@@ -1,6 +1,6 @@
 """Postgres connection + migration helpers."""
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import psycopg
@@ -9,9 +9,18 @@ from pgvector.psycopg import register_vector
 
 @contextmanager
 def connect(database_url: str) -> Iterator[psycopg.Connection]:
-    """Open a connection with pgvector adapter registered."""
+    """Open a connection with pgvector adapter registered.
+
+    Tolerates the bootstrap case where the `vector` extension has not yet been
+    installed (e.g. the first `brain init` on a fresh database). In that case
+    the adapter registration is skipped; callers that need vector support
+    should open a new connection after `run_migrations`.
+    """
     with psycopg.connect(database_url, connect_timeout=10) as conn:
-        register_vector(conn)
+        # vector extension may not exist yet during initial `brain init` bootstrap —
+        # that's fine; migrations will install it and subsequent connects will adapt.
+        with suppress(psycopg.errors.ProgrammingError):
+            register_vector(conn)
         yield conn
 
 
