@@ -2,6 +2,7 @@
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 import psycopg
@@ -145,3 +146,57 @@ def ingest_document(
             )
 
         return IngestResult(document_id=document_id, created=True)
+
+
+_EXTRACTORS = {
+    ".txt": "text",
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".pdf": "pdf",
+    ".docx": "docx",
+}
+
+
+def extract_path(path: Path) -> ExtractedDoc:
+    """Dispatch to the correct extractor based on file extension.
+
+    Raises ``ValueError`` for unsupported extensions or malformed input files;
+    ``OSError`` for unreadable files. Backend-specific parser errors (e.g.
+    :class:`pypdf.errors.PyPdfError`) are wrapped as ``ValueError`` so callers
+    only need to handle a narrow set of exception types.
+    """
+    ext = Path(path).suffix.lower()
+    name = _EXTRACTORS.get(ext)
+    if name is None:
+        raise ValueError(f"unsupported file type: {ext}")
+    try:
+        if name == "text":
+            from .text import extract_text
+            return extract_text(path)
+        if name == "markdown":
+            from .markdown import extract_markdown
+            return extract_markdown(path)
+        if name == "pdf":
+            from pypdf.errors import PyPdfError
+
+            from .pdf import extract_pdf
+            try:
+                return extract_pdf(path)
+            except PyPdfError as e:
+                raise ValueError(f"malformed PDF: {e}") from e
+        if name == "docx":
+            from docx.opc.exceptions import PackageNotFoundError
+
+            from .docx import extract_docx
+            try:
+                return extract_docx(path)
+            except PackageNotFoundError as e:
+                raise ValueError(f"malformed DOCX: {e}") from e
+    except UnicodeDecodeError as e:  # pragma: no cover - extractors use errors="replace"
+        raise ValueError(f"could not decode file as UTF-8: {e}") from e
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
+def supported_extensions() -> list[str]:
+    """Return the list of file extensions that :func:`extract_path` can handle."""
+    return list(_EXTRACTORS.keys())

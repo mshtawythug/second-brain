@@ -41,6 +41,10 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.flake8-bugbear]
+# Typer uses typer.Argument/Option/Typer as defaults — the standard idiom.
+extend-immutable-calls = ["typer.Argument", "typer.Option", "typer.Typer"]
+
 [tool.mypy]
 python_version = "3.11"
 mypy_path = "src"
