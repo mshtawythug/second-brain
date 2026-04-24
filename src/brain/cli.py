@@ -342,3 +342,53 @@ def list_docs(
     for r in rows:
         kind = r[4] or "manual"
         typer.echo(f"{r[0][:8]}  {kind:<8}  {r[2]:<10}  {r[1]}")
+
+
+@app.command(context_settings={"ignore_unknown_options": True})
+def tag(
+    id: str = typer.Argument(...),
+    mods: list[str] = typer.Argument(...),
+) -> None:
+    """Add (+name) or remove (-name) tags. Example: brain tag abc1234 +interview -draft"""
+    add = [m[1:] for m in mods if m.startswith("+") and len(m) > 1]
+    remove = [m[1:] for m in mods if m.startswith("-") and len(m) > 1]
+    if not (add or remove):
+        raise typer.BadParameter("expected +tag or -tag arguments")
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        doc_id = _resolve_id(conn, id)
+        if add:
+            conn.execute(
+                "UPDATE documents SET tags = ARRAY(SELECT DISTINCT unnest(tags || %s::text[])) "
+                "WHERE id = %s",
+                (add, doc_id),
+            )
+        if remove:
+            conn.execute(
+                "UPDATE documents SET tags = ARRAY(SELECT t FROM unnest(tags) AS t "
+                "WHERE t <> ALL(%s::text[])) WHERE id = %s",
+                (remove, doc_id),
+            )
+    typer.echo(f"updated tags on {doc_id[:8]}")
+
+
+@app.command()
+def rm(
+    id: str = typer.Argument(...),
+    yes: bool = typer.Option(False, "--yes", "-y"),
+) -> None:
+    """Delete a document (and its chunks) from the brain."""
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        doc_id = _resolve_id(conn, id)
+        row = conn.execute(
+            "SELECT title FROM documents WHERE id=%s", (doc_id,)
+        ).fetchone()
+        assert row is not None  # _resolve_id confirmed the doc exists
+        title = row[0]
+        if not yes:
+            typer.confirm(f"Delete '{title}' ({doc_id[:8]})?", abort=True)
+        conn.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
+    typer.echo(f"deleted {doc_id[:8]}")
