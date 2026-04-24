@@ -12,6 +12,8 @@ import psycopg
 import pytest
 from dotenv import load_dotenv
 
+from brain.db import connect, run_migrations
+
 load_dotenv()
 
 TEST_DATABASE_URL = os.environ.get(
@@ -20,21 +22,13 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 
-def _migrations_dir() -> Path:
-    return Path(__file__).parent.parent / "migrations"
-
-
-def _apply_migrations(conn: psycopg.Connection) -> None:
-    for sql_file in sorted(_migrations_dir().glob("*.sql")):
-        conn.execute(sql_file.read_text())
-
-
 @pytest.fixture
 def test_db() -> Iterator[psycopg.Connection]:
     """Fresh schema in the test DB for each test."""
-    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+    with connect(TEST_DATABASE_URL) as conn:
+        conn.autocommit = True
         conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-        _apply_migrations(conn)
+        run_migrations(conn)
         yield conn
 
 
