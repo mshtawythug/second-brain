@@ -1,5 +1,6 @@
 """Tests for the `brain init` CLI command."""
 import os
+from unittest.mock import patch
 
 import psycopg
 import pytest
@@ -32,3 +33,16 @@ def test_init_applies_migrations(monkeypatch: pytest.MonkeyPatch) -> None:
         ).fetchone()
         assert row is not None
         assert row[0] == 1
+
+
+def test_init_reports_no_migrations_when_none_apply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+
+    with patch("brain.cli.run_migrations", return_value=[]):
+        result = CliRunner().invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert "no migrations to apply" in result.output

@@ -26,5 +26,5 @@ def init() -> None:
     if applied:
         for name in applied:
             typer.echo(f"applied {name}")
-    else:  # pragma: no cover
+    else:
         typer.echo("no migrations to apply")

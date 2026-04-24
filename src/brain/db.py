@@ -1,6 +1,6 @@
 """Postgres connection + migration helpers."""
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
 
 import psycopg
@@ -17,9 +17,16 @@ def connect(database_url: str) -> Iterator[psycopg.Connection]:
     should open a new connection after `run_migrations`.
     """
     with psycopg.connect(database_url, connect_timeout=10) as conn:
-        # vector extension may not exist yet during initial `brain init` bootstrap —
-        # that's fine; migrations will install it and subsequent connects will adapt.
-        with suppress(psycopg.errors.ProgrammingError):
+        # The vector extension may not exist yet during the initial `brain init`
+        # bootstrap; check pg_type before registering so we don't rely on
+        # exception-as-control-flow. The SELECT starts an implicit transaction
+        # under psycopg3's default autocommit=False — roll it back so the
+        # caller can still flip autocommit on if needed.
+        row = conn.execute(
+            "SELECT 1 FROM pg_type WHERE typname = 'vector'"
+        ).fetchone()
+        conn.rollback()
+        if row is not None:
             register_vector(conn)
         yield conn
 
