@@ -1,6 +1,7 @@
 """brain — second brain CLI."""
 import shutil
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import typer
@@ -234,3 +235,110 @@ def search(
         typer.echo("(no results)")
         return
     console.print(search_table(results))
+
+
+def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
+    """Resolve a UUID prefix (min 6 chars) to a full document id."""
+    if len(prefix) < 6:
+        raise typer.BadParameter("id prefix must be at least 6 characters")
+    rows = conn.execute(
+        "SELECT id::text FROM documents WHERE id::text LIKE %s",
+        (prefix + "%",),
+    ).fetchall()
+    if not rows:
+        typer.secho(f"document not found: {prefix}", fg="red", err=True)
+        raise typer.Exit(code=1)
+    if len(rows) > 1:
+        typer.secho(f"id prefix ambiguous: {prefix}", fg="red", err=True)
+        raise typer.Exit(code=1)
+    return str(rows[0][0])
+
+
+@app.command()
+def show(
+    id: str = typer.Argument(...),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Print a document by id (or 6+ char prefix)."""
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        doc_id = _resolve_id(conn, id)
+        row = conn.execute(
+            """
+            SELECT d.id::text, d.title, d.content, d.content_type, d.tags,
+                   d.source_path, d.ingested_at, s.kind
+            FROM documents d
+            LEFT JOIN sources s ON s.id = d.source_id
+            WHERE d.id = %s
+            """,
+            (doc_id,),
+        ).fetchone()
+    assert row is not None  # _resolve_id confirmed the doc exists
+    payload = {
+        "id": row[0],
+        "title": row[1],
+        "content": row[2],
+        "content_type": row[3],
+        "tags": list(row[4] or []),
+        "source_path": row[5],
+        "ingested_at": row[6],
+        "source_kind": row[7],
+    }
+    if json_output:
+        emit_json(payload)
+        return
+    typer.echo(f"# {payload['title']}")
+    typer.echo(f"id:           {payload['id']}")
+    typer.echo(f"source:       {payload['source_kind'] or 'manual'} ({payload['content_type']})")
+    typer.echo(f"tags:         {', '.join(payload['tags']) or '(none)'}")
+    typer.echo(f"ingested:     {payload['ingested_at']}")
+    typer.echo("")
+    typer.echo(payload["content"])
+
+
+@app.command(name="list")
+def list_docs(
+    source: str | None = typer.Option(None, "--source"),
+    tag: str | None = typer.Option(None, "--tag"),
+    limit: int = typer.Option(20, "--limit", "-n"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List documents in the brain."""
+    cfg = Config.load()
+    where = ["TRUE"]
+    params: list[Any] = []
+    if source:
+        where.append("s.kind = %s")
+        params.append(source)
+    if tag:
+        where.append("%s = ANY(d.tags)")
+        params.append(tag)
+    sql = f"""
+        SELECT d.id::text, d.title, d.content_type, d.tags, s.kind, d.ingested_at
+        FROM documents d
+        LEFT JOIN sources s ON s.id = d.source_id
+        WHERE {" AND ".join(where)}
+        ORDER BY d.ingested_at DESC
+        LIMIT %s
+    """
+    params.append(limit)
+    with connect(cfg.database_url) as conn:
+        rows = conn.execute(sql, params).fetchall()
+    if json_output:
+        emit_json(
+            [
+                {
+                    "id": r[0],
+                    "title": r[1],
+                    "content_type": r[2],
+                    "tags": list(r[3] or []),
+                    "source_kind": r[4],
+                    "ingested_at": r[5],
+                }
+                for r in rows
+            ]
+        )
+        return
+    for r in rows:
+        kind = r[4] or "manual"
+        typer.echo(f"{r[0][:8]}  {kind:<8}  {r[2]:<10}  {r[1]}")
