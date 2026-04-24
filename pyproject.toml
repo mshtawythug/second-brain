@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "ruff>=0.7", "mypy>=1.13"]
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "ruff>=0.7", "mypy>=1.13", "reportlab>=4.0"]
 
 [project.scripts]
 brain = "brain.cli:app"
@@ -48,5 +48,5 @@ explicit_package_bases = true
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["voyageai.*", "pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*"]
+module = ["voyageai.*", "pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*"]
 ignore_missing_imports = true
