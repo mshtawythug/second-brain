@@ -67,3 +67,32 @@ def doctor() -> None:
 
     if failures:
         raise typer.Exit(code=1)
+
+
+@app.command()
+def status() -> None:
+    """Show counts and last-ingest timestamp."""
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        doc_row = conn.execute("SELECT count(*) FROM documents").fetchone()
+        chunk_row = conn.execute("SELECT count(*) FROM chunks").fetchone()
+        source_row = conn.execute("SELECT count(*) FROM sources").fetchone()
+        last_row = conn.execute("SELECT max(ingested_at) FROM documents").fetchone()
+        by_kind = conn.execute(
+            "SELECT coalesce(s.kind, 'manual') AS kind, count(*) "
+            "FROM documents d LEFT JOIN sources s ON s.id = d.source_id "
+            "GROUP BY 1 ORDER BY 2 DESC"
+        ).fetchall()
+
+    doc_count = doc_row[0] if doc_row else 0
+    chunk_count = chunk_row[0] if chunk_row else 0
+    source_count = source_row[0] if source_row else 0
+    last = last_row[0] if last_row else None
+
+    typer.echo(f"documents       {doc_count}")
+    typer.echo(f"chunks          {chunk_count}")
+    typer.echo(f"sources         {source_count}")
+    typer.echo(f"last ingest     {last or 'never'}")
+    typer.echo("\nby source:")
+    for kind, count in by_kind:
+        typer.echo(f"  {kind:<12} {count}")
