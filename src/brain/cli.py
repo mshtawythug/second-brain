@@ -8,11 +8,13 @@ import typer
 from .config import Config, ConfigError
 from .db import connect, run_migrations
 from .embeddings import VoyageEmbedder
+from .format import console, emit_json, search_table
 from .ingest import (
     extract_path,
     ingest_document,
     supported_extensions,
 )
+from .search import hybrid_search
 
 app = typer.Typer(
     name="brain",
@@ -185,3 +187,50 @@ def ingest_dir(
                 typer.echo(f"  {verb}: {f.name}")
             except (ValueError, OSError, psycopg.Error) as e:
                 typer.secho(f"  failed: {f.name} — {e}", fg="red")
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(...),
+    limit: int = typer.Option(5, "--limit", "-n"),
+    source: str | None = typer.Option(None, "--source"),
+    tag: str | None = typer.Option(None, "--tag"),
+    since_days: int | None = typer.Option(None, "--since", help="Days lookback"),
+    json_output: bool = typer.Option(False, "--json"),
+    fts_only: bool = typer.Option(False, "--fts-only"),
+) -> None:
+    """Hybrid search across the brain."""
+    cfg = Config.load()
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        results = hybrid_search(
+            conn,
+            embedder=embedder,
+            query=query,
+            limit=limit,
+            source_kind=source,
+            tag=tag,
+            since_days=since_days,
+            fts_only=fts_only,
+        )
+
+    if json_output:
+        emit_json(
+            [
+                {
+                    "id": r.document_id,
+                    "title": r.title,
+                    "source_kind": r.source_kind,
+                    "snippet": r.snippet,
+                    "score": r.score,
+                    "content_type": r.content_type,
+                    "tags": r.tags,
+                }
+                for r in results
+            ]
+        )
+        return
+    if not results:
+        typer.echo("(no results)")
+        return
+    console.print(search_table(results))
