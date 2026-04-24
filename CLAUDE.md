@@ -1,0 +1,190 @@
+# CLAUDE.md
+
+IMPORTANT:
+1. You must write automated tests for all code (pytest). Aim for both unit tests and integration tests against a real Postgres test database.
+2. You must pass ALL tests before committing.
+3. Maintain a minimum test coverage threshold of 85%. Per-module targets: pure logic (chunker, search, format) 95%, ingest pipeline 90%, CLI commands 85%.
+4. **NEVER commit or push without explicit user permission.** No exceptions — even in bypass permissions mode.
+5. USE Team mode (TeamCreate + teammates) for any multi-task work to keep the main context window clear. **Always use team-driven execution** (not inline) when executing implementation plans. See "Team Mode Override" section below.
+6. After edits, run the full test suite (`pytest`) and lint (`ruff check`). Fix bugs and update tests before claiming work complete.
+7. NEVER jump straight to code. Produce a written plan FIRST for any multi-file task. Get explicit approval before writing code.
+8. When referencing existing modules/functions, READ the actual source file first. Never guess field names, import paths, or function signatures.
+9. All Python code MUST pass `ruff check` with zero warnings AND `mypy src/` with zero errors. See "Linting" below.
+10. **Pre-commit check:** Run `ruff check && mypy src/ && pytest` before committing.
+11. **Memory updates:** After completing a task that adds/changes any of the following, update the corresponding memory file in the auto-memory directory: CLI commands → `cli.md`, database schema → `schema.md`, Python types/dataclasses → `types.md`, ingest extractors → `extractors.md`, search algorithm changes → `search.md`.
+11a. **Memory audits:** When asked to "update memory", audit ALL memory files against the current codebase using parallel Explore agents (one per file). Update any drifted content and the MEMORY.md index.
+11b. **Plans, specs & docs:** ALL plans, specs, design docs, and any `.md` files created as part of work MUST be stored under `docs/` — specs in `docs/specs/YYYY-MM-DD-<topic>-design.md`, plans in `docs/plans/YYYY-MM-DD-<topic>.md`. Never leave planning/spec documents in the repo root.
+12. **MANDATORY regression tests for bug fixes:** Every bug fix MUST include a test that reproduces the original bug and verifies the fix. No bug fix is complete without a regression test.
+13. **NO monkey-patching in tests. NO EXCEPTIONS.**
+    - **BANNED:** Reopening production modules/classes to inject constants, methods, or attributes.
+    - **BANNED:** Direct attribute assignment on imported modules without restoration.
+    - **If a test needs monkey-patching to pass, the production code has a bug.** Fix the production code, not the test.
+    - `monkeypatch` (pytest), `unittest.mock.patch`, and `mocker.patch` (pytest-mock) are NOT monkey-patching — they are standard test doubles with automatic cleanup. These are fine.
+14. **Post-phase code review + completion audit LOOP (MANDATORY):** After completing each phase/wave of a plan, run a **review + audit loop** that repeats until BOTH pass with zero issues:
+    - **Code review:** Dispatch `superpowers:code-reviewer` on ALL changes in the phase against the plan spec.
+    - **Completion audit:** Dispatch a separate completion auditor checking: (a) every task implemented — nothing skipped, (b) every fix matches spec exactly, (c) every required test exists and passes, (d) no regressions, (e) no dead code — no orphaned modules, unused functions, or untested branches.
+    - **THE LOOP:** If EITHER review finds issues → fix ALL issues → re-run BOTH → repeat. Exit condition: code reviewer says "APPROVED" AND auditor says "AUDIT PASSED". No phase is complete until the loop exits clean.
+
+## Team Mode Override (MANDATORY — overrides superpowers skill routing)
+
+**ALL agent dispatching MUST use Team mode** (TeamCreate + Agent with team_name) instead of standalone Agent subagents. This applies to every superpowers skill that spawns agents:
+
+| Superpowers skill | Use instead | What changes |
+|---|---|---|
+| `superpowers:subagent-driven-development` | `team-driven-development` skill | TeamCreate at start, teammates with worktree isolation, SendMessage for coordination |
+| `superpowers:dispatching-parallel-agents` | `team-parallel-dispatch` skill | TeamCreate at start, parallel teammates with worktree isolation |
+| `superpowers:requesting-code-review` | Dispatch reviewer as teammate on existing team (if one exists), otherwise standalone Agent | Add team_name if team active |
+| `superpowers:executing-plans` | Use `team-driven-development` instead of `subagent-driven-development` when it suggests subagents | Same redirect |
+| `superpowers:writing-plans` execution handoff | **NEVER offer a choice.** Skip the two-option prompt and proceed directly with `team-driven-development`. | No "Inline Execution" option, no question asked |
+
+**Non-agent superpowers skills are unchanged:** brainstorming, verification-before-completion, using-git-worktrees, finishing-a-development-branch, test-driven-development, systematic-debugging, receiving-code-review, writing-skills.
+
+**Why:** Team mode provides shared task lists, inter-teammate communication via SendMessage, and better coordination visibility than isolated subagents.
+
+**NEVER** fall back to standalone Agent subagents for execution or parallel dispatch.
+
+**Plan header override:** When writing plan documents, use `> **For agentic workers:** REQUIRED SUB-SKILL: Use team-driven-development to implement this plan task-by-task.`
+
+## Architecture Principles
+
+### DRY
+- Search for existing shared code before creating new modules/utilities.
+- Reusable patterns: `src/brain/` for shared utilities. Extract anything used in 2+ places.
+- Prefer composition over copy-paste.
+
+### SOLID Principles (MANDATORY)
+- **Single Responsibility**: Each module has ONE reason to change. Extractors only extract. The chunker only chunks. The embedder only embeds. The search module only searches. The CLI only orchestrates.
+- **Open/Closed**: Open for extension, closed for modification — adding a new ingest source (e.g., `notion.py`) means adding a new extractor module + dispatcher entry, not editing existing extractors.
+- **Liskov Substitution**: All extractors return `ExtractedDoc`. All search backends conform to the same result shape. Callers don't care which subclass.
+- **Interface Segregation**: Modules expose narrow, focused public APIs. Don't force a consumer to import a kitchen-sink module to get one helper.
+- **Dependency Inversion**: High-level modules accept dependencies via constructor / function args (e.g., `count_tokens` callable on the chunker, `client` on the embedder). Tests pass fakes; production passes real ones.
+
+### Coding Conventions
+- PEP 8, `snake_case` everywhere.
+- Type hints on every function signature. `mypy src/` must pass.
+- f-strings for string formatting (no `%` or `.format()`).
+- `pathlib.Path` for filesystem paths, never raw strings.
+- Dataclasses for value objects (`ExtractedDoc`, `Chunk`, `SearchResult`).
+- Custom exceptions inherit from a project-specific base (`BrainError` if needed); never `raise Exception(...)`.
+- **Every module has a one-line docstring** at the top describing its purpose.
+- **Use parameterized SQL** (`%s` placeholders + tuple). NEVER concatenate user input into SQL strings.
+- **Every external HTTP/DB client MUST have explicit timeouts.** Voyage SDK retries handled in `embeddings.py`; Postgres connections set `connect_timeout`.
+- **No bare `except:`** — always catch specific exceptions (`psycopg.OperationalError`, `voyageai.error.RateLimitError`, etc.).
+
+### Linting — Ruff + mypy
+Run after every change: `ruff check` (lint) or `ruff check --fix` (auto-fix), then `mypy src/`. Config in `pyproject.toml` under `[tool.ruff]` and `[tool.mypy]`.
+
+**Key rules:** Line length 100, target Python 3.11, `from __future__ import annotations` not needed (3.11+ has native PEP 604 union syntax). Sort imports with `ruff check --select I --fix`.
+
+### Migration Safety
+- Migrations are raw SQL files in `migrations/`, applied in name order by `brain init`.
+- **Never reference Python code in migrations** — they are pure SQL, frozen in time.
+- **Every migration must be idempotent or applied to a fresh schema.** During development, `docker compose down -v && docker compose up -d && brain init` resets cleanly.
+- **Schema changes** = new numbered migration file. Never edit `001_init.sql` once shipped.
+
+### Security Standards
+- UUID primary keys everywhere.
+- Parameterized SQL queries only.
+- Never hardcode secrets — `VOYAGE_API_KEY` and `DATABASE_URL` come from `.env` (gitignored). Never commit `.env`.
+- Never log full document content at INFO level — it can contain sensitive transcripts/emails. Log titles + IDs only.
+
+## Workflow
+
+### Plan → Approve → Implement → Verify
+1. **Plan** — List affected files, modules, tests, risks.
+2. **Approve** — Present plan to user. Do NOT write code until approved.
+3. **Implement** — File by file. Use teammates for large tasks (per Team Mode Override above).
+4. **Verify** — Run `ruff check && mypy src/ && pytest`. Then exercise the CLI end-to-end (`brain doctor`, `brain status`, a sample `brain search`).
+
+### Teammate Usage
+Use teammates for: parallel test creation, codebase exploration, tasks consuming >30% of context window, implementation when plan is approved. See "Team Mode Override" — always Team mode, never standalone subagents.
+
+## Project Overview
+
+Local personal knowledge base ("second brain") with hybrid search, designed to be queried by Claude from any conversation. Stores career documents, interview prep, Krisp call transcripts, Slack threads, and selected Gmail in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank + vector cosine similarity (`voyage-3-large`).
+
+Full design in `docs/specs/2026-04-24-second-brain-design.md`. Implementation plan in `docs/plans/2026-04-24-second-brain.md`.
+
+## Tech Stack
+
+- **Language:** Python 3.11+
+- **CLI framework:** Typer
+- **Database:** PostgreSQL 16 + pgvector (Docker, port 5433)
+- **Embeddings:** Voyage AI `voyage-3-large` (1024 dims)
+- **PDF/DOCX:** pypdf, pdfplumber, python-docx
+- **Markdown:** markdown-it-py
+- **Tokenization:** tiktoken (offline, for chunker budget)
+- **Output:** Rich (colored tables, JSON)
+- **Tests:** pytest, real Postgres test DB, fake embedder fixture
+- **Lint/Type:** ruff, mypy
+
+## Build & Run Commands
+
+```bash
+# Setup
+cp .env.example .env                   # paste VOYAGE_API_KEY
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+docker compose up -d                   # Postgres + pgvector on port 5433
+brain init                             # apply migrations
+brain doctor                           # health check
+
+# Daily use
+brain ingest <file>                    # ingest a single file
+brain ingest-dir <dir>                 # recursive ingest
+brain search "..."                     # hybrid search
+brain show <id-prefix>                 # full document
+
+# Testing
+pytest                                 # full suite
+pytest --cov=brain --cov-report=term   # with coverage
+pytest tests/test_chunker.py -v        # single file
+
+# Linting
+ruff check                             # lint
+ruff check --fix                       # auto-fix
+mypy src/                              # type check
+```
+
+## Architecture
+
+### Layout
+```
+src/brain/
+  cli.py            — Typer app, all commands
+  config.py         — env loading
+  db.py             — psycopg connection + migration runner
+  embeddings.py     — Voyage SDK wrapper
+  search.py         — hybrid FTS + vector via RRF
+  format.py         — human + JSON output
+  ingest/
+    __init__.py     — dispatcher + ingest_document() pipeline
+    chunker.py      — paragraph-aware chunking
+    text.py / markdown.py / pdf.py / docx.py — file extractors
+    gmail.py        — shells out to gws CLI
+    stdin.py        — generic stdin ingester (Krisp, Slack)
+
+migrations/         — numbered SQL files
+tests/              — real-DB fixture, fake embedder, one test file per module
+docs/specs/         — design specs
+docs/plans/         — implementation plans
+```
+
+### Key Patterns
+- **Idempotent ingest:** `documents.content_hash` is UNIQUE on `documents`. Re-ingesting the same file is a no-op unless `--force`.
+- **Source dedup:** `sources(kind, external_id)` is UNIQUE. Re-ingesting the same Krisp/Gmail message updates the existing row instead of duplicating.
+- **Hybrid search:** Reciprocal Rank Fusion (k=60) combines FTS rank and vector cosine similarity. Ranks chunks; groups by document; returns top N docs with best matching chunk as snippet.
+- **Claude-orchestrated ingestion:** Krisp and Slack don't have CLIs. Claude calls the MCP, then pipes content into `brain ingest-stdin --source krisp/slack ...`.
+
+## Lessons Learned
+
+These are universal mistakes — never repeat them.
+
+1. **Never guess fields/paths** — Read the actual source file before referencing any field, function, or import path.
+2. **Never declare "done" without running it** — Run the CLI command end-to-end before claiming a task complete. Tests passing ≠ feature working.
+3. **Never copy-paste code** — Extract shared patterns into reusable functions. If you write something twice, refactor on the third write.
+4. **Test mocks must match signatures** — After changing a function's signature, grep ALL call sites and update them. Run `mypy src/` to catch drift.
+5. **Four Phase Tests** — Every test follows setup → exercise → verify → teardown. Clear separation between phases. No mystery guests — make test data explicit, don't rely on invisible factory defaults.
+6. **No test failures are pre-existing** — Every failure is a regression until proven otherwise. Investigate immediately, never dismiss as "pre-existing" or "flaky" without evidence.
+7. **The Scout Law — leave the code better than you found it** — Before completing any task, ALL tests in the suite must pass — not just the ones related to your changes. If you encounter broken tests from other areas, fix them.
