@@ -80,6 +80,30 @@ def test_show_short_prefix_errors(
     assert "6 characters" in result.output.lower()
 
 
+def test_show_rejects_wildcard_in_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+) -> None:
+    """Regression: % in prefix must not slip through as a LIKE wildcard."""
+    _set_env(monkeypatch)
+    result = CliRunner().invoke(app, ["show", "ab%def"])
+    assert result.exit_code != 0
+    output = result.output.lower()
+    assert "prefix" in output or "invalid" in output
+
+
+def test_show_rejects_underscore_in_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+) -> None:
+    """Regression: _ in prefix must not slip through as a LIKE wildcard."""
+    _set_env(monkeypatch)
+    result = CliRunner().invoke(app, ["show", "ab_def1"])
+    assert result.exit_code != 0
+    output = result.output.lower()
+    assert "prefix" in output or "invalid" in output
+
+
 def test_show_ambiguous_prefix_errors(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,

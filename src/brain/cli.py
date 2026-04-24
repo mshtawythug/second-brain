@@ -1,5 +1,6 @@
 """brain — second brain CLI."""
 import json as _json  # aliased — `json` conflicts with the --json output flag name
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -19,6 +20,10 @@ from .ingest import (
 )
 from .ingest.stdin import make_doc as _stdin_make_doc
 from .search import hybrid_search
+
+# UUID prefixes consist solely of hex digits and hyphens; anything else is rejected
+# before reaching SQL so user-supplied `_` / `%` cannot act as LIKE wildcards.
+_UUID_PREFIX_RE = re.compile(r"[0-9a-f-]+")
 
 app = typer.Typer(
     name="brain",
@@ -300,6 +305,8 @@ def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
     """Resolve a UUID prefix (min 6 chars) to a full document id."""
     if len(prefix) < 6:
         raise typer.BadParameter("id prefix must be at least 6 characters")
+    if not _UUID_PREFIX_RE.fullmatch(prefix):
+        raise typer.BadParameter("id prefix must contain only hex digits and hyphens")
     rows = conn.execute(
         "SELECT id::text FROM documents WHERE id::text LIKE %s",
         (prefix + "%",),
