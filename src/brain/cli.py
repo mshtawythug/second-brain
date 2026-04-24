@@ -1,5 +1,7 @@
 """brain — second brain CLI."""
+import json as _json  # aliased — `json` conflicts with the --json output flag name
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ from .ingest import (
     ingest_document,
     supported_extensions,
 )
+from .ingest.stdin import make_doc as _stdin_make_doc
 from .search import hybrid_search
 
 app = typer.Typer(
@@ -188,6 +191,62 @@ def ingest_dir(
                 typer.echo(f"  {verb}: {f.name}")
             except (ValueError, OSError, psycopg.Error) as e:
                 typer.secho(f"  failed: {f.name} — {e}", fg="red")
+
+
+@app.command(name="ingest-stdin")
+def ingest_stdin(
+    source: str = typer.Option(
+        ..., "--source", help="Source kind (krisp, slack, gmail, ...)."
+    ),
+    external_id: str = typer.Option(
+        ..., "--external-id", help="Stable id from the upstream system."
+    ),
+    title: str = typer.Option(..., "--title", help="Document title."),
+    content_type: str = typer.Option(
+        "transcript", "--content-type", help="Content type label (e.g. transcript, note)."
+    ),
+    tag: list[str] = typer.Option([], "--tag", "-t", help="Apply tag(s) to the document."),
+    metadata: str | None = typer.Option(
+        None, "--metadata", help="JSON metadata blob merged into source + document metadata."
+    ),
+    date: str | None = typer.Option(
+        None, "--date", help="Date stamp (ISO); stored under metadata.date."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Re-ingest even if content already exists."
+    ),
+) -> None:
+    """Ingest content piped on stdin (used by Claude for Krisp/Slack)."""
+    content = sys.stdin.read()
+    if not content.strip():
+        typer.secho("stdin was empty", fg="red", err=True)
+        raise typer.Exit(code=1)
+    meta: dict[str, Any] = _json.loads(metadata) if metadata else {}
+    if date:
+        meta.setdefault("date", date)
+    doc = _stdin_make_doc(
+        content=content,
+        title=title,
+        content_type=content_type,
+        metadata=meta,
+    )
+
+    cfg = Config.load()
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        result = ingest_document(
+            conn,
+            embedder=embedder,
+            doc=doc,
+            source_kind=source,
+            source_external_id=external_id,
+            source_metadata=meta,
+            tags=list(tag),
+            force=force,
+        )
+    verb = "ingested" if result.created else "skipped (already ingested)"
+    typer.echo(f"{verb}: {title} → {result.document_id}")
 
 
 @app.command()
