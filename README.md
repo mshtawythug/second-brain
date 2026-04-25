@@ -21,6 +21,20 @@ brain init
 brain doctor   # should print all OK
 ```
 
+### Make `brain` available globally (no venv activation needed)
+
+`pip install -e ".[dev]"` produces `.venv/bin/brain` with an absolute-path shebang
+pointing at the venv's Python, so the launcher is self-contained — running it
+imports from the venv's `site-packages` without `source .venv/bin/activate`.
+
+To call `brain` from anywhere, symlink it onto a directory already on your `$PATH`:
+
+```bash
+ln -s ~/workspace/second-brain/.venv/bin/brain /opt/homebrew/bin/brain
+```
+
+Verify with `which brain` (should resolve to the symlink) and `brain doctor`.
+
 ## Usage
 
 ```bash
