@@ -145,6 +145,54 @@ def test_ingest_gmail_dedups_on_message_id(
     assert s is not None and s[0] == 1
 
 
+def test_ingest_gmail_continues_on_per_message_error(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """A `GmailError` on one message must not abort the whole batch."""
+    _patch_embedder(monkeypatch, fake_embedder)
+
+    def flaky_runner(cmd: list[str], *_args: object, **_kwargs: object) -> str:
+        if cmd[2] == "list":
+            return json.dumps(
+                [
+                    {"id": "good1", "subject": "Good 1"},
+                    {"id": "bad", "subject": "Bad"},
+                    {"id": "good2", "subject": "Good 2"},
+                ]
+            )
+        if cmd[2] == "read":
+            mid = cmd[cmd.index("--id") + 1]
+            if mid == "bad":
+                raise gmail_ingest.GmailError(f"gws failed for {mid}")
+            return json.dumps(
+                {
+                    "id": mid,
+                    "subject": f"Subject for {mid}",
+                    "from": "x@y",
+                    "to": "a@b",
+                    "date": "2026-04-01",
+                    "body": f"body of {mid}",
+                }
+            )
+        raise AssertionError(f"unexpected gws call: {cmd}")
+
+    monkeypatch.setattr("brain.ingest.gmail._run", flaky_runner)
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "test"])
+    assert result.exit_code == 0, result.output
+    # The good messages should be ingested and the bad one reported as failed.
+    assert "ingested" in result.output
+    assert "failed" in result.output.lower()
+    assert "bad" in result.output
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM documents WHERE content_type='email'"
+        ).fetchone()
+    assert row is not None
+    assert row[0] == 2
+
+
 def test_list_messages_builds_full_query() -> None:
     """All scope flags compose into a single `gws gmail list --query ...` string."""
     captured: dict[str, list[str]] = {}

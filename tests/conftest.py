@@ -22,6 +22,22 @@ TEST_DATABASE_URL = os.environ.get(
 )
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _ensure_test_db_initialized() -> Iterator[None]:
+    """Reset the test DB to a known migrated state at session start.
+
+    Tests that don't take the per-test ``test_db`` fixture (e.g. doctor checks
+    that the pgvector extension is installed) still need the schema to be in a
+    migrated state. Doing this once per session — before any test runs — makes
+    that starting state deterministic regardless of any prior aborted runs.
+    """
+    with connect(TEST_DATABASE_URL) as conn:
+        conn.autocommit = True
+        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        run_migrations(conn)
+    yield
+
+
 @pytest.fixture
 def test_db() -> Iterator[psycopg.Connection]:
     """Fresh schema in the test DB for each test."""

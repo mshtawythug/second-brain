@@ -19,6 +19,7 @@ from .ingest import (
     supported_extensions,
 )
 from .ingest import gmail as gmail_ingest
+from .ingest.gmail import GmailError
 from .ingest.stdin import make_doc as _stdin_make_doc
 from .search import hybrid_search
 
@@ -297,20 +298,26 @@ def ingest_gmail(
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         for stub in messages:
-            full = gmail_ingest.read_message(stub["id"])
-            doc = gmail_ingest.to_extracted_doc(full)
-            result = ingest_document(
-                conn,
-                embedder=embedder,
-                doc=doc,
-                source_kind="gmail",
-                source_external_id=full["id"],
-                source_metadata={"from": full.get("from"), "date": full.get("date")},
-                tags=list(tag),
-            )
-            verb = "ingested" if result.created else "skipped"
-            subject = full.get("subject", "(no subject)")
-            typer.echo(f"  {verb}: {subject[:60]}")
+            try:
+                full = gmail_ingest.read_message(stub["id"])
+                doc = gmail_ingest.to_extracted_doc(full)
+                result = ingest_document(
+                    conn,
+                    embedder=embedder,
+                    doc=doc,
+                    source_kind="gmail",
+                    source_external_id=full["id"],
+                    source_metadata={"from": full.get("from"), "date": full.get("date")},
+                    tags=list(tag),
+                )
+                verb = "ingested" if result.created else "skipped"
+                subject = full.get("subject", "(no subject)")
+                typer.echo(f"  {verb}: {subject[:60]}")
+            except (GmailError, psycopg.Error, ValueError) as e:
+                typer.secho(
+                    f"  failed: {stub.get('id', '?')} — {e}", fg="red"
+                )
+                continue
 
 
 @app.command()
