@@ -290,8 +290,11 @@ def ingest_gmail(
     )
     typer.echo(f"found {len(messages)} message(s)")
     if dry_run:
+        # Stubs returned by users.messages.list only have id + threadId — no
+        # subject is available without a per-message read_message() call, which
+        # we skip on --dry-run to keep it cheap.
         for m in messages:
-            typer.echo(f"  would ingest: [{m['id']}] {m.get('subject', '(no subject)')}")
+            typer.echo(f"  would ingest: [{m['id']}]")
         return
 
     embedder = _build_embedder(cfg)
@@ -306,13 +309,15 @@ def ingest_gmail(
                     embedder=embedder,
                     doc=doc,
                     source_kind="gmail",
-                    source_external_id=full["id"],
-                    source_metadata={"from": full.get("from"), "date": full.get("date")},
+                    source_external_id=stub["id"],
+                    source_metadata={
+                        "from": doc.metadata.get("from"),
+                        "date": doc.metadata.get("date"),
+                    },
                     tags=list(tag),
                 )
                 verb = "ingested" if result.created else "skipped"
-                subject = full.get("subject", "(no subject)")
-                typer.echo(f"  {verb}: {subject[:60]}")
+                typer.echo(f"  {verb}: {doc.title[:60]}")
             except (GmailError, psycopg.Error, ValueError) as e:
                 typer.secho(
                     f"  failed: {stub.get('id', '?')} — {e}", fg="red"
