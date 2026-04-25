@@ -2,7 +2,7 @@
 
 Local personal knowledge base with hybrid search, designed to be queried by Claude from any conversation.
 
-Stores career documents, interview prep, Krisp call transcripts, Slack threads, and Gmail messages in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank and vector cosine similarity (`voyage-3-large`).
+Stores career documents, interview prep, Krisp call transcripts, Slack threads, and Gmail messages in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank and vector cosine similarity (`voyage-4`).
 
 ## Setup
 
