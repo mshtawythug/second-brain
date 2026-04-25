@@ -101,7 +101,7 @@ Use teammates for: parallel test creation, codebase exploration, tasks consuming
 
 ## Project Overview
 
-Local personal knowledge base ("second brain") with hybrid search, designed to be queried by Claude from any conversation. Stores career documents, interview prep, Krisp call transcripts, Slack threads, and selected Gmail in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank + vector cosine similarity (`voyage-3-large`).
+Local personal knowledge base ("second brain") with hybrid search, designed to be queried by Claude from any conversation. Stores career documents, interview prep, Krisp call transcripts, Slack threads, and selected Gmail in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank + vector cosine similarity (`voyage-4`).
 
 Full design in `docs/specs/2026-04-24-second-brain-design.md`. Implementation plan in `docs/plans/2026-04-24-second-brain.md`.
 
@@ -110,7 +110,7 @@ Full design in `docs/specs/2026-04-24-second-brain-design.md`. Implementation pl
 - **Language:** Python 3.11+
 - **CLI framework:** Typer
 - **Database:** PostgreSQL 16 + pgvector (Docker, port 5433)
-- **Embeddings:** Voyage AI `voyage-3-large` (1024 dims)
+- **Embeddings:** Voyage AI `voyage-4` (1024 dims)
 - **PDF/DOCX:** pypdf, pdfplumber, python-docx
 - **Markdown:** markdown-it-py
 - **Tokenization:** tiktoken (offline, for chunker budget)
