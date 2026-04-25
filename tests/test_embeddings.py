@@ -17,7 +17,7 @@ def test_embed_single_batch() -> None:
     assert len(out) == 2
     assert len(out[0]) == 1024
     client.embed.assert_called_once_with(
-        texts=["hello", "world"], model="voyage-3-large", input_type="document"
+        texts=["hello", "world"], model="voyage-4", input_type="document"
     )
 
 

@@ -7,7 +7,7 @@ from typing import Any
 
 import tiktoken
 
-MODEL = "voyage-3-large"
+MODEL = "voyage-4"
 DIMS = 1024
 MAX_BATCH = 128
 
