@@ -18,6 +18,7 @@ from .ingest import (
     ingest_document,
     supported_extensions,
 )
+from .ingest import gmail as gmail_ingest
 from .ingest.stdin import make_doc as _stdin_make_doc
 from .search import hybrid_search
 
@@ -252,6 +253,64 @@ def ingest_stdin(
         )
     verb = "ingested" if result.created else "skipped (already ingested)"
     typer.echo(f"{verb}: {title} → {result.document_id}")
+
+
+@app.command(name="ingest-gmail")
+def ingest_gmail(
+    query: str | None = typer.Option(None, "--query", "-q", help="Raw Gmail search query."),
+    label: str | None = typer.Option(None, "--label", "-l", help="Gmail label to scope to."),
+    from_addr: str | None = typer.Option(None, "--from", help="Filter by sender address."),
+    since: str | None = typer.Option(None, "--since", help="Earliest date (YYYY/MM/DD)."),
+    until: str | None = typer.Option(None, "--until", help="Latest date (YYYY/MM/DD)."),
+    tag: list[str] = typer.Option([], "--tag", "-t", help="Apply tag(s) to each document."),
+    max_results: int = typer.Option(50, "--max", help="Max messages to fetch."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="List matches without ingesting."
+    ),
+) -> None:
+    """Ingest Gmail messages via the `gws` CLI. At least one scope flag is required."""
+    if not any([query, label, from_addr, since, until]):
+        typer.secho(
+            "ingest-gmail requires at least one scope flag: "
+            "--query, --label, --from, --since, --until",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    cfg = Config.load()
+    messages = gmail_ingest.list_messages(
+        query=query,
+        label=label,
+        since=since,
+        until=until,
+        from_addr=from_addr,
+        max_results=max_results,
+    )
+    typer.echo(f"found {len(messages)} message(s)")
+    if dry_run:
+        for m in messages:
+            typer.echo(f"  would ingest: [{m['id']}] {m.get('subject', '(no subject)')}")
+        return
+
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        for stub in messages:
+            full = gmail_ingest.read_message(stub["id"])
+            doc = gmail_ingest.to_extracted_doc(full)
+            result = ingest_document(
+                conn,
+                embedder=embedder,
+                doc=doc,
+                source_kind="gmail",
+                source_external_id=full["id"],
+                source_metadata={"from": full.get("from"), "date": full.get("date")},
+                tags=list(tag),
+            )
+            verb = "ingested" if result.created else "skipped"
+            subject = full.get("subject", "(no subject)")
+            typer.echo(f"  {verb}: {subject[:60]}")
 
 
 @app.command()
