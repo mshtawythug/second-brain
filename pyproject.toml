@@ -17,6 +17,7 @@ dependencies = [
   "rich>=13.9",
   "python-dotenv>=1.0",
   "tiktoken>=0.8",
+  "mcp>=1.0,<2.0",
 ]
 
 [project.optional-dependencies]
@@ -24,6 +25,7 @@ dev = ["pytest>=8.3", "pytest-cov>=5.0", "ruff>=0.7", "mypy>=1.13", "reportlab>=
 
 [project.scripts]
 brain = "brain.cli:app"
+brain-mcp = "brain.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=68"]
