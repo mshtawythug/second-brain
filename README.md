@@ -32,32 +32,62 @@ A `brain` CLI backed by a local Postgres database that I can query from any Clau
 
 ## Setup
 
+### Prerequisites
+
+- **Python 3.11+** — `python3.11 --version` should work. On macOS: `brew install python@3.11`.
+- **Docker Desktop** (or Docker Engine) — running. The Postgres + pgvector database lives in a container on port 5433. Get it from [docker.com](https://www.docker.com/products/docker-desktop/).
+- **A Voyage AI API key** — free tier is plenty for personal use. Sign up at [voyageai.com](https://www.voyageai.com/) and grab a key from the dashboard.
+- **Claude Code** (optional but the whole point) — install from [claude.com/claude-code](https://claude.com/claude-code) so Claude can call `brain` for you.
+
+### Install
+
 ```bash
+# 1. Clone the repo and enter it
 git clone <repo> ~/workspace/second-brain
 cd ~/workspace/second-brain
-cp .env.example .env
-# Edit .env: paste your VOYAGE_API_KEY (free tier covers personal use)
 
+# 2. Drop your Voyage API key into a local .env (gitignored)
+cp .env.example .env
+# then open .env and paste your key after VOYAGE_API_KEY=
+
+# 3. Create an isolated Python environment so this project's deps
+#    don't clash with anything else on your system
 python3.11 -m venv .venv
 source .venv/bin/activate
+
+# 4. Install the brain CLI and its dependencies into that venv
 pip install -e ".[dev]"
 
+# 5. Start the Postgres + pgvector container in the background
 docker compose up -d
+
+# 6. Apply database migrations (creates tables, indexes, extensions)
 brain init
-brain doctor   # should print all OK
+
+# 7. Sanity check — should print "all OK"
+brain doctor
 ```
 
-### Make `brain` available globally (no venv activation needed)
+If `brain doctor` complains, the usual suspects are: Docker isn't running, the
+container hasn't finished starting yet (give it ~10 seconds and retry), or
+`VOYAGE_API_KEY` is missing from `.env`.
 
-`pip install -e ".[dev]"` produces `.venv/bin/brain` with an absolute-path shebang
-pointing at the venv's Python, so the launcher is self-contained — running it
-imports from the venv's `site-packages` without `source .venv/bin/activate`.
+### Make `brain` available from any directory
 
-To call `brain` from anywhere, symlink it onto a directory already on your `$PATH`:
+By default, `brain` only works inside this folder with the venv activated. To
+call it from anywhere — including from Claude Code in any project — symlink the
+launcher onto a directory already on your `$PATH`:
 
 ```bash
+# macOS (Homebrew):
 ln -s ~/workspace/second-brain/.venv/bin/brain /opt/homebrew/bin/brain
+
+# Linux (or non-Homebrew macOS):
+ln -s ~/workspace/second-brain/.venv/bin/brain ~/.local/bin/brain
 ```
+
+The symlink works without `source .venv/bin/activate` because `pip install -e`
+gives the launcher an absolute-path shebang pointing at the venv's Python.
 
 Verify with `which brain` (should resolve to the symlink) and `brain doctor`.
 
@@ -159,4 +189,4 @@ pytest --cov=brain          # with coverage
 
 ## License
 
-Personal — not published.
+[MIT](LICENSE)

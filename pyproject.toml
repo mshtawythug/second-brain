@@ -2,6 +2,8 @@
 name = "second-brain"
 version = "0.1.0"
 description = "Local personal knowledge base with hybrid search, queryable by Claude"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
   "psycopg[binary]>=3.2",
