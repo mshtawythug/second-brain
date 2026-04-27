@@ -5,14 +5,16 @@ The test DB is reset (schema dropped + recreated) before each test that uses it.
 
 import hashlib
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import psycopg
 import pytest
 from dotenv import load_dotenv
 
 from brain.db import connect, run_migrations
+from brain.ingest import ExtractedDoc, ingest_document
 
 load_dotenv()
 
@@ -69,6 +71,80 @@ class FakeEmbedder:
 @pytest.fixture
 def fake_embedder() -> FakeEmbedder:
     return FakeEmbedder()
+
+
+class CountingEmbedder:
+    """Wrap an embedder to count Voyage calls — used by `brain edit` tests
+    that need to assert the title-only path didn't re-embed."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.embed_calls = 0
+        self.token_calls = 0
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        self.embed_calls += 1
+        return self._inner.embed(texts, input_type=input_type)  # type: ignore[no-any-return]
+
+    def count_tokens(self, text: str) -> int:
+        self.token_calls += 1
+        return self._inner.count_tokens(text)  # type: ignore[no-any-return]
+
+
+@pytest.fixture
+def counting_embedder(fake_embedder: FakeEmbedder) -> CountingEmbedder:
+    return CountingEmbedder(fake_embedder)
+
+
+@pytest.fixture
+def patch_embedder(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], None]:
+    """Wire ``DATABASE_URL`` + ``VOYAGE_API_KEY`` env vars and swap
+    ``brain.cli._build_embedder`` to return ``embedder``. Returns a callable
+    so tests pick which embedder (fake vs counting) to install."""
+
+    def _install(embedder: object) -> None:
+        monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+        monkeypatch.setenv("VOYAGE_API_KEY", "fake")
+        monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: embedder)
+
+    return _install
+
+
+@pytest.fixture
+def seed_doc(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> Callable[..., str]:
+    """Factory fixture: ingest a manual document and return its UUID.
+
+    Defaults match the simplest test seed; override any kwarg as needed."""
+
+    def _seed(
+        *,
+        title: str = "Initial Title",
+        content: str = "Initial body content.",
+        content_type: str = "note",
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> str:
+        result = ingest_document(
+            test_db,
+            embedder=fake_embedder,
+            doc=ExtractedDoc(
+                title=title,
+                content=content,
+                content_type=content_type,
+                source_path=None,
+                metadata=metadata or {},
+            ),
+            source_kind="manual",
+            tags=tags or [],
+        )
+        assert result.document_id is not None
+        return result.document_id
+
+    return _seed
 
 
 @pytest.fixture

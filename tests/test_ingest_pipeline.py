@@ -144,23 +144,13 @@ def test_ingest_with_tags(test_db, fake_embedder):
 
 
 # --- update_document --------------------------------------------------------
+# These tests use the shared ``seed_doc`` factory fixture from conftest.py.
 
 
-def _seed(test_db, fake_embedder, *, content="hello world", title="T", metadata=None):
-    doc = ExtractedDoc(
-        title=title,
-        content=content,
-        content_type="note",
-        source_path=None,
-        metadata=metadata or {},
-    )
-    return ingest_document(
-        test_db, embedder=fake_embedder, doc=doc, source_kind="manual"
-    ).document_id
-
-
-def test_update_document_body_change_deletes_old_chunks(test_db, fake_embedder):
-    doc_id = _seed(test_db, fake_embedder, content="paragraph one.\n\nparagraph two.")
+def test_update_document_body_change_deletes_old_chunks(
+    test_db, fake_embedder, seed_doc
+):
+    doc_id = seed_doc(content="paragraph one.\n\nparagraph two.")
     old_chunk_ids = {
         r[0]
         for r in test_db.execute(
@@ -185,8 +175,8 @@ def test_update_document_body_change_deletes_old_chunks(test_db, fake_embedder):
     assert new_chunk_ids and new_chunk_ids.isdisjoint(old_chunk_ids)
 
 
-def test_update_document_metadata_merge_preserves_other_keys(test_db, fake_embedder):
-    doc_id = _seed(test_db, fake_embedder, metadata={"a": 1, "b": 2})
+def test_update_document_metadata_merge_preserves_other_keys(test_db, fake_embedder, seed_doc):
+    doc_id = seed_doc(metadata={"a": 1, "b": 2})
     result = update_document(
         test_db, document_id=doc_id, metadata_patch={"b": 3, "c": 4}
     )
@@ -197,9 +187,9 @@ def test_update_document_metadata_merge_preserves_other_keys(test_db, fake_embed
     assert meta == {"a": 1, "b": 3, "c": 4}
 
 
-def test_update_document_collision_aborts(test_db, fake_embedder):
-    a_id = _seed(test_db, fake_embedder, content="alpha")
-    b_id = _seed(test_db, fake_embedder, content="bravo")
+def test_update_document_collision_aborts(test_db, fake_embedder, seed_doc):
+    a_id = seed_doc(content="alpha")
+    b_id = seed_doc(content="bravo")
     with pytest.raises(ValueError, match="content collides"):
         update_document(
             test_db,
@@ -215,9 +205,9 @@ def test_update_document_collision_aborts(test_db, fake_embedder):
 
 
 def test_update_document_body_change_rolls_back_on_embedder_error(
-    test_db, fake_embedder
+    test_db, fake_embedder, seed_doc
 ):
-    doc_id = _seed(test_db, fake_embedder, content="original body of text.")
+    doc_id = seed_doc(content="original body of text.")
     old_hash = test_db.execute(
         "SELECT content_hash FROM documents WHERE id=%s", (doc_id,)
     ).fetchone()[0]
@@ -251,8 +241,8 @@ def test_update_document_body_change_rolls_back_on_embedder_error(
     assert after_chunk_count == old_chunk_count
 
 
-def test_update_document_empty_body_rejected(test_db, fake_embedder):
-    doc_id = _seed(test_db, fake_embedder)
+def test_update_document_empty_body_rejected(test_db, fake_embedder, seed_doc):
+    doc_id = seed_doc()
     with pytest.raises(ValueError, match="content is empty"):
         update_document(
             test_db,
@@ -262,15 +252,15 @@ def test_update_document_empty_body_rejected(test_db, fake_embedder):
         )
 
 
-def test_update_document_body_required_embedder(test_db, fake_embedder):
-    doc_id = _seed(test_db, fake_embedder)
+def test_update_document_body_required_embedder(test_db, fake_embedder, seed_doc):
+    doc_id = seed_doc()
     with pytest.raises(ValueError, match="embedder is required"):
         update_document(
             test_db, document_id=doc_id, new_content="something fresh"
         )
 
 
-def test_update_document_unknown_id_raises(test_db, fake_embedder):
+def test_update_document_unknown_id_raises(test_db, fake_embedder, seed_doc):
     """A bogus UUID should raise ValueError before any DB write."""
     with pytest.raises(ValueError, match="document not found"):
         update_document(
@@ -280,8 +270,8 @@ def test_update_document_unknown_id_raises(test_db, fake_embedder):
         )
 
 
-def test_update_document_content_type_change(test_db, fake_embedder):
-    doc_id = _seed(test_db, fake_embedder)
+def test_update_document_content_type_change(test_db, fake_embedder, seed_doc):
+    doc_id = seed_doc()
     result = update_document(
         test_db, document_id=doc_id, new_content_type="transcript"
     )
@@ -292,8 +282,8 @@ def test_update_document_content_type_change(test_db, fake_embedder):
     assert new_type == "transcript"
 
 
-def test_update_document_tags_change(test_db, fake_embedder):
-    doc_id = _seed(test_db, fake_embedder)
+def test_update_document_tags_change(test_db, fake_embedder, seed_doc):
+    doc_id = seed_doc()
     test_db.execute(
         "UPDATE documents SET tags=%s WHERE id=%s", (["one"], doc_id)
     )
@@ -307,9 +297,9 @@ def test_update_document_tags_change(test_db, fake_embedder):
     assert sorted(tags) == ["three", "two"]
 
 
-def test_update_document_no_op_returns_empty_fields(test_db, fake_embedder):
+def test_update_document_no_op_returns_empty_fields(test_db, fake_embedder, seed_doc):
     """Re-applying current values is a successful no-op (empty fields_changed)."""
-    doc_id = _seed(test_db, fake_embedder, title="T", metadata={"a": 1})
+    doc_id = seed_doc(title="T", metadata={"a": 1})
     result = update_document(
         test_db,
         document_id=doc_id,
@@ -320,9 +310,9 @@ def test_update_document_no_op_returns_empty_fields(test_db, fake_embedder):
     assert result.rechunked is False
 
 
-def test_update_document_replace_metadata_no_op(test_db, fake_embedder):
+def test_update_document_replace_metadata_no_op(test_db, fake_embedder, seed_doc):
     """replace_metadata with identical blob is detected as a no-op."""
-    doc_id = _seed(test_db, fake_embedder, metadata={"a": 1, "b": 2})
+    doc_id = seed_doc(metadata={"a": 1, "b": 2})
     result = update_document(
         test_db,
         document_id=doc_id,

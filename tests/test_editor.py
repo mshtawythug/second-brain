@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from brain.editor import EditorError, find_editor, open_in_editor
+from brain.editor import EditorError, find_editor, make_temp_file, run_editor_on
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -15,13 +15,20 @@ def _write_executable(path: Path, body: str) -> None:
 def test_find_editor_prefers_visual(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VISUAL", "vim-from-visual")
     monkeypatch.setenv("EDITOR", "nano-from-editor")
-    assert find_editor() == "vim-from-visual"
+    assert find_editor() == ["vim-from-visual"]
 
 
 def test_find_editor_falls_back_to_editor(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VISUAL", raising=False)
     monkeypatch.setenv("EDITOR", "nano-from-editor")
-    assert find_editor() == "nano-from-editor"
+    assert find_editor() == ["nano-from-editor"]
+
+
+def test_find_editor_splits_multi_token_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``VISUAL`` / ``EDITOR`` may carry args (e.g. ``code --wait``); split them."""
+    monkeypatch.setenv("VISUAL", "code --wait --new-window")
+    monkeypatch.delenv("EDITOR", raising=False)
+    assert find_editor() == ["code", "--wait", "--new-window"]
 
 
 def test_find_editor_falls_back_to_vi(
@@ -33,7 +40,7 @@ def test_find_editor_falls_back_to_vi(
     fake_vi = tmp_path / "vi"
     _write_executable(fake_vi, "#!/bin/sh\nexit 0\n")
     monkeypatch.setenv("PATH", str(tmp_path))
-    assert find_editor() == str(fake_vi)
+    assert find_editor() == [str(fake_vi)]
 
 
 def test_find_editor_raises_when_nothing_available(
@@ -46,37 +53,52 @@ def test_find_editor_raises_when_nothing_available(
         find_editor()
 
 
-def test_open_in_editor_returns_text_on_success(
+def test_run_editor_on_executes_multi_token_editor(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The fake editor rewrites the file; open_in_editor returns the new text."""
-    fake = tmp_path / "fake.sh"
+    """Regression: a user with EDITOR='wrapper --flag' must reach the wrapper.
+
+    We point ``EDITOR`` at a wrapper script plus a flag; the script writes a
+    sentinel into the file plus the flag it received as $1, so the test can
+    verify both that the launch succeeded and that the flag was forwarded.
+    """
+    wrapper = tmp_path / "wrapper.sh"
     _write_executable(
-        fake,
-        "#!/bin/sh\ncat > \"$1\" <<'BRAIN_EOF'\nedited content\nBRAIN_EOF\nexit 0\n",
+        wrapper,
+        '#!/bin/sh\n'
+        'flag="$1"\n'
+        'shift\n'
+        'target="$1"\n'
+        'printf "wrote %s\\n" "$flag" > "$target"\n'
+        'exit 0\n',
     )
-    monkeypatch.setenv("EDITOR", str(fake))
+    monkeypatch.setenv("EDITOR", f"{wrapper} --some-flag")
     monkeypatch.delenv("VISUAL", raising=False)
-    text, path = open_in_editor("seed")
+    payload = make_temp_file("seed", suffix=".test")
     try:
-        assert text == "edited content\n"
-        assert path.exists()
+        rc = run_editor_on(payload)
+        assert rc == 0
+        assert payload.read_text() == "wrote --some-flag\n"
     finally:
-        if path.exists():
-            path.unlink()
+        if payload.exists():
+            payload.unlink()
 
 
-def test_open_in_editor_returns_none_on_nonzero_exit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_make_temp_file_unlinks_on_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fake = tmp_path / "fake.sh"
-    _write_executable(fake, "#!/bin/sh\nexit 1\n")
-    monkeypatch.setenv("EDITOR", str(fake))
-    monkeypatch.delenv("VISUAL", raising=False)
-    text, path = open_in_editor("seed")
-    try:
-        assert text is None
-        assert path.exists()
-    finally:
-        if path.exists():
-            path.unlink()
+    """If write_text raises, the mkstemp output should be removed."""
+    created: list[Path] = []
+    real_write = Path.write_text
+
+    def boom(self: Path, *args: object, **kwargs: object) -> int:
+        created.append(self)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "write_text", boom)
+    with pytest.raises(OSError, match="disk full"):
+        make_temp_file("x")
+    monkeypatch.setattr(Path, "write_text", real_write)  # restore for assert
+    assert created  # the helper did try to write
+    for p in created:
+        assert not p.exists(), f"orphaned temp file left behind: {p}"

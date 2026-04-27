@@ -264,7 +264,8 @@ def update_document(
             conn.execute(
                 "DELETE FROM chunks WHERE document_id=%s", (document_id,)
             )
-            chunks = chunk_text(new_content or "", count_tokens=embedder.count_tokens)
+            assert new_content is not None  # gated by the empty-check above
+            chunks = chunk_text(new_content, count_tokens=embedder.count_tokens)
             if chunks:
                 embeddings = embedder.embed(
                     [c.content for c in chunks], input_type="document"

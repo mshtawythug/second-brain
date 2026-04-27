@@ -1,6 +1,8 @@
 """Tests for the flag-driven mode of `brain edit`."""
+import hashlib
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 import psycopg
@@ -8,60 +10,11 @@ import pytest
 from typer.testing import CliRunner
 
 from brain.cli import app
-from brain.ingest import ExtractedDoc, ingest_document
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql://brain:brain@localhost:5433/second_brain_test",
 )
-
-
-class CountingEmbedder:
-    """Wraps the fake embedder so tests can assert on Voyage call counts."""
-
-    def __init__(self, inner: Any) -> None:
-        self._inner = inner
-        self.embed_calls = 0
-
-    def embed(self, texts: list[str], *, input_type: str = "document") -> list[list[float]]:
-        self.embed_calls += 1
-        return self._inner.embed(texts, input_type=input_type)
-
-    def count_tokens(self, text: str) -> int:
-        return self._inner.count_tokens(text)
-
-
-def _patch_embedder(monkeypatch: pytest.MonkeyPatch, embedder: object) -> None:
-    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
-    monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: embedder)
-
-
-def _seed(
-    test_db: psycopg.Connection,
-    fake_embedder: Any,
-    *,
-    title: str = "Original Title",
-    content: str = "Hello world. This is the body.",
-    content_type: str = "note",
-    metadata: dict[str, Any] | None = None,
-    tags: list[str] | None = None,
-) -> str:
-    res = ingest_document(
-        test_db,
-        embedder=fake_embedder,
-        doc=ExtractedDoc(
-            title=title,
-            content=content,
-            content_type=content_type,
-            source_path=None,
-            metadata=metadata or {},
-        ),
-        source_kind="manual",
-        tags=tags or [],
-    )
-    assert res.document_id is not None
-    return res.document_id
 
 
 def _row(doc_id: str) -> tuple[str, str, str, dict[str, Any], list[str], str]:
@@ -75,30 +28,33 @@ def _row(doc_id: str) -> tuple[str, str, str, dict[str, Any], list[str], str]:
     return row[0], row[1], row[2], dict(row[3] or {}), list(row[4] or []), row[5]
 
 
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def test_edit_title_only_no_voyage_call(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
-    fake_embedder: Any,
+    counting_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
-    counter = CountingEmbedder(fake_embedder)
-    _patch_embedder(monkeypatch, counter)
-    doc_id = _seed(test_db, fake_embedder, title="Old Title")
+    patch_embedder(counting_embedder)
+    doc_id = seed_doc(title="Old Title")
     result = CliRunner().invoke(
         app, ["edit", doc_id[:8], "--title", "Brand New Title"]
     )
     assert result.exit_code == 0, result.output
     assert "title" in result.output
     assert _row(doc_id)[0] == "Brand New Title"
-    assert counter.embed_calls == 0
+    assert counting_embedder.embed_calls == 0
 
 
 def test_edit_metadata_merge_keeps_other_keys(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
-    _patch_embedder(monkeypatch, fake_embedder)
-    doc_id = _seed(test_db, fake_embedder, metadata={"a": 1, "b": 2})
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc(metadata={"a": 1, "b": 2})
     result = CliRunner().invoke(
         app, ["edit", doc_id[:8], "--metadata", json.dumps({"b": 3})]
     )
@@ -107,12 +63,12 @@ def test_edit_metadata_merge_keeps_other_keys(
 
 
 def test_edit_metadata_replace_swaps_blob(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
-    _patch_embedder(monkeypatch, fake_embedder)
-    doc_id = _seed(test_db, fake_embedder, metadata={"a": 1, "b": 2})
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc(metadata={"a": 1, "b": 2})
     result = CliRunner().invoke(
         app,
         [
@@ -128,16 +84,13 @@ def test_edit_metadata_replace_swaps_blob(
 
 
 def test_edit_content_rechunks_and_reembeds(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
-    fake_embedder: Any,
+    counting_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
     tmp_path: Any,
 ) -> None:
-    counter = CountingEmbedder(fake_embedder)
-    _patch_embedder(monkeypatch, counter)
-    doc_id = _seed(
-        test_db, fake_embedder, content="paragraph one body.\n\nparagraph two."
-    )
+    patch_embedder(counting_embedder)
+    doc_id = seed_doc(content="paragraph one body.\n\nparagraph two.")
     _, _, _, _, _, old_hash = _row(doc_id)
     payload = tmp_path / "new.txt"
     payload.write_text("totally fresh content about company-id and person-a.")
@@ -148,19 +101,18 @@ def test_edit_content_rechunks_and_reembeds(
     assert "content" in result.output
     _, _, _, _, _, new_hash = _row(doc_id)
     assert new_hash != old_hash
-    assert counter.embed_calls >= 1
+    assert counting_embedder.embed_calls >= 1
 
 
 def test_edit_content_collision_aborts(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
     tmp_path: Any,
 ) -> None:
-    counter = CountingEmbedder(fake_embedder)
-    _patch_embedder(monkeypatch, counter)
-    a_id = _seed(test_db, fake_embedder, content="alpha body content.")
-    b_id = _seed(test_db, fake_embedder, content="bravo body content.")
+    patch_embedder(fake_embedder)
+    a_id = seed_doc(content="alpha body content.")
+    b_id = seed_doc(content="bravo body content.")
     _, _, _, _, _, b_hash_before = _row(b_id)
     payload = tmp_path / "clash.txt"
     payload.write_text("alpha body content.")
@@ -177,13 +129,13 @@ def test_edit_content_collision_aborts(
 
 
 def test_edit_empty_content_rejected(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
     tmp_path: Any,
 ) -> None:
-    _patch_embedder(monkeypatch, fake_embedder)
-    doc_id = _seed(test_db, fake_embedder)
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc()
     payload = tmp_path / "empty.txt"
     payload.write_text("")
     result = CliRunner().invoke(
@@ -195,41 +147,40 @@ def test_edit_empty_content_rejected(
 
 def test_edit_no_flags_errors_when_no_editor(
     monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
     """Editor mode is the no-flag path; with no editor available it must error."""
-    _patch_embedder(monkeypatch, fake_embedder)
+    patch_embedder(fake_embedder)
     monkeypatch.delenv("VISUAL", raising=False)
     monkeypatch.delenv("EDITOR", raising=False)
     monkeypatch.setenv("PATH", "/nonexistent")
-    doc_id = _seed(test_db, fake_embedder)
+    doc_id = seed_doc()
     result = CliRunner().invoke(app, ["edit", doc_id[:8]])
     assert result.exit_code == 1, result.output
     assert "editor" in result.output.lower()
 
 
 def test_edit_replace_metadata_alone_errors(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
-    _patch_embedder(monkeypatch, fake_embedder)
-    doc_id = _seed(test_db, fake_embedder)
-    result = CliRunner().invoke(
-        app, ["edit", doc_id[:8], "--replace-metadata"]
-    )
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc()
+    result = CliRunner().invoke(app, ["edit", doc_id[:8], "--replace-metadata"])
     assert result.exit_code != 0
     assert "--replace-metadata" in result.output
 
 
 def test_edit_invalid_metadata_json_errors(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
-    _patch_embedder(monkeypatch, fake_embedder)
-    doc_id = _seed(test_db, fake_embedder)
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc()
     before = _row(doc_id)
     result = CliRunner().invoke(
         app, ["edit", doc_id[:8], "--metadata", "{not json"]
@@ -240,26 +191,24 @@ def test_edit_invalid_metadata_json_errors(
 
 
 def test_edit_metadata_must_be_object(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
-    _patch_embedder(monkeypatch, fake_embedder)
-    doc_id = _seed(test_db, fake_embedder, metadata={"a": 1})
-    result = CliRunner().invoke(
-        app, ["edit", doc_id[:8], "--metadata", '"x"']
-    )
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc(metadata={"a": 1})
+    result = CliRunner().invoke(app, ["edit", doc_id[:8], "--metadata", '"x"'])
     assert result.exit_code == 1, result.output
     assert "object" in result.output
     assert _row(doc_id)[3] == {"a": 1}
 
 
 def test_edit_ambiguous_prefix_errors(
-    monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
 ) -> None:
-    _patch_embedder(monkeypatch, fake_embedder)
+    patch_embedder(fake_embedder)
     # Force two documents whose IDs share a 6-char prefix. We insert directly
     # to bypass the chunk FK that an UPDATE on documents.id would dangle.
     for new_id, content in (
@@ -271,22 +220,19 @@ def test_edit_ambiguous_prefix_errors(
             "content_type) VALUES (%s, %s, %s, %s, %s)",
             (new_id, content, content, content + "_h", "note"),
         )
-    result = CliRunner().invoke(
-        app, ["edit", "aaaaaa", "--title", "x"]
-    )
+    result = CliRunner().invoke(app, ["edit", "aaaaaa", "--title", "x"])
     assert result.exit_code != 0
     assert "ambiguous" in result.output
 
 
 def test_edit_title_updates_fts(
-    monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
-    _patch_embedder(monkeypatch, fake_embedder)
-    doc_id = _seed(
-        test_db, fake_embedder, title="Original Title", content="some body content."
-    )
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc(title="Original Title", content="some body content.")
     # Confirm the original title is searchable by FTS.
     pre = test_db.execute(
         "SELECT count(*) FROM documents "
@@ -315,13 +261,13 @@ def test_edit_title_updates_fts(
 
 
 def test_edit_no_op_reports_no_changes(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
     """Edit with same title is treated as a successful no-op."""
-    _patch_embedder(monkeypatch, fake_embedder)
-    doc_id = _seed(test_db, fake_embedder, title="Same Title")
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc(title="Same Title")
     result = CliRunner().invoke(
         app, ["edit", doc_id[:8], "--title", "Same Title"]
     )
@@ -330,13 +276,13 @@ def test_edit_no_op_reports_no_changes(
 
 
 def test_edit_content_file_and_stdin_mutually_exclusive(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
     fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
     tmp_path: Any,
 ) -> None:
-    _patch_embedder(monkeypatch, fake_embedder)
-    doc_id = _seed(test_db, fake_embedder)
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc()
     payload = tmp_path / "x.txt"
     payload.write_text("body")
     result = CliRunner().invoke(
@@ -355,24 +301,19 @@ def test_edit_content_file_and_stdin_mutually_exclusive(
 
 
 def test_edit_content_stdin(
-    monkeypatch: pytest.MonkeyPatch,
-    test_db: psycopg.Connection,
-    fake_embedder: Any,
+    counting_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
 ) -> None:
-    counter = CountingEmbedder(fake_embedder)
-    _patch_embedder(monkeypatch, counter)
-    doc_id = _seed(test_db, fake_embedder, content="old body of text.")
+    patch_embedder(counting_embedder)
+    doc_id = seed_doc(content="old body of text.")
     _, _, _, _, _, old_hash = _row(doc_id)
     result = CliRunner().invoke(
-        app, ["edit", doc_id[:8], "--content-stdin"], input="brand new body via stdin."
+        app,
+        ["edit", doc_id[:8], "--content-stdin"],
+        input="brand new body via stdin.",
     )
     assert result.exit_code == 0, result.output
     _, _, _, _, _, new_hash = _row(doc_id)
     assert new_hash != old_hash
-    assert counter.embed_calls >= 1
-
-
-def _content_hash(text: str) -> str:
-    import hashlib
-
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    assert counting_embedder.embed_calls >= 1
