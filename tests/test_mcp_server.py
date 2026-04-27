@@ -1,4 +1,4 @@
-"""Unit tests for the four read tools registered by ``brain.mcp_server``.
+"""Unit tests for the six tools registered by ``brain.mcp_server``.
 
 Each test installs a fresh ``_State`` (real test-DB Config + fake embedder)
 via ``monkeypatch.setattr`` and calls the tool functions directly. The
@@ -62,22 +62,6 @@ class _BoomConnect:
         return None
 
 
-class _BoomEmbedder:
-    """Embedder stub that always raises a voyageai exception on ``embed``.
-
-    Used to assert each tool wraps voyage failures as ``McpError`` rather
-    than letting a raw ``VoyageError`` propagate to the MCP runtime.
-    """
-
-    def embed(
-        self, texts: list[str], *, input_type: str = "document"
-    ) -> list[list[float]]:
-        raise voyageai.error.RateLimitError("rate limited")
-
-    def count_tokens(self, text: str) -> int:
-        return 1
-
-
 def _ingest(
     conn: psycopg.Connection,
     embedder: object,
@@ -108,6 +92,44 @@ def _ingest(
     )
     assert result.document_id is not None
     return result.document_id
+
+
+def _doc_tags(doc_id: str) -> list[str]:
+    """Read the current tag list for a document directly from Postgres."""
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT tags FROM documents WHERE id=%s", (doc_id,)
+        ).fetchone()
+    assert row is not None
+    return list(row[0] or [])
+
+
+def _doc_metadata(doc_id: str) -> dict[str, Any]:
+    """Read the current metadata blob for a document directly from Postgres."""
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT metadata FROM documents WHERE id=%s", (doc_id,)
+        ).fetchone()
+    assert row is not None
+    return dict(row[0] or {})
+
+
+def _chunk_count(doc_id: str) -> int:
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT count(*) FROM chunks WHERE document_id=%s", (doc_id,)
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _content_hash(doc_id: str) -> str:
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT content_hash FROM documents WHERE id=%s", (doc_id,)
+        ).fetchone()
+    assert row is not None
+    return str(row[0])
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +206,22 @@ def test_brain_search_respects_filters(
         assert r["source_kind"] == "krisp"
     titles = {r["title"] for r in results}
     assert titles == {"Krisp one", "Krisp two"}
+
+
+class _BoomEmbedder:
+    """Embedder stub that always raises a voyageai exception on ``embed``.
+
+    Used to assert each tool wraps voyage failures as ``McpError`` rather
+    than letting a raw ``VoyageError`` propagate to the MCP runtime.
+    """
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        raise voyageai.error.RateLimitError("rate limited")
+
+    def count_tokens(self, text: str) -> int:
+        return 1
 
 
 def test_brain_search_wraps_voyage_error(
@@ -386,6 +424,283 @@ def test_brain_status_on_empty_db(
 
 
 # ---------------------------------------------------------------------------
+# brain_ingest_stdin
+# ---------------------------------------------------------------------------
+
+
+def test_brain_ingest_stdin_creates_document(
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    payload = mcp_server.brain_ingest_stdin(
+        content="company-id dealmaker notes from the q1 review",
+        source="krisp",
+        external_id="krisp:meeting:42",
+        title="Q1 review",
+        content_type="transcript",
+    )
+    assert payload["created"] is True
+    assert payload["document_id"] is not None
+    # The doc should now show up in search.
+    results = mcp_server.brain_search(query="company-id")
+    titles = {r["title"] for r in results}
+    assert "Q1 review" in titles
+
+
+def test_brain_ingest_stdin_dedup_on_external_id(
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    first = mcp_server.brain_ingest_stdin(
+        content="some content body",
+        source="krisp",
+        external_id="krisp:dup:1",
+        title="First",
+    )
+    second = mcp_server.brain_ingest_stdin(
+        content="some content body",  # same body → same content_hash
+        source="krisp",
+        external_id="krisp:dup:1",
+        title="First",
+    )
+    assert first["created"] is True
+    assert second["created"] is False
+    assert second["document_id"] == first["document_id"]
+
+
+@pytest.mark.parametrize("empty", ["", "   ", "\n\n", "\t  \n"])
+def test_brain_ingest_stdin_empty_content_errors(
+    empty: str,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_ingest_stdin(
+            content=empty,
+            source="krisp",
+            external_id="krisp:empty",
+            title="Empty",
+        )
+    assert "content is empty" in exc_info.value.error.message
+
+
+def test_brain_ingest_stdin_auto_tags_with_source_mcp(
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """No tags arg → stored tags are exactly [\"source-mcp\"]."""
+    payload = mcp_server.brain_ingest_stdin(
+        content="auto-tagging body",
+        source="krisp",
+        external_id="krisp:auto-tag",
+        title="Auto",
+    )
+    doc_id = payload["document_id"]
+    assert doc_id is not None
+    assert _doc_tags(doc_id) == ["source-mcp"]
+
+
+def test_brain_ingest_stdin_user_tags_union_with_source_mcp(
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """User tags are unioned (set semantics, dedup) with source-mcp."""
+    payload = mcp_server.brain_ingest_stdin(
+        content="union body",
+        source="krisp",
+        external_id="krisp:union",
+        title="Union",
+        tags=["interview", "source-mcp"],  # explicit dup of auto tag
+    )
+    doc_id = payload["document_id"]
+    assert doc_id is not None
+    assert sorted(_doc_tags(doc_id)) == ["interview", "source-mcp"]
+
+
+def test_brain_ingest_stdin_passes_date_into_metadata(
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """``date`` arg is stored under metadata.date (parity with the CLI)."""
+    payload = mcp_server.brain_ingest_stdin(
+        content="dated body",
+        source="krisp",
+        external_id="krisp:dated",
+        title="Dated",
+        date="2026-01-15",
+    )
+    doc_id = payload["document_id"]
+    assert doc_id is not None
+    assert _doc_metadata(doc_id)["date"] == "2026-01-15"
+
+
+# ---------------------------------------------------------------------------
+# brain_tag
+# ---------------------------------------------------------------------------
+
+
+def test_brain_tag_adds_and_removes(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    doc_id = _ingest(
+        test_db, fake_embedder, title="Tagged", content="body", tags=["one"]
+    )
+    payload = mcp_server.brain_tag(id_prefix=doc_id[:8], add=["x"])
+    assert sorted(payload["tags"]) == ["one", "x"]
+    payload = mcp_server.brain_tag(id_prefix=doc_id[:8], remove=["x"])
+    assert payload["tags"] == ["one"]
+    payload = mcp_server.brain_tag(id_prefix=doc_id[:8], add=["a"], remove=["one"])
+    assert payload["tags"] == ["a"]
+    assert payload["document_id"] == doc_id
+
+
+def test_brain_tag_unknown_id_errors(
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_tag(id_prefix="ffffff", add=["x"])
+    assert "not found" in exc_info.value.error.message
+
+
+def test_brain_tag_requires_add_or_remove(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="body")
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_tag(id_prefix=doc_id[:8])
+    assert "add or remove" in exc_info.value.error.message
+
+
+# ---------------------------------------------------------------------------
+# brain_edit
+# ---------------------------------------------------------------------------
+
+
+def test_brain_edit_title_only_no_voyage_call(
+    test_db: psycopg.Connection,
+    counting_embedder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Title-only edit must not call the embedder."""
+    state = mcp_server._State(
+        cfg=Config(database_url=TEST_DATABASE_URL, voyage_api_key="fake"),
+        embedder=counting_embedder,
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+    doc_id = _ingest(
+        test_db, counting_embedder, title="Old", content="body content here"
+    )
+    counting_embedder.embed_calls = 0  # reset after the seed ingest
+    payload = mcp_server.brain_edit(id_prefix=doc_id[:8], title="New")
+    assert payload["fields_changed"] == ["title"]
+    assert payload["rechunked"] is False
+    assert counting_embedder.embed_calls == 0
+    # And the title actually persisted.
+    fresh = mcp_server.brain_show(id_prefix=doc_id[:8])
+    assert fresh["title"] == "New"
+
+
+def test_brain_edit_content_rechunks_and_reembeds(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    doc_id = _ingest(
+        test_db, fake_embedder, title="A", content="original body"
+    )
+    pre_chunks = _chunk_count(doc_id)
+    pre_hash = _content_hash(doc_id)
+    payload = mcp_server.brain_edit(
+        id_prefix=doc_id[:8],
+        content="completely different body so the hash must change",
+    )
+    assert payload["rechunked"] is True
+    assert "content" in payload["fields_changed"]
+    post_chunks = _chunk_count(doc_id)
+    post_hash = _content_hash(doc_id)
+    # Both chunks and the content_hash should reflect the new body.
+    assert post_chunks >= 1
+    assert post_hash != pre_hash
+    # We don't assert pre_chunks != post_chunks (single short body → 1 chunk
+    # before and after); the hash + rechunked flag prove the path ran.
+    _ = pre_chunks  # silence unused-warn
+
+
+def test_brain_edit_metadata_merge_keeps_other_keys(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    # Seed a doc, then bolt on metadata via direct SQL (the ingest pipeline
+    # accepts metadata only via source_metadata; documents.metadata stays at
+    # ExtractedDoc.metadata which defaults to {}).
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="body")
+    test_db.execute(
+        "UPDATE documents SET metadata = %s::jsonb WHERE id = %s",
+        ('{"a": 1, "b": 2}', doc_id),
+    )
+    payload = mcp_server.brain_edit(
+        id_prefix=doc_id[:8], metadata={"b": 3}
+    )
+    assert payload["fields_changed"] == ["metadata"]
+    assert _doc_metadata(doc_id) == {"a": 1, "b": 3}
+
+
+def test_brain_edit_metadata_replace_swaps_blob(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="body")
+    test_db.execute(
+        "UPDATE documents SET metadata = %s::jsonb WHERE id = %s",
+        ('{"a": 1, "b": 2}', doc_id),
+    )
+    payload = mcp_server.brain_edit(
+        id_prefix=doc_id[:8],
+        metadata={"only": "this"},
+        replace_metadata=True,
+    )
+    assert payload["fields_changed"] == ["metadata"]
+    assert _doc_metadata(doc_id) == {"only": "this"}
+
+
+def test_brain_edit_no_args_errors(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="body")
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_edit(id_prefix=doc_id[:8])
+    assert "no edit fields" in exc_info.value.error.message
+
+
+def test_brain_edit_replace_metadata_without_metadata_errors(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="body")
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_edit(id_prefix=doc_id[:8], replace_metadata=True)
+    assert "replace_metadata" in exc_info.value.error.message
+
+
+def test_brain_edit_propagates_value_errors(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """A ValueError from update_document (e.g. content collision) becomes McpError."""
+    doc_a = _ingest(test_db, fake_embedder, title="A", content="alpha body")
+    doc_b = _ingest(test_db, fake_embedder, title="B", content="bravo body")
+    # Trying to set doc_b's content to doc_a's content collides on hash.
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_edit(id_prefix=doc_b[:8], content="alpha body")
+    assert "collides" in exc_info.value.error.message
+    _ = doc_a  # silence unused-warn
+
+
+# ---------------------------------------------------------------------------
 # Server state lifecycle + logging configuration
 # ---------------------------------------------------------------------------
 
@@ -483,6 +798,76 @@ def test_brain_list_wraps_db_error(
     assert "database error" in msg
     assert "OperationalError" in msg
     assert "simulated outage" not in msg
+
+
+def test_brain_ingest_stdin_wraps_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_ingest_stdin(
+            content="body", source="krisp", external_id="x", title="t"
+        )
+    msg = exc_info.value.error.message
+    assert "database error" in msg
+    assert "OperationalError" in msg
+
+
+def test_brain_tag_wraps_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_tag(id_prefix="abcdef", add=["x"])
+    msg = exc_info.value.error.message
+    assert "database error" in msg
+
+
+def test_brain_edit_wraps_db_error(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_edit(id_prefix="abcdef", title="new")
+    msg = exc_info.value.error.message
+    assert "database error" in msg
+
+
+def test_brain_ingest_stdin_wraps_voyage_error(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_state: mcp_server._State,
+) -> None:
+    monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_ingest_stdin(
+            content="body that will need embedding",
+            source="krisp",
+            external_id="krisp:voy",
+            title="t",
+        )
+    msg = exc_info.value.error.message
+    assert "embedding failed" in msg
+    assert "RateLimitError" in msg
+
+
+def test_brain_edit_wraps_voyage_error(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_state: mcp_server._State,
+) -> None:
+    """A re-embed failure during brain_edit must surface as McpError."""
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="original")
+    # Swap the state's embedder to one that raises on the new content.
+    monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_edit(id_prefix=doc_id[:8], content="brand new body")
+    msg = exc_info.value.error.message
+    assert "embedding failed" in msg
+    assert "RateLimitError" in msg
 
 
 # ---------------------------------------------------------------------------

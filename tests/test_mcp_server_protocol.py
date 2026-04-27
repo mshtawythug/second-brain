@@ -1,9 +1,8 @@
 """End-to-end protocol test for ``brain-mcp``.
 
-Spawns the server via the installed ``brain-mcp`` console script, runs a real
-MCP ``initialize`` + ``tools/list`` round-trip over stdio, and asserts the
-four read tools are advertised with non-empty input schemas. Subsequent
-phases extend this to cover the write tools.
+Spawns the server via ``python -m brain.mcp_server``, runs a real MCP
+``initialize`` + ``tools/list`` round-trip over stdio, and asserts the six
+tools (four read, three write) are advertised with non-empty input schemas.
 """
 import os
 import shutil
@@ -18,11 +17,14 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql://brain:brain@localhost:5433/second_brain_test",
 )
 
-EXPECTED_READ_TOOLS = {
+EXPECTED_TOOLS = {
     "brain_search",
     "brain_show",
     "brain_list",
     "brain_status",
+    "brain_ingest_stdin",
+    "brain_tag",
+    "brain_edit",
 }
 
 
@@ -64,15 +66,15 @@ async def _list_tools_via_stdio() -> dict[str, dict[str, object]]:
     shutil.which(sys.executable) is None,
     reason="python interpreter not on PATH",
 )
-def test_brain_mcp_tools_list_advertises_read_tools() -> None:
-    """`brain-mcp` responds to tools/list with the four read tools and schemas."""
+def test_brain_mcp_tools_list_advertises_all_tools() -> None:
+    """`brain-mcp` responds to tools/list with all six tools and schemas."""
     tools = anyio.run(_list_tools_via_stdio)
 
     advertised = set(tools.keys())
-    missing = EXPECTED_READ_TOOLS - advertised
+    missing = EXPECTED_TOOLS - advertised
     assert not missing, f"server failed to advertise: {missing} (got {advertised})"
 
-    for name in EXPECTED_READ_TOOLS:
+    for name in EXPECTED_TOOLS:
         schema = tools[name]["inputSchema"]
         assert isinstance(schema, dict), f"{name}: inputSchema not a dict"
         # FastMCP always emits at minimum {"type":"object","properties":{...}}.
@@ -93,3 +95,23 @@ def test_brain_mcp_tools_list_advertises_read_tools() -> None:
     # brain_status takes no args.
     status_props = tools["brain_status"]["inputSchema"]["properties"]  # type: ignore[index]
     assert status_props == {}
+
+    # Write tools advertise the right kwargs.
+    ingest_props = tools["brain_ingest_stdin"]["inputSchema"]["properties"]  # type: ignore[index]
+    for arg in ("content", "source", "external_id", "title", "tags", "metadata"):
+        assert arg in ingest_props, f"brain_ingest_stdin missing {arg}"
+
+    tag_props = tools["brain_tag"]["inputSchema"]["properties"]  # type: ignore[index]
+    for arg in ("id_prefix", "add", "remove"):
+        assert arg in tag_props, f"brain_tag missing {arg}"
+
+    edit_props = tools["brain_edit"]["inputSchema"]["properties"]  # type: ignore[index]
+    for arg in (
+        "id_prefix",
+        "title",
+        "content_type",
+        "content",
+        "metadata",
+        "replace_metadata",
+    ):
+        assert arg in edit_props, f"brain_edit missing {arg}"
