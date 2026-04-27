@@ -6,7 +6,7 @@ Stores career documents, interview prep, Krisp call transcripts, Slack threads, 
 
 ## What this is
 
-A `brain` CLI backed by a local Postgres database that I can query from any Claude Code session. I ingest my own career artifacts — resumes, interview prep, COMPANY_REDACTED docs, Krisp call transcripts, Slack threads, selected Gmail — and Claude searches them via `brain search` whenever a conversation touches my work history. Instead of copy-pasting context into every chat, Claude pulls the real source material on demand.
+A `brain` CLI backed by a local Postgres database that I can query from any Claude Code session. I ingest my own career artifacts — resumes, interview prep, Krisp call transcripts, Slack threads, selected Gmail — and Claude searches them via `brain search` whenever a conversation touches my work history. Instead of copy-pasting context into every chat, Claude pulls the real source material on demand.
 
 ## Tech stack
 
@@ -15,7 +15,7 @@ A `brain` CLI backed by a local Postgres database that I can query from any Clau
 | CLI | Python 3.11 + [Typer](https://typer.tiangolo.com/) | Fast to write, good ergonomics, easy to test. |
 | Storage | PostgreSQL 16 + [`pgvector`](https://github.com/pgvector/pgvector) | One database for both lexical (`tsvector`) and semantic (vector) search — no separate vector store to operate. Runs in Docker on port 5433. |
 | Embeddings | Voyage AI [`voyage-4`](https://docs.voyageai.com/) (1024-dim) | Strong retrieval quality on long-form personal text; free tier covers personal use. |
-| Search | Hybrid: Postgres FTS + vector cosine, fused via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (k=60) | Lexical alone misses paraphrases ("what did I say about X"); vector alone misses exact names ("person-x", "COMPANY_REDACTED"). RRF combines both ranks without tuning weights. |
+| Search | Hybrid: Postgres FTS + vector cosine, fused via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (k=60) | Lexical alone misses paraphrases ("what did I say about X"); vector alone misses exact names ("a coworker", "a former employer"). RRF combines both ranks without tuning weights. |
 | Extraction | `pypdf`, `pdfplumber`, `python-docx`, `markdown-it-py` | Covers the file types I actually have. |
 | Chunking | Paragraph-aware, budgeted with `tiktoken` | Keeps semantic boundaries intact while staying under the embedder's token limit. |
 | Output | [Rich](https://rich.readthedocs.io/) tables + `--json` mode | Human-readable in a terminal, machine-parsable when Claude shells out. |
@@ -26,9 +26,34 @@ A `brain` CLI backed by a local Postgres database that I can query from any Clau
 
 - **Claude has no memory across conversations.** A queryable second brain gives it durable, personal context (past meetings, prior writings, decisions) without me re-pasting it every time.
 - **Local-only by design.** My Krisp transcripts and Slack history don't leave my machine — no SaaS account, no vendor indexing my comms.
-- **Hybrid search beats either half.** My queries split roughly 50/50 between paraphrase-heavy ("compliance horror stories") and exact-name ("person-x", "COMPANY_REDACTED"). RRF gives me both in one ranked list.
+- **Hybrid search beats either half.** My queries split roughly 50/50 between paraphrase-heavy ("compliance horror stories") and exact-name (a coworker, a former employer). RRF gives me both in one ranked list.
 - **Works from any cwd.** A symlinked launcher means Claude Code in any project can call `brain search` — the knowledge base isn't tied to one repo.
 - **Idempotent ingest.** `documents.content_hash` is `UNIQUE`, so re-running `brain ingest-dir` is a no-op. I can rerun without thinking about duplicates.
+
+## Token cost vs. direct fetch
+
+The other big reason this is worth building: querying `brain` burns far less context than having Claude read the source directly via MCP or the `Read` tool. Rough per-query estimates (yours will vary with thread/file size):
+
+| Source | Direct (MCP / `Read` tool) | `brain search` (+ optional `brain show`) | Savings |
+|---|---|---|---|
+| **Gmail** | `search_threads` (~2–5k of metadata) + `get_thread` × 3–5 hits, each 3–10k with quoted replies / signatures / headers (long threads 20k+) → **15–50k** | 5 × 400-char snippets + IDs ≈ **~1k**; one targeted `brain show` of the cleaned body ≈ 1–3k → **~2–4k** | **~5–15×** |
+| **Krisp transcript** | `search_meetings` (~500–1k per match) + `get_multiple_documents` for full transcripts (~6k for 30 min, 10–20k for 60 min) across 5 candidates → **25–75k** | Search ~1k; load just the one relevant transcript via `brain show` (~5–15k) → **~6–16k** | **~4–10×** |
+| **Slack thread** | `slack_search_*` + `slack_read_thread` per hit (3–8k each with user names / timestamps / reactions) → **10–30k** | Search ~1k; `brain show` on one cleaned thread ~2–5k → **~3–6k** | **~3–8×** |
+| **PDF / DOCX (resume, 1-pager)** | `Read` whole file: 5-page resume ~2–4k | One snippet ~100 tokens; usually no `show` needed → **~1k** | **~2–4×** |
+| **Long PDF / DOCX (interview prep, 30+ pages)** | `Read` whole file: ~15–25k | Search ~1k; targeted `brain show` of just that doc when needed ~3–8k → **~1–9k** | **~5–15×** |
+| **Long Markdown notes (~4k words)** | `Read` whole file: ~6k | One snippet ~100 tokens for the matching passage → **~1k** | **~6–10×** |
+
+Why the gap is so large:
+
+- **Pre-extracted bodies.** Brain stores HTML-stripped, quote-removed, signature-free text. Gmail/Slack MCP returns full thread structure, headers, MIME parts, and quoted replies that bloat every hit.
+- **Hybrid retrieval ranks before fetching.** RRF returns the top 5 *actually-relevant* docs in one call. The MCP equivalent is a keyword search that often pulls 20+ unrelated threads and forces a refining round-trip.
+- **Chunking returns just the relevant passage.** A 30-page interview prep doc reduces to a ~100-token snippet of the section that matched — the rest of the doc never enters context unless you ask for it.
+- **Ingest tokens are paid once, off-conversation.** Voyage embedding + extraction happens during `brain ingest`, never against your chat context.
+
+Caveats:
+
+- Numbers are rough — long, chatty threads or very large docs widen the gap; short ones narrow it.
+- Brain only knows what's been ingested. For "search anything in my inbox right now," Gmail MCP is still the only option; brain is for the slice you've curated in.
 
 ## Setup
 
@@ -98,7 +123,7 @@ Verify with `which brain` (should resolve to the symlink) and `brain doctor`.
 brain ingest-dir ~/Documents/career
 
 # Tag a document
-brain tag <id-prefix> +interview +company-id
+brain tag <id-prefix> +interview +career
 
 # Edit a document in place (title / metadata / body)
 brain edit <id-prefix> --title "New title"
@@ -107,7 +132,7 @@ brain edit <id-prefix> --content-file ./fixed.md            # re-embeds
 brain edit <id-prefix>                                      # opens $EDITOR
 
 # Search
-brain search "what did I tell person-x about COMPANY_REDACTED"
+brain search "what did I tell my manager about the platform migration"
 brain search "compliance horror stories" --limit 10
 brain search "interview prep" --tag interview --since 30
 
@@ -116,18 +141,18 @@ brain show <id-prefix>
 
 # Browse
 brain list --source gmail --limit 20
-brain list --tag company-id
+brain list --tag career
 
 # Gmail (requires at least one scope flag)
 brain ingest-gmail --label interviews --since 30d
-brain ingest-gmail --from person-a@example.com
+brain ingest-gmail --from alice@example.com
 
 # Krisp / Slack — Claude orchestrates this:
 # (Claude calls Krisp MCP, then pipes to brain ingest-stdin)
 echo "<transcript>" | brain ingest-stdin \
   --source krisp --external-id meeting-42 \
-  --title "person-x sync — Apr 24" --content-type transcript \
-  --metadata '{"participants":["person-x","Ali"]}'
+  --title "1:1 — Apr 24" --content-type transcript \
+  --metadata '{"participants":["Alice","Bob"]}'
 
 # Admin
 brain status   # counts and last-ingest time
