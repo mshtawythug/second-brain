@@ -1,5 +1,7 @@
 """Integration tests for the ingest pipeline (extract → chunk → embed → store)."""
-from brain.ingest import ExtractedDoc, ingest_document
+import pytest
+
+from brain.ingest import ExtractedDoc, ingest_document, update_document
 
 
 def _ingest(test_db, embedder, doc, *, force=False):
@@ -139,3 +141,192 @@ def test_ingest_with_tags(test_db, fake_embedder):
         "SELECT tags FROM documents WHERE id=%s", (result.document_id,)
     ).fetchone()[0]
     assert sorted(tags) == ["company-id", "interview"]
+
+
+# --- update_document --------------------------------------------------------
+
+
+def _seed(test_db, fake_embedder, *, content="hello world", title="T", metadata=None):
+    doc = ExtractedDoc(
+        title=title,
+        content=content,
+        content_type="note",
+        source_path=None,
+        metadata=metadata or {},
+    )
+    return ingest_document(
+        test_db, embedder=fake_embedder, doc=doc, source_kind="manual"
+    ).document_id
+
+
+def test_update_document_body_change_deletes_old_chunks(test_db, fake_embedder):
+    doc_id = _seed(test_db, fake_embedder, content="paragraph one.\n\nparagraph two.")
+    old_chunk_ids = {
+        r[0]
+        for r in test_db.execute(
+            "SELECT id FROM chunks WHERE document_id=%s", (doc_id,)
+        ).fetchall()
+    }
+    assert old_chunk_ids
+    result = update_document(
+        test_db,
+        document_id=doc_id,
+        embedder=fake_embedder,
+        new_content="brand new body about company-id and person-a.",
+    )
+    assert result.rechunked is True
+    assert "content" in result.fields_changed
+    new_chunk_ids = {
+        r[0]
+        for r in test_db.execute(
+            "SELECT id FROM chunks WHERE document_id=%s", (doc_id,)
+        ).fetchall()
+    }
+    assert new_chunk_ids and new_chunk_ids.isdisjoint(old_chunk_ids)
+
+
+def test_update_document_metadata_merge_preserves_other_keys(test_db, fake_embedder):
+    doc_id = _seed(test_db, fake_embedder, metadata={"a": 1, "b": 2})
+    result = update_document(
+        test_db, document_id=doc_id, metadata_patch={"b": 3, "c": 4}
+    )
+    assert result.fields_changed == ["metadata"]
+    meta = test_db.execute(
+        "SELECT metadata FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()[0]
+    assert meta == {"a": 1, "b": 3, "c": 4}
+
+
+def test_update_document_collision_aborts(test_db, fake_embedder):
+    a_id = _seed(test_db, fake_embedder, content="alpha")
+    b_id = _seed(test_db, fake_embedder, content="bravo")
+    with pytest.raises(ValueError, match="content collides"):
+        update_document(
+            test_db,
+            document_id=b_id,
+            embedder=fake_embedder,
+            new_content="alpha",
+        )
+    # Original document a is unchanged.
+    a_content = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (a_id,)
+    ).fetchone()[0]
+    assert a_content == "alpha"
+
+
+def test_update_document_body_change_rolls_back_on_embedder_error(
+    test_db, fake_embedder
+):
+    doc_id = _seed(test_db, fake_embedder, content="original body of text.")
+    old_hash = test_db.execute(
+        "SELECT content_hash FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()[0]
+    old_chunk_count = test_db.execute(
+        "SELECT count(*) FROM chunks WHERE document_id=%s", (doc_id,)
+    ).fetchone()[0]
+    assert old_chunk_count >= 1
+
+    class BoomEmbedder:
+        def embed(self, texts, *, input_type="document"):
+            raise RuntimeError("voyage is down")
+
+        def count_tokens(self, text):
+            return fake_embedder.count_tokens(text)
+
+    with pytest.raises(RuntimeError, match="voyage is down"):
+        update_document(
+            test_db,
+            document_id=doc_id,
+            embedder=BoomEmbedder(),
+            new_content="totally different body",
+        )
+
+    after_hash = test_db.execute(
+        "SELECT content_hash FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()[0]
+    after_chunk_count = test_db.execute(
+        "SELECT count(*) FROM chunks WHERE document_id=%s", (doc_id,)
+    ).fetchone()[0]
+    assert after_hash == old_hash
+    assert after_chunk_count == old_chunk_count
+
+
+def test_update_document_empty_body_rejected(test_db, fake_embedder):
+    doc_id = _seed(test_db, fake_embedder)
+    with pytest.raises(ValueError, match="content is empty"):
+        update_document(
+            test_db,
+            document_id=doc_id,
+            embedder=fake_embedder,
+            new_content="   \n\n   ",
+        )
+
+
+def test_update_document_body_required_embedder(test_db, fake_embedder):
+    doc_id = _seed(test_db, fake_embedder)
+    with pytest.raises(ValueError, match="embedder is required"):
+        update_document(
+            test_db, document_id=doc_id, new_content="something fresh"
+        )
+
+
+def test_update_document_unknown_id_raises(test_db, fake_embedder):
+    """A bogus UUID should raise ValueError before any DB write."""
+    with pytest.raises(ValueError, match="document not found"):
+        update_document(
+            test_db,
+            document_id="00000000-0000-0000-0000-000000000000",
+            new_title="x",
+        )
+
+
+def test_update_document_content_type_change(test_db, fake_embedder):
+    doc_id = _seed(test_db, fake_embedder)
+    result = update_document(
+        test_db, document_id=doc_id, new_content_type="transcript"
+    )
+    assert result.fields_changed == ["content_type"]
+    new_type = test_db.execute(
+        "SELECT content_type FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()[0]
+    assert new_type == "transcript"
+
+
+def test_update_document_tags_change(test_db, fake_embedder):
+    doc_id = _seed(test_db, fake_embedder)
+    test_db.execute(
+        "UPDATE documents SET tags=%s WHERE id=%s", (["one"], doc_id)
+    )
+    result = update_document(
+        test_db, document_id=doc_id, new_tags=["two", "three"]
+    )
+    assert result.fields_changed == ["tags"]
+    tags = test_db.execute(
+        "SELECT tags FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()[0]
+    assert sorted(tags) == ["three", "two"]
+
+
+def test_update_document_no_op_returns_empty_fields(test_db, fake_embedder):
+    """Re-applying current values is a successful no-op (empty fields_changed)."""
+    doc_id = _seed(test_db, fake_embedder, title="T", metadata={"a": 1})
+    result = update_document(
+        test_db,
+        document_id=doc_id,
+        new_title="T",
+        metadata_patch={"a": 1},
+    )
+    assert result.fields_changed == []
+    assert result.rechunked is False
+
+
+def test_update_document_replace_metadata_no_op(test_db, fake_embedder):
+    """replace_metadata with identical blob is detected as a no-op."""
+    doc_id = _seed(test_db, fake_embedder, metadata={"a": 1, "b": 2})
+    result = update_document(
+        test_db,
+        document_id=doc_id,
+        metadata_patch={"a": 1, "b": 2},
+        replace_metadata=True,
+    )
+    assert result.fields_changed == []

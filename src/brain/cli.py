@@ -3,6 +3,7 @@ import json as _json  # aliased — `json` conflicts with the --json output flag
 import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -11,12 +12,15 @@ import typer
 
 from .config import Config, ConfigError
 from .db import connect, run_migrations
+from .editor import EditorError, make_temp_file, run_editor_on
 from .embeddings import VoyageEmbedder
 from .format import console, emit_json, search_table
 from .ingest import (
+    UpdateResult,
     extract_path,
     ingest_document,
     supported_extensions,
+    update_document,
 )
 from .ingest import gmail as gmail_ingest
 from .ingest.gmail import GmailError
@@ -508,6 +512,274 @@ def tag(
                 (remove, doc_id),
             )
     typer.echo(f"updated tags on {doc_id[:8]}")
+
+
+_EDITOR_SEPARATOR = "\n---\n"
+
+
+def _build_editor_payload(
+    *, title: str, content_type: str, tags: list[str], metadata: dict[str, Any], body: str
+) -> str:
+    """Render a document into the JSON-header / body payload shown to the editor."""
+    header = _json.dumps(
+        {
+            "title": title,
+            "content_type": content_type,
+            "tags": list(tags),
+            "metadata": dict(metadata),
+        },
+        indent=2,
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return header + _EDITOR_SEPARATOR + body
+
+
+def _strip_header_comments(header_text: str) -> str:
+    """Drop ``# ...`` recovery-comment lines before parsing JSON."""
+    return "\n".join(
+        line for line in header_text.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _parse_editor_payload(text: str) -> tuple[dict[str, Any], str]:
+    """Split the editor payload into (header_dict, body). Raises ``ValueError`` on
+    malformed JSON, missing separator, or wrong header/tag types."""
+    if _EDITOR_SEPARATOR not in text:
+        raise ValueError("missing '---' separator between JSON header and body")
+    header_text, body = text.split(_EDITOR_SEPARATOR, 1)
+    cleaned = _strip_header_comments(header_text).strip()
+    try:
+        header = _json.loads(cleaned)
+    except _json.JSONDecodeError as e:
+        raise ValueError(f"invalid JSON header: {e.msg} (line {e.lineno})") from e
+    if not isinstance(header, dict):
+        raise ValueError("JSON header must be an object")
+    if "tags" in header:
+        tags = header["tags"]
+        if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
+            raise ValueError("'tags' must be a JSON array of strings")
+    if "metadata" in header and not isinstance(header["metadata"], dict):
+        raise ValueError("'metadata' must be a JSON object")
+    return header, body
+
+
+def _edit_via_editor(cfg: Config, doc_id: str) -> int:
+    """Editor-mode implementation. Returns the desired CLI exit code."""
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        row = conn.execute(
+            "SELECT title, content, content_type, tags, metadata "
+            "FROM documents WHERE id=%s",
+            (doc_id,),
+        ).fetchone()
+        assert row is not None  # caller resolved the id; row must exist
+        cur_title, cur_content, cur_type, cur_tags, cur_meta = row
+        cur_tags = list(cur_tags or [])
+        cur_meta = dict(cur_meta or {})
+
+        initial = _build_editor_payload(
+            title=cur_title,
+            content_type=cur_type,
+            tags=cur_tags,
+            metadata=cur_meta,
+            body=cur_content,
+        )
+        try:
+            temp_path = make_temp_file(initial)
+        except OSError as e:  # pragma: no cover - mkstemp failure is exceptional
+            typer.secho(f"could not create temp file: {e}", fg="red", err=True)
+            return 1
+
+        preserved_path: Path | None = None
+        try:
+            try:
+                rc = run_editor_on(temp_path)
+            except EditorError as e:
+                typer.secho(str(e), fg="red", err=True)
+                return 1
+            if rc != 0:
+                typer.secho("aborted (editor exited non-zero)", fg="red", err=True)
+                return 1
+            after_first = temp_path.read_text(encoding="utf-8")
+            if after_first == initial:
+                typer.echo("(no changes)")
+                return 0
+
+            try:
+                header, body = _parse_editor_payload(after_first)
+            except ValueError as e:
+                # Recovery: prepend an error comment, re-edit once.
+                recovery_text = f"# error: {e}\n{after_first}"
+                temp_path.write_text(recovery_text, encoding="utf-8")
+                try:
+                    rc = run_editor_on(temp_path)
+                except EditorError as ee:  # pragma: no cover - editor existed earlier
+                    typer.secho(str(ee), fg="red", err=True)
+                    return 1
+                if rc != 0:
+                    typer.secho("aborted (editor exited non-zero)", fg="red", err=True)
+                    return 1
+                after_second = temp_path.read_text(encoding="utf-8")
+                try:
+                    header, body = _parse_editor_payload(after_second)
+                except ValueError as e2:
+                    preserved_path = Path(tempfile.gettempdir()) / (
+                        f"brain-edit-{doc_id[:8]}.json"
+                    )
+                    preserved_path.write_text(after_second, encoding="utf-8")
+                    typer.secho(
+                        f"could not parse JSON header: {e2}\n"
+                        f"your draft was preserved at {preserved_path}",
+                        fg="red",
+                        err=True,
+                    )
+                    return 1
+
+            # POSIX editors append a trailing newline; strip it so a no-op
+            # round-trip compares equal to the stored body. (The leading
+            # newline of the separator is already consumed by the split.)
+            body = body.rstrip("\n")
+            cur_for_compare = cur_content.rstrip("\n")
+            new_title = header.get("title")
+            new_content_type = header.get("content_type")
+            new_tags = header.get("tags")
+            new_meta = header.get("metadata")
+            body_changed = body != cur_for_compare
+            embedder: Any = _build_embedder(cfg) if body_changed else None
+            try:
+                result = update_document(
+                    conn,
+                    document_id=doc_id,
+                    embedder=embedder,
+                    new_title=new_title if isinstance(new_title, str) else None,
+                    new_content_type=(
+                        new_content_type if isinstance(new_content_type, str) else None
+                    ),
+                    new_content=body if body_changed else None,
+                    metadata_patch=new_meta if isinstance(new_meta, dict) else None,
+                    replace_metadata=True,
+                    new_tags=new_tags if isinstance(new_tags, list) else None,
+                )
+            except ValueError as e:
+                typer.secho(str(e), fg="red", err=True)
+                return 1
+            _print_update_result(result, doc_id)
+            return 0
+        finally:
+            if preserved_path is None and temp_path.exists():
+                temp_path.unlink()
+
+
+def _print_update_result(result: UpdateResult, doc_id: str) -> None:
+    """Print a one-line summary of an update."""
+    label = doc_id[:8]
+    if not result.fields_changed:
+        typer.echo(f"updated {label} (no changes)")
+        return
+    typer.echo(f"updated {label} ({'|'.join(result.fields_changed)})")
+
+
+@app.command()
+def edit(
+    id: str = typer.Argument(...),
+    title: str | None = typer.Option(None, "--title", help="New document title."),
+    content_type: str | None = typer.Option(
+        None, "--content-type", help="New content type label."
+    ),
+    metadata: str | None = typer.Option(
+        None,
+        "--metadata",
+        help="JSON object to merge into existing metadata "
+        "(top-level keys overwrite — nested objects are not deep-merged).",
+    ),
+    replace_metadata: bool = typer.Option(
+        False,
+        "--replace-metadata",
+        help="With --metadata, swap the entire JSONB blob instead of merging.",
+    ),
+    content_file: Path | None = typer.Option(
+        None,
+        "--content-file",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Replace document body with the contents of this file (re-embeds).",
+    ),
+    content_stdin: bool = typer.Option(
+        False, "--content-stdin", help="Replace document body with stdin (re-embeds)."
+    ),
+) -> None:
+    """Update title / content_type / metadata / body of an existing document.
+
+    With no flags, opens an editor on a JSON-header + body payload that lets
+    you edit every field at once. With flags, applies a targeted update —
+    body changes re-chunk + re-embed; metadata/title/type changes are a
+    single SQL UPDATE.
+    """
+    mutating = [title, content_type, metadata, content_file, content_stdin]
+    has_mutating = any(x is not None and x is not False for x in mutating)
+
+    if not has_mutating:
+        if replace_metadata:
+            raise typer.BadParameter("--replace-metadata requires --metadata")
+        cfg = Config.load()
+        with connect(cfg.database_url) as conn:
+            doc_id = _resolve_id(conn, id)
+        rc = _edit_via_editor(cfg, doc_id)
+        if rc != 0:
+            raise typer.Exit(code=rc)
+        return
+
+    if content_file is not None and content_stdin:
+        raise typer.BadParameter("--content-file and --content-stdin are mutually exclusive")
+
+    metadata_patch: dict[str, Any] | None = None
+    if metadata is not None:
+        try:
+            parsed = _json.loads(metadata)
+        except _json.JSONDecodeError as e:
+            typer.secho(f"--metadata is not valid JSON: {e}", fg="red", err=True)
+            raise typer.Exit(code=1) from e
+        if not isinstance(parsed, dict):
+            typer.secho("--metadata must be a JSON object", fg="red", err=True)
+            raise typer.Exit(code=1)
+        metadata_patch = parsed
+
+    new_content: str | None = None
+    if content_file is not None:
+        try:
+            new_content = content_file.read_text(encoding="utf-8")
+        except OSError as e:  # pragma: no cover - typer already gated on exists/readable
+            typer.secho(f"could not read --content-file: {e}", fg="red", err=True)
+            raise typer.Exit(code=1) from e
+    elif content_stdin:
+        new_content = sys.stdin.read()
+
+    if new_content is not None and not new_content.strip():
+        typer.secho("content is empty", fg="red", err=True)
+        raise typer.Exit(code=1)
+
+    cfg = Config.load()
+    embedder: Any = _build_embedder(cfg) if new_content is not None else None
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        doc_id = _resolve_id(conn, id)
+        try:
+            result = update_document(
+                conn,
+                document_id=doc_id,
+                embedder=embedder,
+                new_title=title,
+                new_content_type=content_type,
+                new_content=new_content,
+                metadata_patch=metadata_patch,
+                replace_metadata=replace_metadata,
+            )
+        except ValueError as e:
+            typer.secho(str(e), fg="red", err=True)
+            raise typer.Exit(code=1) from e
+    _print_update_result(result, doc_id)
 
 
 @app.command()

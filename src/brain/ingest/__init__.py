@@ -40,6 +40,21 @@ class IngestResult:
     created: bool
 
 
+@dataclass
+class UpdateResult:
+    """Outcome of :func:`update_document`.
+
+    ``fields_changed`` lists the document columns that were actually mutated
+    (subset of ``{"title", "content", "content_type", "metadata", "tags"}``).
+    ``rechunked`` is ``True`` iff the body was replaced and chunks were
+    re-embedded.
+    """
+
+    document_id: str
+    fields_changed: list[str]
+    rechunked: bool
+
+
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -146,6 +161,133 @@ def ingest_document(
             )
 
         return IngestResult(document_id=document_id, created=True)
+
+
+def update_document(
+    conn: psycopg.Connection,
+    *,
+    document_id: str,
+    embedder: Embedder | None = None,
+    new_title: str | None = None,
+    new_content_type: str | None = None,
+    new_content: str | None = None,
+    metadata_patch: dict[str, Any] | None = None,
+    replace_metadata: bool = False,
+    new_tags: list[str] | None = None,
+) -> UpdateResult:
+    """Update one document in place.
+
+    Body changes (``new_content``) re-chunk + re-embed atomically: the prior
+    chunks are deleted and new ones are inserted in the same transaction.
+    Metadata defaults to a shallow merge — top-level keys overwrite, nested
+    objects are not deep-merged. Set ``replace_metadata=True`` to swap the
+    blob entirely.
+
+    Raises :class:`ValueError` if ``new_content`` is empty/whitespace-only or
+    if its SHA-256 collides with another document. ``embedder`` is required
+    when ``new_content`` is provided. Empty/no-op edits are not an error and
+    return an :class:`UpdateResult` with ``fields_changed=[]``.
+    """
+    with conn.transaction():
+        row = conn.execute(
+            "SELECT title, content, content_type, metadata, tags "
+            "FROM documents WHERE id=%s",
+            (document_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"document not found: {document_id}")
+        cur_title, cur_content, cur_type, cur_meta, cur_tags = row
+        cur_meta = dict(cur_meta or {})
+        cur_tags = list(cur_tags or [])
+
+        fields_changed: list[str] = []
+        sets: list[str] = []
+        params: list[Any] = []
+
+        rechunked = False
+        new_hash: str | None = None
+        if new_content is not None:
+            if embedder is None:
+                raise ValueError("embedder is required when new_content is provided")
+            stripped = new_content.strip()
+            if not stripped:
+                raise ValueError("content is empty")
+            if new_content != cur_content:
+                new_hash = _content_hash(new_content)
+                clash = conn.execute(
+                    "SELECT id FROM documents WHERE content_hash=%s AND id<>%s",
+                    (new_hash, document_id),
+                ).fetchone()
+                if clash:
+                    raise ValueError(
+                        f"content collides with existing document {clash[0]}"
+                    )
+                rechunked = True
+
+        if new_title is not None and new_title != cur_title:
+            sets.append("title=%s")
+            params.append(new_title)
+            fields_changed.append("title")
+
+        if new_content_type is not None and new_content_type != cur_type:
+            sets.append("content_type=%s")
+            params.append(new_content_type)
+            fields_changed.append("content_type")
+
+        if metadata_patch is not None:
+            if replace_metadata:
+                if metadata_patch != cur_meta:
+                    sets.append("metadata=%s::jsonb")
+                    params.append(json.dumps(metadata_patch))
+                    fields_changed.append("metadata")
+            else:
+                merged = {**cur_meta, **metadata_patch}
+                if merged != cur_meta:
+                    sets.append("metadata=%s::jsonb")
+                    params.append(json.dumps(merged))
+                    fields_changed.append("metadata")
+
+        if new_tags is not None and sorted(new_tags) != sorted(cur_tags):
+            sets.append("tags=%s")
+            params.append(list(new_tags))
+            fields_changed.append("tags")
+
+        if rechunked:
+            assert new_hash is not None  # set above when rechunked is True
+            assert embedder is not None  # checked above
+            sets.append("content=%s")
+            params.append(new_content)
+            sets.append("content_hash=%s")
+            params.append(new_hash)
+            fields_changed.append("content")
+
+            conn.execute(
+                "DELETE FROM chunks WHERE document_id=%s", (document_id,)
+            )
+            chunks = chunk_text(new_content or "", count_tokens=embedder.count_tokens)
+            if chunks:
+                embeddings = embedder.embed(
+                    [c.content for c in chunks], input_type="document"
+                )
+                for c, emb in zip(chunks, embeddings, strict=True):
+                    conn.execute(
+                        "INSERT INTO chunks (document_id, chunk_index, content, "
+                        "embedding) VALUES (%s, %s, %s, %s)",
+                        (document_id, c.index, c.content, emb),
+                    )
+
+        if sets:
+            params.append(document_id)
+            conn.execute(
+                f"UPDATE documents SET {', '.join(sets)} WHERE id=%s",
+                params,
+            )
+
+    return UpdateResult(
+        document_id=document_id,
+        fields_changed=fields_changed,
+        rechunked=rechunked,
+    )
 
 
 _EXTRACTORS = {
