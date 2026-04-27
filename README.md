@@ -159,6 +159,41 @@ brain status   # counts and last-ingest time
 brain doctor   # health check
 ```
 
+## Use from Claude Desktop
+
+The `brain-mcp` binary exposes the brain as an [MCP](https://modelcontextprotocol.io/) server so Claude Desktop can search, save, and edit entries during a chat — no terminal required. Seven tools are advertised:
+
+- **Read:** `brain_search`, `brain_show`, `brain_list`, `brain_status`
+- **Write:** `brain_ingest_stdin`, `brain_tag`, `brain_edit`
+
+Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json` (replace the API key):
+
+```json
+{
+  "mcpServers": {
+    "brain": {
+      "command": "/Users/mshtawythug/workspace/second-brain/.venv/bin/brain-mcp",
+      "env": {
+        "DATABASE_URL": "postgresql://brain:brain@localhost:5433/second_brain",
+        "VOYAGE_API_KEY": "<paste here>"
+      }
+    }
+  }
+}
+```
+
+### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | (required) | Postgres connection string. Same value used by the CLI. |
+| `VOYAGE_API_KEY` | (required) | Voyage AI key for the embedder. Same key used by the CLI. |
+| `BRAIN_MCP_LOG_LEVEL` | `INFO` | Stderr log level. Accepts `DEBUG`, `INFO`, `WARNING`, `ERROR`. Unknown values fall back to `INFO`. |
+
+### What to expect
+
+After saving the config and restarting Claude Desktop, the seven tools become callable in any chat — ask "search my brain for the Q1 review with person-x" and Claude Desktop calls `brain_search` directly. Server startup is ~0.5–1.5s; the cold start is the Voyage embedder warming up on the first search. Logs go to stderr and are surfaced by Claude Desktop if a tool call fails.
+
 ## Architecture
 
 See [`docs/specs/2026-04-24-second-brain-design.md`](docs/specs/2026-04-24-second-brain-design.md).
