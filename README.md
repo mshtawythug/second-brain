@@ -111,9 +111,44 @@ See [`docs/specs/2026-04-24-second-brain-design.md`](docs/specs/2026-04-24-secon
 ## How Claude uses this
 
 A snippet in `~/.claude/CLAUDE.md` tells every Claude Code conversation:
-- When to invoke `brain search` and `brain show` (career topics, interviews, past meetings, COMPANY_REDACTED, deals)
+- When to invoke `brain search` and `brain show` (career topics, interviews, past meetings, prior roles, deals)
 - How to orchestrate Krisp/Slack ingestion via MCP → `brain ingest-stdin`
 - That `--json` output is available for programmatic parsing
+
+### Example prompts
+
+Once your corpus is ingested, you can ask Claude things like:
+
+**Recall past conversations**
+- "What did I tell the design team about the new onboarding flow?"
+- "Summarize my last three 1:1s with my manager."
+- "Did I ever discuss pricing with the Acme account? Pull the relevant threads."
+
+**Find decisions and rationale**
+- "When did we decide to drop the legacy mobile client, and why?"
+- "What was the argument for picking Postgres over DynamoDB on the platform team?"
+- "Find the meeting where we agreed on the Q3 hiring plan."
+
+**Meeting and interview prep**
+- "I have a call with Acme tomorrow — brief me on everything I've discussed with them."
+- "Pull stories from my notes about cross-functional leadership for an interview."
+- "What examples do I have of resolving production incidents?"
+
+**Draft in your voice**
+- "Draft a follow-up email to the candidate I interviewed last Tuesday, in my voice."
+- "Write a Slack update about the migration status, matching how I usually write."
+- "Help me outline a talk on hybrid search using examples from my own work."
+
+**Cross-source synthesis**
+- "Pull every mention of the data warehouse migration across Slack, Krisp, and email, then summarize where it stands."
+- "What's the through-line in my notes about engineering culture over the past year?"
+
+**Ingest on demand** (Claude orchestrates the MCP calls)
+- "Ingest last week's Krisp calls."
+- "Pull the Slack thread about the auth incident into my brain."
+- "Ingest emails from the recruiting@ alias from the past 30 days."
+
+The pattern: ask the question naturally — Claude decides whether to call `brain search`, which filters to apply (`--source`, `--tag`, `--since`), and when to follow up with `brain show` for full context.
 
 ## Tests
 
