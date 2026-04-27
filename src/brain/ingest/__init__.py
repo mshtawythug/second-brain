@@ -163,6 +163,43 @@ def ingest_document(
         return IngestResult(document_id=document_id, created=True)
 
 
+def apply_tags(
+    conn: psycopg.Connection,
+    document_id: str,
+    *,
+    add: list[str] | None = None,
+    remove: list[str] | None = None,
+) -> list[str]:
+    """Add and/or remove tags on a document; return the resulting tag list.
+
+    ``add`` is unioned with the existing tags (idempotent — re-adding an
+    existing tag is a no-op); ``remove`` strips any matching tags. Operations
+    run in a single transaction. Caller is responsible for resolving any
+    UUID prefix to a full ``document_id`` before calling.
+    """
+    add = add or []
+    remove = remove or []
+    with conn.transaction():
+        if add:
+            conn.execute(
+                "UPDATE documents SET tags = ARRAY(SELECT DISTINCT unnest(tags || %s::text[])) "
+                "WHERE id = %s",
+                (add, document_id),
+            )
+        if remove:
+            conn.execute(
+                "UPDATE documents SET tags = ARRAY(SELECT t FROM unnest(tags) AS t "
+                "WHERE t <> ALL(%s::text[])) WHERE id = %s",
+                (remove, document_id),
+            )
+        row = conn.execute(
+            "SELECT tags FROM documents WHERE id=%s", (document_id,)
+        ).fetchone()
+    if row is None:
+        raise ValueError(f"document not found: {document_id}")
+    return list(row[0] or [])
+
+
 def update_document(
     conn: psycopg.Connection,
     *,

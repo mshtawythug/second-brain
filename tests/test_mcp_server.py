@@ -4,12 +4,14 @@ Each test installs a fresh ``_State`` (real test-DB Config + fake embedder)
 via ``monkeypatch.setattr`` and calls the tool functions directly. The
 JSON-RPC round-trip is exercised separately by the protocol integration test.
 """
+import logging
 import os
 from collections.abc import Iterator
 from typing import Any
 
 import psycopg
 import pytest
+import voyageai.error
 from mcp import McpError
 
 from brain import mcp_server
@@ -38,6 +40,42 @@ def mcp_state(
     )
     monkeypatch.setattr(mcp_server, "_state", state)
     yield state
+
+
+class _BoomConnect:
+    """Stub that mimics ``connect()``: enters a context that raises immediately.
+
+    Used by every "wraps DB error" test — extracted here so we don't reopen
+    the same five-line helper four times.
+    """
+
+    def __init__(self, exc: BaseException | None = None) -> None:
+        self._exc = exc or psycopg.OperationalError("simulated outage")
+
+    def __call__(self, _url: str) -> "_BoomConnect":
+        return self
+
+    def __enter__(self) -> Any:
+        raise self._exc
+
+    def __exit__(self, *_: object) -> None:
+        return None
+
+
+class _BoomEmbedder:
+    """Embedder stub that always raises a voyageai exception on ``embed``.
+
+    Used to assert each tool wraps voyage failures as ``McpError`` rather
+    than letting a raw ``VoyageError`` propagate to the MCP runtime.
+    """
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        raise voyageai.error.RateLimitError("rate limited")
+
+    def count_tokens(self, text: str) -> int:
+        return 1
 
 
 def _ingest(
@@ -146,6 +184,19 @@ def test_brain_search_respects_filters(
         assert r["source_kind"] == "krisp"
     titles = {r["title"] for r in results}
     assert titles == {"Krisp one", "Krisp two"}
+
+
+def test_brain_search_wraps_voyage_error(
+    monkeypatch: pytest.MonkeyPatch,
+    mcp_state: mcp_server._State,
+) -> None:
+    """A Voyage failure must surface as McpError, never a raw VoyageError."""
+    monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_search(query="anything")
+    msg = exc_info.value.error.message
+    assert "embedding failed" in msg
+    assert "RateLimitError" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -348,13 +399,15 @@ def test_get_state_without_init_raises(
         mcp_server._get_state()
 
 
-def test_configure_logging_accepts_known_level(
+def test_configure_logging_sets_known_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Setting BRAIN_MCP_LOG_LEVEL=DEBUG must put the logger at DEBUG."""
     monkeypatch.setenv("BRAIN_MCP_LOG_LEVEL", "DEBUG")
-    # basicConfig is a no-op once a handler is installed, but the call must
-    # not raise and must not warn.
     mcp_server._configure_logging()
+    assert (
+        logging.getLogger("brain.mcp").getEffectiveLevel() == logging.DEBUG
+    )
 
 
 def test_configure_logging_falls_back_on_unknown_level(
@@ -364,6 +417,12 @@ def test_configure_logging_falls_back_on_unknown_level(
     monkeypatch.setenv("BRAIN_MCP_LOG_LEVEL", "WHATEVER")
     with caplog.at_level("WARNING", logger="brain.mcp"):
         mcp_server._configure_logging()
+        # Assert inside the ``at_level`` block — pytest restores the logger
+        # level on exit, which would otherwise mask what we just set.
+        assert (
+            logging.getLogger("brain.mcp").getEffectiveLevel()
+            == logging.INFO
+        )
     assert any("WHATEVER" in rec.message for rec in caplog.records)
 
 
@@ -374,75 +433,56 @@ def test_configure_logging_falls_back_on_unknown_level(
 
 def test_brain_status_wraps_db_error(
     monkeypatch: pytest.MonkeyPatch,
-    mcp_state: mcp_server._State,
+    mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    """If the connect() context manager hits psycopg.Error, surface as McpError."""
-
-    class _Boom:
-        def __enter__(self) -> Any:
-            raise psycopg.OperationalError("simulated outage")
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    def _fail(_url: str) -> Any:
-        return _Boom()
-
-    monkeypatch.setattr(mcp_server, "connect", _fail)
+    """If connect() hits psycopg.Error, surface as McpError with redacted text."""
+    monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
     with pytest.raises(McpError) as exc_info:
         mcp_server.brain_status()
-    assert "simulated outage" in exc_info.value.error.message
+    msg = exc_info.value.error.message
+    assert "database error" in msg
+    assert "OperationalError" in msg
+    # Redaction: do NOT leak the raw psycopg message text.
+    assert "simulated outage" not in msg
 
 
 def test_brain_search_wraps_db_error(
     monkeypatch: pytest.MonkeyPatch,
-    mcp_state: mcp_server._State,
+    mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    class _Boom:
-        def __enter__(self) -> Any:
-            raise psycopg.OperationalError("simulated outage")
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(mcp_server, "connect", lambda _u: _Boom())
+    monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
     with pytest.raises(McpError) as exc_info:
         mcp_server.brain_search(query="anything")
-    assert "simulated outage" in exc_info.value.error.message
+    msg = exc_info.value.error.message
+    assert "database error" in msg
+    assert "OperationalError" in msg
+    assert "simulated outage" not in msg
 
 
 def test_brain_show_wraps_db_error(
     monkeypatch: pytest.MonkeyPatch,
-    mcp_state: mcp_server._State,
+    mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    class _Boom:
-        def __enter__(self) -> Any:
-            raise psycopg.OperationalError("simulated outage")
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(mcp_server, "connect", lambda _u: _Boom())
+    monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
     with pytest.raises(McpError) as exc_info:
         mcp_server.brain_show(id_prefix="abcdef")
-    assert "simulated outage" in exc_info.value.error.message
+    msg = exc_info.value.error.message
+    assert "database error" in msg
+    assert "OperationalError" in msg
+    assert "simulated outage" not in msg
 
 
 def test_brain_list_wraps_db_error(
     monkeypatch: pytest.MonkeyPatch,
-    mcp_state: mcp_server._State,
+    mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    class _Boom:
-        def __enter__(self) -> Any:
-            raise psycopg.OperationalError("simulated outage")
-
-        def __exit__(self, *_: object) -> None:
-            return None
-
-    monkeypatch.setattr(mcp_server, "connect", lambda _u: _Boom())
+    monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
     with pytest.raises(McpError) as exc_info:
         mcp_server.brain_list()
-    assert "simulated outage" in exc_info.value.error.message
+    msg = exc_info.value.error.message
+    assert "database error" in msg
+    assert "OperationalError" in msg
+    assert "simulated outage" not in msg
 
 
 # ---------------------------------------------------------------------------

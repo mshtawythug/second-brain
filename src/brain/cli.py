@@ -1,6 +1,5 @@
 """brain — second brain CLI."""
 import json as _json  # aliased — `json` conflicts with the --json output flag name
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -20,9 +19,16 @@ from .edit_session import (
     run_editor_session,
 )
 from .embeddings import VoyageEmbedder
+from .errors import (
+    IdPrefixAmbiguous,
+    IdPrefixNotFound,
+    IdPrefixNotHex,
+    IdPrefixTooShort,
+)
 from .format import console, emit_json, search_table
 from .ingest import (
     UpdateResult,
+    apply_tags,
     extract_path,
     ingest_document,
     supported_extensions,
@@ -31,11 +37,12 @@ from .ingest import (
 from .ingest import gmail as gmail_ingest
 from .ingest.gmail import GmailError
 from .ingest.stdin import make_doc as _stdin_make_doc
+from .queries import (
+    fetch_document,
+    list_documents,
+    resolve_document_prefix,
+)
 from .search import hybrid_search
-
-# UUID prefixes consist solely of hex digits and hyphens; anything else is rejected
-# before reaching SQL so user-supplied `_` / `%` cannot act as LIKE wildcards.
-_UUID_PREFIX_RE = re.compile(r"[0-9a-f-]+")
 
 app = typer.Typer(
     name="brain",
@@ -383,22 +390,19 @@ def search(
 
 
 def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
-    """Resolve a UUID prefix (min 6 chars) to a full document id."""
-    if len(prefix) < 6:
-        raise typer.BadParameter("id prefix must be at least 6 characters")
-    if not _UUID_PREFIX_RE.fullmatch(prefix):
-        raise typer.BadParameter("id prefix must contain only hex digits and hyphens")
-    rows = conn.execute(
-        "SELECT id::text FROM documents WHERE id::text LIKE %s",
-        (prefix + "%",),
-    ).fetchall()
-    if not rows:
-        typer.secho(f"document not found: {prefix}", fg="red", err=True)
-        raise typer.Exit(code=1)
-    if len(rows) > 1:
-        typer.secho(f"id prefix ambiguous: {prefix}", fg="red", err=True)
-        raise typer.Exit(code=1)
-    return str(rows[0][0])
+    """Resolve a UUID prefix (min 6 chars) to a full document id.
+
+    Thin wrapper around :func:`brain.queries.resolve_document_prefix` that maps
+    its plain exceptions to Typer-flavored ones (``BadParameter`` for argument
+    validation, ``Exit`` + a red stderr line for runtime resolution failures).
+    """
+    try:
+        return resolve_document_prefix(conn, prefix)
+    except (IdPrefixTooShort, IdPrefixNotHex) as e:
+        raise typer.BadParameter(str(e)) from e
+    except (IdPrefixNotFound, IdPrefixAmbiguous) as e:
+        typer.secho(str(e), fg="red", err=True)
+        raise typer.Exit(code=1) from e
 
 
 @app.command()
@@ -410,37 +414,29 @@ def show(
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
         doc_id = _resolve_id(conn, id)
-        row = conn.execute(
-            """
-            SELECT d.id::text, d.title, d.content, d.content_type, d.tags,
-                   d.source_path, d.ingested_at, s.kind
-            FROM documents d
-            LEFT JOIN sources s ON s.id = d.source_id
-            WHERE d.id = %s
-            """,
-            (doc_id,),
-        ).fetchone()
-    assert row is not None  # _resolve_id confirmed the doc exists
-    payload = {
-        "id": row[0],
-        "title": row[1],
-        "content": row[2],
-        "content_type": row[3],
-        "tags": list(row[4] or []),
-        "source_path": row[5],
-        "ingested_at": row[6],
-        "source_kind": row[7],
-    }
+        doc = fetch_document(conn, doc_id)
+    assert doc is not None  # _resolve_id confirmed the doc exists
     if json_output:
-        emit_json(payload)
+        emit_json(
+            {
+                "id": doc.id,
+                "title": doc.title,
+                "content": doc.content,
+                "content_type": doc.content_type,
+                "tags": doc.tags,
+                "source_path": doc.source_path,
+                "ingested_at": doc.ingested_at,
+                "source_kind": doc.source_kind,
+            }
+        )
         return
-    typer.echo(f"# {payload['title']}")
-    typer.echo(f"id:           {payload['id']}")
-    typer.echo(f"source:       {payload['source_kind'] or 'manual'} ({payload['content_type']})")
-    typer.echo(f"tags:         {', '.join(payload['tags']) or '(none)'}")
-    typer.echo(f"ingested:     {payload['ingested_at']}")
+    typer.echo(f"# {doc.title}")
+    typer.echo(f"id:           {doc.id}")
+    typer.echo(f"source:       {doc.source_kind or 'manual'} ({doc.content_type})")
+    typer.echo(f"tags:         {', '.join(doc.tags) or '(none)'}")
+    typer.echo(f"ingested:     {doc.ingested_at}")
     typer.echo("")
-    typer.echo(payload["content"])
+    typer.echo(doc.content or "")
 
 
 @app.command(name="list")
@@ -452,43 +448,26 @@ def list_docs(
 ) -> None:
     """List documents in the brain."""
     cfg = Config.load()
-    where = ["TRUE"]
-    params: list[Any] = []
-    if source:
-        where.append("s.kind = %s")
-        params.append(source)
-    if tag:
-        where.append("%s = ANY(d.tags)")
-        params.append(tag)
-    sql = f"""
-        SELECT d.id::text, d.title, d.content_type, d.tags, s.kind, d.ingested_at
-        FROM documents d
-        LEFT JOIN sources s ON s.id = d.source_id
-        WHERE {" AND ".join(where)}
-        ORDER BY d.ingested_at DESC
-        LIMIT %s
-    """
-    params.append(limit)
     with connect(cfg.database_url) as conn:
-        rows = conn.execute(sql, params).fetchall()
+        rows = list_documents(conn, source=source, tag=tag, limit=limit)
     if json_output:
         emit_json(
             [
                 {
-                    "id": r[0],
-                    "title": r[1],
-                    "content_type": r[2],
-                    "tags": list(r[3] or []),
-                    "source_kind": r[4],
-                    "ingested_at": r[5],
+                    "id": r.id,
+                    "title": r.title,
+                    "content_type": r.content_type,
+                    "tags": r.tags,
+                    "source_kind": r.source_kind,
+                    "ingested_at": r.ingested_at,
                 }
                 for r in rows
             ]
         )
         return
     for r in rows:
-        kind = r[4] or "manual"
-        typer.echo(f"{r[0][:8]}  {kind:<8}  {r[2]:<10}  {r[1]}")
+        kind = r.source_kind or "manual"
+        typer.echo(f"{r.id[:8]}  {kind:<8}  {r.content_type:<10}  {r.title}")
 
 
 @app.command(context_settings={"ignore_unknown_options": True})
@@ -505,18 +484,7 @@ def tag(
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         doc_id = _resolve_id(conn, id)
-        if add:
-            conn.execute(
-                "UPDATE documents SET tags = ARRAY(SELECT DISTINCT unnest(tags || %s::text[])) "
-                "WHERE id = %s",
-                (add, doc_id),
-            )
-        if remove:
-            conn.execute(
-                "UPDATE documents SET tags = ARRAY(SELECT t FROM unnest(tags) AS t "
-                "WHERE t <> ALL(%s::text[])) WHERE id = %s",
-                (remove, doc_id),
-            )
+        apply_tags(conn, doc_id, add=add, remove=remove)
     typer.echo(f"updated tags on {doc_id[:8]}")
 
 
