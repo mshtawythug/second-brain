@@ -1,4 +1,4 @@
-"""Unit tests for the six tools registered by ``brain.mcp_server``.
+"""Unit tests for the seven tools registered by ``brain.mcp_server``.
 
 Each test installs a fresh ``_State`` (real test-DB Config + fake embedder)
 via ``monkeypatch.setattr`` and calls the tool functions directly. The

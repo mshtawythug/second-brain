@@ -21,6 +21,7 @@ from brain.queries import (
     fetch_document,
     list_documents,
     resolve_document_prefix,
+    summary_counts,
 )
 
 
@@ -112,3 +113,62 @@ def test_list_documents_filters_round_trip(
     # list projection omits the body + source_path.
     assert only.content is None
     assert only.source_path is None
+
+
+def test_summary_counts_on_empty_db(test_db: psycopg.Connection) -> None:
+    """Empty brain → zero counts and ``last_ingest`` is ``None``."""
+    counts = summary_counts(test_db)
+    assert counts.documents == 0
+    assert counts.chunks == 0
+    assert counts.sources == 0
+    assert counts.last_ingest is None
+    assert counts.by_kind == []
+
+
+def test_summary_counts_reflects_db_state(
+    test_db: psycopg.Connection, fake_embedder: Any
+) -> None:
+    """Seed a mix of source kinds and verify every field of ``StatusCounts``."""
+    # One manual doc (no source row).
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="manual one",
+            content="manual body alpha",
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        tags=[],
+    )
+    # Two krisp docs (each gets its own sources row via external_id).
+    for n in (1, 2):
+        ingest_document(
+            test_db,
+            embedder=fake_embedder,
+            doc=ExtractedDoc(
+                title=f"krisp {n}",
+                content=f"krisp body {n} unique",
+                content_type="transcript",
+                source_path=None,
+                metadata={},
+            ),
+            source_kind="krisp",
+            source_external_id=f"krisp:{n}",
+            tags=[],
+        )
+
+    counts = summary_counts(test_db)
+    assert counts.documents == 3
+    assert counts.chunks >= 3  # one chunk per short doc, possibly more
+    assert counts.sources == 2  # only the two krisp docs created sources rows
+    assert counts.last_ingest is not None
+    by_kind = dict(counts.by_kind)
+    # Both kinds present; krisp first by count desc, manual still listed.
+    assert by_kind == {"krisp": 2, "manual": 1}
+    # by_kind is a stable list of (str, int) tuples.
+    for kind, count in counts.by_kind:
+        assert isinstance(kind, str)
+        assert isinstance(count, int)

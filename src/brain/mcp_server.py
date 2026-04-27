@@ -31,6 +31,7 @@ from .queries import (
     fetch_document,
     list_documents,
     resolve_document_prefix,
+    summary_counts,
 )
 from .search import hybrid_search
 
@@ -81,6 +82,16 @@ def _wrap_db_error(e: psycopg.Error) -> McpError:
     """
     logger.error("database error", exc_info=e)
     return _mcp_error(INTERNAL_ERROR, f"database error: {type(e).__name__}")
+
+
+def _wrap_voyage_error(e: voyageai.error.VoyageError) -> McpError:
+    """Wrap a Voyage embedding failure as an MCP error.
+
+    Mirrors :func:`_wrap_db_error`: the user-facing message exposes only the
+    exception class name; the full exception is logged to stderr.
+    """
+    logger.error("embedding failed", exc_info=e)
+    return _mcp_error(INTERNAL_ERROR, f"embedding failed: {type(e).__name__}")
 
 
 def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
@@ -136,10 +147,7 @@ def brain_search(
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     except voyageai.error.VoyageError as e:
-        logger.error("embedding failed", exc_info=e)
-        raise _mcp_error(
-            INTERNAL_ERROR, f"embedding failed: {type(e).__name__}"
-        ) from e
+        raise _wrap_voyage_error(e) from e
     return [
         {
             "id": r.document_id,
@@ -226,30 +234,19 @@ def brain_status() -> dict[str, Any]:
     logger.debug("brain_status: called")
     try:
         with connect(state.cfg.database_url) as conn:
-            doc_row = conn.execute("SELECT count(*) FROM documents").fetchone()
-            chunk_row = conn.execute("SELECT count(*) FROM chunks").fetchone()
-            source_row = conn.execute("SELECT count(*) FROM sources").fetchone()
-            last_row = conn.execute(
-                "SELECT max(ingested_at) FROM documents"
-            ).fetchone()
-            by_kind = conn.execute(
-                "SELECT coalesce(s.kind, 'manual') AS kind, count(*) "
-                "FROM documents d LEFT JOIN sources s ON s.id = d.source_id "
-                "GROUP BY 1 ORDER BY 2 DESC"
-            ).fetchall()
+            counts = summary_counts(conn)
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    assert doc_row is not None  # count(*) always yields one row
-    assert chunk_row is not None
-    assert source_row is not None
-    assert last_row is not None
-    last = last_row[0]
     return {
-        "documents": doc_row[0],
-        "chunks": chunk_row[0],
-        "sources": source_row[0],
-        "last_ingest": last.isoformat() if last is not None else None,
-        "by_kind": [{"kind": k, "count": c} for k, c in by_kind],
+        "documents": counts.documents,
+        "chunks": counts.chunks,
+        "sources": counts.sources,
+        "last_ingest": (
+            counts.last_ingest.isoformat()
+            if counts.last_ingest is not None
+            else None
+        ),
+        "by_kind": [{"kind": k, "count": c} for k, c in counts.by_kind],
     }
 
 
@@ -308,10 +305,7 @@ def brain_ingest_stdin(
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     except voyageai.error.VoyageError as e:
-        logger.error("embedding failed", exc_info=e)
-        raise _mcp_error(
-            INTERNAL_ERROR, f"embedding failed: {type(e).__name__}"
-        ) from e
+        raise _wrap_voyage_error(e) from e
     return {
         "document_id": result.document_id,
         "created": result.created,
@@ -405,10 +399,7 @@ def brain_edit(
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     except voyageai.error.VoyageError as e:
-        logger.error("embedding failed", exc_info=e)
-        raise _mcp_error(
-            INTERNAL_ERROR, f"embedding failed: {type(e).__name__}"
-        ) from e
+        raise _wrap_voyage_error(e) from e
     return {
         "document_id": result.document_id,
         "fields_changed": result.fields_changed,

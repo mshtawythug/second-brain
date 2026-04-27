@@ -137,3 +137,41 @@ def list_documents(
         )
         for r in rows
     ]
+
+
+@dataclass
+class StatusCounts:
+    """Aggregate counts for ``brain status`` / ``brain_status``.
+
+    Each caller (CLI vs MCP) formats this into its own response shape.
+    """
+
+    documents: int
+    chunks: int
+    sources: int
+    last_ingest: datetime | None
+    by_kind: list[tuple[str, int]]
+
+
+def summary_counts(conn: psycopg.Connection[Any]) -> StatusCounts:
+    """Aggregate counts for ``status`` / ``brain_status``. One round-trip per table."""
+    doc_row = conn.execute("SELECT count(*) FROM documents").fetchone()
+    chunk_row = conn.execute("SELECT count(*) FROM chunks").fetchone()
+    source_row = conn.execute("SELECT count(*) FROM sources").fetchone()
+    last_row = conn.execute("SELECT max(ingested_at) FROM documents").fetchone()
+    by_kind_rows = conn.execute(
+        "SELECT coalesce(s.kind, 'manual') AS kind, count(*) "
+        "FROM documents d LEFT JOIN sources s ON s.id = d.source_id "
+        "GROUP BY 1 ORDER BY 2 DESC"
+    ).fetchall()
+    assert doc_row is not None  # count(*) always yields one row
+    assert chunk_row is not None
+    assert source_row is not None
+    assert last_row is not None
+    return StatusCounts(
+        documents=int(doc_row[0]),
+        chunks=int(chunk_row[0]),
+        sources=int(source_row[0]),
+        last_ingest=last_row[0],
+        by_kind=[(str(k), int(c)) for k, c in by_kind_rows],
+    )

@@ -1,7 +1,7 @@
 """End-to-end protocol test for ``brain-mcp``.
 
 Spawns the server via ``python -m brain.mcp_server``, runs a real MCP
-``initialize`` + ``tools/list`` round-trip over stdio, and asserts the six
+``initialize`` + ``tools/list`` round-trip over stdio, and asserts the seven
 tools (four read, three write) are advertised with non-empty input schemas.
 """
 import os
@@ -67,7 +67,7 @@ async def _list_tools_via_stdio() -> dict[str, dict[str, object]]:
     reason="python interpreter not on PATH",
 )
 def test_brain_mcp_tools_list_advertises_all_tools() -> None:
-    """`brain-mcp` responds to tools/list with all six tools and schemas."""
+    """`brain-mcp` responds to tools/list with all seven tools and schemas."""
     tools = anyio.run(_list_tools_via_stdio)
 
     advertised = set(tools.keys())
