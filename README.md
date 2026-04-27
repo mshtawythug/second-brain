@@ -70,6 +70,12 @@ brain ingest-dir ~/Documents/career
 # Tag a document
 brain tag <id-prefix> +interview +company-id
 
+# Edit a document in place (title / metadata / body)
+brain edit <id-prefix> --title "New title"
+brain edit <id-prefix> --metadata '{"date":"2026-04-26"}'   # shallow-merges
+brain edit <id-prefix> --content-file ./fixed.md            # re-embeds
+brain edit <id-prefix>                                      # opens $EDITOR
+
 # Search
 brain search "what did I tell person-x about COMPANY_REDACTED"
 brain search "compliance horror stories" --limit 10
