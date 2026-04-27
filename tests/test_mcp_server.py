@@ -607,6 +607,9 @@ def test_brain_edit_content_rechunks_and_reembeds(
         test_db, fake_embedder, title="A", content="original body"
     )
     pre_chunks = _chunk_count(doc_id)
+    # The original ingest must have produced at least one chunk — belt-and-
+    # braces check that the rechunk path has something to replace.
+    assert pre_chunks >= 1
     pre_hash = _content_hash(doc_id)
     payload = mcp_server.brain_edit(
         id_prefix=doc_id[:8],
@@ -621,7 +624,6 @@ def test_brain_edit_content_rechunks_and_reembeds(
     assert post_hash != pre_hash
     # We don't assert pre_chunks != post_chunks (single short body → 1 chunk
     # before and after); the hash + rechunked flag prove the path ran.
-    _ = pre_chunks  # silence unused-warn
 
 
 def test_brain_edit_metadata_merge_keeps_other_keys(
@@ -876,13 +878,55 @@ def test_brain_edit_wraps_voyage_error(
 # ---------------------------------------------------------------------------
 
 
-def test_main_initializes_state_and_starts_server(
+class _RecordingVoyage:
+    """Stand-in for ``VoyageEmbedder`` used by ``main()`` lifecycle tests.
+
+    Records every ``embed`` invocation so warmup can be asserted, and avoids
+    hitting the real Voyage API when ``main()`` runs offline.
+    """
+
+    def __init__(self, *, api_key: str, **_: object) -> None:
+        self.api_key = api_key
+        self.embed_calls = 0
+        self.embed_inputs: list[tuple[list[str], str]] = []
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        self.embed_calls += 1
+        self.embed_inputs.append((list(texts), input_type))
+        return [[0.0] * 1024 for _ in texts]
+
+    def count_tokens(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+
+class _BoomVoyage(_RecordingVoyage):
+    """Variant whose ``embed`` raises a ``VoyageError`` — used to verify the
+    warmup failure path doesn't abort startup."""
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        self.embed_calls += 1
+        raise voyageai.error.RateLimitError("simulated cold start failure")
+
+
+def _install_main_doubles(
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """main() must build _State from env and hand off to mcp_app.run(stdio)."""
+    *,
+    voyage_factory: type[_RecordingVoyage],
+) -> dict[str, object]:
+    """Set env, monkeypatch ``VoyageEmbedder`` to ``voyage_factory``, replace
+    ``mcp_app.run`` with a no-op recorder, and clear ``_state``.
+
+    Returns a ``captured`` dict that ``_fake_run`` populates so the caller
+    can assert on transport + state after ``main()`` returns.
+    """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     monkeypatch.setattr(mcp_server, "_state", None)
+    monkeypatch.setattr(mcp_server, "VoyageEmbedder", voyage_factory)
 
     captured: dict[str, object] = {}
 
@@ -891,7 +935,63 @@ def test_main_initializes_state_and_starts_server(
         captured["state"] = mcp_server._state
 
     monkeypatch.setattr(mcp_server.mcp_app, "run", _fake_run)
+    return captured
+
+
+def test_main_initializes_state_and_starts_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """main() must build _State from env and hand off to mcp_app.run(stdio)."""
+    captured = _install_main_doubles(
+        monkeypatch, voyage_factory=_RecordingVoyage
+    )
     mcp_server.main()
     assert captured["transport"] == "stdio"
     assert isinstance(captured["state"], mcp_server._State)
     assert captured["state"].cfg.database_url == TEST_DATABASE_URL  # type: ignore[union-attr]
+
+
+def test_main_runs_warmup_embed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """main() must fire one warmup embed call before mcp_app.run() to cut
+    cold-start latency on the first real brain_search."""
+    captured = _install_main_doubles(
+        monkeypatch, voyage_factory=_RecordingVoyage
+    )
+    mcp_server.main()
+    state = captured["state"]
+    assert isinstance(state, mcp_server._State)
+    embedder = state.embedder
+    assert isinstance(embedder, _RecordingVoyage)
+    assert embedder.embed_calls >= 1
+    # Warmup uses a document-style embed (matches what brain_search would do).
+    texts, input_type = embedder.embed_inputs[0]
+    assert input_type == "document"
+    assert texts == ["hello"]
+
+
+def test_main_continues_when_warmup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A VoyageError during warmup must be swallowed — main() must still hand
+    off to mcp_app.run() so the server stays up and search can retry on demand."""
+    captured = _install_main_doubles(
+        monkeypatch, voyage_factory=_BoomVoyage
+    )
+    with caplog.at_level("WARNING", logger="brain.mcp"):
+        mcp_server.main()
+    # Server still started despite the warmup blowing up.
+    assert captured["transport"] == "stdio"
+    state = captured["state"]
+    assert isinstance(state, mcp_server._State)
+    embedder = state.embedder
+    assert isinstance(embedder, _BoomVoyage)
+    assert embedder.embed_calls == 1
+    # And we logged a warning naming the exception class so an operator can
+    # see why warmup didn't take.
+    assert any(
+        "warmup embed failed" in rec.message and "RateLimitError" in rec.message
+        for rec in caplog.records
+    )

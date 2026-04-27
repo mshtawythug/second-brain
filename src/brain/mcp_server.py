@@ -167,7 +167,8 @@ def brain_show(id_prefix: str) -> dict[str, Any]:
     """Return the full body and metadata of a single document by id prefix.
 
     The prefix must be at least 6 hex characters and must uniquely identify a
-    document. Raises an MCP error if the prefix is unknown or ambiguous.
+    document. Raises :class:`McpError` (``INVALID_PARAMS``) if the prefix is
+    too short, non-hex, unknown, or ambiguous.
     """
     state = _get_state()
     logger.debug("brain_show: id_prefix=%s", id_prefix)
@@ -435,6 +436,17 @@ def main() -> None:
     cfg = Config.load()
     embedder = VoyageEmbedder(api_key=cfg.voyage_api_key)
     _state = _State(cfg=cfg, embedder=embedder)
+    # One-shot warmup embed to cut cold-start latency on the first real
+    # ``brain_search``. Failure must NOT abort startup — search will retry on
+    # demand. Catch ``VoyageError`` (the SDK's base) so import / programming
+    # errors still surface.
+    try:
+        _state.embedder.embed(["hello"], input_type="document")
+        logger.info("warmup embed completed")
+    except voyageai.error.VoyageError as e:
+        logger.warning(
+            "warmup embed failed (continuing without): %s", type(e).__name__
+        )
     logger.info("brain-mcp starting (stdio transport)")
     mcp_app.run(transport="stdio")
 
