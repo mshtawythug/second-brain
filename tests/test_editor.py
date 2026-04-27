@@ -84,6 +84,22 @@ def test_run_editor_on_executes_multi_token_editor(
             payload.unlink()
 
 
+def test_run_editor_on_raises_editor_error_for_missing_binary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A typo in $EDITOR (path that doesn't exist) must surface as EditorError,
+    not a bare FileNotFoundError traceback."""
+    monkeypatch.setenv("EDITOR", "/no/such/path/vim")
+    monkeypatch.delenv("VISUAL", raising=False)
+    payload = make_temp_file("seed", suffix=".test")
+    try:
+        with pytest.raises(EditorError, match="not found"):
+            run_editor_on(payload)
+    finally:
+        if payload.exists():
+            payload.unlink()
+
+
 def test_make_temp_file_unlinks_on_write_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -174,6 +174,26 @@ def test_edit_replace_metadata_alone_errors(
     assert "--replace-metadata" in result.output
 
 
+def test_edit_replace_metadata_with_other_flags_but_no_metadata_errors(
+    fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    seed_doc: Callable[..., str],
+) -> None:
+    """`--title X --replace-metadata` (no --metadata) must reject — silently
+    dropping the replace intent would mislead the user."""
+    patch_embedder(fake_embedder)
+    doc_id = seed_doc(title="Old", metadata={"a": 1})
+    before = _row(doc_id)
+    result = CliRunner().invoke(
+        app, ["edit", doc_id[:8], "--title", "New", "--replace-metadata"]
+    )
+    assert result.exit_code != 0, result.output
+    assert "--replace-metadata" in result.output
+    # Title must NOT have been applied either — the BadParameter halts
+    # before any DB write.
+    assert _row(doc_id) == before
+
+
 def test_edit_invalid_metadata_json_errors(
     fake_embedder: Any,
     patch_embedder: Callable[[object], None],

@@ -1,6 +1,7 @@
 """Tests for the editor-mode of `brain edit` (no flags → opens $EDITOR)."""
 import os
 import stat
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -287,10 +288,28 @@ def test_editor_repeatedly_malformed_preserves_draft(
     seed_doc: Callable[..., str],
     tmp_path: Path,
 ) -> None:
-    """Two malformed saves → abort with preserved-path message; DB untouched."""
+    """Two malformed saves → abort with preserved-path message; DB untouched.
+
+    Also asserts the temp file is removed (not orphaned alongside the
+    preserved draft) and the preserved file holds the user's last draft.
+    """
     patch_embedder(fake_embedder)
     doc_id = seed_doc(title="Stuck", content="stuck body")
     before = _read(doc_id)
+
+    # Spy on make_temp_file so we can assert the temp path is gone afterwards.
+    import brain.edit_session as _es
+
+    captured: list[Path] = []
+    real = _es.make_temp_file
+
+    def spy(initial: str, *, suffix: str = ".brain.json") -> Path:
+        p = real(initial, suffix=suffix)
+        captured.append(p)
+        return p
+
+    monkeypatch.setattr(_es, "make_temp_file", spy)
+
     body = (
         "#!/bin/sh\n"
         "cat > \"$1\" <<'BRAIN_EOF'\n"
@@ -303,10 +322,28 @@ def test_editor_repeatedly_malformed_preserves_draft(
     editor = _make_fake_editor(tmp_path, body=body)
     monkeypatch.setenv("EDITOR", str(editor))
     monkeypatch.delenv("VISUAL", raising=False)
-    result = CliRunner().invoke(app, ["edit", doc_id[:8]])
-    assert result.exit_code == 1, result.output
-    assert "preserved" in result.output
-    assert _read(doc_id) == before
+
+    preserved = Path(tempfile.gettempdir()) / f"brain-edit-{doc_id[:8]}.json"
+    if preserved.exists():
+        preserved.unlink()  # clean slate from any prior run
+
+    try:
+        result = CliRunner().invoke(app, ["edit", doc_id[:8]])
+        assert result.exit_code == 1, result.output
+        assert "preserved" in result.output
+        assert _read(doc_id) == before
+
+        # Temp file must NOT survive alongside the preserved draft.
+        assert captured, "expected make_temp_file to have been called"
+        for tp in captured:
+            assert not tp.exists(), f"orphaned temp file: {tp}"
+
+        # Preserved draft holds the user's last (still-bad) save.
+        assert preserved.exists()
+        assert "still not json" in preserved.read_text()
+    finally:
+        if preserved.exists():
+            preserved.unlink()
 
 
 def test_parse_editor_payload_branches() -> None:

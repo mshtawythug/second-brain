@@ -34,9 +34,18 @@ def find_editor() -> list[str]:
 
 
 def run_editor_on(path: Path) -> int:
-    """Run the resolved editor against ``path`` and return its exit code."""
+    """Run the resolved editor against ``path`` and return its exit code.
+
+    Raises :class:`EditorError` if no editor is configured *or* if the
+    configured editor binary cannot be found / executed (e.g. a typo in
+    ``$EDITOR``) — the bare ``FileNotFoundError`` from ``subprocess.run``
+    would otherwise leak as an uncaught traceback.
+    """
     argv = find_editor()
-    completed = subprocess.run([*argv, str(path)], check=False)  # noqa: S603 - editor cmd from env
+    try:
+        completed = subprocess.run([*argv, str(path)], check=False)  # noqa: S603 - editor cmd from env
+    except FileNotFoundError as e:
+        raise EditorError(f"editor command not found: {argv[0]}") from e
     return completed.returncode
 
 

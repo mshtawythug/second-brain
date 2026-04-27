@@ -5,6 +5,7 @@ from :mod:`brain.editor` so the subprocess-wrapper layer stays focused on the
 ``$VISUAL``/``$EDITOR``/``vi`` lookup.
 """
 import json
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -120,7 +121,6 @@ def run_editor_session(
         EditorParseFailedError: two consecutive saves failed to parse.
     """
     temp_path = make_temp_file(initial_text)
-    preserved_path: Path | None = None
     try:
         rc = run_editor_on(temp_path)
         if rc != 0:
@@ -144,8 +144,13 @@ def run_editor_session(
                     Path(tempfile.gettempdir())
                     / f"brain-edit-{doc_id_label}.json"
                 )
-                preserved_path.write_text(after_second, encoding="utf-8")
+                # Move (not copy) so we don't leave two identical files on
+                # disk — the temp file would otherwise survive the finally
+                # block because it is no longer "ours" to unlink blindly.
+                shutil.move(str(temp_path), str(preserved_path))
                 raise EditorParseFailedError(str(e2), preserved_path) from e2
     finally:
-        if preserved_path is None and temp_path.exists():
+        # `shutil.move` above already relocates temp_path on the recovery
+        # failure path; on every other path the temp file is still ours.
+        if temp_path.exists():
             temp_path.unlink()

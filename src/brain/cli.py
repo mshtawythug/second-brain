@@ -674,6 +674,12 @@ def edit(
     body changes re-chunk + re-embed; metadata/title/type changes are a
     single SQL UPDATE.
     """
+    # Reject `--replace-metadata` without `--metadata` regardless of which
+    # mode we're about to enter — silently ignoring it lets a user think the
+    # full-replace happened when nothing was passed for it to swap.
+    if replace_metadata and metadata is None:
+        raise typer.BadParameter("--replace-metadata requires --metadata")
+
     if not _has_mutating_edit_flag(
         title=title,
         content_type=content_type,
@@ -681,8 +687,6 @@ def edit(
         content_file=content_file,
         content_stdin=content_stdin,
     ):
-        if replace_metadata:
-            raise typer.BadParameter("--replace-metadata requires --metadata")
         cfg = Config.load()
         with connect(cfg.database_url) as conn:
             doc_id = _resolve_id(conn, id)
