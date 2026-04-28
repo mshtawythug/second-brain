@@ -2,7 +2,7 @@
 
 Local personal knowledge base with hybrid search, designed to be queried by Claude from any conversation.
 
-Stores career documents, interview prep, Krisp call transcripts, Slack threads, and Gmail messages in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank and vector cosine similarity (`voyage-4`).
+Stores career documents, interview prep, Krisp call transcripts, Slack threads, and Gmail messages in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank and vector cosine similarity. The embedding backend is pluggable — defaults to local Snowflake Arctic Embed v2 over Ollama (free, no cloud dependency); Voyage AI and Qwen3-Embedding-8B are also supported.
 
 ## What this is
 
@@ -14,7 +14,7 @@ A `brain` CLI backed by a local Postgres database that I can query from any Clau
 |---|---|---|
 | CLI | Python 3.11 + [Typer](https://typer.tiangolo.com/) | Fast to write, good ergonomics, easy to test. |
 | Storage | PostgreSQL 16 + [`pgvector`](https://github.com/pgvector/pgvector) | One database for both lexical (`tsvector`) and semantic (vector) search — no separate vector store to operate. Runs in Docker on port 5433. |
-| Embeddings | Voyage AI [`voyage-4`](https://docs.voyageai.com/) (1024-dim) | Strong retrieval quality on long-form personal text; free tier covers personal use. |
+| Embeddings | Pluggable via `BRAIN_EMBEDDER` — default [Snowflake Arctic Embed v2](https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0) over local [Ollama](https://ollama.com/) (1024-dim, Apache 2.0, free). [Voyage AI](https://docs.voyageai.com/) (`voyage-3.5`, paid SaaS) and [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) (4096-dim, local Ollama) are alternates behind the same `Embedder` Protocol. | Local-by-default keeps the corpus off vendor servers; the abstraction lets the user upgrade or downgrade backends without touching ingest/search code. |
 | Search | Hybrid: Postgres FTS + vector cosine, fused via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (k=60) | Lexical alone misses paraphrases ("what did I say about X"); vector alone misses exact names ("a coworker", "a former employer"). RRF combines both ranks without tuning weights. |
 | Extraction | `pypdf`, `pdfplumber`, `python-docx`, `markdown-it-py` | Covers the file types I actually have. |
 | Chunking | Paragraph-aware, budgeted with `tiktoken` | Keeps semantic boundaries intact while staying under the embedder's token limit. |
@@ -48,7 +48,7 @@ Why the gap is so large:
 - **Pre-extracted bodies.** Brain stores HTML-stripped, quote-removed, signature-free text. Gmail/Slack MCP returns full thread structure, headers, MIME parts, and quoted replies that bloat every hit.
 - **Hybrid retrieval ranks before fetching.** RRF returns the top 5 *actually-relevant* docs in one call. The MCP equivalent is a keyword search that often pulls 20+ unrelated threads and forces a refining round-trip.
 - **Chunking returns just the relevant passage.** A 30-page interview prep doc reduces to a ~100-token snippet of the section that matched — the rest of the doc never enters context unless you ask for it.
-- **Ingest tokens are paid once, off-conversation.** Voyage embedding + extraction happens during `brain ingest`, never against your chat context.
+- **Ingest tokens are paid once, off-conversation.** Embedding + extraction happen during `brain ingest`, never against your chat context. With the default local Arctic backend, ingest is also free in dollar terms.
 
 Caveats:
 
@@ -61,7 +61,15 @@ Caveats:
 
 - **Python 3.11+** — `python3.11 --version` should work. On macOS: `brew install python@3.11`.
 - **Docker Desktop** (or Docker Engine) — running. The Postgres + pgvector database lives in a container on port 5433. Get it from [docker.com](https://www.docker.com/products/docker-desktop/).
-- **A Voyage AI API key** — free tier is plenty for personal use. Sign up at [voyageai.com](https://www.voyageai.com/) and grab a key from the dashboard.
+- **[Ollama](https://ollama.com/)** (for the default `arctic` backend, and for `qwen3`). On macOS:
+  ```bash
+  brew install ollama
+  brew services start ollama
+  ollama pull snowflake-arctic-embed2     # default — 1.2 GB
+  # ollama pull qwen3-embedding:8b        # only if you want BRAIN_EMBEDDER=qwen3 — 4.7 GB
+  ```
+  Skip Ollama entirely if you plan to use `BRAIN_EMBEDDER=voyage` exclusively.
+- **A Voyage AI API key** (only if `BRAIN_EMBEDDER=voyage`) — free tier covers personal use. Sign up at [voyageai.com](https://www.voyageai.com/) and grab a key.
 - **Claude Code** (optional but the whole point) — install from [claude.com/claude-code](https://claude.com/claude-code) so Claude can call `brain` for you.
 
 ### Install
@@ -71,9 +79,9 @@ Caveats:
 git clone <repo> ~/workspace/second-brain
 cd ~/workspace/second-brain
 
-# 2. Drop your Voyage API key into a local .env (gitignored)
+# 2. Set up the environment file (gitignored). The default BRAIN_EMBEDDER=arctic
+#    needs no API keys; if you choose voyage, paste your VOYAGE_API_KEY here.
 cp .env.example .env
-# then open .env and paste your key after VOYAGE_API_KEY=
 
 # 3. Create an isolated Python environment so this project's deps
 #    don't clash with anything else on your system
@@ -86,16 +94,58 @@ pip install -e ".[dev]"
 # 5. Start the Postgres + pgvector container in the background
 docker compose up -d
 
-# 6. Apply database migrations (creates tables, indexes, extensions)
+# 6. Apply database migrations and align the embedding column with the
+#    active backend's native dim (1024 for arctic/voyage, 4096 for qwen3).
 brain init
 
-# 7. Sanity check — should print "all OK"
+# 7. Backfill embeddings + finalize the column (NOT NULL + index).
+#    On a fresh DB with no chunks yet this is a no-op-then-finalize;
+#    after a re-ingest it backfills any NULL rows.
+brain reembed
+
+# 8. Sanity check — should print "all OK" lines for each component.
 brain doctor
 ```
 
 If `brain doctor` complains, the usual suspects are: Docker isn't running, the
-container hasn't finished starting yet (give it ~10 seconds and retry), or
-`VOYAGE_API_KEY` is missing from `.env`.
+container hasn't finished starting yet (give it ~10 seconds and retry), Ollama
+isn't running (`brew services start ollama`), the configured embedding model
+isn't pulled (`ollama pull snowflake-arctic-embed2`), or — only when
+`BRAIN_EMBEDDER=voyage` — `VOYAGE_API_KEY` is missing from `.env`.
+
+### Choosing an embedder backend
+
+Set `BRAIN_EMBEDDER` in `.env` (or the shell). Three values are supported:
+
+| Value | Model | Dim | Cost | Setup | Notes |
+|---|---|---|---|---|---|
+| `arctic` *(default)* | Snowflake Arctic Embed v2 (Apache 2.0) | 1024 | Free | Ollama + `ollama pull snowflake-arctic-embed2` | Recommended. Strong retrieval quality on personal text; HNSW-indexable; fully local. |
+| `voyage` | Voyage AI `voyage-3.5` | 1024 | ~$0.06/M tokens | `VOYAGE_API_KEY` in `.env` | Highest quality on long-form text; corpus leaves your machine. |
+| `qwen3` | Qwen3-Embedding-8B (Alibaba) | 4096 | Free | Ollama + `ollama pull qwen3-embedding:8b` | Local. Native 4096 dims exceeds pgvector's HNSW cap (2000 for `vector`) so search uses sequential scan — fine at <100K chunks but slower than `arctic`. China-origin model — judge accordingly. |
+
+The active backend is reflected in `brain init` ("embedder arctic (dim=1024)") and `brain doctor` (the embedding-column line shows the column type and whether `[hnsw]` is present).
+
+### Switching embedder backends
+
+**Switching is destructive.** The chosen backend's native dim is baked into the `chunks.embedding` column on the first `brain init`, and existing embeddings cannot be re-projected to a different model — the chunks must be re-embedded from their original text. The CLI refuses to swap dims silently when chunks already exist; instead, do a full reset:
+
+```bash
+# 1. Stop the database and delete the data directory (chunks are wiped).
+docker compose down
+rm -rf data/postgres
+
+# 2. Pick the new backend in .env (or via shell env var).
+#    BRAIN_EMBEDDER=qwen3   # for example
+
+# 3. Start fresh and re-ingest.
+docker compose up -d
+brain init                       # column shaped to the new backend's dim
+brain ingest-dir ~/Documents/career   # or whatever your ingest sources are
+brain reembed                    # finalizes NOT NULL + (for dim ≤ 2000) HNSW index
+brain doctor
+```
+
+`docker compose down -v` is **not** sufficient — Postgres data lives in `./data/postgres` (a host bind-mount), not a Docker-managed volume. The `rm -rf data/postgres` step is what actually wipes the corpus.
 
 ### Make `brain` available from any directory
 
@@ -166,7 +216,7 @@ The `brain-mcp` binary exposes the brain as an [MCP](https://modelcontextprotoco
 - **Read:** `brain_search`, `brain_show`, `brain_list`, `brain_status`
 - **Write:** `brain_ingest_stdin`, `brain_tag`, `brain_edit`
 
-Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json` (replace the API key):
+Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json`. The `env` block must match whichever backend you set in `.env` — pass `BRAIN_EMBEDDER` and the backend-specific knobs (Ollama host for `arctic`/`qwen3`, `VOYAGE_API_KEY` for `voyage`):
 
 ```json
 {
@@ -175,24 +225,30 @@ Add the following to `~/Library/Application Support/Claude/claude_desktop_config
       "command": "/Users/mshtawythug/workspace/second-brain/.venv/bin/brain-mcp",
       "env": {
         "DATABASE_URL": "postgresql://brain:brain@localhost:5433/second_brain",
-        "VOYAGE_API_KEY": "<paste here>"
+        "BRAIN_EMBEDDER": "arctic",
+        "OLLAMA_HOST": "http://localhost:11434"
       }
     }
   }
 }
 ```
 
+For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voyage"` and `"VOYAGE_API_KEY": "<paste here>"`.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `DATABASE_URL` | (required) | Postgres connection string. Same value used by the CLI. |
-| `VOYAGE_API_KEY` | (required) | Voyage AI key for the embedder. Same key used by the CLI. |
+| `BRAIN_EMBEDDER` | `arctic` | Embedder backend: `arctic`, `voyage`, or `qwen3`. Must match the dim baked into the database by `brain init`. |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL. Used by `arctic` and `qwen3`; ignored by `voyage`. |
+| `QWEN3_MODEL` | `qwen3-embedding:8b` | Ollama model tag for the qwen3 backend. |
+| `VOYAGE_API_KEY` | (required for `voyage`) | Voyage AI key. Ignored by the local backends. |
 | `BRAIN_MCP_LOG_LEVEL` | `INFO` | Stderr log level. Accepts `DEBUG`, `INFO`, `WARNING`, `ERROR`. Unknown values fall back to `INFO`. |
 
 ### What to expect
 
-After saving the config and restarting Claude Desktop, the seven tools become callable in any chat — ask "search my brain for the Q1 review with person-x" and Claude Desktop calls `brain_search` directly. Server startup is ~0.5–1.5s; the cold start is the Voyage embedder warming up on the first search. Logs go to stderr and are surfaced by Claude Desktop if a tool call fails.
+After saving the config and restarting Claude Desktop, the seven tools become callable in any chat — ask "search my brain for the Q1 review with person-x" and Claude Desktop calls `brain_search` directly. Server startup is ~0.5–1.5s; the cold start is the embedder warming up on the first search (Ollama loading the model into memory, or the Voyage SDK initializing). Logs go to stderr and are surfaced by Claude Desktop if a tool call fails.
 
 ## Architecture
 

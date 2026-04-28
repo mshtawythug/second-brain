@@ -101,19 +101,28 @@ Use teammates for: parallel test creation, codebase exploration, tasks consuming
 
 ## Project Overview
 
-Local personal knowledge base ("second brain") with hybrid search, designed to be queried by Claude from any conversation. Stores career documents, interview prep, Krisp call transcripts, Slack threads, and selected Gmail in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank + vector cosine similarity (`voyage-4`).
+Local personal knowledge base ("second brain") with hybrid search, designed to be queried by Claude from any conversation. Stores career documents, interview prep, Krisp call transcripts, Slack threads, and selected Gmail in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank + vector cosine similarity.
 
-Full design in `docs/specs/2026-04-24-second-brain-design.md`. Implementation plan in `docs/plans/2026-04-24-second-brain.md`.
+**Embeddings:** Pluggable via the `BRAIN_EMBEDDER` env var. Default `arctic` =
+Snowflake Arctic Embed v2 (1024-dim, local Ollama, free, Apache 2.0).
+Alternatives: `voyage` (Voyage AI `voyage-3.5` SaaS, paid, 1024-dim) and
+`qwen3` (Qwen3-Embedding-8B, local Ollama, free, China-origin, 4096-dim — no
+HNSW index because pgvector caps at 2000 dims for `vector`).
+
+Full design in `docs/specs/2026-04-24-second-brain-design.md`. Implementation plan in `docs/plans/2026-04-24-second-brain.md`. Pluggable-embedder retrofit plan in `docs/plans/2026-04-28-local-embeddings-qwen3-8b.md`.
 
 ## Tech Stack
 
 - **Language:** Python 3.11+
 - **CLI framework:** Typer
 - **Database:** PostgreSQL 16 + pgvector (Docker, port 5433)
-- **Embeddings:** Voyage AI `voyage-4` (1024 dims)
+- **Embeddings:** Pluggable backends behind a single `Embedder` Protocol.
+  Default `arctic` (Snowflake Arctic Embed v2 over local Ollama, 1024-dim).
+  Alternates: `voyage` (Voyage AI SaaS, 1024-dim) and `qwen3` (Qwen3-Embedding-8B
+  over local Ollama, 4096-dim). Selected at setup time via `BRAIN_EMBEDDER`.
 - **PDF/DOCX:** pypdf, pdfplumber, python-docx
 - **Markdown:** markdown-it-py
-- **Tokenization:** tiktoken (offline, for chunker budget)
+- **Tokenization:** tiktoken (offline `cl100k_base`, used by every backend for chunker budgeting)
 - **Output:** Rich (colored tables, JSON)
 - **Tests:** pytest, real Postgres test DB, fake embedder fixture
 - **Lint/Type:** ruff, mypy
@@ -121,30 +130,41 @@ Full design in `docs/specs/2026-04-24-second-brain-design.md`. Implementation pl
 ## Build & Run Commands
 
 ```bash
-# Setup
-cp .env.example .env                   # paste VOYAGE_API_KEY
+# Setup (default arctic backend — local Ollama, free, no API key)
+brew install ollama                      # macOS; on Linux follow ollama.com/install
+brew services start ollama
+ollama pull snowflake-arctic-embed2
+
+cp .env.example .env                     # BRAIN_EMBEDDER=arctic by default
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-docker compose up -d                   # Postgres + pgvector on port 5433
-brain init                             # apply migrations
-brain doctor                           # health check
+docker compose up -d                     # Postgres + pgvector on port 5433
+brain init                               # applies migrations + aligns chunks.embedding dim
+brain reembed                            # backfill any NULL embeddings + finalize column
+brain doctor                             # health check (env, Postgres, embedder, gws CLI)
 
 # Daily use
-brain ingest <file>                    # ingest a single file
-brain ingest-dir <dir>                 # recursive ingest
-brain search "..."                     # hybrid search
-brain show <id-prefix>                 # full document
+brain ingest <file>                      # ingest a single file
+brain ingest-dir <dir>                   # recursive ingest
+brain search "..."                       # hybrid search
+brain show <id-prefix>                   # full document
+brain reembed                            # backfill missing embeddings; idempotent
+
+# Switching backends (destructive — requires data wipe + re-ingest)
+docker compose down && rm -rf data/postgres
+# edit .env (BRAIN_EMBEDDER=qwen3 / voyage / arctic)
+docker compose up -d && brain init && brain ingest-dir <…> && brain reembed
 
 # Testing
-pytest                                 # full suite
-pytest --cov=brain --cov-report=term   # with coverage
-pytest tests/test_chunker.py -v        # single file
+pytest                                   # full suite
+pytest --cov=brain --cov-report=term     # with coverage
+pytest tests/test_chunker.py -v          # single file
 
 # Linting
-ruff check                             # lint
-ruff check --fix                       # auto-fix
-mypy src/                              # type check
+ruff check                               # lint
+ruff check --fix                         # auto-fix
+mypy src/                                # type check
 ```
 
 ## Architecture
@@ -152,20 +172,40 @@ mypy src/                              # type check
 ### Layout
 ```
 src/brain/
-  cli.py            — Typer app, all commands
-  config.py         — env loading
-  db.py             — psycopg connection + migration runner
-  embeddings.py     — Voyage SDK wrapper
+  cli.py            — Typer app, all commands (init / doctor / status /
+                      ingest* / search / show / list / tag / edit / rm / reembed)
+  config.py         — env loading; selects BRAIN_EMBEDDER ∈ {arctic, voyage, qwen3}
+  db.py             — psycopg connection + migration runner;
+                      ensure_embedding_column() reconciles chunks.embedding
+                      dim against the active embedder
+  embeddings.py     — `_OllamaEmbedderBase` shared transport; concrete
+                      `ArcticEmbedder`, `Qwen3Embedder`, `VoyageEmbedder`;
+                      `make_embedder(cfg)` factory dispatched on cfg.embedder
+  errors.py         — BrainError base + id-prefix exceptions, OllamaEmbedError
+  queries.py        — read helpers (resolve_document_prefix, fetch_document,
+                      list_documents, summary_counts) + reembed helpers
+                      (iter_chunks_missing_embedding, finalize_embedding_index,
+                      embedding_column_state)
   search.py         — hybrid FTS + vector via RRF
   format.py         — human + JSON output
+  edit_session.py   — JSON-header + body editor flow used by `brain edit`
+  mcp_server.py     — stdio MCP server (brain-mcp entry point)
   ingest/
-    __init__.py     — dispatcher + ingest_document() pipeline
-    chunker.py      — paragraph-aware chunking
+    __init__.py     — Embedder Protocol (declares `dim`); dispatcher +
+                      ingest_document() / update_document() pipelines
+    chunker.py      — paragraph-aware chunking (uses embedder.count_tokens)
     text.py / markdown.py / pdf.py / docx.py — file extractors
     gmail.py        — shells out to gws CLI
     stdin.py        — generic stdin ingester (Krisp, Slack)
 
 migrations/         — numbered SQL files
+  001_init.sql                    — base schema (chunks.embedding starts as vector(1024))
+  002_qwen3_embedding.sql         — drops + re-adds chunks.embedding as vector(4096), nullable
+                                    (ensure_embedding_column then resizes for the active backend)
+
+scripts/embedding_smoke.py        — retrieval sanity check for a corpus +
+                                    seeded queries (used during backend swaps)
+
 tests/              — real-DB fixture, fake embedder, one test file per module
 docs/specs/         — design specs
 docs/plans/         — implementation plans
@@ -176,6 +216,10 @@ docs/plans/         — implementation plans
 - **Source dedup:** `sources(kind, external_id)` is UNIQUE. Re-ingesting the same Krisp/Gmail message updates the existing row instead of duplicating.
 - **Hybrid search:** Reciprocal Rank Fusion (k=60) combines FTS rank and vector cosine similarity. Ranks chunks; groups by document; returns top N docs with best matching chunk as snippet.
 - **Claude-orchestrated ingestion:** Krisp and Slack don't have CLIs. Claude calls the MCP, then pipes content into `brain ingest-stdin --source krisp/slack ...`.
+- **Pluggable embedders behind one Protocol.** All three backends conform to `brain.ingest.Embedder` (`dim: int`, `embed(texts, *, input_type)`, `count_tokens`). The factory `make_embedder(cfg)` is the only place that knows about concrete backends; ingest, search, and reembed depend only on the Protocol.
+- **Dim-aware finalize.** `queries.finalize_embedding_index` applies `NOT NULL` on `chunks.embedding` for every backend, then conditionally creates an HNSW cosine index when `embedder.dim ≤ 2000` (arctic, voyage). For Qwen3 (4096) the index is skipped — pgvector 0.8.x caps HNSW/IVFFlat at 2000 for `vector`; sequential cosine scan is acceptable at personal-corpus scale.
+- **Backend-aware `brain init`.** `init` runs migrations, then `db.ensure_embedding_column` reconciles `chunks.embedding`'s declared dim against `embedder.dim` — drop + re-add on a fresh DB, error with a destructive-reset hint if chunks already exist at a different dim.
+- **Switching backends is destructive.** Embeddings cannot be re-projected across models; switching requires `docker compose down && rm -rf data/postgres && brain init && brain ingest-dir … && brain reembed`. Postgres data is a host bind-mount (`./data/postgres`), not a Docker volume — `docker compose down -v` alone is *not* sufficient.
 
 ## Lessons Learned
 
