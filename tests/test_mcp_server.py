@@ -15,7 +15,7 @@ from mcp import McpError
 
 from brain import mcp_server
 from brain.config import Config
-from brain.embeddings import Qwen3EmbedError
+from brain.embeddings import OllamaEmbedError
 from brain.ingest import ExtractedDoc, ingest_document
 
 TEST_DATABASE_URL = os.environ.get(
@@ -209,16 +209,16 @@ def test_brain_search_respects_filters(
 
 
 class _BoomEmbedder:
-    """Embedder stub that always raises a Qwen3EmbedError on ``embed``.
+    """Embedder stub that always raises a OllamaEmbedError on ``embed``.
 
     Used to assert each tool wraps embedder failures as ``McpError`` rather
-    than letting a raw ``Qwen3EmbedError`` propagate to the MCP runtime.
+    than letting a raw ``OllamaEmbedError`` propagate to the MCP runtime.
     """
 
     def embed(
         self, texts: list[str], *, input_type: str = "document"
     ) -> list[list[float]]:
-        raise Qwen3EmbedError("rate limited")
+        raise OllamaEmbedError("rate limited")
 
     def count_tokens(self, text: str) -> int:
         return 1
@@ -228,7 +228,7 @@ def test_brain_search_wraps_embed_error(
     monkeypatch: pytest.MonkeyPatch,
     mcp_state: mcp_server._State,
 ) -> None:
-    """An embedder failure must surface as McpError, never a raw Qwen3EmbedError."""
+    """An embedder failure must surface as McpError, never a raw OllamaEmbedError."""
     monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
     with pytest.raises(McpError) as exc_info:
         mcp_server.brain_search(query="anything")
@@ -902,14 +902,14 @@ class _RecordingEmbedder:
 
 
 class _BoomEmbedderFactory(_RecordingEmbedder):
-    """Variant whose ``embed`` raises a ``Qwen3EmbedError`` — used to verify
+    """Variant whose ``embed`` raises a ``OllamaEmbedError`` — used to verify
     the warmup failure path doesn't abort startup."""
 
     def embed(
         self, texts: list[str], *, input_type: str = "document"
     ) -> list[list[float]]:
         self.embed_calls += 1
-        raise Qwen3EmbedError("simulated cold start failure")
+        raise OllamaEmbedError("simulated cold start failure")
 
 
 def _install_main_doubles(
@@ -974,7 +974,7 @@ def test_main_continues_when_warmup_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A Qwen3EmbedError during warmup must be swallowed — main() must still
+    """A OllamaEmbedError during warmup must be swallowed — main() must still
     hand off to mcp_app.run() so the server stays up and search can retry on
     demand."""
     captured = _install_main_doubles(

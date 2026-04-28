@@ -12,7 +12,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from .config import Config
 from .db import connect
-from .embeddings import Qwen3EmbedError, make_embedder
+from .embeddings import OllamaEmbedError, make_embedder
 from .errors import (
     IdPrefixAmbiguous,
     IdPrefixNotFound,
@@ -83,7 +83,7 @@ def _wrap_db_error(e: psycopg.Error) -> McpError:
     return _mcp_error(INTERNAL_ERROR, f"database error: {type(e).__name__}")
 
 
-def _wrap_embed_error(e: Qwen3EmbedError) -> McpError:
+def _wrap_embed_error(e: OllamaEmbedError) -> McpError:
     """Wrap a Qwen3/Ollama embedding failure as an MCP error.
 
     Mirrors :func:`_wrap_db_error`: the user-facing message exposes only the
@@ -145,7 +145,7 @@ def brain_search(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except Qwen3EmbedError as e:
+    except OllamaEmbedError as e:
         raise _wrap_embed_error(e) from e
     return [
         {
@@ -304,7 +304,7 @@ def brain_ingest_stdin(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except Qwen3EmbedError as e:
+    except OllamaEmbedError as e:
         raise _wrap_embed_error(e) from e
     return {
         "document_id": result.document_id,
@@ -398,7 +398,7 @@ def brain_edit(
                 raise _mcp_error(INVALID_PARAMS, str(e)) from e
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except Qwen3EmbedError as e:
+    except OllamaEmbedError as e:
         raise _wrap_embed_error(e) from e
     return {
         "document_id": result.document_id,
@@ -437,12 +437,12 @@ def main() -> None:
     _state = _State(cfg=cfg, embedder=embedder)
     # One-shot warmup embed to cut cold-start latency on the first real
     # ``brain_search``. Failure must NOT abort startup — search will retry on
-    # demand. Catch ``Qwen3EmbedError`` so import / programming errors still
+    # demand. Catch ``OllamaEmbedError`` so import / programming errors still
     # surface.
     try:
         _state.embedder.embed(["hello"], input_type="document")
         logger.info("warmup embed completed")
-    except Qwen3EmbedError as e:
+    except OllamaEmbedError as e:
         logger.warning(
             "warmup embed failed (continuing without): %s", type(e).__name__
         )

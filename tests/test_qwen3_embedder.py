@@ -4,7 +4,7 @@ import json
 import httpx
 import pytest
 
-from brain.embeddings import Qwen3Embedder, Qwen3EmbedError, _format_query
+from brain.embeddings import OllamaEmbedError, Qwen3Embedder
 
 
 def _transport_returning(
@@ -50,8 +50,9 @@ def test_embed_query_prepends_instruct_prefix() -> None:
     formatted = body["input"][0]
     assert formatted.startswith("Instruct: ")
     assert formatted.endswith("Query:what did person-a say?")
-    # And the helper round-trips to the same formatted string.
-    assert formatted == _format_query("what did person-a say?")
+    # And the instance helper round-trips to the same formatted string —
+    # confirming the body sent over HTTP came through `_format_query`.
+    assert formatted == emb._format_query("what did person-a say?")
 
 
 def test_embed_splits_into_batches() -> None:
@@ -79,7 +80,7 @@ def test_network_error_raises_qwen3_embed_error() -> None:
 
     transport = httpx.MockTransport(handler)
     emb = Qwen3Embedder(host="http://x", client=_client(transport))
-    with pytest.raises(Qwen3EmbedError, match="Ollama request failed"):
+    with pytest.raises(OllamaEmbedError, match="Ollama request failed"):
         emb.embed(["doc"], input_type="document")
 
 
@@ -89,7 +90,7 @@ def test_5xx_raises_qwen3_embed_error_with_body() -> None:
 
     transport = httpx.MockTransport(handler)
     emb = Qwen3Embedder(host="http://x", client=_client(transport))
-    with pytest.raises(Qwen3EmbedError) as exc_info:
+    with pytest.raises(OllamaEmbedError) as exc_info:
         emb.embed(["doc"], input_type="document")
     msg = str(exc_info.value)
     assert "503" in msg
@@ -102,7 +103,7 @@ def test_4xx_raises_qwen3_embed_error_with_body() -> None:
 
     transport = httpx.MockTransport(handler)
     emb = Qwen3Embedder(host="http://x", client=_client(transport))
-    with pytest.raises(Qwen3EmbedError) as exc_info:
+    with pytest.raises(OllamaEmbedError) as exc_info:
         emb.embed(["doc"], input_type="document")
     assert "400" in str(exc_info.value)
 
@@ -110,7 +111,7 @@ def test_4xx_raises_qwen3_embed_error_with_body() -> None:
 def test_malformed_response_raises() -> None:
     transport = _transport_returning({"oops": "no embeddings key"})
     emb = Qwen3Embedder(host="http://x", client=_client(transport))
-    with pytest.raises(Qwen3EmbedError, match="missing 'embeddings'"):
+    with pytest.raises(OllamaEmbedError, match="missing 'embeddings'"):
         emb.embed(["doc"], input_type="document")
 
 
@@ -126,7 +127,7 @@ def test_response_with_too_few_embeddings_raises() -> None:
     """Length mismatch (server returns fewer vectors than inputs) → error."""
     transport = _transport_returning({"embeddings": [[0.1] * 4096]})
     emb = Qwen3Embedder(host="http://x", client=_client(transport))
-    with pytest.raises(Qwen3EmbedError, match="1 embeddings for 2 inputs"):
+    with pytest.raises(OllamaEmbedError, match="1 embeddings for 2 inputs"):
         emb.embed(["doc1", "doc2"], input_type="document")
 
 
@@ -136,19 +137,19 @@ def test_response_with_too_many_embeddings_raises() -> None:
         {"embeddings": [[0.1] * 4096, [0.2] * 4096, [0.3] * 4096]}
     )
     emb = Qwen3Embedder(host="http://x", client=_client(transport))
-    with pytest.raises(Qwen3EmbedError, match="3 embeddings for 2 inputs"):
+    with pytest.raises(OllamaEmbedError, match="3 embeddings for 2 inputs"):
         emb.embed(["doc1", "doc2"], input_type="document")
 
 
 def test_malformed_json_raises_qwen3_embed_error() -> None:
-    """A 200 OK with non-JSON body must surface as Qwen3EmbedError, not ValueError."""
+    """A 200 OK with non-JSON body must surface as OllamaEmbedError, not ValueError."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"not json")
 
     transport = httpx.MockTransport(handler)
     emb = Qwen3Embedder(host="http://x", client=_client(transport))
-    with pytest.raises(Qwen3EmbedError, match="non-JSON response"):
+    with pytest.raises(OllamaEmbedError, match="non-JSON response"):
         emb.embed(["doc"], input_type="document")
 
 

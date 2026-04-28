@@ -52,12 +52,6 @@ class OllamaEmbedError(BrainError):
     """Raised when an Ollama-backed embed call fails (network / 4xx / 5xx / shape)."""
 
 
-# Backwards-compatibility alias — renamed in Phase 3.5 when ArcticEmbedder
-# joined Qwen3Embedder under the same Ollama-HTTP base. Keep the old name so
-# existing call sites (mcp_server, tests) don't churn in this PR.
-Qwen3EmbedError = OllamaEmbedError
-
-
 class _OllamaEmbedderBase:
     """Shared HTTP transport, batching, and tokenizer for Ollama-hosted models.
 
@@ -67,7 +61,6 @@ class _OllamaEmbedderBase:
     """
 
     dim: int  # subclasses set this as a class attribute
-    _query_prefix_doc: str = ""  # overridden in subclasses; for tests/inspection
 
     def __init__(
         self,
@@ -196,7 +189,6 @@ class ArcticEmbedder(_OllamaEmbedderBase):
     """
 
     dim: int = 1024
-    _query_prefix_doc = _ARCTIC_QUERY_PREFIX  # exposed for test inspection
 
     def __init__(
         self,
@@ -217,12 +209,6 @@ class ArcticEmbedder(_OllamaEmbedderBase):
 
     def _format_query(self, text: str) -> str:
         return f"{_ARCTIC_QUERY_PREFIX}{text}"
-
-
-# Module-level helper kept for direct test imports of the Qwen3 prefix.
-def _format_query(text: str) -> str:
-    """Return the Qwen3 Instruct-prefixed form of ``text`` (test helper)."""
-    return f"Instruct: {_QWEN3_QUERY_TASK}\nQuery:{text}"
 
 
 class VoyageEmbedder:
