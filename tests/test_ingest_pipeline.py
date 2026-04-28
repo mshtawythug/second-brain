@@ -27,6 +27,31 @@ def test_ingest_creates_document_and_chunks(test_db, fake_embedder):
     assert chunks >= 1
 
 
+def test_ingest_produces_4096_dim_embedding(test_db, fake_embedder):
+    """Regression for migration 002: every embedding row must be 4096-dim.
+
+    The default ``FakeEmbedder()`` now returns 4096-dim vectors to match the
+    new ``vector(4096)`` schema; ingesting must round-trip them intact.
+    """
+    doc = ExtractedDoc(
+        title="Dim check",
+        content="paragraph one.\n\nparagraph two.\n\nparagraph three.",
+        content_type="txt",
+        source_path=None,
+        metadata={},
+    )
+    result = _ingest(test_db, fake_embedder, doc)
+    assert result.document_id is not None
+
+    rows = test_db.execute(
+        "SELECT vector_dims(embedding) FROM chunks WHERE document_id=%s",
+        (result.document_id,),
+    ).fetchall()
+    assert rows, "expected at least one chunk"
+    for (dims,) in rows:
+        assert dims == 4096
+
+
 def test_ingest_is_idempotent_by_content_hash(test_db, fake_embedder):
     doc = ExtractedDoc(
         title="T",

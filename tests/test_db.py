@@ -57,3 +57,37 @@ def test_run_migrations_applies_all_sql_files_in_order() -> None:
         applied = run_migrations(conn)
 
     assert applied == expected_files
+
+
+# --- Migration 002 regression tests -----------------------------------------
+# These verify the Voyage(1024) -> Qwen3(4096) embedding column swap. The
+# session-scoped conftest fixture already applies all migrations in order, so
+# the post-002 schema is what test_db reflects.
+
+
+def test_migration_002_changes_embedding_dim_to_4096(test_db: psycopg.Connection) -> None:
+    """After 002, chunks.embedding must be vector(4096)."""
+    row = test_db.execute(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "vector(4096)"
+
+
+def test_migration_002_drops_hnsw_index(test_db: psycopg.Connection) -> None:
+    """The HNSW index from 001 must be gone — Phase 3 rebuilds it post-backfill."""
+    row = test_db.execute(
+        "SELECT 1 FROM pg_class WHERE relname = 'chunks_embedding_idx'"
+    ).fetchone()
+    assert row is None
+
+
+def test_migration_002_makes_embedding_nullable(test_db: psycopg.Connection) -> None:
+    """The NOT NULL constraint is deferred to Phase 3's finalize step."""
+    row = test_db.execute(
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_name='chunks' AND column_name='embedding'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "YES"
