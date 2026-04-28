@@ -16,7 +16,6 @@ TEST_DATABASE_URL = os.environ.get(
 
 def test_init_applies_migrations(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
 
     # wipe schema first
     with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
@@ -39,7 +38,6 @@ def test_init_reports_no_migrations_when_none_apply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
 
     with patch("brain.cli.run_migrations", return_value=[]):
         result = CliRunner().invoke(app, ["init"])

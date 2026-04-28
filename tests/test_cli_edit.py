@@ -32,7 +32,7 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def test_edit_title_only_no_voyage_call(
+def test_edit_title_only_no_embed_call(
     counting_embedder: Any,
     patch_embedder: Callable[[object], None],
     seed_doc: Callable[..., str],

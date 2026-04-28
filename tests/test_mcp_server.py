@@ -11,11 +11,11 @@ from typing import Any
 
 import psycopg
 import pytest
-import voyageai.error
 from mcp import McpError
 
 from brain import mcp_server
 from brain.config import Config
+from brain.embeddings import Qwen3EmbedError
 from brain.ingest import ExtractedDoc, ingest_document
 
 TEST_DATABASE_URL = os.environ.get(
@@ -35,7 +35,7 @@ def mcp_state(
     Uses ``monkeypatch.setattr`` so the previous value is restored after the
     test (whether or not main() was ever called)."""
     state = mcp_server._State(
-        cfg=Config(database_url=TEST_DATABASE_URL, voyage_api_key="fake"),
+        cfg=Config(database_url=TEST_DATABASE_URL),
         embedder=fake_embedder,  # type: ignore[arg-type]
     )
     monkeypatch.setattr(mcp_server, "_state", state)
@@ -209,32 +209,32 @@ def test_brain_search_respects_filters(
 
 
 class _BoomEmbedder:
-    """Embedder stub that always raises a voyageai exception on ``embed``.
+    """Embedder stub that always raises a Qwen3EmbedError on ``embed``.
 
-    Used to assert each tool wraps voyage failures as ``McpError`` rather
-    than letting a raw ``VoyageError`` propagate to the MCP runtime.
+    Used to assert each tool wraps embedder failures as ``McpError`` rather
+    than letting a raw ``Qwen3EmbedError`` propagate to the MCP runtime.
     """
 
     def embed(
         self, texts: list[str], *, input_type: str = "document"
     ) -> list[list[float]]:
-        raise voyageai.error.RateLimitError("rate limited")
+        raise Qwen3EmbedError("rate limited")
 
     def count_tokens(self, text: str) -> int:
         return 1
 
 
-def test_brain_search_wraps_voyage_error(
+def test_brain_search_wraps_embed_error(
     monkeypatch: pytest.MonkeyPatch,
     mcp_state: mcp_server._State,
 ) -> None:
-    """A Voyage failure must surface as McpError, never a raw VoyageError."""
+    """An embedder failure must surface as McpError, never a raw Qwen3EmbedError."""
     monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
     with pytest.raises(McpError) as exc_info:
         mcp_server.brain_search(query="anything")
     msg = exc_info.value.error.message
     assert "embedding failed" in msg
-    assert "RateLimitError" in msg
+    assert "Qwen3EmbedError" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -574,14 +574,14 @@ def test_brain_tag_requires_add_or_remove(
 # ---------------------------------------------------------------------------
 
 
-def test_brain_edit_title_only_no_voyage_call(
+def test_brain_edit_title_only_no_embed_call(
     test_db: psycopg.Connection,
     counting_embedder: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Title-only edit must not call the embedder."""
     state = mcp_server._State(
-        cfg=Config(database_url=TEST_DATABASE_URL, voyage_api_key="fake"),
+        cfg=Config(database_url=TEST_DATABASE_URL),
         embedder=counting_embedder,
     )
     monkeypatch.setattr(mcp_server, "_state", state)
@@ -838,7 +838,7 @@ def test_brain_edit_wraps_db_error(
     assert "database error" in msg
 
 
-def test_brain_ingest_stdin_wraps_voyage_error(
+def test_brain_ingest_stdin_wraps_embed_error(
     monkeypatch: pytest.MonkeyPatch,
     mcp_state: mcp_server._State,
 ) -> None:
@@ -847,15 +847,15 @@ def test_brain_ingest_stdin_wraps_voyage_error(
         mcp_server.brain_ingest_stdin(
             content="body that will need embedding",
             source="krisp",
-            external_id="krisp:voy",
+            external_id="krisp:embed",
             title="t",
         )
     msg = exc_info.value.error.message
     assert "embedding failed" in msg
-    assert "RateLimitError" in msg
+    assert "Qwen3EmbedError" in msg
 
 
-def test_brain_edit_wraps_voyage_error(
+def test_brain_edit_wraps_embed_error(
     test_db: psycopg.Connection,
     fake_embedder: object,
     monkeypatch: pytest.MonkeyPatch,
@@ -869,7 +869,7 @@ def test_brain_edit_wraps_voyage_error(
         mcp_server.brain_edit(id_prefix=doc_id[:8], content="brand new body")
     msg = exc_info.value.error.message
     assert "embedding failed" in msg
-    assert "RateLimitError" in msg
+    assert "Qwen3EmbedError" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -878,15 +878,15 @@ def test_brain_edit_wraps_voyage_error(
 # ---------------------------------------------------------------------------
 
 
-class _RecordingVoyage:
-    """Stand-in for ``VoyageEmbedder`` used by ``main()`` lifecycle tests.
+class _RecordingEmbedder:
+    """Stand-in for ``Qwen3Embedder`` used by ``main()`` lifecycle tests.
 
     Records every ``embed`` invocation so warmup can be asserted, and avoids
-    hitting the real Voyage API when ``main()`` runs offline.
+    hitting a real Ollama server when ``main()`` runs offline.
     """
 
-    def __init__(self, *, api_key: str, **_: object) -> None:
-        self.api_key = api_key
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
         self.embed_calls = 0
         self.embed_inputs: list[tuple[list[str], str]] = []
 
@@ -895,38 +895,37 @@ class _RecordingVoyage:
     ) -> list[list[float]]:
         self.embed_calls += 1
         self.embed_inputs.append((list(texts), input_type))
-        return [[0.0] * 1024 for _ in texts]
+        return [[0.0] * 4096 for _ in texts]
 
     def count_tokens(self, text: str) -> int:
         return max(1, len(text) // 4)
 
 
-class _BoomVoyage(_RecordingVoyage):
-    """Variant whose ``embed`` raises a ``VoyageError`` — used to verify the
-    warmup failure path doesn't abort startup."""
+class _BoomEmbedderFactory(_RecordingEmbedder):
+    """Variant whose ``embed`` raises a ``Qwen3EmbedError`` — used to verify
+    the warmup failure path doesn't abort startup."""
 
     def embed(
         self, texts: list[str], *, input_type: str = "document"
     ) -> list[list[float]]:
         self.embed_calls += 1
-        raise voyageai.error.RateLimitError("simulated cold start failure")
+        raise Qwen3EmbedError("simulated cold start failure")
 
 
 def _install_main_doubles(
     monkeypatch: pytest.MonkeyPatch,
     *,
-    voyage_factory: type[_RecordingVoyage],
+    embedder_cls: type[_RecordingEmbedder],
 ) -> dict[str, object]:
-    """Set env, monkeypatch ``VoyageEmbedder`` to ``voyage_factory``, replace
+    """Set env, monkeypatch ``make_embedder`` to ``embedder_cls``, replace
     ``mcp_app.run`` with a no-op recorder, and clear ``_state``.
 
     Returns a ``captured`` dict that ``_fake_run`` populates so the caller
     can assert on transport + state after ``main()`` returns.
     """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     monkeypatch.setattr(mcp_server, "_state", None)
-    monkeypatch.setattr(mcp_server, "VoyageEmbedder", voyage_factory)
+    monkeypatch.setattr(mcp_server, "make_embedder", embedder_cls)
 
     captured: dict[str, object] = {}
 
@@ -943,7 +942,7 @@ def test_main_initializes_state_and_starts_server(
 ) -> None:
     """main() must build _State from env and hand off to mcp_app.run(stdio)."""
     captured = _install_main_doubles(
-        monkeypatch, voyage_factory=_RecordingVoyage
+        monkeypatch, embedder_cls=_RecordingEmbedder
     )
     mcp_server.main()
     assert captured["transport"] == "stdio"
@@ -957,13 +956,13 @@ def test_main_runs_warmup_embed(
     """main() must fire one warmup embed call before mcp_app.run() to cut
     cold-start latency on the first real brain_search."""
     captured = _install_main_doubles(
-        monkeypatch, voyage_factory=_RecordingVoyage
+        monkeypatch, embedder_cls=_RecordingEmbedder
     )
     mcp_server.main()
     state = captured["state"]
     assert isinstance(state, mcp_server._State)
     embedder = state.embedder
-    assert isinstance(embedder, _RecordingVoyage)
+    assert isinstance(embedder, _RecordingEmbedder)
     assert embedder.embed_calls >= 1
     # Warmup uses a document-style embed (matches what brain_search would do).
     texts, input_type = embedder.embed_inputs[0]
@@ -975,10 +974,11 @@ def test_main_continues_when_warmup_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A VoyageError during warmup must be swallowed — main() must still hand
-    off to mcp_app.run() so the server stays up and search can retry on demand."""
+    """A Qwen3EmbedError during warmup must be swallowed — main() must still
+    hand off to mcp_app.run() so the server stays up and search can retry on
+    demand."""
     captured = _install_main_doubles(
-        monkeypatch, voyage_factory=_BoomVoyage
+        monkeypatch, embedder_cls=_BoomEmbedderFactory
     )
     with caplog.at_level("WARNING", logger="brain.mcp"):
         mcp_server.main()
@@ -987,11 +987,11 @@ def test_main_continues_when_warmup_fails(
     state = captured["state"]
     assert isinstance(state, mcp_server._State)
     embedder = state.embedder
-    assert isinstance(embedder, _BoomVoyage)
+    assert isinstance(embedder, _BoomEmbedderFactory)
     assert embedder.embed_calls == 1
     # And we logged a warning naming the exception class so an operator can
     # see why warmup didn't take.
     assert any(
-        "warmup embed failed" in rec.message and "RateLimitError" in rec.message
+        "warmup embed failed" in rec.message and "Qwen3EmbedError" in rec.message
         for rec in caplog.records
     )

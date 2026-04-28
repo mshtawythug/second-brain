@@ -42,8 +42,8 @@ def hybrid_search(
     (K=60). Per-document scores are the max across that document's chunks,
     and the highest-scoring chunk per document becomes the returned snippet.
 
-    When ``fts_only`` is True, the vector leg (and the Voyage embed call) is
-    skipped — useful when the embedding API is unavailable.
+    When ``fts_only`` is True, the vector leg (and the Ollama embed call) is
+    skipped — useful when the embedding service is unavailable.
     """
     where_clauses = ["TRUE"]
     where_params: list[Any] = []

@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import httpx
 import psycopg
 import typer
 
@@ -18,7 +19,7 @@ from .edit_session import (
     build_payload,
     run_editor_session,
 )
-from .embeddings import VoyageEmbedder
+from .embeddings import Qwen3Embedder, make_embedder
 from .errors import (
     IdPrefixAmbiguous,
     IdPrefixNotFound,
@@ -98,6 +99,16 @@ def doctor() -> None:
         failures.append(f"database: {e}")
         typer.secho(f"postgres        FAIL — {e}", fg="red", err=True)
 
+    try:
+        with httpx.Client(
+            base_url=cfg.ollama_host, timeout=httpx.Timeout(5.0)
+        ) as client:
+            client.get("/api/tags").raise_for_status()
+        typer.echo(f"ollama          OK ({cfg.ollama_host})")
+    except httpx.HTTPError as e:
+        failures.append(f"ollama: {e}")
+        typer.secho(f"ollama          FAIL — {e}", fg="red", err=True)
+
     if shutil.which("gws"):
         typer.echo("gws CLI         OK")
     else:
@@ -123,10 +134,10 @@ def status() -> None:
         typer.echo(f"  {kind:<12} {count}")
 
 
-def _build_embedder(cfg: Config) -> VoyageEmbedder:
-    """Build a VoyageEmbedder from config. Indirected so tests can substitute a fake."""
-    # pragma: no cover - exercised only against the real Voyage service
-    return VoyageEmbedder(api_key=cfg.voyage_api_key)  # pragma: no cover
+def _build_embedder(cfg: Config) -> Qwen3Embedder:
+    """Build a Qwen3Embedder from config. Indirected so tests can substitute a fake."""
+    # pragma: no cover - exercised only against a real Ollama server
+    return make_embedder(cfg)  # pragma: no cover
 
 
 @app.command()

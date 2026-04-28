@@ -5,6 +5,9 @@ from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
+DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+DEFAULT_QWEN3_MODEL = "qwen3-embedding:8b"
+
 
 def _project_dotenv() -> Path:
     """Path to the .env file at the repo root, relative to this module.
@@ -22,7 +25,8 @@ class ConfigError(RuntimeError):
 @dataclass(frozen=True)
 class Config:
     database_url: str
-    voyage_api_key: str
+    ollama_host: str = DEFAULT_OLLAMA_HOST
+    qwen3_model: str = DEFAULT_QWEN3_MODEL
 
     @classmethod
     def load(cls) -> "Config":
@@ -39,9 +43,12 @@ class Config:
         if project_env.is_file():
             load_dotenv(project_env, override=False)
         database_url = os.environ.get("DATABASE_URL")
-        voyage_api_key = os.environ.get("VOYAGE_API_KEY")
         if not database_url:
             raise ConfigError("DATABASE_URL is not set (see .env.example)")
-        if not voyage_api_key:
-            raise ConfigError("VOYAGE_API_KEY is not set (see .env.example)")
-        return cls(database_url=database_url, voyage_api_key=voyage_api_key)
+        ollama_host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
+        qwen3_model = os.environ.get("QWEN3_MODEL", DEFAULT_QWEN3_MODEL)
+        return cls(
+            database_url=database_url,
+            ollama_host=ollama_host,
+            qwen3_model=qwen3_model,
+        )

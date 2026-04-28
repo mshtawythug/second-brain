@@ -51,7 +51,14 @@ def test_db() -> Iterator[psycopg.Connection]:
 
 
 class FakeEmbedder:
-    """Deterministic embedder for tests — hashes text into a stable 1024-dim vector."""
+    """Deterministic embedder for tests — hashes text into a stable ``dim``-length vector.
+
+    The default of 1024 matches the current ``vector(1024)`` column shape.
+    Phase 2 will widen the column and bump this default.
+    """
+
+    def __init__(self, dim: int = 1024) -> None:
+        self._dim = dim
 
     def embed(self, texts: list[str], input_type: str = "document") -> list[list[float]]:
         return [self._vec(t, input_type) for t in texts]
@@ -60,12 +67,13 @@ class FakeEmbedder:
         # rough approximation: 1 token per ~4 chars
         return max(1, len(text) // 4)
 
-    @staticmethod
-    def _vec(text: str, input_type: str) -> list[float]:
+    def _vec(self, text: str, input_type: str) -> list[float]:
         h = hashlib.sha256((input_type + ":" + text).encode()).digest()
-        # 32 bytes → 32 floats, tiled to 1024
+        # 32 bytes → 32 floats, tiled to ``self._dim``.
         floats = [b / 255.0 - 0.5 for b in h]
-        return (floats * 32)[:1024]
+        # Tile enough copies to cover ``dim``, then truncate.
+        repeats = (self._dim + len(floats) - 1) // len(floats)
+        return (floats * repeats)[: self._dim]
 
 
 @pytest.fixture
@@ -74,7 +82,7 @@ def fake_embedder() -> FakeEmbedder:
 
 
 class CountingEmbedder:
-    """Wrap an embedder to count Voyage calls — used by `brain edit` tests
+    """Wrap an embedder to count embed calls — used by `brain edit` tests
     that need to assert the title-only path didn't re-embed."""
 
     def __init__(self, inner: Any) -> None:
@@ -100,13 +108,12 @@ def counting_embedder(fake_embedder: FakeEmbedder) -> CountingEmbedder:
 
 @pytest.fixture
 def patch_embedder(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], None]:
-    """Wire ``DATABASE_URL`` + ``VOYAGE_API_KEY`` env vars and swap
-    ``brain.cli._build_embedder`` to return ``embedder``. Returns a callable
-    so tests pick which embedder (fake vs counting) to install."""
+    """Wire ``DATABASE_URL`` env var and swap ``brain.cli._build_embedder`` to
+    return ``embedder``. Returns a callable so tests pick which embedder
+    (fake vs counting) to install."""
 
     def _install(embedder: object) -> None:
         monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-        monkeypatch.setenv("VOYAGE_API_KEY", "fake")
         monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: embedder)
 
     return _install

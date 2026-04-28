@@ -42,7 +42,6 @@ def _seed(
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
 
 
 def _tags_for(doc_id: str) -> list[str]:

@@ -16,7 +16,6 @@ TEST_DATABASE_URL = os.environ.get(
 
 def _patch_embedder(monkeypatch: pytest.MonkeyPatch, fake_embedder: object) -> None:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: fake_embedder)
 
 

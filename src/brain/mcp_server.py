@@ -6,14 +6,13 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
-import voyageai.error
 from mcp import McpError
 from mcp.server.fastmcp import FastMCP
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from .config import Config
 from .db import connect
-from .embeddings import VoyageEmbedder
+from .embeddings import Qwen3EmbedError, make_embedder
 from .errors import (
     IdPrefixAmbiguous,
     IdPrefixNotFound,
@@ -84,8 +83,8 @@ def _wrap_db_error(e: psycopg.Error) -> McpError:
     return _mcp_error(INTERNAL_ERROR, f"database error: {type(e).__name__}")
 
 
-def _wrap_voyage_error(e: voyageai.error.VoyageError) -> McpError:
-    """Wrap a Voyage embedding failure as an MCP error.
+def _wrap_embed_error(e: Qwen3EmbedError) -> McpError:
+    """Wrap a Qwen3/Ollama embedding failure as an MCP error.
 
     Mirrors :func:`_wrap_db_error`: the user-facing message exposes only the
     exception class name; the full exception is logged to stderr.
@@ -128,7 +127,7 @@ def brain_search(
 
     Returns up to ``limit`` matching documents ranked by RRF over FTS + vector
     cosine similarity. Filter by ``source`` kind, ``tag``, or ``since_days``
-    recency. Set ``fts_only=True`` to skip the Voyage embed call.
+    recency. Set ``fts_only=True`` to skip the local Ollama embed call.
     """
     state = _get_state()
     logger.debug("brain_search: query=%r limit=%d", query, limit)
@@ -146,8 +145,8 @@ def brain_search(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except voyageai.error.VoyageError as e:
-        raise _wrap_voyage_error(e) from e
+    except Qwen3EmbedError as e:
+        raise _wrap_embed_error(e) from e
     return [
         {
             "id": r.document_id,
@@ -305,8 +304,8 @@ def brain_ingest_stdin(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except voyageai.error.VoyageError as e:
-        raise _wrap_voyage_error(e) from e
+    except Qwen3EmbedError as e:
+        raise _wrap_embed_error(e) from e
     return {
         "document_id": result.document_id,
         "created": result.created,
@@ -399,8 +398,8 @@ def brain_edit(
                 raise _mcp_error(INVALID_PARAMS, str(e)) from e
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except voyageai.error.VoyageError as e:
-        raise _wrap_voyage_error(e) from e
+    except Qwen3EmbedError as e:
+        raise _wrap_embed_error(e) from e
     return {
         "document_id": result.document_id,
         "fields_changed": result.fields_changed,
@@ -434,16 +433,16 @@ def main() -> None:
     global _state
     _configure_logging()
     cfg = Config.load()
-    embedder = VoyageEmbedder(api_key=cfg.voyage_api_key)
+    embedder = make_embedder(cfg)
     _state = _State(cfg=cfg, embedder=embedder)
     # One-shot warmup embed to cut cold-start latency on the first real
     # ``brain_search``. Failure must NOT abort startup — search will retry on
-    # demand. Catch ``VoyageError`` (the SDK's base) so import / programming
-    # errors still surface.
+    # demand. Catch ``Qwen3EmbedError`` so import / programming errors still
+    # surface.
     try:
         _state.embedder.embed(["hello"], input_type="document")
         logger.info("warmup embed completed")
-    except voyageai.error.VoyageError as e:
+    except Qwen3EmbedError as e:
         logger.warning(
             "warmup embed failed (continuing without): %s", type(e).__name__
         )

@@ -218,12 +218,12 @@ def test_update_document_body_change_rolls_back_on_embedder_error(
 
     class BoomEmbedder:
         def embed(self, texts, *, input_type="document"):
-            raise RuntimeError("voyage is down")
+            raise RuntimeError("embedder is down")
 
         def count_tokens(self, text):
             return fake_embedder.count_tokens(text)
 
-    with pytest.raises(RuntimeError, match="voyage is down"):
+    with pytest.raises(RuntimeError, match="embedder is down"):
         update_document(
             test_db,
             document_id=doc_id,

@@ -102,7 +102,6 @@ def _fake_runner(messages_by_id: dict[str, dict[str, Any]]) -> Callable[..., str
 
 def _patch_embedder(monkeypatch: pytest.MonkeyPatch, fake_embedder: object) -> None:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: fake_embedder)
 
 
@@ -112,7 +111,6 @@ def test_ingest_gmail_requires_scope_flag(
 ) -> None:
     """Bare `ingest-gmail` with no scope flags exits non-zero with a helpful message."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     result = CliRunner().invoke(app, ["ingest-gmail"])
     assert result.exit_code != 0
     combined = (result.output + (result.stderr if result.stderr_bytes else "")).lower()

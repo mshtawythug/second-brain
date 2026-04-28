@@ -45,7 +45,6 @@ def _seed(
 
 def _set_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
 
 
 def test_show_full_text(

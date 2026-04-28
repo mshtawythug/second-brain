@@ -38,7 +38,6 @@ async def _list_tools_via_stdio() -> dict[str, dict[str, object]]:
         args=["-m", "brain.mcp_server"],
         env={
             "DATABASE_URL": TEST_DATABASE_URL,
-            "VOYAGE_API_KEY": "fake",
             # Belt-and-suspenders: the server pulls these from the parent
             # environment, but stdio_client only forwards what we list here
             # plus the SDK's defaults. Path is required so Python can find
@@ -46,6 +45,10 @@ async def _list_tools_via_stdio() -> dict[str, dict[str, object]]:
             "PATH": os.environ.get("PATH", ""),
             "VIRTUAL_ENV": os.environ.get("VIRTUAL_ENV", ""),
             "BRAIN_MCP_LOG_LEVEL": "WARNING",
+            # Point at a non-routable host so warmup fails fast without an
+            # Ollama server in the test environment. The failure is caught
+            # and logged; the server still comes up.
+            "OLLAMA_HOST": "http://127.0.0.1:1",
         },
     )
     with anyio.fail_after(15):

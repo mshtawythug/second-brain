@@ -16,7 +16,7 @@ TEST_DATABASE_URL = os.environ.get(
 
 
 def _patch_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Swap the real VoyageEmbedder builder for the FakeEmbedder fixture."""
+    """Swap the real Qwen3Embedder builder for the FakeEmbedder fixture."""
     from tests.conftest import FakeEmbedder
 
     monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: FakeEmbedder())
@@ -28,7 +28,6 @@ def test_ingest_single_file(
     fixtures_dir: Path,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(app, ["ingest", str(fixtures_dir / "sample.txt")])
     assert result.exit_code == 0, result.output
@@ -42,7 +41,6 @@ def test_ingest_same_file_twice_is_skipped(
 ) -> None:
     """Second ingest of the same content should be reported as skipped."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     _patch_embedder(monkeypatch)
     runner = CliRunner()
     first = runner.invoke(app, ["ingest", str(fixtures_dir / "sample.txt")])
@@ -59,7 +57,6 @@ def test_ingest_force_re_ingests(
 ) -> None:
     """With --force, a repeat ingest replaces the prior row."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     _patch_embedder(monkeypatch)
     runner = CliRunner()
     runner.invoke(app, ["ingest", str(fixtures_dir / "sample.txt")])
@@ -76,7 +73,6 @@ def test_ingest_dir_recursive(
     fixtures_dir: Path,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(app, ["ingest-dir", str(fixtures_dir)])
     assert result.exit_code == 0, result.output
@@ -91,7 +87,6 @@ def test_ingest_with_tag(
     fixtures_dir: Path,
 ) -> None:
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(
         app, ["ingest", str(fixtures_dir / "sample.txt"), "--tag", "career"]
@@ -109,7 +104,6 @@ def test_ingest_dir_dry_run(
 ) -> None:
     """--dry-run lists files without touching the database."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(
         app, ["ingest-dir", str(fixtures_dir), "--dry-run"]
@@ -129,7 +123,6 @@ def test_ingest_dir_ext_filter(
 ) -> None:
     """--ext limits the file types considered."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(
         app, ["ingest-dir", str(fixtures_dir), "--ext", "txt"]
@@ -147,7 +140,6 @@ def test_ingest_dir_continues_on_per_file_error(
 ) -> None:
     """A corrupt file in the tree is reported but doesn't stop the run."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setenv("VOYAGE_API_KEY", "fake")
     _patch_embedder(monkeypatch)
 
     # Real good file + a bogus PDF that will fail extraction

@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 
 from brain import config as config_module
-from brain.config import Config, ConfigError
+from brain.config import (
+    DEFAULT_OLLAMA_HOST,
+    DEFAULT_QWEN3_MODEL,
+    Config,
+    ConfigError,
+)
 
 
 @pytest.fixture
@@ -21,29 +26,41 @@ def isolated_dotenv(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.chdir(tmp_path)
     fake_project_env = tmp_path / "project.env"
     monkeypatch.setattr(config_module, "_project_dotenv", lambda: fake_project_env)
+    # Strip any inherited Ollama overrides so default-vs-explicit tests stay
+    # deterministic regardless of the developer's shell env.
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    monkeypatch.delenv("QWEN3_MODEL", raising=False)
     return fake_project_env
 
 
 def test_loads_database_url(monkeypatch, isolated_dotenv):
     monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
     cfg = Config.load()
     assert cfg.database_url == "postgresql://x:y@h:5432/d"
-    assert cfg.voyage_api_key == "vk-test"
 
 
 def test_missing_database_url_raises(monkeypatch, isolated_dotenv):
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test")
     with pytest.raises(ConfigError, match="DATABASE_URL"):
         Config.load()
 
 
-def test_missing_voyage_key_raises(monkeypatch, isolated_dotenv):
+def test_ollama_host_and_model_default_when_unset(monkeypatch, isolated_dotenv):
+    """With only DATABASE_URL set, defaults apply for OLLAMA_HOST and QWEN3_MODEL."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-    with pytest.raises(ConfigError, match="VOYAGE_API_KEY"):
-        Config.load()
+    cfg = Config.load()
+    assert cfg.ollama_host == DEFAULT_OLLAMA_HOST
+    assert cfg.qwen3_model == DEFAULT_QWEN3_MODEL
+
+
+def test_ollama_host_and_model_read_from_env(monkeypatch, isolated_dotenv):
+    """OLLAMA_HOST and QWEN3_MODEL are honored when set."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("OLLAMA_HOST", "http://203.0.113.10:11434")
+    monkeypatch.setenv("QWEN3_MODEL", "qwen3-embedding:4b")
+    cfg = Config.load()
+    assert cfg.ollama_host == "http://203.0.113.10:11434"
+    assert cfg.qwen3_model == "qwen3-embedding:4b"
 
 
 # ---------------------------------------------------------------------------
@@ -57,27 +74,21 @@ def test_loads_dotenv_from_project_root_when_cwd_unrelated(
 ):
     """When cwd has no .env, Config.load() falls back to the project .env."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     isolated_dotenv.write_text(
         "DATABASE_URL=postgresql://from-project-env:5432/db\n"
-        "VOYAGE_API_KEY=vk-from-project\n"
     )
     cfg = Config.load()
     assert cfg.database_url == "postgresql://from-project-env:5432/db"
-    assert cfg.voyage_api_key == "vk-from-project"
 
 
 def test_environment_overrides_project_dotenv(monkeypatch, isolated_dotenv: Path):
     """Shell-set / monkeypatched env wins over the project .env."""
     isolated_dotenv.write_text(
         "DATABASE_URL=postgresql://from-project-env:5432/db\n"
-        "VOYAGE_API_KEY=vk-from-project\n"
     )
     monkeypatch.setenv("DATABASE_URL", "postgresql://from-shell:5432/db")
-    monkeypatch.setenv("VOYAGE_API_KEY", "vk-from-shell")
     cfg = Config.load()
     assert cfg.database_url == "postgresql://from-shell:5432/db"
-    assert cfg.voyage_api_key == "vk-from-shell"
 
 
 def test_missing_dotenv_falls_through_to_strict_error(
@@ -85,7 +96,6 @@ def test_missing_dotenv_falls_through_to_strict_error(
 ):
     """No env, no project .env → ConfigError."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
-    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     assert not isolated_dotenv.exists()
     with pytest.raises(ConfigError):
         Config.load()
