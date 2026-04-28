@@ -1,0 +1,29 @@
+# Hybrid-search smoke queries. One per line; blank lines and #-comments ignored.
+# Edit freely — the seeded set below is just a starter that exercises the
+# kinds of content this brain stores (career, COMPANY_REDACTED, Krisp, Slack, Gmail).
+
+# Career + interview prep
+elevator pitch
+my biggest accomplishment as VPE at COMPANY_REDACTED
+how I described the COMPANY_REDACTED engineering culture in interviews
+
+# People mentioned
+what did person-x say about Q1 review
+last conversation with person-x
+
+# COMPANY_REDACTED-specific
+why did we rewrite the auth middleware
+the customer churn discussion
+Q1 numbers vs forecast
+
+# Krisp transcripts (call topics)
+what was discussed in the engineering all-hands
+last 1:1 with my manager
+
+# Slack threads
+the deploy incident from last week
+hiring discussion thread
+
+# Gmail
+recent recruiter outreach
+interview scheduling threads
