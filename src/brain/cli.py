@@ -19,7 +19,7 @@ from .edit_session import (
     build_payload,
     run_editor_session,
 )
-from .embeddings import Qwen3Embedder, make_embedder
+from .embeddings import make_embedder
 from .errors import (
     IdPrefixAmbiguous,
     IdPrefixNotFound,
@@ -28,6 +28,7 @@ from .errors import (
 )
 from .format import console, emit_json, search_table
 from .ingest import (
+    Embedder,
     UpdateResult,
     apply_tags,
     extract_path,
@@ -72,6 +73,37 @@ def init() -> None:
         typer.echo("no migrations to apply")
 
 
+def _ollama_loaded_models(payload: Any) -> list[str]:
+    """Extract the list of model names from an ``/api/tags`` payload.
+
+    Returns ``[]`` for any structurally unexpected shape so callers can treat
+    "doctor doesn't know" the same as "model not present" — a soft warning,
+    never a failure.
+    """
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if not isinstance(models, list):
+        return []
+    names: list[str] = []
+    for entry in models:
+        if isinstance(entry, dict):
+            name = entry.get("name")
+            if isinstance(name, str):
+                names.append(name)
+    return names
+
+
+def _model_loaded(wanted: str, loaded: list[str]) -> bool:
+    """True iff ``wanted`` matches one of ``loaded`` exactly or modulo the
+    ``:tag`` suffix (Ollama lists ``qwen3-embedding:8b`` as the full tag)."""
+    if wanted in loaded:
+        return True
+    # If the user configured a bare repo without a tag, accept any tag.
+    bare = wanted.split(":", 1)[0]
+    return any(name.split(":", 1)[0] == bare for name in loaded)
+
+
 @app.command()
 def doctor() -> None:
     """Check environment, database connection, and external dependencies."""
@@ -103,9 +135,24 @@ def doctor() -> None:
         with httpx.Client(
             base_url=cfg.ollama_host, timeout=httpx.Timeout(5.0)
         ) as client:
-            client.get("/api/tags").raise_for_status()
-        typer.echo(f"ollama          OK ({cfg.ollama_host})")
-    except httpx.HTTPError as e:
+            response = client.get("/api/tags")
+            response.raise_for_status()
+            tags_payload = response.json()
+        loaded_models = _ollama_loaded_models(tags_payload)
+        wanted = cfg.qwen3_model
+        if _model_loaded(wanted, loaded_models):
+            typer.echo(f"ollama          OK ({cfg.ollama_host})")
+        else:
+            # Soft warning — the daemon is up, but the configured model
+            # isn't pulled. Don't fail doctor; embed calls will surface a
+            # clearer error than "no such model" if anyone tries to use it.
+            typer.secho(
+                f"ollama          OK ({cfg.ollama_host}) — model {wanted} "
+                f"NOT loaded — run `ollama pull {wanted}`",
+                fg="yellow",
+            )
+    except (httpx.HTTPError, ValueError) as e:
+        # ValueError covers a non-JSON /api/tags response (json.JSONDecodeError).
         failures.append(f"ollama: {e}")
         typer.secho(f"ollama          FAIL — {e}", fg="red", err=True)
 
@@ -134,10 +181,13 @@ def status() -> None:
         typer.echo(f"  {kind:<12} {count}")
 
 
-def _build_embedder(cfg: Config) -> Qwen3Embedder:
-    """Build a Qwen3Embedder from config. Indirected so tests can substitute a fake."""
-    # pragma: no cover - exercised only against a real Ollama server
-    return make_embedder(cfg)  # pragma: no cover
+def _build_embedder(cfg: Config) -> Embedder:
+    """Build the configured embedder. Indirected so tests can substitute a fake.
+
+    Returns the :class:`Embedder` Protocol — callers should not depend on the
+    concrete backend (Qwen3 today; potentially others tomorrow).
+    """
+    return make_embedder(cfg)
 
 
 @app.command()

@@ -120,3 +120,65 @@ def test_count_tokens_uses_local_tokenizer() -> None:
     )
     n = emb.count_tokens("hello world this is a test")
     assert n > 0
+
+
+def test_response_with_too_few_embeddings_raises() -> None:
+    """Length mismatch (server returns fewer vectors than inputs) → error."""
+    transport = _transport_returning({"embeddings": [[0.1] * 4096]})
+    emb = Qwen3Embedder(host="http://x", client=_client(transport))
+    with pytest.raises(Qwen3EmbedError, match="1 embeddings for 2 inputs"):
+        emb.embed(["doc1", "doc2"], input_type="document")
+
+
+def test_response_with_too_many_embeddings_raises() -> None:
+    """Length mismatch (server returns more vectors than inputs) → error."""
+    transport = _transport_returning(
+        {"embeddings": [[0.1] * 4096, [0.2] * 4096, [0.3] * 4096]}
+    )
+    emb = Qwen3Embedder(host="http://x", client=_client(transport))
+    with pytest.raises(Qwen3EmbedError, match="3 embeddings for 2 inputs"):
+        emb.embed(["doc1", "doc2"], input_type="document")
+
+
+def test_malformed_json_raises_qwen3_embed_error() -> None:
+    """A 200 OK with non-JSON body must surface as Qwen3EmbedError, not ValueError."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not json")
+
+    transport = httpx.MockTransport(handler)
+    emb = Qwen3Embedder(host="http://x", client=_client(transport))
+    with pytest.raises(Qwen3EmbedError, match="non-JSON response"):
+        emb.embed(["doc"], input_type="document")
+
+
+def test_empty_input_returns_empty_list_with_no_http_call() -> None:
+    """An empty texts list must short-circuit before any HTTP I/O."""
+    calls: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.read())
+        return httpx.Response(200, json={"embeddings": []})
+
+    transport = httpx.MockTransport(handler)
+    emb = Qwen3Embedder(host="http://x", client=_client(transport))
+    out = emb.embed([], input_type="document")
+    assert out == []
+    assert calls == []
+
+
+def test_batch_boundary_exact() -> None:
+    """``n == batch_size`` must produce exactly one HTTP call."""
+    calls: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.read())
+        return httpx.Response(200, json={"embeddings": [[0.0] * 4096] * 3})
+
+    transport = httpx.MockTransport(handler)
+    emb = Qwen3Embedder(
+        host="http://x", client=_client(transport), batch_size=3
+    )
+    out = emb.embed(["a", "b", "c"], input_type="document")
+    assert len(out) == 3
+    assert len(calls) == 1
