@@ -99,8 +99,9 @@ docker compose up -d
 brain init
 
 # 7. Backfill embeddings + finalize the column (NOT NULL + index).
-#    On a fresh DB with no chunks yet this is a no-op-then-finalize;
-#    after a re-ingest it backfills any NULL rows.
+#    On a fresh DB this just finalizes the column (NOT NULL + HNSW
+#    index when applicable); on a re-ingest it backfills any NULL rows
+#    first, then finalizes.
 brain reembed
 
 # 8. Sanity check — should print "all OK" lines for each component.
@@ -119,7 +120,7 @@ Set `BRAIN_EMBEDDER` in `.env` (or the shell). Three values are supported:
 
 | Value | Model | Dim | Cost | Setup | Notes |
 |---|---|---|---|---|---|
-| `arctic` *(default)* | Snowflake Arctic Embed v2 (Apache 2.0) | 1024 | Free | Ollama + `ollama pull snowflake-arctic-embed2` | Recommended. Strong retrieval quality on personal text; HNSW-indexable; fully local. |
+| `arctic` *(default)* | Snowflake Arctic Embed v2 (Apache 2.0) | 1024 | Free | Ollama + `ollama pull snowflake-arctic-embed2` (Ollama packages `Snowflake/snowflake-arctic-embed-l-v2.0` from Hugging Face under this shorter tag — same model) | Recommended. Strong retrieval quality on personal text; HNSW-indexable; fully local. |
 | `voyage` | Voyage AI `voyage-3.5` | 1024 | ~$0.06/M tokens | `VOYAGE_API_KEY` in `.env` | Highest quality on long-form text; corpus leaves your machine. |
 | `qwen3` | Qwen3-Embedding-8B (Alibaba) | 4096 | Free | Ollama + `ollama pull qwen3-embedding:8b` | Local. Native 4096 dims exceeds pgvector's HNSW cap (2000 for `vector`) so search uses sequential scan — fine at <100K chunks but slower than `arctic`. China-origin model — judge accordingly. |
 

@@ -79,7 +79,7 @@ Run after every change: `ruff check` (lint) or `ruff check --fix` (auto-fix), th
 ### Migration Safety
 - Migrations are raw SQL files in `migrations/`, applied in name order by `brain init`.
 - **Never reference Python code in migrations** — they are pure SQL, frozen in time.
-- **Every migration must be idempotent or applied to a fresh schema.** During development, `docker compose down -v && docker compose up -d && brain init` resets cleanly.
+- **Every migration must be idempotent or applied to a fresh schema.** During development, `docker compose down && rm -rf data/postgres && docker compose up -d && brain init` resets cleanly. (`docker compose down -v` alone won't wipe the data — Postgres is mounted from a host bind-mount at `./data/postgres`, not a Docker-managed volume.)
 - **Schema changes** = new numbered migration file. Never edit `001_init.sql` once shipped.
 
 ### Security Standards
