@@ -7,6 +7,10 @@
 -- The NOT NULL constraint is also deferred to post-backfill — also handled by
 -- `brain reembed`.
 
+BEGIN;
+
 DROP INDEX IF EXISTS chunks_embedding_idx;
 ALTER TABLE chunks DROP COLUMN embedding;
 ALTER TABLE chunks ADD COLUMN embedding vector(4096);
+
+COMMIT;

@@ -51,11 +51,11 @@ def test_db() -> Iterator[psycopg.Connection]:
 
 
 class FakeEmbedder:
-    """Deterministic embedder for tests — hashes text into a stable ``dim``-length vector.
+    """Deterministic embedder for tests — hashes text into a stable vector.
 
-    The default of 4096 matches the post-migration-002 ``vector(4096)`` column
-    shape (Qwen3-Embedding-8B native dimension). Tests that need to assert the
-    pre-migration shape can still pass ``dim=1024`` explicitly.
+    Default ``dim`` matches the production schema (4096, Qwen3-Embedding-8B);
+    pass a different ``dim`` to construct vectors at other sizes if a test
+    needs it.
     """
 
     def __init__(self, dim: int = 4096) -> None:
