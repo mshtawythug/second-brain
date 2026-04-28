@@ -102,8 +102,8 @@ def ensure_embedding_column(conn: psycopg.Connection, embedder: Embedder) -> Non
             f"Embedding column is vector({current_dim}) but BRAIN_EMBEDDER "
             f"expects vector({embedder.dim}). Switching backends with "
             f"existing chunks requires a destructive reset. Run: "
-            f"docker compose down -v && docker compose up -d && "
-            f"brain init && brain reembed"
+            f"docker compose down && rm -rf data/postgres && "
+            f"docker compose up -d && brain init && brain reembed"
         )
 
     with conn.transaction():
