@@ -1,8 +1,9 @@
 """Tests for ``scripts/embedding_smoke.py``.
 
 The script lives outside ``src/brain``, so it isn't auto-importable. We load
-it via :mod:`importlib.util` and invoke ``main(argv)`` directly with a fake
-embedder swapped in via monkeypatch — no subprocess, no Ollama / Voyage HTTP.
+it via :mod:`importlib.util` and invoke ``main(argv, embedder=...)`` directly
+with a fake embedder injected through the public DI seam — no subprocess,
+no Ollama / Voyage HTTP.
 """
 import importlib.util
 import json
@@ -33,14 +34,9 @@ def smoke_module() -> ModuleType:
     return module
 
 
-def _install(
-    monkeypatch: pytest.MonkeyPatch,
-    smoke_module: ModuleType,
-    embedder: object,
-) -> None:
-    """Wire DATABASE_URL + swap the script's embedder factory for a fake."""
+def _set_db_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point ``Config.load()`` at the test database for this test."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    monkeypatch.setattr(smoke_module, "_build_embedder", lambda cfg: embedder)
 
 
 def test_smoke_runs_against_seeded_db(
@@ -56,11 +52,13 @@ def test_smoke_runs_against_seeded_db(
         title="Q1 review with person-x",
         content="person-x mentioned the Q1 numbers came in above forecast.",
     )
-    _install(monkeypatch, smoke_module, fake_embedder)
+    _set_db_url(monkeypatch)
     queries_file = tmp_path / "queries.txt"
     queries_file.write_text("person-x Q1\n")
 
-    rc = smoke_module.main(["--queries-file", str(queries_file)])
+    rc = smoke_module.main(
+        ["--queries-file", str(queries_file)], embedder=fake_embedder
+    )
     captured = capsys.readouterr()
 
     assert rc == 0, captured.err
@@ -125,11 +123,13 @@ def test_smoke_json_output_is_valid_jsonl(
 ) -> None:
     seed_doc(title="Doc Alpha", content="alpha bravo charlie discussion")
     seed_doc(title="Doc Delta", content="delta echo foxtrot conversation")
-    _install(monkeypatch, smoke_module, fake_embedder)
+    _set_db_url(monkeypatch)
     queries_file = tmp_path / "q.txt"
     queries_file.write_text("alpha\ndelta\n")
 
-    rc = smoke_module.main(["--queries-file", str(queries_file), "--json"])
+    rc = smoke_module.main(
+        ["--queries-file", str(queries_file), "--json"], embedder=fake_embedder
+    )
     captured = capsys.readouterr()
 
     assert rc == 0, captured.err
@@ -156,7 +156,7 @@ def test_smoke_skips_comments_and_blanks(
     tmp_path: Path,
 ) -> None:
     seed_doc(title="Greetings", content="hello world how are you")
-    _install(monkeypatch, smoke_module, fake_embedder)
+    _set_db_url(monkeypatch)
     queries_file = tmp_path / "q.txt"
     queries_file.write_text(
         "# top-level comment\n"
@@ -168,7 +168,7 @@ def test_smoke_skips_comments_and_blanks(
     )
 
     rc = smoke_module.main(
-        ["--queries-file", str(queries_file), "--json"]
+        ["--queries-file", str(queries_file), "--json"], embedder=fake_embedder
     )
     captured = capsys.readouterr()
 
@@ -188,11 +188,13 @@ def test_smoke_human_no_results(
     tmp_path: Path,
 ) -> None:
     """Empty DB → human output reports ``(no results)`` per query, exits 0."""
-    _install(monkeypatch, smoke_module, fake_embedder)
+    _set_db_url(monkeypatch)
     queries_file = tmp_path / "q.txt"
     queries_file.write_text("nothing-here-xyz\n")
 
-    rc = smoke_module.main(["--queries-file", str(queries_file)])
+    rc = smoke_module.main(
+        ["--queries-file", str(queries_file)], embedder=fake_embedder
+    )
     captured = capsys.readouterr()
 
     assert rc == 0, captured.err

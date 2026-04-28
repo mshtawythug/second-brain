@@ -82,52 +82,16 @@ def _print_jsonl(query: str, results: list[SearchResult]) -> None:
     print(json.dumps(payload, default=str))
 
 
-def _build_embedder(cfg: Config) -> Embedder:
-    """Build the configured embedder. Indirected so tests can substitute a fake."""
-    return make_embedder(cfg)
+def main(
+    argv: list[str] | None = None, embedder: Embedder | None = None
+) -> int:
+    """Parse args and run the smoke test. Returns a shell exit code.
 
-
-def _run_smoke(queries_file: Path, limit: int, json_output: bool) -> int:
-    """Run the smoke test end-to-end. Returns a shell exit code."""
-    if not queries_file.is_file():
-        print(f"queries file not found: {queries_file}", file=sys.stderr)
-        return 1
-    queries = _load_queries(queries_file)
-    if not queries:
-        print(f"no queries in {queries_file}")
-        return 0
-
-    try:
-        cfg = Config.load()
-    except ConfigError as e:
-        print(f"config error: {e}", file=sys.stderr)
-        return 1
-
-    try:
-        embedder = _build_embedder(cfg)
-    except (ConfigError, BrainError) as e:
-        print(f"embedder error: {e}", file=sys.stderr)
-        return 1
-
-    try:
-        with connect(cfg.database_url) as conn:
-            for idx, query in enumerate(queries, 1):
-                results = hybrid_search(
-                    conn, embedder=embedder, query=query, limit=limit
-                )
-                if json_output:
-                    _print_jsonl(query, results)
-                else:
-                    _print_human(idx, len(queries), query, results)
-    except psycopg.Error as e:
-        print(f"database error: {e}", file=sys.stderr)
-        return 1
-
-    return 0
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Parse args and run the smoke test. Returns a shell exit code."""
+    ``embedder`` is the dependency-injection seam: production callers (the
+    ``__main__`` block) leave it ``None`` and the script builds one via
+    :func:`brain.embeddings.make_embedder`; tests pass a fake directly so
+    no Ollama / Voyage HTTP traffic is required.
+    """
     parser = argparse.ArgumentParser(description="Hybrid search smoke test.")
     parser.add_argument(
         "--queries-file",
@@ -148,7 +112,44 @@ def main(argv: list[str] | None = None) -> int:
         help="Emit JSONL (one JSON object per query) instead of human output.",
     )
     args = parser.parse_args(argv)
-    return _run_smoke(args.queries_file, args.limit, args.json_output)
+
+    queries_file: Path = args.queries_file
+    if not queries_file.is_file():
+        print(f"queries file not found: {queries_file}", file=sys.stderr)
+        return 1
+    queries = _load_queries(queries_file)
+    if not queries:
+        print(f"no queries in {queries_file}")
+        return 0
+
+    try:
+        cfg = Config.load()
+    except ConfigError as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 1
+
+    if embedder is None:
+        try:
+            embedder = make_embedder(cfg)
+        except (ConfigError, BrainError) as e:
+            print(f"embedder error: {e}", file=sys.stderr)
+            return 1
+
+    try:
+        with connect(cfg.database_url) as conn:
+            for idx, query in enumerate(queries, 1):
+                results = hybrid_search(
+                    conn, embedder=embedder, query=query, limit=args.limit
+                )
+                if args.json_output:
+                    _print_jsonl(query, results)
+                else:
+                    _print_human(idx, len(queries), query, results)
+    except psycopg.Error as e:
+        print(f"database error: {e}", file=sys.stderr)
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
