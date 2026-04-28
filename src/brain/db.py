@@ -76,15 +76,17 @@ def ensure_embedding_column(conn: psycopg.Connection, embedder: Embedder) -> Non
     Idempotent. The contract:
 
     - Column dim already matches ``embedder.dim`` → no-op.
-    - Mismatch with zero rows in ``chunks`` → drop + re-add the column at
-      ``embedder.dim`` (and drop any leftover HNSW index, which would point
-      at a column that's about to disappear). Safe — there are no embeddings
-      to lose.
-    - Mismatch with one or more rows in ``chunks`` → raise
+    - Mismatch with zero non-NULL embeddings in ``chunks`` → drop + re-add
+      the column at ``embedder.dim`` (and drop any leftover HNSW index,
+      which would point at a column that's about to disappear). Safe —
+      there are no embeddings to lose. Document/chunk rows are preserved;
+      only the (NULL) embedding column is rebuilt at the new dim.
+    - Mismatch with one or more non-NULL embeddings → raise
       :class:`BrainError` instructing the user to do a destructive reset.
-      Switching backends with existing chunks is intentionally not silent;
-      the embeddings would all be invalidated and re-embedding from
-      ``chunks.content`` is the only correct recovery.
+      Switching backends with populated embeddings is intentionally not
+      silent; those embeddings would all be invalidated and re-embedding
+      from ``chunks.content`` (via ``brain reembed --all``) is the only
+      correct recovery.
 
     Called by ``brain init`` after :func:`run_migrations` so the column
     always matches the configured backend before any embeddings are
@@ -94,14 +96,20 @@ def ensure_embedding_column(conn: psycopg.Connection, embedder: Embedder) -> Non
     if current_dim == embedder.dim:
         return
 
-    row = conn.execute("SELECT count(*) FROM chunks").fetchone()
+    # Count rows that ACTUALLY hold a vector. Rows whose embedding is NULL
+    # (e.g. immediately after migration 002 drops + re-adds the column, or
+    # after `brain reembed` ingest of new docs that haven't been embedded)
+    # contribute no data we'd lose by resizing.
+    row = conn.execute(
+        "SELECT count(*) FROM chunks WHERE embedding IS NOT NULL"
+    ).fetchone()
     assert row is not None  # count(*) always yields one row
-    chunk_count = int(row[0])
-    if chunk_count > 0:
+    populated = int(row[0])
+    if populated > 0:
         raise BrainError(
             f"Embedding column is vector({current_dim}) but BRAIN_EMBEDDER "
             f"expects vector({embedder.dim}). Switching backends with "
-            f"existing chunks requires a destructive reset. Run: "
+            f"existing embeddings requires a destructive reset. Run: "
             f"docker compose down && rm -rf data/postgres && "
             f"docker compose up -d && brain init && brain reembed"
         )

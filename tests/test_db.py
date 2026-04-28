@@ -184,6 +184,49 @@ def test_ensure_embedding_column_idempotent(
     assert _column_dim(test_db) == 1024
 
 
+def test_ensure_embedding_column_resizes_when_chunks_have_null_embedding(
+    test_db: psycopg.Connection,
+) -> None:
+    """Mismatch + chunks present but all-NULL embedding → safe to resize.
+
+    Reproduces the real-world flow exposed when a user merges Phase 2's
+    migration into a previously-Voyage corpus: migration 002 drops + re-adds
+    the embedding column at vector(4096), so chunks exist but every
+    embedding is NULL. ensure_embedding_column must allow resizing in this
+    case (no embeddings would be lost) so the user can switch to arctic
+    (1024-dim) without a destructive reset.
+    """
+    # Seed two chunks with NULL embedding (post-migration-002 state).
+    doc_row = test_db.execute(
+        "INSERT INTO documents (title, content, content_hash, content_type) "
+        "VALUES (%s, %s, %s, %s) RETURNING id::text",
+        ("doc", "body", "h-null-1", "note"),
+    ).fetchone()
+    assert doc_row is not None
+    doc_id = doc_row[0]
+    for i in range(2):
+        test_db.execute(
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
+            "VALUES (%s, %s, %s, NULL)",
+            (doc_id, i, f"chunk {i}"),
+        )
+
+    # Sanity: chunks exist (count > 0), but no real embeddings.
+    chunk_count = test_db.execute("SELECT count(*) FROM chunks").fetchone()
+    populated = test_db.execute(
+        "SELECT count(*) FROM chunks WHERE embedding IS NOT NULL"
+    ).fetchone()
+    assert chunk_count is not None and chunk_count[0] == 2
+    assert populated is not None and populated[0] == 0
+
+    # The resize should succeed; chunks survive, embedding is now vector(1024).
+    ensure_embedding_column(test_db, _DimEmbedder(dim=1024))
+
+    assert _column_dim(test_db) == 1024
+    surviving = test_db.execute("SELECT count(*) FROM chunks").fetchone()
+    assert surviving is not None and surviving[0] == 2
+
+
 def test_ensure_embedding_column_drops_stale_index_on_resize(
     test_db: psycopg.Connection,
 ) -> None:
