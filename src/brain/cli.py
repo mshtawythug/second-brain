@@ -478,17 +478,28 @@ def reembed(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Report counts without embedding."
     ),
+    all_chunks: bool = typer.Option(
+        False,
+        "--all",
+        "-a",
+        help="Re-embed every chunk (not just NULL). Use after switching backends.",
+    ),
     finalize: bool = typer.Option(
         True,
         "--finalize/--no-finalize",
         help="After backfill, apply NOT NULL on chunks.embedding.",
     ),
 ) -> None:
-    """Backfill ``chunks.embedding`` for any rows missing an embedding.
+    """Backfill ``chunks.embedding`` for rows missing an embedding.
 
     After ``brain init``, chunks have NULL embeddings until this command
     runs. Idempotent — safe to re-run after a crash; only rows still NULL
     are touched.
+
+    Pass ``--all`` to re-embed every chunk regardless of NULL state. Use
+    this after switching ``BRAIN_EMBEDDER`` backends, where existing
+    embeddings are still present in the column but live in the wrong
+    vector space.
 
     By default, after backfill completes (0 NULL rows remain), applies
     NOT NULL on the embedding column. For backends with ``dim <= 2000``
@@ -504,19 +515,24 @@ def reembed(
 
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
-        total_null = count_chunks_missing_embedding(conn)
-        target = min(limit, total_null) if limit is not None else total_null
+        target_total = count_chunks_missing_embedding(
+            conn, include_embedded=all_chunks
+        )
+        target = min(limit, target_total) if limit is not None else target_total
+        scope = "chunk(s) total" if all_chunks else "chunk(s) have NULL embedding"
 
         if dry_run:
             typer.echo(f"would embed {target} chunk(s)")
-            typer.echo(f"  ({total_null} chunk(s) have NULL embedding)")
+            typer.echo(f"  ({target_total} {scope})")
             return
 
-        if total_null == 0:
+        if target_total == 0:
             typer.echo("nothing to embed (all chunks have embeddings)")
         else:
             embedded = 0
-            for batch in iter_chunks_missing_embedding(conn, batch_size=batch_size):
+            for batch in iter_chunks_missing_embedding(
+                conn, batch_size=batch_size, include_embedded=all_chunks
+            ):
                 if limit is not None and embedded >= limit:
                     break
                 if limit is not None:
@@ -532,7 +548,8 @@ def reembed(
                 embedded += len(batch)
                 typer.echo(f"  embedded {embedded}/{target}")
 
-            typer.echo(f"backfilled {embedded} chunk(s)")
+            verb = "re-embedded" if all_chunks else "backfilled"
+            typer.echo(f"{verb} {embedded} chunk(s)")
 
         if finalize:
             remaining = count_chunks_missing_embedding(conn)

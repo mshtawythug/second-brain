@@ -197,6 +197,7 @@ def iter_chunks_missing_embedding(
     conn: psycopg.Connection[Any],
     *,
     batch_size: int = 32,
+    include_embedded: bool = False,
 ) -> Iterator[list[NullEmbeddingChunk]]:
     """Yield batches of chunks whose embedding is NULL.
 
@@ -210,21 +211,31 @@ def iter_chunks_missing_embedding(
     The iterator advances on ``id`` rather than re-running ``LIMIT N``
     against the NULL-set so that callers which inspect rows *without*
     backfilling them (e.g. tests) still see every NULL row exactly once.
+
+    When ``include_embedded=True``, the ``embedding IS NULL`` filter is
+    dropped — the iterator yields every chunk in the table. Used by
+    ``brain reembed --all`` to re-embed an entire corpus after switching
+    embedder backends.
     """
+    null_clause = "" if include_embedded else "WHERE embedding IS NULL"
+    null_clause_and = "" if include_embedded else "WHERE embedding IS NULL AND"
     last_id: str | None = None
     while True:
         if last_id is None:
             rows = conn.execute(
-                "SELECT id::text, content FROM chunks "
-                "WHERE embedding IS NULL "
-                "ORDER BY id LIMIT %s",
+                f"SELECT id::text, content FROM chunks "
+                f"{null_clause} "
+                f"ORDER BY id LIMIT %s",
                 (batch_size,),
             ).fetchall()
         else:
+            cursor_clause = (
+                "WHERE id > %s::uuid" if include_embedded else f"{null_clause_and} id > %s::uuid"
+            )
             rows = conn.execute(
-                "SELECT id::text, content FROM chunks "
-                "WHERE embedding IS NULL AND id > %s::uuid "
-                "ORDER BY id LIMIT %s",
+                f"SELECT id::text, content FROM chunks "
+                f"{cursor_clause} "
+                f"ORDER BY id LIMIT %s",
                 (last_id, batch_size),
             ).fetchall()
         if not rows:
@@ -233,11 +244,19 @@ def iter_chunks_missing_embedding(
         yield [NullEmbeddingChunk(id=str(r[0]), content=str(r[1])) for r in rows]
 
 
-def count_chunks_missing_embedding(conn: psycopg.Connection[Any]) -> int:
-    """Return the number of chunks whose embedding is NULL."""
-    row = conn.execute(
-        "SELECT count(*) FROM chunks WHERE embedding IS NULL"
-    ).fetchone()
+def count_chunks_missing_embedding(
+    conn: psycopg.Connection[Any], *, include_embedded: bool = False
+) -> int:
+    """Return the number of chunks whose embedding is NULL.
+
+    When ``include_embedded=True``, returns the total chunk count instead.
+    """
+    sql = (
+        "SELECT count(*) FROM chunks"
+        if include_embedded
+        else "SELECT count(*) FROM chunks WHERE embedding IS NULL"
+    )
+    row = conn.execute(sql).fetchone()
     assert row is not None  # count(*) always yields one row
     return int(row[0])
 

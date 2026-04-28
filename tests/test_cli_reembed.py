@@ -364,3 +364,87 @@ def test_doctor_reports_embedding_nullable_pre_finalize(
     assert "embedding" in result.output
     assert "nullable" in result.output
     assert "brain reembed" in result.output
+
+
+def _seed_chunks_with_marker_embedding(
+    conn: psycopg.Connection, *, document_id: str, n: int
+) -> list[str]:
+    """Seed ``n`` chunks whose embedding is a stable, non-zero marker vector.
+
+    Used to verify that ``--all`` actually OVERWRITES existing embeddings —
+    after reembed the values must change from the marker to whatever the
+    fake embedder produces for the chunk content.
+    """
+    marker = "[" + ",".join(["0.5"] * 4096) + "]"
+    ids: list[str] = []
+    for i in range(n):
+        row = conn.execute(
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
+            "VALUES (%s, %s, %s, %s::vector) RETURNING id::text",
+            (document_id, i, f"chunk content {i}", marker),
+        ).fetchone()
+        assert row is not None
+        ids.append(str(row[0]))
+    return ids
+
+
+def test_reembed_all_overwrites_existing_embeddings(
+    test_db: psycopg.Connection,
+    fake_embedder: FakeEmbedder,
+    patch_embedder: Callable[[object], None],
+) -> None:
+    """``brain reembed --all`` re-embeds every chunk, replacing existing vectors.
+
+    Uses ``embedding::text`` so we can compare without depending on the
+    pgvector psycopg adapter being registered on the test connection.
+    """
+    doc_id = _seed_doc(test_db)
+    chunk_ids = _seed_chunks_with_marker_embedding(test_db, document_id=doc_id, n=3)
+    patch_embedder(fake_embedder)
+
+    # Sanity: pre-state — every chunk has the 0.5-marker (its text starts with "[0.5,").
+    pre_row = test_db.execute(
+        "SELECT embedding::text FROM chunks WHERE id = %s::uuid", (chunk_ids[0],)
+    ).fetchone()
+    assert pre_row is not None
+    assert pre_row[0].startswith("[0.5,"), "marker vector should start with [0.5,"
+
+    result = CliRunner().invoke(app, ["reembed", "--all"])
+
+    assert result.exit_code == 0, result.output
+    assert "re-embedded 3 chunk(s)" in result.output
+
+    # Post-state: marker is gone — the FakeEmbedder produces values in [-0.5, 0.5)
+    # derived from sha256, so the leading prefix is essentially never "[0.5,".
+    post_row = test_db.execute(
+        "SELECT embedding::text FROM chunks WHERE id = %s::uuid", (chunk_ids[0],)
+    ).fetchone()
+    assert post_row is not None
+    assert not post_row[0].startswith("[0.5,"), (
+        "expected --all to overwrite the marker vector"
+    )
+
+
+def test_reembed_all_dry_run_counts_every_chunk(
+    test_db: psycopg.Connection,
+    fake_embedder: FakeEmbedder,
+    patch_embedder: Callable[[object], None],
+) -> None:
+    """``--all --dry-run`` reports the total chunk count, not just NULLs."""
+    doc_id = _seed_doc(test_db)
+    _seed_null_chunks(test_db, document_id=doc_id, n=2)
+    _seed_chunks_with_marker_embedding(
+        test_db, document_id=_seed_doc(test_db, content_hash="h-r2"), n=3
+    )
+    patch_embedder(fake_embedder)
+
+    # Without --all: only NULLs counted (2).
+    no_all = CliRunner().invoke(app, ["reembed", "--dry-run"])
+    assert no_all.exit_code == 0
+    assert "would embed 2" in no_all.output
+
+    # With --all: every chunk counted (5).
+    with_all = CliRunner().invoke(app, ["reembed", "--all", "--dry-run"])
+    assert with_all.exit_code == 0
+    assert "would embed 5" in with_all.output
+    assert "5 chunk(s) total" in with_all.output
