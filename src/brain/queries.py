@@ -5,6 +5,7 @@ logic across two callers. The helpers raise plain :mod:`brain.errors`
 exceptions so each caller can map them to its own framework's error type.
 """
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -174,4 +175,118 @@ def summary_counts(conn: psycopg.Connection[Any]) -> StatusCounts:
         sources=int(source_row[0]),
         last_ingest=last_row[0],
         by_kind=[(str(k), int(c)) for k, c in by_kind_rows],
+    )
+
+
+@dataclass
+class _NullEmbeddingChunk:
+    """Internal: a chunk whose embedding is NULL and needs backfill."""
+
+    id: str
+    content: str
+
+
+def iter_chunks_missing_embedding(
+    conn: psycopg.Connection[Any],
+    *,
+    batch_size: int = 32,
+) -> Iterator[list[_NullEmbeddingChunk]]:
+    """Yield batches of chunks whose embedding is NULL.
+
+    Uses keyset pagination over ``chunks.id`` (UUID, ordered) so the
+    in-memory footprint stays bounded even on a brain with hundreds of
+    thousands of chunks — only one batch's content is materialized at a
+    time. Keyset (rather than a server-side ``DECLARE CURSOR``) sidesteps
+    the autocommit/transaction subtleties that would arise from issuing
+    UPDATEs on the same connection while a named cursor is open.
+
+    The iterator advances on ``id`` rather than re-running ``LIMIT N``
+    against the NULL-set so that callers which inspect rows *without*
+    backfilling them (e.g. tests) still see every NULL row exactly once.
+    """
+    last_id: str | None = None
+    while True:
+        if last_id is None:
+            rows = conn.execute(
+                "SELECT id::text, content FROM chunks "
+                "WHERE embedding IS NULL "
+                "ORDER BY id LIMIT %s",
+                (batch_size,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id::text, content FROM chunks "
+                "WHERE embedding IS NULL AND id > %s::uuid "
+                "ORDER BY id LIMIT %s",
+                (last_id, batch_size),
+            ).fetchall()
+        if not rows:
+            return
+        last_id = str(rows[-1][0])
+        yield [_NullEmbeddingChunk(id=str(r[0]), content=str(r[1])) for r in rows]
+
+
+def count_chunks_missing_embedding(conn: psycopg.Connection[Any]) -> int:
+    """Return the number of chunks whose embedding is NULL."""
+    row = conn.execute(
+        "SELECT count(*) FROM chunks WHERE embedding IS NULL"
+    ).fetchone()
+    assert row is not None  # count(*) always yields one row
+    return int(row[0])
+
+
+def finalize_embedding_index(conn: psycopg.Connection[Any]) -> None:
+    """Apply NOT NULL on ``chunks.embedding`` once backfill is complete.
+
+    Called by ``brain reembed`` after backfill completes. Idempotent —
+    ``ALTER COLUMN ... SET NOT NULL`` is a no-op if the column is already
+    non-nullable. Wrapped in a transaction so a partial failure leaves the
+    schema in its prior state.
+
+    No vector index is created here. pgvector 0.8.2 caps both HNSW and
+    IVFFlat at 2000 dims for ``vector`` and 4000 for ``halfvec``, neither
+    of which fits Qwen3's native 4096-dim output. Truncating to fit
+    either cap would re-introduce the quality loss this swap was
+    explicitly designed to avoid. Sequential scan over the 4096-dim
+    cosine operator is acceptable at personal-corpus scale (~150 ms at
+    10K chunks, ~1 s at 100K). An index can be added later if needed.
+
+    Raises :class:`ValueError` if any chunk still has NULL embedding —
+    that's a caller bug (the CLI should only call this after asserting
+    ``count_chunks_missing_embedding == 0``).
+    """
+    remaining = count_chunks_missing_embedding(conn)
+    if remaining > 0:
+        raise ValueError(
+            f"cannot finalize: {remaining} chunk(s) still have NULL embedding"
+        )
+    with conn.transaction():
+        conn.execute("ALTER TABLE chunks ALTER COLUMN embedding SET NOT NULL")
+
+
+@dataclass
+class EmbeddingColumnState:
+    """Snapshot of the ``chunks.embedding`` column for ``brain doctor``."""
+
+    column_type: str
+    not_null: bool
+
+
+def embedding_column_state(conn: psycopg.Connection[Any]) -> EmbeddingColumnState:
+    """Return the current state of the ``chunks.embedding`` column.
+
+    Used by ``brain doctor`` to surface the post-migration / pre-finalize
+    state to the user without gating exit code on it. No "indexed" field
+    is reported because Phase 3 intentionally skips index creation — see
+    :func:`finalize_embedding_index`.
+    """
+    col_row = conn.execute(
+        "SELECT format_type(atttypid, atttypmod), attnotnull "
+        "FROM pg_attribute "
+        "WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"
+    ).fetchone()
+    assert col_row is not None  # chunks.embedding always exists post-migration
+    return EmbeddingColumnState(
+        column_type=str(col_row[0]),
+        not_null=bool(col_row[1]),
     )

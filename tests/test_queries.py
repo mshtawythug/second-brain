@@ -18,11 +18,44 @@ from brain.errors import (
 )
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.queries import (
+    count_chunks_missing_embedding,
+    embedding_column_state,
     fetch_document,
+    finalize_embedding_index,
+    iter_chunks_missing_embedding,
     list_documents,
     resolve_document_prefix,
     summary_counts,
 )
+
+
+def _seed_doc_for_chunks(conn: psycopg.Connection) -> str:
+    """Insert a parent ``documents`` row and return its id (no chunks)."""
+    row = conn.execute(
+        "INSERT INTO documents (title, content, content_hash, content_type) "
+        "VALUES (%s, %s, %s, %s) RETURNING id::text",
+        ("t", "body", "h-" + str(hash(("doc", id(conn)))), "note"),
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _insert_chunk(
+    conn: psycopg.Connection,
+    *,
+    document_id: str,
+    chunk_index: int,
+    content: str,
+    embedding: list[float] | None,
+) -> str:
+    """Insert one chunks row directly via SQL (bypassing ingest)."""
+    row = conn.execute(
+        "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
+        "VALUES (%s, %s, %s, %s) RETURNING id::text",
+        (document_id, chunk_index, content, embedding),
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
 
 
 def _seed(
@@ -172,3 +205,170 @@ def test_summary_counts_reflects_db_state(
     for kind, count in counts.by_kind:
         assert isinstance(kind, str)
         assert isinstance(count, int)
+
+
+# --- Phase 3 helpers: reembed / finalize ------------------------------------
+
+
+def _all_zero_vec(dim: int = 4096) -> list[float]:
+    """A non-NULL placeholder embedding for chunks that already have one."""
+    return [0.0] * dim
+
+
+def test_iter_chunks_missing_embedding_yields_only_null(
+    test_db: psycopg.Connection,
+) -> None:
+    """One chunk has an embedding, two are NULL — iterator yields the two NULL."""
+    doc_id = _seed_doc_for_chunks(test_db)
+    _insert_chunk(
+        test_db,
+        document_id=doc_id,
+        chunk_index=0,
+        content="already embedded",
+        embedding=_all_zero_vec(),
+    )
+    null_ids = {
+        _insert_chunk(
+            test_db,
+            document_id=doc_id,
+            chunk_index=i,
+            content=f"needs embed {i}",
+            embedding=None,
+        )
+        for i in (1, 2)
+    }
+
+    yielded = [c for batch in iter_chunks_missing_embedding(test_db) for c in batch]
+
+    assert {c.id for c in yielded} == null_ids
+    assert all("needs embed" in c.content for c in yielded)
+
+
+def test_iter_chunks_missing_embedding_batches(
+    test_db: psycopg.Connection,
+) -> None:
+    """5 NULL chunks with batch_size=2 → batches of (2, 2, 1)."""
+    doc_id = _seed_doc_for_chunks(test_db)
+    for i in range(5):
+        _insert_chunk(
+            test_db,
+            document_id=doc_id,
+            chunk_index=i,
+            content=f"chunk {i}",
+            embedding=None,
+        )
+
+    sizes = [
+        len(batch) for batch in iter_chunks_missing_embedding(test_db, batch_size=2)
+    ]
+
+    assert sizes == [2, 2, 1]
+
+
+def test_count_chunks_missing_embedding(test_db: psycopg.Connection) -> None:
+    """Counter reflects only NULL-embedding chunks."""
+    doc_id = _seed_doc_for_chunks(test_db)
+    assert count_chunks_missing_embedding(test_db) == 0
+    _insert_chunk(
+        test_db,
+        document_id=doc_id,
+        chunk_index=0,
+        content="filled",
+        embedding=_all_zero_vec(),
+    )
+    _insert_chunk(
+        test_db,
+        document_id=doc_id,
+        chunk_index=1,
+        content="empty",
+        embedding=None,
+    )
+    _insert_chunk(
+        test_db,
+        document_id=doc_id,
+        chunk_index=2,
+        content="empty too",
+        embedding=None,
+    )
+
+    assert count_chunks_missing_embedding(test_db) == 2
+
+
+def test_finalize_embedding_index_applies_not_null(
+    test_db: psycopg.Connection,
+) -> None:
+    """All chunks embedded → finalize applies NOT NULL on the column.
+
+    Phase 3 intentionally does not create a vector index — pgvector 0.8.2
+    caps HNSW/IVFFlat at 2000 dims for ``vector`` and 4000 for ``halfvec``,
+    neither of which fits Qwen3's 4096-dim output without quality loss.
+    """
+    doc_id = _seed_doc_for_chunks(test_db)
+    _insert_chunk(
+        test_db,
+        document_id=doc_id,
+        chunk_index=0,
+        content="filled",
+        embedding=_all_zero_vec(),
+    )
+
+    finalize_embedding_index(test_db)
+
+    state = embedding_column_state(test_db)
+    assert state.not_null
+    assert "vector(4096)" in state.column_type
+    # Phase 3 deliberately ships without an HNSW/IVFFlat index. Phase 4 may
+    # revisit if seq-scan latency ever bites.
+    idx = test_db.execute(
+        "SELECT 1 FROM pg_indexes WHERE indexname = 'chunks_embedding_idx'"
+    ).fetchone()
+    assert idx is None
+
+
+def test_finalize_embedding_index_rejects_when_nulls_remain(
+    test_db: psycopg.Connection,
+) -> None:
+    """A NULL embedding still present → ValueError, schema untouched."""
+    doc_id = _seed_doc_for_chunks(test_db)
+    _insert_chunk(
+        test_db,
+        document_id=doc_id,
+        chunk_index=0,
+        content="empty",
+        embedding=None,
+    )
+
+    with pytest.raises(ValueError, match="cannot finalize"):
+        finalize_embedding_index(test_db)
+
+    state = embedding_column_state(test_db)
+    assert not state.not_null  # schema unchanged
+
+
+def test_finalize_embedding_index_idempotent(
+    test_db: psycopg.Connection,
+) -> None:
+    """Calling finalize twice in a row is a no-op the second time."""
+    doc_id = _seed_doc_for_chunks(test_db)
+    _insert_chunk(
+        test_db,
+        document_id=doc_id,
+        chunk_index=0,
+        content="filled",
+        embedding=_all_zero_vec(),
+    )
+
+    finalize_embedding_index(test_db)
+    finalize_embedding_index(test_db)  # must not raise
+
+    state = embedding_column_state(test_db)
+    assert state.not_null
+
+
+def test_embedding_column_state_pre_finalize(
+    test_db: psycopg.Connection,
+) -> None:
+    """Fresh schema (post-migration, pre-finalize): nullable column."""
+    state = embedding_column_state(test_db)
+    assert "vector(4096)" in state.column_type
+    assert not state.not_null

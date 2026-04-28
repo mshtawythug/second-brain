@@ -40,7 +40,11 @@ from .ingest import gmail as gmail_ingest
 from .ingest.gmail import GmailError
 from .ingest.stdin import make_doc as _stdin_make_doc
 from .queries import (
+    count_chunks_missing_embedding,
+    embedding_column_state,
     fetch_document,
+    finalize_embedding_index,
+    iter_chunks_missing_embedding,
     list_documents,
     resolve_document_prefix,
     summary_counts,
@@ -122,11 +126,12 @@ def doctor() -> None:
             ext = conn.execute(
                 "SELECT extversion FROM pg_extension WHERE extname='vector'"
             ).fetchone()
-        if not ext:
-            failures.append("pgvector extension not installed (run brain init)")
-            typer.echo("postgres        FAIL — pgvector not installed")
-        else:
-            typer.echo(f"postgres        OK (pgvector {ext[0]})")
+            if ext:
+                typer.echo(f"postgres        OK (pgvector {ext[0]})")
+                _report_embedding_column(conn)
+            else:
+                failures.append("pgvector extension not installed (run brain init)")
+                typer.echo("postgres        FAIL — pgvector not installed")
     except psycopg.Error as e:
         failures.append(f"database: {e}")
         typer.secho(f"postgres        FAIL — {e}", fg="red", err=True)
@@ -179,6 +184,33 @@ def status() -> None:
     typer.echo("\nby source:")
     for kind, count in counts.by_kind:
         typer.echo(f"  {kind:<12} {count}")
+
+
+def _report_embedding_column(conn: psycopg.Connection[Any]) -> None:
+    """Print a one-line status for the ``chunks.embedding`` column.
+
+    Informational only — never fails the doctor check. The column is in
+    one of two states post-Phase-2:
+
+    - ``NOT NULL`` → finalize has run; backfill complete.
+    - nullable → migration 002 applied but ``brain reembed`` hasn't
+      finalized yet; vector search may silently degrade for any rows
+      whose embedding is still NULL.
+
+    Phase 3 intentionally skips creating a vector index — pgvector 0.8.2
+    caps HNSW/IVFFlat at 2000 dims (4000 for halfvec), neither of which
+    fits Qwen3's 4096-dim output without quality loss. Sequential scan
+    over the cosine operator is acceptable at personal scale.
+    """
+    state = embedding_column_state(conn)
+    if state.not_null:
+        typer.echo(f"embedding       OK ({state.column_type}, NOT NULL)")
+        return
+    typer.echo(f"embedding       OK ({state.column_type}, nullable)")
+    typer.secho(
+        "                — run `brain reembed` to backfill and finalize",
+        fg="yellow",
+    )
 
 
 def _build_embedder(cfg: Config) -> Embedder:
@@ -389,6 +421,85 @@ def ingest_gmail(
                     f"  failed: {stub.get('id', '?')} — {e}", fg="red"
                 )
                 continue
+
+
+@app.command()
+def reembed(
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Max chunks to embed (default: all)."
+    ),
+    batch_size: int = typer.Option(32, "--batch-size", help="Embedding batch size."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report counts without embedding."
+    ),
+    finalize: bool = typer.Option(
+        True,
+        "--finalize/--no-finalize",
+        help="After backfill, apply NOT NULL on chunks.embedding.",
+    ),
+) -> None:
+    """Backfill ``chunks.embedding`` for any rows missing an embedding.
+
+    After Phase 2's migration, existing chunks have NULL embeddings until
+    this command runs. Idempotent — safe to re-run after a crash; only
+    rows still NULL are touched.
+
+    By default, after backfill completes (0 NULL rows remain), applies
+    NOT NULL on the embedding column. Pass ``--no-finalize`` to skip the
+    constraint step (e.g. for incremental runs over multiple sessions).
+
+    No vector index is created — pgvector 0.8.2 caps HNSW/IVFFlat at
+    2000/4000 dims, neither of which fits Qwen3's 4096-dim output
+    without quality loss. Sequential scan is fine at personal scale.
+    """
+    cfg = Config.load()
+    embedder = _build_embedder(cfg)
+
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        total_null = count_chunks_missing_embedding(conn)
+        target = min(limit, total_null) if limit is not None else total_null
+
+        if dry_run:
+            typer.echo(f"would embed {target} chunk(s)")
+            typer.echo(f"  ({total_null} chunk(s) have NULL embedding)")
+            return
+
+        if total_null == 0:
+            typer.echo("nothing to embed (all chunks have embeddings)")
+        else:
+            embedded = 0
+            for batch in iter_chunks_missing_embedding(conn, batch_size=batch_size):
+                if limit is not None and embedded >= limit:
+                    break
+                if limit is not None:
+                    batch = batch[: limit - embedded]
+                vectors = embedder.embed(
+                    [c.content for c in batch], input_type="document"
+                )
+                for c, vec in zip(batch, vectors, strict=True):
+                    conn.execute(
+                        "UPDATE chunks SET embedding=%s WHERE id=%s",
+                        (vec, c.id),
+                    )
+                embedded += len(batch)
+                typer.echo(f"  embedded {embedded}/{target}")
+
+            typer.echo(f"backfilled {embedded} chunk(s)")
+
+        if finalize:
+            remaining = count_chunks_missing_embedding(conn)
+            if remaining == 0:
+                try:
+                    finalize_embedding_index(conn)
+                    typer.echo("finalized: embedding column is now NOT NULL")
+                except ValueError as e:
+                    typer.secho(f"finalize failed: {e}", fg="red", err=True)
+                    raise typer.Exit(code=1) from e
+            else:
+                typer.echo(
+                    f"finalize skipped: {remaining} chunk(s) still have NULL embedding"
+                )
 
 
 @app.command()
