@@ -2,10 +2,11 @@
 -- existing Voyage embeddings; chunks.content is preserved so Phase 3's
 -- `brain reembed` can repopulate the new column from the original chunk text.
 --
--- The HNSW index is NOT recreated here. Building HNSW on an all-NULL column
--- would be wasted work; `brain reembed` rebuilds the index after backfill.
--- The NOT NULL constraint is also deferred to post-backfill — also handled by
--- `brain reembed`.
+-- The NOT NULL constraint is deferred to post-backfill — `brain reembed --finalize`
+-- applies it once 0 NULL rows remain. No vector index is created: pgvector 0.8.2
+-- caps both HNSW and IVFFlat at 2000 dims for `vector` and 4000 for `halfvec`,
+-- neither of which fits our native 4096-dim Qwen3 output. Sequential scan is
+-- acceptable at personal scale (~150ms @ 10K chunks).
 
 BEGIN;
 

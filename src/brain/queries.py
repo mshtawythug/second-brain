@@ -179,8 +179,8 @@ def summary_counts(conn: psycopg.Connection[Any]) -> StatusCounts:
 
 
 @dataclass
-class _NullEmbeddingChunk:
-    """Internal: a chunk whose embedding is NULL and needs backfill."""
+class NullEmbeddingChunk:
+    """A chunk whose embedding is NULL and needs backfill."""
 
     id: str
     content: str
@@ -190,7 +190,7 @@ def iter_chunks_missing_embedding(
     conn: psycopg.Connection[Any],
     *,
     batch_size: int = 32,
-) -> Iterator[list[_NullEmbeddingChunk]]:
+) -> Iterator[list[NullEmbeddingChunk]]:
     """Yield batches of chunks whose embedding is NULL.
 
     Uses keyset pagination over ``chunks.id`` (UUID, ordered) so the
@@ -223,7 +223,7 @@ def iter_chunks_missing_embedding(
         if not rows:
             return
         last_id = str(rows[-1][0])
-        yield [_NullEmbeddingChunk(id=str(r[0]), content=str(r[1])) for r in rows]
+        yield [NullEmbeddingChunk(id=str(r[0]), content=str(r[1])) for r in rows]
 
 
 def count_chunks_missing_embedding(conn: psycopg.Connection[Any]) -> int:
@@ -240,8 +240,7 @@ def finalize_embedding_index(conn: psycopg.Connection[Any]) -> None:
 
     Called by ``brain reembed`` after backfill completes. Idempotent —
     ``ALTER COLUMN ... SET NOT NULL`` is a no-op if the column is already
-    non-nullable. Wrapped in a transaction so a partial failure leaves the
-    schema in its prior state.
+    non-nullable.
 
     No vector index is created here. pgvector 0.8.2 caps both HNSW and
     IVFFlat at 2000 dims for ``vector`` and 4000 for ``halfvec``, neither
