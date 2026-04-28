@@ -10,7 +10,7 @@ import psycopg
 import typer
 
 from .config import Config, ConfigError
-from .db import connect, run_migrations
+from .db import connect, ensure_embedding_column, run_migrations
 from .edit_session import (
     EditorAbortedError,
     EditorError,
@@ -65,16 +65,27 @@ def _main() -> None:
 
 @app.command()
 def init() -> None:
-    """Apply database migrations."""
+    """Apply database migrations and align embedding column with active embedder.
+
+    After running every SQL file in ``migrations/``, reconciles the
+    ``chunks.embedding`` column dim against ``BRAIN_EMBEDDER``'s native
+    output. On a fresh DB this drops + re-adds the column at the right
+    dim; on an existing DB with chunks already present it errors clearly
+    and tells the user how to do a destructive reset (the only safe way
+    to switch backends).
+    """
     cfg = Config.load()
+    embedder = make_embedder(cfg)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         applied = run_migrations(conn)
+        ensure_embedding_column(conn, embedder)
     if applied:
         for name in applied:
             typer.echo(f"applied {name}")
     else:
         typer.echo("no migrations to apply")
+    typer.echo(f"embedder        {cfg.embedder} (dim={embedder.dim})")
 
 
 def _ollama_loaded_models(payload: Any) -> list[str]:
@@ -108,14 +119,71 @@ def _model_loaded(wanted: str, loaded: list[str]) -> bool:
     return any(name.split(":", 1)[0] == bare for name in loaded)
 
 
+# Per-backend Ollama model that ``brain doctor`` checks for. The voyage
+# backend has no Ollama dependency — handled separately.
+_BACKEND_OLLAMA_MODEL = {
+    "arctic": "snowflake-arctic-embed2",
+    # qwen3 reads from cfg.qwen3_model (user-configurable) so that's looked
+    # up dynamically in _check_ollama; this dict only carries the static one.
+}
+
+
+def _check_voyage(cfg: Config, failures: list[str]) -> None:
+    """Doctor sub-check: verify ``VOYAGE_API_KEY`` is set when backend is voyage."""
+    if cfg.voyage_api_key:
+        typer.echo("voyage          OK (api key set)")
+        return
+    failures.append("VOYAGE_API_KEY not set")
+    typer.secho(
+        "voyage          FAIL — VOYAGE_API_KEY not set",
+        fg="red",
+        err=True,
+    )
+
+
+def _check_ollama(cfg: Config, failures: list[str]) -> None:
+    """Doctor sub-check: ping Ollama and verify the backend's model is loaded."""
+    if cfg.embedder == "qwen3":
+        wanted = cfg.qwen3_model
+    else:
+        wanted = _BACKEND_OLLAMA_MODEL.get(cfg.embedder, cfg.qwen3_model)
+    try:
+        with httpx.Client(
+            base_url=cfg.ollama_host, timeout=httpx.Timeout(5.0)
+        ) as client:
+            response = client.get("/api/tags")
+            response.raise_for_status()
+            tags_payload = response.json()
+        loaded_models = _ollama_loaded_models(tags_payload)
+        if _model_loaded(wanted, loaded_models):
+            typer.echo(f"ollama          OK ({cfg.ollama_host})")
+        else:
+            # Soft warning — daemon up but the configured model isn't pulled.
+            # Don't fail doctor; embed calls will surface "no such model"
+            # later if anyone tries to use it.
+            typer.secho(
+                f"ollama          OK ({cfg.ollama_host}) — model {wanted} "
+                f"NOT loaded — run `ollama pull {wanted}`",
+                fg="yellow",
+            )
+    except (httpx.HTTPError, ValueError) as e:
+        # ValueError covers a non-JSON /api/tags response (json.JSONDecodeError).
+        failures.append(f"ollama: {e}")
+        typer.secho(f"ollama          FAIL — {e}", fg="red", err=True)
+
+
 @app.command()
 def doctor() -> None:
-    """Check environment, database connection, and external dependencies."""
+    """Check environment, database connection, and external dependencies.
+
+    Backend-aware: voyage runs the API-key check; arctic and qwen3 ping
+    Ollama and verify their respective models are loaded.
+    """
     failures: list[str] = []
 
     try:
         cfg = Config.load()
-        typer.echo("env             OK")
+        typer.echo(f"env             OK (embedder={cfg.embedder})")
     except ConfigError as e:
         typer.secho(f"env             FAIL — {e}", fg="red", err=True)
         raise typer.Exit(code=1) from e
@@ -136,30 +204,10 @@ def doctor() -> None:
         failures.append(f"database: {e}")
         typer.secho(f"postgres        FAIL — {e}", fg="red", err=True)
 
-    try:
-        with httpx.Client(
-            base_url=cfg.ollama_host, timeout=httpx.Timeout(5.0)
-        ) as client:
-            response = client.get("/api/tags")
-            response.raise_for_status()
-            tags_payload = response.json()
-        loaded_models = _ollama_loaded_models(tags_payload)
-        wanted = cfg.qwen3_model
-        if _model_loaded(wanted, loaded_models):
-            typer.echo(f"ollama          OK ({cfg.ollama_host})")
-        else:
-            # Soft warning — the daemon is up, but the configured model
-            # isn't pulled. Don't fail doctor; embed calls will surface a
-            # clearer error than "no such model" if anyone tries to use it.
-            typer.secho(
-                f"ollama          OK ({cfg.ollama_host}) — model {wanted} "
-                f"NOT loaded — run `ollama pull {wanted}`",
-                fg="yellow",
-            )
-    except (httpx.HTTPError, ValueError) as e:
-        # ValueError covers a non-JSON /api/tags response (json.JSONDecodeError).
-        failures.append(f"ollama: {e}")
-        typer.secho(f"ollama          FAIL — {e}", fg="red", err=True)
+    if cfg.embedder == "voyage":
+        _check_voyage(cfg, failures)
+    else:
+        _check_ollama(cfg, failures)
 
     if shutil.which("gws"):
         typer.echo("gws CLI         OK")
@@ -189,28 +237,26 @@ def status() -> None:
 def _report_embedding_column(conn: psycopg.Connection[Any]) -> None:
     """Print a one-line status for the ``chunks.embedding`` column.
 
-    Informational only — never fails the doctor check. The column is in
-    one of two states post-Phase-2:
-
-    - ``NOT NULL`` → finalize has run; backfill complete.
-    - nullable → migration 002 applied but ``brain reembed`` hasn't
-      finalized yet; vector search may silently degrade for any rows
-      whose embedding is still NULL.
-
-    Phase 3 intentionally skips creating a vector index — pgvector 0.8.2
-    caps HNSW/IVFFlat at 2000 dims (4000 for halfvec), neither of which
-    fits Qwen3's 4096-dim output without quality loss. Sequential scan
-    over the cosine operator is acceptable at personal scale.
+    Informational only — never fails the doctor check. Reports column type,
+    NOT NULL status, and (for low-dim backends) HNSW index presence. For
+    Qwen3 (4096 dims) the index is absent by design — pgvector caps
+    HNSW/IVFFlat at 2000 dims for ``vector``.
     """
     state = embedding_column_state(conn)
+    parts = [state.column_type]
     if state.not_null:
-        typer.echo(f"embedding       OK ({state.column_type}, NOT NULL)")
-        return
-    typer.echo(f"embedding       OK ({state.column_type}, nullable)")
-    typer.secho(
-        "                — run `brain reembed` to backfill and finalize",
-        fg="yellow",
-    )
+        parts.append("NOT NULL")
+    else:
+        parts.append("nullable")
+    if state.has_index:
+        parts.append("indexed [hnsw]")
+    summary = ", ".join(parts)
+    typer.echo(f"embedding       OK ({summary})")
+    if not state.not_null:
+        typer.secho(
+            "                — run `brain reembed` to backfill and finalize",
+            fg="yellow",
+        )
 
 
 def _build_embedder(cfg: Config) -> Embedder:
@@ -440,17 +486,18 @@ def reembed(
 ) -> None:
     """Backfill ``chunks.embedding`` for any rows missing an embedding.
 
-    After Phase 2's migration, existing chunks have NULL embeddings until
-    this command runs. Idempotent — safe to re-run after a crash; only
-    rows still NULL are touched.
+    After ``brain init``, chunks have NULL embeddings until this command
+    runs. Idempotent — safe to re-run after a crash; only rows still NULL
+    are touched.
 
     By default, after backfill completes (0 NULL rows remain), applies
-    NOT NULL on the embedding column. Pass ``--no-finalize`` to skip the
-    constraint step (e.g. for incremental runs over multiple sessions).
+    NOT NULL on the embedding column. For backends with ``dim <= 2000``
+    (arctic, voyage), additionally creates an HNSW cosine index. For Qwen3
+    (4096 dims) the index is skipped — pgvector caps HNSW at 2000 dims
+    for ``vector``; sequential scan is acceptable at personal-corpus scale.
 
-    No vector index is created — pgvector 0.8.2 caps HNSW/IVFFlat at
-    2000/4000 dims, neither of which fits Qwen3's 4096-dim output
-    without quality loss. Sequential scan is fine at personal scale.
+    Pass ``--no-finalize`` to skip the constraint + index step (e.g. for
+    incremental runs over multiple sessions).
     """
     cfg = Config.load()
     embedder = _build_embedder(cfg)
@@ -491,7 +538,7 @@ def reembed(
             remaining = count_chunks_missing_embedding(conn)
             if remaining == 0:
                 try:
-                    finalize_embedding_index(conn)
+                    finalize_embedding_index(conn, embedder)
                     typer.echo("finalized: embedding column is now NOT NULL")
                 except ValueError as e:
                     typer.secho(f"finalize failed: {e}", fg="red", err=True)

@@ -18,6 +18,7 @@ dependencies = [
   "python-dotenv>=1.0",
   "tiktoken>=0.8",
   "mcp>=1.0,<2.0",
+  "voyageai>=0.3",
 ]
 
 [project.optional-dependencies]
@@ -56,5 +57,5 @@ explicit_package_bases = true
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*"]
+module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*"]
 ignore_missing_imports = true

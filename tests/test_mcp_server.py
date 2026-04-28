@@ -234,7 +234,7 @@ def test_brain_search_wraps_embed_error(
         mcp_server.brain_search(query="anything")
     msg = exc_info.value.error.message
     assert "embedding failed" in msg
-    assert "Qwen3EmbedError" in msg
+    assert "OllamaEmbedError" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -852,7 +852,7 @@ def test_brain_ingest_stdin_wraps_embed_error(
         )
     msg = exc_info.value.error.message
     assert "embedding failed" in msg
-    assert "Qwen3EmbedError" in msg
+    assert "OllamaEmbedError" in msg
 
 
 def test_brain_edit_wraps_embed_error(
@@ -869,7 +869,7 @@ def test_brain_edit_wraps_embed_error(
         mcp_server.brain_edit(id_prefix=doc_id[:8], content="brand new body")
     msg = exc_info.value.error.message
     assert "embedding failed" in msg
-    assert "Qwen3EmbedError" in msg
+    assert "OllamaEmbedError" in msg
 
 
 # ---------------------------------------------------------------------------
@@ -992,6 +992,6 @@ def test_main_continues_when_warmup_fails(
     # And we logged a warning naming the exception class so an operator can
     # see why warmup didn't take.
     assert any(
-        "warmup embed failed" in rec.message and "Qwen3EmbedError" in rec.message
+        "warmup embed failed" in rec.message and "OllamaEmbedError" in rec.message
         for rec in caplog.records
     )

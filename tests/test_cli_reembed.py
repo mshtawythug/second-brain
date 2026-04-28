@@ -330,7 +330,7 @@ def test_reembed_reports_finalize_failure_and_exits_nonzero(
     _seed_null_chunks(test_db, document_id=doc_id, n=1)
     patch_embedder(fake_embedder)
 
-    def _explode(_conn: psycopg.Connection) -> None:
+    def _explode(_conn: psycopg.Connection, _embedder: object) -> None:
         raise ValueError("simulated race")
 
     runner = CliRunner()

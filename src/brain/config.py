@@ -7,6 +7,8 @@ from dotenv import find_dotenv, load_dotenv
 
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_QWEN3_MODEL = "qwen3-embedding:8b"
+DEFAULT_EMBEDDER = "arctic"
+_VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
 
 
 def _project_dotenv() -> Path:
@@ -24,9 +26,19 @@ class ConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class Config:
+    """Project configuration loaded from environment / .env.
+
+    ``embedder`` selects the embedding backend at setup time (one of
+    ``arctic`` / ``voyage`` / ``qwen3``). ``voyage_api_key`` is only
+    consulted when ``embedder == "voyage"``; for the other backends it can
+    be ``None``.
+    """
+
     database_url: str
     ollama_host: str = DEFAULT_OLLAMA_HOST
     qwen3_model: str = DEFAULT_QWEN3_MODEL
+    embedder: str = DEFAULT_EMBEDDER
+    voyage_api_key: str | None = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -47,8 +59,17 @@ class Config:
             raise ConfigError("DATABASE_URL is not set (see .env.example)")
         ollama_host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
         qwen3_model = os.environ.get("QWEN3_MODEL", DEFAULT_QWEN3_MODEL)
+        embedder = os.environ.get("BRAIN_EMBEDDER", DEFAULT_EMBEDDER).lower()
+        if embedder not in _VALID_EMBEDDERS:
+            raise ConfigError(
+                f"BRAIN_EMBEDDER must be one of: arctic, voyage, qwen3 "
+                f"(got {embedder!r})"
+            )
+        voyage_api_key = os.environ.get("VOYAGE_API_KEY")
         return cls(
             database_url=database_url,
             ollama_host=ollama_host,
             qwen3_model=qwen3_model,
+            embedder=embedder,
+            voyage_api_key=voyage_api_key,
         )

@@ -12,7 +12,15 @@ from .chunker import chunk_text
 
 
 class Embedder(Protocol):
-    """Narrow interface for embedding clients used by the ingest pipeline."""
+    """Narrow interface for embedding clients used by the ingest pipeline.
+
+    ``dim`` is the embedder's native output dimension. Schema-wiring code
+    (``db.ensure_embedding_column``, ``queries.finalize_embedding_index``)
+    reads it to keep the ``chunks.embedding`` column in lockstep with the
+    active backend, so callers stay backend-agnostic.
+    """
+
+    dim: int
 
     def embed(
         self, texts: list[str], *, input_type: str = "document"

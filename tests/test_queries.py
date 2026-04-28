@@ -294,14 +294,33 @@ def test_count_chunks_missing_embedding(test_db: psycopg.Connection) -> None:
     assert count_chunks_missing_embedding(test_db) == 2
 
 
-def test_finalize_embedding_index_applies_not_null(
+class _FixedDimEmbedder:
+    """Tiny test double that satisfies the Embedder Protocol's ``dim`` only.
+
+    The finalize path doesn't actually call ``embed`` / ``count_tokens``
+    so a stub with just ``dim`` is sufficient and keeps the parametrized
+    finalize tests focused on the schema effect.
+    """
+
+    def __init__(self, dim: int) -> None:
+        self.dim = dim
+
+    def embed(  # pragma: no cover - never called from finalize tests
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        return [[0.0] * self.dim for _ in texts]
+
+    def count_tokens(self, text: str) -> int:  # pragma: no cover - same
+        return len(text)
+
+
+def test_finalize_embedding_index_applies_not_null_for_qwen3(
     test_db: psycopg.Connection,
 ) -> None:
-    """All chunks embedded → finalize applies NOT NULL on the column.
+    """qwen3 (dim=4096): finalize applies NOT NULL but creates no HNSW index.
 
-    Phase 3 intentionally does not create a vector index — pgvector 0.8.2
-    caps HNSW/IVFFlat at 2000 dims for ``vector`` and 4000 for ``halfvec``,
-    neither of which fits Qwen3's 4096-dim output without quality loss.
+    pgvector 0.8.x caps HNSW at 2000 dims for ``vector``; the qwen3 backend
+    intentionally rides on sequential scan instead.
     """
     doc_id = _seed_doc_for_chunks(test_db)
     _insert_chunk(
@@ -312,17 +331,51 @@ def test_finalize_embedding_index_applies_not_null(
         embedding=_all_zero_vec(),
     )
 
-    finalize_embedding_index(test_db)
+    finalize_embedding_index(test_db, _FixedDimEmbedder(dim=4096))
 
     state = embedding_column_state(test_db)
     assert state.not_null
     assert "vector(4096)" in state.column_type
-    # Phase 3 deliberately ships without an HNSW/IVFFlat index. Phase 4 may
-    # revisit if seq-scan latency ever bites.
+    # qwen3 path: index intentionally skipped.
     idx = test_db.execute(
         "SELECT 1 FROM pg_indexes WHERE indexname = 'chunks_embedding_idx'"
     ).fetchone()
     assert idx is None
+    assert state.has_index is False
+
+
+def test_finalize_embedding_index_creates_hnsw_for_arctic(
+    test_db: psycopg.Connection,
+) -> None:
+    """arctic / voyage (dim=1024): finalize creates the HNSW cosine index.
+
+    Resizes the column to 1024 first so the index can actually be built —
+    the session-scoped fixture leaves it at 4096 (qwen3 default). This
+    mirrors what ``ensure_embedding_column`` does at ``brain init`` time
+    when the active backend is arctic or voyage.
+    """
+    test_db.execute("ALTER TABLE chunks DROP COLUMN embedding")
+    test_db.execute("ALTER TABLE chunks ADD COLUMN embedding vector(1024)")
+
+    doc_id = _seed_doc_for_chunks(test_db)
+    _insert_chunk(
+        test_db,
+        document_id=doc_id,
+        chunk_index=0,
+        content="filled",
+        embedding=[0.0] * 1024,
+    )
+
+    finalize_embedding_index(test_db, _FixedDimEmbedder(dim=1024))
+
+    state = embedding_column_state(test_db)
+    assert state.not_null
+    assert "vector(1024)" in state.column_type
+    assert state.has_index is True
+    idx = test_db.execute(
+        "SELECT 1 FROM pg_indexes WHERE indexname = 'chunks_embedding_idx'"
+    ).fetchone()
+    assert idx is not None
 
 
 def test_finalize_embedding_index_rejects_when_nulls_remain(
@@ -339,7 +392,7 @@ def test_finalize_embedding_index_rejects_when_nulls_remain(
     )
 
     with pytest.raises(ValueError, match="cannot finalize"):
-        finalize_embedding_index(test_db)
+        finalize_embedding_index(test_db, _FixedDimEmbedder(dim=4096))
 
     state = embedding_column_state(test_db)
     assert not state.not_null  # schema unchanged
@@ -358,8 +411,9 @@ def test_finalize_embedding_index_idempotent(
         embedding=_all_zero_vec(),
     )
 
-    finalize_embedding_index(test_db)
-    finalize_embedding_index(test_db)  # must not raise
+    embedder = _FixedDimEmbedder(dim=4096)
+    finalize_embedding_index(test_db, embedder)
+    finalize_embedding_index(test_db, embedder)  # must not raise
 
     state = embedding_column_state(test_db)
     assert state.not_null
@@ -368,7 +422,8 @@ def test_finalize_embedding_index_idempotent(
 def test_embedding_column_state_pre_finalize(
     test_db: psycopg.Connection,
 ) -> None:
-    """Fresh schema (post-migration, pre-finalize): nullable column."""
+    """Fresh schema (post-migration, pre-finalize): nullable column, no index."""
     state = embedding_column_state(test_db)
     assert "vector(4096)" in state.column_type
     assert not state.not_null
+    assert state.has_index is False

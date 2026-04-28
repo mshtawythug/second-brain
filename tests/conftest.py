@@ -53,13 +53,15 @@ def test_db() -> Iterator[psycopg.Connection]:
 class FakeEmbedder:
     """Deterministic embedder for tests — hashes text into a stable vector.
 
-    Default ``dim`` matches the production schema (4096, Qwen3-Embedding-8B);
-    pass a different ``dim`` to construct vectors at other sizes if a test
-    needs it.
+    Default ``dim`` matches the qwen3 production schema (4096); pass a
+    different ``dim`` to construct vectors at other sizes if a test needs
+    it (e.g. 1024 for the arctic / voyage backend paths). ``dim`` is
+    exposed as an instance attribute to satisfy the
+    :class:`brain.ingest.Embedder` Protocol.
     """
 
     def __init__(self, dim: int = 4096) -> None:
-        self._dim = dim
+        self.dim = dim
 
     def embed(self, texts: list[str], input_type: str = "document") -> list[list[float]]:
         return [self._vec(t, input_type) for t in texts]
@@ -70,11 +72,11 @@ class FakeEmbedder:
 
     def _vec(self, text: str, input_type: str) -> list[float]:
         h = hashlib.sha256((input_type + ":" + text).encode()).digest()
-        # 32 bytes → 32 floats, tiled to ``self._dim``.
+        # 32 bytes → 32 floats, tiled to ``self.dim``.
         floats = [b / 255.0 - 0.5 for b in h]
         # Tile enough copies to cover ``dim``, then truncate.
-        repeats = (self._dim + len(floats) - 1) // len(floats)
-        return (floats * repeats)[: self._dim]
+        repeats = (self.dim + len(floats) - 1) // len(floats)
+        return (floats * repeats)[: self.dim]
 
 
 @pytest.fixture
@@ -84,10 +86,14 @@ def fake_embedder() -> FakeEmbedder:
 
 class CountingEmbedder:
     """Wrap an embedder to count embed calls — used by `brain edit` tests
-    that need to assert the title-only path didn't re-embed."""
+    that need to assert the title-only path didn't re-embed.
+
+    Mirrors the wrapped embedder's ``dim`` so it satisfies the same Protocol.
+    """
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
+        self.dim = inner.dim
         self.embed_calls = 0
         self.token_calls = 0
 

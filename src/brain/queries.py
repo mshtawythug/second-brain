@@ -18,6 +18,13 @@ from .errors import (
     IdPrefixNotHex,
     IdPrefixTooShort,
 )
+from .ingest import Embedder
+
+# pgvector 0.8.x caps HNSW (and IVFFlat) at 2000 dims for ``vector`` and 4000
+# for ``halfvec``. Backends with native dims at or below this limit get an
+# HNSW cosine index at finalize time; higher-dim backends (Qwen3 at 4096)
+# use sequential scan, acceptable at personal-corpus scale.
+_PGVECTOR_HNSW_DIM_CAP = 2000
 
 # UUID prefixes consist solely of hex digits and hyphens; anything else is
 # rejected before reaching SQL so user-supplied `_` / `%` cannot act as LIKE
@@ -235,20 +242,21 @@ def count_chunks_missing_embedding(conn: psycopg.Connection[Any]) -> int:
     return int(row[0])
 
 
-def finalize_embedding_index(conn: psycopg.Connection[Any]) -> None:
+def finalize_embedding_index(
+    conn: psycopg.Connection[Any], embedder: Embedder
+) -> None:
     """Apply NOT NULL on ``chunks.embedding`` once backfill is complete.
 
-    Called by ``brain reembed`` after backfill completes. Idempotent —
-    ``ALTER COLUMN ... SET NOT NULL`` is a no-op if the column is already
-    non-nullable.
+    For embedders with ``dim <= 2000`` (arctic, voyage), additionally creates
+    an HNSW cosine index. pgvector 0.8.x caps HNSW/IVFFlat at 2000 dims for
+    ``vector`` (4000 for ``halfvec``), so higher-dim embedders (Qwen3 at
+    4096) skip the index — sequential scan over the cosine operator is
+    acceptable at personal-corpus scale (~150 ms at 10K chunks, ~1 s at
+    100K).
 
-    No vector index is created here. pgvector 0.8.2 caps both HNSW and
-    IVFFlat at 2000 dims for ``vector`` and 4000 for ``halfvec``, neither
-    of which fits Qwen3's native 4096-dim output. Truncating to fit
-    either cap would re-introduce the quality loss this swap was
-    explicitly designed to avoid. Sequential scan over the 4096-dim
-    cosine operator is acceptable at personal-corpus scale (~150 ms at
-    10K chunks, ~1 s at 100K). An index can be added later if needed.
+    Idempotent — ``ALTER COLUMN ... SET NOT NULL`` is a no-op if the column
+    is already non-nullable, and ``CREATE INDEX IF NOT EXISTS`` is a no-op
+    if the index already exists.
 
     Raises :class:`ValueError` if any chunk still has NULL embedding —
     that's a caller bug (the CLI should only call this after asserting
@@ -261,23 +269,32 @@ def finalize_embedding_index(conn: psycopg.Connection[Any]) -> None:
         )
     with conn.transaction():
         conn.execute("ALTER TABLE chunks ALTER COLUMN embedding SET NOT NULL")
+        if embedder.dim <= _PGVECTOR_HNSW_DIM_CAP:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks "
+                "USING hnsw (embedding vector_cosine_ops)"
+            )
 
 
 @dataclass
 class EmbeddingColumnState:
-    """Snapshot of the ``chunks.embedding`` column for ``brain doctor``."""
+    """Snapshot of the ``chunks.embedding`` column for ``brain doctor``.
+
+    ``has_index`` reports whether the HNSW cosine index exists. For low-dim
+    backends (arctic, voyage) finalize creates it; for Qwen3 (4096 dims) it
+    stays absent because pgvector's HNSW cap is 2000.
+    """
 
     column_type: str
     not_null: bool
+    has_index: bool
 
 
 def embedding_column_state(conn: psycopg.Connection[Any]) -> EmbeddingColumnState:
     """Return the current state of the ``chunks.embedding`` column.
 
     Used by ``brain doctor`` to surface the post-migration / pre-finalize
-    state to the user without gating exit code on it. No "indexed" field
-    is reported because Phase 3 intentionally skips index creation — see
-    :func:`finalize_embedding_index`.
+    state to the user without gating exit code on it.
     """
     col_row = conn.execute(
         "SELECT format_type(atttypid, atttypmod), attnotnull "
@@ -285,7 +302,11 @@ def embedding_column_state(conn: psycopg.Connection[Any]) -> EmbeddingColumnStat
         "WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"
     ).fetchone()
     assert col_row is not None  # chunks.embedding always exists post-migration
+    idx_row = conn.execute(
+        "SELECT 1 FROM pg_indexes WHERE indexname = 'chunks_embedding_idx'"
+    ).fetchone()
     return EmbeddingColumnState(
         column_type=str(col_row[0]),
         not_null=bool(col_row[1]),
+        has_index=idx_row is not None,
     )

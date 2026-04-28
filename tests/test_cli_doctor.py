@@ -23,11 +23,15 @@ def _ok_ollama_transport(
 ) -> httpx.MockTransport:
     """Mock transport that returns 200 OK on ``GET /api/tags``.
 
-    Defaults to a model list containing the configured Qwen3 model so the
-    happy-path doctor tests don't trip the new "model not loaded" warning.
+    Defaults to a model list containing the arctic model (the default
+    backend) so the happy-path doctor tests don't trip the "model not
+    loaded" warning. Tests targeting other backends should pass an
+    explicit model list.
     """
     payload_models = (
-        models if models is not None else [{"name": "qwen3-embedding:8b"}]
+        models
+        if models is not None
+        else [{"name": "snowflake-arctic-embed2"}, {"name": "qwen3-embedding:8b"}]
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -77,7 +81,11 @@ def test_doctor_pings_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_doctor_warns_when_model_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Daemon up but qwen3-embedding:8b not pulled → soft warning, exit 0."""
+    """Daemon up but the active backend's model not pulled → soft warning, exit 0.
+
+    Default backend is arctic, so the doctor expects ``snowflake-arctic-embed2``
+    to be loaded and warns when it isn't.
+    """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     transport = _ok_ollama_transport(models=[{"name": "llama3:8b"}])
     with _patch_httpx_client(transport):
@@ -85,8 +93,60 @@ def test_doctor_warns_when_model_missing(monkeypatch: pytest.MonkeyPatch) -> Non
     assert result.exit_code == 0, result.output
     assert "ollama" in result.output
     assert "NOT loaded" in result.output
-    assert "qwen3-embedding:8b" in result.output
+    assert "snowflake-arctic-embed2" in result.output
     assert "ollama pull" in result.output
+
+
+def test_doctor_qwen3_backend_checks_qwen3_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``BRAIN_EMBEDDER=qwen3`` → doctor expects ``qwen3-embedding:8b`` loaded."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_EMBEDDER", "qwen3")
+    transport = _ok_ollama_transport(models=[{"name": "llama3:8b"}])
+    with _patch_httpx_client(transport):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "NOT loaded" in result.output
+    assert "qwen3-embedding:8b" in result.output
+
+
+def test_doctor_voyage_backend_checks_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``BRAIN_EMBEDDER=voyage`` with key set → ``voyage OK``, no Ollama check."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_EMBEDDER", "voyage")
+    monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
+    # _patch_httpx_client is *not* used — voyage path must not call Ollama.
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "voyage" in result.output
+    assert "api key set" in result.output
+    # Ollama check skipped — no "ollama" line on the voyage path.
+    assert "ollama" not in result.output
+
+
+def test_doctor_voyage_backend_fails_when_key_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any"
+) -> None:
+    """``BRAIN_EMBEDDER=voyage`` with no key → FAIL on the voyage line, exit 1.
+
+    Isolates from the dev's project ``.env`` by chdir-ing into a tmp dir and
+    pointing :func:`brain.config._project_dotenv` at a non-existent file —
+    otherwise the project's real ``VOYAGE_API_KEY`` would leak in via dotenv.
+    """
+    from brain import config as config_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        config_module, "_project_dotenv", lambda: tmp_path / "no.env"
+    )
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_EMBEDDER", "voyage")
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code != 0
+    combined = result.output + (result.stderr if result.stderr else "")
+    assert "voyage" in combined
+    assert "FAIL" in combined
+    assert "VOYAGE_API_KEY" in combined
 
 
 def test_doctor_reports_ollama_down(monkeypatch: pytest.MonkeyPatch) -> None:

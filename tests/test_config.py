@@ -5,6 +5,7 @@ import pytest
 
 from brain import config as config_module
 from brain.config import (
+    DEFAULT_EMBEDDER,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_QWEN3_MODEL,
     Config,
@@ -30,6 +31,8 @@ def isolated_dotenv(monkeypatch, tmp_path: Path) -> Path:
     # deterministic regardless of the developer's shell env.
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
     monkeypatch.delenv("QWEN3_MODEL", raising=False)
+    monkeypatch.delenv("BRAIN_EMBEDDER", raising=False)
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     return fake_project_env
 
 
@@ -107,3 +110,55 @@ def test_project_dotenv_points_at_repo_root():
 
     expected = Path(config_module.__file__).resolve().parent.parent.parent / ".env"
     assert _project_dotenv() == expected
+
+
+# ---------------------------------------------------------------------------
+# Phase 3.5: pluggable embedder backend selection.
+# ---------------------------------------------------------------------------
+
+
+def test_embedder_defaults_to_arctic(monkeypatch, isolated_dotenv):
+    """No ``BRAIN_EMBEDDER`` set → arctic (the user-friendly default)."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    cfg = Config.load()
+    assert cfg.embedder == DEFAULT_EMBEDDER
+    assert cfg.embedder == "arctic"
+
+
+def test_embedder_env_var_override(monkeypatch, isolated_dotenv):
+    """``BRAIN_EMBEDDER=qwen3`` is honored verbatim (lowercased)."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("BRAIN_EMBEDDER", "qwen3")
+    cfg = Config.load()
+    assert cfg.embedder == "qwen3"
+
+
+def test_embedder_env_var_lowercased(monkeypatch, isolated_dotenv):
+    """``BRAIN_EMBEDDER=ARCTIC`` is normalized to lowercase before validation."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("BRAIN_EMBEDDER", "ARCTIC")
+    cfg = Config.load()
+    assert cfg.embedder == "arctic"
+
+
+def test_embedder_invalid_value_raises(monkeypatch, isolated_dotenv):
+    """Anything outside the 3-backend whitelist raises at load time."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("BRAIN_EMBEDDER", "bogus-backend")
+    with pytest.raises(ConfigError, match="must be one of"):
+        Config.load()
+
+
+def test_voyage_api_key_is_none_by_default(monkeypatch, isolated_dotenv):
+    """Without ``VOYAGE_API_KEY`` set, the field is ``None`` (validated at use)."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    cfg = Config.load()
+    assert cfg.voyage_api_key is None
+
+
+def test_voyage_api_key_read_from_env(monkeypatch, isolated_dotenv):
+    """``VOYAGE_API_KEY`` env var populates the optional field."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("VOYAGE_API_KEY", "vk-test-secret")
+    cfg = Config.load()
+    assert cfg.voyage_api_key == "vk-test-secret"
