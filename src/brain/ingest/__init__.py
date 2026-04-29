@@ -8,6 +8,9 @@ from typing import Any, Protocol
 import psycopg
 from pgvector.psycopg import register_vector  # noqa: F401  (ensures adapter loaded)
 
+from brain.vault.derived_links.directory import DirectoryStore
+from brain.vault.derived_links.participants import extract_gmail_addresses
+
 from .chunker import chunk_text
 
 
@@ -167,6 +170,19 @@ def ingest_document(
                 "VALUES (%s, %s, %s, %s)",
                 (document_id, c.index, c.content, emb),
             )
+
+        if source_kind == "gmail":
+            # Mine name↔email pairs from the From/To headers and feed the
+            # directory used by the metadata-aware linker. Runs inside the
+            # outer ``conn.transaction()`` so a partial failure leaves no
+            # stale directory state alongside an inserted document.
+            store = DirectoryStore(conn)
+            for display_name, email in extract_gmail_addresses(doc.metadata):
+                store.upsert_pair(
+                    display_name=display_name,
+                    email=email,
+                    source="gmail",
+                )
 
         return IngestResult(document_id=document_id, created=True)
 

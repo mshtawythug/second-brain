@@ -21,9 +21,11 @@ from typing import Any
 
 import psycopg
 import pytest
+from pytest_mock import MockerFixture
 from typer.testing import CliRunner
 
 from brain.cli import app
+from brain.ingest import ExtractedDoc, ingest_document
 from brain.ingest import gmail as gmail_ingest
 
 TEST_DATABASE_URL = os.environ.get(
@@ -411,3 +413,258 @@ def test_read_message_calls_gws_users_messages_get() -> None:
     params = json.loads(cmd[6])
     assert params == {"userId": "me", "id": "m42", "format": "full"}
     assert cmd[-2:] == ["--format", "json"]
+
+
+# ---------------------------------------------------------------------------
+# Directory hook (Task B.2): Gmail ingest must populate ``directory_entries``
+# in the same transaction as the document insert. The hook lives inside
+# ``ingest_document`` gated on ``source_kind == "gmail"`` so every Gmail
+# ingest path (CLI, MCP, future automation) gets it for free.
+# ---------------------------------------------------------------------------
+
+
+def _gmail_doc(
+    *,
+    body: str = "Hello world",
+    title: str = "Hi",
+    from_addr: str | None = "Ali Sarkis <redacted@example.com>",
+    to: str | None = "person-x last-a <person-a@example.com>",
+    message_id: str = "m1",
+) -> ExtractedDoc:
+    """Build an ``ExtractedDoc`` shaped like ``gmail.to_extracted_doc`` output."""
+    return ExtractedDoc(
+        title=title,
+        content=body,
+        content_type="email",
+        source_path=None,
+        metadata={
+            "from": from_addr,
+            "to": to,
+            "date": "2026-04-01",
+            "message_id": message_id,
+            "thread_id": f"t{message_id}",
+            "label_ids": ["INBOX"],
+        },
+    )
+
+
+def test_gmail_ingest_upserts_directory_entries(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """A successful Gmail ingest writes one ``directory_entries`` row per address.
+
+    Display names are normalized via ``normalize_participant`` (lowercased,
+    whitespace collapsed). Sources are tagged ``gmail`` and counts start at 1.
+    """
+    result = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=_gmail_doc(),
+        source_kind="gmail",
+        source_external_id="m1",
+    )
+    assert result.created is True
+
+    rows = test_db.execute(
+        "SELECT display_name, email, source, occurrence_count "
+        "FROM directory_entries ORDER BY email"
+    ).fetchall()
+    assert rows == [
+        ("person-a last-a", "person-a@example.com", "gmail", 1),
+        ("ali sarkis", "redacted@example.com", "gmail", 1),
+    ]
+
+
+def test_re_ingesting_gmail_increments_occurrence(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """Two emails from the same correspondent bump ``occurrence_count`` to 2.
+
+    Different bodies + different message ids dodge the content-hash dedup
+    so both ingests insert a document and trigger the directory hook.
+    """
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=_gmail_doc(body="First email", message_id="m1"),
+        source_kind="gmail",
+        source_external_id="m1",
+    )
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=_gmail_doc(body="Second email", message_id="m2"),
+        source_kind="gmail",
+        source_external_id="m2",
+    )
+
+    rows = test_db.execute(
+        "SELECT email, occurrence_count FROM directory_entries ORDER BY email"
+    ).fetchall()
+    assert rows == [
+        ("person-a@example.com", 2),
+        ("redacted@example.com", 2),
+    ]
+
+
+def test_gmail_ingest_handles_bare_email(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """A bare-email From header (no display name) lands as ``display_name=''``."""
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=_gmail_doc(from_addr="bob@example.com", to=None),
+        source_kind="gmail",
+        source_external_id="m1",
+    )
+
+    rows = test_db.execute(
+        "SELECT display_name, email, source FROM directory_entries"
+    ).fetchall()
+    assert rows == [("", "bob@example.com", "gmail")]
+
+
+def test_gmail_ingest_with_no_from_or_to(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """Empty ``from``/``to`` strings produce no upserts; ingest still succeeds."""
+    result = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Empty headers",
+            content="body content",
+            content_type="email",
+            source_path=None,
+            metadata={"from": "", "to": ""},
+        ),
+        source_kind="gmail",
+        source_external_id="m1",
+    )
+    assert result.created is True
+
+    count = test_db.execute("SELECT count(*) FROM directory_entries").fetchone()
+    assert count is not None
+    assert count[0] == 0
+    # Document itself was still written.
+    doc_count = test_db.execute("SELECT count(*) FROM documents").fetchone()
+    assert doc_count is not None
+    assert doc_count[0] == 1
+
+
+def test_directory_upsert_skipped_for_non_gmail_source(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """Other sources (manual, krisp, slack) MUST NOT touch ``directory_entries``.
+
+    The hook is Gmail-specific in B.2; Krisp gets its own treatment in B.3.
+    """
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="A note",
+            content="manual body",
+            content_type="note",
+            source_path=None,
+            metadata={"from": "Ali <redacted@example.com>", "to": "x@y.com"},
+        ),
+        source_kind="manual",
+    )
+
+    count = test_db.execute("SELECT count(*) FROM directory_entries").fetchone()
+    assert count is not None
+    assert count[0] == 0
+
+
+def test_directory_upsert_runs_in_same_transaction(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mocker: MockerFixture,
+) -> None:
+    """If the directory upsert raises, the document insert rolls back too.
+
+    Forces the second ``upsert_pair`` call to raise ``RuntimeError``. The
+    outer ``with conn.transaction():`` block in ``ingest_document`` must
+    propagate the failure and roll back the partially-inserted document +
+    chunks + the first directory row.
+    """
+    real_upsert = mocker.patch(
+        "brain.ingest.DirectoryStore.upsert_pair",
+        autospec=True,
+    )
+
+    call_state = {"n": 0}
+
+    def flaky(self: Any, **kwargs: Any) -> None:
+        call_state["n"] += 1
+        if call_state["n"] == 2:
+            raise RuntimeError("simulated directory failure")
+        # First call: emulate a real upsert by writing the row directly.
+        # We bypass DirectoryStore.upsert_pair to avoid recursion through
+        # the patched mock.
+        self._conn.execute(
+            "INSERT INTO directory_entries (display_name, email, source) "
+            "VALUES (%s, %s, %s)",
+            (
+                (kwargs["display_name"] or "").lower(),
+                kwargs["email"].lower(),
+                kwargs["source"],
+            ),
+        )
+
+    real_upsert.side_effect = flaky
+
+    with pytest.raises(RuntimeError, match="simulated directory failure"):
+        ingest_document(
+            test_db,
+            embedder=fake_embedder,
+            doc=_gmail_doc(),  # has both From and To → 2 upsert calls
+            source_kind="gmail",
+            source_external_id="m1",
+        )
+
+    # The transaction rolled back: no documents, no chunks, no directory rows.
+    docs = test_db.execute("SELECT count(*) FROM documents").fetchone()
+    chunks = test_db.execute("SELECT count(*) FROM chunks").fetchone()
+    dir_rows = test_db.execute("SELECT count(*) FROM directory_entries").fetchone()
+    assert docs is not None and docs[0] == 0
+    assert chunks is not None and chunks[0] == 0
+    assert dir_rows is not None and dir_rows[0] == 0
+
+
+def test_cli_ingest_gmail_populates_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """End-to-end: ``brain ingest-gmail`` writes ``directory_entries`` rows."""
+    _patch_embedder(monkeypatch, fake_embedder)
+    msgs = {
+        "m1": _msg(
+            id="m1",
+            subject="Hi",
+            from_addr="Ali Sarkis <redacted@example.com>",
+            to="person-x last-a <person-a@example.com>",
+            body="Hello there",
+        ),
+    }
+    monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(msgs))
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
+    assert result.exit_code == 0, result.output
+
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        rows = conn.execute(
+            "SELECT display_name, email, source FROM directory_entries "
+            "ORDER BY email"
+        ).fetchall()
+    assert rows == [
+        ("person-a last-a", "person-a@example.com", "gmail"),
+        ("ali sarkis", "redacted@example.com", "gmail"),
+    ]
