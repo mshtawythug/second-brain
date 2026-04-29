@@ -38,7 +38,7 @@ class Evidence:
     for R3.
     """
 
-    rule: str  # 'shared_thread' | 'shared_participant' | 'same_day_participant'
+    rule: Literal["shared_thread", "shared_participant", "same_day_participant"]
     weight: float  # 1.0 / 0.4 / 0.7
     payload: dict[str, Any]
 

@@ -264,3 +264,18 @@ class TestExtractGmailAddresses:
     def test_only_to_provided(self) -> None:
         result = extract_gmail_addresses({"to": "Alice <a@x.com>"})
         assert result == [("alice", "a@x.com")]
+
+    def test_display_name_trailing_punctuation_stripped(self) -> None:
+        # Symmetric normalization with `normalize_participant`: Gmail's
+        # ``"John Smith." <j@x.com>`` should yield the same display key as
+        # Krisp's ``**John Smith. | 00:01**`` would after normalization, so
+        # they bridge through directory.resolve_name_to_email.
+        result = extract_gmail_addresses({"from": '"John Smith." <j@x.com>'})
+        assert result == [("john smith", "j@x.com")]
+
+    def test_display_name_too_short_falls_back_to_none(self) -> None:
+        # If the display name fails ``normalize_participant`` (e.g. < 2 chars
+        # or a Speaker_N placeholder), drop the display rather than emit a
+        # noisy single-letter key that would never resolve anyway.
+        result = extract_gmail_addresses({"from": '"A" <a@x.com>'})
+        assert result == [(None, "a@x.com")]

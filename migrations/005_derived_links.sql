@@ -14,6 +14,12 @@
 --   * ``directory_refresh_state`` — high-water mark per source so calendar /
 --     contacts refreshes are incremental: each refresh fetches
 --     ``(last_refreshed_at, now]`` only.
+--
+-- Two CHECK constraints tighter than spec §5 (intentional, mirrors the
+--   `link_kind` pattern from migrations/003_vault_model.sql:23):
+--   - `rule` is enum-restricted; adding a 4th rule will require ALTER.
+--   - `weight` is range-restricted to [0, 1.0]; emphasized overrides above
+--      1.0 will require ALTER.
 
 BEGIN;
 

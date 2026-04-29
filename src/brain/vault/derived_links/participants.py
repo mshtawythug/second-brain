@@ -103,7 +103,10 @@ def extract_gmail_addresses(metadata: dict[str, Any]) -> list[tuple[str | None, 
     """Use `email.utils.getaddresses` over metadata['from'] + metadata['to'].
 
     Returns list of (display_name, email) tuples. display_name is None when
-    absent. Both elements are normalized (lowercased, stripped).
+    absent. Both elements are normalized (lowercased, stripped). Display
+    names are run through `normalize_participant` for cross-source matching
+    consistency — that drops outer punctuation and rejects sub-2-char or
+    Speaker_N values that would never resolve through the directory anyway.
     """
     raw_strings: list[str] = []
     for key in ("from", "to"):
@@ -124,8 +127,10 @@ def extract_gmail_addresses(metadata: dict[str, Any]) -> list[tuple[str | None, 
             continue
 
         display_raw = (realname or "").strip()
+        display: str | None
         if display_raw:
-            display: str | None = _WHITESPACE_RE.sub(" ", display_raw.lower())
+            collapsed = _WHITESPACE_RE.sub(" ", display_raw.lower())
+            display = normalize_participant(collapsed)
         else:
             display = None
 
