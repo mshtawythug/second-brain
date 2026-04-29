@@ -1,4 +1,5 @@
 """YAML frontmatter writer + reader for vault files."""
+import hashlib
 from typing import Any
 
 import yaml
@@ -67,3 +68,36 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
             return parsed, body_text
     # No closing fence — treat the whole file as body.
     return {}, text
+
+
+def body_hash(text: str) -> str:
+    """Return SHA-256 of the body of a vault file (frontmatter stripped).
+
+    The hash is what populates ``documents.content_hash`` for vault-tier
+    rows. ``brain vault sync`` uses it to detect "real" content changes and
+    skip a re-embed when only the frontmatter shifted (e.g. tag tweaks,
+    ``updated:`` timestamp bumps).
+
+    Normalizations before hashing — all chosen to preserve hash stability
+    across editors and platforms:
+
+    - The leading ``---\\n…\\n---\\n`` block (if present) is stripped via
+      :func:`parse_frontmatter`. Inputs with no frontmatter hash the entire
+      text.
+    - CRLF line endings collapse to LF so a Windows-saved copy and the same
+      content on macOS produce the same hash.
+    - Leading/trailing whitespace is stripped — the writer's trailing
+      newline is not part of the canonical content. (Editors that append a
+      trailing newline don't trigger spurious updates.)
+
+    The hash matches the value the export module would write into the same
+    document's ``content_hash`` column, which is what makes the
+    export → sync round-trip a no-op.
+    """
+    # ``parse_frontmatter`` raises on malformed YAML — callers (the sync
+    # engine) catch that separately and record an error. For the hash itself
+    # we fall back to hashing the raw text when the file has no frontmatter
+    # at all, but propagate yaml errors upward.
+    _, body = parse_frontmatter(text)
+    normalized = body.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()

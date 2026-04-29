@@ -52,6 +52,7 @@ from .queries import (
 from .search import hybrid_search
 from .vault import init_vault
 from .vault.export import export_vault
+from .vault.sync import sync_vault
 
 app = typer.Typer(
     name="brain",
@@ -1039,3 +1040,81 @@ def vault_export(
         typer.secho(f"  error: {err}", fg="red", err=True)
     if summary.errors:
         raise typer.Exit(code=1)
+
+
+@vault_app.command("sync")
+def vault_sync(
+    vault: Path | None = typer.Option(
+        None,
+        "--vault",
+        help="Override the configured vault path for this invocation.",
+    ),
+    prune: bool = typer.Option(
+        False,
+        "--prune",
+        help="Delete vault-tier rows whose files vanished (default: warn only).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report planned changes without writing to DB or modifying files.",
+    ),
+) -> None:
+    """Reconcile the vault folder into the DB.
+
+    Walks every ``.md`` file under the resolved vault path, upserts a
+    ``documents`` row per file (creating + assigning a frontmatter ``id``
+    on first sight), parses ``[[wiki-links]]`` into the ``links`` and
+    ``unresolved_links`` tables, and re-resolves dangling refs at the end
+    of the run.
+
+    Default policy on missing files: WARN, not delete. Pass ``--prune`` to
+    delete vault-tier rows whose files have vanished. Pass ``--dry-run`` to
+    print the planned actions without writing anything (no id assignment,
+    no DB writes, no link materialization).
+
+    Exit codes:
+    - 0 on success (even with warnings, errors, or unresolved links)
+    - 2 if the vault path doesn't exist or isn't a directory
+    """
+    cfg = Config.load()
+    target = vault.expanduser() if vault is not None else cfg.vault_path
+    if not target.is_dir():
+        typer.secho(
+            f"vault path is not a directory: {target}",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        report = sync_vault(
+            conn,
+            embedder=embedder,
+            vault_path=target,
+            prune=prune,
+            dry_run=dry_run,
+        )
+
+    suffix = " (dry-run)" if dry_run else ""
+    typer.echo(f"vault path:     {target}{suffix}")
+    deletion_phrase = (
+        f"deleted {report.deleted}" if prune else f"warned {report.warned}"
+    )
+    typer.echo(
+        f"created {report.created}, "
+        f"updated {report.updated}, "
+        f"skipped {report.skipped}, "
+        f"{deletion_phrase}, "
+        f"links_resolved {report.links_resolved}, "
+        f"links_unresolved {report.links_unresolved}, "
+        f"errors {len(report.errors)}"
+    )
+    if report.id_assigned:
+        verb = "would assign" if dry_run else "assigned"
+        noun = "file" if report.id_assigned == 1 else "files"
+        typer.echo(f"{verb} ids to {report.id_assigned} {noun}")
+    for path, reason in report.errors:
+        typer.secho(f"  error: {path}: {reason}", fg="red", err=True)

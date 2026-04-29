@@ -1,5 +1,6 @@
 """Tests for brain.vault.export — DB → vault folder dump."""
 import json
+import os
 from pathlib import Path
 
 import psycopg
@@ -470,7 +471,7 @@ def test_cli_vault_export_writes_files(
         # The conftest test_db fixture uses TEST_DATABASE_URL, but the CLI
         # path goes through Config.load() which reads DATABASE_URL. Point
         # it at the same test DB.
-        __import__("os").environ.get(
+        os.environ.get(
             "TEST_DATABASE_URL",
             "postgresql://brain:brain@localhost:5433/second_brain_test",
         ),
@@ -498,7 +499,7 @@ def test_cli_vault_export_idempotent(
 ) -> None:
     monkeypatch.setenv(
         "DATABASE_URL",
-        __import__("os").environ.get(
+        os.environ.get(
             "TEST_DATABASE_URL",
             "postgresql://brain:brain@localhost:5433/second_brain_test",
         ),
@@ -526,7 +527,7 @@ def test_cli_vault_export_refuses_unmanaged_dir_without_force(
 ) -> None:
     monkeypatch.setenv(
         "DATABASE_URL",
-        __import__("os").environ.get(
+        os.environ.get(
             "TEST_DATABASE_URL",
             "postgresql://brain:brain@localhost:5433/second_brain_test",
         ),
@@ -566,3 +567,91 @@ def test_export_reads_metadata_as_dict(
     assert "2026-04-15" in target.name
     # Keep json import alive (avoids unused import warning if test grows):
     assert json.dumps(fields)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 carryover (Task 2.7 #5): aliases in exported frontmatter.
+# ---------------------------------------------------------------------------
+
+
+def test_export_emits_aliases_when_metadata_carries_them(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """``documents.metadata.aliases`` is materialized into the frontmatter.
+
+    Round-trip parity: a future sync pass must be able to read the exported
+    file and re-derive the same alias list.
+    """
+    _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="person-x conversation",
+        content="body",
+        source_kind="manual",
+        metadata={"aliases": ["person-x", "person-a-talk"]},
+    )
+    export_vault(test_db, vault_path=tmp_path / "vault")
+    target = next((tmp_path / "vault" / "_ingested" / "manual").glob("*.md"))
+    fields, _ = parse_frontmatter(target.read_text())
+    assert fields["aliases"] == ["person-x", "person-a-talk"]
+
+
+def test_export_omits_aliases_field_when_empty(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """No ``aliases:`` line at all when the metadata has none.
+
+    Keeps the file readable for the common case (no aliases) and stops a
+    blank ``aliases: []`` from polluting every export.
+    """
+    _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="plain note",
+        content="x",
+        source_kind="manual",
+    )
+    export_vault(test_db, vault_path=tmp_path / "vault")
+    target = next((tmp_path / "vault" / "_ingested" / "manual").glob("*.md"))
+    fields, _ = parse_frontmatter(target.read_text())
+    assert "aliases" not in fields
+
+
+def test_export_drops_non_string_alias_entries(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Defensive coercion: a corrupted aliases array filters down to strings.
+
+    Hand-edited metadata could contain a stray int or null; we don't propagate
+    those into the YAML — the export stays a tidy ``list[str]``.
+    """
+    _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="defensive aliases",
+        content="x",
+        source_kind="manual",
+        metadata={"aliases": ["good", 42, None, ""]},
+    )
+    export_vault(test_db, vault_path=tmp_path / "vault")
+    target = next((tmp_path / "vault" / "_ingested" / "manual").glob("*.md"))
+    fields, _ = parse_frontmatter(target.read_text())
+    assert fields["aliases"] == ["good"]
+
+
+def test_export_omits_aliases_when_metadata_value_is_not_a_list(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """A scalar ``aliases`` value (not a list) is treated as no aliases at all."""
+    _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="bad aliases shape",
+        content="x",
+        source_kind="manual",
+        metadata={"aliases": "not-a-list"},
+    )
+    export_vault(test_db, vault_path=tmp_path / "vault")
+    target = next((tmp_path / "vault" / "_ingested" / "manual").glob("*.md"))
+    fields, _ = parse_frontmatter(target.read_text())
+    assert "aliases" not in fields

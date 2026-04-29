@@ -63,6 +63,12 @@ def _is_directory_unmanaged(target: Path) -> bool:
     by :func:`init_vault`. Anything else with files in it is unmanaged — the
     user has to opt in with ``--force`` so we never silently scribble into
     an unrelated folder.
+
+    Dotfiles and hidden directories (``.git/``, ``.DS_Store``, etc.) are
+    intentionally excluded from the emptiness check. A folder that contains
+    only a ``.git`` directory still counts as empty for our purposes — the
+    user almost certainly wants to use a git-tracked vault, and forcing
+    them through ``--force`` for an empty initial repo would be obnoxious.
     """
     if not target.exists():
         return False
@@ -137,7 +143,10 @@ def _short_id(value: str) -> str:
 
     Used both for the external-id slot in filenames and for the collision
     suffix. Stripping dashes first makes ``-aabbccdd`` collisions deterministic
-    regardless of the full UUID's hyphenation style.
+    regardless of the full UUID's hyphenation style. For non-UUID
+    ``external_id`` values (e.g. Slack's ``1234567.890`` timestamps) the
+    strip-then-truncate behavior preserves the leading bytes verbatim once
+    any non-hex separator characters have been dropped.
     """
     return value.replace("-", "")[:_MAX_SHORT_ID]
 
@@ -146,9 +155,10 @@ def _date_prefix(doc: _DocumentForExport) -> str:
     """Pick the YYYY-MM-DD prefix for an ingested file's filename.
 
     ``metadata.date`` wins when present (a string ISO date or datetime, or a
-    date/datetime object). Otherwise we fall back to ``ingested_at::date``.
-    Always returns the literal ``unknown-date`` string for a doc with neither
-    — extremely rare, but cheaper than crashing the whole export.
+    date/datetime object). Otherwise we fall back to ``ingested_at::date``,
+    which is non-NULL by schema (``documents.ingested_at NOT NULL DEFAULT
+    NOW()``) — the assert is defensive so a future schema regression
+    surfaces here rather than producing a malformed filename.
     """
     raw = doc.metadata.get("date")
     if isinstance(raw, str) and raw:
@@ -156,9 +166,8 @@ def _date_prefix(doc: _DocumentForExport) -> str:
         return raw[:10]
     if isinstance(raw, (datetime, date)):
         return raw.strftime("%Y-%m-%d") if isinstance(raw, date) else raw.date().isoformat()
-    if doc.ingested_at is not None:
-        return doc.ingested_at.date().isoformat()
-    return "unknown-date"
+    assert doc.ingested_at is not None, "documents.ingested_at is NOT NULL"
+    return doc.ingested_at.date().isoformat()
 
 
 def _ingested_relative_path(
@@ -220,10 +229,16 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
     """Return the ordered frontmatter mapping for ``doc``.
 
     Field order is intentional and stable: id, title, created, updated, tags,
-    kind, content_type, then ingested-tier extras (source / external_id) when
-    present. Anything not applicable (e.g. ingested extras for a vault-tier
-    doc) is omitted entirely rather than written as ``null`` — keeps the
-    vault file readable.
+    aliases (when non-empty), kind, content_type, then ingested-tier extras
+    (source / external_id) when present. Anything not applicable (e.g.
+    ingested extras for a vault-tier doc, or an empty alias list) is omitted
+    entirely rather than written as ``null`` / ``[]`` — keeps the vault file
+    readable and round-trips cleanly through sync.
+
+    Aliases come from ``documents.metadata['aliases']`` (the canonical
+    storage location per the spec) — only string elements are emitted; any
+    non-string value in the array is dropped silently to keep the
+    frontmatter's ``aliases:`` always be a flat list of strings.
     """
     fields: dict[str, Any] = {
         "id": doc.id,
@@ -234,6 +249,9 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
         fields["created"] = iso
         fields["updated"] = iso
     fields["tags"] = list(doc.tags)
+    aliases = _aliases_from_metadata(doc.metadata)
+    if aliases:
+        fields["aliases"] = aliases
     fields["kind"] = doc.kind
     fields["content_type"] = doc.content_type
     if doc.kind == "ingested":
@@ -242,6 +260,21 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
         if doc.source_external_id:
             fields["external_id"] = doc.source_external_id
     return fields
+
+
+def _aliases_from_metadata(metadata: dict[str, Any]) -> list[str]:
+    """Extract a clean list of alias strings from ``documents.metadata``.
+
+    Only emits the field when the metadata payload actually carries one or
+    more string aliases. Anything else (missing key, non-list, list of
+    non-strings) returns an empty list — the caller then omits the
+    ``aliases:`` line altogether. Defensive coercion here keeps a corrupt
+    metadata blob from poisoning the entire export pass.
+    """
+    raw = metadata.get("aliases")
+    if not isinstance(raw, list):
+        return []
+    return [a for a in raw if isinstance(a, str) and a]
 
 
 def _content_hash(text: str) -> str:
