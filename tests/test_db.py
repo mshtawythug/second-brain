@@ -61,6 +61,94 @@ def test_run_migrations_applies_all_sql_files_in_order() -> None:
     assert applied == expected_files
 
 
+def test_run_migrations_is_idempotent_when_already_applied() -> None:
+    """Second call returns [] — schema_migrations dedups."""
+    url = os.environ.get(
+        "TEST_DATABASE_URL",
+        "postgresql://brain:brain@localhost:5433/second_brain_test",
+    )
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        first = run_migrations(conn)
+        second = run_migrations(conn)
+
+    assert len(first) > 0  # at least the .sql files in migrations/
+    assert second == []
+
+
+def test_run_migrations_records_each_applied_in_schema_migrations() -> None:
+    """After a fresh run, schema_migrations has one row per .sql file."""
+    url = os.environ.get(
+        "TEST_DATABASE_URL",
+        "postgresql://brain:brain@localhost:5433/second_brain_test",
+    )
+    expected_files = sorted(p.name for p in migrations_dir().glob("*.sql"))
+
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        run_migrations(conn)
+        rows = conn.execute(
+            "SELECT name FROM schema_migrations ORDER BY name"
+        ).fetchall()
+
+    assert [r[0] for r in rows] == expected_files
+
+
+def test_run_migrations_seeds_existing_schema_without_tracking_table() -> None:
+    """Real-world bug: a DB that predates schema_migrations must NOT re-apply
+    migrations 001/002 (which would crash on duplicate-table or destroy
+    existing embeddings). The seeder records existing migrations as applied
+    based on schema state, then only NEW migrations run.
+    """
+    url = os.environ.get(
+        "TEST_DATABASE_URL",
+        "postgresql://brain:brain@localhost:5433/second_brain_test",
+    )
+    with psycopg.connect(url, autocommit=True) as conn:
+        # Simulate a prod-style DB that has 001 + 002 applied (pre-vault-model)
+        # but lacks schema_migrations entirely.
+        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        conn.execute("CREATE EXTENSION IF NOT EXISTS pgcrypto")
+        # Apply 001 and 002 directly so the schema is in a "vault-model never
+        # ran" state, then drop schema_migrations to mimic pre-fix DBs.
+        for name in ("001_init.sql", "002_qwen3_embedding.sql"):
+            sql = (migrations_dir() / name).read_text()
+            conn.execute(sql)
+        # Verify schema_migrations doesn't exist yet.
+        exists = conn.execute(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_name = 'schema_migrations'"
+        ).fetchone()
+        assert exists is None
+
+        # First run: should seed 001+002 as applied (NOT re-apply them) and
+        # then apply only the pending migrations (003, 004, ...).
+        applied = run_migrations(conn)
+
+        # Tracking table now exists with 001, 002, plus everything new.
+        seeded_rows = conn.execute(
+            "SELECT name FROM schema_migrations ORDER BY name"
+        ).fetchall()
+        seeded_names = [r[0] for r in seeded_rows]
+        assert "001_init.sql" in seeded_names
+        assert "002_qwen3_embedding.sql" in seeded_names
+
+        # 001 and 002 must NOT be in the freshly-applied list — they were
+        # seeded, not run again.
+        assert "001_init.sql" not in applied
+        assert "002_qwen3_embedding.sql" not in applied
+        # Pending migrations (everything past 002) WERE applied.
+        all_files = sorted(p.name for p in migrations_dir().glob("*.sql"))
+        for name in all_files:
+            if name not in ("001_init.sql", "002_qwen3_embedding.sql"):
+                assert name in applied, f"expected {name} in applied list"
+
+        # Idempotent: re-running is a no-op.
+        rerun = run_migrations(conn)
+        assert rerun == []
+
+
 # --- Migration 002 regression tests -----------------------------------------
 # These verify the Voyage(1024) -> Qwen3(4096) embedding column swap. The
 # session-scoped conftest fixture already applies all migrations in order, so

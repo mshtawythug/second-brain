@@ -56,11 +56,105 @@ def migrations_dir() -> Path:
     return Path(__file__).parent.parent.parent / "migrations"
 
 
+_SCHEMA_MIGRATIONS_DDL = """
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    name        TEXT PRIMARY KEY,
+    applied_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+)
+"""
+
+
+def _table_exists(conn: psycopg.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name = %s",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _column_exists(conn: psycopg.Connection, table: str, column: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = %s AND column_name = %s",
+        (table, column),
+    ).fetchone()
+    return row is not None
+
+
+def _index_exists(conn: psycopg.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM pg_indexes WHERE indexname = %s",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _seed_applied_migrations(conn: psycopg.Connection) -> None:
+    """Detect and record migrations already applied to a pre-existing schema.
+
+    Run on first encounter with a DB that predates ``schema_migrations``. We
+    can't run prior migrations against a populated DB without crashing
+    (``CREATE TABLE`` collides; ``ALTER TABLE DROP COLUMN`` on 002 would lose
+    data), so we infer their applied state from schema artifacts and seed the
+    tracking table. Subsequent runs then skip them.
+
+    Detection is conservative: 002 is treated as applied whenever 001 is,
+    since 002 is the documented qwen3 backend swap that's been the only
+    supported path for any DB old enough to lack ``schema_migrations``.
+    """
+    if _table_exists(conn, "sources"):
+        conn.execute(
+            "INSERT INTO schema_migrations (name) VALUES (%s) "
+            "ON CONFLICT (name) DO NOTHING",
+            ("001_init.sql",),
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (name) VALUES (%s) "
+            "ON CONFLICT (name) DO NOTHING",
+            ("002_qwen3_embedding.sql",),
+        )
+    if _column_exists(conn, "documents", "kind"):
+        conn.execute(
+            "INSERT INTO schema_migrations (name) VALUES (%s) "
+            "ON CONFLICT (name) DO NOTHING",
+            ("003_vault_model.sql",),
+        )
+    if _index_exists(conn, "documents_content_hash_ingested_idx"):
+        conn.execute(
+            "INSERT INTO schema_migrations (name) VALUES (%s) "
+            "ON CONFLICT (name) DO NOTHING",
+            ("004_relax_content_hash_uniqueness.sql",),
+        )
+
+
 def run_migrations(conn: psycopg.Connection) -> list[str]:
-    """Apply every .sql file in migrations/ in name order. Returns the list applied."""
+    """Apply pending migrations in name order. Returns the list newly applied.
+
+    Tracks applied migrations in the ``schema_migrations`` table so each .sql
+    file runs at most once. On first run against a pre-existing schema (no
+    ``schema_migrations`` table yet), seeds the table from schema state via
+    :func:`_seed_applied_migrations` so the prior CREATE TABLE / ALTER COLUMN
+    statements aren't re-attempted.
+    """
+    conn.execute(_SCHEMA_MIGRATIONS_DDL)
+    seeded_row = conn.execute("SELECT count(*) FROM schema_migrations").fetchone()
+    assert seeded_row is not None  # count(*) always yields one row
+    if int(seeded_row[0]) == 0:
+        _seed_applied_migrations(conn)
+
+    rows = conn.execute("SELECT name FROM schema_migrations").fetchall()
+    applied_names = {str(r[0]) for r in rows}
+
     applied: list[str] = []
     for sql_file in sorted(migrations_dir().glob("*.sql")):
+        if sql_file.name in applied_names:
+            continue
         conn.execute(sql_file.read_text())
+        conn.execute(
+            "INSERT INTO schema_migrations (name) VALUES (%s)",
+            (sql_file.name,),
+        )
         applied.append(sql_file.name)
     return applied
 
