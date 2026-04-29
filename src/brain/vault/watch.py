@@ -235,12 +235,27 @@ def run_watcher(
         # Sentinel tells the worker its queue is now closed.
         state.jobs.put(None)
         worker_thread.join(timeout=10.0)
-        try:
-            worker_conn.close()
-        except psycopg.Error:
-            # Connection may already be closed (e.g. server-side timeout) —
-            # nothing to recover, just don't crash on shutdown.
-            logger.debug("vault watcher: worker connection already closed")
+        if worker_thread.is_alive():
+            # The worker is mid-statement (a sync_vault call, an embed
+            # request, etc.) past our 10s patience. Closing the
+            # connection from the main thread now would race against
+            # the in-flight statement and raise from the worker thread
+            # while we're trying to return cleanly. The thread is a
+            # daemon — it carries the orphaned connection on its back,
+            # and Postgres reaps the backend after its idle timeout.
+            logger.warning(
+                "vault watcher: worker thread did not exit within 10s — "
+                "leaking its connection to avoid a mid-statement close race"
+            )
+        else:
+            try:
+                worker_conn.close()
+            except psycopg.Error:
+                # Connection may already be closed (e.g. server-side timeout) —
+                # nothing to recover, just don't crash on shutdown.
+                logger.debug(
+                    "vault watcher: worker connection already closed"
+                )
 
     logger.info(
         "vault watcher: stopped after %d events (%d errors)",
@@ -423,7 +438,6 @@ def _schedule_debounced(
                 state,
                 _Job(action="upsert", abs_path=config.vault_path),
                 config=config,
-                bypass_filter=True,
             )
             return
         timer = threading.Timer(delay, _fire)
@@ -437,15 +451,8 @@ def _enqueue(
     job: _Job,
     *,
     config: WatchConfig,
-    bypass_filter: bool = False,
 ) -> None:
-    """Push a job onto the worker queue, after the optional test hook.
-
-    ``bypass_filter`` is True only for the synthetic full-sync job
-    enqueued on debounce-buffer overflow — that job uses the vault root
-    path which would otherwise be rejected by ``_filter_path``.
-    """
-    del bypass_filter  # currently informational; kept for future caller filtering
+    """Push a job onto the worker queue, after the optional test hook."""
     if config.on_event is not None:
         try:
             config.on_event(job.action, job.abs_path)

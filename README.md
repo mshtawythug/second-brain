@@ -251,6 +251,63 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 
 After saving the config and restarting Claude Desktop, the seven tools become callable in any chat — ask "search my brain for the Q1 review with person-x" and Claude Desktop calls `brain_search` directly. Server startup is ~0.5–1.5s; the cold start is the embedder warming up on the first search (Ollama loading the model into memory, or the Voyage SDK initializing). Logs go to stderr and are surfaced by Claude Desktop if a tool call fails.
 
+## Wiki rendering (Quartz)
+
+The vault is plain Markdown plus `[[wiki-links]]` plus YAML frontmatter — readable in any editor. When you want a polished wiki view of the vault (graph view, backlinks panel, full-text search, dark mode), `brain vault render` shells out to [Quartz](https://quartz.jzhao.xyz/), a static-site generator built specifically for Obsidian-style vaults. Brain orchestrates Quartz; it doesn't bundle it.
+
+### One-time setup
+
+Quartz is a Node.js project, so this assumes Node 18+ is on your PATH. `brain doctor` prints a `quartz/npx` line (`OK` / `not installed`) so you can tell at a glance whether you're set up.
+
+```bash
+# 1. Scaffold a Quartz workspace inside your vault. The default brain
+#    layout puts it at <vault>/.quartz/, which `brain vault render`
+#    looks for automatically (override with --quartz-dir if you want it
+#    elsewhere). Pick the "empty" or "quickstart" starter when prompted.
+cd ~/brain-vault
+npx quartz create
+
+# 2. Drop in the brain-tuned config. The sample at the brain repo root
+#    has the right plugin set for vault notes (graph view, Obsidian
+#    flavored markdown, ignore patterns for _templates / _attachments).
+cp ~/workspace/second-brain/quartz.config.ts .quartz/quartz.config.ts
+```
+
+### Render
+
+```bash
+brain vault render
+# → rendered to /…/dist (open dist/index.html or serve with `python -m http.server` from there)
+```
+
+Flags:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--to PATH` | `./dist` | Where to write the rendered site. Must stay under the cwd (no `..` traversal). |
+| `--vault PATH` | `cfg.vault_path` | Render a different vault than the configured one. |
+| `--quartz-dir PATH` | `<vault>/.quartz` | Point at a Quartz workspace elsewhere on disk. |
+| `--no-build` | off | Verify the Quartz workspace is wired up correctly without running the build. |
+
+The build inherits stdout/stderr so you see Quartz's progress live. Builds longer than 5 minutes are killed (assume your config is wedged); if you hit that, check `quartz.config.ts` for a runaway plugin.
+
+### Serve locally
+
+```bash
+python -m http.server --directory dist 8080
+open http://localhost:8080
+```
+
+Backlinks, graph view, and full-text search all work out of the box — that's Quartz's job, not brain's.
+
+### Deploy (optional)
+
+`dist/` is plain HTML/CSS/JS — drop it on GitHub Pages, Netlify, S3, Cloudflare Pages, or anywhere else. Quartz's docs cover the deployment recipes; brain doesn't take a position. Note that the default config at the brain repo root has analytics turned off and `baseUrl: "localhost:8080"`; flip both before publishing the site somewhere public.
+
+### When Quartz isn't a fit
+
+If Quartz drifts incompatibly, gets archived, or you just want a different look: the vault format (Markdown + frontmatter + `[[wiki-links]]`) is generic enough that any Obsidian-aware renderer (MkDocs Material with the right plugins, Hugo with an Obsidian theme, your own exporter) can replace it without touching the vault folder. Brain doesn't lock you in.
+
 ## Architecture
 
 See [`docs/specs/2026-04-24-second-brain-design.md`](docs/specs/2026-04-24-second-brain-design.md).

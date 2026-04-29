@@ -1,6 +1,7 @@
 """brain — second brain CLI."""
 import json as _json  # aliased — `json` conflicts with the --json output flag name
 import shutil
+import subprocess
 import sys
 import uuid
 from datetime import date as date_cls
@@ -249,8 +250,63 @@ def doctor() -> None:
     else:
         typer.echo("gws CLI         missing — Gmail ingestion disabled")
 
+    _check_npx()
+
     if failures:
         raise typer.Exit(code=1)
+
+
+def _check_npx() -> None:
+    """Doctor sub-check: probe ``npx`` for the Quartz integration.
+
+    Soft check — Quartz is optional; missing npx is a warning, never a
+    failure. We only print one line either way:
+
+    - ``quartz/npx       OK (npx 10.x.x at /path/to/npx)`` — present.
+    - ``quartz/npx       not installed`` — absent.
+
+    Treats every error path as "not installed": missing on PATH,
+    timeout, non-zero exit, or unparseable stdout. Doctor never fails
+    on Quartz absence — `brain vault render` is the only command that
+    needs it and it surfaces its own setup errors when invoked.
+    """
+    npx_path = shutil.which("npx")
+    if npx_path is None:
+        typer.secho(
+            "quartz/npx      not installed — `brain vault render` will fail; "
+            "install Node.js if you want HTML rendering",
+            fg="yellow",
+        )
+        return
+    try:
+        completed = subprocess.run(  # noqa: S603 — list-form args, no shell
+            [npx_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        # Daemon hung, npx not executable, etc. Treat as "not
+        # installed" — we don't want a flaky probe to red-flag doctor.
+        typer.secho(
+            "quartz/npx      not installed — `brain vault render` will fail; "
+            "install Node.js if you want HTML rendering",
+            fg="yellow",
+        )
+        return
+    if completed.returncode != 0:
+        typer.secho(
+            "quartz/npx      not installed — `brain vault render` will fail; "
+            "install Node.js if you want HTML rendering",
+            fg="yellow",
+        )
+        return
+    version = completed.stdout.strip() or "?"
+    typer.echo(
+        f"quartz/npx      OK (npx {version} at {npx_path}) — "
+        "`brain vault render` available"
+    )
 
 
 @app.command()
@@ -1299,6 +1355,229 @@ def vault_sync(
         typer.echo(f"{verb} ids to {report.id_assigned} {noun}")
     for path, reason in report.errors:
         typer.secho(f"  error: {path}: {reason}", fg="red", err=True)
+
+
+# ---------------------------------------------------------------------------
+# Quartz render — `brain vault render`.
+#
+# Thin wrapper around `npx quartz build`. Quartz is purpose-built for
+# Obsidian-style vaults; we orchestrate it rather than reinventing
+# backlinks / graph view / search in Python. The user installs Quartz
+# themselves via `npx quartz create` (one-time, per vault); this
+# command just shells out to the binary.
+# ---------------------------------------------------------------------------
+
+
+# Hard ceiling on the build subprocess. Quartz on a small vault runs in
+# seconds; on a 10K-note vault still well under a minute. Five minutes
+# is the "your config is broken" threshold — past that we kill the
+# process so a runaway plugin can't lock the user's terminal forever.
+_QUARTZ_BUILD_TIMEOUT_S = 300
+
+
+def _resolve_render_to(to: Path, cwd: Path) -> Path:
+    """Reject `--to` paths that escape the cwd via `..` traversal.
+
+    Mirrors the path-traversal guard `_assert_within_vault` applies to
+    `--folder` in the authoring commands. Relative paths are
+    interpreted against ``cwd`` (so ``--to dist`` lands at
+    ``<cwd>/dist``); absolute paths are honored verbatim. Either way
+    the resolved output directory must live under ``cwd`` — an
+    explicit ``--to ../escape`` or absolute path that points elsewhere
+    is rejected.
+    """
+    expanded = to.expanduser()
+    cwd_resolved = cwd.resolve()
+    # Resolve relative paths against the supplied cwd, NOT the process
+    # cwd — tests pass ``tmp_path / "cwd"`` here even though the actual
+    # process cwd is something else. Absolute paths resolve as-is.
+    resolved = (
+        expanded.resolve()
+        if expanded.is_absolute()
+        else (cwd_resolved / expanded).resolve()
+    )
+    try:
+        resolved.relative_to(cwd_resolved)
+    except ValueError as e:
+        raise typer.BadParameter(
+            f"--to must stay within the current working directory; "
+            f"got a path that resolves outside {cwd_resolved}",
+            param_hint="--to",
+        ) from e
+    return resolved
+
+
+def _vault_has_markdown(vault_path: Path) -> bool:
+    """True iff the vault has at least one `.md` file anywhere."""
+    return any(p.is_file() for p in vault_path.rglob("*.md"))
+
+
+def _check_quartz_workspace(quartz_dir: Path) -> None:
+    """Verify the Quartz workspace exists with the files Quartz expects.
+
+    A well-formed `npx quartz create`-scaffolded directory always has
+    `package.json` (Quartz's own package metadata) and `quartz.config.ts`
+    (the user-editable config). Their absence is the single most common
+    setup failure, and the error message has to walk the user back
+    through the one-time setup — anything less and they get a confusing
+    npx stack trace.
+    """
+    if not quartz_dir.is_dir():
+        # Print the multi-line setup hint to stderr ourselves before
+        # raising — typer's BadParameter wraps long messages inside a
+        # box, which mangles them; a plain stderr write keeps the
+        # `npx quartz create` string contiguous so users (and tests)
+        # can grep it.
+        typer.secho(
+            f"Quartz workspace not found at {quartz_dir}.\n"
+            f"  Run `npx quartz create` in your vault, then re-run.\n"
+            f"  A sample config lives at the brain repo root: "
+            f"`quartz.config.ts`.",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    missing = [
+        name
+        for name in ("package.json", "quartz.config.ts")
+        if not (quartz_dir / name).is_file()
+    ]
+    if missing:
+        typer.secho(
+            f"Quartz workspace at {quartz_dir} is missing: "
+            f"{', '.join(missing)}.\n"
+            f"  Run `npx quartz create` to scaffold a fresh workspace, "
+            f"then copy the sample `quartz.config.ts` from the brain "
+            f"repo root if needed.",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+
+@vault_app.command("render")
+def vault_render(
+    to: Path = typer.Option(
+        Path("./dist"),
+        "--to",
+        help="Output directory for the rendered HTML site (default: ./dist).",
+    ),
+    vault: Path | None = typer.Option(
+        None,
+        "--vault",
+        help="Override the configured vault path.",
+    ),
+    quartz_dir: Path | None = typer.Option(
+        None,
+        "--quartz-dir",
+        help="Quartz workspace directory (default: <vault>/.quartz).",
+    ),
+    no_build: bool = typer.Option(
+        False,
+        "--no-build",
+        help="Verify the Quartz workspace is set up without running the build.",
+    ),
+) -> None:
+    """Render the vault to a static HTML site via Quartz.
+
+    Shells out to `npx quartz build --directory <vault> --output <to>`.
+    The user is responsible for one-time Quartz setup (see the README's
+    "Wiki rendering (Quartz)" section): scaffold a workspace at
+    `<vault>/.quartz/` with `npx quartz create`, then copy the sample
+    `quartz.config.ts` from the brain repo root.
+
+    Honours stdout/stderr passthrough so the user sees Quartz's
+    progress live. Propagates a non-zero exit code from npx as exit 1.
+    """
+    cfg = Config.load()
+    target_vault = vault.expanduser() if vault is not None else cfg.vault_path
+    if not target_vault.is_dir():
+        typer.secho(
+            f"vault path is not a directory: {target_vault}",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if not _vault_has_markdown(target_vault):
+        # No .md files = nothing for Quartz to render. We don't try to
+        # be clever here (e.g. by emitting a "you might want to run
+        # `brain vault export` first" hint) — the user knows what they
+        # have; we just bail clearly.
+        typer.secho(
+            f"vault at {target_vault} has no .md files — nothing to render",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    output_dir = _resolve_render_to(to, Path.cwd())
+
+    workspace = (
+        quartz_dir.expanduser() if quartz_dir is not None else target_vault / ".quartz"
+    )
+    _check_quartz_workspace(workspace)
+
+    if no_build:
+        typer.echo(f"quartz workspace OK at {workspace}")
+        return
+
+    # `npx quartz build` reads its config from cwd, hence cwd=workspace.
+    # `--directory` points it at the vault content; `--output` controls
+    # where it writes the rendered site.
+    args = [
+        "npx",
+        "quartz",
+        "build",
+        "--directory",
+        str(target_vault),
+        "--output",
+        str(output_dir),
+    ]
+    typer.echo(f"running: {' '.join(args)} (cwd={workspace})")
+    try:
+        completed = subprocess.run(  # noqa: S603 — args are list-form, no shell
+            args,
+            cwd=str(workspace),
+            check=False,
+            timeout=_QUARTZ_BUILD_TIMEOUT_S,
+        )
+    except FileNotFoundError as e:
+        # `npx` itself isn't on PATH. `brain doctor` warns about this
+        # ahead of time, but we still surface a friendly error here in
+        # case the user skipped it.
+        typer.secho(
+            f"npx not found ({e}); install Node.js (https://nodejs.org/) "
+            "and re-run.",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1) from e
+    except subprocess.TimeoutExpired as e:
+        typer.secho(
+            f"quartz build exceeded {_QUARTZ_BUILD_TIMEOUT_S}s — likely a "
+            "misconfigured plugin or a runaway transformer; aborting.",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1) from e
+
+    if completed.returncode != 0:
+        # npx already streamed its error output to the inherited
+        # stderr; we just need to propagate the failure. Map any
+        # non-zero exit to 1 (the user shells will see "render
+        # failed", not the raw npx code).
+        typer.secho(
+            f"quartz build failed with exit code {completed.returncode}",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"rendered to {output_dir} "
+        f"(open {output_dir / 'index.html'} or serve with "
+        f"`python -m http.server` from there)"
+    )
 
 
 # ---------------------------------------------------------------------------

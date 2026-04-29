@@ -201,6 +201,9 @@ def test_doctor_reports_missing_gws(monkeypatch: pytest.MonkeyPatch) -> None:
     """When gws is not on PATH, doctor should note Gmail ingestion is disabled but still exit 0."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
 
+    # ``shutil.which`` is consulted for both ``gws`` and ``npx``; both
+    # missing keeps doctor at exit 0 (gws warns, npx soft-warns) and
+    # avoids accidentally matching the npx side of the new doctor flow.
     with patch("brain.cli.shutil.which", return_value=None), _patch_httpx_client(
         _ok_ollama_transport()
     ):
@@ -241,8 +244,16 @@ def test_doctor_reports_gws_found(monkeypatch: pytest.MonkeyPatch) -> None:
     """When gws IS on PATH, doctor should print the OK line for it."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
 
+    # ``shutil.which`` is called for gws AND npx — return a path for
+    # gws and ``None`` for npx so the new Quartz check soft-warns
+    # without trying to subprocess-run ``gws --version``.
+    def _which(binary: str) -> str | None:
+        if binary == "gws":
+            return "/usr/local/bin/gws"
+        return None
+
     with patch(
-        "brain.cli.shutil.which", return_value="/usr/local/bin/gws"
+        "brain.cli.shutil.which", side_effect=_which
     ), _patch_httpx_client(_ok_ollama_transport()):
         result = CliRunner().invoke(app, ["doctor"])
 

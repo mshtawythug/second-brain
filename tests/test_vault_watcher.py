@@ -577,13 +577,19 @@ def test_graceful_shutdown_drains_pending(
     assert kind == "ok"
 
 
-def test_signal_handlers_install_and_restore(
+def test_signal_handlers_are_restored_on_exit(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
 ) -> None:
-    """When ``install_signal_handlers=True``, SIGINT triggers shutdown.
+    """With ``install_signal_handlers=True``, the previous SIGINT handler
+    must be restored after the watcher exits.
 
-    We send the signal to our own process; the watcher must trap it and
-    return cleanly within a second.
+    We do NOT verify actual signal delivery here — pytest's main thread
+    owns Python's signal infrastructure and we cannot safely raise
+    SIGINT from a test thread. Instead we drive shutdown via the
+    ``stop_event`` (the same path the production handler uses) and
+    assert that ``signal.getsignal(SIGINT)`` afterwards is something
+    other than the watcher's private closure — i.e. the prior handler
+    was reinstalled.
     """
     import signal
 
@@ -1049,6 +1055,150 @@ def _start_watcher_with_signal_handlers(
     thread = threading.Thread(target=_target, daemon=True)
     thread.start()
     return thread, result_q
+
+
+def test_enqueue_signature_has_no_bypass_filter(
+    test_db: psycopg.Connection, fake_embedder: Any
+) -> None:
+    """Phase 5 carryover: ``_enqueue`` must not accept ``bypass_filter``.
+
+    The parameter was dead — its body started with ``del bypass_filter``
+    so passing it changed nothing. We removed it in Phase 6; this test
+    pins the new signature so a future refactor doesn't accidentally
+    re-introduce it.
+    """
+    import inspect
+
+    from brain.vault.watch import _enqueue
+
+    params = inspect.signature(_enqueue).parameters
+    assert "bypass_filter" not in params
+    # The expected surviving keyword-only param is ``config``.
+    assert "config" in params
+
+
+def test_worker_join_timeout_skips_close_when_alive(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+) -> None:
+    """Phase 5 carryover: don't close the worker connection when the
+    worker thread is still alive past the join timeout.
+
+    The race: ``worker_thread.join(timeout=10)`` returns after 10s; if
+    the worker is mid-statement, calling ``worker_conn.close()`` from
+    the main thread races against the in-flight statement and the
+    worker thread will raise from inside ``sync_one_file`` while we're
+    trying to return cleanly.
+
+    Fix verified here: when ``is_alive()`` is True after the join, we
+    skip the close + log a warning. The connection becomes the daemon
+    thread's responsibility; Postgres reaps it on idle timeout.
+
+    Strategy: replace ``brain.vault.watch.threading.Thread`` with a
+    factory that returns a real Thread for everything except the
+    watcher's worker thread (matched by name kwarg). For the worker
+    thread we return a fake whose ``start`` no-ops, ``join`` no-ops,
+    and ``is_alive`` returns True — so the watcher's shutdown path
+    runs the join-timeout branch deterministically without an actual
+    background worker.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    real_thread_cls = threading.Thread
+    fake_workers: list[_FakeAliveThread] = []
+
+    def _thread_factory(*args: Any, **kwargs: Any) -> Any:
+        if kwargs.get("name") == "brain-vault-watcher-worker":
+            fake = _FakeAliveThread()
+            fake_workers.append(fake)
+            return fake
+        return real_thread_cls(*args, **kwargs)
+
+    mocker.patch("brain.vault.watch.threading.Thread", _thread_factory)
+
+    # Spy on the worker connection's ``close`` so we can verify it
+    # wasn't invoked when the thread is still "alive".
+    closed: list[bool] = []
+    real_connect = __import__("brain.db", fromlist=["connect_raw"]).connect_raw
+    from tests.conftest import TEST_DATABASE_URL
+
+    call_n = {"n": 0}
+
+    def _conn_factory() -> Any:
+        call_n["n"] += 1
+        inner = real_connect(TEST_DATABASE_URL)
+        if call_n["n"] == 1:
+            # Startup connection — closed inside ``run_watcher``'s
+            # finally block before the worker even starts; we don't
+            # want that to count.
+            return inner
+        return _ConnProxy(inner, closed)
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, result_q = _start_watcher(
+        conn_factory=_conn_factory,
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+    assert len(fake_workers) == 1, "expected one fake worker thread to be created"
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+
+    # The connection's close() must NOT have been invoked — that's the
+    # point of the fix. The fake worker reports ``is_alive()`` True so
+    # we leak the connection rather than race against an in-flight
+    # statement.
+    assert closed == [], (
+        "worker connection was closed despite the worker thread still "
+        "being alive — the join-timeout race fix regressed"
+    )
+    kind, _ = result_q.get_nowait()
+    assert kind == "ok"
+
+
+class _FakeAliveThread:
+    """Stand-in for the watcher's worker thread.
+
+    ``start()`` is a no-op (we don't actually want a worker draining
+    the queue — this test is about the shutdown path), ``join()`` is a
+    no-op (so the watcher's shutdown doesn't block waiting for a
+    nonexistent worker), and ``is_alive()`` returns True forever (the
+    behavior the join-timeout race fix branches on).
+    """
+
+    def start(self) -> None:
+        return None
+
+    def join(self, timeout: float | None = None) -> None:
+        return None
+
+    def is_alive(self) -> bool:
+        return True
+
+
+class _ConnProxy:
+    """Lightweight wrapper that records close() calls without delegating.
+
+    We don't want the real connection actually closed (the test fixture
+    cleans it up), but we DO want to know whether the watcher tried to
+    close it from the main thread. Recording into an outer list keeps
+    the test simple.
+    """
+
+    def __init__(self, inner: Any, closed: list[bool]) -> None:
+        self._inner = inner
+        self._closed_log = closed
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def close(self) -> None:
+        self._closed_log.append(True)
+        self._inner.close()
 
 
 def test_run_watcher_handles_already_closed_connection(
