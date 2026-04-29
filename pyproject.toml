@@ -20,6 +20,7 @@ dependencies = [
   "mcp>=1.0,<2.0",
   "voyageai>=0.3",
   "pyyaml>=6.0",
+  "watchdog>=4.0",
 ]
 
 [project.optional-dependencies]
@@ -58,5 +59,5 @@ explicit_package_bases = true
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*"]
+module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*", "watchdog.*"]
 ignore_missing_imports = true

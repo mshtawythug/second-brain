@@ -14,7 +14,7 @@ import typer
 import yaml
 
 from .config import Config, ConfigError
-from .db import connect, ensure_embedding_column, run_migrations
+from .db import connect, connect_raw, ensure_embedding_column, run_migrations
 from .edit_session import (
     EditorAbortedError,
     EditorError,
@@ -70,6 +70,7 @@ from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.templates import list_template_names, render_template
+from .vault.watch import WatchConfig, run_watcher
 
 app = typer.Typer(
     name="brain",
@@ -1180,6 +1181,15 @@ def vault_sync(
         "--dry-run",
         help="Report planned changes without writing to DB or modifying files.",
     ),
+    watch: bool = typer.Option(
+        False,
+        "--watch",
+        "-w",
+        help=(
+            "Run as a daemon: do one initial sync, then watch the vault "
+            "for changes and incrementally re-sync until Ctrl-C."
+        ),
+    ),
 ) -> None:
     """Reconcile the vault folder into the DB.
 
@@ -1192,12 +1202,22 @@ def vault_sync(
     Default policy on missing files: WARN, not delete. Pass ``--prune`` to
     delete vault-tier rows whose files have vanished. Pass ``--dry-run`` to
     print the planned actions without writing anything (no id assignment,
-    no DB writes, no link materialization).
+    no DB writes, no link materialization). Pass ``--watch`` to run an
+    initial full sync and then keep watching for filesystem changes,
+    incrementally re-syncing affected files until SIGINT/SIGTERM.
 
     Exit codes:
     - 0 on success (even with warnings, errors, or unresolved links)
     - 2 if the vault path doesn't exist or isn't a directory
     """
+    if watch and dry_run:
+        # ``--watch`` is for live editing; ``--dry-run`` is for inspecting
+        # without writing — combining them serves no use case (the watcher
+        # would just spin forever skipping every event), so reject up front.
+        raise typer.BadParameter(
+            "--watch and --dry-run cannot be combined", param_hint="--watch"
+        )
+
     cfg = Config.load()
     target = vault.expanduser() if vault is not None else cfg.vault_path
     if not target.is_dir():
@@ -1209,6 +1229,46 @@ def vault_sync(
         raise typer.Exit(code=2)
 
     embedder = _build_embedder(cfg)
+
+    if watch:
+        # Long-running mode. The watcher owns its own connection lifecycle
+        # (it needs a fresh psycopg connection in its worker thread, not
+        # one borrowed from the CLI's `with connect(...)` block).
+        database_url = cfg.database_url
+        typer.echo(f"watching {target} (Ctrl-C to stop)")
+
+        def _conn_factory() -> psycopg.Connection[Any]:
+            # Use ``connect_raw`` from ``brain.db`` so pgvector adapter
+            # registration happens in the watcher's thread the same way
+            # it does for every other CLI command. The watcher owns the
+            # connection lifetime (closed inside ``run_watcher``).
+            return connect_raw(database_url)
+
+        report = run_watcher(
+            _conn_factory,
+            embedder=embedder,
+            config=WatchConfig(vault_path=target, prune=prune),
+        )
+        typer.echo(f"vault path:     {target}")
+        deletion_phrase = (
+            f"deleted {report.deleted}" if prune else f"warned {report.warned}"
+        )
+        typer.echo(
+            f"initial sync — created {report.created}, "
+            f"updated {report.updated}, "
+            f"skipped {report.skipped}, "
+            f"{deletion_phrase}, "
+            f"links_resolved {report.links_resolved}, "
+            f"links_unresolved {report.links_unresolved}, "
+            f"errors {len(report.errors)}"
+        )
+        if report.id_assigned:
+            noun = "file" if report.id_assigned == 1 else "files"
+            typer.echo(f"assigned ids to {report.id_assigned} {noun}")
+        for path, reason in report.errors:
+            typer.secho(f"  error: {path}: {reason}", fg="red", err=True)
+        return
+
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         report = sync_vault(

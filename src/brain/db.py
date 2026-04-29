@@ -10,6 +10,31 @@ from .errors import BrainError
 from .ingest import Embedder
 
 
+def connect_raw(database_url: str) -> psycopg.Connection:
+    """Open a connection with pgvector adapter registered.
+
+    Same semantics as :func:`connect` but without the context-manager
+    wrapper. Callers own the connection lifecycle: they MUST call
+    ``conn.close()`` themselves. Used by the long-running watcher, which
+    holds a connection across many sync calls in a worker thread; the
+    `with` block of :func:`connect` would auto-close it after the first
+    use.
+    """
+    conn = psycopg.connect(database_url, connect_timeout=10)
+    # The vector extension may not exist yet during the initial `brain init`
+    # bootstrap; check pg_type before registering so we don't rely on
+    # exception-as-control-flow. The SELECT starts an implicit transaction
+    # under psycopg3's default autocommit=False — roll it back so the
+    # caller can still flip autocommit on if needed.
+    row = conn.execute(
+        "SELECT 1 FROM pg_type WHERE typname = 'vector'"
+    ).fetchone()
+    conn.rollback()
+    if row is not None:
+        register_vector(conn)
+    return conn
+
+
 @contextmanager
 def connect(database_url: str) -> Iterator[psycopg.Connection]:
     """Open a connection with pgvector adapter registered.
@@ -19,19 +44,11 @@ def connect(database_url: str) -> Iterator[psycopg.Connection]:
     the adapter registration is skipped; callers that need vector support
     should open a new connection after `run_migrations`.
     """
-    with psycopg.connect(database_url, connect_timeout=10) as conn:
-        # The vector extension may not exist yet during the initial `brain init`
-        # bootstrap; check pg_type before registering so we don't rely on
-        # exception-as-control-flow. The SELECT starts an implicit transaction
-        # under psycopg3's default autocommit=False — roll it back so the
-        # caller can still flip autocommit on if needed.
-        row = conn.execute(
-            "SELECT 1 FROM pg_type WHERE typname = 'vector'"
-        ).fetchone()
-        conn.rollback()
-        if row is not None:
-            register_vector(conn)
+    conn = connect_raw(database_url)
+    try:
         yield conn
+    finally:
+        conn.close()
 
 
 def migrations_dir() -> Path:
