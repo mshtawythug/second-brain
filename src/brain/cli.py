@@ -59,6 +59,13 @@ from .search import hybrid_search
 from .vault import init_vault
 from .vault.export import export_vault
 from .vault.frontmatter import dump_frontmatter, parse_frontmatter
+from .vault.graph import (
+    backlinks_for,
+    graph_data,
+    outgoing_links_for,
+)
+from .vault.graph import orphans as _orphans_query
+from .vault.graph_format import to_dot, to_json, to_mermaid
 from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
@@ -1703,3 +1710,234 @@ def note_rename(
         for path, reason in report.sync_report.errors:
             typer.secho(f"sync error: {path}: {reason}", fg="red", err=True)
         raise typer.Exit(code=1)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — Link graph queries: backlinks / links / orphans / graph.
+# ---------------------------------------------------------------------------
+
+
+_GRAPH_FORMATTERS: dict[str, Any] = {
+    "json": to_json,
+    "dot": to_dot,
+    "mermaid": to_mermaid,
+}
+
+
+@app.command()
+def backlinks(
+    id: str = typer.Argument(..., help="Document id (or 6+ char prefix)."),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List documents that link TO this one.
+
+    Resolves the id prefix first (same semantics as ``brain show``).
+    Default human output is one row per backlink: ``<short-id> <kind>
+    <title>  [[link-text]]``. ``--json`` emits an array of
+    ``{src_document_id, src_title, src_kind, link_text, link_kind}``
+    rows in the same order.
+
+    Empty result is exit-code 0 — "no backlinks" is a valid answer.
+    """
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        doc_id = _resolve_id(conn, id)
+        rows = backlinks_for(conn, doc_id)
+    if json_output:
+        emit_json(
+            [
+                {
+                    "src_document_id": r.src_document_id,
+                    "src_title": r.src_title,
+                    "src_kind": r.src_kind,
+                    "link_text": r.link_text,
+                    "link_kind": r.link_kind,
+                }
+                for r in rows
+            ]
+        )
+        return
+    if not rows:
+        typer.echo("(no backlinks)")
+        return
+    for r in rows:
+        typer.echo(
+            f"{r.src_document_id[:8]}  {r.src_kind:<8}  {r.src_title}  "
+            f"{r.link_text}"
+        )
+
+
+@app.command()
+def links(
+    id: str = typer.Argument(..., help="Document id (or 6+ char prefix)."),
+    json_output: bool = typer.Option(False, "--json"),
+    unresolved: bool = typer.Option(
+        False,
+        "--unresolved",
+        help="Include dangling [[refs]] that don't point at any document yet.",
+    ),
+) -> None:
+    """List documents this one links TO.
+
+    Default output mirrors ``brain backlinks`` but for outgoing edges:
+    ``<short-id> <kind> <title>  [[link-text]]``. With ``--unresolved``,
+    dangling refs are appended after resolved rows with ``--------  --
+    (unresolved)`` placeholders.
+
+    ``--json`` emits ``{dst_document_id, dst_title, dst_kind, link_text,
+    link_kind, resolved}`` rows; unresolved rows have null for the dst
+    fields and ``"resolved": false``.
+    """
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        doc_id = _resolve_id(conn, id)
+        rows = outgoing_links_for(
+            conn, doc_id, include_unresolved=unresolved
+        )
+    if json_output:
+        emit_json(
+            [
+                {
+                    "dst_document_id": r.dst_document_id,
+                    "dst_title": r.dst_title,
+                    "dst_kind": r.dst_kind,
+                    "link_text": r.link_text,
+                    "link_kind": r.link_kind,
+                    "resolved": r.resolved,
+                }
+                for r in rows
+            ]
+        )
+        return
+    if not rows:
+        typer.echo("(no outgoing links)")
+        return
+    for r in rows:
+        if r.resolved:
+            assert r.dst_document_id is not None  # resolved => fields set
+            assert r.dst_title is not None
+            assert r.dst_kind is not None
+            typer.echo(
+                f"{r.dst_document_id[:8]}  {r.dst_kind:<8}  {r.dst_title}  "
+                f"{r.link_text}"
+            )
+        else:
+            typer.echo(
+                f"--------  --        (unresolved)  {r.link_text}"
+            )
+
+
+@app.command(name="orphans")
+def orphans_cmd(
+    all_tiers: bool = typer.Option(
+        False,
+        "--all",
+        help="Include ingested-tier orphans (default: vault-tier only).",
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List documents with zero incoming AND zero outgoing links.
+
+    Defaults to vault-tier only — ingested-tier orphans (raw Krisp /
+    Slack / Gmail mirrors with no ``[[refs]]``) are usually noise; pass
+    ``--all`` to include them.
+
+    Output is one line per orphan: ``<short-id> <title>``. ``--json``
+    emits ``{document_id, title, kind}`` rows.
+
+    Empty result is exit-code 0 — "everything is connected" is a valid
+    (and ideal) answer.
+    """
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        rows = _orphans_query(conn, vault_only=not all_tiers)
+    if json_output:
+        emit_json(
+            [
+                {"document_id": n.document_id, "title": n.title, "kind": n.kind}
+                for n in rows
+            ]
+        )
+        return
+    if not rows:
+        typer.echo("(no orphans)")
+        return
+    for n in rows:
+        typer.echo(f"{n.document_id[:8]}  {n.title}")
+
+
+@app.command()
+def graph(
+    format: str = typer.Option(
+        "json",
+        "--format",
+        help="Output format: json, dot, or mermaid.",
+    ),
+    root: str | None = typer.Option(
+        None,
+        "--root",
+        help="Document id (or 6+ char prefix) to focus on; BFS outward from here.",
+    ),
+    depth: int | None = typer.Option(
+        None,
+        "--depth",
+        help="BFS depth from --root (only with --root). Default: unlimited.",
+    ),
+    include_ingested: bool = typer.Option(
+        False,
+        "--include-ingested",
+        help="Include ingested-tier nodes (default: vault-tier only).",
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Write output to PATH instead of stdout.",
+    ),
+) -> None:
+    """Emit the link graph in JSON / Graphviz DOT / Mermaid format.
+
+    Defaults to vault-tier only — pass ``--include-ingested`` to include
+    every linked document regardless of tier. With ``--root`` (+ optional
+    ``--depth``), the output is restricted to a BFS frontier centered on
+    that document — a focused subgraph for visualization.
+
+    Empty graphs emit valid syntax (``{"nodes": [], "edges": []}`` /
+    ``digraph G {}`` / ``graph TD\\n``). Exit code is 0 in every
+    successful case, including empty results.
+
+    Pipe DOT into ``dot -Tsvg -o graph.svg``; paste Mermaid into any
+    Mermaid renderer.
+    """
+    if format not in _GRAPH_FORMATTERS:
+        raise typer.BadParameter(
+            f"--format must be one of: {', '.join(sorted(_GRAPH_FORMATTERS))}"
+        )
+    if depth is not None and root is None:
+        raise typer.BadParameter("--depth requires --root")
+    if depth is not None and depth < 0:
+        raise typer.BadParameter("--depth must be >= 0")
+
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        root_id: str | None = None
+        if root is not None:
+            root_id = _resolve_id(conn, root)
+        snapshot = graph_data(
+            conn,
+            root=root_id,
+            depth=depth,
+            include_ingested=include_ingested,
+        )
+
+    formatter = _GRAPH_FORMATTERS[format]
+    rendered: str = formatter(snapshot)
+    if out is not None:
+        out.write_text(rendered, encoding="utf-8")
+        typer.echo(f"wrote {out} ({len(rendered)} bytes)")
+        return
+    # Use ``typer.echo`` with ``nl=False`` so the formatters' own trailing
+    # newlines (when present) aren't doubled. JSON has no trailing newline;
+    # DOT / Mermaid both end with one — the formatters own that contract.
+    typer.echo(rendered, nl=False)
+    if not rendered.endswith("\n"):
+        typer.echo("")
