@@ -160,6 +160,109 @@ def sync_vault(
     return report
 
 
+def sync_one_file(
+    conn: psycopg.Connection[Any],
+    *,
+    embedder: Embedder,
+    vault_path: Path,
+    file_path: Path,
+) -> SyncReport:
+    """Sync exactly one ``.md`` file under ``vault_path``.
+
+    Used by the authoring commands (``brain note new``, ``brain daily``,
+    ``brain edit`` for vault-tier docs) so we re-index just the file the user
+    touched instead of walking the entire vault. The contract matches
+    :func:`sync_vault` for the fields it touches:
+
+    - The file is classified the same way as the full walker (path under
+      ``_ingested/`` → ``kind='ingested'``; anywhere else → ``kind='vault'``;
+      ``_templates/`` and ``_attachments/`` are explicitly out of bounds —
+      passing one returns an error in ``report.errors``).
+    - Frontmatter id is auto-assigned + written back to disk if missing
+      (same recovery semantics as a full sync).
+    - Wiki-links from this file are re-materialized; targets that exist
+      anywhere in the DB resolve, others land in ``unresolved_links``.
+    - The link-retry pass runs scoped to this single document so a body
+      that just gained ``[[Foo]]`` (with Foo.md already in the DB from a
+      prior sync) ends up resolved.
+
+    What's intentionally NOT re-checked: the rest of the vault. If another
+    file's ``[[<this title>]]`` was previously unresolved, a full
+    ``brain vault sync`` is still required to convert that dangling ref —
+    otherwise we'd have to walk every file on every authoring action, which
+    defeats the point of the helper. The follow-up sync is cheap (body-hash
+    short-circuits every unchanged file).
+
+    ``file_path`` may be absolute or relative to ``vault_path``; we
+    normalize before classifying. A path outside ``vault_path``, a non-file,
+    or a non-``.md`` file each surfaces in ``report.errors`` rather than
+    raising — the caller is the CLI and a clean error message beats a
+    traceback.
+    """
+    report = SyncReport()
+    if not vault_path.is_dir():
+        report.errors.append(
+            (vault_path, "vault path does not exist or is not a directory")
+        )
+        return report
+
+    abs_path = (
+        file_path
+        if file_path.is_absolute()
+        else (vault_path / file_path)
+    ).resolve()
+    try:
+        relative = abs_path.relative_to(vault_path.resolve())
+    except ValueError:
+        report.errors.append(
+            (abs_path, "file is not under the vault path")
+        )
+        return report
+
+    if abs_path.suffix.lower() != ".md":
+        report.errors.append((abs_path, "not a .md file"))
+        return report
+    if not abs_path.is_file():
+        report.errors.append((abs_path, "file does not exist"))
+        return report
+
+    parts = relative.parts
+    if not parts:
+        report.errors.append((abs_path, "empty relative path"))
+        return report
+    first = parts[0]
+    if first in {_TEMPLATE_DIR_NAME, _ATTACHMENTS_DIR_NAME}:
+        report.errors.append(
+            (abs_path, f"path is under {first}/ — not a syncable note")
+        )
+        return report
+
+    classification = "ingested" if first == _INGESTED_DIR_NAME else "vault"
+    walked = _WalkedFile(
+        abs_path=abs_path,
+        relative_posix=relative.as_posix(),
+        classification=classification,
+    )
+
+    try:
+        doc_id = _sync_one(
+            conn,
+            embedder=embedder,
+            vault_path=vault_path,
+            walked=walked,
+            report=report,
+            dry_run=False,
+        )
+    except _SyncError as e:
+        report.errors.append((walked.abs_path, str(e)))
+        return report
+
+    if doc_id is not None:
+        _retry_unresolved(conn, {doc_id}, report)
+
+    return report
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers.
 # ---------------------------------------------------------------------------

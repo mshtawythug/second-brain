@@ -2,12 +2,16 @@
 import json as _json  # aliased — `json` conflicts with the --json output flag name
 import shutil
 import sys
+import uuid
+from datetime import date as date_cls
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import httpx
 import psycopg
 import typer
+import yaml
 
 from .config import Config, ConfigError
 from .db import connect, ensure_embedding_column, run_migrations
@@ -19,6 +23,8 @@ from .edit_session import (
     build_payload,
     run_editor_session,
 )
+from .editor import EditorError as RawEditorError
+from .editor import run_editor_on
 from .embeddings import make_embedder
 from .errors import (
     IdPrefixAmbiguous,
@@ -52,7 +58,11 @@ from .queries import (
 from .search import hybrid_search
 from .vault import init_vault
 from .vault.export import export_vault
-from .vault.sync import sync_vault
+from .vault.frontmatter import dump_frontmatter, parse_frontmatter
+from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
+from .vault.slug import slugify
+from .vault.sync import SyncReport, sync_one_file, sync_vault
+from .vault.templates import list_template_names, render_template
 
 app = typer.Typer(
     name="brain",
@@ -66,6 +76,13 @@ vault_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(vault_app, name="vault")
+
+note_app = typer.Typer(
+    name="note",
+    help="Authoring commands for vault notes.",
+    no_args_is_help=True,
+)
+app.add_typer(note_app, name="note")
 
 
 @app.callback()
@@ -839,6 +856,78 @@ def _edit_via_editor(cfg: Config, doc_id: str) -> int:
     return 0
 
 
+def _document_tier(
+    conn: psycopg.Connection[Any], doc_id: str
+) -> tuple[str, str | None]:
+    """Return ``(kind, vault_path)`` for ``doc_id``.
+
+    Wrapper kept narrow so the ``brain edit`` and (future) ``brain rm``
+    branches that need to gate on document tier share one query and the
+    same NULL-handling. Caller already validated the id via
+    :func:`_resolve_id`, so the row must exist.
+    """
+    row = conn.execute(
+        "SELECT kind, vault_path FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert row is not None  # _resolve_id confirmed the doc exists
+    return str(row[0]), (str(row[1]) if row[1] is not None else None)
+
+
+def _edit_vault_file(cfg: Config, doc_id: str, vault_path: str) -> int:
+    """Vault-tier edit: open the file in $EDITOR, sync on exit.
+
+    Returns the desired CLI exit code. Mirrors the JSON-header flow's
+    drop-the-DB-connection-during-editor pattern: the connection is closed
+    before the editor blocks (could be hours) and reopened only for the
+    post-exit sync.
+
+    Editor non-zero exit aborts; the file is left exactly as the user wrote
+    it. The next ``brain vault sync`` (or another ``brain edit``) will pick
+    up the in-progress changes.
+    """
+    file_path = (cfg.vault_path / vault_path).resolve()
+    if not file_path.is_file():
+        typer.secho(
+            f"vault file is missing on disk: {file_path}\n"
+            f"run `brain vault sync --prune` to clean up the DB row, "
+            f"or restore the file before editing.",
+            fg="red",
+            err=True,
+        )
+        return 1
+
+    try:
+        rc = run_editor_on(file_path)
+    except RawEditorError as e:
+        typer.secho(str(e), fg="red", err=True)
+        return 1
+    if rc != 0:
+        typer.secho("aborted (editor exited non-zero)", fg="red", err=True)
+        return 1
+
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        report = sync_one_file(
+            conn,
+            embedder=embedder,
+            vault_path=cfg.vault_path,
+            file_path=file_path,
+        )
+    if report.errors:
+        for path, reason in report.errors:
+            typer.secho(f"sync error: {path}: {reason}", fg="red", err=True)
+        return 1
+    label = doc_id[:8]
+    if report.created:
+        typer.echo(f"updated {label} (created)")
+    elif report.updated:
+        typer.echo(f"updated {label} (synced)")
+    else:
+        typer.echo(f"updated {label} (no changes)")
+    return 0
+
+
 @app.command()
 def edit(
     id: str = typer.Argument(...),
@@ -871,10 +960,17 @@ def edit(
 ) -> None:
     """Update title / content_type / metadata / body of an existing document.
 
-    With no flags, opens an editor on a JSON-header + body payload that lets
-    you edit every field at once. With flags, applies a targeted update —
-    body changes re-chunk + re-embed; metadata/title/type changes are a
-    single SQL UPDATE.
+    Behavior is tier-aware:
+
+    - **Vault-tier docs** (``kind='vault'``, file-backed) — the file IS the
+      source of truth. With no flags, ``$EDITOR`` opens the underlying
+      ``.md`` directly (no JSON header) and a single-file sync runs on
+      editor exit. Mutating flags (``--title``, ``--content-type``,
+      ``--metadata``, ``--content-file``, ``--content-stdin``) are
+      rejected — edit the file directly, those fields all live in
+      frontmatter.
+    - **Ingested-tier docs** — the existing JSON-header + body editor flow
+      runs, with the same flag-mode targeted updates as before.
     """
     # Reject `--replace-metadata` without `--metadata` regardless of which
     # mode we're about to enter — silently ignoring it lets a user think the
@@ -882,16 +978,36 @@ def edit(
     if replace_metadata and metadata is None:
         raise typer.BadParameter("--replace-metadata requires --metadata")
 
-    if not _has_mutating_edit_flag(
+    has_mutating_flag = _has_mutating_edit_flag(
         title=title,
         content_type=content_type,
         metadata=metadata,
         content_file=content_file,
         content_stdin=content_stdin,
-    ):
-        cfg = Config.load()
-        with connect(cfg.database_url) as conn:
-            doc_id = _resolve_id(conn, id)
+    )
+
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        doc_id = _resolve_id(conn, id)
+        kind, vault_path_value = _document_tier(conn, doc_id)
+
+    # Vault-tier branch: the file is authoritative; flag-mode edits are
+    # rejected (no JSON-header round-trip), no-flag mode opens the file.
+    if kind == "vault" and vault_path_value:
+        if has_mutating_flag:
+            typer.secho(
+                f"vault-tier docs are file-backed; "
+                f"edit `{vault_path_value}` directly with your editor",
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        rc = _edit_vault_file(cfg, doc_id, vault_path_value)
+        if rc != 0:
+            raise typer.Exit(code=rc)
+        return
+
+    if not has_mutating_flag:
         rc = _edit_via_editor(cfg, doc_id)
         if rc != 0:
             raise typer.Exit(code=rc)
@@ -926,11 +1042,9 @@ def edit(
         typer.secho("content is empty", fg="red", err=True)
         raise typer.Exit(code=1)
 
-    cfg = Config.load()
     embedder: Any = _build_embedder(cfg) if new_content is not None else None
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
-        doc_id = _resolve_id(conn, id)
         try:
             result = update_document(
                 conn,
@@ -1118,3 +1232,474 @@ def vault_sync(
         typer.echo(f"{verb} ids to {report.id_assigned} {noun}")
     for path, reason in report.errors:
         typer.secho(f"  error: {path}: {reason}", fg="red", err=True)
+
+
+# ---------------------------------------------------------------------------
+# Authoring commands: brain note new / brain note rename / brain daily.
+# ---------------------------------------------------------------------------
+
+
+def _resolve_vault(override: Path | None, cfg: Config) -> Path:
+    """Pick the vault path: ``--vault`` flag wins, otherwise ``cfg.vault_path``.
+
+    Centralised so every authoring command resolves identically and so
+    ``--vault`` semantics stay consistent (expanduser applied; no other
+    normalization).
+    """
+    return override.expanduser() if override is not None else cfg.vault_path
+
+
+def _assert_within_vault(target: Path, vault_path: Path, *, label: str) -> None:
+    """Reject ``target`` if it resolves outside ``vault_path``.
+
+    Centralized so every authoring command applies the same path-traversal
+    guard (``--folder ../../etc`` and similar). ``label`` is interpolated
+    into the error message so the user knows which option to fix
+    (``--folder``, ``--date``, etc.).
+
+    Resolves both sides before comparing — the vault root is followed
+    through symlinks too, so a user who symlinks their vault to an iCloud
+    path still gets correct rejection (no false positives) when the
+    resolved target stays inside the resolved vault root.
+    """
+    try:
+        target.resolve().relative_to(vault_path.resolve())
+    except ValueError as e:
+        raise typer.BadParameter(
+            f"{label} must stay within the vault; "
+            f"got a path that resolves outside {vault_path}"
+        ) from e
+
+
+def _ensure_template(vault_path: Path, name: str) -> Path:
+    """Resolve ``<vault>/_templates/<name>.md`` or raise BadParameter.
+
+    The error message tells the user exactly how to recover — either run
+    ``brain vault init`` (no ``_templates/`` at all) or pick a template
+    name that exists.
+    """
+    templates_dir = vault_path / "_templates"
+    if not templates_dir.is_dir():
+        raise typer.BadParameter(
+            f"vault has no _templates/ directory at {templates_dir} — "
+            "run `brain vault init` first"
+        )
+    target = templates_dir / f"{name}.md"
+    if not target.is_file():
+        available = ", ".join(list_template_names(vault_path)) or "(none)"
+        raise typer.BadParameter(
+            f"template '{name}' not found at {target}; available: {available}"
+        )
+    return target
+
+
+def _build_note_text(
+    template_text: str,
+    *,
+    title: str,
+    tags: list[str],
+    today: date_cls,
+    now: datetime,
+) -> tuple[str, str]:
+    """Render a template + force the brain-canonical frontmatter fields.
+
+    Returns ``(file_text, document_id)``. The template's body is preserved
+    verbatim; only frontmatter is rewritten so the brain-managed fields
+    (``id``, ``title``, ``created``, ``updated``, ``kind``, ``tags``) are
+    authoritative regardless of what the template author wrote.
+
+    A user-template ``title:`` line is intentionally ignored — the CLI's
+    ``<title>`` argument wins. That's the contract: if you wanted the
+    template to control title, you'd be using a daily template (which
+    derives title from the date passed in via ``vars``).
+    """
+    rendered = render_template(
+        template_text,
+        {
+            "title": title,
+            "date": today.isoformat(),
+            "datetime": now.isoformat(timespec="seconds"),
+            "slug": slugify(title),
+        },
+    )
+
+    # Try to parse the rendered template's frontmatter; if it's malformed or
+    # missing entirely, build a fresh header. Either way the brain-canonical
+    # fields are forced — the template's body is what we preserve.
+    try:
+        existing_fields, body = parse_frontmatter(rendered)
+    except (ValueError, yaml.YAMLError):
+        # Per the spec's risk: a malformed template shouldn't crash. Fall
+        # back to a fresh frontmatter + the raw rendered text as the body.
+        existing_fields = {}
+        body = rendered
+
+    document_id = str(uuid.uuid4())
+    iso_now = now.isoformat(timespec="seconds")
+    fields: dict[str, Any] = dict(existing_fields)
+    # Brain-managed fields override the template's choices in a fixed order
+    # so frontmatter ordering is stable across runs.
+    fields["id"] = document_id
+    fields["title"] = title
+    fields["created"] = iso_now
+    fields["updated"] = iso_now
+    fields["kind"] = "vault"
+    if tags:
+        fields["tags"] = list(tags)
+    elif "tags" not in fields:
+        fields["tags"] = []
+
+    return dump_frontmatter(fields, body), document_id
+
+
+def _run_post_write_editor_and_sync(
+    cfg: Config, *, vault_path: Path, file_path: Path
+) -> SyncReport | None:
+    """Open ``$EDITOR`` on ``file_path`` then re-sync. Returns the report.
+
+    Returns ``None`` if the user's editor exited non-zero (the file is
+    left in place; sync is skipped). The DB connection is opened ONLY for
+    the sync — it's never held across the editor blocking call.
+
+    **Sync errors are surfaced to stderr here**, not silently returned.
+    Callers don't need to (and historically didn't) re-print them. We
+    deliberately do NOT raise ``typer.Exit`` on a sync error — the file
+    is on disk, a future ``brain vault sync`` will pick it up — but the
+    user always sees the error message so the divergence isn't invisible.
+    """
+    try:
+        rc = run_editor_on(file_path)
+    except RawEditorError as e:
+        typer.secho(str(e), fg="red", err=True)
+        return None
+    if rc != 0:
+        typer.secho(
+            "editor exited non-zero — file kept; "
+            "run `brain vault sync` to index later",
+            fg="yellow",
+            err=True,
+        )
+        return None
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        report = sync_one_file(
+            conn,
+            embedder=embedder,
+            vault_path=vault_path,
+            file_path=file_path,
+        )
+    # Single source of truth for post-edit error reporting — every authoring
+    # command that uses this helper inherits the contract automatically.
+    for err_path, reason in report.errors:
+        typer.secho(
+            f"post-edit sync error: {err_path}: {reason}",
+            fg="red",
+            err=True,
+        )
+    return report
+
+
+@note_app.command("new")
+def note_new(
+    title: str = typer.Argument(..., help="Note title (used for frontmatter + slug)."),
+    folder: str = typer.Option(
+        "",
+        "--folder",
+        "-f",
+        help="Subdirectory under the vault root (default: vault root).",
+    ),
+    template: str = typer.Option(
+        "note",
+        "--template",
+        "-T",
+        help="Template name in _templates/ (default: 'note').",
+    ),
+    tag: list[str] = typer.Option(
+        [], "--tag", "-t", help="Initial tag(s) for the note."
+    ),
+    no_edit: bool = typer.Option(
+        False, "--no-edit", help="Skip launching $EDITOR after the file is written."
+    ),
+    vault: Path | None = typer.Option(
+        None, "--vault", help="Override the configured vault path."
+    ),
+) -> None:
+    """Create a new vault note from a template.
+
+    Resolves ``<vault>/<folder>/<slug(title)>.md``. Errors if the file
+    already exists (use ``brain edit <prefix>`` to modify an existing note).
+    Renders ``_templates/<template>.md`` with ``{{title}}`` / ``{{date}}`` /
+    ``{{datetime}}`` / ``{{slug}}`` substitutions, forces the
+    brain-canonical frontmatter (id, title, created, updated, kind, tags),
+    writes the file, runs a single-file sync, and (unless ``--no-edit``)
+    opens ``$EDITOR`` then re-syncs on exit.
+    """
+    cfg = Config.load()
+    vault_path = _resolve_vault(vault, cfg)
+    template_path = _ensure_template(vault_path, template)
+    template_text = template_path.read_text(encoding="utf-8")
+
+    slug = slugify(title)
+    target_relative = Path(folder) / f"{slug}.md" if folder else Path(f"{slug}.md")
+    target = vault_path / target_relative
+    # Guard against ``--folder ../../etc`` and similar — we'd otherwise
+    # write outside the vault BEFORE sync ever runs and noticed.
+    _assert_within_vault(target, vault_path, label="--folder")
+    if target.exists():
+        typer.secho(
+            f"note already exists at {target_relative.as_posix()}; "
+            f"use `brain edit <prefix>` to modify it",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    now = datetime.now()
+    today = now.date()
+    file_text, document_id = _build_note_text(
+        template_text,
+        title=title,
+        tags=list(tag),
+        today=today,
+        now=now,
+    )
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(file_text, encoding="utf-8")
+
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        sync_report = sync_one_file(
+            conn,
+            embedder=embedder,
+            vault_path=vault_path,
+            file_path=target,
+        )
+    if sync_report.errors:
+        for path, reason in sync_report.errors:
+            typer.secho(f"sync error: {path}: {reason}", fg="red", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(
+        f"created {target_relative.as_posix()} (id={document_id[:8]})"
+    )
+
+    if no_edit:
+        return
+    _run_post_write_editor_and_sync(
+        cfg, vault_path=vault_path, file_path=target
+    )
+
+
+@app.command()
+def daily(
+    date: str | None = typer.Option(
+        None, "--date", help="ISO date (YYYY-MM-DD). Defaults to today (local time)."
+    ),
+    no_edit: bool = typer.Option(
+        False, "--no-edit", help="Skip launching $EDITOR."
+    ),
+    vault: Path | None = typer.Option(
+        None, "--vault", help="Override the configured vault path."
+    ),
+) -> None:
+    """Open or create today's daily note.
+
+    The path is ``<vault>/daily/<YYYY>/<YYYY-MM-DD>.md``. Idempotent — if the
+    file already exists, it's opened in ``$EDITOR`` (and re-synced on exit).
+    Uses ``_templates/daily.md`` to render new files; ``{{date}}`` /
+    ``{{datetime}}`` are populated from the resolved date.
+
+    Date defaults to today's local date — if you cross midnight while
+    typing, you may want to pin it with ``--date`` to avoid getting the
+    next-day file.
+    """
+    if date is not None:
+        try:
+            target_date = date_cls.fromisoformat(date)
+        except ValueError as e:
+            raise typer.BadParameter(
+                f"--date must be YYYY-MM-DD ({e})"
+            ) from e
+    else:
+        target_date = date_cls.today()
+
+    cfg = Config.load()
+    vault_path = _resolve_vault(vault, cfg)
+
+    iso_date = target_date.isoformat()
+    year_folder = f"{target_date.year:04d}"
+    target_relative = Path("daily") / year_folder / f"{iso_date}.md"
+    target = vault_path / target_relative
+    # Defensive: the path is constructed internally so traversal isn't
+    # currently possible, but a future ``--folder`` flag (or a date format
+    # change) would silently break this contract. Keep the guard.
+    _assert_within_vault(target, vault_path, label="--date")
+
+    if target.is_file():
+        typer.echo(f"opened {target_relative.as_posix()} (existing)")
+        if no_edit:
+            return
+        _run_post_write_editor_and_sync(
+            cfg, vault_path=vault_path, file_path=target
+        )
+        return
+
+    template_path = _ensure_template(vault_path, "daily")
+    template_text = template_path.read_text(encoding="utf-8")
+
+    # ``now`` stamps ``created`` / ``updated`` (real wall clock when the note
+    # was made). ``today`` is what populates ``{{date}}`` in the template
+    # (the date the note represents — possibly past/future via --date).
+    now = datetime.now()
+    file_text, _document_id = _build_note_text(
+        template_text,
+        title=iso_date,
+        tags=[],
+        today=target_date,
+        now=now,
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(file_text, encoding="utf-8")
+
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        sync_report = sync_one_file(
+            conn,
+            embedder=embedder,
+            vault_path=vault_path,
+            file_path=target,
+        )
+    if sync_report.errors:
+        for path, reason in sync_report.errors:
+            typer.secho(f"sync error: {path}: {reason}", fg="red", err=True)
+        raise typer.Exit(code=1)
+
+    typer.echo(f"created {target_relative.as_posix()}")
+    if no_edit:
+        return
+    _run_post_write_editor_and_sync(
+        cfg, vault_path=vault_path, file_path=target
+    )
+
+
+def _print_rename_plan(op: RenameOp, vault_path: Path) -> None:
+    """Pretty-print a :class:`RenameOp` for ``--dry-run`` output."""
+    moved = op.new_path.resolve() != op.old_path.resolve()
+    if moved:
+        old_rel = op.old_path.resolve().relative_to(vault_path.resolve())
+        new_rel = op.new_path.resolve().relative_to(vault_path.resolve())
+        typer.echo(
+            f"would rename {old_rel.as_posix()} → {new_rel.as_posix()}"
+        )
+    else:
+        typer.echo(f"would update title: {op.old_title!r} → {op.new_title!r}")
+    if not op.references:
+        typer.echo("no references to rewrite")
+        return
+    file_count = len({r.file_path for r in op.references})
+    typer.echo(
+        f"would rewrite {len(op.references)} reference(s) "
+        f"in {file_count} file(s):"
+    )
+    for ref in op.references:
+        rel = ref.file_path.resolve().relative_to(vault_path.resolve())
+        typer.echo(
+            f"  {rel.as_posix()}:{ref.line_no}  "
+            f"{ref.old_text} → {ref.new_text}"
+        )
+
+
+@note_app.command("rename")
+def note_rename(
+    id: str = typer.Argument(..., help="Document id (or 6+ char prefix)."),
+    new_title: str = typer.Argument(..., help="New title."),
+    no_link_refactor: bool = typer.Option(
+        False,
+        "--no-link-refactor",
+        help="Skip rewriting [[old-title]] references in other notes.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the plan without changing anything."
+    ),
+    vault: Path | None = typer.Option(
+        None, "--vault", help="Override the configured vault path."
+    ),
+) -> None:
+    """Rename a vault note: title, file slug, and ``[[old]]`` references.
+
+    Plans the rename first (vault scan + collision check), then applies
+    atomically — every file we'd write is snapshotted first; on any error
+    the snapshots are restored. With ``--dry-run`` only the plan is
+    printed; no DB or disk writes occur.
+
+    With ``--no-link-refactor``, references in other notes are left alone
+    (the title in this note's frontmatter still updates, and the file is
+    still moved to its new slug).
+    """
+    cfg = Config.load()
+    vault_path = _resolve_vault(vault, cfg)
+
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        document_id = _resolve_id(conn, id)
+        try:
+            op = plan_rename(
+                conn,
+                vault_path=vault_path,
+                document_id=document_id,
+                new_title=new_title,
+            )
+        except RenameError as e:
+            typer.secho(str(e), fg="red", err=True)
+            raise typer.Exit(code=1) from e
+
+    if no_link_refactor:
+        op = RenameOp(
+            document_id=op.document_id,
+            old_title=op.old_title,
+            new_title=op.new_title,
+            old_path=op.old_path,
+            new_path=op.new_path,
+            references=(),
+        )
+
+    if dry_run:
+        _print_rename_plan(op, vault_path)
+        return
+
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        try:
+            report = apply_rename(
+                conn,
+                embedder=embedder,
+                vault_path=vault_path,
+                op=op,
+            )
+        except RenameError as e:
+            typer.secho(str(e), fg="red", err=True)
+            raise typer.Exit(code=1) from e
+
+    if op.references:
+        file_count = len({r.file_path for r in op.references})
+        typer.echo(
+            f"rewrote {report.references_rewritten} reference(s) "
+            f"in {file_count} file(s)"
+        )
+    if report.file_renamed:
+        old_rel = op.old_path.resolve().relative_to(vault_path.resolve())
+        new_rel = op.new_path.resolve().relative_to(vault_path.resolve())
+        typer.echo(
+            f"renamed {old_rel.as_posix()} → {new_rel.as_posix()}"
+        )
+    else:
+        typer.echo(f"updated title: {op.old_title!r} → {op.new_title!r}")
+    if report.sync_report and report.sync_report.errors:
+        for path, reason in report.sync_report.errors:
+            typer.secho(f"sync error: {path}: {reason}", fg="red", err=True)
+        raise typer.Exit(code=1)

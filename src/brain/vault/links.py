@@ -69,8 +69,28 @@ def parse_wiki_links(text: str) -> list[ParsedLink]:
     Returns an empty list for any input that contains no parseable links
     (including the empty string and bodies consisting entirely of code).
     """
+    return [link for link, _start, _end in iter_wiki_links_with_spans(text)]
+
+
+def iter_wiki_links_with_spans(
+    text: str,
+) -> list[tuple[ParsedLink, int, int]]:
+    """Same as :func:`parse_wiki_links`, but each entry carries source spans.
+
+    Each tuple is ``(parsed, start, end)`` where ``text[start:end]`` is the
+    exact byte range the link occupies in the original ``text``. Embeds
+    (``![[...]]``) include the leading ``!`` in the span so callers that
+    rewrite in place don't have to detect it again.
+
+    Spans are non-overlapping and yielded in document order. The
+    :func:`_strip_uncodelike_regions` pass that powers code-fence skipping
+    is length-preserving, so offsets from the regex over the masked text map
+    1:1 onto the original — that's what makes rewriting safe even when a
+    later region of the document contains the same ``[[X]]`` inside a code
+    fence (it's silently skipped, not rewritten).
+    """
     parseable = _strip_uncodelike_regions(text)
-    out: list[ParsedLink] = []
+    out: list[tuple[ParsedLink, int, int]] = []
     for match in _WIKI_LINK_RE.finditer(parseable):
         inner = match.group("inner")
         if not inner.strip():
@@ -80,6 +100,7 @@ def parse_wiki_links(text: str) -> list[ParsedLink]:
         # Detect ``![[...]]`` embeds: look at the character immediately
         # before the opener.
         start = match.start()
+        end = match.end()
         is_embed = start > 0 and parseable[start - 1] == "!"
         # Reject ``\[[X]]`` (backslash-escaped) — the ``\`` makes it literal text.
         # An odd number of backslashes immediately preceding the opener escapes
@@ -98,7 +119,8 @@ def parse_wiki_links(text: str) -> list[ParsedLink]:
         raw = ("![[" if is_embed else "[[") + inner + "]]"
         link = _classify(raw, inner, embed=is_embed)
         if link is not None:
-            out.append(link)
+            span_start = start - 1 if is_embed else start
+            out.append((link, span_start, end))
     return out
 
 
