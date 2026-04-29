@@ -22,7 +22,7 @@ _WHITESPACE_RE = re.compile(r"\s+")
 _MIN_NAME_LENGTH = 2
 
 
-def _looks_like_email(addr: str) -> bool:
+def is_email_like(addr: str) -> bool:
     """Heuristic: exactly one ``@``, both halves non-empty, RHS has a ``.``, no whitespace."""
     if any(ch.isspace() for ch in addr):
         return False
@@ -39,7 +39,7 @@ def _normalize_email(addr: str) -> str | None:
 
     Brackets are stripped independently — a token with only a leading ``<`` or
     only a trailing ``>`` still has the stray bracket removed before
-    validation. ``_looks_like_email`` is the final gate.
+    validation. ``is_email_like`` is the final gate.
     """
     cleaned = addr.strip().lower()
     if cleaned.startswith("<"):
@@ -47,7 +47,7 @@ def _normalize_email(addr: str) -> str | None:
     if cleaned.endswith(">"):
         cleaned = cleaned[:-1]
     cleaned = cleaned.strip()
-    if not _looks_like_email(cleaned):
+    if not is_email_like(cleaned):
         return None
     return cleaned
 
@@ -121,7 +121,7 @@ def extract_gmail_addresses(metadata: dict[str, Any]) -> list[tuple[str | None, 
     pairs: list[tuple[str | None, str]] = []
     for realname, addr in getaddresses(raw_strings):
         email = (addr or "").strip().lower()
-        if not email or not _looks_like_email(email):
+        if not email or not is_email_like(email):
             continue
         if email in seen_emails:
             continue

@@ -36,3 +36,7 @@ class IdPrefixAmbiguous(IdPrefixError):
     def __init__(self, prefix: str) -> None:
         super().__init__(f"id prefix ambiguous: {prefix}")
         self.prefix = prefix
+
+
+class DirectoryRefreshError(BrainError):
+    """Raised when a Calendar / Contacts refresh fails (gws missing, JSON parse, etc.)."""
