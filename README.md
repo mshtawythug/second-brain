@@ -432,7 +432,61 @@ If Quartz drifts incompatibly, gets archived, or you just want a different look:
 
 ## Architecture
 
-See [`docs/specs/2026-04-24-second-brain-design.md`](docs/specs/2026-04-24-second-brain-design.md).
+The design is captured across three specs and one set of phase-by-phase implementation plans. Read the specs for *why* and *what*; read the plans for the task-by-task breakdown that actually shipped.
+
+### Specs (`docs/specs/`)
+
+| Spec | What it covers |
+|---|---|
+| [`2026-04-24-second-brain-design.md`](docs/specs/2026-04-24-second-brain-design.md) | Original v1 — Postgres + pgvector schema, hybrid FTS+vector search via Reciprocal Rank Fusion, ingestion pipeline (PDF/DOCX/MD/TXT, Gmail, Krisp/Slack via stdin), CLI surface. The foundation everything else builds on. |
+| [`2026-04-27-mcp-server-design.md`](docs/specs/2026-04-27-mcp-server-design.md) | FastMCP server exposing brain tools (`brain_search`, `brain_show`, `brain_list`, `brain_status`, `brain_ingest_stdin`, `brain_tag`, `brain_edit`) so Claude Desktop can call them in any conversation. Stdio transport, error wrapping, warmup embed. |
+| [`2026-04-28-vault-model-design.md`](docs/specs/2026-04-28-vault-model-design.md) | The current model — vault folder of `.md` files as source of truth for authored notes, sync engine + watcher, `[[wiki-links]]` graph, Quartz-rendered wiki. Two-tier corpus (vault + ingested). |
+
+### Plans (`docs/plans/`)
+
+| Plan | What it shipped |
+|---|---|
+| [`2026-04-24-second-brain.md`](docs/plans/2026-04-24-second-brain.md) | v1 build-out — schema, ingest extractors, hybrid search, CLI. |
+| [`2026-04-26-brain-edit.md`](docs/plans/2026-04-26-brain-edit.md) | `brain edit` JSON-header + body editor flow for in-place updates. |
+| [`2026-04-27-mcp-server.md`](docs/plans/2026-04-27-mcp-server.md) | MCP server implementation per the design above. |
+| [`2026-04-28-local-embeddings-qwen3-8b.md`](docs/plans/2026-04-28-local-embeddings-qwen3-8b.md) | Pluggable embedder backends (arctic / voyage / qwen3) behind a single `Embedder` Protocol. |
+| `2026-04-{28,29}-vault-model-phase-{1..7}.md` | Vault model rollout: schema + export, sync engine + wiki-link parser, authoring CLI, link graph queries, watcher, Quartz render integration, MCP additions. Each phase shipped independently with its own review + audit loop. |
+
+### Codebase layout
+
+```
+src/brain/
+  cli.py              — Typer app, every `brain ...` subcommand
+  config.py           — env loading; selects BRAIN_EMBEDDER ∈ {arctic, voyage, qwen3}
+  db.py               — psycopg connection + migration runner (schema_migrations tracked)
+  embeddings.py       — three concrete embedders behind a shared Protocol
+  errors.py           — BrainError hierarchy
+  queries.py          — read-side SQL helpers shared by CLI + MCP
+  search.py           — hybrid FTS + vector via RRF
+  format.py           — human + JSON output
+  edit_session.py     — JSON-header + body editor flow
+  editor.py           — $EDITOR / $VISUAL subprocess wrapper
+  mcp_server.py       — FastMCP stdio server
+  ingest/             — extractors per file type + chunker + Embedder Protocol
+  vault/              — vault-model modules
+    slug.py           — deterministic ASCII slugifier
+    templates.py      — _templates/ rendering ({{title}}, {{date}}, ...)
+    frontmatter.py    — YAML frontmatter parse / dump / body_hash
+    export.py         — DB → vault one-shot dump
+    links.py          — wiki-link parser ([[X]], [[X|Y]], ![[X]], [[brain:id]])
+    resolver.py       — title / alias / id / source-external resolution
+    sync.py           — vault → DB reconciliation; sync_one_file helper
+    rename.py         — note rename with [[]] reference rewrite + atomic restore
+    graph.py          — backlinks / outgoing / orphans / graph queries
+    graph_format.py   — JSON / DOT / Mermaid emitters
+    watch.py          — fsnotify watcher with debounce + drain on shutdown
+migrations/           — numbered SQL files (001..004) + schema_migrations tracking
+bin/                  — brain-up / brain-down / brain-status convenience scripts
+quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
+docs/specs/           — design specs (above)
+docs/plans/           — implementation plans (above)
+tests/                — real-DB pattern, fake embedder, ~825 tests
+```
 
 ## How Claude uses this
 
