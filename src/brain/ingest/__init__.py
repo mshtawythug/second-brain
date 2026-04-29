@@ -1,17 +1,34 @@
 """Ingest pipeline: extract → chunk → embed → store."""
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
 import psycopg
 from pgvector.psycopg import register_vector  # noqa: F401  (ensures adapter loaded)
 
-from brain.vault.derived_links.directory import DirectoryStore
-from brain.vault.derived_links.participants import extract_gmail_addresses
+from brain.vault.derived_links.directory import (
+    DirectoryStore,
+    GwsRunner,
+    refresh_calendar,
+    refresh_contacts,
+)
+from brain.vault.derived_links.participants import (
+    extract_gmail_addresses,
+    extract_krisp_speakers,
+)
 
 from .chunker import chunk_text
+
+_logger = logging.getLogger(__name__)
+
+# Contacts refresh is rate-limited to once per 24 hours. Krisp ingest is the
+# trigger; without this gate, every transcript would re-fetch the full Google
+# People page.
+_CONTACTS_REFRESH_INTERVAL = timedelta(hours=24)
 
 
 class Embedder(Protocol):
@@ -105,6 +122,7 @@ def ingest_document(
     source_metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
     force: bool = False,
+    gws_runner: GwsRunner | None = None,
 ) -> IngestResult:
     """Ingest a single extracted document.
 
@@ -114,6 +132,12 @@ def ingest_document(
       row (and its chunks via ON DELETE CASCADE) is removed and re-inserted.
     - Sources are deduped by ``(kind, external_id)``. A repeat ingest pointing
       at the same external id reuses the existing source row.
+
+    Source-specific side effects (Gmail directory upserts, Krisp directory
+    refresh triggers) are dispatched via :func:`_run_source_hooks`. The
+    ``gws_runner`` argument is only consulted by the Krisp hook; passing
+    ``None`` skips the calendar / contacts refresh with a logged warning so
+    callers without a runner wired (early CLI paths, tests) still succeed.
     """
     h = _content_hash(doc.content)
     tags = tags or []
@@ -143,6 +167,13 @@ def ingest_document(
             [c.content for c in chunks], input_type="document"
         )
 
+        # Pre-insert: derive source-specific metadata fields (e.g. Krisp
+        # ``_participant_keys``) so they're stored alongside the doc row in
+        # one INSERT instead of an extra UPDATE after the fact. The leading
+        # underscore on the key flags it as derived/internal — the linker
+        # pass (B.4) reads it via a single SELECT.
+        _apply_pre_insert_metadata(doc, source_kind=source_kind)
+
         doc_row = conn.execute(
             """
             INSERT INTO documents (source_id, title, content, content_hash, content_type,
@@ -171,20 +202,123 @@ def ingest_document(
                 (document_id, c.index, c.content, emb),
             )
 
-        if source_kind == "gmail":
-            # Mine name↔email pairs from the From/To headers and feed the
-            # directory used by the metadata-aware linker. Runs inside the
-            # outer ``conn.transaction()`` so a partial failure leaves no
-            # stale directory state alongside an inserted document.
-            store = DirectoryStore(conn)
-            for display_name, email in extract_gmail_addresses(doc.metadata):
-                store.upsert_pair(
-                    display_name=display_name,
-                    email=email,
-                    source="gmail",
-                )
+        _run_source_hooks(
+            conn,
+            source_kind=source_kind,
+            doc=doc,
+            document_id=document_id,
+            gws_runner=gws_runner,
+        )
 
         return IngestResult(document_id=document_id, created=True)
+
+
+def _apply_pre_insert_metadata(doc: ExtractedDoc, *, source_kind: str) -> None:
+    """Mutate ``doc.metadata`` in place to add derived fields by source.
+
+    Currently:
+    - ``krisp`` → ``_participant_keys`` (sorted list of normalized speaker
+      keys parsed from the transcript body). Always present after this call,
+      even if the body has no speaker labels (empty list signals "this doc
+      was processed by the linker pre-stage" to downstream code).
+    """
+    if source_kind == "krisp":
+        doc.metadata["_participant_keys"] = sorted(extract_krisp_speakers(doc.content))
+
+
+def _gmail_post_ingest_hook(
+    conn: psycopg.Connection, doc: ExtractedDoc, document_id: str
+) -> None:
+    """Upsert (display_name, email) pairs from the Gmail From/To headers.
+
+    Runs inside the outer ``conn.transaction()`` opened by
+    :func:`ingest_document` so a directory-write failure rolls the
+    document back too. ``document_id`` is unused today but kept in the
+    signature for symmetry with future hooks that may need it.
+    """
+    del document_id  # symmetry with other source hooks
+    store = DirectoryStore(conn)
+    for display_name, email in extract_gmail_addresses(doc.metadata):
+        store.upsert_pair(
+            display_name=display_name,
+            email=email,
+            source="gmail",
+        )
+
+
+def _krisp_post_ingest_hook(
+    conn: psycopg.Connection,
+    doc: ExtractedDoc,
+    document_id: str,
+    runner: GwsRunner | None,
+) -> None:
+    """Trigger an incremental Calendar refresh + a stale-only Contacts refresh.
+
+    Both refreshes degrade soft: ``refresh_calendar`` / ``refresh_contacts``
+    catch runner failures internally and return 0 so a Krisp ingest never
+    fails on a transient gws hiccup.
+
+    Calendar window:
+    - First run (no ``directory_refresh_state`` row for ``calendar``) →
+      since = ``YYYY-01-01T00:00:00+00:00`` (current-year start, UTC).
+    - Subsequent runs → since = the stored ``last_refreshed_at``.
+    - until = ``datetime.now(tz=UTC)`` (always).
+
+    Contacts cadence:
+    - Runs only if no state row exists OR ``last_refreshed_at`` is older
+      than 24 hours. Prevents re-fetching the People API on every ingest.
+    """
+    del doc, document_id  # unused — krisp metadata mutation happens pre-insert
+    if runner is None:
+        _logger.warning(
+            "krisp post-ingest: no gws_runner provided; "
+            "skipping calendar/contacts refresh"
+        )
+        return
+
+    now = datetime.now(tz=UTC)
+
+    cal_row = conn.execute(
+        "SELECT last_refreshed_at FROM directory_refresh_state "
+        "WHERE source = 'calendar'"
+    ).fetchone()
+    if cal_row is not None and cal_row[0] is not None:
+        since = cal_row[0]
+    else:
+        since = datetime(now.year, 1, 1, tzinfo=UTC)
+    refresh_calendar(conn, since=since, until=now, runner=runner)
+
+    contacts_row = conn.execute(
+        "SELECT last_refreshed_at FROM directory_refresh_state "
+        "WHERE source = 'contacts'"
+    ).fetchone()
+    contacts_stale = (
+        contacts_row is None
+        or contacts_row[0] is None
+        or contacts_row[0] < now - _CONTACTS_REFRESH_INTERVAL
+    )
+    if contacts_stale:
+        refresh_contacts(conn, runner=runner)
+
+
+def _run_source_hooks(
+    conn: psycopg.Connection,
+    *,
+    source_kind: str,
+    doc: ExtractedDoc,
+    document_id: str,
+    gws_runner: GwsRunner | None,
+) -> None:
+    """Dispatch to the source-specific post-ingest hook (Gmail / Krisp / ...).
+
+    Sources without a registered hook are a no-op. New sources should add a
+    new ``_<kind>_post_ingest_hook`` function and a branch here — the body of
+    :func:`ingest_document` stays untouched (Open/Closed).
+    """
+    if source_kind == "gmail":
+        _gmail_post_ingest_hook(conn, doc, document_id)
+    elif source_kind == "krisp":
+        _krisp_post_ingest_hook(conn, doc, document_id, gws_runner)
 
 
 def apply_tags(

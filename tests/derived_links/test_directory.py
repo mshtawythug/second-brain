@@ -21,6 +21,7 @@ from brain.vault.derived_links.directory import (
     refresh_calendar,
     refresh_contacts,
 )
+from tests.conftest import FakeRunner
 
 
 @pytest.fixture
@@ -374,31 +375,6 @@ class TestLoadPeopleYml:
 # --------------------------------------------------------------------------
 # Refresh helpers — driven via fake GwsRunner; no subprocess in tests.
 # --------------------------------------------------------------------------
-
-
-class FakeRunner:
-    """Test double for the GwsRunner Protocol.
-
-    Stores the most recent ``args`` for assertion and either returns a
-    pre-canned string or raises a pre-set exception. Production code
-    shells out via ``subprocess.run``; here we keep tests pure.
-    """
-
-    def __init__(
-        self,
-        *,
-        response: str = "[]",
-        raises: BaseException | None = None,
-    ) -> None:
-        self.response = response
-        self.raises = raises
-        self.calls: list[list[str]] = []
-
-    def __call__(self, args: list[str]) -> str:
-        self.calls.append(list(args))
-        if self.raises is not None:
-            raise self.raises
-        return self.response
 
 
 def _refresh_state_row(

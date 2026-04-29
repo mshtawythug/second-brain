@@ -113,6 +113,40 @@ def counting_embedder(fake_embedder: FakeEmbedder) -> CountingEmbedder:
     return CountingEmbedder(fake_embedder)
 
 
+class FakeRunner:
+    """Test double for :class:`brain.vault.derived_links.directory.GwsRunner`.
+
+    Records every ``args`` list it's invoked with so tests can assert the
+    Calendar/Contacts subcommand shape. ``response`` defaults to an empty
+    JSON list (a valid empty success that still advances the high-water
+    mark in ``directory_refresh_state``). ``raises`` simulates a
+    subprocess failure — ``refresh_calendar`` / ``refresh_contacts``
+    catch ``(OSError, DirectoryRefreshError, RuntimeError)`` from the
+    runner and downgrade them to soft warnings, so most call sites pass
+    a ``RuntimeError`` here to exercise that branch without dragging in
+    real subprocess machinery.
+
+    Importable via ``from tests.conftest import FakeRunner`` — same
+    pattern as :class:`FakeEmbedder` above.
+    """
+
+    def __init__(
+        self,
+        *,
+        response: str = "[]",
+        raises: BaseException | None = None,
+    ) -> None:
+        self.response = response
+        self.raises = raises
+        self.calls: list[list[str]] = []
+
+    def __call__(self, args: list[str]) -> str:
+        self.calls.append(list(args))
+        if self.raises is not None:
+            raise self.raises
+        return self.response
+
+
 @pytest.fixture
 def patch_embedder(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], None]:
     """Wire ``DATABASE_URL`` env var and swap ``brain.cli._build_embedder`` to

@@ -4,6 +4,7 @@ from brain.vault.derived_links.directory import (
     GwsRunner,
     load_people_yml,
 )
+from brain.vault.derived_links.gws import real_gws_runner
 from brain.vault.derived_links.participants import (
     extract_gmail_addresses,
     extract_krisp_speakers,
@@ -33,6 +34,7 @@ __all__ = [
     "extract_krisp_speakers",
     "load_people_yml",
     "normalize_participant",
+    "real_gws_runner",
     "rebuild_derived_for",
     "rule_same_day_participant",
     "rule_shared_participant",

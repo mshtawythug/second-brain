@@ -58,6 +58,7 @@ from .queries import (
 )
 from .search import hybrid_search
 from .vault import init_vault
+from .vault.derived_links.gws import real_gws_runner
 from .vault.export import export_vault
 from .vault.frontmatter import dump_frontmatter, parse_frontmatter
 from .vault.graph import (
@@ -475,6 +476,10 @@ def ingest_stdin(
 
     cfg = Config.load()
     embedder = _build_embedder(cfg)
+    # Krisp ingest triggers Calendar/Contacts directory refresh via the gws
+    # CLI; other sources don't need a runner. Refresh failures are warnings,
+    # not errors — the ingest itself still succeeds.
+    gws_runner = real_gws_runner if source == "krisp" else None
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         result = ingest_document(
@@ -486,6 +491,7 @@ def ingest_stdin(
             source_metadata=meta,
             tags=list(tag),
             force=force,
+            gws_runner=gws_runner,
         )
     verb = "ingested" if result.created else "skipped (already ingested)"
     typer.echo(f"{verb}: {title} → {result.document_id}")
