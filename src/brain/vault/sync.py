@@ -236,6 +236,11 @@ def sync_one_file(
             (abs_path, f"path is under {first}/ — not a syncable note")
         )
         return report
+    if _has_hidden_component(parts):
+        report.errors.append(
+            (abs_path, "path contains a hidden directory component (starts with '.')")
+        )
+        return report
 
     classification = "ingested" if first == _INGESTED_DIR_NAME else "vault"
     walked = _WalkedFile(
@@ -272,13 +277,27 @@ class _SyncError(Exception):
     """Per-file sync failure; the run continues with the next file."""
 
 
+def _has_hidden_component(parts: tuple[str, ...]) -> bool:
+    """Return True if any path component starts with ``.``.
+
+    Mirrors :func:`brain.vault.watch._filter_path`'s hidden-directory test
+    so the watcher and the one-shot sync agree on what's a non-syncable
+    path. ``.git/``, ``.quartz/`` (Quartz workspace), ``.obsidian/`` (Obsidian
+    config), VSCode's ``.vscode/``, etc. are all unwanted descents — those
+    trees contain ``.md`` files (issue templates, Quartz docs) that aren't
+    user notes and don't carry our frontmatter contract.
+    """
+    return any(part.startswith(".") for part in parts)
+
+
 def _walk_vault(vault_path: Path) -> Iterator[_WalkedFile]:
     """Yield every Markdown file the sync should process.
 
-    Skips ``_templates/`` and ``_attachments/`` entirely. Files under
-    ``_ingested/<source>/...`` are still yielded but classified as
-    ``ingested`` so the caller treats them with ``kind='ingested'``. All
-    other ``.md`` files are vault-tier.
+    Skips ``_templates/`` and ``_attachments/`` entirely, plus any path
+    whose components include a hidden directory (``.git/``, ``.quartz/``,
+    ``.obsidian/``, …). Files under ``_ingested/<source>/...`` are still
+    yielded but classified as ``ingested`` so the caller treats them with
+    ``kind='ingested'``. All other ``.md`` files are vault-tier.
 
     Paths are yielded in deterministic (sorted) order so test assertions on
     iteration order are stable.
@@ -297,6 +316,13 @@ def _walk_vault(vault_path: Path) -> Iterator[_WalkedFile]:
             continue
         first = parts[0]
         if first in {_TEMPLATE_DIR_NAME, _ATTACHMENTS_DIR_NAME}:
+            continue
+        if _has_hidden_component(parts):
+            # Hidden directories (``.git/``, ``.quartz/``, ``.obsidian/``, …)
+            # are tooling state, not authored notes. The watcher's
+            # ``_filter_path`` already skips these; the one-shot sync now
+            # matches that behavior so a vault containing a Quartz workspace
+            # or any other dotted tree doesn't pollute the DB.
             continue
         classification = "ingested" if first == _INGESTED_DIR_NAME else "vault"
         yield _WalkedFile(
