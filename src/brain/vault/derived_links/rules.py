@@ -49,7 +49,25 @@ def rule_shared_thread(a: DocSnapshot, b: DocSnapshot) -> Evidence | None:
     Returns None for non-Gmail pairs, missing thread_ids, or thread_id
     mismatch. Weight ``WEIGHT_SHARED_THREAD``.
     """
-    raise NotImplementedError("Implemented in Task A.4")
+    if a.document_id == b.document_id:
+        return None
+    if a.source_kind != "gmail" or b.source_kind != "gmail":
+        return None
+
+    thread_a = a.metadata.get("thread_id")
+    thread_b = b.metadata.get("thread_id")
+    if not (isinstance(thread_a, str) and thread_a.strip()):
+        return None
+    if not (isinstance(thread_b, str) and thread_b.strip()):
+        return None
+    if thread_a != thread_b:
+        return None
+
+    return Evidence(
+        rule="shared_thread",
+        weight=WEIGHT_SHARED_THREAD,
+        payload={"thread_id": thread_a},
+    )
 
 
 def rule_shared_participant(a: DocSnapshot, b: DocSnapshot) -> Evidence | None:
@@ -60,7 +78,19 @@ def rule_shared_participant(a: DocSnapshot, b: DocSnapshot) -> Evidence | None:
     The pass-runner is responsible for suppressing R2 when R3 fires for
     the same pair.
     """
-    raise NotImplementedError("Implemented in Task A.4")
+    if a.document_id == b.document_id:
+        return None
+
+    shared = a.participant_keys & b.participant_keys
+    if not shared:
+        return None
+
+    representative = sorted(shared)[0]
+    return Evidence(
+        rule="shared_participant",
+        weight=WEIGHT_SHARED_PARTICIPANT,
+        payload={"participant": representative, "shared_count": len(shared)},
+    )
 
 
 def rule_same_day_participant(a: DocSnapshot, b: DocSnapshot) -> Evidence | None:
@@ -71,4 +101,37 @@ def rule_same_day_participant(a: DocSnapshot, b: DocSnapshot) -> Evidence | None
     dates more than 1 day apart. Timezone-naive comparison. Weight
     ``WEIGHT_SAME_DAY_PARTICIPANT``.
     """
-    raise NotImplementedError("Implemented in Task A.4")
+    if a.document_id == b.document_id:
+        return None
+    if {a.source_kind, b.source_kind} != {"krisp", "gmail"}:
+        return None
+
+    a_date = a.date
+    b_date = b.date
+    if a_date is None or b_date is None:
+        return None
+
+    day_delta = abs((a_date - b_date).days)
+    if day_delta > 1:
+        return None
+
+    shared = a.participant_keys & b.participant_keys
+    if not shared:
+        return None
+
+    representative = sorted(shared)[0]
+    if a.source_kind == "krisp":
+        krisp_date_iso, gmail_date_iso = a_date.isoformat(), b_date.isoformat()
+    else:
+        krisp_date_iso, gmail_date_iso = b_date.isoformat(), a_date.isoformat()
+
+    return Evidence(
+        rule="same_day_participant",
+        weight=WEIGHT_SAME_DAY_PARTICIPANT,
+        payload={
+            "participant": representative,
+            "krisp_date": krisp_date_iso,
+            "gmail_date": gmail_date_iso,
+            "day_delta": day_delta,
+        },
+    )
