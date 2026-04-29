@@ -148,11 +148,14 @@ brain doctor
 
 `docker compose down -v` is **not** sufficient — Postgres data lives in `./data/postgres` (a host bind-mount), not a Docker-managed volume. The `rm -rf data/postgres` step is what actually wipes the corpus.
 
-### Make `brain` available from any directory
+### Make `brain` and the `bin/` scripts available from any directory
 
-By default, `brain` only works inside this folder with the venv activated. To
-call it from anywhere — including from Claude Code in any project — symlink the
-launcher onto a directory already on your `$PATH`:
+By default, `brain` only works inside this folder with the venv activated, and
+the `bin/brain-up` / `bin/brain-down` / `bin/brain-status` scripts have to be
+invoked by full path. Two small one-time edits fix both.
+
+**1. Symlink the `brain` launcher onto your PATH** so `brain` works from any
+shell — including Claude Code in any project:
 
 ```bash
 # macOS (Homebrew):
@@ -165,7 +168,36 @@ ln -s ~/workspace/second-brain/.venv/bin/brain ~/.local/bin/brain
 The symlink works without `source .venv/bin/activate` because `pip install -e`
 gives the launcher an absolute-path shebang pointing at the venv's Python.
 
-Verify with `which brain` (should resolve to the symlink) and `brain doctor`.
+**2. Add `bin/` to your shell's PATH** so `brain-up` / `brain-down` /
+`brain-status` work from anywhere. Pick the snippet for your shell:
+
+```bash
+# zsh (macOS default since Catalina) → ~/.zshrc
+echo 'export PATH="$HOME/workspace/second-brain/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+
+# bash → ~/.bashrc (Linux) or ~/.bash_profile (macOS bash users)
+echo 'export PATH="$HOME/workspace/second-brain/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+
+# fish → ~/.config/fish/config.fish
+fish_add_path ~/workspace/second-brain/bin
+```
+
+If you cloned the repo somewhere other than `~/workspace/second-brain/`, swap
+that path in (or use `$(pwd)/bin` while sitting in the repo root).
+
+**3. Verify both:**
+
+```bash
+which brain          # → /opt/homebrew/bin/brain (or ~/.local/bin/brain)
+which brain-up       # → /Users/<you>/workspace/second-brain/bin/brain-up
+brain doctor         # → all OK
+brain-status         # → wiki/watcher status (both stopped initially)
+```
+
+Once both are on PATH, the daily flow is just `brain-up` / `brain-down` —
+no need to remember Quartz or watcher invocations.
 
 ## Usage
 
@@ -386,12 +418,7 @@ brain-down    # stops both.
 brain-status  # shows pids, log paths, and whether the wiki is reachable.
 ```
 
-Add the bin directory to your shell rc so they're on PATH:
-
-```bash
-echo 'export PATH="$HOME/workspace/second-brain/bin:$PATH"' >> ~/.zshrc
-source ~/.zshrc
-```
+These assume `bin/` is on your PATH — see [Make `brain` and the `bin/` scripts available from any directory](#make-brain-and-the-bin-scripts-available-from-any-directory) above for the one-time setup.
 
 Env overrides honored by the scripts: `BRAIN_VAULT_PATH` (default `~/brain-vault`), `BRAIN_WIKI_PORT` (default `8080`), `BRAIN_OPEN_BROWSER` (default `1`; set `0` to skip auto-open). PIDs are tracked at `/tmp/brain-{wiki,watch}.pid`; logs at `/tmp/brain-{wiki,watch}.log`.
 
