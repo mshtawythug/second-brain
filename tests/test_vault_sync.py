@@ -12,7 +12,7 @@ import pytest
 
 from brain.vault.export import export_vault
 from brain.vault.frontmatter import dump_frontmatter, parse_frontmatter
-from brain.vault.sync import SyncReport, sync_vault
+from brain.vault.sync import SyncReport, sync_one_file, sync_vault
 
 # ---------------------------------------------------------------------------
 # Helpers.
@@ -48,6 +48,67 @@ def _unresolved_count(conn: psycopg.Connection) -> int:
     row = conn.execute("SELECT count(*) FROM unresolved_links").fetchone()
     assert row is not None
     return int(row[0])
+
+
+def _derived_rows(conn: psycopg.Connection) -> list[tuple]:
+    """All ``derived_links`` rows ordered for stable assertions.
+
+    Mirrors the helper in ``tests/derived_links/test_pass_runner.py`` so the
+    sync-level tests below can assert on the same shape produced by the
+    linker pass runner.
+    """
+    return conn.execute(
+        "SELECT src_document_id::text, dst_document_id::text, rule, weight "
+        "FROM derived_links ORDER BY src_document_id, dst_document_id, rule"
+    ).fetchall()
+
+
+def _derived_count(conn: psycopg.Connection) -> int:
+    row = conn.execute("SELECT count(*) FROM derived_links").fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _ingest_gmail(
+    conn: psycopg.Connection,
+    fake_embedder,
+    *,
+    external_id: str,
+    title: str,
+    body: str,
+    from_header: str,
+    to_header: str,
+    thread_id: str,
+    date: str,
+) -> str:
+    """Seed one Gmail doc by ingesting it through the real pipeline.
+
+    Returns the new ``documents.id``. Used by the derived-links sync tests so
+    each Gmail row has a real ``sources`` join and the metadata shape the
+    linker pass reads (``from`` / ``to`` / ``thread_id`` / ``date``).
+    """
+    from brain.ingest import ExtractedDoc, ingest_document
+
+    result = ingest_document(
+        conn,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title=title,
+            content=body,
+            content_type="email",
+            source_path=None,
+            metadata={
+                "from": from_header,
+                "to": to_header,
+                "thread_id": thread_id,
+                "date": date,
+            },
+        ),
+        source_kind="gmail",
+        source_external_id=external_id,
+    )
+    assert result.document_id is not None
+    return result.document_id
 
 
 # ---------------------------------------------------------------------------
@@ -1269,5 +1330,216 @@ def test_retry_pass_skips_invalid_link_kind(
     parsed = _reparse_link_text("[[X]]", "wiki", None)
     assert parsed is not None
     assert parsed.target_value == "X"
+
+
+# ---------------------------------------------------------------------------
+# Metadata-derived linker pass — Task B.5 wires ``rebuild_derived_for`` into
+# both ``sync_vault`` and ``sync_one_file`` so derived edges stay current
+# every time the vault reconciles with the DB.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_vault_rebuilds_derived_links(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Two Gmail docs in the same thread → one ``shared_thread`` derived edge.
+
+    End-to-end: ingest two Gmail messages into the DB (linker not yet run),
+    export the vault, then run ``sync_vault`` — the post-sync linker pass
+    rebuilds ``derived_links`` for the touched docs and the report counter
+    matches the inserted-row count.
+    """
+    a_id = _ingest_gmail(
+        test_db,
+        fake_embedder,
+        external_id="syncv-a",
+        title="Re: deal",
+        body="hello there\n",
+        from_header="person-x <person-a@example.com>",
+        to_header="Ali <ali@example.com>",
+        thread_id="t-syncv",
+        date="Wed, 15 Apr 2026 12:00:00 -0700",
+    )
+    b_id = _ingest_gmail(
+        test_db,
+        fake_embedder,
+        external_id="syncv-b",
+        title="Re: deal",
+        body="hi back\n",
+        from_header="Ali <ali@example.com>",
+        to_header="person-x <person-a@example.com>",
+        thread_id="t-syncv",
+        date="Wed, 15 Apr 2026 12:30:00 -0700",
+    )
+    # Sanity: ingest itself doesn't run the linker.
+    assert _derived_count(test_db) == 0
+
+    vault = tmp_path / "vault"
+    export_vault(test_db, vault_path=vault)
+
+    report = _sync(test_db, fake_embedder, vault)
+
+    rows = _derived_rows(test_db)
+    shared_thread_rows = [r for r in rows if r[2] == "shared_thread"]
+    assert len(shared_thread_rows) == 1
+    src, dst, rule, _weight = shared_thread_rows[0]
+    assert {src, dst} == {a_id, b_id}
+    assert src < dst  # canonical (LEAST, GREATEST) ordering
+    assert rule == "shared_thread"
+    # Both docs share participants → R2 (shared_participant) also fires
+    # alongside R1, so the total inserted count covers every rule that
+    # landed for the pair.
+    assert report.derived_links == len(rows)
+    assert report.derived_links >= 1
+
+
+def test_sync_one_file_rebuilds_derived_links_for_that_file(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """``sync_one_file`` only rebuilds edges touching the file it processed.
+
+    Three Gmail docs in the same thread, exported to disk but never
+    full-synced. ``sync_one_file`` on A's file alone must generate only
+    A↔B and A↔C pairs — B↔C is absent because B and C aren't in the
+    touched set. Mirrors ``test_rebuild_only_touches_doc_ids_in_set`` in
+    ``test_pass_runner.py`` but goes through the sync hook end-to-end.
+    """
+    a_id = _ingest_gmail(
+        test_db,
+        fake_embedder,
+        external_id="sync1-a",
+        title="A msg",
+        body="A body\n",
+        from_header="person-x <person-a@example.com>",
+        to_header="Ali <ali@example.com>",
+        thread_id="t-sync1",
+        date="Wed, 15 Apr 2026 12:00:00 -0700",
+    )
+    b_id = _ingest_gmail(
+        test_db,
+        fake_embedder,
+        external_id="sync1-b",
+        title="B msg",
+        body="B body\n",
+        from_header="Ali <ali@example.com>",
+        to_header="person-x <person-a@example.com>",
+        thread_id="t-sync1",
+        date="Wed, 15 Apr 2026 13:00:00 -0700",
+    )
+    c_id = _ingest_gmail(
+        test_db,
+        fake_embedder,
+        external_id="sync1-c",
+        title="C msg",
+        body="C body\n",
+        from_header="person-x <person-a@example.com>",
+        to_header="Ali <ali@example.com>",
+        thread_id="t-sync1",
+        date="Wed, 15 Apr 2026 14:00:00 -0700",
+    )
+
+    vault = tmp_path / "vault"
+    export_vault(test_db, vault_path=vault)
+    # Pre-condition: ingest doesn't run the linker, so the table starts empty.
+    assert _derived_count(test_db) == 0
+
+    # Locate A's exported file by frontmatter id (post-ingest ``vault_path``
+    # is NULL — sync writes it; export only writes the file). Filename
+    # construction is an internal export detail, so match on the stable
+    # frontmatter id instead of the on-disk slug.
+    gmail_dir = vault / "_ingested" / "gmail"
+    a_path: Path | None = None
+    for candidate in gmail_dir.glob("*.md"):
+        fields, _ = parse_frontmatter(candidate.read_text())
+        if fields.get("id") == a_id:
+            a_path = candidate
+            break
+    assert a_path is not None, "could not find A's exported file"
+
+    one_report = sync_one_file(
+        test_db,
+        embedder=fake_embedder,
+        vault_path=vault,
+        file_path=a_path,
+    )
+
+    rows = _derived_rows(test_db)
+    # Every inserted edge involves A — the rebuild's touched set is {a_id}
+    # so pair generation only emits canonical pairs that include A. B↔C is
+    # absent because B and C weren't in the touched set.
+    assert rows
+    for src, dst, *_ in rows:
+        assert a_id in {src, dst}
+    bc_rows = [r for r in rows if {r[0], r[1]} == {b_id, c_id}]
+    assert bc_rows == []
+    # Report counter equals the rebuild's inserted-row count for this call.
+    assert one_report.derived_links == len(rows)
+
+
+def test_sync_vault_dry_run_skips_linker(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """``dry_run=True`` must NOT write derived edges.
+
+    The dry-run contract is "no DB writes"; gating the linker on
+    ``not dry_run`` keeps it consistent. We pre-stage two Gmail docs that
+    would otherwise trigger ``shared_thread`` edges, then verify
+    ``sync_vault(..., dry_run=True)`` leaves ``derived_links`` empty and
+    ``report.derived_links == 0``.
+    """
+    _ingest_gmail(
+        test_db,
+        fake_embedder,
+        external_id="dry-a",
+        title="A",
+        body="A body\n",
+        from_header="person-x <person-a@example.com>",
+        to_header="Ali <ali@example.com>",
+        thread_id="t-dry",
+        date="Wed, 15 Apr 2026 12:00:00 -0700",
+    )
+    _ingest_gmail(
+        test_db,
+        fake_embedder,
+        external_id="dry-b",
+        title="B",
+        body="B body\n",
+        from_header="Ali <ali@example.com>",
+        to_header="person-x <person-a@example.com>",
+        thread_id="t-dry",
+        date="Wed, 15 Apr 2026 13:00:00 -0700",
+    )
+    vault = tmp_path / "vault"
+    export_vault(test_db, vault_path=vault)
+    assert _derived_count(test_db) == 0
+
+    report = _sync(test_db, fake_embedder, vault, dry_run=True)
+
+    assert _derived_count(test_db) == 0
+    assert report.derived_links == 0
+
+
+def test_sync_vault_with_no_linkable_docs_succeeds(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Vault-tier-only sync runs the linker pass cleanly with zero edges.
+
+    ``rebuild_derived_for`` receives the seen vault doc-ids but its SELECT
+    filters to ``sources.kind in {gmail, krisp}`` so vault-tier ids are
+    silently dropped from the candidate pool. The pass is a no-op and the
+    counter stays at 0.
+    """
+    vault = tmp_path / "vault"
+    a_id = str(uuid.uuid4())
+    b_id = str(uuid.uuid4())
+    _write(vault / "a.md", {"id": a_id, "title": "A"}, "vault A\n")
+    _write(vault / "b.md", {"id": b_id, "title": "B"}, "vault B\n")
+
+    report = _sync(test_db, fake_embedder, vault)
+
+    assert report.errors == []
+    assert report.created == 2
+    assert report.derived_links == 0
+    assert _derived_count(test_db) == 0
 
 

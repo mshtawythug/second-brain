@@ -38,6 +38,7 @@ import yaml
 
 from ..ingest import Embedder
 from ..ingest.chunker import chunk_text
+from .derived_links import DirectoryStore, rebuild_derived_for
 from .frontmatter import body_hash, dump_frontmatter, parse_frontmatter
 from .links import ParsedLink, parse_wiki_links
 from .resolver import resolve_link, title_collisions
@@ -61,6 +62,12 @@ class SyncReport:
     ``links_resolved`` / ``links_unresolved`` which count link insertions
     (a file with three links contributes three to one or both of those).
 
+    ``derived_links`` counts ``derived_links`` rows inserted by the
+    metadata-aware linker pass that runs at the end of every non-dry-run
+    sync (see :func:`brain.vault.derived_links.rebuild_derived_for`). The
+    counter stays ``0`` on dry-run and on syncs that touched no Gmail/Krisp
+    docs.
+
     ``errors`` lists files we couldn't sync along with a short human-readable
     reason; the file is skipped (no DB write) and the run continues.
     """
@@ -73,6 +80,7 @@ class SyncReport:
     links_resolved: int = 0
     links_unresolved: int = 0
     id_assigned: int = 0
+    derived_links: int = 0
     errors: list[tuple[Path, str]] = field(default_factory=list)
 
 
@@ -109,14 +117,21 @@ def sync_vault(
        ``src_document_id`` was processed in this run, retry the lookup
        so dangling refs that just got their target created turn into
        resolved links.
+    5. Linker pass: rebuild ``derived_links`` for every touched doc so the
+       metadata-derived (R1 shared_thread / R2 shared_participant /
+       R3 same_day_participant) edges stay consistent with the latest
+       Gmail / Krisp metadata. The pass is scoped to ``seen_doc_ids`` and
+       the runner filters non-linkable (vault-tier) ids itself.
 
     ``embedder`` is an explicit dependency (Dependency Inversion): the sync
     engine never reaches for a global. Tests pass a fake; production passes
     whatever ``brain.embeddings.make_embedder`` returned.
 
     With ``dry_run=True`` no writes happen — neither to the DB nor to disk
-    (no id assignment, no link materialization). The returned report still
-    counts the actions that *would* have been taken.
+    (no id assignment, no link materialization, no derived-links rebuild).
+    The returned report still counts the actions that *would* have been
+    taken for steps 1–3; ``derived_links`` stays at 0 because the linker is
+    skipped entirely on dry-run.
     """
     report = SyncReport()
     if not vault_path.is_dir():
@@ -157,6 +172,18 @@ def sync_vault(
     if not dry_run and seen_doc_ids:
         _retry_unresolved(conn, seen_doc_ids, report)
 
+    # Step 5: rebuild metadata-derived edges (R1/R2/R3) for the touched docs.
+    # Skipped on dry-run to honor the "no DB writes" contract; the linker
+    # opens its own transaction internally, so we call it AFTER the per-file
+    # transactions in ``_sync_one`` have committed (no nesting). Vault-tier
+    # docs in ``seen_doc_ids`` are silently filtered by the runner — only
+    # gmail / krisp rows produce edges. ``rebuild_derived_for`` already
+    # short-circuits on an empty set, so no extra guard here.
+    if not dry_run:
+        report.derived_links = rebuild_derived_for(
+            conn, seen_doc_ids, directory=DirectoryStore(conn)
+        )
+
     return report
 
 
@@ -185,6 +212,10 @@ def sync_one_file(
     - The link-retry pass runs scoped to this single document so a body
       that just gained ``[[Foo]]`` (with Foo.md already in the DB from a
       prior sync) ends up resolved.
+    - The metadata-derived linker pass also runs scoped to this single
+      document so any ``derived_links`` rows touching it stay current.
+      Vault-tier docs are filtered out by the runner — only Gmail / Krisp
+      ids contribute edges.
 
     What's intentionally NOT re-checked: the rest of the vault. If another
     file's ``[[<this title>]]`` was previously unresolved, a full
@@ -264,6 +295,13 @@ def sync_one_file(
 
     if doc_id is not None:
         _retry_unresolved(conn, {doc_id}, report)
+        # Mirror ``sync_vault``: rebuild metadata-derived edges scoped to the
+        # one doc we just processed. ``sync_one_file`` has no dry_run mode,
+        # so the linker always runs here. Non-linkable (vault-tier) doc ids
+        # are filtered by the runner.
+        report.derived_links = rebuild_derived_for(
+            conn, {doc_id}, directory=DirectoryStore(conn)
+        )
 
     return report
 
