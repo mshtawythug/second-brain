@@ -210,6 +210,74 @@ brain status   # counts and last-ingest time
 brain doctor   # health check
 ```
 
+## Vault model
+
+Brain has two storage tiers, both searchable through the same hybrid index:
+
+- **Ingested tier** (`kind='ingested'`) — Krisp transcripts, Slack threads, Gmail, raw files. Read-only by convention; the DB is authoritative. Files are mirrored under `_ingested/<source>/` in the vault folder so they show up in the wiki.
+- **Vault tier** (`kind='vault'`) — notes you author. The `.md` file on disk is the source of truth; the DB is a derived index that `brain vault sync` rebuilds from the file. Edit in any text editor.
+
+Both tiers live in a single vault folder (default `~/brain-vault/`, override with `BRAIN_VAULT_PATH`). Wiki-links (`[[Title]]`, `[[brain:<id>]]`, `[[krisp:<external_id>]]`) cross both tiers — vault notes can link to ingested artifacts and back.
+
+### One-time vault setup
+
+```bash
+# 1. Scaffold the vault folder + templates + _ingested/ subdirs.
+brain vault init                         # creates ~/brain-vault/
+
+# 2. Dump the existing DB into the vault as Markdown files. One-shot,
+#    safe to re-run, idempotent.
+brain vault export --to ~/brain-vault    # produces _ingested/<source>/*.md
+
+# 3. Establish the round-trip baseline so future sync runs are no-ops
+#    until you actually edit something.
+brain vault sync
+```
+
+After this, your DB and vault are in lockstep. Edit any `.md` file in `~/brain-vault/` and the next `brain vault sync` (or the watcher — see below) will re-chunk + re-embed it.
+
+### Authoring commands
+
+```bash
+# Create a note from _templates/note.md, opens $EDITOR.
+brain note new "person-x conversation"
+
+# Today's daily note at daily/<YYYY>/<YYYY-MM-DD>.md.
+brain daily
+
+# Rename a note safely — rewrites every [[old-title]] reference across
+# the vault. Atomic snapshot/restore on failure.
+brain note rename <id-prefix> "New title"
+brain note rename <id-prefix> "New title" --dry-run   # preview the diff
+
+# Edit an existing doc. For vault-tier docs, opens the file in $EDITOR
+# directly. For ingested-tier (Krisp/Slack/Gmail), uses the JSON-header
+# editor flow.
+brain edit <id-prefix>
+```
+
+### Link graph
+
+```bash
+brain backlinks <id-prefix>              # what links TO this doc
+brain links <id-prefix>                  # what this doc links to
+brain links <id-prefix> --unresolved     # plus dangling [[refs]]
+brain orphans                            # vault notes with no links
+brain orphans --all                      # include ingested-tier
+brain graph --format json                # full link graph as JSON
+brain graph --format dot | dot -Tsvg > graph.svg && open graph.svg
+brain graph --format mermaid             # paste into mermaid.live
+brain graph --root <id> --depth 2 --format dot | dot -Tsvg > focus.svg
+```
+
+### Watcher mode
+
+```bash
+brain vault sync --watch
+```
+
+Runs as a daemon (Ctrl-C to stop). Filesystem events trigger debounced (500ms) per-file syncs — edit a note, save, and within a beat the chunk + embedding update in the DB. Skips `_templates/`, `_attachments/`, hidden directories. The `bin/brain-up` script kicks this off alongside the wiki dev server.
+
 ## Use from Claude Desktop
 
 The `brain-mcp` binary exposes the brain as an [MCP](https://modelcontextprotocol.io/) server so Claude Desktop can search, save, and edit entries during a chat — no terminal required. Seven tools are advertised:
@@ -260,17 +328,20 @@ The vault is plain Markdown plus `[[wiki-links]]` plus YAML frontmatter — read
 Quartz is a Node.js project, so this assumes Node 18+ is on your PATH. `brain doctor` prints a `quartz/npx` line (`OK` / `not installed`) so you can tell at a glance whether you're set up.
 
 ```bash
-# 1. Scaffold a Quartz workspace inside your vault. The default brain
-#    layout puts it at <vault>/.quartz/, which `brain vault render`
-#    looks for automatically (override with --quartz-dir if you want it
-#    elsewhere). Pick the "empty" or "quickstart" starter when prompted.
-cd ~/brain-vault
-npx quartz create
+# 1. Clone Quartz into your vault as `.quartz/`. (Quartz isn't published
+#    to npm — there's no `npx quartz create`; the canonical install is
+#    a git clone of the upstream repo. `brain vault render` looks for
+#    the workspace at <vault>/.quartz/ by default; override with
+#    --quartz-dir if you want it elsewhere.)
+git clone https://github.com/jackyzha0/quartz.git ~/brain-vault/.quartz
+cd ~/brain-vault/.quartz
+npm install
 
 # 2. Drop in the brain-tuned config. The sample at the brain repo root
 #    has the right plugin set for vault notes (graph view, Obsidian
-#    flavored markdown, ignore patterns for _templates / _attachments).
-cp ~/workspace/second-brain/quartz.config.ts .quartz/quartz.config.ts
+#    flavored markdown, ignore patterns for _templates / _attachments /
+#    .quartz / .git).
+cp ~/workspace/second-brain/quartz.config.ts ./quartz.config.ts
 ```
 
 ### Render
@@ -293,12 +364,36 @@ The build inherits stdout/stderr so you see Quartz's progress live. Builds longe
 
 ### Serve locally
 
+Use Quartz's own dev server — it handles slug-to-file resolution and SPA routing correctly (Python's `http.server` 404s on Quartz's clean URLs and would need a separate SPA-fallback config):
+
 ```bash
-python -m http.server --directory dist 8080
+cd ~/brain-vault/.quartz
+npx quartz build --serve --port 8080 --directory ~/brain-vault
 open http://localhost:8080
 ```
 
+The dev server hot-reloads when vault files change — pair it with `brain vault sync --watch` and edits flow disk → DB → wiki without manual rebuilds.
+
 Backlinks, graph view, and full-text search all work out of the box — that's Quartz's job, not brain's.
+
+### Daily use — `bin/` scripts
+
+To avoid memorizing the watcher + dev-server invocations, three convenience scripts live under `bin/`:
+
+```bash
+brain-up      # starts watcher + Quartz dev server, opens browser. Idempotent.
+brain-down    # stops both.
+brain-status  # shows pids, log paths, and whether the wiki is reachable.
+```
+
+Add the bin directory to your shell rc so they're on PATH:
+
+```bash
+echo 'export PATH="$HOME/workspace/second-brain/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Env overrides honored by the scripts: `BRAIN_VAULT_PATH` (default `~/brain-vault`), `BRAIN_WIKI_PORT` (default `8080`), `BRAIN_OPEN_BROWSER` (default `1`; set `0` to skip auto-open). PIDs are tracked at `/tmp/brain-{wiki,watch}.pid`; logs at `/tmp/brain-{wiki,watch}.log`.
 
 ### Deploy (optional)
 

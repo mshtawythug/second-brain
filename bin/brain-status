@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Report on what the brain is currently running.
+
+set -euo pipefail
+
+PORT="${BRAIN_WIKI_PORT:-8080}"
+URL="http://localhost:$PORT"
+WIKI_PID="/tmp/brain-wiki.pid"
+WIKI_LOG="/tmp/brain-wiki.log"
+WATCH_PID="/tmp/brain-watch.pid"
+WATCH_LOG="/tmp/brain-watch.log"
+
+check_one() {
+  local pid_file="$1"
+  local label="$2"
+  local extra="$3"
+  if [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null; then
+    printf "  %-9s ✅ running  pid=%-7s %s\n" "$label:" "$(cat "$pid_file")" "$extra"
+  else
+    printf "  %-9s ⛔ stopped  %s\n" "$label:" "$extra"
+  fi
+}
+
+echo "🧠 brain status"
+check_one "$WIKI_PID"  "wiki"    "$URL  (logs: $WIKI_LOG)"
+check_one "$WATCH_PID" "watcher" "(logs: $WATCH_LOG)"
+
+# Quick health check on the wiki socket.
+if curl -fsS -o /dev/null --max-time 2 "$URL/" 2>/dev/null; then
+  echo "  wiki url  reachable ✅"
+else
+  echo "  wiki url  unreachable ⚠️"
+fi

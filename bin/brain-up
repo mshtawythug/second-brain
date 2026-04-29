@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Start the second-brain wiki + sync watcher.
+# Idempotent — safe to re-run.
+#
+# Env overrides:
+#   BRAIN_VAULT_PATH    (default: ~/brain-vault)
+#   BRAIN_WIKI_PORT     (default: 8080)
+#   BRAIN_OPEN_BROWSER  (default: 1; set 0 to skip)
+
+set -euo pipefail
+
+VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
+QUARTZ_DIR="$VAULT/.quartz"
+PORT="${BRAIN_WIKI_PORT:-8080}"
+URL="http://localhost:$PORT"
+
+WIKI_PID="/tmp/brain-wiki.pid"
+WIKI_LOG="/tmp/brain-wiki.log"
+WATCH_PID="/tmp/brain-watch.pid"
+WATCH_LOG="/tmp/brain-watch.log"
+
+is_running() {
+  local pid_file="$1"
+  [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null
+}
+
+start_watcher() {
+  if is_running "$WATCH_PID"; then
+    echo "watcher already running (pid $(cat "$WATCH_PID"))"
+    return 0
+  fi
+  if ! command -v brain >/dev/null 2>&1; then
+    echo "brain CLI not on PATH — install second-brain first" >&2
+    return 1
+  fi
+  : >"$WATCH_LOG"
+  nohup brain vault sync --watch --vault "$VAULT" >"$WATCH_LOG" 2>&1 &
+  echo $! >"$WATCH_PID"
+  echo "watcher started (pid $!) — logs at $WATCH_LOG"
+}
+
+start_wiki() {
+  if is_running "$WIKI_PID"; then
+    echo "wiki already running (pid $(cat "$WIKI_PID")) — $URL"
+    return 0
+  fi
+  if [[ ! -d "$QUARTZ_DIR" ]]; then
+    echo "quartz workspace not found at $QUARTZ_DIR" >&2
+    echo "set up once with:" >&2
+    echo "  git clone https://github.com/jackyzha0/quartz.git \"$QUARTZ_DIR\"" >&2
+    echo "  cd \"$QUARTZ_DIR\" && npm install" >&2
+    echo "  cp \"$(dirname "$0")/../quartz.config.ts\" ./quartz.config.ts  # optional brain-tuned config" >&2
+    return 1
+  fi
+  : >"$WIKI_LOG"
+  cd "$QUARTZ_DIR"
+  nohup npx quartz build --serve --port "$PORT" --directory "$VAULT" \
+    >"$WIKI_LOG" 2>&1 &
+  echo $! >"$WIKI_PID"
+  echo "wiki starting on $URL (pid $!) — logs at $WIKI_LOG"
+}
+
+wait_for_url() {
+  local tries=30
+  while ((tries-- > 0)); do
+    if curl -fsS -o /dev/null "$URL/"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "warning: $URL did not respond within 30s — check $WIKI_LOG" >&2
+  return 1
+}
+
+start_watcher
+start_wiki
+
+if [[ "${BRAIN_OPEN_BROWSER:-1}" == "1" ]]; then
+  if wait_for_url; then
+    if command -v open >/dev/null 2>&1; then
+      open "$URL"
+    elif command -v xdg-open >/dev/null 2>&1; then
+      xdg-open "$URL" >/dev/null 2>&1 &
+    fi
+  fi
+fi
+
+echo
+echo "🧠 brain is up:"
+echo "   wiki:    $URL"
+echo "   watcher: re-syncing on file changes"
+echo "   stop:    brain-down"
+echo "   status:  brain-status"

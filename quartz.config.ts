@@ -1,13 +1,14 @@
 // Sample Quartz v4 configuration for brain vaults.
 //
 // This file is a TEMPLATE. Copy it into your Quartz workspace as
-// `<vault>/.quartz/quartz.config.ts` (the directory `npx quartz create`
-// scaffolds for you) — it does NOT compile or run from the brain repo
-// itself; the imports below resolve against the dependencies Quartz
-// pulls into your workspace, not against any package brain ships.
+// `<vault>/.quartz/quartz.config.ts` after cloning Quartz with
+// `git clone https://github.com/jackyzha0/quartz.git <vault>/.quartz`.
+// It does NOT compile or run from the brain repo itself; the imports
+// below resolve against the dependencies Quartz pulls into the cloned
+// workspace via `npm install`, not against any package brain ships.
 //
-// Tested against Quartz v4.x (April 2026). If a future Quartz version
-// renames a plugin or its option shape, copy the latest config from
+// Tested against Quartz v4.5.x (April 2026). If a future Quartz version
+// renames a plugin or its option shape, pull the latest config from
 // https://quartz.jzhao.xyz/ and re-apply the brain-specific tweaks
 // flagged below with `// brain:` comments.
 
@@ -16,50 +17,68 @@ import * as Plugin from "./quartz/plugins"
 
 const config: QuartzConfig = {
   configuration: {
-    pageTitle: "Second Brain",
+    // brain: friendlier title than the default "Quartz 4".
+    pageTitle: "🧠 Second Brain",
     pageTitleSuffix: "",
     enableSPA: true,
     enablePopovers: true,
-    // brain: analytics off by default — flip this to your provider if
-    // you deploy the rendered site somewhere public. The brain vault is
-    // private by default; we don't phone home from `brain vault render`.
+    // brain: analytics off — the wiki is private and rendered locally.
+    // If you deploy the static output somewhere public, set this to your
+    // provider of choice (plausible, google, umami, etc.).
     analytics: null,
     locale: "en-US",
+    // brain: localhost for dev; flip to your domain before deploying.
     baseUrl: "localhost:8080",
-    // brain: skip tooling-managed folders. `_templates` is brain's
-    // template scaffold dir; `_attachments` holds binaries referenced
-    // by notes; `.git` keeps version-control metadata out of the wiki.
-    ignorePatterns: ["_templates", "_attachments", ".git", ".obsidian"],
-    defaultDateType: "created",
+    // brain: skip tooling-managed folders. `_templates` / `_attachments`
+    // are brain conventions; `.quartz` is the workspace itself; `dist` /
+    // `public` are build outputs that must NOT be re-walked as content.
+    ignorePatterns: [
+      "private",
+      "_templates",
+      "_attachments",
+      "dist",
+      "public",
+      ".obsidian",
+      ".git",
+      ".quartz",
+    ],
+    defaultDateType: "modified",
     theme: {
+      fontOrigin: "googleFonts",
       cdnCaching: true,
+      // brain: warmer typography for a less corporate feel. Fraunces is
+      // characterful without being precious; Inter reads cleanly at body
+      // size; JetBrains Mono has decent ligatures for code blocks.
       typography: {
-        header: "Schibsted Grotesk",
-        body: "Source Sans Pro",
-        code: "IBM Plex Mono",
+        header: "Fraunces",
+        body: "Inter",
+        code: "JetBrains Mono",
       },
+      // brain: warm cream + terracotta in light mode, deep espresso +
+      // peach in dark. Easier to live in for long reading sessions than
+      // the stock cool grays.
       colors: {
         lightMode: {
-          light: "#faf8f8",
-          lightgray: "#e5e5e5",
-          gray: "#b8b8b8",
-          darkgray: "#4e4e4e",
-          dark: "#2b2b2b",
-          secondary: "#284b63",
-          tertiary: "#84a59d",
-          highlight: "rgba(143, 159, 169, 0.15)",
-          textHighlight: "#fff236aa",
+          light: "#fdfaf6",
+          lightgray: "#ebe4d9",
+          gray: "#a89f8c",
+          darkgray: "#5c5340",
+          dark: "#2a2418",
+          secondary: "#c4602b",
+          tertiary: "#a4ac86",
+          highlight: "rgba(196, 96, 43, 0.12)",
+          textHighlight: "#fde58a99",
         },
         darkMode: {
-          light: "#161618",
-          lightgray: "#393639",
-          gray: "#646464",
-          darkgray: "#d4d4d4",
-          dark: "#ebebec",
-          secondary: "#7b97aa",
-          tertiary: "#84a59d",
-          highlight: "rgba(143, 159, 169, 0.15)",
-          textHighlight: "#b3aa0288",
+          light: "#1a1611",
+          lightgray: "#2e2820",
+          gray: "#5c544a",
+          darkgray: "#c4b8a3",
+          dark: "#f0e9da",
+          secondary: "#e8a570",
+          tertiary: "#b8c19c",
+          highlight: "rgba(232, 165, 112, 0.15)",
+          textHighlight: "#fde58a55",
         },
       },
     },
@@ -68,28 +87,20 @@ const config: QuartzConfig = {
     transformers: [
       Plugin.FrontMatter(),
       Plugin.CreatedModifiedDate({
-        priority: ["frontmatter", "filesystem"],
+        priority: ["frontmatter", "git", "filesystem"],
       }),
       Plugin.SyntaxHighlighting({
         theme: { light: "github-light", dark: "github-dark" },
         keepBackground: false,
       }),
-      // brain: the vault uses Obsidian-flavored wiki-links; this
-      // transformer parses `[[Title]]`, `![[embed]]`, and pipe aliases
-      // exactly the way `brain vault sync` does.
       Plugin.ObsidianFlavoredMarkdown({ enableInHtmlEmbed: false }),
       Plugin.GitHubFlavoredMarkdown(),
       Plugin.TableOfContents(),
-      // brain: shortest match keeps `[[person-x]]` working even when the
-      // file lives in a nested folder.
       Plugin.CrawlLinks({ markdownLinkResolution: "shortest" }),
       Plugin.Description(),
       Plugin.Latex({ renderEngine: "katex" }),
     ],
-    filters: [
-      Plugin.RemoveDrafts(),
-      Plugin.ExplicitPublish(),
-    ],
+    filters: [Plugin.RemoveDrafts()],
     emitters: [
       Plugin.AliasRedirects(),
       Plugin.ComponentResources(),
@@ -103,8 +114,9 @@ const config: QuartzConfig = {
       Plugin.Assets(),
       Plugin.Static(),
       Plugin.NotFoundPage(),
-      // brain: graph view is the headline reason to use Quartz over a
-      // plain MkDocs setup — keep this enabled.
+      // brain: the graph view is the killer feature for an Obsidian-style
+      // vault. Tweak its on-page behavior in quartz.layout.ts via
+      // Component.Graph({ localGraph, globalGraph }).
       Plugin.Graph(),
     ],
   },

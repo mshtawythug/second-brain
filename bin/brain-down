@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Stop the second-brain wiki + sync watcher.
+# Idempotent — safe to re-run.
+
+set -euo pipefail
+
+WIKI_PID="/tmp/brain-wiki.pid"
+WATCH_PID="/tmp/brain-watch.pid"
+
+stop_one() {
+  local pid_file="$1"
+  local label="$2"
+  if [[ ! -f "$pid_file" ]]; then
+    return 0
+  fi
+  local pid
+  pid=$(cat "$pid_file")
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+    echo "stopped $label (pid $pid)"
+  fi
+  rm -f "$pid_file"
+}
+
+stop_one "$WIKI_PID"  "wiki"
+stop_one "$WATCH_PID" "watcher"
+
+# Belt + suspenders: any orphaned processes from prior crashed runs.
+pkill -f "quartz build --serve" 2>/dev/null || true
+pkill -f "brain vault sync --watch" 2>/dev/null || true
+
+echo "🧠 brain is down"
