@@ -19,10 +19,11 @@ dependencies = [
   "tiktoken>=0.8",
   "mcp>=1.0,<2.0",
   "voyageai>=0.3",
+  "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "ruff>=0.7", "mypy>=1.13", "reportlab>=4.0"]
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "ruff>=0.7", "mypy>=1.13", "reportlab>=4.0", "types-PyYAML>=6.0"]
 
 [project.scripts]
 brain = "brain.cli:app"

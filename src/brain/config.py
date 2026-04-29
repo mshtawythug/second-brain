@@ -10,6 +10,11 @@ DEFAULT_QWEN3_MODEL = "qwen3-embedding:8b"
 DEFAULT_EMBEDDER = "arctic"
 _VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
 
+# Default vault location — clean, no implicit cloud sync. Users who want iCloud
+# can either symlink ``~/brain-vault`` to an iCloud Drive folder or set
+# ``BRAIN_VAULT_PATH`` to an iCloud path.
+DEFAULT_VAULT_PATH = Path.home() / "brain-vault"
+
 
 def _project_dotenv() -> Path:
     """Path to the .env file at the repo root, relative to this module.
@@ -39,6 +44,7 @@ class Config:
     qwen3_model: str = DEFAULT_QWEN3_MODEL
     embedder: str = DEFAULT_EMBEDDER
     voyage_api_key: str | None = None
+    vault_path: Path = DEFAULT_VAULT_PATH
 
     @classmethod
     def load(cls) -> "Config":
@@ -66,10 +72,17 @@ class Config:
                 f"(got {embedder!r})"
             )
         voyage_api_key = os.environ.get("VOYAGE_API_KEY")
+        vault_path_env = os.environ.get("BRAIN_VAULT_PATH")
+        vault_path = (
+            Path(vault_path_env).expanduser()
+            if vault_path_env
+            else DEFAULT_VAULT_PATH
+        )
         return cls(
             database_url=database_url,
             ollama_host=ollama_host,
             qwen3_model=qwen3_model,
             embedder=embedder,
             voyage_api_key=voyage_api_key,
+            vault_path=vault_path,
         )

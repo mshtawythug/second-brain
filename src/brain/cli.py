@@ -50,12 +50,21 @@ from .queries import (
     summary_counts,
 )
 from .search import hybrid_search
+from .vault import init_vault
+from .vault.export import export_vault
 
 app = typer.Typer(
     name="brain",
     help="Local personal knowledge base. Hybrid search over your career corpus.",
     no_args_is_help=True,
 )
+
+vault_app = typer.Typer(
+    name="vault",
+    help="Vault management.",
+    no_args_is_help=True,
+)
+app.add_typer(vault_app, name="vault")
 
 
 @app.callback()
@@ -957,3 +966,76 @@ def rm(
             typer.confirm(f"Delete '{title}' ({doc_id[:8]})?", abort=True)
         conn.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
     typer.echo(f"deleted {doc_id[:8]}")
+
+
+# ---------------------------------------------------------------------------
+# Vault sub-app commands.
+# ---------------------------------------------------------------------------
+
+
+@vault_app.command("init")
+def vault_init(
+    path: Path | None = typer.Option(
+        None,
+        "--path",
+        help="Override the configured vault path.",
+    ),
+) -> None:
+    """Create the vault folder + default templates. Idempotent.
+
+    Writes ``_templates/``, ``_attachments/``, ``_ingested/{krisp,slack,gmail,manual}/``,
+    and ``daily/`` under the resolved vault path. Drops in default daily/note
+    templates and a vault README on first run; subsequent runs leave existing
+    files alone (so user edits to templates survive).
+    """
+    cfg = Config.load()
+    target = path.expanduser() if path is not None else cfg.vault_path
+    summary = init_vault(target)
+    typer.echo(f"vault path:     {summary.vault_path}")
+    if summary.created_dirs:
+        typer.echo(f"created dirs:   {', '.join(summary.created_dirs)}")
+    if summary.existing_dirs:
+        typer.echo(f"existing dirs:  {', '.join(summary.existing_dirs)}")
+    if summary.written_files:
+        typer.echo(f"wrote files:    {', '.join(summary.written_files)}")
+    if summary.preserved_files:
+        typer.echo(f"left untouched: {', '.join(summary.preserved_files)}")
+
+
+@vault_app.command("export")
+def vault_export(
+    to: Path | None = typer.Option(
+        None,
+        "--to",
+        help="Vault folder to write into (default: configured BRAIN_VAULT_PATH).",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Write into a non-empty target that wasn't created by this tool.",
+    ),
+) -> None:
+    """One-shot dump of the current DB to a vault folder.
+
+    Writes one ``.md`` per document with YAML frontmatter. Idempotent —
+    re-running on the same path is a no-op when nothing changed (compares
+    each destination's existing body content_hash against the DB row).
+    """
+    cfg = Config.load()
+    target = to.expanduser() if to is not None else cfg.vault_path
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        try:
+            summary = export_vault(conn, vault_path=target, force=force)
+        except ValueError as e:
+            typer.secho(str(e), fg="red", err=True)
+            raise typer.Exit(code=1) from e
+    typer.echo(
+        f"wrote {summary.written} file(s), "
+        f"skipped {summary.skipped}, "
+        f"errors {len(summary.errors)}"
+    )
+    for err in summary.errors:
+        typer.secho(f"  error: {err}", fg="red", err=True)
+    if summary.errors:
+        raise typer.Exit(code=1)

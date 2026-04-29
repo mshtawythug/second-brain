@@ -162,3 +162,34 @@ def test_voyage_api_key_read_from_env(monkeypatch, isolated_dotenv):
     monkeypatch.setenv("VOYAGE_API_KEY", "vk-test-secret")
     cfg = Config.load()
     assert cfg.voyage_api_key == "vk-test-secret"
+
+
+# ---------------------------------------------------------------------------
+# Vault path config (Phase 1 of the vault model).
+# ---------------------------------------------------------------------------
+
+
+def test_vault_path_defaults_to_home_brain_vault(monkeypatch, isolated_dotenv):
+    """No ``BRAIN_VAULT_PATH`` set → ``~/brain-vault``."""
+    from brain.config import DEFAULT_VAULT_PATH
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
+    cfg = Config.load()
+    assert cfg.vault_path == DEFAULT_VAULT_PATH
+    assert cfg.vault_path.name == "brain-vault"
+
+
+def test_vault_path_env_var_override(monkeypatch, isolated_dotenv, tmp_path):
+    """``BRAIN_VAULT_PATH=...`` is honored verbatim."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "custom-vault"))
+    cfg = Config.load()
+    assert cfg.vault_path == tmp_path / "custom-vault"
+
+
+def test_vault_path_expands_user_tilde(monkeypatch, isolated_dotenv):
+    """A leading ``~`` in BRAIN_VAULT_PATH expands to the home directory."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", "~/my-brain")
+    cfg = Config.load()
+    assert cfg.vault_path == Path.home() / "my-brain"
