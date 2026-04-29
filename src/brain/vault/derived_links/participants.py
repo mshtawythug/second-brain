@@ -3,9 +3,12 @@ import re
 from email.utils import getaddresses
 from typing import Any
 
-# Krisp writes unidentified speakers as ``Speaker_<digits>``; we drop these
-# because they over-link unrelated calls.
-_SPEAKER_PLACEHOLDER_RE = re.compile(r"^speaker_\d+$")
+# Krisp writes unidentified speakers as ``Speaker <digits>`` (real transcripts,
+# space separator) or ``Speaker_<digits>`` (legacy / synthetic test data,
+# underscore). Either form is dropped because it would over-link unrelated
+# calls — every transcript starts numbering at 1, so ``Speaker 2`` from one
+# call has nothing to do with ``Speaker 2`` from another.
+_SPEAKER_PLACEHOLDER_RE = re.compile(r"^speaker[ _]\d+$")
 
 # Krisp inline speaker label: ``**<name-or-email> | mm:ss**`` (or ``H:MM:SS``
 # for calls over an hour). Capture the label text only. The optional

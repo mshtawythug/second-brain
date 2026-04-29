@@ -3,9 +3,10 @@ import json as _json  # aliased — `json` conflicts with the --json output flag
 import shutil
 import subprocess
 import sys
+import time as _time
 import uuid
+from datetime import UTC, datetime
 from datetime import date as date_cls
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import httpx
 import psycopg
 import typer
 import yaml
+from rich.table import Table
 
 from .config import Config, ConfigError
 from .db import connect, connect_raw, ensure_embedding_column, run_migrations
@@ -58,7 +60,15 @@ from .queries import (
 )
 from .search import hybrid_search
 from .vault import init_vault
-from .vault.derived_links.gws import real_gws_runner
+from .vault.derived_links import (
+    DirectoryStore,
+    extract_gmail_addresses,
+    extract_krisp_speakers,
+    real_gws_runner,
+    rebuild_derived_for,
+    refresh_calendar,
+    refresh_contacts,
+)
 from .vault.export import export_vault
 from .vault.frontmatter import dump_frontmatter, parse_frontmatter
 from .vault.graph import (
@@ -1584,6 +1594,269 @@ def vault_render(
         f"(open {output_dir / 'index.html'} or serve with "
         f"`python -m http.server` from there)"
     )
+
+
+# ---------------------------------------------------------------------------
+# brain vault relink-derived — full-corpus directory + derived-links rebuild.
+#
+# One-shot maintenance command: rescan every Gmail document into the
+# directory, refresh Calendar/Contacts via gws (best-effort), and rebuild
+# every derived_links edge across the Gmail+Krisp corpus. Idempotent.
+# ---------------------------------------------------------------------------
+
+
+def _rescan_gmail_directory(conn: psycopg.Connection[Any]) -> tuple[int, int]:
+    """Re-walk every Gmail document and upsert (display, email) pairs.
+
+    Returns ``(docs_seen, pairs_upserted)``. Each (display, email) pair from
+    a single document's ``from``/``to`` headers contributes ``+1`` to the
+    pair count even when the upsert is a count bump (no row inserted) — the
+    metric matches the user-facing "pairs from N docs" line in the summary.
+
+    The whole rescan runs in one transaction. ``directory_entries`` rows
+    upserted earlier in this command (e.g. by a prior partial run) only have
+    their ``occurrence_count`` incremented, so re-running this is safe.
+    """
+    rows = conn.execute(
+        """
+        SELECT d.id::text, d.metadata
+        FROM documents d
+        JOIN sources s ON s.id = d.source_id
+        WHERE s.kind = 'gmail'
+        """
+    ).fetchall()
+
+    store = DirectoryStore(conn)
+    pairs = 0
+    with conn.transaction():
+        for _doc_id, metadata in rows:
+            for display_name, email in extract_gmail_addresses(
+                dict(metadata or {})
+            ):
+                try:
+                    store.upsert_pair(
+                        display_name=display_name,
+                        email=email,
+                        source="gmail",
+                    )
+                except ValueError:
+                    # Defensive — extract_gmail_addresses already filters
+                    # malformed shapes; a residual bad email would otherwise
+                    # poison the whole rescan.
+                    continue
+                pairs += 1
+    return len(rows), pairs
+
+
+def _backfill_krisp_participant_keys(conn: psycopg.Connection[Any]) -> int:
+    """Re-populate ``metadata['_participant_keys']`` for every Krisp doc from its body.
+
+    Backfills docs ingested before B.3 (which added the pre-insert hook in
+    :func:`brain.ingest._apply_pre_insert_metadata`). For each Krisp doc,
+    parses speaker labels via :func:`extract_krisp_speakers` over the stored
+    body and writes the sorted, normalized list back into
+    ``documents.metadata['_participant_keys']``. Returns the count of docs
+    updated.
+
+    Idempotent — re-running on a doc that already has correct keys is a
+    no-op aside from the UPDATE itself; running on stale keys overwrites
+    them to match the current body. Wrapped in one transaction so a partial
+    failure leaves the corpus in its pre-backfill state.
+
+    This step does NOT depend on ``gws`` — it works purely on already-stored
+    document content. It's the missing piece that lets R3
+    (``same_day_participant``) fire on the existing Krisp corpus.
+    """
+    rows = conn.execute(
+        """
+        SELECT d.id::text, d.content, d.metadata
+        FROM documents d
+        JOIN sources s ON s.id = d.source_id
+        WHERE s.kind = 'krisp'
+        """
+    ).fetchall()
+    updated = 0
+    with conn.transaction():
+        for doc_id, content, metadata in rows:
+            keys = sorted(extract_krisp_speakers(content or ""))
+            new_metadata = dict(metadata or {})
+            new_metadata["_participant_keys"] = keys
+            conn.execute(
+                "UPDATE documents SET metadata = %s::jsonb WHERE id = %s",
+                (_json.dumps(new_metadata), doc_id),
+            )
+            updated += 1
+    return updated
+
+
+def _linkable_corpus_ids(conn: psycopg.Connection[Any]) -> set[str]:
+    """Return every Gmail/Krisp document id as a set of strings.
+
+    The linker only operates on these two source kinds — manual / vault docs
+    don't carry the metadata shapes the rules read.
+    """
+    rows = conn.execute(
+        """
+        SELECT d.id::text
+        FROM documents d
+        JOIN sources s ON s.id = d.source_id
+        WHERE s.kind IN ('gmail', 'krisp')
+        """
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def _directory_counts_by_source(
+    conn: psycopg.Connection[Any],
+) -> list[tuple[str, int]]:
+    """Return ``[(source, count), ...]`` ordered by count desc."""
+    rows = conn.execute(
+        """
+        SELECT source, count(*)::int
+        FROM directory_entries
+        GROUP BY source
+        ORDER BY count(*) DESC, source ASC
+        """
+    ).fetchall()
+    return [(str(r[0]), int(r[1])) for r in rows]
+
+
+def _derived_counts_by_rule(
+    conn: psycopg.Connection[Any],
+) -> list[tuple[str, int]]:
+    """Return ``[(rule, count), ...]`` ordered by count desc."""
+    rows = conn.execute(
+        """
+        SELECT rule, count(*)::int
+        FROM derived_links
+        GROUP BY rule
+        ORDER BY count(*) DESC, rule ASC
+        """
+    ).fetchall()
+    return [(str(r[0]), int(r[1])) for r in rows]
+
+
+@vault_app.command("relink-derived")
+def vault_relink_derived() -> None:
+    """Full-corpus directory rebuild + derived-links rebuild.
+
+    Four steps, all against a single Postgres connection:
+
+    1. **Gmail directory rescan.** Walks every Gmail document and upserts
+       every ``(display_name, email)`` pair from its ``from``/``to``
+       headers into ``directory_entries`` with ``source='gmail'``.
+    1.5. **Krisp ``_participant_keys`` backfill.** Re-derives the
+       ``metadata._participant_keys`` field from every Krisp doc's stored
+       body, so docs ingested before B.3's pre-insert hook land in the
+       linker pass with their speakers populated (otherwise R3 has nothing
+       to match on for those rows).
+    2. **Calendar + Contacts refresh** via the ``gws`` CLI. Calendar is
+       windowed: ``since`` = the stored ``last_refreshed_at`` from
+       ``directory_refresh_state``, or year-start if no row exists; ``until``
+       = now. Contacts is always a full refresh (this command is the user
+       explicitly asking for one — the 24h throttle from incremental Krisp
+       ingest doesn't apply). Both refreshes degrade soft: a missing ``gws``
+       binary or a transient subprocess error logs a warning and the command
+       still completes.
+    3. **Linker pass** over the full Gmail+Krisp corpus. Passes every
+       linkable doc id as a single ``rebuild_derived_for`` call so cross-doc
+       pairs aren't missed by per-batch DELETE+INSERT semantics — we choose
+       Option B from Task B.6 (single full-corpus call) over Option A
+       (delete-all + small batches) because the corpus is small enough
+       (~500 docs) to fit comfortably in memory.
+
+    Idempotent: running twice produces the same final state because
+    ``rebuild_derived_for``'s DELETE+INSERT scopes to the touched docs (and
+    we touch every linkable doc on this command), and the Krisp backfill
+    overwrites ``_participant_keys`` deterministically from the body.
+    """
+    cfg = Config.load()
+    started_at = _time.perf_counter()
+
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+
+        # Step 1: full Gmail directory rescan.
+        typer.echo("Refreshing directory...")
+        gmail_docs_seen, gmail_pairs = _rescan_gmail_directory(conn)
+        typer.echo(
+            f"  - Gmail headers: {gmail_pairs} pairs from {gmail_docs_seen} docs"
+        )
+
+        # Step 1.5: Backfill Krisp _participant_keys from already-stored bodies.
+        # Docs ingested before B.3's pre-insert hook landed have an empty (or
+        # missing) ``metadata._participant_keys`` field, which means R3
+        # (same_day_participant) has nothing to compare against — it silently
+        # degrades to zero edges from those docs. This step is the historical
+        # backfill the original spec promised on the first ``relink-derived``
+        # run; it's body-driven so it works without a live ``gws``.
+        typer.echo("Backfilling Krisp participant keys...")
+        krisp_updated = _backfill_krisp_participant_keys(conn)
+        typer.echo(f"  - Krisp docs: {krisp_updated} backfilled")
+
+        # Step 2: Calendar + Contacts refresh via gws (best-effort).
+        now = datetime.now(tz=UTC)
+        cal_row = conn.execute(
+            "SELECT last_refreshed_at FROM directory_refresh_state "
+            "WHERE source = 'calendar'"
+        ).fetchone()
+        if cal_row is not None and cal_row[0] is not None:
+            since = cal_row[0]
+        else:
+            since = datetime(now.year, 1, 1, tzinfo=UTC)
+        events_seen = refresh_calendar(
+            conn, since=since, until=now, runner=real_gws_runner
+        )
+        typer.echo(
+            f"  - Calendar: {events_seen} events seen since "
+            f"{since.date().isoformat()}"
+        )
+        contacts_seen = refresh_contacts(conn, runner=real_gws_runner)
+        typer.echo(f"  - Contacts: {contacts_seen} contacts seen")
+
+        # Step 3: linker pass over the full Gmail+Krisp corpus.
+        #
+        # Implementation choice (per Task B.6): Option B — pass ALL linkable
+        # corpus ids as a single call to ``rebuild_derived_for`` so the
+        # DELETE+INSERT inside the runner cleanly rebuilds every edge in one
+        # transaction. Option A (delete-all + small batches) would also be
+        # correct but is only worth the complexity at scales where a single
+        # set blows out memory; this corpus is ~500 docs.
+        typer.echo("Rebuilding derived edges...")
+        corpus_ids = _linkable_corpus_ids(conn)
+        if not corpus_ids:
+            typer.echo("No linkable documents to process.")
+        else:
+            directory = DirectoryStore(conn)
+            inserted = rebuild_derived_for(
+                conn, corpus_ids, directory=directory
+            )
+            typer.echo(f"  - Touched docs: {len(corpus_ids)}")
+            typer.echo(f"  - Inserted edges: {inserted}")
+
+        # Step 4: Rich summary — directory by source + derived_links by rule.
+        directory_counts = _directory_counts_by_source(conn)
+        derived_counts = _derived_counts_by_rule(conn)
+
+    elapsed = _time.perf_counter() - started_at
+
+    if directory_counts:
+        directory_table = Table(title="Directory entries by source")
+        directory_table.add_column("Source", style="cyan")
+        directory_table.add_column("Rows", justify="right")
+        for source, count in directory_counts:
+            directory_table.add_row(source, str(count))
+        console.print(directory_table)
+
+    if derived_counts:
+        derived_table = Table(title="Derived links by rule")
+        derived_table.add_column("Rule", style="cyan")
+        derived_table.add_column("Edges", justify="right")
+        for rule, count in derived_counts:
+            derived_table.add_row(rule, str(count))
+        console.print(derived_table)
+
+    typer.echo(f"Done in {elapsed:.1f}s.")
 
 
 # ---------------------------------------------------------------------------

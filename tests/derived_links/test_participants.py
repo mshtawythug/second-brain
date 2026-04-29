@@ -22,6 +22,20 @@ class TestNormalizeParticipant:
     def test_speaker_placeholder_returns_none(self, token: str) -> None:
         assert normalize_participant(token) is None
 
+    def test_normalize_participant_drops_speaker_with_space(self) -> None:
+        # Real Krisp output uses a SPACE separator (``Speaker 3``), not the
+        # underscore form the synthetic test fixtures used. Both forms must
+        # be dropped — every transcript starts numbering at 1, so
+        # ``Speaker 2`` from one call has nothing to do with ``Speaker 2``
+        # from another. Regression: B.6 live run surfaced 185 false-positive
+        # R2 edges from this exact gap.
+        assert normalize_participant("Speaker 3") is None
+
+    def test_normalize_participant_drops_speaker_lowercase_space(self) -> None:
+        # Case-insensitive: ``speaker 7`` (lowercase, space-separated) is
+        # the same placeholder shape and must be dropped too.
+        assert normalize_participant("speaker 7") is None
+
     def test_email_lowercased(self) -> None:
         assert normalize_participant("Bob@Example.COM") == "bob@example.com"
 
@@ -118,6 +132,18 @@ class TestExtractKrispSpeakers:
             "**person-x last-a | 00:40**\nReply.\n"
         )
         assert extract_krisp_speakers(body) == {"ali sarkis", "person-a last-a"}
+
+    def test_extract_krisp_speakers_drops_space_placeholders(self) -> None:
+        # Real Krisp transcripts label unidentified speakers with a SPACE
+        # (``Speaker 2``), not an underscore. Regression: pre-fix this body
+        # would have leaked ``"speaker 2"`` and ``"speaker 5"`` into the
+        # participant key set, where they cross-link unrelated calls.
+        body = (
+            "**Speaker 2 | 0:01**\nUnknown.\n"
+            "**Speaker 5 | 0:02**\nAlso unknown.\n"
+            "**Ali | 0:03**\nReal speaker.\n"
+        )
+        assert extract_krisp_speakers(body) == {"ali"}
 
     def test_email_speaker_returned_as_email(self) -> None:
         body = "**bob@example.com | 1:23**\nHello from bob.\n"

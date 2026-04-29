@@ -3,6 +3,8 @@ from brain.vault.derived_links.directory import (
     DirectoryStore,
     GwsRunner,
     load_people_yml,
+    refresh_calendar,
+    refresh_contacts,
 )
 from brain.vault.derived_links.gws import real_gws_runner
 from brain.vault.derived_links.participants import (
@@ -36,6 +38,8 @@ __all__ = [
     "normalize_participant",
     "real_gws_runner",
     "rebuild_derived_for",
+    "refresh_calendar",
+    "refresh_contacts",
     "rule_same_day_participant",
     "rule_shared_participant",
     "rule_shared_thread",
