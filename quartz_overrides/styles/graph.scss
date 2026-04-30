@@ -1,0 +1,57 @@
+// Brain palette for the custom Quartz Graph component.
+//
+// This file is a TEMPLATE. It is installed at
+// `<vault>/.quartz/quartz/styles/graph.scss` by `brain vault render
+// --overlay`. It is brand-new — not a replacement for upstream's
+// `quartz/components/styles/graph.scss`, which carries the
+// component's box layout (sidebar sizing, modal positioning) and
+// is untouched by this overlay. The brain palette below loads
+// alongside it, imported as a sibling stylesheet by the custom
+// `Graph.tsx` and concatenated onto the component's `css` property.
+//
+// Tested against Quartz v4.5.x (April 2026). The CSS variables
+// defined here are referenced by name from
+// `components/scripts/graph.inline.ts` (via the `cssVars`
+// precompute list and the `cssVar()` helper) and by the
+// `D3Config.tierColors` / `sourceColors` defaults in
+// `components/Graph.tsx`. Renaming or removing a variable here
+// requires the matching update in those two files; the renderer
+// would otherwise resolve to an empty string and silently fall
+// through to `--gray`.
+
+:root {
+  // brain-extension: tier palette. `vault` covers authored notes
+  // (Phase A / B / C); `ingested` covers `_ingested/` notes that
+  // came from external sources via `brain ingest*`. Terracotta vs
+  // sage gives a strong cluster cue without clashing with the
+  // default Quartz body palette.
+  --brain-tier-vault: #c4602b;
+  --brain-tier-ingested: #a4ac86;
+
+  // brain-extension: ingest-source palette. Each `brain ingest
+  // --source <name>` value gets a distinct hue so a quick eye-scan
+  // over the graph clusters krisp / slack / gmail / manual zones
+  // at a glance. Hues picked to be perceptually distinct in light
+  // mode and to keep contrast against Quartz's `--light`
+  // background.
+  --brain-source-krisp: #8b6cab;
+  --brain-source-slack: #4a9eba;
+  --brain-source-gmail: #d4956a;
+  --brain-source-manual: #5c5340;
+}
+
+[data-theme="dark"] {
+  // brain-extension: dark-mode tier palette. Lifted lightness +
+  // muted saturation so the colors read on a dark background
+  // without bleeding into Quartz's text colors.
+  --brain-tier-vault: #e08552;
+  --brain-tier-ingested: #c5cda1;
+
+  // brain-extension: dark-mode source palette. Same hue
+  // dimensions as the light palette, lifted for dark-background
+  // contrast.
+  --brain-source-krisp: #b491cf;
+  --brain-source-slack: #76c1d9;
+  --brain-source-gmail: #e8b385;
+  --brain-source-manual: #8a7e63;
+}
