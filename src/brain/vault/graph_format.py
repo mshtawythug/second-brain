@@ -10,9 +10,27 @@ Determinism contract: every output is a pure function of the
 :class:`GraphData` input. No timestamps, no random sorts, no environment
 reads. Tests pin exact byte strings; any change to a formatter will
 break them — that's the point.
+
+Derived-edge tier styling (per spec §10 Q3):
+
+- Wiki-link edges keep the existing solid black look — they are the
+  user's authoritative thinking surface.
+- ``derived``/``shared_thread`` (R1, weight 1.0) — strongest derived
+  signal, rendered bold (Mermaid ``==>``, DOT ``style=bold``).
+- ``derived``/``same_day_participant`` (R3, weight 0.7) — medium
+  confidence, plain solid arrow but in gray (Mermaid ``-->`` with a
+  ``linkStyle`` directive, DOT ``color=gray``).
+- ``derived``/``shared_participant`` (R2, weight 0.4) — noisiest tier,
+  visually subordinated as dotted/light gray (Mermaid ``-.->``, DOT
+  ``style=dotted, color="#cccccc"``).
+
+JSON output passes ``rule`` / ``weight`` / ``evidence`` straight through
+on every edge regardless of tier; wiki edges carry ``null`` for all three
+to keep the schema stable.
 """
 import hashlib
 import json
+from typing import Any
 
 from .graph import GraphData, GraphEdge, GraphNode
 
@@ -40,6 +58,34 @@ _MERMAID_CLASS_INGESTED = (
     "classDef ingested fill:#dddddd,stroke:#888,color:#000;"
 )
 
+# Mermaid arrow shape per derived rule. R1 (`shared_thread`) and R2
+# (`shared_participant`) use Mermaid's built-in bold/dotted arrows; R3
+# (`same_day_participant`) renders as a plain arrow whose color is
+# overridden via a `linkStyle` directive emitted after the edge block.
+_MERMAID_DERIVED_ARROWS: dict[str, str] = {
+    "shared_thread": "==>",        # R1 — bold built-in
+    "shared_participant": "-.->",  # R2 — dotted built-in
+    "same_day_participant": "-->", # R3 — plain arrow, gray via linkStyle
+}
+# Rules that need a per-edge `linkStyle` line to override the default
+# stroke. Currently only R3 — R1 and R2 carry their styling in the arrow
+# shape itself.
+_MERMAID_LINKSTYLE: dict[str, str] = {
+    "same_day_participant": "stroke:gray",  # R3
+}
+
+# DOT per-edge attributes for derived rules. Stored as a tuple of raw
+# `key=value` fragments that are appended to the per-edge attribute list
+# alongside the existing `label="..."`. Color values that aren't bare
+# Graphviz keywords (e.g. hex codes) are quoted so the parser doesn't
+# choke; bare keywords (`bold`, `solid`, `gray`, `black`, `dotted`) stay
+# unquoted to match the spec table verbatim.
+_DOT_DERIVED_ATTRS: dict[str, tuple[str, ...]] = {
+    "shared_thread": ("style=bold", "color=black"),         # R1
+    "same_day_participant": ("style=solid", "color=gray"),  # R3
+    "shared_participant": ("style=dotted", 'color="#cccccc"'),  # R2
+}
+
 
 def to_json(graph: GraphData) -> str:
     """Stable JSON: ``{"nodes": [...], "edges": [...]}``.
@@ -55,8 +101,13 @@ def to_json(graph: GraphData) -> str:
     titles readable instead of escaping them as ``\\uXXXX`` sequences;
     determinism is preserved because the input was already a Python
     string.
+
+    Every edge carries ``rule``, ``weight``, ``evidence`` keys so the
+    JSON shape is uniform across wiki and derived edges. Wiki edges have
+    ``null`` for all three; derived edges carry the metadata-rule
+    provenance pulled straight from :class:`GraphEdge`.
     """
-    payload: dict[str, list[dict[str, str | None]]] = {
+    payload: dict[str, list[dict[str, Any]]] = {
         "nodes": [
             {
                 "id": n.document_id,
@@ -75,6 +126,9 @@ def to_json(graph: GraphData) -> str:
                 "kind": e.link_kind,
                 "text": e.link_text,
                 "display": e.display_text,
+                "rule": e.rule,
+                "weight": e.weight,
+                "evidence": e.evidence,
             }
             for e in sorted(
                 graph.edges,
@@ -103,6 +157,8 @@ def to_dot(graph: GraphData) -> str:
     - Vault-tier nodes get ``fillcolor=lightblue``; ingested-tier nodes
       get ``fillcolor=lightgray``.
     - Embed edges (``link_kind='embed'``) get ``style=dashed``.
+    - Derived edges pick up tier-specific ``style`` + ``color`` from
+      :data:`_DOT_DERIVED_ATTRS` (see module docstring).
     - Labels: title truncated to 60 chars; all backslashes / quotes /
       newlines escaped per Graphviz quoted-string rules.
     """
@@ -147,6 +203,8 @@ def to_dot(graph: GraphData) -> str:
         attrs = [f'label="{label}"']
         if e.link_kind == "embed":
             attrs.append('style="dashed"')
+        elif e.link_kind == "derived" and e.rule in _DOT_DERIVED_ATTRS:
+            attrs.extend(_DOT_DERIVED_ATTRS[e.rule])
         lines.append(f"  {src} -> {dst} [{', '.join(attrs)}];")
     lines.append("}")
     return "\n".join(lines) + "\n"
@@ -166,6 +224,11 @@ def to_mermaid(graph: GraphData) -> str:
       ``ingested``. Class definitions are emitted at the top so the
       output is one self-contained string.
     - Embed edges use ``-.->`` (dashed). Wiki edges use ``-->``.
+    - Derived edges pick their arrow shape from
+      :data:`_MERMAID_DERIVED_ARROWS` (R1 ``==>``, R2 ``-.->``, R3
+      ``-->``). Rules listed in :data:`_MERMAID_LINKSTYLE` (R3) emit a
+      trailing ``linkStyle <index> stroke:gray;`` directive targeting
+      the edge by its 0-indexed position in the rendered output.
     - Labels: title truncated to 60 chars, with Mermaid-special chars
       escaped (``"`` → ``#quot;`` per Mermaid's HTML-entity convention).
     """
@@ -201,17 +264,30 @@ def to_mermaid(graph: GraphData) -> str:
         lines.append(f'  {node_id}["{label}"]')
         cls = "vault" if n.kind == "vault" else "ingested"
         lines.append(f"  class {node_id} {cls};")
+    # `linkStyle` directives must reference the 0-indexed position of an
+    # edge in the rendered Mermaid output. We track the index as we emit
+    # edges and accumulate directives in a sidecar list, then append them
+    # after the edge block — keeping every edge line contiguous (some
+    # Mermaid renderers stumble on linkStyle interleaved with edges).
+    linkstyle_lines: list[str] = []
+    edge_index = 0
     for e in sorted_edges:
         src = id_map.get(e.src_document_id)
         dst = id_map.get(e.dst_document_id)
         if src is None or dst is None:
             continue  # pragma: no cover
-        arrow = "-.->" if e.link_kind == "embed" else "-->"
+        arrow = _mermaid_arrow_for(e)
         label = _mermaid_escape(_truncate_label(_edge_label(e)))
         if label:
             lines.append(f'  {src} {arrow}|"{label}"| {dst}')
         else:
             lines.append(f"  {src} {arrow} {dst}")
+        if e.link_kind == "derived" and e.rule in _MERMAID_LINKSTYLE:
+            linkstyle_lines.append(
+                f"  linkStyle {edge_index} {_MERMAID_LINKSTYLE[e.rule]};"
+            )
+        edge_index += 1
+    lines.extend(linkstyle_lines)
     return "\n".join(lines) + "\n"
 
 
@@ -250,6 +326,22 @@ def _truncate_label(text: str) -> str:
     if len(text) <= _LABEL_TRUNCATE_AT:
         return text
     return text[: _LABEL_TRUNCATE_AT - 1] + _TRUNCATION_SUFFIX
+
+
+def _mermaid_arrow_for(edge: GraphEdge) -> str:
+    """Pick the Mermaid arrow shape for an edge.
+
+    Embed edges keep the existing dashed arrow. Derived edges use the
+    per-rule arrow from :data:`_MERMAID_DERIVED_ARROWS`. Wiki edges and
+    any unknown derived rule fall through to the plain ``-->`` arrow —
+    that way an unrecognized rule still renders as a valid Mermaid
+    edge instead of crashing the formatter.
+    """
+    if edge.link_kind == "embed":
+        return "-.->"
+    if edge.link_kind == "derived" and edge.rule in _MERMAID_DERIVED_ARROWS:
+        return _MERMAID_DERIVED_ARROWS[edge.rule]
+    return "-->"
 
 
 def _edge_label(edge: GraphEdge) -> str:

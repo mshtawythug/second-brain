@@ -65,7 +65,13 @@ def test_to_json_round_trips_via_json_loads() -> None:
 
 
 def test_to_json_is_byte_stable() -> None:
-    """Repeated calls return identical bytes — pin exact output."""
+    """Repeated calls return identical bytes — pin exact output.
+
+    Every edge carries ``rule`` / ``weight`` / ``evidence``; for the
+    wiki-only fixture they're ``null``, but the keys are always present
+    so downstream consumers can iterate edges without conditional
+    field-existence checks.
+    """
     graph = _three_node_two_edge()
     a = to_json(graph)
     b = to_json(graph)
@@ -76,16 +82,22 @@ def test_to_json_is_byte_stable() -> None:
         '    {\n'
         '      "display": null,\n'
         '      "dst": "22222222-2222-2222-2222-222222222222",\n'
+        '      "evidence": null,\n'
         '      "kind": "wiki",\n'
+        '      "rule": null,\n'
         '      "src": "11111111-1111-1111-1111-111111111111",\n'
-        '      "text": "[[Bravo]]"\n'
+        '      "text": "[[Bravo]]",\n'
+        '      "weight": null\n'
         '    },\n'
         '    {\n'
         '      "display": null,\n'
         '      "dst": "33333333-3333-3333-3333-333333333333",\n'
+        '      "evidence": null,\n'
         '      "kind": "wiki",\n'
+        '      "rule": null,\n'
         '      "src": "22222222-2222-2222-2222-222222222222",\n'
-        '      "text": "[[Charlie]]"\n'
+        '      "text": "[[Charlie]]",\n'
+        '      "weight": null\n'
         '    }\n'
         '  ],\n'
         '  "nodes": [\n'
@@ -432,6 +444,248 @@ def test_to_mermaid_ordering_is_independent_of_input_order() -> None:
         edges=list(reversed(graph.edges)),
     )
     assert to_mermaid(graph) == to_mermaid(reversed_graph)
+
+
+# ---------------------------------------------------------------------------
+# Derived-edge tier styling (Task C.2)
+#
+# Helpers + fixtures for building one-edge derived graphs. Each test
+# pins a single behavior — arrow shape, attribute list, or `linkStyle`
+# index — so a regression in one tier doesn't cascade across the suite.
+# ---------------------------------------------------------------------------
+
+
+def _two_node_derived(
+    rule: str, weight: float, evidence: dict[str, object] | None = None
+) -> GraphData:
+    """A → B with a single derived edge of the given rule/weight."""
+    nodes = [
+        GraphNode(
+            document_id="11111111-1111-1111-1111-111111111111",
+            title="A",
+            kind="vault",
+        ),
+        GraphNode(
+            document_id="22222222-2222-2222-2222-222222222222",
+            title="B",
+            kind="vault",
+        ),
+    ]
+    edges = [
+        GraphEdge(
+            src_document_id=nodes[0].document_id,
+            dst_document_id=nodes[1].document_id,
+            link_kind="derived",
+            link_text="",
+            display_text=None,
+            rule=rule,
+            weight=weight,
+            evidence=evidence if evidence is not None else {},
+        )
+    ]
+    return GraphData(nodes=nodes, edges=edges)
+
+
+def test_mermaid_wiki_edge_uses_solid_arrow() -> None:
+    """Wiki edges keep the plain ``-->`` arrow — never bold or dotted."""
+    out = to_mermaid(_three_node_two_edge())
+    assert "-->" in out
+    assert "==>" not in out
+    # `-.->` would also be wrong here. The fixture has only wiki edges.
+    assert "-.->" not in out
+
+
+def test_mermaid_r1_edge_uses_bold_arrow() -> None:
+    """R1 (``shared_thread``) renders with Mermaid's bold ``==>`` arrow."""
+    out = to_mermaid(_two_node_derived("shared_thread", 1.0))
+    assert "==>" in out
+    # No linkStyle is needed for R1 — bold is built into the arrow shape.
+    assert "linkStyle" not in out
+
+
+def test_mermaid_r3_edge_uses_gray_linkstyle() -> None:
+    """R3 (``same_day_participant``) is plain ``-->`` plus gray linkStyle."""
+    out = to_mermaid(_two_node_derived("same_day_participant", 0.7))
+    # Plain arrow — color comes from the linkStyle directive, not the shape.
+    assert " --> " in out
+    assert "==>" not in out
+    # Single edge → linkStyle indexes 0.
+    assert "linkStyle 0 stroke:gray" in out
+
+
+def test_mermaid_r2_edge_uses_dotted_arrow() -> None:
+    """R2 (``shared_participant``) renders with the dotted ``-.->`` arrow."""
+    out = to_mermaid(_two_node_derived("shared_participant", 0.4))
+    assert "-.->" in out
+    # No linkStyle for R2 — dotted shape carries the styling.
+    assert "linkStyle" not in out
+
+
+def test_dot_wiki_edge_has_default_style() -> None:
+    """Wiki edges in DOT carry only the ``label="..."`` attribute — no
+    derived ``style=`` or ``color=`` overrides on the edge itself.
+
+    Nodes still carry ``fillcolor=`` (a node attribute, unrelated to
+    the per-edge color we're guarding against here), so we inspect each
+    edge line individually instead of grepping the whole graph.
+    """
+    out = to_dot(_three_node_two_edge())
+    edge_lines = [
+        line for line in out.splitlines() if " -> " in line
+    ]
+    # Sanity: the fixture has two wiki edges → two `->` lines.
+    assert len(edge_lines) == 2
+    for line in edge_lines:
+        assert "style=bold" not in line
+        assert "style=dotted" not in line
+        assert "style=solid" not in line
+        assert 'style="dashed"' not in line
+        assert "color=" not in line
+
+
+def test_dot_r1_edge_has_bold_style() -> None:
+    """R1 derived edges in DOT pick up ``style=bold, color=black``."""
+    out = to_dot(_two_node_derived("shared_thread", 1.0))
+    assert "style=bold" in out
+    assert "color=black" in out
+
+
+def test_dot_r3_edge_has_solid_gray_style() -> None:
+    """R3 derived edges in DOT pick up ``style=solid, color=gray``."""
+    out = to_dot(_two_node_derived("same_day_participant", 0.7))
+    assert "style=solid, color=gray" in out
+
+
+def test_dot_r2_edge_has_dotted_light_gray_style() -> None:
+    """R2 derived edges in DOT pick up ``style=dotted, color="#cccccc"``.
+
+    The hex color is quoted because Graphviz parses bare ``#`` as a
+    comment delimiter; the spec's exact form with quotes is reproduced
+    verbatim.
+    """
+    out = to_dot(_two_node_derived("shared_participant", 0.4))
+    assert 'style=dotted, color="#cccccc"' in out
+
+
+def test_json_output_includes_rule_weight_evidence_for_derived_edges() -> None:
+    """JSON for a derived edge surfaces the metadata-rule provenance."""
+    evidence = {"thread_id": "abc123"}
+    graph = _two_node_derived("shared_thread", 1.0, evidence=evidence)
+    parsed = json.loads(to_json(graph))
+    edge = parsed["edges"][0]
+    assert edge["rule"] == "shared_thread"
+    assert edge["weight"] == 1.0
+    assert edge["evidence"] == evidence
+    assert edge["kind"] == "derived"
+
+
+def test_json_output_excludes_or_nullifies_rule_for_wiki_edges() -> None:
+    """Wiki edges in JSON carry ``null`` for ``rule`` / ``weight`` /
+    ``evidence`` — the keys are always present (matching the project's
+    ``display: null`` convention) so consumers can iterate without
+    membership checks."""
+    parsed = json.loads(to_json(_three_node_two_edge()))
+    for edge in parsed["edges"]:
+        assert edge["rule"] is None
+        assert edge["weight"] is None
+        assert edge["evidence"] is None
+
+
+def test_mermaid_mixed_edges_correct_linkstyle_indices() -> None:
+    """A graph with multiple derived rules emits one ``linkStyle`` per R3
+    edge, each targeting the 0-indexed position of that edge in the
+    rendered Mermaid output.
+
+    Edges are sorted by ``(src, dst, link_text, link_kind)``. With the
+    ids below the sort lands them in this order:
+
+    0. A→B  wiki                       (-->)
+    1. A→C  shared_thread              (==>)
+    2. A→D  same_day_participant       (-->) ← linkStyle 2 stroke:gray
+    3. A→E  shared_participant         (-.->)
+    4. B→C  same_day_participant       (-->) ← linkStyle 4 stroke:gray
+
+    So the formatter must emit exactly two ``linkStyle`` lines — one
+    for index 2, one for index 4 — and nothing for the wiki / R1 / R2
+    edges between them.
+    """
+    nodes = [
+        GraphNode(
+            document_id="11111111-1111-1111-1111-111111111111",
+            title="A",
+            kind="vault",
+        ),
+        GraphNode(
+            document_id="22222222-2222-2222-2222-222222222222",
+            title="B",
+            kind="vault",
+        ),
+        GraphNode(
+            document_id="33333333-3333-3333-3333-333333333333",
+            title="C",
+            kind="vault",
+        ),
+        GraphNode(
+            document_id="44444444-4444-4444-4444-444444444444",
+            title="D",
+            kind="vault",
+        ),
+        GraphNode(
+            document_id="55555555-5555-5555-5555-555555555555",
+            title="E",
+            kind="vault",
+        ),
+    ]
+
+    def _wiki(src_idx: int, dst_idx: int, text: str) -> GraphEdge:
+        return GraphEdge(
+            src_document_id=nodes[src_idx].document_id,
+            dst_document_id=nodes[dst_idx].document_id,
+            link_kind="wiki",
+            link_text=text,
+            display_text=None,
+        )
+
+    def _derived(src_idx: int, dst_idx: int, rule: str, weight: float) -> GraphEdge:
+        return GraphEdge(
+            src_document_id=nodes[src_idx].document_id,
+            dst_document_id=nodes[dst_idx].document_id,
+            link_kind="derived",
+            link_text="",
+            display_text=None,
+            rule=rule,
+            weight=weight,
+            evidence={},
+        )
+
+    edges = [
+        _wiki(0, 1, "[[B]]"),                              # A→B wiki
+        _derived(0, 2, "shared_thread", 1.0),              # A→C R1
+        _derived(0, 3, "same_day_participant", 0.7),       # A→D R3 → linkStyle 2
+        _derived(0, 4, "shared_participant", 0.4),         # A→E R2
+        _derived(1, 2, "same_day_participant", 0.7),       # B→C R3 → linkStyle 4
+    ]
+    out = to_mermaid(GraphData(nodes=nodes, edges=edges))
+
+    # Exactly the two expected linkStyle lines, no others.
+    assert "  linkStyle 2 stroke:gray;" in out
+    assert "  linkStyle 4 stroke:gray;" in out
+    assert out.count("linkStyle") == 2
+
+    # Sanity: each non-R3 derived edge picked the right arrow shape.
+    assert " ==> " in out  # R1
+    assert " -.-> " in out  # R2
+
+    # And the linkStyle lines come AFTER the edges (Mermaid renderers
+    # are happiest that way; the formatter buffers them deliberately).
+    body = out.splitlines()
+    last_edge_idx = max(
+        i for i, line in enumerate(body) if " --> " in line or " ==> " in line or " -.-> " in line
+    )
+    first_linkstyle_idx = min(
+        i for i, line in enumerate(body) if "linkStyle " in line
+    )
+    assert first_linkstyle_idx > last_edge_idx
 
 
 @pytest.mark.parametrize("kind", ["vault", "ingested"])
