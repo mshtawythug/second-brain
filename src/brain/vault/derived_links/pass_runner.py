@@ -30,7 +30,7 @@ def rebuild_derived_for(
     doc_ids: set[str],
     *,
     directory: DirectoryStore,
-) -> int:
+) -> tuple[int, set[str]]:
     """Rebuild ``derived_links`` rows whose src or dst is in ``doc_ids``.
 
     Steps (all in one transaction):
@@ -39,13 +39,28 @@ def rebuild_derived_for(
       3. Compute candidate pairs (de-duplicated by canonical ordering); run
          R1/R2/R3 against each.
       4. R3 supersedes R2 for the same pair.
-      5. DELETE FROM derived_links WHERE src or dst IN doc_ids.
+      5. DELETE FROM derived_links WHERE src or dst IN doc_ids (capturing
+         the row endpoints so callers see partners that LOST an edge in
+         this pass too).
       6. INSERT the new edge set with ``(LEAST, GREATEST)`` ordering.
 
-    Returns the count of inserted edges.
+    Returns ``(inserted_count, affected_ids)``:
+
+    - ``inserted_count`` — number of ``derived_links`` rows inserted in
+      step 6.
+    - ``affected_ids`` — superset of ``doc_ids`` containing every endpoint
+      that had an edge added (step 6) OR removed (step 5). This is the
+      touched-set that downstream callers (Phase D's fence renderer)
+      iterate over to decide which ``_ingested/`` files need their fence
+      regenerated. Includes the input ``doc_ids`` even when no edges were
+      added or removed, so callers can rely on the input being a subset
+      of the output.
+
+    The set short-circuits to ``(0, set())`` when ``doc_ids`` is empty —
+    no DB round-trip, no transaction.
     """
     if not doc_ids:
-        return 0
+        return 0, set()
 
     # 1+2. Snapshot every linkable doc once. The corpus is small (~500 rows
     #      at full scale per the spec), so a single SELECT + Python-side hash
@@ -100,13 +115,23 @@ def rebuild_derived_for(
     #      original ``doc_ids`` set (not just ``touched_in_corpus``) so a
     #      caller that passes a now-deleted / kind-changed doc still has its
     #      stale edges cleared.
+    #
+    #      The DELETE returns the endpoints of every removed row so the
+    #      affected-set captures partners that LOST an edge in this pass.
+    #      Without that, a fence renderer wouldn't know to regenerate the
+    #      partner's "Related" section after a deletion.
     doc_ids_list = list(doc_ids)
+    affected_ids: set[str] = set(doc_ids)
     with conn.transaction():
-        conn.execute(
+        deleted_rows = conn.execute(
             "DELETE FROM derived_links "
-            "WHERE src_document_id = ANY(%s) OR dst_document_id = ANY(%s)",
+            "WHERE src_document_id = ANY(%s) OR dst_document_id = ANY(%s) "
+            "RETURNING src_document_id::text, dst_document_id::text",
             (doc_ids_list, doc_ids_list),
-        )
+        ).fetchall()
+        for src, dst in deleted_rows:
+            affected_ids.add(str(src))
+            affected_ids.add(str(dst))
         for src, dst, evidence in pair_evidence:
             conn.execute(
                 """
@@ -122,14 +147,18 @@ def rebuild_derived_for(
                     evidence.weight,
                 ),
             )
+            affected_ids.add(src)
+            affected_ids.add(dst)
 
     _logger.info(
-        "rebuilt %d derived edges across %d touched docs (%d in corpus)",
+        "rebuilt %d derived edges across %d touched docs "
+        "(%d in corpus, %d affected ids)",
         len(pair_evidence),
         len(doc_ids),
         len(touched_in_corpus),
+        len(affected_ids),
     )
-    return len(pair_evidence)
+    return len(pair_evidence), affected_ids
 
 
 def _canonical_pair(a: str, b: str) -> tuple[str, str]:

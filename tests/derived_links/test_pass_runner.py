@@ -125,7 +125,7 @@ class TestSharedThread:
             content="hi back",
         )
 
-        inserted = rebuild_derived_for(
+        inserted, _affected = rebuild_derived_for(
             test_db, {a_id, b_id}, directory=directory
         )
 
@@ -251,11 +251,11 @@ class TestNoIntersection:
             content="y",
         )
 
-        result = rebuild_derived_for(
+        inserted, _affected = rebuild_derived_for(
             test_db, {a_id, b_id}, directory=directory
         )
 
-        assert result == 0
+        assert inserted == 0
         assert _derived_rows(test_db) == []
 
 
@@ -396,18 +396,18 @@ class TestIdempotence:
             content="B",
         )
 
-        first = rebuild_derived_for(
+        first_inserted, _ = rebuild_derived_for(
             test_db, {a_id, b_id}, directory=directory
         )
         first_rows = _derived_rows(test_db)
-        second = rebuild_derived_for(
+        second_inserted, _ = rebuild_derived_for(
             test_db, {a_id, b_id}, directory=directory
         )
         second_rows = _derived_rows(test_db)
 
         # Inserted-count is per-call (DELETE then INSERT), so both calls
         # report the same number; the row set is unchanged.
-        assert first == second
+        assert first_inserted == second_inserted
         assert first_rows == second_rows
 
 
@@ -473,11 +473,11 @@ class TestSelfPair:
             content="lonely",
         )
 
-        result = rebuild_derived_for(
+        inserted, _affected = rebuild_derived_for(
             test_db, {a_id}, directory=directory
         )
 
-        assert result == 0
+        assert inserted == 0
         assert _derived_rows(test_db) == []
 
 
@@ -519,9 +519,12 @@ class TestEmptyInput:
         before = _derived_rows(test_db)
         assert before  # sanity
 
-        result = rebuild_derived_for(test_db, set(), directory=directory)
+        inserted, affected = rebuild_derived_for(
+            test_db, set(), directory=directory
+        )
 
-        assert result == 0
+        assert inserted == 0
+        assert affected == set()
         assert _derived_rows(test_db) == before
 
 
@@ -742,12 +745,12 @@ class TestMalformedMetadata:
             content="y",
         )
 
-        result = rebuild_derived_for(
+        inserted, _affected = rebuild_derived_for(
             test_db, {krisp_id, gmail_id}, directory=directory
         )
 
         # No keys, no overlap, no edges.
-        assert result == 0
+        assert inserted == 0
         assert _derived_rows(test_db) == []
 
     def test_krisp_participant_keys_with_garbage_entries_filtered(
@@ -859,3 +862,164 @@ class TestMalformedMetadata:
 
         rows = _derived_rows(test_db)
         assert [r[2] for r in rows] == ["shared_participant"]
+
+
+# --------------------------------------------------------------------------
+# Phase D — affected_ids reporting (Task D.3).
+# --------------------------------------------------------------------------
+
+
+class TestAffectedIds:
+    """``rebuild_derived_for`` returns every doc id whose edges changed.
+
+    Phase D's fence renderer (Task D.4) iterates this set to know which
+    ``_ingested/`` files need their auto-section regenerated. A returned
+    set that's a strict superset of the input (including new partners,
+    plus partners that LOST an edge in this pass) is what makes the
+    renderer correct under add and remove.
+    """
+
+    def test_empty_input_returns_empty_set(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Empty doc_ids → ``(0, set())`` short-circuit. No DB round-trip.
+        inserted, affected = rebuild_derived_for(
+            test_db, set(), directory=directory
+        )
+        assert inserted == 0
+        assert affected == set()
+
+    def test_returned_set_includes_input_doc_ids(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Even for a solo doc with no candidates to pair, the contract
+        # guarantees the input is a subset of the returned set. Caller code
+        # can rely on this without a separate ``input | output`` union.
+        a_id = _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="incl-a",
+            metadata={
+                "from": "person-x <person-a@example.com>",
+                "to": "Ali <ali@example.com>",
+                "thread_id": "t-isolated",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            content="alone",
+        )
+        # Solo doc — no candidate to pair with → no edges inserted.
+        inserted, affected = rebuild_derived_for(
+            test_db, {a_id}, directory=directory
+        )
+        assert inserted == 0
+        assert affected >= {a_id}
+
+    def test_returned_set_includes_new_partners(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Pass {A_id} where A pairs with B and C. Expect {A, B, C} in the
+        # affected set even though only A is in the input — B and C are the
+        # new partners that gained an edge in this pass.
+        a_id = _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="trio-a",
+            metadata={
+                "from": "person-x <person-a@example.com>",
+                "to": "Ali <ali@example.com>",
+                "thread_id": "t-trio",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            content="A",
+        )
+        b_id = _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="trio-b",
+            metadata={
+                "from": "Ali <ali@example.com>",
+                "to": "person-x <person-a@example.com>",
+                "thread_id": "t-trio",
+                "date": "Wed, 15 Apr 2026 13:00:00 -0700",
+            },
+            content="B",
+        )
+        c_id = _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="trio-c",
+            metadata={
+                "from": "person-x <person-a@example.com>",
+                "to": "Ali <ali@example.com>",
+                "thread_id": "t-trio",
+                "date": "Wed, 15 Apr 2026 14:00:00 -0700",
+            },
+            content="C",
+        )
+
+        inserted, affected = rebuild_derived_for(
+            test_db, {a_id}, directory=directory
+        )
+
+        assert inserted > 0
+        # All three docs surface in the affected set: A from the input,
+        # B and C as the new partners introduced by step 6.
+        assert affected >= {a_id, b_id, c_id}
+
+    def test_returned_set_includes_partners_that_lost_edges(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Seed two docs that link, run a full rebuild so the edge exists,
+        # then mutate A's metadata so it no longer pairs with B and run
+        # rebuild scoped to {A}. The DELETE in step 5 strips the stale
+        # row; B's id must surface in the affected set even though it
+        # wasn't in the input — otherwise the fence renderer would never
+        # know to drop B's "Related → A" bullet.
+        a_id = _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="lost-a",
+            metadata={
+                "from": "person-x <person-a@example.com>",
+                "to": "Ali <ali@example.com>",
+                "thread_id": "t-lost",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            content="A original",
+        )
+        b_id = _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="lost-b",
+            metadata={
+                "from": "Ali <ali@example.com>",
+                "to": "person-x <person-a@example.com>",
+                "thread_id": "t-lost",
+                "date": "Wed, 15 Apr 2026 13:00:00 -0700",
+            },
+            content="B",
+        )
+        # First rebuild — edge (A, B) inserted under shared_thread.
+        rebuild_derived_for(test_db, {a_id, b_id}, directory=directory)
+        before = _derived_rows(test_db)
+        assert before  # sanity: at least one edge
+
+        # Mutate A so the rule no longer fires. Strip thread_id + dates so
+        # neither R1 nor R3 nor R2 (no overlapping participants either) can
+        # produce an edge for the (A, B) pair.
+        test_db.execute(
+            "UPDATE documents SET metadata = %s::jsonb WHERE id = %s",
+            (json.dumps({}), a_id),
+        )
+
+        # Re-run rebuild scoped to {A} — strip the old (A, B) edge.
+        inserted, affected = rebuild_derived_for(
+            test_db, {a_id}, directory=directory
+        )
+
+        # B is no longer paired with A → no new insert, but B WAS
+        # disconnected so its id must show up in the affected set.
+        assert inserted == 0
+        assert affected >= {a_id, b_id}
+        # Sanity: the (A, B) row is gone.
+        assert _derived_rows(test_db) == []

@@ -180,8 +180,12 @@ def sync_vault(
     # docs in ``seen_doc_ids`` are silently filtered by the runner — only
     # gmail / krisp rows produce edges. ``rebuild_derived_for`` already
     # short-circuits on an empty set, so no extra guard here.
+    #
+    # The runner returns ``(inserted_count, affected_ids)`` — only the
+    # count is needed at this layer; the affected-ids set is wired in by
+    # Task D.4 to drive the fence renderer.
     if not dry_run:
-        report.derived_links = rebuild_derived_for(
+        report.derived_links, _affected = rebuild_derived_for(
             conn, seen_doc_ids, directory=DirectoryStore(conn)
         )
 
@@ -299,8 +303,9 @@ def sync_one_file(
         # Mirror ``sync_vault``: rebuild metadata-derived edges scoped to the
         # one doc we just processed. ``sync_one_file`` has no dry_run mode,
         # so the linker always runs here. Non-linkable (vault-tier) doc ids
-        # are filtered by the runner.
-        report.derived_links = rebuild_derived_for(
+        # are filtered by the runner. The returned ``affected_ids`` set is
+        # wired into the fence renderer by Task D.4.
+        report.derived_links, _affected = rebuild_derived_for(
             conn, {doc_id}, directory=DirectoryStore(conn)
         )
 

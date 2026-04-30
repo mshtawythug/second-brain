@@ -1792,11 +1792,16 @@ def vault_relink_derived() -> None:
             typer.echo("No linkable documents to process.")
         else:
             directory = DirectoryStore(conn)
-            inserted = rebuild_derived_for(
+            # ``rebuild_derived_for`` returns ``(inserted_count, affected_ids)``.
+            # The affected-ids set is wired into the fence renderer by Task
+            # D.4; this CLI just surfaces the insert count plus the affected
+            # set's size as a transparency signal.
+            inserted, affected_ids = rebuild_derived_for(
                 conn, corpus_ids, directory=directory
             )
             typer.echo(f"  - Touched docs: {len(corpus_ids)}")
             typer.echo(f"  - Inserted edges: {inserted}")
+            typer.echo(f"  - Affected docs: {len(affected_ids)}")
 
         # Step 4: Rich summary — directory by source + derived_links by rule.
         directory_counts = _directory_counts_by_source(conn)
