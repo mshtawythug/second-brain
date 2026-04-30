@@ -165,8 +165,9 @@ def test_file_ingest_unchanged_content_is_idempotent_noop(test_db, fake_embedder
 
 
 def test_file_ingest_replaces_in_place_when_content_changes(test_db, fake_embedder):
-    """Re-ingesting a file whose content changed on disk replaces the row in
-    place: same ``source_path`` → same ``documents.id``, new ``content_hash``."""
+    """File ingest at the same ``source_path`` with new content replaces the row
+    in place — DELETE + INSERT yields a new ``documents.id`` and a new
+    ``content_hash``, and a single row remains at that ``source_path``."""
     path = "/tmp/notes/career.md"
     first = _ingest(
         test_db,
