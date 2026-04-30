@@ -298,9 +298,11 @@ def test_krisp_ingest_first_run_uses_ytd_window(
         source_external_id="meeting-ytd",
         gws_runner=runner,
     )
+    # Real ``gws`` takes Calendar API params as a single ``--params`` JSON
+    # blob; pull ``timeMin`` out of that to assert the YTD window.
     cal_call = next(c for c in runner.calls if c[1] == "calendar")
-    time_min = cal_call[cal_call.index("--time-min") + 1]
-    parsed = datetime.datetime.fromisoformat(time_min)
+    params = json.loads(cal_call[cal_call.index("--params") + 1])
+    parsed = datetime.datetime.fromisoformat(params["timeMin"])
     today = datetime.datetime.now(tz=datetime.UTC)
     assert parsed.year == today.year
     assert parsed.month == 1
@@ -331,9 +333,11 @@ def test_krisp_ingest_subsequent_run_uses_incremental_window(
         source_external_id="meeting-incr",
         gws_runner=runner,
     )
+    # Real ``gws`` takes Calendar API params as a single ``--params`` JSON
+    # blob; pull ``timeMin`` out to verify the incremental window anchor.
     cal_call = next(c for c in runner.calls if c[1] == "calendar")
-    time_min = cal_call[cal_call.index("--time-min") + 1]
-    parsed = datetime.datetime.fromisoformat(time_min)
+    params = json.loads(cal_call[cal_call.index("--params") + 1])
+    parsed = datetime.datetime.fromisoformat(params["timeMin"])
     # Allow microsecond drift across psycopg's tz coercion; equality on
     # the wall-clock components is what matters here.
     assert parsed == anchor

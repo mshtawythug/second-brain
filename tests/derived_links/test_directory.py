@@ -540,9 +540,13 @@ class TestRefreshCalendar:
             "JSON parse failed" in r.message for r in caplog.records
         )
 
-    def test_top_level_not_a_list_returns_zero(
+    def test_unrecognized_shape_returns_zero(
         self, test_db: psycopg.Connection, caplog: pytest.LogCaptureFixture
     ) -> None:
+        # A JSON object that's neither a top-level list nor a Calendar
+        # response (no ``items`` key) is unrecoverable — the parser
+        # returns None and we warn + abort with the same "JSON parse
+        # failed" warning we emit on truly malformed input.
         runner = FakeRunner(response='{"unexpected": "shape"}')
         with caplog.at_level(logging.WARNING):
             result = refresh_calendar(
@@ -552,7 +556,11 @@ class TestRefreshCalendar:
                 runner=runner,
             )
         assert result == 0
-        assert any("expected JSON list" in r.message for r in caplog.records)
+        assert any(
+            "JSON parse failed" in r.message
+            and "could not normalize" in r.message
+            for r in caplog.records
+        )
 
     def test_non_dict_event_skipped(self, test_db: psycopg.Connection) -> None:
         # A stray non-dict element shouldn't bring the refresh down.
@@ -627,16 +635,27 @@ class TestRefreshCalendar:
     def test_runner_invoked_with_iso_time_range(
         self, test_db: psycopg.Connection
     ) -> None:
+        # Real ``gws`` takes Calendar API params as a single ``--params``
+        # JSON blob; the refresh helper pins ``calendarId``, ``timeMin``,
+        # ``timeMax``, ``singleEvents`` and ``maxResults`` inside it.
         runner = FakeRunner(response="[]")
         since = datetime.datetime(2026, 4, 1, 12, 0, 0)
         until = datetime.datetime(2026, 5, 1, 12, 0, 0)
         refresh_calendar(test_db, since=since, until=until, runner=runner)
         assert len(runner.calls) == 1
         call = runner.calls[0]
-        assert "--time-min" in call
-        assert call[call.index("--time-min") + 1] == since.isoformat()
-        assert "--time-max" in call
-        assert call[call.index("--time-max") + 1] == until.isoformat()
+        # Subcommand shape: gws calendar events list --params <JSON>
+        # --format json --page-all
+        assert call[:4] == ["gws", "calendar", "events", "list"]
+        assert "--params" in call
+        params = json.loads(call[call.index("--params") + 1])
+        assert params["calendarId"] == "primary"
+        assert params["timeMin"] == since.isoformat()
+        assert params["timeMax"] == until.isoformat()
+        assert params["singleEvents"] is True
+        assert "--format" in call
+        assert call[call.index("--format") + 1] == "json"
+        assert "--page-all" in call
 
     def test_records_seen_accumulates_across_refreshes(
         self, test_db: psycopg.Connection
@@ -849,15 +868,20 @@ class TestRefreshContacts:
             "JSON parse failed" in r.message for r in caplog.records
         )
 
-    def test_top_level_not_a_list_returns_zero(
+    def test_unrecognized_shape_returns_zero(
         self, test_db: psycopg.Connection, caplog: pytest.LogCaptureFixture
     ) -> None:
+        # See the matching calendar test for the rationale: a JSON object
+        # without ``otherContacts`` is unrecoverable; we collapse all
+        # parse-time failures under the same "JSON parse failed" warning.
         runner = FakeRunner(response='{"unexpected": "shape"}')
         with caplog.at_level(logging.WARNING):
             result = refresh_contacts(test_db, runner=runner)
         assert result == 0
         assert any(
-            "expected JSON list" in r.message for r in caplog.records
+            "JSON parse failed" in r.message
+            and "could not normalize" in r.message
+            for r in caplog.records
         )
 
     def test_non_dict_contact_skipped(self, test_db: psycopg.Connection) -> None:

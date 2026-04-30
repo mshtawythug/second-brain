@@ -62,12 +62,12 @@ from .search import hybrid_search
 from .vault import init_vault
 from .vault.derived_links import (
     DirectoryStore,
-    extract_gmail_addresses,
     extract_krisp_speakers,
     real_gws_runner,
     rebuild_derived_for,
     refresh_calendar,
     refresh_contacts,
+    rescan_gmail_directory,
 )
 from .vault.export import export_vault
 from .vault.frontmatter import dump_frontmatter, parse_frontmatter
@@ -96,6 +96,13 @@ vault_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(vault_app, name="vault")
+
+vault_directory_app = typer.Typer(
+    name="directory",
+    help="Inspect and rebuild the linker's name↔email directory.",
+    no_args_is_help=True,
+)
+vault_app.add_typer(vault_directory_app, name="directory")
 
 note_app = typer.Typer(
     name="note",
@@ -1605,49 +1612,6 @@ def vault_render(
 # ---------------------------------------------------------------------------
 
 
-def _rescan_gmail_directory(conn: psycopg.Connection[Any]) -> tuple[int, int]:
-    """Re-walk every Gmail document and upsert (display, email) pairs.
-
-    Returns ``(docs_seen, pairs_upserted)``. Each (display, email) pair from
-    a single document's ``from``/``to`` headers contributes ``+1`` to the
-    pair count even when the upsert is a count bump (no row inserted) — the
-    metric matches the user-facing "pairs from N docs" line in the summary.
-
-    The whole rescan runs in one transaction. ``directory_entries`` rows
-    upserted earlier in this command (e.g. by a prior partial run) only have
-    their ``occurrence_count`` incremented, so re-running this is safe.
-    """
-    rows = conn.execute(
-        """
-        SELECT d.id::text, d.metadata
-        FROM documents d
-        JOIN sources s ON s.id = d.source_id
-        WHERE s.kind = 'gmail'
-        """
-    ).fetchall()
-
-    store = DirectoryStore(conn)
-    pairs = 0
-    with conn.transaction():
-        for _doc_id, metadata in rows:
-            for display_name, email in extract_gmail_addresses(
-                dict(metadata or {})
-            ):
-                try:
-                    store.upsert_pair(
-                        display_name=display_name,
-                        email=email,
-                        source="gmail",
-                    )
-                except ValueError:
-                    # Defensive — extract_gmail_addresses already filters
-                    # malformed shapes; a residual bad email would otherwise
-                    # poison the whole rescan.
-                    continue
-                pairs += 1
-    return len(rows), pairs
-
-
 def _backfill_krisp_participant_keys(conn: psycopg.Connection[Any]) -> int:
     """Re-populate ``metadata['_participant_keys']`` for every Krisp doc from its body.
 
@@ -1778,7 +1742,7 @@ def vault_relink_derived() -> None:
 
         # Step 1: full Gmail directory rescan.
         typer.echo("Refreshing directory...")
-        gmail_docs_seen, gmail_pairs = _rescan_gmail_directory(conn)
+        gmail_docs_seen, gmail_pairs = rescan_gmail_directory(conn)
         typer.echo(
             f"  - Gmail headers: {gmail_pairs} pairs from {gmail_docs_seen} docs"
         )
@@ -1857,6 +1821,185 @@ def vault_relink_derived() -> None:
         console.print(derived_table)
 
     typer.echo(f"Done in {elapsed:.1f}s.")
+
+
+# ---------------------------------------------------------------------------
+# brain vault directory refresh / show
+#
+# Diagnostic CLIs for the name↔email directory: ``refresh`` rebuilds it
+# from every source (Gmail rescan + YTD calendar + full contacts) without
+# touching ``derived_links`` (use ``relink-derived`` to also rebuild
+# edges); ``show`` prints the current directory rows as a Rich table.
+# ---------------------------------------------------------------------------
+
+
+# Mirrors :data:`brain.vault.derived_links.directory._VALID_SOURCES`. We
+# duplicate the literal here (instead of importing the private constant)
+# so the CLI's ``--source`` validation surface stays stable independent
+# of any internal refactor of the module-private set.
+_DIRECTORY_VALID_SOURCES: frozenset[str] = frozenset(
+    {"gmail", "calendar", "contacts", "people_yml"}
+)
+
+
+@vault_directory_app.command("refresh")
+def vault_directory_refresh() -> None:
+    """Full directory rebuild from all sources — Gmail rescan + Calendar + Contacts.
+
+    Three steps:
+
+    1. **Gmail rescan.** Walks every Gmail document and upserts
+       ``(display_name, email)`` pairs from ``from`` / ``to`` headers.
+    2. **Calendar refresh** via ``gws``. Window: ``since`` = the stored
+       ``directory_refresh_state.calendar.last_refreshed_at`` if present,
+       otherwise year-start; ``until`` = now.
+    3. **Contacts refresh** via ``gws`` (full refresh; the 24h throttle
+       from incremental Krisp ingest does not apply here — the user has
+       explicitly asked for a refresh).
+
+    Unlike ``relink-derived``, this command does **not** touch
+    ``derived_links``. It's the surgical "I edited ``_people.yml`` /
+    pulled new gws contacts and want the directory current" command,
+    decoupled from the heavy linker pass.
+
+    Soft-fails on missing ``gws``: a warning is logged via
+    ``refresh_calendar`` / ``refresh_contacts`` and the command still
+    exits 0.
+    """
+    cfg = Config.load()
+    started_at = _time.perf_counter()
+
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+
+        typer.echo("Refreshing directory...")
+        gmail_docs_seen, gmail_pairs = rescan_gmail_directory(conn)
+        typer.echo(
+            f"  - Gmail headers: {gmail_pairs} pairs from {gmail_docs_seen} docs"
+        )
+
+        now = datetime.now(tz=UTC)
+        cal_row = conn.execute(
+            "SELECT last_refreshed_at FROM directory_refresh_state "
+            "WHERE source = 'calendar'"
+        ).fetchone()
+        if cal_row is not None and cal_row[0] is not None:
+            since = cal_row[0]
+        else:
+            since = datetime(now.year, 1, 1, tzinfo=UTC)
+        events_seen = refresh_calendar(
+            conn, since=since, until=now, runner=real_gws_runner
+        )
+        typer.echo(
+            f"  - Calendar: {events_seen} events seen since "
+            f"{since.date().isoformat()}"
+        )
+        contacts_seen = refresh_contacts(conn, runner=real_gws_runner)
+        typer.echo(f"  - Contacts: {contacts_seen} contacts seen")
+
+        directory_counts = _directory_counts_by_source(conn)
+
+    elapsed = _time.perf_counter() - started_at
+
+    if directory_counts:
+        directory_table = Table(title="Directory entries by source")
+        directory_table.add_column("Source", style="cyan")
+        directory_table.add_column("Rows", justify="right")
+        for source, count in directory_counts:
+            directory_table.add_row(source, str(count))
+        console.print(directory_table)
+    else:
+        # Friendly message when the directory is genuinely empty (fresh
+        # corpus, no Gmail docs, gws unavailable). Distinct from the
+        # source-grouped table so users don't read empty space as a bug.
+        typer.echo("Directory is empty — no entries from any source.")
+
+    typer.echo(f"Done in {elapsed:.1f}s.")
+
+
+@vault_directory_app.command("show")
+def vault_directory_show(
+    source: str | None = typer.Option(
+        None,
+        "--source",
+        help=(
+            "Filter to one of: gmail, calendar, contacts, people_yml. "
+            "Omit to show every source."
+        ),
+    ),
+) -> None:
+    """Print the directory entries grouped by source as a Rich table.
+
+    Columns: source, email, display_name, count, first_seen, last_seen.
+    Rows are ordered by ``(source, email)`` for stable, scannable output.
+    With ``--source S`` only that source's rows are shown; an unknown
+    source name exits non-zero with the list of valid values.
+    """
+    if source is not None and source not in _DIRECTORY_VALID_SOURCES:
+        valid = ", ".join(sorted(_DIRECTORY_VALID_SOURCES))
+        typer.echo(
+            f"error: invalid --source {source!r}; expected one of: {valid}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        if source is None:
+            rows = conn.execute(
+                """
+                SELECT source, email, display_name, occurrence_count,
+                       first_seen_at, last_seen_at
+                FROM directory_entries
+                ORDER BY source ASC, email ASC
+                """
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT source, email, display_name, occurrence_count,
+                       first_seen_at, last_seen_at
+                FROM directory_entries
+                WHERE source = %s
+                ORDER BY email ASC
+                """,
+                (source,),
+            ).fetchall()
+
+    if not rows:
+        if source is None:
+            typer.echo("Directory is empty — no entries.")
+        else:
+            typer.echo(f"No directory entries with source={source!r}.")
+        return
+
+    title = (
+        "Directory entries"
+        if source is None
+        else f"Directory entries (source={source})"
+    )
+    table = Table(title=title)
+    table.add_column("Source", style="cyan")
+    table.add_column("Email")
+    table.add_column("Name")
+    table.add_column("Count", justify="right")
+    table.add_column("First seen")
+    table.add_column("Last seen")
+    for src, email, display_name, count, first_seen, last_seen in rows:
+        table.add_row(
+            str(src),
+            str(email),
+            str(display_name) if display_name else "",
+            str(count),
+            first_seen.isoformat(timespec="seconds")
+            if first_seen is not None
+            else "",
+            last_seen.isoformat(timespec="seconds")
+            if last_seen is not None
+            else "",
+        )
+    console.print(table)
 
 
 # ---------------------------------------------------------------------------

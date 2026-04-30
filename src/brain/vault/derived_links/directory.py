@@ -10,6 +10,7 @@ import yaml
 
 from brain.errors import DirectoryRefreshError
 from brain.vault.derived_links.participants import (
+    extract_gmail_addresses,
     is_email_like,
     normalize_participant,
 )
@@ -37,12 +38,24 @@ class GwsRunner(Protocol):
     helpers and will propagate.
 
     Implementations should return the raw stdout of the gws command
-    (typically JSON). The refresh helpers parse JSON shape per command:
+    (typically JSON). The refresh helpers invoke the real ``gws`` CLI as:
 
-    - ``gws calendar list-events …`` →
-      ``[{"summary": ..., "attendees": [{"email": ..., "displayName": ...}], ...}, ...]``
-    - ``gws people list …`` →
-      ``[{"names": [{"displayName": ...}], "emailAddresses": [{"value": ...}, ...]}, ...]``
+    - ``gws calendar events list --params <JSON> --format json --page-all``
+      where ``<JSON>`` carries Google Calendar API params
+      (``calendarId``, ``timeMin``, ``timeMax``, ``singleEvents``,
+      ``maxResults``). Each NDJSON page is shaped
+      ``{"items": [{"summary": ..., "attendees": [{"email": ...,
+      "displayName": ...}], ...}, ...], "nextPageToken": ...}``.
+    - ``gws people otherContacts list --params <JSON> --format json --page-all``
+      where ``<JSON>`` carries People API params (``readMask``,
+      ``pageSize``). Each NDJSON page is shaped
+      ``{"otherContacts": [{"names": [{"displayName": ...}],
+      "emailAddresses": [{"value": ...}, ...]}, ...], "nextPageToken": ...}``.
+
+    The refresh helpers parse three accepted shapes from a runner's
+    stdout (see ``_parse_gws_pages``): NDJSON pages, a single JSON
+    response with the page key, and — for backwards compatibility with
+    tests — a top-level JSON list of records.
     """
 
     def __call__(self, args: list[str]) -> str: ...
@@ -211,6 +224,78 @@ def load_people_yml(vault_path: Path) -> dict[str, str]:
 _REFRESH_STATE_SOURCES: frozenset[str] = frozenset({"gmail", "calendar", "contacts"})
 
 
+def _parse_gws_pages(raw: str, *, key: str) -> list[Any] | None:
+    """Normalize ``gws`` stdout into a flat list of records under ``key``.
+
+    Production ``gws`` emits one Google API JSON response per page; with
+    ``--page-all`` those pages are concatenated as NDJSON (one object
+    per line). Without ``--page-all`` a single JSON object is returned.
+    Each page wraps its records under a service-specific key
+    (``items`` for Calendar's ``events.list``, ``otherContacts`` for
+    People's ``otherContacts.list``).
+
+    Returns:
+        - ``[]`` for an empty / whitespace-only response.
+        - The flattened list of records on success.
+        - ``None`` when the response can't be parsed at all (malformed
+          JSON) or doesn't carry any recognized shape — caller logs
+          a warning and aborts the refresh.
+
+    Backwards compatibility: a top-level JSON list is also accepted and
+    returned as-is. This was the documented shape in the original Task
+    B.1 spec (before real ``gws`` subcommands were known) and remains
+    convenient for fake-runner tests that don't want to wrap fixtures
+    in a ``{"items": …}`` envelope.
+    """
+    stripped = raw.strip()
+    if not stripped:
+        return []
+
+    # Single-document JSON path (covers no-pagination output and the
+    # legacy top-level-list shape used by tests).
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        # Fall through to the NDJSON path below.
+        parsed = None
+
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        records = parsed.get(key)
+        if isinstance(records, list):
+            return records
+        # Recognized as JSON but missing the expected page key — treat
+        # as an unrecoverable shape so the caller warns.
+        return None
+
+    # NDJSON fallback: one JSON page per line.
+    accumulated: list[Any] = []
+    saw_any_page = False
+    for line in stripped.splitlines():
+        chunk = line.strip()
+        if not chunk:
+            continue
+        try:
+            page = json.loads(chunk)
+        except json.JSONDecodeError:
+            return None
+        saw_any_page = True
+        if not isinstance(page, dict):
+            return None
+        records = page.get(key)
+        if isinstance(records, list):
+            accumulated.extend(records)
+        # Pages that lack the key entirely (e.g. an error envelope) are
+        # treated as zero records but don't fail the whole refresh — gws
+        # itself raises on errors via the runner's CalledProcessError
+        # translation.
+    if not saw_any_page:
+        # ``parsed is None`` and no NDJSON lines parsed — truly garbage.
+        return None
+    return accumulated
+
+
 def _update_refresh_state(
     conn: psycopg.Connection[Any], *, source: str, records_seen: int
 ) -> None:
@@ -257,24 +342,35 @@ def refresh_calendar(
     refreshes still bump ``last_refreshed_at`` so the high-water mark
     advances even when no events match.
 
-    NOTE: The exact ``gws calendar`` subcommand is a best-guess
-    (``list-events --time-min --time-max --format json``); production code
-    can adapt to the real ``gws`` flag set without touching this function
-    because the Protocol-based design keeps it shell-agnostic.
+    Production calls ``gws calendar events list --params <JSON> --format
+    json --page-all``: the params JSON carries ``calendarId``,
+    ``timeMin``, ``timeMax``, ``singleEvents`` and ``maxResults`` as
+    Google Calendar API expects. ``--page-all`` produces NDJSON, one
+    page per line; :func:`_parse_gws_pages` flattens that into a single
+    list of event records.
     """
     store = DirectoryStore(conn)
+    params = json.dumps(
+        {
+            "calendarId": "primary",
+            "timeMin": since.isoformat(),
+            "timeMax": until.isoformat(),
+            "singleEvents": True,
+            "maxResults": 250,
+        }
+    )
     try:
         raw = runner(
             [
                 "gws",
                 "calendar",
-                "list-events",
-                "--time-min",
-                since.isoformat(),
-                "--time-max",
-                until.isoformat(),
+                "events",
+                "list",
+                "--params",
+                params,
                 "--format",
                 "json",
+                "--page-all",
             ]
         )
     except (OSError, DirectoryRefreshError, RuntimeError) as exc:
@@ -286,20 +382,13 @@ def refresh_calendar(
         )
         return 0
 
-    try:
-        events = json.loads(raw) if raw else []
-    except json.JSONDecodeError as exc:
+    events = _parse_gws_pages(raw, key="items")
+    if events is None:
         _logger.warning(
-            "gws calendar JSON parse failed [%s..%s]: %s",
+            "gws calendar JSON parse failed [%s..%s]: "
+            "could not normalize gws stdout into events",
             since.isoformat(),
             until.isoformat(),
-            exc,
-        )
-        return 0
-
-    if not isinstance(events, list):
-        _logger.warning(
-            "gws calendar: expected JSON list, got %s", type(events).__name__
         )
         return 0
 
@@ -341,6 +430,9 @@ def refresh_calendar(
     return events_seen
 
 
+_CONTACTS_CMD = "gws people otherContacts list --format json --page-all"
+
+
 def refresh_contacts(
     conn: psycopg.Connection[Any],
     *,
@@ -351,33 +443,50 @@ def refresh_contacts(
     Same error-handling contract as :func:`refresh_calendar`: any failure
     logs a warning and returns 0 without updating the high-water mark.
 
-    NOTE: Best-guess subcommand ``gws people list --format json``; see the
-    note on :func:`refresh_calendar`.
+    Production calls ``gws people otherContacts list --params <JSON>
+    --format json --page-all``. ``otherContacts`` is preferred over
+    ``people connections`` because it auto-collects every email-address
+    correspondent the user has interacted with — exactly the directory
+    we want to mine for the linker — without requiring the user to add
+    them as named contacts. Each NDJSON page is shaped
+    ``{"otherContacts": [{"names": [{"displayName": ...}],
+    "emailAddresses": [{"value": ...}]}, ...]}``.
     """
     store = DirectoryStore(conn)
+    params = json.dumps(
+        {
+            "readMask": "names,emailAddresses",
+            "pageSize": 1000,
+        }
+    )
     try:
-        raw = runner(["gws", "people", "list", "--format", "json"])
+        raw = runner(
+            [
+                "gws",
+                "people",
+                "otherContacts",
+                "list",
+                "--params",
+                params,
+                "--format",
+                "json",
+                "--page-all",
+            ]
+        )
     except (OSError, DirectoryRefreshError, RuntimeError) as exc:
         _logger.warning(
             "gws people refresh failed (cmd=%s): %s",
-            "gws people list --format json",
+            _CONTACTS_CMD,
             exc,
         )
         return 0
 
-    try:
-        contacts = json.loads(raw) if raw else []
-    except json.JSONDecodeError as exc:
+    contacts = _parse_gws_pages(raw, key="otherContacts")
+    if contacts is None:
         _logger.warning(
-            "gws people JSON parse failed (cmd=%s): %s",
-            "gws people list --format json",
-            exc,
-        )
-        return 0
-
-    if not isinstance(contacts, list):
-        _logger.warning(
-            "gws people: expected JSON list, got %s", type(contacts).__name__
+            "gws people JSON parse failed (cmd=%s): "
+            "could not normalize gws stdout into contacts",
+            _CONTACTS_CMD,
         )
         return 0
 
@@ -430,3 +539,51 @@ def refresh_contacts(
 
     _update_refresh_state(conn, source="contacts", records_seen=contacts_seen)
     return contacts_seen
+
+
+def rescan_gmail_directory(conn: psycopg.Connection[Any]) -> tuple[int, int]:
+    """Re-walk every Gmail document and upsert (display, email) pairs.
+
+    Returns ``(docs_seen, pairs_upserted)``. Each (display, email) pair from
+    a single document's ``from``/``to`` headers contributes ``+1`` to the
+    pair count even when the upsert is a count bump (no row inserted) — the
+    metric matches the user-facing "pairs from N docs" line in the summary.
+
+    The whole rescan runs in one transaction. ``directory_entries`` rows
+    upserted earlier in this command (e.g. by a prior partial run) only have
+    their ``occurrence_count`` incremented, so re-running this is safe.
+
+    Shared between ``brain vault relink-derived`` (full corpus rebuild) and
+    ``brain vault directory refresh`` (directory-only rebuild) — the linker
+    pass is intentionally NOT invoked from this helper, leaving rebuild
+    orchestration to the caller.
+    """
+    rows = conn.execute(
+        """
+        SELECT d.id::text, d.metadata
+        FROM documents d
+        JOIN sources s ON s.id = d.source_id
+        WHERE s.kind = 'gmail'
+        """
+    ).fetchall()
+
+    store = DirectoryStore(conn)
+    pairs = 0
+    with conn.transaction():
+        for _doc_id, metadata in rows:
+            for display_name, email in extract_gmail_addresses(
+                dict(metadata or {})
+            ):
+                try:
+                    store.upsert_pair(
+                        display_name=display_name,
+                        email=email,
+                        source="gmail",
+                    )
+                except ValueError:
+                    # Defensive — extract_gmail_addresses already filters
+                    # malformed shapes; a residual bad email would otherwise
+                    # poison the whole rescan.
+                    continue
+                pairs += 1
+    return len(rows), pairs
