@@ -151,6 +151,19 @@ def test_ingest_empty_content_is_noop(test_db, fake_embedder):
     assert rows == 0
 
 
+def test_file_ingest_unchanged_content_is_idempotent_noop(test_db, fake_embedder):
+    """Re-ingesting the same file unchanged returns the existing id, no replace."""
+    doc = ExtractedDoc(
+        title="Notes", content="some body bytes", content_type="markdown",
+        source_path="/tmp/notes.md", metadata={},
+    )
+    first = _ingest(test_db, fake_embedder, doc)
+    second = _ingest(test_db, fake_embedder, doc)
+    assert first.created is True
+    assert second.created is False
+    assert first.document_id == second.document_id
+
+
 def test_file_ingest_replaces_in_place_when_content_changes(test_db, fake_embedder):
     """Re-ingesting a file whose content changed on disk replaces the row in
     place: same ``source_path`` → same ``documents.id``, new ``content_hash``."""
