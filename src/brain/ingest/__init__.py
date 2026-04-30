@@ -129,9 +129,14 @@ def ingest_document(
     Dedup rules:
     - File-based ingests (``doc.source_path`` set) are deduped by
       ``source_path``. A repeat ingest of the same path with unchanged content
-      is a no-op; a content change replaces the prior row in place (chunks
-      drop via ON DELETE CASCADE) so the document keeps a stable identity
-      across edits. ``force=True`` always replaces.
+      is a no-op; a content change replaces the row via DELETE + INSERT (a new
+      ``documents.id`` UUID is minted; chunks drop via ON DELETE CASCADE).
+      What's stable is the ``source_path`` invariant (≤1 row per path), NOT
+      the UUID — callers that hold a reference to the prior UUID across an
+      ingest cycle should re-resolve via ``source_path``. Cascade also drops
+      any ``links`` / ``derived_links`` / ``unresolved_links`` rows referencing
+      the prior UUID, so the linker pass should re-run after content changes.
+      ``force=True`` always replaces.
     - Stdin ingests (``doc.source_path`` is ``None`` — krisp/slack/gmail) are
       deduped by ``content_hash`` (SHA-256 of ``doc.content``). Same
       no-op/force semantics as before.
@@ -150,6 +155,11 @@ def ingest_document(
 
     with conn.transaction():
         if doc.source_path is not None:
+            # No DB-level UNIQUE on source_path — two concurrent CLI invocations
+            # for the same path can race past this SELECT and both INSERT,
+            # producing two rows for one path. Acceptable for sequential CLI
+            # use; would need a UNIQUE INDEX or pg_advisory_xact_lock on a
+            # hash of source_path if invoked concurrently.
             existing_row = conn.execute(
                 "SELECT id, content_hash FROM documents "
                 "WHERE source_path=%s AND kind='ingested'",
