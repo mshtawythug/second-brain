@@ -16,7 +16,6 @@ calls are mocked. The four-phase test pattern (setup → exercise →
 verify → teardown) is followed throughout; ``tmp_path`` and pytest
 fixtures handle teardown automatically.
 """
-from __future__ import annotations
 
 import os
 import subprocess
@@ -404,9 +403,50 @@ def _make_vault(tmp_path: Path) -> Path:
     return vault
 
 
-def _completed(returncode: int = 0) -> subprocess.CompletedProcess[str]:
+def _make_vault_with_quartz_workspace(
+    tmp_path: Path, *, with_upstream_contentindex: bool = False
+) -> tuple[Path, Path]:
+    """Build the (vault, workspace) pair the CLI tests expect.
+
+    Returns ``(vault_path, workspace_path)`` where ``workspace_path``
+    is ``<vault>/.quartz`` populated with the two files
+    ``_check_quartz_workspace`` looks for plus the ``quartz/plugins/
+    emitters/`` directory the overlay's rename plan inspects. Pass
+    ``with_upstream_contentindex=True`` to seed the stock emitter so
+    the rename branch fires; default off so each caller is explicit.
+    """
+    vault = _make_vault(tmp_path)
+    workspace = vault / ".quartz"
+    workspace.mkdir()
+    (workspace / "package.json").write_text("{}", encoding="utf-8")
+    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
+    emitters = workspace / "quartz" / "plugins" / "emitters"
+    emitters.mkdir(parents=True)
+    if with_upstream_contentindex:
+        (emitters / "contentIndex.tsx").write_text(
+            "// upstream stock\n", encoding="utf-8"
+        )
+    return vault, workspace
+
+
+def _completed(
+    returncode: int = 0, *, vault: Path | None = None, output: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """A ``CompletedProcess`` shaped like the real ``npx quartz build`` call.
+
+    The CLI builds the args list ``["npx", "quartz", "build",
+    "--directory", <vault>, "--output", <output>]`` and passes it to
+    ``subprocess.run``. Mocks return this stand-in so the CLI's
+    ``returncode`` check + downstream assertions exercise the real
+    arg shape — important for the rare test that inspects ``.args``.
+    """
+    args: list[str] = ["npx", "quartz", "build"]
+    if vault is not None:
+        args.extend(["--directory", str(vault)])
+    if output is not None:
+        args.extend(["--output", str(output)])
     return subprocess.CompletedProcess(
-        args=["npx", "quartz", "build"], returncode=returncode, stdout="", stderr=""
+        args=args, returncode=returncode, stdout="", stderr=""
     )
 
 
@@ -416,15 +456,10 @@ def test_no_overlay_skips_copy(
     """``--no-overlay`` does not touch the Quartz workspace files."""
     # Setup
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
-    emitters = workspace / "quartz" / "plugins" / "emitters"
-    emitters.mkdir(parents=True)
-    upstream = emitters / "contentIndex.tsx"
-    upstream.write_text("// upstream stock\n", encoding="utf-8")
+    vault, workspace = _make_vault_with_quartz_workspace(
+        tmp_path, with_upstream_contentindex=True
+    )
+    upstream = workspace / "quartz" / "plugins" / "emitters" / "contentIndex.tsx"
     components = workspace / "quartz" / "components"
     components.mkdir(parents=True)
     pre_existing_graph = components / "Graph.tsx"
@@ -443,7 +478,7 @@ def test_no_overlay_skips_copy(
     assert "overlay: skipped (--no-overlay)" in result.output
     # Files in the workspace are untouched.
     assert upstream.is_file()  # rename did NOT happen
-    assert not (emitters / "_upstreamContentIndex.tsx").is_file()
+    assert not (upstream.parent / "_upstreamContentIndex.tsx").is_file()
     assert pre_existing_graph.read_text(encoding="utf-8") == "// pre-existing Graph\n"
 
 
@@ -453,16 +488,11 @@ def test_print_overlay_no_writes(
     """``--print-overlay`` lists the plan and exits without mutating anything."""
     # Setup
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
-    emitters = workspace / "quartz" / "plugins" / "emitters"
-    emitters.mkdir(parents=True)
-    upstream = emitters / "contentIndex.tsx"
-    upstream_content = "// upstream stock\n"
-    upstream.write_text(upstream_content, encoding="utf-8")
+    vault, workspace = _make_vault_with_quartz_workspace(
+        tmp_path, with_upstream_contentindex=True
+    )
+    upstream = workspace / "quartz" / "plugins" / "emitters" / "contentIndex.tsx"
+    upstream_content = upstream.read_text(encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     run_mock = mocker.patch("brain.cli.subprocess.run")
 
@@ -482,7 +512,7 @@ def test_print_overlay_no_writes(
     # Workspace is unchanged.
     assert upstream.is_file()
     assert upstream.read_text(encoding="utf-8") == upstream_content
-    assert not (emitters / "_upstreamContentIndex.tsx").is_file()
+    assert not (upstream.parent / "_upstreamContentIndex.tsx").is_file()
     # Real overlay sources land nowhere.
     assert not (workspace / "quartz" / "components" / "Graph.tsx").exists()
 
@@ -493,16 +523,10 @@ def test_print_overlay_already_applied_state(
     """`already_applied` rename state surfaces a distinct message."""
     # Setup
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
-    emitters = workspace / "quartz" / "plugins" / "emitters"
-    emitters.mkdir(parents=True)
-    (emitters / "_upstreamContentIndex.tsx").write_text(
-        "// already renamed\n", encoding="utf-8"
-    )
+    vault, workspace = _make_vault_with_quartz_workspace(tmp_path)
+    (
+        workspace / "quartz" / "plugins" / "emitters" / "_upstreamContentIndex.tsx"
+    ).write_text("// already renamed\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     mocker.patch("brain.cli.subprocess.run")
 
@@ -523,11 +547,7 @@ def test_print_overlay_missing_both_state(
     """`missing_both` rename state surfaces a distinct message."""
     # Setup — workspace exists but the emitters dir has neither contentIndex.
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
+    vault, _workspace = _make_vault_with_quartz_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
     mocker.patch("brain.cli.subprocess.run")
 
@@ -554,11 +574,7 @@ def test_overlay_runs_before_subprocess_run(
     """
     # Setup
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
+    vault, _workspace = _make_vault_with_quartz_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     call_order: list[str] = []
@@ -599,11 +615,7 @@ def test_overlay_then_build_uses_mock_side_effects(
     """
     # Setup
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
+    vault, _workspace = _make_vault_with_quartz_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     parent = mock.Mock()
@@ -637,11 +649,7 @@ def test_overlay_error_during_apply_aborts_build(
     """If ``apply_overlay`` raises ``OverlayError``, the build does not run."""
     # Setup
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
+    vault, _workspace = _make_vault_with_quartz_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     def fake_apply(plan: Any) -> list[tuple[Path, Path]]:
@@ -676,14 +684,10 @@ def test_overlay_apply_logs_rename_echo(
     """
     # Setup
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
+    vault, workspace = _make_vault_with_quartz_workspace(
+        tmp_path, with_upstream_contentindex=True
+    )
     emitters = workspace / "quartz" / "plugins" / "emitters"
-    emitters.mkdir(parents=True)
-    (emitters / "contentIndex.tsx").write_text("// upstream\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     mocker.patch("brain.cli.subprocess.run", return_value=_completed())
 
@@ -706,16 +710,10 @@ def test_overlay_apply_logs_already_applied_echo(
     """The ``already_applied`` rename state surfaces a distinct apply echo."""
     # Setup
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
-    emitters = workspace / "quartz" / "plugins" / "emitters"
-    emitters.mkdir(parents=True)
-    (emitters / "_upstreamContentIndex.tsx").write_text(
-        "// already renamed\n", encoding="utf-8"
-    )
+    vault, workspace = _make_vault_with_quartz_workspace(tmp_path)
+    (
+        workspace / "quartz" / "plugins" / "emitters" / "_upstreamContentIndex.tsx"
+    ).write_text("// already renamed\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
     mocker.patch("brain.cli.subprocess.run", return_value=_completed())
 
@@ -730,17 +728,46 @@ def test_overlay_apply_logs_already_applied_echo(
     assert "overlay: rename already applied" in result.output
 
 
+def test_overlay_apply_logs_missing_both_echo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
+) -> None:
+    """The ``missing_both`` rename state surfaces a warn-level apply echo.
+
+    Sibling to the rename + already_applied apply-branch tests; this
+    one closes the third branch in the CLI's apply-time rename log
+    block at ``cli.py:1607-1611``. With neither contentIndex variant
+    present the brain wrapper will fail at build time, so the message
+    needs to be loud enough that the user knows.
+    """
+    # Setup — workspace exists but the emitters dir has neither
+    # contentIndex.tsx nor _upstreamContentIndex.tsx.
+    _env(monkeypatch)
+    vault, _workspace = _make_vault_with_quartz_workspace(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    mocker.patch("brain.cli.subprocess.run", return_value=_completed())
+
+    # Exercise
+    result = CliRunner().invoke(
+        app,
+        ["vault", "render", "--vault", str(vault)],
+    )
+
+    # Verify — message names the missing file and warns about the
+    # downstream build failure; substring assertions tolerate minor
+    # rewording without re-pinning the whole sentence.
+    assert result.exit_code == 0, result.output
+    assert "overlay: rename skipped" in result.output
+    assert "upstream contentIndex.tsx not" in result.output
+    assert "brain wrapper will fail at build time" in result.output
+
+
 def test_overlay_plan_error_aborts_before_apply(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A planning-time ``OverlayError`` exits before any apply or build."""
     # Setup
     _env(monkeypatch)
-    vault = _make_vault(tmp_path)
-    workspace = vault / ".quartz"
-    workspace.mkdir()
-    (workspace / "package.json").write_text("{}", encoding="utf-8")
-    (workspace / "quartz.config.ts").write_text("// stub\n", encoding="utf-8")
+    vault, _workspace = _make_vault_with_quartz_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
 
     def fake_plan(repo: Path, qd: Path) -> Any:

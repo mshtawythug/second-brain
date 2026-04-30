@@ -14,7 +14,6 @@ Iteration is dynamic — any new file added under ``quartz_overrides/``
 is automatically subjected to these checks. We use parametrization so
 each file shows up as its own pytest case.
 """
-from __future__ import annotations
 
 import re
 from pathlib import Path
@@ -48,13 +47,42 @@ def _ids(paths: list[Path]) -> list[str]:
 
 
 def _strip_comments(text: str) -> str:
-    """Remove line + block comments so brace counting only sees code.
+    """Strip block + line comments. Used by the import-line check.
 
-    Handles ``// ...`` to end of line and ``/* ... */`` (including
-    multi-line). Doesn't bother stripping string literals — a stray
-    brace inside a TypeScript string is rare and would still leave the
-    overall counts roughly balanced.
+    Doesn't touch string literals — the import-line regex needs to
+    see the original ``from "..."`` path, so collapsing it to ``""``
+    would defeat the validation. The trade-off: a ``//`` inside a
+    string on the same line as an ``import`` could spoof the
+    line-comment regex, but in practice every overlay import line is
+    a single ``from "..."`` with no embedded ``//`` in the module
+    specifier, so this is fine.
     """
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+    text = re.sub(r"//[^\n]*", "", text)
+    return text
+
+
+def _strip_for_brace_count(text: str) -> str:
+    """Strip strings + comments so brace counting only sees code.
+
+    Strip order matters: string literals come out FIRST so a ``//``
+    inside ``"http://..."`` doesn't fool the line-comment regex into
+    eating the rest of the line. After that we drop block (``/* */``)
+    and line (``//``) comments. The resulting text keeps every ``{``
+    / ``}`` that lives in actual code, so the brace-balance check
+    isn't tripped up by braces inside strings or comment text.
+
+    String matching is **line-bounded** — the character class excludes
+    ``\\n`` so an unterminated string (or, more commonly, an
+    apostrophe in a comment like ``upstream's``) can't pair up with a
+    quote on a later line and eat the code in between. Real TS / SCSS
+    strings don't span newlines anyway, so this is a safe constraint.
+    Backslash escapes (``\\\"``, ``\\'``) are preserved so an embedded
+    quote doesn't prematurely terminate the match.
+    """
+    text = re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', text)
+    text = re.sub(r"'(?:[^'\\\n]|\\.)*'", "''", text)
+    text = re.sub(r"`(?:[^`\\\n]|\\.)*`", "``", text)
     text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
     text = re.sub(r"//[^\n]*", "", text)
     return text
@@ -83,13 +111,20 @@ def test_overlay_file_has_no_todo_or_fixme(path: Path) -> None:
 
 @pytest.mark.parametrize("path", _OVERLAY_FILES, ids=_ids(_OVERLAY_FILES))
 def test_overlay_file_braces_balance(path: Path) -> None:
-    """Rough brace-balance check after stripping comments."""
-    stripped = _strip_comments(path.read_text(encoding="utf-8"))
+    """Rough brace-balance check after stripping strings + comments.
+
+    Uses the string-stripping variant of the strip helper so braces
+    inside ``"{...}"`` or ``'{...}'`` don't skew the count. That also
+    sidesteps the failure mode where a ``//`` inside a string on the
+    same line as code (e.g. ``xmlns="http://..."``) would otherwise
+    let the line-comment regex eat the rest of the line.
+    """
+    stripped = _strip_for_brace_count(path.read_text(encoding="utf-8"))
     opens = stripped.count("{")
     closes = stripped.count("}")
     assert opens == closes, (
         f"{path.relative_to(REPO_ROOT)} has unbalanced braces: "
-        f"{opens} `{{` vs {closes} `}}` (after stripping comments)."
+        f"{opens} `{{` vs {closes} `}}` (after stripping strings + comments)."
     )
 
 
