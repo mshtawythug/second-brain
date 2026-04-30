@@ -16,6 +16,7 @@ import typer
 import yaml
 from rich.table import Table
 
+from .backfill import backfill_source_rows
 from .config import Config, ConfigError
 from .db import connect, connect_raw, ensure_embedding_column, run_migrations
 from .edit_session import (
@@ -113,6 +114,13 @@ note_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(note_app, name="note")
+
+backfill_app = typer.Typer(
+    name="backfill",
+    help="One-shot data-hygiene utilities for legacy rows.",
+    no_args_is_help=True,
+)
+app.add_typer(backfill_app, name="backfill")
 
 
 @app.callback()
@@ -2847,3 +2855,57 @@ def graph(
     typer.echo(rendered, nl=False)
     if not rendered.endswith("\n"):
         typer.echo("")
+
+
+@backfill_app.command("source-rows")
+def backfill_source_rows_cmd(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Report counts without writing.",
+    ),
+) -> None:
+    """Set ``source_id`` to a manual sources row for legacy markdown docs.
+
+    Targets ``documents`` rows where ``source_id IS NULL``,
+    ``content_type = 'markdown'``, and ``source_path IS NOT NULL`` — the
+    file-ingested rows that predate the manual-source default in
+    ``ingest_document``. Each match upserts a ``sources`` row with
+    ``kind="manual"`` and ``external_id = source_path`` (deduped by the
+    UNIQUE ``(kind, external_id)``), then points the document at it.
+
+    Idempotent: re-running after a successful pass is a no-op (the
+    ``source_id IS NULL`` filter filters everything out). The whole pass
+    runs in a single transaction. Pass ``--dry-run`` for a preview that
+    only counts candidates without writing.
+
+    After this completes, re-export the vault so the on-disk frontmatter
+    picks up the new ``source: manual`` lines:
+    ``brain vault export --to <vault-dir> --force``.
+    """
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        # Autocommit so the explicit ``conn.transaction()`` inside
+        # backfill_source_rows owns the write boundary; otherwise the
+        # outer implicit txn opened by the pre-write SELECT would roll
+        # back on close and silently undo the backfill.
+        conn.autocommit = True
+        report = backfill_source_rows(conn, commit=not dry_run)
+
+    if report.candidates == 0:
+        typer.echo("nothing to backfill (no markdown docs with NULL source_id)")
+        return
+
+    if report.dry_run:
+        typer.echo(f"would backfill {report.candidates} markdown doc(s)")
+        typer.echo("  (re-run without --dry-run to apply)")
+        return
+
+    typer.echo(
+        f"backfilled {report.documents_updated} document(s); "
+        f"created {report.sources_created} new manual source row(s)"
+    )
+    typer.echo(
+        "next: re-export vault so frontmatter picks up `source: manual` — "
+        "brain vault export --to <vault-dir> --force"
+    )

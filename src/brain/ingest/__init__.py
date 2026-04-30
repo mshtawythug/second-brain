@@ -117,7 +117,7 @@ def ingest_document(
     *,
     embedder: Embedder,
     doc: ExtractedDoc,
-    source_kind: str,
+    source_kind: str | None = None,
     source_external_id: str | None = None,
     source_metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
@@ -143,12 +143,32 @@ def ingest_document(
     - Sources are deduped by ``(kind, external_id)``. A repeat ingest pointing
       at the same external id reuses the existing source row.
 
+    Source defaults: file-based ingests (``doc.source_path`` set) default to
+    ``source_kind="manual"`` with ``source_external_id=doc.source_path`` when
+    the caller does not pass them, so the resulting document carries a
+    ``source_id`` pointing at a ``sources`` row with ``kind="manual"``.
+    Without this, downstream consumers (vault-export frontmatter, the graph
+    filter chips) lose the manual-source signal. Explicit ``source_kind`` /
+    ``source_external_id`` arguments always win, so a file-based ingest can
+    still be tagged as e.g. ``krisp`` if needed. Stdin ingests must pass
+    ``source_kind`` explicitly — they get no default.
+
     Source-specific side effects (Gmail directory upserts, Krisp directory
     refresh triggers) are dispatched via :func:`_run_source_hooks`. The
     ``gws_runner`` argument is only consulted by the Krisp hook; passing
     ``None`` skips the calendar / contacts refresh with a logged warning so
     callers without a runner wired (early CLI paths, tests) still succeed.
     """
+    if doc.source_path is not None:
+        if source_kind is None:
+            source_kind = "manual"
+        if source_external_id is None:
+            source_external_id = doc.source_path
+    if source_kind is None:
+        raise ValueError(
+            "source_kind is required when doc.source_path is None"
+        )
+
     h = _content_hash(doc.content)
     tags = tags or []
     source_metadata = source_metadata or {}

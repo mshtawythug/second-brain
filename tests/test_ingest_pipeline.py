@@ -81,6 +81,95 @@ def test_ingest_force_replaces_existing(test_db, fake_embedder):
     assert second.document_id != first.document_id
 
 
+def test_file_ingest_creates_manual_source_by_default(test_db, fake_embedder):
+    """File-based ingests (``doc.source_path`` set) default to a "manual"
+    source row with ``external_id = doc.source_path``. Regression for the
+    bug where 691 manual files had ``source_id = NULL`` because the CLI
+    passed ``source_kind="manual"`` but no external id, so
+    :func:`_upsert_source` returned ``None``."""
+    doc = ExtractedDoc(
+        title="Project plan",
+        content="manual notes body",
+        content_type="markdown",
+        source_path="/tmp/manual-default.md",
+        metadata={},
+    )
+    result = ingest_document(test_db, embedder=fake_embedder, doc=doc)
+    src = test_db.execute(
+        "SELECT kind, external_id FROM sources WHERE id="
+        "(SELECT source_id FROM documents WHERE id=%s)",
+        (result.document_id,),
+    ).fetchone()
+    assert src is not None, "documents.source_id must reference a sources row"
+    assert src[0] == "manual"
+    assert src[1] == "/tmp/manual-default.md"
+
+
+def test_explicit_source_kind_overrides_manual_default(test_db, fake_embedder):
+    """An explicit ``source_kind`` wins over the file-ingest "manual" default,
+    so a file-based ingest can still be tagged as e.g. ``krisp``."""
+    doc = ExtractedDoc(
+        title="krisp-as-file",
+        content="explicit override body",
+        content_type="markdown",
+        source_path="/tmp/explicit-krisp.md",
+        metadata={},
+    )
+    result = ingest_document(
+        test_db, embedder=fake_embedder, doc=doc, source_kind="krisp"
+    )
+    src = test_db.execute(
+        "SELECT kind FROM sources WHERE id="
+        "(SELECT source_id FROM documents WHERE id=%s)",
+        (result.document_id,),
+    ).fetchone()
+    assert src is not None
+    assert src[0] == "krisp"
+
+
+def test_stdin_ingest_unchanged(test_db, fake_embedder):
+    """Stdin ingests (no ``source_path``) keep the prior behavior — caller
+    must pass ``source_kind`` and ``source_external_id`` explicitly, and the
+    resulting source row reflects exactly those values."""
+    doc = ExtractedDoc(
+        title="stdin no-regression",
+        content="stdin body",
+        content_type="transcript",
+        source_path=None,
+        metadata={},
+    )
+    result = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=doc,
+        source_kind="krisp",
+        source_external_id="meeting-99",
+    )
+    src = test_db.execute(
+        "SELECT kind, external_id FROM sources WHERE id="
+        "(SELECT source_id FROM documents WHERE id=%s)",
+        (result.document_id,),
+    ).fetchone()
+    assert src is not None
+    assert src[0] == "krisp"
+    assert src[1] == "meeting-99"
+
+
+def test_stdin_ingest_without_source_kind_raises(test_db, fake_embedder):
+    """A stdin ingest (``source_path is None``) without ``source_kind`` is a
+    programming error — the file-ingest default does not apply, so we
+    surface a clear ``ValueError`` instead of silently dropping the source."""
+    doc = ExtractedDoc(
+        title="bad call",
+        content="stdin body",
+        content_type="transcript",
+        source_path=None,
+        metadata={},
+    )
+    with pytest.raises(ValueError, match="source_kind is required"):
+        ingest_document(test_db, embedder=fake_embedder, doc=doc)
+
+
 def test_ingest_with_external_id_creates_source_row(test_db, fake_embedder):
     doc = ExtractedDoc(
         title="T",

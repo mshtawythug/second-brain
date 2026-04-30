@@ -294,6 +294,22 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
             details.source = fm.source
           }
 
+          // brain: backstop — infer source from the
+          // `_ingested/<source>/...` slug pattern when frontmatter is
+          // missing it. Catches legacy data ingested before the
+          // manual-source default landed in
+          // src/brain/ingest/__init__.py (691 markdown docs were left
+          // with `source_id = NULL`, and their exported frontmatter
+          // therefore omitted `source:`). With this fallback, the
+          // graph's filter chips count those docs under the right
+          // bucket without a destructive DB rebuild.
+          if (!details.source && typeof slug === "string") {
+            const match = slug.match(/^_ingested\/([^/]+)\//)
+            if (match) {
+              details.source = match[1]
+            }
+          }
+
           // brain: kept upstream's `links: SimpleSlug[]` shape
           // unchanged; added `linkRecords` as a parallel field
           // carrying the kind/rule/weight metadata. The plan
