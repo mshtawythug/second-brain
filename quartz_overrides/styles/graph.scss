@@ -55,3 +55,103 @@
   --brain-source-gmail: #e8b385;
   --brain-source-manual: #8a7e63;
 }
+
+// brain-extension: in-graph controls (search input + filter chip rows).
+// Rendered as the first child of `.graph-container` / `.global-graph-container`
+// so they sit above the PixiJS canvas. Sized to take minimal vertical space
+// and to wrap if the sidebar is narrow.
+.brain-graph-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.4rem;
+  font-size: 0.75rem;
+  line-height: 1.2;
+}
+
+.brain-graph-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--lightgray);
+  border-radius: 4px;
+  background: var(--light);
+  color: var(--dark);
+  font: inherit;
+
+  // brain: explicit focus indicator for keyboard users — a border-color
+  // change alone wasn't enough at high-contrast settings. Outline-offset
+  // keeps the ring outside the rounded border so the visual cue is
+  // unambiguous.
+  &:focus {
+    outline: 2px solid var(--secondary);
+    outline-offset: 1px;
+    border-color: var(--secondary);
+  }
+}
+
+.brain-graph-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem;
+}
+
+.brain-graph-chip-label {
+  color: var(--darkgray);
+  margin-right: 0.15rem;
+  text-transform: capitalize;
+}
+
+// Each chip is a button by element so it remains keyboard-focusable. The
+// "active" class flips it to a filled state so the user reads which values
+// are currently included in the filter at a glance.
+.brain-graph-chip {
+  appearance: none;
+  border: 1px solid var(--lightgray);
+  background: transparent;
+  color: var(--darkgray);
+  border-radius: 999px;
+  padding: 0.1rem 0.55rem;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background-color 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+
+  &:hover {
+    border-color: var(--gray);
+    color: var(--dark);
+  }
+
+  // brain: explicit focus ring for keyboard navigation. `:focus-visible`
+  // (vs plain `:focus`) keeps the indicator from showing on mouse-click,
+  // which feels noisy on a chip group, while still surfacing it for
+  // tab-traversed users.
+  &:focus-visible {
+    outline: 2px solid var(--secondary);
+    outline-offset: 1px;
+  }
+
+  &.active {
+    background: var(--secondary);
+    border-color: var(--secondary);
+    color: var(--light);
+  }
+
+  // The "all" chip gets a subtler accent so it doesn't compete with the
+  // value chips for attention — it's a reset affordance, not a filter
+  // value in its own right.
+  &.brain-graph-chip-all {
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.65rem;
+    letter-spacing: 0.04em;
+
+    &.active {
+      background: var(--tertiary);
+      border-color: var(--tertiary);
+    }
+  }
+}

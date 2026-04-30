@@ -132,6 +132,59 @@ type TweenNode = {
   stop: () => void
 }
 
+// brain-extension: ref pattern that lets a chip-driven rerender swap the live
+// cleanup in place without dropping the cleanup-array entry the nav handler
+// holds. The nav handler pushes `() => ref.current()` into the global cleanup
+// arrays; renderGraph writes the latest cleanup into `ref.current` on every
+// (re-)render. That way "dispose this graph" always means "run the most
+// recent cleanup", whether that's the original render or any number of
+// chip-toggle rebuilds since.
+type CleanupRef = { current: () => void }
+
+// brain-extension: chip vocabularies are pinned to the values brain emits
+// (`tier: vault|ingested`, `source: krisp|slack|gmail|manual`). Hardcoding
+// instead of deriving from `data` keeps the chip row stable when the loaded
+// corpus happens to be missing one of the sources — the chip is still there
+// to click later, and the order is deterministic.
+//
+// brain: known coordination point — if a new `source` value is ever added
+// (e.g. brain grows a `notion` ingest extractor), it must be added BOTH
+// here AND in `Graph.tsx`'s `defaultSourceColors` AND in `graph.scss`'s
+// `--brain-source-*` palette. Missing any of those leaves the chip
+// selectable but visually indistinguishable from the gray fallback.
+const chipVocabularies = {
+  tier: ["vault", "ingested"] as const,
+  source: ["krisp", "slack", "gmail", "manual"] as const,
+} as const
+
+// brain-extension: chip filter state at module scope so a user's selection
+// survives SPA navigation. Default = full vocabulary (everything visible).
+//
+// brain: empty-set-as-wildcard is an INTENTIONAL UX choice, not a bug. The
+// acceptance text is literal: "flipping all chips off shows everything",
+// which only makes sense if a fully-empty filter set is treated as
+// "no filter on this dimension". A future maintainer might be tempted to
+// "fix" this to mean "show nothing" (matching set-membership semantics
+// strictly) — please don't, the acceptance test will then fail.
+const activeChipFilters: { tier: Set<string>; source: Set<string> } = {
+  tier: new Set<string>(chipVocabularies.tier),
+  source: new Set<string>(chipVocabularies.source),
+}
+
+// brain-extension: live search query at module scope. Persists across
+// chip-driven rerenders (so toggling a chip mid-search doesn't blow the
+// query away) but is reset on SPA nav by the `nav` event handler. The
+// initial-search-highlight branch in renderGraph reads this on mount.
+let currentSearchQuery = ""
+
+// brain-extension: module-level chip-rerender guard so a chip click that
+// fires mid-rebuild (e.g. clicking an inner-render chip while the outer
+// renderGraph is still awaiting `app.init`) doesn't double-tear-down. A
+// per-instance flag wouldn't catch this case because the outer and inner
+// renders each have their own. Module scope makes "is any rerender in
+// flight" a single source of truth.
+let chipRerenderBusy = false
+
 // brain-extension: linear-decay multiplier for recency sizing. Notes touched today
 // get 2.0×; notes >365 days old get 1.0×. Window pinned to one year so day-old vs
 // week-old reads as a meaningful size delta. The radius clamp at the call site
@@ -226,10 +279,44 @@ function drawDashedLine(
   gfx.stroke({ alpha, width, color })
 }
 
-async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
+async function renderGraph(
+  graph: HTMLElement,
+  fullSlug: FullSlug,
+  cleanupRef: CleanupRef,
+) {
+  // brain: hold the rebuild guard for the WHOLE render, not just the
+  // chip-click trampoline. The trampoline already sets the flag for chip-
+  // triggered rebuilds, but the INITIAL render (called directly from the
+  // nav handler with no trampoline) wasn't covered. A chip click during
+  // the initial render's await window (fetchData / app.init) would
+  // otherwise spawn a second renderGraph that races the outer one and
+  // leaks pixi state when the outer resumes. The trampoline sets the flag
+  // too — re-setting here is a benign no-op in that path; both end up
+  // false via either finally. Body is wrapped in try/finally below; the
+  // body itself is left at its original indentation to keep the diff
+  // small, since this is a structural wrap of an already-tested 1000-line
+  // function.
+  chipRerenderBusy = true
+  try {
   const slug = simplifySlug(fullSlug)
   const visited = getVisited()
   removeAllChildren(graph)
+
+  // brain-extension: chip-rebuild trampoline. Reads the module-level
+  // `chipRerenderBusy` so an inner-render chip click that fires while an
+  // outer render is still awaiting `app.init` is dropped on the floor —
+  // double-tearing-down the same Pixi app would throw on the second
+  // `app.destroy()` call.
+  async function rerenderForChipChange() {
+    if (chipRerenderBusy) return
+    chipRerenderBusy = true
+    try {
+      cleanupRef.current()
+      await renderGraph(graph, fullSlug, cleanupRef)
+    } finally {
+      chipRerenderBusy = false
+    }
+  }
 
   let {
     drag: enableDrag,
@@ -246,10 +333,7 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     focusOnHover,
     enableRadial,
     // brain-extension: brain config knobs. All optional; absent values fall through
-    // to upstream-equivalent behavior. `searchEnabled` and `filterChips` are
-    // type-only stubs and are intentionally not destructured here — the upcoming
-    // search-and-filter customization will add them when their runtime wiring
-    // lands.
+    // to upstream-equivalent behavior.
     tierColors,
     sourceColors,
     hideOrphans,
@@ -257,7 +341,91 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     hideByFrontmatter,
     derivedEdgeStyle,
     recencySizing,
+    // brain-extension: when true, render an in-graph search input above the canvas.
+    // Wired below; runtime debouncer + SPA-nav-on-Enter live in the controls block.
+    searchEnabled,
+    // brain-extension: which chip rows to render. Each named dimension renders one
+    // row of chips ("All <dim>" plus one chip per value in `chipVocabularies[dim]`).
+    filterChips,
   } = JSON.parse(graph.dataset["cfg"]!) as D3Config
+
+  // brain-extension: build the search/chip controls UI when configured. The
+  // elements are appended above the PixiJS canvas (which lands further down)
+  // so they read top-to-bottom: search input, then chip rows, then graph.
+  // Chip click handlers are wired here because they only need module-level
+  // chip state + cleanupRef; the search input's listeners are deferred until
+  // `applySearchHighlight` is in scope further down.
+  const filterChipsList: ("tier" | "source")[] = Array.isArray(filterChips)
+    ? (filterChips as ("tier" | "source")[]).filter(
+        (d): d is "tier" | "source" => d === "tier" || d === "source",
+      )
+    : []
+  let controlsEl: HTMLDivElement | null = null
+  let searchInputEl: HTMLInputElement | null = null
+  if (searchEnabled || filterChipsList.length > 0) {
+    controlsEl = document.createElement("div")
+    controlsEl.className = "brain-graph-controls"
+    graph.appendChild(controlsEl)
+    if (searchEnabled) {
+      const input = document.createElement("input")
+      input.type = "search"
+      input.className = "brain-graph-search"
+      input.placeholder = "Search graph..."
+      input.value = currentSearchQuery
+      // brain-extension: spellcheck/autocomplete add nothing here and would
+      // surface red squiggles under partial slugs — turn them off explicitly.
+      input.spellcheck = false
+      input.autocomplete = "off"
+      controlsEl.appendChild(input)
+      searchInputEl = input
+    }
+    for (const dimension of filterChipsList) {
+      const row = document.createElement("div")
+      row.className = "brain-graph-chip-row"
+      row.dataset["dimension"] = dimension
+      const label = document.createElement("span")
+      label.className = "brain-graph-chip-label"
+      // Capitalize the dimension name for the row label ("tier" → "Tier:").
+      label.textContent = `${dimension[0]!.toUpperCase()}${dimension.slice(1)}:`
+      row.appendChild(label)
+      const allChip = document.createElement("button")
+      allChip.type = "button"
+      allChip.className = "brain-graph-chip brain-graph-chip-all"
+      allChip.textContent = "all"
+      // The "all" chip reads as active iff every value in the vocabulary is
+      // selected — i.e. the dimension is currently unfiltered.
+      if (
+        activeChipFilters[dimension].size === chipVocabularies[dimension].length
+      ) {
+        allChip.classList.add("active")
+      }
+      allChip.addEventListener("click", () => {
+        activeChipFilters[dimension] = new Set<string>(
+          chipVocabularies[dimension],
+        )
+        void rerenderForChipChange()
+      })
+      row.appendChild(allChip)
+      for (const value of chipVocabularies[dimension]) {
+        const chip = document.createElement("button")
+        chip.type = "button"
+        chip.className = "brain-graph-chip"
+        chip.textContent = value
+        if (activeChipFilters[dimension].has(value)) chip.classList.add("active")
+        chip.addEventListener("click", () => {
+          const set = activeChipFilters[dimension]
+          if (set.has(value)) {
+            set.delete(value)
+          } else {
+            set.add(value)
+          }
+          void rerenderForChipChange()
+        })
+        row.appendChild(chip)
+      }
+      controlsEl.appendChild(row)
+    }
+  }
 
   const data: Map<SimpleSlug, BrainContentDetails> = new Map(
     Object.entries<BrainContentDetails>(await fetchData).map(([k, v]) => [
@@ -350,6 +518,46 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
   // emitter surfaces (`tier` / `source`); expanding to other keys (e.g.
   // `index`, `moc`) requires the emitter to widen its frontmatter passthrough.
   const filtered = new Set(neighbourhood)
+  // brain-extension: chip filter runs before the tag/frontmatter/orphan
+  // passes so subsequent passes only see nodes that survive the user's
+  // tier/source selection — orphan computation in particular has to be
+  // post-chip, otherwise hiding (say) every krisp node could leave nodes
+  // that were only linked through krisp pinned in place as "non-orphans".
+  // Empty chipFilter set is treated as a wildcard ("flipping all chips off
+  // shows everything", per acceptance), so deselecting every chip in a row
+  // disables that dimension's filter entirely.
+  //
+  // brain: forgiving rule — a node missing the relevant frontmatter field
+  // ALWAYS passes (we don't filter what we can't measure). Brain has
+  // legacy notes with patchy frontmatter; a strict filter would yank them
+  // from the graph the moment any chip is on, even though the user's
+  // selection has nothing to say about them. Don't tighten this without
+  // backfilling the corpus first.
+  //
+  // Tag aggregates also bypass — they're synthesized hubs, not docs.
+  for (const id of [...filtered]) {
+    if (id.startsWith("tags/")) continue
+    const details = data.get(id)
+    if (!details) continue
+    const nodeTier = typeof details.tier === "string" ? details.tier : undefined
+    const nodeSource =
+      typeof details.source === "string" ? details.source : undefined
+    if (
+      nodeTier &&
+      activeChipFilters.tier.size > 0 &&
+      !activeChipFilters.tier.has(nodeTier)
+    ) {
+      filtered.delete(id)
+      continue
+    }
+    if (
+      nodeSource &&
+      activeChipFilters.source.size > 0 &&
+      !activeChipFilters.source.has(nodeSource)
+    ) {
+      filtered.delete(id)
+    }
+  }
   if (hideTagNodes) {
     for (const id of [...filtered]) {
       if (id.startsWith("tags/")) filtered.delete(id)
@@ -422,7 +630,13 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
   }
 
   const width = graph.offsetWidth
-  const height = Math.max(graph.offsetHeight, 250)
+  // brain-extension: subtract the controls row from the canvas height so
+  // the canvas fits below it instead of overflowing the container. The
+  // 250px floor still applies — narrow sidebars where the controls eat
+  // into the canvas more than the floor allows degrade to a fixed-height
+  // canvas rather than a 0-height one.
+  const controlsHeight = controlsEl ? controlsEl.offsetHeight : 0
+  const height = Math.max(graph.offsetHeight - controlsHeight, 250)
 
   // we virtualize the simulation and use pixi to actually render it
   const simulation: Simulation<NodeData, LinkData> = forceSimulation<NodeData>(graphData.nodes)
@@ -523,11 +737,34 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
   let hoveredNeighbours: Set<string> = new Set()
   const linkRenderData: LinkRenderData[] = []
   const nodeRenderData: NodeRenderData[] = []
+  // brain-extension: search highlight state. When true, the renderers dim
+  // non-active nodes/links the same way `focusOnHover` does — `n.active` is
+  // populated by `applySearchHighlight` (defined below) from the search
+  // input's debounced match pass. Hover and search both write to the same
+  // `n.active` field; whichever fires last wins for that node, which matches
+  // user intent (a hover after typing reveals the hovered node's neighbours,
+  // not the search hits).
+  let searchActive = false
+  // brain-extension: debounce timer handle for the search input. Cleared on
+  // cleanup so a pending fire after teardown doesn't reach a destroyed app.
+  let searchDebounceTimer: number | null = null
   function updateHoverInfo(newHoveredId: string | null) {
     hoveredNodeId = newHoveredId
 
     if (newHoveredId === null) {
       hoveredNeighbours = new Set()
+      // brain: when a search highlight is active, mouseleave shouldn't
+      // blow the matched-set away. Without this re-apply, hovering a node
+      // and then leaving clears every n.active and dims the WHOLE graph
+      // until the next keystroke. Re-applying the search rebuilds the
+      // matched-set state in place; the pointerleave handler will
+      // renderPixiFromD3 right after returning, which makes the (very
+      // slight) double-render harmless — both calls render the same final
+      // alpha state.
+      if (searchActive) {
+        applySearchHighlight(currentSearchQuery)
+        return
+      }
       for (const n of nodeRenderData) {
         n.active = false
       }
@@ -629,7 +866,10 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
 
       // if we are hovering over a node, we want to highlight the immediate neighbours
       // with full alpha and the rest with default alpha
-      if (hoveredNodeId) {
+      // brain: extend the dim trigger to cover search-highlight too — when
+      // the user has typed a query, non-matching links fade the same way
+      // hover-non-neighbours do.
+      if (hoveredNodeId || searchActive) {
         alpha = l.active ? baseAlpha : baseAlpha * 0.2
       }
 
@@ -695,7 +935,11 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
       let alpha = 1
 
       // if we are hovering over a node, we want to highlight the immediate neighbours
-      if (hoveredNodeId !== null && focusOnHover) {
+      // brain: extend the dim trigger to cover search-highlight. Search
+      // bypasses the `focusOnHover` gate intentionally — it's an explicit
+      // user action that should always dim non-matches, regardless of
+      // whether the layout opted into hover focus.
+      if ((hoveredNodeId !== null && focusOnHover) || searchActive) {
         alpha = n.active ? 1 : 0.2
       }
 
@@ -831,6 +1075,117 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
     linkRenderData.push(linkRenderDatum)
   }
 
+  // brain-extension: apply a debounced search query against the loaded
+  // contentIndex. Matches against `title` and `tags` only — we deliberately
+  // skip the full `content` field (Quartz embeds the rendered body there)
+  // because substring-matching every doc body on every keystroke is slow
+  // for personal corpora >1k docs and adds noise to the highlight set.
+  // Active links are only the ones whose endpoints are BOTH matched, which
+  // means a hop between two hits stays bright while pendant hits stand
+  // alone. Empty/whitespace query → clear highlights and let the existing
+  // hover machinery take over.
+  function applySearchHighlight(query: string) {
+    const trimmed = query.trim()
+    if (!trimmed) {
+      searchActive = false
+      for (const n of nodeRenderData) n.active = false
+      for (const l of linkRenderData) l.active = false
+      renderPixiFromD3()
+      return
+    }
+    const q = trimmed.toLowerCase()
+    const matched = new Set<SimpleSlug>()
+    for (const n of nodeRenderData) {
+      const id = n.simulationData.id
+      const details = data.get(id)
+      const titleStr =
+        typeof details?.title === "string" ? details.title.toLowerCase() : ""
+      const rawTags = details?.tags
+      const tagsList: string[] = Array.isArray(rawTags)
+        ? (rawTags as unknown[])
+            .filter((t): t is string => typeof t === "string")
+            .map((t) => t.toLowerCase())
+        : []
+      if (titleStr.includes(q) || tagsList.some((t) => t.includes(q))) {
+        matched.add(id)
+      }
+    }
+    searchActive = true
+    for (const n of nodeRenderData) {
+      n.active = matched.has(n.simulationData.id)
+    }
+    // brain: extends the plan's literal "dim non-matching nodes" to also
+    // light up edges where BOTH endpoints matched. The plan only specifies
+    // node-level highlighting, but a search where every node fades and
+    // every edge fades looks broken — keeping cluster-internal edges
+    // bright preserves the "cluster of matches" gestalt. Pendant edges
+    // (one endpoint matched, one not) still dim along with the unmatched
+    // node, which is the desired UX.
+    for (const l of linkRenderData) {
+      const ld = l.simulationData
+      l.active = matched.has(ld.source.id) && matched.has(ld.target.id)
+    }
+    renderPixiFromD3()
+  }
+
+  if (searchInputEl) {
+    const inputEl = searchInputEl
+    inputEl.addEventListener("input", () => {
+      currentSearchQuery = inputEl.value
+      if (searchDebounceTimer !== null) {
+        window.clearTimeout(searchDebounceTimer)
+      }
+      // 100ms debounce — fast enough that typing feels live, slow enough
+      // that holding a key doesn't fire the match pass per repeat tick.
+      searchDebounceTimer = window.setTimeout(() => {
+        searchDebounceTimer = null
+        applySearchHighlight(currentSearchQuery)
+      }, 100)
+    })
+    inputEl.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return
+      e.preventDefault()
+      const q = inputEl.value.trim().toLowerCase()
+      if (!q) return
+      // brain: top-hit picker — title-priority with lowest-substring-index
+      // wins. Two intentional rules:
+      //   1. TITLE matches only — tag-only matches keep the highlight but
+      //      don't qualify for nav. A "tags" hit means the QUERY hit a
+      //      tag, not that the user wants to land on the tag-aggregate
+      //      page; navigating there would feel wrong.
+      //   2. LOWEST INDEX wins — "person-a" matching "person-x last-c" (idx 0)
+      //      beats "ASKING_PERSON-A.md" (idx 7). Substring position is a rough
+      //      "is this the document about X" heuristic; the alternative
+      //      (alphabetical, recency, link-degree) all need more state and
+      //      don't measurably improve the top-pick for a personal corpus.
+      // Tag-aggregate slugs (`tags/foo`) are skipped explicitly so the
+      // picker never lands on one even if its slug substring matches.
+      let bestId: SimpleSlug | null = null
+      let bestIdx = Number.POSITIVE_INFINITY
+      for (const n of nodeRenderData) {
+        const id = n.simulationData.id
+        if (id.startsWith("tags/")) continue
+        const details = data.get(id)
+        const titleStr =
+          typeof details?.title === "string" ? details.title.toLowerCase() : ""
+        const idx = titleStr.indexOf(q)
+        if (idx >= 0 && idx < bestIdx) {
+          bestIdx = idx
+          bestId = id
+        }
+      }
+      if (bestId) {
+        const targ = resolveRelative(fullSlug, bestId)
+        window.spaNavigate(new URL(targ, window.location.toString()))
+      }
+    })
+    // Replay any persisted query on chip-driven rerender so flipping a chip
+    // mid-search keeps the highlight intact rather than blowing it away.
+    if (currentSearchQuery) {
+      applySearchHighlight(currentSearchQuery)
+    }
+  }
+
   let currentTransform = zoomIdentity
   if (enableDrag) {
     select<HTMLCanvasElement, NodeData | undefined>(app.canvas).call(
@@ -956,12 +1311,40 @@ async function renderGraph(graph: HTMLElement, fullSlug: FullSlug) {
   }
 
   requestAnimationFrame(animate)
-  return () => {
+  const cleanup = () => {
     stopAnimation = true
+    // brain-extension: cancel any pending search-debounce so a fire after
+    // teardown can't reach a destroyed Pixi app or stale render data.
+    if (searchDebounceTimer !== null) {
+      window.clearTimeout(searchDebounceTimer)
+      searchDebounceTimer = null
+    }
     // brain-extension: tear down the tooltip element so re-renders (theme change,
     // SPA nav) don't accumulate orphaned tooltips in the DOM.
     if (tooltip.parentElement) tooltip.parentElement.removeChild(tooltip)
+    // brain-extension: same for the controls row — `removeAllChildren` on
+    // the next render would clear it, but a cleanup-without-rerender (e.g.
+    // global-graph hideOnEscape) needs the explicit removal so the chip
+    // row doesn't linger as a detached child.
+    if (controlsEl && controlsEl.parentElement) {
+      controlsEl.parentElement.removeChild(controlsEl)
+    }
     app.destroy()
+  }
+  // brain-extension: write the live cleanup back into the shared ref so a
+  // chip-driven rerender (which mutates `cleanupRef.current` mid-render)
+  // and the cleanup arrays in the nav handler both reach the latest
+  // teardown. The nav handler's cleanup-array entry is `() => ref.current()`,
+  // so this assignment is what makes "dispose this graph" do the right
+  // thing after any number of rerenders.
+  cleanupRef.current = cleanup
+  return cleanup
+  } finally {
+    // brain: closing brace for the renderGraph-wide try/finally that
+    // guards `chipRerenderBusy`. Always clears the flag regardless of
+    // throw/return path so a render error doesn't leave the graph
+    // permanently locked out of chip toggles.
+    chipRerenderBusy = false
   }
 }
 
@@ -985,12 +1368,22 @@ function cleanupGlobalGraphs() {
 document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
   const slug = e.detail.url
   addToVisited(simplifySlug(slug))
+  // brain-extension: search query is per-page — clear it on every SPA
+  // navigation so a query typed on page A doesn't carry over to page B.
+  // Chip filters intentionally persist across nav (they're a deliberate
+  // user-applied lens), so they live on at module scope without a reset.
+  currentSearchQuery = ""
 
   async function renderLocalGraph() {
     cleanupLocalGraphs()
     const localGraphContainers = document.getElementsByClassName("graph-container")
     for (const container of localGraphContainers) {
-      localGraphCleanups.push(await renderGraph(container as HTMLElement, slug))
+      // brain-extension: each container gets its own cleanup ref. The array
+      // entry resolves through the ref, so chip-driven rerenders that mutate
+      // `ref.current` still get torn down correctly on next nav.
+      const ref: CleanupRef = { current: () => {} }
+      await renderGraph(container as HTMLElement, slug, ref)
+      localGraphCleanups.push(() => ref.current())
     }
   }
 
@@ -1017,7 +1410,11 @@ document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
       const graphContainer = container.querySelector(".global-graph-container") as HTMLElement
       registerEscapeHandler(container, hideGlobalGraph)
       if (graphContainer) {
-        globalGraphCleanups.push(await renderGraph(graphContainer, slug))
+        // brain-extension: same cleanup-ref pattern as the local graph so
+        // chip-driven rerenders inside the global modal stay disposable.
+        const ref: CleanupRef = { current: () => {} }
+        await renderGraph(graphContainer, slug, ref)
+        globalGraphCleanups.push(() => ref.current())
       }
     }
   }
