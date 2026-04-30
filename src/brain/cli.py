@@ -79,6 +79,14 @@ from .vault.graph import (
 )
 from .vault.graph import orphans as _orphans_query
 from .vault.graph_format import to_dot, to_json, to_mermaid
+from .vault.quartz_overlay import (
+    OverlayError,
+    apply_overlay,
+    plan_overlay,
+)
+from .vault.quartz_overlay import (
+    repo_root as _brain_repo_root,
+)
 from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
@@ -1501,6 +1509,23 @@ def vault_render(
         "--no-build",
         help="Verify the Quartz workspace is set up without running the build.",
     ),
+    overlay: bool = typer.Option(
+        True,
+        "--overlay/--no-overlay",
+        help=(
+            "Copy `quartz_overrides/` over the Quartz workspace before "
+            "building. Use `--no-overlay` to skip and use whatever is "
+            "already in the workspace."
+        ),
+    ),
+    print_overlay: bool = typer.Option(
+        False,
+        "--print-overlay",
+        help=(
+            "Print the overlay plan (file pairs + rename status) and exit "
+            "without copying or building."
+        ),
+    ),
 ) -> None:
     """Render the vault to a static HTML site via Quartz.
 
@@ -1509,6 +1534,11 @@ def vault_render(
     "Wiki rendering (Quartz)" section): scaffold a workspace at
     `<vault>/.quartz/` with `npx quartz create`, then copy the sample
     `quartz.config.ts` from the brain repo root.
+
+    Before the build, the overlay step copies `quartz_overrides/` over
+    the Quartz workspace (custom Graph component, contentIndex emitter,
+    etc.). Use `--no-overlay` to skip, or `--print-overlay` to see what
+    would be copied without applying.
 
     Honours stdout/stderr passthrough so the user sees Quartz's
     progress live. Propagates a non-zero exit code from npx as exit 1.
@@ -1540,6 +1570,56 @@ def vault_render(
         quartz_dir.expanduser() if quartz_dir is not None else target_vault / ".quartz"
     )
     _check_quartz_workspace(workspace)
+
+    try:
+        plan = plan_overlay(_brain_repo_root(), workspace)
+    except OverlayError as e:
+        typer.secho(str(e), fg="red", err=True)
+        raise typer.Exit(code=2) from e
+
+    if print_overlay:
+        typer.echo(f"overlay plan for {workspace}:")
+        if plan.rename is not None:
+            src, dest = plan.rename
+            typer.echo(f"  rename: {src} → {dest}")
+        elif plan.rename_state == "already_applied":
+            typer.echo(
+                "  rename: already applied "
+                "(_upstreamContentIndex.tsx present, no upstream contentIndex.tsx)"
+            )
+        else:
+            typer.echo(
+                "  rename: skipped — neither contentIndex.tsx nor "
+                "_upstreamContentIndex.tsx exists; the brain wrapper "
+                "will fail at build time until Quartz is reinstalled"
+            )
+        for src, dest in plan.pairs:
+            typer.echo(f"  copy:   {src} → {dest}")
+        raise typer.Exit(code=0)
+
+    if overlay:
+        try:
+            copied = apply_overlay(plan)
+        except OverlayError as e:
+            typer.secho(str(e), fg="red", err=True)
+            raise typer.Exit(code=2) from e
+        if plan.rename is not None:
+            typer.echo(
+                "overlay: renamed contentIndex.tsx → _upstreamContentIndex.tsx"
+            )
+        elif plan.rename_state == "already_applied":
+            typer.echo("overlay: rename already applied")
+        else:
+            typer.echo(
+                "overlay: rename skipped — upstream contentIndex.tsx not "
+                "found (the brain wrapper will fail at build time)"
+            )
+        typer.echo(f"overlay: copied {len(copied)} files into {workspace}")
+    else:
+        typer.echo(
+            "overlay: skipped (--no-overlay) — using whatever is already "
+            "in place"
+        )
 
     if no_build:
         typer.echo(f"quartz workspace OK at {workspace}")
