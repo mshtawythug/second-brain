@@ -1,4 +1,4 @@
-"""Tests for the Quartz overlay step (G.6 helper + G.6 CLI integration).
+"""Tests for the Quartz overlay step (helper layer + render CLI integration).
 
 Two layers covered here:
 
