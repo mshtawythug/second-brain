@@ -21,17 +21,26 @@ def test_constraint_dropped(test_db: psycopg.Connection) -> None:
 
 
 def test_partial_unique_index_exists(test_db: psycopg.Connection) -> None:
-    """The new partial index is in place and scoped to ``kind='ingested'``."""
+    """The partial index on content_hash is in place.
+
+    Migration 006 (``006_dedup_file_by_source_path.sql``) renamed the index
+    from ``documents_content_hash_ingested_idx`` to
+    ``documents_content_hash_stdin_idx`` and tightened the predicate to
+    ``kind='ingested' AND source_path IS NULL`` so file-based ingests can
+    dedup by ``source_path`` instead of body bytes. The post-migration
+    index is what we assert here — the prior name no longer exists.
+    """
     row = test_db.execute(
         "SELECT indexdef FROM pg_indexes "
         "WHERE schemaname = 'public' "
         "AND tablename = 'documents' "
-        "AND indexname = 'documents_content_hash_ingested_idx'"
+        "AND indexname = 'documents_content_hash_stdin_idx'"
     ).fetchone()
-    assert row is not None, "documents_content_hash_ingested_idx should exist"
+    assert row is not None, "documents_content_hash_stdin_idx should exist"
     indexdef = str(row[0])
     assert "UNIQUE" in indexdef
     assert "kind = 'ingested'" in indexdef
+    assert "source_path IS NULL" in indexdef
 
 
 def test_two_vault_tier_rows_can_share_content_hash(

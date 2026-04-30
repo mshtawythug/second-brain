@@ -151,6 +151,109 @@ def test_ingest_empty_content_is_noop(test_db, fake_embedder):
     assert rows == 0
 
 
+def test_file_ingest_replaces_in_place_when_content_changes(test_db, fake_embedder):
+    """Re-ingesting a file whose content changed on disk replaces the row in
+    place: same ``source_path`` → same ``documents.id``, new ``content_hash``."""
+    path = "/tmp/notes/career.md"
+    first = _ingest(
+        test_db,
+        fake_embedder,
+        ExtractedDoc(
+            title="Career", content="version one", content_type="markdown",
+            source_path=path, metadata={},
+        ),
+    )
+    assert first.created is True
+
+    second = _ingest(
+        test_db,
+        fake_embedder,
+        ExtractedDoc(
+            title="Career", content="version two — updated", content_type="markdown",
+            source_path=path, metadata={},
+        ),
+    )
+    assert second.created is True
+    assert second.document_id != first.document_id  # row replaced (delete + insert)
+
+    rows = test_db.execute(
+        "SELECT id, content, content_hash FROM documents WHERE source_path=%s",
+        (path,),
+    ).fetchall()
+    assert len(rows) == 1
+    surviving_id, content, content_hash = rows[0]
+    assert str(surviving_id) == second.document_id
+    assert content == "version two — updated"
+    # The hash for the new body must differ from the original content's hash.
+    import hashlib
+    assert content_hash == hashlib.sha256(b"version two \xe2\x80\x94 updated").hexdigest()
+
+
+def test_file_ingest_with_force_replaces_even_when_content_unchanged(
+    test_db, fake_embedder
+):
+    """``force=True`` reinserts even when content (and hence hash) is unchanged."""
+    doc = ExtractedDoc(
+        title="Resume", content="same body bytes", content_type="markdown",
+        source_path="/tmp/resume.md", metadata={},
+    )
+    first = _ingest(test_db, fake_embedder, doc)
+    second = _ingest(test_db, fake_embedder, doc, force=True)
+    assert first.created is True
+    assert second.created is True
+    assert second.document_id != first.document_id
+
+    count = test_db.execute(
+        "SELECT count(*) FROM documents WHERE source_path=%s", (doc.source_path,)
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_stdin_ingest_still_dedups_by_content_hash(test_db, fake_embedder):
+    """Stdin ingests (no ``source_path``) keep the prior content-hash dedup."""
+    doc = ExtractedDoc(
+        title="Krisp transcript", content="speaker A: hi\n\nspeaker B: hello",
+        content_type="transcript", source_path=None, metadata={},
+    )
+    first = _ingest(test_db, fake_embedder, doc)
+    second = _ingest(test_db, fake_embedder, doc)
+    assert first.created is True
+    assert second.created is False
+    assert first.document_id == second.document_id
+
+
+def test_two_files_with_same_content_at_different_paths_are_separate_docs(
+    test_db, fake_embedder
+):
+    """Byte-identical content at distinct ``source_path``s yields two rows."""
+    body = "shared boilerplate body"
+    a = _ingest(
+        test_db,
+        fake_embedder,
+        ExtractedDoc(
+            title="A", content=body, content_type="markdown",
+            source_path="/tmp/a.md", metadata={},
+        ),
+    )
+    b = _ingest(
+        test_db,
+        fake_embedder,
+        ExtractedDoc(
+            title="B", content=body, content_type="markdown",
+            source_path="/tmp/b.md", metadata={},
+        ),
+    )
+    assert a.created is True
+    assert b.created is True
+    assert a.document_id != b.document_id
+
+    rows = test_db.execute(
+        "SELECT count(*) FROM documents WHERE source_path IN (%s, %s)",
+        ("/tmp/a.md", "/tmp/b.md"),
+    ).fetchone()[0]
+    assert rows == 2
+
+
 def test_ingest_with_tags(test_db, fake_embedder):
     doc = ExtractedDoc(
         title="T", content="x", content_type="txt", source_path=None, metadata={}

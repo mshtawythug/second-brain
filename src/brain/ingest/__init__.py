@@ -127,9 +127,14 @@ def ingest_document(
     """Ingest a single extracted document.
 
     Dedup rules:
-    - Documents are deduped by ``content_hash`` (SHA-256 of ``doc.content``).
-      A repeat ingest is a no-op unless ``force=True``, in which case the prior
-      row (and its chunks via ON DELETE CASCADE) is removed and re-inserted.
+    - File-based ingests (``doc.source_path`` set) are deduped by
+      ``source_path``. A repeat ingest of the same path with unchanged content
+      is a no-op; a content change replaces the prior row in place (chunks
+      drop via ON DELETE CASCADE) so the document keeps a stable identity
+      across edits. ``force=True`` always replaces.
+    - Stdin ingests (``doc.source_path`` is ``None`` — krisp/slack/gmail) are
+      deduped by ``content_hash`` (SHA-256 of ``doc.content``). Same
+      no-op/force semantics as before.
     - Sources are deduped by ``(kind, external_id)``. A repeat ingest pointing
       at the same external id reuses the existing source row.
 
@@ -144,13 +149,25 @@ def ingest_document(
     source_metadata = source_metadata or {}
 
     with conn.transaction():
-        existing = conn.execute(
-            "SELECT id FROM documents WHERE content_hash=%s", (h,)
-        ).fetchone()
-        if existing:
-            if not force:
-                return IngestResult(document_id=str(existing[0]), created=False)
-            conn.execute("DELETE FROM documents WHERE id=%s", (existing[0],))
+        if doc.source_path is not None:
+            existing_row = conn.execute(
+                "SELECT id, content_hash FROM documents "
+                "WHERE source_path=%s AND kind='ingested'",
+                (doc.source_path,),
+            ).fetchone()
+            if existing_row:
+                existing_id, existing_hash = existing_row
+                if not force and existing_hash == h:
+                    return IngestResult(document_id=str(existing_id), created=False)
+                conn.execute("DELETE FROM documents WHERE id=%s", (existing_id,))
+        else:
+            existing = conn.execute(
+                "SELECT id FROM documents WHERE content_hash=%s", (h,)
+            ).fetchone()
+            if existing:
+                if not force:
+                    return IngestResult(document_id=str(existing[0]), created=False)
+                conn.execute("DELETE FROM documents WHERE id=%s", (existing[0],))
 
         source_id = _upsert_source(
             conn,
