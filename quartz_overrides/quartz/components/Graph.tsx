@@ -187,6 +187,30 @@ export default ((opts?: Partial<GraphOptions>) => {
         <h3>{i18n(cfg.locale).components.graph.title}</h3>
         <div class="graph-outer">
           <div class="graph-container" data-cfg={JSON.stringify(localGraph)}></div>
+          {/* brain-extension: second affordance that opens the global graph in
+              "stock mode" — every brain renderer extension (tier/source colors,
+              derived-edge styling, recency sizing, search input, filter chips,
+              orphan/tag-node hiding) is suppressed so the user sees the corpus
+              with stock-Quartz visual semantics. Renders to the left of the
+              brain-customized globe icon; click handler in graph.inline.ts. */}
+          <button class="brain-stock-graph-icon" aria-label="Global Graph (stock view)">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+              xmlSpace="preserve"
+            >
+              <circle cx="5" cy="5" r="1.6" />
+              <circle cx="12" cy="5" r="1.6" />
+              <circle cx="19" cy="5" r="1.6" />
+              <circle cx="5" cy="12" r="1.6" />
+              <circle cx="12" cy="12" r="1.6" />
+              <circle cx="19" cy="12" r="1.6" />
+              <circle cx="5" cy="19" r="1.6" />
+              <circle cx="12" cy="19" r="1.6" />
+              <circle cx="19" cy="19" r="1.6" />
+            </svg>
+          </button>
           <button class="global-graph-icon" aria-label="Global Graph">
             <svg
               version="1.1"

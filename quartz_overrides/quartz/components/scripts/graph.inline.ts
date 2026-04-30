@@ -283,6 +283,12 @@ async function renderGraph(
   graph: HTMLElement,
   fullSlug: FullSlug,
   cleanupRef: CleanupRef,
+  // brain-extension: when true, suppress every renderer extension (tier/source
+  // colors, derived-edge styling, recency sizing, search input, filter chips,
+  // orphan/tag-node hiding) so the graph renders with stock-Quartz visual
+  // semantics. Wired to the `brain-stock-graph-icon` button; the standard
+  // `global-graph-icon` and the local-graph render path leave this at false.
+  stockMode = false,
 ) {
   // brain: hold the rebuild guard for the WHOLE render, not just the
   // chip-click trampoline. The trampoline already sets the flag for chip-
@@ -312,7 +318,7 @@ async function renderGraph(
     chipRerenderBusy = true
     try {
       cleanupRef.current()
-      await renderGraph(graph, fullSlug, cleanupRef)
+      await renderGraph(graph, fullSlug, cleanupRef, stockMode)
     } finally {
       chipRerenderBusy = false
     }
@@ -348,6 +354,26 @@ async function renderGraph(
     // row of chips ("All <dim>" plus one chip per value in `chipVocabularies[dim]`).
     filterChips,
   } = JSON.parse(graph.dataset["cfg"]!) as D3Config
+
+  // brain-extension: stock-mode override. When the user opened the global graph
+  // via the dot-grid `brain-stock-graph-icon` button, every brain-extension
+  // renderer knob is forced off so the graph renders with stock-Quartz visual
+  // semantics (current/visited/gray colors, plain stroke for every edge,
+  // fixed-radius nodes, no in-graph search input, no chip rows, no orphan
+  // hiding). The chip-filter pass and search-highlight branches further down
+  // also short-circuit on stockMode so any persisted module-state from a
+  // local-graph interaction can't leak into the stock view.
+  if (stockMode) {
+    tierColors = undefined
+    sourceColors = undefined
+    hideOrphans = false
+    hideTagNodes = false
+    hideByFrontmatter = []
+    derivedEdgeStyle = undefined
+    recencySizing = false
+    searchEnabled = false
+    filterChips = []
+  }
 
   // brain-extension: build the search/chip controls UI when configured. The
   // elements are appended above the PixiJS canvas (which lands further down)
@@ -542,7 +568,12 @@ async function renderGraph(
     const nodeTier = typeof details.tier === "string" ? details.tier : undefined
     const nodeSource =
       typeof details.source === "string" ? details.source : undefined
+    // brain-extension: the persisted module-level chip filter is intentionally
+    // ignored in stockMode — the user clicked the dot-grid affordance to escape
+    // brain semantics, including any chip selection they had left active on
+    // the local graph.
     if (
+      !stockMode &&
       nodeTier &&
       activeChipFilters.tier.size > 0 &&
       !activeChipFilters.tier.has(nodeTier)
@@ -551,6 +582,7 @@ async function renderGraph(
       continue
     }
     if (
+      !stockMode &&
       nodeSource &&
       activeChipFilters.source.size > 0 &&
       !activeChipFilters.source.has(nodeSource)
@@ -1181,7 +1213,10 @@ async function renderGraph(
     })
     // Replay any persisted query on chip-driven rerender so flipping a chip
     // mid-search keeps the highlight intact rather than blowing it away.
-    if (currentSearchQuery) {
+    // brain-extension: stockMode opted out of search above (no input element
+    // was rendered), so don't replay a leftover module-level query — the
+    // stock view should look identical regardless of prior search state.
+    if (currentSearchQuery && !stockMode) {
       applySearchHighlight(currentSearchQuery)
     }
   }
@@ -1398,7 +1433,12 @@ document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
   })
 
   const containers = [...document.getElementsByClassName("global-graph-outer")] as HTMLElement[]
-  async function renderGlobalGraph() {
+  // brain-extension: `stockMode` flag threads through to renderGraph so the
+  // dot-grid `brain-stock-graph-icon` button can open the same global-graph
+  // modal but with every renderer extension disabled. The default-false branch
+  // (called from the brain-customized globe icon and the Cmd/Ctrl-G shortcut)
+  // is functionally identical to the pre-stockMode behavior.
+  async function renderGlobalGraph(stockMode = false) {
     const slug = getFullSlug(window)
     for (const container of containers) {
       container.classList.add("active")
@@ -1413,7 +1453,7 @@ document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
         // brain-extension: same cleanup-ref pattern as the local graph so
         // chip-driven rerenders inside the global modal stay disposable.
         const ref: CleanupRef = { current: () => {} }
-        await renderGraph(graphContainer, slug, ref)
+        await renderGraph(graphContainer, slug, ref, stockMode)
         globalGraphCleanups.push(() => ref.current())
       }
     }
@@ -1436,14 +1476,34 @@ document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
       const anyGlobalGraphOpen = containers.some((container) =>
         container.classList.contains("active"),
       )
-      anyGlobalGraphOpen ? hideGlobalGraph() : renderGlobalGraph()
+      // brain: keyboard shortcut keeps brain semantics — only the explicit
+      // dot-grid click opts into stock mode.
+      anyGlobalGraphOpen ? hideGlobalGraph() : renderGlobalGraph(false)
     }
   }
 
   const containerIcons = document.getElementsByClassName("global-graph-icon")
+  // brain: wrap the renderGlobalGraph call so the click event isn't passed
+  // through as the stockMode argument (event objects are truthy → would
+  // accidentally enable stockMode for the brain-customized globe icon too).
+  const handleGlobalGraphClick = () => {
+    void renderGlobalGraph(false)
+  }
   Array.from(containerIcons).forEach((icon) => {
-    icon.addEventListener("click", renderGlobalGraph)
-    window.addCleanup(() => icon.removeEventListener("click", renderGlobalGraph))
+    icon.addEventListener("click", handleGlobalGraphClick)
+    window.addCleanup(() => icon.removeEventListener("click", handleGlobalGraphClick))
+  })
+
+  // brain-extension: the dot-grid affordance opens the same global-graph modal
+  // but with stockMode=true — every renderer extension is suppressed so the
+  // user sees the corpus with stock-Quartz visual semantics.
+  const stockGraphIcons = document.getElementsByClassName("brain-stock-graph-icon")
+  const handleStockGraphClick = () => {
+    void renderGlobalGraph(true)
+  }
+  Array.from(stockGraphIcons).forEach((icon) => {
+    icon.addEventListener("click", handleStockGraphClick)
+    window.addCleanup(() => icon.removeEventListener("click", handleStockGraphClick))
   })
 
   document.addEventListener("keydown", shortcutHandler)
