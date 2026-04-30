@@ -43,6 +43,17 @@ import yaml
 FENCE_START_MARKER: str = "<!-- BRAIN_DERIVED_START -->"
 FENCE_END_MARKER: str = "<!-- BRAIN_DERIVED_END -->"
 
+# Rules surfaced in the Quartz-visible fence. ``shared_participant`` (R2) is
+# excluded because it's high-recall / low-precision: at corpus scale it
+# produces an N×N hairball that breaks Quartz's force-directed graph layout
+# (the user is a participant in nearly every doc, so almost every doc shares
+# a participant with almost every other doc). R2 edges remain queryable via
+# ``brain backlinks`` / ``brain graph`` / MCP — only the Quartz surface is
+# narrowed, not the underlying ``derived_links`` table.
+#
+# Sorted to give psycopg a stable parameter binding shape.
+FENCE_RULES: tuple[str, ...] = ("same_day_participant", "shared_thread")
+
 # Section heading inside the fence. Stable so users (and `git diff`) can grep
 # for it.
 _SECTION_HEADING: str = "## Related (auto-generated, do not edit)"
@@ -141,8 +152,16 @@ def render_fenced_section(
 ) -> str | None:
     """Build the fenced section for ``doc_id`` from the current ``derived_links``.
 
-    Queries every derived edge whose ``src`` or ``dst`` is ``doc_id``,
-    joins ``documents`` for each partner's title / vault_path / metadata,
+    Queries every derived edge whose ``src`` or ``dst`` is ``doc_id`` AND
+    whose ``rule`` is in :data:`FENCE_RULES` (i.e. R1/R3 — ``shared_thread``
+    and ``same_day_participant``). R2 (``shared_participant``) is filtered
+    out at the SQL layer because it's high-recall / low-precision and at
+    corpus scale produces a graph hairball that breaks Quartz's
+    force-directed layout. R2 edges remain queryable via every other read
+    surface (``brain backlinks`` / ``brain graph`` / MCP); only the
+    Quartz-visible fence is narrowed.
+
+    Joins ``documents`` for each partner's title / vault_path / metadata
     and emits one bullet per edge:
 
         - [[<partner-filename-stem>|<partner-title>]] *(<rule>)*
@@ -153,8 +172,9 @@ def render_fenced_section(
 
     Partners without a ``vault_path`` (not exported yet) are skipped — the
     wiki-link wouldn't resolve in Quartz anyway. If skipping leaves the
-    bullet list empty, returns ``None`` (caller should remove the fence
-    rather than emit an empty section).
+    bullet list empty (or the rule filter dropped every edge for this
+    doc), returns ``None`` (caller should remove the fence rather than
+    emit an empty section).
     """
     rows = conn.execute(
         """
@@ -172,10 +192,11 @@ def render_fenced_section(
                  ELSE dl.src_document_id
             END
         )
-        WHERE dl.src_document_id = %s::uuid
-           OR dl.dst_document_id = %s::uuid
+        WHERE (dl.src_document_id = %s::uuid
+               OR dl.dst_document_id = %s::uuid)
+          AND dl.rule = ANY(%s)
         """,
-        (doc_id, doc_id, doc_id),
+        (doc_id, doc_id, doc_id, list(FENCE_RULES)),
     ).fetchall()
 
     bullets: list[tuple[float, bool, int, str]] = []

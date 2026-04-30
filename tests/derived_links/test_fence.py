@@ -327,24 +327,30 @@ class TestRenderFencedSection:
         # Q1 decision: primary sort = rule weight DESC; secondary = partner
         # date DESC (NOT title-ASC). Three partners pinned to deterministic
         # weights and dates so the assertion checks both axes.
+        #
+        # Within-tier sort uses R3 (same_day_participant, weight 0.7) for
+        # the lower tier rather than R2 (shared_participant) — R2 is
+        # filtered out of the fence renderer entirely (high-recall hairball
+        # mitigation), so a within-R2-tier sort assertion would always
+        # short-circuit to None.
         center_id = _seed_partner(
             test_db,
             title="Center",
             vault_path="_ingested/krisp/2026-04-15-ccc-center.md",
             metadata={"date": "2026-04-15"},
         )
-        # weight=0.4 (R2), older date — should be LAST.
-        old_r2 = _seed_partner(
+        # R3 (weight 0.7), older date — should be LAST in the R3 tier.
+        old_r3 = _seed_partner(
             test_db,
-            title="Old R2",
-            vault_path="_ingested/krisp/2026-01-01-aaa-old-r2.md",
+            title="Old R3",
+            vault_path="_ingested/krisp/2026-01-01-aaa-old-r3.md",
             metadata={"date": "2026-01-01"},
         )
-        # weight=0.4 (R2), newer date — should beat ``old_r2`` within tier.
-        new_r2 = _seed_partner(
+        # R3 (weight 0.7), newer date — should beat ``old_r3`` within tier.
+        new_r3 = _seed_partner(
             test_db,
-            title="New R2",
-            vault_path="_ingested/krisp/2026-03-01-bbb-new-r2.md",
+            title="New R3",
+            vault_path="_ingested/krisp/2026-03-01-bbb-new-r3.md",
             metadata={"date": "2026-03-01"},
         )
         # weight=1.0 (R1) — highest weight tier always sorts first.
@@ -356,12 +362,12 @@ class TestRenderFencedSection:
             source_kind="gmail",
         )
         _insert_derived_link(
-            test_db, a_id=center_id, b_id=old_r2,
-            rule="shared_participant", weight=0.4,
+            test_db, a_id=center_id, b_id=old_r3,
+            rule="same_day_participant", weight=0.7,
         )
         _insert_derived_link(
-            test_db, a_id=center_id, b_id=new_r2,
-            rule="shared_participant", weight=0.4,
+            test_db, a_id=center_id, b_id=new_r3,
+            rule="same_day_participant", weight=0.7,
         )
         _insert_derived_link(
             test_db, a_id=center_id, b_id=r1,
@@ -373,13 +379,13 @@ class TestRenderFencedSection:
         # Find the index of each partner's bullet — the rendered string is
         # newline-delimited with bullets in sort order.
         idx_r1 = rendered.index("R1 Partner")
-        idx_new_r2 = rendered.index("New R2")
-        idx_old_r2 = rendered.index("Old R2")
-        # R1 (weight 1.0) before any R2 (weight 0.4).
-        assert idx_r1 < idx_new_r2
-        assert idx_r1 < idx_old_r2
-        # Within R2 tier: newer date beats older.
-        assert idx_new_r2 < idx_old_r2
+        idx_new_r3 = rendered.index("New R3")
+        idx_old_r3 = rendered.index("Old R3")
+        # R1 (weight 1.0) before any R3 (weight 0.7).
+        assert idx_r1 < idx_new_r3
+        assert idx_r1 < idx_old_r3
+        # Within R3 tier: newer date beats older.
+        assert idx_new_r3 < idx_old_r3
 
     def test_partner_with_null_vault_path_is_skipped(
         self, test_db: psycopg.Connection
@@ -406,9 +412,12 @@ class TestRenderFencedSection:
             metadata={"date": "2026-04-12"},
             source_kind="gmail",
         )
+        # Use R3 (kept by FENCE_RULES) instead of R2 (filtered) so the
+        # null-vault-path skip is what excludes ``no_path``, not the rule
+        # filter.
         _insert_derived_link(
             test_db, a_id=center_id, b_id=no_path,
-            rule="shared_participant", weight=0.4,
+            rule="same_day_participant", weight=0.7,
         )
         _insert_derived_link(
             test_db, a_id=center_id, b_id=with_path,
@@ -468,13 +477,15 @@ class TestRenderFencedSection:
             vault_path="_ingested/krisp/local-jjj-undated.md",
             metadata={},
         )
+        # R3 (kept by FENCE_RULES) so both rows make it past the rule
+        # filter and the within-tier date-sort is what we actually verify.
         _insert_derived_link(
             test_db, a_id=center_id, b_id=dated,
-            rule="shared_participant", weight=0.4,
+            rule="same_day_participant", weight=0.7,
         )
         _insert_derived_link(
             test_db, a_id=center_id, b_id=undated,
-            rule="shared_participant", weight=0.4,
+            rule="same_day_participant", weight=0.7,
         )
 
         rendered = render_fenced_section(test_db, center_id)
@@ -499,9 +510,11 @@ class TestRenderFencedSection:
             vault_path="_ingested/krisp/2026-04-02-bbb-bravo.md",
             metadata={"date": "2026-04-02"},
         )
+        # R3 (kept by FENCE_RULES); R2 would be filtered out and the
+        # endpoint-symmetry assertion would short-circuit to None.
         _insert_derived_link(
             test_db, a_id=a_id, b_id=b_id,
-            rule="shared_participant", weight=0.4,
+            rule="same_day_participant", weight=0.7,
         )
 
         from_a = render_fenced_section(test_db, a_id)
@@ -532,13 +545,14 @@ class TestRenderFencedSection:
             vault_path="_ingested/krisp/2026-04-05-mmm-real.md",
             metadata={"date": "2026-04-05"},
         )
+        # R3 (kept by FENCE_RULES) so both rows reach the sort step.
         _insert_derived_link(
             test_db, a_id=center_id, b_id=garbage,
-            rule="shared_participant", weight=0.4,
+            rule="same_day_participant", weight=0.7,
         )
         _insert_derived_link(
             test_db, a_id=center_id, b_id=dated,
-            rule="shared_participant", weight=0.4,
+            rule="same_day_participant", weight=0.7,
         )
 
         rendered = render_fenced_section(test_db, center_id)
@@ -572,13 +586,152 @@ def test_render_handles_missing_or_non_string_date_keys(
         vault_path="_ingested/krisp/partner.md",
         metadata=metadata,
     )
+    # R3 (kept by FENCE_RULES) so the date-handling branches under test
+    # actually run; R2 would short-circuit to None at the SQL filter.
     _insert_derived_link(
         test_db, a_id=center_id, b_id=partner,
-        rule="shared_participant", weight=0.4,
+        rule="same_day_participant", weight=0.7,
     )
     rendered = render_fenced_section(test_db, center_id)
     assert rendered is not None
     assert "Partner" in rendered
+
+
+# --------------------------------------------------------------------------
+# Hotfix D.6.1 — R2 filter in the fence renderer (graph hairball mitigation).
+# --------------------------------------------------------------------------
+
+
+class TestFenceRulesFilter:
+    """``render_fenced_section`` filters R2 (``shared_participant``) at the SQL.
+
+    R2 is high-recall / low-precision — at corpus scale the user is a
+    participant in nearly every doc, so almost every doc shares a
+    participant with almost every other doc. Materializing all of those
+    edges as wiki-links breaks Quartz's force-directed graph layout
+    (oscillating hairball). The filter is render-side only: R2 rows
+    remain in the ``derived_links`` table and surface in
+    ``brain backlinks`` / ``brain graph`` / MCP — only the Quartz fence
+    is narrowed to R1 + R3.
+    """
+
+    def test_render_excludes_shared_participant(
+        self, test_db: psycopg.Connection
+    ) -> None:
+        # Seed one R1, one R3, and five R2 edges. The rendered fence
+        # should contain only the R1 and R3 partners — NO ``shared_participant``
+        # bullets at all.
+        center_id = _seed_partner(
+            test_db,
+            title="Center",
+            vault_path="_ingested/krisp/center.md",
+            metadata={"date": "2026-04-15"},
+        )
+        r1_partner = _seed_partner(
+            test_db,
+            title="R1 Partner",
+            vault_path="_ingested/gmail/r1.md",
+            metadata={"date": "2026-04-15"},
+            source_kind="gmail",
+        )
+        r3_partner = _seed_partner(
+            test_db,
+            title="R3 Partner",
+            vault_path="_ingested/krisp/r3.md",
+            metadata={"date": "2026-04-15"},
+        )
+        _insert_derived_link(
+            test_db, a_id=center_id, b_id=r1_partner,
+            rule="shared_thread", weight=1.0,
+        )
+        _insert_derived_link(
+            test_db, a_id=center_id, b_id=r3_partner,
+            rule="same_day_participant", weight=0.7,
+        )
+        # Five R2 partners, all with valid vault_paths and dates so the
+        # only reason they're absent is the rule filter.
+        for i in range(5):
+            r2_partner = _seed_partner(
+                test_db,
+                title=f"R2 Partner {i}",
+                vault_path=f"_ingested/krisp/r2-{i}.md",
+                metadata={"date": "2026-04-15"},
+            )
+            _insert_derived_link(
+                test_db, a_id=center_id, b_id=r2_partner,
+                rule="shared_participant", weight=0.4,
+            )
+
+        rendered = render_fenced_section(test_db, center_id)
+        assert rendered is not None
+
+        # R1 and R3 are present.
+        assert "R1 Partner" in rendered
+        assert "R3 Partner" in rendered
+        # No R2 partners and no ``*(shared_participant)*`` rule annotation.
+        assert "R2 Partner" not in rendered
+        assert "shared_participant" not in rendered
+
+        # Bullet count: 2 (R1 + R3). Header + 2 bullets + start + end =
+        # 4 lines total inside the fence.
+        bullet_count = sum(
+            1 for line in rendered.splitlines()
+            if line.startswith("- [[")
+        )
+        assert bullet_count == 2
+
+    def test_render_returns_none_when_only_r2_edges(
+        self, test_db: psycopg.Connection
+    ) -> None:
+        # A doc whose ONLY derived edges are R2 produces an empty
+        # bullet list under the filter → returns None so the caller
+        # strips the fence rather than emitting an empty section.
+        # This is the hairball mitigation in action: an "everyone is
+        # a participant" doc gets no Quartz-visible Related section,
+        # but the underlying R2 edges remain in the DB for backlinks /
+        # graph / MCP queries.
+        center_id = _seed_partner(
+            test_db,
+            title="Center",
+            vault_path="_ingested/krisp/center.md",
+            metadata={"date": "2026-04-15"},
+        )
+        for i in range(3):
+            r2_partner = _seed_partner(
+                test_db,
+                title=f"R2 Partner {i}",
+                vault_path=f"_ingested/krisp/r2-only-{i}.md",
+                metadata={"date": "2026-04-15"},
+            )
+            _insert_derived_link(
+                test_db, a_id=center_id, b_id=r2_partner,
+                rule="shared_participant", weight=0.4,
+            )
+
+        # Sanity: the rows ARE in the DB (filter is render-side only).
+        row_count = test_db.execute(
+            "SELECT count(*) FROM derived_links "
+            "WHERE src_document_id = %s OR dst_document_id = %s",
+            (center_id, center_id),
+        ).fetchone()
+        assert row_count is not None
+        assert int(row_count[0]) == 3
+
+        # But the renderer skips them.
+        assert render_fenced_section(test_db, center_id) is None
+
+    def test_fence_rules_constant_excludes_shared_participant(self) -> None:
+        # Lock in the public contract: ``FENCE_RULES`` is the single
+        # source of truth for what's surfaced in the Quartz fence, and
+        # ``shared_participant`` MUST NOT be in it. If a future change
+        # adds R2 back, this test fires with a clear hint about why
+        # the filter exists (Quartz hairball mitigation, see fence.py
+        # docstring for the rationale).
+        from brain.vault.derived_links.fence import FENCE_RULES
+        assert "shared_participant" not in FENCE_RULES
+        # R1 and R3 are in.
+        assert "shared_thread" in FENCE_RULES
+        assert "same_day_participant" in FENCE_RULES
 
 
 # --------------------------------------------------------------------------
@@ -1146,9 +1299,13 @@ class TestRewriteDerivedFences:
             relative_vault_path="_ingested/krisp/bravo.md",
             metadata={"date": "2026-04-15"},
         )
+        # R3 (same_day_participant) — kept by FENCE_RULES. Using R2 here
+        # would have the rule filter drop the edge and both files would
+        # get an empty fence (one strip-fence write each = 2, but the
+        # round-trip assertions about the bullet content would break).
         _insert_derived_link(
             test_db, a_id=a_id, b_id=b_id,
-            rule="shared_participant", weight=0.4,
+            rule="same_day_participant", weight=0.7,
         )
 
         written = rewrite_derived_fences(
