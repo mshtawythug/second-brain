@@ -9,6 +9,28 @@ from typer.testing import CliRunner
 
 from brain.cli import app
 
+
+def _derived(
+    conn: psycopg.Connection[Any],
+    *,
+    a: str,
+    b: str,
+    rule: str = "shared_thread",
+    weight: float = 1.0,
+    evidence: dict[str, Any] | None = None,
+) -> None:
+    """Insert a ``derived_links`` row in canonical (LEAST, GREATEST) order."""
+    src, dst = (a, b) if a < b else (b, a)
+    payload = {} if evidence is None else evidence
+    conn.execute(
+        """
+        INSERT INTO derived_links
+          (src_document_id, dst_document_id, rule, evidence, weight)
+        VALUES (%s, %s, %s, %s::jsonb, %s)
+        """,
+        (src, dst, rule, json.dumps(payload), weight),
+    )
+
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql://brain:brain@localhost:5433/second_brain_test",
@@ -182,3 +204,101 @@ def test_links_unknown_id_errors(
     result = CliRunner().invoke(app, ["links", "00000000"])
     assert result.exit_code != 0
     assert "not found" in result.output.lower()
+
+
+def test_links_annotates_derived_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Outgoing derived rows carry a ``[derived: <rule>]`` prefix.
+
+    Derived edges are undirected — ``brain links <doc>`` returns the
+    partner regardless of which side of the canonical (LEAST, GREATEST)
+    storage row the doc sits on.
+    """
+    _set_env(monkeypatch)
+    a = _make_doc(test_db, doc_id="11111111-1111-1111-1111-111111111111",
+                  title="person-x conversation", vault_path="a.md")
+    b = _make_doc(test_db, doc_id="22222222-2222-2222-2222-222222222222",
+                  title="Re: person-x intro", vault_path="b.md")
+    _derived(test_db, a=a, b=b, rule="same_day_participant", weight=0.7)
+    result = CliRunner().invoke(app, ["links", a[:8]])
+    assert result.exit_code == 0, result.output
+    assert "[derived: same_day_participant]" in result.output
+    assert "Re: person-x intro" in result.output
+
+
+def test_links_does_not_annotate_wiki_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Pure wiki-link outgoing rows must not pick up a ``[derived:`` prefix."""
+    _set_env(monkeypatch)
+    a = _make_doc(test_db, doc_id="11111111-1111-1111-1111-111111111111",
+                  title="A", vault_path="a.md")
+    b = _make_doc(test_db, doc_id="22222222-2222-2222-2222-222222222222",
+                  title="B", vault_path="b.md")
+    _link(test_db, src=a, dst=b, text="[[B]]")
+    result = CliRunner().invoke(app, ["links", a[:8]])
+    assert result.exit_code == 0, result.output
+    assert "[derived:" not in result.output
+    assert "[[B]]" in result.output
+
+
+def test_links_json_includes_rule_weight_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """``--json`` for derived outgoing rows carries rule / weight / evidence."""
+    _set_env(monkeypatch)
+    a = _make_doc(test_db, doc_id="11111111-1111-1111-1111-111111111111",
+                  title="person-x conversation", vault_path="a.md")
+    b = _make_doc(test_db, doc_id="22222222-2222-2222-2222-222222222222",
+                  title="Re: person-x intro", vault_path="b.md")
+    _derived(
+        test_db,
+        a=a,
+        b=b,
+        rule="shared_thread",
+        weight=1.0,
+        evidence={"thread_id": "t-42"},
+    )
+    result = CliRunner().invoke(app, ["links", a[:8], "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    derived_rows = [p for p in payload if p["link_kind"] == "derived"]
+    assert len(derived_rows) == 1
+    row = derived_rows[0]
+    assert row["rule"] == "shared_thread"
+    assert row["weight"] == 1.0
+    assert row["evidence"] == {"thread_id": "t-42"}
+    assert row["resolved"] is True
+
+
+def test_links_json_wiki_rows_have_null_derived_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Wiki rows in ``brain links --json`` expose rule / weight / evidence as null.
+
+    Mirror of ``test_backlinks_json_wiki_rows_have_null_derived_fields``
+    — keeps the JSON shape uniform across wiki and derived rows so
+    downstream consumers can rely on field presence regardless of which
+    side of the edge they're inspecting.
+    """
+    _set_env(monkeypatch)
+    a = _make_doc(test_db, doc_id="11111111-1111-1111-1111-111111111111",
+                  title="A", vault_path="a.md")
+    b = _make_doc(test_db, doc_id="22222222-2222-2222-2222-222222222222",
+                  title="B", vault_path="b.md")
+    _link(test_db, src=a, dst=b, text="[[B]]")
+    result = CliRunner().invoke(app, ["links", a[:8], "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert len(payload) == 1
+    row = payload[0]
+    assert row["link_kind"] == "wiki"
+    assert row["resolved"] is True
+    assert row["rule"] is None
+    assert row["weight"] is None
+    assert row["evidence"] is None

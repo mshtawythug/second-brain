@@ -2493,10 +2493,18 @@ def backlinks(
     """List documents that link TO this one.
 
     Resolves the id prefix first (same semantics as ``brain show``).
+    Includes metadata-derived edges by default per spec §10 Q4 — derived
+    rows are first-class answers to "what's connected to this doc?" and
+    pick up a ``[derived: <rule>]`` prefix in human output to make their
+    provenance obvious at a glance.
+
     Default human output is one row per backlink: ``<short-id> <kind>
-    <title>  [[link-text]]``. ``--json`` emits an array of
-    ``{src_document_id, src_title, src_kind, link_text, link_kind}``
-    rows in the same order.
+    <title>  [[link-text]]``, with the ``[derived: <rule>]`` prefix on
+    derived rows. ``--json`` emits an array of ``{src_document_id,
+    src_title, src_kind, link_text, link_kind, rule, weight, evidence}``
+    rows in the same order — ``rule`` / ``weight`` / ``evidence`` are
+    populated for derived rows and ``null`` for wiki/embed rows so the
+    JSON shape stays uniform across edge kinds.
 
     Empty result is exit-code 0 — "no backlinks" is a valid answer.
     """
@@ -2513,6 +2521,9 @@ def backlinks(
                     "src_kind": r.src_kind,
                     "link_text": r.link_text,
                     "link_kind": r.link_kind,
+                    "rule": r.rule,
+                    "weight": r.weight,
+                    "evidence": r.evidence,
                 }
                 for r in rows
             ]
@@ -2522,8 +2533,18 @@ def backlinks(
         typer.echo("(no backlinks)")
         return
     for r in rows:
+        # Wiki rows are unannotated. Derived rows get a `[derived: <rule>]`
+        # prefix per spec §10 Q3 — rule name only (the numeric weight is
+        # noise for a human reader; the rule name already conveys the tier).
+        # JSON output above carries `rule` / `weight` / `evidence` for
+        # programmatic use.
+        prefix = (
+            f"[derived: {r.rule}] "
+            if r.link_kind == "derived" and r.rule is not None
+            else ""
+        )
         typer.echo(
-            f"{r.src_document_id[:8]}  {r.src_kind:<8}  {r.src_title}  "
+            f"{prefix}{r.src_document_id[:8]}  {r.src_kind:<8}  {r.src_title}  "
             f"{r.link_text}"
         )
 
@@ -2541,13 +2562,19 @@ def links(
     """List documents this one links TO.
 
     Default output mirrors ``brain backlinks`` but for outgoing edges:
-    ``<short-id> <kind> <title>  [[link-text]]``. With ``--unresolved``,
-    dangling refs are appended after resolved rows with ``--------  --
-    (unresolved)`` placeholders.
+    ``<short-id> <kind> <title>  [[link-text]]``, with a
+    ``[derived: <rule>]`` prefix on metadata-derived rows. Includes
+    derived edges by default per spec §10 Q4 (derived storage is
+    undirected, so the partner set matches ``brain backlinks`` for those
+    rows). With ``--unresolved``, dangling refs are appended after
+    resolved rows with ``--------  -- (unresolved)`` placeholders.
 
     ``--json`` emits ``{dst_document_id, dst_title, dst_kind, link_text,
-    link_kind, resolved}`` rows; unresolved rows have null for the dst
-    fields and ``"resolved": false``.
+    link_kind, resolved, rule, weight, evidence}`` rows. ``rule`` /
+    ``weight`` / ``evidence`` are populated for derived rows and ``null``
+    for wiki/embed rows so the JSON shape stays uniform across edge
+    kinds. Unresolved rows have null for the dst fields and
+    ``"resolved": false``.
     """
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
@@ -2565,6 +2592,9 @@ def links(
                     "link_text": r.link_text,
                     "link_kind": r.link_kind,
                     "resolved": r.resolved,
+                    "rule": r.rule,
+                    "weight": r.weight,
+                    "evidence": r.evidence,
                 }
                 for r in rows
             ]
@@ -2578,8 +2608,17 @@ def links(
             assert r.dst_document_id is not None  # resolved => fields set
             assert r.dst_title is not None
             assert r.dst_kind is not None
+            # Wiki rows are unannotated. Derived rows get a
+            # `[derived: <rule>]` prefix per spec §10 Q3 — rule name only
+            # (the weight is noise for a human reader; JSON output above
+            # carries `rule` / `weight` / `evidence` for programmatic use).
+            prefix = (
+                f"[derived: {r.rule}] "
+                if r.link_kind == "derived" and r.rule is not None
+                else ""
+            )
             typer.echo(
-                f"{r.dst_document_id[:8]}  {r.dst_kind:<8}  {r.dst_title}  "
+                f"{prefix}{r.dst_document_id[:8]}  {r.dst_kind:<8}  {r.dst_title}  "
                 f"{r.link_text}"
             )
         else:
@@ -2649,6 +2688,14 @@ def graph(
         "--include-ingested",
         help="Include ingested-tier nodes (default: vault-tier only).",
     ),
+    no_derived: bool = typer.Option(
+        False,
+        "--no-derived",
+        help=(
+            "Exclude metadata-derived edges (shared_thread / "
+            "shared_participant / same_day_participant). Default: include."
+        ),
+    ),
     out: Path | None = typer.Option(
         None,
         "--out",
@@ -2661,6 +2708,11 @@ def graph(
     every linked document regardless of tier. With ``--root`` (+ optional
     ``--depth``), the output is restricted to a BFS frontier centered on
     that document — a focused subgraph for visualization.
+
+    Metadata-derived edges (``shared_thread`` / ``shared_participant`` /
+    ``same_day_participant``) are included by default per spec §10 Q4;
+    pass ``--no-derived`` to drop them and render only authored
+    wiki/embed edges.
 
     Empty graphs emit valid syntax (``{"nodes": [], "edges": []}`` /
     ``digraph G {}`` / ``graph TD\\n``). Exit code is 0 in every
@@ -2688,6 +2740,7 @@ def graph(
             root=root_id,
             depth=depth,
             include_ingested=include_ingested,
+            include_derived=not no_derived,
         )
 
     formatter = _GRAPH_FORMATTERS[format]
