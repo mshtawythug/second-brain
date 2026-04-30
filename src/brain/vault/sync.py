@@ -39,6 +39,7 @@ import yaml
 from ..ingest import Embedder
 from ..ingest.chunker import chunk_text
 from .derived_links import DirectoryStore, rebuild_derived_for
+from .derived_links.fence import strip_fence
 from .frontmatter import body_hash, dump_frontmatter, parse_frontmatter
 from .links import ParsedLink, parse_wiki_links
 from .resolver import resolve_link, title_collisions
@@ -648,18 +649,27 @@ def _sync_one(
 
 
 def _normalized_body(body: str) -> str:
-    """Return ``body`` with line endings normalized + trailing whitespace stripped.
+    """Return ``body`` with the fence + line-ending + trailing-whitespace normalization.
 
-    The DB stores the canonical form: LF line endings, no trailing whitespace.
-    Reading the value back and comparing to a freshly-normalized disk read
-    must produce identical strings, so the export → sync round-trip stays a
-    no-op even if the file was saved with CRLF or an extra trailing newline.
+    The DB stores the canonical form: LF line endings, no trailing whitespace,
+    no auto-generated derived-edges fence. Reading the value back and
+    comparing to a freshly-normalized disk read must produce identical
+    strings, so the export → sync round-trip stays a no-op even if the
+    file was saved with CRLF, has an extra trailing newline, or carries a
+    fenced "Related" section appended by the linker (Phase D).
+
+    The fence strip is what keeps ``documents.content`` clean — vector
+    search must not surface documents by their auto-generated "Related"
+    list, and the wiki-link parser (which runs over this same normalized
+    body in :func:`_materialize_links`) must not double-count fence-internal
+    references that already live in ``derived_links``.
     """
-    return body.replace("\r\n", "\n").replace("\r", "\n").strip()
+    fence_stripped = strip_fence(body)
+    return fence_stripped.replace("\r\n", "\n").replace("\r", "\n").strip()
 
 
 def _legacy_body_hash(body: str) -> str:
-    """SHA-256 of ``body`` exactly as parse_frontmatter returned it (no strip).
+    """SHA-256 of ``body`` (fence stripped, otherwise unnormalized).
 
     Phase 1 ingest computed ``documents.content_hash = sha256(doc.content)``
     with no normalization, and Phase 1 export wrote files whose body bytes
@@ -667,8 +677,14 @@ def _legacy_body_hash(body: str) -> str:
     digest so the sync engine can recognize "body unchanged under the
     legacy hash" and skip a re-embed on the very first sync after a Phase
     1 export — preserving the round-trip-no-op contract.
+
+    Phase D adds the fence strip: a Phase 1 file that has since been
+    rendered with a derived-edges fence still hashes equal to its original
+    content under the legacy form, so the linker's first relink doesn't
+    accidentally invalidate the legacy-hash short-circuit and trigger a
+    re-embed. The fence is contractually not authored body.
     """
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return hashlib.sha256(strip_fence(body).encode("utf-8")).hexdigest()
 
 
 def _build_metadata(
@@ -960,6 +976,12 @@ def _materialize_links(
     DB consistent. Each parsed link either lands in ``links`` (resolved) or
     ``unresolved_links`` (dangling); the unique constraints on both tables
     deduplicate when a body has multiple identical ``[[X]]`` references.
+
+    ``body`` is expected to already be fence-stripped — callers pass
+    ``_normalized_body(...)``, which runs :func:`strip_fence` first.
+    Wiki-links inside the auto-generated derived-edges fence (Phase D)
+    therefore do NOT land in ``links``; those edges live in
+    ``derived_links`` and would double-count if materialized here.
     """
     conn.execute(
         "DELETE FROM links WHERE src_document_id = %s", (document_id,)

@@ -1543,3 +1543,277 @@ def test_sync_vault_with_no_linkable_docs_succeeds(
     assert _derived_count(test_db) == 0
 
 
+# ---------------------------------------------------------------------------
+# Phase D — fence-awareness in body_hash, _normalized_body, _materialize_links.
+# ---------------------------------------------------------------------------
+
+
+def _fenced_body(base_body: str, *bullets: str) -> str:
+    """Compose a body with a ``BRAIN_DERIVED`` fence appended after a blank line.
+
+    Mirrors the shape :func:`brain.vault.derived_links.fence.replace_fence`
+    produces in production: one blank line between body and START marker,
+    one trailing newline after END. Tests use this to construct the same
+    fenced bodies the linker would generate without depending on the
+    renderer's DB query path.
+    """
+    from brain.vault.derived_links.fence import (
+        FENCE_END_MARKER,
+        FENCE_START_MARKER,
+    )
+
+    fence_lines = [FENCE_START_MARKER, "## Related (auto-generated, do not edit)"]
+    fence_lines.extend(bullets)
+    fence_lines.append(FENCE_END_MARKER)
+    return f"{base_body.rstrip()}\n\n" + "\n".join(fence_lines) + "\n"
+
+
+def test_body_hash_stable_across_fence_content(
+    fake_embedder,  # noqa: ARG001 - signature parity with peers
+) -> None:
+    """A file with two different fence bodies must hash identically.
+
+    This is the property that prevents the relink → re-embed cascade: the
+    linker rewrites the fence on every relink; if ``body_hash`` saw the
+    fence as authored content, every relink would mark every ingested file
+    as "body changed" and re-embed the corpus. The fence is contractually
+    not authored body and ``body_hash`` strips it before hashing.
+    """
+    base = "# Title\n\nBody paragraph.\n"
+    file_a = dump_frontmatter(
+        {"id": "x", "title": "T"},
+        _fenced_body(base, "- [[a-stem|A]] *(shared_thread)*"),
+    )
+    file_b = dump_frontmatter(
+        {"id": "x", "title": "T"},
+        _fenced_body(
+            base,
+            "- [[a-stem|A]] *(shared_thread)*",
+            "- [[b-stem|B]] *(shared_participant)*",
+        ),
+    )
+    from brain.vault.frontmatter import body_hash
+    assert body_hash(file_a) == body_hash(file_b)
+
+
+def test_body_hash_same_with_and_without_fence(
+    fake_embedder,  # noqa: ARG001 - signature parity with peers
+) -> None:
+    """A fenced file hashes the same as the same file with the fence removed.
+
+    Inverse of the previous test: removing the fence entirely (the user
+    deletes the section, or the renderer hasn't run yet) must not change
+    the hash. Otherwise a fresh sync of a never-rendered file would re-embed
+    after the linker first appends the fence — wasted work.
+    """
+    base = "# Title\n\nBody paragraph.\n"
+    fenced = dump_frontmatter(
+        {"id": "x", "title": "T"},
+        _fenced_body(base, "- [[a-stem|A]] *(shared_thread)*"),
+    )
+    fenceless = dump_frontmatter({"id": "x", "title": "T"}, base)
+    from brain.vault.frontmatter import body_hash
+    assert body_hash(fenced) == body_hash(fenceless)
+
+
+def test_legacy_body_hash_strips_fence(fake_embedder) -> None:  # noqa: ARG001
+    """``_legacy_body_hash`` must also strip the fence.
+
+    The legacy hash backstops the round-trip-no-op contract for files
+    exported under Phase 1 semantics (``content_hash = sha256(doc.content)``,
+    no normalization). If the linker appended a fence to such a file, the
+    legacy form must still match — otherwise the silent-hash-migration
+    branch in ``_sync_one`` would treat a fence-only change as a body
+    change and re-embed.
+    """
+    import hashlib
+
+    from brain.vault.sync import _legacy_body_hash
+
+    base_body = "the unchanged authored body\n"
+    fenced_body = _fenced_body(base_body, "- [[a|A]] *(shared_thread)*")
+    # Legacy hash of the original body (no fence).
+    expected = hashlib.sha256(base_body.encode("utf-8")).hexdigest()
+    assert _legacy_body_hash(fenced_body) == expected
+
+
+def test_fence_internal_wiki_links_not_in_links_table(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Wiki-links inside the auto-generated fence don't show up in ``links``.
+
+    Phase D's whole point is that derived edges live in ``derived_links``,
+    not ``links`` — and the fenced "Related" section's bullets are wiki-
+    links to those same partners. If the wiki-link parser saw the fence,
+    we'd double-count every derived edge in ``links`` AND ``derived_links``.
+    """
+    vault = tmp_path / "vault"
+    target_id = str(uuid.uuid4())
+    src_id = str(uuid.uuid4())
+
+    # The target the fence's bullet points at — needs to exist so the link
+    # would resolve if the parser saw it. (We're testing the parser doesn't
+    # see it; "would resolve" makes the negative assertion meaningful.)
+    _write(
+        vault / "target.md",
+        {"id": target_id, "title": "Target"},
+        "target body\n",
+    )
+    # Source file with both an authored wiki-link AND a fence containing
+    # a separate wiki-link. The authored link MUST land in ``links``;
+    # the fence-internal one MUST NOT.
+    _write(
+        vault / "source.md",
+        {"id": src_id, "title": "Source"},
+        _fenced_body(
+            "# Source\n\nAn [[Target]] reference in the body.\n",
+            "- [[target|Target]] *(shared_thread)*",
+            "- [[other-stem|Other Title]] *(shared_participant)*",
+        ),
+    )
+
+    report = _sync(test_db, fake_embedder, vault)
+    assert report.errors == []
+
+    # Authored ``[[Target]]`` resolves and lands in ``links``. The fence's
+    # ``[[target|Target]]`` is ALSO a wiki-link (different raw text — has a
+    # display alias), so if the parser saw both we'd see two link rows for
+    # this src_id. We check both the count and the link_text.
+    rows = test_db.execute(
+        "SELECT link_text, dst_document_id::text FROM links "
+        "WHERE src_document_id = %s ORDER BY link_text",
+        (src_id,),
+    ).fetchall()
+    assert len(rows) == 1, f"expected exactly 1 link row, got {rows!r}"
+    raw_text, dst = rows[0]
+    assert raw_text == "[[Target]]"  # authored, no alias
+    assert dst == target_id
+
+    # No unresolved-link row for the fence's ``[[other-stem|Other Title]]``
+    # either — the fence is invisible to the link materializer entirely.
+    unresolved = test_db.execute(
+        "SELECT link_text FROM unresolved_links WHERE src_document_id = %s",
+        (src_id,),
+    ).fetchall()
+    assert unresolved == []
+
+
+def test_fence_only_change_does_not_re_embed(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Re-syncing after a fence rewrite is a clean ``skipped`` — no re-chunk.
+
+    End-to-end check that the three fence strips (body_hash, normalized_body,
+    legacy_body_hash) compose into the desired property: a relink that only
+    edits the fence content of a file produces zero re-embeds on the next
+    sync. The sync engine's ``skipped`` counter tracks the no-op path.
+    """
+    vault = tmp_path / "vault"
+    doc_id = str(uuid.uuid4())
+    base = "# Hello\n\nstable body content\n"
+
+    # First sync — file has no fence yet.
+    _write(vault / "note.md", {"id": doc_id, "title": "Hello"}, base)
+    first = _sync(test_db, fake_embedder, vault)
+    assert first.created == 1
+
+    # Capture the chunks' ids so we can assert they weren't re-inserted.
+    chunk_ids_before = sorted(
+        r[0]
+        for r in test_db.execute(
+            "SELECT id::text FROM chunks WHERE document_id = %s",
+            (doc_id,),
+        ).fetchall()
+    )
+
+    # Now rewrite the file with a fence appended (simulating the linker's
+    # output). Body content is unchanged; only the fence appears.
+    fenced = _fenced_body(base, "- [[a-stem|A]] *(shared_thread)*")
+    _write(vault / "note.md", {"id": doc_id, "title": "Hello"}, fenced)
+
+    second = _sync(test_db, fake_embedder, vault)
+    assert second.errors == []
+    # The doc is "skipped" — body unchanged under the fence-aware hash.
+    assert second.skipped == 1
+    assert second.updated == 0
+
+    # Same chunks (same ids) — re-embed would have DELETEd + re-INSERTed.
+    chunk_ids_after = sorted(
+        r[0]
+        for r in test_db.execute(
+            "SELECT id::text FROM chunks WHERE document_id = %s",
+            (doc_id,),
+        ).fetchall()
+    )
+    assert chunk_ids_after == chunk_ids_before
+
+
+def test_documents_content_excludes_fence(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """``documents.content`` for a fenced file stores the body WITHOUT the fence.
+
+    Vector search ranks chunks by cosine similarity over the chunk content,
+    which is sourced from ``documents.content``. If the fence were stored,
+    a query like "Related auto-generated" would surface every ingested
+    file that has any derived edges — pure noise. The fence strip in
+    ``_normalized_body`` is what prevents that.
+    """
+    vault = tmp_path / "vault"
+    doc_id = str(uuid.uuid4())
+    base = "# Title\n\nThe authored body content goes here.\n"
+    fenced = _fenced_body(
+        base,
+        "- [[partner-stem|Partner]] *(shared_thread)*",
+    )
+    _write(vault / "note.md", {"id": doc_id, "title": "Title"}, fenced)
+
+    report = _sync(test_db, fake_embedder, vault)
+    assert report.errors == []
+
+    row = test_db.execute(
+        "SELECT content FROM documents WHERE id = %s", (doc_id,)
+    ).fetchone()
+    assert row is not None
+    stored = str(row[0])
+    assert "BRAIN_DERIVED_START" not in stored
+    assert "BRAIN_DERIVED_END" not in stored
+    assert "auto-generated" not in stored
+    assert "partner-stem" not in stored
+    # The authored body did make it through unchanged.
+    assert "The authored body content goes here." in stored
+
+
+def test_no_regression_for_fenceless_files(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Files without a fence behave exactly as before — strip_fence is a no-op.
+
+    Backstop for the regression risk in the plan: every existing test in
+    this module sees fence-less files. This explicit test pins the
+    behavior so a future refactor of ``strip_fence`` (e.g. accidentally
+    rstripping fence-less bodies) is caught immediately.
+    """
+    vault = tmp_path / "vault"
+    doc_id = str(uuid.uuid4())
+    body = "# Plain Note\n\nNo fence here, never has been.\n"
+    _write(vault / "plain.md", {"id": doc_id, "title": "Plain Note"}, body)
+
+    first = _sync(test_db, fake_embedder, vault)
+    assert first.errors == []
+    assert first.created == 1
+
+    # Re-sync with no changes is a clean skip.
+    second = _sync(test_db, fake_embedder, vault)
+    assert second.errors == []
+    assert second.skipped == 1
+    assert second.updated == 0
+    assert second.created == 0
+
+    # Body is stored verbatim under normalization (LF, stripped trailing
+    # newline) — no fence-related rewrites snuck in.
+    row = test_db.execute(
+        "SELECT content FROM documents WHERE id = %s", (doc_id,)
+    ).fetchone()
+    assert row is not None
+    assert str(row[0]) == body.strip()

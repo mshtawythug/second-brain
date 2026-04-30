@@ -4,6 +4,8 @@ from typing import Any
 
 import yaml
 
+from .derived_links.fence import strip_fence
+
 _FENCE = "---"
 
 
@@ -71,7 +73,7 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
 
 
 def body_hash(text: str) -> str:
-    """Return SHA-256 of the body of a vault file (frontmatter stripped).
+    """Return SHA-256 of the body of a vault file (frontmatter + fence stripped).
 
     The hash is what populates ``documents.content_hash`` for vault-tier
     rows. ``brain vault sync`` uses it to detect "real" content changes and
@@ -84,6 +86,12 @@ def body_hash(text: str) -> str:
     - The leading ``---\\n…\\n---\\n`` block (if present) is stripped via
       :func:`parse_frontmatter`. Inputs with no frontmatter hash the entire
       text.
+    - The auto-generated derived-edges fence (everything between
+      ``<!-- BRAIN_DERIVED_START -->`` and ``<!-- BRAIN_DERIVED_END -->``)
+      is stripped via :func:`brain.vault.derived_links.fence.strip_fence`.
+      The fence is recomputed every relink from ``derived_links`` rows; its
+      content is therefore not authored body and must not influence the
+      hash, otherwise every relink would trigger a re-embed cascade.
     - CRLF line endings collapse to LF so a Windows-saved copy and the same
       content on macOS produce the same hash.
     - Leading/trailing whitespace is stripped — the writer's trailing
@@ -99,5 +107,6 @@ def body_hash(text: str) -> str:
     # we fall back to hashing the raw text when the file has no frontmatter
     # at all, but propagate yaml errors upward.
     _, body = parse_frontmatter(text)
-    normalized = body.replace("\r\n", "\n").replace("\r", "\n").strip()
+    fence_stripped = strip_fence(body)
+    normalized = fence_stripped.replace("\r\n", "\n").replace("\r", "\n").strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
