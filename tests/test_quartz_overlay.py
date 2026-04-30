@@ -345,6 +345,39 @@ def test_overlay_apply_wraps_oserror_as_overlay_error(
     msg = str(excinfo.value)
     assert "overlay copy failed" in msg
     assert "perm denied" in msg
+    # __cause__ preserves the original error for traceback chaining.
+    assert isinstance(excinfo.value.__cause__, PermissionError)
+
+
+def test_overlay_apply_wraps_rename_oserror(
+    tmp_path: Path, mocker: Any
+) -> None:
+    """A ``Path.rename`` failure surfaces as ``OverlayError`` with context.
+
+    Counterpart to the copy-side wrap test — the upstream-emitter rename
+    runs strictly before any copy, so its failure mode needs the same
+    ``OverlayError`` envelope to keep the CLI's single-catch boundary
+    valid.
+    """
+    # Setup — use a workspace with the upstream contentIndex.tsx in
+    # place so the rename branch fires.
+    repo = _make_fake_repo(tmp_path / "repo")
+    workspace = _make_quartz_workspace(tmp_path, with_upstream_contentindex=True)
+    plan = plan_overlay(repo, workspace)
+    assert plan.rename is not None  # precondition: rename branch will run
+    mocker.patch.object(
+        Path, "rename", side_effect=PermissionError("read-only fs")
+    )
+
+    # Exercise
+    with pytest.raises(OverlayError) as excinfo:
+        apply_overlay(plan)
+
+    # Verify — operation label, inner message, and chained cause.
+    msg = str(excinfo.value)
+    assert "overlay rename failed" in msg
+    assert "read-only fs" in msg
+    assert isinstance(excinfo.value.__cause__, PermissionError)
 
 
 # ---------------------------------------------------------------------------
