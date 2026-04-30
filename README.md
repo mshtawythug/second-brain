@@ -391,8 +391,58 @@ Flags:
 | `--vault PATH` | `cfg.vault_path` | Render a different vault than the configured one. |
 | `--quartz-dir PATH` | `<vault>/.quartz` | Point at a Quartz workspace elsewhere on disk. |
 | `--no-build` | off | Verify the Quartz workspace is wired up correctly without running the build. |
+| `--overlay` / `--no-overlay` | on | Copy `quartz_overrides/` over the workspace before building. See [Customizing the graph](#customizing-the-graph) below. |
+| `--print-overlay` | off | Print the overlay plan (file pairs + rename status) and exit without copying or building. Takes precedence over `--overlay/--no-overlay`. |
 
 The build inherits stdout/stderr so you see Quartz's progress live. Builds longer than 5 minutes are killed (assume your config is wedged); if you hit that, check `quartz.config.ts` for a runaway plugin.
+
+### Customizing the graph
+
+Stock Quartz ships a serviceable graph view, but brain extends it with tier coloring (vault vs. ingested), per-source coloring (krisp / slack / gmail / manual), recency-based node sizing, dashed styling for derived edges, and search-driven filter chips. These extensions live under `quartz_overrides/` in this repo and are mirrored into the user's Quartz workspace at build time by `brain vault render`.
+
+**What the overlay does.** Right before invoking `npx quartz build`, the render command runs an *overlay* pass that copies every file under `quartz_overrides/` over the corresponding path in `<vault>/.quartz/`. The directory tree is a 1:1 mirror of its destination — `quartz_overrides/quartz.layout.ts` lands at the workspace root, and `quartz_overrides/quartz/<subdir>/<file>` lands at `<quartz_dir>/quartz/<subdir>/<file>`. One special case: stock Quartz's `quartz/plugins/emitters/contentIndex.tsx` is renamed to `_upstreamContentIndex.tsx` first, so the brain wrapper at `quartz_overrides/quartz/plugins/emitters/contentIndex.ts` can `import { ContentIndex as UpstreamContentIndex } from "./_upstreamContentIndex"`. The rename is idempotent — re-running the overlay on a workspace that already has it does nothing.
+
+**Opt out.** Pass `--no-overlay` to skip the copy entirely and use whatever the workspace currently has. Useful for testing stock Quartz behavior or when you've hand-edited the workspace and don't want it clobbered.
+
+```bash
+brain vault render --no-overlay
+```
+
+**Inspect.** Pass `--print-overlay` to see the planned rename + copy operations without applying them or building.
+
+```bash
+brain vault render --print-overlay
+# overlay plan for /Users/mshtawythug/brain-vault/.quartz:
+#   rename: …/contentIndex.tsx → …/_upstreamContentIndex.tsx
+#   copy:   …/quartz_overrides/quartz.layout.ts → …/.quartz/quartz.layout.ts
+#   …
+```
+
+**Upgrading Quartz.** When upstream Quartz cuts a release that touches a file we override, the brain repo's vendored copy needs to be re-rebased on top of the new upstream. The brain delta is anchored by `// brain:` and `// brain-extension:` markers — `grep -n "brain:" <file>` enumerates every change.
+
+The recipe:
+
+```bash
+# 1. Pull the latest upstream copy of the file we override.
+curl -L -o /tmp/upstream-Graph.tsx \
+  https://raw.githubusercontent.com/jackyzha0/quartz/v4/quartz/components/Graph.tsx
+
+# 2. Diff against the vendored copy to see the brain delta.
+diff -u /tmp/upstream-Graph.tsx \
+  ~/workspace/second-brain/quartz_overrides/quartz/components/Graph.tsx
+
+# 3. Replace the vendored file with the new upstream and re-apply each
+#    `// brain:` / `// brain-extension:` block from the diff.
+cp /tmp/upstream-Graph.tsx \
+  ~/workspace/second-brain/quartz_overrides/quartz/components/Graph.tsx
+# … hand-port the brain markers …
+
+# 4. Smoke-test: brain vault render → open the site, verify the graph
+#    still loads and the brain-specific visuals (tier colors, derived
+#    edges, recency sizing) all behave.
+```
+
+Per-file maintenance notes (purpose, brain delta scope) live in `~/.claude/projects/-Users-mshtawythug-workspace-second-brain/memory/quartz.md`.
 
 ### Serve locally
 
