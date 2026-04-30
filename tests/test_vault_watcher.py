@@ -34,6 +34,11 @@ from watchdog.events import (
     FileMovedEvent,
 )
 
+from brain.vault.derived_links.fence import (
+    FENCE_END_MARKER,
+    FENCE_START_MARKER,
+    strip_fence,
+)
 from brain.vault.frontmatter import dump_frontmatter
 from brain.vault.watch import (
     WatchConfig,
@@ -1303,3 +1308,399 @@ def test_startup_sync_runs_before_observer_starts(
     kind, report = result_q.get_nowait()
     assert kind == "ok"
     assert report.created == 1
+
+
+# ---------------------------------------------------------------------------
+# Fence-only debounce tests (Phase D, Task D.5).
+#
+# The metadata-aware linker rewrites a fenced ``BRAIN_DERIVED_*`` section in
+# every affected ``_ingested/`` body whenever derived edges are rebuilt, even
+# when the rewrite is byte-identical (decision Q4=(b)). Each rewrite fires a
+# filesystem event the watcher would normally re-sync — and that re-sync
+# would re-rebuild the fence, looping forever. The worker dedups via a
+# strip_fence cache; these tests pin the contract.
+# ---------------------------------------------------------------------------
+
+
+def _fenced_body(prose: str, bullets: list[str]) -> str:
+    """Build a body with a ``BRAIN_DERIVED_*`` fence appended.
+
+    Mirrors the shape :func:`brain.vault.derived_links.fence.render_fenced_section`
+    emits, without going through the renderer (we don't need a real DB
+    edge — the test only cares that the fence markers are present and
+    nestable in :func:`strip_fence`).
+    """
+    lines = [
+        prose,
+        "",
+        FENCE_START_MARKER,
+        "## Related (auto-generated, do not edit)",
+        *bullets,
+        FENCE_END_MARKER,
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _make_sync_spy(mocker: Any) -> list[Path]:
+    """Patch ``sync_one_file`` with a no-op spy and return the call log.
+
+    Returns the list each call appends ``file_path`` into. We don't
+    delegate to the real ``sync_one_file`` because these tests only care
+    whether the debounce gate decided to call it — not what it does to
+    the DB.
+    """
+    calls: list[Path] = []
+
+    def _spy(*_args: Any, **kwargs: Any) -> None:
+        calls.append(kwargs["file_path"])
+
+    mocker.patch("brain.vault.watch.sync_one_file", _spy)
+    return calls
+
+
+def test_fence_only_write_skips_resync(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+) -> None:
+    """A write that only changes the fence content must NOT trigger sync.
+
+    This is the central watch-loop guard: the linker's fence rewriter
+    bumps the file's mtime even on a byte-identical re-render
+    (decision Q4=(b)). Without this skip the watcher would re-enter
+    sync, which would re-enter the linker, which would rewrite the
+    fence, which would fire another event, ad infinitum.
+    """
+    spy_calls = _make_sync_spy(mocker)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "fenced.md"
+    note_id = str(uuid.uuid4())
+    body_v1 = _fenced_body("real body\n", ["- [[a|A]] *(R1)*"])
+    _write(note, {"id": note_id, "title": "Fenced"}, body_v1)
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+    # Seed the cache as if a successful sync had just observed body_v1 —
+    # this is exactly the post-condition ``_refresh_body_cache`` would
+    # leave behind, and lets us isolate the "fence-only" path without a
+    # full real sync warmup.
+    state.body_cache[note] = strip_fence(note.read_text())
+
+    # Now overwrite the file with a DIFFERENT fence but the SAME body.
+    body_v2 = _fenced_body("real body\n", ["- [[a|A]] *(R1)*", "- [[b|B]] *(R3)*"])
+    _write(note, {"id": note_id, "title": "Fenced"}, body_v2)
+    assert strip_fence(note.read_text()) == state.body_cache[note], (
+        "fixture invariant: only the fence region differs"
+    )
+    observer.inject(FileModifiedEvent(str(note)))
+
+    _wait_for(
+        lambda: state.skipped_fence_only >= 1,
+        timeout=2.0,
+    )
+    # ``sync_one_file`` was NOT called for this event.
+    assert spy_calls == [], (
+        f"fence-only write triggered sync; this would loop forever "
+        f"(call log: {spy_calls!r})"
+    )
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def test_real_body_change_with_fence_triggers_resync(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+) -> None:
+    """Body changed AND fence present → sync must still run.
+
+    Cache hit comparison is on ``strip_fence`` output, so a different
+    real body produces a cache miss → fall through to the normal sync
+    path.
+    """
+    spy_calls = _make_sync_spy(mocker)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "fenced_changed.md"
+    note_id = str(uuid.uuid4())
+    body_v1 = _fenced_body("first body\n", ["- [[a|A]] *(R1)*"])
+    _write(note, {"id": note_id, "title": "Changed"}, body_v1)
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+    state.body_cache[note] = strip_fence(note.read_text())
+
+    # Genuine body change (still has a fence — but the body BEFORE the
+    # fence is different, so strip_fence is different).
+    body_v2 = _fenced_body("second body, new content\n", ["- [[a|A]] *(R1)*"])
+    _write(note, {"id": note_id, "title": "Changed"}, body_v2)
+    observer.inject(FileModifiedEvent(str(note)))
+
+    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
+    assert spy_calls == [note]
+    assert state.skipped_fence_only == 0
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def test_real_body_change_without_fence_triggers_resync(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+) -> None:
+    """Body changed AND no fence ever existed → sync must run (regression).
+
+    This is the pre-Phase-D contract: a vault note without any fence
+    section — typical for user-authored vault-tier files, which we
+    don't touch — must still re-sync on edit. The fence dedup must not
+    accidentally suppress those.
+    """
+    spy_calls = _make_sync_spy(mocker)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "plain.md"
+    note_id = str(uuid.uuid4())
+    _write(note, {"id": note_id, "title": "Plain"}, "v1\n")
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+    state.body_cache[note] = strip_fence(note.read_text())
+
+    _write(note, {"id": note_id, "title": "Plain"}, "v2 — completely different\n")
+    observer.inject(FileModifiedEvent(str(note)))
+
+    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
+    assert spy_calls == [note]
+    assert state.skipped_fence_only == 0
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def test_cold_start_first_sight_triggers_resync(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+) -> None:
+    """First event for a path with no cache entry must run sync.
+
+    Spec: "First sight of a file (no cache entry) → run sync, then
+    populate cache." Without this, a watcher restart followed by a
+    fence-only rewrite would silently drop the user's first edit since
+    the previous session.
+    """
+    spy_calls = _make_sync_spy(mocker)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "fresh.md"
+    note_id = str(uuid.uuid4())
+    _write(note, {"id": note_id, "title": "Fresh"}, "hello\n")
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+    # Explicitly assert no cache entry exists (cold start).
+    assert note not in state.body_cache
+
+    observer.inject(FileModifiedEvent(str(note)))
+
+    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
+    assert spy_calls == [note]
+    # Cache was populated post-sync (the spy is a no-op so the file
+    # contents are unchanged).
+    _wait_for(lambda: note in state.body_cache, timeout=1.0)
+    assert state.body_cache[note] == strip_fence(note.read_text())
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def test_delete_invalidates_cache_recreate_resyncs(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+) -> None:
+    """Delete → re-create with same content → re-sync (not a fence-only skip).
+
+    The delete handler must drop the cache entry, otherwise re-creating
+    the file with byte-identical contents would look like a fence-only
+    no-op and silently skip — even though the row has been removed from
+    the DB and genuinely needs an upsert.
+    """
+    spy_calls = _make_sync_spy(mocker)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "rebirth.md"
+    note_id = str(uuid.uuid4())
+    body = _fenced_body("payload\n", ["- [[a|A]] *(R1)*"])
+    _write(note, {"id": note_id, "title": "Rebirth"}, body)
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+    # Pre-populate cache as if a sync had recently observed the body.
+    state.body_cache[note] = strip_fence(note.read_text())
+
+    note.unlink()
+    observer.inject(FileDeletedEvent(str(note)))
+    _wait_for(lambda: note not in state.body_cache, timeout=2.0)
+
+    # Re-create with byte-identical content — a fence-only check against
+    # the (now-evicted) cache would skip and we'd lose the row. Instead
+    # the worker should sync because there's no cache entry anymore.
+    _write(note, {"id": note_id, "title": "Rebirth"}, body)
+    observer.inject(FileCreatedEvent(str(note)))
+
+    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
+    assert spy_calls == [note]
+    assert state.skipped_fence_only == 0
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def test_cache_refreshed_after_real_sync(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+) -> None:
+    """A successful sync_one_file populates the cache from the post-sync state.
+
+    Pins the contract that the cache reflects the file's current
+    fence-stripped content AFTER ``sync_one_file`` returns — so the
+    follow-up filesystem event triggered by sync's own write is
+    recognized as fence-only and skipped.
+    """
+    spy_calls = _make_sync_spy(mocker)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "refresh.md"
+    note_id = str(uuid.uuid4())
+    _write(note, {"id": note_id, "title": "Refresh"}, "before\n")
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+    assert note not in state.body_cache  # cold start
+
+    # First event: cold start → sync runs and cache is populated.
+    observer.inject(FileModifiedEvent(str(note)))
+    _wait_for(lambda: note in state.body_cache, timeout=2.0)
+    assert spy_calls == [note]
+
+    # Second event: same content, no cache miss → fence-only skip.
+    observer.inject(FileModifiedEvent(str(note)))
+    _wait_for(lambda: state.skipped_fence_only >= 1, timeout=2.0)
+    assert len(spy_calls) == 1, (
+        f"second identical event must not call sync_one_file; got {spy_calls!r}"
+    )
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def test_overflow_full_sync_clears_body_cache(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+) -> None:
+    """Overflow recovery (full ``sync_vault``) flushes the body cache.
+
+    After a full sync any cached strip_fence values may be stale (the
+    full sync may have rewritten any number of fences); clearing forces
+    the next per-file event to take the cold-start path so we never
+    silently dedup against a stale baseline.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _write(vault / "a.md", {"id": str(uuid.uuid4()), "title": "A"}, "x\n")
+
+    mocker.patch("brain.vault.watch._MAX_PENDING", 1)
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10_000)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+    # Seed a stale entry — overflow recovery must flush it.
+    bogus = vault / "stale.md"
+    state.body_cache[bogus] = "stale-marker"
+
+    # Trip overflow: more pending paths than _MAX_PENDING.
+    for i in range(3):
+        path = vault / f"f{i}.md"
+        path.write_text("# x")
+        observer.inject(FileModifiedEvent(str(path)))
+
+    _wait_for(
+        lambda: bogus not in state.body_cache,
+        timeout=3.0,
+    )
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def test_unreadable_file_falls_through_to_sync(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
+) -> None:
+    """When the worker can't read the file, ``_is_fence_only_write`` returns
+    False so sync runs and surfaces the read error through the existing
+    error path.
+
+    Drives the OSError branch deterministically by deleting the file
+    between cache seed and event injection — without resorting to OS
+    permission tricks that vary by platform.
+    """
+    spy_calls = _make_sync_spy(mocker)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "vanished.md"
+    note_id = str(uuid.uuid4())
+    _write(note, {"id": note_id, "title": "Vanished"}, "x\n")
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+    state.body_cache[note] = strip_fence(note.read_text())
+
+    # Make the read fail by removing the file before the event fires.
+    note.unlink()
+    observer.inject(FileModifiedEvent(str(note)))
+
+    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
+    assert spy_calls == [note]
+    assert state.skipped_fence_only == 0
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)

@@ -34,6 +34,25 @@ Concurrency invariants worth restating:
 - The debounce buffer is capped (``_MAX_PENDING``) so a runaway editor
   spamming events can't OOM the process; on overflow we trigger an
   immediate full sync and clear the buffer.
+
+Fence-only writes (Phase D, Task D.5):
+
+The metadata-aware linker rewrites a fenced ``BRAIN_DERIVED_*`` section
+inside every affected ``_ingested/`` body whenever derived edges are
+rebuilt (`docs/specs/2026-04-30-derived-edges-in-bodies-design.md`).
+Decision Q4=(b) means the renderer rewrites the fence even when its
+content is byte-identical, which guarantees a filesystem mtime bump and
+therefore another watch event. Without dedup, that event would re-enter
+``sync_one_file`` → ``rebuild_derived_for`` → ``rewrite_derived_fences``
+and we'd loop forever.
+
+The dedup lives in the worker: every successful sync caches
+``strip_fence(file_contents)`` keyed by absolute path. When a later
+event fires for that path, the worker reads the file, strips the fence,
+and compares to the cache. Fence-only changes (or no change at all) skip
+``sync_one_file``. Cold start (first sight of a path), cache miss after a
+delete, or any genuine body change all fall through to the normal sync
+path, so we never silently drop a real edit.
 """
 from __future__ import annotations
 
@@ -56,6 +75,7 @@ from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
 
 from ..ingest import Embedder
+from .derived_links.fence import strip_fence
 from .sync import SyncReport, sync_one_file, sync_vault
 
 logger = logging.getLogger(__name__)
@@ -121,6 +141,15 @@ class _WatcherState:
     # error". Only the worker thread touches them, so no lock is needed.
     processed: int = 0
     errors: int = 0
+    skipped_fence_only: int = 0
+    # Cache of the fence-stripped body last observed AFTER a successful
+    # sync, keyed by absolute path. Lets the worker detect fence-only
+    # rewrites (the linker's `BRAIN_DERIVED_*` section regen) and skip a
+    # redundant ``sync_one_file`` that would just re-trigger the same
+    # rewrite, looping forever. Only the worker thread touches this dict
+    # — no lock is needed for the same reason ``processed`` doesn't
+    # take one.
+    body_cache: dict[Path, str] = field(default_factory=dict)
 
 
 def run_watcher(
@@ -471,11 +500,14 @@ def _worker_loop(
 
     Three classes of work, distinguished by ``job.abs_path``:
 
-    1. ``upsert`` of a regular file → ``sync_one_file``
+    1. ``upsert`` of a regular file → ``sync_one_file`` (preceded by a
+       fence-only-write check; see :func:`_is_fence_only_write`)
     2. ``delete`` of a regular file → DB row removal + link cleanup
-       (we don't touch disk; the file is already gone)
+       (we don't touch disk; the file is already gone) plus body-cache
+       eviction so a re-creation event hits the cold-start path
     3. ``upsert`` of the vault root path → full ``sync_vault`` (the
-       overflow-recovery path)
+       overflow-recovery path) plus full body-cache flush so subsequent
+       per-file events re-prime the cache from the post-sync state
 
     Each call is wrapped in try/except so a single-file failure logs
     but doesn't kill the worker — the watcher should be self-healing.
@@ -494,15 +526,37 @@ def _worker_loop(
                     prune=False,  # never auto-prune in watch mode
                     dry_run=False,
                 )
+                # The full sync may have rewritten any number of fences;
+                # the cache entries from before the overflow window are
+                # now stale. Clearing forces the next per-file event to
+                # take the cold-start path (one extra sync per file,
+                # then dedup resumes) — safer than a half-stale map.
+                state.body_cache.clear()
             elif job.action == "delete":
                 _handle_delete(conn, job.abs_path, config.vault_path)
+                # Drop the cache entry so a future creation event for
+                # the same path is treated as cold-start, not a
+                # spurious fence-only no-op.
+                state.body_cache.pop(job.abs_path, None)
             else:
-                sync_one_file(
-                    conn,
-                    embedder=embedder,
-                    vault_path=config.vault_path,
-                    file_path=job.abs_path,
-                )
+                if _is_fence_only_write(state, job.abs_path):
+                    state.skipped_fence_only += 1
+                    logger.debug(
+                        "vault watcher: skipping fence-only write for %s",
+                        job.abs_path,
+                    )
+                else:
+                    sync_one_file(
+                        conn,
+                        embedder=embedder,
+                        vault_path=config.vault_path,
+                        file_path=job.abs_path,
+                    )
+                    # Re-read after sync so the cache reflects whatever
+                    # fence the linker just rewrote — that way the
+                    # follow-up filesystem event triggered by our own
+                    # write is recognized as fence-only and skipped.
+                    _refresh_body_cache(state, job.abs_path)
             state.processed += 1
         except Exception:
             state.errors += 1
@@ -511,6 +565,54 @@ def _worker_loop(
                 job.action,
                 job.abs_path,
             )
+
+
+def _is_fence_only_write(state: _WatcherState, abs_path: Path) -> bool:
+    """Return True iff ``abs_path`` differs from cache only inside the fence.
+
+    Reads the file at ``abs_path``, strips its ``BRAIN_DERIVED_*`` fence
+    region, and compares the result to the cached fence-stripped body
+    recorded after the most recent successful sync. Equal means the
+    write was a fence regeneration (`docs/specs/2026-04-30-derived-edges-in-bodies-design.md`)
+    and re-running ``sync_one_file`` would just produce the same rewrite,
+    looping forever — caller should skip.
+
+    Returns ``False`` (i.e. don't skip; run sync) when:
+
+    - There's no cache entry for ``abs_path`` (cold start — spec
+      requires first-sight syncs to run).
+    - The file can't be read (vanished between debounce and worker
+      pickup, permissions error, etc.) — let ``sync_one_file`` see the
+      same problem and report it through the existing error path.
+    - The fence-stripped body genuinely changed.
+    """
+    try:
+        current = abs_path.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    cached = state.body_cache.get(abs_path)
+    if cached is None:
+        return False
+    return cached == strip_fence(current)
+
+
+def _refresh_body_cache(state: _WatcherState, abs_path: Path) -> None:
+    """Update the body cache for ``abs_path`` from its current on-disk content.
+
+    Called after every successful ``sync_one_file`` so the cached
+    fence-stripped body reflects whatever the linker just rendered. The
+    next watch event for the same path can then detect a fence-only
+    rewrite and short-circuit.
+
+    If the file vanished between sync and this read, the stale entry is
+    evicted rather than left out of sync with disk.
+    """
+    try:
+        current = abs_path.read_text(encoding="utf-8")
+    except OSError:
+        state.body_cache.pop(abs_path, None)
+        return
+    state.body_cache[abs_path] = strip_fence(current)
 
 
 def _handle_delete(
