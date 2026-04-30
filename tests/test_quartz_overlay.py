@@ -317,6 +317,36 @@ def test_overlay_pairs_idempotent(tmp_path: Path) -> None:
     assert plan_a.rename_state == plan_b.rename_state
 
 
+def test_overlay_apply_wraps_oserror_as_overlay_error(
+    tmp_path: Path, mocker: Any
+) -> None:
+    """A ``shutil.copy2`` failure surfaces as ``OverlayError`` with context.
+
+    The CLI only catches :class:`OverlayError` at the apply boundary,
+    so any raw ``OSError`` from the copy / rename / mkdir operations
+    needs to be wrapped — otherwise an FS-mutation failure (perm denied,
+    disk full, …) escapes as an unhandled traceback instead of the
+    friendly ``typer.secho(..., fg="red") + Exit(2)`` path.
+    """
+    # Setup
+    repo = _make_fake_repo(tmp_path / "repo")
+    workspace = _make_quartz_workspace(tmp_path)
+    plan = plan_overlay(repo, workspace)
+    mocker.patch(
+        "brain.vault.quartz_overlay.shutil.copy2",
+        side_effect=PermissionError("perm denied"),
+    )
+
+    # Exercise
+    with pytest.raises(OverlayError) as excinfo:
+        apply_overlay(plan)
+
+    # Verify — message names the operation + paths so logs are debuggable.
+    msg = str(excinfo.value)
+    assert "overlay copy failed" in msg
+    assert "perm denied" in msg
+
+
 # ---------------------------------------------------------------------------
 # CLI tests — overlay flag wiring
 # ---------------------------------------------------------------------------

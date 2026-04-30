@@ -79,14 +79,8 @@ from .vault.graph import (
 )
 from .vault.graph import orphans as _orphans_query
 from .vault.graph_format import to_dot, to_json, to_mermaid
-from .vault.quartz_overlay import (
-    OverlayError,
-    apply_overlay,
-    plan_overlay,
-)
-from .vault.quartz_overlay import (
-    repo_root as _brain_repo_root,
-)
+from .vault.quartz_overlay import OverlayError, apply_overlay, plan_overlay
+from .vault.quartz_overlay import repo_root as _brain_repo_root
 from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
@@ -1523,7 +1517,8 @@ def vault_render(
         "--print-overlay",
         help=(
             "Print the overlay plan (file pairs + rename status) and exit "
-            "without copying or building."
+            "without copying or building. Takes precedence over "
+            "`--overlay/--no-overlay`."
         ),
     ),
 ) -> None:

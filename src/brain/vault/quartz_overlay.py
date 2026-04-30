@@ -28,7 +28,7 @@ from typing import Literal
 
 from ..errors import BrainError
 
-# brain: special case — see quartz_overrides/plugins/emitters/contentIndex.ts
+# brain: special case — see quartz_overrides/quartz/plugins/emitters/contentIndex.ts
 # header for the why. The wrapper imports from `./_upstreamContentIndex`,
 # so we rename Quartz's stock emitter out of the way before the copy.
 _UPSTREAM_RENAME_FROM = Path("quartz/plugins/emitters/contentIndex.tsx")
@@ -183,11 +183,31 @@ def apply_overlay(plan: OverlayPlan) -> list[tuple[Path, Path]]:
     resolves once the build runs. Existing destinations are
     overwritten via ``shutil.copy2`` — that's the whole point of the
     overlay.
+
+    Re-runnable after a partial failure: the rename step is idempotent
+    via the three-state detection in :func:`_plan_upstream_rename`
+    (already-applied state is a no-op), and copies always overwrite —
+    so a fresh ``plan_overlay`` + ``apply_overlay`` pass converges
+    without manual cleanup.
+
+    Raises :class:`OverlayError` if any filesystem operation fails;
+    callers (CLI, MCP) need only catch ``OverlayError`` to convert
+    every failure mode into a friendly user-facing error.
     """
     if plan.rename is not None:
         src, dest = plan.rename
-        src.rename(dest)
+        try:
+            src.rename(dest)
+        except OSError as e:
+            raise OverlayError(
+                f"overlay rename failed: {src} → {dest}: {e}"
+            ) from e
     for src, dest in plan.pairs:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dest)
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dest)
+        except OSError as e:
+            raise OverlayError(
+                f"overlay copy failed: {src} → {dest}: {e}"
+            ) from e
     return list(plan.pairs)
