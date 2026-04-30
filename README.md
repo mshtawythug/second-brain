@@ -418,31 +418,30 @@ brain vault render --print-overlay
 #   …
 ```
 
-**Upgrading Quartz.** When upstream Quartz cuts a release that touches a file we override, the brain repo's vendored copy needs to be re-rebased on top of the new upstream. The brain delta is anchored by `// brain:` and `// brain-extension:` markers — `grep -n "brain:" <file>` enumerates every change.
+**Upgrading Quartz.** When upstream Quartz cuts a release that touches a file we override, the brain repo's vendored copy needs to be re-rebased on top of the new upstream. The brain delta is anchored by two markers: `// brain:` (value/structural choices on upstream-supported logic) and `// brain-extension:` (keys/types that don't exist in stock Quartz). The combined regex `grep -nE "brain[-:]" <file>` enumerates every change in a file. Each `quartz_overrides/` file's header comment also documents its own upgrade notes inline.
 
-The recipe:
+The recipe (run from the brain repo root):
 
 ```bash
+cd ~/workspace/second-brain     # or wherever you cloned the repo
+
 # 1. Pull the latest upstream copy of the file we override.
 curl -L -o /tmp/upstream-Graph.tsx \
   https://raw.githubusercontent.com/jackyzha0/quartz/v4/quartz/components/Graph.tsx
 
 # 2. Diff against the vendored copy to see the brain delta.
 diff -u /tmp/upstream-Graph.tsx \
-  ~/workspace/second-brain/quartz_overrides/quartz/components/Graph.tsx
+  quartz_overrides/quartz/components/Graph.tsx
 
 # 3. Replace the vendored file with the new upstream and re-apply each
 #    `// brain:` / `// brain-extension:` block from the diff.
-cp /tmp/upstream-Graph.tsx \
-  ~/workspace/second-brain/quartz_overrides/quartz/components/Graph.tsx
+cp /tmp/upstream-Graph.tsx quartz_overrides/quartz/components/Graph.tsx
 # … hand-port the brain markers …
 
 # 4. Smoke-test: brain vault render → open the site, verify the graph
 #    still loads and the brain-specific visuals (tier colors, derived
 #    edges, recency sizing) all behave.
 ```
-
-Per-file maintenance notes (purpose, brain delta scope) live in `~/.claude/projects/-Users-mshtawythug-workspace-second-brain/memory/quartz.md`.
 
 ### Serve locally
 
