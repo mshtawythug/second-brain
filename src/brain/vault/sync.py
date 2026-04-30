@@ -39,7 +39,7 @@ import yaml
 from ..ingest import Embedder
 from ..ingest.chunker import chunk_text
 from .derived_links import DirectoryStore, rebuild_derived_for
-from .derived_links.fence import strip_fence
+from .derived_links.fence import rewrite_derived_fences, strip_fence
 from .frontmatter import body_hash, dump_frontmatter, parse_frontmatter
 from .links import ParsedLink, parse_wiki_links
 from .resolver import resolve_link, title_collisions
@@ -82,6 +82,12 @@ class SyncReport:
     links_unresolved: int = 0
     id_assigned: int = 0
     derived_links: int = 0
+    # Phase D — count of ``_ingested/`` files whose derived-edges fence was
+    # rewritten this pass. Driven by ``rebuild_derived_for``'s affected-ids
+    # set; stays at ``0`` on dry-run, on syncs with no affected ingested
+    # docs, and when the renderer skips every candidate (vault-tier,
+    # missing mirror file, etc.).
+    fences_written: int = 0
     errors: list[tuple[Path, str]] = field(default_factory=list)
 
 
@@ -181,12 +187,17 @@ def sync_vault(
     # gmail / krisp rows produce edges. ``rebuild_derived_for`` already
     # short-circuits on an empty set, so no extra guard here.
     #
-    # The runner returns ``(inserted_count, affected_ids)`` — only the
-    # count is needed at this layer; the affected-ids set is wired in by
-    # Task D.4 to drive the fence renderer.
+    # Step 6 (Phase D): regenerate the fenced "Related" section in every
+    # affected ``_ingested/`` file so Quartz's graph view reflects the
+    # latest derived edges. The renderer is also a no-op on an empty
+    # affected-set, so it's safe to call unconditionally on the post-linker
+    # branch.
     if not dry_run:
-        report.derived_links, _affected = rebuild_derived_for(
+        report.derived_links, affected_ids = rebuild_derived_for(
             conn, seen_doc_ids, directory=DirectoryStore(conn)
+        )
+        report.fences_written = rewrite_derived_fences(
+            conn, affected_ids, vault_path=vault_path
         )
 
     return report
@@ -303,10 +314,16 @@ def sync_one_file(
         # Mirror ``sync_vault``: rebuild metadata-derived edges scoped to the
         # one doc we just processed. ``sync_one_file`` has no dry_run mode,
         # so the linker always runs here. Non-linkable (vault-tier) doc ids
-        # are filtered by the runner. The returned ``affected_ids`` set is
-        # wired into the fence renderer by Task D.4.
-        report.derived_links, _affected = rebuild_derived_for(
+        # are filtered by the runner.
+        #
+        # Phase D step 6: regenerate the fenced "Related" section in every
+        # ``_ingested/`` file the linker touched. ``rewrite_derived_fences``
+        # is also a no-op on an empty affected-set.
+        report.derived_links, affected_ids = rebuild_derived_for(
             conn, {doc_id}, directory=DirectoryStore(conn)
+        )
+        report.fences_written = rewrite_derived_fences(
+            conn, affected_ids, vault_path=vault_path
         )
 
     return report

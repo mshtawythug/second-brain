@@ -69,6 +69,7 @@ from .vault.derived_links import (
     refresh_contacts,
     rescan_gmail_directory,
 )
+from .vault.derived_links.fence import rewrite_derived_fences
 from .vault.export import export_vault
 from .vault.frontmatter import dump_frontmatter, parse_frontmatter
 from .vault.graph import (
@@ -1792,16 +1793,27 @@ def vault_relink_derived() -> None:
             typer.echo("No linkable documents to process.")
         else:
             directory = DirectoryStore(conn)
-            # ``rebuild_derived_for`` returns ``(inserted_count, affected_ids)``.
-            # The affected-ids set is wired into the fence renderer by Task
-            # D.4; this CLI just surfaces the insert count plus the affected
-            # set's size as a transparency signal.
+            # ``rebuild_derived_for`` returns ``(inserted_count, affected_ids)``;
+            # the affected-ids set drives the fence renderer in step 4.
             inserted, affected_ids = rebuild_derived_for(
                 conn, corpus_ids, directory=directory
             )
             typer.echo(f"  - Touched docs: {len(corpus_ids)}")
             typer.echo(f"  - Inserted edges: {inserted}")
             typer.echo(f"  - Affected docs: {len(affected_ids)}")
+
+            # Step 4 (Phase D): regenerate the fenced "Related" section in
+            # every affected ``_ingested/`` file so Quartz's ``/graph`` view
+            # picks up the edges we just rebuilt. The renderer skips
+            # vault-tier rows and missing mirror files silently; the count
+            # is the number of files actually written. Q4=b semantics —
+            # writes happen even when fence content is byte-identical, so
+            # ``Fence files rewritten`` matches the count of ingested-tier
+            # affected docs that have a mirror on disk.
+            fences_written = rewrite_derived_fences(
+                conn, affected_ids, vault_path=cfg.vault_path
+            )
+            typer.echo(f"  - Fence files rewritten: {fences_written}")
 
         # Step 4: Rich summary — directory by source + derived_links by rule.
         directory_counts = _directory_counts_by_source(conn)

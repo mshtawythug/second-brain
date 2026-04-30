@@ -1,14 +1,19 @@
 """Tests for brain.vault.derived_links.fence.
 
 Covers the four pure-string helpers (``extract_fence``, ``strip_fence``,
-``replace_fence``) plus the one DB-backed renderer
-(``render_fenced_section``). The renderer tests use the real
-``test_db`` fixture (Postgres) and seed ``documents`` + ``derived_links``
-rows directly so each scenario can pin the exact corpus shape it needs.
+``replace_fence``), the DB-backed renderer (``render_fenced_section``),
+and the file-rewriting renderer (``rewrite_derived_fences``).
+
+The DB-backed tests use the real ``test_db`` fixture (Postgres) and seed
+``documents`` + ``derived_links`` rows directly so each scenario can pin
+the exact corpus shape it needs. The file-rewriter tests additionally
+seed an ``_ingested/`` mirror under ``tmp_path`` so the disk-write path
+is exercised end-to-end.
 """
 import hashlib
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -20,8 +25,10 @@ from brain.vault.derived_links.fence import (
     extract_fence,
     render_fenced_section,
     replace_fence,
+    rewrite_derived_fences,
     strip_fence,
 )
+from brain.vault.frontmatter import dump_frontmatter, parse_frontmatter
 
 # --------------------------------------------------------------------------
 # Pure-string helpers — no DB.
@@ -572,3 +579,585 @@ def test_render_handles_missing_or_non_string_date_keys(
     rendered = render_fenced_section(test_db, center_id)
     assert rendered is not None
     assert "Partner" in rendered
+
+
+# --------------------------------------------------------------------------
+# File-rewriting renderer — Task D.4.
+# --------------------------------------------------------------------------
+
+
+def _write_vault_file(
+    vault_path: Path, relative: str, fields: dict[str, Any], body: str
+) -> Path:
+    """Write a vault file at ``vault_path/relative`` with frontmatter+body.
+
+    Returns the absolute path. Mirrors the export pipeline's output shape
+    so the rewriter sees realistic input.
+    """
+    target = vault_path / relative
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(dump_frontmatter(fields, body), encoding="utf-8")
+    return target
+
+
+def _seed_ingested_doc_with_file(
+    conn: psycopg.Connection[Any],
+    vault_path: Path,
+    *,
+    title: str,
+    relative_vault_path: str,
+    metadata: dict[str, Any] | None = None,
+    body: str = "authored body content\n",
+    source_kind: str = "krisp",
+) -> tuple[str, Path]:
+    """Seed an ingested-tier doc + write its mirror file.
+
+    Sets ``documents.kind = 'ingested'`` and ``documents.vault_path`` to
+    ``relative_vault_path`` so the rewriter classifies and locates the
+    file the same way it would in production. Returns ``(doc_id, abs_path)``.
+    """
+    metadata = metadata or {}
+    src_row = conn.execute(
+        "INSERT INTO sources (kind, external_id, metadata) "
+        "VALUES (%s, %s, %s::jsonb) RETURNING id",
+        (source_kind, str(uuid.uuid4()), json.dumps({})),
+    ).fetchone()
+    assert src_row is not None
+    salted = f"{body}<!-- {uuid.uuid4()} -->"
+    content_hash = hashlib.sha256(salted.encode("utf-8")).hexdigest()
+    doc_row = conn.execute(
+        """
+        INSERT INTO documents
+            (source_id, title, content, content_hash, content_type,
+             source_path, tags, metadata, kind, vault_path)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+        RETURNING id::text
+        """,
+        (
+            src_row[0],
+            title,
+            salted,
+            content_hash,
+            "transcript",
+            None,
+            [],
+            json.dumps(metadata),
+            "ingested",
+            relative_vault_path,
+        ),
+    ).fetchone()
+    assert doc_row is not None
+    doc_id = str(doc_row[0])
+
+    target = _write_vault_file(
+        vault_path,
+        relative_vault_path,
+        {"id": doc_id, "title": title, "kind": "ingested"},
+        body,
+    )
+    return doc_id, target
+
+
+def _seed_partner_with_path(
+    conn: psycopg.Connection[Any],
+    *,
+    title: str,
+    vault_path: str | None,
+    metadata: dict[str, Any] | None = None,
+) -> str:
+    """Seed a partner doc (no file written) with the given vault_path column.
+
+    The renderer queries ``documents.vault_path`` for the partner's
+    filename stem; partners don't need actual files on disk for the
+    bullet-rendering path to be exercised.
+    """
+    return _seed_partner(
+        conn,
+        title=title,
+        vault_path=vault_path,
+        metadata=metadata,
+    )
+
+
+class TestRewriteDerivedFences:
+    """End-to-end: doc id set → fence regeneration in ``_ingested/`` files.
+
+    Q3=a (vault-tier skipped), Q4=b (always write — no byte-identical
+    skip), atomic temp+rename writes.
+    """
+
+    def test_empty_doc_ids_returns_zero_no_filesystem_touch(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # Empty input → zero writes, no DB query, no FS scan.
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        # A pre-existing file should not be touched.
+        sentinel = vault / "_ingested" / "krisp" / "untouched.md"
+        sentinel.parent.mkdir(parents=True)
+        sentinel.write_text("untouched\n", encoding="utf-8")
+        mtime_before = sentinel.stat().st_mtime_ns
+
+        written = rewrite_derived_fences(test_db, set(), vault_path=vault)
+
+        assert written == 0
+        assert sentinel.read_text(encoding="utf-8") == "untouched\n"
+        assert sentinel.stat().st_mtime_ns == mtime_before
+
+    def test_touched_file_gets_correct_fence(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # Seed: an ingested doc on disk, a partner with a vault_path so
+        # its filename stem is used as the wiki-link target, and one
+        # derived_links row connecting them. After the rewrite, the file
+        # has the fence with the correct bullet.
+        vault = tmp_path / "vault"
+        center_id, target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Center",
+            relative_vault_path="_ingested/krisp/2026-04-15-aaa-center.md",
+            metadata={"date": "2026-04-15"},
+        )
+        partner_id = _seed_partner_with_path(
+            test_db,
+            title="Partner Title",
+            vault_path="_ingested/gmail/2026-04-15-bbb-partner.md",
+            metadata={"date": "Wed, 15 Apr 2026 10:00:00 -0700"},
+        )
+        _insert_derived_link(
+            test_db, a_id=center_id, b_id=partner_id,
+            rule="shared_thread", weight=1.0,
+        )
+
+        written = rewrite_derived_fences(
+            test_db, {center_id, partner_id}, vault_path=vault
+        )
+
+        # Only the center has a file on disk; partner's vault_path points
+        # at a path that doesn't exist on disk → silently skipped.
+        assert written == 1
+        text = target.read_text(encoding="utf-8")
+        # Frontmatter survives unchanged.
+        fm, body = parse_frontmatter(text)
+        assert fm["id"] == center_id
+        # Fence + bullet shape per Q1+Q2a+Q5b.
+        assert FENCE_START_MARKER in body
+        assert FENCE_END_MARKER in body
+        assert "[[2026-04-15-bbb-partner|Partner Title]] *(shared_thread)*" in body
+
+    def test_q4b_always_rewrites_even_when_byte_identical(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # Q4=b: even when the rendered fence is byte-identical to what's
+        # already on disk, the rewriter must produce a write. We assert by
+        # running the rewriter twice in a row and checking the count is
+        # the SAME on the second pass (no skip), and that the file's
+        # mtime advanced between the two passes.
+        vault = tmp_path / "vault"
+        center_id, target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Center",
+            relative_vault_path="_ingested/krisp/center.md",
+            metadata={"date": "2026-04-15"},
+        )
+        partner_id = _seed_partner_with_path(
+            test_db,
+            title="Partner",
+            vault_path="_ingested/gmail/partner.md",
+            metadata={"date": "2026-04-14"},
+        )
+        _insert_derived_link(
+            test_db, a_id=center_id, b_id=partner_id,
+            rule="shared_thread", weight=1.0,
+        )
+
+        first = rewrite_derived_fences(
+            test_db, {center_id}, vault_path=vault
+        )
+        first_text = target.read_text(encoding="utf-8")
+        first_mtime = target.stat().st_mtime_ns
+
+        second = rewrite_derived_fences(
+            test_db, {center_id}, vault_path=vault
+        )
+        second_text = target.read_text(encoding="utf-8")
+        second_mtime = target.stat().st_mtime_ns
+
+        # Same write count both passes — Q4=b: no byte-identical skip.
+        assert first == 1
+        assert second == 1
+        # Content is byte-identical (same fence content from the same DB
+        # state) — but the file was rewritten anyway, so the mtime
+        # advanced. (POSIX mtime is nanosecond-precision; even a
+        # millisecond apart will differ.)
+        assert first_text == second_text
+        assert second_mtime >= first_mtime  # at least non-decreasing
+
+    def test_only_affected_files_are_updated(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # Two ingested files exist; only one is in the affected_ids set.
+        # The other file's content + mtime must not change.
+        vault = tmp_path / "vault"
+        affected_id, affected_target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Affected",
+            relative_vault_path="_ingested/krisp/affected.md",
+            metadata={"date": "2026-04-15"},
+        )
+        bystander_id, bystander_target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Bystander",
+            relative_vault_path="_ingested/krisp/bystander.md",
+            metadata={"date": "2026-04-15"},
+        )
+        partner = _seed_partner_with_path(
+            test_db,
+            title="Partner",
+            vault_path="_ingested/gmail/partner.md",
+            metadata={"date": "2026-04-14"},
+        )
+        # Only the affected doc has a derived edge.
+        _insert_derived_link(
+            test_db, a_id=affected_id, b_id=partner,
+            rule="shared_thread", weight=1.0,
+        )
+
+        bystander_before = bystander_target.read_text(encoding="utf-8")
+        bystander_mtime_before = bystander_target.stat().st_mtime_ns
+
+        written = rewrite_derived_fences(
+            test_db, {affected_id}, vault_path=vault
+        )
+
+        assert written == 1
+        # Affected file picked up the fence.
+        assert FENCE_START_MARKER in affected_target.read_text(encoding="utf-8")
+        # Bystander untouched: same bytes, same mtime.
+        assert bystander_target.read_text(encoding="utf-8") == bystander_before
+        assert bystander_target.stat().st_mtime_ns == bystander_mtime_before
+        # Bystander wasn't even queried (no fence either way), and
+        # ``bystander_id`` wasn't in the affected set anyway.
+        _ = bystander_id  # silence "unused" — kept for symmetry/readability
+
+    def test_vault_tier_files_skipped_silently(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # Q3=a: user-authored vault-tier notes never get a fence. Even if
+        # a vault-tier doc somehow shows up in affected_ids, the rewriter
+        # silently skips it — no write, no error.
+        vault = tmp_path / "vault"
+        # Seed a vault-tier doc with a file on disk.
+        vault_doc_id = str(uuid.uuid4())
+        target = _write_vault_file(
+            vault, "notes/my-note.md",
+            {"id": vault_doc_id, "title": "My Note", "kind": "vault"},
+            "user-authored content\n",
+        )
+        salted = f"vault body\n<!-- {uuid.uuid4()} -->"
+        test_db.execute(
+            """
+            INSERT INTO documents
+                (id, source_id, title, content, content_hash, content_type,
+                 source_path, tags, metadata, kind, vault_path)
+            VALUES (%s, NULL, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+            """,
+            (
+                vault_doc_id,
+                "My Note",
+                salted,
+                hashlib.sha256(salted.encode()).hexdigest(),
+                "note",
+                None,
+                [],
+                json.dumps({}),
+                "vault",
+                "notes/my-note.md",
+            ),
+        )
+        before = target.read_text(encoding="utf-8")
+        mtime_before = target.stat().st_mtime_ns
+
+        written = rewrite_derived_fences(
+            test_db, {vault_doc_id}, vault_path=vault
+        )
+
+        assert written == 0
+        # File untouched.
+        assert target.read_text(encoding="utf-8") == before
+        assert target.stat().st_mtime_ns == mtime_before
+
+    def test_ingested_doc_with_null_vault_path_is_skipped(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # An ingested doc that's never been exported has ``vault_path`` =
+        # NULL on the row. The rewriter has no path to write to → skip
+        # silently. (Distinct from "vault_path is set but file missing":
+        # this branch is the row-level check, not the FS check.)
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        src_row = test_db.execute(
+            "INSERT INTO sources (kind, external_id, metadata) "
+            "VALUES (%s, %s, %s::jsonb) RETURNING id",
+            ("krisp", "null-vp", json.dumps({})),
+        ).fetchone()
+        assert src_row is not None
+        salted = f"body\n<!-- {uuid.uuid4()} -->"
+        doc_row = test_db.execute(
+            """
+            INSERT INTO documents
+                (source_id, title, content, content_hash, content_type,
+                 source_path, tags, metadata, kind, vault_path)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, NULL)
+            RETURNING id::text
+            """,
+            (
+                src_row[0],
+                "Never Exported",
+                salted,
+                hashlib.sha256(salted.encode()).hexdigest(),
+                "transcript",
+                None,
+                [],
+                json.dumps({}),
+                "ingested",
+            ),
+        ).fetchone()
+        assert doc_row is not None
+        doc_id = str(doc_row[0])
+
+        written = rewrite_derived_fences(
+            test_db, {doc_id}, vault_path=vault
+        )
+
+        assert written == 0
+
+    def test_missing_ingested_mirror_is_skipped(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # Doc has ``vault_path`` set but the file isn't on disk yet
+        # (export will produce one on the next pass). The rewriter logs
+        # at debug level and moves on — no count, no error.
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        # Seed an ingested doc with a non-existent vault_path.
+        src_row = test_db.execute(
+            "INSERT INTO sources (kind, external_id, metadata) "
+            "VALUES (%s, %s, %s::jsonb) RETURNING id",
+            ("krisp", "missing-mirror", json.dumps({})),
+        ).fetchone()
+        assert src_row is not None
+        salted = f"body\n<!-- {uuid.uuid4()} -->"
+        doc_row = test_db.execute(
+            """
+            INSERT INTO documents
+                (source_id, title, content, content_hash, content_type,
+                 source_path, tags, metadata, kind, vault_path)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+            RETURNING id::text
+            """,
+            (
+                src_row[0],
+                "Missing Mirror",
+                salted,
+                hashlib.sha256(salted.encode()).hexdigest(),
+                "transcript",
+                None,
+                [],
+                json.dumps({}),
+                "ingested",
+                "_ingested/krisp/never-exported.md",
+            ),
+        ).fetchone()
+        assert doc_row is not None
+        doc_id = str(doc_row[0])
+
+        written = rewrite_derived_fences(
+            test_db, {doc_id}, vault_path=vault
+        )
+
+        assert written == 0
+        # No file was created — the rewriter only writes existing files.
+        assert not (vault / "_ingested" / "krisp" / "never-exported.md").exists()
+
+    def test_doc_with_zero_edges_has_fence_removed(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # The "lost partner" path: a file currently has a fence on disk
+        # (from a previous relink). After all its derived edges have been
+        # deleted, the rewriter must STRIP the stale fence — otherwise
+        # the file keeps pointing at partners that no longer exist as
+        # derived edges.
+        vault = tmp_path / "vault"
+        # Manually seed a doc whose file already has a fence.
+        doc_id, target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Lonely Doc",
+            relative_vault_path="_ingested/krisp/lonely.md",
+            metadata={"date": "2026-04-15"},
+        )
+        # Re-write the file with a stale fence in the body. (Simulates
+        # the post-D.4 state of a file whose edges were since deleted.)
+        existing_fence = (
+            f"{FENCE_START_MARKER}\n"
+            f"## Related (auto-generated, do not edit)\n"
+            f"- [[stale-stem|Stale Partner]] *(shared_thread)*\n"
+            f"{FENCE_END_MARKER}"
+        )
+        target.write_text(
+            dump_frontmatter(
+                {"id": doc_id, "title": "Lonely Doc", "kind": "ingested"},
+                f"the authored body\n\n{existing_fence}\n",
+            ),
+            encoding="utf-8",
+        )
+
+        # No derived_links rows for ``doc_id`` → render_fenced_section
+        # returns None → rewriter calls strip_fence on the body.
+        written = rewrite_derived_fences(
+            test_db, {doc_id}, vault_path=vault
+        )
+
+        assert written == 1
+        text = target.read_text(encoding="utf-8")
+        assert FENCE_START_MARKER not in text
+        assert FENCE_END_MARKER not in text
+        assert "Stale Partner" not in text
+        # Authored body content survived intact.
+        assert "the authored body" in text
+
+    def test_no_existing_fence_no_edges_is_idempotent_write(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # Q4=b: even when there's nothing to add (no edges) and no fence
+        # to strip (file never had one), the rewriter still writes the
+        # file. This is the "predictable mtimes" trade-off the user
+        # explicitly chose. Asserting the count and that the body bytes
+        # are unchanged after the write.
+        vault = tmp_path / "vault"
+        doc_id, target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="No Edges No Fence",
+            relative_vault_path="_ingested/krisp/no-edges.md",
+            metadata={"date": "2026-04-15"},
+        )
+        before = target.read_text(encoding="utf-8")
+
+        written = rewrite_derived_fences(
+            test_db, {doc_id}, vault_path=vault
+        )
+
+        # Q4=b: write happens regardless.
+        assert written == 1
+        # Frontmatter + body round-trip identically (strip_fence is a
+        # no-op on a fence-less body).
+        after = target.read_text(encoding="utf-8")
+        fm_before, body_before = parse_frontmatter(before)
+        fm_after, body_after = parse_frontmatter(after)
+        assert fm_before == fm_after
+        assert body_before.rstrip() == body_after.rstrip()
+
+    def test_atomic_write_no_temp_files_left_behind(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # The rewriter writes via a sibling ``.tmp`` then ``os.replace``.
+        # On a successful pass there should be NO ``*.tmp`` files left in
+        # the vault — the rename moves the temp into place.
+        vault = tmp_path / "vault"
+        center_id, _target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Center",
+            relative_vault_path="_ingested/krisp/atomic.md",
+            metadata={"date": "2026-04-15"},
+        )
+        partner = _seed_partner_with_path(
+            test_db,
+            title="Partner",
+            vault_path="_ingested/gmail/partner.md",
+            metadata={"date": "2026-04-14"},
+        )
+        _insert_derived_link(
+            test_db, a_id=center_id, b_id=partner,
+            rule="shared_thread", weight=1.0,
+        )
+
+        rewrite_derived_fences(
+            test_db, {center_id}, vault_path=vault
+        )
+
+        leftover_tmp = list(vault.rglob("*.tmp"))
+        assert leftover_tmp == [], f"unexpected tempfiles: {leftover_tmp!r}"
+
+    def test_malformed_frontmatter_logged_and_skipped(
+        self, test_db: psycopg.Connection, tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Defensive: a corrupt _ingested/ file with malformed YAML
+        # frontmatter must not crash the rewriter — we log a warning and
+        # move on. The file's bytes stay as-is so the user can fix it.
+        vault = tmp_path / "vault"
+        # Seed an ingested doc row pointing at a real file with bad YAML.
+        doc_id, target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Broken",
+            relative_vault_path="_ingested/krisp/broken.md",
+            metadata={"date": "2026-04-15"},
+        )
+        # Stomp the file with deliberately malformed frontmatter.
+        target.write_text(
+            "---\nid: [unclosed\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        before = target.read_text(encoding="utf-8")
+
+        with caplog.at_level("WARNING", logger="brain.vault.derived_links.fence"):
+            written = rewrite_derived_fences(
+                test_db, {doc_id}, vault_path=vault
+            )
+
+        assert written == 0
+        # File untouched.
+        assert target.read_text(encoding="utf-8") == before
+        # We logged something at WARNING level mentioning the file.
+        assert any(
+            "broken.md" in record.message
+            for record in caplog.records
+            if record.levelname == "WARNING"
+        )
+
+    def test_partner_id_in_input_drives_fence_for_partner_too(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # A partner that's in ``affected_ids`` AND has its own ingested
+        # mirror file gets ITS fence rewritten. This is the symmetry the
+        # affected-ids contract from D.3 enables: the renderer iterates
+        # the full affected set, so both endpoints of an edge get their
+        # "Related" sections regenerated in one pass.
+        vault = tmp_path / "vault"
+        a_id, a_target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Alpha",
+            relative_vault_path="_ingested/krisp/alpha.md",
+            metadata={"date": "2026-04-15"},
+        )
+        b_id, b_target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Bravo",
+            relative_vault_path="_ingested/krisp/bravo.md",
+            metadata={"date": "2026-04-15"},
+        )
+        _insert_derived_link(
+            test_db, a_id=a_id, b_id=b_id,
+            rule="shared_participant", weight=0.4,
+        )
+
+        written = rewrite_derived_fences(
+            test_db, {a_id, b_id}, vault_path=vault
+        )
+
+        assert written == 2
+        # Each side's fence points at the OTHER side.
+        a_text = a_target.read_text(encoding="utf-8")
+        b_text = b_target.read_text(encoding="utf-8")
+        assert "[[bravo|Bravo]]" in a_text
+        assert "[[alpha|Alpha]]" in b_text

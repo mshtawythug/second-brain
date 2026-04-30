@@ -15,18 +15,26 @@ The fence is what keeps this safe across the rest of the pipeline:
 - Wiki-link parser skips the fence → ``[[stems]]`` inside the fence don't
   double-count edges that already live in ``derived_links``.
 
-This module is **pure logic plus one read-only DB query**. Writing files
-is the renderer caller's job (added in Task D.4 alongside
-``rewrite_derived_fences``); this module only produces the fenced text and
-helps callers extract / strip / replace it.
+This module ships:
+
+- Pure-string helpers: :func:`extract_fence`, :func:`strip_fence`,
+  :func:`replace_fence`. No DB.
+- DB-reading renderer: :func:`render_fenced_section` — produces the
+  fenced markdown for a doc id from current ``derived_links`` rows.
+- File-rewriting renderer: :func:`rewrite_derived_fences` — for each
+  affected ingested-tier doc, regenerates the fence on disk via an
+  atomic write. Skips vault-tier docs (Q3=a) and docs without an
+  ``_ingested/`` mirror (covered by export, not the fence renderer).
 """
 import datetime
 import logging
+import os
 from email.utils import parsedate_to_datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import psycopg
+import yaml
 
 # Stable HTML-comment markers. Universal CommonMark — Obsidian, Quartz, GFM,
 # and standard Markdown all treat the line as a passthrough HTML comment.
@@ -230,3 +238,128 @@ def _parse_metadata_date(metadata: dict[str, Any]) -> datetime.date | None:
     if parsed is None:
         return None
     return parsed.date()
+
+
+def rewrite_derived_fences(
+    conn: psycopg.Connection[Any],
+    doc_ids: set[str],
+    *,
+    vault_path: Path,
+) -> int:
+    """Regenerate the derived-edges fence for every affected ``_ingested/`` file.
+
+    Driven by ``rebuild_derived_for``'s ``affected_ids`` return value:
+    every doc whose edges changed (gained or lost) gets its fence rewritten
+    on disk, so Quartz's ``/graph`` view stays consistent with the latest
+    ``derived_links`` rows.
+
+    Behavior per the user's Q3–Q5 decisions:
+
+    - **Q3=a** vault-tier files are silently skipped — user-authored notes
+      stay untouched in v1. Only docs with ``kind='ingested'`` are
+      candidates.
+    - **Q4=b** ALWAYS rewrite, even when the fence content is byte-identical.
+      No no-op skip. Trade-off accepted: extra git/Quartz churn in exchange
+      for predictable mtimes and simpler relink semantics.
+    - **Q5=b** + Q2a fence content uses ``[[<filename-stem>|<title>]]
+      *(<rule>)*`` (rendered by :func:`render_fenced_section`).
+
+    Returns the count of files actually written. Docs in ``doc_ids`` that
+    map to a vault-tier row, have no ``vault_path`` set, or whose mirror
+    file is missing on disk are silently dropped from the count — those
+    skips aren't failures, they're "the renderer has no work to do here."
+
+    Atomicity: each write goes through a sibling temp file plus
+    :func:`os.replace`, which is atomic on POSIX (rename(2)). A crash
+    mid-write leaves the original file intact; the temp file is cleaned
+    up on the next pass over the same doc id.
+
+    Empty input short-circuits to ``0`` — no DB round-trip, no FS scan.
+    """
+    if not doc_ids:
+        return 0
+
+    # Local imports break a cycle: ``brain.vault.frontmatter`` imports
+    # :func:`strip_fence` from this module so its ``body_hash`` ignores the
+    # fence content; we in turn need its parse/dump helpers to round-trip
+    # the YAML frontmatter while editing the body. Lazy-loading at call
+    # time keeps both modules' top-level imports cycle-free.
+    from ..frontmatter import dump_frontmatter, parse_frontmatter
+
+    # Single batch lookup: kind + vault_path for every affected doc id. At
+    # production scale (~500 ingested docs) the IN-list fits comfortably in
+    # one query and saves N round-trips on a full corpus relink.
+    rows = conn.execute(
+        "SELECT id::text, kind, vault_path FROM documents "
+        "WHERE id = ANY(%s)",
+        (sorted(doc_ids),),
+    ).fetchall()
+
+    written = 0
+    for doc_id, kind, vp in rows:
+        # Q3=a: vault-tier files stay untouched in v1.
+        if kind != "ingested":
+            continue
+        # No mirror exported yet — the fence renderer has no file to
+        # rewrite. Export will produce one on the next pass; this is not
+        # an error.
+        if not vp:
+            continue
+        target = vault_path / str(vp)
+        if not target.is_file():
+            _logger.debug(
+                "fence: skipping %s — vault_path %r has no file on disk",
+                doc_id, vp,
+            )
+            continue
+        try:
+            text = target.read_text(encoding="utf-8")
+        except OSError as e:
+            _logger.warning(
+                "fence: could not read %s: %s — skipping", target, e
+            )
+            continue
+        try:
+            frontmatter, body = parse_frontmatter(text)
+        except (ValueError, yaml.YAMLError) as e:
+            _logger.warning(
+                "fence: malformed frontmatter in %s: %s — skipping",
+                target, e,
+            )
+            continue
+
+        new_fence = render_fenced_section(conn, doc_id)
+        new_body = (
+            strip_fence(body) if new_fence is None
+            else replace_fence(body, new_fence)
+        )
+        new_text = dump_frontmatter(frontmatter, new_body)
+
+        # Q4=b: write every time, even when ``new_text == text``. The cost
+        # is one mtime bump + one Quartz rebuild per affected file per
+        # relink — accepted trade-off for predictable relink semantics.
+        try:
+            _atomic_write(target, new_text)
+        except OSError as e:
+            _logger.warning(
+                "fence: could not rewrite %s: %s — skipping", target, e
+            )
+            continue
+        written += 1
+    return written
+
+
+def _atomic_write(target: Path, text: str) -> None:
+    """Write ``text`` to ``target`` atomically (tempfile + ``os.replace``).
+
+    The temp file is a sibling of ``target`` (same parent directory) so the
+    rename never crosses a filesystem boundary — ``os.replace`` is atomic
+    on POSIX in that case (it's ``rename(2)`` underneath). A crash between
+    the write and the rename leaves the original file intact and the temp
+    file present; the next pass over the same path either succeeds or
+    overwrites the stale temp. We don't garbage-collect stale temps here
+    because they're harmless and a delete could race with another writer.
+    """
+    tmp = target.with_name(f"{target.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, target)
