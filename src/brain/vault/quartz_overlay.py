@@ -34,14 +34,17 @@ from ..errors import BrainError
 _UPSTREAM_RENAME_FROM = Path("quartz/plugins/emitters/contentIndex.tsx")
 _UPSTREAM_RENAME_TO = Path("quartz/plugins/emitters/_upstreamContentIndex.tsx")
 
-# Where overlay sources live inside the brain repo.
+# Where overlay sources live inside the brain repo. The directory tree
+# under ``quartz_overrides/`` mirrors ``<quartz_dir>/`` 1:1 — e.g.
+# ``quartz_overrides/quartz.layout.ts`` → ``<quartz_dir>/quartz.layout.ts``
+# (workspace root) and ``quartz_overrides/quartz/components/Graph.tsx``
+# → ``<quartz_dir>/quartz/components/Graph.tsx`` (Quartz source tree).
+# Quartz's workspace splits into two worlds — workspace-root configs
+# like ``quartz.layout.ts`` whose own imports resolve via
+# ``./quartz/cfg``, and Quartz source under ``quartz/``. Encoding the
+# destination layout directly in the source tree keeps the helper a
+# pure 1:1 copy with no per-file routing logic.
 _OVERLAY_SUBDIR = "quartz_overrides"
-
-# Where overlay files land inside the Quartz workspace. The directory
-# structure under ``quartz_overrides/`` mirrors the layout under
-# ``<quartz_dir>/quartz/`` — e.g. ``quartz_overrides/components/Graph.tsx``
-# → ``<quartz_dir>/quartz/components/Graph.tsx``.
-_OVERLAY_DEST_SUBDIR = "quartz"
 
 
 RenameState = Literal["needed", "already_applied", "missing_both"]
@@ -121,7 +124,7 @@ def plan_overlay(repo_root_path: Path, quartz_dir: Path) -> OverlayPlan:
             raise OverlayError(
                 f"overlay source escaped {overrides_root}: {src}"
             ) from e
-        dest = quartz_dir_resolved / _OVERLAY_DEST_SUBDIR / relative
+        dest = quartz_dir_resolved / relative
         pairs.append((src, dest))
 
     rename, rename_state = _plan_upstream_rename(quartz_dir_resolved)
