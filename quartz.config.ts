@@ -11,6 +11,15 @@
 // renames a plugin or its option shape, pull the latest config from
 // https://quartz.jzhao.xyz/ and re-apply the brain-specific tweaks
 // flagged below with `// brain:` comments.
+//
+// brain: this template wires up the brain-specific markdown transformer
+// `Plugin.DerivedFenceMark` (defined in
+// `<vault>/.quartz/quartz/plugins/transformers/derivedFenceMark.ts`,
+// installed by `brain vault render --overlay`). It must run after
+// `Plugin.ObsidianFlavoredMarkdown()` so `[[wiki-link]]` syntax has
+// been converted into mdast `link` nodes by the time the fence walker
+// stamps `data-brain-derived` attributes on them. See the
+// transformer's top-of-file comment for the full contract.
 
 import { QuartzConfig } from "./quartz/cfg"
 import * as Plugin from "./quartz/plugins"
@@ -94,6 +103,13 @@ const config: QuartzConfig = {
         keepBackground: false,
       }),
       Plugin.ObsidianFlavoredMarkdown({ enableInHtmlEmbed: false }),
+      // brain: tag derived-edge `<a>` tags inside Phase D fences with
+      // `data-brain-derived` / `data-brain-rule` / `data-brain-weight`
+      // so the custom contentIndex emitter can classify them as
+      // `kind: "derived"` in `static/contentIndex.json`. Must run after
+      // ObsidianFlavoredMarkdown so wiki-link syntax has already been
+      // converted to mdast link nodes.
+      Plugin.DerivedFenceMark(),
       Plugin.GitHubFlavoredMarkdown(),
       Plugin.TableOfContents(),
       Plugin.CrawlLinks({ markdownLinkResolution: "shortest" }),

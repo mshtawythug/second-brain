@@ -44,7 +44,7 @@
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 
-import type { Root } from "hast"
+import type { Root, Element } from "hast"
 import type { VFile } from "vfile"
 
 import { ContentIndex as UpstreamContentIndex } from "./_upstreamContentIndex"
@@ -101,16 +101,106 @@ export interface ClassifyContext {
 }
 
 // brain-extension: the single localized point where a link's
-// classification is computed. Today this returns `kind: "wiki"` for
-// every link unconditionally. The `derivedFenceMark` transformer
-// stamps `data-brain-derived="true"` / `data-brain-rule` /
-// `data-brain-weight` attributes onto `<a>` tags inside Phase D
-// fences; the next iteration of this helper walks the AST in `ctx`
-// to look up `target` and read those attributes back. Keeping the
-// rule in one function (and only one function) makes that follow-up
-// diff a localized change rather than a sweep through the wrapper.
-export function classifyLink(target: SimpleSlug, _ctx: ClassifyContext): BrainLinkRecord {
-  return { target, kind: "wiki" }
+// classification is computed. The `derivedFenceMark` transformer
+// (see `quartz_overrides/plugins/transformers/derivedFenceMark.ts`)
+// stamps `data-brain-derived="true"` / `data-brain-rule` attributes
+// onto `<a>` tags inside Phase D fences; this helper walks the
+// post-rendered hast tree to find each link by its `href` (the
+// slug-normalized target) and reads the attributes back. Keeping
+// the rule in one function (and only one function) makes future
+// format tweaks (e.g. a third "rule" kind, or adding `weight` once
+// Phase E surfaces it) a localized change rather than a sweep
+// through the wrapper.
+//
+// brain: fence membership is the truth-source for "this link is
+// derived" — links whose `data-brain-rule` is absent (because the
+// transformer's strict parser couldn't pin a rule down) still come
+// back as `kind: "derived"`, just without the `rule` field. The
+// `BrainLinkRecord` type's optional `weight` field is reserved for
+// a future Phase E enhancement; nothing in the current pipeline
+// produces it, so this classifier doesn't read it. When Phase E
+// lands, extend the transformer and this classifier together.
+//
+// brain: lookup is "first <a> whose href matches the target slug".
+// A doc that links the same partner twice (e.g. once authored,
+// once via the Phase D fence) will resolve both records to the
+// first match — but for the brain graph, the union shape is the
+// same (one edge per (src, dst) pair), so the duplicate's
+// classification doesn't actually change graph behavior. If a
+// future renderer needs per-occurrence classification, switch to
+// the index-based pairing approach (parallel walk of `details.links`
+// and the hast tree's `<a>` elements in order).
+export function classifyLink(target: SimpleSlug, ctx: ClassifyContext): BrainLinkRecord {
+  const anchor = findAnchor(ctx.tree, target)
+  if (anchor === null) {
+    return { target, kind: "wiki" }
+  }
+  const props = (anchor.properties ?? {}) as Record<string, unknown>
+  // brain-extension: hast property names are camelCased by hast-util-
+  // from-html (``data-brain-derived`` → ``dataBrainDerived``); we
+  // read both shapes pending empirical verification of which form
+  // Quartz's rehype pipeline actually emits in practice. The
+  // overlay's parse-smoke test confirms the live shape against a
+  // freshly-rendered fixture vault; the unused branch can be
+  // dropped at that point. Until then the dual-read is correct
+  // documentation, not redundancy.
+  if (props["dataBrainDerived"] !== "true" && props["data-brain-derived"] !== "true") {
+    return { target, kind: "wiki" }
+  }
+  const record: BrainLinkRecord = { target, kind: "derived" }
+  const rule = props["dataBrainRule"] ?? props["data-brain-rule"]
+  if (typeof rule === "string" && rule.length > 0) {
+    record.rule = rule
+  }
+  return record
+}
+
+// brain: depth-first hast walker that returns the first `<a>` whose
+// `href` matches the slug-normalized target. The brain emitter feeds
+// us a `SimpleSlug` (Quartz's resolved-and-normalized internal slug
+// type) that already corresponds to the value remark-rehype writes
+// into the rendered link's `href`. Recursion stops at the first
+// match — see the duplicate-link note on `classifyLink` above.
+function findAnchor(tree: Root, target: SimpleSlug): Element | null {
+  const wanted = String(target)
+  const stack: (Root | Element)[] = [tree]
+  while (stack.length > 0) {
+    const node = stack.pop()
+    if (node === undefined) break
+    if ("children" in node && Array.isArray(node.children)) {
+      for (const child of node.children) {
+        if (child.type === "element") {
+          if (child.tagName === "a") {
+            const href = (child.properties ?? {})["href"]
+            if (typeof href === "string" && hrefMatchesSlug(href, wanted)) {
+              return child
+            }
+          }
+          stack.push(child)
+        }
+      }
+    }
+  }
+  return null
+}
+
+// brain: tolerant href↔slug match. Quartz rewrites internal links
+// to relative URLs that may include leading `./` or `../` segments
+// and a trailing fragment (`#section`); the `SimpleSlug` we receive
+// from the emitter is the bare slug. Strip both ends before
+// comparing so matches survive the relative-resolver pass.
+function hrefMatchesSlug(href: string, slug: string): boolean {
+  const fragmentless = href.split("#")[0]
+  // Quartz resolves wiki-links to relative paths like
+  // `../partner-stem` or `./partner-stem`; trim leading `./` or
+  // `../` segments before comparing the tail.
+  const trimmed = fragmentless.replace(/^(?:\.\.\/)+/, "").replace(/^\.\//, "")
+  if (trimmed === slug) return true
+  // Slug may not include the doc's own folder prefix; allow a
+  // suffix match so `folder/partner-stem` still matches a
+  // `partner-stem` slug. Anchored on `/` to avoid matching
+  // `other-partner-stem`.
+  return trimmed.endsWith(`/${slug}`)
 }
 
 // brain: thin compat helper for downstream Quartz code that only
