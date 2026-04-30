@@ -1,11 +1,12 @@
 """Tests for :mod:`brain.vault.graph` against a real Postgres test DB.
 
 Each test seeds documents and (for resolved links) ``links`` /
-``unresolved_links`` rows directly via SQL. We avoid going through the
-sync engine here so the test DB stays small and the assertions stay
-narrow — ``brain.vault.graph`` is plain SELECTs, the contract is that
-*the queries themselves* return the right shape.
+``unresolved_links`` / ``derived_links`` rows directly via SQL. We avoid
+going through the sync engine here so the test DB stays small and the
+assertions stay narrow — ``brain.vault.graph`` is plain SELECTs, the
+contract is that *the queries themselves* return the right shape.
 """
+import json
 from typing import Any
 
 import psycopg
@@ -76,6 +77,33 @@ def _unresolved(
         VALUES (%s, %s, %s, %s)
         """,
         (src, text, kind, display),
+    )
+
+
+def _derived(
+    conn: psycopg.Connection[Any],
+    *,
+    a: str,
+    b: str,
+    rule: str = "shared_thread",
+    weight: float = 1.0,
+    evidence: dict[str, Any] | None = None,
+) -> None:
+    """Insert a ``derived_links`` row in canonical (LEAST, GREATEST) order.
+
+    Mirrors the canonicalization that
+    :func:`brain.vault.derived_links.pass_runner.rebuild_derived_for`
+    applies, so tests stay faithful to production storage layout.
+    """
+    src, dst = (a, b) if a < b else (b, a)
+    payload = {} if evidence is None else evidence
+    conn.execute(
+        """
+        INSERT INTO derived_links
+          (src_document_id, dst_document_id, rule, evidence, weight)
+        VALUES (%s, %s, %s, %s::jsonb, %s)
+        """,
+        (src, dst, rule, json.dumps(payload), weight),
     )
 
 
@@ -385,3 +413,266 @@ def test_graph_data_edge_kind_embed_preserved(
     _link(test_db, src=a, dst=b, text="![[B]]", kind="embed")
     snapshot = graph_data(test_db)
     assert snapshot.edges[0].link_kind == "embed"
+
+
+# ---------------------------------------------------------------------------
+# C.1 — derived edges merged into the read paths.
+# ---------------------------------------------------------------------------
+
+
+def _gmail_pair(
+    test_db: psycopg.Connection[Any],
+) -> dict[str, str]:
+    """Two ingested-tier Gmail-style docs ready for a derived edge."""
+    x = _make_doc(
+        test_db,
+        doc_id="aaaaaaaa-1111-1111-1111-111111111111",
+        title="Email X",
+        kind="ingested",
+        vault_path="_ingested/gmail/x.md",
+    )
+    y = _make_doc(
+        test_db,
+        doc_id="bbbbbbbb-2222-2222-2222-222222222222",
+        title="Email Y",
+        kind="ingested",
+        vault_path="_ingested/gmail/y.md",
+    )
+    return {"x": x, "y": y}
+
+
+def test_graph_data_includes_derived_edges_by_default(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Derived edges land in ``graph_data().edges`` with ``link_kind='derived'``."""
+    ids = _gmail_pair(test_db)
+    _derived(
+        test_db,
+        a=ids["x"],
+        b=ids["y"],
+        rule="shared_thread",
+        weight=1.0,
+        evidence={"thread_id": "thr-9001"},
+    )
+    snapshot = graph_data(test_db, include_ingested=True)
+    derived_edges = [e for e in snapshot.edges if e.link_kind == "derived"]
+    assert len(derived_edges) == 1
+    edge = derived_edges[0]
+    assert edge.rule == "shared_thread"
+    assert edge.weight == 1.0
+    assert edge.evidence == {"thread_id": "thr-9001"}
+    # Stored canonically (LEAST, GREATEST) — confirm the pair appears in
+    # the result regardless of the (a, b) order we passed in.
+    pair = {edge.src_document_id, edge.dst_document_id}
+    assert pair == {ids["x"], ids["y"]}
+    assert edge.link_text == ""
+    assert edge.display_text is None
+
+
+def test_graph_data_excludes_derived_when_include_derived_false(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """``include_derived=False`` reproduces the pre-Phase-C edge set."""
+    ids = _gmail_pair(test_db)
+    _derived(test_db, a=ids["x"], b=ids["y"], rule="shared_thread", weight=1.0)
+    snapshot = graph_data(test_db, include_ingested=True, include_derived=False)
+    assert all(e.link_kind != "derived" for e in snapshot.edges)
+    # No wiki edges seeded — entire edge list is empty.
+    assert snapshot.edges == []
+
+
+def test_graph_data_bfs_traverses_derived_edges(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A node only reachable via a derived edge still lands in a rooted BFS."""
+    ids = _gmail_pair(test_db)
+    _derived(test_db, a=ids["x"], b=ids["y"], rule="shared_thread", weight=1.0)
+    snapshot = graph_data(test_db, root=ids["x"], depth=1)
+    assert {n.document_id for n in snapshot.nodes} == {ids["x"], ids["y"]}
+
+
+def test_backlinks_for_includes_derived_edges(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """``backlinks_for`` returns the partner regardless of canonical side."""
+    ids = _gmail_pair(test_db)
+    _derived(
+        test_db,
+        a=ids["x"],
+        b=ids["y"],
+        rule="shared_thread",
+        weight=1.0,
+        evidence={"thread_id": "thr-1"},
+    )
+    rows_y = backlinks_for(test_db, ids["y"])
+    derived_y = [r for r in rows_y if r.link_kind == "derived"]
+    assert len(derived_y) == 1
+    assert derived_y[0].src_document_id == ids["x"]
+    assert derived_y[0].rule == "shared_thread"
+    assert derived_y[0].weight == 1.0
+    assert derived_y[0].evidence == {"thread_id": "thr-1"}
+
+    # Symmetric: backlinks_for(X) also surfaces Y as the partner — the
+    # storage row is undirected by spec §6.
+    rows_x = backlinks_for(test_db, ids["x"])
+    derived_x = [r for r in rows_x if r.link_kind == "derived"]
+    assert len(derived_x) == 1
+    assert derived_x[0].src_document_id == ids["y"]
+
+
+def test_backlinks_for_excludes_derived_when_flag_off(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """``include_derived=False`` reproduces the wiki-only behavior."""
+    ids = _gmail_pair(test_db)
+    _derived(test_db, a=ids["x"], b=ids["y"], rule="shared_thread", weight=1.0)
+    rows = backlinks_for(test_db, ids["y"], include_derived=False)
+    assert rows == []
+
+
+def test_outgoing_links_for_includes_derived_edges(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """``outgoing_links_for`` is symmetric for derived edges (same as backlinks)."""
+    ids = _gmail_pair(test_db)
+    _derived(
+        test_db,
+        a=ids["x"],
+        b=ids["y"],
+        rule="same_day_participant",
+        weight=0.7,
+        evidence={"participant": "person-a@example.com", "day_delta": 0},
+    )
+    rows_x = outgoing_links_for(test_db, ids["x"])
+    derived_x = [r for r in rows_x if r.link_kind == "derived"]
+    assert len(derived_x) == 1
+    assert derived_x[0].dst_document_id == ids["y"]
+    assert derived_x[0].rule == "same_day_participant"
+    assert derived_x[0].weight == 0.7
+    assert derived_x[0].resolved is True
+
+    rows_y = outgoing_links_for(test_db, ids["y"])
+    derived_y = [r for r in rows_y if r.link_kind == "derived"]
+    assert len(derived_y) == 1
+    assert derived_y[0].dst_document_id == ids["x"]
+
+
+def test_derived_edge_carries_rule_weight_evidence(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Every derived row in graph_data is populated with the rule triple."""
+    ids = _gmail_pair(test_db)
+    _derived(
+        test_db,
+        a=ids["x"],
+        b=ids["y"],
+        rule="shared_participant",
+        weight=0.4,
+        evidence={"participant": "ali@example.com", "shared_count": 3},
+    )
+    snapshot = graph_data(test_db, include_ingested=True)
+    derived_edges = [e for e in snapshot.edges if e.link_kind == "derived"]
+    assert len(derived_edges) == 1
+    edge = derived_edges[0]
+    assert edge.rule == "shared_participant"
+    assert edge.weight == 0.4
+    assert edge.evidence == {"participant": "ali@example.com", "shared_count": 3}
+
+
+def test_backlinks_for_no_double_count_with_wiki_and_derived(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A wiki-edge and a derived edge between the same pair render as separate rows."""
+    a = _make_doc(
+        test_db,
+        doc_id="11111111-1111-1111-1111-111111111111",
+        title="A",
+        vault_path="a.md",
+    )
+    b = _make_doc(
+        test_db,
+        doc_id="22222222-2222-2222-2222-222222222222",
+        title="B",
+        vault_path="b.md",
+    )
+    _link(test_db, src=a, dst=b, text="[[B]]")
+    _derived(
+        test_db,
+        a=a,
+        b=b,
+        rule="shared_participant",
+        weight=0.4,
+        evidence={"participant": "x@y.com"},
+    )
+    rows = backlinks_for(test_db, b)
+    assert len(rows) == 2
+    kinds = sorted(r.link_kind for r in rows)
+    assert kinds == ["derived", "wiki"]
+    # Both source the same partner (A) but with distinct provenance.
+    assert {r.src_document_id for r in rows} == {a}
+    derived_row = next(r for r in rows if r.link_kind == "derived")
+    wiki_row = next(r for r in rows if r.link_kind == "wiki")
+    assert derived_row.rule == "shared_participant"
+    assert derived_row.weight == 0.4
+    assert derived_row.link_text == ""
+    assert wiki_row.rule is None
+    assert wiki_row.weight is None
+    assert wiki_row.link_text == "[[B]]"
+
+
+def test_graph_data_orphan_with_only_derived_edge_is_not_orphan(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Ingested docs connected only by a derived edge survive default filtering.
+
+    With ``include_ingested=False`` the existing rule keeps an ingested-tier
+    node only when it sits on at least one edge. A derived edge counts as
+    an edge — so a Gmail↔Gmail derived pair stays in the snapshot rather
+    than being culled as "isolated ingested orphans."
+    """
+    ids = _gmail_pair(test_db)
+    _derived(test_db, a=ids["x"], b=ids["y"], rule="shared_thread", weight=1.0)
+    snapshot = graph_data(test_db)  # default include_ingested=False
+    node_ids = {n.document_id for n in snapshot.nodes}
+    assert ids["x"] in node_ids
+    assert ids["y"] in node_ids
+
+
+def test_orphans_excludes_doc_with_only_derived_edge(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A vault note paired only via a derived edge is not flagged as an orphan."""
+    a = _make_doc(
+        test_db,
+        doc_id="11111111-1111-1111-1111-111111111111",
+        title="A",
+        vault_path="a.md",
+    )
+    b = _make_doc(
+        test_db,
+        doc_id="22222222-2222-2222-2222-222222222222",
+        title="B",
+        vault_path="b.md",
+    )
+    _derived(test_db, a=a, b=b, rule="shared_thread", weight=1.0)
+    rows = orphans(test_db)
+    assert {r.document_id for r in rows} == set()
+
+
+def test_graph_data_derived_edges_render_in_whole_graph_view(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Whole-graph (no root) view also keeps derived edges intact."""
+    ids = _gmail_pair(test_db)
+    _derived(
+        test_db,
+        a=ids["x"],
+        b=ids["y"],
+        rule="shared_thread",
+        weight=1.0,
+        evidence={"thread_id": "t1"},
+    )
+    snapshot = graph_data(test_db)
+    derived = [e for e in snapshot.edges if e.link_kind == "derived"]
+    assert len(derived) == 1
+    assert derived[0].rule == "shared_thread"

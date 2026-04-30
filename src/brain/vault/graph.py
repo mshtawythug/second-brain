@@ -1,10 +1,11 @@
-"""Read-only link graph queries over the ``links`` / ``unresolved_links`` tables.
+"""Read-only link graph queries over the ``links`` / ``unresolved_links`` /
+``derived_links`` tables.
 
 Phase 4 read API: backlinks, outgoing links, orphans, and a
-:class:`GraphData` snapshot suitable for export. All helpers are plain
-SELECTs over Phase 2's link materialization — no schema changes, no
-writes, no embedder dependency. Callers pass a ``psycopg.Connection``;
-this module never opens or closes one itself.
+:class:`GraphData` snapshot suitable for export. Plain SELECTs over
+Phase 2's wiki-link materialization plus Phase 5's metadata-derived edges —
+no schema changes, no writes, no embedder dependency. Callers pass a
+``psycopg.Connection``; this module never opens or closes one itself.
 
 Resolution conventions:
 
@@ -14,6 +15,21 @@ Resolution conventions:
 - ``vault_only=True`` filters by ``documents.kind='vault'`` — the spec's
   default for orphan / graph views since ingested-tier nodes (Krisp,
   Slack, Gmail mirrors) usually have no ``[[refs]]`` and clutter the graph.
+
+Derived-edge semantics:
+
+- ``derived_links`` rows are stored in canonical ``(LEAST, GREATEST)``
+  order and carry an undirected meaning ("these two docs share a
+  thread / participant"). Read paths therefore treat a derived edge as
+  symmetric: both :func:`backlinks_for` and :func:`outgoing_links_for`
+  return the partner regardless of which side of the storage row the
+  caller's document sits on.
+- Edges materialized in Python carry ``link_kind='derived'``. The schema
+  CHECK in migration 003 still restricts ``links.link_kind`` to
+  ``'wiki' | 'embed'`` — derived edges live in a sibling table, so the
+  enum extension is a Python-only convention.
+- Wiki-link edges keep ``rule=None``, ``weight=None``,
+  ``evidence=None``; derived edges populate all three.
 """
 from collections import deque
 from collections.abc import Iterable
@@ -39,15 +55,31 @@ class GraphNode:
 
 @dataclass(frozen=True)
 class GraphEdge:
-    """A directed wiki-link edge from ``src_document_id`` to ``dst_document_id``.
+    """An edge in the link graph — wiki-link, embed, or metadata-derived.
 
-    ``link_kind`` is ``'wiki'`` or ``'embed'`` (per the schema's CHECK).
-    ``link_text`` is the raw ``[[X]]`` text exactly as it appeared in the
-    source body (round-trippable). ``display_text`` carries the pipe alias
-    when the user wrote ``[[X|alias]]``; ``None`` otherwise.
+    ``link_kind`` is one of:
 
-    Self-loops (src == dst) are excluded by every query in this module —
-    sync's resolver already prevents a note from linking to itself.
+    - ``'wiki'`` / ``'embed'`` — wiki-link materialization (per the
+      ``links.link_kind`` CHECK constraint). ``link_text`` carries the
+      raw ``[[X]]`` exactly as it appeared in the source body;
+      ``display_text`` carries the pipe alias when the user wrote
+      ``[[X|alias]]``. ``rule`` / ``weight`` / ``evidence`` are all
+      ``None``.
+    - ``'derived'`` — Python-level convention (NOT a value in the schema
+      CHECK) for an edge sourced from ``derived_links``. ``link_text``
+      is empty; ``display_text`` is ``None``. ``rule`` is the rule that
+      fired (``'shared_thread'`` / ``'shared_participant'`` /
+      ``'same_day_participant'``), ``weight`` is the rule's confidence
+      (per :mod:`brain.vault.derived_links.rules`), and ``evidence``
+      is the JSONB payload as a Python dict.
+
+    Derived edges are stored as ``(src=LEAST, dst=GREATEST)`` and carry
+    an undirected meaning; consumers that care about direction must
+    treat the pair symmetrically.
+
+    Self-loops (src == dst) never appear: sync's resolver excludes them
+    for wiki edges, and ``derived_links``' ``CHECK (src <> dst)`` does
+    the same for derived.
     """
 
     src_document_id: str
@@ -55,6 +87,9 @@ class GraphEdge:
     link_kind: str
     link_text: str
     display_text: str | None
+    rule: str | None = None
+    weight: float | None = None
+    evidence: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +112,14 @@ class BacklinkRow:
 
     ``src_*`` describes the source of the inbound link; the destination is
     the document the caller passed to :func:`backlinks_for`.
+
+    For wiki/embed edges, ``link_text`` is the raw ``[[X]]`` and
+    ``rule`` / ``weight`` / ``evidence`` are ``None``. For derived edges,
+    ``link_kind='derived'``, ``link_text=''``, and ``rule`` / ``weight`` /
+    ``evidence`` carry the metadata-rule provenance. Derived edges are
+    undirected in semantics — ``backlinks_for(X)`` returns every doc
+    paired with X via ``derived_links`` regardless of which side X sits
+    on in the canonical storage row.
     """
 
     src_document_id: str
@@ -84,16 +127,26 @@ class BacklinkRow:
     src_kind: str
     link_text: str
     link_kind: str
+    rule: str | None = None
+    weight: float | None = None
+    evidence: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
 class OutgoingLinkRow:
     """One row of "documents I link TO."
 
-    For resolved links (the default), every ``dst_*`` field is populated.
-    For unresolved (dangling) ``[[refs]]`` returned with
+    For resolved wiki/embed links (the default), every ``dst_*`` field is
+    populated. For unresolved (dangling) ``[[refs]]`` returned with
     ``include_unresolved=True``, ``dst_document_id`` / ``dst_title`` /
     ``dst_kind`` are ``None`` and ``resolved=False``.
+
+    Derived edges are also included (with ``include_derived=True``, the
+    default) and carry ``link_kind='derived'`` plus populated
+    ``rule`` / ``weight`` / ``evidence``. Because derived edges are
+    undirected, ``outgoing_links_for(X)`` returns the same partner set
+    as ``backlinks_for(X)`` for them — every doc paired with X via
+    ``derived_links``, regardless of canonical storage direction.
     """
 
     dst_document_id: str | None
@@ -102,19 +155,30 @@ class OutgoingLinkRow:
     link_text: str
     link_kind: str
     resolved: bool
+    rule: str | None = None
+    weight: float | None = None
+    evidence: dict[str, Any] | None = None
 
 
 def backlinks_for(
     conn: psycopg.Connection[Any],
     document_id: str,
+    *,
+    include_derived: bool = True,
 ) -> list[BacklinkRow]:
     """Return every document that links TO ``document_id``.
 
-    Single SQL: a JOIN of ``links`` against ``documents`` to fetch the
-    source title / kind in one round-trip (no N+1). Result is sorted by
-    source title (case-insensitive) for deterministic output, then by
-    ``link_text`` to break ties when the same source has multiple
-    distinct ``[[refs]]`` to the same dst.
+    Wiki/embed rows come from a JOIN of ``links`` against ``documents``
+    (one round-trip, no N+1) and are sorted by source title
+    (case-insensitive) then by ``link_text`` to break ties.
+
+    With ``include_derived=True`` (the default), derived edges are
+    appended after the wiki block: every ``derived_links`` row whose src
+    or dst equals ``document_id`` contributes one row keyed on the
+    *partner* document. This treats derived storage as undirected per
+    spec §6 — a row stored ``(A, B)`` shows up in both ``backlinks_for(A)``
+    and ``backlinks_for(B)``. Derived rows sort within their block by
+    rule then partner title for deterministic output.
     """
     rows = conn.execute(
         """
@@ -126,7 +190,7 @@ def backlinks_for(
         """,
         (document_id,),
     ).fetchall()
-    return [
+    out: list[BacklinkRow] = [
         BacklinkRow(
             src_document_id=str(r[0]),
             src_title=str(r[1]),
@@ -136,6 +200,21 @@ def backlinks_for(
         )
         for r in rows
     ]
+    if include_derived:
+        out.extend(
+            BacklinkRow(
+                src_document_id=partner.document_id,
+                src_title=partner.title,
+                src_kind=partner.kind,
+                link_text="",
+                link_kind="derived",
+                rule=row.rule,
+                weight=row.weight,
+                evidence=row.evidence,
+            )
+            for row, partner in _derived_partners(conn, document_id)
+        )
+    return out
 
 
 def outgoing_links_for(
@@ -143,6 +222,7 @@ def outgoing_links_for(
     document_id: str,
     *,
     include_unresolved: bool = False,
+    include_derived: bool = True,
 ) -> list[OutgoingLinkRow]:
     """Return every document ``document_id`` links TO.
 
@@ -153,8 +233,14 @@ def outgoing_links_for(
     With ``include_unresolved=True``, the result also includes dangling
     ``[[refs]]`` from ``unresolved_links`` (``dst_document_id`` /
     ``dst_title`` / ``dst_kind`` all ``None``). Resolved rows come first,
-    then unresolved — both blocks individually sorted by ``link_text`` for
-    stable output.
+    then unresolved.
+
+    With ``include_derived=True`` (the default), derived edges are
+    appended after the resolved wiki block (and before the unresolved
+    block, when included). Because ``derived_links`` rows are undirected
+    in semantics, ``outgoing_links_for(X)`` returns the same partner set
+    as ``backlinks_for(X)`` for them — every doc paired with X
+    regardless of canonical direction.
     """
     resolved_rows = conn.execute(
         """
@@ -177,6 +263,21 @@ def outgoing_links_for(
         )
         for r in resolved_rows
     ]
+    if include_derived:
+        out.extend(
+            OutgoingLinkRow(
+                dst_document_id=partner.document_id,
+                dst_title=partner.title,
+                dst_kind=partner.kind,
+                link_text="",
+                link_kind="derived",
+                resolved=True,
+                rule=row.rule,
+                weight=row.weight,
+                evidence=row.evidence,
+            )
+            for row, partner in _derived_partners(conn, document_id)
+        )
     if include_unresolved:
         unresolved_rows = conn.execute(
             """
@@ -212,6 +313,12 @@ def orphans(
     unresolved (``unresolved_links.src_document_id``) — a note that wrote
     ``[[Foo]]`` once isn't an orphan even when ``Foo`` doesn't yet exist.
 
+    A document with at least one ``derived_links`` edge (on either side)
+    is also not an orphan: the metadata-aware linker has surfaced it as
+    connected to another doc through shared thread / participant
+    overlap, and the user's intuition for "orphan" is "nothing
+    connecting it" — derived edges count.
+
     Defaults to ``vault_only=True`` because ingested-tier orphans are
     usually noise: most Krisp / Slack / Gmail mirrors have no ``[[refs]]``
     yet, and surfacing all of them would drown the user's own notes.
@@ -223,6 +330,8 @@ def orphans(
     where = ["d.id NOT IN (SELECT src_document_id FROM links)"]
     where.append("d.id NOT IN (SELECT dst_document_id FROM links)")
     where.append("d.id NOT IN (SELECT src_document_id FROM unresolved_links)")
+    where.append("d.id NOT IN (SELECT src_document_id FROM derived_links)")
+    where.append("d.id NOT IN (SELECT dst_document_id FROM derived_links)")
     if vault_only:
         where.append("d.kind = 'vault'")
     sql = f"""
@@ -244,6 +353,7 @@ def graph_data(
     root: str | None = None,
     depth: int | None = None,
     include_ingested: bool = False,
+    include_derived: bool = True,
 ) -> GraphData:
     """Build a :class:`GraphData` snapshot for export.
 
@@ -260,12 +370,20 @@ def graph_data(
     immediate neighbourhood regardless of direction. Edges in the result
     keep their original direction.
 
-    The function issues at most three queries (nodes, links, optional
-    BFS-restricting filter applied in Python) — no per-node N+1.
+    With ``include_derived=True`` (the default), ``derived_links`` rows
+    are unioned into the edge set as ``link_kind='derived'`` edges,
+    carrying their canonical ``(LEAST, GREATEST)`` direction plus the
+    rule / weight / evidence triple. BFS treats derived edges as
+    undirected (same as wiki edges), and ingested-tier orphan filtering
+    correctly counts a doc connected only via derived edges as
+    connected. ``include_derived=False`` reproduces the pre-Phase-C
+    behavior.
+
+    The function issues at most three queries (wiki edges, derived
+    edges, documents) — no per-node N+1.
 
     Cycle safety: BFS uses a visited set, so ``A → B → A`` terminates at
-    depth 2 instead of looping. Self-loops never appear (sync's resolver
-    excludes them).
+    depth 2 instead of looping. Self-loops never appear.
     """
     # Single fetch of every link, plus a filter on the document set —
     # cheaper at personal-corpus scale than per-node SELECTs even when
@@ -278,7 +396,7 @@ def graph_data(
         ORDER BY src_document_id, dst_document_id, link_text, link_kind
         """
     ).fetchall()
-    all_edges = [
+    all_edges: list[GraphEdge] = [
         GraphEdge(
             src_document_id=str(r[0]),
             dst_document_id=str(r[1]),
@@ -288,6 +406,29 @@ def graph_data(
         )
         for r in edge_rows
     ]
+
+    if include_derived:
+        derived_rows = conn.execute(
+            """
+            SELECT src_document_id::text, dst_document_id::text,
+                   rule, weight, evidence
+            FROM derived_links
+            ORDER BY src_document_id, dst_document_id, rule
+            """
+        ).fetchall()
+        all_edges.extend(
+            GraphEdge(
+                src_document_id=str(r[0]),
+                dst_document_id=str(r[1]),
+                link_kind="derived",
+                link_text="",
+                display_text=None,
+                rule=str(r[2]),
+                weight=float(r[3]),
+                evidence=_coerce_evidence(r[4]),
+            )
+            for r in derived_rows
+        )
 
     # Pull every document so we can filter / look up titles in Python.
     # Personal-corpus scale (low thousands) — one fetch is cheaper than
@@ -353,6 +494,82 @@ def graph_data(
     return GraphData(nodes=kept_nodes, edges=kept_edges)
 
 
+@dataclass(frozen=True)
+class _DerivedRow:
+    """Internal projection of a ``derived_links`` row used by partner queries."""
+
+    rule: str
+    weight: float
+    evidence: dict[str, Any] | None
+
+
+def _derived_partners(
+    conn: psycopg.Connection[Any], document_id: str
+) -> list[tuple[_DerivedRow, GraphNode]]:
+    """Return ``(row, partner_node)`` pairs for every derived edge touching ``document_id``.
+
+    ``derived_links`` rows are stored undirected as ``(LEAST, GREATEST)``,
+    so a single SELECT with ``OR`` over both columns finds every edge the
+    document participates in. We resolve the *partner* document_id (the
+    other endpoint) plus its title/kind in one round-trip via a CASE +
+    JOIN, mirroring :func:`backlinks_for`'s anti-N+1 style.
+
+    Sort order: rule, then partner title (case-insensitive), then partner
+    id. Stable across calls so callers can pin output bytes in tests.
+    """
+    rows = conn.execute(
+        """
+        SELECT
+            dl.rule,
+            dl.weight,
+            dl.evidence,
+            partner.id::text,
+            partner.title,
+            partner.kind
+        FROM derived_links dl
+        JOIN documents partner
+          ON partner.id = CASE
+              WHEN dl.src_document_id = %(doc)s THEN dl.dst_document_id
+              ELSE dl.src_document_id
+          END
+        WHERE dl.src_document_id = %(doc)s OR dl.dst_document_id = %(doc)s
+        ORDER BY dl.rule, LOWER(partner.title), partner.id::text
+        """,
+        {"doc": document_id},
+    ).fetchall()
+    return [
+        (
+            _DerivedRow(
+                rule=str(r[0]),
+                weight=float(r[1]),
+                evidence=_coerce_evidence(r[2]),
+            ),
+            GraphNode(
+                document_id=str(r[3]),
+                title=str(r[4]),
+                kind=str(r[5]),
+            ),
+        )
+        for r in rows
+    ]
+
+
+def _coerce_evidence(raw: Any) -> dict[str, Any] | None:
+    """Normalize a JSONB column read into a Python ``dict``.
+
+    psycopg's default JSONB adapter already returns ``dict``; this
+    helper is a thin defensive copy so callers can't mutate the
+    underlying row's payload. ``derived_links.evidence`` is
+    ``NOT NULL DEFAULT '{}'::jsonb`` per migration 005, so an empty
+    ``{}`` is the worst case — a payload with no keys. Anything else
+    falls through to ``None`` and the caller treats the row as
+    payload-less.
+    """
+    if isinstance(raw, dict):
+        return dict(raw)
+    return None
+
+
 def _connected_node_set(edges: Iterable[GraphEdge]) -> set[str]:
     """Return every document_id that appears as src or dst in ``edges``."""
     out: set[str] = set()
@@ -375,7 +592,8 @@ def _bfs_frontier(
     because a "graph view rooted at X" intuitively pulls in both backlinks
     and outgoing links — the user expects to see X's neighbourhood in
     every direction. Edge orientation is preserved later when building
-    the final :class:`GraphData`.
+    the final :class:`GraphData`. Derived edges already store undirected
+    semantics; mixing them into ``edges`` here is correct.
     """
     # Build an undirected adjacency map once. Cheaper than scanning the
     # edge list per hop (O(|edges|) per hop vs. O(|nodes|) per hop after
