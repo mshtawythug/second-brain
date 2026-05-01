@@ -10,6 +10,7 @@ the ingest itself.
 import datetime
 import json
 import os
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -173,6 +174,43 @@ def test_ingest_stdin_date_flag_populates_metadata(
     assert row is not None
     assert row[0]["date"] == "2026-04-24"
     assert row[1]["date"] == "2026-04-24"
+
+
+def test_ingest_stdin_creates_vault_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """`brain ingest-stdin` writes a mirror under ``<vault>/_ingested/<source>/``.
+
+    Setup: sandbox ``BRAIN_VAULT_PATH`` to ``tmp_path``.
+    Exercise: invoke ingest-stdin with a slack snippet on stdin.
+    Verify: a single Markdown file lands under ``_ingested/slack/`` whose
+    body contains the stdin content.
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+
+    body = "Mirror this slack thread into the vault.\n"
+    result = CliRunner().invoke(
+        app,
+        [
+            "ingest-stdin",
+            "--source", "slack",
+            "--external-id", "ts-mirror",
+            "--title", "Slack mirror test",
+            "--content-type", "transcript",
+        ],
+        input=body,
+    )
+
+    assert result.exit_code == 0, result.output
+    mirror_dir = tmp_path / "_ingested" / "slack"
+    assert mirror_dir.is_dir(), f"missing mirror dir: {mirror_dir}"
+    mirrors = list(mirror_dir.glob("*.md"))
+    assert len(mirrors) == 1, f"expected one mirror file, got {mirrors}"
+    assert "Mirror this slack thread" in mirrors[0].read_text(encoding="utf-8")
 
 
 def test_ingest_stdin_force_reingests(

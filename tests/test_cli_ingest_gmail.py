@@ -17,6 +17,7 @@ import base64
 import json
 import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -637,6 +638,42 @@ def test_directory_upsert_runs_in_same_transaction(
     assert docs is not None and docs[0] == 0
     assert chunks is not None and chunks[0] == 0
     assert dir_rows is not None and dir_rows[0] == 0
+
+
+def test_ingest_gmail_creates_vault_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """`brain ingest-gmail` writes a mirror under ``<vault>/_ingested/gmail/``.
+
+    Setup: stub the gws CLI so a single message is returned; sandbox
+    ``BRAIN_VAULT_PATH`` to ``tmp_path``.
+    Exercise: invoke ``ingest-gmail --label`` to pull the stubbed message.
+    Verify: a Markdown file lands under ``_ingested/gmail/`` with the
+    message body inside.
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    msgs = {
+        "m1": _msg(
+            id="m1",
+            subject="Mirror this email",
+            from_addr="n@x",
+            body="Mirror body content",
+        ),
+    }
+    monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(msgs))
+
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
+
+    assert result.exit_code == 0, result.output
+    mirror_dir = tmp_path / "_ingested" / "gmail"
+    assert mirror_dir.is_dir(), f"missing mirror dir: {mirror_dir}"
+    mirrors = list(mirror_dir.glob("*.md"))
+    assert len(mirrors) == 1, f"expected one mirror file, got {mirrors}"
+    assert "Mirror body content" in mirrors[0].read_text(encoding="utf-8")
 
 
 def test_cli_ingest_gmail_populates_directory(

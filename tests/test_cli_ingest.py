@@ -153,6 +153,70 @@ def test_ingest_dir_continues_on_per_file_error(
     assert "bad.pdf" in result.output
 
 
+def test_ingest_creates_vault_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fixtures_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """`brain ingest <file>` writes a mirror under ``<vault>/_ingested/manual/``.
+
+    Setup: point ``BRAIN_VAULT_PATH`` at a sandbox tmp dir so the mirror
+    write doesn't touch the real ``~/brain-vault``.
+    Exercise: invoke the ingest command on a fixture text file.
+    Verify: a Markdown file lands under ``_ingested/manual/`` whose body
+    contains the original file's content.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    _patch_embedder(monkeypatch)
+
+    result = CliRunner().invoke(app, ["ingest", str(fixtures_dir / "sample.txt")])
+
+    assert result.exit_code == 0, result.output
+    mirror_dir = tmp_path / "_ingested" / "manual"
+    assert mirror_dir.is_dir(), f"missing mirror dir: {mirror_dir}"
+    mirrors = list(mirror_dir.glob("*.md"))
+    assert len(mirrors) == 1, f"expected one mirror file, got {mirrors}"
+    body = mirrors[0].read_text(encoding="utf-8")
+    expected = (fixtures_dir / "sample.txt").read_text(encoding="utf-8").strip()
+    assert expected.splitlines()[0] in body
+
+
+def test_ingest_dir_creates_vault_mirrors(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fixtures_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """`brain ingest-dir` writes one mirror per ingested file.
+
+    Uses a small isolated tmp dir (rather than ``fixtures_dir``) so we can
+    enumerate exactly which files were ingested. The dir holds two simple
+    text files; both should appear under ``_ingested/manual/``.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    _patch_embedder(monkeypatch)
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "alpha.txt").write_text("alpha body content\n", encoding="utf-8")
+    (src_dir / "beta.txt").write_text("beta body content\n", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["ingest-dir", str(src_dir)])
+
+    assert result.exit_code == 0, result.output
+    mirror_dir = tmp_path / "vault" / "_ingested" / "manual"
+    assert mirror_dir.is_dir(), f"missing mirror dir: {mirror_dir}"
+    mirrors = sorted(mirror_dir.glob("*.md"))
+    assert len(mirrors) == 2, f"expected two mirror files, got {mirrors}"
+    bodies = [p.read_text(encoding="utf-8") for p in mirrors]
+    joined = "\n".join(bodies)
+    assert "alpha body content" in joined
+    assert "beta body content" in joined
+
+
 def test_extract_path_raises_on_unsupported(tmp_path: Path) -> None:
     bogus = tmp_path / "weird.xyz"
     bogus.write_text("irrelevant", encoding="utf-8")

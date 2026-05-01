@@ -413,6 +413,7 @@ def ingest(
             source_kind="manual",
             tags=list(tag),
             force=force,
+            vault_root=cfg.vault_path,
         )
     verb = "ingested" if result.created else "skipped (already ingested)"
     typer.echo(f"{verb}: {path.name} → {result.document_id}")
@@ -461,6 +462,7 @@ def ingest_dir(
                     doc=doc,
                     source_kind="manual",
                     tags=list(tag),
+                    vault_root=cfg.vault_path,
                 )
                 verb = "ingested" if result.created else "skipped"
                 typer.echo(f"  {verb}: {f.name}")
@@ -524,6 +526,7 @@ def ingest_stdin(
             tags=list(tag),
             force=force,
             gws_runner=gws_runner,
+            vault_root=cfg.vault_path,
         )
     verb = "ingested" if result.created else "skipped (already ingested)"
     typer.echo(f"{verb}: {title} → {result.document_id}")
@@ -588,6 +591,7 @@ def ingest_gmail(
                         "date": doc.metadata.get("date"),
                     },
                     tags=list(tag),
+                    vault_root=cfg.vault_path,
                 )
                 verb = "ingested" if result.created else "skipped"
                 typer.echo(f"  {verb}: {doc.title[:60]}")
@@ -1048,6 +1052,7 @@ def _edit_via_editor(cfg: Config, doc_id: str) -> int:
                 metadata_patch=new_meta,
                 replace_metadata=True,
                 new_tags=new_tags,
+                vault_root=cfg.vault_path,
             )
         except ValueError as e:
             typer.secho(str(e), fg="red", err=True)
@@ -1255,6 +1260,7 @@ def edit(
                 new_content=new_content,
                 metadata_patch=metadata_patch,
                 replace_metadata=replace_metadata,
+                vault_root=cfg.vault_path,
             )
         except ValueError as e:
             typer.secho(str(e), fg="red", err=True)

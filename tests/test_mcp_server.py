@@ -7,6 +7,7 @@ JSON-RPC round-trip is exercised separately by the protocol integration test.
 import logging
 import os
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -526,6 +527,47 @@ def test_brain_ingest_stdin_passes_date_into_metadata(
     doc_id = payload["document_id"]
     assert doc_id is not None
     assert _doc_metadata(doc_id)["date"] == "2026-01-15"
+
+
+def test_brain_ingest_stdin_creates_vault_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,  # noqa: ARG001 — ensures fresh schema
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Invoking ``brain_ingest_stdin`` writes a mirror under
+    ``state.cfg.vault_path / _ingested/<source>/``.
+
+    Setup: install an ``mcp_server._state`` whose Config points at the test
+    DB AND whose ``vault_path`` is sandboxed to ``tmp_path`` (so the mirror
+    write doesn't touch the real ``~/brain-vault``).
+    Exercise: call the MCP tool function directly.
+    Verify: a single Markdown file lands under ``_ingested/slack/`` whose
+    body contains the input content.
+    """
+    state = mcp_server._State(
+        cfg=Config(database_url=TEST_DATABASE_URL, vault_path=tmp_path),
+        embedder=fake_embedder,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+
+    payload = mcp_server.brain_ingest_stdin(
+        content="Mirror this slack thread via MCP.\n",
+        source="slack",
+        external_id="slack:mirror:1",
+        title="Slack mirror via MCP",
+        content_type="transcript",
+    )
+
+    assert payload["created"] is True
+    assert payload["document_id"] is not None
+    mirror_dir = tmp_path / "_ingested" / "slack"
+    assert mirror_dir.is_dir(), f"missing mirror dir: {mirror_dir}"
+    mirrors = list(mirror_dir.glob("*.md"))
+    assert len(mirrors) == 1, f"expected one mirror file, got {mirrors}"
+    assert "Mirror this slack thread via MCP" in mirrors[0].read_text(
+        encoding="utf-8"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -367,6 +367,7 @@ def brain_ingest_stdin(
                 source_external_id=external_id,
                 source_metadata=meta,
                 tags=merged_tags,
+                vault_root=state.cfg.vault_path,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -459,6 +460,7 @@ def brain_edit(
                     new_content=content,
                     metadata_patch=metadata,
                     replace_metadata=replace_metadata,
+                    vault_root=state.cfg.vault_path,
                 )
             except ValueError as e:
                 raise _mcp_error(INVALID_PARAMS, str(e)) from e
