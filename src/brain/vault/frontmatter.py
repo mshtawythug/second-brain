@@ -1,9 +1,12 @@
 """YAML frontmatter writer + reader for vault files."""
 import hashlib
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import yaml
 
+from ._atomic import atomic_write_text
 from .derived_links.fence import strip_fence
 
 _FENCE = "---"
@@ -110,3 +113,48 @@ def body_hash(text: str) -> str:
     fence_stripped = strip_fence(body)
     normalized = fence_stripped.replace("\r\n", "\n").replace("\r", "\n").strip()
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def rewrite_tags(path: Path, new_tags: list[str]) -> bool:
+    """Rewrite a vault file's frontmatter ``tags:`` field to ``new_tags``.
+
+    Returns ``True`` if the file changed, ``False`` if it was already in
+    sync — calling this with the same ``new_tags`` twice in a row is a
+    guaranteed no-op on the second call (no rewrite, no ``updated:`` bump,
+    no mtime change). That idempotency is what lets ``brain tag`` and
+    ``brain backfill normalize-tags`` run repeatedly without churning the
+    vault's git history.
+
+    Behavior:
+
+    - All other frontmatter keys and their order are preserved (the dict
+      is mutated in place; :func:`dump_frontmatter` uses ``sort_keys=False``).
+    - A missing ``tags:`` key and an empty ``tags: []`` list are both
+      treated as "set fresh" — passing a non-empty ``new_tags`` triggers
+      a write in either case.
+    - On any change, ``updated:`` is bumped to the current UTC timestamp
+      (mirrors :func:`brain.vault.rename._rewrite_source_frontmatter`).
+      The body is untouched, so ``body_hash`` is stable and the next
+      ``brain vault sync`` skips re-embedding.
+    - The disk write goes through :func:`brain.vault._atomic.atomic_write_text`
+      so a partial write can never leave a half-rewritten frontmatter on
+      disk.
+
+    Raises:
+        FileNotFoundError: if ``path`` does not exist.
+        yaml.YAMLError: propagated from :func:`parse_frontmatter` if the
+            existing frontmatter is unparseable.
+        ValueError: propagated from :func:`parse_frontmatter` if the
+            frontmatter is structurally invalid (e.g. a YAML list at the
+            top level instead of a mapping).
+    """
+    text = path.read_text(encoding="utf-8")
+    fields, body = parse_frontmatter(text)
+    current_tags = list(fields.get("tags") or [])
+    desired_tags = list(new_tags)
+    if current_tags == desired_tags:
+        return False
+    fields["tags"] = desired_tags
+    fields["updated"] = datetime.now(UTC).isoformat()
+    atomic_write_text(path, dump_frontmatter(fields, body))
+    return True
