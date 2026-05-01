@@ -578,6 +578,27 @@ def _worker_loop(
                     # spurious fence-only no-op.
                     state.body_cache.pop(job.abs_path, None)
             else:
+                if not job.abs_path.exists():
+                    # Symmetric to the stale-delete guard above: an
+                    # ``upsert`` event can survive past the file's
+                    # actual existence, e.g. a transient editor temp
+                    # file, a ``brain note new`` followed immediately
+                    # by ``brain rm``, or any tool that creates +
+                    # removes within the debounce window. Without this
+                    # guard ``sync_one_file`` would raise
+                    # ``FileNotFoundError``, the outer ``except`` would
+                    # bump ``state.errors``, and the shutdown report
+                    # would falsely flag a phantom failure. Skip the
+                    # job entirely (``continue``) so neither
+                    # ``processed`` nor ``errors`` advances — there
+                    # was no real work to count.
+                    logger.debug(
+                        "vault watcher: ignoring stale upsert for %s "
+                        "(file no longer exists — likely a transient "
+                        "create+delete)",
+                        job.abs_path,
+                    )
+                    continue
                 if _is_fence_only_write(state, job.abs_path):
                     state.skipped_fence_only += 1
                     logger.debug(

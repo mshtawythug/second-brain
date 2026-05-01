@@ -604,6 +604,89 @@ def test_stale_delete_event_preserves_existing_file(
     thread.join(timeout=5.0)
 
 
+def test_stale_upsert_event_for_vanished_file(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """A spurious 'created' fsevent for a vanished file must be a no-op.
+
+    Symmetric to the delete-side fix in ``ecef181``. Without this guard
+    the worker calls ``sync_one_file`` which raises ``FileNotFoundError``,
+    which the outer ``try/except Exception`` catches and counts as
+    ``state.errors``. That's noisy + cluttering: we processed an event for
+    a path that doesn't exist on disk; nothing is wrong, just stale.
+
+    Trigger scenarios in the wild: editor atomic-save creating + removing a
+    temp file inside the debounce window, ``brain note new`` immediately
+    followed by ``brain rm``, or any tool that creates + removes within the
+    same debounce interval and races the worker.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    # Path that has NEVER existed on disk — the whole point.
+    ghost = vault / "phantom.md"
+    assert not ghost.exists(), "test setup invariant: file must not exist"
+
+    events: list[Any] = []
+    config = WatchConfig(
+        vault_path=vault,
+        debounce_ms=10,
+        on_event=lambda a, p: events.append((a, p)),
+    )
+
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+
+    # Snapshot processed counter BEFORE we inject — startup sync may have
+    # incremented it for the (empty) initial scan, and we want a delta.
+    state = observer.handler._state
+    processed_before = state.processed
+
+    # Inject a "created" event for a path that doesn't exist. The previous
+    # behavior here was: enqueue → worker calls sync_one_file → FileNotFoundError
+    # → except → state.errors += 1. The fix: re-stat before sync, treat
+    # nonexistence as a no-op.
+    observer.inject(FileCreatedEvent(str(ghost)))
+
+    # Wait for the worker to dequeue the job. The on_event hook fires when a
+    # job is enqueued (post-debounce); we poll for that, then bound-wait for
+    # the worker to finish acting on it. We can't sync on a DB row appearing
+    # (it shouldn't) or on processed advancing (it shouldn't either, per the
+    # impl decision to ``continue``), so the bounded wait is the right shape.
+    _wait_for(lambda: ("upsert", ghost) in events, timeout=2.0)
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    # The fix: stale upsert for a vanished file must NOT raise + be caught.
+    assert state.errors == 0, (
+        f"stale upsert event inflated state.errors (={state.errors}); "
+        f"watcher should re-stat the path before sync_one_file"
+    )
+
+    # And it must NOT have written anything to the DB.
+    count = test_db.execute("SELECT count(*) FROM documents").fetchone()[0]
+    assert count == 0, (
+        f"stale upsert event produced a spurious DB row (count={count}); "
+        f"watcher should skip when the file does not exist"
+    )
+
+    # And per impl decision: state.processed must NOT advance for a stale
+    # event. A vanished file isn't meaningful work, neither processed nor
+    # errored — it's a phantom event that should leave the counters alone.
+    assert state.processed == processed_before, (
+        f"state.processed advanced for a stale upsert "
+        f"({processed_before} → {state.processed}); the worker should "
+        f"``continue`` without counting a vanished file as work"
+    )
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
 def test_graceful_shutdown_drains_pending(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
 ) -> None:
@@ -1745,16 +1828,22 @@ def test_overflow_full_sync_clears_body_cache(
     thread.join(timeout=5.0)
 
 
-def test_unreadable_file_falls_through_to_sync(
+def test_vanished_file_with_cached_body_is_noop(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path, mocker: Any
 ) -> None:
-    """When the worker can't read the file, ``_is_fence_only_write`` returns
-    False so sync runs and surfaces the read error through the existing
-    error path.
+    """A vanished file with a stale body-cache entry must be a no-op.
 
-    Drives the OSError branch deterministically by deleting the file
-    between cache seed and event injection — without resorting to OS
-    permission tricks that vary by platform.
+    Companion to ``test_stale_upsert_event_for_vanished_file`` (which covers
+    the cold-cache case). The upsert-side existence guard runs BEFORE
+    ``_is_fence_only_write``, so it intercepts the vanished file
+    regardless of cache state — sync is never attempted, no error is
+    counted, and the spy never fires.
+
+    Historical context: an earlier version of this test asserted the
+    OPPOSITE — that ``sync_one_file`` would be called on the vanished file
+    and the resulting ``FileNotFoundError`` would surface through the
+    error path. That was the symptom of the bug fixed in this change;
+    the test has been inverted to lock in the fix.
     """
     spy_calls = _make_sync_spy(mocker)
     vault = tmp_path / "vault"
@@ -1763,7 +1852,12 @@ def test_unreadable_file_falls_through_to_sync(
     note_id = str(uuid.uuid4())
     _write(note, {"id": note_id, "title": "Vanished"}, "x\n")
 
-    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    events: list[Any] = []
+    config = WatchConfig(
+        vault_path=vault,
+        debounce_ms=10,
+        on_event=lambda a, p: events.append((a, p)),
+    )
     thread, _ = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
@@ -1772,14 +1866,25 @@ def test_unreadable_file_falls_through_to_sync(
     observer = _wait_for_observer()
     state = observer.handler._state
     state.body_cache[note] = strip_fence(note.read_text())
+    processed_before = state.processed
 
-    # Make the read fail by removing the file before the event fires.
+    # Make the file vanish AFTER cache seeding but BEFORE the worker acts.
     note.unlink()
     observer.inject(FileModifiedEvent(str(note)))
 
-    _wait_for(lambda: len(spy_calls) >= 1, timeout=2.0)
-    assert spy_calls == [note]
+    _wait_for(lambda: ("upsert", note) in events, timeout=2.0)
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    # Existence-guard short-circuits before _is_fence_only_write or sync.
+    assert spy_calls == [], (
+        f"vanished file triggered sync; existence guard should have "
+        f"short-circuited (call log: {spy_calls!r})"
+    )
     assert state.skipped_fence_only == 0
+    assert state.errors == 0
+    assert state.processed == processed_before
 
     state.stop_event.set()
     thread.join(timeout=5.0)
