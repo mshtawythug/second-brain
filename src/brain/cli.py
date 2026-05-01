@@ -71,8 +71,8 @@ from .vault.derived_links import (
     rescan_gmail_directory,
 )
 from .vault.derived_links.fence import rewrite_derived_fences
-from .vault.export import export_vault
-from .vault.frontmatter import dump_frontmatter, parse_frontmatter
+from .vault.export import export_vault, regenerate_vault_file
+from .vault.frontmatter import dump_frontmatter, parse_frontmatter, rewrite_tags
 from .vault.graph import (
     backlinks_for,
     graph_data,
@@ -823,8 +823,24 @@ def list_docs(
 def tag(
     id: str = typer.Argument(...),
     mods: list[str] = typer.Argument(...),
+    regenerate_file: bool = typer.Option(
+        False,
+        "--regenerate-file",
+        help=(
+            "If the doc's vault mirror is missing, recreate it from the DB "
+            "before applying tags. Errors out for vault-tier authored notes."
+        ),
+    ),
 ) -> None:
-    """Add (+name) or remove (-name) tags. Example: brain tag abc1234 +interview -draft"""
+    """Add (+name) or remove (-name) tags. Example: brain tag abc1234 +interview -draft
+
+    When the document has a ``vault_path``, the change is also written to the
+    file's frontmatter so the next ``brain vault sync`` does not re-read
+    stale ``tags: []`` from disk and overwrite the DB. The rewrite is
+    idempotent — re-running with the same arguments touches neither DB nor
+    file. Pass ``--regenerate-file`` to recreate a missing ``_ingested/``
+    mirror from the DB row (vault-tier authored notes are refused).
+    """
     add = [m[1:] for m in mods if m.startswith("+") and len(m) > 1]
     remove = [m[1:] for m in mods if m.startswith("-") and len(m) > 1]
     if not (add or remove):
@@ -833,8 +849,90 @@ def tag(
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         doc_id = _resolve_id(conn, id)
-        apply_tags(conn, doc_id, add=add, remove=remove)
-    typer.echo(f"updated tags on {doc_id[:8]}")
+        # Capture vault_path / kind BEFORE the DB write so the suffix matches
+        # the row state we read; the DB write below cannot change either field.
+        row = conn.execute(
+            "SELECT vault_path, kind FROM documents WHERE id = %s",
+            (doc_id,),
+        ).fetchone()
+        assert row is not None  # _resolve_id confirmed the doc exists
+        vault_path_rel: str | None = row[0]
+        kind: str = row[1]
+        new_tags = apply_tags(conn, doc_id, add=add, remove=remove)
+        suffix = _tag_file_writeback(
+            conn,
+            cfg=cfg,
+            vault_path_rel=vault_path_rel,
+            kind=kind,
+            new_tags=new_tags,
+            doc_id=doc_id,
+            regenerate_file=regenerate_file,
+        )
+    typer.echo(f"updated tags on {doc_id[:8]}{suffix}")
+
+
+def _tag_file_writeback(
+    conn: psycopg.Connection[Any],
+    *,
+    cfg: Config,
+    vault_path_rel: str | None,
+    kind: str,
+    new_tags: list[str],
+    doc_id: str,
+    regenerate_file: bool,
+) -> str:
+    """Apply the post-``apply_tags`` file-system side effects for ``brain tag``.
+
+    Returns the suffix to append to the CLI's "updated tags on <id>" line —
+    the suffix shape is part of the user-facing contract and is matched by
+    downstream tests, so keep the strings stable across changes.
+
+    Behavior matches the matrix in
+    ``docs/plans/2026-04-30-brain-tag-frontmatter-write.md``:
+
+    - ``vault_path`` NULL → DB-only, no warning.
+    - File exists → :func:`rewrite_tags` (idempotent — no-op when tags already
+      match disk).
+    - File missing + ``kind='ingested'`` + ``--regenerate-file`` →
+      :func:`regenerate_vault_file` then :func:`rewrite_tags`.
+    - File missing + ``kind='ingested'`` (no flag) → DB-only + yellow warn.
+    - File missing + ``kind='vault'`` + ``--regenerate-file`` → ``BadParameter``
+      (regenerating an authored note from DB risks data loss).
+    - File missing + ``kind='vault'`` (no flag) → DB-only + yellow warn.
+    """
+    if vault_path_rel is None:
+        return " (db only)"
+    abs_path = cfg.vault_path / vault_path_rel
+    if abs_path.exists():
+        rewrite_tags(abs_path, new_tags)
+        return " (file)"
+    if kind == "ingested" and regenerate_file:
+        written_path = regenerate_vault_file(
+            conn, doc_id, vault_path=cfg.vault_path
+        )
+        rewrite_tags(written_path, new_tags)
+        return " (file regenerated)"
+    if kind == "ingested":
+        typer.secho(
+            "file missing on disk; tagged DB only. "
+            "Pass --regenerate-file to recreate the vault mirror from the DB.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
+        return " (db only, file missing)"
+    if kind == "vault" and regenerate_file:
+        raise typer.BadParameter(
+            "cannot --regenerate-file a vault-tier authored note; "
+            "restore from backup or git instead"
+        )
+    # kind == "vault" without --regenerate-file
+    typer.secho(
+        "vault-tier authored note is missing on disk; "
+        "restore from backup or git rather than regenerating.",
+        fg=typer.colors.YELLOW,
+        err=True,
+    )
+    return " (db only, vault file missing)"
 
 
 def _print_update_result(result: UpdateResult, doc_id: str) -> None:
