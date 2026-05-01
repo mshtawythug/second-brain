@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 from brain.cli import app
 from brain.ingest import ExtractedDoc, ingest_document
-from brain.vault.export import export_vault
+from brain.vault.export import export_vault, regenerate_vault_file
 from brain.vault.frontmatter import parse_frontmatter
 
 
@@ -655,3 +655,152 @@ def test_export_omits_aliases_when_metadata_value_is_not_a_list(
     target = next((tmp_path / "vault" / "_ingested" / "manual").glob("*.md"))
     fields, _ = parse_frontmatter(target.read_text())
     assert "aliases" not in fields
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 (Task: regenerate_vault_file): single-doc materialization helper.
+# ---------------------------------------------------------------------------
+
+
+def test_regenerate_vault_file_writes_same_bytes_as_export_vault(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Single-doc helper produces byte-identical output to a corpus dump.
+
+    This is the contract that lets ``brain tag --regenerate-file`` slot
+    in safely: regenerating one doc must look exactly like an `export_vault`
+    pass for that doc — same path, same frontmatter, same body.
+    """
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="round trip",
+        content="body content",
+        source_kind="krisp",
+        external_id="rt12345678",
+        metadata={"date": "2026-04-15"},
+        source_metadata={"date": "2026-04-15"},
+    )
+
+    # Single-doc regenerate into vault A.
+    vault_a = tmp_path / "vault_a"
+    written = regenerate_vault_file(test_db, doc_id, vault_path=vault_a)
+
+    # Corpus export into vault B.
+    vault_b = tmp_path / "vault_b"
+    export_vault(test_db, vault_path=vault_b)
+
+    # Same file path under both roots.
+    rel = written.relative_to(vault_a.resolve())
+    counterpart = vault_b / rel
+    assert counterpart.is_file()
+    assert written.read_bytes() == counterpart.read_bytes()
+
+
+def test_regenerate_vault_file_returns_absolute_path(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Return value is a real absolute path that exists on disk."""
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="abs path",
+        content="x",
+        source_kind="manual",
+    )
+    written = regenerate_vault_file(test_db, doc_id, vault_path=tmp_path / "vault")
+    assert written.is_absolute()
+    assert written.exists()
+    assert written.is_file()
+
+
+def test_regenerate_vault_file_unknown_id_raises(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    """Unknown UUID surfaces as ValueError — caller decides how to report it.
+
+    Uses a syntactically-valid UUID that isn't in the DB so the
+    ``WHERE id = %s::uuid`` cast succeeds but the row lookup returns
+    nothing.
+    """
+    bogus_id = "00000000-0000-0000-0000-000000000000"
+    with pytest.raises(ValueError, match="no document"):
+        regenerate_vault_file(test_db, bogus_id, vault_path=tmp_path / "vault")
+
+
+def test_regenerate_vault_file_refuses_kind_vault(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    """Vault-tier authored notes are file-source-of-truth — never regenerate.
+
+    The DB's copy can lag behind the on-disk version (the user edits the
+    vault file directly between syncs). Rebuilding from the DB would
+    silently clobber unsaved edits, so we error out and force the caller
+    to pick a real recovery path (git restore / backup).
+    """
+    row = test_db.execute(
+        "INSERT INTO documents "
+        "(title, content, content_hash, content_type, kind, vault_path) "
+        "VALUES ('Vault Note', 'body', 'h-vault-x', 'note', "
+        "'vault', 'projects/notes/v.md') RETURNING id::text"
+    ).fetchone()
+    assert row is not None
+    doc_id = row[0]
+    with pytest.raises(ValueError, match="vault-tier"):
+        regenerate_vault_file(test_db, doc_id, vault_path=tmp_path / "vault")
+
+
+def test_regenerate_vault_file_is_idempotent(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Second call returns the same path and does not rewrite the file.
+
+    Mirrors the body-hash skip path in ``export_vault``: if the on-disk
+    body matches the DB content_hash, the file stays put. mtime stability
+    is the observable signal here.
+    """
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="idempotent",
+        content="stable body",
+        source_kind="manual",
+    )
+    vault = tmp_path / "vault"
+    first = regenerate_vault_file(test_db, doc_id, vault_path=vault)
+    first_mtime_ns = first.stat().st_mtime_ns
+    first_bytes = first.read_bytes()
+
+    second = regenerate_vault_file(test_db, doc_id, vault_path=vault)
+    assert second == first
+    assert second.read_bytes() == first_bytes
+    # No-op rewrite leaves mtime untouched (didn't open the file for write).
+    assert second.stat().st_mtime_ns == first_mtime_ns
+
+
+def test_regenerate_vault_file_honors_existing_vault_path(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Ingested doc with a recorded ``vault_path`` regenerates at THAT path.
+
+    The corpus dump always recomputes ingested paths from source/title;
+    the single-doc helper instead trusts the doc's saved location so a
+    previously-synced mirror doesn't get duplicated under a freshly
+    computed path (which would orphan the original).
+    """
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="custom location",
+        content="body",
+        source_kind="manual",
+    )
+    custom_rel = "_ingested/manual/custom/place.md"
+    test_db.execute(
+        "UPDATE documents SET vault_path = %s WHERE id = %s::uuid",
+        (custom_rel, doc_id),
+    )
+    vault = tmp_path / "vault"
+    written = regenerate_vault_file(test_db, doc_id, vault_path=vault)
+    assert written == (vault / custom_rel).resolve()
+    assert written.is_file()

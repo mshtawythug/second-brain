@@ -82,6 +82,36 @@ def _is_directory_unmanaged(target: Path) -> bool:
     return not (target / "README.md").is_file()
 
 
+_DOCUMENT_FOR_EXPORT_COLUMNS = (
+    "d.id::text, d.title, d.content, d.content_hash, "
+    "d.content_type, d.tags, d.metadata, d.ingested_at, "
+    "d.kind, d.vault_path, s.kind, s.external_id"
+)
+
+
+def _row_to_document_for_export(row: tuple[Any, ...]) -> _DocumentForExport:
+    """Project a SELECT row into the dataclass.
+
+    Centralizes the column-index mapping so :func:`_iter_documents` and
+    :func:`_fetch_document_for_export` share one source of truth and a
+    schema change touches a single helper.
+    """
+    return _DocumentForExport(
+        id=str(row[0]),
+        title=str(row[1]),
+        content=str(row[2]),
+        content_hash=str(row[3]),
+        content_type=str(row[4]),
+        tags=list(row[5] or []),
+        metadata=dict(row[6] or {}),
+        ingested_at=row[7],
+        kind=str(row[8]),
+        vault_path=row[9],
+        source_kind=row[10],
+        source_external_id=row[11],
+    )
+
+
 def _iter_documents(conn: psycopg.Connection[Any]) -> Iterator[_DocumentForExport]:
     """Yield every document, joined with its source row, in batches.
 
@@ -93,10 +123,8 @@ def _iter_documents(conn: psycopg.Connection[Any]) -> Iterator[_DocumentForExpor
     while True:
         if last_id is None:
             rows = conn.execute(
-                """
-                SELECT d.id::text, d.title, d.content, d.content_hash,
-                       d.content_type, d.tags, d.metadata, d.ingested_at,
-                       d.kind, d.vault_path, s.kind, s.external_id
+                f"""
+                SELECT {_DOCUMENT_FOR_EXPORT_COLUMNS}
                 FROM documents d
                 LEFT JOIN sources s ON s.id = d.source_id
                 ORDER BY d.id
@@ -106,10 +134,8 @@ def _iter_documents(conn: psycopg.Connection[Any]) -> Iterator[_DocumentForExpor
             ).fetchall()
         else:
             rows = conn.execute(
-                """
-                SELECT d.id::text, d.title, d.content, d.content_hash,
-                       d.content_type, d.tags, d.metadata, d.ingested_at,
-                       d.kind, d.vault_path, s.kind, s.external_id
+                f"""
+                SELECT {_DOCUMENT_FOR_EXPORT_COLUMNS}
                 FROM documents d
                 LEFT JOIN sources s ON s.id = d.source_id
                 WHERE d.id > %s::uuid
@@ -122,20 +148,30 @@ def _iter_documents(conn: psycopg.Connection[Any]) -> Iterator[_DocumentForExpor
             return
         last_id = str(rows[-1][0])
         for r in rows:
-            yield _DocumentForExport(
-                id=str(r[0]),
-                title=str(r[1]),
-                content=str(r[2]),
-                content_hash=str(r[3]),
-                content_type=str(r[4]),
-                tags=list(r[5] or []),
-                metadata=dict(r[6] or {}),
-                ingested_at=r[7],
-                kind=str(r[8]),
-                vault_path=r[9],
-                source_kind=r[10],
-                source_external_id=r[11],
-            )
+            yield _row_to_document_for_export(r)
+
+
+def _fetch_document_for_export(
+    conn: psycopg.Connection[Any], document_id: str
+) -> _DocumentForExport | None:
+    """Fetch a single ``documents`` row in the export projection.
+
+    Returns ``None`` when no row matches ``document_id``. Mirrors the column
+    list used by :func:`_iter_documents` so the resulting dataclass is
+    populated identically for both code paths.
+    """
+    row = conn.execute(
+        f"""
+        SELECT {_DOCUMENT_FOR_EXPORT_COLUMNS}
+        FROM documents d
+        LEFT JOIN sources s ON s.id = d.source_id
+        WHERE d.id = %s::uuid
+        """,
+        (document_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return _row_to_document_for_export(row)
 
 
 def _short_id(value: str) -> str:
@@ -313,6 +349,33 @@ def _existing_body_hash(target: Path) -> str | None:
     return _content_hash(body)
 
 
+def _write_doc_file(
+    doc: _DocumentForExport,
+    *,
+    vault_path: Path,
+    relative: str,
+) -> tuple[Path, bool]:
+    """Materialize ``doc`` at ``vault_path / relative`` and return the result.
+
+    The returned tuple is ``(target_path, written)`` — ``written`` is False
+    when the existing file's body already matches ``doc.content_hash``
+    (idempotent skip), True when the file was rewritten or freshly created.
+
+    Raises :class:`OSError` if the write fails. Callers decide whether to
+    aggregate the failure into a summary or surface it directly.
+    """
+    target = vault_path / relative
+    existing_hash = _existing_body_hash(target)
+    if existing_hash == doc.content_hash:
+        return target, False
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fields = _build_frontmatter(doc)
+    text = dump_frontmatter(fields, doc.content)
+    target.write_text(text, encoding="utf-8")
+    return target, True
+
+
 def export_vault(
     conn: psycopg.Connection[Any],
     *,
@@ -350,20 +413,59 @@ def export_vault(
     for doc in _iter_documents(conn):
         relative = _resolve_relative_path(doc, used_paths)
         used_paths.add(relative)
-        target = vault_path / relative
-
         try:
-            existing_hash = _existing_body_hash(target)
-            if existing_hash == doc.content_hash:
-                summary.skipped += 1
-                continue
-
-            target.parent.mkdir(parents=True, exist_ok=True)
-            fields = _build_frontmatter(doc)
-            text = dump_frontmatter(fields, doc.content)
-            target.write_text(text, encoding="utf-8")
-            summary.written += 1
+            _, written = _write_doc_file(
+                doc, vault_path=vault_path, relative=relative
+            )
         except OSError as e:
             summary.errors.append(f"{relative}: {e}")
+            continue
+        if written:
+            summary.written += 1
+        else:
+            summary.skipped += 1
 
     return summary
+
+
+def regenerate_vault_file(
+    conn: psycopg.Connection[Any],
+    document_id: str,
+    *,
+    vault_path: Path,
+) -> Path:
+    """Re-create a single doc's vault mirror file from its DB row.
+
+    Returns the absolute path of the file written (or, on the idempotent
+    skip path, the path that already matched). The body-hash check from
+    :func:`export_vault` is preserved: if the on-disk body already matches
+    ``documents.content_hash``, the file is left untouched.
+
+    Path resolution prefers the doc's existing ``vault_path`` when set —
+    a previously-synced ingested doc must regenerate at the same place
+    rather than at a freshly computed ``_ingested/<source>/...`` location
+    (which would orphan the original mirror). Docs with no ``vault_path``
+    fall back to the corpus-dump rules (``_resolve_relative_path``) with
+    a fresh, single-doc collision set.
+
+    Raises:
+        ValueError: ``document_id`` does not match any row.
+        ValueError: the row is ``kind='vault'``. Vault-tier authored notes
+            are file-source-of-truth — regenerating from the DB risks
+            losing edits that haven't been re-synced. Restore from backup
+            or git instead.
+        OSError: the write itself fails (permissions, disk full, etc.).
+    """
+    doc = _fetch_document_for_export(conn, document_id)
+    if doc is None:
+        raise ValueError(f"no document with id {document_id}")
+    if doc.kind == "vault":
+        raise ValueError(
+            "cannot regenerate vault-tier authored note from DB; "
+            "restore from backup or git instead"
+        )
+
+    relative = doc.vault_path or _resolve_relative_path(doc, used_paths=set())
+
+    target, _ = _write_doc_file(doc, vault_path=vault_path, relative=relative)
+    return target.resolve()
