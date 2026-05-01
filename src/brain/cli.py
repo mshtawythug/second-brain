@@ -1,5 +1,6 @@
 """brain — second brain CLI."""
 import json as _json  # aliased — `json` conflicts with the --json output flag name
+import logging
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,8 @@ from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.templates import list_template_names, render_template
 from .vault.watch import WatchConfig, run_watcher
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="brain",
@@ -1264,20 +1267,60 @@ def rm(
     id: str = typer.Argument(...),
     yes: bool = typer.Option(False, "--yes", "-y"),
 ) -> None:
-    """Delete a document (and its chunks) from the brain."""
+    """Delete a document (and its chunks) from the brain.
+
+    When the document has a ``vault_path`` the on-disk mirror file under
+    ``cfg.vault_path / vault_path`` is also unlinked. Without that step the
+    next ``brain vault sync`` would re-ingest the file by ``content_hash``
+    (or, after a slug rename, create a fresh row), silently undoing the rm.
+    A missing mirror is tolerated (debug log only) — the DB delete still
+    proceeds.
+    """
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         doc_id = _resolve_id(conn, id)
+        # Capture title + vault_path BEFORE the DELETE; the row is gone
+        # afterwards and we need both for the prompt and the file unlink.
         row = conn.execute(
-            "SELECT title FROM documents WHERE id=%s", (doc_id,)
+            "SELECT title, vault_path FROM documents WHERE id=%s", (doc_id,)
         ).fetchone()
         assert row is not None  # _resolve_id confirmed the doc exists
-        title = row[0]
+        title: str = row[0]
+        vault_path_rel: str | None = row[1]
         if not yes:
             typer.confirm(f"Delete '{title}' ({doc_id[:8]})?", abort=True)
         conn.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
-    typer.echo(f"deleted {doc_id[:8]}")
+    suffix = _rm_unlink_vault_mirror(cfg=cfg, vault_path_rel=vault_path_rel)
+    typer.echo(f"removed {doc_id[:8]}{suffix}")
+
+
+def _rm_unlink_vault_mirror(*, cfg: Config, vault_path_rel: str | None) -> str:
+    """Remove the on-disk vault mirror after ``brain rm`` deletes the DB row.
+
+    Returns the suffix appended to the CLI's ``removed <id>`` line. The
+    suffix shape is part of the user-facing contract and is asserted by
+    ``tests/test_cli_rm.py`` — keep the strings stable across changes.
+
+    - ``vault_path`` NULL → ``" (db only)"`` (e.g., raw ``ingest-stdin`` rows
+      that never made it into a vault export).
+    - File present + unlinked → ``" (file: <vault_path>)"``.
+    - File already absent on disk → ``" (db only, file already gone)"`` so
+      the user sees that the row was deleted but the cleanup was a no-op
+      (e.g., the user manually removed the mirror first, or a previous
+      partial rm).
+    """
+    if vault_path_rel is None:
+        return " (db only)"
+    abs_path: Path = cfg.vault_path / vault_path_rel
+    if abs_path.exists():
+        abs_path.unlink()
+        logger.debug("brain rm: unlinked vault mirror %s", abs_path)
+        return f" (file: {vault_path_rel})"
+    logger.debug(
+        "brain rm: vault mirror already gone at %s (skipping unlink)", abs_path
+    )
+    return " (db only, file already gone)"
 
 
 # ---------------------------------------------------------------------------
