@@ -10,6 +10,7 @@ from typing import Any, Protocol
 import psycopg
 from pgvector.psycopg import register_vector  # noqa: F401  (ensures adapter loaded)
 
+from brain.tags import normalize_tags
 from brain.vault.derived_links.directory import (
     DirectoryStore,
     GwsRunner,
@@ -381,9 +382,14 @@ def apply_tags(
     existing tag is a no-op); ``remove`` strips any matching tags. Operations
     run in a single transaction. Caller is responsible for resolving any
     UUID prefix to a full ``document_id`` before calling.
+
+    Inputs are passed through :func:`brain.tags.normalize_tags` before the
+    DB write — this is the single ongoing-enforcement boundary that keeps
+    ``brain tag <id> +COMPANY_REDACTED`` storing ``company-ko`` and lets a remove of
+    ``COMPANY_REDACTED`` match a row that's currently stored as ``company-ko``.
     """
-    add = add or []
-    remove = remove or []
+    add = normalize_tags(add or [])
+    remove = normalize_tags(remove or [])
     with conn.transaction():
         if add:
             conn.execute(

@@ -38,6 +38,7 @@ import yaml
 
 from ..ingest import Embedder
 from ..ingest.chunker import chunk_text
+from ..tags import normalize_tags
 from .derived_links import DirectoryStore, rebuild_derived_for
 from .derived_links.fence import rewrite_derived_fences, strip_fence
 from .frontmatter import body_hash, dump_frontmatter, parse_frontmatter
@@ -554,7 +555,19 @@ def _sync_one(
     # unchanged" and silently migrate to ``body_hash`` form on the first run.
     new_hash = body_hash(text)
     legacy_hash = _legacy_body_hash(body)
-    tags = _coerce_tag_list(frontmatter.get("tags"))
+    parsed_tags = _coerce_tag_list(frontmatter.get("tags"))
+    tags = normalize_tags(parsed_tags)
+    # If the on-disk frontmatter has non-canonical tags (mixed case,
+    # underscores, duplicates), schedule a write-back so the file
+    # converges with what we're about to upsert into ``documents.tags``.
+    # This piggybacks on the existing ``needs_disk_write`` path that the
+    # missing-id branch already uses, so we still write the file at most
+    # once per sync. ``updated:`` is intentionally NOT bumped here — a tag
+    # normalization is a one-time canonicalization, not an authored edit;
+    # bumping ``updated:`` on every initial sync would churn git history.
+    if tags != parsed_tags:
+        frontmatter["tags"] = tags
+        needs_disk_write = True
     aliases = _coerce_alias_list(frontmatter.get("aliases"))
     content_type = (
         frontmatter["content_type"]

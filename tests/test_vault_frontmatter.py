@@ -309,3 +309,60 @@ def test_rewrite_tags_round_trips_unicode_titles(tmp_path: Path) -> None:
     fields_after, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
     assert fields_after["title"] == title
     assert fields_after["tags"] == ["réview"]
+
+
+# ---------------------------------------------------------------------------
+# rewrite_tags — Phase 3 normalization at the file-write boundary.
+# ---------------------------------------------------------------------------
+
+
+def test_rewrite_tags_normalizes_brand_casing(tmp_path: Path) -> None:
+    """A caller passing ``COMPANY_REDACTED`` writes the canonical lowercase form."""
+    path = _seed_vault_file(
+        tmp_path,
+        {"id": "abc", "title": "S", "tags": []},
+        "b\n",
+    )
+
+    changed = rewrite_tags(path, ["COMPANY_REDACTED"])
+
+    assert changed is True
+    fields, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+    assert fields["tags"] == ["company-ko"]
+
+
+def test_rewrite_tags_dedupes_case_variants(tmp_path: Path) -> None:
+    """``[foo, FOO]`` collapses to a single canonical entry on disk."""
+    path = _seed_vault_file(
+        tmp_path,
+        {"id": "abc", "title": "S", "tags": []},
+        "b\n",
+    )
+
+    changed = rewrite_tags(path, ["foo", "FOO"])
+
+    assert changed is True
+    fields, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+    assert fields["tags"] == ["foo"]
+
+
+def test_rewrite_tags_idempotent_after_canonicalization(tmp_path: Path) -> None:
+    """Re-calling with mixed-case input is a no-op once the file is canonical.
+
+    Regression guard: without idempotency on canonicalized state, the user
+    sees a spurious ``updated:`` bump every time ``brain tag`` re-applies
+    the same brand-case input over an already-canonical file.
+    """
+    path = _seed_vault_file(
+        tmp_path,
+        {"id": "abc", "title": "S", "tags": []},
+        "b\n",
+    )
+
+    rewrite_tags(path, ["COMPANY_REDACTED"])  # first call writes canonical form
+    before_bytes = path.read_bytes()
+
+    changed = rewrite_tags(path, ["COMPANY_REDACTED"])  # second call: same input
+
+    assert changed is False
+    assert path.read_bytes() == before_bytes

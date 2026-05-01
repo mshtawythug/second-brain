@@ -6,6 +6,7 @@ from typing import Any
 
 import yaml
 
+from ..tags import normalize_tags
 from ._atomic import atomic_write_text
 from .derived_links.fence import strip_fence
 
@@ -127,6 +128,10 @@ def rewrite_tags(path: Path, new_tags: list[str]) -> bool:
 
     Behavior:
 
+    - ``new_tags`` is passed through :func:`brain.tags.normalize_tags`
+      before the comparison, so callers passing mixed-case or duplicate
+      input get the canonical form on disk and a re-call with the
+      already-canonical form remains idempotent.
     - All other frontmatter keys and their order are preserved (the dict
       is mutated in place; :func:`dump_frontmatter` uses ``sort_keys=False``).
     - A missing ``tags:`` key and an empty ``tags: []`` list are both
@@ -151,7 +156,7 @@ def rewrite_tags(path: Path, new_tags: list[str]) -> bool:
     text = path.read_text(encoding="utf-8")
     fields, body = parse_frontmatter(text)
     current_tags = list(fields.get("tags") or [])
-    desired_tags = list(new_tags)
+    desired_tags = normalize_tags(new_tags)
     if current_tags == desired_tags:
         return False
     fields["tags"] = desired_tags

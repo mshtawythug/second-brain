@@ -1817,3 +1817,69 @@ def test_no_regression_for_fenceless_files(
     ).fetchone()
     assert row is not None
     assert str(row[0]) == body.strip()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — sync normalizes tags from the file → DB hop AND writes the
+# canonical form back to disk so future syncs are no-ops.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_normalizes_tags_from_frontmatter_into_db_and_disk(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """File tags are canonicalized in BOTH the DB column and the file frontmatter.
+
+    Setup: a vault file with a mix of casing + a duplicate that only
+    differs by case. Exercise: ``sync_vault``. Verify: DB ``tags`` column
+    holds the canonical lowercase deduped list, AND the file's
+    frontmatter is rewritten to the same canonical list (so the next
+    sync has nothing to do).
+    """
+    vault = tmp_path / "vault"
+    note_id = str(uuid.uuid4())
+    _write(
+        vault / "n.md",
+        {"id": note_id, "title": "X", "tags": ["Foo", "BAR", "foo"]},
+        "x\n",
+    )
+
+    _sync(test_db, fake_embedder, vault)
+
+    row = test_db.execute(
+        "SELECT tags FROM documents WHERE id = %s", (note_id,)
+    ).fetchone()
+    assert row is not None
+    assert list(row[0]) == ["foo", "bar"]
+
+    fields, _ = parse_frontmatter((vault / "n.md").read_text(encoding="utf-8"))
+    assert fields["tags"] == ["foo", "bar"]
+
+
+def test_sync_canonical_tags_is_a_no_op_for_disk(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """A file already in canonical form syncs without touching disk.
+
+    Regression guard: the tag-normalization write-back must NOT trigger on
+    files that are already canonical (would churn mtime + git history on
+    every sync).
+    """
+    vault = tmp_path / "vault"
+    note_id = str(uuid.uuid4())
+    file_path = vault / "n.md"
+    _write(
+        file_path,
+        {"id": note_id, "title": "X", "tags": ["foo", "bar"]},
+        "x\n",
+    )
+    before_bytes = file_path.read_bytes()
+
+    _sync(test_db, fake_embedder, vault)
+
+    assert file_path.read_bytes() == before_bytes
+    row = test_db.execute(
+        "SELECT tags FROM documents WHERE id = %s", (note_id,)
+    ).fetchone()
+    assert row is not None
+    assert list(row[0]) == ["foo", "bar"]

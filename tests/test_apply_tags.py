@@ -87,3 +87,50 @@ def test_apply_tags_no_op_returns_current_tags(
     doc_id = _seed(test_db, fake_embedder, tags=["one", "two"])
     final = apply_tags(test_db, doc_id)
     assert sorted(final) == ["one", "two"]
+
+
+def test_apply_tags_normalizes_added_tag_casing(
+    test_db: psycopg.Connection, fake_embedder: Any
+) -> None:
+    """Phase 3: brand-cased input is silently lowercased before the DB write.
+
+    Effect: ``brain tag <id> +COMPANY_REDACTED`` ends up storing ``company-ko`` in
+    ``documents.tags`` regardless of what the caller typed. We verify by
+    SELECTing the column directly so we don't trust the function's return
+    value alone.
+    """
+    doc_id = _seed(test_db, fake_embedder, tags=[])
+    apply_tags(test_db, doc_id, add=["COMPANY_REDACTED"])
+    row = test_db.execute(
+        "SELECT tags FROM documents WHERE id = %s", (doc_id,)
+    ).fetchone()
+    assert row is not None
+    assert list(row[0]) == ["company-ko"]
+
+
+def test_apply_tags_remove_matches_canonical_form_case_insensitive(
+    test_db: psycopg.Connection, fake_embedder: Any
+) -> None:
+    """A remove of ``COMPANY_REDACTED`` matches a row stored as ``company-ko``.
+
+    Without normalization the SQL ``<> ALL`` comparator is case-sensitive
+    and would silently no-op. The boundary normalization is what makes
+    case-insensitive removal work.
+    """
+    doc_id = _seed(test_db, fake_embedder, tags=["company-ko"])
+    final = apply_tags(test_db, doc_id, remove=["COMPANY_REDACTED"])
+    assert final == []
+
+
+def test_apply_tags_dedupes_case_variants_in_add_list(
+    test_db: psycopg.Connection, fake_embedder: Any
+) -> None:
+    """Adding ``["A", "a"]`` results in a single canonical ``["a"]`` entry."""
+    doc_id = _seed(test_db, fake_embedder, tags=[])
+    final = apply_tags(test_db, doc_id, add=["A", "a"])
+    assert final == ["a"]
+    row = test_db.execute(
+        "SELECT tags FROM documents WHERE id = %s", (doc_id,)
+    ).fetchone()
+    assert row is not None
+    assert list(row[0]) == ["a"]

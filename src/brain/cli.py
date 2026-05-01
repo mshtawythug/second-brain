@@ -60,6 +60,7 @@ from .queries import (
     summary_counts,
 )
 from .search import hybrid_search
+from .tags import normalize_tag, normalize_tags
 from .vault import init_vault
 from .vault.derived_links import (
     DirectoryStore,
@@ -3022,4 +3023,161 @@ def backfill_source_rows_cmd(
     typer.echo(
         "next: re-export vault so frontmatter picks up `source: manual` — "
         "brain vault export --to <vault-dir> --force"
+    )
+
+
+def _load_tag_mapping(path: Path) -> dict[str, str]:
+    """Load and validate a ``--mapping`` JSON file for ``backfill normalize-tags``.
+
+    The expected shape is a flat ``{from: to}`` object of strings — values are
+    treated as canonical synonyms applied *before* :func:`normalize_tags`. Both
+    keys and values are themselves passed through :func:`normalize_tag` so the
+    user's mapping JSON can use any casing/separator and still work
+    (``{"Recruiters": "Recruiter"}`` collapses to ``recruiters → recruiter``).
+    Empty keys after normalization are dropped silently.
+
+    Raises :class:`typer.BadParameter` for an unreadable file, malformed JSON,
+    or a non-mapping payload — these are user errors, not crashes.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise typer.BadParameter(f"could not read mapping file: {e}") from e
+    try:
+        parsed = _json.loads(raw)
+    except _json.JSONDecodeError as e:
+        raise typer.BadParameter(f"mapping file is not valid JSON: {e}") from e
+    if not isinstance(parsed, dict):
+        raise typer.BadParameter(
+            "mapping file must be a JSON object of {from: to} strings"
+        )
+    cleaned: dict[str, str] = {}
+    for k, v in parsed.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise typer.BadParameter(
+                "mapping entries must be strings; "
+                f"got {type(k).__name__} → {type(v).__name__}"
+            )
+        canonical_from = normalize_tag(k)
+        canonical_to = normalize_tag(v)
+        if not canonical_from or not canonical_to:
+            continue
+        cleaned[canonical_from] = canonical_to
+    return cleaned
+
+
+def _apply_tag_mapping(tags: list[str], mapping: dict[str, str]) -> list[str]:
+    """Apply a synonym mapping to ``tags`` *before* :func:`normalize_tags`.
+
+    Each input tag is canonicalized once via :func:`normalize_tag` so the
+    mapping lookup is case/separator-insensitive: an input of ``Recruiters``
+    matches a mapping key of ``recruiters``. Tags with no entry in the
+    mapping are returned canonicalized (the caller still pipes the result
+    through :func:`normalize_tags` for dedupe + empty-drop, so passing
+    pre-canonical tags here is a no-op).
+    """
+    out: list[str] = []
+    for tag in tags:
+        canonical = normalize_tag(tag)
+        out.append(mapping.get(canonical, canonical))
+    return out
+
+
+@backfill_app.command("normalize-tags")
+def backfill_normalize_tags(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print planned changes without applying.",
+    ),
+    mapping: Path | None = typer.Option(
+        None,
+        "--mapping",
+        exists=True,
+        dir_okay=False,
+        readable=True,
+        help="Optional JSON {from: to} for manual collapses (synonyms, plurals).",
+    ),
+) -> None:
+    """Lowercase + dedupe every tag in the corpus (DB + vault files).
+
+    Idempotent. Uses :func:`brain.tags.normalize_tags` as the canonical rule:
+    casefold, replace whitespace/underscore with hyphen, collapse runs of
+    hyphens, dedupe preserving first-seen order. Re-running this command
+    after it converges is a no-op.
+
+    The optional ``--mapping`` flag is an escape hatch for non-mechanical
+    collapses (synonyms, plurals, abbreviations) like
+    ``{"recruiters": "recruiter"}`` or
+    ``{"artificial-intelligence": "ai"}``. Mapping keys are matched after
+    canonicalizing each input tag, so the JSON works regardless of the
+    on-disk casing/separator. Mappings are applied BEFORE the canonical
+    normalize step.
+
+    For each doc, the new tag list is written directly to
+    ``documents.tags`` (we don't go through :func:`apply_tags`'s add/remove
+    diff — this is a full replace). When ``vault_path`` is set and the
+    file exists, the file's frontmatter is rewritten via
+    :func:`brain.vault.frontmatter.rewrite_tags`. Missing files are
+    warned (yellow on stderr) and skipped without erroring — same pattern
+    as ``brain tag``.
+    """
+    cfg = Config.load()
+    mapping_dict: dict[str, str] = (
+        _load_tag_mapping(mapping) if mapping is not None else {}
+    )
+
+    docs_normalized = 0
+    files_rewritten = 0
+    files_missing = 0
+    already_canonical = 0
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        # Only fetch docs with at least one tag; an array_length filter keeps
+        # the working set tight even on a large corpus.
+        rows = conn.execute(
+            "SELECT id::text, title, tags, vault_path "
+            "FROM documents "
+            "WHERE tags IS NOT NULL AND array_length(tags, 1) > 0 "
+            "ORDER BY id"
+        ).fetchall()
+        for doc_id, title, current_tags, vault_path_rel in rows:
+            current = list(current_tags or [])
+            mapped = _apply_tag_mapping(current, mapping_dict)
+            new_tags = normalize_tags(mapped)
+            if new_tags == current:
+                already_canonical += 1
+                continue
+            if dry_run:
+                typer.echo(
+                    f"{doc_id[:8]}  {title}  {current} → {new_tags}"
+                )
+                docs_normalized += 1
+                continue
+            conn.execute(
+                "UPDATE documents SET tags = %s WHERE id = %s",
+                (new_tags, doc_id),
+            )
+            docs_normalized += 1
+            if vault_path_rel is None:
+                continue
+            abs_path = cfg.vault_path / vault_path_rel
+            if abs_path.exists():
+                if rewrite_tags(abs_path, new_tags):
+                    files_rewritten += 1
+            else:
+                files_missing += 1
+                typer.secho(
+                    f"file missing on disk for {doc_id[:8]} ({vault_path_rel}); "
+                    "DB updated, file skipped.",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
+
+    prefix = "would normalize" if dry_run else "normalized"
+    typer.echo(
+        f"{prefix} {docs_normalized} doc(s), "
+        f"rewrote {files_rewritten} file(s), "
+        f"{files_missing} file-missing skipped, "
+        f"{already_canonical} already-canonical skipped"
     )
