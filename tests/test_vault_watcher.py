@@ -44,6 +44,7 @@ from brain.vault.watch import (
     WatchConfig,
     _classify_event,
     _filter_path,
+    _handle_delete,
     run_watcher,
 )
 
@@ -1888,3 +1889,96 @@ def test_vanished_file_with_cached_body_is_noop(
 
     state.stop_event.set()
     thread.join(timeout=5.0)
+
+
+def test_handle_delete_logs_error_on_multi_row_delete(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Defensive: if vault_path uniqueness is ever broken, ``_handle_delete``
+    logs a loud error so the user notices.
+
+    Migration ``003_vault_model.sql`` declares a unique partial index on
+    ``documents.vault_path WHERE vault_path IS NOT NULL``, so the DELETE
+    in ``_handle_delete`` matches at most one row in normal operation.
+    But schema drift (manual ``ALTER``, dropped index, migration
+    regression) could let two rows share a ``vault_path``. This test
+    synthesizes that broken state by dropping the unique index for the
+    duration of the test, inserting two duplicate rows, and asserting:
+
+    1. The DELETE itself proceeds — both rows are gone (current
+       behavior preserved; we don't raise + leave half a delete behind).
+    2. An ``ERROR``-level log record is emitted so the operator sees
+       the invariant break.
+
+    Setup is destructive to the test schema, but ``test_db`` rebuilds a
+    fresh schema for every test (see ``conftest.py:test_db``), so the
+    dropped index does not leak.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    relative = "shared/duplicate.md"
+    abs_path = vault / relative
+
+    # Synthesize the broken state: drop the unique partial index so two
+    # rows can share a vault_path. The fresh test schema makes this safe;
+    # the next test gets the index back.
+    test_db.execute("DROP INDEX documents_vault_path_idx")
+
+    # Insert two vault-tier rows pointing at the same vault_path.
+    # content_hash has its own UNIQUE constraint, so each row needs a
+    # distinct hash; vault_path is what we're deliberately duplicating.
+    id_a = str(uuid.uuid4())
+    id_b = str(uuid.uuid4())
+    for doc_id, hash_suffix in ((id_a, "a"), (id_b, "b")):
+        test_db.execute(
+            """
+            INSERT INTO documents
+              (id, title, content, content_hash, content_type,
+               kind, vault_path)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                doc_id,
+                f"Duplicate {hash_suffix}",
+                f"body {hash_suffix}\n",
+                f"hash-{hash_suffix}",
+                "markdown",
+                "vault",
+                relative,
+            ),
+        )
+
+    # Sanity: confirm the broken state actually exists before the call.
+    pre_count = test_db.execute(
+        "SELECT count(*) FROM documents WHERE vault_path = %s",
+        (relative,),
+    ).fetchone()[0]
+    assert pre_count == 2, "test setup must produce two duplicate rows"
+
+    # Capture ERROR-level logs from the watcher logger.
+    with caplog.at_level("ERROR", logger="brain.vault.watch"):
+        _handle_delete(test_db, abs_path, vault)
+
+    # Both rows must be gone — the SQL still ran, we just observed the
+    # invariant break.
+    post_count = test_db.execute(
+        "SELECT count(*) FROM documents WHERE vault_path = %s",
+        (relative,),
+    ).fetchone()[0]
+    assert post_count == 0, (
+        f"_handle_delete should have removed both duplicate rows "
+        f"(post_count={post_count})"
+    )
+
+    # And the loud-error log fired with the expected diagnostic shape.
+    error_records = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert any(
+        "schema uniqueness invariant broken" in r.getMessage()
+        and "expected 0 or 1" in r.getMessage()
+        for r in error_records
+    ), (
+        f"expected an ERROR log mentioning the broken uniqueness invariant, "
+        f"got records: {[r.getMessage() for r in error_records]!r}"
+    )

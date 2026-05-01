@@ -694,6 +694,17 @@ def _handle_delete(
     the canonical DB record. The user can always re-export.
 
     Idempotent: a delete event for a path with no DB row is a no-op.
+
+    Schema-drift defense: the migration ``003_vault_model.sql`` declares
+    a unique partial index ``documents_vault_path_idx`` on
+    ``vault_path`` WHERE ``vault_path IS NOT NULL``, so this DELETE
+    matches at most one row in normal operation. We still run the SQL
+    with ``RETURNING id`` and log a loud ``logger.error`` if the result
+    set has more than one row — observability for a future schema bug
+    (manual ``ALTER``, dropped index, migration regression). The
+    surplus rows are still deleted (we don't raise) so the user isn't
+    left with a half-finished delete and orphaned chunks; the error log
+    is what surfaces the invariant break.
     """
     try:
         relative = abs_path.relative_to(vault_path.resolve()).as_posix()
@@ -706,7 +717,15 @@ def _handle_delete(
                 abs_path,
             )
             return
-    conn.execute(
-        "DELETE FROM documents WHERE kind = 'vault' AND vault_path = %s",
+    deleted = conn.execute(
+        "DELETE FROM documents WHERE kind = 'vault' AND vault_path = %s "
+        "RETURNING id",
         (relative,),
-    )
+    ).fetchall()
+    if len(deleted) > 1:
+        logger.error(
+            "vault watcher: deleted %d rows for vault_path=%s — "
+            "schema uniqueness invariant broken (expected 0 or 1)",
+            len(deleted),
+            relative,
+        )
