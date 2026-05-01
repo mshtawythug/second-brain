@@ -23,16 +23,22 @@
 import { PageLayout, SharedLayout } from "./quartz/cfg"
 import * as Component from "./quartz/components"
 
+// components shared across all pages
 export const sharedPageComponents: SharedLayout = {
   head: Component.Head(),
   header: [],
+  afterBody: [],
   // brain: replace before deploy.
   footer: Component.Footer({ links: { GitHub: "#", "Source": "#" } }),
 }
 
+// components for pages that display a single page (e.g. a single note)
 export const defaultContentPageLayout: PageLayout = {
   beforeBody: [
-    Component.Breadcrumbs(),
+    Component.ConditionalRender({
+      component: Component.Breadcrumbs(),
+      condition: (page) => page.fileData.slug !== "index",
+    }),
     Component.ArticleTitle(),
     Component.ContentMeta(),
     Component.TagList(),
@@ -40,9 +46,17 @@ export const defaultContentPageLayout: PageLayout = {
   left: [
     Component.PageTitle(),
     Component.MobileOnly(Component.Spacer()),
-    Component.Search(),
-    Component.Darkmode(),
-    Component.DesktopOnly(Component.Explorer()),
+    Component.Flex({
+      components: [
+        {
+          Component: Component.Search(),
+          grow: true,
+        },
+        { Component: Component.Darkmode() },
+        { Component: Component.ReaderMode() },
+      ],
+    }),
+    Component.Explorer(),
   ],
   right: [
     // brain: render the local graph inline in the right sidebar so it is
@@ -56,9 +70,10 @@ export const defaultContentPageLayout: PageLayout = {
         scale: 1.1,
         focusOnHover: true,
         enableRadial: false,
-        // brain-extension: hide nodes with no edges so the local graph
-        // does not clutter with isolated stubs.
-        hideOrphans: true,
+        // brain-extension: SHOW orphans — ingested transcripts (krisp
+        // especially) often have no wiki-links and would otherwise vanish
+        // from view, undercounting the corpus.
+        hideOrphans: false,
         // brain-extension: collapse #tag nodes into chips on the side of
         // the graph instead of rendering them as first-class nodes that
         // pull every tagged doc into a hairball.
@@ -85,9 +100,13 @@ export const defaultContentPageLayout: PageLayout = {
         linkDistance: 50,
         focusOnHover: true,
         enableRadial: true,
-        // brain-extension: hide nodes with no edges. At depth: -1 the
-        // hairball is bad enough without isolated stubs piling on.
-        hideOrphans: true,
+        // brain-extension: SHOW orphans on the global graph. The local
+        // graph hides them (focused view at depth 1 — orphans are noise),
+        // but global is the "I want to see everything" view. With
+        // hideOrphans=true we were hiding 62/68 Krisp transcripts (they
+        // have no wiki-links because they're raw transcripts), making
+        // the corpus appear sparser than it is when filtered by source.
+        hideOrphans: false,
         // brain-extension: collapse #tag nodes into chips so a single
         // popular tag does not pull every tagged doc into the center.
         hideTagNodes: true,
@@ -109,4 +128,29 @@ export const defaultContentPageLayout: PageLayout = {
     Component.DesktopOnly(Component.TableOfContents()),
     Component.Backlinks(),
   ],
+}
+
+// brain: the list-page layout is what Quartz's tag-page and folder-page
+// emitters import (`quartz/plugins/emitters/{tagPage,folderPage}.tsx`).
+// Without this export the build fails before producing a single page.
+// Mirrors upstream's structure: same left sidebar (search/explorer/
+// darkmode), no right sidebar (the local graph is meaningless on
+// aggregate index pages).
+export const defaultListPageLayout: PageLayout = {
+  beforeBody: [Component.Breadcrumbs(), Component.ArticleTitle(), Component.ContentMeta()],
+  left: [
+    Component.PageTitle(),
+    Component.MobileOnly(Component.Spacer()),
+    Component.Flex({
+      components: [
+        {
+          Component: Component.Search(),
+          grow: true,
+        },
+        { Component: Component.Darkmode() },
+      ],
+    }),
+    Component.Explorer(),
+  ],
+  right: [],
 }
