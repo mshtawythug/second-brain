@@ -1,7 +1,12 @@
 """Integration tests for the ingest pipeline (extract → chunk → embed → store)."""
-import pytest
+import logging
+from pathlib import Path
 
-from brain.ingest import ExtractedDoc, ingest_document, update_document
+import pytest
+from pytest_mock import MockerFixture
+
+from brain.ingest import ExtractedDoc, IngestResult, ingest_document, update_document
+from brain.vault.frontmatter import parse_frontmatter
 
 
 def _ingest(test_db, embedder, doc, *, force=False):
@@ -551,3 +556,306 @@ def test_update_document_replace_metadata_no_op(test_db, fake_embedder, seed_doc
         replace_metadata=True,
     )
     assert result.fields_changed == []
+
+
+# --- vault_root opt-in mirror writes ---------------------------------------
+# These tests guard the regression that caused 419 vault files to be missing
+# (DB rows existed but the mirror file was never written by `brain ingest*`).
+# `vault_root=None` keeps the legacy DB-only behavior so existing callers,
+# fixtures, and library users see no change.
+
+
+def _ingest_manual_with_mirror(
+    test_db, embedder, *, vault_root: Path, title: str, content: str
+) -> IngestResult:
+    """Test helper — manual stdin ingest with the new ``vault_root`` opt-in."""
+    return ingest_document(
+        test_db,
+        embedder=embedder,
+        doc=ExtractedDoc(
+            title=title,
+            content=content,
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        vault_root=vault_root,
+    )
+
+
+def test_ingest_document_writes_vault_mirror(
+    test_db, fake_embedder, tmp_path: Path
+) -> None:
+    """Passing ``vault_root`` materializes the doc as a Markdown file on disk.
+
+    Regression for the original bug: every ingest path wrote DB rows + chunks
+    but skipped the vault mirror, so Quartz had no file to link to until a
+    manual ``brain vault export --force`` was run.
+    """
+    # Setup
+    vault = tmp_path / "vault"
+
+    # Exercise
+    result = _ingest_manual_with_mirror(
+        test_db,
+        fake_embedder,
+        vault_root=vault,
+        title="Smoke Note",
+        content="hello brain",
+    )
+
+    # Verify
+    assert result.created is True
+    assert result.document_id is not None
+    target = vault / "_ingested" / "manual" / "smoke-note.md"
+    assert target.is_file(), f"expected mirror at {target}"
+    text = target.read_text(encoding="utf-8")
+    _, body = parse_frontmatter(text)
+    assert body.strip() == "hello brain"
+
+
+def test_ingest_document_no_mirror_when_vault_root_omitted(
+    test_db, fake_embedder, tmp_path: Path
+) -> None:
+    """Backwards-compat: omitting ``vault_root`` leaves the filesystem alone.
+
+    Library callers (tests, internal pipelines) that don't care about the
+    mirror must continue to get the legacy DB-only behavior.
+    """
+    # Setup
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    # Exercise — no vault_root argument
+    result = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="No Mirror",
+            content="db only please",
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+    )
+
+    # Verify
+    assert result.created is True
+    # Nothing written under the vault root — the _ingested tree must not
+    # even exist (we never called regenerate_vault_file).
+    assert not (vault / "_ingested").exists()
+
+
+def test_ingest_document_skip_does_not_write_mirror(
+    test_db, fake_embedder, tmp_path: Path
+) -> None:
+    """A no-op repeat ingest does not rewrite the mirror file.
+
+    The first ingest creates the row + the file. A second ingest of identical
+    content is a content-hash skip in the DB layer (``created=False``) and
+    must not touch the on-disk file. mtime stability is the observable
+    signal — the body-hash skip in ``_write_doc_file`` would also catch a
+    needless rewrite, but here we additionally guarantee
+    ``regenerate_vault_file`` isn't even called on the skip path.
+    """
+    # Setup
+    vault = tmp_path / "vault"
+    first = _ingest_manual_with_mirror(
+        test_db,
+        fake_embedder,
+        vault_root=vault,
+        title="Stable",
+        content="unchanged body",
+    )
+    target = vault / "_ingested" / "manual" / "stable.md"
+    assert target.is_file()
+    mtime_before = target.stat().st_mtime_ns
+
+    # Exercise — re-ingest the same content
+    second = _ingest_manual_with_mirror(
+        test_db,
+        fake_embedder,
+        vault_root=vault,
+        title="Stable",
+        content="unchanged body",
+    )
+
+    # Verify
+    assert first.document_id == second.document_id
+    assert second.created is False
+    assert target.stat().st_mtime_ns == mtime_before, (
+        "mtime should be unchanged on a no-op re-ingest"
+    )
+
+
+def test_ingest_document_mirror_failure_does_not_roll_back_db(
+    test_db,
+    fake_embedder,
+    tmp_path: Path,
+    mocker: MockerFixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A vault mirror OSError is logged and swallowed — DB state survives.
+
+    The mirror write runs OUTSIDE the DB transaction precisely so a transient
+    filesystem error (read-only disk, permission denied, full disk) cannot
+    abort an otherwise-successful ingest. Recovery is via
+    ``brain vault export --force``, not by re-running every failed ingest.
+    """
+    # Setup — replace the imported regenerate_vault_file with one that fails.
+    mocker.patch(
+        "brain.ingest.regenerate_vault_file",
+        side_effect=OSError("simulated disk failure"),
+    )
+    vault = tmp_path / "vault"
+
+    # Exercise
+    with caplog.at_level(logging.WARNING, logger="brain.ingest"):
+        result = _ingest_manual_with_mirror(
+            test_db,
+            fake_embedder,
+            vault_root=vault,
+            title="Survives FS Failure",
+            content="DB write must persist",
+        )
+
+    # Verify — DB succeeded, function returned normally, warning was logged.
+    assert result.created is True
+    assert result.document_id is not None
+    db_row = test_db.execute(
+        "SELECT id, content FROM documents WHERE id=%s", (result.document_id,)
+    ).fetchone()
+    assert db_row is not None
+    assert db_row[1] == "DB write must persist"
+    assert any(
+        "vault mirror write failed" in r.message
+        and "simulated disk failure" in r.message
+        for r in caplog.records
+    ), "expected a WARNING-level mirror failure record"
+
+
+def test_update_document_body_change_rewrites_mirror(
+    test_db, fake_embedder, tmp_path: Path
+) -> None:
+    """A body edit propagates to the on-disk mirror file.
+
+    Without this, ``brain edit`` (and the MCP ``brain_edit`` tool) would
+    silently drift: the DB knows the new content, the vault file still
+    shows the old body to Quartz.
+    """
+    # Setup — initial ingest with mirror.
+    vault = tmp_path / "vault"
+    initial = _ingest_manual_with_mirror(
+        test_db,
+        fake_embedder,
+        vault_root=vault,
+        title="Editable Note",
+        content="version one",
+    )
+    assert initial.document_id is not None
+    target = vault / "_ingested" / "manual" / "editable-note.md"
+    assert "version one" in target.read_text(encoding="utf-8")
+
+    # Exercise — edit the body via update_document.
+    update_document(
+        test_db,
+        document_id=initial.document_id,
+        embedder=fake_embedder,
+        new_content="version two — rewritten body",
+        vault_root=vault,
+    )
+
+    # Verify — file body reflects the new content.
+    text = target.read_text(encoding="utf-8")
+    _, body = parse_frontmatter(text)
+    assert body.strip() == "version two — rewritten body"
+
+
+def test_update_document_metadata_only_rewrites_mirror(
+    test_db, fake_embedder, tmp_path: Path
+) -> None:
+    """A title-only edit refreshes the mirror's frontmatter.
+
+    Frontmatter is derived from documents.title/tags/metadata/content_type,
+    so any of those changes must trigger a mirror rewrite even when the body
+    is untouched.
+    """
+    # Setup
+    vault = tmp_path / "vault"
+    initial = _ingest_manual_with_mirror(
+        test_db,
+        fake_embedder,
+        vault_root=vault,
+        title="Old Title",
+        content="body stays the same",
+    )
+    assert initial.document_id is not None
+    original_target = vault / "_ingested" / "manual" / "old-title.md"
+    assert original_target.is_file()
+
+    # Exercise — change only the title.
+    update_document(
+        test_db,
+        document_id=initial.document_id,
+        new_title="New Title",
+        vault_root=vault,
+    )
+
+    # Verify — the new file is written at the regenerate path; its
+    # frontmatter carries the new title.
+    new_target = vault / "_ingested" / "manual" / "new-title.md"
+    assert new_target.is_file(), (
+        "regenerate_vault_file must materialize the mirror at the new path "
+        "after a title change"
+    )
+    fm, _ = parse_frontmatter(new_target.read_text(encoding="utf-8"))
+    assert fm["title"] == "New Title"
+
+
+def test_update_document_vault_kind_skipped(
+    test_db, fake_embedder, tmp_path: Path
+) -> None:
+    """Vault-tier rows (``kind='vault'``) are silently skipped, not raised.
+
+    ``regenerate_vault_file`` raises ValueError for ``kind='vault'`` because
+    vault-tier files are file-source-of-truth — the DB copy may lag behind
+    user edits on disk. ``update_document`` must catch that specific
+    ValueError so a kind='vault' edit (which already wrote to its own file
+    via a different code path) doesn't surface a spurious error.
+    """
+    # Setup — normal ingest, then promote the row to kind='vault'.
+    vault = tmp_path / "vault"
+    initial = _ingest_manual_with_mirror(
+        test_db,
+        fake_embedder,
+        vault_root=vault,
+        title="Vault Authored",
+        content="body owned by the vault file",
+    )
+    assert initial.document_id is not None
+    target = vault / "_ingested" / "manual" / "vault-authored.md"
+    target_mtime_before = target.stat().st_mtime_ns
+    test_db.execute(
+        "UPDATE documents SET kind='vault', vault_path=%s WHERE id=%s",
+        ("projects/notes/vault-authored.md", initial.document_id),
+    )
+
+    # Exercise — must not raise.
+    result = update_document(
+        test_db,
+        document_id=initial.document_id,
+        new_title="Renamed",
+        vault_root=vault,
+    )
+
+    # Verify — DB title was updated; the original mirror was not rewritten
+    # (regenerate refused, the failure was swallowed silently).
+    assert "title" in result.fields_changed
+    assert target.stat().st_mtime_ns == target_mtime_before
+    new_title = test_db.execute(
+        "SELECT title FROM documents WHERE id=%s", (initial.document_id,)
+    ).fetchone()
+    assert new_title is not None
+    assert new_title[0] == "Renamed"

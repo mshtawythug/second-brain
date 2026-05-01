@@ -21,6 +21,7 @@ from brain.vault.derived_links.participants import (
     extract_gmail_addresses,
     extract_krisp_speakers,
 )
+from brain.vault.export import regenerate_vault_file
 
 from .chunker import chunk_text
 
@@ -124,6 +125,7 @@ def ingest_document(
     tags: list[str] | None = None,
     force: bool = False,
     gws_runner: GwsRunner | None = None,
+    vault_root: Path | None = None,
 ) -> IngestResult:
     """Ingest a single extracted document.
 
@@ -159,6 +161,16 @@ def ingest_document(
     ``gws_runner`` argument is only consulted by the Krisp hook; passing
     ``None`` skips the calendar / contacts refresh with a logged warning so
     callers without a runner wired (early CLI paths, tests) still succeed.
+
+    Vault mirror: when ``vault_root`` is supplied AND the call actually wrote
+    a row (``result.created`` or ``force``), the corresponding mirror file
+    under ``vault_root / _ingested/<source>/...md`` is regenerated via
+    :func:`brain.vault.export.regenerate_vault_file`. The call runs OUTSIDE
+    the DB transaction — a filesystem failure is logged at WARNING and
+    swallowed so a transient mirror error never rolls back a successful
+    ingest. Recovery is via ``brain vault export --force``. Library callers
+    (tests, internal pipelines) that don't care about the mirror omit
+    ``vault_root`` and get the legacy DB-only behavior unchanged.
     """
     if doc.source_path is not None:
         if source_kind is None:
@@ -174,6 +186,65 @@ def ingest_document(
     tags = tags or []
     source_metadata = source_metadata or {}
 
+    result = _ingest_within_transaction(
+        conn,
+        embedder=embedder,
+        doc=doc,
+        source_kind=source_kind,
+        source_external_id=source_external_id,
+        source_metadata=source_metadata,
+        tags=tags,
+        force=force,
+        gws_runner=gws_runner,
+        content_hash=h,
+    )
+
+    # Mirror writes happen OUTSIDE the transaction so a filesystem error
+    # cannot roll back the DB ingest (CLAUDE.md: prefer recoverable drift
+    # over an aborted ingest — drift is exactly what `brain vault export`
+    # exists to reconcile).
+    if (
+        vault_root is not None
+        and result.document_id is not None
+        and (result.created or force)
+    ):
+        try:
+            regenerate_vault_file(
+                conn, result.document_id, vault_path=vault_root
+            )
+        except (OSError, ValueError) as exc:
+            _logger.warning(
+                "vault mirror write failed for document %s: %s; "
+                "DB ingest succeeded — recover via `brain vault export`",
+                result.document_id,
+                exc,
+            )
+
+    return result
+
+
+def _ingest_within_transaction(
+    conn: psycopg.Connection,
+    *,
+    embedder: Embedder,
+    doc: ExtractedDoc,
+    source_kind: str,
+    source_external_id: str | None,
+    source_metadata: dict[str, Any],
+    tags: list[str],
+    force: bool,
+    gws_runner: GwsRunner | None,
+    content_hash: str,
+) -> IngestResult:
+    """Body of :func:`ingest_document` that runs inside the DB transaction.
+
+    Extracted so the public function can wrap the post-commit vault mirror
+    write outside the ``with conn.transaction()`` block — a filesystem
+    failure must not roll back a successful DB ingest. Early returns from
+    this helper exit the surrounding ``with conn.transaction()`` cleanly
+    (commit on normal return, rollback on exception).
+    """
+    h = content_hash
     with conn.transaction():
         if doc.source_path is not None:
             # No DB-level UNIQUE on source_path — two concurrent CLI invocations
@@ -411,6 +482,9 @@ def apply_tags(
     return list(row[0] or [])
 
 
+_MIRROR_FRONTMATTER_FIELDS = frozenset({"title", "tags", "metadata", "content_type"})
+
+
 def update_document(
     conn: psycopg.Connection,
     *,
@@ -422,6 +496,7 @@ def update_document(
     metadata_patch: dict[str, Any] | None = None,
     replace_metadata: bool = False,
     new_tags: list[str] | None = None,
+    vault_root: Path | None = None,
 ) -> UpdateResult:
     """Update one document in place.
 
@@ -435,6 +510,17 @@ def update_document(
     if its SHA-256 collides with another document. ``embedder`` is required
     when ``new_content`` is provided. Empty/no-op edits are not an error and
     return an :class:`UpdateResult` with ``fields_changed=[]``.
+
+    Vault mirror: when ``vault_root`` is supplied AND the edit actually
+    changed the body or any frontmatter-bearing field
+    (``title`` / ``tags`` / ``metadata`` / ``content_type``), the mirror file
+    under ``vault_root`` is regenerated via
+    :func:`brain.vault.export.regenerate_vault_file`. Vault-tier rows
+    (``kind='vault'``) are silently skipped — those files are
+    file-source-of-truth and ``vault sync`` reconciles back to the DB.
+    Other failures (``OSError`` on write, unexpected ``ValueError``) log
+    a WARNING and do NOT roll back the DB update — drift is recoverable
+    via ``brain vault export --force``.
     """
     with conn.transaction():
         row = conn.execute(
@@ -530,6 +616,40 @@ def update_document(
             conn.execute(
                 f"UPDATE documents SET {', '.join(sets)} WHERE id=%s",
                 params,
+            )
+
+    # Mirror writes happen OUTSIDE the transaction so a filesystem error
+    # cannot roll back the DB update. Triggered when the body was rechunked
+    # OR any frontmatter-derived field changed (the mirror's frontmatter is
+    # built from documents.title/tags/metadata/content_type — a metadata-only
+    # edit must still propagate).
+    needs_mirror = rechunked or any(
+        f in _MIRROR_FRONTMATTER_FIELDS for f in fields_changed
+    )
+    if vault_root is not None and needs_mirror:
+        try:
+            regenerate_vault_file(conn, document_id, vault_path=vault_root)
+        except ValueError as exc:
+            # Vault-tier rows own their files; regenerate refuses to
+            # clobber them. That's the expected case for `kind='vault'`,
+            # so swallow it silently. Anything else (e.g. document not
+            # found mid-write) is unexpected and worth a warning.
+            if "vault-tier" in str(exc):
+                pass
+            else:
+                _logger.warning(
+                    "vault mirror write failed for document %s: %s; "
+                    "DB update succeeded — recover via "
+                    "`brain vault export`",
+                    document_id,
+                    exc,
+                )
+        except OSError as exc:
+            _logger.warning(
+                "vault mirror write failed for document %s: %s; "
+                "DB update succeeded — recover via `brain vault export`",
+                document_id,
+                exc,
             )
 
     return UpdateResult(
