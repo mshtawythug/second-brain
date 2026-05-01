@@ -28,13 +28,14 @@ This module ships:
 """
 import datetime
 import logging
-import os
 from email.utils import parsedate_to_datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import psycopg
 import yaml
+
+from .._atomic import atomic_write_text
 
 # Stable HTML-comment markers. Universal CommonMark — Obsidian, Quartz, GFM,
 # and standard Markdown all treat the line as a passthrough HTML comment.
@@ -360,7 +361,7 @@ def rewrite_derived_fences(
         # is one mtime bump + one Quartz rebuild per affected file per
         # relink — accepted trade-off for predictable relink semantics.
         try:
-            _atomic_write(target, new_text)
+            atomic_write_text(target, new_text)
         except OSError as e:
             _logger.warning(
                 "fence: could not rewrite %s: %s — skipping", target, e
@@ -368,19 +369,3 @@ def rewrite_derived_fences(
             continue
         written += 1
     return written
-
-
-def _atomic_write(target: Path, text: str) -> None:
-    """Write ``text`` to ``target`` atomically (tempfile + ``os.replace``).
-
-    The temp file is a sibling of ``target`` (same parent directory) so the
-    rename never crosses a filesystem boundary — ``os.replace`` is atomic
-    on POSIX in that case (it's ``rename(2)`` underneath). A crash between
-    the write and the rename leaves the original file intact and the temp
-    file present; the next pass over the same path either succeeds or
-    overwrites the stale temp. We don't garbage-collect stale temps here
-    because they're harmless and a delete could race with another writer.
-    """
-    tmp = target.with_name(f"{target.name}.tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, target)

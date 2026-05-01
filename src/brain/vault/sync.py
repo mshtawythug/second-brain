@@ -41,6 +41,7 @@ from ..ingest.chunker import chunk_text
 from .derived_links import DirectoryStore, rebuild_derived_for
 from .derived_links.fence import rewrite_derived_fences, strip_fence
 from .frontmatter import body_hash, dump_frontmatter, parse_frontmatter
+from .link_rewrite import rewrite_vault_links
 from .links import ParsedLink, parse_wiki_links
 from .resolver import resolve_link, title_collisions
 
@@ -88,6 +89,14 @@ class SyncReport:
     # docs, and when the renderer skips every candidate (vault-tier,
     # missing mirror file, etc.).
     fences_written: int = 0
+    # Vault-tier files whose ``[[…]]`` markers were rewritten to
+    # vault-root-relative path form so Quartz can resolve them without a
+    # frontmatter lookup. Counted by :func:`brain.vault.link_rewrite.
+    # rewrite_vault_links`; stays at ``0`` on dry-run, on syncs that
+    # touched only ingested-tier files, when ``--no-link-rewrite`` is in
+    # effect, and when every link is already in canonical path form
+    # (idempotent re-sync).
+    links_rewritten: int = 0
     errors: list[tuple[Path, str]] = field(default_factory=list)
 
 
@@ -107,6 +116,7 @@ def sync_vault(
     vault_path: Path,
     prune: bool = False,
     dry_run: bool = False,
+    link_rewrite: bool = True,
 ) -> SyncReport:
     """Reconcile every ``.md`` file under ``vault_path`` into the DB.
 
@@ -199,6 +209,12 @@ def sync_vault(
         report.fences_written = rewrite_derived_fences(
             conn, affected_ids, vault_path=vault_path
         )
+        if link_rewrite:
+            report.links_rewritten = _rewrite_vault_tier_links(
+                conn,
+                vault_path=vault_path,
+                doc_ids=seen_doc_ids,
+            )
 
     return report
 
@@ -209,6 +225,7 @@ def sync_one_file(
     embedder: Embedder,
     vault_path: Path,
     file_path: Path,
+    link_rewrite: bool = True,
 ) -> SyncReport:
     """Sync exactly one ``.md`` file under ``vault_path``.
 
@@ -325,6 +342,19 @@ def sync_one_file(
         report.fences_written = rewrite_derived_fences(
             conn, affected_ids, vault_path=vault_path
         )
+        # Vault-tier link rewrite — only runs for the one doc we just
+        # processed, and only when the path lives under a vault-tier
+        # directory (the rewriter is a no-op for ingested-tier mirrors).
+        if (
+            link_rewrite
+            and walked.classification == "vault"
+            and rewrite_vault_links(
+                walked.abs_path,
+                document_id=doc_id,
+                conn=conn,
+            )
+        ):
+            report.links_rewritten += 1
 
     return report
 
@@ -336,6 +366,53 @@ def sync_one_file(
 
 class _SyncError(Exception):
     """Per-file sync failure; the run continues with the next file."""
+
+
+def _rewrite_vault_tier_links(
+    conn: psycopg.Connection[Any],
+    *,
+    vault_path: Path,
+    doc_ids: set[str],
+) -> int:
+    """Rewrite ``[[…]]`` markers in every vault-tier file in ``doc_ids``.
+
+    Pulls each touched doc's ``kind`` + ``vault_path`` in one batch query
+    so we don't issue N round-trips on a full-vault sync, then dispatches
+    to :func:`brain.vault.link_rewrite.rewrite_vault_links` for each
+    vault-tier file that exists on disk. Ingested-tier docs are silently
+    filtered — wiki-link rewriting is contractually a vault-tier-only
+    operation (their ``[[…]]`` markers would all be inside the
+    auto-generated derived-edges fence, which is itself regenerated each
+    sync).
+
+    Empty input short-circuits to ``0`` — no DB round-trip, no FS scan.
+    Returns the count of files actually rewritten on disk; files that
+    were already in canonical path form (idempotent fast path) and files
+    skipped due to read/write errors do not contribute to the count.
+    """
+    if not doc_ids:
+        return 0
+    rows = conn.execute(
+        "SELECT id::text, vault_path FROM documents "
+        "WHERE id = ANY(%s) AND kind = 'vault'",
+        (sorted(doc_ids),),
+    ).fetchall()
+    rewritten = 0
+    for doc_id, vp in rows:
+        if not vp:
+            # Vault-tier rows are supposed to have a ``vault_path``; defensive
+            # skip for the corrupted-row case (no file to rewrite).
+            continue
+        target = vault_path / str(vp)
+        if not target.is_file():
+            continue
+        if rewrite_vault_links(
+            target,
+            document_id=str(doc_id),
+            conn=conn,
+        ):
+            rewritten += 1
+    return rewritten
 
 
 def _has_hidden_component(parts: tuple[str, ...]) -> bool:

@@ -7,12 +7,26 @@ authoring commands, and a Quartz renderer on top of the same module layout.
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .link_rewrite import rewrite_vault_links, rewrite_wiki_links
 from .templates import (
     DAILY_TEMPLATE,
     INGESTED_README,
     NOTE_TEMPLATE,
     VAULT_README,
 )
+
+__all__ = [
+    "DAILY_TEMPLATE",
+    "INGESTED_README",
+    "NOTE_TEMPLATE",
+    "VAULT_README",
+    "VAULT_SUBDIRS",
+    "VAULT_TEMPLATE_FILES",
+    "VaultInitSummary",
+    "init_vault",
+    "rewrite_vault_links",
+    "rewrite_wiki_links",
+]
 
 # Subdirectories created (or ensured) by ``brain vault init``. Order is
 # preserved in the summary so output stays deterministic across runs.

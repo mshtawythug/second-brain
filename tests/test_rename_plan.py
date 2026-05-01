@@ -39,7 +39,16 @@ def _seed_and_sync(
     """
     for relative, (fields, body) in files.items():
         _write(vault / relative, fields, body)
-    sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+    # ``link_rewrite=False`` keeps the seeded ``[[Title]]`` references in
+    # their authored bare form so these tests can assert on exact link
+    # text. The rename module's path-form fallback is exercised by
+    # dedicated tests in ``tests/test_vault_link_rewrite.py``.
+    sync_vault(
+        test_db,
+        embedder=fake_embedder,
+        vault_path=vault,
+        link_rewrite=False,
+    )
     rows = test_db.execute(
         "SELECT id::text, vault_path FROM documents WHERE kind='vault'"
     ).fetchall()

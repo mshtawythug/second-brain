@@ -118,6 +118,12 @@ class WatchConfig:
     debounce_ms: int = 500
     prune: bool = False
     on_event: Callable[[_Action, Path], None] | None = None
+    # Plumbed from ``brain vault sync --no-link-rewrite``: when False, neither
+    # the startup full sync nor the per-file sync will rewrite vault-tier
+    # ``[[…]]`` markers to vault-root-relative path form. The rewrite is on
+    # by default — ``False`` is opt-out for users who want to preserve the
+    # exact authored shape of their wiki-links.
+    link_rewrite: bool = True
 
 
 @dataclass
@@ -196,6 +202,7 @@ def run_watcher(
             vault_path=config.vault_path,
             prune=config.prune,
             dry_run=False,
+            link_rewrite=config.link_rewrite,
         )
     finally:
         startup_conn.close()
@@ -525,6 +532,7 @@ def _worker_loop(
                     vault_path=config.vault_path,
                     prune=False,  # never auto-prune in watch mode
                     dry_run=False,
+                    link_rewrite=config.link_rewrite,
                 )
                 # The full sync may have rewritten any number of fences;
                 # the cache entries from before the overflow window are
@@ -551,6 +559,7 @@ def _worker_loop(
                         embedder=embedder,
                         vault_path=config.vault_path,
                         file_path=job.abs_path,
+                        link_rewrite=config.link_rewrite,
                     )
                     # Re-read after sync so the cache reflects whatever
                     # fence the linker just rewrote — that way the

@@ -1280,6 +1280,15 @@ def vault_sync(
             "for changes and incrementally re-sync until Ctrl-C."
         ),
     ),
+    no_link_rewrite: bool = typer.Option(
+        False,
+        "--no-link-rewrite",
+        help=(
+            "Skip the post-sync rewrite of vault-tier wiki-links to "
+            "vault-root-relative path form. The DB ``links`` table is still "
+            "populated; only on-disk note bodies are left untouched."
+        ),
+    ),
 ) -> None:
     """Reconcile the vault folder into the DB.
 
@@ -1337,7 +1346,11 @@ def vault_sync(
         report = run_watcher(
             _conn_factory,
             embedder=embedder,
-            config=WatchConfig(vault_path=target, prune=prune),
+            config=WatchConfig(
+                vault_path=target,
+                prune=prune,
+                link_rewrite=not no_link_rewrite,
+            ),
         )
         typer.echo(f"vault path:     {target}")
         deletion_phrase = (
@@ -1350,6 +1363,7 @@ def vault_sync(
             f"{deletion_phrase}, "
             f"links_resolved {report.links_resolved}, "
             f"links_unresolved {report.links_unresolved}, "
+            f"links_rewritten {report.links_rewritten}, "
             f"errors {len(report.errors)}"
         )
         if report.id_assigned:
@@ -1367,6 +1381,7 @@ def vault_sync(
             vault_path=target,
             prune=prune,
             dry_run=dry_run,
+            link_rewrite=not no_link_rewrite,
         )
 
     suffix = " (dry-run)" if dry_run else ""
@@ -1381,6 +1396,7 @@ def vault_sync(
         f"{deletion_phrase}, "
         f"links_resolved {report.links_resolved}, "
         f"links_unresolved {report.links_unresolved}, "
+        f"links_rewritten {report.links_rewritten}, "
         f"errors {len(report.errors)}"
     )
     if report.id_assigned:

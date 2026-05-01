@@ -74,7 +74,7 @@ def resolve_link(
             external_id=parsed.target_value,
             exclude_doc_id=exclude_doc_id,
         )
-    # ``target_type == 'title'`` — try title, alias, then id-prefix fallback.
+    # ``target_type == 'title'`` — try title, alias, vault-path, then id-prefix fallback.
     by_title = _resolve_by_title(
         conn, parsed.target_value, exclude_doc_id=exclude_doc_id
     )
@@ -85,6 +85,11 @@ def resolve_link(
     )
     if by_alias is not None:
         return by_alias
+    by_path = _resolve_by_vault_path(
+        conn, parsed.target_value, exclude_doc_id=exclude_doc_id
+    )
+    if by_path is not None:
+        return by_path
     if _looks_like_id_prefix(parsed.target_value):
         return _resolve_id_prefix(
             conn, parsed.target_value, exclude_doc_id=exclude_doc_id
@@ -218,6 +223,54 @@ def _resolve_by_alias(
         ") "
     )
     params: list[Any] = [alias]
+    if exclude_doc_id is not None:
+        sql += "AND id <> %s "
+        params.append(exclude_doc_id)
+    sql += "LIMIT 2"
+    rows = conn.execute(sql, params).fetchall()
+    if len(rows) != 1:
+        return None
+    return ResolvedTarget(document_id=str(rows[0][0]), kind=str(rows[0][1]))
+
+
+def _resolve_by_vault_path(
+    conn: psycopg.Connection[Any],
+    target: str,
+    *,
+    exclude_doc_id: str | None,
+) -> ResolvedTarget | None:
+    """Match ``[[<vault-root-relative-path>]]`` against ``documents.vault_path``.
+
+    Quartz / Obsidian accepts a vault-root-relative path (without the ``.md``
+    extension) as the inner of a wiki-link, e.g.
+    ``[[_ingested/gmail/foo|alias]]``. The brain DB stores the file's
+    extension on ``documents.vault_path`` (``_ingested/gmail/foo.md``), so
+    we append ``.md`` before matching. Case-sensitive — POSIX paths are
+    case-sensitive on Linux and the user is authoring against on-disk
+    filenames either way.
+
+    This step keeps :func:`brain.vault.link_rewrite.rewrite_wiki_links`
+    idempotent: after the rewriter has converted ``[[Title]]`` to
+    ``[[<path>|Title]]``, a second sync pass parses the new form, the
+    title/alias steps miss (the path isn't a title), and this resolver
+    catches the link via its on-disk path so the ``links`` table stays
+    consistent.
+
+    Single-segment targets (no ``/``) are also accepted — a top-level
+    vault file lives at ``foo.md`` and the rewriter produces
+    ``[[foo|Foo]]`` for it. Title / alias resolution runs first, so this
+    branch only fires when neither matched; in practice that means the
+    inner is the user's path (after a prior rewrite) or a deliberate
+    filename reference. Multiple matches → ``None`` (UNIQUE on
+    ``vault_path`` makes that extremely rare; defensive parity with the
+    other resolvers).
+    """
+    candidate = f"{target}.md"
+    sql = (
+        "SELECT id::text, kind FROM documents "
+        "WHERE vault_path = %s "
+    )
+    params: list[Any] = [candidate]
     if exclude_doc_id is not None:
         sql += "AND id <> %s "
         params.append(exclude_doc_id)

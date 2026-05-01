@@ -173,10 +173,18 @@ def plan_rename(
             "pick a more distinctive title"
         )
 
+    # ``old_relative`` (e.g. ``Path("target.md")``) gives the rename
+    # scanner the path stem it needs to match path-form references like
+    # ``[[target|Target]]`` produced by the post-sync wiki-link rewriter
+    # (see ``brain.vault.link_rewrite``). Without this, references in
+    # path form would be missed and the rename would leave broken links
+    # behind.
+    old_path_stem = old_relative.with_suffix("").as_posix()
     references = _collect_references(
         vault_path,
         old_title=old_title,
         new_title=new_title,
+        old_path_stem=old_path_stem,
     )
 
     return RenameOp(
@@ -327,6 +335,7 @@ def _collect_references(
     *,
     old_title: str,
     new_title: str,
+    old_path_stem: str,
 ) -> list[ReferenceMatch]:
     """Walk the vault, returning every ``[[old-title]]`` reference.
 
@@ -338,8 +347,13 @@ def _collect_references(
     but Phase 2's sync gives ingested-tier files their own DB rows so any
     references inside them are part of the live graph.
 
-    Comparison is case-insensitive, matching the resolver's title resolution
-    rule (``LOWER(title) = LOWER(?)``).
+    Title comparison is case-insensitive, matching the resolver's title
+    resolution rule (``LOWER(title) = LOWER(?)``). Path comparison is
+    case-sensitive (vault paths are POSIX strings), matching
+    :func:`brain.vault.resolver._resolve_by_vault_path` so references
+    rewritten by :func:`brain.vault.link_rewrite.rewrite_wiki_links` into
+    ``[[<vault-root-relative-path>|<display>]]`` form are still caught
+    by this scan.
     """
     matches: list[ReferenceMatch] = []
     old_lower = old_title.lower()
@@ -373,11 +387,17 @@ def _collect_references(
         for parsed, start, end in iter_wiki_links_with_spans(body):
             if parsed.target_type != "title":
                 continue
-            if parsed.target_value.lower() != old_lower:
+            target = parsed.target_value
+            matches_title = target.lower() == old_lower
+            matches_path = target == old_path_stem
+            if not (matches_title or matches_path):
                 continue
             old_text = body[start:end]
             new_text = _rewrite_link_text(
-                old_text, new_title=new_title, embed=parsed.kind == "embed"
+                old_text,
+                new_title=new_title,
+                embed=parsed.kind == "embed",
+                old_title=old_title,
             )
             absolute_start = body_offset + start
             absolute_end = body_offset + end
@@ -394,17 +414,33 @@ def _collect_references(
     return matches
 
 
-def _rewrite_link_text(old_text: str, *, new_title: str, embed: bool) -> str:
+def _rewrite_link_text(
+    old_text: str,
+    *,
+    new_title: str,
+    embed: bool,
+    old_title: str | None = None,
+) -> str:
     """Rewrite a single ``[[...]]`` (or ``![[...]]``) match's title segment.
 
     Preserves:
     - The embed marker (``!``) if present.
-    - Pipe alias (``|display``) — only the title part is replaced.
+    - Pipe alias (``|display``) — only the title part is replaced. EXCEPT:
+      when ``display`` equals ``old_title`` (case-insensitive), the alias
+      is treated as the synthetic display added by
+      :func:`brain.vault.link_rewrite.rewrite_wiki_links` for the
+      bare-title case (``[[Old]]`` → ``[[<path>|Old]]``) and is dropped
+      so the rename's output reads ``[[New]]`` rather than
+      ``[[New|Old]]``. A user-chosen alias (``[[Old|something else]]``)
+      is preserved verbatim.
     - Heading anchor (``#heading``) — preserved as-is on the new title.
 
     Examples:
     - ``[[Old]]`` → ``[[New]]``
     - ``[[Old|alias]]`` → ``[[New|alias]]``
+    - ``[[Old|Old]]`` → ``[[New]]`` (synthetic-display drop)
+    - ``[[old-path|Old]]`` → ``[[New]]`` (synthetic-display drop after
+      path-form match)
     - ``[[Old#heading]]`` → ``[[New#heading]]``
     - ``![[Old]]`` → ``![[New]]``
     """
@@ -412,7 +448,7 @@ def _rewrite_link_text(old_text: str, *, new_title: str, embed: bool) -> str:
     assert old_text.startswith(prefix), f"unexpected match shape: {old_text!r}"
     inner = old_text[len(prefix) : -2]  # strip prefix + ``]]``
     target_part, sep, display = inner.partition("|")
-    target_value, hash_sep, heading = target_part.partition("#")
+    _, hash_sep, heading = target_part.partition("#")
     # The title is the first segment up to ``#`` or ``|`` — discard whatever
     # whitespace surrounded it and substitute. The user's spacing inside
     # ``[[ Title ]]`` is normalized away on rewrite (the resolver was
@@ -421,6 +457,18 @@ def _rewrite_link_text(old_text: str, *, new_title: str, embed: bool) -> str:
     rebuilt_target = new_title
     if hash_sep:
         rebuilt_target = f"{rebuilt_target}#{heading}"
+    # Drop the display when it equals the OLD title — this is the
+    # synthetic display the post-sync link rewriter inserts for
+    # bare-title references ``[[Old]]`` → ``[[<path>|Old]]``. The user
+    # never typed it, so the rename should erase it rather than carry
+    # the stale title forward.
+    if (
+        sep
+        and old_title is not None
+        and display.strip().lower() == old_title.strip().lower()
+    ):
+        sep = ""
+        display = ""
     rebuilt_inner = (
         f"{rebuilt_target}|{display}" if sep else rebuilt_target
     )

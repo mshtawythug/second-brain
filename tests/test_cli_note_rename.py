@@ -53,6 +53,146 @@ def _seed_three_note_vault(
     return vault, {str(t): str(i) for t, i in rows}
 
 
+def test_rename_refactors_path_form_references_after_rewrite(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: sync (with link rewrite) → rename → references refactored.
+
+    Reaches the new branches added to ``brain.vault.rename`` once the
+    post-sync wiki-link rewriter (``brain.vault.link_rewrite``) is on by
+    default:
+
+    - ``_collect_references`` must match the path-form ref via
+      ``target == old_path_stem`` (the lowercased title doesn't match
+      because the stem is the slug "target-note" while the old title is
+      "Target Note" — different by case AND by hyphen-vs-space, so the
+      title-form branch can't satisfy this case).
+    - ``_rewrite_link_text`` must drop the synthetic display because it
+      equals the OLD title — otherwise the rename leaves stale-title
+      displays on every previously-bare reference.
+
+    The seed deliberately uses a title with whitespace + capitalization
+    that differs from the slug so ``matches_title`` and ``matches_path``
+    cannot both fire by coincidence — only the path-form branch keeps the
+    rename from missing the reference.
+    """
+    patch_embedder(fake_embedder)
+    vault = tmp_path / "vault"
+    _init(vault)
+    _write(
+        vault / "target-note.md",
+        {"title": "Target Note"},
+        "primary body\n",
+    )
+    _write(
+        vault / "referrer.md",
+        {"title": "Referrer"},
+        "see [[Target Note]] for context\n",
+    )
+    sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+
+    # After sync (link_rewrite=True default), the bare reference is in
+    # path-form with synthetic display.
+    _, post_sync_body = parse_frontmatter((vault / "referrer.md").read_text())
+    assert "[[target-note|Target Note]]" in post_sync_body, (
+        "pre-condition for the test: sync should have rewritten the bare "
+        "[[Target Note]] reference into path-form. If this assertion fails "
+        "the link_rewrite default has changed — adjust the test."
+    )
+
+    rows = test_db.execute(
+        "SELECT title, id::text FROM documents WHERE kind='vault'"
+    ).fetchall()
+    ids = {str(t): str(i) for t, i in rows}
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    result = CliRunner().invoke(
+        app, ["note", "rename", ids["Target Note"], "Renamed Target"]
+    )
+    assert result.exit_code == 0, result.output
+
+    # File-on-disk: synthetic display dropped, new title in bare form.
+    _, body = parse_frontmatter((vault / "referrer.md").read_text())
+    assert "[[Renamed Target]]" in body
+    # Neither the old slug nor the stale-title display survives.
+    assert "[[target-note" not in body
+    assert "|Target Note]]" not in body
+    assert "[[Renamed Target|Target Note]]" not in body
+
+    # DB ``links`` row still points at the renamed doc.
+    link_rows = test_db.execute(
+        "SELECT dst_document_id::text FROM links"
+    ).fetchall()
+    assert len(link_rows) == 1
+    assert link_rows[0][0] == ids["Target Note"]
+    # Title in the DB reflects the rename (post-rename sync_one_file).
+    title_row = test_db.execute(
+        "SELECT title FROM documents WHERE id = %s", (ids["Target Note"],)
+    ).fetchone()
+    assert title_row == ("Renamed Target",)
+
+
+def test_rename_preserves_user_alias_through_path_form_match(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User-chosen alias on a path-form reference survives a rename.
+
+    Pins the case-insensitive comparison in ``_rewrite_link_text``: the
+    synthetic-display drop only applies when the display equals the OLD
+    title (case-insensitive). A user who typed ``[[Target Note|My Custom
+    Alias]]`` keeps that label after rename — the alias is not synthetic.
+
+    This complements
+    :func:`test_rename_refactors_path_form_references_after_rewrite`:
+    same path-form match path through ``_collect_references``, opposite
+    branch through ``_rewrite_link_text`` (display preserved instead of
+    dropped).
+    """
+    patch_embedder(fake_embedder)
+    vault = tmp_path / "vault"
+    _init(vault)
+    _write(
+        vault / "target-note.md",
+        {"title": "Target Note"},
+        "primary body\n",
+    )
+    _write(
+        vault / "referrer.md",
+        {"title": "Referrer"},
+        "see [[Target Note|My Custom Alias]] there\n",
+    )
+    sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+
+    # Pre-condition: post-sync, the explicit alias is preserved through
+    # the rewrite (only the target slug changes, not the display).
+    _, post_sync_body = parse_frontmatter((vault / "referrer.md").read_text())
+    assert "[[target-note|My Custom Alias]]" in post_sync_body
+
+    rows = test_db.execute(
+        "SELECT title, id::text FROM documents WHERE kind='vault'"
+    ).fetchall()
+    ids = {str(t): str(i) for t, i in rows}
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    result = CliRunner().invoke(
+        app, ["note", "rename", ids["Target Note"], "Renamed Target"]
+    )
+    assert result.exit_code == 0, result.output
+
+    _, body = parse_frontmatter((vault / "referrer.md").read_text())
+    # User alias preserved verbatim; only the target part was updated.
+    assert "[[Renamed Target|My Custom Alias]]" in body
+    # Neither the old target nor a synthetic-display drop happened.
+    assert "[[target-note|" not in body
+    assert "[[Renamed Target]]" not in body
+
+
 def test_rename_full_flow(
     test_db: psycopg.Connection,
     tmp_path: Path,
@@ -137,7 +277,12 @@ def test_rename_no_link_refactor_skips_others(
     assert (vault / "renamed.md").is_file()
     # Other files keep their old links — they'll show up as unresolved on
     # the next vault sync, which is the user's signal to clean them up.
-    assert "[[Target]]" in (vault / "alpha.md").read_text()
+    # The reference may be in path-form (``[[target|Target]]``) if
+    # ``brain.vault.link_rewrite`` ran during the seed sync; either form
+    # still points at the OLD slug ("target") rather than the new one.
+    alpha_text = (vault / "alpha.md").read_text()
+    assert "[[Renamed" not in alpha_text
+    assert ("[[Target]]" in alpha_text) or ("[[target|Target]]" in alpha_text)
 
 
 def test_rename_collision_rejected(
