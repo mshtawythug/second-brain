@@ -541,11 +541,42 @@ def _worker_loop(
                 # then dedup resumes) — safer than a half-stale map.
                 state.body_cache.clear()
             elif job.action == "delete":
-                _handle_delete(conn, job.abs_path, config.vault_path)
-                # Drop the cache entry so a future creation event for
-                # the same path is treated as cold-start, not a
-                # spurious fence-only no-op.
-                state.body_cache.pop(job.abs_path, None)
+                # Defensive re-stat: a "deleted" fsevent can fire spuriously
+                # when a file is atomically replaced. ``_atomic.atomic_write_text``
+                # does ``os.replace(tmp, path)`` (used by ``rewrite_tags`` for
+                # ``brain tag`` and by the sync engine itself), and on macOS
+                # APFS the rename can surface as a ``deleted`` on the original
+                # path with the follow-up ``created`` dropped or coalesced by
+                # watchdog. If we trust the action label blindly we'd
+                # ``DELETE FROM documents`` for a perfectly intact file —
+                # discovered live on 2026-05-01 by ``brain tag`` round-trip.
+                # The on-disk file is the source of truth here: re-stat
+                # before deletion. If the file is still there, treat as a
+                # plain upsert (which will reconcile any frontmatter changes
+                # the producer just made).
+                if job.abs_path.exists():
+                    logger.debug(
+                        "vault watcher: ignoring stale delete for %s "
+                        "(file still exists — likely an atomic-replace event)",
+                        job.abs_path,
+                    )
+                    if _is_fence_only_write(state, job.abs_path):
+                        state.skipped_fence_only += 1
+                    else:
+                        sync_one_file(
+                            conn,
+                            embedder=embedder,
+                            vault_path=config.vault_path,
+                            file_path=job.abs_path,
+                            link_rewrite=config.link_rewrite,
+                        )
+                        _refresh_body_cache(state, job.abs_path)
+                else:
+                    _handle_delete(conn, job.abs_path, config.vault_path)
+                    # Drop the cache entry so a future creation event for
+                    # the same path is treated as cold-start, not a
+                    # spurious fence-only no-op.
+                    state.body_cache.pop(job.abs_path, None)
             else:
                 if _is_fence_only_write(state, job.abs_path):
                     state.skipped_fence_only += 1

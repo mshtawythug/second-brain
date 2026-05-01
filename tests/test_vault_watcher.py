@@ -525,6 +525,85 @@ def test_delete_event_removes_row(
     thread.join(timeout=5.0)
 
 
+def test_stale_delete_event_preserves_existing_file(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """A spurious 'deleted' fsevent for a still-existing file must NOT remove the row.
+
+    Repro path: ``rewrite_tags`` (called by ``brain tag``) uses
+    ``_atomic.atomic_write_text`` which does ``os.replace(tmp, path)``.
+    On macOS APFS, fsevents can surface this rename as a ``deleted`` event
+    on the original path without a corresponding ``created``/``modified``
+    follow-up — especially under timing pressure when watchdog's
+    deduplication coalesces events. The on-disk file is fully intact, but
+    the previous worker would blindly call ``DELETE FROM documents`` based
+    on the action label alone.
+
+    Regression: live test on 2026-05-01 confirmed ``brain tag <vault-doc>
+    +foo`` could leave the file written but the DB row gone, causing the
+    next ``brain tag <id> -foo`` to fail with ``document not found``.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "still-here.md"
+    note_id = str(uuid.uuid4())
+    _write(note, {"id": note_id, "title": "Still Here"}, "x\n")
+
+    events: list[Any] = []
+    config = WatchConfig(
+        vault_path=vault,
+        debounce_ms=10,
+        on_event=lambda a, p: events.append((a, p)),
+    )
+
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+
+    # Confirm startup sync inserted the row.
+    _wait_for(
+        lambda: test_db.execute(
+            "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
+        ).fetchone()[0]
+        == 1
+    )
+
+    # The file is still on disk — DO NOT unlink. This is the difference
+    # vs. ``test_delete_event_removes_row``: a real deletion follows
+    # ``note.unlink()``; a stale deletion does not.
+    assert note.exists(), "test setup must leave the file in place"
+
+    observer.inject(FileDeletedEvent(str(note)))
+
+    # Wait for the worker to drain the event queue. The on_event hook
+    # fires when a job is enqueued (post-debounce); poll for it before
+    # asserting on DB state so we don't race the worker.
+    _wait_for(lambda: ("delete", note) in events, timeout=2.0)
+
+    # Give the worker a brief moment to actually process the dequeued
+    # job. We can't sync on the row's deletion because it shouldn't
+    # happen, so a short bounded wait is the right shape here.
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+
+    # The fix: stale delete events must NOT remove the row.
+    count = test_db.execute(
+        "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
+    ).fetchone()[0]
+    assert count == 1, (
+        f"stale delete event removed the row despite the file still existing "
+        f"(count={count}); watcher should re-stat the path before DELETE"
+    )
+
+    state = observer.handler._state
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
 def test_graceful_shutdown_drains_pending(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
 ) -> None:
