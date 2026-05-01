@@ -196,11 +196,67 @@ def test_tag_missing_ingested_file_warns_db_only(
     result = CliRunner().invoke(app, ["tag", doc_id, "+foo"])
     assert result.exit_code == 0, result.output
     combined = result.output + (result.stderr or "")
-    assert "file missing" in combined
+    # Suffix path is hit (printed on stdout next to the tag summary).
     assert "(db only, file missing)" in result.output
+    # Warning text is emitted on stderr — assert on a phrase UNIQUE to the
+    # warning so a regression that silently drops the warning still fails
+    # this test (the substring "file missing" appears in both the suffix
+    # AND the warning, so it is not discriminating).
+    assert "Pass --regenerate-file" in combined
     assert _tags_for(doc_id) == ["foo"]
     # No file should have been written by the warning path.
     assert not (vault / "_ingested/krisp/2026-04-30-x-gone.md").exists()
+
+
+def test_tag_missing_vault_file_warns_db_only(
+    test_db: psycopg.Connection[Any],
+    fake_embedder: Any,
+    tmp_path: Path,
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(d2) Vault-tier doc whose file is gone (no flag) → DB-only + warning.
+
+    Mirrors the ingested-tier ``(db only, file missing)`` branch, but for
+    ``kind='vault'``: a missing authored note must NOT be regenerated from
+    the DB without an explicit flag (regenerating risks data loss vs. the
+    canonical on-disk source). Without ``--regenerate-file`` the CLI should
+    warn and apply the tag in the DB only — exit 0, no file created.
+    """
+    patch_embedder(fake_embedder)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    _set_env(monkeypatch, vault)
+
+    doc_id = "66666666-6666-4666-8666-666666666666"
+    rel_path = "missing-authored.md"
+    test_db.execute(
+        "INSERT INTO documents (id, title, content, content_hash, content_type, "
+        "tags, metadata, kind, vault_path) VALUES "
+        "(%s, 'MissingAuthored', 'authored body', 'h5', 'note', "
+        "'{}', '{}'::jsonb, 'vault', %s)",
+        (doc_id, rel_path),
+    )
+    pre_state = sorted(p.relative_to(vault).as_posix() for p in vault.rglob("*"))
+
+    result = CliRunner().invoke(app, ["tag", doc_id, "+foo"])
+    assert result.exit_code == 0, result.output
+    combined = result.output + (result.stderr or "")
+    # Suffix is printed on stdout for the vault-missing branch.
+    assert "(db only, vault file missing)" in result.output
+    # Warning text is emitted on stderr — assert on a phrase UNIQUE to the
+    # vault-missing warning (the suffix uses "vault file missing" while the
+    # warning uses "vault-tier authored note is missing on disk").
+    assert "vault-tier authored note is missing on disk" in combined
+
+    # DB tag was applied even though the file write was skipped.
+    assert _tags_for(doc_id) == ["foo"]
+
+    # No file was synthesized at the missing path; vault directory contents
+    # are byte-for-byte identical pre/post.
+    post_state = sorted(p.relative_to(vault).as_posix() for p in vault.rglob("*"))
+    assert pre_state == post_state
+    assert not (vault / rel_path).exists()
 
 
 def test_tag_missing_ingested_with_regenerate_file(
