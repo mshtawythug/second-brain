@@ -354,6 +354,7 @@ def _write_doc_file(
     *,
     vault_path: Path,
     relative: str,
+    force: bool = False,
 ) -> tuple[Path, bool]:
     """Materialize ``doc`` at ``vault_path / relative`` and return the result.
 
@@ -361,13 +362,22 @@ def _write_doc_file(
     when the existing file's body already matches ``doc.content_hash``
     (idempotent skip), True when the file was rewritten or freshly created.
 
+    ``force=True`` bypasses the body-hash skip and rewrites the file even
+    when the body is unchanged. Callers must use ``force=True`` when they've
+    already determined a frontmatter-only change happened — otherwise the
+    body-hash check (which only fingerprints the body) silently drops the
+    rewrite and leaves stale frontmatter on disk. The default
+    ``force=False`` keeps the corpus-dump path (:func:`export_vault`) cheap
+    on re-runs.
+
     Raises :class:`OSError` if the write fails. Callers decide whether to
     aggregate the failure into a summary or surface it directly.
     """
     target = vault_path / relative
-    existing_hash = _existing_body_hash(target)
-    if existing_hash == doc.content_hash:
-        return target, False
+    if not force:
+        existing_hash = _existing_body_hash(target)
+        if existing_hash == doc.content_hash:
+            return target, False
 
     target.parent.mkdir(parents=True, exist_ok=True)
     fields = _build_frontmatter(doc)
@@ -433,13 +443,24 @@ def regenerate_vault_file(
     document_id: str,
     *,
     vault_path: Path,
+    force: bool = False,
 ) -> Path:
     """Re-create a single doc's vault mirror file from its DB row.
 
     Returns the absolute path of the file written (or, on the idempotent
     skip path, the path that already matched). The body-hash check from
-    :func:`export_vault` is preserved: if the on-disk body already matches
-    ``documents.content_hash``, the file is left untouched.
+    :func:`export_vault` is preserved by default: if the on-disk body already
+    matches ``documents.content_hash``, the file is left untouched.
+
+    Pass ``force=True`` to bypass the body-hash skip and unconditionally
+    rewrite the file. This is the right choice when the caller has already
+    determined a change happened (e.g., a frontmatter-only edit such as a
+    title, tags, metadata, or content_type update) — the body-hash check
+    only fingerprints the body, so it would silently drop the rewrite and
+    leave stale frontmatter on disk. The ingest pipeline always sets
+    ``force=True`` because it gates the call on a confirmed change
+    (created row or frontmatter-bearing field changed). The full-corpus
+    :func:`export_vault` keeps ``force=False`` so re-runs stay cheap.
 
     Path resolution prefers the doc's existing ``vault_path`` when set —
     a previously-synced ingested doc must regenerate at the same place
@@ -467,5 +488,7 @@ def regenerate_vault_file(
 
     relative = doc.vault_path or _resolve_relative_path(doc, used_paths=set())
 
-    target, _ = _write_doc_file(doc, vault_path=vault_path, relative=relative)
+    target, _ = _write_doc_file(
+        doc, vault_path=vault_path, relative=relative, force=force
+    )
     return target.resolve()

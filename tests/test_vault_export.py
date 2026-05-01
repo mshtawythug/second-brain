@@ -804,3 +804,65 @@ def test_regenerate_vault_file_honors_existing_vault_path(
     written = regenerate_vault_file(test_db, doc_id, vault_path=vault)
     assert written == (vault / custom_rel).resolve()
     assert written.is_file()
+
+
+def test_regenerate_vault_file_force_rewrites_when_body_unchanged(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """``force=True`` bypasses the body-hash skip on a frontmatter-only edit.
+
+    Regression for the bug discovered during phase review of
+    ``feature/vault-mirror-on-ingest``: ``_write_doc_file`` fingerprints the
+    body only, so a frontmatter-only DB edit (tags / metadata / content_type
+    — i.e. anything that does NOT change the slug) would silently skip the
+    rewrite and leave stale frontmatter on disk.
+    ``regenerate_vault_file(force=True)`` is the per-doc fix; the corpus
+    dump (:func:`export_vault`) keeps ``force=False`` so its re-runs stay
+    cheap.
+
+    We mutate ``tags`` here (not ``title``) precisely because a title change
+    also rotates the slug — that would route the write to a fresh path
+    where the body-hash check sees no existing file, masking the bug. Tags
+    keep the slug constant so the same on-disk path is reused on the next
+    regenerate call.
+    """
+    # Setup — ingest a doc and write its initial mirror at force=False
+    # (the default for the first regenerate call).
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="Stable Slug",
+        content="body never changes",
+        source_kind="manual",
+    )
+    vault = tmp_path / "vault"
+    initial_path = regenerate_vault_file(test_db, doc_id, vault_path=vault)
+    fields_before, _ = parse_frontmatter(initial_path.read_text(encoding="utf-8"))
+    assert fields_before.get("tags") == []
+
+    # Mutate frontmatter-only state in the DB. ``tags`` does not affect the
+    # slug, so the regenerate call below targets the same on-disk path with
+    # the same body hash — the exact scenario the body-hash skip mishandled.
+    test_db.execute(
+        "UPDATE documents SET tags = %s WHERE id = %s::uuid",
+        (["alpha", "beta"], doc_id),
+    )
+
+    # Exercise without force — the body-hash skip leaves the file stale.
+    skipped_path = regenerate_vault_file(test_db, doc_id, vault_path=vault)
+    assert skipped_path == initial_path
+    fields_skipped, _ = parse_frontmatter(skipped_path.read_text(encoding="utf-8"))
+    assert fields_skipped.get("tags") == [], (
+        "default force=False must keep the body-hash skip — confirms the "
+        "bug existed and that force is what unlocks the rewrite"
+    )
+
+    # Now with force=True, the file is rewritten and the new tags land.
+    forced_path = regenerate_vault_file(
+        test_db, doc_id, vault_path=vault, force=True
+    )
+
+    # Verify — same file path, new frontmatter tags.
+    assert forced_path == initial_path
+    fields_after, _ = parse_frontmatter(forced_path.read_text(encoding="utf-8"))
+    assert fields_after.get("tags") == ["alpha", "beta"]

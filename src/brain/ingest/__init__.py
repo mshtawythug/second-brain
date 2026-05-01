@@ -211,8 +211,13 @@ def ingest_document(
         and (result.created or force)
     ):
         try:
+            # ``force=True`` because we just inserted/replaced the DB row —
+            # we know a change happened. Without it, the body-hash skip in
+            # ``_write_doc_file`` would mask any frontmatter-only delta
+            # (relevant when ``--force`` rewrites a doc with the same body
+            # but different metadata).
             regenerate_vault_file(
-                conn, result.document_id, vault_path=vault_root
+                conn, result.document_id, vault_path=vault_root, force=True
             )
         except OSError as exc:
             # Only OSError is reachable here: ``regenerate_vault_file``'s
@@ -632,15 +637,24 @@ def update_document(
     # built from documents.title/tags/metadata/content_type — a metadata-only
     # edit must still propagate). Vault-tier rows are skipped via the DB
     # ``cur_kind`` pre-check rather than by catching ``regenerate_vault_file``'s
-    # ValueError — a string-match on the error message would silently break
-    # if that message is ever rephrased. Same convention as
-    # ``_finalize_tag_target_state`` in ``brain.cli``.
+    # ValueError — pre-checking ``kind`` from the DB is more robust than
+    # catching a ``ValueError`` and string-matching its message, since the
+    # upstream message can be rephrased without notice.
     needs_mirror = rechunked or any(
         f in _MIRROR_FRONTMATTER_FIELDS for f in fields_changed
     )
     if vault_root is not None and cur_kind != "vault" and needs_mirror:
         try:
-            regenerate_vault_file(conn, document_id, vault_path=vault_root)
+            # ``force=True`` because we've already gated on
+            # ``rechunked or any(... in _MIRROR_FRONTMATTER_FIELDS ...)`` —
+            # a frontmatter-only edit (tags / metadata / content_type) leaves
+            # the body unchanged, so the body-hash skip in ``_write_doc_file``
+            # would silently drop the rewrite and leave stale frontmatter on
+            # disk. The full-corpus ``export_vault`` keeps the default
+            # ``force=False`` so re-runs of that path stay cheap.
+            regenerate_vault_file(
+                conn, document_id, vault_path=vault_root, force=True
+            )
         except OSError as exc:
             # Only OSError is reachable: ``no document with id`` is impossible
             # (we just SELECTed it), and ``kind='vault'`` is gated above.

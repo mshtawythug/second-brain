@@ -1,4 +1,5 @@
 """Integration tests for the ingest pipeline (extract → chunk → embed → store)."""
+import hashlib
 import logging
 from pathlib import Path
 
@@ -736,6 +737,82 @@ def test_ingest_document_mirror_failure_does_not_roll_back_db(
     ), "expected a WARNING-level mirror failure record"
 
 
+def test_update_document_mirror_failure_does_not_roll_back_db(
+    test_db,
+    fake_embedder,
+    tmp_path: Path,
+    mocker: MockerFixture,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An ``OSError`` from the update-side mirror write is logged + swallowed.
+
+    Symmetric counterpart to
+    :func:`test_ingest_document_mirror_failure_does_not_roll_back_db`: the
+    mirror write happens OUTSIDE the DB transaction so a transient filesystem
+    failure on a body or frontmatter edit cannot abort an otherwise-successful
+    DB update. Recovery is via ``brain vault export --force``.
+    """
+    # Setup — initial ingest succeeds with a real mirror; capture the doc id
+    # and pre-update content_hash to compare against post-update state.
+    vault = tmp_path / "vault"
+    initial = _ingest_manual_with_mirror(
+        test_db,
+        fake_embedder,
+        vault_root=vault,
+        title="Update Survives FS Failure",
+        content="original body",
+    )
+    assert initial.document_id is not None
+    pre_hash_row = test_db.execute(
+        "SELECT content_hash FROM documents WHERE id=%s", (initial.document_id,)
+    ).fetchone()
+    assert pre_hash_row is not None
+    pre_hash = pre_hash_row[0]
+
+    # Now patch regenerate_vault_file so the next call (from update_document)
+    # raises. The earlier ingest has already returned, so the patch only
+    # affects the update path.
+    mocker.patch(
+        "brain.ingest.regenerate_vault_file",
+        side_effect=OSError("simulated disk failure"),
+    )
+
+    # Exercise — body change so we know the mirror write would be triggered.
+    with caplog.at_level(logging.WARNING, logger="brain.ingest"):
+        result = update_document(
+            test_db,
+            document_id=initial.document_id,
+            embedder=fake_embedder,
+            new_content="updated body",
+            vault_root=vault,
+        )
+
+    # Verify — update_document returned normally with the body change applied,
+    # the DB row reflects the new content, and exactly one WARNING was logged.
+    assert result.rechunked is True
+    assert "content" in result.fields_changed
+    db_row = test_db.execute(
+        "SELECT content, content_hash FROM documents WHERE id=%s",
+        (initial.document_id,),
+    ).fetchone()
+    assert db_row is not None
+    assert db_row[0] == "updated body"
+    assert db_row[1] != pre_hash, "content_hash must reflect the new body"
+    expected_hash = hashlib.sha256(b"updated body").hexdigest()
+    assert db_row[1] == expected_hash
+    mirror_failures = [
+        r for r in caplog.records
+        if r.levelno >= logging.WARNING
+        and "vault mirror write failed" in r.message
+        and str(initial.document_id) in r.message
+        and "simulated disk failure" in r.message
+    ]
+    assert len(mirror_failures) == 1, (
+        f"expected exactly one mirror-failure WARNING; got "
+        f"{[r.message for r in mirror_failures]}"
+    )
+
+
 def test_update_document_body_change_rewrites_mirror(
     test_db, fake_embedder, tmp_path: Path
 ) -> None:
@@ -773,45 +850,102 @@ def test_update_document_body_change_rewrites_mirror(
     assert body.strip() == "version two — rewritten body"
 
 
-def test_update_document_metadata_only_rewrites_mirror(
-    test_db, fake_embedder, tmp_path: Path
+@pytest.mark.parametrize(
+    ("field", "old_value", "new_value"),
+    [
+        ("title", "old-name", "new-name"),
+        ("tags", ["alpha"], ["alpha", "beta"]),
+        # ``metadata`` projects to the frontmatter via the ``aliases`` key
+        # (see ``_aliases_from_metadata`` in ``brain.vault.export``); using
+        # it here exercises both the ``metadata`` branch of
+        # ``_MIRROR_FRONTMATTER_FIELDS`` and the metadata→aliases mapping.
+        ("metadata", {"aliases": ["alpha"]}, {"aliases": ["alpha", "beta"]}),
+        ("content_type", "note", "transcript"),
+    ],
+)
+def test_update_document_frontmatter_only_rewrites_mirror(
+    test_db,
+    fake_embedder,
+    tmp_path: Path,
+    field: str,
+    old_value: object,
+    new_value: object,
 ) -> None:
-    """A title-only edit refreshes the mirror's frontmatter.
+    """A frontmatter-field-only edit refreshes the mirror's frontmatter.
 
     Frontmatter is derived from documents.title/tags/metadata/content_type,
     so any of those changes must trigger a mirror rewrite even when the body
-    is untouched.
+    is untouched. Parametrized across all four fields so dropping one from
+    ``_MIRROR_FRONTMATTER_FIELDS`` would fail the matching invocation
+    instead of slipping through a single-branch test.
+
+    Regression for the body-hash-skip bug discovered during phase review:
+    ``_write_doc_file``'s body-hash check fingerprinted the body only, so a
+    frontmatter-only edit with no slug change would silently skip the
+    rewrite. Fixed by routing the per-doc ``regenerate_vault_file`` call
+    through ``force=True``.
     """
-    # Setup
+    # Setup — ingest with the field's old value.
     vault = tmp_path / "vault"
-    initial = _ingest_manual_with_mirror(
+    base_title = "fm-only-mirror" if field != "title" else old_value
+    base_tags = old_value if field == "tags" else []
+    base_meta = old_value if field == "metadata" else {}
+    base_type = old_value if field == "content_type" else "note"
+    initial = ingest_document(
         test_db,
-        fake_embedder,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title=base_title,
+            content="body stays the same",
+            content_type=base_type,
+            source_path=None,
+            metadata=dict(base_meta),
+        ),
+        source_kind="manual",
+        tags=list(base_tags),
         vault_root=vault,
-        title="Old Title",
-        content="body stays the same",
     )
     assert initial.document_id is not None
-    original_target = vault / "_ingested" / "manual" / "old-title.md"
+    # Slug derives from the title — capture the initial mirror so we can
+    # confirm it exists pre-update.
+    initial_slug = "old-name" if field == "title" else "fm-only-mirror"
+    original_target = vault / "_ingested" / "manual" / f"{initial_slug}.md"
     assert original_target.is_file()
 
-    # Exercise — change only the title.
-    update_document(
-        test_db,
-        document_id=initial.document_id,
-        new_title="New Title",
-        vault_root=vault,
-    )
+    # Exercise — change only the targeted field.
+    update_kwargs: dict[str, object] = {
+        "document_id": initial.document_id,
+        "vault_root": vault,
+    }
+    if field == "title":
+        update_kwargs["new_title"] = new_value
+    elif field == "tags":
+        update_kwargs["new_tags"] = new_value
+    elif field == "metadata":
+        update_kwargs["metadata_patch"] = new_value
+        update_kwargs["replace_metadata"] = True
+    elif field == "content_type":
+        update_kwargs["new_content_type"] = new_value
+    update_document(test_db, **update_kwargs)  # type: ignore[arg-type]
 
-    # Verify — the new file is written at the regenerate path; its
-    # frontmatter carries the new title.
-    new_target = vault / "_ingested" / "manual" / "new-title.md"
+    # Verify — the mirror file (possibly at a renamed path for title) carries
+    # the new value in its frontmatter.
+    new_slug = "new-name" if field == "title" else "fm-only-mirror"
+    new_target = vault / "_ingested" / "manual" / f"{new_slug}.md"
     assert new_target.is_file(), (
-        "regenerate_vault_file must materialize the mirror at the new path "
-        "after a title change"
+        "regenerate_vault_file must materialize the mirror after a "
+        f"{field} change"
     )
     fm, _ = parse_frontmatter(new_target.read_text(encoding="utf-8"))
-    assert fm["title"] == "New Title"
+    if field == "title":
+        assert fm["title"] == new_value
+    elif field == "tags":
+        assert sorted(fm.get("tags") or []) == sorted(new_value)  # type: ignore[arg-type]
+    elif field == "metadata":
+        # metadata → aliases is the only metadata→frontmatter projection.
+        assert fm.get("aliases") == new_value["aliases"]  # type: ignore[index]
+    elif field == "content_type":
+        assert fm["content_type"] == new_value
 
 
 def test_update_document_vault_kind_skipped(
