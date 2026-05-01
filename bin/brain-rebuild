@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Rebuild the brain wiki from scratch.
+# Use when Quartz's --serve watcher missed a file change, or after a
+# config/overlay update that needs a clean build pass.
+#
+# Default behavior:
+#   1. Run `brain vault export` so any DB-side changes (e.g. new ingested
+#      docs that haven't been mirrored into the vault yet) are materialized
+#      as Markdown files Quartz can render.
+#   2. Bounce the wiki process so Quartz starts fresh — flushes any stale
+#      build cache and re-applies the brain overlay if you've updated it.
+#
+# Flags:
+#   --no-export   skip the DB→vault export step (use if you only edited
+#                 vault files directly).
+#   --no-bounce   skip the wiki bounce (use if you only want to refresh
+#                 the vault and trust --serve to pick it up).
+#
+# Env overrides (same as brain-up):
+#   BRAIN_VAULT_PATH    (default: ~/brain-vault)
+#   BRAIN_WIKI_PORT     (default: 8080)
+
+set -euo pipefail
+
+VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+DO_EXPORT=1
+DO_BOUNCE=1
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-export) DO_EXPORT=0 ;;
+    --no-bounce) DO_BOUNCE=0 ;;
+    -h|--help)
+      sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//; /^set -euo/d'
+      exit 0
+      ;;
+    *)
+      echo "unknown flag: $arg" >&2
+      echo "try: $(basename "$0") --help" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if ! command -v brain >/dev/null 2>&1; then
+  echo "brain CLI not on PATH — install second-brain first" >&2
+  exit 1
+fi
+
+if [[ "$DO_EXPORT" == "1" ]]; then
+  echo "🔄 exporting DB → vault ($VAULT)..."
+  brain vault export --to "$VAULT"
+fi
+
+if [[ "$DO_BOUNCE" == "1" ]]; then
+  echo "🔄 bouncing wiki..."
+  "$SCRIPT_DIR/brain-down"
+  "$SCRIPT_DIR/brain-up"
+else
+  echo "✅ vault refreshed — Quartz --serve should pick up the changes."
+fi

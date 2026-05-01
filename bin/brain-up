@@ -2,10 +2,16 @@
 # Start the second-brain wiki + sync watcher.
 # Idempotent — safe to re-run.
 #
+# Applies the brain Quartz overlay (`quartz_overrides/`) into the workspace
+# before starting the wiki, so the running site reflects whatever overrides
+# the current branch carries. Set BRAIN_NO_OVERLAY=1 to skip the overlay
+# (use whatever's already in the workspace — typically stock Quartz).
+#
 # Env overrides:
 #   BRAIN_VAULT_PATH    (default: ~/brain-vault)
 #   BRAIN_WIKI_PORT     (default: 8080)
 #   BRAIN_OPEN_BROWSER  (default: 1; set 0 to skip)
+#   BRAIN_NO_OVERLAY    (default: 0; set 1 to skip the overlay step)
 
 set -euo pipefail
 
@@ -39,6 +45,24 @@ start_watcher() {
   echo "watcher started (pid $!) — logs at $WATCH_LOG"
 }
 
+apply_overlay() {
+  if [[ "${BRAIN_NO_OVERLAY:-0}" == "1" ]]; then
+    echo "overlay: skipped (BRAIN_NO_OVERLAY=1)"
+    return 0
+  fi
+  if ! command -v brain >/dev/null 2>&1; then
+    echo "overlay: skipped (brain CLI not on PATH)"
+    return 0
+  fi
+  # `--no-build` applies the overlay to the workspace without running
+  # `npx quartz build` — the dev server below does its own incremental
+  # build and re-runs on file changes.
+  if ! brain vault render --overlay --no-build --vault "$VAULT" 2>&1; then
+    echo "overlay: failed — wiki will start with whatever's in the workspace" >&2
+    return 0
+  fi
+}
+
 start_wiki() {
   if is_running "$WIKI_PID"; then
     echo "wiki already running (pid $(cat "$WIKI_PID")) — $URL"
@@ -52,6 +76,7 @@ start_wiki() {
     echo "  cp \"$(dirname "$0")/../quartz.config.ts\" ./quartz.config.ts  # optional brain-tuned config" >&2
     return 1
   fi
+  apply_overlay
   : >"$WIKI_LOG"
   cd "$QUARTZ_DIR"
   nohup npx quartz build --serve --port "$PORT" --directory "$VAULT" \
