@@ -170,7 +170,9 @@ def ingest_document(
     swallowed so a transient mirror error never rolls back a successful
     ingest. Recovery is via ``brain vault export --force``. Library callers
     (tests, internal pipelines) that don't care about the mirror omit
-    ``vault_root`` and get the legacy DB-only behavior unchanged.
+    ``vault_root`` and get the legacy DB-only behavior unchanged. Named
+    ``vault_root`` to distinguish from the per-document
+    ``documents.vault_path`` relative path.
     """
     if doc.source_path is not None:
         if source_kind is None:
@@ -212,7 +214,12 @@ def ingest_document(
             regenerate_vault_file(
                 conn, result.document_id, vault_path=vault_root
             )
-        except (OSError, ValueError) as exc:
+        except OSError as exc:
+            # Only OSError is reachable here: ``regenerate_vault_file``'s
+            # ValueError paths (no document with id, kind='vault') are both
+            # impossible for a row we just inserted with default
+            # ``kind='ingested'``. Catching ValueError would mask unrelated
+            # bugs.
             _logger.warning(
                 "vault mirror write failed for document %s: %s; "
                 "DB ingest succeeded — recover via `brain vault export`",
@@ -516,21 +523,22 @@ def update_document(
     (``title`` / ``tags`` / ``metadata`` / ``content_type``), the mirror file
     under ``vault_root`` is regenerated via
     :func:`brain.vault.export.regenerate_vault_file`. Vault-tier rows
-    (``kind='vault'``) are silently skipped — those files are
+    (``kind='vault'``) are skipped via a DB pre-check — those files are
     file-source-of-truth and ``vault sync`` reconciles back to the DB.
-    Other failures (``OSError`` on write, unexpected ``ValueError``) log
-    a WARNING and do NOT roll back the DB update — drift is recoverable
-    via ``brain vault export --force``.
+    A filesystem error (``OSError``) on the mirror write logs a WARNING
+    and does NOT roll back the DB update — drift is recoverable via
+    ``brain vault export --force``. Named ``vault_root`` to distinguish
+    from the per-document ``documents.vault_path`` relative path.
     """
     with conn.transaction():
         row = conn.execute(
-            "SELECT title, content, content_type, metadata, tags "
+            "SELECT title, content, content_type, metadata, tags, kind "
             "FROM documents WHERE id=%s",
             (document_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"document not found: {document_id}")
-        cur_title, cur_content, cur_type, cur_meta, cur_tags = row
+        cur_title, cur_content, cur_type, cur_meta, cur_tags, cur_kind = row
         cur_meta = dict(cur_meta or {})
         cur_tags = list(cur_tags or [])
 
@@ -622,29 +630,20 @@ def update_document(
     # cannot roll back the DB update. Triggered when the body was rechunked
     # OR any frontmatter-derived field changed (the mirror's frontmatter is
     # built from documents.title/tags/metadata/content_type — a metadata-only
-    # edit must still propagate).
+    # edit must still propagate). Vault-tier rows are skipped via the DB
+    # ``cur_kind`` pre-check rather than by catching ``regenerate_vault_file``'s
+    # ValueError — a string-match on the error message would silently break
+    # if that message is ever rephrased. Same convention as
+    # ``_finalize_tag_target_state`` in ``brain.cli``.
     needs_mirror = rechunked or any(
         f in _MIRROR_FRONTMATTER_FIELDS for f in fields_changed
     )
-    if vault_root is not None and needs_mirror:
+    if vault_root is not None and cur_kind != "vault" and needs_mirror:
         try:
             regenerate_vault_file(conn, document_id, vault_path=vault_root)
-        except ValueError as exc:
-            # Vault-tier rows own their files; regenerate refuses to
-            # clobber them. That's the expected case for `kind='vault'`,
-            # so swallow it silently. Anything else (e.g. document not
-            # found mid-write) is unexpected and worth a warning.
-            if "vault-tier" in str(exc):
-                pass
-            else:
-                _logger.warning(
-                    "vault mirror write failed for document %s: %s; "
-                    "DB update succeeded — recover via "
-                    "`brain vault export`",
-                    document_id,
-                    exc,
-                )
         except OSError as exc:
+            # Only OSError is reachable: ``no document with id`` is impossible
+            # (we just SELECTed it), and ``kind='vault'`` is gated above.
             _logger.warning(
                 "vault mirror write failed for document %s: %s; "
                 "DB update succeeded — recover via `brain vault export`",

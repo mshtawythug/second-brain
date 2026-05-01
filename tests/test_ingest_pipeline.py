@@ -815,15 +815,16 @@ def test_update_document_metadata_only_rewrites_mirror(
 
 
 def test_update_document_vault_kind_skipped(
-    test_db, fake_embedder, tmp_path: Path
+    test_db, fake_embedder, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Vault-tier rows (``kind='vault'``) are silently skipped, not raised.
+    """Vault-tier rows (``kind='vault'``) are skipped via DB pre-check.
 
-    ``regenerate_vault_file`` raises ValueError for ``kind='vault'`` because
-    vault-tier files are file-source-of-truth — the DB copy may lag behind
-    user edits on disk. ``update_document`` must catch that specific
-    ValueError so a kind='vault' edit (which already wrote to its own file
-    via a different code path) doesn't surface a spurious error.
+    Vault-tier files are file-source-of-truth — the DB copy may lag behind
+    user edits on disk. The pre-check on ``documents.kind`` (read in the
+    same SELECT used for the rest of the update) guarantees we never even
+    call ``regenerate_vault_file``, so there's no warning to log and no
+    string-matched ValueError handler that could silently break if the
+    error message is rephrased.
     """
     # Setup — normal ingest, then promote the row to kind='vault'.
     vault = tmp_path / "vault"
@@ -842,16 +843,18 @@ def test_update_document_vault_kind_skipped(
         ("projects/notes/vault-authored.md", initial.document_id),
     )
 
-    # Exercise — must not raise.
-    result = update_document(
-        test_db,
-        document_id=initial.document_id,
-        new_title="Renamed",
-        vault_root=vault,
-    )
+    # Exercise — must not raise; must not log a WARNING.
+    with caplog.at_level(logging.WARNING, logger="brain.ingest"):
+        result = update_document(
+            test_db,
+            document_id=initial.document_id,
+            new_title="Renamed",
+            vault_root=vault,
+        )
 
     # Verify — DB title was updated; the original mirror was not rewritten
-    # (regenerate refused, the failure was swallowed silently).
+    # (regenerate was never called); no WARNING was emitted (pre-check
+    # short-circuits before the try-block).
     assert "title" in result.fields_changed
     assert target.stat().st_mtime_ns == target_mtime_before
     new_title = test_db.execute(
@@ -859,3 +862,12 @@ def test_update_document_vault_kind_skipped(
     ).fetchone()
     assert new_title is not None
     assert new_title[0] == "Renamed"
+    mirror_warnings = [
+        r for r in caplog.records
+        if r.levelno >= logging.WARNING
+        and "vault mirror write failed" in r.message
+    ]
+    assert mirror_warnings == [], (
+        f"vault-tier skip must not log a mirror-failure WARNING; got "
+        f"{[r.message for r in mirror_warnings]}"
+    )
