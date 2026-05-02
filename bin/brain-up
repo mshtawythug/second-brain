@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
-# Start the second-brain wiki + sync watcher.
+# Start the second-brain wiki + sync watcher (blue/green serve edition).
 # Idempotent — safe to re-run.
 #
+# Architecture (post blue/green migration):
+#   - Caddy serves <vault>/.quartz/current/ statically on :8080 + brain.test.
+#     This script does NOT spawn Quartz's --serve dev server anymore.
+#   - Watcher A: `brain vault sync --watch` — DB <-> vault mirror.
+#   - Cold start: if <vault>/.quartz/current is missing or unhealthy, run a
+#     synchronous one-shot `python -m brain.wiki.build_swap` so the wiki has
+#     something to serve before Watcher B comes up.
+#   - Watcher B: `python -m brain.wiki.build_watcher` — re-renders the site
+#     into a fresh build dir and atomically retargets `current` on every
+#     vault change.
+#
 # Applies the brain Quartz overlay (`quartz_overrides/`) into the workspace
-# before starting the wiki, so the running site reflects whatever overrides
-# the current branch carries. Set BRAIN_NO_OVERLAY=1 to skip the overlay
-# (use whatever's already in the workspace — typically stock Quartz).
+# BEFORE the cold-start build so the reload-signal transformer is wired in.
+# Set BRAIN_NO_OVERLAY=1 to skip the overlay (use whatever's already in the
+# workspace).
 #
 # Env overrides:
-#   BRAIN_VAULT_PATH    (default: ~/brain-vault)
-#   BRAIN_WIKI_PORT     (default: 8080)
-#   BRAIN_OPEN_BROWSER  (default: 1; set 0 to skip)
-#   BRAIN_NO_OVERLAY    (default: 0; set 1 to skip the overlay step)
+#   BRAIN_VAULT_PATH        (default: ~/brain-vault)
+#   BRAIN_WIKI_PORT         (default: 8080 — for the URL we curl/open)
+#   BRAIN_OPEN_BROWSER      (default: 1; set 0 to skip)
+#   BRAIN_NO_OVERLAY        (default: 0; set 1 to skip the overlay step)
+#   BRAIN_WIKI_KEEP_BUILDS  (default: 3 — old build dirs retained per swap)
+#   BRAIN_NO_BUILD_WATCHER  (default: 0; set 1 to skip Watcher B — used by tests)
 
 set -euo pipefail
 
@@ -19,100 +32,173 @@ VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
 QUARTZ_DIR="$VAULT/.quartz"
 PORT="${BRAIN_WIKI_PORT:-8080}"
 URL="http://localhost:$PORT"
+KEEP="${BRAIN_WIKI_KEEP_BUILDS:-3}"
 
-WIKI_PID="/tmp/brain-wiki.pid"
-WIKI_LOG="/tmp/brain-wiki.log"
-WATCH_PID="/tmp/brain-watch.pid"
-WATCH_LOG="/tmp/brain-watch.log"
+WATCH_PID='/tmp/brain-watch.pid'
+WATCH_LOG='/tmp/brain-watch.log'
+BUILD_PID='/tmp/brain-build.pid'
+BUILD_LOG='/tmp/brain-build.log'
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+VENV_PY="$PROJECT_ROOT/.venv/bin/python"
+SRC_DIR="$PROJECT_ROOT/src"
+
+# Pick the Python interpreter once. ``BRAIN_PY`` env var wins (used by
+# the bin-script tests to plug in a stub); otherwise prefer the project's
+# venv so spawned processes always see the editable install + locked
+# deps; fall back to ``python`` / ``python3`` on PATH (with a warning) for
+# users running the scripts outside the venv.
+if [[ -n "${BRAIN_PY:-}" ]]; then
+    PY="$BRAIN_PY"
+elif [[ -x "$VENV_PY" ]]; then
+    PY="$VENV_PY"
+elif command -v python >/dev/null 2>&1; then
+    echo "warning: $VENV_PY not found — falling back to $(command -v python)" >&2
+    PY="$(command -v python)"
+elif command -v python3 >/dev/null 2>&1; then
+    echo "warning: $VENV_PY not found — falling back to $(command -v python3)" >&2
+    PY="$(command -v python3)"
+else
+    echo "no python interpreter found at $VENV_PY or on PATH" >&2
+    exit 1
+fi
 
 is_running() {
-  local pid_file="$1"
-  [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null
+    local pid_file="$1"
+    [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null
 }
 
 start_watcher() {
-  if is_running "$WATCH_PID"; then
-    echo "watcher already running (pid $(cat "$WATCH_PID"))"
-    return 0
-  fi
-  if ! command -v brain >/dev/null 2>&1; then
-    echo "brain CLI not on PATH — install second-brain first" >&2
-    return 1
-  fi
-  : >"$WATCH_LOG"
-  nohup brain vault sync --watch --vault "$VAULT" >"$WATCH_LOG" 2>&1 &
-  echo $! >"$WATCH_PID"
-  echo "watcher started (pid $!) — logs at $WATCH_LOG"
+    if is_running "$WATCH_PID"; then
+        echo "watcher already running (pid $(cat "$WATCH_PID"))"
+        return 0
+    fi
+    if ! command -v brain >/dev/null 2>&1; then
+        echo "brain CLI not on PATH — install second-brain first" >&2
+        return 1
+    fi
+    : >"$WATCH_LOG"
+    nohup brain vault sync --watch --vault "$VAULT" >"$WATCH_LOG" 2>&1 &
+    echo $! >"$WATCH_PID"
+    echo "watcher started (pid $!) — logs at $WATCH_LOG"
 }
 
 apply_overlay() {
-  if [[ "${BRAIN_NO_OVERLAY:-0}" == "1" ]]; then
-    echo "overlay: skipped (BRAIN_NO_OVERLAY=1)"
-    return 0
-  fi
-  if ! command -v brain >/dev/null 2>&1; then
-    echo "overlay: skipped (brain CLI not on PATH)"
-    return 0
-  fi
-  # `--no-build` applies the overlay to the workspace without running
-  # `npx quartz build` — the dev server below does its own incremental
-  # build and re-runs on file changes.
-  if ! brain vault render --overlay --no-build --vault "$VAULT" 2>&1; then
-    echo "overlay: failed — wiki will start with whatever's in the workspace" >&2
-    return 0
-  fi
+    if [[ "${BRAIN_NO_OVERLAY:-0}" == '1' ]]; then
+        echo 'overlay: skipped (BRAIN_NO_OVERLAY=1)'
+        return 0
+    fi
+    if ! command -v brain >/dev/null 2>&1; then
+        echo 'overlay: skipped (brain CLI not on PATH)'
+        return 0
+    fi
+    # `--no-build` applies the overlay to the workspace without running
+    # `npx quartz build` — the build watcher does its own builds on every
+    # vault change, and we run a cold-start build below if needed.
+    if ! brain vault render --overlay --no-build --vault "$VAULT" 2>&1; then
+        echo 'overlay: failed — wiki will start with whatever is in the workspace' >&2
+        return 0
+    fi
 }
 
-start_wiki() {
-  if is_running "$WIKI_PID"; then
-    echo "wiki already running (pid $(cat "$WIKI_PID")) — $URL"
+current_healthy() {
+    # Healthy = `current` is a symlink, resolves to a directory, and that
+    # directory contains both `index.html` AND `.build-id`. Anything else
+    # (no symlink, dangling target, empty target, missing `.build-id`)
+    # means we need a cold-start build before the watcher comes up.
+    local cur="$QUARTZ_DIR/current"
+    if [[ ! -L "$cur" ]]; then
+        return 1
+    fi
+    local resolved
+    resolved="$(cd "$cur" 2>/dev/null && pwd -P)" || return 1
+    if [[ -z "$resolved" || ! -d "$resolved" ]]; then
+        return 1
+    fi
+    if [[ ! -f "$resolved/index.html" || ! -f "$resolved/.build-id" ]]; then
+        return 1
+    fi
     return 0
-  fi
-  if [[ ! -d "$QUARTZ_DIR" ]]; then
-    echo "quartz workspace not found at $QUARTZ_DIR" >&2
-    echo "set up once with:" >&2
-    echo "  git clone https://github.com/jackyzha0/quartz.git \"$QUARTZ_DIR\"" >&2
-    echo "  cd \"$QUARTZ_DIR\" && npm install" >&2
-    echo "  cp \"$(dirname "$0")/../quartz.config.ts\" ./quartz.config.ts  # optional brain-tuned config" >&2
-    return 1
-  fi
-  apply_overlay
-  : >"$WIKI_LOG"
-  cd "$QUARTZ_DIR"
-  nohup npx quartz build --serve --port "$PORT" --directory "$VAULT" \
-    >"$WIKI_LOG" 2>&1 &
-  echo $! >"$WIKI_PID"
-  echo "wiki starting on $URL (pid $!) — logs at $WIKI_LOG"
+}
+
+cold_start_build() {
+    if current_healthy; then
+        echo 'cold-start build: skipping cold-start build (current/ is healthy)'
+        return 0
+    fi
+    if [[ ! -d "$QUARTZ_DIR" ]]; then
+        echo "quartz workspace not found at $QUARTZ_DIR" >&2
+        echo 'set up once with:' >&2
+        echo "  git clone https://github.com/jackyzha0/quartz.git \"$QUARTZ_DIR\"" >&2
+        echo "  cd \"$QUARTZ_DIR\" && npm install" >&2
+        echo "  cp \"$SCRIPT_DIR/../quartz.config.ts\" ./quartz.config.ts  # optional brain-tuned config" >&2
+        return 1
+    fi
+    echo 'cold-start build: running first-time build, this takes ~40s...'
+    local started
+    started="$(date +%s)"
+    if ! BRAIN_WIKI_RELOAD=1 PYTHONPATH="$SRC_DIR" "$PY" -m brain.wiki.build_swap \
+            --vault "$VAULT" --keep "$KEEP"; then
+        echo 'cold-start build: failed — aborting brain-up' >&2
+        return 1
+    fi
+    local elapsed=$(( $(date +%s) - started ))
+    echo "cold-start build: first build done in ${elapsed}s"
+}
+
+start_build_watcher() {
+    if [[ "${BRAIN_NO_BUILD_WATCHER:-0}" == '1' ]]; then
+        echo 'build watcher: skipped (BRAIN_NO_BUILD_WATCHER=1)'
+        return 0
+    fi
+    if is_running "$BUILD_PID"; then
+        echo "build watcher already running (pid $(cat "$BUILD_PID"))"
+        return 0
+    fi
+    : >"$BUILD_LOG"
+    BRAIN_WIKI_RELOAD=1 PYTHONPATH="$SRC_DIR" nohup "$PY" -m brain.wiki.build_watcher \
+        --vault "$VAULT" --keep "$KEEP" >"$BUILD_LOG" 2>&1 &
+    echo $! >"$BUILD_PID"
+    echo "build watcher started (pid $!) — logs at $BUILD_LOG"
 }
 
 wait_for_url() {
-  local tries=30
-  while ((tries-- > 0)); do
-    if curl -fsS -o /dev/null "$URL/"; then
-      return 0
-    fi
-    sleep 1
-  done
-  echo "warning: $URL did not respond within 30s — check $WIKI_LOG" >&2
-  return 1
+    local tries=30
+    while ((tries-- > 0)); do
+        if curl -fsS -o /dev/null "$URL/"; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo "warning: $URL did not respond within 30s — is Caddy running and serving $QUARTZ_DIR/current?" >&2
+    return 1
 }
 
 start_watcher
-start_wiki
+apply_overlay
+cold_start_build
+start_build_watcher
 
-if [[ "${BRAIN_OPEN_BROWSER:-1}" == "1" ]]; then
-  if wait_for_url; then
-    if command -v open >/dev/null 2>&1; then
-      open "$URL"
-    elif command -v xdg-open >/dev/null 2>&1; then
-      xdg-open "$URL" >/dev/null 2>&1 &
+if [[ "${BRAIN_OPEN_BROWSER:-1}" == '1' ]]; then
+    if wait_for_url; then
+        if command -v open >/dev/null 2>&1; then
+            open "$URL"
+        elif command -v xdg-open >/dev/null 2>&1; then
+            xdg-open "$URL" >/dev/null 2>&1 &
+        fi
     fi
-  fi
 fi
 
+WATCH_PID_VALUE='?'
+BUILD_PID_VALUE='?'
+[[ -f "$WATCH_PID" ]] && WATCH_PID_VALUE="$(cat "$WATCH_PID")"
+[[ -f "$BUILD_PID" ]] && BUILD_PID_VALUE="$(cat "$BUILD_PID")"
+
 echo
-echo "🧠 brain is up:"
-echo "   wiki:    $URL"
-echo "   watcher: re-syncing on file changes"
-echo "   stop:    brain-down"
-echo "   status:  brain-status"
+echo '🧠 brain is up:'
+echo "   wiki:    $URL  (also brain.test if Caddy is configured)"
+echo "   vault:   re-syncing on file changes (pid $WATCH_PID_VALUE)"
+echo "   build:   re-rendering on vault changes (pid $BUILD_PID_VALUE)"
+echo '   stop:    brain-down'
+echo '   status:  brain-status'

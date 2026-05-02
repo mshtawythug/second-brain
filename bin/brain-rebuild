@@ -1,63 +1,88 @@
 #!/usr/bin/env bash
-# Rebuild the brain wiki from scratch.
-# Use when Quartz's --serve watcher missed a file change, or after a
-# config/overlay update that needs a clean build pass.
+# Force a one-shot Quartz rebuild + atomic swap (blue/green serve edition).
+# Use when you want a clean rebuild on demand — e.g. after a config or
+# overlay change that the watcher won't pick up because nothing in the
+# vault tree changed.
 #
 # Default behavior:
 #   1. Run `brain vault export` so any DB-side changes (e.g. new ingested
 #      docs that haven't been mirrored into the vault yet) are materialized
 #      as Markdown files Quartz can render.
-#   2. Bounce the wiki process so Quartz starts fresh — flushes any stale
-#      build cache and re-applies the brain overlay if you've updated it.
+#   2. Run `python -m brain.wiki.build_swap` once: builds into a fresh
+#      `<vault>/.quartz/builds/<id>/`, atomically retargets `current/`,
+#      and prunes old build dirs. The build watcher (started by
+#      `brain-up`) keeps running — no restart needed because the swap
+#      is atomic and the watcher only cares about vault changes.
 #
 # Flags:
 #   --no-export   skip the DB→vault export step (use if you only edited
 #                 vault files directly).
-#   --no-bounce   skip the wiki bounce (use if you only want to refresh
-#                 the vault and trust --serve to pick it up).
+#   --no-build    skip the one-shot build (use if the running watcher
+#                 will pick up the changes anyway after the export).
 #
 # Env overrides (same as brain-up):
-#   BRAIN_VAULT_PATH    (default: ~/brain-vault)
-#   BRAIN_WIKI_PORT     (default: 8080)
+#   BRAIN_VAULT_PATH        (default: ~/brain-vault)
+#   BRAIN_WIKI_PORT         (default: 8080)
+#   BRAIN_WIKI_KEEP_BUILDS  (default: 3)
 
 set -euo pipefail
 
 VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
+KEEP="${BRAIN_WIKI_KEEP_BUILDS:-3}"
+
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+VENV_PY="$PROJECT_ROOT/.venv/bin/python"
+SRC_DIR="$PROJECT_ROOT/src"
+
+if [[ -n "${BRAIN_PY:-}" ]]; then
+    PY="$BRAIN_PY"
+elif [[ -x "$VENV_PY" ]]; then
+    PY="$VENV_PY"
+elif command -v python >/dev/null 2>&1; then
+    echo "warning: $VENV_PY not found — falling back to $(command -v python)" >&2
+    PY="$(command -v python)"
+elif command -v python3 >/dev/null 2>&1; then
+    echo "warning: $VENV_PY not found — falling back to $(command -v python3)" >&2
+    PY="$(command -v python3)"
+else
+    echo "no python interpreter found at $VENV_PY or on PATH" >&2
+    exit 1
+fi
 
 DO_EXPORT=1
-DO_BOUNCE=1
+DO_BUILD=1
 
 for arg in "$@"; do
-  case "$arg" in
-    --no-export) DO_EXPORT=0 ;;
-    --no-bounce) DO_BOUNCE=0 ;;
-    -h|--help)
-      sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//; /^set -euo/d'
-      exit 0
-      ;;
-    *)
-      echo "unknown flag: $arg" >&2
-      echo "try: $(basename "$0") --help" >&2
-      exit 2
-      ;;
-  esac
+    case "$arg" in
+        --no-export) DO_EXPORT=0 ;;
+        --no-build)  DO_BUILD=0 ;;
+        -h|--help)
+            sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//; /^set -euo/d'
+            exit 0
+            ;;
+        *)
+            echo "unknown flag: $arg" >&2
+            echo "try: $(basename "$0") --help" >&2
+            exit 2
+            ;;
+    esac
 done
 
 if ! command -v brain >/dev/null 2>&1; then
-  echo "brain CLI not on PATH — install second-brain first" >&2
-  exit 1
+    echo 'brain CLI not on PATH — install second-brain first' >&2
+    exit 1
 fi
 
-if [[ "$DO_EXPORT" == "1" ]]; then
-  echo "🔄 exporting DB → vault ($VAULT)..."
-  brain vault export --to "$VAULT"
+if [[ "$DO_EXPORT" == '1' ]]; then
+    echo "🔄 exporting DB → vault ($VAULT)..."
+    brain vault export --to "$VAULT"
 fi
 
-if [[ "$DO_BOUNCE" == "1" ]]; then
-  echo "🔄 bouncing wiki..."
-  "$SCRIPT_DIR/brain-down"
-  "$SCRIPT_DIR/brain-up"
+if [[ "$DO_BUILD" == '1' ]]; then
+    echo '🔄 running one-shot Quartz build + atomic swap...'
+    BRAIN_WIKI_RELOAD=1 PYTHONPATH="$SRC_DIR" "$PY" -m brain.wiki.build_swap \
+        --vault "$VAULT" --keep "$KEEP"
 else
-  echo "✅ vault refreshed — Quartz --serve should pick up the changes."
+    echo '✅ vault refreshed — the running build watcher will pick up changes.'
 fi
