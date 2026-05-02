@@ -757,12 +757,17 @@ async function renderGraph(
     ).length
     const base = 2 + Math.sqrt(numLinks)
     // brain-extension: scale by recency when enabled; clamp final radius to
-    // [1, 4] per spec.
+    // [2, 10]. The previous [1, 4] clamp was too tight — any node with ≥ 4
+    // links pinned to the ceiling, and any node touched today (recency
+    // multiplier 2×) hit the ceiling at base 2, so the global graph rendered
+    // every node at the same size. Lifting the ceiling to 10 lets degree
+    // differences read visually (e.g. a hub with 25 links is ~3× larger
+    // than a leaf with 1 link).
     const multiplier =
       recencySizing && d.mtime !== null && d.mtime !== undefined
         ? recencyMultiplier(d.mtime)
         : 1
-    return Math.min(4, Math.max(1, base * multiplier))
+    return Math.min(10, Math.max(2, base * multiplier))
   }
 
   let hoveredNodeId: string | null = null
