@@ -153,9 +153,9 @@ const config: QuartzConfig = {
       Plugin.Static(),
       Plugin.NotFoundPage(),
       // brain: the graph view is the killer feature for an Obsidian-style
-      // vault. Tweak its on-page behavior in quartz.layout.ts via
-      // Component.Graph({ localGraph, globalGraph }).
-      Plugin.Graph(),
+      // vault. The actual graph rendering happens via `Component.Graph(...)`
+      // in `quartz.layout.ts`; there is no `Plugin.Graph` emitter in stock
+      // Quartz v4.5.x — only the component is needed here.
     ],
   },
 }
