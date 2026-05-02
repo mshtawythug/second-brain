@@ -38,8 +38,12 @@ export const sharedPageComponents: SharedLayout = {
   head: Component.Head(),
   header: [],
   afterBody: [Component.CommandPalette()],
-  // brain: replace before deploy.
-  footer: Component.Footer({ links: { GitHub: "#", "Source": "#" } }),
+  // brain: single GitHub link to the repo. Was previously a placeholder
+  // pair of "GitHub: #" + "Source: #" — both pointed nowhere and were
+  // redundant against each other.
+  footer: Component.Footer({
+    links: { GitHub: "https://github.com/mshtawythug/second-brain" },
+  }),
 }
 
 // components for pages that display a single page (e.g. a single note)

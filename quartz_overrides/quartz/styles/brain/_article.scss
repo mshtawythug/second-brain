@@ -60,8 +60,13 @@
 // and on a 1440px viewport the article still fills the center column
 // rather than collapsing to a narrow strip. Newsreader at `--fs-base`
 // makes 68ch ≈ 660px.
+// brain (Linear variant): bumped from 68ch to 95ch — Geist is narrower
+// per character than Newsreader, so the same line-count needs a wider
+// measure to read at body size. 95ch on a 1440px viewport with 320px
+// sidebars leaves the article filling the center column with no dead
+// space; on wider viewports the cap still holds against runaway lines.
 .popover-hint {
-  max-width: 68ch;
+  max-width: 95ch;
 }
 
 // ---------------------------------------------------------------------------

@@ -133,21 +133,24 @@
   }
 }
 
-// brain: stock Quartz renders the global-graph button as
-// `<button class="global-graph-icon">` directly inside `.graph-outer`,
-// but its own graph.scss only styles `.graph-icon` (no `global-` prefix
-// and inside a `.graph-icons` wrapper that doesn't exist in the markup).
-// Result on stock Quartz: the button sits unstyled in the top-left,
-// hard to see and easy to miss. We position + size it explicitly so
-// readers can actually find the "open global graph" affordance.
-//
-// brain-extension: `.brain-stock-graph-icon` is a sibling affordance that
-// opens the SAME global-graph modal but with the renderer's brain extensions
-// disabled (stock Quartz visuals). The selector list shares all the visual
-// rules — only the absolute-position offset differs (28px to the left of the
-// globe icon, same vertical alignment) so the two affordances read as a pair.
+// brain (Linear variant): hide the two graph icon buttons. The local
+// graph in the right sidebar is the primary affordance; the global
+// graph modal opens on top with no contrast against the dark
+// charcoal page bg. The Linear feedback was "search bar should cover
+// these buttons" — we hide them entirely so the in-graph search input
+// gets the full top row of the panel uncluttered. The buttons can be
+// re-shown by removing the `display: none` rule below if a future
+// design wants the global graph back; the underlying click handlers
+// in `graph.inline.ts` stay wired, so unhiding restores functionality.
 .graph > .graph-outer > .global-graph-icon,
 .graph > .graph-outer > .brain-stock-graph-icon {
+  display: none;
+}
+
+// Original positioning — kept here as documentation for future re-enable.
+// .graph > .graph-outer > .global-graph-icon,
+// .graph > .graph-outer > .brain-stock-graph-icon {
+.graph > .graph-outer > .__brain-disabled-graph-icon {
   position: absolute;
   top: 0;
   margin: 0.3rem;
@@ -209,6 +212,31 @@
 // future content addition (e.g. a long ToC on a deeply-headed page)
 // pushes total content past the viewport. No-op when content fits;
 // gracefully scrolls when it doesn't.
+// brain (Linear variant): global-graph modal contrast fix.
+//
+// Stock Quartz's `.global-graph-container` (and `.local-graph-container`)
+// uses `background-color: var(--light)` + `border: 1px solid var(--lightgray)`
+// for the centered modal panel. In our Linear dark mode `--light` resolves
+// to `#0a0a0a` (charcoal page bg) — same color as what's behind the modal
+// — so the panel renders invisible against the page, and only the canvas
+// nodes hint at where the modal is. Override to `--surface-1` so the panel
+// has visible elevation against the page in both light + dark modes.
+//
+// Also tighten the backdrop: stock relies on `backdrop-filter: blur(4px)`
+// alone, which barely registers in dark mode. Layer in our `--scrim`
+// token for a proper modal scrim.
+.graph > .global-graph-outer,
+.graph > .local-graph-outer {
+  background: var(--scrim);
+}
+
+.graph > .global-graph-outer > .global-graph-container,
+.graph > .local-graph-outer > .local-graph-container {
+  background-color: var(--surface-1);
+  border-color: var(--rule);
+  box-shadow: var(--shadow-md);
+}
+
 .sidebar.right {
   overflow-y: auto;
   // Hide the scrollbar gutter so the sidebar reads as a clean column

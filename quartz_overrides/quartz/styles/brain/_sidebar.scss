@@ -81,7 +81,64 @@
 // `.readermode`). We unify their box, hover, and focus treatment so
 // the row reads as a single component instead of three loose buttons.
 .sidebar.left {
-  .search-button,
+  // Search button — looks like an inline search input so the affordance
+  // is obvious (Linear variant feedback: icon-only button hid the
+  // search functionality from sight). Grows to fill its flex slot;
+  // the darkmode + readermode buttons stay icon-squares to its right.
+  .search-button {
+    box-sizing: border-box;
+    width: 100%;
+    height: 32px;
+    padding: 0 0.6rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.5rem;
+    background: var(--surface-2);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    color: var(--ink-2);
+    cursor: pointer;
+    font-family: var(--bodyFont);
+    font-size: 0.875rem;
+    transition:
+      background var(--motion-fast) var(--motion-easing),
+      border-color var(--motion-fast) var(--motion-easing),
+      color var(--motion-fast) var(--motion-easing);
+
+    > svg {
+      width: 14px;
+      height: 14px;
+      stroke-width: 2;
+      flex-shrink: 0;
+    }
+
+    // Stock emits `<p>Search</p>` next to the magnifier — keep it
+    // visible so the row reads as "search input" rather than a
+    // mystery icon. Linear-style placeholder voice.
+    > p {
+      margin: 0;
+      color: var(--ink-2);
+      font-weight: 400;
+    }
+
+    &:hover {
+      border-color: var(--ink-2);
+      color: var(--ink-1);
+
+      > p {
+        color: var(--ink-1);
+      }
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--accent-strong);
+      outline-offset: 2px;
+    }
+  }
+
+  // Darkmode + readermode stay as 32px icon squares — they're toggles,
+  // not search affordances, so the icon-only treatment is correct.
   button.darkmode,
   button.readermode {
     box-sizing: border-box;
@@ -101,13 +158,6 @@
       border-color var(--motion-fast) var(--motion-easing),
       color var(--motion-fast) var(--motion-easing);
 
-    // Stock Quartz's `.search-button` puts a `<p>Search</p>` next to
-    // the magnifier glyph — hide it so the button collapses to a
-    // 32px icon square consistent with the other two.
-    > p {
-      display: none;
-    }
-
     > svg {
       width: 18px;
       height: 18px;
@@ -126,6 +176,39 @@
       outline-offset: 1px;
     }
   }
+}
+
+// Stock Quartz's search panel — `.search-container` is `position:
+// fixed; display: inline-block` when active, with `.search-space`
+// inside set to `width: 65%; margin: 0 auto`. The `inline-block`
+// wrapper doesn't establish a centering context for `margin: auto`
+// children, so the panel renders left-anchored. Force flex-centering
+// so `.search-space` sits in the middle of the viewport. Global
+// selector — `.search-container` is the unique stock class and the
+// element is full-viewport via `position: fixed`, so DOM ancestry
+// doesn't matter.
+.search > .search-container.active {
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+}
+
+// Linear-variant retint of the search panel inner card. Stock paints
+// `.search-space > *` with `var(--light)` (page bg) + a warm shadow
+// recipe; against our charcoal `--surface-0` the panel reads as a
+// flat extension of the page. Lift to `--surface-1` and trade the
+// shadow for an outline-style hairline so the panel actually looks
+// like an elevated modal in dark mode.
+.search > .search-container > .search-space > * {
+  background: var(--surface-1);
+  box-shadow: var(--shadow-md);
+  border: 1px solid var(--rule);
+}
+
+.search > .search-container > .search-space > input {
+  background: var(--surface-1);
+  color: var(--ink-0);
+  border: 1px solid var(--rule);
 }
 
 // ---------------------------------------------------------------------------
