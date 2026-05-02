@@ -287,22 +287,31 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
           // can color-cluster nodes without round-tripping through
           // the brain CLI. Both are optional; missing-frontmatter
           // docs simply skip the field rather than emit `undefined`.
-          if (typeof fm.tier === "string") {
+          //
+          // Brain vault frontmatter persists tier under `kind:`
+          // (with values `vault` / `ingested`); we still accept a
+          // legacy `tier:` key for any pre-2026-04-29 export that
+          // wrote it under that name.
+          if (typeof fm.kind === "string") {
+            details.tier = fm.kind
+          } else if (typeof fm.tier === "string") {
             details.tier = fm.tier
           }
           if (typeof fm.source === "string") {
             details.source = fm.source
           }
 
-          // brain: backstop — infer source from the
-          // `_ingested/<source>/...` slug pattern when frontmatter is
-          // missing it. Catches legacy data ingested before the
-          // manual-source default landed in
-          // src/brain/ingest/__init__.py (691 markdown docs were left
-          // with `source_id = NULL`, and their exported frontmatter
-          // therefore omitted `source:`). With this fallback, the
-          // graph's filter chips count those docs under the right
-          // bucket without a destructive DB rebuild.
+          // brain: backstop — infer tier + source from the slug when
+          // frontmatter is missing them. Symmetric: the path-based
+          // classifier in `brain.vault.sync` does the same — anything
+          // under `_ingested/...` is ingested-tier, everything else is
+          // vault-tier. This guarantees the graph's tier filter has a
+          // populated value on every node so toggling `vault` /
+          // `ingested` chips actually filters; without this, missing-
+          // frontmatter docs silently survive every tier filter.
+          if (!details.tier && typeof slug === "string") {
+            details.tier = slug.startsWith("_ingested/") ? "ingested" : "vault"
+          }
           if (!details.source && typeof slug === "string") {
             const match = slug.match(/^_ingested\/([^/]+)\//)
             if (match) {
