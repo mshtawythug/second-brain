@@ -687,9 +687,42 @@ async function renderGraph(
   // the user drags one and the simulation re-energizes). 300 ticks is
   // enough for both the local graph (≤ a few dozen nodes) and the
   // global graph (~1300 nodes at current corpus size) to settle into
-  // a centered cluster; runtime cost is ~50-100ms on init, paid once
+  // a converged cluster; runtime cost is ~50-100ms on init, paid once
   // before first paint.
   simulation.tick(300)
+
+  // brain-extension: explicitly recenter the bounding box of all settled
+  // nodes around (0, 0). `forceCenter` only equalizes the *mean* of node
+  // positions — for asymmetric graphs (a dense central cluster plus a
+  // handful of outlier leaves pulled outward by `forceManyBody`) the
+  // mean and the bounding-box center diverge by tens of pixels. The
+  // user's eye reads the bounding-box center against the panel's visual
+  // center, so without this pass the cluster appears pushed to one side
+  // even after the simulation has converged. This is layout-independent
+  // and provably symmetric: maxX-minX horizontal extent / 2 and same
+  // for vertical, then shift every node by the negation. Skipped on
+  // empty graphs (no nodes → nothing to recenter).
+  if (graphData.nodes.length > 0) {
+    let minX = Infinity
+    let maxX = -Infinity
+    let minY = Infinity
+    let maxY = -Infinity
+    for (const n of graphData.nodes) {
+      if (n.x === undefined || n.y === undefined) continue
+      if (n.x < minX) minX = n.x
+      if (n.x > maxX) maxX = n.x
+      if (n.y < minY) minY = n.y
+      if (n.y > maxY) maxY = n.y
+    }
+    if (Number.isFinite(minX) && Number.isFinite(minY)) {
+      const cx = (minX + maxX) / 2
+      const cy = (minY + maxY) / 2
+      for (const n of graphData.nodes) {
+        if (n.x !== undefined) n.x -= cx
+        if (n.y !== undefined) n.y -= cy
+      }
+    }
+  }
 
   // precompute style prop strings as pixi doesn't support css variables
   // brain: extend the precompute list with the brain palette CSS vars so color()
@@ -1316,7 +1349,13 @@ async function renderGraph(
     if (stopAnimation) return
     for (const n of nodeRenderData) {
       const { x, y } = n.simulationData
-      if (!x || !y) continue
+      // brain: gate on "actually has a position" (not "position is truthy"):
+      // `!x || !y` is true when EITHER coordinate equals 0, so a node that
+      // settles exactly at (0, 0) — common for sparse graphs whose bounding
+      // box gets recentered to origin, or for a single-node local graph
+      // initialized at the phyllotaxis origin — never has its position
+      // updated and stays at the Pixi default (canvas top-left).
+      if (x === undefined || y === undefined) continue
       n.gfx.position.set(x + width / 2, y + height / 2)
       if (n.label) {
         n.label.position.set(x + width / 2, y + height / 2)
