@@ -196,27 +196,35 @@
   }
 }
 
-// Stock Quartz's search panel — `.search-container` is `position:
-// fixed` with `display: inline-block` when active, and `.search-space`
-// inside has `width: 65%; margin: 0 auto`. Stock's `inline-block` on
-// the container, combined with the auto margins on the inner space,
-// failed to actually center the panel — the user observed left-
-// anchored rendering across browsers.
+// Stock Quartz's search panel positioning recipe (`width: 65%` +
+// `margin-left/right: auto` inside an `inline-block` parent + the
+// container's own `position: fixed`) is unreliable in our cascade —
+// previous attempts via `display: flex; justify-content: center` and
+// then `position: absolute; left: 50%` both failed to center the panel
+// in practice. The robust path is to bypass stock's positioning
+// entirely on BOTH the wrapper and the inner space, and use explicit
+// fixed-position values.
 //
-// brain (Linear-variant feedback round 2): instead of fighting stock's
-// `display` value, robustly center the inner `.search-space` itself
-// via `position: absolute; left: 50%; transform: translateX(-50%)`.
-// The container is `position: fixed; left: 0; width: 100vw`, so the
-// absolute child positions relative to it. This works regardless of
-// the parent's display mode and survives any future stock cascade
-// changes.
+// brain (Linear-variant feedback round 3):
+//   1. `display: block` on `.search-container.active` kills stock's
+//      `display: inline-block` (which can collapse the container to
+//      content-width despite its `width: 100vw` declaration).
+//   2. `.search-space` becomes its own `position: fixed` element
+//      anchored directly to the viewport via `left: 50%` + a
+//      `translateX(-50%)` offset — no parent cascade involvement.
+//      Width capped at 800px or 90vw so it reads as a focused modal
+//      on wide viewports, not a stretched bar.
+.search > .search-container.active {
+  display: block;
+}
+
 .search > .search-container > .search-space {
-  position: absolute;
+  position: fixed;
   left: 50%;
+  top: 12vh;
   transform: translateX(-50%);
-  // Stock's `margin-left: auto; margin-right: auto` becomes redundant
-  // under absolute positioning but doesn't harm — leaving stock's
-  // declarations untouched here.
+  width: min(800px, 90vw);
+  margin: 0;
 }
 
 // Linear-variant retint of the search panel inner card. Stock paints

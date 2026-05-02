@@ -225,22 +225,36 @@
 // future content addition (e.g. a long ToC on a deeply-headed page)
 // pushes total content past the viewport. No-op when content fits;
 // gracefully scrolls when it doesn't.
-// brain (Linear variant): global-graph modal contrast fix.
+// brain (Linear variant): global/local graph modal — contrast +
+// positioning override.
 //
-// Stock Quartz's `.global-graph-container` (and `.local-graph-container`)
-// uses `background-color: var(--light)` + `border: 1px solid var(--lightgray)`
-// for the centered modal panel. In our Linear dark mode `--light` resolves
-// to `#0a0a0a` (charcoal page bg) — same color as what's behind the modal
-// — so the panel renders invisible against the page, and only the canvas
-// nodes hint at where the modal is. Override to `--surface-1` so the panel
-// has visible elevation against the page in both light + dark modes.
+// Stock paints `.global-graph-container` with `var(--light)` +
+// `var(--lightgray)` border, which makes the modal invisible in our
+// charcoal dark mode (page bg = `#0a0a0a` = same as `--light`). We
+// override to `--surface-1` so the panel has elevation, then layer in
+// `--scrim` for the backdrop.
 //
-// Also tighten the backdrop: stock relies on `backdrop-filter: blur(4px)`
-// alone, which barely registers in dark mode. Layer in our `--scrim`
-// token for a proper modal scrim.
+// brain (Linear-variant feedback round 3): stock's modal centering
+// relies on `display: inline-block` on the outer wrapper plus
+// `transform: translate(-50%, -50%)` on the container, which together
+// have been rendering the modal as a narrow vertical strip on the
+// right edge of the viewport instead of a centered 80vw × 80vh panel.
+// Bypass the recipe entirely:
+//   1. `display: block` on `.global-graph-outer.active` kills the
+//      `inline-block` (stock's `width: 100vw` declaration only takes
+//      effect reliably on a block-level element).
+//   2. Replace the `transform: translate(-50%, -50%)` centering trick
+//      with explicit `left: 10vw; top: 10vh` offsets. No transforms
+//      means no chance of an accidental containing-block creation
+//      for the fixed-position container.
 .graph > .global-graph-outer,
 .graph > .local-graph-outer {
   background: var(--scrim);
+}
+
+.graph > .global-graph-outer.active,
+.graph > .local-graph-outer.active {
+  display: block;
 }
 
 .graph > .global-graph-outer > .global-graph-container,
@@ -248,6 +262,11 @@
   background-color: var(--surface-1);
   border-color: var(--rule);
   box-shadow: var(--shadow-md);
+  // Explicit positioning replaces stock's `top: 50%; left: 50%;
+  // transform: translate(-50%, -50%)` recipe.
+  left: 10vw;
+  top: 10vh;
+  transform: none;
 }
 
 .sidebar.right {
