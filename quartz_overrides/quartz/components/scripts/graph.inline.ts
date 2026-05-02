@@ -680,6 +680,17 @@ async function renderGraph(
   const radius = (Math.min(width, height) / 2) * 0.8
   if (enableRadial) simulation.force("radial", forceRadial(radius).strength(0.2))
 
+  // brain-extension: pre-tick the simulation so the first frame renders a
+  // converged layout instead of d3-force's default phyllotaxis spiral
+  // (which initializes nodes in the lower-right quadrant of the canvas
+  // and looks like "all my nodes loaded in the top-right corner" until
+  // the user drags one and the simulation re-energizes). 300 ticks is
+  // enough for both the local graph (≤ a few dozen nodes) and the
+  // global graph (~1300 nodes at current corpus size) to settle into
+  // a centered cluster; runtime cost is ~50-100ms on init, paid once
+  // before first paint.
+  simulation.tick(300)
+
   // precompute style prop strings as pixi doesn't support css variables
   // brain: extend the precompute list with the brain palette CSS vars so color()
   // can resolve them without re-reading getComputedStyle on every frame. Variable
