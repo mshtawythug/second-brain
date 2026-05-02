@@ -189,11 +189,13 @@
     > h3 {
       margin-top: 0;
       margin-bottom: 0.4rem;
-      font-size: var(--fs-sm);
-      // Use the small-caps treatment defined in `_typography.scss` so
-      // the heading reads as metadata rather than article content.
-      font-variant-caps: all-small-caps;
-      letter-spacing: 0.08em;
+      // brain (Linear): uppercase + tracking instead of small-caps.
+      // Cleaner tech feel; reads as a section label without the
+      // editorial small-caps voice.
+      font-weight: 600;
+      font-size: 0.7rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
       color: var(--ink-1);
     }
   }

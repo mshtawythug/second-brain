@@ -159,7 +159,12 @@ a.tag-link {
   padding: 0.1rem 0.55rem;
   background: var(--surface-2);
   border-radius: 999px;
-  font-feature-settings: "smcp", "lnum";
+  // brain (Linear variant): drop `smcp` — Geist doesn't ship the
+  // small-caps OpenType feature, so the declaration is a silent no-op.
+  // Lining numerals + slight uppercase tracking via the rule below
+  // give the chip its tech-forward voice.
+  font-feature-settings: "lnum";
+  text-transform: uppercase;
   letter-spacing: 0.04em;
   text-decoration: none;
   // brain: vertical-align nudge so the chip sits on the text baseline

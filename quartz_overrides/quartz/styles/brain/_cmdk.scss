@@ -174,13 +174,13 @@
   font-family: var(--bodyFont);
   font-size: var(--fs-lg);
   outline: none;
-  // brain: input always uses old-style numerals to track the
-  // commonplace-book voice — see `_typography.scss`.
-  font-variant-numeric: oldstyle-nums;
+  // brain (Linear): lining numerals + slight Geist tightness — tech
+  // aesthetic doesn't have old-style numerals.
+  font-variant-numeric: lining-nums proportional-nums;
+  letter-spacing: -0.011em;
 
   &::placeholder {
     color: var(--ink-2);
-    font-style: italic;
   }
 }
 
@@ -243,15 +243,16 @@
 
     > .brain-cmdk-slug {
       color: var(--ink-2);
+      // brain (Linear): mono slug — Geist Mono at small size reads
+      // as a clean tech path, replacing the small-caps editorial
+      // treatment.
+      font-family: var(--codeFont);
       font-size: var(--fs-xs);
       line-height: 1.2;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      // Same small-caps treatment as article meta — keeps slugs
-      // visually subordinate to the title.
-      font-variant-caps: all-small-caps;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.02em;
     }
   }
 
@@ -277,8 +278,8 @@
   padding: 2rem 1.2rem;
   text-align: center;
   color: var(--ink-2);
-  font-style: italic;
-  font-family: var(--displayFont);
+  font-family: var(--bodyFont);
+  font-size: var(--fs-sm);
 }
 
 // ---------------------------------------------------------------------------
@@ -292,9 +293,10 @@
   align-items: center;
   gap: 0.4rem;
   color: var(--ink-2);
+  // brain (Linear): mono footer hint — tech aesthetic, not small-caps.
+  font-family: var(--codeFont);
   font-size: var(--fs-xs);
-  font-variant-caps: all-small-caps;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.02em;
   background: var(--surface-2);
 
   kbd {
@@ -310,6 +312,5 @@
     font-family: var(--codeFont);
     font-size: 0.85em;
     letter-spacing: normal;
-    font-variant-caps: normal;
   }
 }

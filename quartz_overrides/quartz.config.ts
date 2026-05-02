@@ -65,59 +65,44 @@ const config: QuartzConfig = {
     theme: {
       fontOrigin: "googleFonts",
       cdnCaching: true,
-      // brain: commonplace-book typography pairing for the 2026 redesign.
-      // Fraunces (display) carries headings + italics + display flourishes.
-      // Newsreader (body) is Google Fonts' optical-sized serif designed for
-      // long-form reading; it pairs with Fraunces' carved character for a
-      // private-scriptorium voice. JetBrains Mono ships ligatures for code.
-      // Inter was dropped (the `frontend-design` skill flags it as generic
-      // / "AI-slop") — body type is now serif throughout.
+      // brain: Linear-style typography for the tech-forward variant of
+      // the 2026 redesign. Geist (Vercel's grotesk) for both display and
+      // body — clean, neutral, modern; Geist Mono for code and metadata.
+      // Both are on Google Fonts; Quartz's Google Fonts loader uses the
+      // family name verbatim.
       typography: {
-        header: "Fraunces",
-        body: "Newsreader",
-        code: "JetBrains Mono",
+        header: "Geist",
+        body: "Geist",
+        code: "Geist Mono",
       },
-      // brain: warm cream + terracotta in light mode, deep espresso +
-      // peach in dark. Easier to live in for long reading sessions than
-      // the stock cool grays.
-      //
-      // 2026-05-02 redesign refinements (Lane A):
-      //   * Light: secondary terracotta deepened (`#c4602b → #b85427`)
-      //     for more saturation, tertiary cooled toward sage
-      //     (`#a4ac86 → #7a8a6b`), `dark` darkened (`#2a2418 → #1f1a0e`)
-      //     for crisper text contrast on the cream paper bg.
-      //   * Dark: `light` (the dark-mode page bg) lifted to a richer
-      //     espresso (`#1a1611 → #16110a`) and `gray` warmed
-      //     (`#5c544a → #6b6354`) so muted UI text reads warm on the
-      //     deeper background. Other dark tokens kept stable to avoid
-      //     pulling on Lane C/D component work.
+      // brain: Linear-style charcoal + indigo-violet palette. Dark mode
+      // is the headline aesthetic — Linear lives in dark — but light mode
+      // is a clean pure-neutral zinc scale for daytime reading.
       colors: {
         lightMode: {
-          light: "#fdfaf6",
-          lightgray: "#ebe4d9",
-          // brain: 2026-05-02 redesign — bumped from `#a89f8c` to
-          // `#7a715f` so `--ink-2: var(--gray)` (muted metadata, dingbats,
-          // chip labels per `_tokens.scss`) clears WCAG AA on the
-          // `--surface-0` cream bg. Old value measured 2.52:1 (fails
-          // even the 3:1 large-text floor); new value measures ~4.5:1.
-          gray: "#7a715f",
-          darkgray: "#5c5340",
-          dark: "#1f1a0e",
-          secondary: "#b85427",
-          tertiary: "#7a8a6b",
-          highlight: "rgba(184, 84, 39, 0.12)",
-          textHighlight: "#fde58a99",
+          light: "#ffffff",
+          lightgray: "#e4e4e7",
+          // brain: zinc-500 (#71717a) clears WCAG AA against pure white
+          // bg for muted text, metadata, dingbats.
+          gray: "#71717a",
+          darkgray: "#3f3f46",
+          dark: "#09090b",
+          secondary: "#5e6ad2",
+          tertiary: "#8b5cf6",
+          highlight: "rgba(94, 106, 210, 0.12)",
+          textHighlight: "#fde047b3",
         },
         darkMode: {
-          light: "#16110a",
-          lightgray: "#2e2820",
-          gray: "#6b6354",
-          darkgray: "#c4b8a3",
-          dark: "#f0e9da",
-          secondary: "#e8a570",
-          tertiary: "#b8c19c",
-          highlight: "rgba(232, 165, 112, 0.15)",
-          textHighlight: "#fde58a55",
+          light: "#0a0a0a",
+          lightgray: "#27272a",
+          // brain: zinc-400 (#a1a1aa) clears WCAG AA against #0a0a0a.
+          gray: "#a1a1aa",
+          darkgray: "#d4d4d8",
+          dark: "#fafafa",
+          secondary: "#7170ff",
+          tertiary: "#a78bfa",
+          highlight: "rgba(113, 112, 255, 0.18)",
+          textHighlight: "#fde04766",
         },
       },
     },

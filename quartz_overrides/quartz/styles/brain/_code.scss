@@ -137,8 +137,10 @@ article pre[data-language]::before {
   font-family: var(--codeFont);
   font-size: var(--fs-xs);
   color: var(--ink-2);
-  font-variant-caps: all-small-caps;
-  letter-spacing: 0.08em;
+  // brain (Linear): code-style label — lowercase mono instead of
+  // small-caps. Reads as a tech tag, not an editorial caption.
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
   pointer-events: none;
   opacity: 0;
   transition: opacity var(--motion-fast) var(--motion-easing);
@@ -163,10 +165,12 @@ article pre:focus-within[data-language]::before {
   color: var(--ink-1);
   border: 1px solid var(--rule);
   border-radius: 4px;
-  font-family: var(--bodyFont);
+  // brain (Linear): mono copy button — Geist Mono lowercase tracks
+  // the language label's tech tag treatment.
+  font-family: var(--codeFont);
   font-size: var(--fs-xs);
-  font-variant-caps: all-small-caps;
-  letter-spacing: 0.08em;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
   cursor: pointer;
   opacity: 0;
   transition:

@@ -88,22 +88,27 @@
   --border: var(--type-color, var(--callout-note));
 }
 
-// Title bar — small-caps tracking, type-color tint, tighter padding
+// Title bar — uppercase + tracking, type-color tint, tighter padding
 // than stock so the title sits close to the content rather than
 // floating mid-card.
+//
+// brain (Linear): replaced small-caps with uppercase + tracking.
+// Tech aesthetic doesn't have small caps; uppercase reads cleaner
+// against the indigo-violet accent.
 .callout-title {
   padding: 0.6rem 0;
-  font-variant-caps: all-small-caps;
-  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.75rem;
   font-weight: 600;
   color: var(--type-color, var(--callout-note));
 
   // The inner `<p>` Quartz wraps around the title text inherits the
   // type color via stock's `.callout-title-inner > p { color: var(--color) }`.
-  // We re-pin to be explicit (and to track the redesign small-caps).
+  // We re-pin to be explicit and inherit the uppercase treatment.
   > .callout-title-inner > p {
     color: inherit;
-    font-variant-caps: inherit;
+    text-transform: inherit;
     letter-spacing: inherit;
     margin: 0;
   }
@@ -171,8 +176,5 @@
   &[data-callout="quote"],
   &[data-callout="cite"] {
     --type-color: var(--callout-quote);
-    // Quote callouts stay editorially soft — italicize the body to
-    // distinguish them from `<blockquote>` pull-quotes inside articles.
-    font-style: italic;
   }
 }
