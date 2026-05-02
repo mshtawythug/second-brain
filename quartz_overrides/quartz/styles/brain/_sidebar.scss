@@ -111,15 +111,33 @@
       height: 14px;
       stroke-width: 2;
       flex-shrink: 0;
+      // Stock CSS sets `margin: 0 0.5rem` on the svg — kill it so the
+      // 0.5rem gap on the parent flex is the only spacing between
+      // icon and text (otherwise we get 0.5rem + 0.5rem stacked and
+      // the text gets pushed off the right edge of narrow sidebars).
+      margin: 0;
     }
 
-    // Stock emits `<p>Search</p>` next to the magnifier — keep it
-    // visible so the row reads as "search input" rather than a
-    // mystery icon. Linear-style placeholder voice.
+    // Stock emits `<p>Search</p>` next to the magnifier. Stock CSS
+    // sets `display: inline; color: var(--gray); text-wrap: unset` on
+    // it; that's fine until we wrap the row in a flex container with a
+    // `gap`. In flex context, `display: inline` is treated as block,
+    // and an unconstrained text node CAN squeeze to its content width.
+    // Force the `<p>` visible by:
+    //   * explicit `display: block` so flex-layout treats it predictably,
+    //   * `flex: 1 1 auto` so it fills the remaining space after the icon,
+    //   * `min-width: 0` so it can shrink without overflowing,
+    //   * `text-wrap: unset` (preserve stock) so "Search" stays one line.
     > p {
+      display: block;
+      flex: 1 1 auto;
+      min-width: 0;
       margin: 0;
       color: var(--ink-2);
       font-weight: 400;
+      font-size: 0.875rem;
+      line-height: 1;
+      text-wrap: unset;
     }
 
     &:hover {
