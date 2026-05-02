@@ -93,17 +93,32 @@
 // mid/slow` block). The duration `var(--motion-slow)` was already a
 // token; no change needed there.
 
+// brain (Linear-variant feedback round 4): `animation-fill-mode` is
+// `backwards`, NOT `both`. With `both`, the final keyframe's
+// `transform: none` was getting interpolated into
+// `matrix(1, 0, 0, 1, 0, 0)` (the identity) and stuck on the element
+// permanently. A non-`none` transform on `.right.sidebar` creates a
+// containing block for `position: fixed` descendants, which broke the
+// global-graph modal — it anchored to the sidebar instead of the
+// viewport, rendering as a narrow strip on the right edge.
+//
+// `backwards` applies the `from` keyframe BEFORE animation starts (so
+// the entrance animation has its hidden-and-shifted starting state
+// during the delay window) and lets the element fall back to its
+// natural style (transform: none, opacity: 1) after the animation
+// completes. No leftover identity-transform → no leftover containing
+// block → fixed-position modals anchor to viewport correctly.
 @media (prefers-reduced-motion: no-preference) {
   .left.sidebar {
-    animation: brain-slide-in-left var(--motion-slow) var(--motion-easing) var(--motion-stagger-1) both;
+    animation: brain-slide-in-left var(--motion-slow) var(--motion-easing) var(--motion-stagger-1) backwards;
   }
 
   .center {
-    animation: brain-fade-up var(--motion-slow) var(--motion-easing) var(--motion-stagger-2) both;
+    animation: brain-fade-up var(--motion-slow) var(--motion-easing) var(--motion-stagger-2) backwards;
   }
 
   .right.sidebar {
-    animation: brain-slide-in-right var(--motion-slow) var(--motion-easing) var(--motion-stagger-3) both;
+    animation: brain-slide-in-right var(--motion-slow) var(--motion-easing) var(--motion-stagger-3) backwards;
   }
 }
 
@@ -113,6 +128,19 @@
 // referenced by an `animation` property; defining them globally is
 // the conventional shape.
 
+// brain (Linear-variant feedback round 4): the `to` keyframes MUST end
+// with `transform: none`, NOT `transform: translateX(0)` /
+// `translateY(0)`. Reason: a non-`none` transform value on any
+// ancestor creates a containing block for `position: fixed` descendants
+// (per CSS spec). With `animation-fill-mode: both` (set on the
+// `.left.sidebar / .center / .right.sidebar` rules above), the final
+// keyframe's transform value sticks AFTER the animation finishes —
+// leaving `matrix(1,0,0,1,0,0)` on the sidebars permanently. That CB
+// caused the global-graph modal (which is `position: fixed; left: 0;
+// width: 100vw` inside `.right.sidebar`) to anchor to the sidebar
+// instead of the viewport, rendering as a narrow strip on the right
+// edge of the page. `transform: none` in the `to` keyframe restores
+// the default and the modal anchors back to the viewport.
 @keyframes brain-slide-in-left {
   from {
     opacity: 0;
@@ -120,7 +148,7 @@
   }
   to {
     opacity: 1;
-    transform: translateX(0);
+    transform: none;
   }
 }
 
@@ -131,7 +159,7 @@
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    transform: none;
   }
 }
 
@@ -142,6 +170,6 @@
   }
   to {
     opacity: 1;
-    transform: translateX(0);
+    transform: none;
   }
 }

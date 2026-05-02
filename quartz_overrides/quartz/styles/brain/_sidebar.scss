@@ -223,7 +223,14 @@
   left: 50%;
   top: 12vh;
   transform: translateX(-50%);
-  width: min(800px, 90vw);
+  // brain (Linear-variant feedback round 4): bumped from min(800px, 90vw)
+  // to min(1100px, 90vw). On a 1440 viewport the previous 800px modal
+  // had 320px margin on each side — exactly matching the left sidebar
+  // width — which made the modal read as left-anchored against the
+  // sidebar even though it was geometrically centered on the viewport.
+  // 1100px wide × 1440 viewport leaves 170px margin per side, which
+  // visually presents as a properly-centered focused modal.
+  width: min(1100px, 90vw);
   margin: 0;
 }
 
