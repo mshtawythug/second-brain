@@ -724,6 +724,18 @@ async function renderGraph(
     }
   }
 
+  // brain-extension: freeze the simulation after the recenter pass.
+  // `forceSimulation` keeps an internal d3-timer running even after
+  // `tick(N)` returns — and on each tick `forceCenter` re-equalizes
+  // the *mean* of positions to (0, 0), which immediately undoes the
+  // bounding-box recenter above (mean and bbox center diverge for
+  // asymmetric graphs). Stopping the timer pins the layout to the
+  // recentered state. The drag handler below calls
+  // `simulation.alphaTarget(1).restart()` on pointerdown, so user
+  // interaction still re-energizes the simulation as before — only
+  // the idle drift between renders is suppressed.
+  simulation.stop()
+
   // precompute style prop strings as pixi doesn't support css variables
   // brain: extend the precompute list with the brain palette CSS vars so color()
   // can resolve them without re-reading getComputedStyle on every frame. Variable
@@ -1318,30 +1330,75 @@ async function renderGraph(
   }
 
   if (enableZoom) {
-    select<HTMLCanvasElement, NodeData>(app.canvas).call(
-      zoom<HTMLCanvasElement, NodeData>()
-        .extent([
-          [0, 0],
-          [width, height],
-        ])
-        .scaleExtent([0.25, 4])
-        .on("zoom", ({ transform }) => {
-          currentTransform = transform
-          stage.scale.set(transform.k, transform.k)
-          stage.position.set(transform.x, transform.y)
+    const zoomBehavior = zoom<HTMLCanvasElement, NodeData>()
+      .extent([
+        [0, 0],
+        [width, height],
+      ])
+      .scaleExtent([0.25, 4])
+      .on("zoom", ({ transform }) => {
+        currentTransform = transform
+        stage.scale.set(transform.k, transform.k)
+        stage.position.set(transform.x, transform.y)
 
-          // zoom adjusts opacity of labels too
-          const scale = transform.k * opacityScale
-          let scaleOpacity = Math.max((scale - 1) / 3.75, 0)
-          const activeNodes = nodeRenderData.filter((n) => n.active).flatMap((n) => n.label)
+        // zoom adjusts opacity of labels too
+        const scale = transform.k * opacityScale
+        let scaleOpacity = Math.max((scale - 1) / 3.75, 0)
+        const activeNodes = nodeRenderData.filter((n) => n.active).flatMap((n) => n.label)
 
-          for (const label of labelsContainer.children) {
-            if (!activeNodes.includes(label)) {
-              label.alpha = scaleOpacity
-            }
+        for (const label of labelsContainer.children) {
+          if (!activeNodes.includes(label)) {
+            label.alpha = scaleOpacity
           }
-        }),
-    )
+        }
+      })
+
+    const zoomSelection = select<HTMLCanvasElement, NodeData>(app.canvas).call(zoomBehavior)
+
+    // brain-extension: fit the cluster to the canvas with 12% padding on
+    // every side. After pre-tick + bbox-recenter the cluster is centered
+    // at sim (0, 0); render translation puts that at canvas center
+    // (width/2, height/2). For dense local graphs (COMPANY_REDACTED Hub: ~12
+    // neighbors radiating from a hub at ~30px linkDistance) the cluster
+    // diameter exceeds the canvas height, so the bottom row gets clipped
+    // even when perfectly centered. Compute an initial zoom transform
+    // that scales the cluster to fit within (1 - 2 * pad) of each axis,
+    // capped at scale=1 (never zoom IN beyond identity for small
+    // clusters that already fit). Calling `zoomBehavior.transform(...)`
+    // rather than mutating stage directly keeps d3-zoom's internal
+    // state in sync, so subsequent user pan/zoom is relative to the
+    // fit position, not identity.
+    if (graphData.nodes.length > 0) {
+      let bMinX = Infinity
+      let bMaxX = -Infinity
+      let bMinY = Infinity
+      let bMaxY = -Infinity
+      for (const n of graphData.nodes) {
+        if (n.x === undefined || n.y === undefined) continue
+        if (n.x < bMinX) bMinX = n.x
+        if (n.x > bMaxX) bMaxX = n.x
+        if (n.y < bMinY) bMinY = n.y
+        if (n.y > bMaxY) bMaxY = n.y
+      }
+      if (Number.isFinite(bMinX) && Number.isFinite(bMinY)) {
+        // bbox half-extent in render coords (cluster is recentered so
+        // bMinX = -bMaxX and bMinY = -bMaxY, but compute via max(|min|, |max|)
+        // for safety against the symmetric-recenter assumption breaking).
+        const halfW = Math.max(Math.abs(bMinX), Math.abs(bMaxX), 1)
+        const halfH = Math.max(Math.abs(bMinY), Math.abs(bMaxY), 1)
+        const padFraction = 0.12
+        const fitScale = Math.min(
+          ((1 - 2 * padFraction) * width) / (2 * halfW),
+          ((1 - 2 * padFraction) * height) / (2 * halfH),
+          1.0,
+        )
+        // Scale around canvas center so the cluster (which is at canvas
+        // center pre-zoom) stays centered post-zoom.
+        const tx = (width / 2) * (1 - fitScale)
+        const ty = (height / 2) * (1 - fitScale)
+        zoomBehavior.transform(zoomSelection, zoomIdentity.translate(tx, ty).scale(fitScale))
+      }
+    }
   }
 
   let stopAnimation = false
