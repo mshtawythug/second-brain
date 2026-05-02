@@ -673,6 +673,73 @@ def test_brain_tag_mcp_writes_file_after_ingest(
     )
 
 
+def test_brain_tag_mcp_missing_mirror_logs_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,  # noqa: ARG001 — fixture keeps schema fresh
+    fake_embedder: object,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A populated ``vault_path`` whose mirror is gone → warn + DB-only success.
+
+    The MCP ``brain_tag`` tool intentionally does NOT expose a
+    ``--regenerate-file`` equivalent (recovery is the CLI's job). When the
+    on-disk mirror is missing for a doc that *should* have one, the tool
+    emits a WARNING via the standard logger so the MCP caller (Claude) can
+    surface it, and lets the DB update stand — exit code 0, payload still
+    reflects the new tag list. This test pins both the DB-update success
+    contract and the warning emission so a regression that silently drops
+    the warning fails here.
+    """
+    # Setup — sandbox the vault to ``tmp_path`` so the ingest writes its
+    # mirror into the test directory and populates ``documents.vault_path``.
+    state = mcp_server._State(
+        cfg=Config(database_url=TEST_DATABASE_URL, vault_path=tmp_path),
+        embedder=fake_embedder,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+
+    ingest_payload = mcp_server.brain_ingest_stdin(
+        content="MCP missing-mirror body.\n",
+        source="manual",
+        external_id="mcp-tag-missing-1",
+        title="MCP tag missing smoke",
+        content_type="transcript",
+    )
+    doc_id = ingest_payload["document_id"]
+    assert doc_id is not None
+
+    # Re-point ``vault_path`` at a relative path that does NOT exist on disk
+    # (the original mirror still lives at the slug-derived path under
+    # ``_ingested/manual/``; we want the writeback's existence check to
+    # FAIL, so steer it at a path the ingest never wrote to).
+    missing_rel = "_ingested/manual/missing.md"
+    test_db.execute(
+        "UPDATE documents SET vault_path = %s WHERE id = %s::uuid",
+        (missing_rel, doc_id),
+    )
+    assert not (tmp_path / missing_rel).exists()  # precondition
+
+    # Exercise — invoke brain_tag and capture WARNING-level log records.
+    with caplog.at_level(logging.WARNING, logger="brain.mcp"):
+        payload = mcp_server.brain_tag(
+            id_prefix=str(doc_id)[:8], add=["still-applied"]
+        )
+
+    # Verify — payload reflects the new tag, AND the missing-mirror warning
+    # was emitted with a phrase unique to that branch (so a regression that
+    # drops the warning fails this test even if the success-suffix wording
+    # drifts elsewhere).
+    assert "still-applied" in payload["tags"]
+    assert any(
+        "mirror missing" in r.message for r in caplog.records
+    ), (
+        "MCP brain_tag must log a WARNING when vault_path is set but the "
+        "on-disk mirror is gone; got: "
+        f"{[r.message for r in caplog.records]}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # brain_edit
 # ---------------------------------------------------------------------------

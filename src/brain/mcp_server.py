@@ -399,9 +399,12 @@ def brain_tag(
     has a populated ``vault_path`` and the on-disk mirror exists, the file's
     frontmatter ``tags:`` field is rewritten via :func:`rewrite_tags` so the
     next ``brain vault sync`` does not re-read stale ``tags: []`` from disk
-    and overwrite the DB. A missing mirror or NULL ``vault_path`` falls back
-    to DB-only — the MCP tool does not expose a ``--regenerate-file`` flag,
-    so recovery there is reserved for the CLI command.
+    and overwrite the DB. A populated ``vault_path`` whose mirror is missing
+    on disk emits a WARNING (the MCP caller — Claude — can decide whether
+    to re-ingest or invoke a future regenerate tool). A NULL ``vault_path``
+    is silently DB-only. The MCP tool does not expose a
+    ``--regenerate-file`` equivalent — recovery there is reserved for the
+    CLI command.
     """
     add = add or []
     remove = remove or []
@@ -427,6 +430,14 @@ def brain_tag(
         abs_path = state.cfg.vault_path / vault_path_rel
         if abs_path.exists():
             rewrite_tags(abs_path, tags)
+            logger.debug("brain_tag: rewrote tags in %s", abs_path)
+        else:
+            logger.warning(
+                "brain_tag: mirror missing for %s "
+                "(expected %s); db updated only",
+                doc_id,
+                abs_path,
+            )
     return {"document_id": doc_id, "tags": tags}
 
 
