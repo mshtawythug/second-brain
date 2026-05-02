@@ -39,6 +39,13 @@
 // each link record carries `kind: "derived"` + structured rule /
 // weight metadata.
 //
+// brain (Lane B 2026-05-02): also writes a `title` attribute on each
+// derived link so the `cursor: help` styling Lane B's `_links.scss`
+// applies to derived links surfaces a real tooltip on hover. Format:
+// `"Derived: <rule>"` when the bullet emphasis parsed cleanly,
+// `"Derived (related)"` as a fallback when no rule was extracted.
+// Cross-lane edit (Lane B's CSS depends on this transformer's data).
+//
 // Registration: this transformer must run AFTER
 // `Plugin.ObsidianFlavoredMarkdown()` so that `[[wiki-link]]` syntax
 // has already been converted into mdast `link` nodes before we walk
@@ -124,12 +131,24 @@ function collectText(node: RootContent): string {
 // emphasis parse. ``data-brain-rule`` is added only when the parser
 // pinned a rule down; bullets with missing/malformed metadata still
 // produce ``kind: "derived"`` records (just without a rule field).
+//
+// brain (Lane B 2026-05-02): also stamp ``title`` so the
+// ``cursor: help`` styling on derived links in
+// ``brain/styles/_links.scss`` actually surfaces a tooltip on hover.
+// Without the title write, the SCSS rule promised an affordance the
+// DOM didn't deliver. The fallback string for the rule-less case is
+// the literal word "Derived (related)" so screen readers and
+// browser tooltips both read sensibly even when the bullet emphasis
+// failed to parse.
 function stampDerived(link: Link, meta: BulletMeta): void {
   const data = (link.data ??= {}) as Record<string, unknown>
   const props = (data.hProperties ??= {}) as Record<string, string>
   props["data-brain-derived"] = "true"
   if (meta.rule !== undefined) {
     props["data-brain-rule"] = meta.rule
+    props["title"] = `Derived: ${meta.rule}`
+  } else {
+    props["title"] = "Derived (related)"
   }
 }
 

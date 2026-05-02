@@ -140,6 +140,34 @@ const config: QuartzConfig = {
       // ObsidianFlavoredMarkdown so wiki-link syntax has already been
       // converted to mdast link nodes.
       Plugin.DerivedFenceMark(),
+      // brain: Lane B redesign — classify every mdast link node into
+      // one of five kinds (wiki / external / tag / ingested / derived)
+      // and stamp `data-brain-link-kind` on `node.data.hProperties`.
+      // The Lane B `_links.scss` consumes that attribute to give each
+      // kind a distinct visual treatment (terracotta underline / dotted
+      // + arrow / pill chip / source-tinted left rail / italic dashed).
+      // Must run AFTER `ObsidianFlavoredMarkdown` (so wiki-link mdast
+      // nodes exist) AND AFTER `DerivedFenceMark` (so its
+      // `data-brain-derived` stamp is already in place — the
+      // classifier reads it to short-circuit the kind to `derived`).
+      // See `quartz/plugins/transformers/linkKindMark.ts` for the
+      // full classification contract.
+      Plugin.LinkKindMark(),
+      // brain: Lane B redesign — inject the runtime source-tagger
+      // (`/static/linkSourceTag.js`) into every page. The tagger
+      // extracts the source segment from `_ingested/<source>/...`
+      // hrefs at `DOMContentLoaded` (and on Quartz SPA `nav` events)
+      // and stamps `data-brain-source="krisp"` etc. on each ingested
+      // link, so `_links.scss`'s source-tinted left-rail rules
+      // (`&[data-brain-source="krisp"]`) can pick the right
+      // `--brain-source-*` color from `_tokens.scss`. Always emits
+      // (no env-var gate, unlike `ReloadSignal`) — the script is part
+      // of the production redesign. No markdown ordering requirement;
+      // grouped here next to `LinkKindMark` so the Lane B plugins
+      // stay co-located. See `quartz/plugins/transformers/linkSourceTag.ts`
+      // for the inject contract and the static script for the
+      // tagging logic.
+      Plugin.LinkSourceTag(),
       // brain: inject the polling reload watcher (`/static/reload.js`)
       // into every page when `BRAIN_WIKI_RELOAD=1` at build time.
       // Replaces Quartz's `--serve` WebSocket reload, which is dead in
@@ -154,7 +182,13 @@ const config: QuartzConfig = {
       Plugin.ReloadSignal(),
       Plugin.GitHubFlavoredMarkdown(),
       Plugin.TableOfContents(),
-      Plugin.CrawlLinks({ markdownLinkResolution: "shortest" }),
+      // brain: Lane B redesign — `externalLinkIcon: false` disables
+      // Quartz's stock inline-SVG `↗` arrow on external links. The Lane B
+      // `_links.scss` paints its own `↗` via `::after` on
+      // `a[data-brain-link-kind="external"]` so the color/opacity track
+      // the redesign tokens; leaving stock's icon enabled would render
+      // every external link with two arrows side-by-side.
+      Plugin.CrawlLinks({ markdownLinkResolution: "shortest", externalLinkIcon: false }),
       Plugin.Description(),
       Plugin.Latex({ renderEngine: "katex" }),
     ],

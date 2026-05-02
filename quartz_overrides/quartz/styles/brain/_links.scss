@@ -1,1 +1,306 @@
-// placeholder — Lane B (link type system) fills this in.
+// Brain wiki — link type system styles (Lane B, the headline complaint).
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_links.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via
+// `custom.scss`'s `@use "./brain/links"` line.
+//
+// Five distinct visual treatments — one per link kind. The
+// `data-brain-link-kind` attribute is stamped at build time by the
+// `linkKindMark.ts` transformer, which keys off the URL pattern
+// (and the `data-brain-derived` attribute already stamped by
+// `derivedFenceMark.ts` for evidence edges). For ingested links we
+// also read `data-brain-source` (krisp/slack/gmail/manual), which is
+// stamped at runtime by `linkSourceTag.js` because the source segment
+// lives in the URL path but extracting it at build time would require
+// a per-doc lookup.
+//
+// Token contract — every color, motion timing, and surface here is
+// pulled from `_tokens.scss` so a future palette swap propagates
+// automatically. Tokens consumed:
+//
+//   * `--accent-soft`, `--accent-strong`  — wiki underline + tag-chip hover
+//   * `--ink-2`                            — external dotted underline + derived dashed underline
+//   * `--surface-2`                        — tag-chip resting background
+//   * `--motion-fast`, `--motion-easing`   — universal hover transitions
+//   * `--brain-source-{krisp,slack,gmail,manual}` — ingested left-rail color
+//
+// Underline pattern — uses `text-decoration-thickness` +
+// `text-underline-offset` (2020+ CSS) instead of `border-bottom` so:
+//   * Descenders (`p`, `g`, `y`, `j`) aren't clipped by the rule.
+//   * Underline thickness scales with `font-size` automatically.
+//   * The underline can be transitioned (`text-decoration-thickness`
+//     is animatable in modern browsers; `border-bottom-width` is too,
+//     but border-bottom adds layout-shift risk via the box model).
+//
+// Selector strategy — every rule keys off `[data-brain-link-kind=...]`
+// rather than `.internal` / `.external` / `.tag-link` so the styling
+// is decoupled from Quartz's internal class naming. Stock Quartz
+// classes survive (we don't strip them) but they aren't used as
+// selectors here.
+//
+// brain a11y note: screen readers (NVDA / JAWS / VoiceOver / Chromium-
+// derived) WILL announce the "↗" content of the external-link
+// `::after` rule — CSS pseudo-element `content` is NOT auto-aria-
+// hidden, contrary to the common myth. Stock Quartz's SVG icon had
+// `aria-hidden="true"` for this reason; once we disable it (in
+// `quartz.config.ts` via `externalLinkIcon: false`, to avoid double-
+// arrow rendering with the `::after` glyph), the announcement
+// returns. Accepted tradeoff — the alternative is reverting to
+// stock's SVG and losing CSS color/opacity/transition control over
+// the indicator. Revisit if a11y feedback surfaces.
+
+// Feature flag for the universal visited-state desaturation. Default
+// on; flip to `false` if testing reveals the saturate(0.7) filter
+// muddies the design or interacts poorly with a future color tweak.
+// `!default` means a downstream `@use "./brain/links" with (...)`
+// can override without editing this file.
+$enable-visited-desaturation: true !default;
+
+// ---------------------------------------------------------------------------
+// 1. wiki — internal links to other vault notes (the most common kind)
+// ---------------------------------------------------------------------------
+//
+// Subtle terracotta underline with a small offset so descenders
+// breathe. Hover thickens the underline and shifts to the full-
+// strength accent — a tactile-feeling micro-interaction that signals
+// "this is clickable" without shouting.
+a[data-brain-link-kind="wiki"] {
+  // brain: stock Quartz `quartz/styles/base.scss` paints `a.internal`
+  // with `background-color: var(--highlight)`, `padding: 0 0.1rem`, and
+  // `border-radius: 5px` — a chunky 12%-alpha terracotta pill. Lane B's
+  // wiki kind has equal specificity (0,1,1) but doesn't redeclare those
+  // three properties, so the pill bleeds through. Reset them explicitly
+  // here so the redesign's subtle underline reads as intended.
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  text-decoration: underline;
+  text-decoration-color: var(--accent-soft);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  // brain: `text-decoration-skip-ink: auto` is the browser default in
+  // modern engines but spell it out so descenders are explicitly
+  // skipped (no underline crossing through `g`/`y`/`p`).
+  text-decoration-skip-ink: auto;
+  transition:
+    text-decoration-thickness var(--motion-fast) var(--motion-easing),
+    text-decoration-color var(--motion-fast) var(--motion-easing);
+
+  &:hover {
+    text-decoration-thickness: 2px;
+    text-decoration-color: var(--accent-strong);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. external — http(s)/mailto links that leave the vault
+// ---------------------------------------------------------------------------
+//
+// Dotted underline in the muted ink color signals "different
+// destination" without competing with wiki links for attention.
+// The trailing `↗` arrow is the universal "leaves this site"
+// affordance (Wikipedia, MDN, GOV.UK conventions).
+a[data-brain-link-kind="external"] {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-decoration-color: var(--ink-2);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: auto;
+  transition:
+    text-decoration-thickness var(--motion-fast) var(--motion-easing),
+    text-decoration-color var(--motion-fast) var(--motion-easing);
+
+  &:hover {
+    text-decoration-thickness: 2px;
+    text-decoration-color: var(--accent-strong);
+  }
+
+  // brain: external-link arrow indicator. Inline-baseline alignment
+  // keeps it riding on the text baseline; `font-size: 0.85em` shrinks
+  // it just enough to read as an icon, not a glyph.
+  &::after {
+    content: "↗";
+    font-size: 0.85em;
+    margin-left: 0.15em;
+    opacity: 0.7;
+    vertical-align: baseline;
+    // Don't underline the arrow itself (looks weird).
+    text-decoration: none;
+    display: inline-block;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3. tag — `#tag` and `[[tags/x]]` links rendered as pill chips
+// ---------------------------------------------------------------------------
+//
+// Pill-shape chip with a leading `#`, small-caps tracking. Hover
+// lifts the chip 1px and tints the background — the chip becomes a
+// small button. `inline-flex` aligns the chip's baseline with
+// surrounding running text without needing magic margins.
+//
+// Selector covers BOTH:
+//   * `[data-brain-link-kind="tag"]` — stamped by `linkKindMark.ts`
+//     for tag links the markdown pipeline produces (e.g. `#tag`
+//     inline syntax via OFM, or `[[tags/foo]]` wiki-link form).
+//   * `.tag-link` — Quartz's stock class on tag chips emitted by the
+//     `TagList` component (article header) and the `TagPage` emitter
+//     (tag page chips). These are JSX/hast nodes, not mdast, so
+//     `linkKindMark` never sees them — we lean on the upstream class
+//     for them. Listed second so the data-attribute is the canonical
+//     selector when both are present (they're equivalent rules; the
+//     comma form just widens reach).
+a[data-brain-link-kind="tag"],
+a.tag-link {
+  display: inline-flex;
+  align-items: baseline;
+  padding: 0.1rem 0.55rem;
+  background: var(--surface-2);
+  border-radius: 999px;
+  font-feature-settings: "smcp", "lnum";
+  letter-spacing: 0.04em;
+  text-decoration: none;
+  // brain: vertical-align nudge so the chip sits on the text baseline
+  // even with the inline padding. Without this, the pill rides ~2px
+  // below the baseline when wrapped inside running serif text.
+  vertical-align: baseline;
+  transition:
+    background var(--motion-fast) var(--motion-easing),
+    transform var(--motion-fast) var(--motion-easing),
+    color var(--motion-fast) var(--motion-easing);
+
+  // brain: leading `#` — opacity 0.5 so it reads as decoration, not
+  // content. `margin-right: 0.1em` gives it just enough breathing room
+  // from the tag name.
+  &::before {
+    content: "#";
+    opacity: 0.5;
+    margin-right: 0.1em;
+  }
+
+  &:hover {
+    background: var(--accent-soft);
+    transform: translateY(-1px);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 4. derived — Phase D evidence edges (auto-generated "Related" links)
+// ---------------------------------------------------------------------------
+//
+// Italic + dashed underline + opacity 0.78 says "this is a hint, not
+// an authored claim." `cursor: help` reinforces the pattern (browsers
+// render `?` cursor; users learn that hovering reveals the rule).
+// The `title` attribute is already populated by `derivedFenceMark.ts`
+// with the rule shape (`same_day_participant`, `shared_thread`).
+a[data-brain-link-kind="derived"] {
+  text-decoration: underline;
+  text-decoration-style: dashed;
+  text-decoration-color: var(--ink-2);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: auto;
+  font-style: italic;
+  opacity: 0.78;
+  cursor: help;
+  transition:
+    opacity var(--motion-fast) var(--motion-easing),
+    text-decoration-color var(--motion-fast) var(--motion-easing);
+
+  &:hover {
+    opacity: 1;
+    text-decoration-color: var(--accent-strong);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. ingested — vault-internal links into `_ingested/<source>/<slug>`
+// ---------------------------------------------------------------------------
+//
+// Inherits the wiki underline pattern (terracotta thin → thick on
+// hover) and adds a 2px source-tinted left rail via `box-shadow`
+// (NOT `border-left` — `border-left` adds 2px to the box width and
+// causes layout shift on the long form below; `inset` `box-shadow`
+// paints inside the existing box so widths stay consistent).
+//
+// Source-color comes from a CSS custom property (`--source-color`)
+// scoped per-link via the `[data-brain-source="..."]` selectors
+// below. Default fallback is `--brain-source-manual` so any
+// uncategorized ingested link still gets a rail.
+a[data-brain-link-kind="ingested"] {
+  // brain: same reset as the wiki block — stock `a.internal` from
+  // `base.scss` paints a chunky 12%-alpha pill (background + padding +
+  // border-radius) that would mix with the source-tinted rail. Wipe
+  // background/border-radius and rebuild padding from scratch so the
+  // 0.35em rail offset is the only horizontal padding present.
+  background: transparent;
+  border-radius: 0;
+  // Padding rebuilt: zero on top/right/bottom (match wiki kind),
+  // 0.35em on the left to keep text off the source rail.
+  padding: 0 0 0 0.35em;
+  // Inherit wiki underline behaviour. SCSS doesn't have `extend`
+  // across the `[attr=value]` selector cleanly, so re-declare the
+  // five properties (kept in sync with the wiki block above by code
+  // review).
+  text-decoration: underline;
+  text-decoration-color: var(--accent-soft);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: auto;
+  // The source-tinted rail. `inset` keeps it inside the box; the
+  // 2px width matches the wiki-link hover thickness so the visual
+  // weight is consistent between the two related kinds.
+  box-shadow: inset 2px 0 0 var(--source-color, var(--brain-source-manual));
+  transition:
+    text-decoration-thickness var(--motion-fast) var(--motion-easing),
+    text-decoration-color var(--motion-fast) var(--motion-easing),
+    box-shadow var(--motion-fast) var(--motion-easing);
+
+  &:hover {
+    text-decoration-thickness: 2px;
+    text-decoration-color: var(--accent-strong);
+    // Thicken the source rail on hover too — same "tactile" cue as
+    // the wiki underline grow.
+    box-shadow: inset 3px 0 0 var(--source-color, var(--brain-source-manual));
+  }
+
+  // Source palette mappings. Each rule sets `--source-color` to the
+  // matching `--brain-source-*` token from `_tokens.scss`. Both light
+  // and dark mode `--brain-source-*` definitions live in `_tokens.scss`,
+  // so no per-mode override is needed here.
+  &[data-brain-source="krisp"] {
+    --source-color: var(--brain-source-krisp);
+  }
+  &[data-brain-source="slack"] {
+    --source-color: var(--brain-source-slack);
+  }
+  &[data-brain-source="gmail"] {
+    --source-color: var(--brain-source-gmail);
+  }
+  &[data-brain-source="manual"] {
+    --source-color: var(--brain-source-manual);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Universal: visited state
+// ---------------------------------------------------------------------------
+//
+// `filter: saturate(0.7)` desaturates the link color slightly without
+// overriding the kind-specific styling above (which uses
+// `text-decoration-color`, not `color`, so a `color` override would
+// be invisible anyway). Applies to every kind including chips and
+// dashed derived links — visited state should read consistently
+// across the whole link family.
+//
+// Gated by the SCSS variable at the top so it can be turned off from
+// `custom.scss` via `@use "./brain/links" with ($enable-visited-desaturation: false)`
+// if it ever clashes with another visual choice.
+@if $enable-visited-desaturation {
+  a[data-brain-link-kind]:visited,
+  a.tag-link:visited {
+    filter: saturate(0.7);
+  }
+}
