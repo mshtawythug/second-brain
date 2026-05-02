@@ -19,42 +19,19 @@
 // would otherwise resolve to an empty string and silently fall
 // through to `--gray`.
 
-:root {
-  // brain-extension: tier palette. `vault` covers authored notes
-  // (Phase A / B / C); `ingested` covers `_ingested/` notes that
-  // came from external sources via `brain ingest*`. Terracotta vs
-  // sage gives a strong cluster cue without clashing with the
-  // default Quartz body palette.
-  --brain-tier-vault: #c4602b;
-  --brain-tier-ingested: #a4ac86;
-
-  // brain-extension: ingest-source palette. Each `brain ingest
-  // --source <name>` value gets a distinct hue so a quick eye-scan
-  // over the graph clusters krisp / slack / gmail / manual zones
-  // at a glance. Hues picked to be perceptually distinct in light
-  // mode and to keep contrast against Quartz's `--light`
-  // background.
-  --brain-source-krisp: #8b6cab;
-  --brain-source-slack: #4a9eba;
-  --brain-source-gmail: #d4956a;
-  --brain-source-manual: #5c5340;
-}
-
-[data-theme="dark"] {
-  // brain-extension: dark-mode tier palette. Lifted lightness +
-  // muted saturation so the colors read on a dark background
-  // without bleeding into Quartz's text colors.
-  --brain-tier-vault: #e08552;
-  --brain-tier-ingested: #c5cda1;
-
-  // brain-extension: dark-mode source palette. Same hue
-  // dimensions as the light palette, lifted for dark-background
-  // contrast.
-  --brain-source-krisp: #b491cf;
-  --brain-source-slack: #76c1d9;
-  --brain-source-gmail: #e8b385;
-  --brain-source-manual: #8a7e63;
-}
+// brain-extension: the `--brain-tier-*` and `--brain-source-*` tokens
+// formerly declared here moved to
+// `quartz/styles/brain/_tokens.scss` as part of the 2026-05-02
+// redesign (Lane A) so the graph palette and the ingested-link
+// styling (Lane B) share one source of truth.
+//
+// Note: the previous dark-mode block selected on `[data-theme="dark"]`,
+// which Quartz never sets (the dark-mode toggle writes
+// `<html saved-theme="dark">` — see `darkmode.inline.ts`). The new
+// tokens file uses the correct selector so dark-mode source colors
+// actually fire.
+//
+// Future graph-only tokens live alongside the palette in `_tokens.scss`.
 
 // brain-extension: in-graph controls (search input + filter chip rows).
 // Rendered as the first child of `.graph-container` / `.global-graph-container`

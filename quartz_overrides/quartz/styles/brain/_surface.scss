@@ -1,0 +1,43 @@
+// Brain surface system — applies the three-tier surface scale defined
+// in `_tokens.scss` to the page chrome.
+//
+// Tier semantics:
+//   --surface-0 → page bg               (matches Quartz `--light`)
+//   --surface-1 → cards, sidebars       (one notch warmer)
+//   --surface-2 → inline code, popovers (one more notch warmer)
+//
+// Quartz's stock `body { background-color: var(--light); }` already
+// covers `--surface-0`. We re-pin it explicitly so the tier name
+// reads in any future audit and so swapping `--surface-0` in dark
+// mode propagates without relying on `--light` alignment.
+
+body {
+  background-color: var(--surface-0);
+}
+
+// Sidebars (left + right) sit on `--surface-1` so the article column
+// reads as the focal "page" against a slightly warmer chrome. The
+// shadow elevates the card without aggressive contrast.
+//
+// Quartz's stock markup is `<div class="sidebar left">` /
+// `<div class="sidebar right">` — selecting on `.sidebar` covers both.
+// Lane C (`sidebar.scss`) refines layout / spacing; this file owns
+// only the surface tier + elevation.
+.sidebar {
+  background-color: var(--surface-1);
+}
+
+// Inline code pops against the page bg with a one-step-warmer surface.
+// `code:not(pre code)` excludes code inside `<pre>` blocks (those get
+// their own surface treatment in Lane C `code.scss`).
+code:not(pre code) {
+  background-color: var(--surface-2);
+}
+
+// Popover bodies (footnotes, link previews) ride the same `--surface-2`
+// so the depth scale stays consistent across hover surfaces.
+// Quartz emits `.popover .popover-inner` for hover previews.
+.popover .popover-inner {
+  background-color: var(--surface-2);
+  box-shadow: var(--shadow-md);
+}

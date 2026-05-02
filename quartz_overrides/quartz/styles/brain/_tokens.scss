@@ -1,0 +1,145 @@
+// Brain design tokens — the single source of truth for the redesign.
+//
+// Defined as CSS custom properties on `:root` and `:root[saved-theme="dark"]`
+// (Quartz toggles dark mode by setting the `saved-theme` attribute on
+// `<html>` — see `quartz/components/scripts/darkmode.inline.ts`).
+//
+// What lives here:
+//   * Surface tiers (`--surface-0/1/2`) — page bg, card/sidebar bg,
+//     inline-code/popover bg.
+//   * Ink scale (`--ink-0/1/2`) — primary / secondary / muted text.
+//     Aliased to Quartz's `--dark` / `--darkgray` / `--gray` so the
+//     scale stays in sync with `theme.colors`.
+//   * Accent aliases (`--accent-soft`, `--accent-strong`) — the
+//     softened (12% alpha) and full-strength terracotta. Aliased to
+//     Quartz's `--highlight` and `--secondary` respectively.
+//   * Hairline rule color (`--rule`) — used for column rules,
+//     callout borders, indent guides.
+//   * Shadow tiers (`--shadow-sm`, `--shadow-md`) — subtle depth
+//     for cards and pre-blocks. Dark mode swaps to outline-shadows
+//     because alpha shadows on near-black bg lose depth.
+//   * Modular type scale (`--fs-xs … --fs-4xl`) — major-third (1.250)
+//     scale; consumed by `typography.scss` and `article.scss`.
+//   * Motion timings (`--motion-fast/mid/slow`) + shared easing
+//     (`--motion-easing`) — used by `links.scss`, `motion.scss`,
+//     and the Lane D Cmd-K modal.
+//   * Source palette (`--brain-source-*`) + tier palette
+//     (`--brain-tier-*`) — moved from `graph.scss` so the graph and
+//     ingested-link styles share one source of truth (Lane B reads
+//     `--brain-source-*` for `[kind=ingested]` left-rail color).
+//
+// What does NOT live here:
+//   * `--light`, `--lightgray`, `--gray`, `--darkgray`, `--dark`,
+//     `--secondary`, `--tertiary`, `--highlight`, `--textHighlight`,
+//     `--bodyFont`, `--headerFont`, `--codeFont`, `--titleFont` —
+//     these are emitted by `quartz/util/theme.ts::joinStyles()` from
+//     `quartz.config.ts` `theme.colors` / `theme.typography`. Don't
+//     re-declare them here; alias them when useful.
+
+:root {
+  // Surface tiers (light mode). Cream paper on top of cream paper —
+  // intentionally subtle so depth reads as elevation, not contrast.
+  --surface-0: #fdfaf6;  // page bg (matches `--light`)
+  --surface-1: #f5efe5;  // cards, sidebars (one notch warmer)
+  --surface-2: #ebe4d9;  // inline code, popovers (matches `--lightgray`)
+
+  // Ink scale (light mode). Aliased to Quartz tokens so future
+  // palette tweaks in `quartz.config.ts` propagate without hunting.
+  --ink-0: var(--dark);      // primary text (deepest)
+  --ink-1: var(--darkgray);  // secondary text / body running color
+  --ink-2: var(--gray);      // muted text, metadata, dingbats
+
+  // Accent aliases. Lane B (`links.scss`) consumes these heavily.
+  --accent-soft: var(--highlight);   // 12%-alpha terracotta
+  --accent-strong: var(--secondary); // full-saturation terracotta
+
+  // Semantic font alias. Quartz emits `--headerFont` / `--bodyFont` /
+  // `--codeFont` / `--titleFont` from `quartz.config.ts`; the redesign
+  // plan and downstream Lane B/C/D code refer to the *role*
+  // (`--displayFont`) rather than Quartz's internal naming. One alias
+  // keeps the plan's selectors verbatim across all four lanes.
+  --displayFont: var(--headerFont);
+
+  // Hairline rule. One step warmer than `--lightgray` so the hairline
+  // reads on cream without disappearing.
+  --rule: #e0d6c4;
+
+  // Shadow tiers. Stacked alpha-shadows give a tighter, less
+  // muddy edge than a single mid-strength shadow.
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 1px rgba(0, 0, 0, 0.02);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.06);
+
+  // Modular scale (1.250 — major third). Single ratio across
+  // headings, metadata, body, and pull-quotes; keeps the page in
+  // visual rhythm without per-element fine-tuning.
+  --fs-xs: 0.75rem;
+  --fs-sm: 0.875rem;
+  --fs-base: 1rem;
+  --fs-md: 1.125rem;
+  --fs-lg: 1.25rem;
+  --fs-xl: 1.563rem;
+  --fs-2xl: 1.953rem;
+  --fs-3xl: 2.441rem;
+  --fs-4xl: 3.052rem;
+
+  // Motion timings. Easing is a smooth-out-quint
+  // (`cubic-bezier(0.2, 0.8, 0.2, 1)`) — overshoots the midpoint
+  // briefly then eases in, which feels paper-like and confident
+  // rather than bouncy. Defined as a named token so transition
+  // declarations stay short: `transition: opacity var(--motion-fast) var(--motion-easing)`.
+  --motion-fast: 150ms;
+  --motion-mid: 250ms;
+  --motion-slow: 400ms;
+  --motion-easing: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  // Tier palette (moved from `graph.scss`). `vault` covers authored
+  // notes (Phase A/B/C); `ingested` covers `_ingested/` notes that
+  // came from external sources via `brain ingest*`. Terracotta vs
+  // sage gives a strong cluster cue without clashing with the
+  // default Quartz body palette.
+  --brain-tier-vault: #b85427;
+  --brain-tier-ingested: #7a8a6b;
+
+  // Source palette (moved from `graph.scss`). Each `brain ingest
+  // --source <name>` value gets a distinct hue so a quick eye-scan
+  // over the graph clusters krisp / slack / gmail / manual zones
+  // at a glance. Hues picked to be perceptually distinct in light
+  // mode and to keep contrast against the cream `--surface-0` bg.
+  // Lane B reads these for the ingested-link source-tint left rail.
+  --brain-source-krisp: #8b6cab;
+  --brain-source-slack: #4a9eba;
+  --brain-source-gmail: #d4956a;
+  --brain-source-manual: #5c5340;
+}
+
+// Dark mode. Quartz toggles via `<html saved-theme="dark">` (see
+// `darkmode.inline.ts` line 3 + the matching `:root[saved-theme="dark"]`
+// declarations in `quartz/util/theme.ts`). The legacy graph.scss block
+// uses `[data-theme="dark"]` which never matches — preserved here as
+// the correct selector so source palette swaps actually fire in dark mode.
+:root[saved-theme="dark"] {
+  // Espresso surface tiers. The plan calls for `light` (page bg) lifted
+  // to `#16110a`; the card and inline tiers warm a step further so each
+  // tier reads distinctly without cranking contrast.
+  --surface-0: #16110a;
+  --surface-1: #1f1a11;
+  --surface-2: #2a2418;
+
+  --rule: #2e2820;
+
+  // Outline shadows replace alpha shadows in dark mode. Alpha-on-near-
+  // black loses all visible elevation; a 1px hairline outline reads as
+  // depth without darkening the surface further.
+  --shadow-sm: 0 0 0 1px var(--rule);
+  --shadow-md: 0 0 0 1px var(--rule), 0 4px 12px rgba(0, 0, 0, 0.25);
+
+  // Tier + source palette (lifted lightness, muted saturation for
+  // dark-bg legibility). Same hue dimensions as light mode.
+  --brain-tier-vault: #e08552;
+  --brain-tier-ingested: #c5cda1;
+
+  --brain-source-krisp: #b491cf;
+  --brain-source-slack: #76c1d9;
+  --brain-source-gmail: #e8b385;
+  --brain-source-manual: #8a7e63;
+}

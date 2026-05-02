@@ -1,0 +1,127 @@
+// Brain typography system — applies the Newsreader / Fraunces /
+// JetBrains Mono pairing chosen for the 2026 commonplace-book redesign.
+//
+// `quartz.config.ts` `theme.typography` sets:
+//   header → Fraunces       (var(--headerFont) / var(--titleFont))
+//   body   → Newsreader     (var(--bodyFont))
+//   code   → JetBrains Mono (var(--codeFont))
+//
+// This file:
+//   * Locks the modular scale onto `body` defaults + h1–h4.
+//   * Turns on optical sizing (Newsreader is variable-OPSZ).
+//   * Switches running text to old-style numerals, keeps tabular
+//     contexts (`th`, `td`) on lining numerals.
+//   * Routes italics through Fraunces for emphasis (more characterful
+//     than Newsreader italic at body size).
+//
+// Order note: this file `@use`s nothing — relies on `_tokens.scss`
+// having been imported earlier in `custom.scss` so `--fs-*` resolve.
+
+html {
+  // Anchor the rem scale at 16px on the root so `--fs-base: 1rem`
+  // lands at exactly 16px regardless of any user-agent tweaks Quartz's
+  // base.scss might inherit. Newsreader at 16px hits its sweet spot.
+  font-size: 100%;
+}
+
+body {
+  // Body running text: Newsreader, optical-sized, old-style numerals.
+  font-family: var(--bodyFont);
+  font-size: var(--fs-base);
+  line-height: 1.7;
+  letter-spacing: -0.005em;
+
+  // Newsreader ships an `opsz` axis — let the browser pick the
+  // matching optical size per element (display sizes get a tighter,
+  // text sizes get a looser master).
+  font-optical-sizing: auto;
+
+  // Old-style numerals (`onum`) blend with running text so dates and
+  // counts don't visually shout. `pnum` keeps proportional widths so
+  // numerals sit on the same metric as letters. Lining numerals are
+  // re-enabled below for tabular contexts where alignment matters.
+  font-feature-settings: "onum", "pnum", "kern", "liga";
+  font-variant-numeric: oldstyle-nums proportional-nums;
+}
+
+// Display headings — Fraunces. Tighter leading + tracking than body
+// because serif display faces sit visually loose at large sizes
+// without negative tracking. Weight 600 (semibold) reads more
+// elegant than 700 against a serif body.
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-family: var(--headerFont);
+  font-weight: 600;
+  line-height: 1.15;
+  letter-spacing: -0.022em;
+  // Headings stay on lining numerals — visual weight matches the
+  // letterforms; old-style would feel mismatched at display sizes.
+  font-variant-numeric: lining-nums proportional-nums;
+}
+
+h1 {
+  font-size: var(--fs-3xl);
+}
+h2 {
+  font-size: var(--fs-2xl);
+}
+h3 {
+  font-size: var(--fs-xl);
+}
+h4 {
+  font-size: var(--fs-lg);
+}
+h5 {
+  font-size: var(--fs-md);
+}
+h6 {
+  font-size: var(--fs-base);
+}
+
+// Italic emphasis routes through Fraunces — Newsreader italic is
+// competent but Fraunces italic carries more character at body size
+// and reinforces the commonplace-book voice. Scoped to `em, i` so
+// other italicized contexts (e.g. callout titles styled italic by
+// Quartz) inherit the same treatment.
+em,
+i {
+  font-family: var(--headerFont);
+  font-style: italic;
+  // Fraunces italic at body size benefits from a hair-tighter
+  // tracking — the strokes terminate further out than Newsreader.
+  letter-spacing: -0.01em;
+}
+
+// Tabular data switches back to lining numerals + tabular widths so
+// columns of numbers align under each other.
+th,
+td {
+  font-variant-numeric: lining-nums tabular-nums;
+  font-feature-settings: "lnum", "tnum", "kern";
+}
+
+// Small-caps tracking on chips + metadata labels. Lane B (link tag
+// chips), Lane C (article meta `time` + read-time), and Lane D
+// (drop cap and pull quote) all opt in by setting
+// `font-variant-caps: small-caps` plus `letter-spacing: 0.08em`.
+// The class hook below is consumed by Lane B/C/D when those files
+// land — defining it here keeps the small-caps rhythm in one place.
+.brain-smallcaps {
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.08em;
+  font-feature-settings: "smcp", "lnum";
+}
+
+// Code paths stay on JetBrains Mono. base.scss already wires `code`,
+// `pre code`, `kbd` to `var(--codeFont)`; we just lock numerals to
+// tabular so column-aligned snippets read cleanly.
+code,
+kbd,
+pre,
+samp {
+  font-variant-numeric: tabular-nums;
+}

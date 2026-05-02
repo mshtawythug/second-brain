@@ -1,0 +1,51 @@
+// Brain wiki global styles — entry point for the 2026 redesign.
+//
+// This file is installed at `<vault>/.quartz/quartz/styles/custom.scss`
+// by `brain vault render --overlay` and is Quartz's intended seam for
+// global customizations (stock content is just `@use "./base.scss"`).
+//
+// Layering order (top-to-bottom = first-loaded → last-loaded):
+//
+//   1. base.scss        — Quartz's stock chrome + variables (must come
+//                          first; everything below cascades over it).
+//   2. brain/tokens     — design tokens: colors, fonts, sizes, motion.
+//                          Defines the vars consumed everywhere else.
+//   3. brain/typography — modular type scale + Newsreader / Fraunces /
+//                          JetBrains Mono application + numerals.
+//   4. brain/surface    — page / card / inline-code surface tiers +
+//                          shadows.
+//   5. brain/atmosphere — Lane D — paper grain, hairline rules,
+//                          dingbat section breaks.
+//   6. brain/motion     — Lane D — page-load reveal animations and
+//                          shared timing/easing tokens consumers use.
+//   7. brain/links      — Lane B — link-kind underline + tag chip +
+//                          source-tinted ingested-tier rules.
+//   8. brain/sidebar    — Lane C — left/right sidebar layout polish.
+//   9. brain/article    — Lane C — article column measure + heading
+//                          rhythm + blockquote + meta typography.
+//  10. brain/marginalia — Lane D — backlinks-as-figure-margin notes
+//                          on wide viewports.
+//  11. brain/callouts   — Lane C — refreshed callout palette + chrome.
+//  12. brain/code       — Lane C — pre/inline code surface + copy
+//                          button styling.
+//  13. brain/home       — Lane C — index card grid override.
+//
+// Lane A (this PR) ships only `tokens`, `typography`, `surface`. Lanes
+// B/C/D files exist as one-line placeholder stubs so SCSS can resolve
+// every `@use` import — without the stubs, dart-sass aborts the
+// build with "Can't find stylesheet to import." Subsequent lanes
+// fill the placeholders in place.
+
+@use "./base.scss";
+@use "./brain/tokens";
+@use "./brain/typography";
+@use "./brain/surface";
+@use "./brain/atmosphere";    // Lane D
+@use "./brain/motion";        // Lane D
+@use "./brain/links";
+@use "./brain/sidebar";
+@use "./brain/article";
+@use "./brain/marginalia";    // Lane D
+@use "./brain/callouts";
+@use "./brain/code";
+@use "./brain/home";
