@@ -186,13 +186,13 @@ article pre:focus-within[data-language]::before {
   }
 
   // brain: the "Copied" pulse swaps the label text via JS; the chip
-  // itself uses the success-callout color briefly (token shared with
-  // `_callouts.scss`'s `--callout-success`). Adds a small confidence
-  // affordance — users see the action took effect.
+  // itself uses the success-callout color briefly. `--callout-success`
+  // is defined in `_tokens.scss` (loaded first via `custom.scss` order),
+  // so the var is always resolved here — no fallback hex needed.
   &.is-copied {
-    background: color-mix(in srgb, var(--callout-success, #4f8a5e) 18%, var(--surface-1));
-    color: var(--callout-success, #4f8a5e);
-    border-color: var(--callout-success, #4f8a5e);
+    background: color-mix(in srgb, var(--callout-success) 18%, var(--surface-1));
+    color: var(--callout-success);
+    border-color: var(--callout-success);
     opacity: 1;
   }
 }

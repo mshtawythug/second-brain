@@ -33,60 +33,21 @@
 //   * `--ink-0`         — body text inside callouts
 //   * `--accent-soft`/`--accent-strong` — ridden by `note` + `quote`
 //   * `--brain-tier-*`  — re-used so callouts and the graph share hues
-//
-// Tokens this file declares (consumed only inside this partial):
-//   * `--callout-note`     → secondary terracotta
-//   * `--callout-info`     → tertiary sage
-//   * `--callout-abstract` → cool blue (added — the only new hue)
-//   * `--callout-tip`      → tertiary sage (shares with info; tip is rarer)
-//   * `--callout-success`  → green (added)
-//   * `--callout-question` → amber (added)
-//   * `--callout-warning`  → amber (shared with question — same urgency)
-//   * `--callout-danger`   → deep red (added)
-//   * `--callout-failure`  → deep red (shared with danger)
-//   * `--callout-bug`      → deep red (shared with danger)
-//   * `--callout-example`  → purple (added)
-//   * `--callout-quote`    → muted ink (--ink-2) — quote chrome reads as soft
+//   * `--callout-note / -info / -abstract / -tip / -success /
+//      -question / -warning / -danger / -failure / -bug / -example /
+//      -quote` — per-type hue palette (one per Quartz callout type),
+//      defined in `_tokens.scss` so cross-file consumers (`_code.scss`'s
+//      success-flash, future home/sidebar callouts) don't depend on
+//      this partial's load order.
 
 // ---------------------------------------------------------------------------
-// Type-color tokens
-// ---------------------------------------------------------------------------
+// Type-color tokens are defined in `_tokens.scss` (light + dark blocks).
 //
-// Defined globally so devtools-inspecting any callout surfaces the
-// per-type hue in one read. Light-mode values picked to clear ~3:1
-// against `--surface-1`; dark-mode values lifted lightness + reduced
-// saturation per the same rules in `_tokens.scss` for the source
-// palette.
-
-:root {
-  --callout-note: var(--accent-strong);            // #b85427 terracotta
-  --callout-info: #4a8fa0;                         // muted blue-teal
-  --callout-abstract: #5e7c98;                     // dusty steel blue
-  --callout-tip: var(--brain-tier-ingested);       // sage #7a8a6b
-  --callout-success: #4f8a5e;                      // forest green
-  --callout-question: #c08a3a;                     // burnt amber
-  --callout-warning: #c08a3a;                      // shared with question
-  --callout-danger: #a8362b;                       // deep brick red
-  --callout-failure: #a8362b;                      // shared with danger
-  --callout-bug: #a8362b;                          // shared with danger
-  --callout-example: #7a5b8f;                      // muted plum
-  --callout-quote: var(--ink-2);                   // muted ink — quote reads as soft
-}
-
-:root[saved-theme="dark"] {
-  --callout-note: var(--accent-strong);            // #e8a570 (already lifted in tokens)
-  --callout-info: #7baeb8;
-  --callout-abstract: #93a8c0;
-  --callout-tip: var(--brain-tier-ingested);       // #c5cda1
-  --callout-success: #8ab797;
-  --callout-question: #d6b06a;
-  --callout-warning: #d6b06a;
-  --callout-danger: #d97a6f;
-  --callout-failure: #d97a6f;
-  --callout-bug: #d97a6f;
-  --callout-example: #b59cca;
-  --callout-quote: var(--ink-2);
-}
+// Single source of truth — devtools-inspecting any callout surfaces the
+// full palette under `:root` alongside the rest of the redesign tokens,
+// and cross-file consumers (`_code.scss`'s success-flash, future
+// home/sidebar callouts) don't depend on this partial's load order.
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Container chrome — applied uniformly via the data-callout attribute

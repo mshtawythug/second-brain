@@ -126,6 +126,26 @@
   --brain-source-slack: #4a9eba;
   --brain-source-gmail: #d4956a;
   --brain-source-manual: #5c5340;
+
+  // Callout palette (Lane C). One hue per Quartz callout type; consumed
+  // by `_callouts.scss` to retint stock chrome via the `--type-color`
+  // pattern, and by `_code.scss` for the success-state copy-button flash.
+  // Lifted out of `_callouts.scss` so devtools-inspecting any callout
+  // reveals the full palette in one read AND so cross-file consumers
+  // (code, future home/sidebar callouts) don't depend on a partial's
+  // load order. Picked to clear ~3:1 contrast against `--surface-1`.
+  --callout-note: var(--accent-strong);            // #b85427 terracotta
+  --callout-info: #4a8fa0;                         // muted blue-teal
+  --callout-abstract: #5e7c98;                     // dusty steel blue
+  --callout-tip: var(--brain-tier-ingested);       // sage #7a8a6b
+  --callout-success: #4f8a5e;                      // forest green
+  --callout-question: #c08a3a;                     // burnt amber
+  --callout-warning: #c08a3a;                      // shared with question
+  --callout-danger: #a8362b;                       // deep brick red
+  --callout-failure: #a8362b;                      // shared with danger
+  --callout-bug: #a8362b;                          // shared with danger
+  --callout-example: #7a5b8f;                      // muted plum
+  --callout-quote: var(--ink-2);                   // muted ink — quote reads as soft
 }
 
 // Dark mode. Quartz toggles via `<html saved-theme="dark">` (see
@@ -164,4 +184,21 @@
   --brain-source-slack: #76c1d9;
   --brain-source-gmail: #e8b385;
   --brain-source-manual: #8a7e63;
+
+  // Callout palette — dark variant. Lifted lightness + softer saturation
+  // for legibility against `--surface-1` espresso. Same hue families as
+  // the light palette above so chips/icons feel like the same callout
+  // species across themes.
+  --callout-note: var(--accent-strong);            // #e8a570 (already lifted in tokens)
+  --callout-info: #7baeb8;
+  --callout-abstract: #93a8c0;
+  --callout-tip: var(--brain-tier-ingested);       // #c5cda1
+  --callout-success: #8ab797;
+  --callout-question: #d6b06a;
+  --callout-warning: #d6b06a;
+  --callout-danger: #d97a6f;
+  --callout-failure: #d97a6f;
+  --callout-bug: #d97a6f;
+  --callout-example: #b59cca;
+  --callout-quote: var(--ink-2);
 }

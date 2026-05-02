@@ -104,17 +104,19 @@ td {
   font-feature-settings: "lnum", "tnum", "kern";
 }
 
-// Small-caps tracking on chips + metadata labels. Lane B (link tag
-// chips), Lane C (article meta `time` + read-time), and Lane D
-// (drop cap and pull quote) all opt in by setting
-// `font-variant-caps: small-caps` plus `letter-spacing: 0.08em`.
-// The class hook below is consumed by Lane B/C/D when those files
-// land — defining it here keeps the small-caps rhythm in one place.
-.brain-smallcaps {
-  font-variant-caps: all-small-caps;
-  letter-spacing: 0.08em;
-  font-feature-settings: "smcp", "lnum";
-}
+// Small-caps treatment is applied per-call-site rather than via a shared
+// utility class. The recipe (`font-variant-caps: all-small-caps;
+// letter-spacing: <0.04..0.08em>`) is small enough that duplication is
+// cheaper than a utility, and per-site tracking varies (chip tracking
+// 0.04em, metadata 0.08em, code language label 0.06em) — a single class
+// would either need a parameter (back to a mixin) or force every site
+// to the same tracking. Sites:
+//   * `_links.scss` — tag chips (0.04em)
+//   * `_article.scss` — `.content-meta` + tag header chips (0.08em)
+//   * `_callouts.scss` — `.callout-title` (0.08em)
+//   * `_sidebar.scss` — sidebar `<h3>` labels (0.06em)
+//   * `_code.scss` — language label + copy button (0.06em + 0.08em)
+//   * `_cmdk.scss` — modal footer + result kind labels (0.04em + 0.08em)
 
 // Code paths stay on JetBrains Mono. base.scss already wires `code`,
 // `pre code`, `kbd` to `var(--codeFont)`; we just lock numerals to
