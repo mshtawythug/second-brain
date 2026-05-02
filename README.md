@@ -69,6 +69,12 @@ Caveats:
   # ollama pull qwen3-embedding:8b        # only if you want BRAIN_EMBEDDER=qwen3 — 4.7 GB
   ```
   Skip Ollama entirely if you plan to use `BRAIN_EMBEDDER=voyage` exclusively.
+- **[Caddy](https://caddyserver.com/)** (only if you want the live wiki at `brain.test` or `localhost:8080`). On macOS:
+  ```bash
+  brew install caddy
+  brew services start caddy
+  ```
+  See [Wiki rendering → Serve locally](#serve-locally) for the Caddyfile recipe and the `brain.test` /etc/hosts entry. Skip Caddy if you only ever query the brain through `brain search` from Claude — the wiki view is optional.
 - **A Voyage AI API key** (only if `BRAIN_EMBEDDER=voyage`) — free tier covers personal use. Sign up at [voyageai.com](https://www.voyageai.com/) and grab a key.
 - **Claude Code** (optional but the whole point) — install from [claude.com/claude-code](https://claude.com/claude-code) so Claude can call `brain` for you.
 
@@ -114,6 +120,51 @@ isn't running (`brew services start ollama`), the configured embedding model
 isn't pulled (`ollama pull snowflake-arctic-embed2`), or — only when
 `BRAIN_EMBEDDER=voyage` — `VOYAGE_API_KEY` is missing from `.env`.
 
+### Wiki (optional)
+
+If you want a live wiki view of your vault at `brain.test` (Obsidian-style
+graph, backlinks, full-text search, dark mode), wire up Caddy + the Quartz
+workspace. This is the procedural "I want it working" path — the
+how-it-works details (architecture, atomic build swap, auto-reload
+mechanism) live under [Wiki rendering → Serve locally](#serve-locally)
+below.
+
+```bash
+# 1. Install Caddy (skip if it's already running on your machine).
+brew install caddy
+brew services start caddy
+
+# 2. Map brain.test to localhost (one-time, system-wide).
+echo '127.0.0.1 brain.test' | sudo tee -a /etc/hosts
+
+# 3. Clone Quartz into your vault as .quartz/.
+git clone https://github.com/jackyzha0/quartz.git ~/brain-vault/.quartz
+cd ~/brain-vault/.quartz
+npm install
+
+# 4. Drop in the brain-tuned Quartz config (graph extensions, ignore patterns,
+#    reload-signal transformer registration).
+cp ~/workspace/second-brain/quartz.config.ts ./quartz.config.ts
+
+# 5. Configure Caddy to serve the live build symlink. Paste the Caddyfile
+#    recipe from "Serve locally" below into /opt/homebrew/etc/Caddyfile,
+#    replacing /Users/<you>/brain-vault with your actual vault path
+#    (Caddy does NOT expand ~). Then reload:
+brew services reload caddy
+
+# 6. Light the wiki up. Cold start is ~40s for a ~450-doc vault.
+#    (Run `~/workspace/second-brain/bin/brain-up` if `bin/` isn't on your
+#    PATH yet — see the section below for the one-time PATH setup.)
+brain-up
+```
+
+`brain-up` starts the vault sync watcher, applies the brain Quartz overlay,
+runs the cold-start build (if `current/` is empty or unhealthy), starts the
+build watcher, and opens the browser. After it returns, every save in
+`~/brain-vault/` triggers a fresh background rebuild, and open tabs
+auto-reload the moment the new build is swapped in. See [Daily use —
+`bin/` scripts](#daily-use--bin-scripts) for the full daily workflow.
+
 ### Choosing an embedder backend
 
 Set `BRAIN_EMBEDDER` in `.env` (or the shell). Three values are supported:
@@ -151,8 +202,8 @@ brain doctor
 ### Make `brain` and the `bin/` scripts available from any directory
 
 By default, `brain` only works inside this folder with the venv activated, and
-the `bin/brain-up` / `bin/brain-down` / `bin/brain-status` scripts have to be
-invoked by full path. Two small one-time edits fix both.
+the `bin/brain-up` / `bin/brain-down` / `bin/brain-rebuild` / `bin/brain-status`
+scripts have to be invoked by full path. Two small one-time edits fix both.
 
 **1. Symlink the `brain` launcher onto your PATH** so `brain` works from any
 shell — including Claude Code in any project:
@@ -169,7 +220,8 @@ The symlink works without `source .venv/bin/activate` because `pip install -e`
 gives the launcher an absolute-path shebang pointing at the venv's Python.
 
 **2. Add `bin/` to your shell's PATH** so `brain-up` / `brain-down` /
-`brain-status` work from anywhere. Pick the snippet for your shell:
+`brain-rebuild` / `brain-status` work from anywhere. Pick the snippet for
+your shell:
 
 ```bash
 # zsh (macOS default since Catalina) → ~/.zshrc
@@ -308,7 +360,7 @@ brain graph --root <id> --depth 2 --format dot | dot -Tsvg > focus.svg
 brain vault sync --watch
 ```
 
-Runs as a daemon (Ctrl-C to stop). Filesystem events trigger debounced (500ms) per-file syncs — edit a note, save, and within a beat the chunk + embedding update in the DB. Skips `_templates/`, `_attachments/`, hidden directories. The `bin/brain-up` script kicks this off alongside the wiki dev server.
+Runs as a daemon (Ctrl-C to stop). Filesystem events trigger debounced (500ms) per-file syncs — edit a note, save, and within a beat the chunk + embedding update in the DB. Skips `_templates/`, `_attachments/`, hidden directories. The `bin/brain-up` script kicks this off alongside the wiki [build watcher](#serve-locally).
 
 ## Use from Claude Desktop
 
@@ -445,31 +497,77 @@ cp /tmp/upstream-Graph.tsx quartz_overrides/quartz/components/Graph.tsx
 
 ### Serve locally
 
-Use Quartz's own dev server — it handles slug-to-file resolution and SPA routing correctly (Python's `http.server` 404s on Quartz's clean URLs and would need a separate SPA-fallback config):
+Brain serves the wiki as a **blue/green static site**: [Caddy](https://caddyserver.com/) serves a `current` symlink under the vault, the build watcher renders each new build into a fresh sibling directory, and an atomic symlink swap flips traffic to the new build the instant it's ready. Every request between rebuilds hits a complete, self-consistent build — no half-written window, no missing assets, no CSS that doesn't match the HTML. Quartz's own `--serve` dev server is no longer used.
 
-```bash
-cd ~/brain-vault/.quartz
-npx quartz build --serve --port 8080 --directory ~/brain-vault
-open http://localhost:8080
+```
+~/brain-vault/.quartz/
+  builds/
+    20260501-153912-ab12cd/    ← one dir per build
+    20260501-154430-ef34gh/
+    20260501-155102-ij56kl/    ← active
+  current → builds/20260501-155102-ij56kl/   ← Caddy serves this
 ```
 
-The dev server hot-reloads when vault files change — pair it with `brain vault sync --watch` and edits flow disk → DB → wiki without manual rebuilds.
+**Caddyfile.** Paste the recipe below into `/opt/homebrew/etc/Caddyfile` (system-wide, absolute paths only — Caddy does *not* expand `~`). Replace `/Users/<you>/brain-vault` with your actual vault path:
+
+```caddy
+http://brain.test, http://localhost:8080 {
+    root * /Users/<you>/brain-vault/.quartz/current
+    file_server
+    @build_id path /.build-id
+    header @build_id Cache-Control "no-store"
+    try_files {path} {path}/ {path}.html /404.html
+    encode gzip
+}
+```
+
+Then `brew services reload caddy`. `localhost:8080` stays as a backwards-compat alias for anything that hardcodes the port. The `try_files` chain handles Quartz's three slug shapes (`/foo`, `/foo/`, `/foo.html`) and falls back to Quartz's own `404.html`. The `Cache-Control` override on `/.build-id` is what lets the auto-reload poller actually see new build IDs instead of a stale cached one.
+
+**`/etc/hosts`.** One-time entry so `brain.test` resolves locally:
+
+```bash
+echo '127.0.0.1 brain.test' | sudo tee -a /etc/hosts
+```
+
+**Auto-reload.** When the build watcher swaps `current/` to a new build, every open tab reloads within ~3 seconds. The mechanism: `bin/brain-up` exports `BRAIN_WIKI_RELOAD=1` for the build watcher, which makes the brain Quartz overlay's `Plugin.ReloadSignal()` transformer inject a `<script src="/static/reload.js" defer>` into every page. That script polls `/.build-id` every 3 seconds while the tab is foregrounded, pauses while the tab is backgrounded (so an idle tab in the background doesn't generate traffic), and calls `location.reload()` when the build ID changes. `brain vault render` (the one-shot prod build path) leaves `BRAIN_WIKI_RELOAD` unset, so production builds ship without the polling script — only the dev daily-use flow gates it on.
+
+**First-build cost.** Cold start (`brain-up` against an empty `.quartz/current`) takes ~40s for a ~450-doc vault — the user sees a "first build, ~40s" message in the foreground before the script returns. Subsequent rebuilds are also ~40s, but they happen entirely in the background under `builds/<ts>-<hash>/`; open tabs keep seeing the previous build right up to the atomic swap. The build watcher coalesces rapid edits with a 1.5s debounce, so a flurry of saves produces one rebuild rather than one per save. Old build dirs are GC'd after each swap (default keep=3, tunable via `BRAIN_WIKI_KEEP_BUILDS`); the build that `current` points at is never deleted, even if it's beyond the keep window.
 
 Backlinks, graph view, and full-text search all work out of the box — that's Quartz's job, not brain's.
 
 ### Daily use — `bin/` scripts
 
-To avoid memorizing the watcher + dev-server invocations, three convenience scripts live under `bin/`:
+Four convenience scripts under `bin/` cover the daily flow. They assume `bin/` is on your PATH — see [Make `brain` and the `bin/` scripts available from any directory](#make-brain-and-the-bin-scripts-available-from-any-directory) above for the one-time setup.
 
 ```bash
-brain-up      # starts watcher + Quartz dev server, opens browser. Idempotent.
-brain-down    # stops both.
-brain-status  # shows pids, log paths, and whether the wiki is reachable.
+brain-up       # start vault sync watcher → apply Quartz overlay → cold-start
+               # build (if needed) → start build watcher → open browser.
+               # Idempotent.
+brain-down     # stop both watchers. Caddy is left running so brain.test keeps
+               # serving the last good build.
+brain-rebuild  # one-shot rebuild + atomic swap. Use after overlay or config
+               # edits the watcher won't catch (since nothing in the vault tree
+               # changed). --no-export skips the DB→vault export step;
+               # --no-build skips the build itself.
+brain-status   # show watcher state, the active build dir, the build-id pinned
+               # by current/, and whether the wiki URL is reachable.
 ```
 
-These assume `bin/` is on your PATH — see [Make `brain` and the `bin/` scripts available from any directory](#make-brain-and-the-bin-scripts-available-from-any-directory) above for the one-time setup.
+`brain-up` is idempotent: re-running it skips the cold-start build when `current/` is healthy and re-uses any already-running watchers. `brain-down` deliberately leaves Caddy alone — the previous build keeps serving while you iterate, and `brain.test` survives `brain-down && brain-up` cleanly. The blue/green swap means open tabs survive every rebuild — no broken assets, no half-written CSS, no flicker.
 
-Env overrides honored by the scripts: `BRAIN_VAULT_PATH` (default `~/brain-vault`), `BRAIN_WIKI_PORT` (default `8080`), `BRAIN_OPEN_BROWSER` (default `1`; set `0` to skip auto-open). PIDs are tracked at `/tmp/brain-{wiki,watch}.pid`; logs at `/tmp/brain-{wiki,watch}.log`.
+Env overrides:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault directory the watchers + builds operate against. |
+| `BRAIN_WIKI_PORT` | `8080` | Port `brain-up` opens / `brain-status` curls. Caddy must be configured to listen on it (see [Serve locally](#serve-locally)). |
+| `BRAIN_OPEN_BROWSER` | `1` | Set `0` to skip the auto-`open` after `brain-up`. |
+| `BRAIN_WIKI_KEEP_BUILDS` | `3` | How many old build dirs under `builds/` to retain after each swap. Lets you `git diff`-style inspect prior builds. |
+| `BRAIN_NO_OVERLAY` | `0` | Set `1` to skip the Quartz overlay step at startup. Useful when iterating on stock Quartz behavior. |
+| `BRAIN_NO_BUILD_WATCHER` | `0` | Set `1` to skip starting the build watcher (used by the bin-script tests; also handy when debugging the sync watcher in isolation). |
+| `BRAIN_PY` | (unset) | Test/CI knob — overrides the Python interpreter `bin/brain-{up,rebuild}` invoke for the watcher + build subprocesses. Defaults to `<repo>/.venv/bin/python`. |
+
+PIDs are tracked at `/tmp/brain-{watch,build}.pid`; logs at `/tmp/brain-{watch,build}.log`. (The legacy `/tmp/brain-wiki.pid` from the old `quartz --serve` setup is still cleaned up by `brain-down` for backward compat — fresh installs won't see it.)
 
 ### Deploy (optional)
 
