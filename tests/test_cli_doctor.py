@@ -260,3 +260,68 @@ def test_doctor_reports_gws_found(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.exit_code == 0, result.output
     assert "gws CLI" in result.output
     assert "OK" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Vault drift line — surfaces ``_ingested/`` mirror DB-vs-disk drift in
+# ``brain doctor``. Informational only (never flips exit code).
+# ---------------------------------------------------------------------------
+
+
+def _write_orphan(path: "Any", *, doc_id: str, title: str = "orphan") -> None:
+    """Drop a stub orphan mirror file with the given fresh UUID into ``path``."""
+    from brain.vault.frontmatter import dump_frontmatter
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        dump_frontmatter({"id": doc_id, "title": title}, "orphan body\n"),
+        encoding="utf-8",
+    )
+
+
+def test_doctor_reports_zero_drift_clean_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """Empty vault + no ingested rows → ``vault drift     OK (...)`` with zeros."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    vault = tmp_path / "vault"
+    (vault / "_ingested" / "manual").mkdir(parents=True)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "vault drift" in result.output
+    assert "OK (0 mirrors, 0 NULL vault_path, 0 orphan files, 0 ghost rows)" in (
+        result.output
+    )
+    # No suggested-fix hints when clean.
+    assert "prune-orphans" not in result.output
+    assert "vault export --force" not in result.output
+
+
+def test_doctor_reports_drift_when_orphans_exist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """An orphan file under ``_ingested/`` triggers the yellow drift hint.
+
+    Setup: a vault dir whose ``_ingested/manual/`` holds one file with a
+    fresh UUID that has no matching DB row.
+    Exercise: ``brain doctor``.
+    Verify: the drift line names the orphan count and the prune-orphans
+    suggested fix appears in the output.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    vault = tmp_path / "vault"
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    _write_orphan(
+        vault / "_ingested" / "manual" / "orphan.md",
+        doc_id="22222222-2222-4222-8222-222222222222",
+    )
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "vault drift" in result.output
+    # The exact counts: 0 ingested rows in DB, 0 NULL, 1 orphan, 0 ghost.
+    assert "1 orphan files" in result.output
+    assert "drift detected" in result.output
+    assert "prune-orphans" in result.output

@@ -1883,3 +1883,159 @@ def test_sync_canonical_tags_is_a_no_op_for_disk(
     ).fetchone()
     assert row is not None
     assert list(row[0]) == ["foo", "bar"]
+
+
+# ---------------------------------------------------------------------------
+# Watcher resilience — UniqueViolation in _sync_one is converted to a
+# per-file SyncReport.errors entry instead of crashing the whole pass.
+#
+# Drift trigger: an _ingested/ mirror file with a fresh frontmatter id but a
+# body byte-identical to an already-ingested stdin doc. The INSERT collides
+# on ``documents_content_hash_stdin_idx`` (UNIQUE on content_hash WHERE
+# kind='ingested' AND source_path IS NULL). Without the guard the watcher
+# would crash the whole sync the first time this drift surfaces; with the
+# guard one bad file never poisons the rest.
+# ---------------------------------------------------------------------------
+
+
+def _seed_stdin_ingest(
+    conn: psycopg.Connection,
+    fake_embedder,
+    *,
+    body: str,
+    title: str = "Seed Krisp",
+    external_id: str = "ext-collide-1",
+) -> str:
+    """Ingest one stdin doc so its ``content_hash`` is locked in the DB.
+
+    The follow-up vault-sync test writes an ``_ingested/`` mirror with a
+    fresh UUID but the same body bytes; the resulting ``_insert_document``
+    call must trip the UNIQUE index on ``content_hash`` and surface as a
+    per-file error, not a crash.
+    """
+    from brain.ingest import ingest_document
+    from brain.ingest.stdin import make_doc as stdin_make_doc
+
+    doc = stdin_make_doc(
+        content=body,
+        title=title,
+        content_type="transcript",
+        metadata={},
+    )
+    result = ingest_document(
+        conn,
+        embedder=fake_embedder,
+        doc=doc,
+        source_kind="krisp",
+        source_external_id=external_id,
+    )
+    assert result.document_id is not None
+    return result.document_id
+
+
+def test_sync_vault_continues_on_unique_violation(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """A drift file whose body collides with an ingested doc lands in errors.
+
+    Setup: seed one stdin krisp doc → its content_hash is now reserved.
+    Write an ``_ingested/`` mirror file with a FRESH frontmatter id but the
+    same body bytes (drift state — typically caused by a manual import or a
+    legacy bug that left orphan mirrors). Also write one healthy vault file
+    so we can verify the rest of the pass is unaffected.
+
+    Exercise: ``sync_vault``.
+
+    Verify: the report contains one error pointing at the bad file with a
+    "unique constraint" reason, but the healthy file synced cleanly. No
+    exception escapes; the watcher would have crashed without the guard.
+    """
+    seed_id = _seed_stdin_ingest(
+        test_db,
+        fake_embedder,
+        body="krisp transcript body for collision",
+    )
+
+    vault = tmp_path / "vault"
+    good_id = str(uuid.uuid4())
+    _write(
+        vault / "good.md",
+        {"id": good_id, "title": "Good"},
+        "fresh body content for the clean note\n",
+    )
+    bad_id = str(uuid.uuid4())
+    bad_path = vault / "_ingested" / "manual" / "bad.md"
+    _write(
+        bad_path,
+        {"id": bad_id, "title": "Drift Bad"},
+        # Body bytes match the seeded krisp doc (after _normalized_body
+        # strips trailing whitespace) → INSERT will collide on
+        # documents_content_hash_stdin_idx.
+        "krisp transcript body for collision\n",
+    )
+
+    report = _sync(test_db, fake_embedder, vault)
+
+    # The bad file lands in errors with a unique-constraint message.
+    assert len(report.errors) == 1, report.errors
+    err_path, reason = report.errors[0]
+    assert err_path == bad_path
+    assert "unique constraint" in reason
+    # Good file synced fine — the bad file did not poison the run.
+    assert report.created >= 1
+    good_row = test_db.execute(
+        "SELECT id::text FROM documents WHERE id = %s", (good_id,)
+    ).fetchone()
+    assert good_row is not None and good_row[0] == good_id
+    # The bad file's row was rolled back — only the seeded doc survives at
+    # that content_hash.
+    rows = test_db.execute(
+        "SELECT id::text FROM documents WHERE content_hash = ("
+        "  SELECT content_hash FROM documents WHERE id = %s"
+        ")",
+        (seed_id,),
+    ).fetchall()
+    assert [str(r[0]) for r in rows] == [seed_id]
+
+
+def test_sync_one_file_continues_on_unique_violation(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """The single-file watcher entry point also degrades gracefully on drift.
+
+    ``sync_one_file`` is what the watcher calls per FS event; it shares
+    ``_sync_one`` under the hood so the same UniqueViolation guard applies.
+    The contract: returns a report with the per-file error and never
+    raises.
+    """
+    _seed_stdin_ingest(
+        test_db,
+        fake_embedder,
+        body="single-file drift collision body",
+        external_id="ext-collide-single",
+    )
+
+    vault = tmp_path / "vault"
+    bad_id = str(uuid.uuid4())
+    bad_path = vault / "_ingested" / "manual" / "bad-single.md"
+    _write(
+        bad_path,
+        {"id": bad_id, "title": "Drift Single"},
+        "single-file drift collision body\n",
+    )
+
+    report = sync_one_file(
+        test_db,
+        embedder=fake_embedder,
+        vault_path=vault,
+        file_path=bad_path,
+    )
+
+    # Did NOT raise.
+    assert isinstance(report, SyncReport)
+    assert len(report.errors) == 1, report.errors
+    err_path, reason = report.errors[0]
+    assert err_path == bad_path
+    assert "unique constraint" in reason
+    assert report.created == 0
+    assert report.updated == 0

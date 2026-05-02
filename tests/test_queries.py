@@ -427,3 +427,161 @@ def test_embedding_column_state_pre_finalize(
     assert "vector(4096)" in state.column_type
     assert not state.not_null
     assert state.has_index is False
+
+
+# ---------------------------------------------------------------------------
+# Mirror drift helpers — used by ``brain doctor`` and
+# ``brain vault prune-orphans``.
+# ---------------------------------------------------------------------------
+
+
+def _write_mirror_file(
+    path: "Any", *, frontmatter: dict[str, Any], body: str
+) -> None:
+    """Write a vault mirror file with YAML frontmatter + body."""
+    from brain.vault.frontmatter import dump_frontmatter
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dump_frontmatter(frontmatter, body), encoding="utf-8")
+
+
+def test_iter_orphan_mirror_files(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: "Any"
+) -> None:
+    """The iterator yields exactly the file whose frontmatter id has no DB row.
+
+    Setup: a vault folder with three mirror files —
+      1. one whose frontmatter id matches a real ``documents.id`` (NOT orphan)
+      2. one with a fresh UUID that has no DB row (ORPHAN — the only yield)
+      3. one with no frontmatter at all (vault README — skipped)
+    Plus a control file outside ``_ingested/`` that must never be considered.
+
+    Exercise: iterate :func:`iter_orphan_mirror_files`.
+
+    Verify: yields exactly the orphan path (in any order, but here only one).
+    """
+    from brain.queries import iter_orphan_mirror_files
+
+    real_id = _seed(test_db, fake_embedder, title="real")
+    vault = tmp_path / "vault"
+
+    not_orphan = vault / "_ingested" / "manual" / "real.md"
+    _write_mirror_file(
+        not_orphan,
+        frontmatter={"id": real_id, "title": "real"},
+        body="real body\n",
+    )
+
+    orphan_id = "00000000-0000-4000-8000-000000000abc"
+    orphan = vault / "_ingested" / "manual" / "orphan.md"
+    _write_mirror_file(
+        orphan,
+        frontmatter={"id": orphan_id, "title": "ghost"},
+        body="orphan body\n",
+    )
+
+    # No-frontmatter README — the iterator must skip it.
+    readme = vault / "_ingested" / "README.md"
+    readme.parent.mkdir(parents=True, exist_ok=True)
+    readme.write_text("Just a plain README, no YAML.\n", encoding="utf-8")
+
+    # Control file outside _ingested/ — must never be considered.
+    elsewhere = vault / "notes" / "elsewhere.md"
+    _write_mirror_file(
+        elsewhere,
+        frontmatter={"id": "ffffffff-ffff-4fff-bfff-ffffffffffff", "title": "x"},
+        body="not in scope\n",
+    )
+
+    yielded = list(iter_orphan_mirror_files(test_db, vault_path=vault))
+    assert yielded == [orphan]
+
+
+def test_mirror_drift_summary(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: "Any"
+) -> None:
+    """Each of the four counters reflects independent DB/disk state.
+
+    Setup pieces (each independent of the others):
+
+    - One ingested doc + matching mirror file (healthy: contributes only to
+      the total).
+    - One ingested doc whose ``vault_path`` is NULL (after-ingest, pre-export
+      state).
+    - One ingested doc whose ``vault_path`` points at a file that doesn't
+      exist (ghost row).
+    - One on-disk file under ``_ingested/`` whose frontmatter id has no DB
+      row (orphan).
+
+    Exercise: :func:`mirror_drift_summary`.
+
+    Verify: the dataclass returns ``(total=3, null=1, ghost=1, orphan=1)``.
+    """
+    from brain.ingest import ExtractedDoc, ingest_document
+    from brain.queries import mirror_drift_summary
+    from brain.vault.frontmatter import dump_frontmatter
+
+    vault = tmp_path / "vault"
+
+    def _ingest_unique(title: str, body: str) -> str:
+        # Use distinct body bytes per row so ``documents_content_hash_stdin_idx``
+        # (UNIQUE on content_hash WHERE kind='ingested' AND source_path IS NULL)
+        # never silently dedupes the seeds.
+        result = ingest_document(
+            test_db,
+            embedder=fake_embedder,
+            doc=ExtractedDoc(
+                title=title,
+                content=body,
+                content_type="note",
+                source_path=None,
+                metadata={},
+            ),
+            source_kind="manual",
+        )
+        assert result.document_id is not None
+        return result.document_id
+
+    # 1. Healthy ingest: row + matching file.
+    healthy_id = _ingest_unique("healthy", "healthy unique body")
+    healthy_rel = "_ingested/manual/healthy.md"
+    test_db.execute(
+        "UPDATE documents SET kind='ingested', vault_path=%s WHERE id=%s",
+        (healthy_rel, healthy_id),
+    )
+    healthy_path = vault / healthy_rel
+    healthy_path.parent.mkdir(parents=True, exist_ok=True)
+    healthy_path.write_text(
+        dump_frontmatter({"id": healthy_id, "title": "healthy"}, "x\n"),
+        encoding="utf-8",
+    )
+
+    # 2. NULL-vault_path row: ingested but never exported.
+    null_id = _ingest_unique("null-vp", "null-vp distinct body")
+    test_db.execute(
+        "UPDATE documents SET kind='ingested', vault_path=NULL WHERE id=%s",
+        (null_id,),
+    )
+
+    # 3. Ghost row: vault_path set, file missing on disk.
+    ghost_id = _ingest_unique("ghost", "ghost-row distinct body")
+    test_db.execute(
+        "UPDATE documents SET kind='ingested', vault_path=%s WHERE id=%s",
+        ("_ingested/manual/ghost.md", ghost_id),
+    )
+    # Intentionally NO file on disk for ghost.
+
+    # 4. Orphan file: on disk, no DB row.
+    orphan_uuid = "11111111-1111-4111-8111-111111111111"
+    orphan_path = vault / "_ingested" / "manual" / "orphan.md"
+    orphan_path.parent.mkdir(parents=True, exist_ok=True)
+    orphan_path.write_text(
+        dump_frontmatter({"id": orphan_uuid, "title": "orphan"}, "y\n"),
+        encoding="utf-8",
+    )
+
+    summary = mirror_drift_summary(test_db, vault_path=vault)
+    assert summary.total_ingested_rows == 3
+    assert summary.rows_with_null_vault_path == 1
+    assert summary.ghost_rows == 1
+    assert summary.orphan_files == 1

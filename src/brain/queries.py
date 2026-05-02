@@ -8,9 +8,11 @@ import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import psycopg
+import yaml
 
 from .errors import (
     IdPrefixAmbiguous,
@@ -19,6 +21,7 @@ from .errors import (
     IdPrefixTooShort,
 )
 from .ingest import Embedder
+from .vault.frontmatter import parse_frontmatter
 
 # pgvector 0.8.x caps HNSW (and IVFFlat) at 2000 dims for ``vector`` and 4000
 # for ``halfvec``. Backends with native dims at or below this limit get an
@@ -328,4 +331,135 @@ def embedding_column_state(conn: psycopg.Connection[Any]) -> EmbeddingColumnStat
         column_type=str(col_row[0]),
         not_null=bool(col_row[1]),
         has_index=idx_row is not None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Mirror drift helpers — used by ``brain doctor`` and
+# ``brain vault prune-orphans`` to surface DB-vs-disk drift in the
+# ``_ingested/`` mirror tier.
+# ---------------------------------------------------------------------------
+
+# Top-level vault subdirectory that holds mirror files for stdin/file-ingested
+# documents. Mirrors :mod:`brain.vault.sync._INGESTED_DIR_NAME` — duplicating
+# the constant here keeps ``queries`` from importing the heavier
+# ``vault.sync`` module just to read a string.
+_INGESTED_DIR_NAME = "_ingested"
+
+
+@dataclass(frozen=True)
+class MirrorDriftSummary:
+    """Counts of DB↔disk drift in the ``_ingested/`` mirror tier.
+
+    All four counters are independent; a healthy vault has zeros across the
+    board. Used by ``brain doctor`` to surface drift the user can act on:
+
+    - ``rows_with_null_vault_path`` → ``brain vault export --force`` to
+      re-materialize mirror files for ingest rows missing one.
+    - ``orphan_files`` → ``brain vault prune-orphans`` to delete mirror files
+      whose document row was removed.
+    - ``ghost_rows`` → manual ``brain rm <id>`` for each, or
+      ``brain vault export --force`` to re-create the missing files.
+    """
+
+    total_ingested_rows: int
+    rows_with_null_vault_path: int
+    ghost_rows: int  # vault_path set, file missing on disk
+    orphan_files: int  # file on disk under _ingested/, no DB row matches its id
+
+
+def iter_orphan_mirror_files(
+    conn: psycopg.Connection[Any], *, vault_path: Path
+) -> Iterator[Path]:
+    """Yield absolute paths under ``<vault>/_ingested/`` that have no DB row.
+
+    A file is "orphan" iff:
+
+    - It lives under ``<vault>/_ingested/`` (recursive walk).
+    - It is a regular ``.md`` file.
+    - Its YAML frontmatter parses cleanly and contains a string ``id`` key.
+    - That ``id`` value matches no row in ``documents.id``.
+
+    Files without parseable frontmatter (e.g. ``_ingested/README.md`` written
+    by ``brain vault init``, or any markdown file the user dropped in
+    manually) are skipped — "no frontmatter" is intentional, not orphan.
+    Files whose frontmatter has no ``id`` are likewise skipped: pruning would
+    silently delete user-authored content.
+
+    Returns a generator so the caller (``brain doctor``) can show a count
+    without holding the full path list. Iteration order follows
+    :py:meth:`Path.rglob` sort for deterministic output. The corpus is
+    bounded (≤10K rows in the personal-brain use case), so we materialize
+    every ``documents.id`` into a single in-memory ``set`` to avoid issuing
+    one SELECT per file.
+    """
+    ingested_dir = vault_path / _INGESTED_DIR_NAME
+    if not ingested_dir.is_dir():
+        return
+    rows = conn.execute("SELECT id::text FROM documents").fetchall()
+    known_ids = {str(r[0]) for r in rows}
+    for path in sorted(ingested_dir.rglob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            frontmatter, _body = parse_frontmatter(text)
+        except (ValueError, yaml.YAMLError):
+            continue
+        doc_id = frontmatter.get("id")
+        if not isinstance(doc_id, str) or not doc_id:
+            continue
+        if doc_id in known_ids:
+            continue
+        yield path
+
+
+def mirror_drift_summary(
+    conn: psycopg.Connection[Any], *, vault_path: Path
+) -> MirrorDriftSummary:
+    """Compute the four-counter drift snapshot for ``<vault>/_ingested/``.
+
+    Three SQL round-trips (total ingested rows, NULL-vault_path rows, and the
+    set of vault_path strings claimed by ingested rows) plus one filesystem
+    walk via :func:`iter_orphan_mirror_files`. Safe to call from
+    ``brain doctor`` on every invocation — bounded by the corpus size.
+
+    Ghost rows are counted purely against the filesystem: a row whose
+    ``vault_path`` points at a file that doesn't exist on disk under
+    ``vault_path`` contributes one ghost. We don't dedupe pairs (a single
+    DB row with a missing file is one ghost regardless of whether an
+    orphan file with the same id happens to also exist — these are
+    independent symptoms with different fixes).
+    """
+    total_row = conn.execute(
+        "SELECT count(*) FROM documents WHERE kind = 'ingested'"
+    ).fetchone()
+    null_row = conn.execute(
+        "SELECT count(*) FROM documents "
+        "WHERE kind = 'ingested' AND vault_path IS NULL"
+    ).fetchone()
+    ghost_paths = conn.execute(
+        "SELECT vault_path FROM documents "
+        "WHERE kind = 'ingested' AND vault_path IS NOT NULL"
+    ).fetchall()
+    assert total_row is not None  # count(*) always yields one row
+    assert null_row is not None
+
+    ghost_count = 0
+    for (vp,) in ghost_paths:
+        if vp is None:
+            continue
+        if not (vault_path / str(vp)).is_file():
+            ghost_count += 1
+
+    orphan_count = sum(1 for _ in iter_orphan_mirror_files(conn, vault_path=vault_path))
+
+    return MirrorDriftSummary(
+        total_ingested_rows=int(total_row[0]),
+        rows_with_null_vault_path=int(null_row[0]),
+        ghost_rows=ghost_count,
+        orphan_files=orphan_count,
     )

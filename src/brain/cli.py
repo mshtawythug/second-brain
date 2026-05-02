@@ -51,12 +51,15 @@ from .ingest import gmail as gmail_ingest
 from .ingest.gmail import GmailError
 from .ingest.stdin import make_doc as _stdin_make_doc
 from .queries import (
+    MirrorDriftSummary,
     count_chunks_missing_embedding,
     embedding_column_state,
     fetch_document,
     finalize_embedding_index,
     iter_chunks_missing_embedding,
+    iter_orphan_mirror_files,
     list_documents,
+    mirror_drift_summary,
     resolve_document_prefix,
     summary_counts,
 )
@@ -266,6 +269,7 @@ def doctor() -> None:
             if ext:
                 typer.echo(f"postgres        OK (pgvector {ext[0]})")
                 _report_embedding_column(conn)
+                _report_mirror_drift(conn, vault_path=cfg.vault_path)
             else:
                 failures.append("pgvector extension not installed (run brain init)")
                 typer.echo("postgres        FAIL — pgvector not installed")
@@ -381,6 +385,68 @@ def _report_embedding_column(conn: psycopg.Connection[Any]) -> None:
             "                — run `brain reembed` to backfill and finalize",
             fg="yellow",
         )
+
+
+def _report_mirror_drift(
+    conn: psycopg.Connection[Any], *, vault_path: Path
+) -> None:
+    """Print a one-line "vault drift" status for the ``_ingested/`` mirror tier.
+
+    Informational only — never fails the doctor check. Counts ingested
+    rows, rows missing ``vault_path``, on-disk orphan files (file present,
+    no DB row matches its frontmatter id), and ghost rows (DB claims a
+    ``vault_path`` whose file is missing from disk).
+
+    A clean state prints "OK"; any non-zero counter flips the line yellow
+    and follows up with one suggested-fix line per actionable counter so
+    the user knows the next move without grepping the README.
+
+    The vault directory may not exist yet (fresh install before
+    ``brain vault init``); in that case we skip the check entirely with a
+    soft "not initialized" line. Doctor never fails here — vault drift is
+    a hygiene signal, not a runtime blocker.
+    """
+    if not vault_path.is_dir():
+        typer.echo(f"vault drift     not initialized ({vault_path} missing)")
+        return
+    summary = mirror_drift_summary(conn, vault_path=vault_path)
+    counters = (
+        f"{summary.total_ingested_rows} mirrors, "
+        f"{summary.rows_with_null_vault_path} NULL vault_path, "
+        f"{summary.orphan_files} orphan files, "
+        f"{summary.ghost_rows} ghost rows"
+    )
+    if _drift_clean(summary):
+        typer.echo(f"vault drift     OK ({counters})")
+        return
+    typer.secho(f"vault drift     drift detected ({counters})", fg="yellow")
+    if summary.rows_with_null_vault_path:
+        typer.secho(
+            "                — `brain vault export --force` to populate "
+            "NULL vault_path",
+            fg="yellow",
+        )
+    if summary.orphan_files:
+        typer.secho(
+            "                — `brain vault prune-orphans` to inspect "
+            "orphan files (dry-run)",
+            fg="yellow",
+        )
+    if summary.ghost_rows:
+        typer.secho(
+            "                — `brain vault export --force` to recreate "
+            "missing files (or `brain rm <id>` per ghost)",
+            fg="yellow",
+        )
+
+
+def _drift_clean(summary: MirrorDriftSummary) -> bool:
+    """True iff every actionable drift counter is zero."""
+    return (
+        summary.rows_with_null_vault_path == 0
+        and summary.orphan_files == 0
+        and summary.ghost_rows == 0
+    )
 
 
 def _build_embedder(cfg: Config) -> Embedder:
@@ -1553,6 +1619,81 @@ def vault_sync(
         typer.echo(f"{verb} ids to {report.id_assigned} {noun}")
     for path, reason in report.errors:
         typer.secho(f"  error: {path}: {reason}", fg="red", err=True)
+
+
+@vault_app.command("prune-orphans")
+def vault_prune_orphans(
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help=(
+            "Actually delete the orphan files. Without this flag, prints "
+            "the list (dry-run)."
+        ),
+    ),
+    vault: Path | None = typer.Option(
+        None,
+        "--vault",
+        help="Override the configured vault path.",
+    ),
+) -> None:
+    """List or delete ``_ingested/`` mirror files whose frontmatter id has no
+    matching ``documents`` row.
+
+    Default behavior (no ``--apply``) is a dry-run: each candidate is
+    printed as ``would delete: <path>`` and a final summary reports the
+    count plus the hint to re-run with ``--apply``. With ``--apply`` each
+    file is :py:meth:`Path.unlink`'d and the line becomes
+    ``deleted: <path>``.
+
+    The command refuses to run if ``<vault>/_ingested`` is missing
+    (exit code 2) — that's a fresh / mis-configured vault, and walking it
+    would silently no-op which is more confusing than an explicit error.
+    Files lacking parseable frontmatter or a string ``id`` key are NEVER
+    deleted: :func:`brain.queries.iter_orphan_mirror_files` already
+    excludes them so user-authored content under ``_ingested/`` (e.g. the
+    init-time README) survives every run.
+    """
+    cfg = Config.load()
+    target = vault.expanduser() if vault is not None else cfg.vault_path
+    ingested_dir = target / "_ingested"
+    if not ingested_dir.is_dir():
+        typer.secho(
+            f"_ingested/ not found under vault: {ingested_dir}\n"
+            f"  Run `brain vault init` first, or pass --vault.",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    with connect(cfg.database_url) as conn:
+        # Materialize the candidate list before opening write/unlink calls so
+        # we don't iterate the tree while mutating it.
+        orphans = list(iter_orphan_mirror_files(conn, vault_path=target))
+
+    if not orphans:
+        typer.echo("0 orphan files")
+        return
+
+    deleted = 0
+    for path in orphans:
+        if apply:
+            try:
+                path.unlink()
+            except OSError as e:
+                typer.secho(f"  failed: {path} — {e}", fg="red", err=True)
+                continue
+            typer.echo(f"deleted: {path}")
+            deleted += 1
+        else:
+            typer.echo(f"would delete: {path}")
+
+    if apply:
+        typer.echo(f"deleted: {deleted}")
+    else:
+        typer.echo(
+            f"{len(orphans)} orphan file(s) (dry-run; pass --apply to remove)"
+        )
 
 
 # ---------------------------------------------------------------------------

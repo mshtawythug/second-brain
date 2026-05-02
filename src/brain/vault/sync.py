@@ -369,6 +369,18 @@ class _SyncError(Exception):
     """Per-file sync failure; the run continues with the next file."""
 
 
+def _violation_constraint(exc: psycopg.errors.UniqueViolation) -> str:
+    """Extract a human-readable constraint name from a ``UniqueViolation``.
+
+    Falls back to a sentinel when ``exc.diag.constraint_name`` is empty —
+    psycopg's diagnostic fields are documented as nullable, and we'd rather
+    surface a stable label in :class:`SyncReport.errors` than crash a second
+    time formatting the original error.
+    """
+    name = getattr(exc.diag, "constraint_name", None)
+    return name or "<unknown>"
+
+
 def _rewrite_vault_tier_links(
     conn: psycopg.Connection[Any],
     *,
@@ -643,23 +655,33 @@ def _sync_one(
             metadata = _build_metadata(
                 frontmatter, aliases, tier=classification, existing_metadata=None
             )
-            _insert_document(
-                conn,
-                embedder=embedder,
-                document_id=document_id,
-                title=title,
-                content=normalized_body,
-                content_hash=new_hash,
-                content_type=content_type,
-                tags=tags,
-                metadata=metadata,
-                kind=classification,
-                vault_path=walked.relative_posix,
-                source=_source_from_frontmatter(frontmatter, classification),
-                external_id=_external_id_from_frontmatter(
-                    frontmatter, classification
-                ),
-            )
+            try:
+                _insert_document(
+                    conn,
+                    embedder=embedder,
+                    document_id=document_id,
+                    title=title,
+                    content=normalized_body,
+                    content_hash=new_hash,
+                    content_type=content_type,
+                    tags=tags,
+                    metadata=metadata,
+                    kind=classification,
+                    vault_path=walked.relative_posix,
+                    source=_source_from_frontmatter(frontmatter, classification),
+                    external_id=_external_id_from_frontmatter(
+                        frontmatter, classification
+                    ),
+                )
+            except psycopg.errors.UniqueViolation as exc:
+                # Mirror drift: the file's vault_path or content_hash already
+                # belongs to another row. One bad file must not crash the
+                # whole sync — convert to ``_SyncError`` so the outer loop
+                # routes it into ``report.errors`` and continues.
+                raise _SyncError(
+                    "unique constraint violation (mirror drift): "
+                    f"{_violation_constraint(exc)}"
+                ) from exc
             report.created += 1
         else:
             (
@@ -700,20 +722,29 @@ def _sync_one(
                 or type_changed
             )
             if not body_unchanged or user_visible_change:
-                _update_document(
-                    conn,
-                    embedder=embedder,
-                    document_id=document_id,
-                    title=title,
-                    content=normalized_body,
-                    content_hash=new_hash,
-                    content_type=content_type,
-                    tags=tags,
-                    metadata=metadata,
-                    kind=classification,
-                    vault_path=walked.relative_posix,
-                    body_changed=not body_unchanged,
-                )
+                try:
+                    _update_document(
+                        conn,
+                        embedder=embedder,
+                        document_id=document_id,
+                        title=title,
+                        content=normalized_body,
+                        content_hash=new_hash,
+                        content_type=content_type,
+                        tags=tags,
+                        metadata=metadata,
+                        kind=classification,
+                        vault_path=walked.relative_posix,
+                        body_changed=not body_unchanged,
+                    )
+                except psycopg.errors.UniqueViolation as exc:
+                    # Mirror drift on update: another row already owns the
+                    # vault_path or content_hash this file is trying to
+                    # claim. Convert to ``_SyncError`` so the run continues.
+                    raise _SyncError(
+                        "unique constraint violation (mirror drift): "
+                        f"{_violation_constraint(exc)}"
+                    ) from exc
                 report.updated += 1
             elif cur_hash != new_hash:
                 # Silent hash migration: body is byte-equivalent under the
