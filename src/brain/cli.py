@@ -1679,7 +1679,10 @@ def vault_prune_orphans(
     for path in orphans:
         if apply:
             try:
-                path.unlink()
+                # missing_ok swallows the benign race where a watcher (or a
+                # concurrent prune) removes the file between enumeration
+                # and unlink. Real I/O failures still raise OSError.
+                path.unlink(missing_ok=True)
             except OSError as e:
                 typer.secho(f"  failed: {path} — {e}", fg="red", err=True)
                 continue

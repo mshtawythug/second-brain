@@ -20,6 +20,7 @@ from .config import Config
 from .db import connect
 from .embeddings import OllamaEmbedError, make_embedder
 from .errors import (
+    BrainError,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
@@ -421,7 +422,11 @@ def brain_tag(
             row = conn.execute(
                 "SELECT vault_path FROM documents WHERE id = %s", (doc_id,)
             ).fetchone()
-            assert row is not None  # _resolve_id confirmed the row exists
+            if row is None:
+                # _resolve_id just confirmed the row exists; a None here means
+                # someone deleted it between the two queries. Surface explicitly
+                # so the failure mode survives `python -O`.
+                raise BrainError(f"document vanished mid-transaction: {doc_id}")
             vault_path_rel: str | None = row[0]
             tags = apply_tags(conn, doc_id, add=add, remove=remove)
     except psycopg.Error as e:

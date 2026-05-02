@@ -15,6 +15,7 @@ import psycopg
 import yaml
 
 from .errors import (
+    BrainError,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
@@ -445,8 +446,10 @@ def mirror_drift_summary(
         "SELECT vault_path FROM documents "
         "WHERE kind = 'ingested' AND vault_path IS NOT NULL"
     ).fetchall()
-    assert total_row is not None  # count(*) always yields one row
-    assert null_row is not None
+    if total_row is None or null_row is None:
+        # count(*) always returns one row in practice; guard explicitly so
+        # the failure mode survives `python -O` (which strips asserts).
+        raise BrainError("count(*) returned no row from documents")
 
     ghost_count = 0
     for (vp,) in ghost_paths:
