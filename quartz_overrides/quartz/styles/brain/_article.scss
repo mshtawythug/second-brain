@@ -69,6 +69,21 @@
   max-width: 95ch;
 }
 
+// brain (Linear-variant feedback): horizontal breathing room for the
+// article column. Stock Quartz pins `.center` flush against the two
+// sidebar columns with only the grid gap (5px) as separation, which
+// reads as cramped on the redesigned layout. 2rem of horizontal
+// padding gives the prose room to breathe between the explorer/search
+// rail on the left and the graph/ToC/backlinks rail on the right.
+//
+// Padding (not margin) keeps `.popover-hint`'s 95ch measure cap
+// resolving against the same containing block — the prose stays
+// centered inside the column rather than drifting against one edge.
+.center {
+  padding-left: 2rem;
+  padding-right: 2rem;
+}
+
 // ---------------------------------------------------------------------------
 // 2. Heading hierarchy + rhythm
 // ---------------------------------------------------------------------------
