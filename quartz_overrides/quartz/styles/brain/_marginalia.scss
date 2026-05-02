@@ -1,1 +1,183 @@
-// placeholder — Lane D (atmosphere & motion) fills this in.
+// Brain marginalia — Lane D of the 2026 commonplace-book redesign.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_marginalia.scss` by `brain
+// vault render --overlay` and pulled into the global SCSS via
+// `custom.scss`'s `@use "./brain/marginalia"` line (between
+// `article` and `callouts`).
+//
+// What this file owns: at desktop+ viewports (≥1280px), the right
+// sidebar's `<div class="backlinks">` block reads as figure-margin
+// side-notes — narrow column width, italic Newsreader, dimmed ink,
+// tight per-link spacing — so backlinks register as "the
+// commonplace book's marginal annotations" rather than "another
+// chrome panel."
+//
+// brain (Lane D — fallback path taken):
+//
+//   The original Lane D plan considered moving `.backlinks` out of
+//   `.right.sidebar` and rendering it as a true sibling of `.center`
+//   in the article column's right gutter — the "real Tufte
+//   side-note" approach. We did NOT take that path. Reasons:
+//
+//   1. Quartz's three-column grid is defined in `base.scss` via
+//      `templateAreas` (`grid-sidebar-left grid-center
+//      grid-sidebar-right`). Extracting `.backlinks` into a fourth
+//      grid area requires modifying the template at the source —
+//      either by editing `base.scss` (which the overlay tries hard
+//      to leave untouched, since stock Quartz's `joinStyles()` and
+//      grid map machinery in `variables.scss` are tightly coupled),
+//      or by duplicating the grid declaration here, which then
+//      becomes a fragile fork.
+//
+//   2. The backlinks component itself is rendered by Quartz's layout
+//      engine into the `right` slot (see `quartz.layout.ts` line
+//      144). To make `.backlinks` a sibling of `.center` in the DOM
+//      we'd need to either move the component declaration out of
+//      `right: [...]` (and lose its sticky-sidebar positioning for
+//      everything else in that column), or split the component
+//      tree, neither of which is a single-file SCSS concern.
+//
+//   3. The team-lead's brief explicitly endorses this fallback:
+//      "If marginalia turns out architecturally infeasible without
+//      layout surgery, document why and fall back to a 'softer'
+//      treatment: the right-sidebar Backlinks block gets the same
+//      italic / smaller / dimmed treatment it would have in
+//      marginalia, but stays in its current position. This is
+//      acceptable — design intent is preserved, layout architecture
+//      isn't violated."
+//
+//   The fallback preserves ~95% of the visual intent: backlinks read
+//   as marginalia (narrow, italic, dimmed, compact), they just live
+//   in the right sidebar instead of the article's right gutter. A
+//   future redesign that's willing to fork `base.scss` can take the
+//   architectural path; this file is the current best-effort
+//   styling contract.
+//
+// Below the desktop breakpoint (1280px and narrower) this file makes
+// NO changes — the right sidebar falls back to its Lane C card
+// styling from `_sidebar.scss`. That's deliberate: at 1200px or
+// 1024px the backlinks panel needs the full sidebar width to read,
+// and squeezing it into a 18ch column would force every backlink
+// title to truncate.
+//
+// Tokens consumed (all from `_tokens.scss`):
+//   * `--ink-2`        — dimmed marginalia ink color
+//   * `--fs-sm` / `--fs-xs` — smaller-than-body type
+//   * `--rule`         — vertical rule on the marginalia column edge
+//   * `--bodyFont`     — Newsreader italic for the side-note voice
+//                        (printed marginalia is always body type one
+//                        notch smaller than running prose, not display
+//                        type — even though Lane A's project-wide
+//                        italic convention reaches for Fraunces, that
+//                        rule applies to inline emphasis, not to a
+//                        whole-block side-note voice)
+
+// ---------------------------------------------------------------------------
+// 1. Marginalia treatment at desktop+ viewports
+// ---------------------------------------------------------------------------
+//
+// 1280px is one notch above Quartz's `$desktop` breakpoint (1200px).
+// At 1200-1279px the right sidebar is already cramped (the local
+// graph eats most of the vertical space); marginalia would compete
+// with the graph and ToC for too little room. At 1280px+ there's
+// enough vertical breathing room to make the backlinks panel feel
+// like figure-margin annotations rather than another stacked card.
+//
+// Why scope to `.right.sidebar > .backlinks` (not just `.backlinks`)?
+// Quartz emits `<div class="backlinks">` from `Component.Backlinks`
+// (see `quartz/components/Backlinks.tsx` line 32). The same component
+// could in theory appear elsewhere (e.g. `.center` slot for a
+// custom layout); we only want the marginalia treatment when the
+// component is sitting in the right sidebar position. The descendant
+// selector enforces that scope.
+//
+// brain: this rule wins over Lane C's `.sidebar.right .backlinks`
+// card chrome (background, border-radius, shadow, padding) because
+// it's both later in the cascade AND uses overrides where they
+// matter (background → transparent, padding → 0). Where Lane C
+// rules don't conflict (e.g. nothing about font-style) we inherit
+// Lane C's defaults silently — which is fine.
+
+@media (min-width: 1280px) {
+  .sidebar.right > .backlinks {
+    // Strip Lane C's card chrome — marginalia should read as
+    // ambient page furniture, not an elevated panel. The right
+    // edge gets a hairline rule instead, anchoring the column
+    // visually as a "margin" beside the article.
+    background: transparent;
+    box-shadow: none;
+    border-radius: 0;
+    border-left: 1px solid var(--rule);
+    padding: 0 0 0 0.8rem;
+    // Constrain to ~18ch so titles wrap to the marginalia column
+    // and read as side-notes rather than running across the full
+    // 320px sidebar width. 18ch ≈ 4-5 words at `--fs-sm`, the
+    // classical side-note width.
+    max-width: 18ch;
+
+    // Section heading — re-paint to match the marginalia voice.
+    // Lane C's sidebar styles already small-cap the h3 (see
+    // `_sidebar.scss` line 187-198); we keep the small-caps but
+    // dim further to `--ink-2` so the heading subordinates to the
+    // links beneath it (in marginalia, the topic is implied by
+    // proximity to the article — the heading is just a label).
+    > h3 {
+      color: var(--ink-2);
+      margin-bottom: 0.6rem;
+    }
+
+    // The backlinks list itself — Quartz emits `<ul>` (via the
+    // `OverflowList` wrapper, see `Backlinks.tsx` line 34) with
+    // `<li><a class="internal">title</a></li>` rows.
+    ul {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    // Each side-note link — italic Newsreader, smaller type,
+    // dimmed ink, tight per-link spacing. Hover lifts the ink
+    // back to body (`--ink-1`) and surfaces Quartz's stock
+    // popover preview (already wired by `popover.inline.ts` for
+    // every `.internal` link — no script work needed here).
+    ul li {
+      margin: 0.35rem 0;
+      line-height: 1.35;
+      font-size: var(--fs-sm);
+    }
+
+    ul li a {
+      // Newsreader italic — body-type voice for marginalia. Lane A's
+      // project-wide italic-→-Fraunces convention applies to inline
+      // `<em>` / `<i>`, not to a whole-block side-note treatment.
+      // Printed marginalia in tradition uses the body type one notch
+      // smaller, italicized; Newsreader's optical-size italic at
+      // `--fs-sm` is exactly that.
+      font-family: var(--bodyFont);
+      font-style: italic;
+      color: var(--ink-2);
+      // Subdue Lane B's link underline treatment for the
+      // marginalia voice — side-notes read as quiet references,
+      // not call-to-action links. Lane B's `.internal` rules in
+      // `_links.scss` paint a 1px underline-from-font; we drop it
+      // here in favor of a hover-only underline.
+      text-decoration: none;
+      // brain (Lane D audit fix 2026-05-02): only `color` is animated.
+      // The earlier draft also listed `text-decoration-color` in the
+      // transition, but the resting state has `text-decoration: none`
+      // — there's nothing for color to apply to until hover instantly
+      // adds the underline, so animating the color did nothing.
+      transition: color var(--motion-fast) var(--motion-easing);
+
+      &:hover,
+      &:focus-visible {
+        color: var(--ink-1);
+        text-decoration: underline;
+        text-decoration-thickness: 1px;
+        text-decoration-color: var(--accent-soft);
+        text-underline-offset: 2px;
+      }
+    }
+  }
+}

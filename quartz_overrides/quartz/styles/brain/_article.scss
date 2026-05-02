@@ -115,11 +115,19 @@ article {
 // italic for a pull-quote voice, and add generous vertical breathing
 // room.
 //
-// Scoped to `article > blockquote` (and blockquotes nested inside
-// callouts via `:not(.callout *)` semantics) so callout chrome stays
-// owned by `_callouts.scss`.
+// brain (Lane D audit fix 2026-05-02): the original selector was
+// `article blockquote:not(.callout blockquote)` — a descendant
+// `:not()` argument that excludes blockquotes nested INSIDE callout
+// blockquotes (a structure Quartz never emits). The actual Quartz
+// markup for callouts is `<blockquote class="callout note">` (see
+// `quartz/plugins/transformers/ofm.ts` line 499 — the blockquote IS
+// the callout). The wrong selector applied this rule to every
+// callout, overriding the per-type color rule with `--accent-soft`.
+// Correct exclusion is `:not(.callout)` so callout chrome stays
+// owned by `_callouts.scss`. The same selector bug is fixed below
+// in the Lane D pull-quote rule.
 
-article blockquote:not(.callout blockquote) {
+article blockquote:not(.callout) {
   border-left-color: var(--accent-soft);
   margin: 1.6rem 0;
   padding: 0.4rem 0 0.4rem 1.2rem;
@@ -183,4 +191,168 @@ ul.tags {
     margin: 0;
     padding: 0;
   }
+}
+
+// ---------------------------------------------------------------------------
+// 6. Lane D — drop cap + pull quote (editorial flourishes)
+// ---------------------------------------------------------------------------
+//
+// Lane C above defines the article *baseline* — measure, heading
+// rhythm, body blockquote, meta, tag chips. Lane D appends the
+// editorial flourishes that turn the article surface from "well-
+// typeset prose" into "page out of a printed commonplace book":
+//
+//   * Drop cap on the first paragraph — large Fraunces capital that
+//     signals "the article begins here." The classical opening
+//     gesture in long-form prose; we use it deliberately as a slow
+//     entrance into the column.
+//   * Pull-quote treatment for `<blockquote>` — bumped from Lane C's
+//     `--fs-md` body-quote size to `--fs-xl` so quoted passages read
+//     as editorial pull-out moments rather than indented body text.
+//
+// Why these are appended here (not in `_motion.scss` or a fresh
+// partial): the article surface is already this file's domain;
+// keeping all article-rhythm rules in one file means a future audit
+// can read the entire article visual contract top-to-bottom without
+// hopping partials. The `Lane D` section header demarcates the
+// editorial layer from Lane C's baseline — a future reviewer can
+// strip Lane D rules cleanly by deleting from this comment to EOF.
+
+// 6a. Drop cap on the first paragraph
+//
+// Stock CSS provides `::first-letter` which targets the first
+// rendered glyph of the matched element. We pin it to the first
+// paragraph that's a direct child of `<article>` (Quartz's article
+// wrapper) so that callouts, blockquote leads, and other non-
+// paragraph openers don't sprout a drop cap.
+//
+// Tuning:
+//   * `font-size: 3.5em` — ~3-4 lines tall against Newsreader body.
+//     Larger reads as gimmicky; smaller doesn't register as a
+//     deliberate flourish.
+//   * `line-height: 0.85` — tightens the cap into the paragraph
+//     baseline so the first body line wraps closely beneath the
+//     letterform rather than floating in dead vertical space.
+//   * `float: left` — classical drop-cap positioning. The body
+//     paragraph wraps around the cap on the right.
+//   * `padding: 0.1em 0.1em 0 0` — small right gutter so the body
+//     glyphs don't touch the cap; small top inset to align the cap
+//     baseline with the first line's cap height.
+//   * `color: var(--accent-strong)` — full-saturation terracotta
+//     in both modes. `--accent-strong` aliases to `--secondary`,
+//     which Quartz's theme-color machinery automatically swaps per
+//     theme: `#b85427` in light, `#e8a570` in dark (see
+//     `quartz.config.ts` lines 106 + 117). The dark-mode terracotta
+//     is already softer than light's by design — no explicit
+//     dark-mode override needed.
+//   * `font-weight: 700` — bold gives the cap presence; Fraunces
+//     at 700 is a satisfying, inky display weight.
+//
+// brain (Lane D audit fix 2026-05-02): the original Lane D commit
+// added a `:root[saved-theme="dark"]` override that pinned the
+// drop-cap color to `--accent-soft`. That was wrong:
+// `--accent-soft` aliases to `--highlight`, which is
+// `rgba(232, 165, 112, 0.15)` in dark — a 15% alpha designed for
+// tinted backgrounds and 3px borders, not for foreground glyphs. A
+// 3.5em letter at 15% alpha against `#16110a` espresso renders as a
+// near-invisible smudge. The theme-color swap on `--accent-strong`
+// already provides the "softer in dark" treatment automatically;
+// the override has been deleted.
+
+article > p:first-of-type::first-letter {
+  font-family: var(--displayFont);
+  font-size: 3.5em;
+  line-height: 0.85;
+  float: left;
+  padding: 0.1em 0.1em 0 0;
+  color: var(--accent-strong);
+  font-weight: 700;
+}
+
+// Opt-out for short / aggregate-index pages.
+//
+// Drop cap is opt-OUT (not opt-in) because the vast majority of
+// vault notes are long-form prose — the drop cap is the natural
+// default. Aggregate index pages (tags, folders, 404, root index)
+// suppress it because their first paragraph is a label
+// ("Pages with this tag:", "Files in this folder:", etc.), not
+// running prose; a drop cap on a one-line label reads as a glitch.
+//
+// Quartz emits `<body data-slug=...>` (see `renderPage.tsx` line
+// 265). The opt-out selector list below covers every aggregate
+// page Quartz renders by default:
+//
+//   * `data-slug="index"`     — root home page
+//   * `data-slug="404"`       — error page
+//   * `data-slug="tags"`      — top-level tag list
+//   * `data-slug^="tags/"`    — every individual tag page
+//   * `data-slug$="/"`        — every folder index page (folders
+//                               always end in `/` per Quartz's slug
+//                               convention)
+//
+// brain (Lane D audit fix 2026-05-02): the original Lane D commit
+// only excluded the root `index` slug. The auditor flagged that
+// `tags/*`, folder-pages, and 404 also have label-style first
+// paragraphs and were getting drop caps. List broadened.
+//
+// If the opt-out grows beyond these patterns over time, consider
+// switching to opt-in via a `body.brain-drop-cap` class set by the
+// rendering pipeline. For now the prefix/suffix attribute selectors
+// catch every known short page without per-slug enumeration.
+//
+// `all: unset` reverts every property the drop-cap rule set; the
+// follow-up `font-family: inherit; ...` lines are belt-and-braces
+// in case `all: unset` interacts oddly with `::first-letter` in a
+// future browser (the spec carves `::first-letter` out of some
+// universal-reset behavior).
+
+body[data-slug="index"] article > p:first-of-type::first-letter,
+body[data-slug="404"] article > p:first-of-type::first-letter,
+body[data-slug="tags"] article > p:first-of-type::first-letter,
+body[data-slug^="tags/"] article > p:first-of-type::first-letter,
+body[data-slug$="/"] article > p:first-of-type::first-letter {
+  all: unset;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+  float: none;
+  padding: 0;
+  color: inherit;
+  font-weight: inherit;
+}
+
+// 6b. Pull-quote treatment for `<blockquote>`
+//
+// Lane C above already paints `article blockquote:not(.callout)`
+// with Fraunces italic at `--fs-md`. Lane D bumps the type to
+// `--fs-xl` and tightens the rhythm so quotes register as editorial
+// pull-outs — the moment in the article where the writer steps back
+// and lets the source speak. Same `:not(.callout)` exclusion so
+// callout chrome stays owned by `_callouts.scss`.
+//
+// brain (Lane D audit fix): selector matches Lane C's `:not(.callout)`
+// — the original `:not(.callout blockquote)` form was wrong (see the
+// Lane C blockquote rule comment above for the explanation).
+//
+// brain (Lane D): this rule comes AFTER Lane C's blockquote rule in
+// the same file, so the cascade resolves Lane D properties
+// (`font-size`, `line-height`, `padding`, `border-left-color`,
+// `margin`, `color`) over Lane C's. The properties Lane C sets but
+// Lane D doesn't (e.g. `font-family: var(--displayFont)`,
+// `font-style: italic`) are inherited from Lane C.
+//
+// brain (Lane D audit fix): use `border-left-color` only (matching
+// Lane C's pattern at line 124) instead of redeclaring the full
+// `border-left` shorthand. Stock Quartz paints
+// `border-left: 3px solid var(--secondary)` in `base.scss`; both
+// Lane C and Lane D pin only the color so the width stays in lock-
+// step with stock if it ever changes upstream.
+
+article blockquote:not(.callout) {
+  font-size: var(--fs-xl);
+  line-height: 1.3;
+  padding: 0.5em 0 0.5em 1em;
+  border-left-color: var(--accent-soft);
+  margin: 2rem 0;
+  color: var(--ink-1);
 }

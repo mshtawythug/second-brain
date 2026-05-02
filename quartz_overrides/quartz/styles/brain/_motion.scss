@@ -1,1 +1,147 @@
-// placeholder — Lane D (atmosphere & motion) fills this in.
+// Brain motion — Lane D of the 2026 commonplace-book redesign.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_motion.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via
+// `custom.scss`'s `@use "./brain/motion"` line (between
+// `atmosphere` and `links`).
+//
+// What this file owns:
+//
+//   1. Page-load reveal animation — staggered slide/fade for the
+//      three-column shell on first paint. Sidebar-left slides in
+//      from the left, center fades up, sidebar-right slides in from
+//      the right; offsets ramped 50ms / 150ms / 250ms so the eye
+//      reads them in sequence rather than as a single twitch.
+//   2. `prefers-reduced-motion` accessibility gate — the entire
+//      animation block sits inside a `(prefers-reduced-motion:
+//      no-preference)` media query so a user with the OS-level
+//      reduce-motion setting never sees the slide-in. Without the
+//      gate the WCAG 2.2 SC 2.3.3 (Animation from Interactions)
+//      regression risk is real for vestibular-disorder users.
+//   3. Documentation pointer to the canonical motion-token knobs.
+//      Lane A's `_tokens.scss` defines `--motion-fast`, `--motion-mid`,
+//      `--motion-slow`, and `--motion-easing` — every other partial
+//      consumes those tokens for hover / focus / transition timings.
+//      This file does NOT redefine them; it just notes where they
+//      live so a future maintainer knows the single source of truth.
+//
+// Tokens consumed (all from `_tokens.scss`):
+//   * `--motion-easing` — smooth-out-quint cubic-bezier for the
+//     reveal animations.
+//
+// Tokens NOT redefined here (deliberate — see above):
+//   * `--motion-fast` (150ms) — hover transitions, link underline
+//     reveals (Lane B `_links.scss`), code-copy button (Lane C).
+//   * `--motion-mid` (250ms) — Cmd-K modal entrance, ToC card hovers,
+//     callout chrome.
+//   * `--motion-slow` (400ms) — page-load reveal duration; the
+//     stagger offsets below cap at 250ms so the cumulative reveal
+//     finishes around 650ms (slow + last-stagger), short enough to
+//     not feel laggy but long enough to register as "the page
+//     composed itself" rather than "the page snapped in."
+//
+// brain (Lane D): hover micro-interactions are already wired in
+// Lanes B (link underlines) and C (sidebar icon trio, code-copy
+// button, callout chrome). This file deliberately does NOT
+// re-declare those — the `--motion-fast/mid/slow` + `--motion-easing`
+// tokens declared in `_tokens.scss` are the canonical knobs, and
+// the consuming partials read them directly. If a future change
+// wants to retune motion globally, change the tokens once in
+// `_tokens.scss` and every consumer updates.
+
+// ---------------------------------------------------------------------------
+// 1. Page-load reveal — staggered three-column entrance
+// ---------------------------------------------------------------------------
+//
+// The animation block is wrapped in
+// `(prefers-reduced-motion: no-preference)` — the negative form
+// matches when the OS-level reduce-motion setting is OFF. Users
+// with reduce-motion ON see the page paint statically, no slide,
+// no fade.
+//
+// Stagger order:
+//   * `.left.sidebar` — 50ms delay, slides 12px from the left
+//   * `.center`       — 150ms delay, fades up 8px
+//   * `.right.sidebar` — 250ms delay, slides 12px from the right
+//
+// Why this order: the eye reads the page from outside-in. The
+// left-sidebar (search + explorer) and right-sidebar (graph + ToC +
+// backlinks) are reference scaffolding; the center is the article
+// itself. By staggering the chrome before the content, we cue the
+// reader's eye toward the center column on arrival — the page
+// "composes itself" around the article rather than dumping
+// everything in at once.
+//
+// `animation-fill-mode: both` (the `both` keyword in the shorthand)
+// applies the `from` keyframe state during the delay window. Without
+// it, the elements would paint at their final state during the 50/
+// 150/250ms delay, then snap back to `from` and run the animation —
+// the dreaded "FOUC of motion." `both` makes the delay window the
+// `from` state.
+//
+// SPA navigation (Quartz's `enableSPA` + micromorph) patches DOM in
+// place rather than replacing it, so `.left.sidebar` / `.center` /
+// `.right.sidebar` are typically NOT re-mounted between routes. The
+// animation fires once per hard load, which is the desired behavior
+// — the cinematic entrance shouldn't replay on every internal click.
+
+// brain (Lane D audit fix 2026-05-02): the original commit hardcoded
+// the stagger delays as `0.05s`, `0.15s`, `0.25s`. Project rule is
+// tokens-only — the literals were swapped for `--motion-stagger-1/2/3`
+// declared in `_tokens.scss` (next to the existing `--motion-fast/
+// mid/slow` block). The duration `var(--motion-slow)` was already a
+// token; no change needed there.
+
+@media (prefers-reduced-motion: no-preference) {
+  .left.sidebar {
+    animation: brain-slide-in-left var(--motion-slow) var(--motion-easing) var(--motion-stagger-1) both;
+  }
+
+  .center {
+    animation: brain-fade-up var(--motion-slow) var(--motion-easing) var(--motion-stagger-2) both;
+  }
+
+  .right.sidebar {
+    animation: brain-slide-in-right var(--motion-slow) var(--motion-easing) var(--motion-stagger-3) both;
+  }
+}
+
+// Keyframes live OUTSIDE the media query — declaring them inside
+// would scope them to that query in a way some renderers handle
+// inconsistently. The `@keyframes` themselves are inert until
+// referenced by an `animation` property; defining them globally is
+// the conventional shape.
+
+@keyframes brain-slide-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes brain-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes brain-slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}

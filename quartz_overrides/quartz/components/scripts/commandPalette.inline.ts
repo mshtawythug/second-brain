@@ -330,21 +330,53 @@ function setSelected(
 // ---------------------------------------------------------------------------
 
 function openPalette(dialog: HTMLDialogElement, input: HTMLInputElement): void {
-  // brain (Lane C audit fix): order matters here.
-  //   1. Add `.is-open` BEFORE `showModal()`. The class drives the
-  //      entrance animation (transform scale + opacity in `_cmdk.scss`).
-  //      `showModal()` displays the dialog synchronously; if we add
-  //      `.is-open` after, the animation has nothing to interpolate
-  //      from because the resting state and the start state are the
-  //      same paint frame.
-  //   2. `showModal()` triggers the focus trap + locks page scroll +
-  //      paints the `::backdrop` pseudo-element.
-  //   3. Sync `aria-expanded="true"` on the combobox so AT
-  //      announces the popup as expanded.
-  //   4. Clear input + focus it. Native dialog auto-focuses its
-  //      first focusable child by default; we set it explicitly to
-  //      the input regardless (we want to type immediately).
-  dialog.classList.add("is-open")
+  // brain (Lane D audit fix 2026-05-02): the previous order added
+  // `.is-open` BEFORE `showModal()`, intending the class to drive
+  // the entrance animation. The Lane C reviewer flagged — and
+  // browser testing confirmed — that this order BREAKS the
+  // entrance:
+  //
+  //   * Before `showModal()`, the dialog is `display: none` (native
+  //     `<dialog>` default without the `[open]` attribute). Setting
+  //     `.is-open` on a `display:none` element doesn't trigger any
+  //     transition because the element isn't rendered.
+  //   * `showModal()` flips the dialog to its open state in a
+  //     single synchronous paint. Because `.is-open` is already
+  //     set, the modal child's computed style at first paint is
+  //     `transform: scale(1); opacity: 1` — the FINAL state. There
+  //     is no `from` keyframe state to interpolate from, so the
+  //     transition has no animation to run.
+  //   * Result: the modal pops in instantly with no scale-up.
+  //
+  // Correct order:
+  //   1. `showModal()` first — dialog flips to `display: flex` with
+  //      `.is-open` ABSENT, so the modal child paints at its
+  //      resting state (`transform: scale(0.96); opacity: 0` from
+  //      `_cmdk.scss` line 152-154). This is the from-state of the
+  //      entrance.
+  //   2. `requestAnimationFrame` — wait one frame so the resting-
+  //      state paint commits to the screen before the next mutation.
+  //      Without the rAF, modern browsers would batch both DOM
+  //      changes into a single paint and the transition would still
+  //      have nothing to interpolate.
+  //   3. Add `.is-open` on the next frame — the class flip retargets
+  //      the modal child's transform/opacity to (scale(1)/opacity(1));
+  //      the browser sees the property change and runs the
+  //      transition (250ms scale + opacity per `--motion-mid`).
+  //   4. Sync `aria-expanded="true"` + clear input + focus it.
+  //      ARIA + focus changes don't need to wait for the animation;
+  //      AT consumers and keyboard users want immediate feedback.
+  //
+  // The `_cmdk.scss` rules are unchanged — the resting state lives
+  // on `.brain-cmdk-modal` directly, the open state lives on
+  // `#brain-cmdk-root.is-open .brain-cmdk-modal`. The fix is purely
+  // in the script-side mutation order.
+  //
+  // The dialog's native `cancel` event still fires on Esc and runs
+  // the close path (`closePalette`) unchanged — listener wired at
+  // attach time in `setupPalette`, independent of this entrance
+  // order rework. Close-path mutation order is in `closePalette`
+  // below.
   if (typeof dialog.showModal === "function") {
     dialog.showModal()
   } else {
@@ -354,6 +386,12 @@ function openPalette(dialog: HTMLDialogElement, input: HTMLInputElement): void {
     // but the palette itself remains usable.
     dialog.setAttribute("open", "")
   }
+  // brain (Lane D fix): rAF before adding `.is-open` so the resting-
+  // state paint commits before the class flip retargets the
+  // animation. See block comment above.
+  requestAnimationFrame(() => {
+    dialog.classList.add("is-open")
+  })
   input.setAttribute("aria-expanded", "true")
   input.value = ""
   input.focus()

@@ -99,6 +99,15 @@
   --motion-slow: 400ms;
   --motion-easing: cubic-bezier(0.2, 0.8, 0.2, 1);
 
+  // Stagger delays for the page-load reveal sequence (Lane D —
+  // `_motion.scss`). Sequence-relative — each step is one
+  // `--motion-fast` (150ms) apart, starting at one half-step (50ms)
+  // so the cascade reads as a smooth flow rather than three separate
+  // animations. Theme-agnostic; no dark-mode counterpart needed.
+  --motion-stagger-1: 50ms;
+  --motion-stagger-2: 150ms;
+  --motion-stagger-3: 250ms;
+
   // Tier palette (moved from `graph.scss`). `vault` covers authored
   // notes (Phase A/B/C); `ingested` covers `_ingested/` notes that
   // came from external sources via `brain ingest*`. Terracotta vs
