@@ -76,10 +76,20 @@
 // padding gives the prose room to breathe between the explorer/search
 // rail on the left and the graph/ToC/backlinks rail on the right.
 //
-// Padding (not margin) keeps `.popover-hint`'s 95ch measure cap
-// resolving against the same containing block — the prose stays
-// centered inside the column rather than drifting against one edge.
+// box-sizing + min-width are CRITICAL: stock Quartz's body grid is
+// `grid-template-columns: 320px auto 320px`. The `auto` track sizes
+// to its content's intrinsic width, so naive `padding: 0 2rem` on
+// `.center` (with default content-box) made the track grow 64px
+// wider than the available space, pushing the article over the right
+// sidebar and clipping its right-edge text. `box-sizing: border-box`
+// pulls padding INTO the element's declared width; `min-width: 0`
+// tells the grid algorithm not to inflate the track to fit the
+// content's min-content size. Together they keep the center track
+// at its natural ~790px width on a 1440 viewport, with the inner
+// content area at 790 - 64 = 726px (well above readable measure).
 .center {
+  box-sizing: border-box;
+  min-width: 0;
   padding-left: 2rem;
   padding-right: 2rem;
 }
