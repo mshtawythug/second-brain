@@ -12,14 +12,24 @@
 // https://quartz.jzhao.xyz/ and re-apply the brain-specific tweaks
 // flagged below with `// brain:` comments.
 //
-// brain: this template wires up the brain-specific markdown transformer
-// `Plugin.DerivedFenceMark` (defined in
-// `<vault>/.quartz/quartz/plugins/transformers/derivedFenceMark.ts`,
-// installed by `brain vault render --overlay`). It must run after
-// `Plugin.ObsidianFlavoredMarkdown()` so `[[wiki-link]]` syntax has
-// been converted into mdast `link` nodes by the time the fence walker
-// stamps `data-brain-derived` attributes on them. See the
-// transformer's top-of-file comment for the full contract.
+// brain: this template wires up two brain-specific transformers:
+//
+//   * `Plugin.DerivedFenceMark` (defined in
+//     `<vault>/.quartz/quartz/plugins/transformers/derivedFenceMark.ts`,
+//     installed by `brain vault render --overlay`). It must run after
+//     `Plugin.ObsidianFlavoredMarkdown()` so `[[wiki-link]]` syntax
+//     has been converted into mdast `link` nodes by the time the
+//     fence walker stamps `data-brain-derived` attributes on them.
+//     See the transformer's top-of-file comment for the full contract.
+//
+//   * `Plugin.ReloadSignal` (defined in
+//     `<vault>/.quartz/quartz/plugins/transformers/reloadSignal.ts`,
+//     also installed by the overlay). Injects a polling reload
+//     `<script>` into every page when `BRAIN_WIKI_RELOAD=1` is set in
+//     the build env — replaces Quartz's `--serve` WebSocket reload
+//     path, which is dead in the brain blue-green serve flow because
+//     Caddy (not Quartz) serves the static output. See the
+//     transformer's top-of-file comment for the full contract.
 
 import { QuartzConfig } from "./quartz/cfg"
 import * as Plugin from "./quartz/plugins"
@@ -110,6 +120,18 @@ const config: QuartzConfig = {
       // ObsidianFlavoredMarkdown so wiki-link syntax has already been
       // converted to mdast link nodes.
       Plugin.DerivedFenceMark(),
+      // brain: inject the polling reload watcher (`/static/reload.js`)
+      // into every page when `BRAIN_WIKI_RELOAD=1` at build time.
+      // Replaces Quartz's `--serve` WebSocket reload, which is dead in
+      // our blue-green serve flow because Caddy (not Quartz) is the
+      // static file server. `bin/brain-up` sets the env var; `brain
+      // vault render` (prod path) leaves it unset so prod pages ship
+      // without a polling client. The transformer has no markdown
+      // ordering requirement — it only contributes a `<script>` tag
+      // via `externalResources()` — but is grouped here next to
+      // `DerivedFenceMark` so the two brain-extension transformers
+      // stay co-located.
+      Plugin.ReloadSignal(),
       Plugin.GitHubFlavoredMarkdown(),
       Plugin.TableOfContents(),
       Plugin.CrawlLinks({ markdownLinkResolution: "shortest" }),

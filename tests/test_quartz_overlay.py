@@ -57,6 +57,8 @@ def _make_fake_repo(
             "quartz/components/scripts/graph.inline.ts": "// stub inline\n",
             "quartz/plugins/emitters/contentIndex.ts": "// stub emitter\n",
             "quartz/plugins/transformers/derivedFenceMark.ts": "// stub xform\n",
+            "quartz/plugins/transformers/reloadSignal.ts": "// stub reload xform\n",
+            "quartz/static/reload.js": "// stub reload client\n",
             "quartz/styles/graph.scss": "// stub scss\n",
             "quartz/util/path.ts": "// stub util\n",
         }
@@ -123,6 +125,11 @@ def test_overlay_copies_all_files(tmp_path: Path) -> None:
             "quartz/plugins/transformers/derivedFenceMark.ts",
             "quartz/plugins/transformers/derivedFenceMark.ts",
         ),
+        (
+            "quartz/plugins/transformers/reloadSignal.ts",
+            "quartz/plugins/transformers/reloadSignal.ts",
+        ),
+        ("quartz/static/reload.js", "quartz/static/reload.js"),
         ("quartz/styles/graph.scss", "quartz/styles/graph.scss"),
         ("quartz/util/path.ts", "quartz/util/path.ts"),
     }
