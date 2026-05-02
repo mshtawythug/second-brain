@@ -218,3 +218,23 @@
 .graph > .graph-outer > .brain-stock-graph-icon {
   right: 28px;
 }
+
+// brain: upstream pins `.graph-outer` to `height: 250px` (sized for stock
+// Quartz where the only child is the canvas). The brain layout inserts
+// `.brain-graph-controls` (search input + tier/source chip rows, ~94px)
+// above the canvas. With the canvas also at 250px the total content is
+// ~344px and upstream's `overflow: hidden` clips the bottom ~94px of the
+// canvas — exactly the cluster's lower half on dense local graphs.
+//
+// Let the container auto-size to fit controls + canvas. The
+// `min-height` floor reserves the final dimensions upfront — without
+// it the panel renders at controls-only height (~94px) on first paint
+// and then jumps to ~344px once the JS creates the 250px canvas, a
+// visible layout shift. 360px covers the typical layout (94px controls
+// + 6px margin + 250px canvas) plus headroom for chip-row wrapping in
+// narrow sidebars; if content actually exceeds the floor the panel
+// grows naturally (height: auto).
+.graph > .graph-outer {
+  height: auto;
+  min-height: 360px;
+}
