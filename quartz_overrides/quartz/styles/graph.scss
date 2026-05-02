@@ -44,13 +44,6 @@
   margin-bottom: 0.4rem;
   font-size: 0.75rem;
   line-height: 1.2;
-  // brain (Linear-variant feedback): reserve horizontal space for the
-  // two absolutely-positioned graph icon buttons (`.global-graph-icon`
-  // at right:0 + `.brain-stock-graph-icon` at right:28px, each 24px
-  // wide with 0.3rem margin). Without this padding, the search input
-  // extends under the buttons and the user can't tell where the
-  // input ends and the buttons begin.
-  padding-right: 60px;
 }
 
 .brain-graph-search {
