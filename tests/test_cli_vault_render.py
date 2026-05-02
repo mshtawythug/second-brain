@@ -489,9 +489,14 @@ def test_sample_quartz_config_exists_and_parses_minimally() -> None:
     assert "transformers:" in text
     assert "filters:" in text
     assert "emitters:" in text
-    # Critical brain-flagged plugins.
+    # Critical brain-flagged plugins. ``Plugin.Graph()`` was previously
+    # asserted here; it was removed from the template by commit 885644a
+    # ("fix(quartz): drop nonexistent Plugin.Graph()") because the symbol
+    # doesn't exist in stock Quartz v4.5.x. ``Plugin.GitHubFlavoredMarkdown``
+    # is a stable substitute — present in the template and required for
+    # the brain vault's GFM-flavored content.
     assert "Plugin.ObsidianFlavoredMarkdown" in text
-    assert "Plugin.Graph()" in text
+    assert "Plugin.GitHubFlavoredMarkdown" in text
     assert "Plugin.ContentIndex" in text
     # Default export is what `npx quartz build` reads.
     assert "export default config" in text
