@@ -928,15 +928,23 @@ def test_update_document_frontmatter_only_rewrites_mirror(
         update_kwargs["new_content_type"] = new_value
     update_document(test_db, **update_kwargs)  # type: ignore[arg-type]
 
-    # Verify — the mirror file (possibly at a renamed path for title) carries
-    # the new value in its frontmatter.
-    new_slug = "new-name" if field == "title" else "fm-only-mirror"
-    new_target = vault / "_ingested" / "manual" / f"{new_slug}.md"
-    assert new_target.is_file(), (
+    # Verify — the mirror stays at the ORIGINAL slug for every field
+    # (including ``title``, post the populate-vault_path fix). Rotating the
+    # file on title edits would orphan the old mirror at the same UUID.
+    # Frontmatter is regenerated in place to reflect the new value.
+    target = original_target
+    assert target.is_file(), (
         "regenerate_vault_file must materialize the mirror after a "
         f"{field} change"
     )
-    fm, _ = parse_frontmatter(new_target.read_text(encoding="utf-8"))
+    if field == "title":
+        # Pre-fix bug: a title rename rotated the slug and created a file at
+        # the new-name path. Post-fix, no orphan should exist there.
+        assert not (vault / "_ingested" / "manual" / "new-name.md").exists(), (
+            "title edit must not rotate the slug — pre-fix bug created an "
+            "orphan at the new-title path while leaving the original behind"
+        )
+    fm, _ = parse_frontmatter(target.read_text(encoding="utf-8"))
     if field == "title":
         assert fm["title"] == new_value
     elif field == "tags":

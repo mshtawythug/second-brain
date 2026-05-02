@@ -866,3 +866,155 @@ def test_regenerate_vault_file_force_rewrites_when_body_unchanged(
     assert forced_path == initial_path
     fields_after, _ = parse_frontmatter(forced_path.read_text(encoding="utf-8"))
     assert fields_after.get("tags") == ["alpha", "beta"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 (Task: populate vault_path): UPDATE side-effect on the documents row
+# so subsequent tag/rm/edit calls all see the same on-disk location.
+# ---------------------------------------------------------------------------
+
+
+def _vault_path_for(conn: psycopg.Connection, doc_id: str) -> str | None:
+    """Read the current ``documents.vault_path`` for ``doc_id`` directly.
+
+    Centralizes the SELECT so each test below stays focused on the assertion
+    rather than the boilerplate. Returns the raw column (NULL → ``None``).
+    """
+    row = conn.execute(
+        "SELECT vault_path FROM documents WHERE id = %s::uuid", (doc_id,)
+    ).fetchone()
+    assert row is not None, f"missing row for {doc_id}"
+    return row[0]
+
+
+def test_regenerate_vault_file_populates_vault_path(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """``regenerate_vault_file`` UPDATEs ``documents.vault_path`` after writing.
+
+    Before this fix, ``regenerate_vault_file`` wrote the on-disk mirror but
+    left ``vault_path`` NULL — every downstream consumer that gates on
+    ``vault_path`` (``brain rm``, ``brain tag``, the slug-stable branch of
+    ``regenerate_vault_file`` itself) was locked out.
+    """
+    # Setup — ingest a doc without ``vault_root`` so the row lands with a
+    # NULL ``vault_path``, mirroring the pre-fix on-disk state.
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="path tracker",
+        content="body",
+        source_kind="manual",
+    )
+    assert _vault_path_for(test_db, doc_id) is None  # precondition
+
+    # Exercise — regenerate without an existing ``vault_path``.
+    written = regenerate_vault_file(
+        test_db, doc_id, vault_path=tmp_path / "vault"
+    )
+
+    # Verify — the row's ``vault_path`` is now the relative path used by
+    # the writer. The file landed under ``_ingested/manual/<slug>.md``;
+    # the column should match that path verbatim.
+    assert written.name == "path-tracker.md"
+    expected_relative = "_ingested/manual/path-tracker.md"
+    assert _vault_path_for(test_db, doc_id) == expected_relative
+
+
+def test_regenerate_vault_file_idempotent_vault_path_update(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Repeated ``regenerate_vault_file`` calls leave ``vault_path`` stable.
+
+    The ``IS DISTINCT FROM`` predicate makes the second UPDATE a no-op at
+    the row level; the test asserts the observable contract: same value
+    pre/post, no error raised.
+    """
+    # Setup — single doc, two regenerate calls back-to-back.
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="idempotent path",
+        content="body",
+        source_kind="manual",
+    )
+    vault = tmp_path / "vault"
+
+    # Exercise — first call populates, second call must be a no-op.
+    regenerate_vault_file(test_db, doc_id, vault_path=vault)
+    first = _vault_path_for(test_db, doc_id)
+    regenerate_vault_file(test_db, doc_id, vault_path=vault)
+    second = _vault_path_for(test_db, doc_id)
+
+    # Verify — value is identical across calls and matches the writer path.
+    assert first == "_ingested/manual/idempotent-path.md"
+    assert first == second
+
+
+def test_regenerate_vault_file_existing_vault_path_preserved_after_title_change(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Regression for bug #1: a title edit must NOT rotate the slug + orphan.
+
+    Pre-fix flow:
+      1. Ingest sets up the row with ``vault_path = NULL``.
+      2. ``brain edit --title "New Title"`` updates the DB title.
+      3. ``regenerate_vault_file`` recomputes the slug from the *new* title,
+         writes ``new-title.md``, and leaves ``original-slug.md`` orphaned.
+
+    Post-fix: step (1) populates ``vault_path`` (via the ingest hook calling
+    ``regenerate_vault_file`` with ``vault_root=tmp_path``), so step (3)'s
+    "doc.vault_path or _resolve_relative_path(...)" branch picks the
+    original slug — the file stays put, only its frontmatter title changes,
+    and no orphan appears at the new-title slug.
+    """
+    # Setup — ingest with ``vault_root`` so the post-ingest hook calls
+    # ``regenerate_vault_file`` and populates ``vault_path`` to the
+    # original slug path.
+    vault = tmp_path / "vault"
+    res = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Original Title",
+            content="body content",
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        source_external_id=None,
+        source_metadata={},
+        vault_root=vault,
+    )
+    doc_id = res.document_id
+    assert doc_id is not None
+    original_relative = "_ingested/manual/original-title.md"
+    assert _vault_path_for(test_db, doc_id) == original_relative
+    assert (vault / original_relative).is_file()
+
+    # Mutate the title in the DB (bypassing ``update_document`` to keep the
+    # test focused on the export-side rotation behavior).
+    test_db.execute(
+        "UPDATE documents SET title = %s WHERE id = %s::uuid",
+        ("New Title", doc_id),
+    )
+
+    # Exercise — re-run regenerate. Use ``force=True`` so the body-hash skip
+    # doesn't mask the frontmatter rewrite (matches the production
+    # ``update_document`` call site).
+    written = regenerate_vault_file(
+        test_db, doc_id, vault_path=vault, force=True
+    )
+
+    # Verify — file still at the original slug; frontmatter title updated;
+    # no orphan written at the would-be new-title slug.
+    assert written == (vault / original_relative).resolve()
+    fields_after, _ = parse_frontmatter(written.read_text(encoding="utf-8"))
+    assert fields_after["title"] == "New Title"
+    assert not (vault / "_ingested" / "manual" / "new-title.md").exists(), (
+        "title edit must not rotate the slug — pre-fix bug created an "
+        "orphan at the new-title path while leaving the original behind"
+    )
+    # The DB column also stayed pinned to the original path.
+    assert _vault_path_for(test_db, doc_id) == original_relative

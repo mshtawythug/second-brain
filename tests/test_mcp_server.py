@@ -18,6 +18,7 @@ from brain import mcp_server
 from brain.config import Config
 from brain.embeddings import OllamaEmbedError
 from brain.ingest import ExtractedDoc, ingest_document
+from brain.vault.frontmatter import parse_frontmatter
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -609,6 +610,67 @@ def test_brain_tag_requires_add_or_remove(
     with pytest.raises(McpError) as exc_info:
         mcp_server.brain_tag(id_prefix=doc_id[:8])
     assert "add or remove" in exc_info.value.error.message
+
+
+def test_brain_tag_mcp_writes_file_after_ingest(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,  # noqa: ARG001 — ensures fresh schema
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Regression for bug #2 via MCP: ``brain_tag`` writes to the file too.
+
+    Mirrors the CLI test ``test_brain_tag_writes_file_after_ingest`` end-to-end
+    via the MCP tool surface. After ``brain_ingest_stdin`` materializes the
+    on-disk mirror AND populates ``documents.vault_path`` (the fix in
+    ``regenerate_vault_file``), ``brain_tag`` must update the file's
+    frontmatter ``tags:`` so a subsequent ``brain vault sync`` doesn't
+    overwrite the DB tag list with stale ``tags: []`` from disk.
+
+    Pattern lifted from ``test_brain_ingest_stdin_creates_vault_mirror``:
+    build a ``_State`` with ``Config(vault_path=tmp_path)`` so the mirror
+    write lands in the sandboxed test directory.
+    """
+    # Setup — install state pointing the vault at ``tmp_path``.
+    state = mcp_server._State(
+        cfg=Config(database_url=TEST_DATABASE_URL, vault_path=tmp_path),
+        embedder=fake_embedder,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+
+    ingest_payload = mcp_server.brain_ingest_stdin(
+        content="MCP path-tracker body.\n",
+        source="manual",
+        external_id="mcp-tag-mirror-1",
+        title="MCP tag smoke",
+        content_type="transcript",
+    )
+    assert ingest_payload["created"] is True
+    doc_id = ingest_payload["document_id"]
+    assert doc_id is not None
+
+    mirror_path = tmp_path / "_ingested" / "manual" / "mcp-tag-smoke.md"
+    assert mirror_path.is_file(), f"missing mirror at {mirror_path}"
+    # Precondition: the freshly-written file carries the ``source-mcp`` auto
+    # tag (added by ``brain_ingest_stdin``), but NOT the new tag we're about
+    # to add. The latter is what the post-tag verify step keys off.
+    fields_before, _ = parse_frontmatter(mirror_path.read_text(encoding="utf-8"))
+    assert "mcp-new-tag" not in (fields_before.get("tags") or [])
+
+    # Exercise — apply a tag via the MCP tool.
+    tag_payload = mcp_server.brain_tag(
+        id_prefix=str(doc_id)[:8], add=["mcp-new-tag"]
+    )
+
+    # Verify — payload tags include the new tag, and the on-disk frontmatter
+    # mirrors the DB. Without the path-tracking fix the file would still
+    # be missing ``mcp-new-tag`` (the same gap the CLI test #5 covers).
+    assert "mcp-new-tag" in tag_payload["tags"]
+    fields_after, _ = parse_frontmatter(mirror_path.read_text(encoding="utf-8"))
+    assert "mcp-new-tag" in (fields_after.get("tags") or []), (
+        "MCP brain_tag must write to the on-disk frontmatter once "
+        "vault_path is populated by the ingest-time regenerate_vault_file call"
+    )
 
 
 # ---------------------------------------------------------------------------

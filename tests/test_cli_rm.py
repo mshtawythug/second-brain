@@ -264,3 +264,69 @@ def test_rm_unknown_id_errors_cleanly(
     combined = result.output + (result.stderr or "")
     # Phrasing comes from brain.errors.IdPrefixNotFound: "document not found: ...".
     assert "not found" in combined.lower()
+
+
+def test_brain_rm_unlinks_mirror_after_ingest(
+    test_db: psycopg.Connection[Any],  # noqa: ARG001 — fixture resets the schema
+    fake_embedder: Any,
+    tmp_path: Path,
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for bug #3: ``brain rm`` cleans up the mirror after stdin ingest.
+
+    Pre-fix: ``brain ingest-stdin`` created the on-disk mirror via
+    ``regenerate_vault_file`` but left ``documents.vault_path = NULL``, so the
+    follow-up ``brain rm`` hit the ``vault_path is None`` branch in
+    ``_rm_unlink_vault_mirror`` and reported ``" (db only)"`` while the file
+    sat orphaned in the vault. With ``regenerate_vault_file`` now updating
+    ``documents.vault_path`` after the write, the rm path finds the relative
+    path and unlinks the file, surfacing the ``(file: ...)`` suffix.
+    """
+    # Setup — sandbox both the DB URL and the vault to ``tmp_path``.
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+
+    # Exercise — ingest via stdin so the post-ingest hook writes the mirror
+    # and (with this fix) populates ``documents.vault_path``.
+    body = "Some manual snippet to mirror + remove.\n"
+    ingest_result = CliRunner().invoke(
+        app,
+        [
+            "ingest-stdin",
+            "--source", "manual",
+            "--external-id", "rm-mirror-1",
+            "--title", "Rm mirror smoke",
+            "--content-type", "transcript",
+        ],
+        input=body,
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+
+    mirror_dir = tmp_path / "_ingested" / "manual"
+    mirrors = list(mirror_dir.glob("*.md"))
+    assert len(mirrors) == 1, f"expected one mirror file, got {mirrors}"
+    mirror_path = mirrors[0]
+    assert mirror_path.is_file()
+
+    # Resolve the doc id via the title for a clean integration call.
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT id::text FROM documents WHERE title = 'Rm mirror smoke'"
+        ).fetchone()
+    assert row is not None
+    doc_id = str(row[0])
+
+    rm_result = CliRunner().invoke(app, ["rm", doc_id, "-y"])
+
+    # Verify — file gone AND CLI suffix is the populated-path branch.
+    assert rm_result.exit_code == 0, rm_result.output
+    assert not mirror_path.exists(), (
+        "brain rm must unlink the mirror once vault_path is populated by "
+        "the ingest-time regenerate_vault_file call"
+    )
+    assert "(file:" in rm_result.output, (
+        f"expected '(file: ...)' suffix (path-populated branch); got: "
+        f"{rm_result.output!r}"
+    )
+    assert "(db only)" not in rm_result.output

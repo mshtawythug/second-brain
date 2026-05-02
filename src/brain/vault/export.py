@@ -469,6 +469,16 @@ def regenerate_vault_file(
     fall back to the corpus-dump rules (``_resolve_relative_path``) with
     a fresh, single-doc collision set.
 
+    Side effect: also UPDATEs ``documents.vault_path`` to the chosen
+    relative path so subsequent ``regenerate_vault_file``, ``brain rm``,
+    and ``brain tag`` calls all use the same on-disk location. The
+    UPDATE is its own statement under ``conn.autocommit=True`` (which
+    all current callers use) — a future caller wrapping this function
+    in a read-only transaction would have to opt that statement in.
+    The ``IS DISTINCT FROM`` predicate keeps it idempotent (NULL-safe):
+    re-running on a row that already has the right ``vault_path`` is a
+    no-op at the row level.
+
     Raises:
         ValueError: ``document_id`` does not match any row.
         ValueError: the row is ``kind='vault'``. Vault-tier authored notes
@@ -490,5 +500,10 @@ def regenerate_vault_file(
 
     target, _ = _write_doc_file(
         doc, vault_path=vault_path, relative=relative, force=force
+    )
+    conn.execute(
+        "UPDATE documents SET vault_path = %s "
+        "WHERE id = %s AND vault_path IS DISTINCT FROM %s",
+        (relative, document_id, relative),
     )
     return target.resolve()

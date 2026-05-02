@@ -359,3 +359,68 @@ def test_tag_is_idempotent_on_disk(
     assert after_first_bytes == after_second_bytes, (
         "second +foo call must not rewrite the file (rewrite_tags is idempotent)"
     )
+
+
+def test_brain_tag_writes_file_after_ingest(
+    test_db: psycopg.Connection[Any],  # noqa: ARG001 — fixture resets the schema
+    fake_embedder: Any,
+    tmp_path: Path,
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for bug #2: ``brain tag`` writes to the file after stdin ingest.
+
+    Pre-fix: ``brain ingest-stdin`` materialized the on-disk mirror but left
+    ``documents.vault_path = NULL``. The follow-up ``brain tag`` hit the
+    ``vault_path is None`` short-circuit in ``_tag_file_writeback`` and
+    reported ``" (db only)"`` — the DB tag list was right but the file's
+    frontmatter ``tags:`` stayed empty and would be re-flushed back over
+    the DB on the next vault sync. With ``vault_path`` populated post-
+    ingest, the file-rewrite branch lights up and the suffix becomes
+    ``" (file)"``.
+    """
+    # Setup — sandbox both the DB URL and the vault.
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+
+    # Exercise — ingest a manual snippet via stdin (mirror is written and
+    # ``vault_path`` is populated as part of the same call).
+    ingest_result = CliRunner().invoke(
+        app,
+        [
+            "ingest-stdin",
+            "--source", "manual",
+            "--external-id", "tag-mirror-1",
+            "--title", "Tag mirror smoke",
+            "--content-type", "transcript",
+        ],
+        input="A note that needs tagging post-ingest.\n",
+    )
+    assert ingest_result.exit_code == 0, ingest_result.output
+
+    mirror_path = tmp_path / "_ingested" / "manual" / "tag-mirror-smoke.md"
+    assert mirror_path.is_file(), f"missing mirror at {mirror_path}"
+    # Precondition: file's tags are empty before the tag command runs.
+    assert _frontmatter_tags(mirror_path) == []
+
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT id::text FROM documents WHERE title = 'Tag mirror smoke'"
+        ).fetchone()
+    assert row is not None
+    doc_id = str(row[0])
+
+    tag_result = CliRunner().invoke(app, ["tag", doc_id, "+new-tag"])
+
+    # Verify — DB + file are both updated; suffix is the file-rewrite branch.
+    assert tag_result.exit_code == 0, tag_result.output
+    assert "(file)" in tag_result.output, (
+        f"expected '(file)' suffix (path-populated branch); got: "
+        f"{tag_result.output!r}"
+    )
+    assert "(db only)" not in tag_result.output
+    assert _tags_for(doc_id) == ["new-tag"]
+    assert _frontmatter_tags(mirror_path) == ["new-tag"], (
+        "brain tag must write to the file's frontmatter once vault_path is "
+        "populated by the ingest-time regenerate_vault_file call"
+    )

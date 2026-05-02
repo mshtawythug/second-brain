@@ -39,7 +39,11 @@ from .queries import (
     summary_counts,
 )
 from .search import hybrid_search
-from .vault.frontmatter import dump_frontmatter, parse_frontmatter
+from .vault.frontmatter import (
+    dump_frontmatter,
+    parse_frontmatter,
+    rewrite_tags,
+)
 from .vault.graph import backlinks_for, orphans, outgoing_links_for
 from .vault.slug import slugify
 from .vault.sync import sync_one_file
@@ -390,6 +394,14 @@ def brain_tag(
     At least one of ``add`` / ``remove`` must be non-empty. Returns the
     document's full tag list after the mutation. Re-adding an existing tag is
     a no-op.
+
+    File-writeback parity with ``brain tag`` on the CLI: when the document
+    has a populated ``vault_path`` and the on-disk mirror exists, the file's
+    frontmatter ``tags:`` field is rewritten via :func:`rewrite_tags` so the
+    next ``brain vault sync`` does not re-read stale ``tags: []`` from disk
+    and overwrite the DB. A missing mirror or NULL ``vault_path`` falls back
+    to DB-only — the MCP tool does not expose a ``--regenerate-file`` flag,
+    so recovery there is reserved for the CLI command.
     """
     add = add or []
     remove = remove or []
@@ -403,9 +415,18 @@ def brain_tag(
         with connect(state.cfg.database_url) as conn:
             conn.autocommit = True
             doc_id = _resolve_id(conn, id_prefix)
+            row = conn.execute(
+                "SELECT vault_path FROM documents WHERE id = %s", (doc_id,)
+            ).fetchone()
+            assert row is not None  # _resolve_id confirmed the row exists
+            vault_path_rel: str | None = row[0]
             tags = apply_tags(conn, doc_id, add=add, remove=remove)
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
+    if vault_path_rel is not None:
+        abs_path = state.cfg.vault_path / vault_path_rel
+        if abs_path.exists():
+            rewrite_tags(abs_path, tags)
     return {"document_id": doc_id, "tags": tags}
 
 
