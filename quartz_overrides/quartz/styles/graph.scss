@@ -219,22 +219,30 @@
   right: 28px;
 }
 
-// brain: upstream pins `.graph-outer` to `height: 250px` (sized for stock
-// Quartz where the only child is the canvas). The brain layout inserts
-// `.brain-graph-controls` (search input + tier/source chip rows, ~94px)
-// above the canvas. With the canvas also at 250px the total content is
-// ~344px and upstream's `overflow: hidden` clips the bottom ~94px of the
-// canvas — exactly the cluster's lower half on dense local graphs.
+// brain: keep upstream's `.graph-outer { height: 250px; overflow: hidden; }`
+// untouched. The compact `.brain-graph-controls` redesign above takes
+// only ~30px of vertical space (vs the previous ~94px), so a 250px
+// container leaves ~220px for the canvas — plenty of room for the
+// cluster — without growing the panel and pushing Table of Contents +
+// Backlinks past the viewport. The d3-zoom fit-to-bounds pass in
+// graph.inline.ts auto-scales the cluster to whatever canvas height
+// we end up with.
 //
-// Let the container auto-size to fit controls + canvas. The
-// `min-height` floor reserves the final dimensions upfront — without
-// it the panel renders at controls-only height (~94px) on first paint
-// and then jumps to ~344px once the JS creates the 250px canvas, a
-// visible layout shift. 360px covers the typical layout (94px controls
-// + 6px margin + 250px canvas) plus headroom for chip-row wrapping in
-// narrow sidebars; if content actually exceeds the floor the panel
-// grows naturally (height: auto).
-.graph > .graph-outer {
-  height: auto;
-  min-height: 360px;
+// Defense-in-depth: also let the right sidebar scroll internally if a
+// future content addition (e.g. a long ToC on a deeply-headed page)
+// pushes total content past the viewport. No-op when content fits;
+// gracefully scrolls when it doesn't.
+.sidebar.right {
+  overflow-y: auto;
+  // Hide the scrollbar gutter so the sidebar reads as a clean column
+  // when content fits. Still scrollable via wheel / touchpad gestures.
+  scrollbar-width: thin;
+  scrollbar-color: var(--lightgray) transparent;
+  &::-webkit-scrollbar {
+    width: 4px;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: var(--lightgray);
+    border-radius: 2px;
+  }
 }

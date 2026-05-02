@@ -662,13 +662,23 @@ async function renderGraph(
   }
 
   const width = graph.offsetWidth
-  // brain-extension: subtract the controls row from the canvas height so
-  // the canvas fits below it instead of overflowing the container. The
-  // 250px floor still applies — narrow sidebars where the controls eat
-  // into the canvas more than the floor allows degrade to a fixed-height
-  // canvas rather than a 0-height one.
-  const controlsHeight = controlsEl ? controlsEl.offsetHeight : 0
-  const height = Math.max(graph.offsetHeight - controlsHeight, 250)
+  // brain-extension: size the canvas to fill the panel below the
+  // controls. `graph.offsetHeight` (the inner `.graph-container`) lags
+  // layout when the canvas hasn't been appended yet — at init time it
+  // can report just the controls' height, which would lock the canvas
+  // to a tiny size for the lifetime of the page. Read the parent
+  // `.graph-outer` instead: that's the 250px panel upstream sizes
+  // explicitly via CSS, so it's the authoritative measure. Subtract
+  // the controls' offsetHeight + margin-bottom (offsetHeight excludes
+  // margin) to get the canvas allowance, with a small floor so a
+  // pathological narrow sidebar can't produce a zero-height canvas
+  // (PixiJS rejects 0).
+  const outerEl = graph.closest(".graph-outer") as HTMLElement | null
+  const panelHeight = outerEl ? outerEl.clientHeight : graph.offsetHeight
+  const controlsHeight = controlsEl
+    ? controlsEl.offsetHeight + parseFloat(getComputedStyle(controlsEl).marginBottom || "0")
+    : 0
+  const height = Math.max(panelHeight - controlsHeight, 60)
 
   // we virtualize the simulation and use pixi to actually render it
   const simulation: Simulation<NodeData, LinkData> = forceSimulation<NodeData>(graphData.nodes)

@@ -88,10 +88,15 @@ export const defaultContentPageLayout: PageLayout = {
         // brain-extension: in-graph search box that filters visible
         // nodes by title substring.
         searchEnabled: true,
-        // brain-extension: filter chips wired to frontmatter facets;
-        // tier = vault-tier (a/b/c), source = ingest source (krisp,
-        // slack, gmail, manual).
-        filterChips: ["tier", "source"],
+        // brain-extension: tier/source chips are deliberately empty for
+        // the local (sidebar) graph. At depth=1 there are usually only a
+        // handful of nodes — slicing 5 nodes by tier or source nearly
+        // always empties the view, and the filters eat 60+ vertical
+        // pixels of sidebar space that's better spent on the canvas.
+        // The full filter chip rail still appears in the global modal
+        // graph below, where it actually slices a useful number of
+        // nodes.
+        filterChips: [],
       },
       globalGraph: {
         depth: -1,
