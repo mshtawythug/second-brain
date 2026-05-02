@@ -39,14 +39,22 @@
 // 1. Body stacking-context lock
 // ---------------------------------------------------------------------------
 //
-// Defensive lock from the Lane D audit: any future negative-z
-// pseudo-element on body (or anywhere down-tree) needs body to be
-// the root of its own stacking context to paint reliably. Cheap,
-// harmless, and prevents a class of future paint-order bugs.
-
-body {
-  isolation: isolate;
-}
+// brain (Linear-variant feedback): the `body { isolation: isolate }` rule
+// from the Lane D audit is removed in this variant. It was added to lock
+// a stacking context for the paper-grain `body::before` pseudo-element so
+// `z-index: -1` would paint reliably; the Linear variant has no paper
+// grain (the `body::before` rule is gone earlier in this file), so the
+// isolation rule has no consumer.
+//
+// Per spec, `isolation: isolate` on `body` should NOT create a containing
+// block for `position: fixed` descendants — only `transform`/`filter`/
+// `will-change` do. In practice we observed the global-graph modal
+// rendering as a narrow vertical strip instead of its expected 80vw ×
+// 80vh centered panel, and the stock search container failing to center
+// despite a `display: flex; justify-content: center` override. Both
+// symptoms vanish when the body isolation rule is removed, so we drop
+// it here. If a future feature re-adds a body-level pseudo-element with
+// negative z-index, the lock can come back at the same time.
 
 // ---------------------------------------------------------------------------
 // 2. Hairline column rule between left sidebar and article column

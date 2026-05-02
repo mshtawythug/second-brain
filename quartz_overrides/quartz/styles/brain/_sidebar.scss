@@ -197,18 +197,26 @@
 }
 
 // Stock Quartz's search panel — `.search-container` is `position:
-// fixed; display: inline-block` when active, with `.search-space`
-// inside set to `width: 65%; margin: 0 auto`. The `inline-block`
-// wrapper doesn't establish a centering context for `margin: auto`
-// children, so the panel renders left-anchored. Force flex-centering
-// so `.search-space` sits in the middle of the viewport. Global
-// selector — `.search-container` is the unique stock class and the
-// element is full-viewport via `position: fixed`, so DOM ancestry
-// doesn't matter.
-.search > .search-container.active {
-  display: flex;
-  justify-content: center;
-  align-items: flex-start;
+// fixed` with `display: inline-block` when active, and `.search-space`
+// inside has `width: 65%; margin: 0 auto`. Stock's `inline-block` on
+// the container, combined with the auto margins on the inner space,
+// failed to actually center the panel — the user observed left-
+// anchored rendering across browsers.
+//
+// brain (Linear-variant feedback round 2): instead of fighting stock's
+// `display` value, robustly center the inner `.search-space` itself
+// via `position: absolute; left: 50%; transform: translateX(-50%)`.
+// The container is `position: fixed; left: 0; width: 100vw`, so the
+// absolute child positions relative to it. This works regardless of
+// the parent's display mode and survives any future stock cascade
+// changes.
+.search > .search-container > .search-space {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  // Stock's `margin-left: auto; margin-right: auto` becomes redundant
+  // under absolute positioning but doesn't harm — leaving stock's
+  // declarations untouched here.
 }
 
 // Linear-variant retint of the search panel inner card. Stock paints

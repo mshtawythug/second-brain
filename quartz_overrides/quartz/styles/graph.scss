@@ -44,12 +44,23 @@
   margin-bottom: 0.4rem;
   font-size: 0.75rem;
   line-height: 1.2;
+  // brain (Linear-variant feedback): reserve horizontal space for the
+  // two absolutely-positioned graph icon buttons (`.global-graph-icon`
+  // at right:0 + `.brain-stock-graph-icon` at right:28px, each 24px
+  // wide with 0.3rem margin). Without this padding, the search input
+  // extends under the buttons and the user can't tell where the
+  // input ends and the buttons begin.
+  padding-right: 60px;
 }
 
 .brain-graph-search {
   width: 100%;
   box-sizing: border-box;
-  padding: 0.25rem 0.5rem;
+  // brain (Linear-variant feedback): bumped padding so the input
+  // stands ~28px tall, visually balancing the 24×24 graph icon
+  // buttons absolutely-positioned to its right. Was 0.25rem 0.5rem
+  // — too short, read as a stubby strip next to the buttons.
+  padding: 0.45rem 0.7rem;
   border: 1px solid var(--lightgray);
   border-radius: 4px;
   background: var(--light);
@@ -133,24 +144,26 @@
   }
 }
 
-// brain (Linear variant): hide the two graph icon buttons. The local
-// graph in the right sidebar is the primary affordance; the global
-// graph modal opens on top with no contrast against the dark
-// charcoal page bg. The Linear feedback was "search bar should cover
-// these buttons" — we hide them entirely so the in-graph search input
-// gets the full top row of the panel uncluttered. The buttons can be
-// re-shown by removing the `display: none` rule below if a future
-// design wants the global graph back; the underlying click handlers
-// in `graph.inline.ts` stay wired, so unhiding restores functionality.
+// brain: stock Quartz renders the global-graph button as
+// `<button class="global-graph-icon">` directly inside `.graph-outer`,
+// but its own graph.scss only styles `.graph-icon` (no `global-` prefix
+// and inside a `.graph-icons` wrapper that doesn't exist in the markup).
+// Result on stock Quartz: the button sits unstyled in the top-left,
+// hard to see and easy to miss. We position + size it explicitly so
+// readers can actually find the "open global graph" affordance.
+//
+// brain-extension: `.brain-stock-graph-icon` is a sibling affordance that
+// opens the SAME global-graph modal but with the renderer's brain extensions
+// disabled (stock Quartz visuals). Same visual rules — only the absolute-
+// position offset differs.
+//
+// Layout note (Linear-variant feedback): the buttons are absolutely
+// positioned at the top-right corner. The `.brain-graph-controls`
+// below reserves a `padding-right` equal to both buttons' combined
+// horizontal footprint, so the search input shrinks to leave room
+// rather than slipping under the buttons.
 .graph > .graph-outer > .global-graph-icon,
 .graph > .graph-outer > .brain-stock-graph-icon {
-  display: none;
-}
-
-// Original positioning — kept here as documentation for future re-enable.
-// .graph > .graph-outer > .global-graph-icon,
-// .graph > .graph-outer > .brain-stock-graph-icon {
-.graph > .graph-outer > .__brain-disabled-graph-icon {
   position: absolute;
   top: 0;
   margin: 0.3rem;
