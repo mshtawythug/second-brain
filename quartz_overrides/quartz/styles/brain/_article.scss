@@ -1,1 +1,186 @@
-// placeholder — Lane C (component polish) fills this in.
+// Brain article surface — Lane C of the 2026 commonplace-book redesign.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_article.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via `custom.scss`'s
+// `@use "./brain/article"` line.
+//
+// Scope of this file:
+//
+//   * `measure` — cap article column width at 68ch via `.popover-hint`
+//     so prose doesn't sprawl on a 1440px viewport. The Quartz article
+//     wrapper is `.popover-hint` (used both for live popover hints AND
+//     as the article content container — see `Component.Body`).
+//   * Heading rhythm — sizes pulled from the `_tokens.scss` modular
+//     scale (h1 `--fs-3xl`, h2 `--fs-2xl`, h3 `--fs-xl`). h2 gets a
+//     1px hairline rule below in `--rule` to mark major section
+//     breaks editorially.
+//   * Blockquote — repurposed for editorial pull-quotes inside the
+//     article. Left rule 3px in `--accent-soft`, italic Fraunces
+//     (via `var(--displayFont)`), generous breathing room.
+//   * Article meta — `time` + read-time small-caps via `--fs-xs` +
+//     `+0.08em` tracking, dimmed via `--ink-2`. Quartz's
+//     `Component.ContentMeta` emits `<p class="content-meta">` with
+//     `<time>` + `<span>` children.
+//   * Tag chips at the article header — re-apply Lane B's `.tag-link`
+//     pill styling pattern. Lane B already targets `.tag-link` via
+//     the comma-form selector in `_links.scss`; this file owns only
+//     the *container* spacing on the `<ul class="tags">` wrapper
+//     emitted by `Component.TagList`.
+//
+// Scope NOT covered here:
+//
+//   * Drop cap + pull quote — Lane D (`brain/article` extension via
+//     `_motion.scss` / Lane D's article additions). This file is the
+//     baseline rhythm; Lane D adds the editorial flourishes on top.
+//   * Code surface — `_code.scss`.
+//   * Callout chrome — `_callouts.scss`.
+//
+// Tokens consumed (all from `_tokens.scss`):
+//
+//   * `--fs-3xl` / `--fs-2xl` / `--fs-xl` — heading scale
+//   * `--fs-xs` / `--fs-sm`               — meta + tag-chip type
+//   * `--rule`                            — h2 hairline + tag chip border
+//   * `--accent-soft`                     — blockquote left rule
+//   * `--ink-1` / `--ink-2`               — ink scale for meta + body
+//   * `--displayFont`                     — Fraunces for italic blockquote
+
+// ---------------------------------------------------------------------------
+// 1. Article measure
+// ---------------------------------------------------------------------------
+//
+// `.popover-hint` is the wrapper Quartz emits around article bodies
+// AND popover hints (`Component.Body` + `popover.inline.ts`). Capping
+// it at 68ch gives long-form prose a comfortable line length without
+// touching the grid columns from base.scss.
+//
+// brain: 68ch is a deliberate trade-off. The classical body-text
+// measure is 45–75 characters; 68ch lands at the comfortable upper
+// end so technical prose with code identifiers doesn't wrap awkwardly,
+// and on a 1440px viewport the article still fills the center column
+// rather than collapsing to a narrow strip. Newsreader at `--fs-base`
+// makes 68ch ≈ 660px.
+.popover-hint {
+  max-width: 68ch;
+}
+
+// ---------------------------------------------------------------------------
+// 2. Heading hierarchy + rhythm
+// ---------------------------------------------------------------------------
+//
+// Sizes from `_tokens.scss`. Stock Quartz's `base.scss` paints
+// `h1: 1.75rem`, `h2: 1.4rem`, `h3: 1.12rem` — flat and unrelated to
+// our modular scale. The `_typography.scss` Lane A file already pins
+// h1–h6 to the scale; this block adds the *editorial* treatment
+// (rule below h2, tighter top margins inside articles, anchor-link
+// glyph color).
+//
+// Selectors are scoped under `article` so they only fire inside the
+// article column — popover hints and breadcrumbs don't grow horns.
+
+article {
+  > h1 {
+    font-size: var(--fs-3xl);
+    margin-top: 0;
+    margin-bottom: 1rem;
+  }
+
+  > h2 {
+    font-size: var(--fs-2xl);
+    margin-top: 2rem;
+    margin-bottom: 0.8rem;
+    // brain: hairline rule below every h2 marks major section breaks
+    // editorially — it reads like a page-layout rule in a printed book
+    // rather than a hard divider. The rule sits 0.4rem below the
+    // baseline so descenders don't graze it.
+    padding-bottom: 0.4rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  > h3 {
+    font-size: var(--fs-xl);
+    margin-top: 1.6rem;
+    margin-bottom: 0.6rem;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3. Blockquote — editorial pull-quote treatment
+// ---------------------------------------------------------------------------
+//
+// Stock Quartz paints `blockquote { border-left: 3px solid var(--secondary) }`
+// (see `base.scss` line 349-354). We swap the rule color to
+// `--accent-soft` (12% terracotta) so the rule reads as a soft visual
+// accent rather than a hard partition, route the body through Fraunces
+// italic for a pull-quote voice, and add generous vertical breathing
+// room.
+//
+// Scoped to `article > blockquote` (and blockquotes nested inside
+// callouts via `:not(.callout *)` semantics) so callout chrome stays
+// owned by `_callouts.scss`.
+
+article blockquote:not(.callout blockquote) {
+  border-left-color: var(--accent-soft);
+  margin: 1.6rem 0;
+  padding: 0.4rem 0 0.4rem 1.2rem;
+  font-family: var(--displayFont);
+  font-style: italic;
+  font-size: var(--fs-md);
+  color: var(--ink-1);
+  line-height: 1.4;
+
+  // Trim default paragraph margins inside the quote so a single-`<p>`
+  // quote doesn't read as a stack of margin gaps.
+  > p {
+    margin: 0.3rem 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 4. Article meta — time + read-time
+// ---------------------------------------------------------------------------
+//
+// Quartz emits `<p class="content-meta"><time>…</time><span>…</span></p>`
+// from `Component.ContentMeta`. Treat the row as a metadata caption:
+// small-caps tracking, dimmed ink, tight leading. The `show-comma`
+// attribute Quartz adds drives a `::after` "," separator we keep.
+
+.content-meta {
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.08em;
+  margin: 0.2rem 0 0.8rem 0;
+  line-height: 1.3;
+
+  // Force lining numerals inside metadata — old-style numerals (the
+  // body default from `_typography.scss`) read as literary, but in
+  // dates and read-time counts we want clean tabular alignment.
+  font-feature-settings: "smcp", "lnum";
+
+  // Time + span both inherit the small-caps; nothing to override.
+}
+
+// ---------------------------------------------------------------------------
+// 5. TagList container at the article header
+// ---------------------------------------------------------------------------
+//
+// `Component.TagList` emits `<ul class="tags"><li><a class="internal tag-link">…</a></li></ul>`.
+// Lane B's `_links.scss` already styles `.tag-link` as a pill chip
+// via the comma-form selector. Here we own only the wrapper layout:
+// inline-flex row with consistent gap, no list bullets, top margin
+// matching the meta row.
+
+ul.tags {
+  list-style: none;
+  padding: 0;
+  margin: 0.4rem 0 1rem 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+
+  > li {
+    margin: 0;
+    padding: 0;
+  }
+}

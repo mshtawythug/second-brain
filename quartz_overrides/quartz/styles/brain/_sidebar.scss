@@ -1,1 +1,207 @@
-// placeholder — Lane C (component polish) fills this in.
+// Brain sidebar polish — Lane C of the 2026 commonplace-book redesign.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_sidebar.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via `custom.scss`'s
+// `@use "./brain/sidebar"` line.
+//
+// Scope of this file:
+//
+//   * Compact icon row in the LEFT sidebar — `Search`, `Darkmode`,
+//     `ReaderMode` rendered side-by-side as 32px square buttons with a
+//     consistent stroke / hover treatment. Stock Quartz draws each
+//     button with its own component CSS (different sizes, different
+//     hover behavior); this file levels them out without rewriting
+//     the components.
+//   * Sticky search header — `position: sticky; top: 0;` on the Flex
+//     row that holds the icon trio, so the search affordance stays in
+//     view as the explorer scrolls. Background `--surface-1` so the
+//     sticky header reads as a chrome band rather than running text.
+//   * Explorer tree indent guides — `border-left: 1px solid var(--rule)`
+//     on nested `<ul>` so the folder hierarchy reads at a glance,
+//     plus a smoother rotation transition on the fold caret.
+//   * RIGHT sidebar elevation — matching `--surface-1` background +
+//     `8px` border-radius on the ToC and Backlinks panels so they
+//     read as a pair with the graph component (which already styles
+//     itself in `graph.scss`). Padding follows the `0.6rem` plan spec.
+//
+// Scope NOT covered here:
+//
+//   * Surface tier baseline — `_surface.scss` (Lane A) already paints
+//     `.sidebar { background: var(--surface-1); }`. This file only
+//     refines the children.
+//   * Graph component visuals — owned by `graph.scss` and `Graph.tsx`.
+//     We don't restyle the graph itself; we only add card chrome to
+//     its sibling panels (ToC + Backlinks).
+//   * Cmd-K palette — owned by `_cmdk.scss` (Lane C, separate file)
+//     because its visual language (modal + backdrop) is large enough
+//     to warrant its own partial.
+//
+// Tokens consumed (all from `_tokens.scss`):
+//
+//   * `--surface-1`     — sticky header band + ToC/Backlinks card bg
+//   * `--rule`          — explorer indent guides + sticky header bottom rule
+//   * `--ink-0`/`--ink-2` — icon stroke + label colors
+//   * `--accent-soft`   — icon hover background
+//   * `--motion-fast`/`--motion-easing` — transitions
+
+// ---------------------------------------------------------------------------
+// 1. Compact icon row + sticky search header (LEFT sidebar)
+// ---------------------------------------------------------------------------
+//
+// Stock Quartz renders the Search/Darkmode/ReaderMode trio inside a
+// `<div class="flex-component">` (rendered by `Component.Flex`). Each
+// child wraps a single button. We flatten visual sizing across the
+// three so they read as a single icon strip.
+//
+// The Flex container itself becomes the sticky band. `.sidebar.left`
+// already has `position: sticky` from base.scss; we layer this on top.
+
+.sidebar.left {
+  // brain: the Flex row that holds Search/Darkmode/ReaderMode is the
+  // first non-title flex-component child of the left sidebar. Pin it
+  // to the top so search remains reachable as the explorer scrolls.
+  // `top: 0` works because `.sidebar.left` is itself sticky to the
+  // viewport top — both elements share the same scrolling context.
+  > .flex-component {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    background: var(--surface-1);
+    // Subtle bottom hairline so the sticky band reads as a header rule
+    // rather than melting into the explorer below.
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.4rem;
+  }
+}
+
+// Icon trio normalization. Quartz emits each control as a `<button>`
+// with a class that names the control (`.search-button`, `.darkmode`,
+// `.readermode`). We unify their box, hover, and focus treatment so
+// the row reads as a single component instead of three loose buttons.
+.sidebar.left {
+  .search-button,
+  button.darkmode,
+  button.readermode {
+    box-sizing: border-box;
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    color: var(--ink-1);
+    cursor: pointer;
+    transition:
+      background var(--motion-fast) var(--motion-easing),
+      border-color var(--motion-fast) var(--motion-easing),
+      color var(--motion-fast) var(--motion-easing);
+
+    // Stock Quartz's `.search-button` puts a `<p>Search</p>` next to
+    // the magnifier glyph — hide it so the button collapses to a
+    // 32px icon square consistent with the other two.
+    > p {
+      display: none;
+    }
+
+    > svg {
+      width: 18px;
+      height: 18px;
+      stroke-width: 2;
+    }
+
+    &:hover {
+      background: var(--accent-soft);
+      border-color: var(--rule);
+      color: var(--ink-0);
+    }
+
+    // Keyboard-only focus ring (mouse focus reads as click).
+    &:focus-visible {
+      outline: 2px solid var(--accent-strong);
+      outline-offset: 1px;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Explorer tree polish — indent guides + smoother fold transition
+// ---------------------------------------------------------------------------
+//
+// Stock Quartz already paints a `border-left: 1px solid var(--lightgray)`
+// on `.folder-outer > ul` (see upstream `explorer.scss`). We re-pin
+// the rule color to `--rule` so it tracks the redesign tokens, lift
+// the indent slightly so deep trees read clearly, and smooth the
+// fold-icon rotation.
+
+.explorer-content {
+  .folder-outer > ul {
+    border-left: 1px solid var(--rule);
+    margin-left: 8px;
+    padding-left: 0.8rem;
+  }
+}
+
+.folder-icon {
+  // brain: stock sets a 0.3s linear-ease transition; bump easing to
+  // the shared smooth-out-quint so the rotation feels paper-like
+  // rather than mechanical.
+  transition: transform var(--motion-mid) var(--motion-easing);
+}
+
+// Active note highlight — stock Quartz colors `.explorer-content li > a.active`
+// with `--tertiary`. Repaint to `--accent-strong` so the active
+// affordance tracks the link palette.
+.explorer-content ul li > a.active {
+  color: var(--accent-strong);
+}
+
+// ---------------------------------------------------------------------------
+// 3. RIGHT sidebar elevation — ToC + Backlinks as cards
+// ---------------------------------------------------------------------------
+//
+// The graph component already styles itself with the matching surface
+// + radius via `graph.scss`. ToC and Backlinks need the same
+// treatment so the right sidebar reads as a stack of three coordinated
+// panels rather than two flat rivers around a card.
+//
+// Stock markup: `<div class="toc">…</div>` + `<div class="backlinks">…</div>`.
+// We paint each as a `--surface-1` card with `8px` radius and `0.6rem`
+// padding (per the plan spec). The shadow is subtle (`--shadow-sm`)
+// so panels don't compete with the article column for attention.
+
+.sidebar.right {
+  .toc,
+  .backlinks {
+    background: var(--surface-1);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    box-shadow: var(--shadow-sm);
+    box-sizing: border-box;
+
+    // Section heading inside each card — Quartz emits `<h3>` for both
+    // ToC and Backlinks. Tighten the top margin so the heading sits
+    // close to the card edge rather than floating mid-air.
+    > h3 {
+      margin-top: 0;
+      margin-bottom: 0.4rem;
+      font-size: var(--fs-sm);
+      // Use the small-caps treatment defined in `_typography.scss` so
+      // the heading reads as metadata rather than article content.
+      font-variant-caps: all-small-caps;
+      letter-spacing: 0.08em;
+      color: var(--ink-1);
+    }
+  }
+
+  // Backlinks list items — tighten leading so multiple backlinks
+  // stack as a compact reference list rather than running prose.
+  .backlinks ul li {
+    line-height: 1.4;
+    margin: 0.2rem 0;
+  }
+}

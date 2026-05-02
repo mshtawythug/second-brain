@@ -1,1 +1,204 @@
-// placeholder — Lane C (component polish) fills this in.
+// Brain code surface — Lane C of the 2026 commonplace-book redesign.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_code.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via `custom.scss`'s
+// `@use "./brain/code"` line.
+//
+// Scope of this file:
+//
+//   * `<pre>` block surface — rounded `8px`, `--shadow-sm`, padding
+//     `1rem 1.2rem`, `--fs-sm` body. Background `--surface-2` in light,
+//     a deeper espresso in dark (the dark-mode token wiring is in
+//     `_tokens.scss`'s dark-mode `:root[saved-theme="dark"]` block —
+//     `--surface-2` becomes `#2a2418` there).
+//   * Inline `code` polish — Lane A's `_surface.scss` already paints
+//     the background; this file refines padding/radius/no-shrink so
+//     `code` snippets read at the surrounding text size.
+//   * Language label + copy button hover affordance — wires the
+//     `[data-language]` attribute Quartz's `Plugin.SyntaxHighlighting`
+//     stamps on `<pre>` into a CSS-only top-right pill, paired with
+//     a brain-themed copy button injected by `codeCopy.js`.
+//   * Hide stock Quartz `.clipboard-button` — Body.tsx ships a
+//     stock clipboard button that, if left alone, would render next
+//     to our brain-themed `.brain-code-copy`. Our button supersedes
+//     it; this file hides stock's via `display: none`.
+//
+// Tokens consumed (from `_tokens.scss`):
+//   * `--surface-1` / `--surface-2` — code surfaces
+//   * `--shadow-sm`                 — pre elevation
+//   * `--fs-sm`                     — pre font size
+//   * `--ink-1` / `--ink-2`         — label + button colors
+//   * `--rule`                      — button border
+//   * `--accent-soft`               — copy hover
+//   * `--motion-fast`/`--motion-easing` — transitions
+
+// ---------------------------------------------------------------------------
+// 1. <pre> block surface
+// ---------------------------------------------------------------------------
+//
+// Stock Quartz paints `pre { padding: 0 0.5rem; border-radius: 5px;
+// border: 1px solid var(--lightgray); }` (see base.scss). We override
+// to the redesign aesthetic: bigger radius, generous padding, soft
+// shadow, no border. Background pulls from the surface scale —
+// `--surface-2` is the third-tier paper surface in light, the espresso
+// `#2a2418` in dark (see `_tokens.scss`).
+
+article pre {
+  position: relative;
+  background: var(--surface-2);
+  border: 0;
+  border-radius: 8px;
+  box-shadow: var(--shadow-sm);
+  padding: 1rem 1.2rem;
+  font-size: var(--fs-sm);
+  // Stock Quartz keeps `<pre>` content as a single line in some
+  // mermaid contexts; cap with an explicit overflow rule so wide
+  // code scrolls horizontally rather than blowing out the column.
+  overflow-x: auto;
+  margin: 1.2rem 0;
+  // brain: line-height tuned for code reading. Stock leaves it at the
+  // article's `1.7`, which is far too loose for monospace.
+  line-height: 1.55;
+}
+
+// Reset the inner `<code>` so its padding doesn't double-pad inside
+// the pre. Stock Quartz adds `padding: 0.5rem 0` on `pre > code`;
+// keep that for line-number gutters but trim outer.
+article pre > code {
+  padding: 0;
+  background: none;
+  font-size: inherit;
+}
+
+// ---------------------------------------------------------------------------
+// 2. Inline `code` polish
+// ---------------------------------------------------------------------------
+//
+// Lane A's `_surface.scss` already writes `code:not(pre code) { background: var(--surface-2) }`.
+// This block refines the box: tighter padding, smaller radius, and
+// `font-size: 0.92em` so `code` snippets don't visibly shrink against
+// surrounding running serif text. The 0.92em is deliberate — pure
+// `1em` reads chunky against Newsreader's optical-sized body, while
+// the stock `0.9em` reads tiny.
+
+code:not(pre code) {
+  padding: 0.1rem 0.35rem;
+  border-radius: 3px;
+  font-size: 0.92em;
+  // Reset stock Quartz's `color: var(--dark)` so inline code rides the
+  // ink scale for theme consistency. Falls back to the body color
+  // otherwise.
+  color: var(--ink-0);
+}
+
+// ---------------------------------------------------------------------------
+// 3. Hide stock Quartz `.clipboard-button`
+// ---------------------------------------------------------------------------
+//
+// `Body.tsx` injects a stock clipboard button on every `<pre>`. Our
+// brain copy button (injected by `codeCopy.js`) supersedes it. Hiding
+// stock's avoids two-buttons-side-by-side. The stock script's click
+// behavior still functions if accessed programmatically; we only hide
+// the visual chrome.
+//
+// brain (Lane C audit fix 2026-05-02): scoped to `article pre
+// .clipboard-button`. The added selector chain (3,0,2 vs stock's
+// 0,1,0) wins on specificity without `!important`, and confines the
+// rule to article code blocks — popovers / mermaid diagrams / future
+// non-pre clipboard hooks won't be globally hidden.
+
+article pre .clipboard-button {
+  display: none;
+}
+
+// ---------------------------------------------------------------------------
+// 4. Brain copy button + language label hover area
+// ---------------------------------------------------------------------------
+//
+// Both the copy button and the language label live in the top-right
+// of the `<pre>`. Together they form a small chrome that fades in on
+// hover. Default: opacity 0; on `pre:hover` or `pre:focus-within`:
+// opacity 1. `focus-within` covers keyboard users tabbing into the
+// button.
+//
+// The language label is pure CSS, driven by `pre[data-language]`
+// (Quartz's `Plugin.SyntaxHighlighting` stamps the attribute). Falls
+// back gracefully when absent — the `::before` only renders when the
+// attribute is present, so untyped code blocks stay clean.
+
+article pre[data-language]::before {
+  content: attr(data-language);
+  position: absolute;
+  top: 0.5rem;
+  // brain: room for the 64px-wide copy button at the same right edge.
+  // The label sits to the LEFT of the button so they don't overlap.
+  right: 4.2rem;
+  font-family: var(--codeFont);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--motion-easing);
+}
+
+article pre:hover[data-language]::before,
+article pre:focus-within[data-language]::before {
+  opacity: 1;
+}
+
+// The injected copy button — class is `.brain-code-copy`, written
+// by `codeCopy.js`. ARIA label set there too. Visual rules here.
+.brain-code-copy {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  background: var(--surface-1);
+  color: var(--ink-1);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  font-family: var(--bodyFont);
+  font-size: var(--fs-xs);
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--motion-fast) var(--motion-easing),
+    background var(--motion-fast) var(--motion-easing),
+    color var(--motion-fast) var(--motion-easing);
+
+  &:hover {
+    background: var(--accent-soft);
+    color: var(--ink-0);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 1px;
+    opacity: 1;
+  }
+
+  // brain: the "Copied" pulse swaps the label text via JS; the chip
+  // itself uses the success-callout color briefly (token shared with
+  // `_callouts.scss`'s `--callout-success`). Adds a small confidence
+  // affordance — users see the action took effect.
+  &.is-copied {
+    background: color-mix(in srgb, var(--callout-success, #4f8a5e) 18%, var(--surface-1));
+    color: var(--callout-success, #4f8a5e);
+    border-color: var(--callout-success, #4f8a5e);
+    opacity: 1;
+  }
+}
+
+// Reveal on hover or keyboard focus on the surrounding pre.
+article pre:hover .brain-code-copy,
+article pre:focus-within .brain-code-copy {
+  opacity: 1;
+}

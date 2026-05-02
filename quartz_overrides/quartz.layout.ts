@@ -24,10 +24,20 @@ import { PageLayout, SharedLayout } from "./quartz/cfg"
 import * as Component from "./quartz/components"
 
 // components shared across all pages
+//
+// brain: Lane C redesign — `CommandPalette` lives in `afterBody` so
+// the modal markup ships with every page exactly once (the script
+// listener at `Cmd/Ctrl+K` is then reachable from any route). The
+// component is hidden by default (sets the `hidden` attribute on its
+// root `<div>`) and only revealed when the inline script removes the
+// attribute on a Cmd-K press. See
+// `quartz/components/CommandPalette.tsx` for the markup and
+// `quartz/components/scripts/commandPalette.inline.ts` for the
+// runtime open/close + fuzzy search logic.
 export const sharedPageComponents: SharedLayout = {
   head: Component.Head(),
   header: [],
-  afterBody: [],
+  afterBody: [Component.CommandPalette()],
   // brain: replace before deploy.
   footer: Component.Footer({ links: { GitHub: "#", "Source": "#" } }),
 }

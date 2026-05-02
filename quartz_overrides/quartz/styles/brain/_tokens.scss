@@ -64,6 +64,13 @@
   // reads on cream without disappearing.
   --rule: #e0d6c4;
 
+  // Scrim — backdrop tint for modal overlays (Cmd-K, future modals).
+  // Light-mode scrim sits a touch warm so it reads as "paper darkened
+  // to vellum" rather than "neutral gray screen." 0.45 alpha balances
+  // legibility of the focused modal with continued visibility of the
+  // page underneath.
+  --scrim: rgba(20, 16, 10, 0.45);
+
   // Shadow tiers. Stacked alpha-shadows give a tighter, less
   // muddy edge than a single mid-strength shadow.
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04), 0 1px 1px rgba(0, 0, 0, 0.02);
@@ -126,6 +133,12 @@
   --surface-2: #2a2418;
 
   --rule: #2e2820;
+
+  // Scrim — backdrop tint for modal overlays. Bumped to 0.55 alpha
+  // because the dark page bg is already espresso; a 0.45 scrim
+  // wouldn't read as a depth cue against `#16110a`. Pure black so the
+  // scrim doesn't pull warm at the edges.
+  --scrim: rgba(0, 0, 0, 0.55);
 
   // Outline shadows replace alpha shadows in dark mode. Alpha-on-near-
   // black loses all visible elevation; a 1px hairline outline reads as

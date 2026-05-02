@@ -1,1 +1,217 @@
-// placeholder — Lane C (component polish) fills this in.
+// Brain callouts — Lane C of the 2026 commonplace-book redesign.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_callouts.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via `custom.scss`'s
+// `@use "./brain/callouts"` line.
+//
+// Stock Quartz callouts (`quartz/styles/callouts.scss`) ship a
+// Material-style palette — saturated blue / cyan / orange / red over
+// white — that clashes hard with the cream-paper redesign. This file
+// repaints every Quartz callout type into the redesign palette, then
+// adds the editorial chrome the plan calls for: tinted background
+// (`color-mix`), a 3px left border in the type color, a small-caps
+// title bar, and a subtle `--shadow-sm` on the container.
+//
+// Callout types touched (the full Quartz set):
+//   note, info, abstract, tip, success, question, warning, danger,
+//   failure, bug, example, quote.
+//
+// Each gets its own `--callout-{type}` token at the top of `:root` /
+// `:root[saved-theme="dark"]` so the palette is auditable in one
+// place. The per-type rule below resolves `--type-color` from the
+// matching token, then layers the chrome on top.
+//
+// Strategy note — we don't try to fight stock Quartz on icon/glyph
+// markup (the SVG icon URIs in stock `callouts.scss` still apply via
+// `--callout-icon`). We only repaint colors, the title bar, and the
+// container.
+//
+// Tokens consumed (from `_tokens.scss`):
+//   * `--surface-1`     — base for the `color-mix` tinted bg
+//   * `--shadow-sm`     — container elevation
+//   * `--ink-0`         — body text inside callouts
+//   * `--accent-soft`/`--accent-strong` — ridden by `note` + `quote`
+//   * `--brain-tier-*`  — re-used so callouts and the graph share hues
+//
+// Tokens this file declares (consumed only inside this partial):
+//   * `--callout-note`     → secondary terracotta
+//   * `--callout-info`     → tertiary sage
+//   * `--callout-abstract` → cool blue (added — the only new hue)
+//   * `--callout-tip`      → tertiary sage (shares with info; tip is rarer)
+//   * `--callout-success`  → green (added)
+//   * `--callout-question` → amber (added)
+//   * `--callout-warning`  → amber (shared with question — same urgency)
+//   * `--callout-danger`   → deep red (added)
+//   * `--callout-failure`  → deep red (shared with danger)
+//   * `--callout-bug`      → deep red (shared with danger)
+//   * `--callout-example`  → purple (added)
+//   * `--callout-quote`    → muted ink (--ink-2) — quote chrome reads as soft
+
+// ---------------------------------------------------------------------------
+// Type-color tokens
+// ---------------------------------------------------------------------------
+//
+// Defined globally so devtools-inspecting any callout surfaces the
+// per-type hue in one read. Light-mode values picked to clear ~3:1
+// against `--surface-1`; dark-mode values lifted lightness + reduced
+// saturation per the same rules in `_tokens.scss` for the source
+// palette.
+
+:root {
+  --callout-note: var(--accent-strong);            // #b85427 terracotta
+  --callout-info: #4a8fa0;                         // muted blue-teal
+  --callout-abstract: #5e7c98;                     // dusty steel blue
+  --callout-tip: var(--brain-tier-ingested);       // sage #7a8a6b
+  --callout-success: #4f8a5e;                      // forest green
+  --callout-question: #c08a3a;                     // burnt amber
+  --callout-warning: #c08a3a;                      // shared with question
+  --callout-danger: #a8362b;                       // deep brick red
+  --callout-failure: #a8362b;                      // shared with danger
+  --callout-bug: #a8362b;                          // shared with danger
+  --callout-example: #7a5b8f;                      // muted plum
+  --callout-quote: var(--ink-2);                   // muted ink — quote reads as soft
+}
+
+:root[saved-theme="dark"] {
+  --callout-note: var(--accent-strong);            // #e8a570 (already lifted in tokens)
+  --callout-info: #7baeb8;
+  --callout-abstract: #93a8c0;
+  --callout-tip: var(--brain-tier-ingested);       // #c5cda1
+  --callout-success: #8ab797;
+  --callout-question: #d6b06a;
+  --callout-warning: #d6b06a;
+  --callout-danger: #d97a6f;
+  --callout-failure: #d97a6f;
+  --callout-bug: #d97a6f;
+  --callout-example: #b59cca;
+  --callout-quote: var(--ink-2);
+}
+
+// ---------------------------------------------------------------------------
+// Container chrome — applied uniformly via the data-callout attribute
+// ---------------------------------------------------------------------------
+//
+// Stock callouts.scss writes `--color`, `--border`, `--bg` per type.
+// We override those vars to pull from our `--callout-{type}` tokens
+// instead, then add the `--shadow-sm` + `border-left: 3px solid` +
+// tinted bg via `color-mix`.
+//
+// Why mutate stock's `--color`/`--bg` rather than restyle every
+// selector: stock's `.callout-title { color: var(--color) }` (and
+// inner-`<p>` in title, and icon mask color) all read the same vars,
+// so swapping the var values cleanly retints the entire chrome with
+// one block. Less drift surface than re-targeting each child.
+
+.callout {
+  // brain: redesign chrome — the per-type `--color` set in the rules
+  // below picks the hue; this block applies the universal layout.
+  border: 0;
+  border-left: 3px solid var(--type-color, var(--callout-note));
+  border-radius: 6px;
+  // brain: tinted background via `color-mix`. 8% per the plan spec —
+  // visible enough to read as a tinted region, faint enough not to
+  // shout. Falls back to `--surface-1` cleanly when `color-mix` is
+  // unsupported (graceful degradation).
+  background: color-mix(in srgb, var(--type-color, var(--callout-note)) 8%, var(--surface-1));
+  box-shadow: var(--shadow-sm);
+  margin: 1.2rem 0;
+  padding: 0.4rem 1rem;
+  color: var(--ink-0);
+
+  // Override stock's `--color` so the title bar + icon mask track
+  // the redesigned hue. (`--bg` is irrelevant since we paint the
+  // background directly above; we still null it for cleanliness.)
+  --color: var(--type-color, var(--callout-note));
+  --bg: transparent;
+  --border: var(--type-color, var(--callout-note));
+}
+
+// Title bar — small-caps tracking, type-color tint, tighter padding
+// than stock so the title sits close to the content rather than
+// floating mid-card.
+.callout-title {
+  padding: 0.6rem 0;
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.08em;
+  font-weight: 600;
+  color: var(--type-color, var(--callout-note));
+
+  // The inner `<p>` Quartz wraps around the title text inherits the
+  // type color via stock's `.callout-title-inner > p { color: var(--color) }`.
+  // We re-pin to be explicit (and to track the redesign small-caps).
+  > .callout-title-inner > p {
+    color: inherit;
+    font-variant-caps: inherit;
+    letter-spacing: inherit;
+    margin: 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Per-type rules — set --type-color, the chrome above does the rest
+// ---------------------------------------------------------------------------
+//
+// Stock callouts.scss uses the `&[data-callout="x"]` selector pattern
+// inside its top-level `.callout` block. Since this file is loaded
+// AFTER stock's via custom.scss's `@use` order (base → tokens →
+// typography → surface → atmosphere → motion → links → sidebar →
+// article → marginalia → callouts → code → home), we override at
+// equal specificity by using the same `&[data-callout="x"]` shape.
+
+.callout {
+  &[data-callout="note"] {
+    --type-color: var(--callout-note);
+  }
+  &[data-callout="info"],
+  &[data-callout="todo"] {
+    --type-color: var(--callout-info);
+  }
+  &[data-callout="abstract"],
+  &[data-callout="summary"],
+  &[data-callout="tldr"] {
+    --type-color: var(--callout-abstract);
+  }
+  &[data-callout="tip"],
+  &[data-callout="hint"],
+  &[data-callout="important"] {
+    --type-color: var(--callout-tip);
+  }
+  &[data-callout="success"],
+  &[data-callout="check"],
+  &[data-callout="done"] {
+    --type-color: var(--callout-success);
+  }
+  &[data-callout="question"],
+  &[data-callout="help"],
+  &[data-callout="faq"] {
+    --type-color: var(--callout-question);
+  }
+  &[data-callout="warning"],
+  &[data-callout="caution"],
+  &[data-callout="attention"] {
+    --type-color: var(--callout-warning);
+  }
+  &[data-callout="danger"],
+  &[data-callout="error"] {
+    --type-color: var(--callout-danger);
+  }
+  &[data-callout="failure"],
+  &[data-callout="fail"],
+  &[data-callout="missing"] {
+    --type-color: var(--callout-failure);
+  }
+  &[data-callout="bug"] {
+    --type-color: var(--callout-bug);
+  }
+  &[data-callout="example"] {
+    --type-color: var(--callout-example);
+  }
+  &[data-callout="quote"],
+  &[data-callout="cite"] {
+    --type-color: var(--callout-quote);
+    // Quote callouts stay editorially soft — italicize the body to
+    // distinguish them from `<blockquote>` pull-quotes inside articles.
+    font-style: italic;
+  }
+}

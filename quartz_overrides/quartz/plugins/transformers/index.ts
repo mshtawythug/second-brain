@@ -46,7 +46,15 @@ export { RoamFlavoredMarkdown } from "./roam"
 //     `/static/linkSourceTag.js` to add `data-brain-source` to
 //     ingested links at runtime (source identity is in the URL path
 //     but extraction at build-time would require a doc lookup).
+//   * CodeCopy         — Lane C redesign — injects
+//     `/static/codeCopy.js` to add a brain-themed copy button to
+//     every `<pre>` in the article (supersedes stock Quartz's
+//     `.clipboard-button`, which `_code.scss` hides) and to lift
+//     the `data-language` attribute from inner `<code>` to outer
+//     `<pre>` so the CSS-only language label can render via
+//     `attr()`.
 export { DerivedFenceMark } from "./derivedFenceMark"
 export { ReloadSignal } from "./reloadSignal"
 export { LinkKindMark } from "./linkKindMark"
 export { LinkSourceTag } from "./linkSourceTag"
+export { CodeCopy } from "./codeCopy"

@@ -1,1 +1,155 @@
-// placeholder — Lane C (component polish) fills this in.
+// Brain home page card grid — Lane C of the 2026 commonplace-book redesign.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_home.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via `custom.scss`'s
+// `@use "./brain/home"` line.
+//
+// Scope of this file:
+//
+//   * Detect the home page via `body[data-slug="index"]` (Quartz
+//     stamps the slug onto `<body>` from `renderPage.tsx`).
+//   * Inside the article body's top-level `<ul>` lists, render the
+//     direct child `<li>` items as a responsive card grid.
+//   * Cards: `--surface-1` background, `--shadow-md` on hover, accent
+//     border on hover, generous padding.
+//   * Wiki + ingested links INSIDE a card opt out of Lane B's
+//     underline + box-shadow source rail — the card itself IS the
+//     affordance, so the inner link should read as plain text.
+//
+// CSS-only — no markdown change. Degrades to a vertical list cleanly
+// when the assumed `<ul>` shape isn't present (for a future home doc
+// that uses different markup).
+//
+// Tokens consumed (from `_tokens.scss`):
+//   * `--surface-1` — card background
+//   * `--shadow-sm` / `--shadow-md` — resting + hover elevation
+//   * `--rule` — card border (resting)
+//   * `--accent-strong` — card border on hover
+//   * `--ink-0` / `--ink-1` / `--ink-2` — text + supporting copy
+//   * `--motion-fast` / `--motion-mid` / `--motion-easing` — transitions
+
+// ---------------------------------------------------------------------------
+// 1. Card grid layout — only on the home page
+// ---------------------------------------------------------------------------
+//
+// The home `index.md` is structured as `<h2>` section headings followed
+// by `<ul>` lists where each `<li>` contains a wiki/ingested link plus
+// a description (`<a>...</a> — text`). We turn each top-level `<ul>`
+// into a CSS grid, with each `<li>` becoming a card.
+//
+// Why not target h2-anchored sections individually: h2 + ul is a
+// repeated pattern (Doors, Topic clusters, etc.), and they all share
+// the same card treatment. Repainting every `<ul>` inside the article
+// is simpler and stays consistent if more sections land later.
+//
+// Why CSS-only: the plan flagged this explicitly — markdown stays
+// human-edited and unsurprising; no markdown rewrite, no JS dependency.
+// The grid degrades to a vertical list (the default `<ul>` rendering)
+// in any browser that ignores `display: grid`.
+
+body[data-slug="index"] {
+  article.popover-hint > ul,
+  // brain: also catch nested .popover-hint wrappers (Quartz's article
+  // body is `<article class="popover-hint">`, but we name both forms
+  // for resilience against future renderPage.tsx changes).
+  article > ul {
+    list-style: none;
+    padding: 0;
+    margin: 0.6rem 0 1.6rem 0;
+
+    // Responsive grid: 3 columns at desktop, 2 at tablet, 1 below.
+    // `auto-fit` + `minmax(240px, 1fr)` would also work but explicit
+    // breakpoints match the plan's "3/2/1" spec exactly and read
+    // clearly in devtools.
+    display: grid;
+    gap: 0.8rem;
+    grid-template-columns: 1fr;
+
+    @media (min-width: 768px) {
+      grid-template-columns: repeat(2, 1fr);
+    }
+    @media (min-width: 1024px) {
+      grid-template-columns: repeat(3, 1fr);
+    }
+
+    // Each list item becomes a card.
+    > li {
+      box-sizing: border-box;
+      background: var(--surface-1);
+      border: 1px solid var(--rule);
+      border-radius: 8px;
+      padding: 1.2rem;
+      box-shadow: var(--shadow-sm);
+      color: var(--ink-1);
+      line-height: 1.5;
+      list-style: none;
+      transition:
+        transform var(--motion-mid) var(--motion-easing),
+        box-shadow var(--motion-mid) var(--motion-easing),
+        border-color var(--motion-mid) var(--motion-easing);
+
+      &:hover {
+        transform: translateY(-2px);
+        box-shadow: var(--shadow-md);
+        border-color: var(--accent-strong);
+      }
+
+      // The leading wiki/ingested link inside the card reads as the
+      // card title — promote its visual weight.
+      > a:first-child {
+        display: inline;
+        font-family: var(--displayFont);
+        font-size: var(--fs-md);
+        font-weight: 600;
+        color: var(--ink-0);
+        margin-right: 0.25em;
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Opt cards out of Lane B link-kind chrome
+// ---------------------------------------------------------------------------
+//
+// Lane B's `_links.scss` paints `[data-brain-link-kind="wiki"]` with a
+// terracotta underline + the `a.internal` reset, and
+// `[data-brain-link-kind="ingested"]` with the source-tinted left
+// rail. Inside a card, both treatments compete with the card's own
+// hover affordance — the card lifts, that's the affordance, the
+// link should read as plain card title text.
+//
+// Higher specificity than Lane B (adds the `body[data-slug="index"]`
+// + `> li > a` chain) so this override wins without `!important`.
+//
+// brain (Lane C audit fix 2026-05-02): exclude `.tag-link` from the
+// reset. Tag chips (rendered by `Component.TagList` and inline
+// `[[tags/x]]` wiki-links) carry both `class="internal"` AND
+// `class="tag-link"`. Without the `:not(.tag-link)` filter the
+// reset blew away Lane B's pill chrome (background, border-radius,
+// padding) — leaving a bare-text "tag" in the card. The chip *is*
+// the affordance, the card lift is complementary; both should
+// survive.
+
+body[data-slug="index"] article ul > li > a[data-brain-link-kind="wiki"]:not(.tag-link),
+body[data-slug="index"] article ul > li > a[data-brain-link-kind="ingested"]:not(.tag-link),
+body[data-slug="index"] article ul > li > a.internal:not(.tag-link) {
+  text-decoration: none;
+  background: transparent;
+  border-radius: 0;
+  padding: 0;
+  // Source-rail box-shadow reset for ingested kind.
+  box-shadow: none;
+
+  &:hover {
+    text-decoration-thickness: 0;
+    box-shadow: none;
+  }
+}
+
+// Tag-link chips inside cards stay as chips (the chip *is* the
+// affordance, and the card's hover lift complements rather than
+// competes with the chip's own micro-interaction). The
+// `:not(.tag-link)` filter on the reset above is what preserves
+// them — without it Lane B's pill chrome would be wiped.

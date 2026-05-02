@@ -168,6 +168,21 @@ const config: QuartzConfig = {
       // for the inject contract and the static script for the
       // tagging logic.
       Plugin.LinkSourceTag(),
+      // brain: Lane C redesign — inject the runtime code-copy injector
+      // (`/static/codeCopy.js`) into every page. The injector walks
+      // every `<pre>` in the article body, lifts the `data-language`
+      // attribute from the inner `<code>` to the outer `<pre>` (so
+      // the CSS-only language label in `_code.scss` can read it via
+      // `attr()`), and appends a brain-themed `.brain-code-copy`
+      // button. Stock Quartz's `.clipboard-button` is hidden via
+      // `_code.scss` so the two don't render side-by-side. Always
+      // emits (no env-var gate, like `LinkSourceTag`) — the script is
+      // part of the production redesign. No markdown ordering
+      // requirement; grouped here next to `LinkSourceTag` so the
+      // brain script-only transformers stay co-located. See
+      // `quartz/plugins/transformers/codeCopy.ts` for the inject
+      // contract and `quartz/static/codeCopy.js` for the injector.
+      Plugin.CodeCopy(),
       // brain: inject the polling reload watcher (`/static/reload.js`)
       // into every page when `BRAIN_WIKI_RELOAD=1` at build time.
       // Replaces Quartz's `--serve` WebSocket reload, which is dead in

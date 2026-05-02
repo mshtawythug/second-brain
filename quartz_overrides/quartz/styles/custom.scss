@@ -21,6 +21,10 @@
 //   7. brain/links      — Lane B — link-kind underline + tag chip +
 //                          source-tinted ingested-tier rules.
 //   8. brain/sidebar    — Lane C — left/right sidebar layout polish.
+//   8a. brain/cmdk      — Lane C — Cmd/Ctrl-K palette modal visuals.
+//                          Listed between sidebar and article so the
+//                          modal chrome inherits the surface scale
+//                          but doesn't interfere with article rules.
 //   9. brain/article    — Lane C — article column measure + heading
 //                          rhythm + blockquote + meta typography.
 //  10. brain/marginalia — Lane D — backlinks-as-figure-margin notes
@@ -44,6 +48,7 @@
 @use "./brain/motion";        // Lane D
 @use "./brain/links";
 @use "./brain/sidebar";
+@use "./brain/cmdk";          // Lane C — Cmd-K modal visuals
 @use "./brain/article";
 @use "./brain/marginalia";    // Lane D
 @use "./brain/callouts";
