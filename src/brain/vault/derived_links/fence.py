@@ -61,6 +61,16 @@ _SECTION_HEADING: str = "## Related (auto-generated, do not edit)"
 
 _logger = logging.getLogger(__name__)
 
+# Quartz's wiki-link regex defines the alias group with character class
+# `[^\[\]\#]`, so any `[` or `]` inside an alias makes the whole `[[...]]`
+# fail to match and emit as raw text. Doc titles can contain bracketed
+# prefixes (e.g. `Re: [External] Re: …` from Gmail subjects), so we swap
+# `[` → `(` and `]` → `)` only in the alias slot before interpolating.
+# Targets are slugified upstream and never contain these characters, so
+# this only applies to alias text.
+def _safe_alias(title: str) -> str:
+    return title.replace("[", "(").replace("]", ")")
+
 
 def extract_fence(body: str) -> tuple[str, str | None]:
     """Split ``body`` into ``(body_without_fence, fence_text_or_None)``.
@@ -215,7 +225,7 @@ def render_fenced_section(
         partner_date = _parse_metadata_date(dict(metadata or {}))
         date_missing = partner_date is None
         date_key = -partner_date.toordinal() if partner_date else 0
-        bullet = f"- [[{stem}|{title}]] *({rule})*"
+        bullet = f"- [[{stem}|{_safe_alias(title)}]] *({rule})*"
         bullets.append((-float(weight), date_missing, date_key, bullet))
 
     if not bullets:

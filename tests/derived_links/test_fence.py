@@ -559,6 +559,54 @@ class TestRenderFencedSection:
         assert rendered is not None
         assert rendered.index("Real Date") < rendered.index("Garbage Date")
 
+    def test_partner_title_with_brackets_renders_quartz_parseable_alias(
+        self, test_db: psycopg.Connection
+    ) -> None:
+        # Regression: Quartz's wikilinkRegex defines the alias group with
+        # character class `[^\[\]\#]`, so any `[` or `]` in the alias text
+        # makes the whole `[[…]]` fail to match and emit as raw markdown.
+        # Gmail subjects like `Re: [External] …` propagate to partner
+        # `documents.title` and broke the rendered fence in the wild.
+        # The fix sanitizes the alias slot only (target stays untouched).
+        import re
+
+        # Vendored Quartz wikilinkRegex (quartz/plugins/transformers/ofm.ts).
+        # Keep this in sync with upstream if Quartz is ever upgraded — it's
+        # the contract this regression test enforces.
+        quartz_wikilink = re.compile(
+            r"!?\[\[([^\[\]\|\#\\]+)?(#+[^\[\]\|\#\\]+)?(\\?\|[^\[\]\#]*)?\]\]"
+        )
+
+        center_id = _seed_partner(
+            test_db,
+            title="Center",
+            vault_path="_ingested/krisp/2026-04-15-center.md",
+            metadata={"date": "2026-04-15"},
+        )
+        partner_id = _seed_partner(
+            test_db,
+            title="Re: [External] Re: Ali Sarkis × vendor-ev",
+            vault_path="_ingested/gmail/2026-04-12-partner.md",
+            metadata={"date": "Sat, 12 Apr 2026 09:00:00 -0700"},
+            source_kind="gmail",
+        )
+        _insert_derived_link(
+            test_db, a_id=center_id, b_id=partner_id,
+            rule="shared_thread", weight=1.0,
+        )
+
+        rendered = render_fenced_section(test_db, center_id)
+        assert rendered is not None
+        # Alias bracketed prefix has been sanitized to round parens.
+        assert "[[2026-04-12-partner|Re: (External) Re: Ali Sarkis × vendor-ev]]" in rendered
+        # And no raw `[…]` survives in the alias slot — the bullet line
+        # itself must round-trip Quartz's wikilinkRegex cleanly.
+        bullet = next(
+            line for line in rendered.splitlines()
+            if line.startswith("- [[2026-04-12-partner|")
+        )
+        assert quartz_wikilink.search(bullet) is not None, bullet
+
 
 @pytest.mark.parametrize(
     "raw_date",
