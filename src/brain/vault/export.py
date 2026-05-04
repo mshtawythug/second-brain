@@ -23,7 +23,7 @@ import yaml
 
 from . import init_vault
 from .frontmatter import dump_frontmatter, parse_frontmatter
-from .slug import slugify
+from .slug import gmail_slug, slugify
 
 _BATCH_SIZE = 100
 _MAX_SHORT_ID = 8  # first N chars of an external/document UUID for filename use
@@ -206,6 +206,46 @@ def _date_prefix(doc: _DocumentForExport) -> str:
     return doc.ingested_at.date().isoformat()
 
 
+def _parse_iso_datetime(raw: Any) -> datetime | None:
+    """Parse an ISO-8601 string (with optional trailing ``Z``) into a datetime.
+
+    Returns ``None`` for any non-string / unparseable input. Used by the
+    Gmail-slug branch to read ``metadata.sent_at`` (set by the gmail
+    extractor). Naive datetimes survive as-is — :func:`gmail_slug` treats
+    them as UTC.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _gmail_relative_path(doc: _DocumentForExport) -> str | None:
+    """Compute the ``_ingested/gmail/<gmail-slug>.md`` path for a Gmail doc.
+
+    Returns ``None`` when the metadata is too sparse to build a stable slug
+    (no ``thread_id`` AND no usable date) — the caller falls back to the
+    generic ingested-path rules so legacy rows still export. Idempotent: a
+    given ``(thread_id, sent_at, subject)`` triple always yields the same
+    path.
+    """
+    thread_id = doc.metadata.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id:
+        return None
+    sent_at = _parse_iso_datetime(doc.metadata.get("sent_at"))
+    if sent_at is None and doc.ingested_at is None:
+        return None
+    slug = gmail_slug(
+        thread_id,
+        sent_at,
+        doc.title,
+        fallback_date=doc.ingested_at,
+    )
+    return f"_ingested/gmail/{slug}.md"
+
+
 def _ingested_relative_path(
     doc: _DocumentForExport, used_paths: set[str]
 ) -> str:
@@ -215,6 +255,11 @@ def _ingested_relative_path(
 
     - ``manual``: ``_ingested/manual/<slug>.md`` (no date prefix; older
       manual ingests had no upstream date at all).
+    - ``gmail``: ``_ingested/gmail/<gmail-slug>.md`` where ``<gmail-slug>``
+      is :func:`brain.vault.slug.gmail_slug` over
+      ``(thread_id, sent_at, subject)``. Stable across re-ingests of the
+      same thread; falls back to the generic shape below for legacy rows
+      missing ``thread_id``.
     - everything else: ``_ingested/<source>/<YYYY-MM-DD>-<external-id>-<slug>.md``
       using the first 8 chars of ``sources.external_id`` (or
       ``local-<short-doc-id>`` when no source row exists, e.g. legacy
@@ -229,6 +274,18 @@ def _ingested_relative_path(
 
     if source == "manual":
         candidate = f"_ingested/manual/{slug}.md"
+    elif source == "gmail":
+        gmail_path = _gmail_relative_path(doc)
+        if gmail_path is not None:
+            candidate = gmail_path
+        else:
+            date_prefix = _date_prefix(doc)
+            external = (
+                _short_id(doc.source_external_id)
+                if doc.source_external_id
+                else f"local-{_short_id(doc.id)}"
+            )
+            candidate = f"_ingested/gmail/{date_prefix}-{external}-{slug}.md"
     else:
         date_prefix = _date_prefix(doc)
         external = (
