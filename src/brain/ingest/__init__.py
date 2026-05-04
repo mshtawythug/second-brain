@@ -633,7 +633,9 @@ def apply_tags(
     return list(row[0] or [])
 
 
-_MIRROR_FRONTMATTER_FIELDS = frozenset({"title", "tags", "metadata", "content_type"})
+_MIRROR_FRONTMATTER_FIELDS = frozenset(
+    {"title", "tags", "metadata", "content_type", "draft"}
+)
 
 
 def update_document(
@@ -647,6 +649,7 @@ def update_document(
     metadata_patch: dict[str, Any] | None = None,
     replace_metadata: bool = False,
     new_tags: list[str] | None = None,
+    new_draft: bool | None = None,
     vault_root: Path | None = None,
 ) -> UpdateResult:
     """Update one document in place.
@@ -657,6 +660,14 @@ def update_document(
     objects are not deep-merged. Set ``replace_metadata=True`` to swap the
     blob entirely.
 
+    ``new_draft`` flips the top-level ``documents.draft`` boolean column
+    introduced by migration 007. Unlike metadata-promoted columns this lives
+    directly on ``documents``; passing ``True`` / ``False`` writes the new
+    value, ``None`` leaves it alone. The wiki build (Quartz contentIndex
+    emitter) hides ``draft=true`` docs from the explorer/graph/search;
+    ``brain search`` / ``brain list`` still surface them so the user can
+    re-publish.
+
     Raises :class:`ValueError` if ``new_content`` is empty/whitespace-only or
     if its SHA-256 collides with another document. ``embedder`` is required
     when ``new_content`` is provided. Empty/no-op edits are not an error and
@@ -664,8 +675,8 @@ def update_document(
 
     Vault mirror: when ``vault_root`` is supplied AND the edit actually
     changed the body or any frontmatter-bearing field
-    (``title`` / ``tags`` / ``metadata`` / ``content_type``), the mirror file
-    under ``vault_root`` is regenerated via
+    (``title`` / ``tags`` / ``metadata`` / ``content_type`` / ``draft``),
+    the mirror file under ``vault_root`` is regenerated via
     :func:`brain.vault.export.regenerate_vault_file`. Vault-tier rows
     (``kind='vault'``) are skipped via a DB pre-check — those files are
     file-source-of-truth and ``vault sync`` reconciles back to the DB.
@@ -676,13 +687,21 @@ def update_document(
     """
     with conn.transaction():
         row = conn.execute(
-            "SELECT title, content, content_type, metadata, tags, kind "
+            "SELECT title, content, content_type, metadata, tags, kind, draft "
             "FROM documents WHERE id=%s",
             (document_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"document not found: {document_id}")
-        cur_title, cur_content, cur_type, cur_meta, cur_tags, cur_kind = row
+        (
+            cur_title,
+            cur_content,
+            cur_type,
+            cur_meta,
+            cur_tags,
+            cur_kind,
+            cur_draft,
+        ) = row
         cur_meta = dict(cur_meta or {})
         cur_tags = list(cur_tags or [])
 
@@ -750,6 +769,11 @@ def update_document(
             sets.append("tags=%s")
             params.append(list(new_tags))
             fields_changed.append("tags")
+
+        if new_draft is not None and bool(new_draft) != bool(cur_draft):
+            sets.append("draft=%s")
+            params.append(bool(new_draft))
+            fields_changed.append("draft")
 
         if rechunked:
             assert new_hash is not None  # set above when rechunked is True

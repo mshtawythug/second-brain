@@ -281,6 +281,22 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
           const source = sourceBySlug.get(slug)
           const fm = (source?.[1].data?.frontmatter ?? {}) as Record<string, unknown>
 
+          // brain-extension: draft / seed quarantine. When the source
+          // file's frontmatter carries `draft: true` (set by `brain
+          // mark-draft <id>` and mirrored via `vault.export`), drop the
+          // entry from `contentIndex.json` entirely. The doc still
+          // exists on disk and in the DB; this only hides it from the
+          // wiki — Explorer tree, graph view, full-text search — by
+          // removing the slug from the index. Minimum-blast-radius
+          // filter: every consumer (Search component, Graph component,
+          // Explorer) reads from `contentIndex.json`, so dropping the
+          // entry quarantines the doc across the whole site without
+          // touching individual components.
+          if (fm.draft === true) {
+            delete parsed[slug]
+            continue
+          }
+
           // brain-extension: surface the vault `tier`
           // (vault | ingested) and ingest `source`
           // (krisp / slack / gmail / manual) so the graph renderer

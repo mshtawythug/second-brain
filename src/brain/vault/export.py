@@ -54,6 +54,7 @@ class _DocumentForExport:
     vault_path: str | None
     source_kind: str | None
     source_external_id: str | None
+    draft: bool
 
 
 def _is_directory_unmanaged(target: Path) -> bool:
@@ -85,7 +86,7 @@ def _is_directory_unmanaged(target: Path) -> bool:
 _DOCUMENT_FOR_EXPORT_COLUMNS = (
     "d.id::text, d.title, d.content, d.content_hash, "
     "d.content_type, d.tags, d.metadata, d.ingested_at, "
-    "d.kind, d.vault_path, s.kind, s.external_id"
+    "d.kind, d.vault_path, s.kind, s.external_id, d.draft"
 )
 
 
@@ -109,6 +110,7 @@ def _row_to_document_for_export(row: tuple[Any, ...]) -> _DocumentForExport:
         vault_path=row[9],
         source_kind=row[10],
         source_external_id=row[11],
+        draft=bool(row[12]),
     )
 
 
@@ -323,10 +325,17 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
 
     Field order is intentional and stable: id, title, created, updated, tags,
     aliases (when non-empty), kind, content_type, then ingested-tier extras
-    (source / external_id) when present. Anything not applicable (e.g.
-    ingested extras for a vault-tier doc, or an empty alias list) is omitted
-    entirely rather than written as ``null`` / ``[]`` — keeps the vault file
-    readable and round-trips cleanly through sync.
+    (source / external_id) when present, and finally ``draft: true`` when the
+    document is quarantined. Anything not applicable (e.g. ingested extras
+    for a vault-tier doc, or an empty alias list) is omitted entirely rather
+    than written as ``null`` / ``[]`` — keeps the vault file readable and
+    round-trips cleanly through sync.
+
+    The ``draft`` line is emitted ONLY when ``documents.draft`` is true. The
+    default-false case is the vast majority of files; writing ``draft: false``
+    on every export would be visual noise. The Quartz contentIndex emitter
+    reads this key (or the absence of it) to filter quarantined docs out of
+    the wiki's explorer / graph / search index without touching the DB row.
 
     Aliases come from ``documents.metadata['aliases']`` (the canonical
     storage location per the spec) — only string elements are emitted; any
@@ -352,6 +361,8 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
             fields["source"] = doc.source_kind
         if doc.source_external_id:
             fields["external_id"] = doc.source_external_id
+    if doc.draft:
+        fields["draft"] = True
     return fields
 
 

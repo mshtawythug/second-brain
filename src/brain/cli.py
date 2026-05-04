@@ -1367,6 +1367,74 @@ def rm(
     typer.echo(f"removed {doc_id[:8]}{suffix}")
 
 
+@app.command(name="mark-draft")
+def mark_draft(id: str = typer.Argument(...)) -> None:
+    """Quarantine a document: set ``draft=true`` and regenerate its mirror.
+
+    A draft doc still lives in the DB and is reachable via ``brain search`` /
+    ``brain show`` / ``brain list`` (the CLI is local — the user wants to
+    see drafts). Only the wiki hides it: the Quartz contentIndex emitter
+    skips ``draft: true`` entries entirely, so the doc disappears from the
+    explorer tree, the graph view, and full-text search on the rendered site.
+
+    Idempotent — running it twice on an already-draft doc is a no-op and
+    prints ``<short-id> is already draft``. Use ``brain mark-published`` to
+    re-publish.
+    """
+    _set_draft(id, draft=True)
+
+
+@app.command(name="mark-published")
+def mark_published(id: str = typer.Argument(...)) -> None:
+    """Un-quarantine a document: set ``draft=false`` and regenerate its mirror.
+
+    Inverse of ``brain mark-draft``. Idempotent — running it on a doc that
+    is already published prints ``<short-id> is already published`` and
+    exits 0.
+    """
+    _set_draft(id, draft=False)
+
+
+def _set_draft(id_prefix: str, *, draft: bool) -> None:
+    """Shared body for ``mark-draft`` / ``mark-published``.
+
+    Resolves ``id_prefix``, no-ops idempotently when the column already
+    matches ``draft``, otherwise calls :func:`update_document` with
+    ``new_draft=draft`` and ``vault_root=cfg.vault_path`` so the on-disk
+    mirror is regenerated with the new ``draft:`` frontmatter line. Echoes
+    a one-line confirmation.
+
+    Errors (prefix not found / ambiguous) propagate via
+    :func:`_resolve_id` → ``typer.Exit(code=1)``.
+    """
+    cfg = Config.load()
+    target_state_label = "draft" if draft else "published"
+    other_state_label = "published" if draft else "draft"
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        doc_id = _resolve_id(conn, id_prefix)
+        row = conn.execute(
+            "SELECT draft FROM documents WHERE id=%s", (doc_id,)
+        ).fetchone()
+        assert row is not None  # _resolve_id confirmed the row exists
+        current_draft = bool(row[0])
+        label = doc_id[:8]
+        if current_draft == draft:
+            typer.echo(f"{label} is already {target_state_label}")
+            return
+        try:
+            update_document(
+                conn,
+                document_id=doc_id,
+                new_draft=draft,
+                vault_root=cfg.vault_path,
+            )
+        except ValueError as e:
+            typer.secho(str(e), fg="red", err=True)
+            raise typer.Exit(code=1) from e
+    typer.echo(f"marked {label} as {target_state_label} (was {other_state_label})")
+
+
 def _rm_unlink_vault_mirror(*, cfg: Config, vault_path_rel: str | None) -> str:
     """Remove the on-disk vault mirror after ``brain rm`` deletes the DB row.
 
