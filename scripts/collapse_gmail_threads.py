@@ -69,7 +69,7 @@ import psycopg
 from brain.config import Config, ConfigError
 from brain.db import connect
 from brain.embeddings import make_embedder
-from brain.errors import BrainError
+from brain.errors import BrainError, DraftSkipped
 from brain.ingest import Embedder, ingest_document
 from brain.ingest.gmail import GmailError, Runner, read_message, to_extracted_thread
 from brain.tags import normalize_tags
@@ -148,14 +148,16 @@ class ThreadReport:
     """Outcome of collapsing one Gmail thread.
 
     Surfaced in the run report. ``error`` is non-None when the per-thread
-    transaction was rolled back; the script exits non-zero whenever any
-    thread reports an error.
+    transaction was rolled back OR when the thread was skipped because
+    every message is a draft. ``skipped_draft`` distinguishes the two:
+    the script exits non-zero whenever a hard failure is reported (i.e.
+    ``error`` is set AND ``skipped_draft`` is False).
     """
 
     thread_id: str
     title: str
     msg_count_before: int
-    msg_count_after: int  # always 1 on success, 0 on failure
+    msg_count_after: int  # always 1 on success, 0 on skip/failure
     tag_union_count: int
     refs_rewritten: int
     db_links_rewritten: int
@@ -163,6 +165,7 @@ class ThreadReport:
     db_unresolved_dropped: int
     vault_files_unlinked: int
     error: str | None = None
+    skipped_draft: bool = False
 
 
 @dataclass
@@ -172,6 +175,7 @@ class CollapseReport:
     dry_run: bool
     processed: list[ThreadReport] = field(default_factory=list)
     skipped_singletons: int = 0
+    skipped_drafts: list[ThreadReport] = field(default_factory=list)
     failed: list[ThreadReport] = field(default_factory=list)
 
     @property
@@ -181,6 +185,10 @@ class CollapseReport:
     @property
     def failure_count(self) -> int:
         return len(self.failed)
+
+    @property
+    def skipped_draft_count(self) -> int:
+        return len(self.skipped_drafts)
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +481,18 @@ def _collapse_thread(
                 )
             messages.append(read_message(old.message_id, runner=runner))
         merged_doc = to_extracted_thread(messages)
+    except DraftSkipped as exc:
+        # All-draft thread: no merged doc to insert, but drop the legacy
+        # per-message rows is *not* this script's responsibility — the
+        # operator already cleaned out drafts before running collapse,
+        # and a future re-ingest under the post-fix pipeline won't see
+        # them. Surface the skip with a sentinel error string the report
+        # formatter recognises so it doesn't get lumped in with hard
+        # failures (count goes to ``skipped_drafts`` instead of
+        # ``failed`` in the printed summary).
+        report.error = f"draft-only thread skipped: {exc}"
+        report.skipped_draft = True
+        return report
     except (GmailError, ValueError) as exc:
         report.error = f"thread fetch/assemble failed: {exc}"
         return report
@@ -693,14 +713,23 @@ def collapse_threads(
             vault_path=vault_path,
             group=group,
         )
-        if thread_report.error is not None:
+        if thread_report.skipped_draft:
+            # Draft-only threads aren't failures — they were filtered at
+            # the extractor layer because every message in the thread
+            # carries the DRAFT label. Track them separately so the
+            # script's exit code only reflects real failures.
+            report.skipped_drafts.append(thread_report)
+        elif thread_report.error is not None:
             report.failed.append(thread_report)
         else:
             report.processed.append(thread_report)
 
     # Corpus-wide directory_entries recompute. Only safe in live mode
     # AND only when no thread failed — a partial collapse leaves the
-    # directory inconsistent until the user re-runs.
+    # directory inconsistent until the user re-runs. Draft-skipped
+    # threads are NOT failures: they were filtered at the extractor
+    # layer with no DB writes, so the directory recompute can still
+    # proceed when only ``skipped_drafts`` is non-empty.
     #
     # The DELETE and the rescan run in ONE transaction so the gmail
     # source is never observed empty by another reader. ``rescan_gmail_directory``
@@ -749,7 +778,9 @@ def _format_thread_line(r: ThreadReport) -> str:
         f"unresolved-dropped={r.db_unresolved_dropped} "
         f"files-unlinked={r.vault_files_unlinked}"
     )
-    if r.error is not None:
+    if r.skipped_draft:
+        base = f"SKIPPED-DRAFT {base} reason={r.error}"
+    elif r.error is not None:
         base = f"FAILED {base} error={r.error}"
     return base
 
@@ -761,17 +792,20 @@ def _format_report(report: CollapseReport) -> str:
         lines.append("Collapse report (DRY RUN — nothing written):")
     else:
         lines.append("Collapse report:")
-    if not report.processed and not report.failed:
+    if not report.processed and not report.failed and not report.skipped_drafts:
         lines.append("  no thread groups of ≥2 per-message rows")
         return "\n".join(lines)
 
     for r in report.processed:
         lines.append(f"  {_format_thread_line(r)}")
+    for r in report.skipped_drafts:
+        lines.append(f"  {_format_thread_line(r)}")
     for r in report.failed:
         lines.append(f"  {_format_thread_line(r)}")
 
-    total_msgs = sum(r.msg_count_before for r in report.processed + report.failed)
-    total_threads = len(report.processed) + len(report.failed)
+    all_reports = report.processed + report.skipped_drafts + report.failed
+    total_msgs = sum(r.msg_count_before for r in all_reports)
+    total_threads = len(all_reports)
     total_links = sum(r.db_links_rewritten for r in report.processed)
     total_derived = sum(r.db_derived_rewritten for r in report.processed)
     total_unresolved = sum(r.db_unresolved_dropped for r in report.processed)
@@ -788,6 +822,7 @@ def _format_report(report: CollapseReport) -> str:
         lines.append(
             f"  TOTAL collapsed {report.success_count} threads "
             f"({total_msgs} per-message rows) "
+            f"skipped-drafts={report.skipped_draft_count} "
             f"failed={report.failure_count} "
             f"links={total_links} derived={total_derived} "
             f"unresolved-dropped={total_unresolved} "

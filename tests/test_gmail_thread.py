@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+from brain.errors import DraftSkipped
 from brain.ingest.gmail import to_extracted_thread
 
 
@@ -608,3 +609,100 @@ def test_empty_message_list_raises() -> None:
     """Calling with no messages is a programmer error and raises ValueError."""
     with pytest.raises(ValueError, match="at least one message"):
         to_extracted_thread([])
+
+
+# --- Drafts are excluded at extraction time --------------------------------
+
+
+def test_to_extracted_thread_filters_drafts_from_mixed_thread() -> None:
+    """A thread of [sent, draft, sent] yields a doc with only the 2 sent sections.
+
+    The DRAFT-labelled message is dropped before assembly. message_count,
+    body, label_ids, and participants all reflect only the sent messages
+    — the draft never reaches the assembled output. This guards against
+    a thread whose latest "message" is actually a discarded draft showing
+    up as the visible H2 (newest message) in the merged doc.
+    """
+    msgs = [
+        _make_message(
+            msg_id="m1",
+            internal_date="1000",
+            headers={
+                "Subject": "x",
+                "From": "Alice <alice@example.com>",
+                "To": "Bob <bob@example.com>",
+                "Date": "Tue, 28 Apr 2026 09:00:00 -0400",
+            },
+            body_text="FIRST SENT BODY",
+            label_ids=["INBOX", "SENT"],
+        ),
+        _make_message(
+            msg_id="m2",
+            internal_date="2000",
+            headers={
+                "Subject": "Re: x",
+                "From": "Alice <alice@example.com>",
+                "To": "Bob <bob@example.com>",
+                "Date": "Tue, 28 Apr 2026 10:00:00 -0400",
+            },
+            body_text="DRAFT BODY SHOULD NOT APPEAR",
+            label_ids=["DRAFT"],
+        ),
+        _make_message(
+            msg_id="m3",
+            internal_date="3000",
+            headers={
+                "Subject": "Re: x",
+                "From": "Bob <bob@example.com>",
+                "To": "Alice <alice@example.com>",
+                "Date": "Tue, 28 Apr 2026 11:00:00 -0400",
+            },
+            body_text="THIRD SENT BODY",
+            label_ids=["INBOX", "SENT"],
+        ),
+    ]
+    doc = to_extracted_thread(msgs)
+    # message_count reflects post-filter set.
+    assert doc.metadata["message_count"] == 2
+    # Body has only the two sent messages.
+    assert "FIRST SENT BODY" in doc.content
+    assert "THIRD SENT BODY" in doc.content
+    assert "DRAFT BODY SHOULD NOT APPEAR" not in doc.content
+    # Sectioning matches: 1 plain H2 (newest sent) + 1 <details> (older sent).
+    assert doc.content.count("<details>") == 1
+    # Label union does NOT include DRAFT.
+    assert "DRAFT" not in doc.metadata["label_ids"]
+    # Latest-message fields come from the latest *sent* message.
+    assert doc.metadata["sent_at"] == "2026-04-28T15:00:00+00:00"
+
+
+def test_to_extracted_thread_raises_for_all_draft_thread() -> None:
+    """A thread where every message is a draft raises ``DraftSkipped``."""
+    msgs = [
+        _make_message(
+            msg_id="m1",
+            thread_id="all-draft-thread",
+            internal_date="1000",
+            headers={
+                "Subject": "Draft 1",
+                "From": "a@x.com",
+                "Date": "Tue, 28 Apr 2026 09:00:00 -0400",
+            },
+            body_text="draft body 1",
+            label_ids=["DRAFT"],
+        ),
+        _make_message(
+            msg_id="m2",
+            thread_id="all-draft-thread",
+            internal_date="2000",
+            headers={
+                "Subject": "Draft 2",
+                "From": "a@x.com",
+                "Date": "Tue, 28 Apr 2026 10:00:00 -0400",
+            },
+            body_text="draft body 2",
+            label_ids=["DRAFT"],
+        ),
+    ]
+    with pytest.raises(DraftSkipped, match="all-draft-thread"):
+        to_extracted_thread(msgs)

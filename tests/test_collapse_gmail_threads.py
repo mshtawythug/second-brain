@@ -779,3 +779,188 @@ def test_singleton_threads_skipped(
     assert row is not None
     assert row[0] == 1
     assert row[1] == "email"
+
+
+# ---------------------------------------------------------------------------
+# 13. Drafts inside a legacy thread are filtered before assembly.
+# ---------------------------------------------------------------------------
+
+
+def test_collapse_drops_draft_from_thread(
+    test_db: psycopg.Connection,
+    fake_embedder: FakeEmbedder,
+) -> None:
+    """A pre-existing thread with [sent, sent, draft, sent] collapses to 3 sections.
+
+    Mirrors the COMPANY_REDACTED-thread case from prod: the legacy per-message rows
+    were ingested before the draft filter shipped, so a discarded draft
+    sits among real sent messages. The collapse runner re-fetches every
+    message via ``gws gmail users messages get`` — Gmail still returns
+    the draft (it exists in the user's drafts folder), so the per-thread
+    extractor must filter it before assembly. The merged doc carries
+    only the 3 sent messages; the 4 per-message rows (including the
+    draft) are deleted post-collapse because the spec is "collapse legacy
+    rows into the merged thread doc". The draft message *cannot* be
+    fetched from Gmail in real life if it was discarded (we get 'not
+    found') — that's the failure mode the user originally hit; this test
+    pins the success path where the draft is still fetchable.
+    """
+    msgs = _make_thread_messages(thread_id="thread-A", message_count=4)
+    # Mark the third message as a DRAFT.
+    msgs[2]["labelIds"] = ["DRAFT"]
+
+    # Seed all four as legacy per-message rows. We bypass `to_extracted_doc`
+    # for the draft (which now raises) by building its ExtractedDoc directly
+    # — the point of this test is that legacy rows already exist and
+    # collapse-time filtering must drop the draft.
+    from brain.ingest import ExtractedDoc
+    from brain.ingest.gmail import _extract_body, strip_boilerplate, to_extracted_doc
+
+    doc_ids: list[str] = []
+    for raw in msgs:
+        if "DRAFT" in (raw.get("labelIds") or []):
+            payload = raw.get("payload") or {}
+            headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
+            doc = ExtractedDoc(
+                title=headers.get("subject") or "(no subject)",
+                content=strip_boilerplate(_extract_body(payload).strip()),
+                content_type="email",
+                source_path=None,
+                metadata={
+                    "from": headers.get("from"),
+                    "to": headers.get("to"),
+                    "date": headers.get("date"),
+                    "message_id": raw["id"],
+                    "thread_id": raw["threadId"],
+                    "label_ids": raw.get("labelIds") or [],
+                },
+            )
+        else:
+            doc = to_extracted_doc(raw)
+        result = ingest_document(
+            test_db,
+            embedder=fake_embedder,
+            doc=doc,
+            source_kind="gmail",
+            source_external_id=raw["id"],
+        )
+        assert result.document_id is not None
+        doc_ids.append(result.document_id)
+
+    # Sanity: 4 per-message rows exist before collapse.
+    pre = test_db.execute(
+        "SELECT count(*) FROM documents WHERE thread_id=%s AND content_type='email'",
+        ("thread-A",),
+    ).fetchone()
+    assert pre is not None
+    assert pre[0] == 4
+
+    # The runner returns every message — including the draft — when the
+    # collapse script re-fetches them. The extractor (not the runner)
+    # filters drafts.
+    runner = _fake_runner({m["id"]: m for m in msgs})
+    report = collapse.collapse_threads(
+        test_db,
+        embedder=fake_embedder,
+        runner=runner,
+        vault_path=None,
+        dry_run=False,
+    )
+    assert not report.failed, [r.error for r in report.failed]
+    assert not report.skipped_drafts, [r.error for r in report.skipped_drafts]
+    assert len(report.processed) == 1
+    assert report.processed[0].msg_count_before == 4
+    assert report.processed[0].msg_count_after == 1
+
+    # Merged doc has exactly 3 sections: 1 plain H2 + 2 <details>.
+    merged = test_db.execute(
+        "SELECT content, metadata FROM documents "
+        "WHERE thread_id=%s AND content_type='email_thread'",
+        ("thread-A",),
+    ).fetchone()
+    assert merged is not None
+    body, metadata = merged
+    assert body.count("<details>") == 2
+    assert metadata["message_count"] == 3
+    # The draft body (Message 3) is filtered out.
+    assert "Message 3 body for thread thread-A." not in body
+    assert "Message 1 body for thread thread-A." in body
+    assert "Message 2 body for thread thread-A." in body
+    assert "Message 4 body for thread thread-A." in body
+
+    # All four old per-message rows are deleted post-collapse.
+    leftover = test_db.execute(
+        "SELECT count(*) FROM documents WHERE thread_id=%s AND content_type='email'",
+        ("thread-A",),
+    ).fetchone()
+    assert leftover is not None
+    assert leftover[0] == 0
+
+
+def test_collapse_skips_all_draft_thread(
+    test_db: psycopg.Connection,
+    fake_embedder: FakeEmbedder,
+) -> None:
+    """An all-draft legacy thread is reported as skipped (drafts), not failed.
+
+    The script's exit code does NOT flip non-zero because draft skips are
+    semantically distinct from real failures — the drafts were filtered
+    by the extractor on purpose, not because of a Gmail-side error.
+    """
+    msgs = _make_thread_messages(thread_id="thread-D", message_count=2)
+    for raw in msgs:
+        raw["labelIds"] = ["DRAFT"]
+
+    # Seed two legacy per-message rows that pre-date the draft filter.
+    from brain.ingest import ExtractedDoc
+    from brain.ingest.gmail import _extract_body, strip_boilerplate
+
+    for raw in msgs:
+        payload = raw.get("payload") or {}
+        headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
+        doc = ExtractedDoc(
+            title=headers.get("subject") or "(no subject)",
+            content=strip_boilerplate(_extract_body(payload).strip()),
+            content_type="email",
+            source_path=None,
+            metadata={
+                "from": headers.get("from"),
+                "to": headers.get("to"),
+                "date": headers.get("date"),
+                "message_id": raw["id"],
+                "thread_id": raw["threadId"],
+                "label_ids": raw.get("labelIds") or [],
+            },
+        )
+        ingest_document(
+            test_db,
+            embedder=fake_embedder,
+            doc=doc,
+            source_kind="gmail",
+            source_external_id=raw["id"],
+        )
+
+    runner = _fake_runner({m["id"]: m for m in msgs})
+    report = collapse.collapse_threads(
+        test_db,
+        embedder=fake_embedder,
+        runner=runner,
+        vault_path=None,
+        dry_run=False,
+    )
+    assert not report.processed
+    assert not report.failed
+    assert len(report.skipped_drafts) == 1
+    skipped = report.skipped_drafts[0]
+    assert skipped.thread_id == "thread-D"
+    assert skipped.skipped_draft is True
+    assert skipped.error is not None and "draft-only" in skipped.error
+    # Legacy rows are LEFT IN PLACE — collapse_gmail_threads is for
+    # collapsing real-thread legacy rows; cleaning out drafts is a
+    # different operator action (already done by the user).
+    leftover = test_db.execute(
+        "SELECT count(*) FROM documents WHERE thread_id=%s",
+        ("thread-D",),
+    ).fetchone()
+    assert leftover is not None
+    assert leftover[0] == 2

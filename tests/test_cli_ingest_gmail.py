@@ -26,6 +26,7 @@ from pytest_mock import MockerFixture
 from typer.testing import CliRunner
 
 from brain.cli import app
+from brain.errors import DraftSkipped
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.ingest import gmail as gmail_ingest
 
@@ -224,7 +225,10 @@ def test_ingest_gmail_idempotent_on_re_run(
     second = CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
     assert second.exit_code == 0, second.output
     assert "skipped thread tm1 (unchanged)" in second.output
-    assert "0 threads ingested, 1 skipped, 0 failed" in second.output
+    assert (
+        "0 ingested, 1 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        in second.output
+    )
 
     with psycopg.connect(TEST_DATABASE_URL) as conn:
         n = conn.execute("SELECT count(*) FROM documents").fetchone()
@@ -284,7 +288,10 @@ def test_ingest_gmail_continues_on_per_thread_failure(
     assert result.exit_code == 0, result.output
     assert "ingested thread tgood" in result.output
     assert "failed thread tbad" in result.output
-    assert "1 threads ingested, 0 skipped, 1 failed" in result.output
+    assert (
+        "1 ingested, 0 skipped (unchanged), 0 skipped (drafts), 1 failed"
+        in result.output
+    )
     with psycopg.connect(TEST_DATABASE_URL) as conn:
         row = conn.execute(
             "SELECT count(*) FROM documents WHERE content_type='email_thread'"
@@ -342,7 +349,10 @@ def test_ingest_gmail_groups_by_thread_id(
     monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(msgs))
     result = CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
     assert result.exit_code == 0, result.output
-    assert "2 threads ingested, 0 skipped, 0 failed" in result.output
+    assert (
+        "2 ingested, 0 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        in result.output
+    )
 
     with psycopg.connect(TEST_DATABASE_URL) as conn:
         rows = conn.execute(
@@ -432,8 +442,9 @@ def test_ingest_gmail_progress_output_format(
     """Three threads ingested → 3 per-thread lines + 1 summary line.
 
     Pins the user-visible output format: one ``ingested thread <tid>
-    (<n> messages)`` line per thread plus a ``<X> threads ingested,
-    <Y> skipped, <Z> failed`` summary at the end.
+    (<n> messages)`` line per thread plus a ``<X> ingested,
+    <Y> skipped (unchanged), <Z> skipped (drafts), <W> failed`` summary
+    at the end.
     """
     _patch_embedder(monkeypatch, fake_embedder)
     msgs = {
@@ -465,7 +476,10 @@ def test_ingest_gmail_progress_output_format(
     assert "ingested thread ta (1 messages)" in result.output
     assert "ingested thread tb (1 messages)" in result.output
     assert "ingested thread tc (1 messages)" in result.output
-    assert "3 threads ingested, 0 skipped, 0 failed" in result.output
+    assert (
+        "3 ingested, 0 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        in result.output
+    )
 
 
 def test_list_messages_builds_full_query() -> None:
@@ -500,12 +514,21 @@ def test_list_messages_builds_full_query() -> None:
     assert cmd[-2:] == ["--format", "json"]
 
 
-def test_list_messages_no_scope_omits_query_param() -> None:
-    """When no scope parts are supplied, the ``q`` key is omitted from ``--params``."""
+def test_list_messages_no_scope_still_excludes_drafts() -> None:
+    """Even with no scope flags, ``-in:drafts`` is appended so drafts are filtered.
+
+    Pre-fix this test asserted ``q`` was omitted entirely. Post-fix the
+    drafts exclusion is unconditional: every call to the Gmail list
+    surface excludes drafts as a belt-and-braces filter. The CLI
+    ``ingest-gmail`` command refuses to run without at least one user-
+    supplied scope flag, but ``list_messages`` itself is callable
+    without scopes (e.g. from internal tooling) and that path must
+    still filter drafts.
+    """
 
     def runner(cmd: list[str]) -> str:
         params = json.loads(cmd[6])
-        assert "q" not in params
+        assert params.get("q") == "-in:drafts"
         assert params["userId"] == "me"
         return json.dumps({"resultSizeEstimate": 0})
 
@@ -1039,3 +1062,255 @@ def test_to_extracted_doc_naive_date_treated_as_utc() -> None:
     # it as naive. Either way our code emits a UTC-anchored ISO string.
     assert doc.metadata["sent_at"].endswith("+00:00")
     assert "2026-04-28T16:38:01" in doc.metadata["sent_at"]
+
+
+# ---------------------------------------------------------------------------
+# Drafts excluded at ingest end-to-end (P2.4 follow-up).
+#
+# Draft Gmail messages — ``labelIds`` containing ``DRAFT`` — are unsent
+# emails the user typed but never sent. Ingesting them pollutes search:
+# "did I send X to Y?" returns drafts as evidence of sent messages, which
+# is the wrong answer. Three layers filter drafts:
+#
+# 1. ``list_messages`` appends ``-in:drafts`` to every Gmail query so
+#    drafts never appear in the message-stub list.
+# 2. ``to_extracted_doc`` raises :class:`DraftSkipped` if it sees a
+#    DRAFT-labelled message anyway (belt-and-braces).
+# 3. ``to_extracted_thread`` filters drafts from mixed threads and
+#    raises :class:`DraftSkipped` for all-draft threads.
+#
+# The CLI catches :class:`DraftSkipped` per thread and tracks it with a
+# dedicated ``skipped (drafts)`` counter so the user can see how many
+# threads were filtered for this reason vs failed for other reasons.
+# ---------------------------------------------------------------------------
+
+
+def test_list_messages_query_excludes_drafts() -> None:
+    """``list_messages`` appends ``-in:drafts`` to the Gmail ``q`` string.
+
+    Cheap belt-and-braces filter at the source: even before ``to_extracted_doc``
+    /``to_extracted_thread`` get a chance to inspect ``labelIds``, the
+    Gmail API itself returns no drafts in the message-stub list because
+    ``-in:drafts`` is part of every query. Combined with all three scope
+    flags so the test pins both the user-supplied parts and the
+    auto-appended exclusion.
+    """
+    captured: dict[str, list[str]] = {}
+
+    def runner(cmd: list[str]) -> str:
+        captured["cmd"] = cmd
+        return json.dumps({"resultSizeEstimate": 0})
+
+    gmail_ingest.list_messages(
+        query="project foo",
+        label="interviews",
+        from_addr="a@b",
+        runner=runner,
+    )
+    cmd = captured["cmd"]
+    params = json.loads(cmd[6])
+    q = params["q"]
+    assert "-in:drafts" in q
+    # User-supplied parts still present.
+    assert "project foo" in q
+    assert "label:interviews" in q
+    assert "from:a@b" in q
+
+
+def test_to_extracted_doc_raises_draft_skipped() -> None:
+    """``to_extracted_doc`` raises ``DraftSkipped`` when ``labelIds`` contains ``DRAFT``.
+
+    Even if a draft message somehow reaches the per-message extractor
+    (e.g. the ``-in:drafts`` filter on ``list_messages`` was bypassed
+    by a direct ``read_message`` call), the extractor refuses to emit
+    an ``ExtractedDoc`` for it. Callers catch this and increment a
+    "skipped (drafts)" counter rather than treating it as a failure.
+    """
+    msg = {
+        "id": "draft-msg-1",
+        "threadId": "t-draft",
+        "labelIds": ["DRAFT"],
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [
+                {"name": "From", "value": "x@y"},
+                {"name": "Subject", "value": "unsent draft"},
+            ],
+            "body": {"data": _b64url("draft body"), "size": 10},
+        },
+    }
+    with pytest.raises(DraftSkipped, match="draft-msg-1"):
+        gmail_ingest.to_extracted_doc(msg)
+
+
+def test_ingest_gmail_skips_draft_only_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """A thread with one DRAFT-only message is skipped, not failed.
+
+    The summary line surfaces the count under "skipped (drafts)" rather
+    than "failed", so the user can tell apart "Gmail returned a draft I
+    don't want" from "the ingest pipeline broke".
+
+    Note: in production ``-in:drafts`` on the list query means drafts
+    don't reach the ingest path at all. This test simulates a runner
+    that returns a draft anyway (e.g. from a stub built before the
+    list-side filter shipped) — the per-thread extractor catches it.
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+
+    draft_msg = {
+        "id": "d1",
+        "threadId": "td",
+        "labelIds": ["DRAFT"],
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [
+                {"name": "From", "value": "ali@example.com"},
+                {"name": "To", "value": "person-a@example.com"},
+                {"name": "Subject", "value": "discarded draft"},
+                {"name": "Date", "value": "Mon, 04 May 2026 12:00:00 +0000"},
+            ],
+            "body": {"data": _b64url("draft body that was never sent"), "size": 30},
+        },
+    }
+
+    def runner(cmd: list[str], *_a: object, **_kw: object) -> str:
+        op = cmd[4]
+        if op == "list":
+            return json.dumps(
+                {
+                    "messages": [{"id": "d1", "threadId": "td"}],
+                    "resultSizeEstimate": 1,
+                }
+            )
+        if op == "get":
+            return json.dumps(draft_msg)
+        raise AssertionError(f"unexpected gws call: {cmd}")
+
+    monkeypatch.setattr("brain.ingest.gmail._run", runner)
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "anything"])
+
+    assert result.exit_code == 0, result.output
+    assert "skipped thread td (draft)" in result.output
+    assert (
+        "0 ingested, 0 skipped (unchanged), 1 skipped (drafts), 0 failed"
+        in result.output
+    )
+    # No documents were written.
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        n = conn.execute(
+            "SELECT count(*) FROM documents WHERE content_type='email_thread'"
+        ).fetchone()
+    assert n is not None
+    assert n[0] == 0
+
+
+def test_ingest_gmail_drops_draft_from_mixed_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """A thread of [sent, draft, sent] yields one ingested doc with 2 sections.
+
+    The draft is filtered at extraction; the merged thread doc carries
+    only the sent messages. ``message_count=2``, body shows two
+    sections (one plain H2 + one collapsed <details>).
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+
+    def _build(
+        msg_id: str,
+        body: str,
+        when: str,
+        internal: str,
+        labels: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "id": msg_id,
+            "threadId": "tmix",
+            "labelIds": labels,
+            "internalDate": internal,
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": "alice@example.com"},
+                    {"name": "To", "value": "bob@example.com"},
+                    {"name": "Subject", "value": "Mixed thread"},
+                    {"name": "Date", "value": when},
+                ],
+                "body": {"data": _b64url(body), "size": len(body)},
+            },
+        }
+
+    msgs_by_id = {
+        "s1": _build(
+            "s1",
+            "FIRST SENT",
+            "Mon, 04 May 2026 09:00:00 +0000",
+            "1700000001000",
+            ["INBOX", "SENT"],
+        ),
+        "d1": _build(
+            "d1",
+            "DRAFT IN MIDDLE",
+            "Mon, 04 May 2026 10:00:00 +0000",
+            "1700000002000",
+            ["DRAFT"],
+        ),
+        "s2": _build(
+            "s2",
+            "SECOND SENT",
+            "Mon, 04 May 2026 11:00:00 +0000",
+            "1700000003000",
+            ["INBOX", "SENT"],
+        ),
+    }
+
+    def runner(cmd: list[str], *_a: object, **_kw: object) -> str:
+        op = cmd[4]
+        if op == "list":
+            # Production sends ``-in:drafts`` so the DRAFT id wouldn't
+            # appear here in real life. We include it here so the test
+            # exercises the extractor-side filter for a defensive case
+            # where the list filter is bypassed (e.g. a future runner
+            # variant or an older Gmail server quirk).
+            return json.dumps(
+                {
+                    "messages": [
+                        {"id": "s1", "threadId": "tmix"},
+                        {"id": "d1", "threadId": "tmix"},
+                        {"id": "s2", "threadId": "tmix"},
+                    ],
+                    "resultSizeEstimate": 3,
+                }
+            )
+        if op == "get":
+            params = json.loads(cmd[6])
+            return json.dumps(msgs_by_id[params["id"]])
+        raise AssertionError(f"unexpected gws call: {cmd}")
+
+    monkeypatch.setattr("brain.ingest.gmail._run", runner)
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "anything"])
+
+    assert result.exit_code == 0, result.output
+    assert "ingested thread tmix" in result.output
+    assert (
+        "1 ingested, 0 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        in result.output
+    )
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT content, metadata->>'message_count' "
+            "FROM documents WHERE content_type='email_thread'"
+        ).fetchone()
+    assert row is not None
+    body, message_count = row
+    assert message_count == "2"
+    assert "FIRST SENT" in body
+    assert "SECOND SENT" in body
+    assert "DRAFT IN MIDDLE" not in body
+    # 2 sections: 1 collapsed older + 1 plain H2 newest.
+    assert body.count("<details>") == 1

@@ -17,6 +17,7 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 from brain.config import BOILERPLATE_PATTERNS
+from brain.errors import DraftSkipped
 
 # Re-using the shared Re/Fwd-prefix helper from vault.slug rather than
 # duplicating the regex — it's marked private (leading underscore) but the
@@ -47,6 +48,9 @@ class GmailError(RuntimeError):
 Runner = Callable[[list[str]], str]
 
 
+_DRAFTS_EXCLUSION = "-in:drafts"
+
+
 def _build_query(
     *,
     query: str | None,
@@ -55,7 +59,16 @@ def _build_query(
     until: str | None,
     from_addr: str | None,
 ) -> str:
-    """Compose the Gmail search ``q`` string from the CLI scope flags."""
+    """Compose the Gmail search ``q`` string from the CLI scope flags.
+
+    Always appends ``-in:drafts`` so unsent draft messages never appear in
+    the message-stub list. Drafts are unsent emails the user typed but
+    never sent — ingesting them pollutes search results ("did I send X to
+    Y?" returns drafts as evidence of sent messages → wrong answer). The
+    per-message extractor (`to_extracted_doc`) and per-thread extractor
+    (`to_extracted_thread`) repeat the filter at the DRAFT-label level as
+    belt-and-braces in case Gmail hands a draft back anyway.
+    """
     parts: list[str] = []
     if query:
         parts.append(query)
@@ -67,6 +80,7 @@ def _build_query(
         parts.append(f"after:{since}")
     if until:
         parts.append(f"before:{until}")
+    parts.append(_DRAFTS_EXCLUSION)
     return " ".join(parts)
 
 
@@ -242,8 +256,31 @@ def _parse_date_header_to_iso_utc(raw: str | None) -> str | None:
     return parsed.astimezone(UTC).isoformat()
 
 
+def _is_draft(msg: dict[str, Any]) -> bool:
+    """Return True when the Gmail Message resource carries the ``DRAFT`` label.
+
+    Gmail's draft state is communicated via ``labelIds`` on the Message
+    resource. Drafts are unsent — the user typed them but never sent —
+    and ingesting them pollutes the searchable corpus. Ingest paths use
+    this helper to short-circuit on drafts before doing any work.
+    """
+    label_ids = msg.get("labelIds") or []
+    return "DRAFT" in label_ids
+
+
 def to_extracted_doc(msg: dict[str, Any]) -> ExtractedDoc:
-    """Build an :class:`ExtractedDoc` from a Gmail ``users.messages.get`` response."""
+    """Build an :class:`ExtractedDoc` from a Gmail ``users.messages.get`` response.
+
+    Raises:
+        DraftSkipped: ``msg`` carries the ``DRAFT`` label. Callers should
+            catch this and increment a "skipped (drafts)" counter rather
+            than treating it as a failure. Drafts are unsent; ingesting
+            them would pollute search.
+    """
+    if _is_draft(msg):
+        raise DraftSkipped(
+            f"message {msg.get('id')!r} is a draft (labelIds contains DRAFT)"
+        )
     payload = msg.get("payload") or {}
     headers = _headers_to_dict(payload.get("headers") or [])
     title = headers.get("subject") or "(no subject)"
@@ -444,13 +481,29 @@ def to_extracted_thread(messages: list[dict[str, Any]]) -> ExtractedDoc:
     unioning across the source per-message rows; new threaded ingests
     pick tags up via ``brain tag <id> +foo`` post-ingest.
 
+    Drafts are filtered out before assembly. A mixed thread (some drafts,
+    some sent) keeps only the sent messages — body, participants,
+    label_ids, message_count all reflect the post-filter set. A thread
+    where every message is a draft raises :class:`DraftSkipped` so the
+    caller can route it to the "skipped (drafts)" counter rather than
+    emit an empty document. Empty input still raises ``ValueError``
+    (programmer error — callers must supply at least one message).
+
     Raises:
         ValueError: ``messages`` is empty.
+        DraftSkipped: every message in ``messages`` carries the ``DRAFT``
+            label. The thread has nothing left to ingest after filtering.
     """
     if not messages:
         raise ValueError("to_extracted_thread requires at least one message")
 
-    sorted_msgs = sorted(messages, key=_message_sort_key)
+    non_draft = [m for m in messages if not _is_draft(m)]
+    if not non_draft:
+        thread_id = messages[0].get("threadId")
+        raise DraftSkipped(
+            f"thread {thread_id!r} contains only draft messages"
+        )
+    sorted_msgs = sorted(non_draft, key=_message_sort_key)
     first = sorted_msgs[0]
     latest = sorted_msgs[-1]
 

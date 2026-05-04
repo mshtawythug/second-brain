@@ -32,6 +32,7 @@ from .editor import EditorError as RawEditorError
 from .editor import run_editor_on
 from .embeddings import make_embedder
 from .errors import (
+    DraftSkipped,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
@@ -675,6 +676,7 @@ def ingest_gmail(
     embedder = _build_embedder(cfg)
     ingested = 0
     skipped = 0
+    skipped_drafts = 0
     failed = 0
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
@@ -709,6 +711,15 @@ def ingest_gmail(
                 else:
                     typer.echo(f"  skipped thread {tid} (unchanged)")
                     skipped += 1
+            except DraftSkipped as e:
+                # Drafts are unsent emails the user typed but never sent —
+                # ingesting them pollutes search ("did I send X?" returns
+                # drafts as evidence of sent messages). Skip and surface
+                # the count separately so it's clear how many threads were
+                # filtered for this reason vs failed for other reasons.
+                typer.echo(f"  skipped thread {tid} (draft): {e}")
+                skipped_drafts += 1
+                continue
             except (GmailError, psycopg.Error, ValueError, KeyError) as e:
                 typer.secho(
                     f"  failed thread {tid} ({len(ts)} messages): {e}",
@@ -717,7 +728,8 @@ def ingest_gmail(
                 failed += 1
                 continue
     typer.echo(
-        f"{ingested} threads ingested, {skipped} skipped, {failed} failed"
+        f"{ingested} ingested, {skipped} skipped (unchanged), "
+        f"{skipped_drafts} skipped (drafts), {failed} failed"
     )
 
 
