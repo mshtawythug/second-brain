@@ -15,6 +15,27 @@ _VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
 # ``BRAIN_VAULT_PATH`` to an iCloud path.
 DEFAULT_VAULT_PATH = Path.home() / "brain-vault"
 
+# Boilerplate regex patterns stripped from email bodies during Gmail ingest.
+# Compiled with ``re.MULTILINE | re.IGNORECASE`` in
+# :func:`brain.ingest.gmail.strip_boilerplate`. Default-deny for ``re.DOTALL``;
+# patterns that genuinely need cross-line matching opt in with the inline
+# ``(?s)`` flag and document why. Cross-line matches MUST be bounded by a
+# non-greedy lookahead (``.*?(?=\n\n|\Z)``) so a single notice block can be
+# absorbed without devouring the rest of the message.
+#
+# Single-source-of-truth: tweak the list here, no code change required.
+BOILERPLATE_PATTERNS: tuple[str, ...] = (
+    # Common mobile-app footers — single line, terminated by EOL.
+    r"^Sent from my (iPhone|iPad|Android|BlackBerry|Windows Phone)\.?$",
+    r"^Get Outlook for (iOS|Android)\s*<https?://[^>]+>\s*$",
+    # Confidentiality / corporate-disclaimer footers run multiple lines.
+    # ``(?s)`` enables DOTALL on this pattern only so ``.*?`` can cross
+    # newlines; the ``(?=\n\n|\Z)`` lookahead caps the match at the next
+    # blank line (or EOF) so we don't eat into legitimate downstream content.
+    r"(?s)^CONFIDENTIALITY NOTICE:.*?(?=\n\n|\Z)",
+    r"(?s)^This email and any attachments are confidential.*?(?=\n\n|\Z)",
+)
+
 
 def _project_dotenv() -> Path:
     """Path to the .env file at the repo root, relative to this module.

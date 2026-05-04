@@ -12,9 +12,25 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
+from datetime import UTC
+from email.utils import parsedate_to_datetime
 from typing import Any
 
+from brain.config import BOILERPLATE_PATTERNS
+
 from . import ExtractedDoc
+
+# Compile boilerplate patterns once at import time. Per-pattern ``(?s)``
+# inline flags opt individual entries into DOTALL; see ``BOILERPLATE_PATTERNS``
+# in ``brain.config`` for the rationale.
+_BOILERPLATE_REGEXES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.MULTILINE | re.IGNORECASE) for p in BOILERPLATE_PATTERNS
+)
+
+# Run-collapse threshold: only collapse runs of consecutive identical lines
+# longer than this (in characters). Short repeated lines (signoffs, blank
+# separators, "ok") stay untouched.
+_COLLAPSE_MIN_LINE_LEN = 40
 
 
 class GmailError(RuntimeError):
@@ -154,25 +170,103 @@ def _extract_body(payload: dict[str, Any]) -> str:
     return _decode_body_data(root_data) if root_data else ""
 
 
+def _collapse_repeated_long_lines(body: str) -> str:
+    """Collapse runs of ≥2 consecutive identical lines longer than the threshold.
+
+    Operates on the line view of ``body`` (split on ``\\n`` so empty trailing
+    lines from a trailing newline are preserved). Only lines whose stripped
+    length exceeds :data:`_COLLAPSE_MIN_LINE_LEN` are eligible — short
+    repetitions (sign-offs, blank lines, single-word pleasantries) are left
+    alone.
+    """
+    if not body:
+        return body
+    lines = body.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Look for a run of identical lines starting at i.
+        j = i + 1
+        while j < len(lines) and lines[j] == line:
+            j += 1
+        run_length = j - i
+        if run_length >= 2 and len(line.strip()) > _COLLAPSE_MIN_LINE_LEN:
+            out.append(line)
+        else:
+            out.extend(lines[i:j])
+        i = j
+    return "\n".join(out)
+
+
+def strip_boilerplate(body: str) -> str:
+    """Remove repeated email signatures / disclaimers / mobile-app footers.
+
+    1. Collapse runs of identical lines (>40 chars) to one occurrence.
+    2. Strip patterns from ``BOILERPLATE_PATTERNS`` (config.py).
+    Quoted-reply markers below the most recent message are left alone for
+    single-message ingest; thread assembly (Phase 2) will revisit.
+    """
+    if not body:
+        return body
+    body = _collapse_repeated_long_lines(body)
+    for regex in _BOILERPLATE_REGEXES:
+        body = regex.sub("", body)
+    return body.strip()
+
+
+def _parse_date_header_to_iso_utc(raw: str | None) -> str | None:
+    """Parse an RFC 2822 ``Date:`` header into an ISO-8601 UTC string.
+
+    Returns ``None`` when ``raw`` is missing/empty or unparseable so the
+    caller can omit the field rather than crash the ingest. Naive datetimes
+    (rare in real Gmail headers) are treated as UTC.
+    """
+    if not raw or not raw.strip():
+        return None
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat()
+
+
 def to_extracted_doc(msg: dict[str, Any]) -> ExtractedDoc:
     """Build an :class:`ExtractedDoc` from a Gmail ``users.messages.get`` response."""
     payload = msg.get("payload") or {}
     headers = _headers_to_dict(payload.get("headers") or [])
     title = headers.get("subject") or "(no subject)"
-    body = _extract_body(payload).strip()
+    body = strip_boilerplate(_extract_body(payload).strip())
+    metadata: dict[str, Any] = {
+        "from": headers.get("from"),
+        "to": headers.get("to"),
+        "date": headers.get("date"),
+        "message_id": msg.get("id"),
+        "thread_id": msg.get("threadId"),
+        "label_ids": msg.get("labelIds") or [],
+    }
+    # New typed-column feeders (P1.3). Each key is omitted when the source
+    # header is absent so downstream column-promotion stays NULL rather than
+    # storing empty strings.
+    rfc_id = headers.get("message-id")
+    if rfc_id:
+        metadata["rfc_message_id"] = rfc_id
+    in_reply_to = headers.get("in-reply-to")
+    if in_reply_to:
+        metadata["in_reply_to"] = in_reply_to
+    sent_at = _parse_date_header_to_iso_utc(headers.get("date"))
+    if sent_at is not None:
+        metadata["sent_at"] = sent_at
     return ExtractedDoc(
         title=title,
         content=body,
         content_type="email",
         source_path=None,
-        metadata={
-            "from": headers.get("from"),
-            "to": headers.get("to"),
-            "date": headers.get("date"),
-            "message_id": msg.get("id"),
-            "thread_id": msg.get("threadId"),
-            "label_ids": msg.get("labelIds") or [],
-        },
+        metadata=metadata,
     )
 
 

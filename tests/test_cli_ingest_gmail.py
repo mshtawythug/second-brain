@@ -705,3 +705,110 @@ def test_cli_ingest_gmail_populates_directory(
         ("person-a last-a", "person-a@example.com", "gmail"),
         ("ali sarkis", "redacted@example.com", "gmail"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# P1.3 — RFC header capture in ``to_extracted_doc``. Each branch mirrors a
+# distinct ``_PROMOTED_COLUMNS`` feeder in ``brain.ingest`` so the typed-column
+# promotion landed in P1.1 actually gets fed real data.
+# ---------------------------------------------------------------------------
+
+
+def _msg_with_headers(headers: dict[str, str], *, body: str = "Hi") -> dict[str, Any]:
+    """Build a Gmail Message resource with arbitrary ``payload.headers``."""
+    return {
+        "id": "m1",
+        "threadId": "t1",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [{"name": k, "value": v} for k, v in headers.items()],
+            "body": {"data": _b64url(body), "size": len(body)},
+        },
+    }
+
+
+def test_to_extracted_doc_captures_rfc_message_id() -> None:
+    """``Message-ID`` header → ``metadata.rfc_message_id`` (verbatim, brackets kept)."""
+    msg = _msg_with_headers(
+        {"Subject": "Hi", "Message-ID": "<abc@example.com>", "From": "x@y"}
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert doc.metadata["rfc_message_id"] == "<abc@example.com>"
+
+
+def test_to_extracted_doc_captures_in_reply_to() -> None:
+    """``In-Reply-To`` header → ``metadata.in_reply_to`` (verbatim)."""
+    msg = _msg_with_headers(
+        {"Subject": "Re: Hi", "In-Reply-To": "<parent@example.com>", "From": "x@y"}
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert doc.metadata["in_reply_to"] == "<parent@example.com>"
+
+
+def test_to_extracted_doc_parses_date_to_iso_utc() -> None:
+    """RFC 2822 ``Date:`` → ISO-8601 UTC string in ``metadata.sent_at``.
+
+    The original raw ``date`` field is preserved for backwards compat — code
+    paths that haven't migrated to ``sent_at`` keep working.
+    """
+    msg = _msg_with_headers(
+        {
+            "Subject": "Hi",
+            "Date": "Tue, 28 Apr 2026 16:38:01 -0400",
+            "From": "x@y",
+        }
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert doc.metadata["sent_at"] == "2026-04-28T20:38:01+00:00"
+    # Raw value is preserved.
+    assert doc.metadata["date"] == "Tue, 28 Apr 2026 16:38:01 -0400"
+
+
+def test_to_extracted_doc_unparseable_date_does_not_crash() -> None:
+    """A garbage ``Date:`` header drops ``sent_at`` but keeps the raw value."""
+    msg = _msg_with_headers(
+        {"Subject": "Hi", "Date": "garbage", "From": "x@y"}
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert "sent_at" not in doc.metadata
+    assert doc.metadata["date"] == "garbage"
+
+
+def test_to_extracted_doc_missing_message_id_omits_field() -> None:
+    """When the ``Message-ID`` header is absent, the metadata key is omitted entirely.
+
+    Downstream column-promotion treats missing keys as "leave the column as
+    NULL", which is the desired behavior — we never want to write empty strings.
+    """
+    msg = _msg_with_headers({"Subject": "Hi", "From": "x@y"})
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert "rfc_message_id" not in doc.metadata
+    assert "in_reply_to" not in doc.metadata
+    # ``date`` raw key still exists (set to None) since we always emit it.
+    assert doc.metadata["date"] is None
+
+
+def test_to_extracted_doc_strips_boilerplate_from_body() -> None:
+    """Body extraction routes through ``strip_boilerplate`` before doc construction."""
+    body = "Real content here.\n\nSent from my iPhone"
+    msg = _msg_with_headers({"Subject": "Hi", "From": "x@y"}, body=body)
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert "Sent from my iPhone" not in doc.content
+    assert "Real content here." in doc.content
+
+
+def test_to_extracted_doc_naive_date_treated_as_utc() -> None:
+    """A ``Date:`` value with no timezone offset is treated as UTC.
+
+    ``parsedate_to_datetime`` returns a naive datetime when the input has no
+    timezone offset (and isn't a known TZ abbreviation); the parser explicitly
+    coerces such values to UTC rather than raising or skipping.
+    """
+    msg = _msg_with_headers(
+        {"Subject": "Hi", "Date": "Tue, 28 Apr 2026 16:38:01 -0000", "From": "x@y"}
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    # ``-0000`` is RFC 2822's "no meaningful TZ" sentinel; some parsers return
+    # it as naive. Either way our code emits a UTC-anchored ISO string.
+    assert doc.metadata["sent_at"].endswith("+00:00")
+    assert "2026-04-28T16:38:01" in doc.metadata["sent_at"]
