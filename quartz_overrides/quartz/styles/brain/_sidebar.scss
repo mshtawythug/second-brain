@@ -49,6 +49,14 @@
 // 1. Compact icon row + sticky search header (LEFT sidebar)
 // ---------------------------------------------------------------------------
 //
+// Stock Quartz gives both sidebars a large top/bottom gutter via
+// `.page > #quartz-body .sidebar { padding: 6rem 2rem 2rem; }`.
+// Brain's denser wiki chrome needs the sidebar to start closer to the
+// viewport edge, while keeping the same horizontal rhythm.
+.page > #quartz-body .sidebar {
+  padding: 2rem;
+}
+
 // Stock Quartz renders the Search/Darkmode/ReaderMode trio inside a
 // `<div class="flex-component">` (rendered by `Component.Flex`). Each
 // child wraps a single button. We flatten visual sizing across the

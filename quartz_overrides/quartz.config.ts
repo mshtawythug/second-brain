@@ -37,7 +37,7 @@ import * as Plugin from "./quartz/plugins"
 const config: QuartzConfig = {
   configuration: {
     // brain: friendlier title than the default "Quartz 4".
-    pageTitle: "🧠 Second Brain",
+    pageTitle: "Second Brain",
     pageTitleSuffix: "",
     enableSPA: true,
     enablePopovers: true,

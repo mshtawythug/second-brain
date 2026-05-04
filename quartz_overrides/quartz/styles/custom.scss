@@ -25,6 +25,11 @@
 //                          Listed between sidebar and article so the
 //                          modal chrome inherits the surface scale
 //                          but doesn't interfere with article rules.
+//   8b. brain/search    — P3.2 — search popover: chip rail, source-
+//                          icon result rows, lazy preview pane. Loaded
+//                          after sidebar so the chip rail can layer on
+//                          top of the sticky search header without the
+//                          sidebar's bottom hairline painting through.
 //   9. brain/article    — Lane C — article column measure + heading
 //                          rhythm + blockquote + meta typography.
 //  10. brain/marginalia — Lane D — backlinks-as-figure-margin notes
@@ -49,6 +54,7 @@
 @use "./brain/links";
 @use "./brain/sidebar";
 @use "./brain/cmdk";          // Lane C — Cmd-K modal visuals
+@use "./brain/search";        // P3.2 — Search popover: chips, rows, preview
 @use "./brain/article";
 @use "./brain/marginalia";    // Lane D
 @use "./brain/callouts";
