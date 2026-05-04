@@ -220,6 +220,23 @@ export function linkSlugs(records: BrainLinkRecord[] | undefined): SimpleSlug[] 
 // is a single-line fix rather than a hunt through this file.
 const CONTENT_INDEX_RELPATH = path.join("static", "contentIndex.json")
 
+// brain-extension: relative directory where the slim post-processor
+// writes one `<slug>.json` body file per surviving entry. The Search
+// component (P3.2) lazy-fetches `static/contentBodies/<slug>.json`
+// when a result is selected for the preview pane; the slim
+// `contentIndex.json` only carries a 240-char snippet. Splitting body
+// out cuts the index from ~19 MB → well under 2 MB gzipped, which is
+// the budget enforced by `scripts/check_index_size.py`.
+const CONTENT_BODIES_RELDIR = path.join("static", "contentBodies")
+
+// brain-extension: snippet character budget. The slim
+// `contentIndex.json` keeps a `snippet` (and rewrites `details.content`
+// to the same 240-char prefix as a backwards-compat fallback) so the
+// search popover can render result rows without round-tripping to the
+// per-slug body file. 240 chars ≈ 2-3 lines of result preview, which
+// matches the upstream Search component's render budget.
+const SNIPPET_LENGTH = 240
+
 type Opts = Parameters<typeof UpstreamContentIndex>[0]
 
 export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
@@ -354,6 +371,32 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
           details.linkRecords = slugs.map((s) =>
             ctxClassify ? classifyLink(s, ctxClassify) : { target: s, kind: "wiki" },
           )
+
+          // brain-extension: slim transform. Capture the full body,
+          // write it out to `static/contentBodies/<slug>.json` so the
+          // Search component (P3.2) can lazy-fetch on selection, then
+          // overwrite `details.content` with a snippet so the index
+          // itself stays small. We keep `content` populated with the
+          // snippet (rather than dropping the field) as the
+          // backwards-compat fallback documented in the plan — any
+          // consumer that hasn't been taught about lazy-fetching still
+          // sees a usable preview, just truncated. `details.snippet` is
+          // the canonical name for forward-looking consumers (P3.2's
+          // Search.tsx will branch on `snippet ?? content`). Slugs may
+          // contain `/` separators (e.g. `_ingested/gmail/<id>`); the
+          // mkdir-recursive call ensures the nested directory exists
+          // before each write.
+          const body = typeof details.content === "string" ? details.content : ""
+          const snippet = body.slice(0, SNIPPET_LENGTH)
+          const bodyTarget = path.join(
+            ctx.argv.output,
+            CONTENT_BODIES_RELDIR,
+            `${slug}.json`,
+          )
+          await fs.mkdir(path.dirname(bodyTarget), { recursive: true })
+          await fs.writeFile(bodyTarget, JSON.stringify({ slug, content: body }))
+          details.content = snippet
+          details.snippet = snippet
         }
 
         await fs.writeFile(targetPath, JSON.stringify(parsed))
