@@ -156,7 +156,8 @@
 // horizontal footprint, so the search input shrinks to leave room
 // rather than slipping under the buttons.
 .graph > .graph-outer > .global-graph-icon,
-.graph > .graph-outer > .brain-stock-graph-icon {
+.graph > .graph-outer > .brain-stock-graph-icon,
+.graph > .graph-outer > .local-graph-fullscreen-icon {
   position: absolute;
   top: 0;
   margin: 0.3rem;
@@ -203,6 +204,15 @@
 // surrounding sidebar width.
 .graph > .graph-outer > .brain-stock-graph-icon {
   right: 28px;
+}
+
+// brain-extension: maximize affordance sits 56px from the right (one icon
+// width to the left of the dot-grid icon), so the three controls read left-
+// to-right as: maximize / dot-grid / globe. Order matches the cognitive
+// hierarchy — narrowest scope (current page) on the left, broadest scope
+// (entire corpus) on the right.
+.graph > .graph-outer > .local-graph-fullscreen-icon {
+  right: 56px;
 }
 
 // brain: keep upstream's `.graph-outer { height: 250px; overflow: hidden; }`

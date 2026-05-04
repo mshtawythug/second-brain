@@ -105,6 +105,47 @@ export interface D3Config {
   // brain-extension: render filter chips for tier and/or source. Type-only here;
   // the runtime wiring lands with the upcoming search-and-filter customization.
   filterChips?: Array<"tier" | "source">
+  // brain-extension: scalar multiplier applied to every node's computed
+  // radius (and to the clamp bounds). 1 = sidebar default; >1 = bigger
+  // dots (typically wanted in the fullscreen modal where the canvas can
+  // absorb the larger marks). Renderer treats absent / non-finite values
+  // as 1.
+  nodeRadiusMultiplier?: number
+  // brain-extension: max character length for node labels. Anything
+  // longer is truncated to `labelMaxLength - 1` chars + `…`, with the
+  // full title restored on pointerover. Defaults to 10 (the dense
+  // fullscreen modal default); the small sidebar panel sets 25 so its
+  // few visible labels stay readable without a hover.
+  labelMaxLength?: number
+  // brain-extension: exponent applied to `numLinks` in the node-radius
+  // formula. The base radius is `2 + Math.pow(numLinks, exponent)`. The
+  // default (0.5 = sqrt) compresses hub-vs-leaf differences; bumping
+  // toward 0.8–1.0 produces the dramatic Obsidian-style hierarchy where
+  // a 50-link hub is visibly ~6× the radius of a 1-link leaf. Renderer
+  // treats absent / non-finite values as 0.5.
+  nodeRadiusGrowthExponent?: number
+  // brain-extension: base alpha for wiki (non-derived) edges. Defaults
+  // to 1 (fully opaque). Lower values fade edges so the graph reads as
+  // "labels first, structure second" — useful in dense fullscreen views
+  // where edge density would otherwise overpower the nodes.
+  wikiEdgeBaseAlpha?: number
+  // brain-extension: minimum incident-link count to treat a node as a
+  // hub and bypass label truncation. Defaults to 6 (sidebar / local-
+  // fullscreen sweet spot). Set higher (~25–30) on the global graph
+  // since at depth=-1 hundreds of central docs would otherwise wall-
+  // of-text. Renderer treats absent / non-finite values as 6.
+  hubLabelThreshold?: number
+  // brain-extension: upper clamp on the per-node radius before the
+  // `nodeRadiusMultiplier` is applied. Defaults to 10 (Quartz's
+  // historical ceiling). Lift on dense modal views so hubs can
+  // visually dominate — clamps as `nodeRadiusCeiling * radiusMul`,
+  // so 25 with radiusMul=2.5 → effective max radius 62.5px.
+  nodeRadiusCeiling?: number
+  // brain-extension: fontSize multiplier applied to label text for
+  // nodes whose link count meets `hubLabelThreshold`. Default 1
+  // (no boost). 1.5–2.0 makes hub labels visually pop without
+  // affecting leaf/intermediate labels.
+  hubLabelFontMultiplier?: number
 }
 
 interface GraphOptions {
@@ -187,6 +228,30 @@ export default ((opts?: Partial<GraphOptions>) => {
         <h3>{i18n(cfg.locale).components.graph.title}</h3>
         <div class="graph-outer">
           <div class="graph-container" data-cfg={JSON.stringify(localGraph)}></div>
+          {/* brain-extension: third affordance that opens THIS page's local
+              graph (depth=1 — only the page + its connected nodes) in the
+              same fullscreen modal the global icons use. Search + tier/source
+              chips are forced on so the focused view stays explorable. Click
+              handler in graph.inline.ts. */}
+          <button
+            class="local-graph-fullscreen-icon"
+            aria-label="Local Graph (fullscreen)"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <polyline points="4 9 4 4 9 4" />
+              <polyline points="20 9 20 4 15 4" />
+              <polyline points="4 15 4 20 9 20" />
+              <polyline points="20 15 20 20 15 20" />
+            </svg>
+          </button>
           {/* brain-extension: second affordance that opens the global graph in
               "stock mode" — every brain renderer extension (tier/source colors,
               derived-edge styling, recency sizing, search input, filter chips,
@@ -240,6 +305,84 @@ export default ((opts?: Partial<GraphOptions>) => {
         </div>
         <div class="global-graph-outer">
           <div class="global-graph-container" data-cfg={JSON.stringify(globalGraph)}></div>
+        </div>
+        {/* brain-extension: separate modal container for the fullscreen LOCAL
+            graph (depth=1 — current page + its connected nodes). Reuses the
+            same outer/active CSS as `.global-graph-outer` for the scrim +
+            centered panel; data-cfg is a clone of the inline localGraph
+            config with `filterChips` forced on so the focused view stays
+            explorable. Click handler in graph.inline.ts. */}
+        <div class="local-graph-outer">
+          <div
+            class="local-graph-container"
+            data-cfg={JSON.stringify({
+              ...localGraph,
+              filterChips: ["tier", "source"],
+              // brain-extension: Obsidian-grade spread — first-pass
+              // calibration after side-by-side comparison with the
+              // Obsidian docs vault graph. Repel ~6× sidebar default,
+              // linkDistance ~8× sidebar default, centerForce nearly
+              // off so the layout breathes outward instead of tugging
+              // back to the middle.
+              repelForce: 3.0,
+              linkDistance: 240,
+              centerForce: 0.05,
+              // brain-extension: 2.5× node radius (was 2×) so even after
+              // the wider spread the dots don't read as tiny specks.
+              nodeRadiusMultiplier: 2.5,
+              // brain-extension: steeper degree → radius curve. Default
+              // 0.5 (sqrt) capped hub-vs-leaf ratio at ~3×; bumping to
+              // 0.85 gives ~6–8× ratio so hubs visibly dominate the
+              // layout the way Obsidian's "Settings" / "Sync settings"
+              // nodes do.
+              nodeRadiusGrowthExponent: 0.85,
+              // brain-extension: fade wiki edges to 30% opacity so the
+              // graph reads as "labels and nodes first, edges as
+              // context." Matches Obsidian's barely-there grey strokes.
+              // Hover-highlighted edges still pop to full alpha via the
+              // existing `l.active` branch.
+              wikiEdgeBaseAlpha: 0.3,
+              // brain-extension: counteract the zoom-tied label-opacity
+              // formula `(transform.k * opacityScale - 1) / 3.75` —
+              // the wide spread above forces fit-zoom k < 1, which
+              // otherwise clamps every label's alpha to 0. Bumping
+              // opacityScale to 6 keeps labels readable at the
+              // initial fit (k≈0.4 → alpha≈0.4) while still letting
+              // user-initiated zoom-in further sharpen them.
+              opacityScale: 6,
+              // brain-extension: lift the per-node radius ceiling so
+              // hubs (the page itself + a few sub-hubs at depth=1)
+              // can grow past the historical 10×radiusMul cap. With
+              // ceiling=25 and radiusMul=2.5, max radius is 62.5px —
+              // big enough to dominate the layout the way Obsidian's
+              // structural hubs do.
+              nodeRadiusCeiling: 25,
+              // brain-extension: hub-node labels render at 1.7× the
+              // base fontSize so they immediately read as "this is the
+              // page / a major sub-hub" without competing with leaf
+              // labels.
+              hubLabelFontMultiplier: 1.7,
+              // brain-extension: hide orphans by default in the
+              // fullscreen modal (toggle chip in the controls rail
+              // brings them back). At depth=1 the only "orphan" is
+              // typically a few stray ingested docs that don't link
+              // anywhere — they add noise without contributing to the
+              // page-graph story.
+              hideOrphans: true,
+              // brain-extension: bump label size from the 0.6 default to
+              // 1.0 for the fullscreen modal — the canvas has plenty of
+              // room and the sidebar's small-text constraint doesn't
+              // apply here. Matches the global-graph fontSize override
+              // in quartz.layout.ts so the two fullscreen modals read
+              // with consistent typography.
+              fontSize: 1.0,
+              // brain-extension: same 10-char truncation as the global
+              // graph — at depth=1 with the wider spread above, full
+              // titles still wall-of-text near the central hub. Hover
+              // restores the full title.
+              labelMaxLength: 10,
+            })}
+          ></div>
         </div>
       </div>
     )

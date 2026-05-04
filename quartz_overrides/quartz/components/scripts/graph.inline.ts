@@ -114,6 +114,10 @@ type LinkRenderData = GraphicsInfo & {
 type NodeRenderData = GraphicsInfo & {
   simulationData: NodeData
   label: Text
+  // brain-extension: cached at label-creation time so the per-frame
+  // label-opacity loop can branch on hub-vs-leaf without recomputing
+  // the link count every frame.
+  isHub: boolean
 }
 
 const localStorageKey = "graph-visited"
@@ -131,6 +135,26 @@ type TweenNode = {
   update: (time: number) => void
   stop: () => void
 }
+
+// brain-extension: collapse long node titles to a glance-readable stub by
+// default — the dense fullscreen modal otherwise renders as an unreadable
+// wall of overlapping text (esp. with NFPA-style "Chapter X: ..." titles).
+// The full title is restored on pointerover. The cap is per-render-context
+// (cfg.labelMaxLength) so the dense modals can stay tight while the
+// sparser sidebar panel keeps more characters visible.
+const DEFAULT_LABEL_MAX = 10
+function shortLabel(text: string, max: number): string {
+  if (text.length <= max) return text
+  return text.slice(0, max - 1).trimEnd() + "…"
+}
+
+// brain-extension: default minimum incident-link count to treat a node
+// as a hub and bypass label truncation. Tuned for depth=1 contexts
+// (sidebar / local-fullscreen) where ~6 connections genuinely mark a
+// page as central. The global graph (depth=-1, ~1000 nodes) overrides
+// this to a higher value via cfg.hubLabelThreshold so the central
+// cluster doesn't wall-of-text.
+const DEFAULT_HUB_LABEL_THRESHOLD = 6
 
 // brain-extension: ref pattern that lets a chip-driven rerender swap the live
 // cleanup in place without dropping the cleanup-array entry the nav handler
@@ -170,6 +194,14 @@ const activeChipFilters: { tier: Set<string>; source: Set<string> } = {
   tier: new Set<string>(chipVocabularies.tier),
   source: new Set<string>(chipVocabularies.source),
 }
+
+// brain-extension: persistent across SPA navigation. When true, the
+// "show unconnected" chip is on and orphans (degree-0 nodes after the
+// chip + tag + frontmatter passes) are NOT hidden even when the
+// layout's `hideOrphans` cfg is true. Lives at module scope so a
+// user's preference carries across hover-driven and chip-driven
+// rerenders within a session.
+let hideOrphansToggleOn = false
 
 // brain-extension: live search query at module scope. Persists across
 // chip-driven rerenders (so toggling a chip mid-search doesn't blow the
@@ -353,7 +385,61 @@ async function renderGraph(
     // brain-extension: which chip rows to render. Each named dimension renders one
     // row of chips ("All <dim>" plus one chip per value in `chipVocabularies[dim]`).
     filterChips,
+    // brain-extension: scalar multiplier applied to nodeRadius() output and clamp
+    // bounds. Falls back to 1 when absent / non-finite so existing render contexts
+    // are unaffected. Resolved into `radiusMul` AFTER the stockMode override
+    // block below so the dot-grid view stays at the stock-Quartz radius.
+    nodeRadiusMultiplier,
+    // brain-extension: per-context label truncation cap. Long titles are
+    // truncated to `labelMaxLength - 1` chars + `…` and expanded on hover.
+    // Defaults to DEFAULT_LABEL_MAX (10) when absent / non-finite — sidebar
+    // panel overrides to a higher value so its sparse labels stay legible.
+    labelMaxLength,
+    // brain-extension: see D3Config docstrings. Both default to gentle
+    // curves so existing render contexts are unaffected.
+    nodeRadiusGrowthExponent,
+    wikiEdgeBaseAlpha,
+    hubLabelThreshold,
+    nodeRadiusCeiling,
+    hubLabelFontMultiplier,
   } = JSON.parse(graph.dataset["cfg"]!) as D3Config
+  const labelMax =
+    typeof labelMaxLength === "number" &&
+    Number.isFinite(labelMaxLength) &&
+    labelMaxLength > 0
+      ? Math.floor(labelMaxLength)
+      : DEFAULT_LABEL_MAX
+  const radiusExponent =
+    typeof nodeRadiusGrowthExponent === "number" &&
+    Number.isFinite(nodeRadiusGrowthExponent) &&
+    nodeRadiusGrowthExponent > 0
+      ? nodeRadiusGrowthExponent
+      : 0.5
+  const wikiEdgeAlpha =
+    typeof wikiEdgeBaseAlpha === "number" &&
+    Number.isFinite(wikiEdgeBaseAlpha) &&
+    wikiEdgeBaseAlpha >= 0 &&
+    wikiEdgeBaseAlpha <= 1
+      ? wikiEdgeBaseAlpha
+      : 1
+  const hubThreshold =
+    typeof hubLabelThreshold === "number" &&
+    Number.isFinite(hubLabelThreshold) &&
+    hubLabelThreshold > 0
+      ? Math.floor(hubLabelThreshold)
+      : DEFAULT_HUB_LABEL_THRESHOLD
+  const radiusCeiling =
+    typeof nodeRadiusCeiling === "number" &&
+    Number.isFinite(nodeRadiusCeiling) &&
+    nodeRadiusCeiling > 0
+      ? nodeRadiusCeiling
+      : 10
+  const hubFontMul =
+    typeof hubLabelFontMultiplier === "number" &&
+    Number.isFinite(hubLabelFontMultiplier) &&
+    hubLabelFontMultiplier > 0
+      ? hubLabelFontMultiplier
+      : 1
 
   // brain-extension: stock-mode override. When the user opened the global graph
   // via the dot-grid `brain-stock-graph-icon` button, every brain-extension
@@ -373,7 +459,20 @@ async function renderGraph(
     recencySizing = false
     searchEnabled = false
     filterChips = []
+    nodeRadiusMultiplier = undefined
+    nodeRadiusGrowthExponent = undefined
+    wikiEdgeBaseAlpha = undefined
+    hubLabelThreshold = undefined
+    nodeRadiusCeiling = undefined
+    hubLabelFontMultiplier = undefined
   }
+  // brain-extension: resolve the radius multiplier AFTER stockMode so the
+  // dot-grid view stays at the stock-Quartz radius even when the layout
+  // sets a non-1 multiplier on the underlying globalGraph cfg.
+  const radiusMul =
+    typeof nodeRadiusMultiplier === "number" && Number.isFinite(nodeRadiusMultiplier)
+      ? nodeRadiusMultiplier
+      : 1
 
   // brain-extension: build the search/chip controls UI when configured. The
   // elements are appended above the PixiJS canvas (which lands further down)
@@ -388,7 +487,11 @@ async function renderGraph(
     : []
   let controlsEl: HTMLDivElement | null = null
   let searchInputEl: HTMLInputElement | null = null
-  if (searchEnabled || filterChipsList.length > 0) {
+  // brain-extension: render the "Show unconnected" chip only on graphs
+  // whose layout actively hides orphans — otherwise the toggle has
+  // nothing to flip. Keeps the sidebar (hideOrphans:false) chip-free.
+  const showOrphanToggleChip = hideOrphans === true
+  if (searchEnabled || filterChipsList.length > 0 || showOrphanToggleChip) {
     controlsEl = document.createElement("div")
     controlsEl.className = "brain-graph-controls"
     graph.appendChild(controlsEl)
@@ -449,6 +552,26 @@ async function renderGraph(
         })
         row.appendChild(chip)
       }
+      controlsEl.appendChild(row)
+    }
+    if (showOrphanToggleChip) {
+      // brain-extension: standalone toggle chip — no "all" reset, no
+      // dimension label. Reads as ON when orphans are currently
+      // visible (i.e. the toggle has been flipped to override the
+      // layout's hide-orphans default).
+      const row = document.createElement("div")
+      row.className = "brain-graph-chip-row"
+      row.dataset["dimension"] = "orphans"
+      const chip = document.createElement("button")
+      chip.type = "button"
+      chip.className = "brain-graph-chip"
+      chip.textContent = "Show unconnected"
+      if (hideOrphansToggleOn) chip.classList.add("active")
+      chip.addEventListener("click", () => {
+        hideOrphansToggleOn = !hideOrphansToggleOn
+        void rerenderForChipChange()
+      })
+      row.appendChild(chip)
       controlsEl.appendChild(row)
     }
   }
@@ -612,7 +735,11 @@ async function renderGraph(
   const survivingLinks = links.filter(
     (l) => filtered.has(l.source) && filtered.has(l.target),
   )
-  if (hideOrphans) {
+  // brain-extension: the "Show unconnected" chip toggles the orphan
+  // filter at runtime. When ON, orphans are kept regardless of the
+  // layout's `hideOrphans` cfg.
+  const effectiveHideOrphans = hideOrphans && !hideOrphansToggleOn
+  if (effectiveHideOrphans) {
     const degree = new Map<SimpleSlug, number>()
     for (const id of filtered) degree.set(id, 0)
     for (const l of survivingLinks) {
@@ -821,7 +948,11 @@ async function renderGraph(
     const numLinks = graphData.links.filter(
       (l) => l.source.id === d.id || l.target.id === d.id,
     ).length
-    const base = 2 + Math.sqrt(numLinks)
+    // brain-extension: configurable degree → radius curve. The default
+    // exponent (0.5 = sqrt) gives a gentle hub/leaf ratio; bumping the
+    // exponent toward 1 widens the spread so hubs visibly dominate
+    // (matches Obsidian's "Settings" being ~5× a leaf node).
+    const base = 2 + Math.pow(numLinks, radiusExponent)
     // brain-extension: scale by recency when enabled; clamp final radius to
     // [2, 10]. The previous [1, 4] clamp was too tight — any node with ≥ 4
     // links pinned to the ceiling, and any node touched today (recency
@@ -833,11 +964,24 @@ async function renderGraph(
       recencySizing && d.mtime !== null && d.mtime !== undefined
         ? recencyMultiplier(d.mtime)
         : 1
-    return Math.min(10, Math.max(2, base * multiplier))
+    // brain-extension: `radiusMul` (from the `nodeRadiusMultiplier` cfg knob)
+    // scales both the radius value AND the clamp bounds, so a 2× multiplier
+    // produces dots that are uniformly twice as big without compressing
+    // hub/leaf size differences against the ceiling.
+    return Math.min(
+      radiusCeiling * radiusMul,
+      Math.max(2 * radiusMul, base * multiplier * radiusMul),
+    )
   }
 
   let hoveredNodeId: string | null = null
   let hoveredNeighbours: Set<string> = new Set()
+  // brain-extension: latest zoom-driven label opacity. The d3-zoom callback
+  // writes here on every zoom event; `renderLabels` reads it to compute the
+  // baseline alpha for non-active labels during hover (so they fade to a
+  // small fraction of their natural opacity rather than disappearing /
+  // staying full-bright).
+  let currentScaleOpacity = 0
   const linkRenderData: LinkRenderData[] = []
   const nodeRenderData: NodeRenderData[] = []
   // brain-extension: search highlight state. When true, the renderers dim
@@ -959,12 +1103,14 @@ async function renderGraph(
 
     for (const l of linkRenderData) {
       // brain: derived edges start at the configured (typically <1) base alpha;
-      // wiki edges keep upstream's full alpha. Hover dimming layers on top so a
-      // hovered-neighbour derived edge doesn't fade further than its base.
+      // wiki edges use `wikiEdgeAlpha` (default 1, lowered on dense fullscreen
+      // views so the graph reads "labels first, structure second"). Hover
+      // dimming layers on top so a hovered-neighbour derived edge doesn't
+      // fade further than its base.
       const baseAlpha =
         l.simulationData.kind === "derived" && derivedEdgeStyle
           ? derivedEdgeStyle.alpha
-          : 1
+          : wikiEdgeAlpha
       let alpha = baseAlpha
 
       // if we are hovering over a node, we want to highlight the immediate neighbours
@@ -976,7 +1122,13 @@ async function renderGraph(
         alpha = l.active ? baseAlpha : baseAlpha * 0.2
       }
 
-      l.color = l.active ? computedStyleMap["--gray"] : computedStyleMap["--lightgray"]
+      // brain-extension: paint hover-active edges in the brain accent
+      // (`--secondary`, indigo-violet) instead of `--gray` — matches
+      // Obsidian's behavior where selecting a node lights up its
+      // immediate connections in a vivid color so the user can trace
+      // them at a glance against the dimmed-down rest of the graph.
+      // Non-active edges still fade to the very-light gray.
+      l.color = l.active ? computedStyleMap["--secondary"] : computedStyleMap["--lightgray"]
       tweenGroup.add(new Tweened<LinkRenderData>(l).to({ alpha }, 200))
     }
 
@@ -995,30 +1147,53 @@ async function renderGraph(
 
     const defaultScale = 1 / scale
     const activeScale = defaultScale * 1.1
+    // brain-extension: when a hover or search is active, dim every
+    // non-active label to a small fraction of its natural opacity and
+    // bring the active labels (hovered node + its neighbours / search
+    // matches) to full brightness — matches Obsidian's behavior where
+    // selecting a node lights up its neighbourhood and fades the rest
+    // of the canvas. When nothing is active, every label tweens back
+    // toward `currentScaleOpacity` (the zoom-driven baseline) so labels
+    // return to their natural visibility on pointerleave.
+    const hoverOrSearchActive = hoveredNodeId !== null || searchActive
+    const dimAlpha = currentScaleOpacity * 0.15
     for (const n of nodeRenderData) {
       const nodeId = n.simulationData.id
-
+      let targetAlpha: number
+      let targetScale: number
       if (hoveredNodeId === nodeId) {
-        tweenGroup.add(
-          new Tweened<Text>(n.label).to(
-            {
-              alpha: 1,
-              scale: { x: activeScale, y: activeScale },
-            },
-            100,
-          ),
-        )
+        targetAlpha = 1
+        targetScale = activeScale
+      } else if (hoverOrSearchActive && n.active) {
+        targetAlpha = 1
+        targetScale = defaultScale
+      } else if (hoverOrSearchActive) {
+        targetAlpha = dimAlpha
+        targetScale = defaultScale
+      } else if (n.isHub) {
+        // brain-extension: hub labels pinned to full alpha at rest so
+        // they read at the same brightness as a hovered label — the
+        // zoom-driven `currentScaleOpacity` was leaving them at ~0.3–0.5
+        // at fit zoom, which felt washed out compared to stock Quartz.
+        targetAlpha = 1
+        targetScale = defaultScale
       } else {
-        tweenGroup.add(
-          new Tweened<Text>(n.label).to(
-            {
-              alpha: n.label.alpha,
-              scale: { x: defaultScale, y: defaultScale },
-            },
-            100,
-          ),
-        )
+        // brain-extension: non-hub labels dim by default — they reveal
+        // on hover (via the hovered + n.active branches above) but
+        // otherwise stay quiet so the canvas reads as "hubs first,
+        // detail on demand."
+        targetAlpha = dimAlpha
+        targetScale = defaultScale
       }
+      tweenGroup.add(
+        new Tweened<Text>(n.label).to(
+          {
+            alpha: targetAlpha,
+            scale: { x: targetScale, y: targetScale },
+          },
+          100,
+        ),
+      )
     }
 
     tweenGroup.getAll().forEach((tw) => tw.start())
@@ -1092,14 +1267,34 @@ async function renderGraph(
   for (const n of graphData.nodes) {
     const nodeId = n.id
 
+    // brain-extension: cache the full + truncated label strings on the
+    // closure so the pointer handlers below can flip between them without
+    // recomputing on every hover. When the title already fits inside
+    // `labelMax`, both strings are identical and the value-equality guard
+    // in the handlers short-circuits the swap (no Pixi atlas churn).
+    const fullText = n.text
+    // brain-extension: any node above HUB_LABEL_THRESHOLD links is treated
+    // as "big enough to deserve its full title" — the layout's truncation
+    // cap is bypassed for these nodes (in every render context, sidebar
+    // and modals alike) so the structural anchors of the graph stay
+    // immediately readable without requiring a hover.
+    const numLinks = graphData.links.filter(
+      (l) => l.source.id === n.id || l.target.id === n.id,
+    ).length
+    const isHubNode = numLinks >= hubThreshold
+    const truncatedText = isHubNode ? fullText : shortLabel(fullText, labelMax)
+    // brain-extension: hub nodes get a larger label fontSize (× hubFontMul)
+    // so they read as "this is a structurally important page" at a glance.
+    const labelFontSize = (isHubNode ? fontSize * hubFontMul : fontSize) * 15
+
     const label = new Text({
       interactive: false,
       eventMode: "none",
-      text: n.text,
+      text: truncatedText,
       alpha: 0,
       anchor: { x: 0.5, y: 1.2 },
       style: {
-        fontSize: fontSize * 15,
+        fontSize: labelFontSize,
         fill: computedStyleMap["--dark"],
         fontFamily: computedStyleMap["--bodyFont"],
       },
@@ -1121,6 +1316,12 @@ async function renderGraph(
       .on("pointerover", (e) => {
         updateHoverInfo(e.target.label)
         oldLabelOpacity = label.alpha
+        // brain-extension: swap to the full title on hover. Pixi's Text
+        // regenerates its glyph atlas on `.text =` mutation, so we only
+        // assign when the value differs (no-op when already full).
+        if (fullText !== truncatedText && label.text !== fullText) {
+          label.text = fullText
+        }
         // brain-extension: surface derived-edge metadata when this node has any
         // incident derived edges. Spec deviation rationale documented at the
         // tooltip-create site above. Pixi pointer events expose clientX/clientY
@@ -1137,6 +1338,10 @@ async function renderGraph(
       .on("pointerleave", () => {
         updateHoverInfo(null)
         label.alpha = oldLabelOpacity
+        // brain-extension: restore the truncated label when the cursor leaves.
+        if (fullText !== truncatedText && label.text !== truncatedText) {
+          label.text = truncatedText
+        }
         // brain-extension: hide the derived-edge tooltip when the cursor leaves.
         hideTooltip()
         if (!dragging) {
@@ -1158,6 +1363,7 @@ async function renderGraph(
       color: color(n),
       alpha: 1,
       active: false,
+      isHub: isHubNode,
     }
 
     nodeRenderData.push(nodeRenderDatum)
@@ -1354,11 +1560,31 @@ async function renderGraph(
         // zoom adjusts opacity of labels too
         const scale = transform.k * opacityScale
         let scaleOpacity = Math.max((scale - 1) / 3.75, 0)
-        const activeNodes = nodeRenderData.filter((n) => n.active).flatMap((n) => n.label)
+        currentScaleOpacity = scaleOpacity
+        // brain-extension: respect both the hover-dim state AND the
+        // hub-vs-non-hub baseline when re-applying the zoom-driven
+        // opacity. Without this, zooming would clobber both the
+        // hover-dim effect (renderLabels applied during hover) and
+        // the hub-bright / non-hub-dim baseline that's the steady
+        // state when nothing is hovered.
+        const hoverOrSearchActive = hoveredNodeId !== null || searchActive
+        const dimAlpha = scaleOpacity * 0.15
+        const activeLabels = nodeRenderData.filter((n) => n.active).flatMap((n) => n.label)
+        const hubLabels = new Set(nodeRenderData.filter((n) => n.isHub).map((n) => n.label))
 
         for (const label of labelsContainer.children) {
-          if (!activeNodes.includes(label)) {
-            label.alpha = scaleOpacity
+          if (activeLabels.includes(label)) {
+            // Active labels are pinned at full alpha by renderLabels;
+            // don't overwrite them on zoom.
+            continue
+          }
+          if (hoverOrSearchActive) {
+            label.alpha = dimAlpha
+          } else {
+            // brain-extension: hub labels pinned to full alpha at rest
+            // (matches the renderLabels branch); non-hub labels track
+            // the zoom-driven dim baseline.
+            label.alpha = hubLabels.has(label) ? 1 : dimAlpha
           }
         }
       })
@@ -1507,6 +1733,11 @@ async function renderGraph(
 
 let localGraphCleanups: (() => void)[] = []
 let globalGraphCleanups: (() => void)[] = []
+// brain-extension: separate cleanup bucket for the fullscreen-local-graph
+// modal so opening the global modal afterwards doesn't tear down its Pixi
+// app, and vice versa. Both modals share the same Esc handler shape, so
+// each one's hide function only clears its own bucket.
+let localFullscreenCleanups: (() => void)[] = []
 
 function cleanupLocalGraphs() {
   for (const cleanup of localGraphCleanups) {
@@ -1520,6 +1751,13 @@ function cleanupGlobalGraphs() {
     cleanup()
   }
   globalGraphCleanups = []
+}
+
+function cleanupLocalFullscreenGraphs() {
+  for (const cleanup of localFullscreenCleanups) {
+    cleanup()
+  }
+  localFullscreenCleanups = []
 }
 
 document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
@@ -1592,15 +1830,60 @@ document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
     }
   }
 
+  // brain-extension: fullscreen-LOCAL-graph modal. Uses its own outer
+  // container (`.local-graph-outer`) so it can co-exist with the global
+  // modal's open/close state without sharing cleanup buckets. The inner
+  // `.local-graph-container` carries a data-cfg that's a clone of the
+  // sidebar's localGraph config + `filterChips: ["tier", "source"]`
+  // forced on, so depth=1 (current page + neighbours) survives but the
+  // user gets the same search + chip rail as the global modal.
+  const localFullscreenContainers = [
+    ...document.getElementsByClassName("local-graph-outer"),
+  ] as HTMLElement[]
+
+  async function renderLocalFullscreenGraph() {
+    const slug = getFullSlug(window)
+    for (const container of localFullscreenContainers) {
+      container.classList.add("active")
+      const sidebar = container.closest(".sidebar") as HTMLElement
+      if (sidebar) {
+        sidebar.style.zIndex = "1"
+      }
+      const graphContainer = container.querySelector(
+        ".local-graph-container",
+      ) as HTMLElement
+      registerEscapeHandler(container, hideLocalFullscreenGraph)
+      if (graphContainer) {
+        const ref: CleanupRef = { current: () => {} }
+        await renderGraph(graphContainer, slug, ref)
+        localFullscreenCleanups.push(() => ref.current())
+      }
+    }
+  }
+
+  function hideLocalFullscreenGraph() {
+    cleanupLocalFullscreenGraphs()
+    for (const container of localFullscreenContainers) {
+      container.classList.remove("active")
+      const sidebar = container.closest(".sidebar") as HTMLElement
+      if (sidebar) {
+        sidebar.style.zIndex = ""
+      }
+    }
+  }
+
   async function shortcutHandler(e: HTMLElementEventMap["keydown"]) {
     if (e.key === "g" && (e.ctrlKey || e.metaKey) && !e.shiftKey) {
       e.preventDefault()
-      const anyGlobalGraphOpen = containers.some((container) =>
-        container.classList.contains("active"),
+      // brain: Cmd/Ctrl+G drives the fullscreen-LOCAL-graph modal (current
+      // page + its neighbourhood at depth=1, with search + filter chips).
+      // The global graph still has its own globe/dot-grid icons in the
+      // sidebar; the keyboard shortcut intentionally addresses the more
+      // common "show me what THIS page is connected to" intent.
+      const anyLocalFullscreenOpen = localFullscreenContainers.some((c) =>
+        c.classList.contains("active"),
       )
-      // brain: keyboard shortcut keeps brain semantics — only the explicit
-      // dot-grid click opts into stock mode.
-      anyGlobalGraphOpen ? hideGlobalGraph() : renderGlobalGraph(false)
+      anyLocalFullscreenOpen ? hideLocalFullscreenGraph() : renderLocalFullscreenGraph()
     }
   }
 
@@ -1628,10 +1911,28 @@ document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
     window.addCleanup(() => icon.removeEventListener("click", handleStockGraphClick))
   })
 
+  // brain-extension: the maximize affordance opens the fullscreen-local-graph
+  // modal — same scope as the sidebar's inline local graph (depth=1) but
+  // rendered into the centered modal panel with search + tier/source chips
+  // on. Same handler shape as the other two icons.
+  const localFullscreenIcons = document.getElementsByClassName(
+    "local-graph-fullscreen-icon",
+  )
+  const handleLocalFullscreenClick = () => {
+    void renderLocalFullscreenGraph()
+  }
+  Array.from(localFullscreenIcons).forEach((icon) => {
+    icon.addEventListener("click", handleLocalFullscreenClick)
+    window.addCleanup(() =>
+      icon.removeEventListener("click", handleLocalFullscreenClick),
+    )
+  })
+
   document.addEventListener("keydown", shortcutHandler)
   window.addCleanup(() => {
     document.removeEventListener("keydown", shortcutHandler)
     cleanupLocalGraphs()
     cleanupGlobalGraphs()
+    cleanupLocalFullscreenGraphs()
   })
 })

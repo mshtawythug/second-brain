@@ -76,6 +76,7 @@ body[data-slug="index"] {
     // Each list item becomes a card.
     > li {
       box-sizing: border-box;
+      position: relative;
       background: var(--surface-1);
       border: 1px solid var(--rule);
       border-radius: 8px;
@@ -84,6 +85,7 @@ body[data-slug="index"] {
       color: var(--ink-1);
       line-height: 1.5;
       list-style: none;
+      cursor: pointer;
       transition:
         transform var(--motion-mid) var(--motion-easing),
         box-shadow var(--motion-mid) var(--motion-easing),
@@ -97,6 +99,15 @@ body[data-slug="index"] {
 
       // The leading wiki/ingested link inside the card reads as the
       // card title — promote its visual weight.
+      //
+      // Stretched-link pattern: the leading `<a>` paints an invisible
+      // `::before` overlay across the entire card so a click anywhere
+      // in the card follows the link. Markdown stays as `<li>emoji
+      // <a>title</a> — desc</li>` (no markup change), and the link's
+      // accessible name still comes from its text. Tradeoff: text
+      // selection inside the card requires shift-click (same as
+      // Bootstrap's `.stretched-link`); acceptable here because the
+      // card's primary affordance is "navigate", not "read & copy".
       > a:first-child {
         display: inline;
         font-family: var(--displayFont);
@@ -104,6 +115,22 @@ body[data-slug="index"] {
         font-weight: 600;
         color: var(--ink-0);
         margin-right: 0.25em;
+
+        &::before {
+          content: "";
+          position: absolute;
+          inset: 0;
+          border-radius: inherit;
+          z-index: 1;
+        }
+      }
+
+      // Tag chips inside a card stay independently clickable — float
+      // them above the stretched-link overlay so the chip's own click
+      // target wins over the card-wide link.
+      a.tag-link {
+        position: relative;
+        z-index: 2;
       }
     }
   }

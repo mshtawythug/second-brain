@@ -8,7 +8,12 @@
 #   1. Run `brain vault export` so any DB-side changes (e.g. new ingested
 #      docs that haven't been mirrored into the vault yet) are materialized
 #      as Markdown files Quartz can render.
-#   2. Run `python -m brain.wiki.build_swap` once: builds into a fresh
+#   2. Apply the brain Quartz overlay (`quartz_overrides/`) into the
+#      workspace via `brain vault render --overlay --no-build`, so any
+#      edits to overlay sources land in `<vault>/.quartz/` before the
+#      build picks them up. (`brain-up` does the same on cold start —
+#      this mirrors that behaviour for in-place rebuilds.)
+#   3. Run `python -m brain.wiki.build_swap` once: builds into a fresh
 #      `<vault>/.quartz/builds/<id>/`, atomically retargets `current/`,
 #      and prunes old build dirs. The build watcher (started by
 #      `brain-up`) keeps running — no restart needed because the swap
@@ -17,6 +22,8 @@
 # Flags:
 #   --no-export   skip the DB→vault export step (use if you only edited
 #                 vault files directly).
+#   --no-overlay  skip the overlay re-apply step (use if you haven't
+#                 touched `quartz_overrides/` since the last apply).
 #   --no-build    skip the one-shot build (use if the running watcher
 #                 will pick up the changes anyway after the export).
 #
@@ -24,6 +31,7 @@
 #   BRAIN_VAULT_PATH        (default: ~/brain-vault)
 #   BRAIN_WIKI_PORT         (default: 8080)
 #   BRAIN_WIKI_KEEP_BUILDS  (default: 3)
+#   BRAIN_NO_OVERLAY        (default: 0; set 1 to skip the overlay step)
 
 set -euo pipefail
 
@@ -51,12 +59,14 @@ else
 fi
 
 DO_EXPORT=1
+DO_OVERLAY=1
 DO_BUILD=1
 
 for arg in "$@"; do
     case "$arg" in
-        --no-export) DO_EXPORT=0 ;;
-        --no-build)  DO_BUILD=0 ;;
+        --no-export)  DO_EXPORT=0 ;;
+        --no-overlay) DO_OVERLAY=0 ;;
+        --no-build)   DO_BUILD=0 ;;
         -h|--help)
             sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//; /^set -euo/d'
             exit 0
@@ -77,6 +87,18 @@ fi
 if [[ "$DO_EXPORT" == '1' ]]; then
     echo "🔄 exporting DB → vault ($VAULT)..."
     brain vault export --to "$VAULT"
+fi
+
+if [[ "$DO_OVERLAY" == '1' && "${BRAIN_NO_OVERLAY:-0}" != '1' ]]; then
+    # `--no-build` applies the overlay to the workspace without running
+    # `npx quartz build` — the build step below owns the actual build.
+    # Mirrors the apply_overlay() helper in `bin/brain-up`.
+    echo '🔄 applying quartz overlay...'
+    if ! brain vault render --overlay --no-build --vault "$VAULT" 2>&1; then
+        echo 'overlay: failed — build will use whatever is in the workspace' >&2
+    fi
+elif [[ "${BRAIN_NO_OVERLAY:-0}" == '1' ]]; then
+    echo 'overlay: skipped (BRAIN_NO_OVERLAY=1)'
 fi
 
 if [[ "$DO_BUILD" == '1' ]]; then

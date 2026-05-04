@@ -111,21 +111,35 @@ export const defaultContentPageLayout: PageLayout = {
         // graph below, where it actually slices a useful number of
         // nodes.
         filterChips: [],
+        // brain-extension: looser label cap for the sidebar panel — at
+        // depth=1 there are typically only a handful of nodes, so 30
+        // chars fits a full short-thread reply ("Apr 28 — Re: Ali Sarkis
+        // × vendor-ev") without crowding. The fullscreen modal (Graph.tsx
+        // override) and the global graph (defaulted to 10) both keep
+        // the tighter cap since their dense canvases would otherwise
+        // wall-of-text.
+        labelMaxLength: 30,
       },
       globalGraph: {
         depth: -1,
         scale: 0.9,
-        repelForce: 0.8,
-        linkDistance: 50,
+        // brain-extension: corpus-scale Obsidian-grade tunings — even
+        // bigger spread than the local-fullscreen modal because the
+        // node count is ~30× higher (1000+ docs vs ~30 neighbours at
+        // depth=1). Without this the central cluster compresses into
+        // an unreadable blob.
+        repelForce: 4.5,
+        linkDistance: 280,
+        centerForce: 0.05,
         focusOnHover: true,
         enableRadial: true,
-        // brain-extension: SHOW orphans on the global graph. The local
-        // graph hides them (focused view at depth 1 — orphans are noise),
-        // but global is the "I want to see everything" view. With
-        // hideOrphans=true we were hiding 62/68 Krisp transcripts (they
-        // have no wiki-links because they're raw transcripts), making
-        // the corpus appear sparser than it is when filtered by source.
-        hideOrphans: false,
+        // brain-extension: hide orphans (degree-0 nodes after the chip
+        // + tag passes) by default — at corpus scale the floating
+        // unconnected dots add visual noise without conveying
+        // structure. Users who want to see them can flip the
+        // "Show unconnected" chip in the controls rail; the toggle
+        // persists across SPA navigation within the session.
+        hideOrphans: true,
         // brain-extension: collapse #tag nodes into chips so a single
         // popular tag does not pull every tagged doc into the center.
         hideTagNodes: true,
@@ -142,6 +156,55 @@ export const defaultContentPageLayout: PageLayout = {
         // tier = vault-tier (a/b/c), source = ingest source (krisp,
         // slack, gmail, manual).
         filterChips: ["tier", "source"],
+        // brain-extension: 2× node radius — matches the fullscreen-local
+        // modal's sizing so the brain-customized globe view reads with
+        // comfortable, glance-sized dots. The dot-grid (stock-mode) view
+        // strips this back to 1× via the stockMode override in
+        // graph.inline.ts so that affordance keeps stock-Quartz visuals.
+        nodeRadiusMultiplier: 2,
+        // brain-extension: same steeper degree → radius curve as the
+        // local-fullscreen view so corpus-level hubs (COMPANY_REDACTED,
+        // COMPANY_REDACTED Hub, COMPANY_REDACTED) visibly dominate vs leaves.
+        nodeRadiusGrowthExponent: 0.85,
+        // brain-extension: fade wiki edges to 25% — slightly fainter
+        // than local-fullscreen because at 1000+ nodes the edge density
+        // is much higher and would otherwise dominate the canvas.
+        wikiEdgeBaseAlpha: 0.25,
+        // brain-extension: bump opacityScale so labels stay visible at
+        // the wide-spread fit zoom (which lands at k < 1 and would
+        // otherwise clamp every label to alpha 0).
+        opacityScale: 6,
+        // brain-extension: bump label size from the 0.6 default to 1.0
+        // — at 80vw × 80vh the canvas has plenty of room and the sidebar
+        // panel's small-text constraint doesn't apply. Matches the
+        // local-fullscreen modal's fontSize override in Graph.tsx so the
+        // two fullscreen views read with consistent typography.
+        fontSize: 1.0,
+        // brain-extension: any node with ≥ 12 incident links skips
+        // truncation in the global view. Was 25 — too restrictive
+        // (COMPANY_REDACTED Hub, Interview Prep, COMPANY_REDACTED only had ~10–20 links
+        // each, so they got truncated despite being clearly hubs).
+        // Lower threshold lets the structural anchors of the corpus
+        // read at full length without flooding the canvas with text.
+        hubLabelThreshold: 12,
+        // brain-extension: non-hub leaf labels in the global view show
+        // up to 20 chars (was 10, default). At depth=-1 the cluster is
+        // already broken into named regions by the hub labels above, so
+        // a longer leaf cap helps disambiguate adjacent nodes (e.g.
+        // "Re: VP of Engineerin…" vs "Re: VP of Engineering — Eve…")
+        // without restoring the wall-of-text problem.
+        labelMaxLength: 20,
+        // brain-extension: lift the radius ceiling further than the
+        // local-fullscreen view (25 → 30) because at corpus scale the
+        // dynamic range between leaves (1 link) and mega-hubs (200+
+        // links) is much wider — letting hubs render to ~60px gives
+        // the visual hierarchy room to breathe.
+        nodeRadiusCeiling: 30,
+        // brain-extension: 2× hub-label fontSize — slightly more
+        // dramatic than local-fullscreen's 1.7× because at depth=-1
+        // there are many more leaves and the size delta needs to be
+        // bigger to read as a distinct tier.
+        hubLabelFontMultiplier: 2.0,
       },
     }),
     Component.DesktopOnly(Component.TableOfContents()),

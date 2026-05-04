@@ -277,10 +277,51 @@
   transition: transform var(--motion-mid) var(--motion-easing);
 }
 
+// brain: folder file-count badge — appended after `.folder-title` by
+// `quartz_overrides/quartz/components/scripts/explorer.inline.ts`. Reads
+// as a dim subscript next to the folder name (e.g. "company-id  5"), so it
+// recedes against the title until you scan for it. Recursive count of
+// leaf descendants — what's actually visible under the folder, not the
+// raw contentIndex.
+.folder-count {
+  margin-left: 0.4em;
+  font-size: 0.8em;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+  // The badge sits inside `.folder-container > div`, alongside the
+  // title button/anchor. `vertical-align: baseline` is the default but
+  // explicit-align here so the count stays aligned even if a parent
+  // sets a different vertical-align rule.
+  vertical-align: baseline;
+}
+
 // Active note highlight — stock Quartz colors `.explorer-content li > a.active`
 // with `--tertiary`. Repaint to `--accent-strong` so the active
 // affordance tracks the link palette.
 .explorer-content ul li > a.active {
+  color: var(--accent-strong);
+}
+
+// brain: hover treatment parity for file links. Upstream paints
+// `.folder-container div > a:hover` and `.folder-icon:hover` with
+// `--tertiary`, but file `<li><a>` rows get no hover affordance — the
+// only way to tell what you're about to click is to follow the cursor.
+// Match the folder hover (repainted to `--accent-strong` for token
+// consistency) so every clickable thing in the explorer reacts the
+// same way to a hover.
+.explorer-content ul li > a {
+  transition: color var(--motion-fast) var(--motion-easing);
+
+  &:hover {
+    color: var(--accent-strong);
+    opacity: 1;
+  }
+}
+
+// Repaint the upstream `--tertiary` folder-link + folder-icon hovers
+// to `--accent-strong` so every explorer hover reads the same.
+.folder-container div > a:hover,
+.folder-icon:hover {
   color: var(--accent-strong);
 }
 
