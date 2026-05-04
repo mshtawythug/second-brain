@@ -130,6 +130,66 @@ def test_emitter_slim_runs_after_linkrecords_graft(emitter_source: str) -> None:
     )
 
 
+def test_emitter_lifts_date_from_frontmatter(emitter_source: str) -> None:
+    """The post-processor surfaces ``details.date`` from frontmatter (P3.3 Part B).
+
+    Lookup order mirrors the brain frontmatter writer in
+    ``src/brain/vault/export.py`` (``date`` > ``created`` >
+    ``published`` > ``updated``). Anchoring on each branch's literal
+    assignment keeps the priority order explicit — a reorder would be
+    a UX deviation (e.g. preferring ``updated`` over ``created`` would
+    cause every doc to look "fresh" after a touch).
+    """
+    expected_branches = (
+        'if (typeof fm.date === "string") {',
+        'details.date = fm.date',
+        '} else if (typeof fm.created === "string") {',
+        'details.date = fm.created',
+        '} else if (typeof fm.published === "string") {',
+        'details.date = fm.published',
+        '} else if (typeof fm.updated === "string") {',
+        'details.date = fm.updated',
+    )
+    for marker in expected_branches:
+        assert marker in emitter_source, (
+            f"date-lift branch missing in emitter: `{marker}` — "
+            "P3.3 Part B requires the four-field fallback chain"
+        )
+
+
+def test_emitter_date_lift_runs_after_tier_source(emitter_source: str) -> None:
+    """Date lift comes after the tier/source graft, before linkRecords.
+
+    Ordering keeps the per-entry block readable: frontmatter pulls
+    cluster together, then the link-classification pass, then the
+    slim transform writes the body file.
+    """
+    tier_marker = "details.tier = fm.kind"
+    date_marker = "details.date = fm.date"
+    link_marker = "details.linkRecords ="
+    tier_idx = emitter_source.find(tier_marker)
+    date_idx = emitter_source.find(date_marker)
+    link_idx = emitter_source.find(link_marker)
+    assert tier_idx >= 0 and date_idx >= 0 and link_idx >= 0
+    assert tier_idx < date_idx < link_idx, (
+        "expected order: tier/source pulls → date pull → linkRecords graft"
+    )
+
+
+def test_emitter_brain_content_details_declares_date_field(emitter_source: str) -> None:
+    """``BrainContentDetails`` type carries the optional ``date`` field.
+
+    Without the type declaration the date assignment trips a TS error
+    at build time (``Property 'date' does not exist on type
+    'BrainContentDetails'``). Anchored on the literal ``date?: string``
+    line so a rename to ``date?: number`` (epoch millis) would force a
+    test update + a downstream Search.tsx update together.
+    """
+    assert "date?: string" in emitter_source, (
+        "BrainContentDetails must declare `date?: string` for the date lift"
+    )
+
+
 def test_emitter_slim_io_inside_existing_try_catch(emitter_source: str) -> None:
     """Slim writes are inside the post-processor's existing try/catch.
 
@@ -282,7 +342,7 @@ def test_python_port_handles_missing_content(tmp_path: Path) -> None:
 
 
 def test_python_port_preserves_other_fields(tmp_path: Path) -> None:
-    """Slim step doesn't touch ``title`` / ``tags`` / ``links`` / ``linkRecords``."""
+    """Slim step doesn't touch ``title`` / ``tags`` / ``links`` / ``linkRecords`` / ``date``."""
     # Setup
     parsed = {
         "doc": {
@@ -293,6 +353,7 @@ def test_python_port_preserves_other_fields(tmp_path: Path) -> None:
             "linkRecords": [{"target": "other", "kind": "wiki"}],
             "tier": "vault",
             "source": "manual",
+            "date": "2026-04-12T00:00:00+00:00",
             "content": "body",
         }
     }
@@ -300,7 +361,9 @@ def test_python_port_preserves_other_fields(tmp_path: Path) -> None:
     # Exercise
     out = _python_port_slim_transform(parsed, tmp_path)
 
-    # Verify — only `content` and `snippet` change.
+    # Verify — only `content` and `snippet` change. Date passthrough
+    # confirms the slim step doesn't accidentally drop the field
+    # P3.3 Part B added.
     d = out["doc"]
     assert d["title"] == "Example"
     assert d["tags"] == ["a", "b"]
@@ -308,5 +371,64 @@ def test_python_port_preserves_other_fields(tmp_path: Path) -> None:
     assert d["linkRecords"] == [{"target": "other", "kind": "wiki"}]
     assert d["tier"] == "vault"
     assert d["source"] == "manual"
+    assert d["date"] == "2026-04-12T00:00:00+00:00"
     assert d["content"] == "body"
     assert d["snippet"] == "body"
+
+
+def _python_port_date_lift(
+    fm: dict[str, Any],
+) -> str | None:
+    """Mirror of the TS date-lift fallback chain (P3.3 Part B).
+
+    The TS emitter:
+        if (typeof fm.date === "string")        details.date = fm.date
+        else if (typeof fm.created === "string") details.date = fm.created
+        else if (typeof fm.published === "string") details.date = fm.published
+        else if (typeof fm.updated === "string")   details.date = fm.updated
+
+    Returns the resolved date or ``None`` if no string field matches.
+    """
+    for key in ("date", "created", "published", "updated"):
+        v = fm.get(key)
+        if isinstance(v, str):
+            return v
+    return None
+
+
+def test_date_lift_prefers_explicit_date_field() -> None:
+    """``date`` wins when present (forward-looking authoring override)."""
+    fm = {"date": "2026-04-12", "created": "2026-04-01", "updated": "2026-05-01"}
+    assert _python_port_date_lift(fm) == "2026-04-12"
+
+
+def test_date_lift_falls_back_to_created() -> None:
+    """``created`` is the primary brain frontmatter field — used when ``date`` is absent."""
+    fm = {"created": "2026-04-01T00:00:00+00:00", "updated": "2026-05-01T00:00:00+00:00"}
+    assert _python_port_date_lift(fm) == "2026-04-01T00:00:00+00:00"
+
+
+def test_date_lift_falls_back_to_published() -> None:
+    """``published`` covers any legacy authoring tool that wrote that key."""
+    fm = {"published": "2025-12-12"}
+    assert _python_port_date_lift(fm) == "2025-12-12"
+
+
+def test_date_lift_falls_back_to_updated() -> None:
+    """``updated`` is the last-resort fallback (kept current on every sync)."""
+    fm = {"updated": "2026-05-01"}
+    assert _python_port_date_lift(fm) == "2026-05-01"
+
+
+def test_date_lift_returns_none_when_all_missing() -> None:
+    """Frontmatter with no recognised date field → ``None`` (consumers handle).
+
+    The TS branch leaves ``details.date`` undefined; the Search row
+    renders an empty date column and the tag-content row hides the
+    ``<QuartzDate>`` element altogether — both already exercised by
+    static checks above.
+    """
+    assert _python_port_date_lift({}) is None
+    # Non-string values don't satisfy the type guard.
+    assert _python_port_date_lift({"created": 12345}) is None
+    assert _python_port_date_lift({"date": None}) is None

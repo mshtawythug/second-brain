@@ -408,3 +408,32 @@ def test_source_icons_json_in_component_parses(search_tsx_source: str) -> None:
     )
     for v in parsed.values():
         assert isinstance(v, str) and len(v) > 0, "icon glyph must be a non-empty string"
+
+
+# ---------------------------------------------------------------------------
+# P3.3 cross-check — Search inline still consumes the date column
+# ---------------------------------------------------------------------------
+
+
+def test_search_inline_reads_entry_date(search_inline_source: str) -> None:
+    """Inline script reads ``entry.date`` from the loaded contentIndex.
+
+    P3.3 Part B added a ``date`` field to ``contentIndex.json`` entries.
+    Smoke-check that Search.tsx's inline runtime still references it
+    when building the per-row date label — without this field the
+    column shows blank for every row.
+    """
+    assert "entry.date" in search_inline_source, (
+        "search.inline.ts must read `entry.date` from the loaded contentIndex"
+    )
+
+
+def test_search_inline_renders_date_column(search_inline_source: str) -> None:
+    """The per-row markup carries a ``brain-search-date`` slot for the date label.
+
+    Anchors the markup hook the SCSS partial styles. Without the slot
+    the date label has nowhere to render and the column collapses.
+    """
+    assert "brain-search-date" in search_inline_source, (
+        "search.inline.ts must render the `brain-search-date` slot"
+    )

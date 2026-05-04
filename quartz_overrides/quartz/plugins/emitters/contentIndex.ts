@@ -88,7 +88,19 @@ export interface BrainLinkRecord {
 export type BrainContentDetails = Record<string, unknown> & {
   tier?: string
   source?: string
+  // brain-extension: ISO date string lifted from frontmatter
+  // (`date` > `created` > `published` > `updated`). Consumed by
+  // `Search.tsx` (P3.2) for the date column and `TagContent.tsx`
+  // (P3.3) for the per-row date stamp. Optional — missing-frontmatter
+  // docs leave the field unset and consumers render an empty column.
+  date?: string
   linkRecords?: BrainLinkRecord[]
+  // brain-extension: 240-char snippet of the body, populated by the
+  // P3.1 slim transform. Search.tsx prefers this over `content` when
+  // building the result-row preview; TagContent.tsx renders its own
+  // tag-aware snippet from `description`, so this field is informative
+  // for it (not authoritative).
+  snippet?: string
 }
 
 // brain-extension: classification context handed to `classifyLink`.
@@ -350,6 +362,31 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
             if (match) {
               details.source = match[1]
             }
+          }
+
+          // brain-extension: surface the doc's date so the Search row
+          // (P3.2) and tag-content row (P3.3) can render
+          // `… · 2026-04-12 · …` without each consumer re-deriving the
+          // date from `dates` / `frontmatter`. Lookup order mirrors
+          // the brain frontmatter writer (`src/brain/vault/export.py:
+          // _build_frontmatter`) which always writes `created` /
+          // `updated` (ISO strings) and accepts a forward-looking
+          // `date` / `published` for any future authoring tool that
+          // wants to override the export-derived value. We pick the
+          // most user-meaningful field first (`date` if explicitly
+          // authored, then `created` as the canonical ingest time,
+          // then `published` as a legacy alias) and fall back to
+          // `updated` only as a last resort. Missing dates leave
+          // `details.date` undefined — Search.tsx and TagContent
+          // already handle that gracefully.
+          if (typeof fm.date === "string") {
+            details.date = fm.date
+          } else if (typeof fm.created === "string") {
+            details.date = fm.created
+          } else if (typeof fm.published === "string") {
+            details.date = fm.published
+          } else if (typeof fm.updated === "string") {
+            details.date = fm.updated
           }
 
           // brain: kept upstream's `links: SimpleSlug[]` shape
