@@ -66,7 +66,7 @@ def test_rename_refactors_path_form_references_after_rewrite(
     post-sync wiki-link rewriter (``brain.vault.link_rewrite``) is on by
     default:
 
-    - ``_collect_references`` must match the path-form ref via
+    - ``collect_references`` must match the path-form ref via
       ``target == old_path_stem`` (the lowercased title doesn't match
       because the stem is the slug "target-note" while the old title is
       "Target Note" — different by case AND by hyphen-vs-space, so the
@@ -151,7 +151,7 @@ def test_rename_preserves_user_alias_through_path_form_match(
 
     This complements
     :func:`test_rename_refactors_path_form_references_after_rewrite`:
-    same path-form match path through ``_collect_references``, opposite
+    same path-form match path through ``collect_references``, opposite
     branch through ``_rewrite_link_text`` (display preserved instead of
     dropped).
     """

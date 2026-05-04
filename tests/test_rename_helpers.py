@@ -1,4 +1,4 @@
-"""Unit tests for the private helpers in ``brain.vault.rename``.
+"""Unit tests for the helpers in ``brain.vault.rename``.
 
 These exercise pure transforms (no DB) so we cover defensive branches that
 the higher-level integration tests don't naturally hit.
@@ -9,16 +9,16 @@ import pytest
 
 from brain.vault.rename import (
     RenameError,
-    _apply_matches_to_text,
     _rewrite_link_text,
     _rewrite_source_frontmatter,
+    apply_matches_to_text,
 )
 
 
 def test_apply_matches_empty_returns_text() -> None:
     """No matches → text returned unchanged."""
     text = "no links here"
-    assert _apply_matches_to_text(text, []) == text
+    assert apply_matches_to_text(text, []) == text
 
 
 def test_rewrite_link_text_simple() -> None:

@@ -180,11 +180,10 @@ def plan_rename(
     # path form would be missed and the rename would leave broken links
     # behind.
     old_path_stem = old_relative.with_suffix("").as_posix()
-    references = _collect_references(
+    references = collect_references(
         vault_path,
-        old_title=old_title,
+        old_targets=[(old_title, old_path_stem)],
         new_title=new_title,
-        old_path_stem=old_path_stem,
     )
 
     return RenameOp(
@@ -251,7 +250,7 @@ def apply_rename(
                 # Source-file references handled below alongside the
                 # frontmatter rewrite — keeps the source's writes coherent.
                 continue
-            new_text = _apply_matches_to_text(
+            new_text = apply_matches_to_text(
                 path.read_text(encoding="utf-8"),
                 matches,
             )
@@ -266,7 +265,7 @@ def apply_rename(
         text = op.old_path.read_text(encoding="utf-8")
         source_matches = files_to_rewrite.get(op.old_path, [])
         if source_matches:
-            text = _apply_matches_to_text(text, source_matches)
+            text = apply_matches_to_text(text, source_matches)
             report.references_rewritten += len(source_matches)
         text = _rewrite_source_frontmatter(text, new_title=op.new_title)
 
@@ -326,18 +325,26 @@ def apply_rename(
 
 
 # ---------------------------------------------------------------------------
-# Helpers (private).
+# Public helpers (also used by ``scripts/collapse_gmail_threads.py``).
 # ---------------------------------------------------------------------------
 
 
-def _collect_references(
+def collect_references(
     vault_path: Path,
     *,
-    old_title: str,
+    old_targets: list[tuple[str, str]],
     new_title: str,
-    old_path_stem: str,
 ) -> list[ReferenceMatch]:
-    """Walk the vault, returning every ``[[old-title]]`` reference.
+    """Walk the vault, returning every ``[[old-title]]`` / ``[[old-path]]`` reference.
+
+    ``old_targets`` is a list of ``(old_title, old_path_stem)`` pairs. A wiki-link
+    matches when its target equals one of the ``old_title`` values
+    (case-insensitive) OR equals one of the ``old_path_stem`` values
+    (case-sensitive POSIX path). Each match's rewrite uses the matched pair's
+    ``old_title`` so the synthetic-display drop in :func:`_rewrite_link_text`
+    fires correctly even when several old targets share one new title (the
+    Gmail-thread collapse use case in
+    :mod:`scripts.collapse_gmail_threads`).
 
     The walk includes the source file itself (a note may reference its own
     title) but excludes ``_templates/`` and ``_attachments/`` — those don't
@@ -356,7 +363,14 @@ def _collect_references(
     by this scan.
     """
     matches: list[ReferenceMatch] = []
-    old_lower = old_title.lower()
+    # Build (lower_title, path_stem) lookup tuples once. Single-element
+    # ``old_targets`` is the rename use case; multi-element is the
+    # gmail-thread collapse use case (one new merged thread doc replaces
+    # N per-message docs).
+    targets: list[tuple[str, str, str]] = [
+        (old_title.lower(), old_path_stem, old_title)
+        for old_title, old_path_stem in old_targets
+    ]
     for path in sorted(vault_path.rglob("*.md")):
         if not path.is_file():
             continue
@@ -388,16 +402,20 @@ def _collect_references(
             if parsed.target_type != "title":
                 continue
             target = parsed.target_value
-            matches_title = target.lower() == old_lower
-            matches_path = target == old_path_stem
-            if not (matches_title or matches_path):
+            target_lower = target.lower()
+            matched_old_title: str | None = None
+            for lower_title, path_stem, original_title in targets:
+                if target_lower == lower_title or target == path_stem:
+                    matched_old_title = original_title
+                    break
+            if matched_old_title is None:
                 continue
             old_text = body[start:end]
             new_text = _rewrite_link_text(
                 old_text,
                 new_title=new_title,
                 embed=parsed.kind == "embed",
-                old_title=old_title,
+                old_title=matched_old_title,
             )
             absolute_start = body_offset + start
             absolute_end = body_offset + end
@@ -481,7 +499,7 @@ def _group_by_file(
     """Bucket matches by their file path, preserving in-file order.
 
     The apply phase rewrites back-to-front per file; preserving the natural
-    order returned by :func:`_collect_references` (which is document order
+    order returned by :func:`collect_references` (which is document order
     by virtue of the parser's deterministic walk) is what makes that
     correct without an explicit sort.
     """
@@ -491,12 +509,14 @@ def _group_by_file(
     return grouped
 
 
-def _apply_matches_to_text(text: str, matches: list[ReferenceMatch]) -> str:
+def apply_matches_to_text(text: str, matches: list[ReferenceMatch]) -> str:
     """Splice ``new_text`` over each match's span in ``text``.
 
     Writes back-to-front so each splice doesn't invalidate earlier offsets.
     The matches list is required to be non-overlapping (the parser
-    guarantees this by construction).
+    guarantees this by construction). Public so
+    :mod:`scripts.collapse_gmail_threads` can reuse the splice logic when
+    rewriting per-message gmail references onto the merged thread doc.
     """
     if not matches:
         return text
