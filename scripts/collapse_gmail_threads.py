@@ -336,30 +336,60 @@ def _drop_unresolved_links(
 def _verify_no_dangling_fk(
     conn: psycopg.Connection[Any], *, deleted_ids: list[str]
 ) -> None:
-    """Raise BrainError if any links/derived_links row still points at a deleted doc.
+    """Raise BrainError if any links/derived_links row still references a deleted doc.
 
     Belt-and-suspenders against an unfilled retarget branch. Should never
     fire under normal operation: the FK CASCADE on documents would have
-    dropped the row when its parent disappeared, so a surviving
-    ``WHERE dst_document_id = ANY(deleted_ids)`` is a real bug.
+    dropped any row when its parent disappeared, so a survivor pointing
+    at ``deleted_ids`` is a real bug.
+
+    Checks BOTH ``dst_document_id`` (the column the script's retarget step
+    is responsible for) AND ``src_document_id`` (relies on FK CASCADE; a
+    survivor here would mean cascade is missing or broken). Symmetric
+    verification keeps the destructive guarantee from depending solely
+    on cascade semantics that a future migration could drop silently.
     """
     if not deleted_ids:
         return
-    bad_links = conn.execute(
+    bad_links_dst = conn.execute(
         "SELECT count(*) FROM links WHERE dst_document_id = ANY(%s::uuid[])",
         (deleted_ids,),
     ).fetchone()
-    bad_derived = conn.execute(
+    bad_links_src = conn.execute(
+        "SELECT count(*) FROM links WHERE src_document_id = ANY(%s::uuid[])",
+        (deleted_ids,),
+    ).fetchone()
+    bad_derived_dst = conn.execute(
         "SELECT count(*) FROM derived_links "
         "WHERE dst_document_id = ANY(%s::uuid[])",
         (deleted_ids,),
     ).fetchone()
-    assert bad_links is not None and bad_derived is not None
-    if bad_links[0] or bad_derived[0]:
+    bad_derived_src = conn.execute(
+        "SELECT count(*) FROM derived_links "
+        "WHERE src_document_id = ANY(%s::uuid[])",
+        (deleted_ids,),
+    ).fetchone()
+    if (
+        bad_links_dst is None
+        or bad_links_src is None
+        or bad_derived_dst is None
+        or bad_derived_src is None
+    ):
+        raise BrainError(
+            "verification failed: count(*) returned None on dangling-FK probe"
+        )
+    total = (
+        bad_links_dst[0]
+        + bad_links_src[0]
+        + bad_derived_dst[0]
+        + bad_derived_src[0]
+    )
+    if total:
         raise BrainError(
             f"verification failed after collapse: "
-            f"{bad_links[0]} links + {bad_derived[0]} derived_links rows still "
-            f"point at deleted document(s) {deleted_ids}"
+            f"links(dst={bad_links_dst[0]}, src={bad_links_src[0]}) + "
+            f"derived_links(dst={bad_derived_dst[0]}, src={bad_derived_src[0]}) "
+            f"row(s) still reference deleted document(s) {deleted_ids}"
         )
 
 
@@ -671,13 +701,18 @@ def collapse_threads(
     # Corpus-wide directory_entries recompute. Only safe in live mode
     # AND only when no thread failed — a partial collapse leaves the
     # directory inconsistent until the user re-runs.
+    #
+    # The DELETE and the rescan run in ONE transaction so the gmail
+    # source is never observed empty by another reader. ``rescan_gmail_directory``
+    # opens its own inner transaction; that becomes a savepoint here, which
+    # is fine — savepoints commit/rollback as part of the outer block.
     if not dry_run and not report.failed and report.processed:
         try:
             with conn.transaction():
                 conn.execute(
                     "DELETE FROM directory_entries WHERE source = 'gmail'"
                 )
-            docs_seen, pairs = rescan_gmail_directory(conn)
+                docs_seen, pairs = rescan_gmail_directory(conn)
             _logger.info(
                 "directory recompute: %d gmail docs, %d (display, email) pairs",
                 docs_seen,
@@ -685,6 +720,11 @@ def collapse_threads(
             )
         except psycopg.Error as exc:
             # Logged + surfaced via stderr; the collapse itself stands.
+            # The directory_entries delete-and-rescan is now atomic — on
+            # failure the entire transaction rolls back so directory rows
+            # for other sources stay intact and gmail rows survive at their
+            # pre-collapse state. Operator can re-run
+            # `brain vault directory refresh` to retry.
             _logger.warning(
                 "directory_entries recompute failed (%s); "
                 "run `brain vault directory refresh` manually",
