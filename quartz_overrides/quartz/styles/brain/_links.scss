@@ -161,10 +161,21 @@ a.tag-link {
   border-radius: 999px;
   // brain (Linear variant): drop `smcp` — Geist doesn't ship the
   // small-caps OpenType feature, so the declaration is a silent no-op.
-  // Lining numerals + slight uppercase tracking via the rule below
-  // give the chip its tech-forward voice.
+  // Lining numerals + slight letter-spacing keep the chip readable
+  // without uppercasing the text.
+  //
+  // brain (P3.4 — Wiki UX Overhaul, item 10): `text-transform: none`
+  // (explicit) — tags are the canonical lowercased values produced by
+  // `brain.tags.normalize_tags` (casefold + hyphen-separated). The
+  // earlier `uppercase` rule made every chip render `#AGENTIC-AI`,
+  // which contradicted the storage format and made the visual feel
+  // shouty. Locking `text-transform: none` here also defends against
+  // a future upstream Quartz default that might flip the default to
+  // uppercase. The DOM text from `TagList.tsx` is already lowercase,
+  // so this rule is the single seam between normalized storage and
+  // the user-visible chip.
   font-feature-settings: "lnum";
-  text-transform: uppercase;
+  text-transform: none;
   letter-spacing: 0.04em;
   text-decoration: none;
   // brain: vertical-align nudge so the chip sits on the text baseline
