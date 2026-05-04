@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -87,6 +88,133 @@ class UpdateResult:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# Metadata keys promoted into typed columns on ``documents``. The mapping is
+# intentionally narrow: every key here must correspond to a column added by
+# migration 007. Anything outside this set stays in the JSONB ``metadata``
+# blob, untouched.
+_PROMOTED_COLUMNS: tuple[str, ...] = (
+    "thread_id",
+    "rfc_message_id",
+    "in_reply_to",
+    "sent_at",
+    "participants",
+    "duration_min",
+)
+
+
+def _parse_sent_at(raw: Any) -> datetime | None:
+    """Parse a date string into a TZ-aware UTC ``datetime``.
+
+    Accepts both RFC 2822 (Gmail ``Date:`` header style — e.g.
+    ``"Tue, 04 May 2026 14:23:01 -0400"``) and ISO 8601 (Krisp-style — e.g.
+    ``"2026-05-04T14:23:01+00:00"``) inputs. Returns ``None`` for any input
+    we can't parse — callers log + skip the column rather than crashing the
+    ingest. Naive datetimes are treated as UTC.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+
+    parsed: datetime | None = None
+    # RFC 2822 first — ``parsedate_to_datetime`` is strict-but-tolerant and
+    # is the format Gmail's ``Date:`` header uses, so it's the more common
+    # case for this codebase.
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        parsed = None
+    if parsed is None:
+        try:
+            # ``fromisoformat`` accepts the trailing-Z form in 3.11+.
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Project a metadata blob onto the typed ``documents`` columns.
+
+    Returns a ``{column_name: value}`` dict — keys are limited to the columns
+    in :data:`_PROMOTED_COLUMNS`. Missing-or-``None`` metadata keys are
+    omitted (callers never need to write a NULL explicitly — the column
+    default of NULL handles it on INSERT, and on UPDATE we just leave the
+    column alone). Malformed values are logged at WARNING and skipped so a
+    bad header never blocks an ingest.
+
+    Type-coercion rules:
+
+    - ``thread_id`` / ``rfc_message_id`` / ``in_reply_to`` — accept ``str``;
+      anything else is logged + skipped.
+    - ``date`` (RFC 2822 or ISO 8601 string) → ``sent_at`` (TZ-aware UTC).
+      Unparseable strings log + skip; we never store a partially-parsed
+      datetime.
+    - ``participants`` — accept ``list[str]`` (Krisp speakers, Gmail headers
+      already-parsed by an upstream extractor). Non-list / mixed-type lists
+      log + skip rather than silently coercing.
+    - ``duration_min`` — accept ``int`` (or a ``str`` that parses cleanly).
+      Floats like ``42.7`` round down via ``int(...)``; non-numeric values
+      log + skip.
+    """
+    out: dict[str, Any] = {}
+
+    for key in ("thread_id", "rfc_message_id", "in_reply_to"):
+        raw = metadata.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            out[key] = raw
+        else:
+            _logger.warning(
+                "metadata.%s expected str, got %s; skipping column promotion",
+                key,
+                type(raw).__name__,
+            )
+
+    raw_date = metadata.get("date")
+    if raw_date is not None:
+        sent_at = _parse_sent_at(raw_date)
+        if sent_at is not None:
+            out["sent_at"] = sent_at
+        else:
+            _logger.warning(
+                "metadata.date is not parseable (%r); leaving sent_at NULL",
+                raw_date,
+            )
+
+    raw_participants = metadata.get("participants")
+    if raw_participants is not None:
+        if isinstance(raw_participants, list) and all(
+            isinstance(p, str) for p in raw_participants
+        ):
+            out["participants"] = list(raw_participants)
+        else:
+            _logger.warning(
+                "metadata.participants expected list[str], got %r; "
+                "skipping column promotion",
+                type(raw_participants).__name__,
+            )
+
+    raw_duration = metadata.get("duration_min")
+    if raw_duration is not None:
+        try:
+            # ``bool`` is a subclass of ``int`` in Python — reject it
+            # explicitly so ``True`` doesn't end up as ``1`` in the column.
+            if isinstance(raw_duration, bool):
+                raise TypeError("bool is not a valid duration")
+            out["duration_min"] = int(raw_duration)
+        except (TypeError, ValueError):
+            _logger.warning(
+                "metadata.duration_min expected int, got %r; "
+                "skipping column promotion",
+                raw_duration,
+            )
+
+    return out
 
 
 def _upsert_source(
@@ -305,11 +433,21 @@ def _ingest_within_transaction(
         # pass (B.4) reads it via a single SELECT.
         _apply_pre_insert_metadata(doc, source_kind=source_kind)
 
+        # Project email/krisp metadata onto typed columns. The base INSERT
+        # always writes the same fixed columns; the promoted columns ride
+        # along as a dynamic suffix so a doc with no recognized metadata
+        # keys produces the exact same SQL as before migration 007.
+        promoted = _promote_metadata_to_columns(doc.metadata)
+        promoted_columns = list(promoted.keys())
+        promoted_values = [promoted[c] for c in promoted_columns]
+        extra_cols = "".join(f", {c}" for c in promoted_columns)
+        extra_placeholders = ", %s" * len(promoted_columns)
+
         doc_row = conn.execute(
-            """
+            f"""
             INSERT INTO documents (source_id, title, content, content_hash, content_type,
-                                   source_path, tags, metadata)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                   source_path, tags, metadata{extra_cols})
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s{extra_placeholders})
             RETURNING id
             """,
             (
@@ -321,6 +459,7 @@ def _ingest_within_transaction(
                 doc.source_path,
                 tags,
                 json.dumps(doc.metadata),
+                *promoted_values,
             ),
         ).fetchone()
         assert doc_row is not None  # RETURNING id always yields a row
@@ -582,17 +721,30 @@ def update_document(
             fields_changed.append("content_type")
 
         if metadata_patch is not None:
-            if replace_metadata:
-                if metadata_patch != cur_meta:
-                    sets.append("metadata=%s::jsonb")
-                    params.append(json.dumps(metadata_patch))
-                    fields_changed.append("metadata")
-            else:
-                merged = {**cur_meta, **metadata_patch}
-                if merged != cur_meta:
-                    sets.append("metadata=%s::jsonb")
-                    params.append(json.dumps(merged))
-                    fields_changed.append("metadata")
+            new_meta = (
+                metadata_patch if replace_metadata else {**cur_meta, **metadata_patch}
+            )
+            if new_meta != cur_meta:
+                sets.append("metadata=%s::jsonb")
+                params.append(json.dumps(new_meta))
+                fields_changed.append("metadata")
+                # Re-project the new metadata blob onto typed columns, and
+                # diff against what we'd project from the prior blob. This
+                # keeps the typed columns in lockstep with metadata: a
+                # patch that adds ``thread_id`` populates the column; a
+                # replace_metadata that drops the key NULLs the column.
+                old_promoted = _promote_metadata_to_columns(cur_meta)
+                new_promoted = _promote_metadata_to_columns(new_meta)
+                for column in _PROMOTED_COLUMNS:
+                    if column in new_promoted:
+                        if new_promoted[column] != old_promoted.get(column):
+                            sets.append(f"{column}=%s")
+                            params.append(new_promoted[column])
+                    elif column in old_promoted:
+                        # replace_metadata dropped the source key — clear
+                        # the typed column so it no longer disagrees with
+                        # the JSONB blob.
+                        sets.append(f"{column}=NULL")
 
         if new_tags is not None and sorted(new_tags) != sorted(cur_tags):
             sets.append("tags=%s")
