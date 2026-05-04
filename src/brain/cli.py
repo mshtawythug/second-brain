@@ -612,7 +612,16 @@ def ingest_gmail(
         False, "--dry-run", help="List matches without ingesting."
     ),
 ) -> None:
-    """Ingest Gmail messages via the `gws` CLI. At least one scope flag is required."""
+    """Ingest Gmail messages via the `gws` CLI, batched per thread.
+
+    P2.3 collapses N messages sharing a ``threadId`` into a single
+    ``content_type='email_thread'`` document via :func:`to_extracted_thread`.
+    Re-ingesting an unchanged thread is a no-op (P2.2 same-hash short-circuit);
+    a thread that has grown by one message updates the existing row in place
+    so downstream links / derived_links continue to point at a stable UUID.
+
+    At least one scope flag is required (no bulk-inbox ingests).
+    """
     if not any([query, label, from_addr, since, until]):
         typer.secho(
             "ingest-gmail requires at least one scope flag: "
@@ -623,7 +632,7 @@ def ingest_gmail(
         raise typer.Exit(code=2)
 
     cfg = Config.load()
-    messages = gmail_ingest.list_messages(
+    stubs = gmail_ingest.list_messages(
         query=query,
         label=label,
         since=since,
@@ -631,42 +640,108 @@ def ingest_gmail(
         from_addr=from_addr,
         max_results=max_results,
     )
-    typer.echo(f"found {len(messages)} message(s)")
+    typer.echo(f"found {len(stubs)} message(s)")
+    if not stubs:
+        typer.echo("no messages matched")
+        return
+
+    # Group stubs by Gmail ``threadId`` while preserving list-order so the
+    # dry-run report is deterministic across runs that hit the same query.
+    threads: dict[str, list[dict[str, Any]]] = {}
+    for stub in stubs:
+        tid = stub.get("threadId") or stub.get("id")
+        if not isinstance(tid, str) or not tid:
+            # Defensive: malformed stubs without an id at all are unreachable
+            # against real Gmail traffic, but skip rather than crash so a
+            # partial response from `gws` doesn't poison the whole batch.
+            continue
+        threads.setdefault(tid, []).append(stub)
+
+    total_messages = sum(len(t) for t in threads.values())
+
     if dry_run:
-        # Stubs returned by users.messages.list only have id + threadId — no
-        # subject is available without a per-message read_message() call, which
-        # we skip on --dry-run to keep it cheap.
-        for m in messages:
-            typer.echo(f"  would ingest: [{m['id']}]")
+        typer.echo(f"would ingest {len(threads)} thread(s):")
+        for tid, ts in threads.items():
+            subject = _gmail_thread_subject_for_dry_run(ts)
+            typer.echo(
+                f"  [thread_id={tid} messages={len(ts)}] Subject: {subject}"
+            )
+        typer.echo(
+            f"total: {len(threads)} threads, {total_messages} messages → "
+            f"{len(threads)} documents"
+        )
         return
 
     embedder = _build_embedder(cfg)
+    ingested = 0
+    skipped = 0
+    failed = 0
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
-        for stub in messages:
+        for tid, ts in threads.items():
             try:
-                full = gmail_ingest.read_message(stub["id"])
-                doc = gmail_ingest.to_extracted_doc(full)
+                messages = [gmail_ingest.read_message(stub["id"]) for stub in ts]
+                doc = gmail_ingest.to_extracted_thread(messages)
                 result = ingest_document(
                     conn,
                     embedder=embedder,
                     doc=doc,
                     source_kind="gmail",
-                    source_external_id=stub["id"],
+                    source_external_id=tid,
                     source_metadata={
+                        "thread_id": tid,
                         "from": doc.metadata.get("from"),
                         "date": doc.metadata.get("date"),
                     },
                     tags=list(tag),
                     vault_root=cfg.vault_path,
                 )
-                verb = "ingested" if result.created else "skipped"
-                typer.echo(f"  {verb}: {doc.title[:60]}")
-            except (GmailError, psycopg.Error, ValueError) as e:
+                # P2.2 thread upsert: ``created`` is True only on first
+                # insert; ``body_changed`` is True when an existing thread
+                # was rewritten in place (new message appended). Either
+                # counts as "ingested" for the per-thread summary; an
+                # unchanged thread (both False) is "skipped".
+                if result.created or result.body_changed:
+                    typer.echo(
+                        f"  ingested thread {tid} ({len(ts)} messages)"
+                    )
+                    ingested += 1
+                else:
+                    typer.echo(f"  skipped thread {tid} (unchanged)")
+                    skipped += 1
+            except (GmailError, psycopg.Error, ValueError, KeyError) as e:
                 typer.secho(
-                    f"  failed: {stub.get('id', '?')} — {e}", fg="red"
+                    f"  failed thread {tid} ({len(ts)} messages): {e}",
+                    fg="red",
                 )
+                failed += 1
                 continue
+    typer.echo(
+        f"{ingested} threads ingested, {skipped} skipped, {failed} failed"
+    )
+
+
+def _gmail_thread_subject_for_dry_run(stubs: list[dict[str, Any]]) -> str:
+    """Best-effort subject lookup for ``brain ingest-gmail --dry-run``.
+
+    Reads the FIRST message of the thread to pull its ``Subject`` header — a
+    single ``read_message`` call per thread is acceptably cheap for a dry-run
+    report (``ingest-gmail`` callers typically scope to <100 threads). On any
+    failure the function returns ``"(unable to fetch)"`` so a single bad
+    message can't abort the whole report; the actual ingest pass will hit
+    the same failure and surface it via the structured per-thread error path.
+    """
+    try:
+        first_id = stubs[0]["id"]
+        full = gmail_ingest.read_message(first_id)
+    except (GmailError, KeyError, IndexError):
+        return "(unable to fetch)"
+    payload = full.get("payload") or {}
+    headers = payload.get("headers") or []
+    for h in headers:
+        if (h.get("name") or "").lower() == "subject":
+            return h.get("value") or "(no subject)"
+    return "(no subject)"
 
 
 @app.command()
