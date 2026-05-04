@@ -120,6 +120,19 @@ type NodeRenderData = GraphicsInfo & {
   isHub: boolean
 }
 
+type GraphRenderMode = "standard" | "workbench"
+type GraphWorkbenchMode = "overview" | "incoming" | "outgoing" | "missing" | "suspicious" | "evidence"
+
+type NodeDiagnostic = {
+  incomingCount: number
+  outgoingCount: number
+  derivedCount: number
+  authoredCount: number
+  issueCount: number
+  issueLabels: string[]
+  strongRelations: SimpleSlug[]
+}
+
 const localStorageKey = "graph-visited"
 function getVisited(): Set<SimpleSlug> {
   return new Set(JSON.parse(localStorage.getItem(localStorageKey) ?? "[]"))
@@ -311,6 +324,59 @@ function drawDashedLine(
   gfx.stroke({ alpha, width, color })
 }
 
+function computeGraphDiagnostics(
+  nodes: NodeData[],
+  links: LinkData[],
+): Map<SimpleSlug, NodeDiagnostic> {
+  const diagnostics = new Map<SimpleSlug, NodeDiagnostic>()
+  for (const node of nodes) {
+    diagnostics.set(node.id, {
+      incomingCount: 0,
+      outgoingCount: 0,
+      derivedCount: 0,
+      authoredCount: 0,
+      issueCount: 0,
+      issueLabels: [],
+      strongRelations: [],
+    })
+  }
+
+  for (const link of links) {
+    const source = diagnostics.get(link.source.id)
+    const target = diagnostics.get(link.target.id)
+    if (source) {
+      source.outgoingCount += 1
+      source.strongRelations.push(link.target.id)
+      if (link.kind === "derived") source.derivedCount += 1
+      else source.authoredCount += 1
+      if (link.kind === "derived" && typeof link.weight === "number" && link.weight < 0.5) {
+        source.issueLabels.push("low-confidence derived relation")
+      }
+    }
+    if (target) {
+      target.incomingCount += 1
+      target.strongRelations.push(link.source.id)
+      if (link.kind === "derived") target.derivedCount += 1
+      else target.authoredCount += 1
+      if (link.kind === "derived" && typeof link.weight === "number" && link.weight < 0.5) {
+        target.issueLabels.push("low-confidence derived relation")
+      }
+    }
+  }
+
+  for (const [id, diagnostic] of diagnostics) {
+    if (diagnostic.incomingCount === 0) diagnostic.issueLabels.push("no backlinks")
+    if (diagnostic.outgoingCount === 0 && !id.startsWith("tags/")) {
+      diagnostic.issueLabels.push("no outgoing links")
+    }
+    diagnostic.issueLabels = [...new Set(diagnostic.issueLabels)]
+    diagnostic.issueCount = diagnostic.issueLabels.length
+    diagnostic.strongRelations = [...new Set(diagnostic.strongRelations)].slice(0, 8)
+  }
+
+  return diagnostics
+}
+
 async function renderGraph(
   graph: HTMLElement,
   fullSlug: FullSlug,
@@ -402,6 +468,7 @@ async function renderGraph(
     hubLabelThreshold,
     nodeRadiusCeiling,
     hubLabelFontMultiplier,
+    diagnosticWorkbench,
   } = JSON.parse(graph.dataset["cfg"]!) as D3Config
   const labelMax =
     typeof labelMaxLength === "number" &&
@@ -465,6 +532,7 @@ async function renderGraph(
     hubLabelThreshold = undefined
     nodeRadiusCeiling = undefined
     hubLabelFontMultiplier = undefined
+    diagnosticWorkbench = false
   }
   // brain-extension: resolve the radius multiplier AFTER stockMode so the
   // dot-grid view stays at the stock-Quartz radius even when the layout
@@ -493,7 +561,9 @@ async function renderGraph(
   const showOrphanToggleChip = hideOrphans === true
   if (searchEnabled || filterChipsList.length > 0 || showOrphanToggleChip) {
     controlsEl = document.createElement("div")
-    controlsEl.className = "brain-graph-controls"
+    controlsEl.className = diagnosticWorkbench
+      ? "brain-graph-controls brain-graph-toolbar"
+      : "brain-graph-controls"
     graph.appendChild(controlsEl)
     if (searchEnabled) {
       const input = document.createElement("input")
@@ -788,7 +858,140 @@ async function renderGraph(
       })),
   }
 
-  const width = graph.offsetWidth
+  const renderMode: GraphRenderMode = diagnosticWorkbench ? "workbench" : "standard"
+  let selectedNodeId: SimpleSlug | null = slug
+  let workbenchMode: GraphWorkbenchMode = "overview"
+  const diagnostics = computeGraphDiagnostics(graphData.nodes, graphData.links)
+  let workbenchCanvasPane: HTMLDivElement | null = null
+  let workbenchInspector: HTMLElement | null = null
+  let workbenchRail: HTMLElement | null = null
+
+  function titleFor(id: SimpleSlug): string {
+    return ((data.get(id)?.title as string | undefined) ?? id).toString()
+  }
+
+  function renderWorkbenchShell(): HTMLElement | null {
+    if (renderMode !== "workbench") return null
+    graph.classList.add("brain-graph-workbench-shell")
+
+    const rail = document.createElement("div")
+    rail.className = "brain-graph-mode-rail"
+    const modes: [GraphWorkbenchMode, string, string][] = [
+      ["overview", "Overview", "All useful relations"],
+      ["incoming", "Incoming", "Who points here"],
+      ["outgoing", "Outgoing", "What this references"],
+      ["missing", "Missing", "Thin or unlinked nodes"],
+      ["suspicious", "Suspicious", "Low-confidence edges"],
+      ["evidence", "Evidence", "Derived relations"],
+    ]
+    for (const [mode, label, hint] of modes) {
+      const button = document.createElement("button")
+      button.type = "button"
+      button.className = `brain-graph-mode${mode === workbenchMode ? " active" : ""}`
+      button.innerHTML = `<span>${escapeHtml(label)}</span><small>${escapeHtml(hint)}</small>`
+      button.addEventListener("click", () => {
+        workbenchMode = mode
+        for (const child of rail.querySelectorAll(".brain-graph-mode")) {
+          child.classList.toggle("active", child === button)
+        }
+        applyWorkbenchMode()
+        updateWorkbenchInspector(selectedNodeId)
+        renderPixiFromD3()
+      })
+      rail.appendChild(button)
+    }
+
+    const inspector = document.createElement("aside")
+    inspector.className = "brain-graph-inspector"
+    const canvasPane = document.createElement("div")
+    canvasPane.className = "brain-graph-canvas-pane"
+    graph.prepend(rail)
+    graph.appendChild(canvasPane)
+    graph.appendChild(inspector)
+    workbenchCanvasPane = canvasPane
+    workbenchRail = rail
+    workbenchInspector = inspector
+    return inspector
+  }
+
+  function updateWorkbenchInspector(nodeId: SimpleSlug | null) {
+    if (!workbenchInspector) return
+    if (!nodeId) {
+      workbenchInspector.innerHTML = "<h3>Graph Inspector</h3><p>Select a node to inspect relations.</p>"
+      return
+    }
+
+    const node = graphData.nodes.find((n) => n.id === nodeId)
+    const diagnostic = diagnostics.get(nodeId)
+    if (!node || !diagnostic) {
+      workbenchInspector.innerHTML = "<h3>Graph Inspector</h3><p>No details available.</p>"
+      return
+    }
+
+    const relationItems = diagnostic.strongRelations
+      .slice(0, 5)
+      .map((id) => `<li>${escapeHtml(titleFor(id))}</li>`)
+      .join("")
+    const issueItems = diagnostic.issueLabels.length
+      ? diagnostic.issueLabels.map((issue) => `<li>${escapeHtml(issue)}</li>`).join("")
+      : "<li>No obvious graph issues from available data.</li>"
+    const sourceText = node.source ? ` / ${escapeHtml(node.source)}` : ""
+
+    workbenchInspector.innerHTML = `
+      <h3>${escapeHtml(node.text)}</h3>
+      <p class="brain-graph-inspector-meta">${escapeHtml(node.tier ?? "unknown")}${sourceText}</p>
+      <div class="brain-graph-metrics">
+        <div><strong>${diagnostic.incomingCount}</strong><span>incoming</span></div>
+        <div><strong>${diagnostic.outgoingCount}</strong><span>outgoing</span></div>
+        <div><strong>${diagnostic.derivedCount}</strong><span>derived</span></div>
+        <div><strong>${diagnostic.issueCount}</strong><span>issues</span></div>
+      </div>
+      <h4>Needs Review</h4>
+      <ul>${issueItems}</ul>
+      <h4>Strong Relations</h4>
+      <ul>${relationItems || "<li>No relations in this filtered view.</li>"}</ul>
+    `
+  }
+
+  function applyWorkbenchMode() {
+    if (renderMode !== "workbench") return
+    for (const n of nodeRenderData) {
+      const diagnostic = diagnostics.get(n.simulationData.id)
+      if (!diagnostic) {
+        n.active = false
+        continue
+      }
+      if (workbenchMode === "missing") {
+        n.active = diagnostic.incomingCount === 0 || diagnostic.outgoingCount === 0
+      } else if (workbenchMode === "suspicious") {
+        n.active = diagnostic.issueLabels.some((label) => label.includes("low-confidence"))
+      } else if (workbenchMode === "evidence") {
+        n.active = diagnostic.derivedCount > 0
+      } else if (workbenchMode === "incoming" && selectedNodeId) {
+        n.active = graphData.links.some(
+          (l) => l.target.id === selectedNodeId && l.source.id === n.simulationData.id,
+        )
+      } else if (workbenchMode === "outgoing" && selectedNodeId) {
+        n.active = graphData.links.some(
+          (l) => l.source.id === selectedNodeId && l.target.id === n.simulationData.id,
+        )
+      } else {
+        n.active =
+          selectedNodeId === null ||
+          n.simulationData.id === selectedNodeId ||
+          hoveredNeighbours.has(n.simulationData.id)
+      }
+    }
+    for (const l of linkRenderData) {
+      if (workbenchMode === "evidence") l.active = l.simulationData.kind === "derived"
+      else if (selectedNodeId) {
+        l.active =
+          l.simulationData.source.id === selectedNodeId ||
+          l.simulationData.target.id === selectedNodeId
+      }
+    }
+  }
+
   // brain-extension: size the canvas to fill the panel below the
   // controls. `graph.offsetHeight` (the inner `.graph-container`) lags
   // layout when the canvas hasn't been appended yet — at init time it
@@ -800,12 +1003,27 @@ async function renderGraph(
   // margin) to get the canvas allowance, with a small floor so a
   // pathological narrow sidebar can't produce a zero-height canvas
   // (PixiJS rejects 0).
-  const outerEl = graph.closest(".graph-outer") as HTMLElement | null
-  const panelHeight = outerEl ? outerEl.clientHeight : graph.offsetHeight
+  const outerEl = graph.closest(
+    ".graph-outer, .global-graph-container, .local-graph-container, .brain-graph-workbench-container",
+  ) as HTMLElement | null
+  renderWorkbenchShell()
+  updateWorkbenchInspector(selectedNodeId)
+
   const controlsHeight = controlsEl
     ? controlsEl.offsetHeight + parseFloat(getComputedStyle(controlsEl).marginBottom || "0")
     : 0
-  const height = Math.max(panelHeight - controlsHeight, 60)
+  const canvasHost = workbenchCanvasPane ?? graph
+  const width = Math.max(canvasHost.clientWidth || graph.offsetWidth, 60)
+  const panelHeight =
+    renderMode === "workbench"
+      ? canvasHost.clientHeight
+      : outerEl
+        ? outerEl.clientHeight
+        : graph.offsetHeight
+  const height = Math.max(
+    renderMode === "workbench" ? panelHeight : panelHeight - controlsHeight,
+    60,
+  )
 
   // we virtualize the simulation and use pixi to actually render it
   const simulation: Simulation<NodeData, LinkData> = forceSimulation<NodeData>(graphData.nodes)
@@ -1035,6 +1253,9 @@ async function renderGraph(
         n.active = hoveredNeighbours.has(n.simulationData.id)
       }
     }
+    if (renderMode === "workbench") {
+      applyWorkbenchMode()
+    }
   }
 
   // brain-extension: tooltip element for derived-edge metadata.
@@ -1118,7 +1339,7 @@ async function renderGraph(
       // brain: extend the dim trigger to cover search-highlight too — when
       // the user has typed a query, non-matching links fade the same way
       // hover-non-neighbours do.
-      if (hoveredNodeId || searchActive) {
+      if (hoveredNodeId || searchActive || renderMode === "workbench") {
         alpha = l.active ? baseAlpha : baseAlpha * 0.2
       }
 
@@ -1155,7 +1376,8 @@ async function renderGraph(
     // of the canvas. When nothing is active, every label tweens back
     // toward `currentScaleOpacity` (the zoom-driven baseline) so labels
     // return to their natural visibility on pointerleave.
-    const hoverOrSearchActive = hoveredNodeId !== null || searchActive
+    const hoverOrSearchActive =
+      hoveredNodeId !== null || searchActive || renderMode === "workbench"
     const dimAlpha = currentScaleOpacity * 0.15
     for (const n of nodeRenderData) {
       const nodeId = n.simulationData.id
@@ -1217,7 +1439,7 @@ async function renderGraph(
       // bypasses the `focusOnHover` gate intentionally — it's an explicit
       // user action that should always dim non-matches, regardless of
       // whether the layout opted into hover focus.
-      if ((hoveredNodeId !== null && focusOnHover) || searchActive) {
+      if ((hoveredNodeId !== null && focusOnHover) || searchActive || renderMode === "workbench") {
         alpha = n.active ? 1 : 0.2
       }
 
@@ -1254,7 +1476,33 @@ async function renderGraph(
     resolution: window.devicePixelRatio,
     eventMode: "static",
   })
-  graph.appendChild(app.canvas)
+  canvasHost.appendChild(app.canvas)
+  let resizeObserver: ResizeObserver | null = null
+  let resizeRerenderTimer: number | null = null
+  let observedCanvasWidth = width
+  let observedCanvasHeight = height
+  if (renderMode === "workbench" && workbenchCanvasPane && "ResizeObserver" in window) {
+    resizeObserver = new ResizeObserver((entries) => {
+      const entry = entries[0]
+      if (!entry) return
+      const nextWidth = Math.round(entry.contentRect.width)
+      const nextHeight = Math.round(entry.contentRect.height)
+      if (
+        Math.abs(nextWidth - observedCanvasWidth) < 2 &&
+        Math.abs(nextHeight - observedCanvasHeight) < 2
+      ) {
+        return
+      }
+      observedCanvasWidth = nextWidth
+      observedCanvasHeight = nextHeight
+      if (resizeRerenderTimer !== null) window.clearTimeout(resizeRerenderTimer)
+      resizeRerenderTimer = window.setTimeout(() => {
+        resizeRerenderTimer = null
+        void rerenderForChipChange()
+      }, 120)
+    })
+    resizeObserver.observe(workbenchCanvasPane)
+  }
 
   const stage = app.stage
   stage.interactive = false
@@ -1314,6 +1562,8 @@ async function renderGraph(
       .circle(0, 0, nodeRadius(n))
       .fill({ color: isTagNode ? computedStyleMap["--light"] : color(n) })
       .on("pointerover", (e) => {
+        selectedNodeId = e.target.label as SimpleSlug
+        updateWorkbenchInspector(selectedNodeId)
         updateHoverInfo(e.target.label)
         oldLabelOpacity = label.alpha
         // brain-extension: swap to the full title on hover. Pixi's Text
@@ -1382,6 +1632,11 @@ async function renderGraph(
     }
 
     linkRenderData.push(linkRenderDatum)
+  }
+
+  if (renderMode === "workbench") {
+    applyWorkbenchMode()
+    renderPixiFromD3()
   }
 
   // brain-extension: apply a debounced search query against the loaded
@@ -1567,7 +1822,8 @@ async function renderGraph(
         // hover-dim effect (renderLabels applied during hover) and
         // the hub-bright / non-hub-dim baseline that's the steady
         // state when nothing is hovered.
-        const hoverOrSearchActive = hoveredNodeId !== null || searchActive
+        const hoverOrSearchActive =
+          hoveredNodeId !== null || searchActive || renderMode === "workbench"
         const dimAlpha = scaleOpacity * 0.15
         const activeLabels = nodeRenderData.filter((n) => n.active).flatMap((n) => n.label)
         const hubLabels = new Set(nodeRenderData.filter((n) => n.isHub).map((n) => n.label))
@@ -1702,6 +1958,11 @@ async function renderGraph(
       window.clearTimeout(searchDebounceTimer)
       searchDebounceTimer = null
     }
+    if (resizeRerenderTimer !== null) {
+      window.clearTimeout(resizeRerenderTimer)
+      resizeRerenderTimer = null
+    }
+    resizeObserver?.disconnect()
     // brain-extension: tear down the tooltip element so re-renders (theme change,
     // SPA nav) don't accumulate orphaned tooltips in the DOM.
     if (tooltip.parentElement) tooltip.parentElement.removeChild(tooltip)
@@ -1712,6 +1973,16 @@ async function renderGraph(
     if (controlsEl && controlsEl.parentElement) {
       controlsEl.parentElement.removeChild(controlsEl)
     }
+    if (workbenchRail && workbenchRail.parentElement) {
+      workbenchRail.parentElement.removeChild(workbenchRail)
+    }
+    if (workbenchCanvasPane && workbenchCanvasPane.parentElement) {
+      workbenchCanvasPane.parentElement.removeChild(workbenchCanvasPane)
+    }
+    if (workbenchInspector && workbenchInspector.parentElement) {
+      workbenchInspector.parentElement.removeChild(workbenchInspector)
+    }
+    graph.classList.remove("brain-graph-workbench-shell")
     app.destroy()
   }
   // brain-extension: write the live cleanup back into the shared ref so a
@@ -1738,6 +2009,7 @@ let globalGraphCleanups: (() => void)[] = []
 // app, and vice versa. Both modals share the same Esc handler shape, so
 // each one's hide function only clears its own bucket.
 let localFullscreenCleanups: (() => void)[] = []
+let workbenchGraphCleanups: (() => void)[] = []
 
 function cleanupLocalGraphs() {
   for (const cleanup of localGraphCleanups) {
@@ -1758,6 +2030,13 @@ function cleanupLocalFullscreenGraphs() {
     cleanup()
   }
   localFullscreenCleanups = []
+}
+
+function cleanupWorkbenchGraphs() {
+  for (const cleanup of workbenchGraphCleanups) {
+    cleanup()
+  }
+  workbenchGraphCleanups = []
 }
 
 document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
@@ -1840,6 +2119,9 @@ document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
   const localFullscreenContainers = [
     ...document.getElementsByClassName("local-graph-outer"),
   ] as HTMLElement[]
+  const workbenchContainers = [
+    ...document.getElementsByClassName("brain-graph-workbench-outer"),
+  ] as HTMLElement[]
 
   async function renderLocalFullscreenGraph() {
     const slug = getFullSlug(window)
@@ -1864,6 +2146,37 @@ document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
   function hideLocalFullscreenGraph() {
     cleanupLocalFullscreenGraphs()
     for (const container of localFullscreenContainers) {
+      container.classList.remove("active")
+      const sidebar = container.closest(".sidebar") as HTMLElement
+      if (sidebar) {
+        sidebar.style.zIndex = ""
+      }
+    }
+  }
+
+  async function renderWorkbenchGraph() {
+    const slug = getFullSlug(window)
+    for (const container of workbenchContainers) {
+      container.classList.add("active")
+      const sidebar = container.closest(".sidebar") as HTMLElement
+      if (sidebar) {
+        sidebar.style.zIndex = "1"
+      }
+      const graphContainer = container.querySelector(
+        ".brain-graph-workbench-container",
+      ) as HTMLElement
+      registerEscapeHandler(container, hideWorkbenchGraph)
+      if (graphContainer) {
+        const ref: CleanupRef = { current: () => {} }
+        await renderGraph(graphContainer, slug, ref)
+        workbenchGraphCleanups.push(() => ref.current())
+      }
+    }
+  }
+
+  function hideWorkbenchGraph() {
+    cleanupWorkbenchGraphs()
+    for (const container of workbenchContainers) {
       container.classList.remove("active")
       const sidebar = container.closest(".sidebar") as HTMLElement
       if (sidebar) {
@@ -1928,11 +2241,21 @@ document.addEventListener("nav", async (e: CustomEventMap["nav"]) => {
     )
   })
 
+  const workbenchIcons = document.getElementsByClassName("brain-graph-workbench-icon")
+  const handleWorkbenchClick = () => {
+    void renderWorkbenchGraph()
+  }
+  Array.from(workbenchIcons).forEach((icon) => {
+    icon.addEventListener("click", handleWorkbenchClick)
+    window.addCleanup(() => icon.removeEventListener("click", handleWorkbenchClick))
+  })
+
   document.addEventListener("keydown", shortcutHandler)
   window.addCleanup(() => {
     document.removeEventListener("keydown", shortcutHandler)
     cleanupLocalGraphs()
     cleanupGlobalGraphs()
     cleanupLocalFullscreenGraphs()
+    cleanupWorkbenchGraphs()
   })
 })

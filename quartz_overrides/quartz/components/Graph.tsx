@@ -146,11 +146,16 @@ export interface D3Config {
   // (no boost). 1.5–2.0 makes hub labels visually pop without
   // affecting leaf/intermediate labels.
   hubLabelFontMultiplier?: number
+  // brain-extension: render the diagnostic workbench shell around this graph.
+  // The workbench keeps the graph canvas but adds a mode rail and inspector
+  // for incoming/outgoing/derived/issue signals.
+  diagnosticWorkbench?: boolean
 }
 
 interface GraphOptions {
   localGraph: Partial<D3Config> | undefined
   globalGraph: Partial<D3Config> | undefined
+  workbenchGraph: Partial<D3Config> | undefined
 }
 
 // brain-extension: shared default mapping for tier / source palettes. Pulled into a
@@ -207,6 +212,24 @@ const defaultOptions: GraphOptions = {
     tierColors: defaultTierColors,
     sourceColors: defaultSourceColors,
   },
+  workbenchGraph: {
+    drag: true,
+    zoom: true,
+    depth: -1,
+    scale: 0.9,
+    repelForce: 0.5,
+    centerForce: 0.2,
+    linkDistance: 30,
+    fontSize: 0.6,
+    opacityScale: 1,
+    showTags: true,
+    removeTags: [],
+    focusOnHover: true,
+    enableRadial: true,
+    tierColors: defaultTierColors,
+    sourceColors: defaultSourceColors,
+    diagnosticWorkbench: true,
+  },
 }
 
 export default ((opts?: Partial<GraphOptions>) => {
@@ -223,6 +246,10 @@ export default ((opts?: Partial<GraphOptions>) => {
     }
     const localGraph = { ...defaultOptions.localGraph, ...opts?.localGraph }
     const globalGraph = { ...defaultOptions.globalGraph, ...opts?.globalGraph }
+    const workbenchGraph = {
+      ...defaultOptions.workbenchGraph,
+      ...opts?.workbenchGraph,
+    }
     return (
       <div class={classNames(displayClass, "graph")}>
         <h3>{i18n(cfg.locale).components.graph.title}</h3>
@@ -276,6 +303,26 @@ export default ((opts?: Partial<GraphOptions>) => {
               <circle cx="19" cy="19" r="1.6" />
             </svg>
           </button>
+          {/* brain-extension: separate diagnostic workbench affordance. It opens
+              its own fullscreen modal and does not change the existing global /
+              stock / local-fullscreen buttons. */}
+          <button class="brain-graph-workbench-icon" aria-label="Graph Diagnostic Workbench">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="8" cy="8" r="3" />
+              <circle cx="16" cy="16" r="3" />
+              <path d="M10.2 10.2 13.8 13.8" />
+              <path d="M15.5 6.5 18 4" />
+              <path d="M6 18l2.5-2.5" />
+            </svg>
+          </button>
           <button class="global-graph-icon" aria-label="Global Graph">
             <svg
               version="1.1"
@@ -305,6 +352,29 @@ export default ((opts?: Partial<GraphOptions>) => {
         </div>
         <div class="global-graph-outer">
           <div class="global-graph-container" data-cfg={JSON.stringify(globalGraph)}></div>
+        </div>
+        <div class="brain-graph-workbench-outer">
+          <div
+            class="brain-graph-workbench-container"
+            data-cfg={JSON.stringify({
+              ...globalGraph,
+              ...workbenchGraph,
+              diagnosticWorkbench: true,
+              filterChips: ["tier", "source"],
+              searchEnabled: true,
+              hideOrphans: false,
+              focusOnHover: true,
+              nodeRadiusMultiplier: 2,
+              nodeRadiusGrowthExponent: 0.85,
+              wikiEdgeBaseAlpha: 0.25,
+              opacityScale: 6,
+              fontSize: 1.0,
+              hubLabelThreshold: 8,
+              labelMaxLength: 24,
+              nodeRadiusCeiling: 30,
+              hubLabelFontMultiplier: 1.8,
+            })}
+          ></div>
         </div>
         {/* brain-extension: separate modal container for the fullscreen LOCAL
             graph (depth=1 — current page + its connected nodes). Reuses the

@@ -44,10 +44,35 @@
   margin-bottom: 0.4rem;
   font-size: 0.75rem;
   line-height: 1.2;
+  min-width: 0;
+}
+
+.brain-graph-toolbar {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.55rem 0.65rem;
+  margin-bottom: 0;
+  border-bottom: 1px solid var(--rule);
+  background: color-mix(in srgb, var(--surface-1) 94%, var(--dark) 6%);
+  position: relative;
+  z-index: 2;
+
+  .brain-graph-search {
+    max-width: 24rem;
+    min-width: 12rem;
+  }
+
+  .brain-graph-chip-row {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: thin;
+  }
 }
 
 .brain-graph-search {
   width: 100%;
+  min-width: 0;
   box-sizing: border-box;
   // brain (Linear-variant feedback): bumped padding so the input
   // stands ~28px tall, visually balancing the 24×24 graph icon
@@ -157,7 +182,8 @@
 // rather than slipping under the buttons.
 .graph > .graph-outer > .global-graph-icon,
 .graph > .graph-outer > .brain-stock-graph-icon,
-.graph > .graph-outer > .local-graph-fullscreen-icon {
+.graph > .graph-outer > .local-graph-fullscreen-icon,
+.graph > .graph-outer > .brain-graph-workbench-icon {
   position: absolute;
   top: 0;
   margin: 0.3rem;
@@ -206,13 +232,15 @@
   right: 28px;
 }
 
-// brain-extension: maximize affordance sits 56px from the right (one icon
-// width to the left of the dot-grid icon), so the three controls read left-
-// to-right as: maximize / dot-grid / globe. Order matches the cognitive
-// hierarchy — narrowest scope (current page) on the left, broadest scope
-// (entire corpus) on the right.
-.graph > .graph-outer > .local-graph-fullscreen-icon {
+.graph > .graph-outer > .brain-graph-workbench-icon {
   right: 56px;
+}
+
+// brain-extension: maximize affordance sits left of the diagnostic,
+// dot-grid, and global buttons. Order reads left-to-right as: local
+// fullscreen / diagnostic workbench / stock / global.
+.graph > .graph-outer > .local-graph-fullscreen-icon {
+  right: 84px;
 }
 
 // brain: keep upstream's `.graph-outer { height: 250px; overflow: hidden; }`
@@ -251,12 +279,26 @@
 //      means no chance of an accidental containing-block creation
 //      for the fixed-position container.
 .graph > .global-graph-outer,
-.graph > .local-graph-outer {
+.graph > .local-graph-outer,
+.graph > .brain-graph-workbench-outer {
   background: var(--scrim);
 }
 
+.graph > .brain-graph-workbench-outer {
+  backdrop-filter: blur(4px);
+  display: none;
+  height: 100%;
+  left: 0;
+  overflow: hidden;
+  position: fixed;
+  top: 0;
+  width: 100vw;
+  z-index: 9999;
+}
+
 .graph > .global-graph-outer.active,
-.graph > .local-graph-outer.active {
+.graph > .local-graph-outer.active,
+.graph > .brain-graph-workbench-outer.active {
   display: block;
 }
 
@@ -270,6 +312,181 @@
   left: 10vw;
   top: 10vh;
   transform: none;
+}
+
+.graph > .brain-graph-workbench-outer > .brain-graph-workbench-container {
+  background-color: var(--surface-1);
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  border-color: var(--rule);
+  box-sizing: border-box;
+  box-shadow: var(--shadow-md);
+  position: fixed;
+  left: 4vw;
+  top: 6vh;
+  width: 92vw;
+  height: 88vh;
+  transform: none;
+}
+
+.brain-graph-workbench-shell {
+  display: grid;
+  grid-template-areas:
+    "toolbar toolbar toolbar"
+    "rail graph inspector";
+  grid-template-columns: 9.5rem minmax(0, 1fr) 18rem;
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  isolation: isolate;
+  overflow: hidden;
+}
+
+.brain-graph-workbench-shell > .brain-graph-toolbar {
+  grid-area: toolbar;
+}
+
+.brain-graph-mode-rail {
+  grid-area: rail;
+  border-right: 1px solid var(--rule);
+  background: var(--surface-1);
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.brain-graph-mode {
+  appearance: none;
+  border: 1px solid var(--lightgray);
+  background: transparent;
+  color: var(--dark);
+  border-radius: 6px;
+  padding: 0.55rem 0.6rem;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+
+  small {
+    display: block;
+    color: var(--darkgray);
+    font-size: 0.68rem;
+    margin-top: 0.12rem;
+  }
+
+  &.active {
+    border-color: var(--secondary);
+    background: color-mix(in srgb, var(--secondary) 14%, transparent);
+  }
+}
+
+.brain-graph-inspector {
+  grid-area: inspector;
+  align-self: stretch;
+  box-sizing: border-box;
+  border-left: 1px solid var(--rule);
+  background: #202124;
+  background-color: #202124;
+  color: var(--dark);
+  height: 100%;
+  justify-self: stretch;
+  min-height: 0;
+  min-width: 18rem;
+  padding: 0.9rem;
+  overflow: auto;
+  position: relative;
+  z-index: 3;
+
+  h3 {
+    margin: 0 0 0.25rem;
+    font-size: 1rem;
+  }
+
+  h4 {
+    margin: 1rem 0 0.35rem;
+    color: var(--darkgray);
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  ul {
+    margin: 0;
+    padding-left: 1rem;
+  }
+}
+
+.brain-graph-inspector-meta {
+  color: var(--darkgray);
+  margin: 0 0 0.75rem;
+}
+
+.brain-graph-metrics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.45rem;
+
+  > div {
+    border: 1px solid var(--lightgray);
+    border-radius: 6px;
+    padding: 0.45rem;
+  }
+
+  strong,
+  span {
+    display: block;
+  }
+}
+
+.brain-graph-canvas-pane {
+  grid-area: graph;
+  align-self: stretch;
+  contain: paint;
+  justify-self: stretch;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+  z-index: 1;
+}
+
+.brain-graph-canvas-pane > canvas {
+  display: block;
+  max-height: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.brain-graph-workbench-shell > .brain-graph-tooltip {
+  grid-column: 2;
+  grid-row: 2;
+}
+
+@media (max-width: 900px) {
+  .brain-graph-workbench-shell {
+    grid-template-areas:
+      "toolbar"
+      "rail"
+      "graph"
+      "inspector";
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto minmax(22rem, 1fr) auto;
+  }
+
+  .brain-graph-mode-rail {
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  .brain-graph-inspector {
+    border-left: 0;
+    border-top: 1px solid var(--rule);
+    max-height: 14rem;
+    min-width: 0;
+  }
 }
 
 .sidebar.right {
