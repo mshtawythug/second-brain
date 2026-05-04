@@ -65,10 +65,21 @@ class ExtractedDoc:
 
 @dataclass
 class IngestResult:
-    """Outcome of :func:`ingest_document`."""
+    """Outcome of :func:`ingest_document`.
+
+    ``body_changed`` is ``True`` whenever the call wrote new chunks/embeddings
+    — either by inserting a new row (``created=True``) or by upserting an
+    existing thread doc in place (``created=False`` when the gmail-thread
+    upsert path replaced the body of an existing
+    ``content_type='email_thread'`` row). A re-ingest with unchanged content
+    leaves it ``False``. The mirror trigger in :func:`ingest_document` reads
+    this so an in-place thread update propagates to disk; CLI summary output
+    still uses ``created`` to say "ingested" vs "skipped".
+    """
 
     document_id: str | None
     created: bool
+    body_changed: bool = False
 
 
 @dataclass
@@ -88,6 +99,28 @@ class UpdateResult:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _is_gmail_thread_doc(doc: ExtractedDoc, source_kind: str) -> bool:
+    """Return True iff ``doc`` is a P2.1 merged-thread Gmail doc.
+
+    The marker shape — ``source_kind == "gmail"`` AND
+    ``content_type == "email_thread"`` AND ``metadata.thread_id`` populated
+    with a non-empty string — is the same triple that the partial unique
+    index ``uq_documents_gmail_thread`` (migration 008) constrains. Anything
+    else (legacy ``content_type == "email"`` per-message rows, manual
+    ``email_thread`` docs without a thread_id) falls through to the legacy
+    content_hash dedup path. Centralising the check here keeps the call
+    sites in :func:`ingest_document` and :func:`_ingest_within_transaction`
+    in lockstep — divergence between them would silently break the upsert.
+    """
+    thread_id = doc.metadata.get("thread_id")
+    return (
+        source_kind == "gmail"
+        and doc.content_type == "email_thread"
+        and isinstance(thread_id, str)
+        and bool(thread_id)
+    )
 
 
 # Metadata keys promoted into typed columns on ``documents``. The mapping is
@@ -312,6 +345,21 @@ def ingest_document(
             "source_kind is required when doc.source_path is None"
         )
 
+    # Gmail-thread upsert (P2.2): a merged-thread doc keys on the stable
+    # Gmail ``threadId`` rather than a per-message ``messageId``. Mirroring
+    # that invariant onto the ``sources`` row keeps source dedup aligned
+    # with the new partial unique index ``uq_documents_gmail_thread`` —
+    # repeated thread-batched ingests reuse the same ``sources`` row instead
+    # of accumulating one per re-ingest. The override only fires when the
+    # caller actually produced a thread doc (``content_type='email_thread'``
+    # AND ``metadata.thread_id`` populated); legacy per-message gmail rows
+    # still pass message_id as ``source_external_id`` and are unaffected.
+    if _is_gmail_thread_doc(doc, source_kind):
+        thread_id = doc.metadata.get("thread_id")
+        # _is_gmail_thread_doc guarantees thread_id is a non-empty str.
+        assert isinstance(thread_id, str) and thread_id
+        source_external_id = thread_id
+
     h = _content_hash(doc.content)
     tags = tags or []
     source_metadata = source_metadata or {}
@@ -332,11 +380,13 @@ def ingest_document(
     # Mirror writes happen OUTSIDE the transaction so a filesystem error
     # cannot roll back the DB ingest (CLAUDE.md: prefer recoverable drift
     # over an aborted ingest — drift is exactly what `brain vault export`
-    # exists to reconcile).
+    # exists to reconcile). ``body_changed`` covers the gmail-thread
+    # in-place upsert case where ``created`` stays ``False`` but the body
+    # was rewritten — without it the on-disk mirror would lag the DB.
     if (
         vault_root is not None
         and result.document_id is not None
-        and (result.created or force)
+        and (result.created or result.body_changed or force)
     ):
         try:
             # ``force=True`` because we just inserted/replaced the DB row —
@@ -385,8 +435,55 @@ def _ingest_within_transaction(
     (commit on normal return, rollback on exception).
     """
     h = content_hash
+    is_thread = _is_gmail_thread_doc(doc, source_kind)
     with conn.transaction():
-        if doc.source_path is not None:
+        if is_thread:
+            # P2.2: gmail-thread upsert. Lookup keys on the
+            # ``(kind, thread_id, content_type='email_thread')`` triple
+            # constrained by ``uq_documents_gmail_thread``. Same-body
+            # re-ingests short-circuit; body-changed re-ingests UPDATE
+            # in place so the document UUID stays stable across thread
+            # growth (links / derived_links / unresolved_links keep
+            # pointing at the same row instead of cascade-dropping).
+            thread_id = doc.metadata.get("thread_id")
+            assert isinstance(thread_id, str) and thread_id  # _is_gmail_thread_doc
+            existing_thread = conn.execute(
+                "SELECT id, content_hash FROM documents "
+                "WHERE thread_id=%s AND kind='ingested' "
+                "AND content_type='email_thread'",
+                (thread_id,),
+            ).fetchone()
+            if existing_thread is not None:
+                existing_id, existing_hash = existing_thread
+                if not force and existing_hash == h:
+                    return IngestResult(
+                        document_id=str(existing_id),
+                        created=False,
+                        body_changed=False,
+                    )
+                _update_thread_doc_in_place(
+                    conn,
+                    embedder=embedder,
+                    document_id=str(existing_id),
+                    doc=doc,
+                    source_kind=source_kind,
+                    source_external_id=source_external_id,
+                    source_metadata=source_metadata,
+                    tags=tags,
+                    content_hash=h,
+                    gws_runner=gws_runner,
+                )
+                return IngestResult(
+                    document_id=str(existing_id),
+                    created=False,
+                    body_changed=True,
+                )
+            # No existing thread doc — fall through to the standard INSERT
+            # path. The partial unique index ``uq_documents_gmail_thread``
+            # protects against concurrent dual-insert: a second concurrent
+            # transaction reaching this branch raises IntegrityError on
+            # the INSERT below, which bubbles up to the caller.
+        elif doc.source_path is not None:
             # No DB-level UNIQUE on source_path — two concurrent CLI invocations
             # for the same path can race past this SELECT and both INSERT,
             # producing two rows for one path. Acceptable for sequential CLI
@@ -480,7 +577,109 @@ def _ingest_within_transaction(
             gws_runner=gws_runner,
         )
 
-        return IngestResult(document_id=document_id, created=True)
+        return IngestResult(
+            document_id=document_id, created=True, body_changed=True
+        )
+
+
+def _update_thread_doc_in_place(
+    conn: psycopg.Connection,
+    *,
+    embedder: Embedder,
+    document_id: str,
+    doc: ExtractedDoc,
+    source_kind: str,
+    source_external_id: str | None,
+    source_metadata: dict[str, Any],
+    tags: list[str],
+    content_hash: str,
+    gws_runner: GwsRunner | None,
+) -> None:
+    """Replace title / body / metadata / tags / typed columns on an existing
+    gmail-thread doc and rebuild its chunks. Used by the P2.2 upsert path.
+
+    Runs inside the caller's open transaction. The document UUID is preserved
+    so any ``links`` / ``derived_links`` / ``unresolved_links`` referencing
+    this doc keep pointing at the same row across re-ingest. Old chunks are
+    deleted via direct DELETE (no need for ON DELETE CASCADE — we know the
+    parent doc id) and re-inserted from the freshly chunked + embedded body.
+    Source-specific post-ingest hooks (gmail directory upsert) re-run so
+    headers from the latest message in the rebuilt thread propagate.
+    """
+    # Re-evaluate the source row — same ``(kind, external_id)`` as the
+    # initial insert, so this is a SELECT-with-fallback-INSERT no-op in
+    # practice. Kept here so a future caller passing different
+    # ``source_metadata`` still gets the source row's metadata refreshed.
+    source_id = _upsert_source(
+        conn,
+        kind=source_kind,
+        external_id=source_external_id,
+        metadata=source_metadata,
+    )
+
+    chunks = chunk_text(doc.content, count_tokens=embedder.count_tokens)
+    embeddings = (
+        embedder.embed([c.content for c in chunks], input_type="document")
+        if chunks
+        else []
+    )
+
+    # Pre-insert metadata derivation (krisp adds ``_participant_keys``).
+    # No-op for gmail today, but kept symmetric with the INSERT path so
+    # future per-source enrichments apply on UPDATE too.
+    _apply_pre_insert_metadata(doc, source_kind=source_kind)
+
+    promoted = _promote_metadata_to_columns(doc.metadata)
+    set_parts: list[str] = [
+        "source_id=%s",
+        "title=%s",
+        "content=%s",
+        "content_hash=%s",
+        "content_type=%s",
+        "tags=%s",
+        "metadata=%s::jsonb",
+    ]
+    params: list[Any] = [
+        source_id,
+        doc.title,
+        doc.content,
+        content_hash,
+        doc.content_type,
+        list(tags),
+        json.dumps(doc.metadata),
+    ]
+    # Project the rebuilt thread's metadata onto the typed columns so they
+    # stay in lockstep with the JSONB blob: a key that's present in the
+    # new metadata writes the column; a key that's gone (e.g. an old
+    # ``in_reply_to`` that no longer applies after a thread split) clears
+    # the column to NULL.
+    for column in _PROMOTED_COLUMNS:
+        if column in promoted:
+            set_parts.append(f"{column}=%s")
+            params.append(promoted[column])
+        else:
+            set_parts.append(f"{column}=NULL")
+    params.append(document_id)
+    conn.execute(
+        f"UPDATE documents SET {', '.join(set_parts)} WHERE id=%s",
+        params,
+    )
+
+    conn.execute("DELETE FROM chunks WHERE document_id=%s", (document_id,))
+    for c, emb in zip(chunks, embeddings, strict=True):
+        conn.execute(
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
+            "VALUES (%s, %s, %s, %s)",
+            (document_id, c.index, c.content, emb),
+        )
+
+    _run_source_hooks(
+        conn,
+        source_kind=source_kind,
+        doc=doc,
+        document_id=document_id,
+        gws_runner=gws_runner,
+    )
 
 
 def _apply_pre_insert_metadata(doc: ExtractedDoc, *, source_kind: str) -> None:
