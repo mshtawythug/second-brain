@@ -58,6 +58,7 @@ from .queries import (
     finalize_embedding_index,
     iter_chunks_missing_embedding,
     iter_orphan_mirror_files,
+    iter_stale_mirror_files,
     list_documents,
     mirror_drift_summary,
     resolve_document_prefix,
@@ -1699,6 +1700,16 @@ def vault_prune_orphans(
             "the list (dry-run)."
         ),
     ),
+    include_stale: bool = typer.Option(
+        False,
+        "--include-stale",
+        help=(
+            "Also delete stale mirror files: those whose frontmatter id "
+            "resolves to a row but whose path differs from that row's "
+            "``vault_path`` (leftovers from a slug-shape change). Default "
+            "off; only true orphans are processed."
+        ),
+    ),
     vault: Path | None = typer.Option(
         None,
         "--vault",
@@ -1706,7 +1717,8 @@ def vault_prune_orphans(
     ),
 ) -> None:
     """List or delete ``_ingested/`` mirror files whose frontmatter id has no
-    matching ``documents`` row.
+    matching ``documents`` row (or, with ``--include-stale``, also files
+    pointed past by a row whose ``vault_path`` is a different file).
 
     Default behavior (no ``--apply``) is a dry-run: each candidate is
     printed as ``would delete: <path>`` and a final summary reports the
@@ -1738,6 +1750,8 @@ def vault_prune_orphans(
         # Materialize the candidate list before opening write/unlink calls so
         # we don't iterate the tree while mutating it.
         orphans = list(iter_orphan_mirror_files(conn, vault_path=target))
+        if include_stale:
+            orphans.extend(iter_stale_mirror_files(conn, vault_path=target))
 
     if not orphans:
         typer.echo("0 orphan files")

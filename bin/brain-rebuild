@@ -100,8 +100,8 @@ if [[ "$DO_EXPORT" == '1' ]]; then
 fi
 
 if [[ "$DO_PRUNE" == '1' ]]; then
-    echo "🔄 pruning DB-orphan mirror files..."
-    brain vault prune-orphans --apply --vault "$VAULT" || {
+    echo "🔄 pruning DB-orphan + stale mirror files..."
+    brain vault prune-orphans --apply --include-stale --vault "$VAULT" || {
         echo 'prune-orphans: failed (continuing — files left in place)' >&2
     }
 fi
