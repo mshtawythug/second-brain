@@ -38,6 +38,8 @@
 //  12. brain/code       — Lane C — pre/inline code surface + copy
 //                          button styling.
 //  13. brain/home       — Lane C — index card grid override.
+//  14. brain/tag_content — P3.3 — per-tag listing rows.
+//  15. brain/explorer   — P4.2 — Explorer "Show ingested" toggle pill.
 //
 // Lane A (this PR) ships only `tokens`, `typography`, `surface`. Lanes
 // B/C/D files exist as one-line placeholder stubs so SCSS can resolve
@@ -61,3 +63,4 @@
 @use "./brain/code";
 @use "./brain/home";
 @use "./brain/tag_content";   // P3.3 — per-tag listing rows (icon + title + date + snippet + footer)
+@use "./brain/explorer";      // P4.2 — Explorer "Show ingested" toggle pill

@@ -1,0 +1,81 @@
+// Brain Explorer extras — P4.2 of the Wiki UX Overhaul.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_explorer.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via `custom.scss`'s
+// `@use "./brain/explorer"` line. Loaded after `_sidebar.scss` so any
+// sticky-header / surface-tier rules in the sidebar partial paint
+// underneath these explorer-content children.
+//
+// Scope of this file:
+//
+//   * `.brain-explorer-ingested-toggle` — the "Show ingested" /
+//     "Hide ingested" pill that the inline script injects as the
+//     first child of `.explorer-content`. Drives state via
+//     `[data-active="true"]` (set by the inline script on toggle).
+//
+// Scope NOT covered here:
+//
+//   * Folder-count badges, explorer indent guides, sticky search
+//     header — owned by `_sidebar.scss` (Lane C).
+//   * The `<ul class="explorer-ul">` tree itself — owned by upstream
+//     `quartz/components/styles/explorer.scss`.
+//
+// Tokens consumed (all from `_tokens.scss`):
+//
+//   * `--surface-1`     — toggle background when inactive
+//   * `--accent`        — toggle bg when active
+//   * `--rule`          — toggle border
+//   * `--ink-1` / `--ink-2` — text colors
+//   * `--motion-fast`   — hover transition
+
+.explorer .brain-explorer-ingested-toggle {
+  // Layout — full-width pill button so it reads as a control rail
+  // rather than a tag-pill. Sits above the tree but inside the
+  // collapsible explorer-content region.
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin: 0 0 0.5rem 0;
+  padding: 0.3rem 0.6rem;
+  font: inherit;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  // brain: lowercase by default so the chip reads "show ingested"
+  // not "SHOW INGESTED" — matches the P3.4 lowercase-tag contract.
+  text-transform: none;
+  cursor: pointer;
+  background: transparent;
+  color: var(--ink-2, var(--gray));
+  border: 1px solid var(--rule, var(--lightgray));
+  border-radius: 999px;
+  transition:
+    background var(--motion-fast, 120ms) ease,
+    color var(--motion-fast, 120ms) ease,
+    border-color var(--motion-fast, 120ms) ease;
+
+  &:hover,
+  &:focus-visible {
+    background: var(--accent-soft, var(--highlight));
+    color: var(--ink-1, var(--darkgray));
+    border-color: var(--accent, var(--secondary));
+    outline: none;
+  }
+
+  // Active state — toggle ON, ingested visible. Reverse fg/bg so
+  // the active read matches the pattern used by the P3.2 search
+  // chips and the graph-view filter chips.
+  &[data-active="true"] {
+    background: var(--accent, var(--secondary));
+    color: var(--light, white);
+    border-color: var(--accent, var(--secondary));
+
+    &:hover,
+    &:focus-visible {
+      // Slight darken on hover so the active chip still gives
+      // pressed-state feedback.
+      background: color-mix(in srgb, var(--accent, var(--secondary)) 85%, black);
+    }
+  }
+}
