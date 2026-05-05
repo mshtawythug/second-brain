@@ -32,6 +32,23 @@
 // `.search > .search-container` so the rules can't bleed onto
 // non-search markup that happens to share class names.
 
+.search > .search-container {
+  position: fixed;
+  contain: layout;
+  z-index: 999;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow-y: auto;
+  display: none;
+  backdrop-filter: blur(4px);
+}
+
+.search > .search-container.active {
+  display: block;
+}
+
 .search > .search-container .brain-search-chips {
   display: flex;
   flex-wrap: wrap;

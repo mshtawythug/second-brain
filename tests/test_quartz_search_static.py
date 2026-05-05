@@ -338,6 +338,25 @@ def test_search_scss_handles_active_chip_state(search_scss_source: str) -> None:
     )
 
 
+def test_search_scss_hides_container_until_active(search_scss_source: str) -> None:
+    """The SSR'd search popover container is hidden until JS marks it active.
+
+    The Search override does not ship Quartz's stock component CSS, so
+    the brain search partial must preserve the upstream closed-state
+    contract itself. Without ``display: none`` on ``.search-container``,
+    the SSR'd chips/input/results render inline in the left sidebar.
+    """
+    assert ".search > .search-container {" in search_scss_source, (
+        "expected _search.scss to declare the base search-container shell"
+    )
+    assert "display: none;" in search_scss_source, (
+        "expected .search-container to be hidden by default"
+    )
+    assert ".search > .search-container.active" in search_scss_source, (
+        "expected active selector to reopen the search-container"
+    )
+
+
 def test_custom_scss_imports_search_partial(custom_scss_source: str) -> None:
     """The new ``_search.scss`` partial is imported from the SCSS entry point.
 
