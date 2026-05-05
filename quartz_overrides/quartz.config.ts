@@ -189,6 +189,17 @@ const config: QuartzConfig = {
       // the redesign tokens; leaving stock's icon enabled would render
       // every external link with two arrows side-by-side.
       Plugin.CrawlLinks({ markdownLinkResolution: "shortest", externalLinkIcon: false }),
+      // brain: P4.1 — strip home-page `<li>`s whose link resolves to an
+      // empty folder (today: `daily/` when the user hasn't created any
+      // daily notes yet). Generic — extend the `folders` option to
+      // protect future top-level subdirs (e.g. a hypothetical
+      // `workbench/`) from the same 404. Must run AFTER `CrawlLinks` so
+      // the rehype-stage `<a href>`s have already been resolved to the
+      // shape the matcher expects (`daily/`, `daily/index`, …); without
+      // that ordering the matcher's normalizer sees raw markdown URLs
+      // and mis-classifies. The transformer reads `ctx.argv.directory`
+      // once per build to compute which folders are empty.
+      Plugin.EmptyDoorFilter(),
       Plugin.Description(),
       Plugin.Latex({ renderEngine: "katex" }),
     ],

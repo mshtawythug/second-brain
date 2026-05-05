@@ -68,6 +68,7 @@ from .queries import (
 from .search import hybrid_search
 from .tags import normalize_tag, normalize_tags
 from .vault import init_vault
+from .vault.daily_index import regenerate_daily_index
 from .vault.derived_links import (
     DirectoryStore,
     extract_krisp_speakers,
@@ -2885,6 +2886,12 @@ def daily(
 
     if target.is_file():
         typer.echo(f"opened {target_relative.as_posix()} (existing)")
+        # P4.1: refresh the index even on the "existing" path so a user
+        # who's just deleted an old daily (or migrated their vault) can
+        # re-run ``brain daily`` to repair the index without touching
+        # anything else. Idempotent — same dailies on disk ⇒ same
+        # ``daily/index.md`` byte-for-byte ⇒ no rewrite, no sync churn.
+        _refresh_daily_index(cfg, vault_path)
         if no_edit:
             return
         _run_post_write_editor_and_sync(
@@ -2924,11 +2931,47 @@ def daily(
         raise typer.Exit(code=1)
 
     typer.echo(f"created {target_relative.as_posix()}")
+    # P4.1: regen the daily index now that today's note exists. The
+    # index is a brain-managed bullet list of every daily; without
+    # this step the home page's "Daily notes" door is a 404. Sync the
+    # generated file so the indexed row reflects the new bullet list.
+    _refresh_daily_index(cfg, vault_path)
     if no_edit:
         return
     _run_post_write_editor_and_sync(
         cfg, vault_path=vault_path, file_path=target
     )
+
+
+def _refresh_daily_index(cfg: Config, vault_path: Path) -> None:
+    """Regen ``<vault>/daily/index.md`` and sync it through the DB.
+
+    Co-located with the ``daily`` command because both write paths
+    (existing-note + fresh-note) call into it. Errors during the
+    DB sync are surfaced to stderr but never raised — the index file
+    is on disk already, a future ``brain vault sync`` will pick it
+    up. Failing the whole command on a sync hiccup would block the
+    user's primary action (creating today's daily) for a secondary
+    bookkeeping concern.
+    """
+    if not regenerate_daily_index(vault_path):
+        return
+    embedder = _build_embedder(cfg)
+    index_path = vault_path / "daily" / "index.md"
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        report = sync_one_file(
+            conn,
+            embedder=embedder,
+            vault_path=vault_path,
+            file_path=index_path,
+        )
+    for path, reason in report.errors:
+        typer.secho(
+            f"daily index sync error: {path}: {reason}",
+            fg="yellow",
+            err=True,
+        )
 
 
 def _print_rename_plan(op: RenameOp, vault_path: Path) -> None:

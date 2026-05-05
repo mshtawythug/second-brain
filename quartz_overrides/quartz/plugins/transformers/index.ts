@@ -58,3 +58,9 @@ export { ReloadSignal } from "./reloadSignal"
 export { LinkKindMark } from "./linkKindMark"
 export { LinkSourceTag } from "./linkSourceTag"
 export { CodeCopy } from "./codeCopy"
+//   * EmptyDoorFilter   — P4.1 — strips home-page list-items whose
+//     internal link resolves to an empty folder (e.g. `daily/` when
+//     no daily notes exist). Pairs with the brain CLI's auto-generated
+//     `<folder>/index.md` so the door appears iff the folder has
+//     content.
+export { EmptyDoorFilter } from "./emptyDoorFilter"
