@@ -1,6 +1,11 @@
 # AGENTS.md
 
-Codex instructions for this repository.
+Meta-instructions for the Codex coding agent, peer to `CLAUDE.md`. Both
+files live at the repo root because they are agent-runtime configuration,
+not project documentation — `CLAUDE.md` configures Anthropic's Claude
+Code; `AGENTS.md` configures OpenAI's Codex. Do NOT move either file
+under `docs/` (rule 8 below covers `.md` artifacts produced *as part of
+work*; these two files configure the workers themselves).
 
 ## Hard Rules
 

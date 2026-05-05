@@ -21,6 +21,7 @@ coverage even without a real build.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -135,26 +136,59 @@ def test_emitter_lifts_date_from_frontmatter(emitter_source: str) -> None:
 
     Lookup order mirrors the brain frontmatter writer in
     ``src/brain/vault/export.py`` (``date`` > ``created`` >
-    ``published`` > ``updated``). Anchoring on each branch's literal
-    assignment keeps the priority order explicit — a reorder would be
-    a UX deviation (e.g. preferring ``updated`` over ``created`` would
-    cause every doc to look "fresh" after a touch).
+    ``published`` > ``updated``). The P3.6 fix routes every candidate
+    through ``liftDate()`` so both string and `Date`-typed frontmatter
+    values resolve correctly — the fallback chain itself is anchored
+    by checking the literal call sequence inside the assignment.
     """
+    # P3.6 fix-1: the lookup chain now flows through ``liftDate(...)``
+    # so both YAML strings AND js-yaml-parsed Date objects resolve. Each
+    # candidate field is named explicitly so a reorder still trips the
+    # test (preferring ``updated`` over ``created`` would be a UX
+    # deviation — every doc would look "fresh" after a touch).
     expected_branches = (
-        'if (typeof fm.date === "string") {',
-        'details.date = fm.date',
-        '} else if (typeof fm.created === "string") {',
-        'details.date = fm.created',
-        '} else if (typeof fm.published === "string") {',
-        'details.date = fm.published',
-        '} else if (typeof fm.updated === "string") {',
-        'details.date = fm.updated',
+        "liftDate(fm.date)",
+        "liftDate(fm.created)",
+        "liftDate(fm.published)",
+        "liftDate(fm.updated)",
     )
     for marker in expected_branches:
         assert marker in emitter_source, (
             f"date-lift branch missing in emitter: `{marker}` — "
             "P3.3 Part B requires the four-field fallback chain"
         )
+    # The fallback chain is preserved as a `??` cascade so order is
+    # observable in source.
+    assert (
+        "liftDate(fm.date) ??\n            liftDate(fm.created) ??\n"
+        "            liftDate(fm.published) ??\n            liftDate(fm.updated)"
+        in emitter_source
+    ), "expected `liftDate(...) ?? liftDate(...) ?? ...` cascade preserving the priority order"
+
+
+def test_emitter_lift_date_helper_accepts_strings_and_dates(
+    emitter_source: str,
+) -> None:
+    """``liftDate`` accepts both YAML strings and js-yaml-parsed `Date` objects.
+
+    P3.6 fix-1: gray-matter / js-yaml parses bare YAML dates
+    (``date: 2026-04-12``) into JS ``Date`` instances rather than
+    strings. The original ``typeof X === "string"`` checks silently
+    dropped Date instances. Anchoring on the helper signature + the
+    two type branches inside it.
+    """
+    assert "export function liftDate(v: unknown): string | undefined" in emitter_source, (
+        "expected exported `liftDate(v: unknown): string | undefined` helper"
+    )
+    assert 'if (typeof v === "string" && v.length > 0) return v' in emitter_source, (
+        "liftDate must accept string values"
+    )
+    assert "v instanceof Date" in emitter_source, (
+        "liftDate must accept `Date` instances (js-yaml parses YAML dates as Date)"
+    )
+    assert "v.toISOString().slice(0, 10)" in emitter_source, (
+        "liftDate must normalise Date instances to a `YYYY-MM-DD` slice"
+    )
 
 
 def test_emitter_date_lift_runs_after_tier_source(emitter_source: str) -> None:
@@ -162,10 +196,12 @@ def test_emitter_date_lift_runs_after_tier_source(emitter_source: str) -> None:
 
     Ordering keeps the per-entry block readable: frontmatter pulls
     cluster together, then the link-classification pass, then the
-    slim transform writes the body file.
+    slim transform writes the body file. The P3.6 fix-1 routes the
+    date lift through ``liftDate`` so we anchor on the new helper
+    invocation rather than the old `details.date = fm.date` literal.
     """
     tier_marker = "details.tier = fm.kind"
-    date_marker = "details.date = fm.date"
+    date_marker = "liftDate(fm.date)"
     link_marker = "details.linkRecords ="
     tier_idx = emitter_source.find(tier_marker)
     date_idx = emitter_source.find(date_marker)
@@ -376,23 +412,65 @@ def test_python_port_preserves_other_fields(tmp_path: Path) -> None:
     assert d["snippet"] == "body"
 
 
+class _FakeDate:
+    """Minimal stand-in for a JS ``Date`` object.
+
+    js-yaml parses bare YAML date literals (``date: 2026-04-12``) into
+    ``Date`` instances on the JS side. The Python port can't import a
+    real ``Date``, but the contract we care about is "the value carries
+    a `toISOString()` method that returns an ISO 8601 string". This
+    fake mirrors that contract just well enough to exercise the
+    Date-handling branch of `_python_port_lift_date`.
+    """
+
+    def __init__(self, iso: str) -> None:
+        self._iso = iso
+
+    def toISOString(self) -> str:  # noqa: N802 — match JS API spelling
+        return self._iso
+
+
+def _python_port_lift_date(v: Any) -> str | None:
+    """Mirror of the TS ``liftDate`` helper (P3.6 fix-1).
+
+    The TS helper:
+        if (typeof v === "string" && v.length > 0) return v
+        if (v instanceof Date && !Number.isNaN(v.getTime()))
+            return v.toISOString().slice(0, 10)
+        return undefined
+
+    The Python port treats ``_FakeDate`` instances as Date stand-ins
+    so we can exercise the Date branch without wiring up a real JS
+    runtime.
+    """
+    if isinstance(v, str) and len(v) > 0:
+        return v
+    if isinstance(v, _FakeDate):
+        return v.toISOString()[:10]
+    return None
+
+
 def _python_port_date_lift(
     fm: dict[str, Any],
 ) -> str | None:
-    """Mirror of the TS date-lift fallback chain (P3.3 Part B).
+    """Mirror of the TS date-lift fallback chain (P3.6 fix-1).
 
     The TS emitter:
-        if (typeof fm.date === "string")        details.date = fm.date
-        else if (typeof fm.created === "string") details.date = fm.created
-        else if (typeof fm.published === "string") details.date = fm.published
-        else if (typeof fm.updated === "string")   details.date = fm.updated
+        const lifted =
+            liftDate(fm.date) ??
+            liftDate(fm.created) ??
+            liftDate(fm.published) ??
+            liftDate(fm.updated)
 
-    Returns the resolved date or ``None`` if no string field matches.
+    Each candidate field flows through ``liftDate`` which now accepts
+    BOTH strings AND Date instances (the original `typeof X ===
+    "string"` checks silently dropped Date instances — the bug P3.6
+    fix-1 closes).
     """
     for key in ("date", "created", "published", "updated"):
-        v = fm.get(key)
-        if isinstance(v, str):
-            return v
+        result = _python_port_lift_date(fm.get(key))
+        if result is not None:
+            return result
     return None
 
 
@@ -429,6 +507,211 @@ def test_date_lift_returns_none_when_all_missing() -> None:
     static checks above.
     """
     assert _python_port_date_lift({}) is None
-    # Non-string values don't satisfy the type guard.
+    # Non-string, non-Date values don't satisfy the type guard.
     assert _python_port_date_lift({"created": 12345}) is None
     assert _python_port_date_lift({"date": None}) is None
+    assert _python_port_date_lift({"date": True}) is None
+
+
+# ---------------------------------------------------------------------------
+# P3.6 fix-1 — Date-instance handling
+# ---------------------------------------------------------------------------
+
+
+def test_lift_date_accepts_string_value() -> None:
+    """A non-empty string passes through unchanged."""
+    assert _python_port_lift_date("2026-04-12") == "2026-04-12"
+    # Datetime-form strings (with time + zone) survive verbatim — the
+    # consumer (Search.tsx, TagContent.tsx) handles parsing.
+    assert (
+        _python_port_lift_date("2026-04-12T15:30:00+00:00")
+        == "2026-04-12T15:30:00+00:00"
+    )
+
+
+def test_lift_date_accepts_date_instance() -> None:
+    """A `Date`-shaped object resolves to its ISO date slice (`YYYY-MM-DD`).
+
+    Mirrors the TS branch ``v instanceof Date`` — the bug fix lets
+    js-yaml-parsed YAML dates flow through.
+    """
+    fake = _FakeDate("2026-04-12T00:00:00.000Z")
+    assert _python_port_lift_date(fake) == "2026-04-12"
+
+
+def test_lift_date_returns_none_for_other_types() -> None:
+    """Numbers, bools, None, dicts → ``None`` (no falsy date emitted)."""
+    for v in (None, 12345, True, [], {}, 0, ""):
+        assert _python_port_lift_date(v) is None, f"unexpected lift for {v!r}"
+
+
+def test_date_lift_chain_resolves_date_field_when_object() -> None:
+    """The `Date`-shaped value at `fm.date` wins over a string `created`.
+
+    Anchors the bug-regression scenario: previously a `Date`-typed
+    `fm.date` would skip to `created` (because `typeof Date !== "string"`),
+    silently demoting the authored date in favour of the export-time
+    one. The fix routes both candidates through `liftDate` so the
+    explicit authoring override wins as documented.
+    """
+    fm = {
+        "date": _FakeDate("2026-04-12T00:00:00.000Z"),
+        "created": "2026-04-01T00:00:00+00:00",
+    }
+    assert _python_port_date_lift(fm) == "2026-04-12"
+
+
+# ---------------------------------------------------------------------------
+# P3.6 fix-3 — Slug allowlist (path-traversal hardening)
+# ---------------------------------------------------------------------------
+
+# Pinned regex mirroring the TS `SAFE_SLUG_RE` constant in the emitter.
+# Asserted by `test_emitter_pins_safe_slug_re` below so any drift on
+# the TS side trips a test rather than silently bypassing the port.
+# Composition rationale lives next to the TS constant — see
+# `quartz_overrides/quartz/plugins/emitters/contentIndex.ts`.
+_SAFE_SLUG_RE = re.compile(r"^[a-zA-Z0-9._/,:-]+$")
+
+
+def _is_safe_slug(slug: str) -> bool:
+    """Mirror of the TS ``isSafeSlug`` helper.
+
+    Char allowlist plus segment-shape rejection. ``../etc/passwd`` is
+    rejected even though every individual char is in the allowlist
+    (`.`, `/`, alphanumeric); ``/leading/slash`` is rejected because
+    its first segment is empty.
+    """
+    if not _SAFE_SLUG_RE.match(slug):
+        return False
+    return all(segment not in ("", "..") for segment in slug.split("/"))
+
+
+def test_emitter_pins_safe_slug_re(emitter_source: str) -> None:
+    """Emitter declares the allowlist regex constant + ``isSafeSlug`` helper.
+
+    Defense in depth: a slug like ``../etc/passwd`` would otherwise let
+    `fs.writeFile` escape the `static/contentBodies/` directory. The
+    char allowlist alone permits `..` (every char is individually safe),
+    so the helper additionally rejects any `..` segment.
+    """
+    assert (
+        "export const SAFE_SLUG_RE = /^[a-zA-Z0-9._/,:-]+$/" in emitter_source
+    ), (
+        "expected exported `SAFE_SLUG_RE` allowlist regex including `,` and "
+        "`:` (justified against live-vault slug shapes — see emitter comment)"
+    )
+    assert "export function isSafeSlug(slug: string): boolean" in emitter_source, (
+        "expected exported `isSafeSlug` helper combining char allowlist + .. rejection"
+    )
+    assert 'slug.split("/")' in emitter_source, (
+        "expected `slug.split(\"/\")` to inspect path segments"
+    )
+    assert 'segment === ".."' in emitter_source, (
+        "expected explicit `..`-segment rejection in `isSafeSlug`"
+    )
+    # The slim transform must consult the helper BEFORE constructing the
+    # body file path.
+    assert "if (!isSafeSlug(slug))" in emitter_source, (
+        "expected `isSafeSlug` guard before per-slug body write"
+    )
+
+
+def test_safe_slug_regex_accepts_typical_quartz_slugs() -> None:
+    """Quartz's slugify output passes the allowlist.
+
+    The live-vault slug list includes shapes with commas (from email
+    subject lines that mention dates: ``Tue,-7-Apr-...``) and colons
+    (from the ``krisp:`` prefix Krisp transcripts get). These chars
+    are URL- and path-safe, so the allowlist accepts them while still
+    rejecting HTML metachars and shell metachars.
+    """
+    for slug in (
+        "demo-vault-doc",
+        "_ingested/gmail/abc123",
+        "_ingested/krisp/2026-04-12-meeting",
+        "tags/take-home",
+        "README",
+        "folder/sub.folder/page",
+        # Live-vault shapes — found by running `bin/brain-rebuild`
+        # against a real corpus and inspecting the rejected slugs.
+        "_ingested/gmail/Tue,-7-Apr-19d68a63-reminder-meeting",
+        "_ingested/krisp/2026-05-02-krisp:au-auto",
+        "_ingested/gmail/Wed,-04-Ma-19cb8c7c-venwise",
+    ):
+        assert _is_safe_slug(slug), f"expected `{slug}` to pass allowlist + segment check"
+
+
+def test_safe_slug_regex_rejects_path_traversal_attempts() -> None:
+    """Attacker-shaped slugs are rejected by ``isSafeSlug`` (allowlist + `..` segment).
+
+    The char allowlist alone passes things like ``../etc/passwd`` (every
+    char is individually safe), so we use ``isSafeSlug`` here — the
+    same helper the emitter and the inline-fetch site call.
+    """
+    for slug in (
+        "../etc/passwd",
+        "../../etc/passwd",
+        "..",
+        "foo/../bar",  # `..` segment in the middle
+        "foo bar",  # space (not in allowlist)
+        "foo;rm",  # shell metachar
+        "foo<script>",  # HTML injection attempt
+        "",  # empty
+        "/absolute/path",  # leading slash → first segment empty
+    ):
+        assert not _is_safe_slug(slug), f"expected `{slug}` to be rejected"
+
+
+def _python_port_slim_transform_with_guard(
+    parsed: dict[str, dict[str, Any]],
+    output_dir: Path,
+) -> dict[str, dict[str, Any]]:
+    """Variant of the slim transform that enforces ``SAFE_SLUG_RE``.
+
+    Mirrors the P3.6 fix-3 guard: slugs failing the allowlist skip
+    both the body-file write and the slim overwrite, leaving the
+    entry in ``parsed`` with its full content.
+    """
+    bodies_root = output_dir / "static" / "contentBodies"
+    for slug, details in parsed.items():
+        if not _is_safe_slug(slug):
+            continue
+        raw = details.get("content")
+        body = raw if isinstance(raw, str) else ""
+        snippet = body[:SNIPPET_LENGTH]
+        body_target = bodies_root / f"{slug}.json"
+        body_target.parent.mkdir(parents=True, exist_ok=True)
+        body_target.write_text(
+            json.dumps({"slug": slug, "content": body}),
+            encoding="utf-8",
+        )
+        details["content"] = snippet
+        details["snippet"] = snippet
+    return parsed
+
+
+def test_slim_transform_skips_unsafe_slugs(tmp_path: Path) -> None:
+    """Slim transform refuses to write a body file for ``../etc/passwd``.
+
+    Behavioural regression test for P3.6 fix-3: the entry is preserved
+    in the parsed dict (with its full content) but no body file is
+    written under contentBodies/.
+    """
+    # Setup
+    parsed = {
+        "../etc/passwd": {"slug": "../etc/passwd", "content": "secret"},
+        "demo-doc": {"slug": "demo-doc", "content": "y" * 500},
+    }
+
+    # Exercise
+    out = _python_port_slim_transform_with_guard(parsed, tmp_path)
+
+    # Verify — the unsafe slug's entry is untouched (full content stays)
+    # and no file written outside contentBodies/.
+    assert out["../etc/passwd"]["content"] == "secret"
+    assert "snippet" not in out["../etc/passwd"]
+    # The traversal target — `tmp_path/etc/passwd` — must not exist.
+    assert not (tmp_path / "etc" / "passwd").exists()
+    # The safe slug still gets the slim treatment.
+    assert out["demo-doc"]["snippet"] == "y" * 240
+    assert (tmp_path / "static" / "contentBodies" / "demo-doc.json").is_file()

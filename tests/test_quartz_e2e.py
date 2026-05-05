@@ -48,10 +48,13 @@ Coverage scope:
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import re
 import shutil
+import sys
 from collections.abc import Iterator
+from pathlib import Path
 from urllib import request as urlrequest
 
 import pytest
@@ -67,6 +70,31 @@ from tests.quartz_e2e_helper import (
 # contentIndex emitter (P3.1) — kept in lock-step here so a future
 # bump on the emitter side surfaces as an obvious test failure.
 SNIPPET_LENGTH = 240
+
+# brain (P3.6 fix-7): reach into ``scripts/check_index_size.py`` so the
+# e2e suite enforces the same gzipped-size budget the operator script
+# does. We import the module by file path because ``scripts/`` is not on
+# sys.path by default (it's not a package — it ships single-purpose
+# CLIs). The import is wrapped in a helper that returns ``None`` if the
+# script is missing so the harness still runs in isolation.
+_CHECK_INDEX_PATH = (
+    Path(__file__).resolve().parent.parent / "scripts" / "check_index_size.py"
+)
+
+
+def _load_check_index_module() -> object | None:
+    """Load `scripts/check_index_size.py` as a module by file path."""
+    if not _CHECK_INDEX_PATH.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "_brain_check_index_size", _CHECK_INDEX_PATH
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, module)
+    spec.loader.exec_module(module)
+    return module
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +121,13 @@ pytestmark = [
 # ---------------------------------------------------------------------------
 
 
+# Module-level latch so `e2e_build_dir` can recover the on-disk build
+# path that `e2e_build` produced. Set at fixture setup, cleared at
+# teardown. Module-scope is fine because both fixtures are also module-
+# scope so the build runs at most once per test module.
+_LAST_E2E_BUILD_DIR: Path | None = None
+
+
 @pytest.fixture(scope="module")
 def e2e_build(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     """Build the fixture vault and serve it; yield the base URL.
@@ -101,6 +136,7 @@ def e2e_build(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     the build is the expensive step (~10-20s); the per-test fetches
     are cheap. Teardown is automatic via the context manager.
     """
+    global _LAST_E2E_BUILD_DIR
     tmp = tmp_path_factory.mktemp("quartz_e2e")
     vault = tmp / "vault"
     output = tmp / "build"
@@ -111,15 +147,35 @@ def e2e_build(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     except Exception as exc:  # noqa: BLE001 — surface as test skip, not error
         pytest.skip(f"npx quartz build failed: {exc}")
 
-    with serve_directory(output) as (url, _port):
-        # Print the URL so a human running ``pytest -s`` can drive
-        # the same build with the MCP browser tools mid-test.
-        print(f"\ne2e_build URL: {url} (output: {output})", flush=True)
-        yield url
+    _LAST_E2E_BUILD_DIR = output
+    try:
+        with serve_directory(output) as (url, _port):
+            # Print the URL so a human running ``pytest -s`` can drive
+            # the same build with the MCP browser tools mid-test.
+            print(f"\ne2e_build URL: {url} (output: {output})", flush=True)
+            yield url
+    finally:
+        _LAST_E2E_BUILD_DIR = None
+        # `output` lives under tmp_path — pytest cleans it up after the
+        # session ends. We also clean up the staged vault just in case.
+        shutil.rmtree(vault, ignore_errors=True)
 
-    # `output` lives under tmp_path — pytest cleans it up after the
-    # session ends. We also clean up the staged vault just in case.
-    shutil.rmtree(vault, ignore_errors=True)
+
+@pytest.fixture(scope="module")
+def e2e_build_dir(e2e_build: str) -> Path:
+    """Companion fixture: the build output directory on disk.
+
+    Tests that exercise on-disk artifacts (e.g. the gzipped-size
+    budget check) ask for this fixture in addition to ``e2e_build``.
+    Reads the path from the module-scope latch ``e2e_build`` populates
+    on setup so we don't re-run the build.
+    """
+    # Touch `e2e_build` so pytest enforces the dependency — the URL
+    # itself isn't used here, but the fixture must run first.
+    _ = e2e_build
+    if _LAST_E2E_BUILD_DIR is None:
+        pytest.fail("e2e_build did not publish its output directory")
+    return _LAST_E2E_BUILD_DIR
 
 
 def _fetch_text(url: str) -> str:
@@ -338,4 +394,43 @@ def test_tag_page_lowercases_pill_text(e2e_build: str) -> None:
     assert not css_inline_pattern.search(html), (
         "found inline `text-transform: uppercase` on `a.tag-link` — "
         "P3.4 contract violated"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P3.6 fix-7 — Wire `check_index_size.py` into the e2e harness
+# ---------------------------------------------------------------------------
+
+
+def test_contentindex_gzipped_under_default_budget(e2e_build_dir: Path) -> None:
+    """The rendered ``contentIndex.json`` fits under the operator-script budget.
+
+    P3.1's slim transform was sized for a 2 MB gzipped budget (the
+    constant pinned in ``scripts/check_index_size.py``). Until P3.6
+    that script was operator-only — never run against a real build
+    artifact. Wiring it into the e2e harness closes the gap: every
+    e2e run now enforces the same budget the operator hits manually
+    via ``python scripts/check_index_size.py``.
+
+    Skips if the script can't be imported (defensive — the harness
+    runs in environments where `scripts/` may not be on the
+    repository tree, e.g. a future packaging change).
+    """
+    module = _load_check_index_module()
+    if module is None:
+        pytest.skip(
+            f"`scripts/check_index_size.py` not importable from {_CHECK_INDEX_PATH}"
+        )
+
+    index_path = e2e_build_dir / "static" / "contentIndex.json"
+    assert index_path.is_file(), f"missing build artifact at {index_path}"
+
+    raw_bytes = index_path.read_bytes()
+    compressed_size = module.gzipped_size(raw_bytes)  # type: ignore[attr-defined]
+    budget = module.DEFAULT_BUDGET_BYTES  # type: ignore[attr-defined]
+
+    assert compressed_size <= budget, (
+        f"contentIndex.json gzipped is {compressed_size:,} B "
+        f"(> budget {budget:,} B; raw {len(raw_bytes):,} B). "
+        "Run `python scripts/check_index_size.py <path>` to reproduce."
     )

@@ -239,7 +239,14 @@ export default ((opts?: Partial<TagContentOptions>) => {
                     <p class="brain-tag-footer">
                       <span class="brain-tag-footer-label">tagged:</span>{" "}
                       {tags.map((rowTag, i) => (
-                        <>
+                        // brain (P3.6 fix-6): bare `<>` fragments inside
+                        // a `.map()` trip Preact's runtime warning
+                        // ("Each child in a list should have a unique
+                        // key prop"). Promote to a span with a stable
+                        // `key={rowTag}` so the warning goes away and
+                        // the reconciler can match nodes correctly when
+                        // the tags list mutates between renders.
+                        <span key={rowTag} class="brain-tag-footer-fragment">
                           {i > 0 ? " " : ""}
                           <a
                             class="internal tag-link brain-tag-footer-link"
@@ -247,7 +254,7 @@ export default ((opts?: Partial<TagContentOptions>) => {
                           >
                             #{rowTag}
                           </a>
-                        </>
+                        </span>
                       ))}
                     </p>
                   )}

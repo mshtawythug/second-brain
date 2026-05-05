@@ -46,6 +46,7 @@ import FlexSearch, { DefaultDocumentSearchResults } from "flexsearch"
 import { ContentDetails } from "../../plugins/emitters/contentIndex"
 import { registerEscapeHandler, removeAllChildren } from "./util"
 import { FullSlug, pathToRoot, resolveRelative } from "../../util/path"
+import { SOURCE_ICONS, inferSource as sharedInferSource } from "../../util/sourceIcons"
 
 interface Item {
   id: number
@@ -76,16 +77,50 @@ interface BrainEntry {
 // active set survives `setupSearch` re-entry (per SPA `nav` event).
 const ACTIVE_SOURCES_KEY = "brain.search.activeSources"
 const CONTENT_BODIES_RELDIR = "static/contentBodies"
-// Glyph fallback when the chip rail lacks a `data-brain-source-icons`
-// attribute (defensive — the SSR path always sets it). Mirrors the
-// `SOURCE_ICONS` table in `Search.tsx`.
-const FALLBACK_SOURCE_ICONS: Record<string, string> = {
-  gmail: "📧",
-  krisp: "🎙️",
-  slack: "💬",
-  manual: "✍️",
-  vault: "🌱",
+
+// brain (P3.6 fix-3): mirror of `SAFE_SLUG_RE` + `isSafeSlug` in
+// `quartz_overrides/quartz/plugins/emitters/contentIndex.ts`. Duplicated
+// here (rather than imported) because the inline script is bundled
+// separately by esbuild-loader and can't take a runtime import from the
+// server-side emitter module without dragging hast/vfile types into the
+// browser bundle. Defense in depth: any slug we'd have rejected on the
+// emitter side gets the same treatment on the fetch side, so a stale
+// `contentIndex.json` from before the emitter guard rolled out can't
+// poison the fetch URL. The allowlist composition is documented in
+// the emitter's identical constant (it justifies every char against the
+// real brain-vault slug shapes including `,` from email subject dates
+// and `:` from `krisp:` prefixes); see contentIndex.ts for the
+// rationale on what's in the set and what isn't.
+const SAFE_SLUG_RE = /^[a-zA-Z0-9._/,:-]+$/
+
+function isSafeSlug(slug: string): boolean {
+  if (!SAFE_SLUG_RE.test(slug)) return false
+  // Reject empty segments (leading slash, double slash) and `..`
+  // segments — the char allowlist alone permits both.
+  for (const segment of slug.split("/")) {
+    if (segment === "" || segment === "..") return false
+  }
+  return true
 }
+
+// brain (P3.6 fix-4): single-key parse-failure fallback. Previously this
+// module carried a full duplicate of the source-icon table (mirroring
+// the `SOURCE_ICONS` constant in Search.tsx). Both copies have now
+// converged on `quartz_overrides/quartz/util/sourceIcons.ts` (P3.3); the
+// SSR rail serializes the imported table into `data-brain-source-icons`
+// and the inline script reads it back at boot via `readSourceIcons`. We
+// keep one minimal fallback entry here for the "data attribute is
+// absent or unparseable" branch — `vault` is the universal-default
+// glyph the `sourceIcon` helper falls back to anyway, and a single key
+// is enough to keep the chip rail rendering rather than throwing.
+const FALLBACK_SOURCE_ICONS: Record<string, string> = { vault: SOURCE_ICONS["vault"] }
+
+// brain (P3.6 fix-4): canonical default-active vocabulary, sourced from
+// the shared `SOURCE_ICONS` keys so adding a new ingest source (e.g.
+// `notion`) is a one-line change in `util/sourceIcons.ts` rather than a
+// hunt across files. Preserves the original behaviour of "all known
+// sources visible by default" without a duplicated string list.
+const DEFAULT_SOURCE_VOCAB: ReadonlyArray<string> = Object.keys(SOURCE_ICONS)
 
 // Can be expanded with things like "term" in the future
 type SearchType = "basic" | "tags"
@@ -96,7 +131,7 @@ let currentSearchTerm: string = ""
 // survives SPA navigation. Default = full vocabulary (everything
 // visible). On first load we hydrate from localStorage; subsequent
 // chip clicks rewrite the same key.
-const DEFAULT_ACTIVE_SOURCES = new Set<string>(Object.keys(FALLBACK_SOURCE_ICONS))
+const DEFAULT_ACTIVE_SOURCES = new Set<string>(DEFAULT_SOURCE_VOCAB)
 let activeSources: Set<string> = loadActiveSources()
 
 function loadActiveSources(): Set<string> {
@@ -210,6 +245,30 @@ const tokenizeTerm = (term: string) => {
   return tokens.sort((a, b) => b.length - a.length) // always highlight longest terms first
 }
 
+// brain (P3.6 fix-2): regex-metachar escape. The `highlight()` helper
+// takes raw user query tokens and previously fed them straight into
+// `new RegExp(...)`. A token like `(.*)` would compile as a capturing
+// group and either throw or match unintended substrings; a token
+// containing `<` could escape its surrounding `<mark>` tags. Escaping
+// every metachar before the regex compile is the standard fix.
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
+// brain (P3.6 fix-2): the previous `highlight()` was an XSS hole. The
+// upstream comment promised escaping but the implementation only fed
+// raw tokens through `String.prototype.replace`, which preserved every
+// HTML metachar verbatim. A title like `Re: <script>alert(1)</script>`
+// would execute when `resultToHTML()` set `itemTile.innerHTML = ...`.
+// The fix:
+//   1. Escape the entire body text first via `escapeHtml()` so any HTML
+//      metachars in the snippet/title become safe entities.
+//   2. Escape each query token via `escapeHtml(escapeRegExp(...))` so
+//      both the regex semantics AND the rendered `<mark>` body are safe.
+//   3. Wrap matches in `<mark>` *after* escaping — the only HTML we
+//      intentionally produce, scoped to the literal six-char tag pair.
+// This preserves the original "wrap matches in <mark>" UX without
+// allowing user-supplied content to break out of the row markup.
 function highlight(searchTerm: string, text: string, trim?: boolean) {
   const tokenizedTerms = tokenizeTerm(searchTerm)
   let tokenizedText = text.split(/\s+/).filter((t) => t !== "")
@@ -239,18 +298,33 @@ function highlight(searchTerm: string, text: string, trim?: boolean) {
 
   const slice = tokenizedText
     .map((tok) => {
+      // brain (P3.6 fix-2): escape the raw text BEFORE looking for
+      // matches. Every subsequent regex substitution operates on
+      // already-escaped text, so a title like `<script>alert(1)
+      // </script>` becomes `&lt;script&gt;alert(1)&lt;/script&gt;` and
+      // the popover renders it as visible literal text rather than
+      // executing it.
+      const escapedTok = escapeHtml(tok)
       // see if this tok is prefixed by any search terms
       for (const searchTok of tokenizedTerms) {
         if (tok.toLowerCase().includes(searchTok.toLowerCase())) {
-          const regex = new RegExp(searchTok.toLowerCase(), "gi")
+          // Escape regex metachars in the token before compiling so a
+          // query like `(.*)` doesn't blow up `new RegExp()` or match
+          // unintended substrings; HTML-escape the regex source so the
+          // resulting RegExp matches the *escaped* version of the
+          // token in the already-escaped body text.
+          const regexSource = escapeHtml(escapeRegExp(searchTok.toLowerCase()))
+          const regex = new RegExp(regexSource, "gi")
           // brain: emit `<mark>` so the brain accent CSS in
           // `_search.scss` can paint per-result highlights without
           // colliding with the upstream `.highlight` class (which is
-          // also reused by the preview pane's HTML highlighter).
-          return tok.replace(regex, `<mark>$&</mark>`)
+          // also reused by the preview pane's HTML highlighter). The
+          // `<mark>` tags are the only HTML we intentionally produce
+          // here — the wrapped match is itself escaped by step 1.
+          return escapedTok.replace(regex, `<mark>$&</mark>`)
         }
       }
-      return tok
+      return escapedTok
     })
     .join(" ")
 
@@ -285,20 +359,16 @@ function readSourceIcons(rail: HTMLElement | null): Record<string, string> {
   }
 }
 
-// brain: fall back to a slug-based source classification when the
-// emitter didn't graft a `source` field (e.g. legacy entries). Mirrors
-// the path-form heuristic the contentIndex post-processor uses
-// (`slug.startsWith("_ingested/")` ⇒ ingested-tier; the next segment
-// is the source).
-function inferSource(slug: string, source: string | undefined): string {
-  if (typeof source === "string" && source.length > 0) return source
-  const match = slug.match(/^_ingested\/([^/]+)\//)
-  if (match) return match[1]
-  return "vault"
-}
+// brain (P3.6 fix-4): re-export the shared `inferSource` helper from
+// `util/sourceIcons.ts` under its prior local name so the rest of this
+// file (and the static parity tests that grep for the symbol) keeps
+// working without a sweep. The previous local copy duplicated the
+// regex + fallback logic for no good reason — same heuristic, same
+// branches.
+const inferSource = sharedInferSource
 
 function sourceIcon(icons: Record<string, string>, source: string): string {
-  return icons[source] ?? icons["vault"] ?? FALLBACK_SOURCE_ICONS["vault"]
+  return icons[source] ?? icons["vault"] ?? FALLBACK_SOURCE_ICONS["vault"] ?? SOURCE_ICONS["vault"]
 }
 
 // brain: format a contentIndex date stamp for the right-aligned column
@@ -377,6 +447,22 @@ function highlightHTML(searchTerm: string, el: HTMLElement) {
 // builds rows with `innerHTML` so escaping is mandatory anywhere we
 // embed user-supplied content (titles, snippets that bypass the
 // `highlight()` mark-injection path).
+//
+// brain (P3.6 fix-2): protection inventory — every user-supplied string
+// that flows into innerHTML is escaped:
+//   * `highlight()`            — escapes body text + each token before
+//                                 wrapping matches in `<mark>`.
+//   * `highlightTags()`        — escapes each `tag` before
+//                                 interpolating into `<p>#...</p>`.
+//   * `formatForDisplay`       — escapes the title in the
+//                                 `searchType === "tags"` branch (the
+//                                 other branch flows through
+//                                 `highlight()`).
+//   * `resultToHTML`           — escapes the icon + date label before
+//                                 embedding them into the row tile.
+// Adding new innerHTML interpolations: pass user content through
+// `escapeHtml()` first, OR through a helper that escapes internally
+// (`highlight()` does). Anchor tests in `tests/test_quartz_search_static.py`.
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -473,9 +559,9 @@ async function setupSearch(searchElement: Element, currentSlug: FullSlug, data: 
         persistActiveSources()
         refreshChipState()
         // brain: re-run the current query through the filter so chip
-        // toggles reflect immediately. `onType` reads `searchBar.value`,
-        // so we just refire its handler with the existing input.
-        void onType({ target: searchBar } as unknown as InputEvent)
+        // toggles reflect immediately. `onType` reads `searchBar.value`
+        // directly (no event arg), so we just call it.
+        void onType()
       }
       chip.addEventListener("click", handler)
       window.addCleanup(() => chip.removeEventListener("click", handler))
@@ -579,7 +665,16 @@ async function setupSearch(searchElement: Element, currentSlug: FullSlug, data: 
     return {
       id,
       slug,
-      title: searchType === "tags" ? entry.title ?? "" : highlight(term, entry.title ?? ""),
+      // brain (P3.6 fix-2): both branches must escape — `highlight()`
+      // already escapes its return value, but the tag-search branch
+      // bypasses it and previously interpolated the raw frontmatter
+      // title into innerHTML. Add an explicit `escapeHtml` so a title
+      // like `Re: <script>alert(1)</script>` renders as visible
+      // literal text in the popover instead of executing.
+      title:
+        searchType === "tags"
+          ? escapeHtml(entry.title ?? "")
+          : highlight(term, entry.title ?? ""),
       content: highlight(term, rawSnippet, true),
       tags: highlightTags(term.substring(1), entry.tags ?? []) as unknown as string[],
       source: inferSource(slug as string, entry.source),
@@ -692,6 +787,17 @@ async function setupSearch(searchElement: Element, currentSlug: FullSlug, data: 
     if (fetchContentCache.has(slug)) {
       return fetchContentCache.get(slug) ?? null
     }
+    // brain (P3.6 fix-3): defense-in-depth slug guard. Slugs come from
+    // Quartz's trusted slugify, but a stale `contentIndex.json` from
+    // before the emitter's matching guard rolled out could still carry
+    // an unsafe slug. Reject anything outside the allowlist (or
+    // containing a `..` path segment) before building the fetch URL —
+    // the preview pane falls through to the snippet fallback (same
+    // shape as a 404).
+    if (!isSafeSlug(slug)) {
+      fetchContentCache.set(slug, null)
+      return null
+    }
     const root = pathToRoot(currentSlug)
     const url = `${root}/${CONTENT_BODIES_RELDIR}/${slug}.json`
     try {
@@ -759,9 +865,16 @@ async function setupSearch(searchElement: Element, currentSlug: FullSlug, data: 
     return activeSources.has(inferSource(slug, source))
   }
 
-  async function onType(e: HTMLElementEventMap["input"]) {
+  // brain (P3.6 fix-5): `onType` previously took an `InputEvent` so it
+  // could read `e.target.value`. The chip-toggle handler was forced to
+  // synthesise a fake event (`{target: searchBar} as unknown as
+  // InputEvent`) just to refire it. Refactor: the handler reads
+  // `searchBar.value` directly. Both call sites (the input listener and
+  // the chip toggle) now invoke `onType()` with no arguments — no cast,
+  // no synthetic event.
+  async function onType() {
     if (!searchLayout || !index) return
-    currentSearchTerm = (e.target as HTMLInputElement).value
+    currentSearchTerm = searchBar.value
     searchLayout.classList.toggle("display-results", currentSearchTerm !== "")
     searchType = currentSearchTerm.startsWith("#") ? "tags" : "basic"
 
@@ -834,8 +947,16 @@ async function setupSearch(searchElement: Element, currentSlug: FullSlug, data: 
   window.addCleanup(() => document.removeEventListener("keydown", shortcutHandler))
   searchButton.addEventListener("click", () => showSearch("basic"))
   window.addCleanup(() => searchButton.removeEventListener("click", () => showSearch("basic")))
-  searchBar.addEventListener("input", onType)
-  window.addCleanup(() => searchBar.removeEventListener("input", onType))
+  // brain (P3.6 fix-5): wrap `onType` in an arrow so the InputEvent the
+  // browser passes here is harmlessly discarded. `onType` takes no
+  // args; binding it directly would still work (extra arg ignored at
+  // runtime) but the explicit wrapper makes the intent visible and
+  // matches the chip handler's `void onType()` shape.
+  const onTypeListener = (): void => {
+    void onType()
+  }
+  searchBar.addEventListener("input", onTypeListener)
+  window.addCleanup(() => searchBar.removeEventListener("input", onTypeListener))
 
   registerEscapeHandler(container, hideSearch)
   await fillDocument(data)

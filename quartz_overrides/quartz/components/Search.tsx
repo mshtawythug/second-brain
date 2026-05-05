@@ -41,8 +41,12 @@
 // vault glyph — better than rendering an empty span.
 //
 // Coordination point: if a future ingest source is added (e.g. brain
-// grows a `notion` extractor), append it BOTH here AND in
-// `_search.scss`'s chip palette (via the chip data attribute) AND in
+// grows a `notion` extractor), append it ONCE in
+// `quartz_overrides/quartz/util/sourceIcons.ts` (the canonical
+// SOURCE_ICONS table). This component, the inline search script, and
+// the TagContent override all import from that one util — so the new
+// glyph cascades to all three surfaces. Also append it to
+// `_search.scss`'s chip palette (via the chip data attribute) AND to
 // `commandPalette.inline.ts`'s `kindIcon()` helper if Cmd-K is rebuilt
 // to share the same icon vocabulary.
 import { QuartzComponent, QuartzComponentConstructor, QuartzComponentProps } from "./types"
@@ -50,6 +54,7 @@ import { QuartzComponent, QuartzComponentConstructor, QuartzComponentProps } fro
 import script from "./scripts/search.inline"
 import { classNames } from "../util/lang"
 import { i18n } from "../i18n"
+import { SOURCE_ICONS, SOURCE_CHIP_ORDER } from "../util/sourceIcons"
 
 export interface SearchOptions {
   enablePreview: boolean
@@ -59,32 +64,24 @@ const defaultOptions: SearchOptions = {
   enablePreview: true,
 }
 
-// brain: source-icon mapping — single source of truth for glyphs.
-// Mirrored in the inline script via the JSON-encoded
-// `data-brain-source-icons` attribute on the chip rail; the script
-// parses it once at boot rather than re-importing this constant
-// (the inline script runs as a `<script type="module">` against
-// runtime globals, not a real ES import of this file).
-const SOURCE_ICONS: Record<string, string> = {
-  gmail: "📧",
-  krisp: "🎙️",
-  slack: "💬",
-  manual: "✍️",
-  vault: "🌱",
-}
+// brain (P3.6 fix-4): source-icon table consolidated. Previously this
+// file declared its own `SOURCE_ICONS` constant duplicated against
+// `util/sourceIcons.ts` and `search.inline.ts`. All three sites now
+// share the canonical util — adding a new source is a one-line change
+// in `util/sourceIcons.ts`. The chip rail still serializes the table
+// into `data-brain-source-icons` so the inline script reads it back at
+// boot via `readSourceIcons` (defense in depth: even if the import
+// chain breaks at runtime, the SSR'd attribute keeps the chip glyphs
+// rendering).
 
 // brain: ordered list of chip values rendered above the search input.
 // Order is deterministic and pinned (vs. derived from the index) so
 // the chip rail looks identical even when the loaded corpus is missing
 // one source. Matches the `chipVocabularies.source` order in
-// `graph.inline.ts` so the two filter rails read as siblings.
-const CHIP_VALUES: ReadonlyArray<keyof typeof SOURCE_ICONS> = [
-  "krisp",
-  "slack",
-  "gmail",
-  "manual",
-  "vault",
-] as const
+// `graph.inline.ts` so the two filter rails read as siblings. Sourced
+// from the shared `SOURCE_CHIP_ORDER` so the order stays in lock-step
+// with the canonical util.
+const CHIP_VALUES: ReadonlyArray<keyof typeof SOURCE_ICONS> = SOURCE_CHIP_ORDER
 
 export default ((userOpts?: Partial<SearchOptions>) => {
   const Search: QuartzComponent = ({ displayClass, cfg }: QuartzComponentProps) => {

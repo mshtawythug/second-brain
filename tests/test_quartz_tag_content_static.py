@@ -131,23 +131,25 @@ def test_source_icons_util_exports_helpers(source_icons_source: str) -> None:
 def test_source_icons_util_parity_with_search_tsx(
     source_icons_source: str, search_tsx_source: str
 ) -> None:
-    """Util's vocabulary matches Search.tsx's ``SOURCE_ICONS`` constant.
+    """Search.tsx imports the canonical util; util has every expected key.
 
-    P3.2 ships its own component-local copy of the table for now;
-    P3.3 introduces the shared util. Until a future refactor folds
-    Search.tsx onto the util, this parity test is the only thing
-    keeping the two copies aligned. Assert that every key the util
-    declares also exists in Search.tsx (substring match — exact emoji
-    parity needs a bytewise compare on the line, which a UTF-8 emoji
-    can confuse).
+    P3.6 fix-4 consolidated the duplicated source-icon table: Search.tsx
+    no longer declares its own copy, it imports ``SOURCE_ICONS`` from
+    ``util/sourceIcons.ts``. The parity check that previously kept the
+    two literals in sync is now a single import-statement check —
+    Search.tsx must reach for the util, and the util must carry every
+    key the chip rail expects.
     """
     for key in EXPECTED_SOURCES:
         assert f"{key}:" in source_icons_source, (
-            f"util missing `{key}` (parity check)"
+            f"util missing `{key}` (canonical source of truth)"
         )
-        assert f"{key}:" in search_tsx_source, (
-            f"Search.tsx missing `{key}` (parity check)"
-        )
+    assert 'from "../util/sourceIcons"' in search_tsx_source, (
+        "Search.tsx must import its source-icon table from `../util/sourceIcons`"
+    )
+    assert "SOURCE_ICONS" in search_tsx_source, (
+        "Search.tsx must reference the imported `SOURCE_ICONS` constant"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -427,4 +429,39 @@ def test_tag_content_at_pages_subpath() -> None:
     assert TAG_CONTENT_TSX.is_file(), (
         f"TagContent override must live at {TAG_CONTENT_TSX} so the overlay "
         f"copy lands on the upstream file"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P3.6 fix-6 — Preact `key` prop on tag-footer fragments
+# ---------------------------------------------------------------------------
+
+
+def test_tag_footer_loop_carries_key_prop(tag_content_source: str) -> None:
+    """Every tag-footer iteration carries a stable ``key={rowTag}`` prop.
+
+    Bare `<>` fragments inside `.map()` trigger Preact's runtime
+    "Each child in a list should have a unique key prop" warning.
+    The fix promotes the fragment to a `<span key={rowTag}>` so the
+    reconciler can match nodes correctly when the tag list mutates
+    between renders. Anchored on the literal `key={rowTag}` token so
+    a regression to a bare fragment trips the test.
+    """
+    assert "key={rowTag}" in tag_content_source, (
+        "expected `key={rowTag}` on the tag-footer iteration to silence "
+        "Preact's missing-key warning"
+    )
+
+
+def test_tag_footer_no_bare_fragment_in_map(tag_content_source: str) -> None:
+    """The footer .map() does not return a bare `<>` fragment.
+
+    Anchors that the fix replaces ``<>...</>`` with a host element
+    carrying the key. We look for the now-canonical wrapping span
+    class so a future refactor either preserves the class or updates
+    this test.
+    """
+    assert "brain-tag-footer-fragment" in tag_content_source, (
+        "expected a host element (e.g. `<span class=\"brain-tag-footer-fragment\">`) "
+        "wrapping each footer iteration so `key` lands on a real node"
     )

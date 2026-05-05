@@ -249,6 +249,79 @@ const CONTENT_BODIES_RELDIR = path.join("static", "contentBodies")
 // matches the upstream Search component's render budget.
 const SNIPPET_LENGTH = 240
 
+// brain-extension (P3.6 fix-3): allowlist for slug values that are safe
+// to interpolate into a filesystem path (`contentBodies/<slug>.json`)
+// or a fetch URL. Slugs come from Quartz's trusted slugify, so practical
+// exploitability is near-zero — but defense in depth: a future upstream
+// change that loosened slug normalisation, or a malicious frontmatter
+// `permalink` override that bypasses slugify, would otherwise leak path
+// traversal into both the emitter's `fs.writeFile` and the inline
+// script's `fetch`. The character allowlist alone permits `..` (both
+// `.` and the path separator are individually safe), so `isSafeSlug`
+// also rejects any `..` segment to close the path-traversal loophole.
+// The same regex + helper are duplicated in
+// `quartz_overrides/quartz/components/scripts/search.inline.ts` (rather
+// than imported) because the inline script is bundled separately and
+// can't take a runtime import from this server-side emitter.
+//
+// brain: allowlist composition — each char was justified against the
+// real live-vault corpus, NOT picked from RFC 3986 wholesale:
+//   * a-zA-Z0-9   bulk of slug chars
+//   * `_`         underscore prefix on `_ingested/`
+//   * `.`         file extension separators (`README.md` style)
+//   * `-`         the canonical word separator slugify emits
+//   * `/`         path component separator
+//   * `,`         e.g. `_ingested/gmail/Tue,-7-Apr-...` (subject dates)
+//   * `:`         e.g. `_ingested/krisp/2026-05-02-krisp:au-auto`
+// What's NOT in the list and why:
+//   * `<>"'` `&`  HTML metachars — would let titles/snippets break out
+//                 of the row markup
+//   * ` `         spaces — every URL-safe slug encodes them as `-`
+//   * `?#&=`      query/fragment delimiters — would corrupt the
+//                 `fetch(url)` shape
+//   * `\`         Windows path separator + escape sequence on POSIX
+//   * `\x00..1F`  control chars + null bytes — header smuggling
+//   * `;`         shell metachar (defense in depth on path joins)
+// Adding a new char here should require a documented live-vault slug
+// shape that needs it AND a check it can't enable path traversal or
+// HTML/URL injection downstream.
+export const SAFE_SLUG_RE = /^[a-zA-Z0-9._/,:-]+$/
+
+// brain (P3.6 fix-3): char-allowlist plus segment-shape rejection. A
+// bare `..` segment in a slug would let the joined path
+// (`<output>/static/contentBodies/../etc/passwd.json`) escape the
+// `contentBodies/` directory, even though every character in
+// `../etc/passwd` is individually in the allowlist. Empty segments
+// (leading slash, double slash) are also rejected — Quartz's slugify
+// never produces them, and a leading slash on the URL side would
+// resolve against the site root rather than the static dir.
+export function isSafeSlug(slug: string): boolean {
+  if (!SAFE_SLUG_RE.test(slug)) return false
+  const segments = slug.split("/")
+  for (const segment of segments) {
+    if (segment === "" || segment === "..") return false
+  }
+  return true
+}
+
+// brain-extension (P3.6 fix-1): normalise a frontmatter date value to an
+// ISO `YYYY-MM-DD` string. gray-matter / js-yaml parses bare YAML dates
+// (`date: 2026-04-12`) into JS `Date` objects, so the previous
+// `typeof X === "string"` check silently missed them. We accept both
+// shapes — strings pass through verbatim (so an ISO datetime keeps its
+// time/zone suffix); `Date` instances render as the date-only `YYYY-MM-
+// DD` slice (the time-of-day component is meaningless when the source
+// value was a date-only YAML literal). Invalid Date instances and other
+// non-{string, Date} values return `undefined` so the lookup chain can
+// fall through to the next candidate field.
+export function liftDate(v: unknown): string | undefined {
+  if (typeof v === "string" && v.length > 0) return v
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    return v.toISOString().slice(0, 10)
+  }
+  return undefined
+}
+
 type Opts = Parameters<typeof UpstreamContentIndex>[0]
 
 export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
@@ -379,14 +452,22 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
           // `updated` only as a last resort. Missing dates leave
           // `details.date` undefined — Search.tsx and TagContent
           // already handle that gracefully.
-          if (typeof fm.date === "string") {
-            details.date = fm.date
-          } else if (typeof fm.created === "string") {
-            details.date = fm.created
-          } else if (typeof fm.published === "string") {
-            details.date = fm.published
-          } else if (typeof fm.updated === "string") {
-            details.date = fm.updated
+          //
+          // brain (P3.6 fix-1): YAML `date: 2026-04-12` is parsed by
+          // gray-matter / js-yaml's default schema as a JS `Date`
+          // object, NOT a string. The original `typeof X === "string"`
+          // checks silently dropped Date instances, leaving
+          // `details.date` empty for every doc whose authored
+          // frontmatter used the bare YAML date form. The `liftDate`
+          // helper accepts both shapes (string or Date) and normalises
+          // to an ISO `YYYY-MM-DD` string for consumers.
+          const lifted =
+            liftDate(fm.date) ??
+            liftDate(fm.created) ??
+            liftDate(fm.published) ??
+            liftDate(fm.updated)
+          if (lifted !== undefined) {
+            details.date = lifted
           }
 
           // brain: kept upstream's `links: SimpleSlug[]` shape
@@ -423,6 +504,22 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
           // contain `/` separators (e.g. `_ingested/gmail/<id>`); the
           // mkdir-recursive call ensures the nested directory exists
           // before each write.
+          //
+          // brain (P3.6 fix-3): defense-in-depth slug guard. Slugs that
+          // fall outside `isSafeSlug` skip both the body-file write
+          // and the slim transform — the entry stays in the index with
+          // its full `content`, which the search popover already knows
+          // how to render as a fallback. We log a warning so a
+          // legitimate slug shape we forgot to whitelist surfaces as
+          // build noise rather than silent data loss.
+          if (!isSafeSlug(slug)) {
+            console.warn(
+              `brain contentIndex: skipping unsafe slug ${JSON.stringify(slug)} ` +
+                `(failed isSafeSlug check) — body file not written, ` +
+                `entry retained with full content`,
+            )
+            continue
+          }
           const body = typeof details.content === "string" ? details.content : ""
           const snippet = body.slice(0, SNIPPET_LENGTH)
           const bodyTarget = path.join(

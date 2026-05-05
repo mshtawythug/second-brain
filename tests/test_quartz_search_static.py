@@ -33,7 +33,6 @@ toolchain not on the test image — flagged in the P3.2 DONE report.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -103,21 +102,37 @@ def layout_ts_source() -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_search_tsx_declares_full_source_icon_table(search_tsx_source: str) -> None:
-    """The component constant ``SOURCE_ICONS`` lists all 5 keys.
+def test_search_tsx_imports_shared_source_icons(search_tsx_source: str) -> None:
+    """``Search.tsx`` imports ``SOURCE_ICONS`` + ``SOURCE_CHIP_ORDER`` from the shared util.
 
-    The chip rail renders icons keyed off this table; missing a source
-    means missing a chip on the rail. We verify each key explicitly so
-    a future drop (e.g. accidentally removing ``manual``) trips this
-    test rather than only surfacing as a missing chip in production.
+    P3.6 fix-4 consolidated the source-icon table: previously this
+    file declared its own ``const SOURCE_ICONS = {...}`` duplicated
+    against ``util/sourceIcons.ts`` and ``search.inline.ts``. The
+    canonical table now lives in the util; the component imports it.
+    Anchored on the literal import line so a future revert (re-
+    declaring the table inline) trips the test.
     """
-    assert "const SOURCE_ICONS" in search_tsx_source, (
-        "expected SOURCE_ICONS constant to anchor the source-icon table"
+    assert (
+        'from "../util/sourceIcons"' in search_tsx_source
+    ), "expected import from `../util/sourceIcons`"
+    assert "SOURCE_ICONS" in search_tsx_source, (
+        "expected `SOURCE_ICONS` symbol referenced (imported from util)"
     )
-    for key in EXPECTED_SOURCES:
-        assert f"{key}:" in search_tsx_source, (
-            f"SOURCE_ICONS missing key `{key}` — chip rail won't render its glyph"
-        )
+    assert "SOURCE_CHIP_ORDER" in search_tsx_source, (
+        "expected `SOURCE_CHIP_ORDER` symbol referenced (imported from util)"
+    )
+
+
+def test_search_tsx_does_not_redeclare_source_icons(search_tsx_source: str) -> None:
+    """``Search.tsx`` no longer declares a local ``SOURCE_ICONS`` constant.
+
+    P3.6 fix-4: the component-local ``const SOURCE_ICONS: Record<...>``
+    was deleted in favour of the shared util import. Re-introducing it
+    would resurrect the duplication the fix closed.
+    """
+    assert (
+        "const SOURCE_ICONS: Record<string, string> = {" not in search_tsx_source
+    ), "Search.tsx must NOT redeclare a local SOURCE_ICONS constant — import from util"
 
 
 def test_search_tsx_renders_chip_rail_markup(search_tsx_source: str) -> None:
@@ -127,6 +142,12 @@ def test_search_tsx_renders_chip_rail_markup(search_tsx_source: str) -> None:
     handlers and reads ``data-brain-source-icons`` for the icon table.
     Each chip carries ``data-brain-source`` so the toggle handler can
     map clicks back to vocabulary values.
+
+    Per-key chip presence is enforced by
+    ``test_source_icons_util_exports_full_vocab`` in
+    ``test_quartz_tag_content_static.py`` — the chip values are
+    derived from ``SOURCE_CHIP_ORDER`` so any drop in the shared util
+    surfaces there.
     """
     assert 'class="brain-search-chips"' in search_tsx_source, (
         "expected `.brain-search-chips` rail in the SSR markup"
@@ -137,10 +158,11 @@ def test_search_tsx_renders_chip_rail_markup(search_tsx_source: str) -> None:
     assert 'data-brain-source="__all__"' in search_tsx_source, (
         "expected an `All` pseudo-chip with `data-brain-source=__all__`"
     )
-    for key in EXPECTED_SOURCES:
-        assert "data-brain-source={value}" in search_tsx_source or (
-            f'"{key}"' in search_tsx_source
-        ), f"expected chip for source `{key}` in chip rail"
+    # The chip values come from the imported `SOURCE_CHIP_ORDER`;
+    # a per-chip JSX uses `data-brain-source={value}` driven by the map.
+    assert "data-brain-source={value}" in search_tsx_source, (
+        "expected `data-brain-source={value}` interpolation across the chip map"
+    )
 
 
 def test_search_tsx_uses_afterDOMLoaded_hook(search_tsx_source: str) -> None:
@@ -374,59 +396,47 @@ def test_custom_scss_imports_search_partial(custom_scss_source: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_source_icons_match_between_component_and_inline(
-    search_tsx_source: str, search_inline_source: str
-) -> None:
-    """The 5 source keys appear in BOTH the component and the inline script.
+def test_source_icons_canonical_in_shared_util(search_inline_source: str) -> None:
+    """The shared util is the single source of truth for source icons (P3.6 fix-4).
 
-    The inline script's `FALLBACK_SOURCE_ICONS` is the parse-failure
-    safety net for the SSR'd JSON attribute. Both tables must list
-    every source so a fall-through render doesn't drop a chip glyph.
+    Both the SSR component (``Search.tsx``) and the inline script
+    (``search.inline.ts``) now import ``SOURCE_ICONS`` from
+    ``util/sourceIcons.ts``. Verify that the inline script imports
+    from the shared util AND that it carries the minimum-viable
+    fallback for the parse-failure path (a single `vault` entry).
     """
-    for key in EXPECTED_SOURCES:
-        assert f"{key}:" in search_tsx_source, (
-            f"SOURCE_ICONS in Search.tsx missing `{key}`"
-        )
-        assert f"{key}:" in search_inline_source, (
-            f"FALLBACK_SOURCE_ICONS in search.inline.ts missing `{key}`"
-        )
-
-
-def test_source_icons_json_in_component_parses(search_tsx_source: str) -> None:
-    """The literal SOURCE_ICONS object in Search.tsx is parseable as JSON-ish.
-
-    Static parse-and-shape check — extracts the object literal between
-    the first ``= {`` and the matching closing brace, then tries to
-    coerce it into a JSON string by quoting bare keys. The point isn't
-    full TS parsing — it's catching a typo'd key/value pair early.
-    """
-    marker = "const SOURCE_ICONS: Record<string, string> = {"
-    start = search_tsx_source.index(marker)
-    body_start = start + len(marker)
-    # Match braces to find the closing one.
-    depth = 1
-    i = body_start
-    while i < len(search_tsx_source) and depth > 0:
-        ch = search_tsx_source[i]
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-        i += 1
-    body = search_tsx_source[body_start : i - 1]
-    # Quote bare keys. Drop trailing commas before parsing.
-    import re
-
-    quoted = re.sub(r"(\w+):", r'"\1":', body).strip()
-    if quoted.endswith(","):
-        quoted = quoted[:-1]
-    json_text = "{" + quoted + "}"
-    parsed = json.loads(json_text)
-    assert set(parsed.keys()) == set(EXPECTED_SOURCES), (
-        f"SOURCE_ICONS keys {set(parsed.keys())} != expected {set(EXPECTED_SOURCES)}"
+    assert (
+        'from "../../util/sourceIcons"' in search_inline_source
+    ), "expected inline script to import SOURCE_ICONS from `../../util/sourceIcons`"
+    assert "SOURCE_ICONS" in search_inline_source, (
+        "expected SOURCE_ICONS symbol referenced in the inline script"
     )
-    for v in parsed.values():
-        assert isinstance(v, str) and len(v) > 0, "icon glyph must be a non-empty string"
+    # The inline script keeps a tiny `vault`-only fallback for the
+    # "data attribute missing" branch — assert it exists so a future
+    # refactor doesn't accidentally leave the function returning {}.
+    assert "FALLBACK_SOURCE_ICONS" in search_inline_source, (
+        "expected `FALLBACK_SOURCE_ICONS` parse-failure fallback (single key)"
+    )
+    assert 'vault: SOURCE_ICONS["vault"]' in search_inline_source, (
+        "expected single-key fallback `vault: SOURCE_ICONS[\"vault\"]`"
+    )
+
+
+def test_inline_does_not_redeclare_inferSource(search_inline_source: str) -> None:
+    """The inline script no longer carries its own ``inferSource`` implementation.
+
+    P3.6 fix-4: ``inferSource`` lives in ``util/sourceIcons.ts``; the
+    inline script aliases the imported helper under the prior local
+    name. Re-introducing a `function inferSource(...)` declaration
+    would resurrect the duplication.
+    """
+    assert (
+        "function inferSource(slug: string, source: string | undefined)"
+        not in search_inline_source
+    ), (
+        "inline script must not redeclare `inferSource` — alias the "
+        "import from `util/sourceIcons` instead"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -455,4 +465,137 @@ def test_search_inline_renders_date_column(search_inline_source: str) -> None:
     """
     assert "brain-search-date" in search_inline_source, (
         "search.inline.ts must render the `brain-search-date` slot"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P3.6 fix-2 — XSS hardening on result-row title/snippet
+# ---------------------------------------------------------------------------
+
+
+def test_highlight_escapes_body_text_before_substitution(
+    search_inline_source: str,
+) -> None:
+    """``highlight()`` escapes the body text BEFORE the regex substitution loop.
+
+    Previously the helper interpolated raw `tok` into innerHTML, so a
+    title like `Re: <script>alert(1)</script>` would execute. The fix
+    runs every token through `escapeHtml(...)` first, then wraps
+    matches in `<mark>` against the escaped string. Anchored on the
+    literal ``escapeHtml(tok)`` call inside the slice loop AND the
+    helper signature remaining intact.
+    """
+    assert "function highlight(searchTerm: string, text: string" in search_inline_source, (
+        "expected `highlight()` helper signature unchanged"
+    )
+    assert "const escapedTok = escapeHtml(tok)" in search_inline_source, (
+        "expected `escapeHtml(tok)` to run before regex substitution"
+    )
+    assert "escapedTok.replace(regex, `<mark>$&</mark>`)" in search_inline_source, (
+        "expected substitution to operate on the escaped token (not raw)"
+    )
+
+
+def test_highlight_escapes_query_token_before_compiling_regex(
+    search_inline_source: str,
+) -> None:
+    """Query tokens are escaped BEFORE compilation into a `RegExp`.
+
+    Without `escapeRegExp`, a query like `(.*)` would compile as a
+    capturing group; without `escapeHtml`, a query containing `<`
+    would not match the escaped body. The fix combines both so the
+    regex matches the escaped form of the token.
+    """
+    assert "function escapeRegExp" in search_inline_source, (
+        "expected `escapeRegExp` helper for regex-metachar escaping"
+    )
+    assert "escapeHtml(escapeRegExp(searchTok.toLowerCase()))" in search_inline_source, (
+        "expected query token escaped via `escapeHtml(escapeRegExp(...))`"
+    )
+
+
+def test_format_for_display_escapes_tag_search_title(
+    search_inline_source: str,
+) -> None:
+    """The tag-search branch of `formatForDisplay` escapes the title.
+
+    The basic-search branch flows through `highlight()` (which now
+    escapes). The tag-search branch previously passed the raw title
+    straight to innerHTML — closing that hole here.
+    """
+    assert 'escapeHtml(entry.title ?? "")' in search_inline_source, (
+        'expected `escapeHtml(entry.title ?? "")` in the tag-search title branch'
+    )
+
+
+def test_search_inline_protection_inventory_comment_present(
+    search_inline_source: str,
+) -> None:
+    """The escapeHtml comment block is now an accurate protection inventory.
+
+    Previously the comment claimed protection in places the code
+    didn't deliver — a misleading invariant. The fix updates the
+    block to enumerate every innerHTML interpolation and the helper
+    that escapes it.
+    """
+    assert "protection inventory" in search_inline_source, (
+        "expected an explicit `protection inventory` comment block "
+        "documenting every innerHTML interpolation"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P3.6 fix-3 — Slug allowlist on the fetch side
+# ---------------------------------------------------------------------------
+
+
+def test_search_inline_pins_safe_slug_re(search_inline_source: str) -> None:
+    """The inline script declares the same ``SAFE_SLUG_RE`` constant as the emitter.
+
+    Defense in depth: a stale ``contentIndex.json`` carrying an unsafe
+    slug would otherwise feed straight into `fetch(url)`. The fix
+    rejects unsafe slugs before the URL is built.
+    """
+    assert "const SAFE_SLUG_RE = /^[a-zA-Z0-9._/,:-]+$/" in search_inline_source, (
+        "expected `SAFE_SLUG_RE` allowlist regex constant matching the emitter "
+        "(includes `,` and `:` for live-vault slug shapes)"
+    )
+    # Guard runs inside `fetchBody` before constructing the URL.
+    assert "if (!SAFE_SLUG_RE.test(slug))" in search_inline_source, (
+        "expected `SAFE_SLUG_RE` guard inside `fetchBody`"
+    )
+
+
+# ---------------------------------------------------------------------------
+# P3.6 fix-5 — Synthetic event cast cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_chip_handler_no_synthetic_event_cast(search_inline_source: str) -> None:
+    """The chip-toggle handler no longer synthesises a fake `InputEvent`.
+
+    Previously the handler called ``onType({target: searchBar} as
+    unknown as InputEvent)``. The fix refactors `onType` to read
+    `searchBar.value` directly (no event arg), so the chip handler
+    just calls `void onType()`.
+    """
+    assert (
+        "as unknown as InputEvent" not in search_inline_source
+    ), "expected no `as unknown as InputEvent` cast in the chip handler"
+    assert "void onType()" in search_inline_source, (
+        "expected chip handler to call `void onType()` with no args"
+    )
+
+
+def test_on_type_no_event_arg(search_inline_source: str) -> None:
+    """`onType` is declared without an event parameter.
+
+    Anchored on the new signature so a future regression that adds the
+    `InputEvent` arg back surfaces here.
+    """
+    assert "async function onType()" in search_inline_source, (
+        "expected `async function onType()` (no event parameter) signature"
+    )
+    assert "currentSearchTerm = searchBar.value" in search_inline_source, (
+        "expected `onType` to read `searchBar.value` directly"
     )
