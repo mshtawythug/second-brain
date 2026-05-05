@@ -311,11 +311,12 @@ def _resolve_relative_path(
 ) -> str:
     """Pick the on-disk path for ``doc``.
 
-    Vault-tier rows with an explicit ``vault_path`` round-trip identity (the
-    file stays where the user authored it). Everything else lands in
-    ``_ingested/`` per :func:`_ingested_relative_path`.
+    Rows with an explicit ``vault_path`` round-trip identity (vault-tier files
+    stay where the user authored them; ingested mirrors stay at their recorded
+    canonical path). Rows without one land in ``_ingested/`` per
+    :func:`_ingested_relative_path`.
     """
-    if doc.kind == "vault" and doc.vault_path:
+    if doc.vault_path:
         return doc.vault_path
     return _ingested_relative_path(doc, used_paths)
 

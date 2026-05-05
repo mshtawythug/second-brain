@@ -402,6 +402,43 @@ def test_vault_tier_doc_round_trips_to_explicit_vault_path(
     assert body == "authored body"
 
 
+def test_export_honors_existing_ingested_vault_path(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Ingested rows with ``vault_path`` export to that recorded location.
+
+    Regression for ``brain-rebuild`` repeatedly deleting Gmail mirrors:
+    full export recomputed a new Gmail slug while stale-prune treated the
+    DB row's existing ``vault_path`` as canonical.
+    """
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="Ali Sarkis -- vendor-ev",
+        content="thread body",
+        source_kind="gmail",
+        external_id="msg-1",
+        metadata={
+            "thread_id": "thread-vendor-ev",
+            "sent_at": "2026-04-28T12:00:00+00:00",
+        },
+    )
+    recorded_rel = "_ingested/gmail/Tue, 28 Ap-19dd5817-ali-sarkis-vendor-ev.md"
+    test_db.execute(
+        "UPDATE documents SET vault_path = %s WHERE id = %s::uuid",
+        (recorded_rel, doc_id),
+    )
+
+    vault = tmp_path / "vault"
+    summary = export_vault(test_db, vault_path=vault)
+
+    assert summary.written == 1
+    recorded = vault / recorded_rel
+    assert recorded.is_file()
+    gmail_files = sorted((vault / "_ingested" / "gmail").glob("*.md"))
+    assert gmail_files == [recorded]
+
+
 def test_unparseable_existing_file_triggers_rewrite(
     test_db: psycopg.Connection, fake_embedder, tmp_path: Path
 ) -> None:
