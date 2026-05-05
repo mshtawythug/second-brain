@@ -676,6 +676,77 @@ def test_to_extracted_thread_filters_drafts_from_mixed_thread() -> None:
     assert doc.metadata["sent_at"] == "2026-04-28T15:00:00+00:00"
 
 
+def test_summary_html_escapes_angle_bracketed_email() -> None:
+    """`<details><summary>` content escapes the From's angle-bracketed email.
+
+    Regression for P4.4: Gmail headers commonly carry the From in
+    ``Name <email@addr>`` form. Markdown processors (Quartz /
+    CommonMark) treat raw HTML blocks like ``<details>...</details>``
+    as opaque pass-through — but the BROWSER then parses the inner
+    ``<summary>Name <email@addr></summary>`` and treats
+    ``<email@addr>`` as an unknown HTML tag, silently dropping the
+    address from the rendered text. That broke the P4.4 "Show only
+    my replies" runtime filter, which reads ``summary.textContent``
+    and matches it against ``window.BRAIN_USER_EMAIL`` — without the
+    email in the text, every historical user reply read as
+    "not mine."
+
+    The fix HTML-escapes the summary content. This test pins the
+    escape so a future refactor that drops it surfaces here.
+    """
+    msgs = [
+        _make_message(
+            msg_id="m1",
+            internal_date="1000",
+            headers={
+                "Subject": "x",
+                "From": "Ali Sarkis <redacted@example.com>",
+                "Date": "Tue, 24 Feb 2026 17:11:00 -0500",
+            },
+            body_text="OLDER body",
+        ),
+        _make_message(
+            msg_id="m2",
+            internal_date="2000",
+            headers={
+                "Subject": "Re: x",
+                "From": "Bob <bob@example.com>",
+                "Date": "Tue, 24 Feb 2026 19:33:00 -0500",
+            },
+            body_text="LATEST body",
+        ),
+    ]
+    doc = to_extracted_thread(msgs)
+    # The older message is wrapped in <details> with an escaped
+    # summary — the angle brackets become entities so the browser
+    # renders the email as literal text instead of stripping it.
+    assert (
+        "<summary>2026-02-24 22:11 — Ali Sarkis &lt;redacted@example.com&gt;"
+        "</summary>"
+        in doc.content
+    ), (
+        "expected the <details><summary> to HTML-escape the angle "
+        "brackets around the email so the browser renders the address "
+        "as text (P4.4 filter prerequisite)"
+    )
+    # Defense in depth: the unescaped form must NOT appear inside any
+    # <summary> — that would re-introduce the stripped-by-browser bug.
+    assert (
+        "<summary>2026-02-24 22:11 — Ali Sarkis <redacted@example.com>"
+        "</summary>"
+        not in doc.content
+    ), (
+        "expected the unescaped form `<summary>...<email>...</summary>` "
+        "to be absent (browser would strip the email as a fake HTML tag)"
+    )
+    # The latest message is rendered as a plain H2 — markdown
+    # auto-linking handles the angle-bracketed email there, so the
+    # H2 form intentionally keeps the unescaped shape.
+    assert (
+        "## 2026-02-25 00:33 — Bob <bob@example.com>" in doc.content
+    ), "latest H2 should keep the unescaped form for markdown autolink"
+
+
 def test_to_extracted_thread_raises_for_all_draft_thread() -> None:
     """A thread where every message is a draft raises ``DraftSkipped``."""
     msgs = [

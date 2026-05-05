@@ -64,3 +64,10 @@ export { CodeCopy } from "./codeCopy"
 //     `<folder>/index.md` so the door appears iff the folder has
 //     content.
 export { EmptyDoorFilter } from "./emptyDoorFilter"
+//   * EmailThreadReader — P4.4 — injects the email-thread reading-mode
+//     runtime (`/static/emailThread.js`) plus an inline
+//     `window.BRAIN_USER_EMAIL` global (read from
+//     `process.env.BRAIN_USER_EMAIL` at build time). The runtime
+//     enhances `email_thread` pages with per-message data attributes
+//     and a "Show only my replies" filter button.
+export { EmailThreadReader } from "./emailThread"

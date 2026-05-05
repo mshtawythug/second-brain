@@ -58,6 +58,15 @@ class Config:
     ``arctic`` / ``voyage`` / ``qwen3``). ``voyage_api_key`` is only
     consulted when ``embedder == "voyage"``; for the other backends it can
     be ``None``.
+
+    ``user_email`` (P4.4) is the owner's primary email address, optionally
+    set via ``BRAIN_USER_EMAIL``. Consumed by the email-thread reading
+    mode in the rendered wiki — the Quartz transformer reads
+    ``process.env.BRAIN_USER_EMAIL`` at build time and bakes it into a
+    ``window.BRAIN_USER_EMAIL`` global so the runtime "Show only my
+    replies" filter knows whose ``From:`` address counts as the user's.
+    Empty string / ``None`` disables the filter (button still renders;
+    matching no-ops).
     """
 
     database_url: str
@@ -66,6 +75,7 @@ class Config:
     embedder: str = DEFAULT_EMBEDDER
     voyage_api_key: str | None = None
     vault_path: Path = DEFAULT_VAULT_PATH
+    user_email: str | None = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -99,6 +109,15 @@ class Config:
             if vault_path_env
             else DEFAULT_VAULT_PATH
         )
+        # P4.4 — owner identity for the email-thread "Show only my replies"
+        # filter. Optional; an unset/empty value renders the button but
+        # the runtime filter no-ops (no message ever matches the empty
+        # user identity, so toggling the button hides every section —
+        # which is the right "I forgot to set this" feedback signal).
+        # ``.strip()`` so trailing newlines from a `.env` quirk don't
+        # bleed into the JS global.
+        user_email_raw = os.environ.get("BRAIN_USER_EMAIL")
+        user_email = (user_email_raw or "").strip() or None
         return cls(
             database_url=database_url,
             ollama_host=ollama_host,
@@ -106,4 +125,5 @@ class Config:
             embedder=embedder,
             voyage_api_key=voyage_api_key,
             vault_path=vault_path,
+            user_email=user_email,
         )

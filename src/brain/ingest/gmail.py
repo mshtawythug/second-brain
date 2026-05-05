@@ -7,6 +7,7 @@ and may live either on ``payload.body.data`` or inside ``payload.parts[]``
 (multi-part messages) — this module normalises both shapes into plain text.
 """
 import base64
+import html
 import json
 import re
 import shutil
@@ -430,12 +431,30 @@ def _format_thread_section(msg: dict[str, Any], *, collapsed: bool) -> str:
     heading = f"{date_label} — {raw_from}"
 
     if collapsed:
+        # P4.4 fix: HTML-escape the summary content. Gmail headers
+        # routinely carry the From in `Name <email@addr>` form, and
+        # markdown processors (Quartz / CommonMark) treat raw HTML
+        # blocks like ``<details>...</details>`` as opaque pass-
+        # through. The browser then parses the inner ``<summary>Name
+        # <email@addr></summary>`` and treats ``<email@addr>`` as an
+        # unknown HTML tag — silently stripping it from the rendered
+        # text. Escaping ``<`` / ``>`` / ``&`` keeps the address
+        # visible in the rendered summary AND keeps the email
+        # substring available to the P4.4 "Show only my replies"
+        # JS filter (which reads ``summary.textContent`` and matches
+        # against ``window.BRAIN_USER_EMAIL``). Without the escape,
+        # the user's own historical replies inside ``<details>``
+        # mismatch the filter and stay visible when the toggle is on.
+        # Apply ``quote=False`` so single/double quotes pass through
+        # — the surrounding HTML uses no quote-delimited attributes
+        # on ``<summary>``.
+        escaped_heading = html.escape(heading, quote=False)
         # Blank lines around the body are required for markdown processors
         # (and Quartz) to render the inner content as markdown rather than
         # a single HTML block.
         return (
             f"<details>\n"
-            f"<summary>{heading}</summary>\n"
+            f"<summary>{escaped_heading}</summary>\n"
             f"\n"
             f"{body}\n"
             f"\n"

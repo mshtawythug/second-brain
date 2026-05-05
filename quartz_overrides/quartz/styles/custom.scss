@@ -40,6 +40,14 @@
 //  13. brain/home       — Lane C — index card grid override.
 //  14. brain/tag_content — P3.3 — per-tag listing rows.
 //  15. brain/explorer   — P4.2 — Explorer "Show ingested" toggle pill.
+//  16. brain/email_thread — P4.4 — email-thread reading mode:
+//                          per-message <details> chrome + "Show only
+//                          my replies" filter button + visibility
+//                          rule. Loaded after `article` so the
+//                          section card chrome cascades over the
+//                          base article-level <details> styling
+//                          (none in stock Quartz, but defensively
+//                          ordered).
 //
 // Lane A (this PR) ships only `tokens`, `typography`, `surface`. Lanes
 // B/C/D files exist as one-line placeholder stubs so SCSS can resolve
@@ -64,3 +72,4 @@
 @use "./brain/home";
 @use "./brain/tag_content";   // P3.3 — per-tag listing rows (icon + title + date + snippet + footer)
 @use "./brain/explorer";      // P4.2 — Explorer "Show ingested" toggle pill
+@use "./brain/email_thread";  // P4.4 — Email-thread reading mode (collapsibles + replies-only filter)

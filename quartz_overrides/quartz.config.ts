@@ -168,6 +168,26 @@ const config: QuartzConfig = {
       // `quartz/plugins/transformers/codeCopy.ts` for the inject
       // contract and `quartz/static/codeCopy.js` for the injector.
       Plugin.CodeCopy(),
+      // brain: P4.4 — inject the email-thread reading-mode runtime
+      // (`/static/emailThread.js`) plus an inline `window
+      // .BRAIN_USER_EMAIL` global (read from
+      // `process.env.BRAIN_USER_EMAIL` at build time). The runtime
+      // (a) annotates each per-message section in an `email_thread`
+      // body with `data-brain-thread-from` + `data-brain-is-mine`,
+      // and (b) renders a "Show only my replies" filter button at
+      // the top of `<article>` that toggles the
+      // `body.brain-replies-only` class — the SCSS partial
+      // `_email_thread.scss` then hides every
+      // `[data-brain-is-mine="false"]` section. Always emits (no
+      // env-var gate, like `LinkSourceTag` and `CodeCopy`) — the
+      // runtime is part of the production redesign and self-gates on
+      // an `_ingested/gmail/` URL pathname. No markdown ordering
+      // requirement; grouped here next to `CodeCopy` so the brain
+      // script-only transformers stay co-located. See
+      // `quartz/plugins/transformers/emailThread.ts` for the inject
+      // contract and `quartz/static/emailThread.js` for the runtime
+      // logic.
+      Plugin.EmailThreadReader(),
       // brain: inject the polling reload watcher (`/static/reload.js`)
       // into every page when `BRAIN_WIKI_RELOAD=1` at build time.
       // Replaces Quartz's `--serve` WebSocket reload, which is dead in

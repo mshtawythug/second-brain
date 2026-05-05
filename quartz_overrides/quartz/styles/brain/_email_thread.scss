@@ -1,0 +1,228 @@
+// Brain wiki — email-thread reading mode (P4.4 of the Wiki UX
+// Overhaul).
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_email_thread.scss` by `brain
+// vault render --overlay` and is pulled into the global SCSS via
+// `custom.scss`'s `@use "./brain/email_thread"` line.
+//
+// Scope of this file:
+//
+//   * `<details>` + `<summary>` chrome inside `article` — paint each
+//     per-message collapsible as an intentional section card rather
+//     than the browser-default disclosure widget. Solid left rail in
+//     `--accent-soft`, padded body, hover state on the summary, no
+//     `<summary>` marker carat (replaced with our own `▸` / `▾`
+//     glyph that rotates on `[open]`).
+//   * `.brain-thread-message.brain-thread-latest` — the runtime-
+//     wrapped section around the leading H2 message. Mirrors the
+//     `<details>` body padding / left rail so the latest message
+//     reads as a section card too, just without the disclosure
+//     widget (it's always visible).
+//   * `.brain-email-replies-only-toggle` — the filter button the
+//     runtime injects at the top of `<article>`. Pill-shape, neutral
+//     surface, accent border on `aria-pressed="true"`.
+//   * `body.brain-replies-only [data-brain-is-mine="false"]` —
+//     visibility rule for the toggle. When the body class is on,
+//     hide every section whose `From:` doesn't match the user's
+//     email.
+//
+// Scope NOT covered here:
+//
+//   * The H2 inside the latest-message section reuses
+//     `_article.scss`'s heading rhythm (the `> h2` rule in
+//     `article`). We intentionally do NOT restate it here — single
+//     source of truth.
+//   * Per-source link tinting on email-thread links lives in
+//     `_links.scss` (`[data-brain-source="gmail"]`).
+//
+// Tokens consumed (all from `_tokens.scss`):
+//
+//   * `--accent-soft`     — left rail on each message section
+//   * `--accent-strong`   — toggle button pressed-state border
+//   * `--rule`            — summary hover + toggle hairline
+//   * `--surface-1`       — section + button background
+//   * `--ink-1` / `--ink-2` — body / dimmed text
+//   * `--fs-sm` / `--fs-xs` — toggle + summary type sizes
+//   * `--codeFont`        — toggle button face (mono chrome to
+//                           match the search-chip rail rhythm)
+
+// ---------------------------------------------------------------------------
+// 1. Per-message <details> chrome
+// ---------------------------------------------------------------------------
+//
+// Stock browser default for `<details>` is unstyled — a triangle
+// disclosure widget on a plain text run. The brain treatment paints
+// each message as a section card with a left accent rail and a
+// padded body, matching the editorial rhythm in `_article.scss`. The
+// `<summary>` gets a hover state + a custom rotation glyph so the
+// disclosure feels intentional rather than browser-OEM.
+
+article details.brain-thread-message,
+article > details {
+  // brain: tag every <details> inside an article with the section
+  // chrome, even when the runtime hasn't yet stamped
+  // `.brain-thread-message`. The two selectors are equivalent in
+  // practice (every <details> in an article body comes from
+  // `to_extracted_thread`) but the comma-form keeps the rule painted
+  // even before the runtime fires (avoids a brief unstyled flash).
+  margin: 1.2rem 0;
+  padding: 0.6rem 0.9rem 0.6rem 1.1rem;
+  background: var(--surface-1, transparent);
+  border-left: 3px solid var(--accent-soft);
+  border-radius: 4px;
+  // brain: subtle elevation shifts on [open] — closed sections sit
+  // flat; opened ones lift a hair to signal "this is what you're
+  // reading right now."
+  box-shadow: 0 1px 0 var(--rule);
+  transition: box-shadow 120ms ease-out;
+
+  &[open] {
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+  }
+
+  > summary {
+    // brain: replace the OEM triangle with our own glyph (managed
+    // via ::before below) so the summary reads as an intentional
+    // section header rather than a generic disclosure widget.
+    list-style: none;
+    cursor: pointer;
+    font-family: var(--codeFont);
+    font-size: var(--fs-sm);
+    color: var(--ink-2);
+    padding: 0.2rem 0;
+    user-select: none;
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    transition: color 120ms ease-out;
+
+    // Hide WebKit's native disclosure marker (Chrome / Safari).
+    // `list-style: none` above handles Firefox; `::-webkit-details-
+    // marker` covers WebKit.
+    &::-webkit-details-marker {
+      display: none;
+    }
+
+    // brain: custom disclosure glyph. Right-pointing triangle when
+    // closed, rotates 90° on `[open]`. CSS-only, no JS hook — the
+    // browser's native open/close still drives the state.
+    &::before {
+      content: "▸";
+      display: inline-block;
+      width: 0.8em;
+      color: var(--accent-strong);
+      transition: transform 120ms ease-out;
+    }
+
+    &:hover {
+      color: var(--ink-1);
+    }
+  }
+
+  &[open] > summary::before {
+    transform: rotate(90deg);
+  }
+
+  // brain: indent the message body inside the disclosure so the
+  // closed-state summary visually anchors the section, and the
+  // opened body reads as inset content. The inner paragraphs use
+  // article-default leading so they match the latest-message body.
+  > *:not(summary) {
+    margin-left: 1.2rem;
+  }
+
+  > p {
+    margin: 0.4rem 0;
+    color: var(--ink-1);
+    line-height: 1.55;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Latest-message section wrapper (runtime-injected)
+// ---------------------------------------------------------------------------
+//
+// The latest message renders as `## H2 + body` in the markdown (per
+// `to_extracted_thread`'s contract — pinned by the P2.1 test). The
+// runtime wraps that H2 + its trailing siblings inside a
+// `<section class="brain-thread-message brain-thread-latest">` so the
+// "Show only my replies" filter has a uniform DOM shape across
+// latest + older messages. The styling here mirrors `<details>`'s
+// chrome minus the disclosure widget (always-visible).
+
+article section.brain-thread-message.brain-thread-latest {
+  display: block;
+  margin: 1.2rem 0 1.6rem 0;
+  padding: 0.4rem 0.9rem 0.6rem 1.1rem;
+  background: var(--surface-1, transparent);
+  border-left: 3px solid var(--accent-strong);
+  border-radius: 4px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
+
+  // The H2 inside the latest section is the most recent message's
+  // heading. Pull the top margin in so it lands flush with the
+  // section's top padding.
+  > h2 {
+    margin-top: 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3. "Show only my replies" toggle button
+// ---------------------------------------------------------------------------
+//
+// Runtime-injected at the top of <article> on email-thread pages.
+// Pill chrome, mono face (matches the cmd-K palette + chip rail
+// rhythm), neutral surface in default state, accent border + bold
+// type on `aria-pressed="true"`.
+
+article > .brain-email-replies-only-toggle {
+  display: inline-block;
+  margin: 0 0 1rem 0;
+  padding: 0.35em 0.9em;
+  font-family: var(--codeFont);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--ink-2);
+  background: var(--surface-1);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+  transition: color 120ms ease-out, border-color 120ms ease-out,
+    background 120ms ease-out;
+
+  &:hover {
+    color: var(--ink-1);
+    border-color: var(--accent-soft);
+  }
+
+  &[aria-pressed="true"] {
+    color: var(--accent-strong);
+    border-color: var(--accent-strong);
+    background: var(--accent-soft);
+    font-weight: 600;
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--accent-strong);
+    outline-offset: 2px;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 4. Filter visibility rules
+// ---------------------------------------------------------------------------
+//
+// When the toggle is ON, hide every message section whose `From:`
+// doesn't match the user's email. The runtime stamps
+// `data-brain-is-mine="true|false"` on each section
+// (`.brain-thread-message`) at boot; the body class
+// `brain-replies-only` is the master switch. Using `display: none`
+// (rather than `visibility` / opacity) so hidden sections also
+// collapse out of the document flow — keeps the visible list compact.
+
+body.brain-replies-only article [data-brain-is-mine="false"] {
+  display: none;
+}
