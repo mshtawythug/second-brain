@@ -497,6 +497,63 @@ def test_iter_orphan_mirror_files(
     assert yielded == [orphan]
 
 
+def test_iter_stale_mirror_files(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: "Any"
+) -> None:
+    """The iterator yields files whose id resolves but path != row's vault_path.
+
+    Setup: a vault with three mirror files all carrying the same frontmatter id —
+      1. canonical: at the path stored in ``documents.vault_path`` (NOT stale)
+      2. stale: same id, different path (YIELDED — leftover from a slug-shape change)
+      3. another stale: same id, third path (YIELDED — multiple stales for one row)
+    Plus a control file with no frontmatter (skipped) and a true orphan whose id
+    doesn't resolve (NOT yielded — that's :func:`iter_orphan_mirror_files`'s job).
+    """
+    from brain.queries import iter_stale_mirror_files
+
+    real_id = _seed(test_db, fake_embedder, title="real")
+    canonical_relative = "_ingested/manual/real.md"
+    test_db.execute(
+        "UPDATE documents SET vault_path = %s WHERE id = %s",
+        (canonical_relative, real_id),
+    )
+
+    vault = tmp_path / "vault"
+
+    canonical_path = vault / canonical_relative
+    _write_mirror_file(
+        canonical_path,
+        frontmatter={"id": real_id, "title": "real"},
+        body="canonical body\n",
+    )
+
+    stale_a = vault / "_ingested" / "manual" / "real-old-shape.md"
+    _write_mirror_file(
+        stale_a,
+        frontmatter={"id": real_id, "title": "real"},
+        body="leftover from earlier slug shape\n",
+    )
+
+    stale_b = vault / "_ingested" / "manual" / "real-older-shape-deadbeef.md"
+    _write_mirror_file(
+        stale_b,
+        frontmatter={"id": real_id, "title": "real"},
+        body="even earlier leftover\n",
+    )
+
+    # True orphan — id has no DB row. iter_orphan_mirror_files would catch this,
+    # but iter_stale_mirror_files must NOT yield it.
+    pure_orphan = vault / "_ingested" / "manual" / "ghost.md"
+    _write_mirror_file(
+        pure_orphan,
+        frontmatter={"id": "00000000-0000-4000-8000-000000000def", "title": "ghost"},
+        body="ghost\n",
+    )
+
+    yielded = sorted(iter_stale_mirror_files(test_db, vault_path=vault))
+    assert yielded == sorted([stale_a, stale_b])
+
+
 def test_mirror_drift_summary(
     test_db: psycopg.Connection, fake_embedder: Any, tmp_path: "Any"
 ) -> None:

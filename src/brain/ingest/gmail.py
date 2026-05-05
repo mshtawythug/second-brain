@@ -12,9 +12,33 @@ import re
 import shutil
 import subprocess
 from collections.abc import Callable
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
+from brain.config import BOILERPLATE_PATTERNS
+from brain.errors import DraftSkipped
+
+# Re-using the shared Re/Fwd-prefix helper from vault.slug rather than
+# duplicating the regex — it's marked private (leading underscore) but the
+# strip rule is identical between the URL slug (``gmail_slug``) and the
+# thread-doc title, and a divergent local copy would invite drift. Single
+# source of truth wins over the soft visibility convention here.
+from brain.vault.slug import _strip_re_fwd_prefixes
+
 from . import ExtractedDoc
+
+# Compile boilerplate patterns once at import time. Per-pattern ``(?s)``
+# inline flags opt individual entries into DOTALL; see ``BOILERPLATE_PATTERNS``
+# in ``brain.config`` for the rationale.
+_BOILERPLATE_REGEXES: tuple[re.Pattern[str], ...] = tuple(
+    re.compile(p, re.MULTILINE | re.IGNORECASE) for p in BOILERPLATE_PATTERNS
+)
+
+# Run-collapse threshold: only collapse runs of consecutive identical lines
+# longer than this (in characters). Short repeated lines (signoffs, blank
+# separators, "ok") stay untouched.
+_COLLAPSE_MIN_LINE_LEN = 40
 
 
 class GmailError(RuntimeError):
@@ -22,6 +46,9 @@ class GmailError(RuntimeError):
 
 
 Runner = Callable[[list[str]], str]
+
+
+_DRAFTS_EXCLUSION = "-in:drafts"
 
 
 def _build_query(
@@ -32,7 +59,16 @@ def _build_query(
     until: str | None,
     from_addr: str | None,
 ) -> str:
-    """Compose the Gmail search ``q`` string from the CLI scope flags."""
+    """Compose the Gmail search ``q`` string from the CLI scope flags.
+
+    Always appends ``-in:drafts`` so unsent draft messages never appear in
+    the message-stub list. Drafts are unsent emails the user typed but
+    never sent — ingesting them pollutes search results ("did I send X to
+    Y?" returns drafts as evidence of sent messages → wrong answer). The
+    per-message extractor (`to_extracted_doc`) and per-thread extractor
+    (`to_extracted_thread`) repeat the filter at the DRAFT-label level as
+    belt-and-braces in case Gmail hands a draft back anyway.
+    """
     parts: list[str] = []
     if query:
         parts.append(query)
@@ -44,6 +80,7 @@ def _build_query(
         parts.append(f"after:{since}")
     if until:
         parts.append(f"before:{until}")
+    parts.append(_DRAFTS_EXCLUSION)
     return " ".join(parts)
 
 
@@ -154,25 +191,389 @@ def _extract_body(payload: dict[str, Any]) -> str:
     return _decode_body_data(root_data) if root_data else ""
 
 
+def _collapse_repeated_long_lines(body: str) -> str:
+    """Collapse runs of ≥2 consecutive identical lines longer than the threshold.
+
+    Operates on the line view of ``body`` (split on ``\\n`` so empty trailing
+    lines from a trailing newline are preserved). Only lines whose stripped
+    length exceeds :data:`_COLLAPSE_MIN_LINE_LEN` are eligible — short
+    repetitions (sign-offs, blank lines, single-word pleasantries) are left
+    alone.
+    """
+    if not body:
+        return body
+    lines = body.split("\n")
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        # Look for a run of identical lines starting at i.
+        j = i + 1
+        while j < len(lines) and lines[j] == line:
+            j += 1
+        run_length = j - i
+        if run_length >= 2 and len(line.strip()) > _COLLAPSE_MIN_LINE_LEN:
+            out.append(line)
+        else:
+            out.extend(lines[i:j])
+        i = j
+    return "\n".join(out)
+
+
+def strip_boilerplate(body: str) -> str:
+    """Remove repeated email signatures / disclaimers / mobile-app footers.
+
+    1. Collapse runs of identical lines (>40 chars) to one occurrence.
+    2. Strip patterns from ``BOILERPLATE_PATTERNS`` (config.py).
+    Quoted-reply markers below the most recent message are left alone for
+    single-message ingest; thread assembly (Phase 2) will revisit.
+    """
+    if not body:
+        return body
+    body = _collapse_repeated_long_lines(body)
+    for regex in _BOILERPLATE_REGEXES:
+        body = regex.sub("", body)
+    return body.strip()
+
+
+def _parse_date_header_to_iso_utc(raw: str | None) -> str | None:
+    """Parse an RFC 2822 ``Date:`` header into an ISO-8601 UTC string.
+
+    Returns ``None`` when ``raw`` is missing/empty or unparseable so the
+    caller can omit the field rather than crash the ingest. Naive datetimes
+    (rare in real Gmail headers) are treated as UTC.
+    """
+    if not raw or not raw.strip():
+        return None
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _is_draft(msg: dict[str, Any]) -> bool:
+    """Return True when the Gmail Message resource carries the ``DRAFT`` label.
+
+    Gmail's draft state is communicated via ``labelIds`` on the Message
+    resource. Drafts are unsent — the user typed them but never sent —
+    and ingesting them pollutes the searchable corpus. Ingest paths use
+    this helper to short-circuit on drafts before doing any work.
+    """
+    label_ids = msg.get("labelIds") or []
+    return "DRAFT" in label_ids
+
+
 def to_extracted_doc(msg: dict[str, Any]) -> ExtractedDoc:
-    """Build an :class:`ExtractedDoc` from a Gmail ``users.messages.get`` response."""
+    """Build an :class:`ExtractedDoc` from a Gmail ``users.messages.get`` response.
+
+    Raises:
+        DraftSkipped: ``msg`` carries the ``DRAFT`` label. Callers should
+            catch this and increment a "skipped (drafts)" counter rather
+            than treating it as a failure. Drafts are unsent; ingesting
+            them would pollute search.
+    """
+    if _is_draft(msg):
+        raise DraftSkipped(
+            f"message {msg.get('id')!r} is a draft (labelIds contains DRAFT)"
+        )
     payload = msg.get("payload") or {}
     headers = _headers_to_dict(payload.get("headers") or [])
     title = headers.get("subject") or "(no subject)"
-    body = _extract_body(payload).strip()
+    body = strip_boilerplate(_extract_body(payload).strip())
+    metadata: dict[str, Any] = {
+        "from": headers.get("from"),
+        "to": headers.get("to"),
+        "date": headers.get("date"),
+        "message_id": msg.get("id"),
+        "thread_id": msg.get("threadId"),
+        "label_ids": msg.get("labelIds") or [],
+    }
+    # New typed-column feeders (P1.3). Each key is omitted when the source
+    # header is absent so downstream column-promotion stays NULL rather than
+    # storing empty strings.
+    rfc_id = headers.get("message-id")
+    if rfc_id:
+        metadata["rfc_message_id"] = rfc_id
+    in_reply_to = headers.get("in-reply-to")
+    if in_reply_to:
+        metadata["in_reply_to"] = in_reply_to
+    sent_at = _parse_date_header_to_iso_utc(headers.get("date"))
+    if sent_at is not None:
+        metadata["sent_at"] = sent_at
     return ExtractedDoc(
         title=title,
         content=body,
         content_type="email",
         source_path=None,
-        metadata={
-            "from": headers.get("from"),
-            "to": headers.get("to"),
-            "date": headers.get("date"),
-            "message_id": msg.get("id"),
-            "thread_id": msg.get("threadId"),
-            "label_ids": msg.get("labelIds") or [],
-        },
+        metadata=metadata,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Thread assembly (P2.1)
+#
+# A Gmail thread is N messages sharing the same ``threadId``. P2.1 collapses
+# them into one ``ExtractedDoc`` so downstream search / vault export operates
+# on a single conversational unit instead of N near-duplicate per-message
+# rows. The function is pure: no DB, no I/O, no logging at INFO.
+# ---------------------------------------------------------------------------
+
+# Cap the assembled-thread title at 200 chars (after Re/Fwd strip) so a
+# pathological subject line — e.g. an auto-mailer that crams a multi-line
+# log into the subject — doesn't blow out the ``documents.title`` column or
+# the wiki UI. Truncation is whole-word-aware; the URL slug uses a separate
+# 64-char cap inside ``vault.slug.gmail_slug``.
+_THREAD_TITLE_MAX = 200
+
+
+def _message_sort_key(msg: dict[str, Any]) -> int:
+    """Return a milliseconds-since-epoch sort key for a Gmail message.
+
+    Prefer ``internalDate`` (Gmail's canonical receive timestamp, expressed
+    as a string of ms-since-epoch). When ``internalDate`` is missing or
+    unparseable, fall back to ``Date:`` header parsed via the standard
+    library. Returns ``0`` when neither is parseable — the call site keeps
+    such messages but their order is undefined; the spec only requires
+    defensive handling, not stable tie-breaking.
+    """
+    raw = msg.get("internalDate")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str) and raw.strip():
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+
+    payload = msg.get("payload") or {}
+    headers = _headers_to_dict(payload.get("headers") or [])
+    date_header = headers.get("date")
+    if date_header:
+        try:
+            parsed = parsedate_to_datetime(date_header)
+        except (TypeError, ValueError):
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            return int(parsed.astimezone(UTC).timestamp() * 1000)
+    return 0
+
+
+def _truncate_title_to_word(title: str, *, limit: int = _THREAD_TITLE_MAX) -> str:
+    """Truncate ``title`` to ``limit`` chars at a word boundary, append ``…``.
+
+    Returns the input unchanged when ``len(title) <= limit``. Otherwise:
+
+    1. Take the first ``limit`` characters.
+    2. Cut back to the last space within that window so we don't slice
+       through a word. If no space exists (single very long token), keep
+       the hard slice.
+    3. ``rstrip`` trailing whitespace and append the U+2026 ellipsis.
+
+    Final length is at most ``limit + 1`` (one ellipsis char appended).
+    """
+    if len(title) <= limit:
+        return title
+    chunk = title[:limit]
+    last_space = chunk.rfind(" ")
+    if last_space > 0:
+        chunk = chunk[:last_space]
+    return f"{chunk.rstrip()}…"
+
+
+def _split_addresses(value: str | None) -> list[str]:
+    """Split a comma-separated To/Cc header value into individual entries.
+
+    Simple comma split — does NOT handle the rare RFC 5322 quoted-pair case
+    (``"Last, First" <addr>``). Test fixtures and live Gmail traffic stay
+    unquoted in practice; revisit with ``email.utils.getaddresses`` only if
+    we hit a real-world false-split. Empty / whitespace-only entries are
+    dropped.
+    """
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _format_thread_section(msg: dict[str, Any], *, collapsed: bool) -> str:
+    """Render one message as a Markdown section for the assembled thread body.
+
+    The most recent message uses a plain ``## YYYY-MM-DD HH:MM — <from>``
+    H2 (always expanded). Older messages wrap in ``<details><summary>``
+    so they collapse by default — both Markdown processors and Quartz
+    pass HTML through, and ``<details>`` is supported natively by every
+    modern browser.
+
+    Date format is ``YYYY-MM-DD HH:MM`` in UTC. The ``from`` value is the
+    raw header (``"Name <email>"``) for fidelity. Each message body passes
+    through :func:`strip_boilerplate` first.
+    """
+    payload = msg.get("payload") or {}
+    headers = _headers_to_dict(payload.get("headers") or [])
+    raw_from = headers.get("from") or "(unknown sender)"
+
+    iso_utc = _parse_date_header_to_iso_utc(headers.get("date"))
+    if iso_utc is not None:
+        date_label = datetime.fromisoformat(iso_utc).astimezone(UTC).strftime(
+            "%Y-%m-%d %H:%M"
+        )
+    else:
+        date_label = "(unknown date)"
+
+    body = strip_boilerplate(_extract_body(payload).strip())
+    heading = f"{date_label} — {raw_from}"
+
+    if collapsed:
+        # Blank lines around the body are required for markdown processors
+        # (and Quartz) to render the inner content as markdown rather than
+        # a single HTML block.
+        return (
+            f"<details>\n"
+            f"<summary>{heading}</summary>\n"
+            f"\n"
+            f"{body}\n"
+            f"\n"
+            f"</details>"
+        )
+    return f"## {heading}\n\n{body}"
+
+
+def to_extracted_thread(messages: list[dict[str, Any]]) -> ExtractedDoc:
+    """Group N gmail messages from the same thread into one ExtractedDoc.
+
+    Pure function — no DB writes, no file I/O, no logging at INFO level.
+    Messages are sorted ascending by ``internalDate`` (defensive fallback to
+    ``Date:`` header) and assembled into a single Markdown document, one
+    H2 per message. The most recent message renders as a plain H2; older
+    ones wrap in ``<details><summary>`` so they collapse by default.
+
+    Title is the FIRST message's subject after stripping leading
+    ``Re:`` / ``Fwd:`` / ``Fw:`` prefixes (case-insensitive, repeated).
+    Empty subjects fall back to ``"(no subject)"``. Subjects longer than
+    200 chars are word-boundary truncated with a trailing ``…``.
+
+    Metadata aggregation — first-vs-latest is asymmetric on purpose:
+
+    - ``thread_id`` is the FIRST message's ``threadId`` (stable across the
+      whole thread; first-vs-last is a no-op in practice but the spec
+      pins ``first`` so re-ingestion is deterministic if a future Gmail
+      bug ever splits a thread mid-conversation).
+    - ``rfc_message_id``, ``in_reply_to``, ``from``, ``to``, ``date``,
+      ``sent_at`` come from the LATEST message — the thread doc tracks
+      the most recent reply so an in-flight conversation surfaces with
+      its newest state.
+    - ``participants`` is the union of From + To + Cc across ALL
+      messages, deduped case-insensitively, sorted case-insensitively for
+      stability.
+    - ``label_ids`` is the sorted union of ``labelIds`` across all
+      messages — a thread inherits IMPORTANT / STARRED if any reply
+      carries it.
+    - ``message_count`` is N.
+
+    Tags are not produced here — the per-message extractor doesn't tag
+    either. Phase 2.4's destructive collapse will preserve tags by
+    unioning across the source per-message rows; new threaded ingests
+    pick tags up via ``brain tag <id> +foo`` post-ingest.
+
+    Drafts are filtered out before assembly. A mixed thread (some drafts,
+    some sent) keeps only the sent messages — body, participants,
+    label_ids, message_count all reflect the post-filter set. A thread
+    where every message is a draft raises :class:`DraftSkipped` so the
+    caller can route it to the "skipped (drafts)" counter rather than
+    emit an empty document. Empty input still raises ``ValueError``
+    (programmer error — callers must supply at least one message).
+
+    Raises:
+        ValueError: ``messages`` is empty.
+        DraftSkipped: every message in ``messages`` carries the ``DRAFT``
+            label. The thread has nothing left to ingest after filtering.
+    """
+    if not messages:
+        raise ValueError("to_extracted_thread requires at least one message")
+
+    non_draft = [m for m in messages if not _is_draft(m)]
+    if not non_draft:
+        thread_id = messages[0].get("threadId")
+        raise DraftSkipped(
+            f"thread {thread_id!r} contains only draft messages"
+        )
+    sorted_msgs = sorted(non_draft, key=_message_sort_key)
+    first = sorted_msgs[0]
+    latest = sorted_msgs[-1]
+
+    first_headers = _headers_to_dict(
+        (first.get("payload") or {}).get("headers") or []
+    )
+    latest_headers = _headers_to_dict(
+        (latest.get("payload") or {}).get("headers") or []
+    )
+
+    raw_subject = first_headers.get("subject") or ""
+    stripped_subject = _strip_re_fwd_prefixes(raw_subject).strip()
+    title = stripped_subject or "(no subject)"
+    title = _truncate_title_to_word(title)
+
+    last_idx = len(sorted_msgs) - 1
+    sections = [
+        _format_thread_section(msg, collapsed=(idx != last_idx))
+        for idx, msg in enumerate(sorted_msgs)
+    ]
+    body = "\n\n".join(sections)
+
+    # Participants: From + To + Cc across every message, deduped case-
+    # insensitively (first-seen form wins so a "Alice <a@x.com>" sighting
+    # is preferred over a later "ALICE <a@x.com>"), then sorted case-
+    # insensitively for stability across re-ingests.
+    seen: dict[str, str] = {}
+    for msg in sorted_msgs:
+        headers = _headers_to_dict((msg.get("payload") or {}).get("headers") or [])
+        candidates: list[str] = []
+        from_hdr = headers.get("from")
+        if from_hdr:
+            candidates.append(from_hdr)
+        candidates.extend(_split_addresses(headers.get("to")))
+        candidates.extend(_split_addresses(headers.get("cc")))
+        for addr in candidates:
+            key = addr.casefold()
+            if key not in seen:
+                seen[key] = addr
+    participants = sorted(seen.values(), key=str.casefold)
+
+    label_ids: set[str] = set()
+    for msg in sorted_msgs:
+        label_ids.update(msg.get("labelIds") or [])
+
+    metadata: dict[str, Any] = {
+        "thread_id": first.get("threadId"),
+        "from": latest_headers.get("from"),
+        "to": latest_headers.get("to"),
+        "date": latest_headers.get("date"),
+        "label_ids": sorted(label_ids),
+        "participants": participants,
+        "message_count": len(sorted_msgs),
+    }
+    rfc_id = latest_headers.get("message-id")
+    if rfc_id:
+        metadata["rfc_message_id"] = rfc_id
+    in_reply_to = latest_headers.get("in-reply-to")
+    if in_reply_to:
+        metadata["in_reply_to"] = in_reply_to
+    sent_at = _parse_date_header_to_iso_utc(latest_headers.get("date"))
+    if sent_at is not None:
+        metadata["sent_at"] = sent_at
+
+    return ExtractedDoc(
+        title=title,
+        content=body,
+        content_type="email_thread",
+        source_path=None,
+        metadata=metadata,
     )
 
 

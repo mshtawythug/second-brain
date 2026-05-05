@@ -1,0 +1,118 @@
+// Brain tag-content styles — Phase 3.3 of the Wiki UX Overhaul.
+//
+// Layout for the per-tag listing rows produced by
+// `quartz_overrides/quartz/components/pages/TagContent.tsx`. The
+// component renders an `<ul class="brain-tag-results">` of
+// `<li class="brain-tag-row">` items, each containing:
+//   * an icon glyph,
+//   * a title,
+//   * a date column,
+//   * a 1-line snippet around the tag occurrence,
+//   * a `tagged: #...` footer.
+//
+// The grid below lays the icon / title / date in a single row across
+// the page width with the snippet wrapping on its own row underneath
+// (where a `&-snippet` slot is allocated). The footer floats a tiny
+// label + chip strip beneath each row.
+//
+// All class hooks are documented in the component file. Keep the two
+// in lock-step — a class rename here that's not mirrored there
+// silently degrades to unstyled markup.
+
+.brain-tag-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.brain-tag-row {
+  margin: 0 0 1.1rem 0;
+  padding: 0;
+  border-bottom: 1px dashed var(--lightgray);
+  padding-bottom: 0.6rem;
+
+  &:last-child {
+    border-bottom: 0;
+  }
+}
+
+.brain-tag-row-link {
+  display: grid;
+  // brain: icon · title (flex) · date (auto) on the first row, snippet
+  // spans the full width on a second row. `auto-flow: row dense` lets
+  // the snippet drop cleanly underneath the title column without
+  // needing an explicit grid-area name.
+  grid-template-columns: auto 1fr auto;
+  column-gap: 0.6rem;
+  row-gap: 0.25rem;
+  align-items: baseline;
+  text-decoration: none;
+  color: inherit;
+
+  &:hover .brain-tag-title {
+    text-decoration: underline;
+  }
+}
+
+.brain-tag-icon {
+  font-size: 1.05rem;
+  line-height: 1;
+  // brain: nudge down a hair so the emoji baseline aligns with the
+  // title's text baseline (emoji glyphs sit slightly higher than Latin).
+  transform: translateY(0.05em);
+}
+
+.brain-tag-title {
+  font-weight: 600;
+  // brain: clamp the title to a single line — long thread titles
+  // ("Re: Re: Re: VP of Engineering — eve…") would otherwise wrap and
+  // shove the date column down.
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brain-tag-date {
+  font-family: var(--codeFont, monospace);
+  font-size: 0.78rem;
+  color: var(--gray);
+  white-space: nowrap;
+}
+
+.brain-tag-snippet {
+  grid-column: 1 / -1;
+  font-size: 0.85rem;
+  color: var(--darkgray);
+  // brain: 1-line clamp — the snippet is meant to be a glance-sized
+  // peek, not a full description. The component already chunks the
+  // window down to ~200 chars, but on narrow viewports that can still
+  // overflow, so the clamp is the belt-and-suspenders guard.
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.brain-tag-footer {
+  margin: 0.3rem 0 0 0;
+  font-size: 0.78rem;
+  color: var(--gray);
+}
+
+.brain-tag-footer-label {
+  font-style: italic;
+  margin-right: 0.25rem;
+}
+
+.brain-tag-footer-link {
+  // brain: chip-style tag link — softens the underline `_links.scss`
+  // applies to internal anchors so the "tagged: #a #b #c" line reads
+  // as a meta strip rather than three competing CTAs.
+  text-decoration: none;
+  margin-right: 0.4rem;
+
+  &:hover {
+    text-decoration: underline;
+  }
+}

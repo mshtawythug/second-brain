@@ -23,7 +23,7 @@ import yaml
 
 from . import init_vault
 from .frontmatter import dump_frontmatter, parse_frontmatter
-from .slug import slugify
+from .slug import gmail_slug, slugify
 
 _BATCH_SIZE = 100
 _MAX_SHORT_ID = 8  # first N chars of an external/document UUID for filename use
@@ -54,6 +54,7 @@ class _DocumentForExport:
     vault_path: str | None
     source_kind: str | None
     source_external_id: str | None
+    draft: bool
 
 
 def _is_directory_unmanaged(target: Path) -> bool:
@@ -85,7 +86,7 @@ def _is_directory_unmanaged(target: Path) -> bool:
 _DOCUMENT_FOR_EXPORT_COLUMNS = (
     "d.id::text, d.title, d.content, d.content_hash, "
     "d.content_type, d.tags, d.metadata, d.ingested_at, "
-    "d.kind, d.vault_path, s.kind, s.external_id"
+    "d.kind, d.vault_path, s.kind, s.external_id, d.draft"
 )
 
 
@@ -109,6 +110,7 @@ def _row_to_document_for_export(row: tuple[Any, ...]) -> _DocumentForExport:
         vault_path=row[9],
         source_kind=row[10],
         source_external_id=row[11],
+        draft=bool(row[12]),
     )
 
 
@@ -206,6 +208,46 @@ def _date_prefix(doc: _DocumentForExport) -> str:
     return doc.ingested_at.date().isoformat()
 
 
+def _parse_iso_datetime(raw: Any) -> datetime | None:
+    """Parse an ISO-8601 string (with optional trailing ``Z``) into a datetime.
+
+    Returns ``None`` for any non-string / unparseable input. Used by the
+    Gmail-slug branch to read ``metadata.sent_at`` (set by the gmail
+    extractor). Naive datetimes survive as-is — :func:`gmail_slug` treats
+    them as UTC.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _gmail_relative_path(doc: _DocumentForExport) -> str | None:
+    """Compute the ``_ingested/gmail/<gmail-slug>.md`` path for a Gmail doc.
+
+    Returns ``None`` when the metadata is too sparse to build a stable slug
+    (no ``thread_id`` AND no usable date) — the caller falls back to the
+    generic ingested-path rules so legacy rows still export. Idempotent: a
+    given ``(thread_id, sent_at, subject)`` triple always yields the same
+    path.
+    """
+    thread_id = doc.metadata.get("thread_id")
+    if not isinstance(thread_id, str) or not thread_id:
+        return None
+    sent_at = _parse_iso_datetime(doc.metadata.get("sent_at"))
+    if sent_at is None and doc.ingested_at is None:
+        return None
+    slug = gmail_slug(
+        thread_id,
+        sent_at,
+        doc.title,
+        fallback_date=doc.ingested_at,
+    )
+    return f"_ingested/gmail/{slug}.md"
+
+
 def _ingested_relative_path(
     doc: _DocumentForExport, used_paths: set[str]
 ) -> str:
@@ -215,6 +257,11 @@ def _ingested_relative_path(
 
     - ``manual``: ``_ingested/manual/<slug>.md`` (no date prefix; older
       manual ingests had no upstream date at all).
+    - ``gmail``: ``_ingested/gmail/<gmail-slug>.md`` where ``<gmail-slug>``
+      is :func:`brain.vault.slug.gmail_slug` over
+      ``(thread_id, sent_at, subject)``. Stable across re-ingests of the
+      same thread; falls back to the generic shape below for legacy rows
+      missing ``thread_id``.
     - everything else: ``_ingested/<source>/<YYYY-MM-DD>-<external-id>-<slug>.md``
       using the first 8 chars of ``sources.external_id`` (or
       ``local-<short-doc-id>`` when no source row exists, e.g. legacy
@@ -229,6 +276,18 @@ def _ingested_relative_path(
 
     if source == "manual":
         candidate = f"_ingested/manual/{slug}.md"
+    elif source == "gmail":
+        gmail_path = _gmail_relative_path(doc)
+        if gmail_path is not None:
+            candidate = gmail_path
+        else:
+            date_prefix = _date_prefix(doc)
+            external = (
+                _short_id(doc.source_external_id)
+                if doc.source_external_id
+                else f"local-{_short_id(doc.id)}"
+            )
+            candidate = f"_ingested/gmail/{date_prefix}-{external}-{slug}.md"
     else:
         date_prefix = _date_prefix(doc)
         external = (
@@ -266,10 +325,17 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
 
     Field order is intentional and stable: id, title, created, updated, tags,
     aliases (when non-empty), kind, content_type, then ingested-tier extras
-    (source / external_id) when present. Anything not applicable (e.g.
-    ingested extras for a vault-tier doc, or an empty alias list) is omitted
-    entirely rather than written as ``null`` / ``[]`` — keeps the vault file
-    readable and round-trips cleanly through sync.
+    (source / external_id) when present, and finally ``draft: true`` when the
+    document is quarantined. Anything not applicable (e.g. ingested extras
+    for a vault-tier doc, or an empty alias list) is omitted entirely rather
+    than written as ``null`` / ``[]`` — keeps the vault file readable and
+    round-trips cleanly through sync.
+
+    The ``draft`` line is emitted ONLY when ``documents.draft`` is true. The
+    default-false case is the vast majority of files; writing ``draft: false``
+    on every export would be visual noise. The Quartz contentIndex emitter
+    reads this key (or the absence of it) to filter quarantined docs out of
+    the wiki's explorer / graph / search index without touching the DB row.
 
     Aliases come from ``documents.metadata['aliases']`` (the canonical
     storage location per the spec) — only string elements are emitted; any
@@ -295,6 +361,8 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
             fields["source"] = doc.source_kind
         if doc.source_external_id:
             fields["external_id"] = doc.source_external_id
+    if doc.draft:
+        fields["draft"] = True
     return fields
 
 

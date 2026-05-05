@@ -32,6 +32,7 @@ from .editor import EditorError as RawEditorError
 from .editor import run_editor_on
 from .embeddings import make_embedder
 from .errors import (
+    DraftSkipped,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
@@ -58,6 +59,7 @@ from .queries import (
     finalize_embedding_index,
     iter_chunks_missing_embedding,
     iter_orphan_mirror_files,
+    iter_stale_mirror_files,
     list_documents,
     mirror_drift_summary,
     resolve_document_prefix,
@@ -611,7 +613,16 @@ def ingest_gmail(
         False, "--dry-run", help="List matches without ingesting."
     ),
 ) -> None:
-    """Ingest Gmail messages via the `gws` CLI. At least one scope flag is required."""
+    """Ingest Gmail messages via the `gws` CLI, batched per thread.
+
+    P2.3 collapses N messages sharing a ``threadId`` into a single
+    ``content_type='email_thread'`` document via :func:`to_extracted_thread`.
+    Re-ingesting an unchanged thread is a no-op (P2.2 same-hash short-circuit);
+    a thread that has grown by one message updates the existing row in place
+    so downstream links / derived_links continue to point at a stable UUID.
+
+    At least one scope flag is required (no bulk-inbox ingests).
+    """
     if not any([query, label, from_addr, since, until]):
         typer.secho(
             "ingest-gmail requires at least one scope flag: "
@@ -622,7 +633,7 @@ def ingest_gmail(
         raise typer.Exit(code=2)
 
     cfg = Config.load()
-    messages = gmail_ingest.list_messages(
+    stubs = gmail_ingest.list_messages(
         query=query,
         label=label,
         since=since,
@@ -630,42 +641,119 @@ def ingest_gmail(
         from_addr=from_addr,
         max_results=max_results,
     )
-    typer.echo(f"found {len(messages)} message(s)")
+    typer.echo(f"found {len(stubs)} message(s)")
+    if not stubs:
+        typer.echo("no messages matched")
+        return
+
+    # Group stubs by Gmail ``threadId`` while preserving list-order so the
+    # dry-run report is deterministic across runs that hit the same query.
+    threads: dict[str, list[dict[str, Any]]] = {}
+    for stub in stubs:
+        tid = stub.get("threadId") or stub.get("id")
+        if not isinstance(tid, str) or not tid:
+            # Defensive: malformed stubs without an id at all are unreachable
+            # against real Gmail traffic, but skip rather than crash so a
+            # partial response from `gws` doesn't poison the whole batch.
+            continue
+        threads.setdefault(tid, []).append(stub)
+
+    total_messages = sum(len(t) for t in threads.values())
+
     if dry_run:
-        # Stubs returned by users.messages.list only have id + threadId — no
-        # subject is available without a per-message read_message() call, which
-        # we skip on --dry-run to keep it cheap.
-        for m in messages:
-            typer.echo(f"  would ingest: [{m['id']}]")
+        typer.echo(f"would ingest {len(threads)} thread(s):")
+        for tid, ts in threads.items():
+            subject = _gmail_thread_subject_for_dry_run(ts)
+            typer.echo(
+                f"  [thread_id={tid} messages={len(ts)}] Subject: {subject}"
+            )
+        typer.echo(
+            f"total: {len(threads)} threads, {total_messages} messages → "
+            f"{len(threads)} documents"
+        )
         return
 
     embedder = _build_embedder(cfg)
+    ingested = 0
+    skipped = 0
+    skipped_drafts = 0
+    failed = 0
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
-        for stub in messages:
+        for tid, ts in threads.items():
             try:
-                full = gmail_ingest.read_message(stub["id"])
-                doc = gmail_ingest.to_extracted_doc(full)
+                messages = [gmail_ingest.read_message(stub["id"]) for stub in ts]
+                doc = gmail_ingest.to_extracted_thread(messages)
                 result = ingest_document(
                     conn,
                     embedder=embedder,
                     doc=doc,
                     source_kind="gmail",
-                    source_external_id=stub["id"],
+                    source_external_id=tid,
                     source_metadata={
+                        "thread_id": tid,
                         "from": doc.metadata.get("from"),
                         "date": doc.metadata.get("date"),
                     },
                     tags=list(tag),
                     vault_root=cfg.vault_path,
                 )
-                verb = "ingested" if result.created else "skipped"
-                typer.echo(f"  {verb}: {doc.title[:60]}")
-            except (GmailError, psycopg.Error, ValueError) as e:
-                typer.secho(
-                    f"  failed: {stub.get('id', '?')} — {e}", fg="red"
-                )
+                # P2.2 thread upsert: ``created`` is True only on first
+                # insert; ``body_changed`` is True when an existing thread
+                # was rewritten in place (new message appended). Either
+                # counts as "ingested" for the per-thread summary; an
+                # unchanged thread (both False) is "skipped".
+                if result.created or result.body_changed:
+                    typer.echo(
+                        f"  ingested thread {tid} ({len(ts)} messages)"
+                    )
+                    ingested += 1
+                else:
+                    typer.echo(f"  skipped thread {tid} (unchanged)")
+                    skipped += 1
+            except DraftSkipped as e:
+                # Drafts are unsent emails the user typed but never sent —
+                # ingesting them pollutes search ("did I send X?" returns
+                # drafts as evidence of sent messages). Skip and surface
+                # the count separately so it's clear how many threads were
+                # filtered for this reason vs failed for other reasons.
+                typer.echo(f"  skipped thread {tid} (draft): {e}")
+                skipped_drafts += 1
                 continue
+            except (GmailError, psycopg.Error, ValueError, KeyError) as e:
+                typer.secho(
+                    f"  failed thread {tid} ({len(ts)} messages): {e}",
+                    fg="red",
+                )
+                failed += 1
+                continue
+    typer.echo(
+        f"{ingested} ingested, {skipped} skipped (unchanged), "
+        f"{skipped_drafts} skipped (drafts), {failed} failed"
+    )
+
+
+def _gmail_thread_subject_for_dry_run(stubs: list[dict[str, Any]]) -> str:
+    """Best-effort subject lookup for ``brain ingest-gmail --dry-run``.
+
+    Reads the FIRST message of the thread to pull its ``Subject`` header — a
+    single ``read_message`` call per thread is acceptably cheap for a dry-run
+    report (``ingest-gmail`` callers typically scope to <100 threads). On any
+    failure the function returns ``"(unable to fetch)"`` so a single bad
+    message can't abort the whole report; the actual ingest pass will hit
+    the same failure and surface it via the structured per-thread error path.
+    """
+    try:
+        first_id = stubs[0]["id"]
+        full = gmail_ingest.read_message(first_id)
+    except (GmailError, KeyError, IndexError):
+        return "(unable to fetch)"
+    payload = full.get("payload") or {}
+    headers = payload.get("headers") or []
+    for h in headers:
+        if (h.get("name") or "").lower() == "subject":
+            return h.get("value") or "(no subject)"
+    return "(no subject)"
 
 
 @app.command()
@@ -1367,6 +1455,74 @@ def rm(
     typer.echo(f"removed {doc_id[:8]}{suffix}")
 
 
+@app.command(name="mark-draft")
+def mark_draft(id: str = typer.Argument(...)) -> None:
+    """Quarantine a document: set ``draft=true`` and regenerate its mirror.
+
+    A draft doc still lives in the DB and is reachable via ``brain search`` /
+    ``brain show`` / ``brain list`` (the CLI is local — the user wants to
+    see drafts). Only the wiki hides it: the Quartz contentIndex emitter
+    skips ``draft: true`` entries entirely, so the doc disappears from the
+    explorer tree, the graph view, and full-text search on the rendered site.
+
+    Idempotent — running it twice on an already-draft doc is a no-op and
+    prints ``<short-id> is already draft``. Use ``brain mark-published`` to
+    re-publish.
+    """
+    _set_draft(id, draft=True)
+
+
+@app.command(name="mark-published")
+def mark_published(id: str = typer.Argument(...)) -> None:
+    """Un-quarantine a document: set ``draft=false`` and regenerate its mirror.
+
+    Inverse of ``brain mark-draft``. Idempotent — running it on a doc that
+    is already published prints ``<short-id> is already published`` and
+    exits 0.
+    """
+    _set_draft(id, draft=False)
+
+
+def _set_draft(id_prefix: str, *, draft: bool) -> None:
+    """Shared body for ``mark-draft`` / ``mark-published``.
+
+    Resolves ``id_prefix``, no-ops idempotently when the column already
+    matches ``draft``, otherwise calls :func:`update_document` with
+    ``new_draft=draft`` and ``vault_root=cfg.vault_path`` so the on-disk
+    mirror is regenerated with the new ``draft:`` frontmatter line. Echoes
+    a one-line confirmation.
+
+    Errors (prefix not found / ambiguous) propagate via
+    :func:`_resolve_id` → ``typer.Exit(code=1)``.
+    """
+    cfg = Config.load()
+    target_state_label = "draft" if draft else "published"
+    other_state_label = "published" if draft else "draft"
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        doc_id = _resolve_id(conn, id_prefix)
+        row = conn.execute(
+            "SELECT draft FROM documents WHERE id=%s", (doc_id,)
+        ).fetchone()
+        assert row is not None  # _resolve_id confirmed the row exists
+        current_draft = bool(row[0])
+        label = doc_id[:8]
+        if current_draft == draft:
+            typer.echo(f"{label} is already {target_state_label}")
+            return
+        try:
+            update_document(
+                conn,
+                document_id=doc_id,
+                new_draft=draft,
+                vault_root=cfg.vault_path,
+            )
+        except ValueError as e:
+            typer.secho(str(e), fg="red", err=True)
+            raise typer.Exit(code=1) from e
+    typer.echo(f"marked {label} as {target_state_label} (was {other_state_label})")
+
+
 def _rm_unlink_vault_mirror(*, cfg: Config, vault_path_rel: str | None) -> str:
     """Remove the on-disk vault mirror after ``brain rm`` deletes the DB row.
 
@@ -1631,6 +1787,16 @@ def vault_prune_orphans(
             "the list (dry-run)."
         ),
     ),
+    include_stale: bool = typer.Option(
+        False,
+        "--include-stale",
+        help=(
+            "Also delete stale mirror files: those whose frontmatter id "
+            "resolves to a row but whose path differs from that row's "
+            "``vault_path`` (leftovers from a slug-shape change). Default "
+            "off; only true orphans are processed."
+        ),
+    ),
     vault: Path | None = typer.Option(
         None,
         "--vault",
@@ -1638,7 +1804,8 @@ def vault_prune_orphans(
     ),
 ) -> None:
     """List or delete ``_ingested/`` mirror files whose frontmatter id has no
-    matching ``documents`` row.
+    matching ``documents`` row (or, with ``--include-stale``, also files
+    pointed past by a row whose ``vault_path`` is a different file).
 
     Default behavior (no ``--apply``) is a dry-run: each candidate is
     printed as ``would delete: <path>`` and a final summary reports the
@@ -1670,6 +1837,8 @@ def vault_prune_orphans(
         # Materialize the candidate list before opening write/unlink calls so
         # we don't iterate the tree while mutating it.
         orphans = list(iter_orphan_mirror_files(conn, vault_path=target))
+        if include_stale:
+            orphans.extend(iter_stale_mirror_files(conn, vault_path=target))
 
     if not orphans:
         typer.echo("0 orphan files")

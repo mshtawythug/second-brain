@@ -418,6 +418,63 @@ def iter_orphan_mirror_files(
         yield path
 
 
+def iter_stale_mirror_files(
+    conn: psycopg.Connection[Any], *, vault_path: Path
+) -> Iterator[Path]:
+    """Yield mirror files whose id resolves but whose path is not the row's ``vault_path``.
+
+    A file is "stale" iff:
+
+    - It lives under ``<vault>/_ingested/`` (recursive walk).
+    - It is a regular ``.md`` file.
+    - Its YAML frontmatter parses and contains a string ``id``.
+    - That ``id`` matches a row in ``documents``.
+    - That row's ``documents.vault_path`` is set to a path **other** than this file.
+
+    These are leftovers from a slug-shape change (e.g. P1.5 reshaped Gmail
+    mirrors from ``Mon,-27-Ap-19dd20fb-no-subject.md`` to
+    ``2026-04-28-03015b-no-subject.md``). The DB row's ``vault_path`` was
+    updated but the old file was not unlinked, so it lingers on disk while
+    the new file is the canonical mirror. Stale files don't get deleted by
+    :func:`iter_orphan_mirror_files` because their id still resolves; this
+    helper catches them.
+
+    Files whose frontmatter has no ``id``, or whose ``id`` doesn't resolve
+    to any row, are NOT yielded — those are handled by
+    :func:`iter_orphan_mirror_files`. Rows with ``vault_path IS NULL`` are
+    treated as not-yet-mirrored and yield no stales (the file at this path
+    might be the row's new canonical mirror once the next export runs).
+    """
+    ingested_dir = vault_path / _INGESTED_DIR_NAME
+    if not ingested_dir.is_dir():
+        return
+    rows = conn.execute(
+        "SELECT id::text, vault_path FROM documents WHERE vault_path IS NOT NULL"
+    ).fetchall()
+    canonical: dict[str, str] = {str(r[0]): str(r[1]) for r in rows}
+    for path in sorted(ingested_dir.rglob("*.md")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        try:
+            frontmatter, _body = parse_frontmatter(text)
+        except (ValueError, yaml.YAMLError):
+            continue
+        doc_id = frontmatter.get("id")
+        if not isinstance(doc_id, str) or not doc_id:
+            continue
+        canonical_path = canonical.get(doc_id)
+        if canonical_path is None:
+            continue
+        relative = path.relative_to(vault_path).as_posix()
+        if relative == canonical_path:
+            continue
+        yield path
+
+
 def mirror_drift_summary(
     conn: psycopg.Connection[Any], *, vault_path: Path
 ) -> MirrorDriftSummary:

@@ -4,6 +4,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -64,10 +65,21 @@ class ExtractedDoc:
 
 @dataclass
 class IngestResult:
-    """Outcome of :func:`ingest_document`."""
+    """Outcome of :func:`ingest_document`.
+
+    ``body_changed`` is ``True`` whenever the call wrote new chunks/embeddings
+    — either by inserting a new row (``created=True``) or by upserting an
+    existing thread doc in place (``created=False`` when the gmail-thread
+    upsert path replaced the body of an existing
+    ``content_type='email_thread'`` row). A re-ingest with unchanged content
+    leaves it ``False``. The mirror trigger in :func:`ingest_document` reads
+    this so an in-place thread update propagates to disk; CLI summary output
+    still uses ``created`` to say "ingested" vs "skipped".
+    """
 
     document_id: str | None
     created: bool
+    body_changed: bool = False
 
 
 @dataclass
@@ -87,6 +99,155 @@ class UpdateResult:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _is_gmail_thread_doc(doc: ExtractedDoc, source_kind: str) -> bool:
+    """Return True iff ``doc`` is a P2.1 merged-thread Gmail doc.
+
+    The marker shape — ``source_kind == "gmail"`` AND
+    ``content_type == "email_thread"`` AND ``metadata.thread_id`` populated
+    with a non-empty string — is the same triple that the partial unique
+    index ``uq_documents_gmail_thread`` (migration 008) constrains. Anything
+    else (legacy ``content_type == "email"`` per-message rows, manual
+    ``email_thread`` docs without a thread_id) falls through to the legacy
+    content_hash dedup path. Centralising the check here keeps the call
+    sites in :func:`ingest_document` and :func:`_ingest_within_transaction`
+    in lockstep — divergence between them would silently break the upsert.
+    """
+    thread_id = doc.metadata.get("thread_id")
+    return (
+        source_kind == "gmail"
+        and doc.content_type == "email_thread"
+        and isinstance(thread_id, str)
+        and bool(thread_id)
+    )
+
+
+# Metadata keys promoted into typed columns on ``documents``. The mapping is
+# intentionally narrow: every key here must correspond to a column added by
+# migration 007. Anything outside this set stays in the JSONB ``metadata``
+# blob, untouched.
+_PROMOTED_COLUMNS: tuple[str, ...] = (
+    "thread_id",
+    "rfc_message_id",
+    "in_reply_to",
+    "sent_at",
+    "participants",
+    "duration_min",
+)
+
+
+def _parse_sent_at(raw: Any) -> datetime | None:
+    """Parse a date string into a TZ-aware UTC ``datetime``.
+
+    Accepts both RFC 2822 (Gmail ``Date:`` header style — e.g.
+    ``"Tue, 04 May 2026 14:23:01 -0400"``) and ISO 8601 (Krisp-style — e.g.
+    ``"2026-05-04T14:23:01+00:00"``) inputs. Returns ``None`` for any input
+    we can't parse — callers log + skip the column rather than crashing the
+    ingest. Naive datetimes are treated as UTC.
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+
+    parsed: datetime | None = None
+    # RFC 2822 first — ``parsedate_to_datetime`` is strict-but-tolerant and
+    # is the format Gmail's ``Date:`` header uses, so it's the more common
+    # case for this codebase.
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except (TypeError, ValueError):
+        parsed = None
+    if parsed is None:
+        try:
+            # ``fromisoformat`` accepts the trailing-Z form in 3.11+.
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Project a metadata blob onto the typed ``documents`` columns.
+
+    Returns a ``{column_name: value}`` dict — keys are limited to the columns
+    in :data:`_PROMOTED_COLUMNS`. Missing-or-``None`` metadata keys are
+    omitted (callers never need to write a NULL explicitly — the column
+    default of NULL handles it on INSERT, and on UPDATE we just leave the
+    column alone). Malformed values are logged at WARNING and skipped so a
+    bad header never blocks an ingest.
+
+    Type-coercion rules:
+
+    - ``thread_id`` / ``rfc_message_id`` / ``in_reply_to`` — accept ``str``;
+      anything else is logged + skipped.
+    - ``date`` (RFC 2822 or ISO 8601 string) → ``sent_at`` (TZ-aware UTC).
+      Unparseable strings log + skip; we never store a partially-parsed
+      datetime.
+    - ``participants`` — accept ``list[str]`` (Krisp speakers, Gmail headers
+      already-parsed by an upstream extractor). Non-list / mixed-type lists
+      log + skip rather than silently coercing.
+    - ``duration_min`` — accept ``int`` (or a ``str`` that parses cleanly).
+      Floats like ``42.7`` round down via ``int(...)``; non-numeric values
+      log + skip.
+    """
+    out: dict[str, Any] = {}
+
+    for key in ("thread_id", "rfc_message_id", "in_reply_to"):
+        raw = metadata.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, str):
+            out[key] = raw
+        else:
+            _logger.warning(
+                "metadata.%s expected str, got %s; skipping column promotion",
+                key,
+                type(raw).__name__,
+            )
+
+    raw_date = metadata.get("date")
+    if raw_date is not None:
+        sent_at = _parse_sent_at(raw_date)
+        if sent_at is not None:
+            out["sent_at"] = sent_at
+        else:
+            _logger.warning(
+                "metadata.date is not parseable (%r); leaving sent_at NULL",
+                raw_date,
+            )
+
+    raw_participants = metadata.get("participants")
+    if raw_participants is not None:
+        if isinstance(raw_participants, list) and all(
+            isinstance(p, str) for p in raw_participants
+        ):
+            out["participants"] = list(raw_participants)
+        else:
+            _logger.warning(
+                "metadata.participants expected list[str], got %r; "
+                "skipping column promotion",
+                type(raw_participants).__name__,
+            )
+
+    raw_duration = metadata.get("duration_min")
+    if raw_duration is not None:
+        try:
+            # ``bool`` is a subclass of ``int`` in Python — reject it
+            # explicitly so ``True`` doesn't end up as ``1`` in the column.
+            if isinstance(raw_duration, bool):
+                raise TypeError("bool is not a valid duration")
+            out["duration_min"] = int(raw_duration)
+        except (TypeError, ValueError):
+            _logger.warning(
+                "metadata.duration_min expected int, got %r; "
+                "skipping column promotion",
+                raw_duration,
+            )
+
+    return out
 
 
 def _upsert_source(
@@ -184,6 +345,21 @@ def ingest_document(
             "source_kind is required when doc.source_path is None"
         )
 
+    # Gmail-thread upsert (P2.2): a merged-thread doc keys on the stable
+    # Gmail ``threadId`` rather than a per-message ``messageId``. Mirroring
+    # that invariant onto the ``sources`` row keeps source dedup aligned
+    # with the new partial unique index ``uq_documents_gmail_thread`` —
+    # repeated thread-batched ingests reuse the same ``sources`` row instead
+    # of accumulating one per re-ingest. The override only fires when the
+    # caller actually produced a thread doc (``content_type='email_thread'``
+    # AND ``metadata.thread_id`` populated); legacy per-message gmail rows
+    # still pass message_id as ``source_external_id`` and are unaffected.
+    if _is_gmail_thread_doc(doc, source_kind):
+        thread_id = doc.metadata.get("thread_id")
+        # _is_gmail_thread_doc guarantees thread_id is a non-empty str.
+        assert isinstance(thread_id, str) and thread_id
+        source_external_id = thread_id
+
     h = _content_hash(doc.content)
     tags = tags or []
     source_metadata = source_metadata or {}
@@ -204,11 +380,13 @@ def ingest_document(
     # Mirror writes happen OUTSIDE the transaction so a filesystem error
     # cannot roll back the DB ingest (CLAUDE.md: prefer recoverable drift
     # over an aborted ingest — drift is exactly what `brain vault export`
-    # exists to reconcile).
+    # exists to reconcile). ``body_changed`` covers the gmail-thread
+    # in-place upsert case where ``created`` stays ``False`` but the body
+    # was rewritten — without it the on-disk mirror would lag the DB.
     if (
         vault_root is not None
         and result.document_id is not None
-        and (result.created or force)
+        and (result.created or result.body_changed or force)
     ):
         try:
             # ``force=True`` because we just inserted/replaced the DB row —
@@ -257,8 +435,55 @@ def _ingest_within_transaction(
     (commit on normal return, rollback on exception).
     """
     h = content_hash
+    is_thread = _is_gmail_thread_doc(doc, source_kind)
     with conn.transaction():
-        if doc.source_path is not None:
+        if is_thread:
+            # P2.2: gmail-thread upsert. Lookup keys on the
+            # ``(kind, thread_id, content_type='email_thread')`` triple
+            # constrained by ``uq_documents_gmail_thread``. Same-body
+            # re-ingests short-circuit; body-changed re-ingests UPDATE
+            # in place so the document UUID stays stable across thread
+            # growth (links / derived_links / unresolved_links keep
+            # pointing at the same row instead of cascade-dropping).
+            thread_id = doc.metadata.get("thread_id")
+            assert isinstance(thread_id, str) and thread_id  # _is_gmail_thread_doc
+            existing_thread = conn.execute(
+                "SELECT id, content_hash FROM documents "
+                "WHERE thread_id=%s AND kind='ingested' "
+                "AND content_type='email_thread'",
+                (thread_id,),
+            ).fetchone()
+            if existing_thread is not None:
+                existing_id, existing_hash = existing_thread
+                if not force and existing_hash == h:
+                    return IngestResult(
+                        document_id=str(existing_id),
+                        created=False,
+                        body_changed=False,
+                    )
+                _update_thread_doc_in_place(
+                    conn,
+                    embedder=embedder,
+                    document_id=str(existing_id),
+                    doc=doc,
+                    source_kind=source_kind,
+                    source_external_id=source_external_id,
+                    source_metadata=source_metadata,
+                    tags=tags,
+                    content_hash=h,
+                    gws_runner=gws_runner,
+                )
+                return IngestResult(
+                    document_id=str(existing_id),
+                    created=False,
+                    body_changed=True,
+                )
+            # No existing thread doc — fall through to the standard INSERT
+            # path. The partial unique index ``uq_documents_gmail_thread``
+            # protects against concurrent dual-insert: a second concurrent
+            # transaction reaching this branch raises IntegrityError on
+            # the INSERT below, which bubbles up to the caller.
+        elif doc.source_path is not None:
             # No DB-level UNIQUE on source_path — two concurrent CLI invocations
             # for the same path can race past this SELECT and both INSERT,
             # producing two rows for one path. Acceptable for sequential CLI
@@ -305,11 +530,21 @@ def _ingest_within_transaction(
         # pass (B.4) reads it via a single SELECT.
         _apply_pre_insert_metadata(doc, source_kind=source_kind)
 
+        # Project email/krisp metadata onto typed columns. The base INSERT
+        # always writes the same fixed columns; the promoted columns ride
+        # along as a dynamic suffix so a doc with no recognized metadata
+        # keys produces the exact same SQL as before migration 007.
+        promoted = _promote_metadata_to_columns(doc.metadata)
+        promoted_columns = list(promoted.keys())
+        promoted_values = [promoted[c] for c in promoted_columns]
+        extra_cols = "".join(f", {c}" for c in promoted_columns)
+        extra_placeholders = ", %s" * len(promoted_columns)
+
         doc_row = conn.execute(
-            """
+            f"""
             INSERT INTO documents (source_id, title, content, content_hash, content_type,
-                                   source_path, tags, metadata)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                   source_path, tags, metadata{extra_cols})
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s{extra_placeholders})
             RETURNING id
             """,
             (
@@ -321,6 +556,7 @@ def _ingest_within_transaction(
                 doc.source_path,
                 tags,
                 json.dumps(doc.metadata),
+                *promoted_values,
             ),
         ).fetchone()
         assert doc_row is not None  # RETURNING id always yields a row
@@ -341,7 +577,109 @@ def _ingest_within_transaction(
             gws_runner=gws_runner,
         )
 
-        return IngestResult(document_id=document_id, created=True)
+        return IngestResult(
+            document_id=document_id, created=True, body_changed=True
+        )
+
+
+def _update_thread_doc_in_place(
+    conn: psycopg.Connection,
+    *,
+    embedder: Embedder,
+    document_id: str,
+    doc: ExtractedDoc,
+    source_kind: str,
+    source_external_id: str | None,
+    source_metadata: dict[str, Any],
+    tags: list[str],
+    content_hash: str,
+    gws_runner: GwsRunner | None,
+) -> None:
+    """Replace title / body / metadata / tags / typed columns on an existing
+    gmail-thread doc and rebuild its chunks. Used by the P2.2 upsert path.
+
+    Runs inside the caller's open transaction. The document UUID is preserved
+    so any ``links`` / ``derived_links`` / ``unresolved_links`` referencing
+    this doc keep pointing at the same row across re-ingest. Old chunks are
+    deleted via direct DELETE (no need for ON DELETE CASCADE — we know the
+    parent doc id) and re-inserted from the freshly chunked + embedded body.
+    Source-specific post-ingest hooks (gmail directory upsert) re-run so
+    headers from the latest message in the rebuilt thread propagate.
+    """
+    # Re-evaluate the source row — same ``(kind, external_id)`` as the
+    # initial insert, so this is a SELECT-with-fallback-INSERT no-op in
+    # practice. Kept here so a future caller passing different
+    # ``source_metadata`` still gets the source row's metadata refreshed.
+    source_id = _upsert_source(
+        conn,
+        kind=source_kind,
+        external_id=source_external_id,
+        metadata=source_metadata,
+    )
+
+    chunks = chunk_text(doc.content, count_tokens=embedder.count_tokens)
+    embeddings = (
+        embedder.embed([c.content for c in chunks], input_type="document")
+        if chunks
+        else []
+    )
+
+    # Pre-insert metadata derivation (krisp adds ``_participant_keys``).
+    # No-op for gmail today, but kept symmetric with the INSERT path so
+    # future per-source enrichments apply on UPDATE too.
+    _apply_pre_insert_metadata(doc, source_kind=source_kind)
+
+    promoted = _promote_metadata_to_columns(doc.metadata)
+    set_parts: list[str] = [
+        "source_id=%s",
+        "title=%s",
+        "content=%s",
+        "content_hash=%s",
+        "content_type=%s",
+        "tags=%s",
+        "metadata=%s::jsonb",
+    ]
+    params: list[Any] = [
+        source_id,
+        doc.title,
+        doc.content,
+        content_hash,
+        doc.content_type,
+        list(tags),
+        json.dumps(doc.metadata),
+    ]
+    # Project the rebuilt thread's metadata onto the typed columns so they
+    # stay in lockstep with the JSONB blob: a key that's present in the
+    # new metadata writes the column; a key that's gone (e.g. an old
+    # ``in_reply_to`` that no longer applies after a thread split) clears
+    # the column to NULL.
+    for column in _PROMOTED_COLUMNS:
+        if column in promoted:
+            set_parts.append(f"{column}=%s")
+            params.append(promoted[column])
+        else:
+            set_parts.append(f"{column}=NULL")
+    params.append(document_id)
+    conn.execute(
+        f"UPDATE documents SET {', '.join(set_parts)} WHERE id=%s",
+        params,
+    )
+
+    conn.execute("DELETE FROM chunks WHERE document_id=%s", (document_id,))
+    for c, emb in zip(chunks, embeddings, strict=True):
+        conn.execute(
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
+            "VALUES (%s, %s, %s, %s)",
+            (document_id, c.index, c.content, emb),
+        )
+
+    _run_source_hooks(
+        conn,
+        source_kind=source_kind,
+        doc=doc,
+        document_id=document_id,
+        gws_runner=gws_runner,
+    )
 
 
 def _apply_pre_insert_metadata(doc: ExtractedDoc, *, source_kind: str) -> None:
@@ -494,7 +832,9 @@ def apply_tags(
     return list(row[0] or [])
 
 
-_MIRROR_FRONTMATTER_FIELDS = frozenset({"title", "tags", "metadata", "content_type"})
+_MIRROR_FRONTMATTER_FIELDS = frozenset(
+    {"title", "tags", "metadata", "content_type", "draft"}
+)
 
 
 def update_document(
@@ -508,6 +848,7 @@ def update_document(
     metadata_patch: dict[str, Any] | None = None,
     replace_metadata: bool = False,
     new_tags: list[str] | None = None,
+    new_draft: bool | None = None,
     vault_root: Path | None = None,
 ) -> UpdateResult:
     """Update one document in place.
@@ -518,6 +859,14 @@ def update_document(
     objects are not deep-merged. Set ``replace_metadata=True`` to swap the
     blob entirely.
 
+    ``new_draft`` flips the top-level ``documents.draft`` boolean column
+    introduced by migration 007. Unlike metadata-promoted columns this lives
+    directly on ``documents``; passing ``True`` / ``False`` writes the new
+    value, ``None`` leaves it alone. The wiki build (Quartz contentIndex
+    emitter) hides ``draft=true`` docs from the explorer/graph/search;
+    ``brain search`` / ``brain list`` still surface them so the user can
+    re-publish.
+
     Raises :class:`ValueError` if ``new_content`` is empty/whitespace-only or
     if its SHA-256 collides with another document. ``embedder`` is required
     when ``new_content`` is provided. Empty/no-op edits are not an error and
@@ -525,8 +874,8 @@ def update_document(
 
     Vault mirror: when ``vault_root`` is supplied AND the edit actually
     changed the body or any frontmatter-bearing field
-    (``title`` / ``tags`` / ``metadata`` / ``content_type``), the mirror file
-    under ``vault_root`` is regenerated via
+    (``title`` / ``tags`` / ``metadata`` / ``content_type`` / ``draft``),
+    the mirror file under ``vault_root`` is regenerated via
     :func:`brain.vault.export.regenerate_vault_file`. Vault-tier rows
     (``kind='vault'``) are skipped via a DB pre-check — those files are
     file-source-of-truth and ``vault sync`` reconciles back to the DB.
@@ -537,13 +886,21 @@ def update_document(
     """
     with conn.transaction():
         row = conn.execute(
-            "SELECT title, content, content_type, metadata, tags, kind "
+            "SELECT title, content, content_type, metadata, tags, kind, draft "
             "FROM documents WHERE id=%s",
             (document_id,),
         ).fetchone()
         if row is None:
             raise ValueError(f"document not found: {document_id}")
-        cur_title, cur_content, cur_type, cur_meta, cur_tags, cur_kind = row
+        (
+            cur_title,
+            cur_content,
+            cur_type,
+            cur_meta,
+            cur_tags,
+            cur_kind,
+            cur_draft,
+        ) = row
         cur_meta = dict(cur_meta or {})
         cur_tags = list(cur_tags or [])
 
@@ -582,22 +939,40 @@ def update_document(
             fields_changed.append("content_type")
 
         if metadata_patch is not None:
-            if replace_metadata:
-                if metadata_patch != cur_meta:
-                    sets.append("metadata=%s::jsonb")
-                    params.append(json.dumps(metadata_patch))
-                    fields_changed.append("metadata")
-            else:
-                merged = {**cur_meta, **metadata_patch}
-                if merged != cur_meta:
-                    sets.append("metadata=%s::jsonb")
-                    params.append(json.dumps(merged))
-                    fields_changed.append("metadata")
+            new_meta = (
+                metadata_patch if replace_metadata else {**cur_meta, **metadata_patch}
+            )
+            if new_meta != cur_meta:
+                sets.append("metadata=%s::jsonb")
+                params.append(json.dumps(new_meta))
+                fields_changed.append("metadata")
+                # Re-project the new metadata blob onto typed columns, and
+                # diff against what we'd project from the prior blob. This
+                # keeps the typed columns in lockstep with metadata: a
+                # patch that adds ``thread_id`` populates the column; a
+                # replace_metadata that drops the key NULLs the column.
+                old_promoted = _promote_metadata_to_columns(cur_meta)
+                new_promoted = _promote_metadata_to_columns(new_meta)
+                for column in _PROMOTED_COLUMNS:
+                    if column in new_promoted:
+                        if new_promoted[column] != old_promoted.get(column):
+                            sets.append(f"{column}=%s")
+                            params.append(new_promoted[column])
+                    elif column in old_promoted:
+                        # replace_metadata dropped the source key — clear
+                        # the typed column so it no longer disagrees with
+                        # the JSONB blob.
+                        sets.append(f"{column}=NULL")
 
         if new_tags is not None and sorted(new_tags) != sorted(cur_tags):
             sets.append("tags=%s")
             params.append(list(new_tags))
             fields_changed.append("tags")
+
+        if new_draft is not None and bool(new_draft) != bool(cur_draft):
+            sets.append("draft=%s")
+            params.append(bool(new_draft))
+            fields_changed.append("draft")
 
         if rechunked:
             assert new_hash is not None  # set above when rechunked is True

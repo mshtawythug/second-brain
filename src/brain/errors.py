@@ -40,3 +40,14 @@ class IdPrefixAmbiguous(IdPrefixError):
 
 class DirectoryRefreshError(BrainError):
     """Raised when a Calendar / Contacts refresh fails (gws missing, JSON parse, etc.)."""
+
+
+class DraftSkipped(BrainError):
+    """Raised when a Gmail message or thread is skipped because it's a draft.
+
+    Drafts (labelIds containing ``DRAFT``) are unsent emails the user typed
+    but never sent. Ingesting them pollutes search ("did I send X to Y?"
+    returns drafts as evidence of sent messages → wrong answer). Callers
+    catch this exception and increment a "skipped (drafts)" counter
+    instead of treating it as a failure.
+    """

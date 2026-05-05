@@ -1,0 +1,220 @@
+// Brain search popover — Phase 3.2 styling for the custom Search.tsx.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_search.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via `custom.scss`'s
+// `@use "./brain/search"` line. It is loaded after `_sidebar.scss` so
+// the chip rail can layer on top of the sidebar's sticky header
+// without the sticky band's `border-bottom` rule painting over the
+// chip pills.
+//
+// Scope of this file:
+//
+//   * Result row layout — `{icon} {title} {date}` on one line, with
+//     the snippet wrapped to a single line below. Replaces the stock
+//     Quartz `<h3>title</h3><p>snippet</p>` stack.
+//   * Source-filter chip rail above the input — pill buttons with an
+//     active/inactive state keyed off `[data-active="true"]` so the
+//     inline script can flip state without touching layout-class names.
+//   * Preview pane refinements — same surface tier as the rest of the
+//     popover; `<mark>` highlights inherit the brain accent.
+//
+// Tokens consumed (from `_tokens.scss`):
+//
+//   * `--accent-soft`     — chip background + mark fill
+//   * `--accent`          — active chip border + mark color
+//   * `--rule`            — preview-pane separator + chip border
+//   * `--ink-1` / `--ink-2` — title / metadata text
+//   * `--surface-1`       — chip rail background
+//   * `--codeFont`        — date column monospace fallback
+//
+// Chrome scope: every selector here is rooted under
+// `.search > .search-container` so the rules can't bleed onto
+// non-search markup that happens to share class names.
+
+.search > .search-container {
+  position: fixed;
+  contain: layout;
+  z-index: 999;
+  left: 0;
+  top: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow-y: auto;
+  display: none;
+  backdrop-filter: blur(4px);
+}
+
+.search > .search-container.active {
+  display: block;
+}
+
+.search > .search-container .brain-search-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--surface-1, var(--light));
+  border-bottom: 1px solid var(--rule, var(--lightgray));
+  // brain: the search-space wraps every direct child (chips, input,
+  // results) in the upstream stylesheet's `border-radius` rule. We
+  // keep the chip rail visually attached to the input below by
+  // squaring its bottom corners.
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  margin-bottom: 0;
+
+  .brain-search-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.15rem 0.6rem;
+    border-radius: 999px;
+    border: 1px solid var(--rule, var(--lightgray));
+    background: transparent;
+    color: var(--ink-2, var(--gray));
+    font: inherit;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    cursor: pointer;
+    transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+
+    &:hover {
+      background: var(--accent-soft, var(--highlight));
+      color: var(--ink-1, var(--darkgray));
+    }
+
+    &[data-active="true"] {
+      // brain: active chip flips fg/bg per spec. `--accent` (terracotta
+      // in light, peach in dark) is the same accent the snippet `<mark>`
+      // uses below — keeping the two in lock-step makes the rail read
+      // as part of the same filter affordance.
+      background: var(--accent, var(--secondary));
+      color: var(--light, white);
+      border-color: var(--accent, var(--secondary));
+    }
+
+    .brain-search-chip-icon {
+      font-size: 0.85rem;
+      line-height: 1;
+    }
+
+    .brain-search-chip-label {
+      font-variant-caps: all-small-caps;
+      letter-spacing: 0.04em;
+    }
+  }
+
+  .brain-search-chip-all {
+    font-weight: 600;
+  }
+}
+
+// brain: result row — flex layout with the icon and date pinned and
+// the title taking the remaining width. The snippet wraps below via
+// the explicit grid-column override; we keep `display: flex` for the
+// header strip and reserve the snippet line as a flex item that takes
+// 100% width.
+.search > .search-container .results-container .result-card.brain-search-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.65rem 0.9rem;
+
+  .brain-search-icon {
+    flex: 0 0 auto;
+    width: 1.25rem;
+    font-size: 1rem;
+    line-height: 1.2;
+    text-align: center;
+  }
+
+  .brain-search-title {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-weight: 600;
+    color: var(--ink-1, var(--dark));
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .brain-search-date {
+    flex: 0 0 auto;
+    font-family: var(--codeFont, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 0.75rem;
+    opacity: 0.7;
+    color: var(--ink-2, var(--gray));
+  }
+
+  .brain-search-snippet {
+    flex: 0 0 100%;
+    width: 100%;
+    margin: 0;
+    margin-top: 0.15rem;
+    font-size: 0.85rem;
+    line-height: 1.4;
+    opacity: 0.85;
+    color: var(--ink-2, var(--gray));
+    // brain: clamp to a single line — the snippet is already a 240-
+    // char preview from the slim contentIndex, so a one-line clamp
+    // keeps every row visually scannable. Falls back to `overflow:
+    // hidden` on engines that don't honor `-webkit-line-clamp`.
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-height: 1.4em;
+
+    mark {
+      background: var(--accent-soft, var(--highlight));
+      color: var(--accent, var(--secondary));
+      border-radius: 3px;
+      padding: 0 0.15rem;
+    }
+  }
+
+  .brain-search-tags {
+    flex: 0 0 100%;
+    margin-top: 0.25rem;
+    margin-bottom: 0;
+    padding-left: 0;
+    list-style: none;
+  }
+}
+
+// brain: preview pane refinements. The upstream class
+// `.preview-container` already has its own padding + scroll; we layer
+// the brain-specific surface treatment on the brain class so the two
+// stylesheets coexist.
+.search > .search-container .preview-container.brain-search-preview {
+  border-left: 1px solid var(--rule, var(--lightgray));
+  padding: 1rem 1.5rem;
+  overflow-y: auto;
+
+  .brain-search-preview-body,
+  .brain-search-preview-fallback {
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: var(--ink-1, var(--dark));
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .brain-search-preview-fallback {
+    // brain: dimmed slightly so the user can tell the preview is the
+    // 240-char snippet fallback rather than the full body. Matches
+    // the snippet column treatment so the two reads consistently.
+    opacity: 0.85;
+  }
+
+  mark,
+  .highlight {
+    background: var(--accent-soft, var(--highlight));
+    color: var(--accent, var(--secondary));
+    border-radius: 3px;
+    padding: 0 0.15rem;
+  }
+}

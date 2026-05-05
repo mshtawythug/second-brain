@@ -25,13 +25,47 @@ TEST_DATABASE_URL = os.environ.get(
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _ensure_test_db_initialized() -> Iterator[None]:
+def _force_test_database_url() -> Iterator[None]:
+    """Bulletproof prod-DB isolation for the entire test session.
+
+    Without this, any test that uses ``CliRunner().invoke(app, ...)`` without
+    first calling ``_patch_embedder`` (or its local copies) reads
+    ``DATABASE_URL`` from ``.env`` (= PROD) inside
+    ``brain.config.Config.load()``. On 2026-05-04 the post-merge full-suite
+    run leaked 15 test fixtures (titles like "Renamed Document",
+    "Sample Heading", "person-x sync") into the real ``second_brain`` DB before
+    being noticed. This fixture forces
+    ``os.environ["DATABASE_URL"] = TEST_DATABASE_URL`` for the whole pytest
+    session and restores the original at teardown.
+
+    Per-test ``monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)`` calls
+    in individual fixtures (``patch_embedder``, ``_patch_embedder`` siblings)
+    still work — ``monkeypatch`` undoes itself per-test, after which this
+    session-scope assignment continues to hold. There is no ordering
+    requirement; tests that already use those helpers don't need to change.
+    """
+    original = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = TEST_DATABASE_URL
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = original
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _ensure_test_db_initialized(_force_test_database_url: None) -> Iterator[None]:
     """Reset the test DB to a known migrated state at session start.
 
     Tests that don't take the per-test ``test_db`` fixture (e.g. doctor checks
     that the pgvector extension is installed) still need the schema to be in a
     migrated state. Doing this once per session — before any test runs — makes
     that starting state deterministic regardless of any prior aborted runs.
+
+    Depends on :func:`_force_test_database_url` so the schema reset happens
+    against ``second_brain_test``, never against prod.
     """
     with connect(TEST_DATABASE_URL) as conn:
         conn.autocommit = True

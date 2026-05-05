@@ -88,7 +88,19 @@ export interface BrainLinkRecord {
 export type BrainContentDetails = Record<string, unknown> & {
   tier?: string
   source?: string
+  // brain-extension: ISO date string lifted from frontmatter
+  // (`date` > `created` > `published` > `updated`). Consumed by
+  // `Search.tsx` (P3.2) for the date column and `TagContent.tsx`
+  // (P3.3) for the per-row date stamp. Optional — missing-frontmatter
+  // docs leave the field unset and consumers render an empty column.
+  date?: string
   linkRecords?: BrainLinkRecord[]
+  // brain-extension: 240-char snippet of the body, populated by the
+  // P3.1 slim transform. Search.tsx prefers this over `content` when
+  // building the result-row preview; TagContent.tsx renders its own
+  // tag-aware snippet from `description`, so this field is informative
+  // for it (not authoritative).
+  snippet?: string
 }
 
 // brain-extension: classification context handed to `classifyLink`.
@@ -220,6 +232,96 @@ export function linkSlugs(records: BrainLinkRecord[] | undefined): SimpleSlug[] 
 // is a single-line fix rather than a hunt through this file.
 const CONTENT_INDEX_RELPATH = path.join("static", "contentIndex.json")
 
+// brain-extension: relative directory where the slim post-processor
+// writes one `<slug>.json` body file per surviving entry. The Search
+// component (P3.2) lazy-fetches `static/contentBodies/<slug>.json`
+// when a result is selected for the preview pane; the slim
+// `contentIndex.json` only carries a 240-char snippet. Splitting body
+// out cuts the index from ~19 MB → well under 2 MB gzipped, which is
+// the budget enforced by `scripts/check_index_size.py`.
+const CONTENT_BODIES_RELDIR = path.join("static", "contentBodies")
+
+// brain-extension: snippet character budget. The slim
+// `contentIndex.json` keeps a `snippet` (and rewrites `details.content`
+// to the same 240-char prefix as a backwards-compat fallback) so the
+// search popover can render result rows without round-tripping to the
+// per-slug body file. 240 chars ≈ 2-3 lines of result preview, which
+// matches the upstream Search component's render budget.
+const SNIPPET_LENGTH = 240
+
+// brain-extension (P3.6 fix-3): allowlist for slug values that are safe
+// to interpolate into a filesystem path (`contentBodies/<slug>.json`)
+// or a fetch URL. Slugs come from Quartz's trusted slugify, so practical
+// exploitability is near-zero — but defense in depth: a future upstream
+// change that loosened slug normalisation, or a malicious frontmatter
+// `permalink` override that bypasses slugify, would otherwise leak path
+// traversal into both the emitter's `fs.writeFile` and the inline
+// script's `fetch`. The character allowlist alone permits `..` (both
+// `.` and the path separator are individually safe), so `isSafeSlug`
+// also rejects any `..` segment to close the path-traversal loophole.
+// The same regex + helper are duplicated in
+// `quartz_overrides/quartz/components/scripts/search.inline.ts` (rather
+// than imported) because the inline script is bundled separately and
+// can't take a runtime import from this server-side emitter.
+//
+// brain: allowlist composition — each char was justified against the
+// real live-vault corpus, NOT picked from RFC 3986 wholesale:
+//   * a-zA-Z0-9   bulk of slug chars
+//   * `_`         underscore prefix on `_ingested/`
+//   * `.`         file extension separators (`README.md` style)
+//   * `-`         the canonical word separator slugify emits
+//   * `/`         path component separator
+//   * `,`         e.g. `_ingested/gmail/Tue,-7-Apr-...` (subject dates)
+//   * `:`         e.g. `_ingested/krisp/2026-05-02-krisp:au-auto`
+// What's NOT in the list and why:
+//   * `<>"'` `&`  HTML metachars — would let titles/snippets break out
+//                 of the row markup
+//   * ` `         spaces — every URL-safe slug encodes them as `-`
+//   * `?#&=`      query/fragment delimiters — would corrupt the
+//                 `fetch(url)` shape
+//   * `\`         Windows path separator + escape sequence on POSIX
+//   * `\x00..1F`  control chars + null bytes — header smuggling
+//   * `;`         shell metachar (defense in depth on path joins)
+// Adding a new char here should require a documented live-vault slug
+// shape that needs it AND a check it can't enable path traversal or
+// HTML/URL injection downstream.
+export const SAFE_SLUG_RE = /^[a-zA-Z0-9._/,:-]+$/
+
+// brain (P3.6 fix-3): char-allowlist plus segment-shape rejection. A
+// bare `..` segment in a slug would let the joined path
+// (`<output>/static/contentBodies/../etc/passwd.json`) escape the
+// `contentBodies/` directory, even though every character in
+// `../etc/passwd` is individually in the allowlist. Empty segments
+// (leading slash, double slash) are also rejected — Quartz's slugify
+// never produces them, and a leading slash on the URL side would
+// resolve against the site root rather than the static dir.
+export function isSafeSlug(slug: string): boolean {
+  if (!SAFE_SLUG_RE.test(slug)) return false
+  const segments = slug.split("/")
+  for (const segment of segments) {
+    if (segment === "" || segment === "..") return false
+  }
+  return true
+}
+
+// brain-extension (P3.6 fix-1): normalise a frontmatter date value to an
+// ISO `YYYY-MM-DD` string. gray-matter / js-yaml parses bare YAML dates
+// (`date: 2026-04-12`) into JS `Date` objects, so the previous
+// `typeof X === "string"` check silently missed them. We accept both
+// shapes — strings pass through verbatim (so an ISO datetime keeps its
+// time/zone suffix); `Date` instances render as the date-only `YYYY-MM-
+// DD` slice (the time-of-day component is meaningless when the source
+// value was a date-only YAML literal). Invalid Date instances and other
+// non-{string, Date} values return `undefined` so the lookup chain can
+// fall through to the next candidate field.
+export function liftDate(v: unknown): string | undefined {
+  if (typeof v === "string" && v.length > 0) return v
+  if (v instanceof Date && !Number.isNaN(v.getTime())) {
+    return v.toISOString().slice(0, 10)
+  }
+  return undefined
+}
+
 type Opts = Parameters<typeof UpstreamContentIndex>[0]
 
 export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
@@ -281,6 +383,22 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
           const source = sourceBySlug.get(slug)
           const fm = (source?.[1].data?.frontmatter ?? {}) as Record<string, unknown>
 
+          // brain-extension: draft / seed quarantine. When the source
+          // file's frontmatter carries `draft: true` (set by `brain
+          // mark-draft <id>` and mirrored via `vault.export`), drop the
+          // entry from `contentIndex.json` entirely. The doc still
+          // exists on disk and in the DB; this only hides it from the
+          // wiki — Explorer tree, graph view, full-text search — by
+          // removing the slug from the index. Minimum-blast-radius
+          // filter: every consumer (Search component, Graph component,
+          // Explorer) reads from `contentIndex.json`, so dropping the
+          // entry quarantines the doc across the whole site without
+          // touching individual components.
+          if (fm.draft === true) {
+            delete parsed[slug]
+            continue
+          }
+
           // brain-extension: surface the vault `tier`
           // (vault | ingested) and ingest `source`
           // (krisp / slack / gmail / manual) so the graph renderer
@@ -319,6 +437,39 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
             }
           }
 
+          // brain-extension: surface the doc's date so the Search row
+          // (P3.2) and tag-content row (P3.3) can render
+          // `… · 2026-04-12 · …` without each consumer re-deriving the
+          // date from `dates` / `frontmatter`. Lookup order mirrors
+          // the brain frontmatter writer (`src/brain/vault/export.py:
+          // _build_frontmatter`) which always writes `created` /
+          // `updated` (ISO strings) and accepts a forward-looking
+          // `date` / `published` for any future authoring tool that
+          // wants to override the export-derived value. We pick the
+          // most user-meaningful field first (`date` if explicitly
+          // authored, then `created` as the canonical ingest time,
+          // then `published` as a legacy alias) and fall back to
+          // `updated` only as a last resort. Missing dates leave
+          // `details.date` undefined — Search.tsx and TagContent
+          // already handle that gracefully.
+          //
+          // brain (P3.6 fix-1): YAML `date: 2026-04-12` is parsed by
+          // gray-matter / js-yaml's default schema as a JS `Date`
+          // object, NOT a string. The original `typeof X === "string"`
+          // checks silently dropped Date instances, leaving
+          // `details.date` empty for every doc whose authored
+          // frontmatter used the bare YAML date form. The `liftDate`
+          // helper accepts both shapes (string or Date) and normalises
+          // to an ISO `YYYY-MM-DD` string for consumers.
+          const lifted =
+            liftDate(fm.date) ??
+            liftDate(fm.created) ??
+            liftDate(fm.published) ??
+            liftDate(fm.updated)
+          if (lifted !== undefined) {
+            details.date = lifted
+          }
+
           // brain: kept upstream's `links: SimpleSlug[]` shape
           // unchanged; added `linkRecords` as a parallel field
           // carrying the kind/rule/weight metadata. The plan
@@ -338,6 +489,48 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
           details.linkRecords = slugs.map((s) =>
             ctxClassify ? classifyLink(s, ctxClassify) : { target: s, kind: "wiki" },
           )
+
+          // brain-extension: slim transform. Capture the full body,
+          // write it out to `static/contentBodies/<slug>.json` so the
+          // Search component (P3.2) can lazy-fetch on selection, then
+          // overwrite `details.content` with a snippet so the index
+          // itself stays small. We keep `content` populated with the
+          // snippet (rather than dropping the field) as the
+          // backwards-compat fallback documented in the plan — any
+          // consumer that hasn't been taught about lazy-fetching still
+          // sees a usable preview, just truncated. `details.snippet` is
+          // the canonical name for forward-looking consumers (P3.2's
+          // Search.tsx will branch on `snippet ?? content`). Slugs may
+          // contain `/` separators (e.g. `_ingested/gmail/<id>`); the
+          // mkdir-recursive call ensures the nested directory exists
+          // before each write.
+          //
+          // brain (P3.6 fix-3): defense-in-depth slug guard. Slugs that
+          // fall outside `isSafeSlug` skip both the body-file write
+          // and the slim transform — the entry stays in the index with
+          // its full `content`, which the search popover already knows
+          // how to render as a fallback. We log a warning so a
+          // legitimate slug shape we forgot to whitelist surfaces as
+          // build noise rather than silent data loss.
+          if (!isSafeSlug(slug)) {
+            console.warn(
+              `brain contentIndex: skipping unsafe slug ${JSON.stringify(slug)} ` +
+                `(failed isSafeSlug check) — body file not written, ` +
+                `entry retained with full content`,
+            )
+            continue
+          }
+          const body = typeof details.content === "string" ? details.content : ""
+          const snippet = body.slice(0, SNIPPET_LENGTH)
+          const bodyTarget = path.join(
+            ctx.argv.output,
+            CONTENT_BODIES_RELDIR,
+            `${slug}.json`,
+          )
+          await fs.mkdir(path.dirname(bodyTarget), { recursive: true })
+          await fs.writeFile(bodyTarget, JSON.stringify({ slug, content: body }))
+          details.content = snippet
+          details.snippet = snippet
         }
 
         await fs.writeFile(targetPath, JSON.stringify(parsed))

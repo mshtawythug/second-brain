@@ -40,6 +40,14 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85"
+markers = [
+  # P3.5 — frontend integration harness. Tests under this marker shell
+  # out to `npx quartz build` and serve the artifact over HTTP, so they
+  # require a Node toolchain + the live brain Quartz workspace at
+  # `~/brain-vault/.quartz/`. Marked separately from the default suite
+  # so CI runners without Node can opt out via `-m "not e2e"`.
+  "e2e: end-to-end Quartz build + serve test (requires npx + live workspace)",
+]
 
 [tool.ruff]
 line-length = 100

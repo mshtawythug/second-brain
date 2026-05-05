@@ -26,6 +26,7 @@ from pytest_mock import MockerFixture
 from typer.testing import CliRunner
 
 from brain.cli import app
+from brain.errors import DraftSkipped
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.ingest import gmail as gmail_ingest
 
@@ -46,13 +47,26 @@ def _msg(
     subject: str,
     from_addr: str,
     body: str,
-    date: str = "2026-04-01",
+    date: str = "Mon, 01 Apr 2026 12:00:00 +0000",
     to: str = "ali@example.com",
+    thread_id: str | None = None,
+    internal_date: str | None = None,
 ) -> dict[str, Any]:
-    """Build a realistic single-part Gmail Message resource for ``users.messages.get``."""
-    return {
+    """Build a realistic single-part Gmail Message resource for ``users.messages.get``.
+
+    ``thread_id`` defaults to ``f"t{id}"`` so legacy tests that don't care
+    about thread grouping still produce one-message-per-thread fixtures.
+    Pass ``thread_id`` explicitly to put multiple messages in the same Gmail
+    thread (P2.3 thread-batched ingest path).
+
+    ``internal_date`` (Gmail's canonical receive timestamp, ms-since-epoch as
+    a string) controls the order in which messages render inside the merged
+    thread doc. Defaults to ``None`` so the per-message ``Date:`` header is
+    used as the sort fallback.
+    """
+    msg: dict[str, Any] = {
         "id": id,
-        "threadId": f"t{id}",
+        "threadId": thread_id or f"t{id}",
         "labelIds": ["INBOX"],
         "payload": {
             "mimeType": "text/plain",
@@ -68,13 +82,18 @@ def _msg(
             },
         },
     }
+    if internal_date is not None:
+        msg["internalDate"] = internal_date
+    return msg
 
 
 def _fake_runner(messages_by_id: dict[str, dict[str, Any]]) -> Callable[..., str]:
     """Simulate ``gws gmail users messages list/get``.
 
     ``messages_by_id`` maps message id → full Message resource. ``list`` responses
-    are generated from its keys; ``get`` responses pull the resource by id.
+    are generated from its keys (with each stub's ``threadId`` pulled from the
+    underlying resource so multi-message threads share the same group key);
+    ``get`` responses pull the resource by id.
 
     Accepts ``*args, **kwargs`` so it works both when passed as ``runner=`` and
     when used to replace the module-level ``_run`` (which has signature
@@ -90,7 +109,8 @@ def _fake_runner(messages_by_id: dict[str, dict[str, Any]]) -> Callable[..., str
             return json.dumps(
                 {
                     "messages": [
-                        {"id": mid, "threadId": f"t{mid}"} for mid in messages_by_id
+                        {"id": mid, "threadId": resource["threadId"]}
+                        for mid, resource in messages_by_id.items()
                     ],
                     "resultSizeEstimate": len(messages_by_id),
                 }
@@ -125,7 +145,12 @@ def test_ingest_gmail_with_label(
     test_db: psycopg.Connection,
     fake_embedder: object,
 ) -> None:
-    """`ingest-gmail --label ...` pulls each message and stores it as an email document."""
+    """`ingest-gmail --label ...` ingests one ``email_thread`` doc per Gmail thread.
+
+    P2.3 collapsed the per-message ingest path into a per-thread one — even a
+    single-message thread now lands as ``content_type='email_thread'`` so the
+    schema invariant (one document per ``threadId``) holds uniformly.
+    """
     _patch_embedder(monkeypatch, fake_embedder)
     msgs = {
         "m1": _msg(id="m1", subject="Hi", from_addr="n@x", body="Hello there"),
@@ -133,22 +158,28 @@ def test_ingest_gmail_with_label(
     monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(msgs))
     result = CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
     assert result.exit_code == 0, result.output
-    assert "ingested: Hi" in result.output
+    assert "ingested thread tm1" in result.output
     with psycopg.connect(TEST_DATABASE_URL) as conn:
         row = conn.execute(
-            "SELECT count(*), max(title) FROM documents WHERE content_type='email'"
+            "SELECT count(*), max(title) FROM documents "
+            "WHERE content_type='email_thread'"
         ).fetchone()
     assert row is not None
     assert row[0] == 1
     assert row[1] == "Hi"
 
 
-def test_ingest_gmail_dry_run_skips_ingest(
+def test_ingest_gmail_dry_run_does_not_write(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
 ) -> None:
-    """`--dry-run` lists match ids without writing to the DB."""
+    """`--dry-run` lists thread breakdown without writing to the DB.
+
+    The dry-run path still issues ``read_message`` once per thread to pull
+    the subject for the report, but skips ``ingest_document`` entirely so
+    no rows land in ``documents`` / ``sources`` / ``chunks``.
+    """
     _patch_embedder(monkeypatch, fake_embedder)
     msgs = {
         "m1": _msg(id="m1", subject="Hi", from_addr="n@x", body="Hello there"),
@@ -159,30 +190,46 @@ def test_ingest_gmail_dry_run_skips_ingest(
         app, ["ingest-gmail", "--label", "interviews", "--dry-run"]
     )
     assert result.exit_code == 0, result.output
-    assert "would ingest" in result.output
-    assert "m1" in result.output
-    assert "m2" in result.output
+    assert "would ingest 2 thread(s)" in result.output
+    assert "thread_id=tm1" in result.output
+    assert "thread_id=tm2" in result.output
+    assert "Subject: Hi" in result.output
+    assert "Subject: Bye" in result.output
+    assert "total: 2 threads, 2 messages → 2 documents" in result.output
     with psycopg.connect(TEST_DATABASE_URL) as conn:
         row = conn.execute("SELECT count(*) FROM documents").fetchone()
     assert row is not None
     assert row[0] == 0
 
 
-def test_ingest_gmail_dedups_on_message_id(
+def test_ingest_gmail_idempotent_on_re_run(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
 ) -> None:
-    """Re-running the same ingest reuses the source row and skips the document."""
+    """A second run on an unchanged thread is a no-op (P2.2 same-hash short-circuit).
+
+    Verifies that the thread-keyed upsert path keeps a single
+    ``documents`` row + a single ``sources`` row across re-ingests, and
+    that the second run reports the thread as skipped.
+    """
     _patch_embedder(monkeypatch, fake_embedder)
     msgs = {
         "m1": _msg(id="m1", subject="Hi", from_addr="n@x", body="Hello there"),
     }
     monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(msgs))
-    CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
+    first = CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
+    assert first.exit_code == 0, first.output
+    assert "ingested thread tm1" in first.output
+
     second = CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
     assert second.exit_code == 0, second.output
-    assert "skipped" in second.output.lower()
+    assert "skipped thread tm1 (unchanged)" in second.output
+    assert (
+        "0 ingested, 1 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        in second.output
+    )
+
     with psycopg.connect(TEST_DATABASE_URL) as conn:
         n = conn.execute("SELECT count(*) FROM documents").fetchone()
         s = conn.execute(
@@ -192,17 +239,27 @@ def test_ingest_gmail_dedups_on_message_id(
     assert s is not None and s[0] == 1
 
 
-def test_ingest_gmail_continues_on_per_message_error(
+def test_ingest_gmail_continues_on_per_thread_failure(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
 ) -> None:
-    """A `GmailError` on one message must not abort the whole batch."""
+    """A `GmailError` on one thread must not abort the whole batch.
+
+    Two threads in the result set; ``read_message`` raises for the second
+    thread's lone message. The good thread still ingests, the bad thread
+    is logged as failed, and the final summary reports the split.
+    """
     _patch_embedder(monkeypatch, fake_embedder)
 
     good = {
-        "good1": _msg(id="good1", subject="Good 1", from_addr="x@y", body="body of good1"),
-        "good2": _msg(id="good2", subject="Good 2", from_addr="x@y", body="body of good2"),
+        "good1": _msg(
+            id="good1",
+            subject="Good 1",
+            from_addr="x@y",
+            body="body of good1",
+            thread_id="tgood",
+        ),
     }
 
     def flaky_runner(cmd: list[str], *_args: object, **_kwargs: object) -> str:
@@ -212,11 +269,10 @@ def test_ingest_gmail_continues_on_per_message_error(
             return json.dumps(
                 {
                     "messages": [
-                        {"id": "good1", "threadId": "tgood1"},
+                        {"id": "good1", "threadId": "tgood"},
                         {"id": "bad", "threadId": "tbad"},
-                        {"id": "good2", "threadId": "tgood2"},
                     ],
-                    "resultSizeEstimate": 3,
+                    "resultSizeEstimate": 2,
                 }
             )
         if op == "get":
@@ -230,15 +286,200 @@ def test_ingest_gmail_continues_on_per_message_error(
     monkeypatch.setattr("brain.ingest.gmail._run", flaky_runner)
     result = CliRunner().invoke(app, ["ingest-gmail", "--label", "test"])
     assert result.exit_code == 0, result.output
-    assert "ingested" in result.output
-    assert "failed" in result.output.lower()
-    assert "bad" in result.output
+    assert "ingested thread tgood" in result.output
+    assert "failed thread tbad" in result.output
+    assert (
+        "1 ingested, 0 skipped (unchanged), 0 skipped (drafts), 1 failed"
+        in result.output
+    )
     with psycopg.connect(TEST_DATABASE_URL) as conn:
         row = conn.execute(
-            "SELECT count(*) FROM documents WHERE content_type='email'"
+            "SELECT count(*) FROM documents WHERE content_type='email_thread'"
         ).fetchone()
     assert row is not None
-    assert row[0] == 2
+    assert row[0] == 1
+
+
+def test_ingest_gmail_groups_by_thread_id(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """Four messages from two threads (3+1) collapse into 2 documents.
+
+    Verifies P2.3's core grouping invariant: one ``content_type='email_thread'``
+    row per ``threadId``, with ``thread_id`` populated in metadata + the
+    typed column for downstream column-promotion.
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+    msgs = {
+        "m1": _msg(
+            id="m1",
+            subject="Project A kickoff",
+            from_addr="alice@x",
+            body="kickoff body",
+            thread_id="ta",
+            internal_date="1700000001000",
+        ),
+        "m2": _msg(
+            id="m2",
+            subject="Re: Project A kickoff",
+            from_addr="bob@x",
+            body="reply 1 body",
+            thread_id="ta",
+            internal_date="1700000002000",
+        ),
+        "m3": _msg(
+            id="m3",
+            subject="Re: Project A kickoff",
+            from_addr="alice@x",
+            body="reply 2 body",
+            thread_id="ta",
+            internal_date="1700000003000",
+        ),
+        "m4": _msg(
+            id="m4",
+            subject="Other topic",
+            from_addr="carol@x",
+            body="standalone body",
+            thread_id="tb",
+            internal_date="1700000010000",
+        ),
+    }
+    monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(msgs))
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "2 ingested, 0 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        in result.output
+    )
+
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        rows = conn.execute(
+            "SELECT thread_id, content_type, "
+            "       metadata->>'thread_id', metadata->>'message_count' "
+            "FROM documents ORDER BY thread_id"
+        ).fetchall()
+    assert len(rows) == 2
+    by_thread = {r[0]: r for r in rows}
+    assert set(by_thread.keys()) == {"ta", "tb"}
+    for tid, expected_count in (("ta", "3"), ("tb", "1")):
+        thread_id_col, ctype, meta_thread_id, meta_msg_count = by_thread[tid]
+        assert ctype == "email_thread"
+        assert thread_id_col == tid
+        assert meta_thread_id == tid
+        assert meta_msg_count == expected_count
+
+
+def test_ingest_gmail_existing_thread_with_new_message_updates(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """A thread that grows by one message updates the existing row in place.
+
+    Round 1 ingests a 4-message thread → 1 row with ``message_count=4``.
+    Round 2 ingests the same thread plus one more message (still 1 thread)
+    → still 1 row, but ``message_count=5`` and the body has 5 sections.
+    The document UUID is preserved across the update so downstream links /
+    derived_links continue to point at the same row (P2.2 invariant).
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+
+    def _make_msg(idx: int) -> dict[str, Any]:
+        prefix = "" if idx == 1 else "Re: "
+        return _msg(
+            id=f"m{idx}",
+            subject=f"{prefix}Growing thread",
+            from_addr=f"sender{idx}@x",
+            body=f"message {idx} body",
+            thread_id="tg",
+            internal_date=str(1700000000000 + idx),
+        )
+
+    round_one = {f"m{i}": _make_msg(i) for i in range(1, 5)}  # m1..m4
+    monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(round_one))
+    first = CliRunner().invoke(app, ["ingest-gmail", "--label", "test"])
+    assert first.exit_code == 0, first.output
+
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        rows = conn.execute(
+            "SELECT id, metadata->>'message_count' FROM documents "
+            "WHERE content_type='email_thread'"
+        ).fetchall()
+    assert len(rows) == 1
+    original_id, original_count = rows[0]
+    assert original_count == "4"
+
+    round_two = {f"m{i}": _make_msg(i) for i in range(1, 6)}  # m1..m5
+    monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(round_two))
+    second = CliRunner().invoke(app, ["ingest-gmail", "--label", "test"])
+    assert second.exit_code == 0, second.output
+    assert "ingested thread tg (5 messages)" in second.output
+
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        rows = conn.execute(
+            "SELECT id, content, metadata->>'message_count' FROM documents "
+            "WHERE content_type='email_thread'"
+        ).fetchall()
+    assert len(rows) == 1, "expected in-place update, not a second row"
+    new_id, new_content, new_count = rows[0]
+    assert new_id == original_id, "thread doc UUID must be preserved across update"
+    assert new_count == "5"
+    # Latest message renders as a plain ``## YYYY-MM-DD HH:MM — sender``
+    # heading; the four older messages each wrap in <details><summary>.
+    assert new_content.count("<summary>") == 4
+    assert new_content.count("\n## ") + (
+        1 if new_content.startswith("## ") else 0
+    ) == 1
+
+
+def test_ingest_gmail_progress_output_format(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """Three threads ingested → 3 per-thread lines + 1 summary line.
+
+    Pins the user-visible output format: one ``ingested thread <tid>
+    (<n> messages)`` line per thread plus a ``<X> ingested,
+    <Y> skipped (unchanged), <Z> skipped (drafts), <W> failed`` summary
+    at the end.
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+    msgs = {
+        "m1": _msg(
+            id="m1",
+            subject="A",
+            from_addr="alice@x",
+            body="alpha body",
+            thread_id="ta",
+        ),
+        "m2": _msg(
+            id="m2",
+            subject="B",
+            from_addr="bob@x",
+            body="bravo body",
+            thread_id="tb",
+        ),
+        "m3": _msg(
+            id="m3",
+            subject="C",
+            from_addr="carol@x",
+            body="charlie body",
+            thread_id="tc",
+        ),
+    }
+    monkeypatch.setattr("brain.ingest.gmail._run", _fake_runner(msgs))
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "test"])
+    assert result.exit_code == 0, result.output
+    assert "ingested thread ta (1 messages)" in result.output
+    assert "ingested thread tb (1 messages)" in result.output
+    assert "ingested thread tc (1 messages)" in result.output
+    assert (
+        "3 ingested, 0 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        in result.output
+    )
 
 
 def test_list_messages_builds_full_query() -> None:
@@ -273,12 +514,21 @@ def test_list_messages_builds_full_query() -> None:
     assert cmd[-2:] == ["--format", "json"]
 
 
-def test_list_messages_no_scope_omits_query_param() -> None:
-    """When no scope parts are supplied, the ``q`` key is omitted from ``--params``."""
+def test_list_messages_no_scope_still_excludes_drafts() -> None:
+    """Even with no scope flags, ``-in:drafts`` is appended so drafts are filtered.
+
+    Pre-fix this test asserted ``q`` was omitted entirely. Post-fix the
+    drafts exclusion is unconditional: every call to the Gmail list
+    surface excludes drafts as a belt-and-braces filter. The CLI
+    ``ingest-gmail`` command refuses to run without at least one user-
+    supplied scope flag, but ``list_messages`` itself is callable
+    without scopes (e.g. from internal tooling) and that path must
+    still filter drafts.
+    """
 
     def runner(cmd: list[str]) -> str:
         params = json.loads(cmd[6])
-        assert "q" not in params
+        assert params.get("q") == "-in:drafts"
         assert params["userId"] == "me"
         return json.dumps({"resultSizeEstimate": 0})
 
@@ -705,3 +955,362 @@ def test_cli_ingest_gmail_populates_directory(
         ("person-a last-a", "person-a@example.com", "gmail"),
         ("ali sarkis", "redacted@example.com", "gmail"),
     ]
+
+
+# ---------------------------------------------------------------------------
+# P1.3 — RFC header capture in ``to_extracted_doc``. Each branch mirrors a
+# distinct ``_PROMOTED_COLUMNS`` feeder in ``brain.ingest`` so the typed-column
+# promotion landed in P1.1 actually gets fed real data.
+# ---------------------------------------------------------------------------
+
+
+def _msg_with_headers(headers: dict[str, str], *, body: str = "Hi") -> dict[str, Any]:
+    """Build a Gmail Message resource with arbitrary ``payload.headers``."""
+    return {
+        "id": "m1",
+        "threadId": "t1",
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [{"name": k, "value": v} for k, v in headers.items()],
+            "body": {"data": _b64url(body), "size": len(body)},
+        },
+    }
+
+
+def test_to_extracted_doc_captures_rfc_message_id() -> None:
+    """``Message-ID`` header → ``metadata.rfc_message_id`` (verbatim, brackets kept)."""
+    msg = _msg_with_headers(
+        {"Subject": "Hi", "Message-ID": "<abc@example.com>", "From": "x@y"}
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert doc.metadata["rfc_message_id"] == "<abc@example.com>"
+
+
+def test_to_extracted_doc_captures_in_reply_to() -> None:
+    """``In-Reply-To`` header → ``metadata.in_reply_to`` (verbatim)."""
+    msg = _msg_with_headers(
+        {"Subject": "Re: Hi", "In-Reply-To": "<parent@example.com>", "From": "x@y"}
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert doc.metadata["in_reply_to"] == "<parent@example.com>"
+
+
+def test_to_extracted_doc_parses_date_to_iso_utc() -> None:
+    """RFC 2822 ``Date:`` → ISO-8601 UTC string in ``metadata.sent_at``.
+
+    The original raw ``date`` field is preserved for backwards compat — code
+    paths that haven't migrated to ``sent_at`` keep working.
+    """
+    msg = _msg_with_headers(
+        {
+            "Subject": "Hi",
+            "Date": "Tue, 28 Apr 2026 16:38:01 -0400",
+            "From": "x@y",
+        }
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert doc.metadata["sent_at"] == "2026-04-28T20:38:01+00:00"
+    # Raw value is preserved.
+    assert doc.metadata["date"] == "Tue, 28 Apr 2026 16:38:01 -0400"
+
+
+def test_to_extracted_doc_unparseable_date_does_not_crash() -> None:
+    """A garbage ``Date:`` header drops ``sent_at`` but keeps the raw value."""
+    msg = _msg_with_headers(
+        {"Subject": "Hi", "Date": "garbage", "From": "x@y"}
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert "sent_at" not in doc.metadata
+    assert doc.metadata["date"] == "garbage"
+
+
+def test_to_extracted_doc_missing_message_id_omits_field() -> None:
+    """When the ``Message-ID`` header is absent, the metadata key is omitted entirely.
+
+    Downstream column-promotion treats missing keys as "leave the column as
+    NULL", which is the desired behavior — we never want to write empty strings.
+    """
+    msg = _msg_with_headers({"Subject": "Hi", "From": "x@y"})
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert "rfc_message_id" not in doc.metadata
+    assert "in_reply_to" not in doc.metadata
+    # ``date`` raw key still exists (set to None) since we always emit it.
+    assert doc.metadata["date"] is None
+
+
+def test_to_extracted_doc_strips_boilerplate_from_body() -> None:
+    """Body extraction routes through ``strip_boilerplate`` before doc construction."""
+    body = "Real content here.\n\nSent from my iPhone"
+    msg = _msg_with_headers({"Subject": "Hi", "From": "x@y"}, body=body)
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert "Sent from my iPhone" not in doc.content
+    assert "Real content here." in doc.content
+
+
+def test_to_extracted_doc_naive_date_treated_as_utc() -> None:
+    """A ``Date:`` value with no timezone offset is treated as UTC.
+
+    ``parsedate_to_datetime`` returns a naive datetime when the input has no
+    timezone offset (and isn't a known TZ abbreviation); the parser explicitly
+    coerces such values to UTC rather than raising or skipping.
+    """
+    msg = _msg_with_headers(
+        {"Subject": "Hi", "Date": "Tue, 28 Apr 2026 16:38:01 -0000", "From": "x@y"}
+    )
+    doc = gmail_ingest.to_extracted_doc(msg)
+    # ``-0000`` is RFC 2822's "no meaningful TZ" sentinel; some parsers return
+    # it as naive. Either way our code emits a UTC-anchored ISO string.
+    assert doc.metadata["sent_at"].endswith("+00:00")
+    assert "2026-04-28T16:38:01" in doc.metadata["sent_at"]
+
+
+# ---------------------------------------------------------------------------
+# Drafts excluded at ingest end-to-end (P2.4 follow-up).
+#
+# Draft Gmail messages — ``labelIds`` containing ``DRAFT`` — are unsent
+# emails the user typed but never sent. Ingesting them pollutes search:
+# "did I send X to Y?" returns drafts as evidence of sent messages, which
+# is the wrong answer. Three layers filter drafts:
+#
+# 1. ``list_messages`` appends ``-in:drafts`` to every Gmail query so
+#    drafts never appear in the message-stub list.
+# 2. ``to_extracted_doc`` raises :class:`DraftSkipped` if it sees a
+#    DRAFT-labelled message anyway (belt-and-braces).
+# 3. ``to_extracted_thread`` filters drafts from mixed threads and
+#    raises :class:`DraftSkipped` for all-draft threads.
+#
+# The CLI catches :class:`DraftSkipped` per thread and tracks it with a
+# dedicated ``skipped (drafts)`` counter so the user can see how many
+# threads were filtered for this reason vs failed for other reasons.
+# ---------------------------------------------------------------------------
+
+
+def test_list_messages_query_excludes_drafts() -> None:
+    """``list_messages`` appends ``-in:drafts`` to the Gmail ``q`` string.
+
+    Cheap belt-and-braces filter at the source: even before ``to_extracted_doc``
+    /``to_extracted_thread`` get a chance to inspect ``labelIds``, the
+    Gmail API itself returns no drafts in the message-stub list because
+    ``-in:drafts`` is part of every query. Combined with all three scope
+    flags so the test pins both the user-supplied parts and the
+    auto-appended exclusion.
+    """
+    captured: dict[str, list[str]] = {}
+
+    def runner(cmd: list[str]) -> str:
+        captured["cmd"] = cmd
+        return json.dumps({"resultSizeEstimate": 0})
+
+    gmail_ingest.list_messages(
+        query="project foo",
+        label="interviews",
+        from_addr="a@b",
+        runner=runner,
+    )
+    cmd = captured["cmd"]
+    params = json.loads(cmd[6])
+    q = params["q"]
+    assert "-in:drafts" in q
+    # User-supplied parts still present.
+    assert "project foo" in q
+    assert "label:interviews" in q
+    assert "from:a@b" in q
+
+
+def test_to_extracted_doc_raises_draft_skipped() -> None:
+    """``to_extracted_doc`` raises ``DraftSkipped`` when ``labelIds`` contains ``DRAFT``.
+
+    Even if a draft message somehow reaches the per-message extractor
+    (e.g. the ``-in:drafts`` filter on ``list_messages`` was bypassed
+    by a direct ``read_message`` call), the extractor refuses to emit
+    an ``ExtractedDoc`` for it. Callers catch this and increment a
+    "skipped (drafts)" counter rather than treating it as a failure.
+    """
+    msg = {
+        "id": "draft-msg-1",
+        "threadId": "t-draft",
+        "labelIds": ["DRAFT"],
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [
+                {"name": "From", "value": "x@y"},
+                {"name": "Subject", "value": "unsent draft"},
+            ],
+            "body": {"data": _b64url("draft body"), "size": 10},
+        },
+    }
+    with pytest.raises(DraftSkipped, match="draft-msg-1"):
+        gmail_ingest.to_extracted_doc(msg)
+
+
+def test_ingest_gmail_skips_draft_only_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """A thread with one DRAFT-only message is skipped, not failed.
+
+    The summary line surfaces the count under "skipped (drafts)" rather
+    than "failed", so the user can tell apart "Gmail returned a draft I
+    don't want" from "the ingest pipeline broke".
+
+    Note: in production ``-in:drafts`` on the list query means drafts
+    don't reach the ingest path at all. This test simulates a runner
+    that returns a draft anyway (e.g. from a stub built before the
+    list-side filter shipped) — the per-thread extractor catches it.
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+
+    draft_msg = {
+        "id": "d1",
+        "threadId": "td",
+        "labelIds": ["DRAFT"],
+        "payload": {
+            "mimeType": "text/plain",
+            "headers": [
+                {"name": "From", "value": "ali@example.com"},
+                {"name": "To", "value": "person-a@example.com"},
+                {"name": "Subject", "value": "discarded draft"},
+                {"name": "Date", "value": "Mon, 04 May 2026 12:00:00 +0000"},
+            ],
+            "body": {"data": _b64url("draft body that was never sent"), "size": 30},
+        },
+    }
+
+    def runner(cmd: list[str], *_a: object, **_kw: object) -> str:
+        op = cmd[4]
+        if op == "list":
+            return json.dumps(
+                {
+                    "messages": [{"id": "d1", "threadId": "td"}],
+                    "resultSizeEstimate": 1,
+                }
+            )
+        if op == "get":
+            return json.dumps(draft_msg)
+        raise AssertionError(f"unexpected gws call: {cmd}")
+
+    monkeypatch.setattr("brain.ingest.gmail._run", runner)
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "anything"])
+
+    assert result.exit_code == 0, result.output
+    assert "skipped thread td (draft)" in result.output
+    assert (
+        "0 ingested, 0 skipped (unchanged), 1 skipped (drafts), 0 failed"
+        in result.output
+    )
+    # No documents were written.
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        n = conn.execute(
+            "SELECT count(*) FROM documents WHERE content_type='email_thread'"
+        ).fetchone()
+    assert n is not None
+    assert n[0] == 0
+
+
+def test_ingest_gmail_drops_draft_from_mixed_thread(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """A thread of [sent, draft, sent] yields one ingested doc with 2 sections.
+
+    The draft is filtered at extraction; the merged thread doc carries
+    only the sent messages. ``message_count=2``, body shows two
+    sections (one plain H2 + one collapsed <details>).
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+
+    def _build(
+        msg_id: str,
+        body: str,
+        when: str,
+        internal: str,
+        labels: list[str],
+    ) -> dict[str, Any]:
+        return {
+            "id": msg_id,
+            "threadId": "tmix",
+            "labelIds": labels,
+            "internalDate": internal,
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "From", "value": "alice@example.com"},
+                    {"name": "To", "value": "bob@example.com"},
+                    {"name": "Subject", "value": "Mixed thread"},
+                    {"name": "Date", "value": when},
+                ],
+                "body": {"data": _b64url(body), "size": len(body)},
+            },
+        }
+
+    msgs_by_id = {
+        "s1": _build(
+            "s1",
+            "FIRST SENT",
+            "Mon, 04 May 2026 09:00:00 +0000",
+            "1700000001000",
+            ["INBOX", "SENT"],
+        ),
+        "d1": _build(
+            "d1",
+            "DRAFT IN MIDDLE",
+            "Mon, 04 May 2026 10:00:00 +0000",
+            "1700000002000",
+            ["DRAFT"],
+        ),
+        "s2": _build(
+            "s2",
+            "SECOND SENT",
+            "Mon, 04 May 2026 11:00:00 +0000",
+            "1700000003000",
+            ["INBOX", "SENT"],
+        ),
+    }
+
+    def runner(cmd: list[str], *_a: object, **_kw: object) -> str:
+        op = cmd[4]
+        if op == "list":
+            # Production sends ``-in:drafts`` so the DRAFT id wouldn't
+            # appear here in real life. We include it here so the test
+            # exercises the extractor-side filter for a defensive case
+            # where the list filter is bypassed (e.g. a future runner
+            # variant or an older Gmail server quirk).
+            return json.dumps(
+                {
+                    "messages": [
+                        {"id": "s1", "threadId": "tmix"},
+                        {"id": "d1", "threadId": "tmix"},
+                        {"id": "s2", "threadId": "tmix"},
+                    ],
+                    "resultSizeEstimate": 3,
+                }
+            )
+        if op == "get":
+            params = json.loads(cmd[6])
+            return json.dumps(msgs_by_id[params["id"]])
+        raise AssertionError(f"unexpected gws call: {cmd}")
+
+    monkeypatch.setattr("brain.ingest.gmail._run", runner)
+    result = CliRunner().invoke(app, ["ingest-gmail", "--label", "anything"])
+
+    assert result.exit_code == 0, result.output
+    assert "ingested thread tmix" in result.output
+    assert (
+        "1 ingested, 0 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        in result.output
+    )
+    with psycopg.connect(TEST_DATABASE_URL) as conn:
+        row = conn.execute(
+            "SELECT content, metadata->>'message_count' "
+            "FROM documents WHERE content_type='email_thread'"
+        ).fetchone()
+    assert row is not None
+    body, message_count = row
+    assert message_count == "2"
+    assert "FIRST SENT" in body
+    assert "SECOND SENT" in body
+    assert "DRAFT IN MIDDLE" not in body
+    # 2 sections: 1 collapsed older + 1 plain H2 newest.
+    assert body.count("<details>") == 1
