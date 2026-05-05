@@ -55,6 +55,11 @@ const config: QuartzConfig = {
       "private",
       "_templates",
       "_attachments",
+      // brain: P4.7 — server-rendered partials (e.g. `_partials/recent.md`,
+      // the source-of-truth for the home-page "Recently captured" rail) live
+      // outside the public surface. The home note renders them inline via
+      // a fence; the partial itself must never appear as its own page.
+      "_partials",
       "dist",
       "public",
       ".obsidian",

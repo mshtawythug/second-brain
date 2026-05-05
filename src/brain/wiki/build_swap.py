@@ -33,6 +33,7 @@ argparse) on bad arguments.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import functools
 import logging
 import secrets
@@ -43,7 +44,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:  # pragma: no cover — type-only import to avoid runtime cycle
+    from ..config import Config
 
 from .errors import BrainWikiBuildError, BrainWikiError
 
@@ -412,6 +416,17 @@ def _resolve_current_target(workspace: Path) -> Path | None:
 # ---------------------------------------------------------------------------
 
 
+def _replace_vault_path(cfg: Config, vault_path: Path) -> Config:
+    """Return a copy of ``cfg`` with ``vault_path`` overridden.
+
+    ``Config`` is frozen, so we use :func:`dataclasses.replace`. Lifted
+    into a helper so the call site in :func:`main` reads cleanly and so
+    a future Config field addition (which would otherwise break the
+    inline ``replace(...)`` call by omission) flags here in one spot.
+    """
+    return dataclasses.replace(cfg, vault_path=vault_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run a single ``build_and_swap`` from the command line.
 
@@ -453,6 +468,34 @@ def main(argv: list[str] | None = None) -> int:
     quartz_dir: Path | None = (
         args.quartz_dir.expanduser().resolve() if args.quartz_dir is not None else None
     )
+
+    # P4.7 — refresh the home-page "Recently captured" rail before the build
+    # so the new build picks up the freshest 12 docs. Failures here are
+    # logged-and-swallowed by ``refresh_homepage`` itself (DB unreachable,
+    # missing fence, …) — the rail is a courtesy, the build is the customer.
+    # Config loading is opt-in: a Config-load failure (no DATABASE_URL on
+    # PATH) shouldn't block the build either, so we wrap the import too.
+    try:
+        from ..config import Config, ConfigError
+        from .build_homepage import refresh_homepage
+        try:
+            cfg = Config.load()
+        except ConfigError as exc:
+            logger.warning(
+                "wiki recent rail: Config.load failed (%s) — skipping refresh",
+                exc,
+            )
+        else:
+            # Honor --vault override: caller may point the build at a different
+            # tree than the env-default vault. The home rail must follow the
+            # tree being built, not the env's notion of "the vault."
+            cfg_for_rail = (
+                cfg if cfg.vault_path == vault
+                else _replace_vault_path(cfg, vault)
+            )
+            refresh_homepage(cfg_for_rail)
+    except Exception as exc:  # noqa: BLE001 — refresh is best-effort
+        logger.warning("wiki recent rail: unexpected refresh failure: %s", exc)
 
     try:
         result = build_and_swap(vault, quartz_dir=quartz_dir, keep=args.keep)
