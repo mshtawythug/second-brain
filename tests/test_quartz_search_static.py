@@ -379,6 +379,47 @@ def test_search_scss_hides_container_until_active(search_scss_source: str) -> No
     )
 
 
+def test_search_scss_pins_search_bar_layout(search_scss_source: str) -> None:
+    """The popover input has explicit width + background rules.
+
+    The brain ``Search.tsx`` override drops the upstream
+    ``Search.css = style`` binding (the stock component shipped its CSS
+    via that property; our override only ships ``afterDOMLoaded``), so
+    the ``& > .search-space > input { box-sizing: border-box; width:
+    100%; padding: 0.5em 1em; ... }`` rule from
+    ``quartz/components/styles/search.scss`` never loads. Without that
+    rule, the input collapses to the UA-default ~177px width (visible
+    gap on the right of the chip rail + result rows) and reads as
+    transparent against the darkened popover scrim. ``_sidebar.scss``
+    paints the input's background+border for theme parity, but never
+    the layout primitives. This test pins both the layout primitives
+    AND a defense-in-depth background restate inside ``_search.scss``
+    so a future ``_sidebar.scss`` refactor cannot reintroduce the
+    regression silently.
+
+    User-visible regression report:
+    ``/Users/mshtawythug/Desktop/Screenshot 2026-05-04 at 9.31.42 PM.png``.
+    """
+    # Selector pins the rule scope so a refactor that drops the
+    # `.search-space > .search-bar` chain trips the test.
+    assert (
+        ".search > .search-container > .search-space > .search-bar" in search_scss_source
+    ), "expected explicit `.search-bar` rule scoped under `.search-space`"
+    # The three layout primitives the upstream rule provided.
+    assert "width: 100%" in search_scss_source, (
+        "expected `width: 100%` on the search input (stops UA-default ~177px collapse)"
+    )
+    assert "box-sizing: border-box" in search_scss_source, (
+        "expected `box-sizing: border-box` on the search input"
+    )
+    # Background restate keeps the regression locked even if `_sidebar.scss`
+    # changes its `.search-space > input` rule.
+    assert "background: var(--surface-1, var(--light))" in search_scss_source, (
+        "expected explicit background restate on the search input "
+        "(defense-in-depth against `_sidebar.scss` refactors)"
+    )
+
+
 def test_custom_scss_imports_search_partial(custom_scss_source: str) -> None:
     """The new ``_search.scss`` partial is imported from the SCSS entry point.
 

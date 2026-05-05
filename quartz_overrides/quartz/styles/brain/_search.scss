@@ -110,6 +110,38 @@
   }
 }
 
+// brain: explicit `.search-bar` layout. The brain `Search.tsx` override
+// drops upstream's `Search.css = style` binding, so the stock
+// `& > .search-space > input { box-sizing: border-box; width: 100%;
+// padding: 0.5em 1em; ... }` rule from
+// `quartz/components/styles/search.scss` never loads. Without
+// `width: 100%`, the input collapses to the UA-default ~177px and
+// shows a visible gap on the right edge versus the chip rail and
+// result rows below — and without an explicit background it reads as
+// transparent against the darkened popover scrim. `_sidebar.scss`
+// already paints `background: var(--surface-1); border: 1px solid
+// var(--rule)` on `.search-space > input` for theme parity; this rule
+// supplies the missing layout primitives plus a defense-in-depth
+// background restate so a future `_sidebar.scss` refactor cannot
+// reintroduce the regression silently. Top corners squared so the
+// input sits flush with the chip rail above (which squares its bottom
+// corners via `border-bottom-{left,right}-radius: 0`).
+.search > .search-container > .search-space > .search-bar {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 0.6rem 0.9rem;
+  font-family: var(--bodyFont);
+  font-size: 1rem;
+  color: var(--ink-0, var(--dark));
+  background: var(--surface-1, var(--light));
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+
+  &:focus {
+    outline: none;
+  }
+}
+
 // brain: result row — flex layout with the icon and date pinned and
 // the title taking the remaining width. The snippet wraps below via
 // the explicit grid-column override; we keep `display: flex` for the
