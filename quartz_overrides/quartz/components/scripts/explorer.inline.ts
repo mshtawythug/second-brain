@@ -26,6 +26,20 @@
 //     label. The injection is script-side (rather than SSR-side via an
 //     Explorer.tsx override) to keep the upstream component unforked —
 //     same pattern as the `.folder-count` badge above.
+//   * P4.3 (Wiki UX Overhaul, item 9) — per-source month grouping for
+//     `_ingested/krisp/` and `_ingested/gmail/`. When `createFolderNode`
+//     descends into either of those folders, the children are grouped
+//     by `YYYY-MM` parsed from the slug-segment date prefix (krisp +
+//     gmail slugs are uniformly `<YYYY-MM-DD>-<rest>.md` per the P1.4 /
+//     P1.5 slug contracts). Groups render newest month first; files
+//     within a month sort by day descending. Each file's link text is
+//     rewritten to `<MMM D> · <Title>` so the meeting / thread date is
+//     visible without expanding the doc. Group headers are SSR-free
+//     `<li class="brain-explorer-month-header">` rows — non-collapsible
+//     to keep the patch minimal (no synthetic folder-state to persist).
+//     Implemented as a `groupFn` extension to the existing tree builder:
+//     the `isMonthGroupedFolder()` predicate gates the branch so every
+//     other folder renders through the original child loop unchanged.
 //
 // Everything else is verbatim from upstream. When upgrading Quartz,
 // diff this file against the new
@@ -183,6 +197,220 @@ function createFileNode(currentSlug: FullSlug, node: FileTrieNode): HTMLLIElemen
   return li
 }
 
+// brain (P4.3): the simple-slug paths whose direct children are
+// grouped by `YYYY-MM` parsed from the slug date prefix. Path-form
+// (post-`simplifySlug`) so we match what the trie produces after
+// stripping the synthetic `/index` suffix from folder nodes. Note
+// the **trailing slash** — `simplifySlug("foo/bar/index")` returns
+// `"foo/bar/"` (the `stripSlashes(s, true)` call inside `simplifySlug`
+// only strips the *leading* slash; trailing is preserved). Verified
+// by upstream `quartz/util/path.test.ts::simplifySlug` which asserts
+// `simplifySlug("abc/index") === "abc/"`.
+const MONTH_GROUPED_FOLDERS: ReadonlySet<string> = new Set([
+  "_ingested/krisp/",
+  "_ingested/gmail/",
+])
+
+// brain (P4.3): slug-segment date-prefix matcher. The slug for ingested
+// krisp / gmail docs is uniformly `<YYYY>-<MM>-<DD>-<external_id>-<slug>`
+// per `_krisp_slug()` / `gmail_slug()`. The capture groups feed
+// `parseSlugDate`; everything past the date prefix is irrelevant.
+const SLUG_DATE_PREFIX_RE = /^(\d{4})-(\d{2})-(\d{2})/
+
+// brain (P4.3): localized month names. Indexed 0..11 to match
+// `Date.getMonth()` semantics so a future swap to `Intl.DateTimeFormat`
+// is a single-line drop-in. Long names render in the group header
+// ("April 2026"), short names render in the per-file date prefix
+// ("Apr 15 · Title"). Pinned literals (rather than `Intl`) so the
+// static source-test in `tests/test_explorer_groupfn.py` can anchor
+// on them and so SSR-free rendering doesn't depend on the visitor's
+// browser locale.
+const MONTH_LABELS_LONG = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+] as const
+
+const MONTH_LABELS_SHORT = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+] as const
+
+// brain (P4.3): visual separator between the date prefix and the
+// document title in the rewritten link text. Middle-dot reads as a
+// soft cue without competing with the title's typography (the explorer
+// already uses em-dash for folder counts).
+const MONTH_DATE_SEPARATOR = " · "
+
+interface ParsedSlugDate {
+  year: number
+  month: number // 1..12
+  day: number   // 1..31
+}
+
+// brain (P4.3): parse `YYYY-MM-DD` prefix from a slug segment. Returns
+// `null` when the slug doesn't carry a leading date (defensive — covers
+// hand-dropped non-ingested files in `_ingested/krisp/` and any future
+// slug-shape change). Bounds-check month/day so a malformed slug like
+// `2026-13-99-...` doesn't yield a phantom group.
+function parseSlugDate(slugSegment: string): ParsedSlugDate | null {
+  const match = SLUG_DATE_PREFIX_RE.exec(slugSegment)
+  if (!match) return null
+  const year = parseInt(match[1], 10)
+  const month = parseInt(match[2], 10)
+  const day = parseInt(match[3], 10)
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null
+  }
+  if (month < 1 || month > 12) return null
+  if (day < 1 || day > 31) return null
+  return { year, month, day }
+}
+
+// brain (P4.3): `YYYY-MM` group key. Stable lexicographic sort matches
+// chronological sort because the year is fixed-width and zero-padded.
+function monthKey(parsed: ParsedSlugDate): string {
+  return `${parsed.year}-${String(parsed.month).padStart(2, "0")}`
+}
+
+// brain (P4.3): human-readable group header label, e.g. `April 2026`.
+function monthGroupLabel(parsed: ParsedSlugDate): string {
+  const name = MONTH_LABELS_LONG[parsed.month - 1] ?? ""
+  return `${name} ${parsed.year}`
+}
+
+// brain (P4.3): per-file short date label, e.g. `Apr 15`.
+function monthDayShort(parsed: ParsedSlugDate): string {
+  const name = MONTH_LABELS_SHORT[parsed.month - 1] ?? ""
+  return `${name} ${parsed.day}`
+}
+
+// brain (P4.3): activation predicate. `simplifySlug` turns the trie's
+// folder slug `_ingested/krisp/index` into the simple `_ingested/krisp`
+// form pinned in `MONTH_GROUPED_FOLDERS`. Folders outside this set fall
+// through to the original child-iteration loop in `createFolderNode`.
+function isMonthGroupedFolder(folderPath: FullSlug): boolean {
+  return MONTH_GROUPED_FOLDERS.has(simplifySlug(folderPath))
+}
+
+// brain (P4.3): rewrite a file node's link text to `<MMM D> · <Title>`.
+// Built on top of `createFileNode` so the href / `data-for` /
+// `.active` wiring stays identical to every other file row — the only
+// delta is the link's child structure. Two spans (`-date`, `-title`)
+// give the SCSS partial separate hooks for typography (date is
+// dimmed + tabular numerals; title is the regular ink color).
+function createFileNodeWithDatePrefix(
+  currentSlug: FullSlug,
+  node: FileTrieNode,
+  parsed: ParsedSlugDate,
+): HTMLLIElement {
+  const li = createFileNode(currentSlug, node)
+  const a = li.querySelector("a") as HTMLAnchorElement | null
+  if (!a) return li
+
+  const title = node.displayName
+  // Replace the upstream textContent with two spans so the date can
+  // be styled independently of the title.
+  a.textContent = ""
+  const dateEl = document.createElement("span")
+  dateEl.className = "brain-explorer-month-date"
+  dateEl.textContent = monthDayShort(parsed)
+  a.appendChild(dateEl)
+  a.appendChild(document.createTextNode(MONTH_DATE_SEPARATOR))
+  const titleEl = document.createElement("span")
+  titleEl.className = "brain-explorer-month-title"
+  titleEl.textContent = title
+  a.appendChild(titleEl)
+
+  return li
+}
+
+// brain (P4.3): the `groupFn` extension itself. Splits the folder's
+// children into month buckets, renders one header `<li>` per bucket
+// (newest first) followed by the bucket's files (newest day first),
+// and appends everything to `ul`. Behaviour notes:
+//
+//   * Folder children (defensive — current corpus is flat) recurse
+//     through `createFolderNode` so they render exactly as they would
+//     outside the grouped path. They appear before any month buckets
+//     so they don't visually break a `April 2026` ↘ files run.
+//   * Files whose slug segment doesn't match `SLUG_DATE_PREFIX_RE`
+//     are appended at the end as undated rows, rendered through the
+//     plain `createFileNode` so they keep their normal link text.
+//   * Empty buckets are skipped — defensive; a bucket only exists
+//     because at least one item parsed into it.
+//
+// The function returns `void` and mutates `ul` in place — same shape
+// as the original child loop in `createFolderNode`.
+function buildMonthGroupedChildren(
+  currentSlug: FullSlug,
+  node: FileTrieNode,
+  ul: HTMLUListElement,
+  opts: ParsedOptions,
+): void {
+  interface Bucket {
+    parsed: ParsedSlugDate
+    items: Array<{ child: FileTrieNode; parsed: ParsedSlugDate }>
+  }
+
+  const buckets = new Map<string, Bucket>()
+  const undatedFiles: FileTrieNode[] = []
+  const folderChildren: FileTrieNode[] = []
+
+  for (const child of node.children) {
+    if (child.isFolder) {
+      folderChildren.push(child)
+      continue
+    }
+    const parsed = parseSlugDate(child.slugSegment)
+    if (parsed === null) {
+      undatedFiles.push(child)
+      continue
+    }
+    const key = monthKey(parsed)
+    let bucket = buckets.get(key)
+    if (bucket === undefined) {
+      bucket = { parsed: { ...parsed, day: 1 }, items: [] }
+      buckets.set(key, bucket)
+    }
+    bucket.items.push({ child, parsed })
+  }
+
+  // Render any straggler subfolders first so they don't appear
+  // sandwiched between month groups.
+  for (const child of folderChildren) {
+    ul.appendChild(createFolderNode(currentSlug, child, opts))
+  }
+
+  // Sort keys descending — `YYYY-MM` is fixed-width zero-padded so
+  // lexicographic compare === chronological compare.
+  const sortedKeys = [...buckets.keys()].sort().reverse()
+  for (const key of sortedKeys) {
+    const bucket = buckets.get(key)
+    if (!bucket || bucket.items.length === 0) continue
+    const headerLi = document.createElement("li")
+    headerLi.className = "brain-explorer-month-header"
+    headerLi.setAttribute("role", "presentation")
+    headerLi.dataset["monthKey"] = key
+    headerLi.textContent = monthGroupLabel(bucket.parsed)
+    ul.appendChild(headerLi)
+
+    // Day-descending within the month. Same-day collisions fall back
+    // to slug-segment alpha so the ordering is deterministic.
+    bucket.items.sort((a, b) => {
+      if (a.parsed.day !== b.parsed.day) return b.parsed.day - a.parsed.day
+      return a.child.slugSegment.localeCompare(b.child.slugSegment)
+    })
+    for (const item of bucket.items) {
+      ul.appendChild(createFileNodeWithDatePrefix(currentSlug, item.child, item.parsed))
+    }
+  }
+
+  // Appendix — undated files (defensive; not expected in current corpus).
+  for (const child of undatedFiles) {
+    ul.appendChild(createFileNode(currentSlug, child))
+  }
+}
+
 // brain delta: recursive leaf-count for folder nodes. A "leaf" is any
 // node where `isFolder === false` — `FileTrieNode` is the post-filter
 // trie (Quartz strips `tags/` via the default `filterFn`), so the
@@ -265,11 +493,18 @@ function createFolderNode(
     folderOuter.classList.add("open")
   }
 
-  for (const child of node.children) {
-    const childNode = child.isFolder
-      ? createFolderNode(currentSlug, child, opts)
-      : createFileNode(currentSlug, child)
-    ul.appendChild(childNode)
+  // brain (P4.3): per-source month grouping for `_ingested/krisp/`
+  // and `_ingested/gmail/`. Every other folder renders through the
+  // original child loop unchanged.
+  if (isMonthGroupedFolder(folderPath)) {
+    buildMonthGroupedChildren(currentSlug, node, ul, opts)
+  } else {
+    for (const child of node.children) {
+      const childNode = child.isFolder
+        ? createFolderNode(currentSlug, child, opts)
+        : createFileNode(currentSlug, child)
+      ul.appendChild(childNode)
+    }
   }
 
   return li

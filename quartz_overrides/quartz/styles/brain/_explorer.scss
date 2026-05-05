@@ -13,6 +13,13 @@
 //     "Hide ingested" pill that the inline script injects as the
 //     first child of `.explorer-content`. Drives state via
 //     `[data-active="true"]` (set by the inline script on toggle).
+//   * `.brain-explorer-month-header` — month-group header `<li>`
+//     injected by the P4.3 `buildMonthGroupedChildren` pass when
+//     descending into `_ingested/krisp/` or `_ingested/gmail/`.
+//   * `.brain-explorer-month-date` / `.brain-explorer-month-title` —
+//     the two-span structure inside each grouped file's link, so
+//     the date prefix can render in dimmed tabular numerals while
+//     the title keeps the regular ink color.
 //
 // Scope NOT covered here:
 //
@@ -78,4 +85,58 @@
       background: color-mix(in srgb, var(--accent, var(--secondary)) 85%, black);
     }
   }
+}
+
+// ---------------------------------------------------------------------
+// P4.3 — Per-source month grouping inside `_ingested/{krisp,gmail}/`.
+// The inline script (`buildMonthGroupedChildren`) injects a header
+// `<li>` per month plus rewrites each file's link text into a
+// `<span.brain-explorer-month-date> · <span.brain-explorer-month-title>`
+// pair. Styling lives here so the upstream `explorer.scss` partial
+// stays unforked.
+// ---------------------------------------------------------------------
+
+.explorer .brain-explorer-month-header {
+  // Appearance — dimmed small-caps section heading that reads as a
+  // separator rather than as a navigable row. No hover/active state
+  // because the header is non-interactive (`role="presentation"`).
+  list-style: none;
+  margin: 0.6rem 0 0.15rem 0;
+  padding: 0.1rem 0;
+  font-family: var(--bodyFont, inherit);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3, var(--gray));
+  // Subtle hairline below the label so the eye picks up the section
+  // boundary without competing with the file rows.
+  border-bottom: 1px solid var(--rule, var(--lightgray));
+  // First header in a folder-outer flush against the top — drop the
+  // top margin so it doesn't collide with the parent folder's
+  // padding/indent.
+  &:first-child {
+    margin-top: 0.1rem;
+  }
+}
+
+.explorer .brain-explorer-month-date {
+  // Tabular numerals so `Mar 9` / `Apr 15` line up vertically when
+  // stacked. Lighter weight + dimmed color so the date prefix feels
+  // like marginalia, not the primary read.
+  display: inline-block;
+  min-width: 2.6rem;
+  margin-right: 0.25rem;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+  font-size: 0.78rem;
+  color: var(--ink-3, var(--gray));
+  white-space: nowrap;
+}
+
+.explorer .brain-explorer-month-title {
+  // The title carries the regular ink color so it remains the primary
+  // read in the row. No layout overrides — let the link's own padding
+  // and ellipsis-truncation rules from the upstream `explorer.scss`
+  // continue to apply.
+  color: inherit;
 }
