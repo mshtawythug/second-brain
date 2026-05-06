@@ -1,4 +1,30 @@
-"""Hybrid search: FTS + vector via Reciprocal Rank Fusion."""
+"""Hybrid search: FTS + vector via Reciprocal Rank Fusion.
+
+Three Phase-D refinements live here in addition to the original RRF
+combiner (see `docs/plans/2026-05-06-search-ranking-fix.md`):
+
+1. **Per-document FTS candidate cap** (revision #1). The FTS leg is
+   wrapped in a window-function CTE that keeps the top
+   :data:`PER_DOC_CHUNK_CAP` chunks per ``document_id`` before the
+   global ``LIMIT 50``, so a single long title-matching doc can no
+   longer monopolize the candidate set.
+
+2. **Compact-form query expansion** (revision #2).
+   :func:`_build_tsquery` ORs the standard tokenization with the
+   lowercase-concatenated form when the raw query has 2+ tokens, so
+   `Example Group` matches a doc whose only relevant term is the
+   single-token `[example-group]`.
+
+3. **Vector cosine floor** (revisions #3 + #6). The vector leg
+   filters out chunks below ``vector_sim_floor`` (default
+   :data:`DEFAULT_VECTOR_SIM_FLOOR`, overridable via
+   ``BRAIN_VECTOR_SIM_FLOOR`` in :mod:`brain.config`). Tuned
+   empirically — see :mod:`brain.config` and
+   ``tests/test_search_floor_default_excludes_known_bad.py``.
+
+The fts_only path bypasses (3) entirely.
+"""
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +50,47 @@ RRF_K = 60
 CANDIDATE_LIMIT = 50
 SNIPPET_LENGTH = 400
 
+# Maximum FTS chunks kept per document before the global candidate cut.
+# K=3 retains overlap signal across body chunks while preventing a long
+# title-matching doc (the live corpus has docs with 304+ chunks) from
+# filling the entire 50-candidate slot. Per plan revision #1.
+PER_DOC_CHUNK_CAP = 3
+
+# Token regex for compact-form query expansion. Matches alphanumeric runs
+# starting with a letter so we strip stray punctuation but preserve
+# embedded digits (`v2`, `cto4u` etc.). See :func:`_build_tsquery`.
+_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+
+
+def _build_tsquery(conn: psycopg.Connection, raw_query: str) -> str:
+    """Return a ``to_tsquery``-compatible string for ``raw_query``.
+
+    When the query has 2+ alphabetic tokens, ORs the standard
+    ``plainto_tsquery`` form with the lowercase-concatenated compact
+    form (e.g. ``Example Group`` → ``(cto & lunch) | ctolunch``). This
+    catches docs whose only mention of the term is a single compact
+    token like ``[example-group]`` that the English parser stems to
+    ``ctolunch``.
+
+    Returns an empty string for empty / pure-punctuation input —
+    ``to_tsquery('')`` is a valid empty tsquery that matches nothing.
+    """
+    tokens = _TOKEN_RE.findall(raw_query)
+    standard_row = conn.execute(
+        "SELECT plainto_tsquery('english', %s)::text", (raw_query,)
+    ).fetchone()
+    standard = standard_row[0] if standard_row else ""
+    if len(tokens) < 2 or not standard:
+        return standard
+    compact = "".join(tokens).lower()
+    compact_row = conn.execute(
+        "SELECT plainto_tsquery('english', %s)::text", (compact,)
+    ).fetchone()
+    compact_tsq = compact_row[0] if compact_row else ""
+    if not compact_tsq or compact_tsq == standard:
+        return standard
+    return f"({standard}) | ({compact_tsq})"
+
 
 def hybrid_search(
     conn: psycopg.Connection,
@@ -35,6 +102,7 @@ def hybrid_search(
     tag: str | None = None,
     since_days: int | None = None,
     fts_only: bool = False,
+    vector_sim_floor: float = 0.0,
 ) -> list[SearchResult]:
     """Combine FTS and vector ranks via Reciprocal Rank Fusion.
 
@@ -43,7 +111,13 @@ def hybrid_search(
     and the highest-scoring chunk per document becomes the returned snippet.
 
     When ``fts_only`` is True, the vector leg (and the Ollama embed call) is
-    skipped — useful when the embedding service is unavailable.
+    skipped — useful when the embedding service is unavailable. The cosine
+    floor (``vector_sim_floor``) only applies to the vector leg; FTS
+    candidates are not filtered by it.
+
+    ``vector_sim_floor`` filters chunks whose ``1 - cosine_distance`` is
+    below the floor. Default ``0.0`` keeps backwards compatibility for
+    direct callers; the CLI plumbs ``cfg.vector_sim_floor`` through.
     """
     where_clauses = ["TRUE"]
     where_params: list[Any] = []
@@ -58,16 +132,32 @@ def hybrid_search(
         where_params.append(since_days)
     where_sql = " AND ".join(where_clauses)
 
+    tsquery = _build_tsquery(conn, query)
+
+    # Per-doc cap CTE — keep the top PER_DOC_CHUNK_CAP chunks per
+    # ``document_id`` (ranked by ts_rank) before the global LIMIT, so one
+    # long doc can't fill the entire candidate slot.
     fts_sql = f"""
-        SELECT c.id, c.document_id, c.content,
-               ts_rank(c.tsv, plainto_tsquery('english', %s)) AS score
-        FROM chunks c
-        JOIN documents d ON d.id = c.document_id
-        WHERE c.tsv @@ plainto_tsquery('english', %s) AND {where_sql}
+        WITH ranked AS (
+            SELECT c.id, c.document_id, c.content,
+                   ts_rank(c.tsv, to_tsquery('english', %s)) AS score,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY c.document_id
+                       ORDER BY ts_rank(c.tsv, to_tsquery('english', %s)) DESC
+                   ) AS rn
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.tsv @@ to_tsquery('english', %s) AND {where_sql}
+        )
+        SELECT id, document_id, content, score
+        FROM ranked
+        WHERE rn <= {PER_DOC_CHUNK_CAP}
         ORDER BY score DESC
         LIMIT {CANDIDATE_LIMIT}
     """
-    fts_rows = conn.execute(fts_sql, [query, query, *where_params]).fetchall()
+    fts_rows = conn.execute(
+        fts_sql, [tsquery, tsquery, tsquery, *where_params]
+    ).fetchall()
 
     vec_rows: list[Any] = []
     if not fts_only:
@@ -78,10 +168,14 @@ def hybrid_search(
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
             WHERE {where_sql}
+              AND 1 - (c.embedding <=> %s::vector) >= %s
             ORDER BY c.embedding <=> %s::vector
             LIMIT {CANDIDATE_LIMIT}
         """
-        vec_rows = conn.execute(vec_sql, [q_emb, *where_params, q_emb]).fetchall()
+        vec_rows = conn.execute(
+            vec_sql,
+            [q_emb, *where_params, q_emb, vector_sim_floor, q_emb],
+        ).fetchall()
 
     rrf: dict[str, float] = {}
     chunk_meta: dict[str, tuple[str, str]] = {}  # chunk_id → (document_id, content)

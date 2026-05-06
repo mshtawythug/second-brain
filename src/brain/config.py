@@ -10,6 +10,25 @@ DEFAULT_QWEN3_MODEL = "qwen3-embedding:8b"
 DEFAULT_EMBEDDER = "arctic"
 _VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
 
+# Cosine-similarity floor for the vector leg of hybrid search. Tuned
+# empirically against the live corpus on 2026-05-06 (see Phase D of
+# `docs/plans/2026-05-06-search-ranking-fix.md` and
+# `tests/test_search_floor_default_excludes_known_bad.py`).
+#
+# Measurement: real Arctic embedding of the query ``person-x``
+# vs. stored chunk embeddings on the live corpus.
+#
+# * Known-bad docs (interview prep / cheatsheet false positives):
+#   max cosine ≤ 0.20.
+# * True positives kept by acceptance criterion #1: Krisp meeting
+#   ``3508c63e`` max 0.36; Gmail thread ``bc9f06c9`` max 0.27.
+#
+# The clean gap is (0.20, 0.27). A floor of 0.25 sits ``max_bad +
+# 0.05`` (per plan revision #3) and stays comfortably below the
+# 0.27 true-positive ceiling so neither acceptance-criterion doc is
+# dropped from the vector leg. Override via ``BRAIN_VECTOR_SIM_FLOOR``.
+DEFAULT_VECTOR_SIM_FLOOR = 0.25
+
 # Default vault location — clean, no implicit cloud sync. Users who want iCloud
 # can either symlink ``~/brain-vault`` to an iCloud Drive folder or set
 # ``BRAIN_VAULT_PATH`` to an iCloud path.
@@ -76,6 +95,7 @@ class Config:
     voyage_api_key: str | None = None
     vault_path: Path = DEFAULT_VAULT_PATH
     user_email: str | None = None
+    vector_sim_floor: float = DEFAULT_VECTOR_SIM_FLOOR
 
     @classmethod
     def load(cls) -> "Config":
@@ -118,6 +138,27 @@ class Config:
         # bleed into the JS global.
         user_email_raw = os.environ.get("BRAIN_USER_EMAIL")
         user_email = (user_email_raw or "").strip() or None
+        # Vector cosine floor — see DEFAULT_VECTOR_SIM_FLOOR. Validation:
+        # must parse as float in [0.0, 1.0] (cosine similarity range).
+        # Negative values would silently re-admit the noise tail; >1
+        # would exclude every chunk. Either is a config bug — surface it
+        # eagerly with ``ConfigError`` (per plan revision #6).
+        floor_raw = os.environ.get("BRAIN_VECTOR_SIM_FLOOR")
+        if floor_raw is None or floor_raw.strip() == "":
+            vector_sim_floor = DEFAULT_VECTOR_SIM_FLOOR
+        else:
+            try:
+                vector_sim_floor = float(floor_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_VECTOR_SIM_FLOOR must be a float in [0.0, 1.0] "
+                    f"(got {floor_raw!r})"
+                ) from exc
+            if not (0.0 <= vector_sim_floor <= 1.0):
+                raise ConfigError(
+                    f"BRAIN_VECTOR_SIM_FLOOR must be a float in [0.0, 1.0] "
+                    f"(got {vector_sim_floor!r})"
+                )
         return cls(
             database_url=database_url,
             ollama_host=ollama_host,
@@ -126,4 +167,5 @@ class Config:
             voyage_api_key=voyage_api_key,
             vault_path=vault_path,
             user_email=user_email,
+            vector_sim_floor=vector_sim_floor,
         )

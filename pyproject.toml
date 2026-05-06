@@ -47,6 +47,13 @@ markers = [
   # `~/brain-vault/.quartz/`. Marked separately from the default suite
   # so CI runners without Node can opt out via `-m "not e2e"`.
   "e2e: end-to-end Quartz build + serve test (requires npx + live workspace)",
+  # Phase D — search-ranking-fix. Tests under this marker connect to the
+  # live local Postgres (`second_brain` database) and to a real Ollama
+  # instance to embed a known-bad query and measure cosine similarity to
+  # a known-bad doc. Used to tune ``DEFAULT_VECTOR_SIM_FLOOR`` and to
+  # canary-check the post-fix corpus. Skipped on hosts without those
+  # services; opt out via `-m "not live_db"`.
+  "live_db: requires live local Postgres + Ollama (Phase D verification)",
 ]
 
 [tool.ruff]

@@ -36,8 +36,10 @@ from typing import Any
 import psycopg
 import yaml
 
-from ..ingest import Embedder
+from ..ingest import Embedder, _chunk_search_metadata
 from ..ingest.chunker import chunk_text
+from ..ingest.sub_tokens import extract_sub_tokens
+from ..queries import sync_chunk_search_metadata
 from ..tags import normalize_tags
 from .derived_links import DirectoryStore, rebuild_derived_for
 from .derived_links.fence import rewrite_derived_fences, strip_fence
@@ -1027,7 +1029,12 @@ def _insert_document(
         ),
     )
     _embed_and_insert_chunks(
-        conn, embedder=embedder, document_id=document_id, content=content
+        conn,
+        embedder=embedder,
+        document_id=document_id,
+        content=content,
+        title=title,
+        tags=tags,
     )
 
 
@@ -1075,8 +1082,20 @@ def _update_document(
     if body_changed:
         conn.execute("DELETE FROM chunks WHERE document_id = %s", (document_id,))
         _embed_and_insert_chunks(
-            conn, embedder=embedder, document_id=document_id, content=content
+            conn,
+            embedder=embedder,
+            document_id=document_id,
+            content=content,
+            title=title,
+            tags=tags,
         )
+    else:
+        # Body unchanged but the parent doc's title / tags may have moved
+        # (frontmatter-only edit). Migration 009 denormalizes both onto
+        # every chunk for the weighted tsv, so propagate the change to the
+        # existing chunks. The IS DISTINCT FROM guards inside the helper
+        # make this a free no-op when neither column actually moved.
+        sync_chunk_search_metadata(conn, document_id)
 
 
 def _embed_and_insert_chunks(
@@ -1085,22 +1104,40 @@ def _embed_and_insert_chunks(
     embedder: Embedder,
     document_id: str,
     content: str,
+    title: str,
+    tags: list[str],
 ) -> None:
     """Chunk + embed ``content`` and INSERT the resulting chunks.
 
     Empty / whitespace-only bodies produce zero chunks; the document row
     still exists (so ``brain show`` works) but is unsearchable until the user
     adds content. Matches the existing ingest pipeline's behavior.
+
+    ``title`` and ``tags`` populate the migration-009 denormalized
+    ``chunks.title_text`` / ``chunks.tags_text`` columns so the weighted
+    FTS tsvector (title at weight A, tags at weight B) ranks vault-tier
+    title/tag hits ahead of body hits — same contract as the ingest
+    pipeline.
     """
     chunks = chunk_text(content, count_tokens=embedder.count_tokens)
     if not chunks:
         return
     embeddings = embedder.embed([c.content for c in chunks], input_type="document")
+    title_text, tags_text = _chunk_search_metadata(title, tags)
     for c, vec in zip(chunks, embeddings, strict=True):
         conn.execute(
-            "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
-            "VALUES (%s, %s, %s, %s)",
-            (document_id, c.index, c.content, vec),
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding, "
+            "title_text, tags_text, search_extras) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                document_id,
+                c.index,
+                c.content,
+                vec,
+                title_text,
+                tags_text,
+                extract_sub_tokens(c.content),
+            ),
         )
 
 

@@ -25,6 +25,7 @@ from brain.vault.derived_links.participants import (
 from brain.vault.export import regenerate_vault_file
 
 from .chunker import chunk_text
+from .sub_tokens import extract_sub_tokens
 
 _logger = logging.getLogger(__name__)
 
@@ -99,6 +100,25 @@ class UpdateResult:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _chunk_search_metadata(title: str, tags: list[str]) -> tuple[str, str]:
+    """Compute the per-document ``(title_text, tags_text)`` chunk columns.
+
+    Migration 009 splits chunks.tsv into a weighted multi-field tsvector — the
+    title goes under weight ``A`` and the tags under weight ``B``. Both are
+    denormalized onto every chunk row so the FTS rewrite stays a single
+    GIN-indexable expression. This helper centralizes the projection so all
+    four ``INSERT INTO chunks`` sites + the ``sync_chunk_search_metadata``
+    helper in :mod:`brain.queries` agree on the exact textual form.
+
+    ``tags_text`` mirrors the SQL backfill pattern
+    ``array_to_string(d.tags, ' ')`` — space-joined, empty string when the
+    tag list is empty (NOT ``None``; we never write SQL NULL here so the
+    coalesce inside the generated tsv stays a no-op rather than a noisy
+    cast).
+    """
+    return title, " ".join(tags) if tags else ""
 
 
 def _is_gmail_thread_doc(doc: ExtractedDoc, source_kind: str) -> bool:
@@ -562,11 +582,21 @@ def _ingest_within_transaction(
         assert doc_row is not None  # RETURNING id always yields a row
         document_id = str(doc_row[0])
 
+        title_text, tags_text = _chunk_search_metadata(doc.title, tags)
         for c, emb in zip(chunks, embeddings, strict=True):
             conn.execute(
-                "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
-                "VALUES (%s, %s, %s, %s)",
-                (document_id, c.index, c.content, emb),
+                "INSERT INTO chunks (document_id, chunk_index, content, embedding, "
+                "title_text, tags_text, search_extras) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (
+                    document_id,
+                    c.index,
+                    c.content,
+                    emb,
+                    title_text,
+                    tags_text,
+                    extract_sub_tokens(c.content),
+                ),
             )
 
         _run_source_hooks(
@@ -666,11 +696,21 @@ def _update_thread_doc_in_place(
     )
 
     conn.execute("DELETE FROM chunks WHERE document_id=%s", (document_id,))
+    title_text, tags_text = _chunk_search_metadata(doc.title, tags)
     for c, emb in zip(chunks, embeddings, strict=True):
         conn.execute(
-            "INSERT INTO chunks (document_id, chunk_index, content, embedding) "
-            "VALUES (%s, %s, %s, %s)",
-            (document_id, c.index, c.content, emb),
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding, "
+            "title_text, tags_text, search_extras) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (
+                document_id,
+                c.index,
+                c.content,
+                emb,
+                title_text,
+                tags_text,
+                extract_sub_tokens(c.content),
+            ),
         )
 
     _run_source_hooks(
@@ -809,6 +849,13 @@ def apply_tags(
     ``brain tag <id> +COMPANY_REDACTED`` storing ``company-ko`` and lets a remove of
     ``COMPANY_REDACTED`` match a row that's currently stored as ``company-ko``.
     """
+    # Deferred import: ``brain.queries`` imports the ``Embedder`` Protocol
+    # from this module, so a top-level ``from ..queries import ...`` would
+    # cycle at package-load time. The function-local import resolves cleanly
+    # because both modules have finished initializing by the time
+    # ``apply_tags`` is first called.
+    from ..queries import sync_chunk_search_metadata
+
     add = normalize_tags(add or [])
     remove = normalize_tags(remove or [])
     with conn.transaction():
@@ -824,6 +871,14 @@ def apply_tags(
                 "WHERE t <> ALL(%s::text[])) WHERE id = %s",
                 (remove, document_id),
             )
+        # Migration 009 denormalizes documents.tags onto chunks.tags_text so
+        # the weighted tsv reflects tag changes. Run inside the same
+        # transaction that wrote the new tags so a rollback (e.g. SELECT
+        # below failing) keeps chunks and parent in lockstep. The IS
+        # DISTINCT FROM guards in the helper make this a no-op when add /
+        # remove produced no net change.
+        if add or remove:
+            sync_chunk_search_metadata(conn, document_id)
         row = conn.execute(
             "SELECT tags FROM documents WHERE id=%s", (document_id,)
         ).fetchone()
@@ -992,11 +1047,29 @@ def update_document(
                 embeddings = embedder.embed(
                     [c.content for c in chunks], input_type="document"
                 )
+                # Project the post-update title/tags onto the new chunks so
+                # the weighted tsv reflects the user's new edits, not the
+                # pre-edit state. Falls back to current values when the
+                # caller didn't pass an override; the surrounding ``UPDATE
+                # documents`` writes the same values back to the documents
+                # row, so the chunks and parent stay in lockstep.
+                final_title = new_title if new_title is not None else cur_title
+                final_tags = list(new_tags) if new_tags is not None else cur_tags
+                title_text, tags_text = _chunk_search_metadata(final_title, final_tags)
                 for c, emb in zip(chunks, embeddings, strict=True):
                     conn.execute(
                         "INSERT INTO chunks (document_id, chunk_index, content, "
-                        "embedding) VALUES (%s, %s, %s, %s)",
-                        (document_id, c.index, c.content, emb),
+                        "embedding, title_text, tags_text, search_extras) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        (
+                            document_id,
+                            c.index,
+                            c.content,
+                            emb,
+                            title_text,
+                            tags_text,
+                            extract_sub_tokens(c.content),
+                        ),
                     )
 
         if sets:
@@ -1005,6 +1078,17 @@ def update_document(
                 f"UPDATE documents SET {', '.join(sets)} WHERE id=%s",
                 params,
             )
+
+        # Migration 009 denormalizes documents.title / documents.tags onto
+        # chunks.title_text / chunks.tags_text. After ``rechunked`` the
+        # freshly-inserted chunks already carry the post-update values, so
+        # the helper's IS DISTINCT FROM guards turn this into a no-op for
+        # those rows. For the no-rechunk path (title-only or tags-only
+        # edit), this is the call that propagates the change to every
+        # existing chunk so the weighted tsv stays consistent.
+        if "title" in fields_changed or "tags" in fields_changed:
+            from ..queries import sync_chunk_search_metadata
+            sync_chunk_search_metadata(conn, document_id)
 
     # Mirror writes happen OUTSIDE the transaction so a filesystem error
     # cannot roll back the DB update. Triggered when the body was rechunked

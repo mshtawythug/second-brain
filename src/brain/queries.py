@@ -299,6 +299,38 @@ def finalize_embedding_index(
             )
 
 
+def sync_chunk_search_metadata(
+    conn: psycopg.Connection[Any], document_id: str
+) -> int:
+    """Refresh ``chunks.title_text`` and ``chunks.tags_text`` from documents.
+
+    Migration 009 denormalizes ``documents.title`` and ``documents.tags`` onto
+    every chunk so the weighted FTS tsvector (title at weight A, tags at
+    weight B) stays a single GIN-indexable expression. Anything that mutates
+    those two source columns without re-inserting chunks must call this so
+    the chunk-side denormalization stays consistent — every title/tag UPDATE
+    site in the codebase pairs with a call to this helper.
+
+    The ``IS DISTINCT FROM`` guards on both columns make repeated calls a
+    no-op (returns 0). Scoped to one document so the mutation is bounded
+    even on a brain with hundreds of thousands of chunks. Returns the
+    number of chunk rows actually updated — useful for tests and
+    observability.
+    """
+    cur = conn.execute(
+        "UPDATE chunks "
+        "SET title_text = d.title, "
+        "    tags_text  = array_to_string(d.tags, ' ') "
+        "FROM documents d "
+        "WHERE chunks.document_id = d.id "
+        "  AND chunks.document_id = %s "
+        "  AND (chunks.title_text IS DISTINCT FROM d.title "
+        "       OR chunks.tags_text IS DISTINCT FROM array_to_string(d.tags, ' '))",
+        (document_id,),
+    )
+    return cur.rowcount or 0
+
+
 @dataclass
 class EmbeddingColumnState:
     """Snapshot of the ``chunks.embedding`` column for ``brain doctor``.

@@ -17,7 +17,7 @@ import typer
 import yaml
 from rich.table import Table
 
-from .backfill import backfill_source_rows
+from .backfill import backfill_search, backfill_source_rows
 from .config import Config, ConfigError
 from .db import connect, connect_raw, ensure_embedding_column, run_migrations
 from .edit_session import (
@@ -64,6 +64,7 @@ from .queries import (
     mirror_drift_summary,
     resolve_document_prefix,
     summary_counts,
+    sync_chunk_search_metadata,
 )
 from .search import hybrid_search
 from .tags import normalize_tag, normalize_tags
@@ -165,16 +166,32 @@ def init() -> None:
     """
     cfg = Config.load()
     embedder = make_embedder(cfg)
+    search_backfill_report: backfill_search.BackfillReport | None = None
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         applied = run_migrations(conn)
         ensure_embedding_column(conn, embedder)
+        # Migration 009 added title_text/tags_text/search_extras columns to
+        # chunks but seeded them as NULL. When 009 is applied for the first
+        # time on a populated DB, run the backfill in the same init pass so
+        # search ranking is correct without a separate operator step. On a
+        # fresh DB (zero chunks) the backfill is a cheap no-op. On
+        # subsequent init runs 009 is no longer in ``applied`` so we skip
+        # the work entirely.
+        if "009_chunks_weighted_tsv.sql" in applied:
+            search_backfill_report = backfill_search.run(conn)
     if applied:
         for name in applied:
             typer.echo(f"applied {name}")
     else:
         typer.echo("no migrations to apply")
     typer.echo(f"embedder        {cfg.embedder} (dim={embedder.dim})")
+    if search_backfill_report is not None:
+        typer.echo(
+            f"backfill search Stage A: {search_backfill_report.stage_a_rows} "
+            f"row(s) / Stage B: {search_backfill_report.stage_b_rows} row(s) "
+            f"/ total chunks: {search_backfill_report.total_chunks}"
+        )
 
 
 def _ollama_loaded_models(payload: Any) -> list[str]:
@@ -891,6 +908,7 @@ def search(
             tag=tag,
             since_days=since_days,
             fts_only=fts_only,
+            vector_sim_floor=cfg.vector_sim_floor,
         )
 
     if json_output:
@@ -3445,6 +3463,39 @@ def backfill_source_rows_cmd(
     )
 
 
+@backfill_app.command("search")
+def backfill_search_cmd() -> None:
+    """Backfill ``chunks.title_text`` / ``tags_text`` / ``search_extras`` for migration 009.
+
+    Two stages, both idempotent:
+
+    Stage A — SQL ``UPDATE`` denormalizes ``documents.title`` and
+    ``documents.tags`` onto every chunk via the FK. Re-running on a
+    converged corpus reports 0 rows updated.
+
+    Stage B — Python loop: recomputes ``extract_sub_tokens(content)`` for
+    every chunk and writes back only when the computed value differs from
+    the stored ``search_extras``. Restores the canonical value if a row's
+    ``search_extras`` was hand-edited to a stale string.
+
+    ``brain init`` calls this automatically right after migration 009 is
+    first applied; running it again by hand later is safe and a no-op
+    once the corpus has converged.
+    """
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        # Autocommit so the explicit ``conn.transaction()`` blocks inside
+        # backfill_search.run own the write boundary; otherwise the outer
+        # implicit txn opened by the pre-write SELECT would roll back on
+        # close and silently undo the backfill.
+        conn.autocommit = True
+        report = backfill_search.run(conn)
+
+    typer.echo(f"Stage A (title/tags denorm): {report.stage_a_rows} rows updated")
+    typer.echo(f"Stage B (search_extras):     {report.stage_b_rows} rows updated")
+    typer.echo(f"Total chunks:                {report.total_chunks}")
+
+
 def _load_tag_mapping(path: Path) -> dict[str, str]:
     """Load and validate a ``--mapping`` JSON file for ``backfill normalize-tags``.
 
@@ -3577,6 +3628,12 @@ def backfill_normalize_tags(
                 "UPDATE documents SET tags = %s WHERE id = %s",
                 (new_tags, doc_id),
             )
+            # Migration 009 denormalizes documents.tags onto chunks.tags_text
+            # so the weighted tsv reflects tag changes. The bulk normalizer
+            # bypasses ``apply_tags`` (full replace, not add/remove diff), so
+            # the chunk sync has to happen here. The IS DISTINCT FROM guards
+            # inside the helper make this a no-op when only ordering changed.
+            sync_chunk_search_metadata(conn, doc_id)
             docs_normalized += 1
             if vault_path_rel is None:
                 continue
