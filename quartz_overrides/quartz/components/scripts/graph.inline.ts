@@ -114,6 +114,7 @@ type LinkRenderData = GraphicsInfo & {
 type NodeRenderData = GraphicsInfo & {
   simulationData: NodeData
   label: Text
+  radius: number
   // brain-extension: cached at label-creation time so the per-frame
   // label-opacity loop can branch on hub-vs-leaf without recomputing
   // the link count every frame.
@@ -168,6 +169,12 @@ function shortLabel(text: string, max: number): string {
 // this to a higher value via cfg.hubLabelThreshold so the central
 // cluster doesn't wall-of-text.
 const DEFAULT_HUB_LABEL_THRESHOLD = 6
+
+// brain-extension: graph labels should read as attached to their node,
+// Obsidian-style. Small labels sit directly under the circle; structurally
+// important hub labels can sit centered inside the circle when the mark is big
+// enough to carry the text.
+const LABEL_NODE_GAP = 3
 
 // brain-extension: ref pattern that lets a chip-driven rerender swap the live
 // cleanup in place without dropping the cleanup-array entry the nav handler
@@ -1192,6 +1199,38 @@ async function renderGraph(
     )
   }
 
+  function unscaledLabelSize(label: Text): { width: number; height: number } {
+    const scaleX = Math.abs(label.scale.x)
+    const scaleY = Math.abs(label.scale.y)
+    const width =
+      scaleX === 0 || !Number.isFinite(scaleX) ? label.width : label.width / scaleX
+    const height =
+      scaleY === 0 || !Number.isFinite(scaleY) ? label.height : label.height / scaleY
+    return { width, height }
+  }
+
+  function placeNodeLabel(
+    label: Text,
+    node: NodeRenderData,
+    x: number,
+    y: number,
+  ) {
+    const labelSize = unscaledLabelSize(label)
+    const diameter = node.radius * 2
+    if (
+      node.isHub &&
+      labelSize.height <= diameter &&
+      labelSize.width <= diameter
+    ) {
+      label.anchor.set(0.5, 0.5)
+      label.position.set(x, y)
+      return
+    }
+
+    label.anchor.set(0.5, 0)
+    label.position.set(x, y + node.radius + LABEL_NODE_GAP)
+  }
+
   let hoveredNodeId: string | null = null
   let hoveredNeighbours: Set<string> = new Set()
   // brain-extension: latest zoom-driven label opacity. The d3-zoom callback
@@ -1540,7 +1579,7 @@ async function renderGraph(
       eventMode: "none",
       text: truncatedText,
       alpha: 0,
-      anchor: { x: 0.5, y: 1.2 },
+      anchor: { x: 0.5, y: 0.5 },
       style: {
         fontSize: labelFontSize,
         fill: computedStyleMap["--dark"],
@@ -1552,14 +1591,15 @@ async function renderGraph(
 
     let oldLabelOpacity = 0
     const isTagNode = nodeId.startsWith("tags/")
+    const radius = nodeRadius(n)
     const gfx = new Graphics({
       interactive: true,
       label: nodeId,
       eventMode: "static",
-      hitArea: new Circle(0, 0, nodeRadius(n)),
+      hitArea: new Circle(0, 0, radius),
       cursor: "pointer",
     })
-      .circle(0, 0, nodeRadius(n))
+      .circle(0, 0, radius)
       .fill({ color: isTagNode ? computedStyleMap["--light"] : color(n) })
       .on("pointerover", (e) => {
         selectedNodeId = e.target.label as SimpleSlug
@@ -1610,6 +1650,7 @@ async function renderGraph(
       simulationData: n,
       gfx,
       label,
+      radius,
       color: color(n),
       alpha: 1,
       active: false,
@@ -1907,7 +1948,7 @@ async function renderGraph(
       if (x === undefined || y === undefined) continue
       n.gfx.position.set(x + width / 2, y + height / 2)
       if (n.label) {
-        n.label.position.set(x + width / 2, y + height / 2)
+        placeNodeLabel(n.label, n, x + width / 2, y + height / 2)
       }
     }
 

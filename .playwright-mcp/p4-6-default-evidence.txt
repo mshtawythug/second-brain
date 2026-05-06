@@ -1,5 +1,0 @@
-=== DEFAULT BUILD (no BRAIN_DEBUG) — only 2 buttons should appear ===
-class="global-graph-icon"
-class="local-graph-fullscreen-icon"
----
-Saved: .playwright-mcp/p4-6-default-evidence.txt
