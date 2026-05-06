@@ -52,12 +52,18 @@ def test_related_docs_is_exported_and_wired_into_right_sidebar() -> None:
     assert 'import RelatedDocs from "./RelatedDocs"' in index_text
     assert "RelatedDocs," in index_text
     assert "Component.RelatedDocs()" in layout_text
+    # brain (2026-05-06): right-sidebar order is graph → toc → related
+    # → backlinks. ToC sits above RelatedDocs because page-utility
+    # outranks exploration; previously RelatedDocs ran above the ToC
+    # and crowded the flex column on hub pages with many related notes,
+    # squeezing the ToC's inner scroll list to ~0px and making its
+    # entries unreachable.
     assert layout_text.index("Component.Graph(") < layout_text.index(
-        "Component.RelatedDocs()"
-    )
-    assert layout_text.index("Component.RelatedDocs()") < layout_text.index(
         "Component.DesktopOnly(Component.TableOfContents())"
     )
+    assert layout_text.index(
+        "Component.DesktopOnly(Component.TableOfContents())"
+    ) < layout_text.index("Component.RelatedDocs()")
 
 
 def test_related_docs_styles_are_loaded() -> None:

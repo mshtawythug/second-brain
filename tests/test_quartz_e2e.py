@@ -274,6 +274,44 @@ def test_related_docs_and_command_palette_assets_present(
     assert first["source"] == "vault"
 
 
+def test_right_sidebar_renders_toc_above_related_docs(
+    e2e_build: str,
+) -> None:
+    """The right sidebar order is graph → toc → related-docs → backlinks.
+
+    Regression for the "can't scroll to the Table of Contents" bug
+    (2026-05-06): on hub pages with many related notes, the TOC
+    component sat below RelatedDocs in the flex-column right sidebar
+    and got squeezed to ~0 internal height, making its entries
+    unreachable. The fix in ``quartz.layout.ts`` moves the TOC above
+    RelatedDocs so it claims its natural height first.
+
+    The fixture ``index.md`` carries two ``##`` headings, so the stock
+    TOC component renders (it returns ``null`` for heading-less pages).
+    We assert ordering by string-index of class hooks in the HTML.
+    """
+    html = _fetch_text(f"{e2e_build}/")
+
+    # `Component.DesktopOnly` appends the `desktop-only` displayClass after
+    # the component's own class via `classNames` (see
+    # `quartz/util/lang.ts`), so the rendered order is `class="toc
+    # desktop-only"` rather than the other way around.
+    graph_idx = html.find('class="graph"')
+    toc_idx = html.find('class="toc desktop-only"')
+    related_idx = html.find("brain-related-docs")
+
+    assert graph_idx > -1, "expected the local graph to render in the right sidebar"
+    assert toc_idx > -1, (
+        "expected the TOC to render — fixture index.md must have at least one heading"
+    )
+    assert related_idx > -1, "expected RelatedDocs panel in the right sidebar"
+
+    assert graph_idx < toc_idx < related_idx, (
+        "right-sidebar order must be graph → toc → related-docs; "
+        f"got positions graph={graph_idx} toc={toc_idx} related={related_idx}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 2 — contentIndex.json shape
 # ---------------------------------------------------------------------------

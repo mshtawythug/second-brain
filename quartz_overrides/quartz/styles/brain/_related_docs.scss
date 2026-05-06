@@ -11,6 +11,12 @@
     padding: 0.6rem 0.8rem;
     box-shadow: var(--shadow-sm);
     box-sizing: border-box;
+    // brain: allow the panel to shrink in the right-sidebar flex column
+    // so a tall related list never pushes ToC / Backlinks off the
+    // viewport. Without `min-height: 0` flex children refuse to shrink
+    // below their content size, which is what produced the original
+    // "can't scroll to the ToC" bug on hub pages.
+    min-height: 0;
 
     &[hidden] {
       display: none;
@@ -27,12 +33,32 @@
     }
   }
 
+  // brain: cap the related-docs list at ~one third of the viewport with
+  // its own internal scroll. The panel chrome (background, h3, padding)
+  // stays put; only the rows scroll. Combined with reordering the ToC
+  // above this panel in `quartz.layout.ts`, this guarantees the ToC and
+  // Backlinks panels remain reachable on hub pages with many related
+  // notes (COMPANY_REDACTED, COMPANY_REDACTED, etc. routinely pull 12+).
   .brain-related-docs-list {
     list-style: none;
     margin: 0;
     padding: 0;
     display: grid;
     gap: 0.35rem;
+    max-height: 32vh;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    scrollbar-color: var(--lightgray) transparent;
+
+    &::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: var(--lightgray);
+      border-radius: 2px;
+    }
   }
 
   .brain-related-docs-item {

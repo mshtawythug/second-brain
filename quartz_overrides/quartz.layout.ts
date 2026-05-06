@@ -231,8 +231,15 @@ export const defaultContentPageLayout: PageLayout = {
         hubLabelFontMultiplier: 1.8,
       },
     }),
-    Component.RelatedDocs(),
+    // brain: ToC sits directly under the graph (page-utility outranks
+    // exploration). Stock Quartz styles the ToC as a flex column with
+    // `flex: 0 0.5 auto` and a self-scrolling `<ul>` — when RelatedDocs
+    // ran above it the related list (often 12+ rows on hub pages) ate
+    // the available column height and squeezed the ToC's inner list to
+    // ~0px, making the entries unreachable. Putting the ToC first lets
+    // it claim its natural height before the related list grows.
     Component.DesktopOnly(Component.TableOfContents()),
+    Component.RelatedDocs(),
     Component.Backlinks(),
   ],
 }
