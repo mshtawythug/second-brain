@@ -173,6 +173,45 @@ def test_brain_search_returns_expected_shape(
     assert "Doc A" in titles
 
 
+def test_brain_search_propagates_vector_sim_floor_from_state_cfg(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MCP ``brain_search`` must pass ``cfg.vector_sim_floor`` to ``hybrid_search``.
+
+    Regression for a missed callsite: ``brain.cli.search`` was updated to
+    forward ``cfg.vector_sim_floor`` but ``brain.mcp_server.brain_search``
+    was not, so MCP callers (Claude itself) silently got the pre-fix
+    no-floor behavior and the search-ranking-fix's known-bad docs leaked
+    back into their results.
+
+    The contract is: MCP brain_search calls hybrid_search with
+    ``vector_sim_floor=state.cfg.vector_sim_floor`` — full stop. This
+    test asserts the kwarg is wired by spying on hybrid_search.
+    """
+    captured: dict[str, object] = {}
+
+    def spy_hybrid_search(*_args: object, **kwargs: object) -> list[object]:
+        captured.update(kwargs)
+        return []
+
+    state = mcp_server._State(
+        cfg=Config(database_url=TEST_DATABASE_URL, vector_sim_floor=0.42),
+        embedder=fake_embedder,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+    monkeypatch.setattr(mcp_server, "hybrid_search", spy_hybrid_search)
+
+    mcp_server.brain_search(query="anything")
+
+    assert captured.get("vector_sim_floor") == 0.42, (
+        "MCP brain_search must forward state.cfg.vector_sim_floor to "
+        "hybrid_search; got "
+        f"{captured.get('vector_sim_floor')!r} instead."
+    )
+
+
 def test_brain_search_respects_filters(
     test_db: psycopg.Connection,
     fake_embedder: object,

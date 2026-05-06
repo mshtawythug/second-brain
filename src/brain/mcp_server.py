@@ -213,6 +213,7 @@ def brain_search(
                 tag=tag,
                 since_days=since_days,
                 fts_only=fts_only,
+                vector_sim_floor=state.cfg.vector_sim_floor,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
