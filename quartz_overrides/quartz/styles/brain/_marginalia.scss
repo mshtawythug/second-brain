@@ -99,85 +99,19 @@
 // rules don't conflict (e.g. nothing about font-style) we inherit
 // Lane C's defaults silently — which is fine.
 
-@media (min-width: 1280px) {
-  .sidebar.right > .backlinks {
-    // Strip Lane C's card chrome — marginalia should read as
-    // ambient page furniture, not an elevated panel. The right
-    // edge gets a hairline rule instead, anchoring the column
-    // visually as a "margin" beside the article.
-    background: transparent;
-    box-shadow: none;
-    border-radius: 0;
-    border-left: 1px solid var(--rule);
-    padding: 0 0 0 0.8rem;
-    // Constrain to ~18ch so titles wrap to the marginalia column
-    // and read as side-notes rather than running across the full
-    // 320px sidebar width. 18ch ≈ 4-5 words at `--fs-sm`, the
-    // classical side-note width.
-    max-width: 18ch;
-
-    // Section heading — re-paint to match the marginalia voice.
-    // Lane C's sidebar styles already small-cap the h3 (see
-    // `_sidebar.scss` line 187-198); we keep the small-caps but
-    // dim further to `--ink-2` so the heading subordinates to the
-    // links beneath it (in marginalia, the topic is implied by
-    // proximity to the article — the heading is just a label).
-    > h3 {
-      color: var(--ink-2);
-      margin-bottom: 0.6rem;
-    }
-
-    // The backlinks list itself — Quartz emits `<ul>` (via the
-    // `OverflowList` wrapper, see `Backlinks.tsx` line 34) with
-    // `<li><a class="internal">title</a></li>` rows.
-    ul {
-      margin: 0;
-      padding: 0;
-      list-style: none;
-    }
-
-    // Each side-note link — italic Newsreader, smaller type,
-    // dimmed ink, tight per-link spacing. Hover lifts the ink
-    // back to body (`--ink-1`) and surfaces Quartz's stock
-    // popover preview (already wired by `popover.inline.ts` for
-    // every `.internal` link — no script work needed here).
-    ul li {
-      margin: 0.35rem 0;
-      line-height: 1.35;
-      font-size: var(--fs-sm);
-    }
-
-    ul li a {
-      // Newsreader italic — body-type voice for marginalia. Lane A's
-      // project-wide italic-→-Fraunces convention applies to inline
-      // `<em>` / `<i>`, not to a whole-block side-note treatment.
-      // Printed marginalia in tradition uses the body type one notch
-      // smaller, italicized; Newsreader's optical-size italic at
-      // `--fs-sm` is exactly that.
-      font-family: var(--bodyFont);
-      font-style: italic;
-      color: var(--ink-2);
-      // Subdue Lane B's link underline treatment for the
-      // marginalia voice — side-notes read as quiet references,
-      // not call-to-action links. Lane B's `.internal` rules in
-      // `_links.scss` paint a 1px underline-from-font; we drop it
-      // here in favor of a hover-only underline.
-      text-decoration: none;
-      // brain (Lane D audit fix 2026-05-02): only `color` is animated.
-      // The earlier draft also listed `text-decoration-color` in the
-      // transition, but the resting state has `text-decoration: none`
-      // — there's nothing for color to apply to until hover instantly
-      // adds the underline, so animating the color did nothing.
-      transition: color var(--motion-fast) var(--motion-easing);
-
-      &:hover,
-      &:focus-visible {
-        color: var(--ink-1);
-        text-decoration: underline;
-        text-decoration-thickness: 1px;
-        text-decoration-color: var(--accent-soft);
-        text-underline-offset: 2px;
-      }
-    }
-  }
-}
+// brain (2026-05-06): the marginalia treatment was REMOVED per user
+// feedback that Backlinks read as visually inconsistent with the
+// Related and Table of Contents cards above it (190px column vs ~256px
+// full-width cards). Backlinks now inherits Lane C's full-width card
+// chrome from `_sidebar.scss` (`background: var(--surface-1)`,
+// `border-radius: 8px`, `box-shadow: var(--shadow-sm)`,
+// `padding: 0.6rem 0.8rem`), matching the ToC and Related panels above
+// it. The italic / dimmed / narrow side-note voice is dropped — sidebar
+// reads as a stack of three coordinated panels instead.
+//
+// If a future redesign wants the Tufte side-note treatment back, the
+// architectural path is to extract `.backlinks` into a fourth grid
+// area in `base.scss`'s template (see the original analysis in this
+// file's git history at commit 2eaf550) — re-applying the SCSS without
+// also moving the DOM out of `.right.sidebar` reproduces the exact
+// width-mismatch bug this removal addresses.

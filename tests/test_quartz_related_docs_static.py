@@ -79,3 +79,49 @@ def test_related_docs_styles_are_loaded() -> None:
     ):
         assert selector in text
     assert '@use "./brain/related_docs"' in custom
+
+
+def test_related_docs_section_contains_inner_list_via_flex_column() -> None:
+    """Regression: prevent the inner <ol> from spilling onto Backlinks.
+
+    Bug (2026-05-06): when the right-sidebar flex column squeezed
+    `.brain-related-docs` (which has `min-height: 0`), the inner list
+    kept its hardcoded `max-height: 32vh` and rendered past the section
+    box (default `overflow: visible`) — visually overlapping the
+    Backlinks panel below it. Measured: section box was 146px tall but
+    the list rendered at 288px, spilling 152px onto Backlinks at y=772.
+
+    Fix: section becomes a flex column itself + the list grows
+    `min-height: 0` so the section's flex layout shrinks the list (and
+    its `overflow-y: auto` provides internal scroll) instead of letting
+    it overflow the section box.
+    """
+    text = _read(RELATED_SCSS)
+
+    # The section must be a flex column so the inner list participates
+    # in flex sizing (and shrinks within the section's allocated height).
+    assert "display: flex" in text
+    assert "flex-direction: column" in text
+
+    # The inner list must allow flex-shrink (min-height: 0) and provide
+    # its own internal scroll (overflow-y: auto). Without min-height: 0,
+    # flex children refuse to shrink below content and the list
+    # overflows the section box.
+    list_block_start = text.index(".brain-related-docs-list")
+    list_block_end = text.index("}", list_block_start + 1)
+    # Find the closing brace of the *outer* list block (skip nested
+    # &::-webkit-scrollbar rules); search for the next selector instead.
+    list_block_end = text.index(".brain-related-docs-item", list_block_start)
+    list_block = text[list_block_start:list_block_end]
+    assert "min-height: 0" in list_block, (
+        "list needs min-height: 0 so flex layout can shrink it within "
+        "the section box (otherwise it overflows onto Backlinks)"
+    )
+    assert "overflow-y: auto" in list_block, (
+        "list needs internal scroll so users can still see all related "
+        "items when the section is squeezed by the parent flex column"
+    )
+    assert "max-height: 32vh" in list_block, (
+        "list keeps its 32vh cap so a packed related set leaves room "
+        "for Backlinks below in the natural-height case"
+    )

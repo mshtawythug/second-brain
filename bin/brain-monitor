@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# Diagnose the brain sync + build watchers when something feels off.
+#
+# Modes:
+#   brain-monitor               Snapshot of both watchers and recent activity.
+#   brain-monitor -f | --tail   Live stream of relevant events from both logs.
+#   brain-monitor probe         End-to-end: touch a vault file, time the rebuild.
+#   brain-monitor -h | --help   Show this help.
+#
+# Why this exists: build_watcher.py emits no per-build log line at INFO level,
+# and the Quartz subprocess output is dominated by KaTeX warnings, so the
+# build log looks "broken" even when it's working — and "stuck" when it really
+# is broken. This script surfaces ground truth from three places:
+#   - PIDs in /tmp/brain-{watch,build}.pid
+#   - the .quartz/builds/<id>/ directory tree (mtimes = real build cycles)
+#   - the .quartz/current symlink target (= what Caddy is serving right now)
+#
+# Env (matches brain-up):
+#   BRAIN_VAULT_PATH   default ~/brain-vault
+#   BRAIN_WIKI_PORT    default 8080
+
+set -euo pipefail
+
+VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
+QUARTZ_DIR="$VAULT/.quartz"
+BUILDS_DIR="$QUARTZ_DIR/builds"
+CURRENT="$QUARTZ_DIR/current"
+PORT="${BRAIN_WIKI_PORT:-8080}"
+URL="http://localhost:$PORT"
+
+WATCH_PID='/tmp/brain-watch.pid'
+WATCH_LOG='/tmp/brain-watch.log'
+BUILD_PID='/tmp/brain-build.pid'
+BUILD_LOG='/tmp/brain-build.log'
+
+usage() {
+    sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# --- helpers ---------------------------------------------------------------
+
+pid_alive() {
+    local pid_file="$1"
+    [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null
+}
+
+pid_or_dash() {
+    [[ -f "$1" ]] && cat "$1" || echo '-'
+}
+
+# Drop the well-known noise classes from the build log so the actual signal
+# (build start/end markers from Quartz, errors, our own log lines) is legible.
+# Also drops blank lines so trailing KaTeX bursts don't leave a window of
+# whitespace at the tail.
+filter_build_log() {
+    grep -Ev \
+        -e '^[[:space:]]*$' \
+        -e 'LaTeX-incompatible input' \
+        -e 'No character metrics for' \
+        -e "Warning: couldn't find git repository" \
+        -e '^Parsing input files using' \
+        -e '^Cleaned output directory' \
+        || true
+}
+
+current_build_id() {
+    if [[ -f "$CURRENT/.build-id" ]]; then
+        cat "$CURRENT/.build-id"
+    else
+        echo '(none)'
+    fi
+}
+
+# Most recent N build dirs sorted by name (build_id is timestamp-prefixed,
+# so lexical order == chronological).
+recent_builds() {
+    local n="${1:-5}"
+    [[ -d "$BUILDS_DIR" ]] || return 0
+    /bin/ls -1 "$BUILDS_DIR" 2>/dev/null | sort | tail -n "$n"
+}
+
+# Most recently modified files inside the vault, excluding our own output
+# tree and noisy dotdirs. Used by both `snapshot` and `probe` to confirm the
+# vault we're inspecting is the one being edited.
+recent_vault_files() {
+    local n="${1:-5}"
+    # Subshell with pipefail off: `head` closes the pipe early, which
+    # SIGPIPEs `find`/`stat`/`sort` and would otherwise abort the script
+    # under `set -o pipefail`.
+    (
+        set +o pipefail
+        find "$VAULT" \
+            -type f \
+            -not -path "$VAULT/.quartz/*" \
+            -not -path "$VAULT/.git/*" \
+            -not -name '.DS_Store' \
+            -print0 2>/dev/null \
+          | xargs -0 stat -f '%m %N' 2>/dev/null \
+          | sort -rn \
+          | head -n "$n" \
+          | awk '{
+                ts = $1
+                $1 = ""
+                sub(/^ /, "")
+                cmd = "date -r " ts " \"+%H:%M:%S\""
+                cmd | getline t
+                close(cmd)
+                print "  " t "  " $0
+            }'
+    )
+}
+
+# --- snapshot mode ---------------------------------------------------------
+
+snapshot() {
+    local sync_pid build_pid sync_state build_state
+    sync_pid="$(pid_or_dash "$WATCH_PID")"
+    build_pid="$(pid_or_dash "$BUILD_PID")"
+
+    if pid_alive "$WATCH_PID"; then sync_state='running'; else sync_state='stopped'; fi
+    if pid_alive "$BUILD_PID"; then build_state='running'; else build_state='stopped'; fi
+
+    echo "🧠 brain-monitor   vault=$VAULT"
+    echo
+    printf '  sync watcher   %-7s  pid=%-7s  log=%s\n' "$sync_state" "$sync_pid" "$WATCH_LOG"
+    printf '  build watcher  %-7s  pid=%-7s  log=%s\n' "$build_state" "$build_pid" "$BUILD_LOG"
+
+    # Cross-check: PID file says one thing, ps may say another. If we see
+    # multiple build_watcher processes (or none when pid file claims one),
+    # that's worth surfacing — this is exactly the symptom of "watcher is
+    # back to not working" when an old process is still consuming events.
+    local sync_seen build_seen
+    sync_seen=$(pgrep -f 'brain vault sync --watch' | wc -l | tr -d ' ')
+    build_seen=$(pgrep -f 'brain.wiki.build_watcher' | wc -l | tr -d ' ')
+    if [[ "$sync_seen" != '1' ]] || [[ "$build_seen" != '1' ]]; then
+        echo
+        echo '  ⚠️  process count vs pid file:'
+        printf '       sync_watcher  pgrep=%s  pidfile=%s\n' "$sync_seen" "$sync_pid"
+        printf '       build_watcher pgrep=%s  pidfile=%s\n' "$build_seen" "$build_pid"
+        echo '       (>1 = orphan running; 0 with pidfile = stale pid)'
+    fi
+
+    echo
+    echo '  current build:'
+    if [[ -L "$CURRENT" ]]; then
+        printf '    symlink → %s\n' "$(readlink "$CURRENT")"
+        printf '    build-id %s\n' "$(current_build_id)"
+        if [[ -f "$CURRENT/index.html" ]]; then
+            local age
+            age="$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$CURRENT/index.html" 2>/dev/null || echo '?')"
+            printf '    last build %s\n' "$age"
+        fi
+    else
+        echo '    (no symlink — run brain-up to bootstrap)'
+    fi
+
+    if [[ -d "$BUILDS_DIR" ]]; then
+        echo
+        echo '  recent builds:'
+        local cur_id
+        cur_id="$(current_build_id)"
+        while IFS= read -r b; do
+            local mark='  '
+            [[ "$b" == "$cur_id" ]] && mark='→ '
+            local mt
+            mt="$(stat -f '%Sm' -t '%H:%M:%S' "$BUILDS_DIR/$b" 2>/dev/null || echo '?')"
+            printf '    %s%s   %s\n' "$mark" "$mt" "$b"
+        done < <(recent_builds 5)
+    fi
+
+    echo
+    echo '  recent vault edits:'
+    recent_vault_files 5
+
+    echo
+    echo '  wiki url:'
+    if curl -fsS -o /dev/null --max-time 2 "$URL/" 2>/dev/null; then
+        echo "    $URL  reachable ✅"
+    else
+        echo "    $URL  unreachable ⚠️"
+    fi
+
+    echo
+    echo '  last 8 build-log lines (filtered):'
+    if [[ -s "$BUILD_LOG" ]]; then
+        # Tail a wide window so even a long KaTeX-noisy run yields signal
+        # after filtering. ``|| true`` keeps an empty filtered tail from
+        # tripping pipefail.
+        local out
+        out="$(tail -n 1000 "$BUILD_LOG" | filter_build_log | tail -n 8 || true)"
+        if [[ -n "$out" ]]; then
+            printf '%s\n' "$out" | sed 's/^/    /'
+        else
+            echo '    (only KaTeX/git-warnings in the tail window — filter saw nothing else)'
+        fi
+    else
+        echo '    (empty)'
+    fi
+    echo
+    echo '  last 5 sync-log lines:'
+    if [[ -s "$WATCH_LOG" ]]; then
+        tail -n 5 "$WATCH_LOG" | sed 's/^/    /'
+    else
+        echo '    (empty)'
+    fi
+}
+
+# --- live tail mode --------------------------------------------------------
+
+tail_logs() {
+    if [[ ! -f "$BUILD_LOG" && ! -f "$WATCH_LOG" ]]; then
+        echo 'no logs to tail (neither watcher has started)' >&2
+        return 1
+    fi
+    echo "tailing watchers — Ctrl-C to stop"
+    echo "  sync:  $WATCH_LOG"
+    echo "  build: $BUILD_LOG  (KaTeX/git-warnings filtered)"
+    echo
+
+    # Stream both logs through one pipeline so they interleave. Each line is
+    # prefixed with its source so you can tell which watcher emitted what.
+    # The build log is filtered before it hits the screen.
+    {
+        tail -n 0 -F "$WATCH_LOG" 2>/dev/null | sed -u 's/^/[sync ] /' &
+        local sync_pid=$!
+        tail -n 0 -F "$BUILD_LOG" 2>/dev/null | filter_build_log | sed -u 's/^/[build] /' &
+        local build_pid=$!
+        trap 'kill '"$sync_pid"' '"$build_pid"' 2>/dev/null || true' INT TERM
+        wait
+    }
+}
+
+# --- probe mode ------------------------------------------------------------
+#
+# Write a unique file into the vault, then poll for two signals:
+#   1. The build watcher swaps `current` to a NEW build-id (= rebuild fired).
+#   2. That new build-dir contains the probe file's HTML output (= our edit
+#      made it into the rendered site).
+#
+# Either signal alone is informative:
+#   - new build-id but probe missing → watcher is firing but on something
+#     else (or build_swap is racing); inspect the build log.
+#   - same build-id after timeout → watcher saw nothing; check if the right
+#     pid is on the right vault path, or if a stale process is hoarding
+#     FSEvents.
+
+probe() {
+    local timeout="${1:-90}"
+    if [[ ! -d "$VAULT" ]]; then
+        echo "vault not found at $VAULT" >&2
+        return 1
+    fi
+    if ! pid_alive "$BUILD_PID"; then
+        echo 'build watcher not running — start with brain-up' >&2
+        return 1
+    fi
+
+    local stamp probe_file probe_id baseline
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    probe_id="probe-$stamp-$$"
+    probe_file="$VAULT/_brain_monitor_${probe_id}.md"
+    baseline="$(current_build_id)"
+
+    cat >"$probe_file" <<EOF
+---
+title: brain-monitor probe $probe_id
+---
+
+This file was written by brain-monitor at $(date '+%Y-%m-%d %H:%M:%S').
+Marker: $probe_id
+EOF
+    # Always clean up, even on Ctrl-C.
+    trap 'rm -f "$probe_file"' EXIT INT TERM
+
+    echo "🧠 probe $probe_id"
+    echo "  wrote   $probe_file"
+    echo "  baseline build-id: $baseline"
+    echo "  waiting up to ${timeout}s for the build watcher to react..."
+    echo
+
+    local started swap_at swap_elapsed='?' rendered_at rendered_elapsed='?'
+    started=$(date +%s)
+    swap_at=''
+    rendered_at=''
+    local probe_html_glob="$CURRENT/_brain_monitor_${probe_id}*"
+
+    while :; do
+        local now elapsed cur
+        now=$(date +%s)
+        elapsed=$(( now - started ))
+        cur="$(current_build_id)"
+
+        if [[ -z "$swap_at" && "$cur" != "$baseline" && "$cur" != '(none)' ]]; then
+            swap_at=$elapsed
+            swap_elapsed="${elapsed}s"
+            echo "  +${elapsed}s  current swapped → $cur"
+        fi
+
+        if [[ -z "$rendered_at" ]]; then
+            # Glob-expand inside [[ to test for any matching rendered file.
+            # The probe file's slug may be encoded by Quartz, so we glob
+            # rather than test an exact path.
+            if compgen -G "$probe_html_glob" >/dev/null 2>&1; then
+                rendered_at=$elapsed
+                rendered_elapsed="${elapsed}s"
+                echo "  +${elapsed}s  probe HTML appeared in current/"
+                break
+            fi
+        fi
+
+        if (( elapsed >= timeout )); then
+            break
+        fi
+        sleep 1
+    done
+
+    echo
+    echo '  result:'
+    if [[ -n "$swap_at" && -n "$rendered_at" ]]; then
+        echo "    ✅ end-to-end OK"
+        printf '       swap to new build:    %s\n' "$swap_elapsed"
+        printf '       probe content live:   %s\n' "$rendered_elapsed"
+    elif [[ -n "$swap_at" ]]; then
+        echo "    ⚠️ build ran ($swap_elapsed) but probe HTML never appeared in current/"
+        echo '       likely a build_swap mismatch or the probe was filtered out'
+        echo "       inspect: tail -n 200 $BUILD_LOG | grep -i $probe_id"
+    else
+        echo "    ❌ no rebuild within ${timeout}s — watcher is not seeing the vault"
+        echo '       things to check:'
+        echo "         pgrep -af brain.wiki.build_watcher        # one process? right --vault?"
+        echo "         pgrep -af 'brain vault sync --watch'      # same"
+        echo "         tail -n 50 $BUILD_LOG"
+        echo "         tail -n 50 $WATCH_LOG"
+        echo '         brain-down && brain-up                    # nuclear option'
+    fi
+}
+
+# --- entrypoint ------------------------------------------------------------
+
+case "${1:-}" in
+    ''|status|snapshot)
+        snapshot
+        ;;
+    -f|--tail|tail)
+        tail_logs
+        ;;
+    probe)
+        probe "${2:-90}"
+        ;;
+    -h|--help|help)
+        usage
+        ;;
+    *)
+        echo "unknown command: $1" >&2
+        usage
+        exit 2
+        ;;
+esac

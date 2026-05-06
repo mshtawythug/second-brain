@@ -17,6 +17,14 @@
     // below their content size, which is what produced the original
     // "can't scroll to the ToC" bug on hub pages.
     min-height: 0;
+    // brain: become a flex column ourselves so the inner <ol> can be
+    // flex-shrunk to whatever height the parent sidebar grants this
+    // section. Without this, the section flex-shrinks but the inner
+    // list keeps its hardcoded `max-height: 32vh` and renders past the
+    // section's box (overflow: visible) — visually spilling onto the
+    // Backlinks panel below it. Pairs with `min-height: 0` on the list.
+    display: flex;
+    flex-direction: column;
 
     &[hidden] {
       display: none;
@@ -45,7 +53,14 @@
     padding: 0;
     display: grid;
     gap: 0.35rem;
+    // brain: cap natural height at 32vh so a packed related set still
+    // leaves room for Backlinks below. `min-height: 0` plus the section
+    // being a flex column above lets the right sidebar's flex layout
+    // shrink the list (with its own internal scroll) when the column is
+    // squeezed — keeps the list inside the section's box instead of
+    // spilling onto the Backlinks panel below.
     max-height: 32vh;
+    min-height: 0;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-width: thin;
