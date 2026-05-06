@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -25,6 +26,32 @@ from ..vault._atomic import atomic_write_text
 
 DEFAULT_RELATED_LIMIT = 10
 SNIPPET_LENGTH = 240
+
+# Token regex mirrors :data:`brain.search._TOKEN_RE`. Used to count
+# *meaningful* (non-stop-word) tokens in a source doc's title to decide
+# whether the title alone is a strong enough self-query or whether we need
+# to augment it with body-derived keywords. Postgres's English text-search
+# config still removes stop-words from the final tsquery — we only use this
+# regex + ``_STOP_TOKENS`` to gate the title-only-vs-fallback decision.
+_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*")
+
+# Inline stop-token set for the title-vs-fallback gate. Intentionally tiny:
+# Postgres handles real stop-word removal at tsquery time. The plan
+# (docs/plans/2026-05-06-related-docs-rebuild.md, "Title fallback") only
+# needs us to recognise titles like "Notes" or "On the bus" as too thin to
+# carry the FTS leg by themselves.
+_STOP_TOKENS = frozenset(
+    {"the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "at", "by", "with", "from"}
+)
+
+# How many body-derived lexemes the fallback path appends to the title query.
+# Five is the value called out in the plan; lexemes are ranked by document
+# frequency over this doc's chunks.
+_BODY_FALLBACK_LEXEME_LIMIT = 5
+
+# Minimum number of meaningful (non-stop) title tokens required to skip the
+# body-fallback augmentation. Plan: "<3 alphabetic tokens after stop-words".
+_MIN_TITLE_TOKENS_FOR_TITLE_ONLY = 3
 
 _logger = logging.getLogger(__name__)
 
@@ -191,6 +218,103 @@ def _iter_related_rows(conn: psycopg.Connection[Any], *, k: int) -> list[tuple[A
             (SNIPPET_LENGTH, k),
         )
     )
+
+
+def _build_self_tsquery(
+    conn: psycopg.Connection[Any], doc_id: str, *, title: str
+) -> str:
+    """Build a ``to_tsquery``-compatible string for the source doc.
+
+    The new hybrid Related-docs signal treats each source document as its
+    own self-query (see ``docs/plans/2026-05-06-related-docs-rebuild.md``,
+    "The replacement signal"). The FTS leg's "query" is the source doc's
+    title — but a title like "Notes" or "Meeting" can't carry the leg on
+    its own, so we fall back to augmenting the title with the doc's
+    top-frequency body lexemes when fewer than three meaningful title
+    tokens remain.
+
+    Returns ``""`` only when the doc has neither a usable title nor any
+    body lexemes. The caller (Phase F.B's hybrid CTE) treats empty as
+    "skip the FTS leg, use vector-only".
+
+    Body-keyword extraction (option A from the plan): we use ``ts_stat``
+    to rank lexemes from this doc's chunks by document frequency. This
+    works regardless of whether the doc has tags — option B (rely on
+    ``chunks.tags_text``) was rejected because untagged docs would get
+    no fallback signal at all.
+    """
+    tokens = _TOKEN_RE.findall(title)
+    meaningful_count = sum(1 for tok in tokens if tok.lower() not in _STOP_TOKENS)
+
+    title_tsq = _plainto_tsquery_text(conn, title)
+
+    if meaningful_count >= _MIN_TITLE_TOKENS_FOR_TITLE_ONLY:
+        return title_tsq
+
+    body_lexemes = _top_body_lexemes(conn, doc_id, limit=_BODY_FALLBACK_LEXEME_LIMIT)
+
+    parts: list[str] = []
+    if title_tsq:
+        parts.append(f"({title_tsq})")
+    for lex in body_lexemes:
+        lex_tsq = _to_tsquery_text(conn, lex)
+        if lex_tsq:
+            parts.append(f"({lex_tsq})")
+
+    if not parts:
+        return ""
+    return " | ".join(parts)
+
+
+def _plainto_tsquery_text(conn: psycopg.Connection[Any], text: str) -> str:
+    """Return ``plainto_tsquery('english', text)::text`` or ``""`` on empty."""
+    row = conn.execute(
+        "SELECT plainto_tsquery('english', %s)::text", (text,)
+    ).fetchone()
+    if row is None:
+        return ""
+    return str(row[0]) if row[0] is not None else ""
+
+
+def _to_tsquery_text(conn: psycopg.Connection[Any], lexeme: str) -> str:
+    """Wrap a single ts_stat-derived lexeme in a tsquery, defensively.
+
+    ``ts_stat`` returns already-stemmed lexemes (typically ``[a-z0-9]+``).
+    We re-feed them through ``to_tsquery`` so the result is always a
+    well-formed tsquery fragment. Returns ``""`` for anything that
+    doesn't look like a safe lexeme — e.g. a multi-word phrase or a
+    leading digit — so callers can safely ``" | ".join`` the parts.
+    """
+    if not re.fullmatch(r"[a-z][a-z0-9]*", lexeme):
+        return ""
+    row = conn.execute("SELECT to_tsquery('english', %s)::text", (lexeme,)).fetchone()
+    if row is None:
+        return ""
+    return str(row[0]) if row[0] is not None else ""
+
+
+def _top_body_lexemes(
+    conn: psycopg.Connection[Any], doc_id: str, *, limit: int
+) -> list[str]:
+    """Return the source doc's top ``limit`` lexemes by document frequency.
+
+    Uses ``ts_stat`` over a SQL sub-query that selects this doc's
+    ``chunks.tsv`` rows. ``ts_stat`` requires a SQL string, so the
+    ``document_id`` is interpolated as a UUID literal — guarded by
+    :func:`uuid.UUID` to defeat injection. Returns ``[]`` when the id
+    isn't a valid UUID or the doc has no chunks (or all chunks have
+    empty tsv).
+    """
+    try:
+        validated = uuid.UUID(str(doc_id))
+    except (ValueError, AttributeError, TypeError):
+        return []
+    inner_sql = f"SELECT tsv FROM chunks WHERE document_id = '{validated}'::uuid"
+    rows = conn.execute(
+        "SELECT word FROM ts_stat(%s) ORDER BY ndoc DESC, nentry DESC, word LIMIT %s",
+        (inner_sql, limit),
+    ).fetchall()
+    return [str(r[0]) for r in rows if r[0] is not None]
 
 
 def _slug_from_vault_path(vault_path: str) -> str | None:
