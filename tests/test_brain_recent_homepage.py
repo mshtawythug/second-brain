@@ -485,12 +485,13 @@ def test_quartz_config_ignores_partials_dir() -> None:
     )
 
 
-def test_build_swap_main_calls_refresh_homepage(
+def test_build_and_swap_calls_refresh_homepage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Wire test: ``brain.wiki.build_swap.main`` invokes refresh_homepage
-    once before the build subprocess. Patches build_and_swap to a no-op
-    so we don't need a real Quartz workspace."""
+    """Wire test: ``build_and_swap`` invokes refresh_homepage before Quartz.
+
+    This covers watcher/direct build callers, not only the CLI wrapper.
+    """
     import brain.wiki.build_swap as bs
 
     refresh_calls: list[Any] = []
@@ -499,34 +500,31 @@ def test_build_swap_main_calls_refresh_homepage(
         refresh_calls.append(cfg)
         return (True, True)
 
-    def fake_build_and_swap(*args: Any, **kwargs: Any) -> Any:
-        # Match the BuildResult shape so main()'s success-path message
-        # formatter doesn't crash.
-        from brain.wiki.build_swap import BuildResult
+    def fake_run_build(*args: Any, **kwargs: Any) -> None:
+        build_dir = kwargs["build_dir"]
+        build_dir.mkdir(parents=True)
+        (build_dir / "index.html").write_text("", encoding="utf-8")
 
-        return BuildResult(
-            build_dir=tmp_path / "fake-build",
-            build_id="fake-id",
-            elapsed_seconds=0.0,
-            pruned=[],
-            method="output-flag",
-        )
-
-    # Monkeypatch refresh_homepage where build_swap.main imports it, plus
-    # build_and_swap so we don't run npx.
     monkeypatch.setattr(
         "brain.wiki.build_homepage.refresh_homepage", fake_refresh
     )
-    monkeypatch.setattr(bs, "build_and_swap", fake_build_and_swap)
+    monkeypatch.setattr(
+        "brain.wiki.build_related.refresh_related",
+        lambda _cfg: None,
+    )
+    monkeypatch.setattr(bs, "_probe_build_method", lambda *a, **kw: "output-flag")
+    monkeypatch.setattr(bs, "_run_build", fake_run_build)
 
-    # Provide a Quartz workspace stub so Config.load() succeeds.
     monkeypatch.setenv("DATABASE_URL", "postgresql://x:x@localhost:5432/x")
     vault = tmp_path / "vault"
     vault.mkdir()
+    quartz = vault / ".quartz"
+    quartz.mkdir()
+    (quartz / "quartz.config.ts").write_text("", encoding="utf-8")
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
 
-    rc = bs.main(["--vault", str(vault)])
-    assert rc == 0
+    bs.build_and_swap(vault, quartz_dir=quartz)
+
     assert len(refresh_calls) == 1
     # The cfg passed to refresh has vault_path == the resolved CLI vault.
     assert refresh_calls[0].vault_path == vault.resolve()

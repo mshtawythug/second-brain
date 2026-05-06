@@ -21,7 +21,7 @@
 //   7. brain/links      — Lane B — link-kind underline + tag chip +
 //                          source-tinted ingested-tier rules.
 //   8. brain/sidebar    — Lane C — left/right sidebar layout polish.
-//   8a. brain/cmdk      — Lane C — Cmd/Ctrl-K palette modal visuals.
+//   8a. brain/command_palette — Lane C/P5.3 — Cmd/Ctrl-P palette modal visuals.
 //                          Listed between sidebar and article so the
 //                          modal chrome inherits the surface scale
 //                          but doesn't interfere with article rules.
@@ -48,6 +48,8 @@
 //                          base article-level <details> styling
 //                          (none in stock Quartz, but defensively
 //                          ordered).
+//  17. brain/related_docs — P5.2 — semantic-related right-sidebar
+//                          panel fed by `/static/related/<slug>.json`.
 //
 // Lane A (this PR) ships only `tokens`, `typography`, `surface`. Lanes
 // B/C/D files exist as one-line placeholder stubs so SCSS can resolve
@@ -63,7 +65,8 @@
 @use "./brain/motion";        // Lane D
 @use "./brain/links";
 @use "./brain/sidebar";
-@use "./brain/cmdk";          // Lane C — Cmd-K modal visuals
+@use "./brain/related_docs"; // P5.2 — semantic-related right-sidebar panel
+@use "./brain/command_palette"; // P5.3 — Cmd-P quick-open modal visuals
 @use "./brain/search";        // P3.2 — Search popover: chips, rows, preview
 @use "./brain/article";
 @use "./brain/marginalia";    // Lane D

@@ -1,0 +1,96 @@
+// Brain related-docs sidebar — Phase 5.2 of the Wiki UX Overhaul.
+//
+// Loaded globally via `custom.scss`. The component only renders in the
+// right sidebar for content pages; the runtime hides the whole panel
+// until `/static/related/<slug>.json` returns valid rows.
+
+.sidebar.right {
+  .brain-related-docs {
+    background: var(--surface-1);
+    border-radius: 8px;
+    padding: 0.6rem 0.8rem;
+    box-shadow: var(--shadow-sm);
+    box-sizing: border-box;
+
+    &[hidden] {
+      display: none;
+    }
+
+    > h3 {
+      margin-top: 0;
+      margin-bottom: 0.4rem;
+      font-weight: 600;
+      font-size: 0.7rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--ink-1);
+    }
+  }
+
+  .brain-related-docs-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.35rem;
+  }
+
+  .brain-related-docs-item {
+    margin: 0;
+
+    > a {
+      display: grid;
+      grid-template-columns: 1.25rem minmax(0, 1fr);
+      gap: 0.45rem;
+      align-items: start;
+      padding: 0.35rem 0;
+      color: var(--ink-1);
+      text-decoration: none;
+      border-radius: 6px;
+      transition:
+        background var(--motion-fast) var(--motion-easing),
+        color var(--motion-fast) var(--motion-easing);
+
+      &:hover {
+        background: var(--accent-soft);
+        color: var(--ink-0);
+      }
+    }
+  }
+
+  .brain-related-docs-source {
+    width: 1.25rem;
+    line-height: 1.25;
+    text-align: center;
+    font-size: var(--fs-sm);
+  }
+
+  .brain-related-docs-body {
+    min-width: 0;
+    display: grid;
+    gap: 0.12rem;
+  }
+
+  .brain-related-docs-title {
+    color: var(--ink-0);
+    font-weight: 600;
+    font-size: var(--fs-sm);
+    line-height: 1.25;
+  }
+
+  .brain-related-docs-snippet {
+    display: -webkit-box;
+    color: var(--ink-2);
+    font-size: var(--fs-xs);
+    line-height: 1.35;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .brain-related-docs-empty {
+    margin: 0;
+    color: var(--ink-2);
+    font-size: var(--fs-xs);
+  }
+}

@@ -1,0 +1,19 @@
+Phase 5 manual UI verification
+
+Command:
+BASE_URL=http://127.0.0.1:8127 NODE_PATH=$HOME/.npm/_npx/420ff84f11983ee5/node_modules npx -p @playwright/test playwright test .playwright-mcp/phase5-ui.spec.ts --browser chromium --workers 1 --reporter line
+
+Result:
+1 passed
+
+Coverage:
+- RelatedDocs renders from /static/related/index.json on the home page.
+- Cmd/Ctrl+P opens the command palette.
+- Source chips render with aria-pressed=true.
+- Typing "Demo" returns "Demo Vault Doc" in the palette.
+- Escape closes the palette.
+- Cmd/Ctrl+K still opens the full Search overlay and does not reopen the command palette.
+
+Screenshots:
+- .playwright-mcp/phase5-related-docs.png
+- .playwright-mcp/phase5-command-palette.png

@@ -24,7 +24,7 @@
 //
 //   * `Plugin.ReloadSignal` (defined in
 //     `<vault>/.quartz/quartz/plugins/transformers/reloadSignal.ts`,
-//     also installed by the overlay). Injects a polling reload
+//     also installed by the overlay). Injects an ETag-aware polling reload
 //     `<script>` into every page when `BRAIN_WIKI_RELOAD=1` is set in
 //     the build env — replaces Quartz's `--serve` WebSocket reload
 //     path, which is dead in the brain blue-green serve flow because
@@ -193,7 +193,7 @@ const config: QuartzConfig = {
       // contract and `quartz/static/emailThread.js` for the runtime
       // logic.
       Plugin.EmailThreadReader(),
-      // brain: inject the polling reload watcher (`/static/reload.js`)
+      // brain: inject the ETag-aware reload watcher (`/static/reload.js`)
       // into every page when `BRAIN_WIKI_RELOAD=1` at build time.
       // Replaces Quartz's `--serve` WebSocket reload, which is dead in
       // our blue-green serve flow because Caddy (not Quartz) is the

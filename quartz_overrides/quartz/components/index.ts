@@ -46,12 +46,13 @@ import ConditionalRender from "./ConditionalRender"
 
 // brain-extension: brain-only components added by the overlay. Each
 // is documented in its own file's top-of-file comment.
-//   * CommandPalette — Lane C redesign — Cmd/Ctrl-K palette modal.
+//   * CommandPalette — Lane C redesign — Cmd/Ctrl-P palette modal.
 //     Renders hidden markup once globally (registered in
 //     `quartz.layout.ts` `afterBody`); the inline script
 //     `scripts/commandPalette.inline.ts` owns the open/close + fuzzy
 //     search lifecycle.
 import CommandPalette from "./CommandPalette"
+import RelatedDocs from "./RelatedDocs"
 
 export {
   ArticleTitle,
@@ -81,4 +82,5 @@ export {
   ConditionalRender,
   // brain-extension exports
   CommandPalette,
+  RelatedDocs,
 }

@@ -1,0 +1,369 @@
+// Brain command palette — Lane C of the 2026 commonplace-book redesign.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_command_palette.scss` by `brain vault
+// render --overlay` and pulled into the global SCSS via `custom.scss`'s
+// `@use "./brain/command_palette"` line (added between `_sidebar` and
+// `_article`).
+//
+// Visual rules for the Cmd/Ctrl-P palette:
+//
+//   * Native `<dialog>` reset — strip the browser's default
+//     `padding`, `border`, `position`, etc. so our modal styles
+//     control the chrome cleanly.
+//   * Native `::backdrop` pseudo-element — replaces the manual
+//     `.brain-cmdk-backdrop` div with the browser-managed scrim.
+//     Tinted with `var(--scrim)` from `_tokens.scss` (light/dark
+//     variants).
+//   * Modal — centered, rounded card on `--surface-1` with
+//     `--shadow-md`. Scales `0.96 → 1.0` on open; mirrored on close.
+//   * Input — single-row text field, larger than body text, no
+//     visible borders (clean writing-tool feel).
+//   * Source chips — compact filter rail mirroring Search's source
+//     vocabulary so quick-open can narrow to gmail / krisp / slack /
+//     manual / vault without invoking the full search overlay.
+//   * Results — vertical list, each item carries kind icon, title,
+//     and a faint slug subtitle. Selected item highlighted via
+//     `aria-selected="true"`.
+//
+// The component markup itself (rendered by `CommandPalette.tsx`):
+//
+//   <dialog id="brain-cmdk-root" class="brain-cmdk-root" aria-label="Command palette">
+//     <div class="brain-cmdk-modal">
+//       <div class="brain-cmdk-chips">...</div>
+//       <input class="brain-cmdk-input" role="combobox" aria-expanded="false"
+//              aria-haspopup="listbox" aria-controls="brain-cmdk-results"
+//              aria-autocomplete="list" type="text" autocomplete="off"
+//              placeholder="Search the wiki…" aria-label="Search the wiki">
+//       <ul class="brain-cmdk-results" id="brain-cmdk-results" role="listbox">
+//         <!-- populated by commandPalette.inline.ts -->
+//       </ul>
+//       <div class="brain-cmdk-empty" hidden>No results.</div>
+//       <div class="brain-cmdk-footer">
+//         <kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>↵</kbd> open · <kbd>esc</kbd> close
+//       </div>
+//     </div>
+//   </dialog>
+//
+// brain (Lane C audit fix 2026-05-02): refactored to native
+// `<dialog>`. Open/close is driven by the dialog's own `open`
+// attribute (set by `dialog.showModal()`); the `.is-open` class on
+// the dialog still gates the entrance/exit transitions because the
+// transition properties below interpolate ON the dialog itself, and
+// the class flip provides a paint-frame boundary the browser can
+// animate over.
+//
+// Tokens consumed (from `_tokens.scss`):
+//   * `--surface-1`/`--surface-2`     — modal + input bg
+//   * `--scrim`                       — `::backdrop` tint
+//   * `--ink-0`/`--ink-1`/`--ink-2`   — title, subtitle, footer
+//   * `--rule`                        — input bottom hairline + footer top hairline
+//   * `--accent-soft`/`--accent-strong` — selected item bg + ring
+//   * `--shadow-md`                   — modal elevation
+//   * `--motion-fast`/`--motion-mid`/`--motion-easing` — fades + scale
+
+// ---------------------------------------------------------------------------
+// 1. Dialog reset + positioning
+// ---------------------------------------------------------------------------
+//
+// brain (Lane C audit fix): native `<dialog>` ships with browser
+// defaults for `padding`, `border`, `background`, `position`, `width`,
+// and `margin: auto` for centering. We strip them all so the
+// `.brain-cmdk-modal` child is the only chrome that paints. Using
+// `all: unset` would also blow away the dialog's open/closed
+// semantics, so we reset properties explicitly.
+//
+// `position: fixed` + `inset: 0` + `display: flex` re-implements
+// centering — native dialog's `margin: auto` only works when the
+// dialog has an intrinsic size, which we don't want (the modal
+// sizes itself).
+
+#brain-cmdk-root.brain-cmdk-root {
+  // Reset native dialog chrome.
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  // Position over the full viewport so flex centering works.
+  // `position: fixed` overrides the browser default of `absolute`.
+  position: fixed;
+  inset: 0;
+  margin: 0;
+  // Browser default sets `max-width` / `max-height` to `calc(100% - 6px - 2em)`;
+  // override so we control sizing via the modal child.
+  max-width: 100vw;
+  max-height: 100vh;
+  width: 100vw;
+  height: 100vh;
+  // brain: `display: none` when `[open]` is absent is the native
+  // default — but stock dialog also matches `display: block` on
+  // [open], which conflicts with our `display: flex` for centering.
+  // Re-pin to flex on `[open]` so the modal sits in the center.
+  z-index: 1000;
+  // brain: prevent body content showing through edges when the
+  // backdrop is being painted. `overflow: hidden` on the dialog
+  // itself isn't enough; we also clip backdrop scroll below.
+}
+
+#brain-cmdk-root.brain-cmdk-root[open] {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  // 12vh top spacing so the modal sits in the upper third — standard
+  // PKB convention (Reflect, Notion, Linear all bias to the top).
+  padding-top: 12vh;
+}
+
+// ---------------------------------------------------------------------------
+// 2. Native `::backdrop`
+// ---------------------------------------------------------------------------
+//
+// brain (Lane C audit fix): the browser-painted `::backdrop`
+// pseudo-element replaces the manual `<div class="brain-cmdk-backdrop">`.
+// The browser stacks it above all page content but below the dialog's
+// own contents, no z-index gymnastics required.
+//
+// The opacity transition runs on the `::backdrop` directly. Stock
+// browsers may not support animating the backdrop in every version;
+// graceful — the worst case is the scrim appearing instantly without
+// the fade, which is still a coherent UI.
+
+#brain-cmdk-root.brain-cmdk-root::backdrop {
+  background: var(--scrim);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  opacity: 0;
+  transition: opacity var(--motion-mid) var(--motion-easing);
+}
+
+#brain-cmdk-root.brain-cmdk-root.is-open::backdrop {
+  opacity: 1;
+}
+
+// ---------------------------------------------------------------------------
+// 3. Modal card + source chips + input
+// ---------------------------------------------------------------------------
+
+.brain-cmdk-modal {
+  position: relative;
+  width: min(640px, calc(100vw - 2rem));
+  max-height: 70vh;
+  background: var(--surface-1);
+  border-radius: 12px;
+  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  // Entrance transform — small scale-up paired with the backdrop fade.
+  transform: scale(0.96);
+  opacity: 0;
+  transition:
+    transform var(--motion-mid) var(--motion-easing),
+    opacity var(--motion-mid) var(--motion-easing);
+}
+
+#brain-cmdk-root.brain-cmdk-root.is-open .brain-cmdk-modal {
+  transform: scale(1);
+  opacity: 1;
+}
+
+.brain-cmdk-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  padding: 0.65rem 1.2rem 0;
+}
+
+.brain-cmdk-chip {
+  appearance: none;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  min-height: 24px;
+  padding: 0.12rem 0.55rem;
+  cursor: pointer;
+  font-family: var(--bodyFont);
+  font-size: var(--fs-xs);
+  line-height: 1;
+  transition:
+    background var(--motion-fast) var(--motion-easing),
+    border-color var(--motion-fast) var(--motion-easing),
+    color var(--motion-fast) var(--motion-easing);
+
+  &[data-active="true"] {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent-strong) 45%, var(--rule));
+    color: var(--ink-0);
+  }
+
+  &:hover {
+    border-color: var(--ink-2);
+    color: var(--ink-0);
+  }
+}
+
+.brain-cmdk-chip-icon {
+  width: 1em;
+  text-align: center;
+}
+
+.brain-cmdk-chip-label {
+  text-transform: lowercase;
+}
+
+.brain-cmdk-input {
+  appearance: none;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 1rem 1.2rem;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-0);
+  font-family: var(--bodyFont);
+  font-size: var(--fs-lg);
+  outline: none;
+  // brain (Linear): lining numerals + slight Geist tightness — tech
+  // aesthetic doesn't have old-style numerals.
+  font-variant-numeric: lining-nums proportional-nums;
+  letter-spacing: -0.011em;
+
+  &::placeholder {
+    color: var(--ink-2);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 4. Results list
+// ---------------------------------------------------------------------------
+
+.brain-cmdk-results {
+  list-style: none;
+  margin: 0;
+  padding: 0.4rem 0;
+  overflow-y: auto;
+  flex: 1 1 auto;
+  // Custom scrollbar so the list reads as part of the modal chrome.
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule) transparent;
+
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+  &::-webkit-scrollbar-thumb {
+    background: var(--rule);
+    border-radius: 3px;
+  }
+}
+
+.brain-cmdk-result {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.55rem 1.2rem;
+  cursor: pointer;
+  color: var(--ink-1);
+  transition: background var(--motion-fast) var(--motion-easing);
+
+  // Kind icon (left-most). Mono-width so titles stack visually.
+  > .brain-cmdk-icon {
+    flex: 0 0 1.2rem;
+    text-align: center;
+    color: var(--ink-2);
+    font-size: var(--fs-sm);
+  }
+
+  // Body wraps title + slug subtitle.
+  > .brain-cmdk-body {
+    flex: 1 1 auto;
+    min-width: 0;
+
+    > .brain-cmdk-title {
+      color: var(--ink-0);
+      font-weight: 600;
+      font-family: var(--displayFont);
+      font-size: var(--fs-md);
+      line-height: 1.2;
+      // Truncate over-long titles to a single line.
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    > .brain-cmdk-slug {
+      color: var(--ink-2);
+      // brain (Linear): mono slug — Geist Mono at small size reads
+      // as a clean tech path, replacing the small-caps editorial
+      // treatment.
+      font-family: var(--codeFont);
+      font-size: var(--fs-xs);
+      line-height: 1.2;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      letter-spacing: 0.02em;
+    }
+  }
+
+  // brain: ARIA-driven selected state. The inline script sets
+  // `aria-selected="true"` on the active item; styling follows the
+  // attribute so the visual highlight stays a11y-accessible.
+  &[aria-selected="true"] {
+    background: var(--accent-soft);
+    color: var(--ink-0);
+    > .brain-cmdk-body > .brain-cmdk-title,
+    > .brain-cmdk-icon {
+      color: var(--ink-0);
+    }
+  }
+
+  &:hover {
+    background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
+  }
+}
+
+// "No results" empty state.
+.brain-cmdk-empty {
+  padding: 2rem 1.2rem;
+  text-align: center;
+  color: var(--ink-2);
+  font-family: var(--bodyFont);
+  font-size: var(--fs-sm);
+}
+
+// ---------------------------------------------------------------------------
+// 5. Footer hint row
+// ---------------------------------------------------------------------------
+
+.brain-cmdk-footer {
+  border-top: 1px solid var(--rule);
+  padding: 0.5rem 1.2rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--ink-2);
+  // brain (Linear): mono footer hint — tech aesthetic, not small-caps.
+  font-family: var(--codeFont);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.02em;
+  background: var(--surface-2);
+
+  kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    padding: 0.05rem 0.3rem;
+    background: var(--surface-1);
+    color: var(--ink-1);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    font-family: var(--codeFont);
+    font-size: 0.85em;
+    letter-spacing: normal;
+  }
+}

@@ -515,7 +515,7 @@ http://brain.test, http://localhost:8080 {
     root * /Users/<you>/brain-vault/.quartz/current
     file_server
     @build_id path /.build-id
-    header @build_id Cache-Control "no-store"
+    header @build_id Cache-Control "max-age=2, must-revalidate"
     try_files {path} {path}/ {path}.html /404.html
     encode gzip
 }
@@ -529,7 +529,7 @@ Then `brew services reload caddy`. `localhost:8080` stays as a backwards-compat 
 echo '127.0.0.1 brain.test' | sudo tee -a /etc/hosts
 ```
 
-**Auto-reload.** When the build watcher swaps `current/` to a new build, every open tab reloads within ~3 seconds. The mechanism: `bin/brain-up` exports `BRAIN_WIKI_RELOAD=1` for the build watcher, which makes the brain Quartz overlay's `Plugin.ReloadSignal()` transformer inject a `<script src="/static/reload.js" defer>` into every page. That script polls `/.build-id` every 3 seconds while the tab is foregrounded, pauses while the tab is backgrounded (so an idle tab in the background doesn't generate traffic), and calls `location.reload()` when the build ID changes. `brain vault render` (the one-shot prod build path) leaves `BRAIN_WIKI_RELOAD` unset, so production builds ship without the polling script — only the dev daily-use flow gates it on.
+**Auto-reload.** When the build watcher swaps `current/` to a new build, every open tab reloads within ~3 seconds. The mechanism: `bin/brain-up` exports `BRAIN_WIKI_RELOAD=1` for the build watcher, which makes the brain Quartz overlay's `Plugin.ReloadSignal()` transformer inject a `<script src="/static/reload.js" defer>` into every page. That script polls `/.build-id` every 3 seconds while the tab is foregrounded, sends `If-None-Match` after the first ETag-bearing response so unchanged builds return `304 Not Modified`, pauses while the tab is backgrounded (so an idle tab in the background doesn't generate traffic), and calls `location.reload()` when the build ID changes. `brain vault render` (the one-shot prod build path) leaves `BRAIN_WIKI_RELOAD` unset, so production builds ship without the polling script — only the dev daily-use flow gates it on.
 
 **First-build cost.** Cold start (`brain-up` against an empty `.quartz/current`) takes ~40s for a ~450-doc vault — the user sees a "first build, ~40s" message in the foreground before the script returns. Subsequent rebuilds are also ~40s, but they happen entirely in the background under `builds/<ts>-<hash>/`; open tabs keep seeing the previous build right up to the atomic swap. The build watcher coalesces rapid edits with a 1.5s debounce, so a flurry of saves produces one rebuild rather than one per save. Old build dirs are GC'd after each swap (default keep=3, tunable via `BRAIN_WIKI_KEEP_BUILDS`); the build that `current` points at is never deleted, even if it's beyond the keep window.
 

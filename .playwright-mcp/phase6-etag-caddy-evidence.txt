@@ -1,0 +1,31 @@
+Phase 6 ETag reload evidence
+
+Final active build:
+- `bin/brain-rebuild` swapped in build `20260505-200620-8b4ea7`.
+
+Served reload client:
+- `cmp -s quartz_overrides/quartz/static/reload.js "$HOME/brain-vault/.quartz/current/static/reload.js"` succeeded.
+- `curl http://localhost:8080/static/reload.js` contains:
+  - `BUILD_ID_PATTERN`
+  - `If-None-Match`
+  - `if (r.status === 304) return`
+  - `cache: "no-cache"`
+- Served reload client no longer contains the previous `?_=` cache buster or
+  `cache: "no-store"` fetch option.
+
+Caddy:
+- `/opt/homebrew/etc/Caddyfile` uses
+  `header @build_id Cache-Control "max-age=2, must-revalidate"`.
+- `caddy fmt --overwrite /opt/homebrew/etc/Caddyfile` ran.
+- `caddy reload --config /opt/homebrew/etc/Caddyfile` ran.
+
+HTTP probe:
+- `curl -I http://localhost:8080/.build-id` returned:
+  - `HTTP/1.1 200 OK`
+  - `Cache-Control: max-age=2, must-revalidate`
+  - `Etag: "dib5mcm0kmu4n"`
+- `curl -I -H 'If-None-Match: "dib5mcm0kmu4n"' http://localhost:8080/.build-id`
+  returned:
+  - `HTTP/1.1 304 Not Modified`
+  - `Cache-Control: max-age=2, must-revalidate`
+  - `Etag: "dib5mcm0kmu4n"`

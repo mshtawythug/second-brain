@@ -127,6 +127,7 @@ def build_and_swap(
     started = time.monotonic()
     workspace = quartz_dir if quartz_dir is not None else vault / ".quartz"
     _check_workspace(workspace)
+    _refresh_pre_build_adornments(vault)
 
     method = _probe_build_method(npx_path, workspace, timeout_seconds=_PROBE_TIMEOUT_S)
 
@@ -427,6 +428,42 @@ def _replace_vault_path(cfg: Config, vault_path: Path) -> Config:
     return dataclasses.replace(cfg, vault_path=vault_path)
 
 
+def _refresh_pre_build_adornments(vault: Path) -> None:
+    """Best-effort generated wiki adornment refresh before any Quartz build."""
+    # P4.7/P5.1 — refresh generated wiki adornments before the build
+    # so the new build picks up the freshest recent rail and related-doc
+    # JSON. Failures here are logged-and-swallowed by the refresh helpers
+    # themselves (DB unreachable, missing fence, …) — these adornments are
+    # a courtesy, the build is the customer.
+    # Config loading is opt-in: a Config-load failure (no DATABASE_URL on
+    # PATH) shouldn't block the build either, so we wrap the import too.
+    try:
+        from ..config import Config, ConfigError
+        from .build_homepage import refresh_homepage
+        from .build_related import refresh_related
+
+        try:
+            cfg = Config.load()
+        except ConfigError as exc:
+            logger.warning(
+                "wiki pre-build refresh: Config.load failed (%s) — skipping refresh",
+                exc,
+            )
+        else:
+            target_vault = vault.expanduser().resolve()
+            # Honor explicit build vault overrides: the generated adornments
+            # must follow the tree being built, not the env default.
+            cfg_for_build = (
+                cfg
+                if cfg.vault_path == target_vault
+                else _replace_vault_path(cfg, target_vault)
+            )
+            refresh_homepage(cfg_for_build)
+            refresh_related(cfg_for_build)
+    except Exception as exc:  # noqa: BLE001 — refresh is best-effort
+        logger.warning("wiki pre-build refresh: unexpected failure: %s", exc)
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run a single ``build_and_swap`` from the command line.
 
@@ -468,34 +505,6 @@ def main(argv: list[str] | None = None) -> int:
     quartz_dir: Path | None = (
         args.quartz_dir.expanduser().resolve() if args.quartz_dir is not None else None
     )
-
-    # P4.7 — refresh the home-page "Recently captured" rail before the build
-    # so the new build picks up the freshest 12 docs. Failures here are
-    # logged-and-swallowed by ``refresh_homepage`` itself (DB unreachable,
-    # missing fence, …) — the rail is a courtesy, the build is the customer.
-    # Config loading is opt-in: a Config-load failure (no DATABASE_URL on
-    # PATH) shouldn't block the build either, so we wrap the import too.
-    try:
-        from ..config import Config, ConfigError
-        from .build_homepage import refresh_homepage
-        try:
-            cfg = Config.load()
-        except ConfigError as exc:
-            logger.warning(
-                "wiki recent rail: Config.load failed (%s) — skipping refresh",
-                exc,
-            )
-        else:
-            # Honor --vault override: caller may point the build at a different
-            # tree than the env-default vault. The home rail must follow the
-            # tree being built, not the env's notion of "the vault."
-            cfg_for_rail = (
-                cfg if cfg.vault_path == vault
-                else _replace_vault_path(cfg, vault)
-            )
-            refresh_homepage(cfg_for_rail)
-    except Exception as exc:  # noqa: BLE001 — refresh is best-effort
-        logger.warning("wiki recent rail: unexpected refresh failure: %s", exc)
 
     try:
         result = build_and_swap(vault, quartz_dir=quartz_dir, keep=args.keep)

@@ -27,6 +27,21 @@ from .slug import gmail_slug, slugify
 
 _BATCH_SIZE = 100
 _MAX_SHORT_ID = 8  # first N chars of an external/document UUID for filename use
+_EXPORT_OWNED_FRONTMATTER_KEYS = frozenset(
+    {
+        "id",
+        "title",
+        "tags",
+        "aliases",
+        "kind",
+        "content_type",
+        "source",
+        "external_id",
+        "created",
+        "updated",
+        "vault_path",
+    }
+)
 
 
 @dataclass
@@ -338,6 +353,11 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
     reads this key (or the absence of it) to filter quarantined docs out of
     the wiki's explorer / graph / search index without touching the DB row.
 
+    Vault-tier rows also preserve freeform metadata keys because sync stores
+    user-authored frontmatter there. Export-owned keys stay canonical here,
+    and ingested-tier metadata remains DB-only so source metadata does not
+    leak into mirror frontmatter.
+
     Aliases come from ``documents.metadata['aliases']`` (the canonical
     storage location per the spec) — only string elements are emitted; any
     non-string value in the array is dropped silently to keep the
@@ -362,9 +382,21 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
             fields["source"] = doc.source_kind
         if doc.source_external_id:
             fields["external_id"] = doc.source_external_id
+    if doc.kind == "vault":
+        fields.update(_freeform_vault_metadata(doc.metadata))
     if doc.draft:
         fields["draft"] = True
     return fields
+
+
+def _freeform_vault_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Return vault-tier metadata keys that should round-trip to YAML."""
+    out: dict[str, Any] = {}
+    for key, value in metadata.items():
+        if key in _EXPORT_OWNED_FRONTMATTER_KEYS:
+            continue
+        out[key] = value
+    return out
 
 
 def _aliases_from_metadata(metadata: dict[str, Any]) -> list[str]:

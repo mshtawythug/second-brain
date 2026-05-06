@@ -1,0 +1,8 @@
+=== BRAIN_DEBUG=1 BUILD — all 4 buttons + workbench-outer should appear ===
+class="brain-graph-workbench-container"
+class="brain-graph-workbench-icon"
+class="brain-graph-workbench-outer"
+class="brain-stock-graph-icon"
+class="global-graph-icon"
+class="local-graph-fullscreen-icon"
+---

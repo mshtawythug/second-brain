@@ -27,13 +27,14 @@
 // the dev server back to the page so it can push a reload — but
 // `--serve` is dead in our flow (Caddy serves the static output
 // directly; Quartz only builds), so the WebSocket-reload path is
-// gone. This transformer injects a polling client
+// gone. This transformer injects an ETag-aware polling client
 // (`quartz/static/reload.js`, also installed by the overlay) that
-// fetches `/.build-id` every 3s and calls `location.reload()`
-// when the value changes. The polling target is the per-build
-// identifier file `brain.wiki.build_swap` writes at each build
-// dir's root; Caddy serves it directly because the build dir IS
-// the site root.
+// fetches `/.build-id` every 3s, revalidates with `If-None-Match`
+// after the first ETag-bearing response, and calls
+// `location.reload()` when the value changes. The polling target is
+// the per-build identifier file `brain.wiki.build_swap` writes at
+// each build dir's root; Caddy serves it directly because the build
+// dir IS the site root.
 //
 // brain-extension: env-var contract. The script is injected only
 // when `process.env.BRAIN_WIKI_RELOAD === "1"` at BUILD time

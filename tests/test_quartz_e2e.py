@@ -1,7 +1,7 @@
-"""Phase 3 frontend integration harness — drives a real Quartz build.
+"""Quartz frontend integration harness — drives a real Quartz build.
 
 This is the first end-to-end test in the brain repo that exercises
-the rendered Quartz output. The five existing P3 test files
+the rendered Quartz output. The original P3 static-source test files
 (``test_contentindex_slim``, ``test_search_size_budget``,
 ``test_quartz_search_static``, ``test_quartz_tag_content_static``,
 ``test_quartz_tags_static``) are static-source assertions — they
@@ -45,6 +45,11 @@ Coverage scope:
   - Test 3 — TagContent rendering: ``/tags/demo/`` renders with
     ``.brain-tag-row``, ``.brain-tag-icon``, ``.brain-tag-footer``
     classes present, AND the row count matches the fixture (>=2).
+  - P4.8 — rendered-output assertions for the daily door, recent
+    rail, Explorer runtime hooks, email-thread runtime + fixture
+    shape, and graph affordance / chip assets.
+  - P5 — rendered-output assertions for RelatedDocs and Cmd/Ctrl+P
+    quick-open assets, plus a fetchable related-doc JSON fixture.
 """
 from __future__ import annotations
 
@@ -195,6 +200,20 @@ def _fetch_json(url: str) -> object:
     return json.loads(text)
 
 
+def _fetch_first_text(base_url: str, candidate_paths: tuple[str, ...]) -> str:
+    """Fetch the first candidate path that Quartz emitted for a slug."""
+    last_err: Exception | None = None
+    for candidate in candidate_paths:
+        try:
+            return _fetch_text(f"{base_url}{candidate}")
+        except Exception as exc:  # noqa: BLE001 — try next emitted shape
+            last_err = exc
+    pytest.fail(
+        f"could not fetch any candidate path {candidate_paths!r}; "
+        f"last error: {last_err}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — Search popover assets present in rendered HTML
 # ---------------------------------------------------------------------------
@@ -230,6 +249,29 @@ def test_search_popover_assets_present_in_rendered_html(e2e_build: str) -> None:
     assert 'data-brain-source="__all__"' in html, (
         "expected the `All` pseudo-chip with `data-brain-source=__all__`"
     )
+
+
+def test_related_docs_and_command_palette_assets_present(
+    e2e_build: str,
+) -> None:
+    """The rendered home page ships P5 RelatedDocs + quick-open hooks."""
+    html = _fetch_text(f"{e2e_build}/")
+
+    assert "brain-related-docs" in html
+    assert "data-brain-related-slug" in html
+    assert "brain-related-docs-list" in html
+    assert "brain-cmdk-chips" in html
+    for source in ("krisp", "slack", "gmail", "manual", "vault"):
+        assert f'data-brain-source="{source}"' in html
+    assert 'data-brain-source="__all__"' in html
+
+    related = _fetch_json(f"{e2e_build}/static/related/index.json")
+    assert isinstance(related, list)
+    assert related
+    first = related[0]
+    assert isinstance(first, dict)
+    assert first["slug"] == "demo-vault-doc"
+    assert first["source"] == "vault"
 
 
 # ---------------------------------------------------------------------------
@@ -434,3 +476,119 @@ def test_contentindex_gzipped_under_default_budget(e2e_build_dir: Path) -> None:
         f"(> budget {budget:,} B; raw {len(raw_bytes):,} B). "
         "Run `python scripts/check_index_size.py <path>` to reproduce."
     )
+
+
+# ---------------------------------------------------------------------------
+# P4.8 — rendered-output coverage for Phase 4 wiki UX features
+# ---------------------------------------------------------------------------
+
+
+def test_p4_home_renders_daily_door_and_recent_rail(e2e_build: str) -> None:
+    """The fixture home page renders the P4 daily door and recent rail.
+
+    This is intentionally HTTP-fetch based, matching the rest of the harness:
+    it verifies the Quartz build output, not browser-local click state.
+    """
+    html = _fetch_text(f"{e2e_build}/")
+    for needle in (
+        "Daily notes",
+        "chronological log door",
+        "Recently captured",
+        "P4 Recent Rail Canary",
+        "P4 Krisp Recent Canary",
+    ):
+        assert needle in html, f"expected {needle!r} in rendered home page"
+
+    daily_html = _fetch_first_text(
+        e2e_build,
+        ("/daily/", "/daily/index.html", "/daily/index", "/daily"),
+    )
+    assert "Daily notes" in daily_html
+    assert "2026-05-04" in daily_html
+    assert "Daily fixture note" in _fetch_first_text(
+        e2e_build,
+        (
+            "/daily/2026/2026-05-04/",
+            "/daily/2026/2026-05-04.html",
+            "/daily/2026/2026-05-04",
+        ),
+    )
+
+
+def test_p4_explorer_filter_and_month_grouping_assets_rendered(
+    e2e_build: str,
+) -> None:
+    """The rendered build includes the P4 Explorer runtime hooks.
+
+    The toggle and grouping are client-side mutations, so this test pins
+    the emitted runtime assets rather than pretending an HTTP fetch can click
+    localStorage-backed controls.
+    """
+    postscript = _fetch_text(f"{e2e_build}/postscript.js")
+    for needle in (
+        "brain.explorer.showIngested",
+        "brain-explorer-ingested-toggle",
+        "brain-explorer-month-header",
+        "brain-explorer-month-date",
+        "brain-explorer-month-title",
+    ):
+        assert needle in postscript, (
+            f"expected Explorer hook {needle!r} in emitted postscript.js"
+        )
+
+
+def test_p4_email_thread_reader_assets_and_fixture_shape(
+    e2e_build: str,
+) -> None:
+    """Gmail thread pages carry the reading-mode runtime and details markup."""
+    html = _fetch_first_text(
+        e2e_build,
+        (
+            "/_ingested/gmail/2026-04-22-fixture-gmail-thread/",
+            "/_ingested/gmail/2026-04-22-fixture-gmail-thread.html",
+            "/_ingested/gmail/2026-04-22-fixture-gmail-thread",
+        ),
+    )
+    for needle in (
+        "<details",
+        "<summary>",
+        "owner@example.com",
+        "alice@example.com",
+        "/static/emailThread.js",
+        "window.BRAIN_USER_EMAIL",
+    ):
+        assert needle in html, f"expected email-thread signal {needle!r}"
+
+    runtime = _fetch_text(f"{e2e_build}/static/emailThread.js")
+    for needle in (
+        "brain.email.repliesOnly",
+        "brain-email-replies-only-toggle",
+        "data-brain-is-mine",
+        "document.addEventListener(\"nav\", init)",
+    ):
+        assert needle in runtime, f"expected runtime hook {needle!r}"
+
+
+def test_p4_graph_buttons_and_chip_runtime_assets(
+    e2e_build: str,
+) -> None:
+    """The build keeps all graph affordances and emits chip runtime assets."""
+    html = _fetch_text(f"{e2e_build}/")
+    for needle in (
+        "local-graph-fullscreen-icon",
+        "brain-stock-graph-icon",
+        "brain-graph-workbench-icon",
+        "global-graph-icon",
+    ):
+        assert needle in html, f"expected graph signal {needle!r} in build HTML"
+
+    postscript = _fetch_text(f"{e2e_build}/postscript.js")
+    for needle in (
+        "filterChips",
+        "brain-graph-chip-all",
+        "brain-graph-chip-row",
+        "brain-graph-chip-label",
+    ):
+        assert needle in postscript, (
+            f"expected graph runtime signal {needle!r} in emitted postscript.js"
+        )

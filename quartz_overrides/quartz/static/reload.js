@@ -32,16 +32,18 @@
 // loop is the replacement reload mechanism.
 //
 // Mechanism: every 3s, fetch `/.build-id` (a one-line text file
-// `brain.wiki.build_swap` writes to each build dir) with
-// cache-busting + no-store. The first response is captured as
-// the baseline; any subsequent response with a different value
-// triggers `location.reload()`. Network errors and non-2xx
-// responses are swallowed silently — a transient blip must NOT
-// reset the baseline (that would cause spurious reloads on the
-// next successful poll). Polling pauses while the tab is
-// hidden (`document.visibilityState === "hidden"`) and resumes
-// on `visibilitychange` to "visible" so backgrounded tabs don't
-// burn battery / network.
+// `brain.wiki.build_swap` writes to each build dir) as a conditional
+// request after the first successful response. Caddy serves the file
+// with an ETag; this client reuses that ETag via `If-None-Match` so
+// unchanged builds return `304 Not Modified` without a response body.
+// The first 200 response is captured as the baseline; any subsequent
+// 200 response with a different value triggers `location.reload()`.
+// Network errors, non-2xx responses, and 304s are swallowed silently —
+// a transient blip must NOT reset the baseline (that would cause
+// spurious reloads on the next successful poll). Polling pauses while
+// the tab is hidden (`document.visibilityState === "hidden"`) and
+// resumes on `visibilitychange` to "visible" so backgrounded tabs
+// don't burn battery / network.
 //
 // Env-var contract: the script tag itself is gated by
 // `BRAIN_WIKI_RELOAD=1` at Quartz BUILD time (not at script
@@ -71,6 +73,18 @@
   // comparing.
   var BUILD_ID_PATH = "/.build-id"
 
+  // Must match `brain.wiki.build_swap._generate_build_id()`. Rejecting
+  // non-empty garbage bodies (for example an HTML fallback) prevents a
+  // bad 200 response from poisoning the ETag baseline.
+  var BUILD_ID_PATTERN = /^\d{8}-\d{6}-[0-9a-f]{6}$/
+
+  // Last ETag returned by Caddy for `/.build-id`. `null` means the
+  // first request has not completed yet, so no conditional header can
+  // be sent. This is independent from the baseline body value: the
+  // ETag saves bandwidth on unchanged builds, while the body comparison
+  // remains the correctness check that decides when to reload.
+  var lastEtag = null
+
   // Baseline build id captured on the first successful poll.
   // `null` means "not yet known"; any response other than the
   // baseline triggers a reload. Once set, this is NEVER cleared
@@ -83,13 +97,25 @@
   // visibilitychange. `null` means "not currently polling".
   var timer = null
 
+  function buildHeaders() {
+    if (lastEtag === null) return {}
+    return { "If-None-Match": lastEtag }
+  }
+
   async function poll() {
     try {
-      var url = BUILD_ID_PATH + "?_=" + Date.now()
-      var r = await fetch(url, { cache: "no-store" })
+      var r = await fetch(BUILD_ID_PATH, {
+        cache: "no-cache",
+        headers: buildHeaders(),
+      })
+      if (r.status === 304) return
       if (!r.ok) return
+      var etag = r.headers.get("ETag")
       var id = (await r.text()).trim()
-      if (!id) return
+      if (!BUILD_ID_PATTERN.test(id)) return
+      if (etag) {
+        lastEtag = etag
+      }
       if (baseline === null) {
         baseline = id
         // One-time banner so the user can confirm the watcher is

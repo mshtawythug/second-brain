@@ -27,10 +27,10 @@ import * as Component from "./quartz/components"
 //
 // brain: Lane C redesign — `CommandPalette` lives in `afterBody` so
 // the modal markup ships with every page exactly once (the script
-// listener at `Cmd/Ctrl+K` is then reachable from any route). The
+// listener at `Cmd/Ctrl+P` is then reachable from any route). The
 // component is hidden by default (sets the `hidden` attribute on its
 // root `<div>`) and only revealed when the inline script removes the
-// attribute on a Cmd-K press. See
+// attribute on a Cmd-P press. See
 // `quartz/components/CommandPalette.tsx` for the markup and
 // `quartz/components/scripts/commandPalette.inline.ts` for the
 // runtime open/close + fuzzy search logic.
@@ -231,6 +231,7 @@ export const defaultContentPageLayout: PageLayout = {
         hubLabelFontMultiplier: 1.8,
       },
     }),
+    Component.RelatedDocs(),
     Component.DesktopOnly(Component.TableOfContents()),
     Component.Backlinks(),
   ],

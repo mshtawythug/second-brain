@@ -1,4 +1,4 @@
-// Brain command palette runtime (Lane C, Cmd/Ctrl-K).
+// Brain command palette runtime (Lane C, Cmd/Ctrl-P).
 //
 // This file is a TEMPLATE. It is installed at
 // `<vault>/.quartz/quartz/components/scripts/commandPalette.inline.ts`
@@ -9,11 +9,11 @@
 // every page at `</body>` time by Quartz's `renderPage.tsx`.
 //
 // What this script does, and why: nothing in stock Quartz exposes a
-// Cmd/Ctrl-K palette. We render the palette markup once globally
+// quick-open palette. We render the palette markup once globally
 // (registered in `quartz.layout.ts` `afterBody` slot via the
 // `CommandPalette` component), then this script owns the open/close
-// lifecycle, fuzzy search against `contentIndex.json`, keyboard
-// navigation, and SPA-nav cleanup.
+// lifecycle, source chips, fuzzy search against `contentIndex.json`,
+// keyboard navigation, and SPA-nav cleanup.
 //
 // brain (Lane C audit fix 2026-05-02): refactored to native
 // `<dialog>` element. We call `dialog.showModal()` to open and
@@ -26,11 +26,11 @@
 //   * Automatic focus restoration to the previously-focused element
 //     on `dialog.close()` (browser-managed, no manual stash).
 //   * `::backdrop` pseudo-element for the scrim (styled in
-//     `_cmdk.scss`) — replaces the manual `<div class="brain-cmdk-backdrop">`.
+//     `_command_palette.scss`) — replaces the manual `<div class="brain-cmdk-backdrop">`.
 //
 // brain (Lane C audit fix 2026-05-02): SPA-mode aware navigation.
 // `window.location.assign` defeats Quartz's micromorph SPA — every
-// Cmd-K result selection blew the page cache and incurred a full
+// quick-open result selection blew the page cache and incurred a full
 // paint. `spa.inline.ts` exposes `window.spaNavigate(url, isBack?)`
 // at line 146; we route through it when present and only fall back
 // to `window.location.assign` when SPA mode is disabled.
@@ -45,7 +45,7 @@
 //
 // Contracts the script depends on:
 //
-//   * `window.fetchData` — a `Promise<Record<FullSlug, ContentDetails>>`
+//   * `fetchData` — a `Promise<Record<FullSlug, ContentDetails>>`
 //     defined inline in `renderPage.tsx`'s `<head>` block. Stock
 //     Quartz exposes it for the search component; we piggyback so we
 //     don't fetch the index twice.
@@ -62,7 +62,7 @@
 //     is empty for a non-empty query.
 //
 // Keyboard contract:
-//   * `Cmd+K` (macOS) / `Ctrl+K` (Win/Linux) — open the palette
+//   * `Cmd+P` (macOS) / `Ctrl+P` (Win/Linux) — open the palette
 //     (always; works from any page).
 //   * `Esc` — close the palette (handled natively via the `cancel`
 //     event so the close animation still runs).
@@ -84,6 +84,7 @@
 // because that creates a real ES module dependency; the inline
 // script runs as `<script type="module">` and these are runtime
 // globals, not module exports.
+import { SOURCE_CHIP_ORDER, inferSource, sourceIconFor } from "../../util/sourceIcons"
 declare global {
   // brain: defined inline by Quartz's renderPage.tsx as
   // `const fetchData = fetch("./static/contentIndex.json").then(d => d.json())`.
@@ -120,6 +121,7 @@ interface Result {
   slug: string
   title: string
   tags: string[]
+  source: string
   score: number
 }
 
@@ -127,6 +129,7 @@ const ROOT_SELECTOR = "#brain-cmdk-root"
 const INPUT_SELECTOR = ".brain-cmdk-input"
 const RESULTS_SELECTOR = ".brain-cmdk-results"
 const EMPTY_SELECTOR = ".brain-cmdk-empty"
+const CHIPS_SELECTOR = ".brain-cmdk-chips"
 
 // brain: prefix for each result `<li>`'s id. The `aria-activedescendant`
 // on the input points at one of these per-keystroke. Single source
@@ -134,6 +137,9 @@ const EMPTY_SELECTOR = ".brain-cmdk-empty"
 const RESULT_ID_PREFIX = "brain-cmdk-result-"
 
 const MAX_RESULTS = 12
+const ACTIVE_SOURCES_KEY = "brain.commandPalette.activeSources"
+const DEFAULT_ACTIVE_SOURCES = new Set<string>(SOURCE_CHIP_ORDER)
+let activeSources: Set<string> = loadActiveSources()
 
 // brain: matches `--motion-mid` in `_tokens.scss`. Used to delay the
 // actual `dialog.close()` after we strip `.is-open`, so the exit
@@ -150,6 +156,33 @@ function registerCleanup(fn: () => void): void {
   if (typeof window.addCleanup === "function") {
     window.addCleanup(fn)
   }
+}
+
+function loadActiveSources(): Set<string> {
+  if (typeof localStorage === "undefined") return new Set(DEFAULT_ACTIVE_SOURCES)
+  try {
+    const raw = localStorage.getItem(ACTIVE_SOURCES_KEY)
+    if (raw === null) return new Set(DEFAULT_ACTIVE_SOURCES)
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set(DEFAULT_ACTIVE_SOURCES)
+    const filtered = parsed.filter((value): value is string => typeof value === "string")
+    return new Set<string>(filtered)
+  } catch {
+    return new Set(DEFAULT_ACTIVE_SOURCES)
+  }
+}
+
+function persistActiveSources(): void {
+  if (typeof localStorage === "undefined") return
+  try {
+    localStorage.setItem(ACTIVE_SOURCES_KEY, JSON.stringify([...activeSources]))
+  } catch {
+    // localStorage can throw in private browsing; filtering should still work in memory.
+  }
+}
+
+function passesSourceFilter(source: string): boolean {
+  return activeSources.size === 0 || activeSources.has(source)
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +225,8 @@ function fuzzy(
     const entry = data[slug]
     const title = entry.title ?? slug
     const tags = entry.tags ?? []
+    const source = inferSource(slug, entry.source)
+    if (!passesSourceFilter(source)) continue
 
     let score = 0
     score += scoreMatch(q, title, 3.0)
@@ -201,7 +236,7 @@ function fuzzy(
     score += scoreMatch(q, slug, 0.8)
 
     if (score > 0) {
-      out.push({ slug, title, tags, score })
+      out.push({ slug, title, tags, source, score })
     }
   }
 
@@ -213,16 +248,6 @@ function fuzzy(
 // ---------------------------------------------------------------------------
 // Render results into the listbox
 // ---------------------------------------------------------------------------
-
-function kindIcon(slug: string): string {
-  // Tag pages live under `tags/`. Ingested artifacts under `_ingested/`.
-  // Everything else is a regular note. Use simple glyphs — the
-  // CSS handles color/sizing.
-  if (slug.startsWith("tags/")) return "#"
-  if (slug.startsWith("_ingested/")) return "📄"
-  if (slug.startsWith("daily/")) return "🗓"
-  return "📝"
-}
 
 function renderResults(
   list: HTMLUListElement,
@@ -259,7 +284,7 @@ function renderResults(
 
     const icon = document.createElement("span")
     icon.className = "brain-cmdk-icon"
-    icon.textContent = kindIcon(result.slug)
+    icon.textContent = sourceIconFor(result.source)
     li.appendChild(icon)
 
     const body = document.createElement("div")
@@ -272,7 +297,7 @@ function renderResults(
 
     const slug = document.createElement("div")
     slug.className = "brain-cmdk-slug"
-    slug.textContent = result.slug
+    slug.textContent = `${result.source} / ${result.slug}`
     body.appendChild(slug)
 
     li.appendChild(body)
@@ -310,7 +335,7 @@ function setSelected(
     return
   }
   // brain: clamp to range and wrap — wrapping makes ↑ from the top
-  // jump to bottom and vice versa, which matches Cmd-K conventions
+  // jump to bottom and vice versa, which matches quick-open conventions
   // (Reflect, Linear, Spotlight all wrap).
   const clamped = ((target % items.length) + items.length) % items.length
   items.forEach((item, i) => {
@@ -352,7 +377,7 @@ function openPalette(dialog: HTMLDialogElement, input: HTMLInputElement): void {
   //   1. `showModal()` first — dialog flips to `display: flex` with
   //      `.is-open` ABSENT, so the modal child paints at its
   //      resting state (`transform: scale(0.96); opacity: 0` from
-  //      `_cmdk.scss` line 152-154). This is the from-state of the
+  //      `_command_palette.scss` line 152-154). This is the from-state of the
   //      entrance.
   //   2. `requestAnimationFrame` — wait one frame so the resting-
   //      state paint commits to the screen before the next mutation.
@@ -367,7 +392,7 @@ function openPalette(dialog: HTMLDialogElement, input: HTMLInputElement): void {
   //      ARIA + focus changes don't need to wait for the animation;
   //      AT consumers and keyboard users want immediate feedback.
   //
-  // The `_cmdk.scss` rules are unchanged — the resting state lives
+  // The `_command_palette.scss` rules are unchanged — the resting state lives
   // on `.brain-cmdk-modal` directly, the open state lives on
   // `#brain-cmdk-root.is-open .brain-cmdk-modal`. The fix is purely
   // in the script-side mutation order.
@@ -454,22 +479,78 @@ async function setupPalette(): Promise<void> {
   const input = dialog.querySelector<HTMLInputElement>(INPUT_SELECTOR)
   const list = dialog.querySelector<HTMLUListElement>(RESULTS_SELECTOR)
   const empty = dialog.querySelector<HTMLElement>(EMPTY_SELECTOR)
+  const chipsRail = dialog.querySelector<HTMLElement>(CHIPS_SELECTOR)
   if (input === null || list === null || empty === null) return
 
-  // brain: wait for the global content index. `window.fetchData` is
+  // brain: wait for the global content index. `fetchData` is
   // installed by `renderPage.tsx`'s prescript; if absent for any
   // reason (e.g. an experimental layout disables it), bail
   // gracefully without breaking the page.
-  if (typeof window.fetchData === "undefined") return
-  const data = await window.fetchData
+  if (typeof fetchData === "undefined") return
+  const data = await fetchData
 
-  // ---- Cmd-K toggle (page-level keyboard listener) ------------------
+  function rerenderCurrentQuery(): void {
+    const results = fuzzy(input.value, data)
+    renderResults(list, empty, input, results)
+  }
+
+  function refreshChipState(): void {
+    if (chipsRail === null) return
+    const chips = chipsRail.querySelectorAll<HTMLButtonElement>(".brain-cmdk-chip")
+    const values = Array.from(chips)
+      .map((chip) => chip.dataset["brainSource"])
+      .filter((value): value is string => typeof value === "string" && value !== "__all__")
+    const allActive = values.length > 0 && values.every((value) => activeSources.has(value))
+    chips.forEach((chip) => {
+      const value = chip.dataset["brainSource"]
+      if (value === "__all__") {
+        chip.dataset["active"] = allActive ? "true" : "false"
+        chip.setAttribute("aria-pressed", allActive ? "true" : "false")
+      } else if (typeof value === "string") {
+        const isActive = activeSources.has(value)
+        chip.dataset["active"] = isActive ? "true" : "false"
+        chip.setAttribute("aria-pressed", isActive ? "true" : "false")
+      }
+    })
+  }
+
+  function bindChipHandlers(): void {
+    if (chipsRail === null) return
+    const chips = chipsRail.querySelectorAll<HTMLButtonElement>(".brain-cmdk-chip")
+    const allValues = Array.from(chips)
+      .map((chip) => chip.dataset["brainSource"])
+      .filter((value): value is string => typeof value === "string" && value !== "__all__")
+    chips.forEach((chip) => {
+      const value = chip.dataset["brainSource"]
+      const handler = (): void => {
+        if (value === "__all__") {
+          activeSources = new Set<string>(allValues)
+        } else if (typeof value === "string") {
+          if (activeSources.has(value)) {
+            activeSources.delete(value)
+          } else {
+            activeSources.add(value)
+          }
+        }
+        persistActiveSources()
+        refreshChipState()
+        rerenderCurrentQuery()
+      }
+      chip.addEventListener("click", handler)
+      registerCleanup(() => chip.removeEventListener("click", handler))
+    })
+  }
+
+  refreshChipState()
+  bindChipHandlers()
+
+  // ---- Cmd-P toggle (page-level keyboard listener) ------------------
   const onKeyDown = (event: KeyboardEvent): void => {
     const isOpen = dialog.open
-    const isCmdK =
-      (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k"
+    const isCmdP =
+      (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "p"
 
-    if (isCmdK) {
+    if (isCmdP) {
       event.preventDefault()
       if (isOpen) {
         closePalette(dialog, input)
@@ -479,11 +560,13 @@ async function setupPalette(): Promise<void> {
       return
     }
 
-    // brain (Lane C audit fix): drop manual Esc handling — native
-    // `<dialog>` fires a `cancel` event on Escape that we hook
-    // below. Manual Esc here would race with the cancel handler.
-
     if (!isOpen) return
+
+    if (event.key === "Escape") {
+      event.preventDefault()
+      closePalette(dialog, input)
+      return
+    }
 
     if (event.key === "ArrowDown") {
       event.preventDefault()
@@ -523,8 +606,7 @@ async function setupPalette(): Promise<void> {
 
   // ---- Input → search ---------------------------------------------
   const onInput = (): void => {
-    const results = fuzzy(input.value, data)
-    renderResults(list, empty, input, results)
+    rerenderCurrentQuery()
   }
 
   // ---- Click on a result ------------------------------------------

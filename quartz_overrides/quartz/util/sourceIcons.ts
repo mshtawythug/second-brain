@@ -10,18 +10,12 @@
 // `search.inline.ts`). P3.3 needs the same vocabulary on the
 // server-rendered tag-content rows. Rather than copy a third time, we
 // factor the table into this small util module so a future ingest
-// source (e.g. notion) is a single-line change. P3.2's component-side
-// constant is intentionally left in place for now (per coordinator
-// instructions) — a static parity test in
-// `tests/test_quartz_tag_content_static.py` and
-// `tests/test_quartz_search_static.py` keeps the two copies aligned;
-// a follow-up refactor can converge them once both consumers are
-// stable.
+// source (e.g. notion) is a single-line change. Search, TagContent,
+// RelatedDocs, and CommandPalette all import this canonical table.
 
 // brain: source-icon mapping. Adding a key here is necessary but not
-// sufficient — Search.tsx's `SOURCE_ICONS` and the chip palette in
-// `_search.scss` must also gain the new entry. The static parity test
-// in `test_quartz_search_static.py` enforces the lockstep.
+// sufficient — source chip styles and any source-specific palettes must
+// also gain the new entry. Static tests keep the consumers in lockstep.
 export const SOURCE_ICONS: Record<string, string> = {
   gmail: "📧",
   krisp: "🎙️",
