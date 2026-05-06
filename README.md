@@ -59,6 +59,7 @@ Caveats:
 
 ### Prerequisites
 
+- **Git** — used to clone this repo and the optional Quartz wiki renderer.
 - **Python 3.11+** — `python3.11 --version` should work. On macOS: `brew install python@3.11`.
 - **Docker Desktop** (or Docker Engine) — running. The Postgres + pgvector database lives in a container on port 5433. Get it from [docker.com](https://www.docker.com/products/docker-desktop/).
 - **[Ollama](https://ollama.com/)** (for the default `arctic` backend, and for `qwen3`). On macOS:
@@ -69,14 +70,17 @@ Caveats:
   # ollama pull qwen3-embedding:8b        # only if you want BRAIN_EMBEDDER=qwen3 — 4.7 GB
   ```
   Skip Ollama entirely if you plan to use `BRAIN_EMBEDDER=voyage` exclusively.
+- **Node.js 18+ and npm** (only if you want the rendered wiki). On macOS: `brew install node`.
 - **[Caddy](https://caddyserver.com/)** (only if you want the live wiki at `brain.test` or `localhost:8080`). On macOS:
   ```bash
   brew install caddy
   brew services start caddy
   ```
   See [Wiki rendering → Serve locally](#serve-locally) for the Caddyfile recipe and the `brain.test` /etc/hosts entry. Skip Caddy if you only ever query the brain through `brain search` from Claude — the wiki view is optional.
+- **`gws` CLI** (only for Gmail ingest and Google-backed directory linking). Brain shells out to `gws gmail users messages list/get` for `brain ingest-gmail`, and uses `gws` best-effort for Calendar/Contacts directory refreshes. Install and authenticate it separately, make sure `which gws` resolves, then `brain doctor` will report `gws CLI OK`.
+- **Graphviz** (optional) — only needed if you want to render `brain graph --format dot` output locally with `dot -Tsvg`. On macOS: `brew install graphviz`.
 - **A Voyage AI API key** (only if `BRAIN_EMBEDDER=voyage`) — free tier covers personal use. Sign up at [voyageai.com](https://www.voyageai.com/) and grab a key.
-- **Claude Code** (optional but the whole point) — install from [claude.com/claude-code](https://claude.com/claude-code) so Claude can call `brain` for you.
+- **Claude Code or Claude Desktop** (optional but the whole point) — Claude Code can call the `brain` CLI from any project; Claude Desktop can call the `brain-mcp` server once configured.
 
 ### Install
 
@@ -86,7 +90,8 @@ git clone <repo> ~/workspace/second-brain
 cd ~/workspace/second-brain
 
 # 2. Set up the environment file (gitignored). The default BRAIN_EMBEDDER=arctic
-#    needs no API keys; if you choose voyage, paste your VOYAGE_API_KEY here.
+#    needs no API keys. If you choose voyage, paste VOYAGE_API_KEY here.
+#    Optional: set BRAIN_VAULT_PATH and BRAIN_USER_EMAIL here too.
 cp .env.example .env
 
 # 3. Create an isolated Python environment so this project's deps
@@ -110,7 +115,7 @@ brain init
 #    first, then finalizes.
 brain reembed
 
-# 8. Sanity check — should print "all OK" lines for each component.
+# 8. Sanity check. Optional integrations (gws, npx) print warnings when absent.
 brain doctor
 ```
 
@@ -118,7 +123,9 @@ If `brain doctor` complains, the usual suspects are: Docker isn't running, the
 container hasn't finished starting yet (give it ~10 seconds and retry), Ollama
 isn't running (`brew services start ollama`), the configured embedding model
 isn't pulled (`ollama pull snowflake-arctic-embed2`), or — only when
-`BRAIN_EMBEDDER=voyage` — `VOYAGE_API_KEY` is missing from `.env`.
+`BRAIN_EMBEDDER=voyage` — `VOYAGE_API_KEY` is missing from `.env`. Missing
+`gws` only disables Gmail ingest and Google directory refreshes; missing `npx`
+only disables `brain vault render`.
 
 ### Wiki (optional)
 
@@ -199,11 +206,13 @@ brain doctor
 
 `docker compose down -v` is **not** sufficient — Postgres data lives in `./data/postgres` (a host bind-mount), not a Docker-managed volume. The `rm -rf data/postgres` step is what actually wipes the corpus.
 
-### Make `brain` and the `bin/` scripts available from any directory
+### Make `brain`, `brain-mcp`, and the `bin/` scripts available from any directory
 
-By default, `brain` only works inside this folder with the venv activated, and
-the `bin/brain-up` / `bin/brain-down` / `bin/brain-rebuild` / `bin/brain-status`
-scripts have to be invoked by full path. Two small one-time edits fix both.
+By default, `brain` and `brain-mcp` only work inside this folder with the venv
+activated, and the `bin/brain-up` / `bin/brain-down` / `bin/brain-rebuild` /
+`bin/brain-status` scripts have to be invoked by full path. Two small one-time
+edits fix the CLI and wiki scripts; the MCP symlink is optional but useful for
+debugging.
 
 **1. Symlink the `brain` launcher onto your PATH** so `brain` works from any
 shell — including Claude Code in any project:
@@ -219,7 +228,21 @@ ln -s ~/workspace/second-brain/.venv/bin/brain ~/.local/bin/brain
 The symlink works without `source .venv/bin/activate` because `pip install -e`
 gives the launcher an absolute-path shebang pointing at the venv's Python.
 
-**2. Add `bin/` to your shell's PATH** so `brain-up` / `brain-down` /
+**2. Optional: symlink `brain-mcp` too** so you can start the MCP server from
+any terminal while debugging Claude Desktop:
+
+```bash
+# macOS (Homebrew):
+ln -s ~/workspace/second-brain/.venv/bin/brain-mcp /opt/homebrew/bin/brain-mcp
+
+# Linux (or non-Homebrew macOS):
+ln -s ~/workspace/second-brain/.venv/bin/brain-mcp ~/.local/bin/brain-mcp
+```
+
+Claude Desktop can still use the absolute venv path shown below; this symlink
+is only for convenience.
+
+**3. Add `bin/` to your shell's PATH** so `brain-up` / `brain-down` /
 `brain-rebuild` / `brain-status` work from anywhere. Pick the snippet for
 your shell:
 
@@ -239,12 +262,13 @@ fish_add_path ~/workspace/second-brain/bin
 If you cloned the repo somewhere other than `~/workspace/second-brain/`, swap
 that path in (or use `$(pwd)/bin` while sitting in the repo root).
 
-**3. Verify both:**
+**4. Verify everything:**
 
 ```bash
 which brain          # → /opt/homebrew/bin/brain (or ~/.local/bin/brain)
+which brain-mcp      # optional; same prefix if you created the symlink
 which brain-up       # → /Users/<you>/workspace/second-brain/bin/brain-up
-brain doctor         # → all OK
+brain doctor         # → required components OK; optional ones may warn
 brain-status         # → wiki/watcher status (both stopped initially)
 ```
 
@@ -253,46 +277,109 @@ no need to remember Quartz or watcher invocations.
 
 ## Usage
 
+### Ingest files and pasted text
+
 ```bash
-# Ingest your career corpus
+# Single files: TXT, Markdown, PDF, DOCX.
+brain ingest ~/Documents/resume.pdf --tag career --tag resume
+brain ingest ./notes.md --force       # re-ingest even if the content already exists
+
+# Directories: recursive, idempotent by content hash.
 brain ingest-dir ~/Documents/career
+brain ingest-dir ~/Documents/career --tag career --ext pdf,md,docx
+brain ingest-dir ~/Documents/career --dry-run
 
-# Tag a document
-brain tag <id-prefix> +interview +career
+# Piped content: used for Krisp / Slack / arbitrary text from agents.
+echo "<transcript>" | brain ingest-stdin \
+  --source krisp \
+  --external-id meeting-42 \
+  --title "1:1 - 2026-04-24" \
+  --content-type transcript \
+  --date 2026-04-24 \
+  --tag one-on-one \
+  --metadata '{"participants":["Alice","Bob"],"duration_min":30}'
+```
 
-# Edit a document in place (title / metadata / body)
-brain edit <id-prefix> --title "New title"
-brain edit <id-prefix> --metadata '{"date":"2026-04-26"}'   # shallow-merges
-brain edit <id-prefix> --content-file ./fixed.md            # re-embeds
-brain edit <id-prefix>                                      # opens $EDITOR
+All ingest paths write rows + chunks to Postgres and, when `BRAIN_VAULT_PATH`
+exists, mirror ingested documents into `_ingested/<source>/` so the wiki can
+show them. Re-running unchanged content is a no-op unless you pass `--force`.
 
-# Search
+### Search, browse, and inspect
+
+```bash
 brain search "what did I tell my manager about the platform migration"
 brain search "compliance horror stories" --limit 10
 brain search "interview prep" --tag interview --since 30
+brain search "person-x onboarding" --source gmail --json
+brain search "exact product name" --fts-only   # skip embedding call
 
-# Drill into a result
 brain show <id-prefix>
+brain show <id-prefix> --json
 
-# Browse
 brain list --source gmail --limit 20
 brain list --tag career
-
-# Gmail (requires at least one scope flag)
-brain ingest-gmail --label interviews --since 30d
-brain ingest-gmail --from alice@example.com
-
-# Krisp / Slack — Claude orchestrates this:
-# (Claude calls Krisp MCP, then pipes to brain ingest-stdin)
-echo "<transcript>" | brain ingest-stdin \
-  --source krisp --external-id meeting-42 \
-  --title "1:1 — Apr 24" --content-type transcript \
-  --metadata '{"participants":["Alice","Bob"]}'
-
-# Admin
-brain status   # counts and last-ingest time
-brain doctor   # health check
+brain list --json
 ```
+
+ID prefixes must be at least 6 hex characters and must uniquely identify one
+document. `--json` is the machine-readable path for Claude or scripts.
+
+### Tags, edits, draft hiding, and deletes
+
+```bash
+# Tags accept +name and -name modifiers. Existing vault mirrors are rewritten
+# so frontmatter stays aligned with the DB.
+brain tag <id-prefix> +interview +career -old-tag
+brain tag <id-prefix> +career --regenerate-file   # recover a missing ingested mirror
+
+# Ingested-tier docs: targeted updates or JSON-header editor flow.
+brain edit <id-prefix> --title "New title"
+brain edit <id-prefix> --metadata '{"date":"2026-04-26"}'   # shallow merge
+brain edit <id-prefix> --metadata '{"date":"2026-04-26"}' --replace-metadata
+brain edit <id-prefix> --content-file ./fixed.md            # re-chunks + re-embeds
+cat ./fixed.md | brain edit <id-prefix> --content-stdin
+brain edit <id-prefix>                                      # opens $EDITOR
+
+# Vault-tier docs: the file is source of truth. `brain edit <id>` opens the
+# Markdown file directly; mutating flags are rejected for vault docs.
+brain edit <vault-id-prefix>
+
+# Hide a doc from the rendered wiki without removing it from local CLI search.
+brain mark-draft <id-prefix>
+brain mark-published <id-prefix>
+
+# Delete a document and its chunks. If a vault mirror exists, it is unlinked too.
+brain rm <id-prefix>
+brain rm <id-prefix> --yes
+```
+
+### Gmail ingest
+
+`brain ingest-gmail` uses the `gws` CLI and requires at least one scope flag so
+you do not accidentally ingest your entire mailbox. It excludes Gmail drafts,
+groups messages by `threadId`, stores each thread as one `email_thread`
+document, and updates a stable row when a thread grows.
+
+```bash
+brain ingest-gmail --label interviews --since 2026/04/01 --tag interview
+brain ingest-gmail --from alice@example.com --max 25
+brain ingest-gmail --query 'from:recruiting@example.com newer_than:30d' --dry-run
+brain ingest-gmail --until 2026/05/01 --tag archive
+```
+
+Dates passed to `--since` / `--until` are converted into Gmail `after:` /
+`before:` query terms, so use Gmail's `YYYY/MM/DD` shape. Raw `--query` is
+passed through and can use any Gmail search syntax.
+
+### Status and health
+
+```bash
+brain status   # counts and last-ingest time
+brain doctor   # env, Postgres/pgvector, embedder, gws, npx, mirror drift
+```
+
+`brain doctor` exits non-zero only for required failures: config, database, or
+active embedder. Optional integrations (`gws`, `npx`) are warnings.
 
 ## Vault model
 
@@ -362,14 +449,62 @@ brain vault sync --watch
 
 Runs as a daemon (Ctrl-C to stop). Filesystem events trigger debounced (500ms) per-file syncs — edit a note, save, and within a beat the chunk + embedding update in the DB. Skips `_templates/`, `_attachments/`, hidden directories. The `bin/brain-up` script kicks this off alongside the wiki [build watcher](#serve-locally).
 
+### Vault maintenance
+
+```bash
+# Preview or prune vault-tier DB rows whose source files vanished.
+brain vault sync --dry-run
+brain vault sync --prune
+
+# Remove stale _ingested/ mirror files whose DB rows no longer exist.
+brain vault prune-orphans
+brain vault prune-orphans --include-stale
+brain vault prune-orphans --apply
+
+# Rebuild the name/email directory used by metadata-derived links.
+brain vault directory refresh
+brain vault directory show
+brain vault directory show --source gmail
+
+# Rebuild Gmail/Krisp metadata-derived graph edges and rewrite the
+# "Related" fences in affected _ingested/ files.
+brain vault relink-derived
+```
+
+Use `brain vault directory refresh` after a large Gmail ingest, after changing
+Google contacts/calendar access, or after editing any people metadata consumed
+by the linker. Use `brain vault relink-derived` when you want the graph and
+rendered "Related" sections to reflect the latest Gmail/Krisp corpus. Both
+commands are idempotent; missing `gws` degrades to warnings, with Gmail-derived
+directory entries still refreshed from already-ingested mail.
+
+### Data hygiene backfills
+
+These commands are for cleanup after older imports or tag taxonomy changes:
+
+```bash
+brain backfill normalize-tags --dry-run
+brain backfill normalize-tags
+brain backfill normalize-tags --mapping ./tag-map.json
+
+brain backfill source-rows --dry-run
+brain backfill source-rows
+brain vault export --to ~/brain-vault --force   # after source-rows
+```
+
+`normalize-tags` lowercases, hyphenates, dedupes, and rewrites both DB tags and
+frontmatter tags when a mirror file exists. The optional mapping file is a JSON
+object like `{"recruiters": "recruiter", "artificial-intelligence": "ai"}`.
+`source-rows` is only for legacy Markdown rows with `source_id IS NULL`; fresh
+installs should not need it.
+
 ## Use from Claude Desktop
 
-The `brain-mcp` binary exposes the brain as an [MCP](https://modelcontextprotocol.io/) server so Claude Desktop can search, save, and edit entries during a chat — no terminal required. Seven tools are advertised:
+The `brain-mcp` binary exposes Brain as an [MCP](https://modelcontextprotocol.io/)
+server so Claude Desktop can search, save, author notes, inspect links, and
+edit entries during a chat — no terminal required.
 
-- **Read:** `brain_search`, `brain_show`, `brain_list`, `brain_status`
-- **Write:** `brain_ingest_stdin`, `brain_tag`, `brain_edit`
-
-Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json`. The `env` block must match whichever backend you set in `.env` — pass `BRAIN_EMBEDDER` and the backend-specific knobs (Ollama host for `arctic`/`qwen3`, `VOYAGE_API_KEY` for `voyage`):
+Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json`. The `env` block must match whichever backend you set in `.env` — pass `BRAIN_EMBEDDER` and the backend-specific knobs (Ollama host for `arctic`/`qwen3`, `VOYAGE_API_KEY` for `voyage`). `BRAIN_VAULT_PATH` is optional when you use the default `~/brain-vault`, but setting it explicitly makes Desktop behavior match the CLI even if the repo moves later:
 
 ```json
 {
@@ -379,7 +514,9 @@ Add the following to `~/Library/Application Support/Claude/claude_desktop_config
       "env": {
         "DATABASE_URL": "postgresql://brain:brain@localhost:5433/second_brain",
         "BRAIN_EMBEDDER": "arctic",
-        "OLLAMA_HOST": "http://localhost:11434"
+        "OLLAMA_HOST": "http://localhost:11434",
+        "BRAIN_VAULT_PATH": "/Users/<you>/brain-vault",
+        "BRAIN_MCP_LOG_LEVEL": "INFO"
       }
     }
   }
@@ -387,6 +524,24 @@ Add the following to `~/Library/Application Support/Claude/claude_desktop_config
 ```
 
 For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voyage"` and `"VOYAGE_API_KEY": "<paste here>"`.
+
+### MCP tools
+
+| Tool | What it does |
+|---|---|
+| `brain_search` | Hybrid search with `source`, `tag`, `since_days`, and `fts_only` filters. |
+| `brain_show` | Return one full document by 6+ character id prefix. |
+| `brain_list` | Browse recent documents, optionally filtered by `source` or `tag`. |
+| `brain_status` | Counts, last-ingest timestamp, and by-source breakdown. |
+| `brain_ingest_stdin` | Save text from a chat or another MCP result; auto-tags `source-mcp`. |
+| `brain_tag` | Add/remove tags on an existing document and rewrite mirror frontmatter when present. |
+| `brain_edit` | Update title, content type, body, or metadata; body edits re-embed. |
+| `brain_backlinks` | List documents that link to a document. |
+| `brain_links` | List outgoing links, optionally including unresolved refs. |
+| `brain_orphans` | List docs with no incoming or outgoing links. |
+| `brain_note_new` | Create a vault note from chat content without opening `$EDITOR`; auto-tags `source-mcp`. |
+| `brain_daily` | Resolve or create a daily note for a date. |
+| `brain_link_proposal` | Propose a `[[link]]` from one vault note to another without writing files. |
 
 ### Environment variables
 
@@ -397,11 +552,19 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL. Used by `arctic` and `qwen3`; ignored by `voyage`. |
 | `QWEN3_MODEL` | `qwen3-embedding:8b` | Ollama model tag for the qwen3 backend. |
 | `VOYAGE_API_KEY` | (required for `voyage`) | Voyage AI key. Ignored by the local backends. |
+| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault folder for authored notes, ingested mirrors, wiki rendering, and MCP note tools. |
+| `BRAIN_USER_EMAIL` | unset | Owner email used by the rendered Gmail thread view's "Show only my replies" filter. Set it before wiki builds if you use that filter. |
 | `BRAIN_MCP_LOG_LEVEL` | `INFO` | Stderr log level. Accepts `DEBUG`, `INFO`, `WARNING`, `ERROR`. Unknown values fall back to `INFO`. |
 
 ### What to expect
 
-After saving the config and restarting Claude Desktop, the seven tools become callable in any chat — ask "search my brain for the Q1 review with person-x" and Claude Desktop calls `brain_search` directly. Server startup is ~0.5–1.5s; the cold start is the embedder warming up on the first search (Ollama loading the model into memory, or the Voyage SDK initializing). Logs go to stderr and are surfaced by Claude Desktop if a tool call fails.
+After saving the config and fully quitting/reopening Claude Desktop, the
+`brain_*` tools become callable in any chat. Ask "search my brain for the Q1
+review with person-x" and Desktop can call `brain_search`; ask "make a daily note
+for today with these bullets" and it can call `brain_daily` / `brain_edit`.
+Server startup is ~0.5–1.5s; the first search may also pay the embedder cold
+start cost (Ollama loading the model, or the Voyage SDK/network path warming
+up). Logs go to stderr and are surfaced by Claude Desktop if a tool call fails.
 
 ## Wiki rendering (Quartz)
 
