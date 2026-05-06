@@ -560,11 +560,32 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 
 After saving the config and fully quitting/reopening Claude Desktop, the
 `brain_*` tools become callable in any chat. Ask "search my brain for the Q1
-review with person-x" and Desktop can call `brain_search`; ask "make a daily note
-for today with these bullets" and it can call `brain_daily` / `brain_edit`.
-Server startup is ~0.5–1.5s; the first search may also pay the embedder cold
-start cost (Ollama loading the model, or the Voyage SDK/network path warming
-up). Logs go to stderr and are surfaced by Claude Desktop if a tool call fails.
+review with [person]" and Desktop can call `brain_search`; ask "make a daily
+note for today with these bullets" and it can call `brain_daily` /
+`brain_edit`. Server startup is ~0.5–1.5s; the first search may also pay the
+embedder cold start cost (Ollama loading the model, or the Voyage
+SDK/network path warming up). Logs go to stderr and are surfaced by Claude
+Desktop if a tool call fails.
+
+## Use from Claude Code (consult-brain skill)
+
+For Claude Code (the CLI), this repo ships a skill at
+`skills/consult-brain/SKILL.md` that teaches Claude when and how to query the
+brain. It triggers on phrases like "what did I say to X", "summarize my
+conversations about Y", "write this in my voice", and similar — searching the
+brain instead of guessing.
+
+Install once with a symlink so live edits to the repo update the skill:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$(pwd)/skills/consult-brain" ~/.claude/skills/consult-brain
+```
+
+Verify with `claude` running in any project: ask "what's in my brain about
+[topic]?" — Claude should reach for the skill, run `brain search`, read the
+top hits with `brain show`, and answer with citations. The MCP server above
+covers Claude Desktop; this skill covers Claude Code.
 
 ## Wiki rendering (Quartz)
 
