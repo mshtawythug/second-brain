@@ -98,9 +98,23 @@ from .vault.watch import WatchConfig, run_watcher
 
 logger = logging.getLogger(__name__)
 
+_KRISP_INGEST_HELP = (
+    "Importing Krisp calls — Krisp has no CLI, so transcripts are pulled by "
+    "Claude via the Krisp MCP (mcp__claude_ai_Krisp__search_meetings) and "
+    "piped into `brain ingest-stdin`. From any Claude conversation, ask e.g. "
+    '"ingest last week\'s Krisp calls" and Claude will fetch each transcript '
+    "and pipe it in with --source krisp, --external-id <meeting_id>, --title, "
+    "--content-type transcript, --date YYYY-MM-DD, and a --metadata JSON blob "
+    "({participants, duration_min}). Re-ingest is a no-op unless --force; "
+    "Krisp ingest also refreshes the Calendar/Contacts directory used by the "
+    "linker. See `brain ingest-stdin --help` for the full flag list."
+)
+
+
 app = typer.Typer(
     name="brain",
     help="Local personal knowledge base. Hybrid search over your career corpus.",
+    epilog=_KRISP_INGEST_HELP,
     no_args_is_help=True,
 )
 
