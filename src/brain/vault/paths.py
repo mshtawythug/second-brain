@@ -25,8 +25,9 @@ def strip_md_extension(path: str) -> str:
     Used by every renderer that emits ``[[<vault-path-no-md>|<title>]]``
     so wiki-links match what
     :func:`brain.vault.resolver._resolve_by_vault_path` looks for. Empty
-    input yields the empty string (the renderers guard for that
-    separately if they care).
+    input yields ``'.'`` (because ``PurePosixPath('').as_posix() == '.'``);
+    the renderers guard for that separately if they care, and the
+    contract is pinned by ``tests/test_vault_paths.py::test_empty_input``.
     """
     posix = PurePosixPath(path).as_posix()
     if posix.endswith(".md"):

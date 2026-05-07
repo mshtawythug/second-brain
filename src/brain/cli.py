@@ -3771,30 +3771,6 @@ def _person_to_payload(record: PersonRecord) -> dict[str, Any]:
     }
 
 
-def _find_person_by_name(
-    records: list[PersonRecord], name: str
-) -> PersonRecord | None:
-    """Case-insensitive substring match on ``display_name``.
-
-    Returns the first lexicographic match (``records`` is already
-    ``sorted(... key=display_name)`` by ``aggregate_people``) or
-    ``None`` when nothing matches. The substring rule keeps the CLI
-    forgiving — ``brain people person-luke`` should resolve "person-person-luke"
-    without forcing the user to remember the exact form.
-
-    Ties are broken by alpha order on ``display_name``; the call site
-    surfaces the count of additional matches so the user knows when
-    to disambiguate.
-    """
-    needle = name.casefold().strip()
-    if not needle:
-        return None
-    for rec in records:
-        if needle in rec.display_name.casefold():
-            return rec
-    return None
-
-
 def _people_matches(
     records: list[PersonRecord], name: str
 ) -> list[PersonRecord]:
