@@ -478,6 +478,36 @@ rendered "Related" sections to reflect the latest Gmail/Krisp corpus. Both
 commands are idempotent; missing `gws` degrades to warnings, with Gmail-derived
 directory entries still refreshed from already-ingested mail.
 
+**Excluding the corpus owner from derived edges.** By default the
+participant-overlap rules (R2 `shared_participant`, R3 `same_day_participant`)
+treat every participant as graph-worthy — including yourself, which can make
+every meeting/email link to every other doc you're on. Set
+`BRAIN_OWNER_PARTICIPANTS` in `.env` to a comma-separated list of identifiers
+to strip before the rules evaluate. Both emails AND display names are
+accepted, matching is case-insensitive, and entries are trimmed +
+lowercased at load time.
+
+For full coverage **list every form your name appears under in your
+corpus** — Gmail headers contribute both the email AND a normalized
+display-name key for each participant, so listing only the email leaves
+the display-name key behind and the rules still match. The recommended
+shape is `<Display Name>,<email>[,<other-email>...]`:
+
+```
+BRAIN_OWNER_PARTICIPANTS="Ali Sarkis,redacted@example.com,redacted@example.com"
+```
+
+After changing the value, run `brain vault relink-derived` to rebuild the
+derived-links table, then `brain vault sync` to refresh the in-body
+"Related" fences. Unset / blank disables the exclusion (existing behavior).
+
+The `brain owner` subcommand group manages this list without hand-editing
+`.env`: `brain owner show` prints the active list, `brain owner set
+"<csv>"` replaces it, and `brain owner add <id>` / `brain owner remove
+<id>` adjust one entry at a time (idempotent, case-insensitive). Each
+mutation rewrites `.env` atomically and reminds you to run
+`brain vault relink-derived` + `brain vault sync` afterward.
+
 ### Data hygiene backfills
 
 These commands are for cleanup after older imports or tag taxonomy changes:

@@ -96,6 +96,15 @@ class Config:
     vault_path: Path = DEFAULT_VAULT_PATH
     user_email: str | None = None
     vector_sim_floor: float = DEFAULT_VECTOR_SIM_FLOOR
+    # Comma-separated list of identifiers (emails AND/OR display names) that
+    # count as the corpus owner. Stripped from ``DocSnapshot.participant_keys``
+    # before R2 (``shared_participant``) and R3 (``same_day_participant``)
+    # evaluate, so a meeting/email isn't linked to every other doc the owner
+    # is on. Loaded from ``BRAIN_OWNER_PARTICIPANTS``; entries are trimmed,
+    # lowercased, and de-duplicated at load time so downstream comparisons
+    # can be a single ``.lower() in owner_participants`` check. Empty
+    # frozenset (default) is a fast-path no-op.
+    owner_participants: frozenset[str] = frozenset()
 
     @classmethod
     def load(cls) -> "Config":
@@ -159,6 +168,19 @@ class Config:
                     f"BRAIN_VECTOR_SIM_FLOOR must be a float in [0.0, 1.0] "
                     f"(got {vector_sim_floor!r})"
                 )
+        # Owner participants — identifiers (emails and/or display names)
+        # whose presence in a doc's participant set is treated as
+        # ``corpus owner``. Comma-separated; trim + lowercase + drop empty
+        # entries at load time so the downstream filter is a fast
+        # ``key.lower() in owner_participants`` check. Unset / blank /
+        # whitespace-only strings produce an empty frozenset (no
+        # behavioral change).
+        owner_raw = os.environ.get("BRAIN_OWNER_PARTICIPANTS", "")
+        owner_participants = frozenset(
+            piece
+            for piece in (entry.strip().lower() for entry in owner_raw.split(","))
+            if piece
+        )
         return cls(
             database_url=database_url,
             ollama_host=ollama_host,
@@ -168,4 +190,5 @@ class Config:
             vault_path=vault_path,
             user_email=user_email,
             vector_sim_floor=vector_sim_floor,
+            owner_participants=owner_participants,
         )

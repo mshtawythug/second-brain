@@ -33,6 +33,7 @@ def isolated_dotenv(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.delenv("QWEN3_MODEL", raising=False)
     monkeypatch.delenv("BRAIN_EMBEDDER", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    monkeypatch.delenv("BRAIN_OWNER_PARTICIPANTS", raising=False)
     return fake_project_env
 
 
@@ -193,3 +194,72 @@ def test_vault_path_expands_user_tilde(monkeypatch, isolated_dotenv):
     monkeypatch.setenv("BRAIN_VAULT_PATH", "~/my-brain")
     cfg = Config.load()
     assert cfg.vault_path == Path.home() / "my-brain"
+
+
+# ---------------------------------------------------------------------------
+# BRAIN_OWNER_PARTICIPANTS — corpus-owner identifiers stripped from
+# ``DocSnapshot.participant_keys`` before R2/R3 derived-edge rules evaluate.
+# ---------------------------------------------------------------------------
+
+
+class TestOwnerParticipants:
+    """Env parsing for ``BRAIN_OWNER_PARTICIPANTS``."""
+
+    def test_unset_yields_empty_frozenset(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_OWNER_PARTICIPANTS", raising=False)
+        cfg = Config.load()
+        assert cfg.owner_participants == frozenset()
+
+    def test_blank_value_yields_empty_frozenset(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        # An empty / whitespace-only env var must not produce phantom keys
+        # like ``""`` or ``"   "`` that would compare-equal to a stripped key.
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_OWNER_PARTICIPANTS", "   ")
+        cfg = Config.load()
+        assert cfg.owner_participants == frozenset()
+
+    def test_csv_lowercased_and_trimmed(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv(
+            "BRAIN_OWNER_PARTICIPANTS",
+            "Ali Sarkis,redacted@example.com",
+        )
+        cfg = Config.load()
+        assert cfg.owner_participants == frozenset(
+            {"ali sarkis", "redacted@example.com"}
+        )
+
+    def test_csv_drops_empty_entries_and_normalises(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        # Whitespace-padded entries get trimmed; trailing empties from
+        # ``Ali ,, ALI@x.com ,`` are dropped; mixed case is folded.
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv(
+            "BRAIN_OWNER_PARTICIPANTS",
+            "  Ali  ,  ALI@x.com  ,  ",
+        )
+        cfg = Config.load()
+        assert cfg.owner_participants == frozenset({"ali", "ali@x.com"})
+
+    def test_duplicates_collapsed(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        # frozenset() naturally de-dupes, but we still pin the contract so a
+        # mixed-case duplicate entry doesn't double-count via casing skew.
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv(
+            "BRAIN_OWNER_PARTICIPANTS",
+            "ali@example.com, ALI@EXAMPLE.COM ,Ali Sarkis,ali sarkis",
+        )
+        cfg = Config.load()
+        assert cfg.owner_participants == frozenset(
+            {"ali@example.com", "ali sarkis"}
+        )

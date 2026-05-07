@@ -124,6 +124,12 @@ class WatchConfig:
     # by default — ``False`` is opt-out for users who want to preserve the
     # exact authored shape of their wiki-links.
     link_rewrite: bool = True
+    # Plumbed from ``Config.owner_participants`` (env: BRAIN_OWNER_PARTICIPANTS):
+    # identifiers (emails / display names, lowercased + trimmed at config-load
+    # time) stripped from each ``DocSnapshot.participant_keys`` before R2/R3
+    # rule evaluation in the linker pass. Empty frozenset (default) disables
+    # the filter — used by every existing test.
+    owner_participants: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -203,6 +209,7 @@ def run_watcher(
             prune=config.prune,
             dry_run=False,
             link_rewrite=config.link_rewrite,
+            owner_participants=config.owner_participants,
         )
     finally:
         startup_conn.close()
@@ -533,6 +540,7 @@ def _worker_loop(
                     prune=False,  # never auto-prune in watch mode
                     dry_run=False,
                     link_rewrite=config.link_rewrite,
+                    owner_participants=config.owner_participants,
                 )
                 # The full sync may have rewritten any number of fences;
                 # the cache entries from before the overflow window are
@@ -569,6 +577,7 @@ def _worker_loop(
                             vault_path=config.vault_path,
                             file_path=job.abs_path,
                             link_rewrite=config.link_rewrite,
+                            owner_participants=config.owner_participants,
                         )
                         _refresh_body_cache(state, job.abs_path)
                 else:
@@ -612,6 +621,7 @@ def _worker_loop(
                         vault_path=config.vault_path,
                         file_path=job.abs_path,
                         link_rewrite=config.link_rewrite,
+                        owner_participants=config.owner_participants,
                     )
                     # Re-read after sync so the cache reflects whatever
                     # fence the linker just rewrote — that way the

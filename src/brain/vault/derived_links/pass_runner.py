@@ -30,6 +30,7 @@ def rebuild_derived_for(
     doc_ids: set[str],
     *,
     directory: DirectoryStore,
+    owner_participants: frozenset[str] = frozenset(),
 ) -> tuple[int, set[str]]:
     """Rebuild ``derived_links`` rows whose src or dst is in ``doc_ids``.
 
@@ -55,6 +56,16 @@ def rebuild_derived_for(
       regenerated. Includes the input ``doc_ids`` even when no edges were
       added or removed, so callers can rely on the input being a subset
       of the output.
+
+    ``owner_participants`` is the set of corpus-owner identifiers (emails
+    or display names, lowercased + trimmed at config-load time per
+    :class:`brain.config.Config.owner_participants`) that should be
+    stripped from each :class:`DocSnapshot.participant_keys` BEFORE rule
+    evaluation. Without this filter the owner is a participant on
+    essentially every doc, which floods R2 / R3 with noise edges keyed
+    on a single shared identity. The default (empty frozenset) is a
+    fast-path no-op and preserves the historical behaviour for tests
+    and any caller that hasn't opted in.
 
     The set short-circuits to ``(0, set())`` when ``doc_ids`` is empty —
     no DB round-trip, no transaction.
@@ -84,6 +95,7 @@ def rebuild_derived_for(
             source_kind=str(source_kind),
             metadata=dict(metadata or {}),
             directory=directory,
+            owner_participants=owner_participants,
         )
         snapshots[snap.document_id] = snap
 
@@ -201,6 +213,7 @@ def _build_snapshot(
     source_kind: str,
     metadata: dict[str, Any],
     directory: DirectoryStore,
+    owner_participants: frozenset[str] = frozenset(),
 ) -> DocSnapshot:
     """Project a DB row into a :class:`DocSnapshot` for rule evaluation.
 
@@ -214,6 +227,13 @@ def _build_snapshot(
     keys are bridged to emails via :meth:`DirectoryStore.resolve_name_to_email`
     so cross-source linking works without baking the directory into the
     pre-insert step.
+
+    ``owner_participants`` (lowercased at config load) is subtracted from the
+    final key set — emails AND display-name keys both run through the same
+    ``key.lower() in owner_participants`` filter — so the corpus owner can't
+    create participant-overlap edges between every doc they're on. The
+    default (empty frozenset) skips the dict-comp entirely (zero overhead
+    for callers that haven't opted in).
     """
     if source_kind == "gmail":
         keys = _gmail_participant_keys(metadata, directory)
@@ -221,6 +241,9 @@ def _build_snapshot(
         keys = _krisp_participant_keys(metadata, directory)
     else:  # pragma: no cover - SELECT filter keeps us here
         keys = set()
+
+    if owner_participants:
+        keys = {k for k in keys if k.lower() not in owner_participants}
 
     return DocSnapshot(
         document_id=document_id,

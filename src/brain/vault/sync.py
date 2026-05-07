@@ -120,6 +120,7 @@ def sync_vault(
     prune: bool = False,
     dry_run: bool = False,
     link_rewrite: bool = True,
+    owner_participants: frozenset[str] = frozenset(),
 ) -> SyncReport:
     """Reconcile every ``.md`` file under ``vault_path`` into the DB.
 
@@ -207,7 +208,10 @@ def sync_vault(
     # branch.
     if not dry_run:
         report.derived_links, affected_ids = rebuild_derived_for(
-            conn, seen_doc_ids, directory=DirectoryStore(conn)
+            conn,
+            seen_doc_ids,
+            directory=DirectoryStore(conn),
+            owner_participants=owner_participants,
         )
         report.fences_written = rewrite_derived_fences(
             conn, affected_ids, vault_path=vault_path
@@ -229,6 +233,7 @@ def sync_one_file(
     vault_path: Path,
     file_path: Path,
     link_rewrite: bool = True,
+    owner_participants: frozenset[str] = frozenset(),
 ) -> SyncReport:
     """Sync exactly one ``.md`` file under ``vault_path``.
 
@@ -340,7 +345,10 @@ def sync_one_file(
         # ``_ingested/`` file the linker touched. ``rewrite_derived_fences``
         # is also a no-op on an empty affected-set.
         report.derived_links, affected_ids = rebuild_derived_for(
-            conn, {doc_id}, directory=DirectoryStore(conn)
+            conn,
+            {doc_id},
+            directory=DirectoryStore(conn),
+            owner_participants=owner_participants,
         )
         report.fences_written = rewrite_derived_fences(
             conn, affected_ids, vault_path=vault_path

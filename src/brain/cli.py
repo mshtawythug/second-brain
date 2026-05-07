@@ -1,6 +1,7 @@
 """brain — second brain CLI."""
 import json as _json  # aliased — `json` conflicts with the --json output flag name
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import typer
 import yaml
 from rich.table import Table
 
+from . import config as _config_module
 from .backfill import backfill_search, backfill_source_rows
 from .config import Config, ConfigError
 from .db import connect, connect_raw, ensure_embedding_column, run_migrations
@@ -146,6 +148,16 @@ backfill_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(backfill_app, name="backfill")
+
+owner_app = typer.Typer(
+    name="owner",
+    help=(
+        "Manage BRAIN_OWNER_PARTICIPANTS — corpus-owner identifiers stripped "
+        "from derived-edge participant rules (R2/R3)."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(owner_app, name="owner")
 
 
 @app.callback()
@@ -1305,6 +1317,7 @@ def _edit_vault_file(cfg: Config, doc_id: str, vault_path: str) -> int:
             embedder=embedder,
             vault_path=cfg.vault_path,
             file_path=file_path,
+            owner_participants=cfg.owner_participants,
         )
     if report.errors:
         for path, reason in report.errors:
@@ -1753,6 +1766,7 @@ def vault_sync(
                 vault_path=target,
                 prune=prune,
                 link_rewrite=not no_link_rewrite,
+                owner_participants=cfg.owner_participants,
             ),
         )
         typer.echo(f"vault path:     {target}")
@@ -1785,6 +1799,7 @@ def vault_sync(
             prune=prune,
             dry_run=dry_run,
             link_rewrite=not no_link_rewrite,
+            owner_participants=cfg.owner_participants,
         )
 
     suffix = " (dry-run)" if dry_run else ""
@@ -2389,7 +2404,10 @@ def vault_relink_derived() -> None:
             # ``rebuild_derived_for`` returns ``(inserted_count, affected_ids)``;
             # the affected-ids set drives the fence renderer in step 4.
             inserted, affected_ids = rebuild_derived_for(
-                conn, corpus_ids, directory=directory
+                conn,
+                corpus_ids,
+                directory=directory,
+                owner_participants=cfg.owner_participants,
             )
             typer.echo(f"  - Touched docs: {len(corpus_ids)}")
             typer.echo(f"  - Inserted edges: {inserted}")
@@ -2766,6 +2784,7 @@ def _run_post_write_editor_and_sync(
             embedder=embedder,
             vault_path=vault_path,
             file_path=file_path,
+            owner_participants=cfg.owner_participants,
         )
     # Single source of truth for post-edit error reporting — every authoring
     # command that uses this helper inherits the contract automatically.
@@ -2854,6 +2873,7 @@ def note_new(
             embedder=embedder,
             vault_path=vault_path,
             file_path=target,
+            owner_participants=cfg.owner_participants,
         )
     if sync_report.errors:
         for path, reason in sync_report.errors:
@@ -2956,6 +2976,7 @@ def daily(
             embedder=embedder,
             vault_path=vault_path,
             file_path=target,
+            owner_participants=cfg.owner_participants,
         )
     if sync_report.errors:
         for path, reason in sync_report.errors:
@@ -2997,6 +3018,7 @@ def _refresh_daily_index(cfg: Config, vault_path: Path) -> None:
             embedder=embedder,
             vault_path=vault_path,
             file_path=index_path,
+            owner_participants=cfg.owner_participants,
         )
     for path, reason in report.errors:
         typer.secho(
@@ -3657,3 +3679,251 @@ def backfill_normalize_tags(
         f"{files_missing} file-missing skipped, "
         f"{already_canonical} already-canonical skipped"
     )
+
+
+# ---------------------------------------------------------------------------
+# brain owner — manage BRAIN_OWNER_PARTICIPANTS in `.env` without hand-editing.
+# ---------------------------------------------------------------------------
+
+# Hint printed after every mutation. Shipped through stdout (not stderr) so
+# CliRunner captures it for the regression test and so users running in a
+# pipe still see it.
+_OWNER_RELINK_HINT = (
+    "Updated BRAIN_OWNER_PARTICIPANTS. Run `brain vault relink-derived` to "
+    "rebuild derived links, then `brain vault sync` to refresh body fences."
+)
+
+
+def _owner_dotenv_path() -> Path:
+    """Path to the `.env` file the owner subcommands read + mutate.
+
+    Indirects through ``config._project_dotenv`` so tests can patch one
+    helper and have it cover both ``Config.load()`` (used by ``show``) and
+    the writer used by ``set/add/remove``. Keeps the source of truth in one
+    place.
+    """
+    return _config_module._project_dotenv()
+
+
+def _owner_normalize_csv(csv: str) -> list[str]:
+    """Mirror ``Config.load()`` parsing: trim → lowercase → drop empty → dedupe.
+
+    Returns the canonical list ordering (insertion order, deduped) — the
+    on-disk representation. Owner identifiers are stored lowercased to match
+    the comparison Phase 1 already performs in
+    ``pass_runner._build_doc_snapshot`` (``key.lower() in owner_participants``).
+
+    Rejects entries containing newline / carriage-return characters by
+    raising ``typer.Exit(1)`` after a friendly stderr message — a literal
+    newline embedded in an identifier would silently corrupt the next
+    line of ``.env`` once written. Defensive: real-world emails and
+    display names never contain raw line terminators.
+    """
+    seen: set[str] = set()
+    out: list[str] = []
+    for piece in csv.split(","):
+        norm = piece.strip().lower()
+        if not norm:
+            continue
+        if "\n" in norm or "\r" in norm:
+            typer.secho(
+                "error: BRAIN_OWNER_PARTICIPANTS entries must not contain "
+                "newline characters",
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        if norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
+
+
+def _owner_read_existing(path: Path) -> list[str]:
+    """Parse the current ``BRAIN_OWNER_PARTICIPANTS`` value from ``path``.
+
+    Returns the lowercased, deduped entry list — same shape as
+    :func:`_owner_normalize_csv`. Returns ``[]`` for missing file, missing
+    line, or blank value. Strips surrounding double-quotes (the writer's
+    quoting rule round-trips exactly).
+    """
+    if not path.is_file():
+        return []
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.lstrip()
+        if not line.startswith("BRAIN_OWNER_PARTICIPANTS="):
+            continue
+        value = line[len("BRAIN_OWNER_PARTICIPANTS=") :].strip()
+        if (
+            len(value) >= 2
+            and value.startswith('"')
+            and value.endswith('"')
+        ):
+            value = value[1:-1].replace('\\"', '"')
+        return _owner_normalize_csv(value)
+    return []
+
+
+def _owner_format_value(entries: list[str]) -> str:
+    """Render the RHS of the ``BRAIN_OWNER_PARTICIPANTS=…`` line.
+
+    Quotes the value when it contains spaces or commas (i.e. always for
+    2+ entries, or for any single entry containing whitespace). Pure
+    ``alphanumeric+@+.`` single entries stay unquoted to match the existing
+    style of ``DATABASE_URL=…`` lines.
+    """
+    raw = ",".join(entries)
+    if any(ch in raw for ch in (" ", ",", "\t")):
+        escaped = raw.replace('"', '\\"')
+        return f'"{escaped}"'
+    return raw
+
+
+def _owner_write_dotenv(path: Path, entries: list[str]) -> None:
+    """Atomically replace (or insert) the ``BRAIN_OWNER_PARTICIPANTS`` line.
+
+    Read existing contents, replace the target line in place if found
+    (preserves every other line, blank lines, and trailing comments),
+    otherwise append at the end with a leading newline if the file
+    doesn't already terminate in one. Creates the file if missing. Writes
+    via a sibling temp file + ``os.replace`` so a partial write can never
+    leave ``.env`` truncated.
+    """
+    new_value = _owner_format_value(entries)
+    new_line = f"BRAIN_OWNER_PARTICIPANTS={new_value}"
+
+    if path.is_file():
+        existing = path.read_text(encoding="utf-8")
+        lines = existing.splitlines(keepends=True)
+        replaced = False
+        for idx, line in enumerate(lines):
+            stripped = line.lstrip()
+            if stripped.startswith("BRAIN_OWNER_PARTICIPANTS="):
+                trailing_nl = "\n" if line.endswith("\n") else ""
+                lines[idx] = new_line + trailing_nl
+                replaced = True
+                break
+        if not replaced:
+            if lines and not lines[-1].endswith("\n"):
+                lines.append("\n")
+            lines.append(new_line + "\n")
+        new_text = "".join(lines)
+    else:
+        new_text = new_line + "\n"
+
+    tmp = path.parent / (path.name + ".tmp")
+    try:
+        tmp.write_text(new_text, encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        # Clean up the half-written sidecar so a retry can't trip over a
+        # stale ``.env.tmp``. ``missing_ok=True`` covers the case where the
+        # original ``write_text`` failed before the file was created.
+        tmp.unlink(missing_ok=True)
+        typer.secho(
+            f"error: failed to write {path}: {exc}", fg="red", err=True
+        )
+        raise typer.Exit(code=1) from exc
+
+
+@owner_app.command("show")
+def owner_show() -> None:
+    """Print the active ``BRAIN_OWNER_PARTICIPANTS`` list, one entry per line.
+
+    Reads from ``Config.owner_participants`` so shell-env overrides of
+    ``BRAIN_OWNER_PARTICIPANTS`` (which beat ``.env``) are reflected. An
+    empty list prints a single ``(none — BRAIN_OWNER_PARTICIPANTS unset)``
+    placeholder so the output channel is never silent.
+    """
+    cfg = Config.load()
+    if not cfg.owner_participants:
+        typer.echo("(none — BRAIN_OWNER_PARTICIPANTS unset)")
+        return
+    for entry in sorted(cfg.owner_participants):
+        typer.echo(entry)
+
+
+@owner_app.command("set")
+def owner_set(
+    csv: str = typer.Argument(
+        ...,
+        help='Comma-separated identifiers, e.g. "Ali Sarkis,fixture@example.com"',
+    ),
+) -> None:
+    """Replace the entire ``BRAIN_OWNER_PARTICIPANTS`` list in ``.env``.
+
+    Trims, lowercases, dedupes — same normalisation ``Config.load()``
+    performs. Quotes the on-disk value when it contains spaces or commas.
+    Atomic write; never partial.
+
+    Idempotent: if the new normalised list equals the current on-disk
+    list (same entries, same order — ``_owner_normalize_csv`` produces
+    deterministic ordering for any input that maps to the same set),
+    skip the rewrite + relink hint and emit a "no change" message. This
+    matches ``add`` / ``remove`` behaviour and avoids advising the user
+    to run an expensive ``relink-derived`` for a no-op.
+    """
+    entries = _owner_normalize_csv(csv)
+    path = _owner_dotenv_path()
+    current = _owner_read_existing(path)
+    if entries == current:
+        typer.echo(
+            "BRAIN_OWNER_PARTICIPANTS already matches — no change."
+        )
+        return
+    _owner_write_dotenv(path, entries)
+    typer.echo(_OWNER_RELINK_HINT)
+
+
+@owner_app.command("add")
+def owner_add(
+    identifier: str = typer.Argument(
+        ...,
+        help="Identifier to append (email or display name).",
+    ),
+) -> None:
+    """Append one identifier to ``BRAIN_OWNER_PARTICIPANTS``. Idempotent.
+
+    Lookup is case-insensitive (entries are stored lowercased); a duplicate
+    add is a silent no-op that does not rewrite ``.env`` and does not print
+    the relink hint — there's nothing to relink.
+    """
+    norm = identifier.strip().lower()
+    if not norm:
+        typer.secho("error: identifier must not be empty", fg="red", err=True)
+        raise typer.Exit(code=1)
+    path = _owner_dotenv_path()
+    current = _owner_read_existing(path)
+    if norm in current:
+        typer.echo(f"{norm!r} already present in BRAIN_OWNER_PARTICIPANTS — no change.")
+        return
+    current.append(norm)
+    _owner_write_dotenv(path, current)
+    typer.echo(_OWNER_RELINK_HINT)
+
+
+@owner_app.command("remove")
+def owner_remove(
+    identifier: str = typer.Argument(
+        ...,
+        help="Identifier to drop (email or display name).",
+    ),
+) -> None:
+    """Drop one identifier from ``BRAIN_OWNER_PARTICIPANTS``. Idempotent.
+
+    Lookup is case-insensitive. Removing an absent entry is a silent no-op
+    that does not rewrite ``.env`` and does not print the relink hint.
+    """
+    norm = identifier.strip().lower()
+    if not norm:
+        typer.secho("error: identifier must not be empty", fg="red", err=True)
+        raise typer.Exit(code=1)
+    path = _owner_dotenv_path()
+    current = _owner_read_existing(path)
+    if norm not in current:
+        typer.echo(f"{norm!r} not present in BRAIN_OWNER_PARTICIPANTS — no change.")
+        return
+    current = [e for e in current if e != norm]
+    _owner_write_dotenv(path, current)
+    typer.echo(_OWNER_RELINK_HINT)

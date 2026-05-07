@@ -14,7 +14,14 @@ import psycopg
 import pytest
 
 from brain.vault.derived_links.directory import DirectoryStore
-from brain.vault.derived_links.pass_runner import rebuild_derived_for
+from brain.vault.derived_links.pass_runner import (
+    _build_snapshot,
+    rebuild_derived_for,
+)
+from brain.vault.derived_links.rules import (
+    rule_same_day_participant,
+    rule_shared_participant,
+)
 
 # --------------------------------------------------------------------------
 # Helpers — direct SQL seeding so each test can build the exact corpus shape
@@ -1022,4 +1029,250 @@ class TestAffectedIds:
         assert inserted == 0
         assert affected >= {a_id, b_id}
         # Sanity: the (A, B) row is gone.
+        assert _derived_rows(test_db) == []
+
+
+# --------------------------------------------------------------------------
+# Owner-participant exclusion (Phase 1 of
+# ``docs/plans/2026-05-07-owner-participant-exclusion.md``).
+#
+# The strip happens at ``_build_snapshot`` construction so all three rules
+# (R1/R2/R3) automatically respect the exclusion — R1 keys on thread_id
+# (untouched), R2/R3 key on participant intersection (filtered).
+# --------------------------------------------------------------------------
+
+
+class TestOwnerParticipantStrip:
+    """``owner_participants`` is subtracted from snapshot keys before R2/R3."""
+
+    def test_snapshot_strips_owner_emails(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Gmail snapshot whose ``from``/``to`` include both the owner email
+        # and a non-owner email. The owner's email must be filtered before
+        # the rules see it; the non-owner email survives.
+        snap = _build_snapshot(
+            document_id="d1",
+            source_kind="gmail",
+            metadata={
+                "from": "Ali Sarkis <redacted@example.com>",
+                "to": "person-x <person-a@example.com>",
+                "thread_id": "t-strip",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            directory=directory,
+            owner_participants=frozenset({"redacted@example.com", "ali sarkis"}),
+        )
+        # Both the owner email and the directory-resolved display key for
+        # "Ali Sarkis" should be gone; only "person-a@example.com" remains
+        # (display "person-x" is not in the directory, so it stays — but lower-
+        # cased to "person-a" by ``extract_gmail_addresses`` normalisation).
+        assert "redacted@example.com" not in snap.participant_keys
+        assert "ali sarkis" not in snap.participant_keys
+        assert "person-a@example.com" in snap.participant_keys
+
+    def test_snapshot_strips_owner_display_name(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Krisp snapshot with two name-only participant keys, no directory
+        # resolution, so both stay as raw names. Configuring
+        # ``owner_participants={"ali sarkis"}`` strips that one key while
+        # leaving "person-a" untouched.
+        snap = _build_snapshot(
+            document_id="d2",
+            source_kind="krisp",
+            metadata={
+                "_participant_keys": ["Ali Sarkis", "person-a"],
+                "date": "2026-04-15",
+            },
+            directory=directory,
+            owner_participants=frozenset({"ali sarkis"}),
+        )
+        # Krisp keys are stored as the raw display name (case-preserved)
+        # when the directory has no resolution. The strip uses
+        # ``key.lower() in owner_participants`` so the case-mixed
+        # "Ali Sarkis" key matches the lowercased owner entry.
+        assert "Ali Sarkis" not in snap.participant_keys
+        assert "ali sarkis" not in snap.participant_keys
+        assert "person-a" in snap.participant_keys
+
+    def test_empty_owner_set_does_not_strip_keys(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # When ``owner_participants`` is empty the snapshot keeps every
+        # participant key it would have produced without the feature
+        # configured. Behavioural no-op — the same identifiers a caller
+        # would see with the feature unset (which is the default for
+        # every existing test and any user who hasn't opted in).
+        snap = _build_snapshot(
+            document_id="d3",
+            source_kind="gmail",
+            metadata={
+                "from": "Ali Sarkis <redacted@example.com>",
+                "to": "person-x <person-a@example.com>",
+                "thread_id": "t-noop",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            directory=directory,
+            owner_participants=frozenset(),
+        )
+        assert "redacted@example.com" in snap.participant_keys
+        assert "person-a@example.com" in snap.participant_keys
+
+    def test_shared_participant_drops_to_none_when_only_owner_is_shared(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Two snapshots whose ONLY shared participant is the owner. After
+        # the strip the intersection is empty, so R2 returns None.
+        # ``_gmail_participant_keys`` adds BOTH the email and the lowered
+        # display name to the key set — so the owner config must list
+        # both forms (mirrors the plan's recommended ``BRAIN_OWNER_PARTICIPANTS``
+        # value: ``"Ali Sarkis,redacted@example.com"``).
+        owner = frozenset({"redacted@example.com", "ali sarkis"})
+        a = _build_snapshot(
+            document_id="a",
+            source_kind="gmail",
+            metadata={
+                "from": "Ali Sarkis <redacted@example.com>",
+                "to": "person-x <person-a@example.com>",
+                "thread_id": "t-a",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            directory=directory,
+            owner_participants=owner,
+        )
+        b = _build_snapshot(
+            document_id="b",
+            source_kind="gmail",
+            metadata={
+                "from": "Ali Sarkis <redacted@example.com>",
+                "to": "Carol <carol@example.com>",
+                "thread_id": "t-b",
+                "date": "Thu, 16 Apr 2026 12:00:00 -0700",
+            },
+            directory=directory,
+            owner_participants=owner,
+        )
+
+        assert rule_shared_participant(a, b) is None
+
+    def test_shared_participant_survives_when_real_overlap_exists(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Same owner-strip configuration, but both docs also share a real
+        # non-owner participant. R2 must still fire on the surviving
+        # overlap.
+        owner = frozenset({"redacted@example.com", "ali sarkis"})
+        a = _build_snapshot(
+            document_id="a",
+            source_kind="gmail",
+            metadata={
+                "from": "Ali Sarkis <redacted@example.com>",
+                "to": "person-x <person-a@example.com>",
+                "thread_id": "t-a",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            directory=directory,
+            owner_participants=owner,
+        )
+        b = _build_snapshot(
+            document_id="b",
+            source_kind="gmail",
+            metadata={
+                "from": "Ali Sarkis <redacted@example.com>",
+                "to": "person-x <person-a@example.com>",
+                "thread_id": "t-b",
+                "date": "Fri, 17 Apr 2026 12:00:00 -0700",
+            },
+            directory=directory,
+            owner_participants=owner,
+        )
+
+        evidence = rule_shared_participant(a, b)
+
+        assert evidence is not None
+        assert evidence.rule == "shared_participant"
+        # The owner keys are gone from the intersection — the surviving
+        # overlap is "person-a" (display) + "person-a@example.com" (email). The
+        # representative is the lex-min member of that intersection;
+        # "person-a" sorts before "person-a@…" because the empty suffix beats the
+        # ``@`` character. Either form must be a non-owner.
+        assert evidence.payload["participant"] in {"person-a", "person-a@example.com"}
+        assert evidence.payload["participant"] not in {
+            "redacted@example.com",
+            "ali sarkis",
+        }
+
+    def test_same_day_participant_drops_to_none_when_only_owner_is_shared(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Krisp + Gmail on the same date whose only shared participant is
+        # the owner — after the strip R3 has no intersection and returns
+        # None.
+        owner = frozenset({"redacted@example.com", "ali sarkis"})
+        krisp = _build_snapshot(
+            document_id="k",
+            source_kind="krisp",
+            metadata={
+                "_participant_keys": ["ali sarkis"],
+                "date": "2026-04-15",
+            },
+            directory=directory,
+            owner_participants=owner,
+        )
+        gmail = _build_snapshot(
+            document_id="g",
+            source_kind="gmail",
+            metadata={
+                "from": "Ali Sarkis <redacted@example.com>",
+                "to": "Carol <carol@example.com>",
+                "thread_id": "t-g",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            directory=directory,
+            owner_participants=owner,
+        )
+
+        assert rule_same_day_participant(krisp, gmail) is None
+
+    def test_rebuild_drops_owner_only_pair_end_to_end(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        # Real-DB integration: two docs whose only shared participant is
+        # the configured owner. With ``owner_participants`` set, the pass
+        # produces zero edges. (Without it they'd produce R3 — see
+        # ``TestSameDayParticipant`` for the unconfigured baseline.)
+        krisp_id = _seed_doc(
+            test_db,
+            source_kind="krisp",
+            external_id="own-k",
+            metadata={
+                "_participant_keys": ["ali sarkis"],
+                "date": "2026-04-15",
+            },
+            content="**Ali Sarkis | 0:01**\nbanking call",
+        )
+        gmail_id = _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="own-g",
+            metadata={
+                "from": "Ali Sarkis <redacted@example.com>",
+                "to": "company-mc <support@example.com>",
+                "thread_id": "t-company-mc",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            content="banking statement",
+        )
+
+        inserted, _affected = rebuild_derived_for(
+            test_db,
+            {krisp_id, gmail_id},
+            directory=directory,
+            owner_participants=frozenset(
+                {"redacted@example.com", "ali sarkis"}
+            ),
+        )
+
+        assert inserted == 0
         assert _derived_rows(test_db) == []
