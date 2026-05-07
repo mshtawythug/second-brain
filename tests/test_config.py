@@ -34,6 +34,7 @@ def isolated_dotenv(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.delenv("BRAIN_EMBEDDER", raising=False)
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("BRAIN_OWNER_PARTICIPANTS", raising=False)
+    monkeypatch.delenv("BRAIN_PEOPLE_HUB_MIN_DOCS", raising=False)
     return fake_project_env
 
 
@@ -263,3 +264,66 @@ class TestOwnerParticipants:
         assert cfg.owner_participants == frozenset(
             {"ali@example.com", "ali sarkis"}
         )
+
+
+# ---------------------------------------------------------------------------
+# BRAIN_PEOPLE_HUB_MIN_DOCS — doc-count threshold for the People Hub.
+# Phase C of the 2026-05-07 People Hub plan.
+# ---------------------------------------------------------------------------
+
+
+class TestPeopleHubMinDocs:
+    """Env parsing + validation for ``BRAIN_PEOPLE_HUB_MIN_DOCS``."""
+
+    def test_unset_yields_default(self, monkeypatch, isolated_dotenv) -> None:
+        from brain.config import DEFAULT_PEOPLE_HUB_MIN_DOCS
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_PEOPLE_HUB_MIN_DOCS", raising=False)
+        cfg = Config.load()
+        assert cfg.people_hub_min_docs == DEFAULT_PEOPLE_HUB_MIN_DOCS
+        assert cfg.people_hub_min_docs == 3
+
+    def test_blank_value_falls_back_to_default(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        # Mirrors BRAIN_VECTOR_SIM_FLOOR — whitespace-only env values
+        # are treated as "not set" rather than "empty integer" so a
+        # ``.env`` with a quoted blank survives load.
+        from brain.config import DEFAULT_PEOPLE_HUB_MIN_DOCS
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_PEOPLE_HUB_MIN_DOCS", "   ")
+        cfg = Config.load()
+        assert cfg.people_hub_min_docs == DEFAULT_PEOPLE_HUB_MIN_DOCS
+
+    def test_valid_integer_honored(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_PEOPLE_HUB_MIN_DOCS", "5")
+        cfg = Config.load()
+        assert cfg.people_hub_min_docs == 5
+
+    def test_zero_is_valid(self, monkeypatch, isolated_dotenv) -> None:
+        # Zero is a valid configuration: "render every person regardless
+        # of doc count". Curated-only is the goal — the threshold floor
+        # is opt-in via ``in_people_yml`` always-on rendering.
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_PEOPLE_HUB_MIN_DOCS", "0")
+        cfg = Config.load()
+        assert cfg.people_hub_min_docs == 0
+
+    def test_negative_value_rejected(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_PEOPLE_HUB_MIN_DOCS", "-1")
+        with pytest.raises(ConfigError, match="non-negative integer"):
+            Config.load()
+
+    def test_non_integer_value_rejected(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_PEOPLE_HUB_MIN_DOCS", "three")
+        with pytest.raises(ConfigError, match="non-negative integer"):
+            Config.load()

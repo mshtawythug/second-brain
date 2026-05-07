@@ -34,6 +34,14 @@ DEFAULT_VECTOR_SIM_FLOOR = 0.25
 # ``BRAIN_VAULT_PATH`` to an iCloud path.
 DEFAULT_VAULT_PATH = Path.home() / "brain-vault"
 
+# Default doc-count threshold for the People Hub (``brain people``,
+# ``<vault>/people/``). Persons with fewer than this many documents whose
+# names are NOT pinned in ``<vault>/_people.yml`` are filtered out. The
+# default of 3 keeps the long-tail of one-off cc'd recipients from each
+# getting their own page; curated ``_people.yml`` entries always render
+# regardless. Override via ``BRAIN_PEOPLE_HUB_MIN_DOCS``.
+DEFAULT_PEOPLE_HUB_MIN_DOCS = 3
+
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
 # :func:`brain.ingest.gmail.strip_boilerplate`. Default-deny for ``re.DOTALL``;
@@ -105,6 +113,15 @@ class Config:
     # can be a single ``.lower() in owner_participants`` check. Empty
     # frozenset (default) is a fast-path no-op.
     owner_participants: frozenset[str] = frozenset()
+    # Minimum number of associated documents required for a non-curated
+    # person to render a ``/people/<slug>`` hub page. Curated entries
+    # (anyone in ``<vault>/_people.yml``) always render regardless of
+    # this threshold. Loaded from ``BRAIN_PEOPLE_HUB_MIN_DOCS``; default
+    # is :data:`DEFAULT_PEOPLE_HUB_MIN_DOCS`. Negative values are
+    # rejected at load time via :class:`ConfigError` — a negative
+    # threshold would silently flip the filter (no effective filtering)
+    # and is almost certainly a config bug.
+    people_hub_min_docs: int = DEFAULT_PEOPLE_HUB_MIN_DOCS
 
     @classmethod
     def load(cls) -> "Config":
@@ -181,6 +198,28 @@ class Config:
             for piece in (entry.strip().lower() for entry in owner_raw.split(","))
             if piece
         )
+        # People Hub doc-count threshold — see DEFAULT_PEOPLE_HUB_MIN_DOCS.
+        # Validation: must parse as a non-negative integer. A negative
+        # threshold is almost certainly a config typo (it would render every
+        # person, since ``len(docs) < negative`` is never true) — surface
+        # eagerly via ConfigError so the user fixes the typo rather than
+        # silently getting a hub flooded with one-off recipients.
+        people_min_raw = os.environ.get("BRAIN_PEOPLE_HUB_MIN_DOCS")
+        if people_min_raw is None or people_min_raw.strip() == "":
+            people_hub_min_docs = DEFAULT_PEOPLE_HUB_MIN_DOCS
+        else:
+            try:
+                people_hub_min_docs = int(people_min_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_PEOPLE_HUB_MIN_DOCS must be a non-negative integer "
+                    f"(got {people_min_raw!r})"
+                ) from exc
+            if people_hub_min_docs < 0:
+                raise ConfigError(
+                    f"BRAIN_PEOPLE_HUB_MIN_DOCS must be a non-negative integer "
+                    f"(got {people_hub_min_docs!r})"
+                )
         return cls(
             database_url=database_url,
             ollama_host=ollama_host,
@@ -191,4 +230,5 @@ class Config:
             user_email=user_email,
             vector_sim_floor=vector_sim_floor,
             owner_participants=owner_participants,
+            people_hub_min_docs=people_hub_min_docs,
         )
