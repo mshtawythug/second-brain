@@ -1,0 +1,100 @@
+// Brain People Hub — Phase C of the 2026-05-07 People Hub plan.
+//
+// This file is installed at
+// `<vault>/.quartz/quartz/styles/brain/_people_hub.scss` by `brain
+// vault render --overlay` and pulled into the global SCSS via
+// `custom.scss`'s `@use "./brain/people_hub"` line.
+//
+// Scope of this file:
+//
+//   * Distinct heading + frontmatter treatment for `kind: people`
+//     pages so the user can tell at a glance they're on a hub page
+//     (a person's roster) vs. a regular doc.
+//   * Index page (`/people/index`) gets a slightly heavier treatment
+//     to read as a directory landing page.
+//
+// Targeting strategy:
+//
+//   Quartz exposes `body[data-slug=...]` (set in `renderPage.tsx`)
+//   but does NOT expose a `data-kind` attribute for arbitrary
+//   frontmatter fields. We key off the slug prefix instead — every
+//   people-hub page lives under `people/...` (per the
+//   `<vault>/people/<slug>.md` emit contract in
+//   `src/brain/wiki/build_people.py`), so `body[data-slug^="people/"]`
+//   selects the entire hub. The index page gets an additional rule
+//   keyed off `body[data-slug="people/index"]` for landing-page treatment.
+//
+// Tokens consumed (all from `_tokens.scss`):
+//
+//   * `--accent-strong` — page-kind accent rail
+//   * `--surface-1`     — H1 underline backdrop
+//   * `--rule`          — primary-email block hairline
+//   * `--ink-0` / `--ink-2` — text colors
+
+// ---------------------------------------------------------------------------
+// 1. Per-person pages — `body[data-slug^="people/"]` minus the index.
+//
+// We rely on a sibling rule below to refine the index landing page.
+// The :not() selector keeps individual roster pages tighter (a
+// distinct accent rail under the H1) and lets the index claim the
+// fuller card treatment.
+// ---------------------------------------------------------------------------
+
+body[data-slug^="people/"]:not([data-slug="people/index"]) {
+  // Page-kind accent: a colored vertical rail to the left of the H1
+  // so the person's name reads as a heading-of-headings, not just
+  // another doc title. Uses padding (not margin) so the rail aligns
+  // with the article column rather than the page edge.
+  article > h1:first-of-type {
+    border-left: 4px solid var(--accent-strong, var(--secondary));
+    padding-left: 0.6rem;
+    // Subtle background so the rail reads as an enclosed badge rather
+    // than a stray vertical line. Falls back to `--gray` if the surface
+    // token isn't defined (older theme setups).
+    background: linear-gradient(
+      to right,
+      var(--surface-1, transparent) 0%,
+      transparent 60%
+    );
+  }
+
+  // Primary-email line: bold the label, faintly indent the value, give
+  // it a hairline underline so it reads as a header field rather than
+  // body prose. Targets the first `<p>` inside the article (the
+  // emitter writes "**Primary email:** [...]" as the very first
+  // paragraph).
+  article > p:first-of-type {
+    border-bottom: 1px solid var(--rule, var(--lightgray));
+    padding-bottom: 0.4rem;
+    margin-bottom: 1.2rem;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Index page — `body[data-slug="people/index"]`.
+//
+// The index lists every person; we want it to read as a "directory
+// landing" page — heavier H1 treatment, a touch more breathing room
+// between roster rows. Ordering matters: this block must come AFTER
+// the per-person block above so its more specific selector wins
+// (the per-person rule's `:not([data-slug="people/index"])` already
+// excludes the index, but defense in depth).
+// ---------------------------------------------------------------------------
+
+body[data-slug="people/index"] {
+  article > h1:first-of-type {
+    // Heavier weight than the per-person H1; this is a landing page
+    // for the whole hub.
+    font-weight: 700;
+    border-bottom: 2px solid var(--accent-strong, var(--secondary));
+    padding-bottom: 0.4rem;
+    margin-bottom: 1.4rem;
+  }
+
+  // Roster rows — one per person — get a touch more vertical
+  // breathing room so the curated badge + name + doc count reads
+  // as a glanceable directory rather than a dense bullet list.
+  article ul > li {
+    padding: 0.2rem 0;
+  }
+}

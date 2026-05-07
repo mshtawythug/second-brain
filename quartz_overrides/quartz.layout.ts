@@ -22,6 +22,36 @@
 
 import { PageLayout, SharedLayout } from "./quartz/cfg"
 import * as Component from "./quartz/components"
+import { FileTrieNode } from "./quartz/util/fileTrie"
+
+// brain (People Hub, 2026-05-07): pin the `people/` directory to the
+// top of the Explorer tree so Ali can reach the per-person hub pages
+// from anywhere on the site in one click. Mirrors the upstream sort
+// rule (folders before files, then alpha) but with a deterministic
+// override for the `people` slug-segment that bumps it ahead of every
+// other folder. Not a contractual schema field — Quartz options accept
+// any function as `sortFn`, and the inline script serializes it via
+// `.toString()` for client-side execution. We pass the same function
+// to every Explorer slot in the layout (default content + list
+// pages) so the pin behavior is consistent across page types.
+const PINNED_EXPLORER_FOLDER_SLUG = "people"
+
+function explorerSortPinningPeople(a: FileTrieNode, b: FileTrieNode): number {
+  // Pin `people/` ahead of every other folder. The slug-segment is the
+  // last path-component of the trie node; a pinned folder always wins
+  // over any non-pinned sibling regardless of type. When neither is the
+  // pinned folder, fall through to upstream's "folders first, alpha"
+  // rule so the rest of the tree behaves identically to stock Quartz.
+  if (a.isFolder && a.slugSegment === PINNED_EXPLORER_FOLDER_SLUG) return -1
+  if (b.isFolder && b.slugSegment === PINNED_EXPLORER_FOLDER_SLUG) return 1
+  if ((!a.isFolder && !b.isFolder) || (a.isFolder && b.isFolder)) {
+    return a.displayName.localeCompare(b.displayName, undefined, {
+      numeric: true,
+      sensitivity: "base",
+    })
+  }
+  return !a.isFolder && b.isFolder ? 1 : -1
+}
 
 // components shared across all pages
 //
@@ -70,7 +100,7 @@ export const defaultContentPageLayout: PageLayout = {
         { Component: Component.ReaderMode() },
       ],
     }),
-    Component.Explorer(),
+    Component.Explorer({ sortFn: explorerSortPinningPeople }),
   ],
   right: [
     // brain: render the local graph inline in the right sidebar so it is
@@ -264,7 +294,7 @@ export const defaultListPageLayout: PageLayout = {
         { Component: Component.Darkmode() },
       ],
     }),
-    Component.Explorer(),
+    Component.Explorer({ sortFn: explorerSortPinningPeople }),
   ],
   right: [],
 }
