@@ -29,6 +29,7 @@ import psycopg
 import pytest
 
 from brain.vault.frontmatter import dump_frontmatter, parse_frontmatter
+from brain.vault.paths import safe_wikilink_alias, strip_md_extension
 from brain.wiki.build_homepage import (
     FENCE_END_MARKER,
     FENCE_START_MARKER,
@@ -38,8 +39,6 @@ from brain.wiki.build_homepage import (
     _format_relative_date,
     _render_bullets,
     _replace_fence,
-    _safe_alias,
-    _strip_md_extension,
     refresh_homepage,
     regenerate_recent_fence,
     regenerate_recent_partial,
@@ -101,18 +100,18 @@ def _make_index(
 # --------------------------------------------------------------------------
 
 
-def test_safe_alias_strips_brackets() -> None:
+def test_safe_wikilink_alias_strips_brackets() -> None:
     """Brackets in titles would break Quartz wiki-link parsing."""
-    assert _safe_alias("Re: [External] Re: foo") == "Re: (External) Re: foo"
-    assert _safe_alias("plain title") == "plain title"
+    assert safe_wikilink_alias("Re: [External] Re: foo") == "Re: (External) Re: foo"
+    assert safe_wikilink_alias("plain title") == "plain title"
 
 
 def test_strip_md_extension_removes_trailing_md() -> None:
     """Vault-paths are stored with ``.md``; wiki-link targets must not have it."""
-    assert _strip_md_extension("_ingested/gmail/foo.md") == "_ingested/gmail/foo"
-    assert _strip_md_extension("hubs/company-id.md") == "hubs/company-id"
+    assert strip_md_extension("_ingested/gmail/foo.md") == "_ingested/gmail/foo"
+    assert strip_md_extension("hubs/company-id.md") == "hubs/company-id"
     # Already stripped (defensive) — leave untouched.
-    assert _strip_md_extension("hubs/company-id") == "hubs/company-id"
+    assert strip_md_extension("hubs/company-id") == "hubs/company-id"
 
 
 def test_format_relative_date_buckets() -> None:

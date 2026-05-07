@@ -36,7 +36,7 @@ import datetime
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -45,6 +45,7 @@ from ..config import Config
 from ..db import connect
 from ..vault._atomic import atomic_write_text
 from ..vault.frontmatter import dump_frontmatter, parse_frontmatter
+from ..vault.paths import safe_wikilink_alias, strip_md_extension
 
 # Stable HTML-comment markers — universal CommonMark passthroughs that
 # Obsidian, Quartz, and GFM all leave alone. Public so tests + future
@@ -324,8 +325,8 @@ def _render_bullets(docs: Sequence[RecentDoc]) -> str:
     lines: list[str] = []
     for doc in docs:
         icon = _SOURCE_ICONS.get(doc.source_kind or "vault", _DEFAULT_SOURCE_ICON)
-        target = _strip_md_extension(doc.vault_path)
-        alias = _safe_alias(doc.title)
+        target = strip_md_extension(doc.vault_path)
+        alias = safe_wikilink_alias(doc.title)
         when = _format_relative_date(doc.ingested_at, today=today)
         lines.append(f"- {icon} [[{target}|{alias}]] · {when}")
     return "\n".join(lines) + "\n"
@@ -418,28 +419,3 @@ def _to_date(when: datetime.datetime) -> datetime.date:
         when = when.astimezone()
     return when.date()
 
-
-def _strip_md_extension(path: str) -> str:
-    """Return ``path`` with a trailing ``.md`` removed, POSIX-style.
-
-    ``vault_path`` is stored as a forward-slash relative path (POSIX); we
-    return the same shape so wiki-links round-trip on Windows hosts too.
-    """
-    posix = PurePosixPath(path).as_posix()
-    if posix.endswith(".md"):
-        return posix[:-3]
-    return posix
-
-
-def _safe_alias(title: str) -> str:
-    """Strip wiki-link-breaking ``[`` / ``]`` from a wiki-link alias slot.
-
-    Quartz's wiki-link regex defines the alias as ``[^\\[\\]\\#]``; any
-    ``[`` or ``]`` in the alias makes the whole ``[[...]]`` fail to match
-    and emit as raw text. Doc titles can contain bracketed prefixes
-    (``Re: [External] Re: …`` from forwarded Gmail; ``[2026-04] Plenty
-    sync notes`` from manual notes) so we swap brackets for parens in the
-    alias slot only — the wiki-link target is `vault_path`, which never
-    contains these characters by construction.
-    """
-    return title.replace("[", "(").replace("]", ")")

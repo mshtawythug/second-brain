@@ -48,6 +48,7 @@ import yaml
 
 from ._atomic import atomic_write_text
 from .frontmatter import dump_frontmatter, parse_frontmatter
+from .paths import strip_md_extension
 
 # Filename stem of a daily note: ``YYYY-MM-DD``. Anchored on both ends
 # so a stray ``2026-04-29-rough-thoughts.md`` (a manually-named note
@@ -122,11 +123,10 @@ def _build_index_body(daily_paths: list[Path], *, vault_path: Path) -> str:
             # Skip rather than crash.
             continue
         # POSIX form so the wiki link round-trips on Windows too. Strip
-        # ``.md`` to match what the link rewriter emits.
-        posix = rel.as_posix()
-        if posix.endswith(".md"):
-            posix = posix[:-3]
-        rels.append((p.stem, posix))
+        # ``.md`` to match what the link rewriter emits — shared helper
+        # in :mod:`brain.vault.paths` so the homepage / people / daily
+        # renderers cannot drift on the canonical link-target shape.
+        rels.append((p.stem, strip_md_extension(rel.as_posix())))
     rels.sort(key=lambda t: t[0], reverse=True)
 
     lines = [

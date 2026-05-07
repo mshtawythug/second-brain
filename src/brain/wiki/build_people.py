@@ -29,7 +29,6 @@ every name and email a key could resolve to also lives in
 ``directory_entries``.
 """
 import logging
-import posixpath
 from dataclasses import dataclass, field
 from datetime import datetime
 from email.utils import parsedate_to_datetime
@@ -42,6 +41,7 @@ from brain.vault._atomic import atomic_write_text
 from brain.vault.derived_links.directory import _score_directory_rows
 from brain.vault.derived_links.participants import extract_gmail_addresses
 from brain.vault.frontmatter import dump_frontmatter
+from brain.vault.paths import safe_wikilink_alias, strip_md_extension
 from brain.vault.slug import slugify
 
 logger = logging.getLogger(__name__)
@@ -300,16 +300,18 @@ def _vault_target(vault_path: str | None) -> str | None:
     side. Mirrors the canonical wiki-link target shape emitted by
     :func:`brain.wiki.build_homepage._render_bullets` for the recent rail.
 
+    Delegates the ``.md``-stripping + POSIX normalization to
+    :func:`brain.vault.paths.strip_md_extension` so the three vault
+    renderers (homepage, people, daily-index) cannot drift on the
+    canonical link-target shape.
+
     Returns ``None`` for docs without a ``vault_path`` (rare — Krisp/Gmail
     rows that haven't been mirrored to the vault yet). The renderer
     surfaces those as plain-text titles with no wiki-link.
     """
     if not vault_path:
         return None
-    posix = posixpath.normpath(vault_path).replace("\\", "/")
-    if posix.endswith(".md"):
-        posix = posix[: -len(".md")]
-    return posix or None
+    return strip_md_extension(vault_path) or None
 
 
 def _sort_docs(docs: list[DocRef]) -> list[DocRef]:
@@ -505,21 +507,6 @@ def _humanize_display_name(display_name: str) -> str:
     return display_name.title()
 
 
-def _safe_alias(title: str) -> str:
-    """Strip ``[``/``]`` from a wiki-link alias slot.
-
-    Quartz's wiki-link regex defines aliases as ``[^\\[\\]\\#]``; any ``[``
-    or ``]`` makes the whole ``[[...]]`` fail to match and emit as raw
-    text. Doc titles routinely contain bracketed prefixes (``Re: [External]
-    Re: ...`` Gmail forwards; ``[2026-04] Plenty sync notes`` manual
-    notes) so we swap brackets for parens in the alias slot only — the
-    wiki-link target is the vault path, which never contains these by
-    construction. Mirrors :func:`brain.wiki.build_homepage._safe_alias`
-    one-for-one.
-    """
-    return title.replace("[", "(").replace("]", ")")
-
-
 def _render_doc_line(doc: DocRef) -> str:
     """Render one document line of a person's roster.
 
@@ -537,7 +524,7 @@ def _render_doc_line(doc: DocRef) -> str:
     the next refresh cycle will turn it into a link.
     """
     date_str = doc.date.strftime("%Y-%m-%d") if doc.date is not None else "undated"
-    safe_title = _safe_alias(doc.title)
+    safe_title = safe_wikilink_alias(doc.title)
     link_text = (
         f"[[{doc.vault_target}|{safe_title}]]" if doc.vault_target else safe_title
     )
