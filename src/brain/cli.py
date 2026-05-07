@@ -2466,7 +2466,7 @@ def vault_relink_derived() -> None:
         typer.echo(f"  - Pages written: {people_report.pages_written}")
         typer.echo(f"  - Pages deleted: {people_report.pages_deleted}")
 
-        # Step 4: Rich summary — directory by source + derived_links by rule.
+        # Step 6: Rich summary — directory by source + derived_links by rule.
         directory_counts = _directory_counts_by_source(conn)
         derived_counts = _derived_counts_by_rule(conn)
 
