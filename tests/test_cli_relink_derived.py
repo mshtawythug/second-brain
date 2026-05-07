@@ -459,3 +459,158 @@ def test_relink_derived_overwrites_stale_krisp_keys(
     # Stale value gone; current-body-derived value present.
     assert keys == ["ali sarkis", "person-a"]
     assert "someone-who-doesnt-exist" not in (keys or [])
+
+
+# ---------------------------------------------------------------------------
+# Phase C (2026-05-07 People Hub plan): the new Step 5 emits per-person
+# pages under ``<vault>/people/`` and an index page from the freshly
+# rebuilt directory + curated ``_people.yml`` overrides. The tests below
+# verify the wiring without re-covering ``emit_people_pages`` itself
+# (already exhaustively tested in ``test_build_people.py``).
+# ---------------------------------------------------------------------------
+
+
+def test_relink_derived_emits_people_pages_for_curated_entry(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    patch_embedder: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``_people.yml`` entry produces ``<vault>/people/<slug>.md`` + index.
+
+    Curated entries always emit regardless of ``BRAIN_PEOPLE_HUB_MIN_DOCS``
+    (the threshold only filters non-curated rows). The default threshold
+    of 3 still applies to other rows; we don't seed any Gmail data here
+    so only the curated person renders.
+    """
+    patch_embedder(fake_embedder)
+    yml = tmp_path / "_people.yml"
+    yml.write_text(
+        "person-person-luke: person-luke@example.com\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["vault", "relink-derived"])
+    assert result.exit_code == 0, result.stdout
+
+    # Stdout surfaces the new People Hub step with non-zero pages_written.
+    assert "people hub" in result.stdout.lower()
+    assert "Pages written" in result.stdout
+
+    # Per-person page exists at the expected path.
+    luke_md = tmp_path / "people" / "person-person-luke.md"
+    assert luke_md.is_file(), f"expected page at {luke_md}"
+    body = luke_md.read_text(encoding="utf-8")
+    # Frontmatter contract: kind: people, slug: person-person-luke.
+    assert "kind: people" in body
+    assert "slug: person-person-luke" in body
+    # Body H1 carries the title-cased name.
+    assert "# person-person-luke" in body
+
+    # Index page also written.
+    index = tmp_path / "people" / "index.md"
+    assert index.is_file(), f"expected index at {index}"
+    index_body = index.read_text(encoding="utf-8")
+    assert "kind: people-index" in index_body
+    # Roster row references the curated person.
+    assert "person-person-luke" in index_body
+
+
+def test_relink_derived_people_emit_is_idempotent(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    patch_embedder: Any,
+    tmp_path: Path,
+) -> None:
+    """Running ``vault relink-derived`` twice produces the same on-disk state.
+
+    The skip-if-unchanged contract from ``emit_people_pages`` means the
+    second call's ``Pages written`` count is zero (file mtimes unchanged
+    too, but we don't pin that — simpler to assert via the count line).
+    """
+    patch_embedder(fake_embedder)
+    yml = tmp_path / "_people.yml"
+    yml.write_text(
+        "person-person-luke: person-luke@example.com\n",
+        encoding="utf-8",
+    )
+
+    runner = CliRunner()
+    first = runner.invoke(app, ["vault", "relink-derived"])
+    assert first.exit_code == 0, first.stdout
+    luke_md = tmp_path / "people" / "person-person-luke.md"
+    assert luke_md.is_file()
+    first_bytes = luke_md.read_bytes()
+
+    second = runner.invoke(app, ["vault", "relink-derived"])
+    assert second.exit_code == 0, second.stdout
+    # File still present, contents byte-identical.
+    assert luke_md.is_file()
+    assert luke_md.read_bytes() == first_bytes
+    # Second run reports zero new pages written.
+    assert "Pages written: 0" in second.stdout
+
+
+def test_relink_derived_people_emit_cleans_up_dropped_curation(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    patch_embedder: Any,
+    tmp_path: Path,
+) -> None:
+    """Removing a person from ``_people.yml`` deletes their page on next emit.
+
+    First run with both person-person-luke and person-person-marc curated → both pages exist.
+    Second run with only person-person-luke curated → person-person-marc's page is unlinked,
+    person-person-luke's page stays, and the summary's ``Pages deleted`` is 1.
+    """
+    patch_embedder(fake_embedder)
+    yml = tmp_path / "_people.yml"
+    yml.write_text(
+        "person-person-luke: person-luke@example.com\n"
+        "person-person-marc: person-marc@example.com\n",
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+    first = runner.invoke(app, ["vault", "relink-derived"])
+    assert first.exit_code == 0, first.stdout
+    luke_md = tmp_path / "people" / "person-person-luke.md"
+    marc_md = tmp_path / "people" / "person-person-marc.md"
+    assert luke_md.is_file()
+    assert marc_md.is_file()
+
+    # Drop person-person-marc.
+    yml.write_text(
+        "person-person-luke: person-luke@example.com\n",
+        encoding="utf-8",
+    )
+    second = runner.invoke(app, ["vault", "relink-derived"])
+    assert second.exit_code == 0, second.stdout
+    assert luke_md.is_file()
+    assert not marc_md.is_file(), "expected person-person-marc.md to be deleted"
+    assert "Pages deleted: 1" in second.stdout
+
+
+def test_relink_derived_people_emit_runs_on_empty_corpus(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    patch_embedder: Any,
+    tmp_path: Path,
+) -> None:
+    """Empty corpus + empty ``_people.yml`` → the index page still renders.
+
+    The People Hub step is unconditional (sits outside the
+    ``corpus_ids`` branch) so the index page exists from day one,
+    giving the user something to navigate to even before the
+    threshold has been crossed.
+    """
+    patch_embedder(fake_embedder)
+
+    result = CliRunner().invoke(app, ["vault", "relink-derived"])
+    assert result.exit_code == 0, result.stdout
+
+    # Index page present with the empty-state placeholder.
+    index = tmp_path / "people" / "index.md"
+    assert index.is_file()
+    body = index.read_text(encoding="utf-8")
+    assert "no people yet" in body.lower()

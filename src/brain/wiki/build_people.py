@@ -52,6 +52,7 @@ __all__ = [
     "PersonRecord",
     "aggregate_people",
     "emit_people_pages",
+    "humanize_display_name",
     "render_index_md",
     "render_person_md",
 ]
@@ -491,7 +492,7 @@ _PEOPLE_DIR_NAME: str = "people"
 _NO_DOCS_PLACEHOLDER: str = "*No documents yet.*"
 
 
-def _humanize_display_name(display_name: str) -> str:
+def humanize_display_name(display_name: str) -> str:
     """Re-cap the lowercased canonical name for use in headings + frontmatter.
 
     PersonRecord stores names in the normalized lowercase form
@@ -503,8 +504,19 @@ def _humanize_display_name(display_name: str) -> str:
     directory layer normalized the input in the first place. The user
     can fix any specific name by adjusting their ``_people.yml`` if it
     matters for their corpus.
+
+    Public so the ``brain people`` CLI (Phase C) can render the same
+    title-cased form in its terminal output without re-implementing
+    the rule. Keep the internal alias below for backwards compat
+    inside this module — every call site already routes through it.
     """
     return display_name.title()
+
+
+# Internal alias — every existing call site reads from this name. Public
+# helper above is the supported import surface; this private alias is
+# preserved to keep the module's render functions readable.
+_humanize_display_name = humanize_display_name
 
 
 def _render_doc_line(doc: DocRef) -> str:

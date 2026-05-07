@@ -99,6 +99,12 @@ from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.templates import list_template_names, render_template
 from .vault.watch import WatchConfig, run_watcher
+from .wiki.build_people import (
+    PersonRecord,
+    aggregate_people,
+    emit_people_pages,
+    humanize_display_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2314,9 +2320,9 @@ def _derived_counts_by_rule(
 
 @vault_app.command("relink-derived")
 def vault_relink_derived() -> None:
-    """Full-corpus directory rebuild + derived-links rebuild.
+    """Full-corpus directory rebuild + derived-links rebuild + People Hub.
 
-    Four steps, all against a single Postgres connection:
+    Five steps, all against a single Postgres connection:
 
     1. **Gmail directory rescan.** Walks every Gmail document and upserts
        every ``(display_name, email)`` pair from its ``from``/``to``
@@ -2340,6 +2346,15 @@ def vault_relink_derived() -> None:
        Option B from Task B.6 (single full-corpus call) over Option A
        (delete-all + small batches) because the corpus is small enough
        (~500 docs) to fit comfortably in memory.
+    4. **Fence rewrite** across every ``_ingested/`` body whose derived
+       edges drifted (so Quartz's ``/graph`` view picks up the fresh edges).
+    5. **People Hub emission** — :func:`emit_people_pages` walks the
+       freshly-rebuilt directory + the curated ``_people.yml`` set and
+       writes one ``<vault>/people/<slug>.md`` per emittable person plus
+       an ``index.md`` roster. Pages whose rendered bytes match disk are
+       skipped; pages for people no longer in scope are deleted. The
+       step runs unconditionally so the index page still renders on a
+       fresh corpus with no Gmail/Krisp data yet.
 
     Idempotent: running twice produces the same final state because
     ``rebuild_derived_for``'s DELETE+INSERT scopes to the touched docs (and
@@ -2433,6 +2448,23 @@ def vault_relink_derived() -> None:
                 conn, affected_ids, vault_path=cfg.vault_path
             )
             typer.echo(f"  - Fence files rewritten: {fences_written}")
+
+        # Step 5 (Phase C, 2026-05-07 People Hub plan): emit per-person hub
+        # pages under ``<vault>/people/`` from the freshly-rebuilt directory.
+        # Idempotent — pages whose rendered bytes match disk are no-ops, and
+        # pages for people no longer in scope (curation removed, dropped
+        # below ``min_docs``) are deleted. Runs unconditionally (not gated
+        # on ``corpus_ids``) so the index page + curated-only pages still
+        # render on a corpus that has yet to acquire any Krisp/Gmail data.
+        typer.echo("Emitting people hub pages...")
+        people_report = emit_people_pages(
+            conn,
+            vault_path=cfg.vault_path,
+            owner_keys=cfg.owner_participants,
+            min_docs=cfg.people_hub_min_docs,
+        )
+        typer.echo(f"  - Pages written: {people_report.pages_written}")
+        typer.echo(f"  - Pages deleted: {people_report.pages_deleted}")
 
         # Step 4: Rich summary — directory by source + derived_links by rule.
         directory_counts = _directory_counts_by_source(conn)
@@ -3690,6 +3722,227 @@ def backfill_normalize_tags(
         f"{files_missing} file-missing skipped, "
         f"{already_canonical} already-canonical skipped"
     )
+
+
+# ---------------------------------------------------------------------------
+# brain people — terminal view onto the People Hub aggregation.
+#
+# Phase C of the 2026-05-07 People Hub plan. The hub itself is rendered
+# into ``<vault>/people/`` by ``vault relink-derived`` (Step 5); this
+# command surfaces the same data without leaving the terminal.
+#
+# Two forms:
+#   * ``brain people``         — alphabetised roster (display_name,
+#                                 doc count, primary email, curated badge)
+#   * ``brain people <name>``  — single record with full doc list
+#
+# ``--json`` swaps the Rich table for machine-readable JSON.
+# ---------------------------------------------------------------------------
+
+
+def _person_to_payload(record: PersonRecord) -> dict[str, Any]:
+    """Render one :class:`PersonRecord` as a JSON-friendly dict.
+
+    Used by the ``--json`` branch of the ``brain people`` commands and
+    extracted so the list and detail views serialize identically (no
+    drift between the roster and the per-person view).
+
+    ``DocRef.date`` is dropped through ``isoformat`` for stable output.
+    Missing dates serialize as ``null`` (rather than absent) so the
+    consumer always sees the same key set per doc.
+    """
+    return {
+        "slug": record.slug,
+        "display_name": humanize_display_name(record.display_name),
+        "primary_email": record.primary_email,
+        "all_emails": list(record.all_emails),
+        "doc_count": len(record.docs),
+        "in_people_yml": record.in_people_yml,
+        "docs": [
+            {
+                "id": doc.document_id,
+                "title": doc.title,
+                "source_kind": doc.source_kind,
+                "date": doc.date.isoformat() if doc.date is not None else None,
+                "vault_target": doc.vault_target,
+            }
+            for doc in record.docs
+        ],
+    }
+
+
+def _find_person_by_name(
+    records: list[PersonRecord], name: str
+) -> PersonRecord | None:
+    """Case-insensitive substring match on ``display_name``.
+
+    Returns the first lexicographic match (``records`` is already
+    ``sorted(... key=display_name)`` by ``aggregate_people``) or
+    ``None`` when nothing matches. The substring rule keeps the CLI
+    forgiving — ``brain people person-luke`` should resolve "person-person-luke"
+    without forcing the user to remember the exact form.
+
+    Ties are broken by alpha order on ``display_name``; the call site
+    surfaces the count of additional matches so the user knows when
+    to disambiguate.
+    """
+    needle = name.casefold().strip()
+    if not needle:
+        return None
+    for rec in records:
+        if needle in rec.display_name.casefold():
+            return rec
+    return None
+
+
+def _people_matches(
+    records: list[PersonRecord], name: str
+) -> list[PersonRecord]:
+    """Every record whose ``display_name`` contains ``name`` (case-insensitive).
+
+    Returned in the alphabetical order ``aggregate_people`` already
+    produced. Used by the detail view to surface "did you mean …?"
+    when the lookup is ambiguous.
+    """
+    needle = name.casefold().strip()
+    if not needle:
+        return []
+    return [r for r in records if needle in r.display_name.casefold()]
+
+
+def _render_people_roster_table(records: list[PersonRecord]) -> Table:
+    """Build the Rich table shown by ``brain people`` (no name argument).
+
+    Columns: ``Curated`` (✅ when ``in_people_yml`` is True, blank
+    otherwise), ``Display name``, ``Docs``, ``Primary email``. Sorted
+    alphabetically by display name (``aggregate_people`` already
+    produces that ordering).
+    """
+    table = Table(title="People Hub")
+    table.add_column("Curated", style="green", justify="center")
+    table.add_column("Display name", style="cyan")
+    table.add_column("Docs", justify="right")
+    table.add_column("Primary email")
+    for rec in records:
+        table.add_row(
+            "✅" if rec.in_people_yml else "",
+            humanize_display_name(rec.display_name),
+            str(len(rec.docs)),
+            rec.primary_email,
+        )
+    return table
+
+
+def _render_person_detail_table(record: PersonRecord) -> Table:
+    """Build the per-doc Rich table shown by ``brain people <name>``.
+
+    Columns: ``Date`` (``YYYY-MM-DD`` or ``undated``), ``Source``,
+    ``Title`` (truncated with ellipsis if long), and ``Doc id``
+    (8-char prefix — enough for ``brain show <prefix>`` resolution).
+    Rows in the order :func:`_sort_docs` produced inside
+    ``aggregate_people`` (date desc, then title asc).
+    """
+    table = Table(
+        title=f"{humanize_display_name(record.display_name)} — "
+        f"{len(record.docs)} doc(s)"
+    )
+    table.add_column("Date", style="dim")
+    table.add_column("Source", style="cyan")
+    table.add_column("Title")
+    table.add_column("Doc id", style="dim")
+    for doc in record.docs:
+        date_str = (
+            doc.date.strftime("%Y-%m-%d") if doc.date is not None else "undated"
+        )
+        table.add_row(
+            date_str,
+            doc.source_kind,
+            doc.title,
+            doc.document_id[:8],
+        )
+    return table
+
+
+@app.command("people")
+def people_cmd(
+    name: str | None = typer.Argument(
+        None,
+        help=(
+            "Optional case-insensitive substring of a display name. "
+            "Without this argument, the full alphabetised roster is "
+            "shown. With it, that person's full doc list is shown."
+        ),
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit the aggregation as JSON instead of a Rich table.",
+    ),
+) -> None:
+    """Browse the People Hub aggregation.
+
+    Reuses :func:`brain.wiki.build_people.aggregate_people` so the
+    terminal view, the rendered ``<vault>/people/`` pages, and the
+    derived-link participant filter all derive from the same canonical
+    set. Read-only — no DB writes.
+
+    The threshold (``BRAIN_PEOPLE_HUB_MIN_DOCS``, default 3) and owner
+    filter (``BRAIN_OWNER_PARTICIPANTS``) flow through the existing
+    :class:`Config`, so flipping either env var changes the visible
+    roster on the next invocation without code changes.
+    """
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        records = aggregate_people(
+            conn,
+            owner_keys=cfg.owner_participants,
+            min_docs=cfg.people_hub_min_docs,
+        )
+
+    if name is None:
+        # Roster view.
+        if json_output:
+            emit_json([_person_to_payload(r) for r in records])
+            return
+        if not records:
+            typer.echo(
+                "(no people in scope — add entries to <vault>/_people.yml or "
+                "lower BRAIN_PEOPLE_HUB_MIN_DOCS)"
+            )
+            return
+        console.print(_render_people_roster_table(records))
+        return
+
+    # Detail view: case-insensitive substring match on display_name.
+    matches = _people_matches(records, name)
+    if not matches:
+        typer.secho(
+            f"no person matched {name!r}.",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    record = matches[0]
+    if len(matches) > 1:
+        # Surface the ambiguity; pick the first alphabetically (matches
+        # are already sorted) but tell the user the others exist so
+        # they can refine. Not an error — the substring rule deliberately
+        # tolerates partial input.
+        others = ", ".join(
+            humanize_display_name(r.display_name) for r in matches[1:]
+        )
+        typer.secho(
+            f"note: {len(matches)} matches; showing "
+            f"{humanize_display_name(record.display_name)!r}. "
+            f"Other matches: {others}",
+            fg="yellow",
+            err=True,
+        )
+    if json_output:
+        emit_json(_person_to_payload(record))
+        return
+    console.print(_render_person_detail_table(record))
 
 
 # ---------------------------------------------------------------------------
