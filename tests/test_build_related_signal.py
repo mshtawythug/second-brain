@@ -211,19 +211,63 @@ def test_self_tsquery_from_descriptive_title(test_db: psycopg.Connection[Any]) -
     tsquery = _build_self_tsquery(test_db, doc_id, title="COMPANY_REDACTED Enrollment Reference Brief")
 
     assert tsquery, "title with 4 meaningful tokens must produce a non-empty tsquery"
-    # Title-only path → ``plainto_tsquery`` ANDs all stemmed lexemes:
-    # COMPANY_REDACTED → 'topic-ih', Enrollment → 'enrol', Reference → 'referenc',
-    # Brief → 'brief'. The matching body must therefore contain *all*
-    # four un-stemmed forms.
+    # Title-only path now combines ``(plainto AND-form) | <per-token OR>``
+    # (Phase F.C tuning) so a doc containing every title lexeme still
+    # matches via the AND clause:
     assert _matches(
         test_db, tsquery, "An COMPANY_REDACTED enrollment reference brief document"
     )
-    # Missing one of the four required lexemes (no "brief") → no match,
-    # which proves the title-only path didn't silently OR the lexemes.
-    assert not _matches(test_db, tsquery, "An COMPANY_REDACTED enrollment reference document")
+    # And — the F.C fix — a doc with even ONE distinctive title token
+    # ("COMPANY_REDACTED" alone) now matches via the OR clause. The pre-fix
+    # title-only path rejected this and produced zero FTS candidates for
+    # long distinctive titles such as "COMPANY_REDACTED — SVP of Engineering …".
+    assert _matches(test_db, tsquery, "An COMPANY_REDACTED overview document")
     assert "[" not in tsquery and "]" not in tsquery
     # No body augmentation happened — body-only words must NOT appear.
     assert not _matches(test_db, tsquery, "insurance carrier networks")
+
+
+def test_self_tsquery_long_title_matches_partial_overlap(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Phase F.C regression — long, distinctive titles must retrieve
+    partial-overlap neighbors.
+
+    Pre-fix: ``_build_self_tsquery`` returned a 7-way AND
+    (``'30' & 'min' & 'meet' & 'person-b' & 'topic-b' & 'ali' & 'sarki'``)
+    so a candidate body that contained only ``person-x`` was rejected and
+    the FTS leg returned zero candidates. The doc 3508c63e in the live
+    corpus exhibited this exact failure: its only person-x-mentioning
+    relative (a Example Group gmail thread) never surfaced.
+
+    Post-fix: the title-only path returns ``(AND-form) | <per-token OR>``,
+    so a body containing even one distinctive title token matches.
+    """
+    title = "30 min meeting between person-x and Ali Sarkis"
+    doc_id = _doc(
+        test_db,
+        title=title,
+        chunk_contents=["Body about the meeting itself, no other lexemes overlap."],
+    )
+
+    tsquery = _build_self_tsquery(test_db, doc_id, title=title)
+
+    assert tsquery
+    # Partial-overlap candidate: contains "person-x" and nothing else from
+    # the title. The pre-fix behavior would NOT match this. The post-fix
+    # behavior MUST.
+    assert _matches(
+        test_db,
+        tsquery,
+        "Example Group: person-x replied confirming the slot.",
+    )
+    # And the all-tokens-present body still matches (regression boundary —
+    # AND clause stays useful for stronger ranking).
+    assert _matches(
+        test_db,
+        tsquery,
+        "30 min meeting between person-x and Ali Sarkis recap",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -347,8 +391,9 @@ def test_self_tsquery_handles_punctuation_safely(
     assert row is not None
     assert row[0]
     # And the title-derived terms (all three: person-x, topic-b, meeting)
-    # still match a relevant body. ``plainto_tsquery`` ANDs the lexemes,
-    # so the body must contain all three forms.
+    # still match a relevant body. After Phase F.C tuning the title-only
+    # path is ``(AND-form) | <per-token OR>``, so any one of the lexemes
+    # is sufficient — but a body containing all three still matches.
     assert _matches(
         test_db, tsquery, "Meeting notes from a sync with person-x"
     )

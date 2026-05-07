@@ -496,6 +496,16 @@ def _build_self_tsquery(
     top-frequency body lexemes when fewer than three meaningful title
     tokens remain.
 
+    Title-only path (≥3 meaningful tokens) returns ``(<AND-form>) | <OR-of-tokens>``.
+    The AND clause from ``plainto_tsquery`` boosts ``ts_rank`` when a
+    candidate doc contains every title lexeme (still the strongest signal),
+    while the OR clause lets long, distinctive titles such as
+    ``COMPANY_REDACTED — SVP of Engineering — Internal Job Spec`` retrieve
+    partial-overlap neighbors instead of returning an empty FTS leg.
+    This mirrors the OR shape ``brain.search._build_tsquery`` uses to
+    catch compact-token variants. Phase F.C tuning — see
+    ``docs/plans/2026-05-06-related-docs-rebuild.md``, "Acceptance criteria".
+
     Returns ``""`` only when the doc has neither a usable title nor any
     body lexemes. The caller (Phase F.B's hybrid CTE) treats empty as
     "skip the FTS leg, use vector-only".
@@ -507,12 +517,25 @@ def _build_self_tsquery(
     no fallback signal at all.
     """
     tokens = _TOKEN_RE.findall(title)
-    meaningful_count = sum(1 for tok in tokens if tok.lower() not in _STOP_TOKENS)
+    meaningful_tokens = [tok for tok in tokens if tok.lower() not in _STOP_TOKENS]
+    meaningful_count = len(meaningful_tokens)
 
     title_tsq = _plainto_tsquery_text(conn, title)
 
     if meaningful_count >= _MIN_TITLE_TOKENS_FOR_TITLE_ONLY:
-        return title_tsq
+        # OR each meaningful token alongside the AND-form. ``_to_tsquery_text``
+        # rejects tokens that don't normalise to a safe ``[a-z][a-z0-9]*``
+        # lexeme (digits-first, multi-word fragments left over from
+        # punctuation-heavy titles), so the join below silently drops
+        # those — same defensive shape the body-fallback path uses.
+        token_tsqs = [
+            _to_tsquery_text(conn, tok.lower()) for tok in meaningful_tokens
+        ]
+        token_tsqs = [t for t in token_tsqs if t]
+        token_or = " | ".join(token_tsqs)
+        if title_tsq and token_or:
+            return f"({title_tsq}) | {token_or}"
+        return title_tsq or token_or
 
     body_lexemes = _top_body_lexemes(conn, doc_id, limit=_BODY_FALLBACK_LEXEME_LIMIT)
 
