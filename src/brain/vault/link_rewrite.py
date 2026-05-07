@@ -28,7 +28,7 @@ Public API:
   was rewritten.
 """
 import logging
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -37,6 +37,7 @@ import yaml
 from ._atomic import atomic_write_text
 from .frontmatter import dump_frontmatter, parse_frontmatter
 from .links import ParsedLink, iter_wiki_links_with_spans
+from .paths import strip_md_extension
 from .resolver import resolve_link
 
 logger = logging.getLogger(__name__)
@@ -127,7 +128,7 @@ def rewrite_wiki_links(
             )
             continue
 
-        path_no_ext = _strip_md_extension(str(target_vault_path))
+        path_no_ext = strip_md_extension(str(target_vault_path))
         display = _choose_display(parsed, resolved_title=str(target_title))
         new_inner = _build_inner(
             path_no_ext, heading=parsed.heading, display=display
@@ -205,22 +206,6 @@ def rewrite_vault_links(
         )
         return False
     return True
-
-
-def _strip_md_extension(vault_path: str) -> str:
-    """Drop a trailing ``.md`` from a POSIX vault path, otherwise return as-is.
-
-    ``vault_path`` is stored in POSIX form (forward-slash separators); we
-    parse it through :class:`pathlib.PurePosixPath` so we don't accidentally
-    pick up Windows separators when the renderer runs on macOS / Linux.
-    Files without a ``.md`` suffix (defensive — every vault file should
-    have one, but a corrupted row could exist) are returned untouched and
-    the rewriter falls back to the path verbatim.
-    """
-    p = PurePosixPath(vault_path)
-    if p.suffix.lower() == ".md":
-        return str(p.with_suffix(""))
-    return vault_path
 
 
 def _choose_display(parsed: ParsedLink, *, resolved_title: str) -> str:
