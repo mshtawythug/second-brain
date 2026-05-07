@@ -1288,3 +1288,153 @@ class TestEmitPeoplePagesCleanup:
         )
         assert (people_dir / "notes.txt").read_text() == "hand-written"
         assert (people_dir / "subdir").is_dir()
+
+
+# ==========================================================================
+# Phase B — defensive coverage of OSError catches in emit_people_pages
+# ==========================================================================
+#
+# Each branch wraps a filesystem call that can fail (read for compare,
+# unlink during cleanup, write for the per-person page, write for the
+# index). These are belt-and-suspenders for the case where the user
+# deleted permissions on a single file mid-run; we verify the logger
+# warns and the run keeps going.
+
+
+class TestEmitPeoplePagesDefensiveErrorHandling:
+    """OSError on read/unlink/write must be logged + the run continues."""
+
+    def test_unreadable_existing_page_still_writes(
+        self,
+        test_db: psycopg.Connection[Any],
+        tmp_path: Path,
+        mocker: "Any",  # noqa: F821 — pytest-mock injects MockerFixture at runtime
+    ) -> None:
+        # Pre-populate ``ann-arbor.md`` with garbage that will be overwritten.
+        # Mock ``Path.read_text`` to raise OSError on the read-for-compare,
+        # so we exercise the ``except OSError`` branch in _write_if_changed.
+        _seed_curated_with_docs(
+            test_db, name="ann arbor", email="ann@example.com", n_gmail_docs=1,
+        )
+        page_dir = tmp_path / "people"
+        page_dir.mkdir()
+        target = page_dir / "ann-arbor.md"
+        target.write_text("stale", encoding="utf-8")
+
+        original_read = Path.read_text
+
+        def fake_read_text(self: Path, *a: Any, **kw: Any) -> str:
+            if self == target:
+                raise PermissionError("synthetic")
+            return original_read(self, *a, **kw)
+
+        mocker.patch.object(Path, "read_text", fake_read_text)
+
+        report = emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=1,
+        )
+        assert report.pages_written == 1  # write went through despite read failure
+
+    def test_unlinkable_stale_page_logged_and_skipped(
+        self,
+        test_db: psycopg.Connection[Any],
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        mocker: "Any",  # noqa: F821
+    ) -> None:
+        # Drop a stale page on disk and force ``unlink`` to raise.
+        people_dir = tmp_path / "people"
+        people_dir.mkdir()
+        stale = people_dir / "ghost.md"
+        stale.write_text("stale", encoding="utf-8")
+        original_unlink = Path.unlink
+
+        def fake_unlink(self: Path, *a: Any, **kw: Any) -> None:
+            if self == stale:
+                raise PermissionError("synthetic unlink")
+            original_unlink(self, *a, **kw)
+
+        mocker.patch.object(Path, "unlink", fake_unlink)
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            report = emit_people_pages(
+                test_db, vault_path=tmp_path,
+                owner_keys=frozenset(), min_docs=3,
+            )
+        assert report.pages_deleted == 0  # unlink failed → not counted
+        assert any(
+            "could not delete stale page" in r.message for r in caplog.records
+        )
+
+    def test_write_failure_per_person_logs_and_continues(
+        self,
+        test_db: psycopg.Connection[Any],
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        mocker: "Any",  # noqa: F821
+    ) -> None:
+        # Force the per-person write path to raise OSError; the index write
+        # should still complete.
+        _seed_curated_with_docs(
+            test_db, name="bad write", email="bw@example.com", n_gmail_docs=1,
+        )
+        # Mock atomic_write_text in the build_people module so only the
+        # first call (per-person page) raises; the second (index) succeeds.
+        target = tmp_path / "people" / "bad-write.md"
+        original_atomic = __import__(
+            "brain.wiki.build_people", fromlist=["atomic_write_text"]
+        ).atomic_write_text
+
+        def fake_atomic(path: Path, text: str) -> None:
+            if path == target:
+                raise PermissionError("synthetic write")
+            original_atomic(path, text)
+
+        mocker.patch("brain.wiki.build_people.atomic_write_text", fake_atomic)
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            report = emit_people_pages(
+                test_db, vault_path=tmp_path,
+                owner_keys=frozenset(), min_docs=1,
+            )
+        assert report.pages_written == 0
+        assert any(
+            "could not write" in r.message and "bad-write" in r.message
+            for r in caplog.records
+        )
+        # Index still wrote successfully.
+        assert (tmp_path / "people" / "index.md").is_file()
+
+    def test_index_write_failure_logged_and_report_false(
+        self,
+        test_db: psycopg.Connection[Any],
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+        mocker: "Any",  # noqa: F821
+    ) -> None:
+        # Force only the index write to raise.
+        index_target = tmp_path / "people" / "index.md"
+        original_atomic = __import__(
+            "brain.wiki.build_people", fromlist=["atomic_write_text"]
+        ).atomic_write_text
+
+        def fake_atomic(path: Path, text: str) -> None:
+            if path == index_target:
+                raise PermissionError("synthetic index write")
+            original_atomic(path, text)
+
+        mocker.patch("brain.wiki.build_people.atomic_write_text", fake_atomic)
+
+        import logging
+        with caplog.at_level(logging.WARNING):
+            report = emit_people_pages(
+                test_db, vault_path=tmp_path,
+                owner_keys=frozenset(), min_docs=3,
+            )
+        assert report.index_written is False
+        assert any(
+            "could not write index" in r.message for r in caplog.records
+        )
