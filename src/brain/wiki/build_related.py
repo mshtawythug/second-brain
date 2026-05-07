@@ -1,11 +1,14 @@
 """Generate precomputed semantic-related JSON files for the Quartz wiki.
 
-P5.1 of the Wiki UX Overhaul. For each browseable, non-draft document with
-chunk embeddings, write ``<vault>/static/related/<slug>.json`` containing the
-top-K nearest neighboring documents by cosine similarity over averaged chunk
-embeddings. Quartz's stock Static emitter copies the vault ``static/`` tree
-into the build output, making the files fetchable as
-``/static/related/<slug>.json``.
+Phase F of ``docs/plans/2026-05-06-related-docs-rebuild.md``. For each
+browseable, non-draft document with at least one embedded chunk, write
+``<vault>/static/related/<slug>.json`` containing the top-K most-related
+documents under the **same hybrid signal as runtime search**: weighted
+multi-field FTS (title weight A, tags B, content C) per-document-capped to
+``PER_DOC_CHUNK_CAP`` chunks, blended via Reciprocal Rank Fusion with a
+vector leg gated by ``cfg.vector_sim_floor``. Quartz's stock Static emitter
+copies the vault ``static/`` tree into the build output, making the files
+fetchable as ``/static/related/<slug>.json``.
 """
 from __future__ import annotations
 
@@ -22,6 +25,7 @@ import psycopg
 
 from ..config import Config
 from ..db import connect
+from ..search import CANDIDATE_LIMIT, PER_DOC_CHUNK_CAP, RRF_K
 from ..vault._atomic import atomic_write_text
 
 DEFAULT_RELATED_LIMIT = 10
@@ -91,12 +95,22 @@ def refresh_related(
 ) -> RelatedSummary:
     """Refresh related-doc JSON using ``cfg``'s DB and vault path.
 
+    Plumbs ``cfg.vector_sim_floor`` through to the hybrid neighbor query so
+    the precompute and runtime ``brain search`` share the same cosine floor
+    (single source of truth — see plan ``docs/plans/2026-05-06-related-docs-rebuild.md``,
+    "Cosine-floor reuse").
+
     Failures are logged and returned in ``summary.errors`` rather than raised:
     related docs are a wiki enhancement and must not block the build.
     """
     try:
         with connect(cfg.database_url) as conn:
-            return regenerate_related_json(conn, vault_path=cfg.vault_path, k=k)
+            return regenerate_related_json(
+                conn,
+                vault_path=cfg.vault_path,
+                k=k,
+                vector_sim_floor=cfg.vector_sim_floor,
+            )
     except (OSError, psycopg.Error) as exc:
         _logger.warning("wiki related docs: refresh failed: %s", exc)
         return RelatedSummary(errors=[str(exc)])
@@ -107,14 +121,21 @@ def regenerate_related_json(
     *,
     vault_path: Path,
     k: int = DEFAULT_RELATED_LIMIT,
+    vector_sim_floor: float,
 ) -> RelatedSummary:
-    """Write ``static/related/<slug>.json`` files for eligible documents."""
+    """Write ``static/related/<slug>.json`` files for eligible documents.
+
+    ``vector_sim_floor`` is required (no default — callers must pass an
+    explicit value or wire ``cfg.vector_sim_floor`` through). Mirrors the
+    runtime ``brain search`` cosine floor so the precompute can't silently
+    diverge from the user-facing ranking.
+    """
     if k < 1:
         raise ValueError("k must be >= 1")
 
     grouped: dict[str, list[RelatedEntry]] = defaultdict(list)
     source_slugs: set[str] = set()
-    for row in _iter_related_rows(conn, k=k):
+    for row in _iter_hybrid_neighbors(conn, k=k, vector_sim_floor=vector_sim_floor):
         source_vault_path = row[0]
         if not isinstance(source_vault_path, str):
             continue
@@ -172,52 +193,294 @@ def regenerate_related_json(
     return RelatedSummary(written=written, skipped=skipped, pruned=pruned)
 
 
-def _iter_related_rows(conn: psycopg.Connection[Any], *, k: int) -> list[tuple[Any, ...]]:
-    """Return source/neighbor rows from pgvector centroid ranking."""
-    return list(
-        conn.execute(
-            """
-            WITH doc_embeddings AS MATERIALIZED (
-              SELECT
-                d.id::text AS id,
-                d.title AS title,
-                d.vault_path AS vault_path,
-                COALESCE(s.kind, 'vault') AS source,
-                LEFT(regexp_replace(d.content, '\\s+', ' ', 'g'), %s) AS snippet,
-                avg(c.embedding) AS embedding
-              FROM documents d
-              JOIN chunks c ON c.document_id = d.id
-              LEFT JOIN sources s ON s.id = d.source_id
-              WHERE d.draft = FALSE
-                AND d.vault_path IS NOT NULL
-                AND c.embedding IS NOT NULL
-              GROUP BY d.id, d.title, d.vault_path, s.kind, d.content
-            )
-            SELECT
-              src.vault_path AS source_vault_path,
-              rel.vault_path AS related_vault_path,
-              rel.title AS related_title,
-              rel.source AS related_source,
-              rel.score AS related_score,
-              rel.snippet AS related_snippet
-            FROM doc_embeddings src
-            LEFT JOIN LATERAL (
-              SELECT
-                other.vault_path,
-                other.title,
-                other.source,
-                1.0 - (other.embedding <=> src.embedding) AS score,
-                other.snippet
-              FROM doc_embeddings other
-              WHERE other.id <> src.id
-              ORDER BY other.embedding <=> src.embedding, other.title, other.id
-              LIMIT %s
-            ) rel ON TRUE
-            ORDER BY src.vault_path, rel.score DESC NULLS LAST, rel.title NULLS LAST
-            """,
-            (SNIPPET_LENGTH, k),
+def _iter_hybrid_neighbors(
+    conn: psycopg.Connection[Any],
+    *,
+    k: int,
+    vector_sim_floor: float,
+) -> list[tuple[Any, ...]]:
+    """Yield (source_vault_path, related_vault_path, related_title,
+    related_source, related_score, related_snippet) rows under the new
+    hybrid Related-docs signal.
+
+    Mirrors :func:`brain.search.hybrid_search` structurally — the source
+    document acts as the query. Per the plan's "Algorithm in pseudocode"
+    section (``docs/plans/2026-05-06-related-docs-rebuild.md``):
+
+    1. Compute ``tsquery_str`` via :func:`_build_self_tsquery` (title with
+       optional body-keyword fallback for short/generic titles).
+    2. Compute ``src_embedding = avg(c.embedding)`` over the source doc's
+       embedded chunks.
+    3. **FTS leg** (when ``tsquery_str`` is non-empty): per-doc-cap CTE
+       (``PER_DOC_CHUNK_CAP=3`` chunks per candidate doc, ranked by
+       ``ts_rank``) filtered to non-draft docs with non-NULL ``vault_path``
+       and excluding self; global LIMIT ``CANDIDATE_LIMIT``.
+    4. **Vector leg** (when ``src_embedding`` is non-NULL): cosine distance
+       gated by ``vector_sim_floor``; ORDER BY cosine distance LIMIT
+       ``CANDIDATE_LIMIT``; same self/draft/vault_path exclusions.
+    5. **RRF blend.** ``1 / (RRF_K + rank)`` per leg, summed per chunk.
+       Group by ``document_id`` taking the max chunk score; that chunk's
+       content becomes the snippet.
+    6. **Top-K.** Highest ``k`` documents by RRF score.
+
+    Implementation choice: a Python loop over eligible source docs is the
+    plan's pseudocode shape. Each iteration is independent; per-doc cost is
+    comparable to a single ``brain search`` (~200ms) so a ~1k-doc corpus
+    finishes well under the plan's 60s ideal / 3min ceiling.
+    """
+    eligible = _eligible_source_docs(conn)
+    rows: list[tuple[Any, ...]] = []
+    for source in eligible:
+        neighbors = _neighbors_for_source(
+            conn,
+            source=source,
+            k=k,
+            vector_sim_floor=vector_sim_floor,
         )
+        for neighbor in neighbors:
+            rows.append(
+                (
+                    source.vault_path,
+                    neighbor.vault_path,
+                    neighbor.title,
+                    neighbor.source,
+                    neighbor.score,
+                    neighbor.snippet,
+                )
+            )
+    return rows
+
+
+@dataclass(frozen=True)
+class _SourceDoc:
+    """One eligible source document for the related-docs precompute."""
+
+    id: str
+    title: str
+    vault_path: str
+
+
+@dataclass(frozen=True)
+class _Neighbor:
+    """One ranked neighbor of a source document."""
+
+    document_id: str
+    vault_path: str
+    title: str
+    source: str
+    score: float
+    snippet: str
+
+
+def _eligible_source_docs(conn: psycopg.Connection[Any]) -> list[_SourceDoc]:
+    """Return the set of docs the precompute generates JSON for.
+
+    Eligibility mirrors the pre-rewrite query: non-draft, non-NULL
+    ``vault_path``, at least one chunk with a non-NULL embedding.
+    """
+    rows = conn.execute(
+        """
+        SELECT DISTINCT d.id::text, d.title, d.vault_path
+        FROM documents d
+        JOIN chunks c ON c.document_id = d.id
+        WHERE d.draft = FALSE
+          AND d.vault_path IS NOT NULL
+          AND c.embedding IS NOT NULL
+        ORDER BY d.vault_path
+        """
+    ).fetchall()
+    return [
+        _SourceDoc(id=str(row[0]), title=str(row[1] or ""), vault_path=str(row[2]))
+        for row in rows
+    ]
+
+
+def _avg_embedding(conn: psycopg.Connection[Any], doc_id: str) -> Any:
+    """Return ``avg(c.embedding)`` for ``doc_id`` or ``None`` if all NULL."""
+    row = conn.execute(
+        "SELECT avg(c.embedding) "
+        "FROM chunks c WHERE c.document_id = %s::uuid AND c.embedding IS NOT NULL",
+        (doc_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row[0]
+
+
+def _fts_candidates(
+    conn: psycopg.Connection[Any], *, tsquery: str, exclude_doc_id: str
+) -> list[tuple[str, str, str]]:
+    """Return up to ``CANDIDATE_LIMIT`` (chunk_id, document_id, content) rows
+    from the per-doc-capped FTS leg. Empty list when ``tsquery`` is empty.
+
+    Mirrors the per-doc-cap CTE in :func:`brain.search.hybrid_search` but
+    with the eligibility filters from the related-docs pipeline (non-draft,
+    non-NULL ``vault_path``) and an explicit self-exclusion.
+    """
+    if not tsquery:
+        return []
+    sql = f"""
+        WITH ranked AS (
+            SELECT c.id::text AS id,
+                   c.document_id::text AS document_id,
+                   c.content AS content,
+                   ts_rank(c.tsv, to_tsquery('english', %s)) AS score,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY c.document_id
+                       ORDER BY ts_rank(c.tsv, to_tsquery('english', %s)) DESC
+                   ) AS rn
+            FROM chunks c
+            JOIN documents d ON d.id = c.document_id
+            WHERE c.tsv @@ to_tsquery('english', %s)
+              AND d.draft = FALSE
+              AND d.vault_path IS NOT NULL
+              AND d.id <> %s::uuid
+        )
+        SELECT id, document_id, content
+        FROM ranked
+        WHERE rn <= {PER_DOC_CHUNK_CAP}
+        ORDER BY score DESC
+        LIMIT {CANDIDATE_LIMIT}
+    """
+    rows = conn.execute(sql, (tsquery, tsquery, tsquery, exclude_doc_id)).fetchall()
+    return [(str(r[0]), str(r[1]), str(r[2] or "")) for r in rows]
+
+
+def _vector_candidates(
+    conn: psycopg.Connection[Any],
+    *,
+    src_embedding: Any,
+    exclude_doc_id: str,
+    vector_sim_floor: float,
+) -> list[tuple[str, str, str]]:
+    """Return up to ``CANDIDATE_LIMIT`` (chunk_id, document_id, content) rows
+    from the cosine-floor-gated vector leg. Empty list when
+    ``src_embedding`` is ``None``.
+    """
+    if src_embedding is None:
+        return []
+    sql = f"""
+        SELECT c.id::text, c.document_id::text, c.content
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        WHERE d.draft = FALSE
+          AND d.vault_path IS NOT NULL
+          AND d.id <> %s::uuid
+          AND c.embedding IS NOT NULL
+          AND 1 - (c.embedding <=> %s::vector) >= %s
+        ORDER BY c.embedding <=> %s::vector
+        LIMIT {CANDIDATE_LIMIT}
+    """
+    rows = conn.execute(
+        sql,
+        (exclude_doc_id, src_embedding, vector_sim_floor, src_embedding),
+    ).fetchall()
+    return [(str(r[0]), str(r[1]), str(r[2] or "")) for r in rows]
+
+
+def _neighbors_for_source(
+    conn: psycopg.Connection[Any],
+    *,
+    source: _SourceDoc,
+    k: int,
+    vector_sim_floor: float,
+) -> list[_Neighbor]:
+    """RRF-blend the FTS + vector legs for one source doc and return top-K.
+
+    Per-chunk RRF score: ``1 / (RRF_K + rank)`` from each leg the chunk
+    appears in. Per-doc score: max chunk RRF for that document. Snippet:
+    the highest-RRF chunk's content for the winning doc, whitespace-
+    collapsed and truncated to ``SNIPPET_LENGTH``.
+    """
+    tsquery = _build_self_tsquery(conn, source.id, title=source.title)
+    src_embedding = _avg_embedding(conn, source.id)
+
+    fts_rows = _fts_candidates(conn, tsquery=tsquery, exclude_doc_id=source.id)
+    vec_rows = _vector_candidates(
+        conn,
+        src_embedding=src_embedding,
+        exclude_doc_id=source.id,
+        vector_sim_floor=vector_sim_floor,
     )
+
+    rrf: dict[str, float] = {}
+    chunk_meta: dict[str, tuple[str, str]] = {}  # chunk_id → (document_id, content)
+    for rank, (cid, doc_id, content) in enumerate(fts_rows):
+        rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        chunk_meta[cid] = (doc_id, content)
+    for rank, (cid, doc_id, content) in enumerate(vec_rows):
+        rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        chunk_meta[cid] = (doc_id, content)
+
+    if not rrf:
+        return []
+
+    # Per-document max chunk score + remember the winning chunk's content
+    # so the JSON snippet shows the actual matching context, not a generic
+    # head-of-document slice (plan: snippet is rendered next to the source
+    # icon in ``RelatedDocs.tsx``; the matching chunk is the right text).
+    by_doc: dict[str, tuple[float, str]] = {}
+    for cid, score in rrf.items():
+        doc_id, content = chunk_meta[cid]
+        prev = by_doc.get(doc_id)
+        if prev is None or score > prev[0]:
+            by_doc[doc_id] = (score, content)
+
+    if not by_doc:
+        return []
+
+    doc_ids = list(by_doc.keys())
+    meta_rows = conn.execute(
+        """
+        SELECT d.id::text, d.title, d.vault_path, COALESCE(s.kind, 'vault')
+        FROM documents d
+        LEFT JOIN sources s ON s.id = d.source_id
+        WHERE d.id = ANY(%s::uuid[])
+        """,
+        (doc_ids,),
+    ).fetchall()
+    meta = {
+        str(row[0]): (str(row[1] or ""), str(row[2] or ""), str(row[3] or "vault"))
+        for row in meta_rows
+    }
+
+    neighbors: list[_Neighbor] = []
+    for doc_id, (score, raw_snippet) in by_doc.items():
+        if doc_id not in meta:
+            continue
+        title, vault_path, source_kind = meta[doc_id]
+        if not vault_path:
+            continue
+        snippet = _collapse_whitespace(raw_snippet)[:SNIPPET_LENGTH]
+        neighbors.append(
+            _Neighbor(
+                document_id=doc_id,
+                vault_path=vault_path,
+                title=title,
+                source=source_kind,
+                score=score,
+                snippet=snippet,
+            )
+        )
+
+    neighbors.sort(key=lambda n: (-n.score, n.title, n.document_id))
+    return neighbors[:k]
+
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _collapse_whitespace(text: str) -> str:
+    """Mirror the snippet-formatter regex used by the old centroid query.
+
+    The pre-rewrite ``_iter_related_rows`` collapsed whitespace inside SQL
+    via ``regexp_replace(d.content, '\\s+', ' ', 'g')``. The new pipeline
+    builds the snippet from the matching chunk's content in Python; we
+    apply the same whitespace rule here so the rendered JSON keeps the
+    same shape and ``RelatedDocs.tsx`` doesn't need to learn anything
+    about line breaks.
+    """
+    return _WHITESPACE_RE.sub(" ", text).strip()
 
 
 def _build_self_tsquery(

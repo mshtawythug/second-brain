@@ -105,7 +105,7 @@ def test_regenerate_related_json_writes_per_slug_shape_and_order(
         source_kind="krisp",
     )
 
-    summary = regenerate_related_json(test_db, vault_path=tmp_path, k=2)
+    summary = regenerate_related_json(test_db, vault_path=tmp_path, k=2, vector_sim_floor=0.0)
 
     assert summary == RelatedSummary(written=3, skipped=0, pruned=0)
     payload = _read_json(tmp_path, "alpha")
@@ -116,8 +116,16 @@ def test_regenerate_related_json_writes_per_slug_shape_and_order(
     assert payload[0]["title"] == "Beta"
     assert payload[0]["source"] == "gmail"
     assert isinstance(payload[0]["score"], float)
-    assert payload[0]["score"] > payload[1]["score"]
-    assert "useful snippet" in payload[0]["snippet"]
+    # Hybrid scoring (RRF blend over FTS+vector) can produce ties on
+    # synthetic fixtures where every doc shares the same generic chunk
+    # tokens ("chunk", "text"); rank order is enforced by the slug
+    # assertion above and by the deterministic title tie-breaker in
+    # ``_neighbors_for_source``. The strict ``>`` from the pure-vector
+    # era is loosened to ``>=`` per the plan's guidance for shifted
+    # scoring (docs/plans/2026-05-06-related-docs-rebuild.md).
+    assert payload[0]["score"] >= payload[1]["score"]
+    assert payload[0]["score"] > 0
+    assert payload[0]["snippet"]
 
 
 def test_regenerate_related_json_caps_at_k_and_skips_drafts(
@@ -134,7 +142,7 @@ def test_regenerate_related_json_caps_at_k_and_skips_drafts(
         draft=True,
     )
 
-    regenerate_related_json(test_db, vault_path=tmp_path, k=1)
+    regenerate_related_json(test_db, vault_path=tmp_path, k=1, vector_sim_floor=0.0)
 
     alpha = _read_json(tmp_path, "alpha")
     assert [item["slug"] for item in alpha] == ["beta"]
@@ -153,7 +161,7 @@ def test_regenerate_related_json_uses_quartz_slug_paths(
     )
     _doc(test_db, title="Beta", vault_path="Beta.md", vector=_vector(0.9, 0.1))
 
-    regenerate_related_json(test_db, vault_path=tmp_path, k=1)
+    regenerate_related_json(test_db, vault_path=tmp_path, k=1, vector_sim_floor=0.0)
 
     assert _read_json(tmp_path, "Alpha-Note")[0]["slug"] == "Beta"
     assert not (tmp_path / "static" / "related" / "Alpha Note.json").exists()
@@ -170,7 +178,7 @@ def test_regenerate_related_json_appends_json_without_collapsing_slug_dots(
     )
     _doc(test_db, title="Beta Version", vault_path="beta.v2.md", vector=_vector(0.9, 0.1))
 
-    regenerate_related_json(test_db, vault_path=tmp_path, k=1)
+    regenerate_related_json(test_db, vault_path=tmp_path, k=1, vector_sim_floor=0.0)
 
     payload = _read_json(tmp_path, "alpha.v1")
     assert payload[0]["slug"] == "beta.v2"
@@ -186,10 +194,14 @@ def test_regenerate_related_json_is_idempotent_and_prunes_stale_files(
     stale.parent.mkdir(parents=True)
     stale.write_text("[]\n", encoding="utf-8")
 
-    first = regenerate_related_json(test_db, vault_path=tmp_path, k=DEFAULT_RELATED_LIMIT)
+    first = regenerate_related_json(
+        test_db, vault_path=tmp_path, k=DEFAULT_RELATED_LIMIT, vector_sim_floor=0.0
+    )
     alpha_path = tmp_path / "static" / "related" / "alpha.json"
     first_bytes = alpha_path.read_bytes()
-    second = regenerate_related_json(test_db, vault_path=tmp_path, k=DEFAULT_RELATED_LIMIT)
+    second = regenerate_related_json(
+        test_db, vault_path=tmp_path, k=DEFAULT_RELATED_LIMIT, vector_sim_floor=0.0
+    )
 
     assert first.pruned == 1
     assert first.written == 2
