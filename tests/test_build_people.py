@@ -1,20 +1,33 @@
-"""Tests for ``brain.wiki.build_people.aggregate_people`` (Phase A).
+"""Tests for ``brain.wiki.build_people`` — aggregation + page emission.
 
-Real-Postgres integration tests — seed ``sources``, ``documents``, and
-``directory_entries`` directly so we exercise the production SELECT and the
-real participant-extraction helpers without dragging the chunker / embedder
-into the loop.
+Phase A: ``aggregate_people`` (real-Postgres SELECT against seeded
+``sources`` / ``documents`` / ``directory_entries`` rows; no chunker /
+embedder in the loop).
+
+Phase B: ``render_person_md`` / ``render_index_md`` (pure-string
+golden-shape tests) and ``emit_people_pages`` (DB → tmp_path round-trip
+with idempotency + cleanup contracts).
 """
 import hashlib
 import json
 import uuid
+from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 
 from brain.vault.derived_links.directory import DirectoryStore
-from brain.wiki.build_people import PersonRecord, aggregate_people
+from brain.vault.frontmatter import parse_frontmatter
+from brain.wiki.build_people import (
+    DocRef,
+    EmitReport,
+    PersonRecord,
+    aggregate_people,
+    emit_people_pages,
+    render_index_md,
+    render_person_md,
+)
 
 # --------------------------------------------------------------------------
 # Helpers — direct SQL seeding mirrors tests/derived_links/test_pass_runner.py
@@ -130,8 +143,8 @@ class TestSingleGmailDocTwoParticipants:
         assert len(alice.docs) == 1
         assert alice.docs[0].source_kind == "gmail"
         assert alice.docs[0].title == "Lunch plans"
-        assert alice.docs[0].vault_slug == (
-            "2026-04-15-deadbeef-lunch-plans"
+        assert alice.docs[0].vault_target == (
+            "_ingested/gmail/2026-04-15-deadbeef-lunch-plans"
         )
         assert alice.docs[0].date is not None
         assert alice.docs[0].date.year == 2026
@@ -644,7 +657,7 @@ class TestDefensive:
         assert bob.primary_email == "bob@b.com"
         assert bob.all_emails == ["bob@a.com", "bob@b.com"]
 
-    def test_doc_without_vault_path_yields_none_slug(
+    def test_doc_without_vault_path_yields_none_target(
         self, test_db: psycopg.Connection[Any]
     ) -> None:
         store = DirectoryStore(test_db)
@@ -670,7 +683,7 @@ class TestDefensive:
             aggregate_people(test_db, owner_keys=frozenset(), min_docs=1),
             "bob",
         )
-        assert bob.docs[0].vault_slug is None
+        assert bob.docs[0].vault_target is None
 
     def test_gmail_sent_at_takes_precedence_over_metadata_date(
         self, test_db: psycopg.Connection[Any]
@@ -808,3 +821,470 @@ class TestDefensive:
             min_docs=1,
         )
         assert "alias account" not in [r.display_name for r in records]
+
+
+# ==========================================================================
+# Phase B — page rendering (B.1 / B.2)
+# ==========================================================================
+#
+# These are pure-function tests on hand-built PersonRecord values — they
+# do NOT touch the DB. The DB → render round-trip lives further down.
+
+
+def _make_person(
+    *,
+    slug: str = "person-person-luke",
+    display_name: str = "person-person-luke",
+    primary_email: str = "person-luke@example.com",
+    all_emails: list[str] | None = None,
+    docs: list[DocRef] | None = None,
+    in_people_yml: bool = True,
+) -> PersonRecord:
+    """Tiny PersonRecord factory for the Phase B render tests."""
+    return PersonRecord(
+        slug=slug,
+        display_name=display_name,
+        primary_email=primary_email,
+        all_emails=all_emails or [primary_email],
+        docs=docs or [],
+        in_people_yml=in_people_yml,
+    )
+
+
+class TestRenderPersonMdFrontmatter:
+    """Frontmatter shape — keys, types, and ordering match the spec."""
+
+    def test_frontmatter_round_trips(self) -> None:
+        rec = _make_person(
+            all_emails=["person-luke@example.com", "person-luke@home.com"],
+            docs=[
+                DocRef(
+                    document_id="d1",
+                    title="Sync",
+                    source_kind="krisp",
+                    date=__import__("datetime").datetime(2026, 5, 1),
+                    vault_target="_ingested/krisp/2026-05-01-abc-sync",
+                ),
+            ],
+        )
+        rendered = render_person_md(rec)
+        fm, _body = parse_frontmatter(rendered)
+        assert fm["title"] == "person-person-luke"
+        assert fm["slug"] == "person-person-luke"
+        assert fm["kind"] == "people"
+        assert fm["emails"] == ["person-luke@example.com", "person-luke@home.com"]
+        assert fm["doc_count"] == 1
+        assert fm["in_people_yml"] is True
+
+    def test_in_people_yml_false_for_threshold_persons(self) -> None:
+        rec = _make_person(in_people_yml=False)
+        fm, _ = parse_frontmatter(render_person_md(rec))
+        assert fm["in_people_yml"] is False
+
+    def test_doc_count_matches_docs_length(self) -> None:
+        rec = _make_person(
+            docs=[
+                DocRef(f"id-{i}", f"Title {i}", "gmail", None, None)
+                for i in range(7)
+            ],
+        )
+        fm, _ = parse_frontmatter(render_person_md(rec))
+        assert fm["doc_count"] == 7
+
+
+class TestRenderPersonMdBody:
+    """Body layout — H1, primary email, doc lines, empty-state placeholder."""
+
+    def test_body_contains_h1_humanized_name(self) -> None:
+        rec = _make_person(display_name="person-person-luke")
+        rendered = render_person_md(rec)
+        assert "# person-person-luke" in rendered
+
+    def test_primary_email_rendered_as_mailto(self) -> None:
+        rendered = render_person_md(_make_person())
+        assert "**Primary email:** [person-luke@example.com](mailto:person-luke@example.com)" in rendered
+
+    def test_other_emails_listed_when_multiple(self) -> None:
+        rec = _make_person(
+            all_emails=["person-luke@example.com", "person-luke@home.com", "person-luke@work.com"],
+        )
+        rendered = render_person_md(rec)
+        assert "**Other emails:** person-luke@home.com, person-luke@work.com" in rendered
+
+    def test_other_emails_omitted_when_only_primary(self) -> None:
+        rec = _make_person(all_emails=["person-luke@example.com"])
+        rendered = render_person_md(rec)
+        assert "**Other emails:**" not in rendered
+
+    def test_documents_section_uses_h2_with_count(self) -> None:
+        rec = _make_person(
+            docs=[
+                DocRef(f"d{i}", f"T{i}", "gmail", None, None) for i in range(3)
+            ],
+        )
+        assert "## Documents (3)" in render_person_md(rec)
+
+    def test_doc_line_emits_h3_with_date_and_link(self) -> None:
+        from datetime import datetime
+        rec = _make_person(
+            docs=[
+                DocRef(
+                    document_id="d1",
+                    title="AI CoS Jam Session",
+                    source_kind="krisp",
+                    date=datetime(2026, 5, 6),
+                    vault_target="_ingested/krisp/2026-05-06-abc-ai-cos-jam-session",
+                )
+            ],
+        )
+        rendered = render_person_md(rec)
+        assert (
+            "### 2026-05-06 · [[_ingested/krisp/2026-05-06-abc-ai-cos-jam-session"
+            "|AI CoS Jam Session]] (krisp)"
+        ) in rendered
+
+    def test_doc_with_brackets_in_title_sanitized_to_parens(self) -> None:
+        # Quartz's wiki-link parser rejects ``[``/``]`` in the alias slot.
+        from datetime import datetime
+        rec = _make_person(
+            docs=[
+                DocRef(
+                    document_id="d1",
+                    title="Re: [External] Q1 review",
+                    source_kind="gmail",
+                    date=datetime(2026, 4, 15),
+                    vault_target="_ingested/gmail/2026-04-15-x-re-q1",
+                )
+            ],
+        )
+        rendered = render_person_md(rec)
+        # Brackets in the alias slot replaced by parens.
+        assert "Re: (External) Q1 review" in rendered
+        assert "[External]" not in rendered
+
+    def test_doc_without_vault_target_renders_plaintext(self) -> None:
+        from datetime import datetime
+        rec = _make_person(
+            docs=[
+                DocRef(
+                    document_id="d1",
+                    title="Plain note",
+                    source_kind="manual",
+                    date=datetime(2026, 4, 1),
+                    vault_target=None,
+                )
+            ],
+        )
+        rendered = render_person_md(rec)
+        # No wiki-link wrapper, just the title.
+        assert "### 2026-04-01 · Plain note (manual)" in rendered
+        assert "[[Plain note" not in rendered
+
+    def test_doc_without_date_renders_undated(self) -> None:
+        rec = _make_person(
+            docs=[
+                DocRef("d1", "Stale", "krisp", None, None),
+            ],
+        )
+        rendered = render_person_md(rec)
+        assert "### undated · Stale (krisp)" in rendered
+
+    def test_zero_docs_renders_no_documents_yet_placeholder(self) -> None:
+        # Curated person with no matched documents — the page must still
+        # render (Phase A allows them, Phase B emits a placeholder).
+        rec = _make_person(docs=[])
+        rendered = render_person_md(rec)
+        assert "## Documents (0)" in rendered
+        assert "*No documents yet.*" in rendered
+
+    def test_render_is_idempotent(self) -> None:
+        rec = _make_person(
+            docs=[DocRef("d1", "T", "gmail", None, "_ingested/gmail/x")]
+        )
+        first = render_person_md(rec)
+        second = render_person_md(rec)
+        assert first == second
+
+
+class TestRenderIndexMd:
+    """Index page — alphabetical, curated badge, empty-state placeholder."""
+
+    def test_empty_records_render_placeholder(self) -> None:
+        rendered = render_index_md([])
+        fm, body = parse_frontmatter(rendered)
+        assert fm["kind"] == "people-index"
+        assert "*No people yet" in body
+
+    def test_records_alphabetized_by_display_name(self) -> None:
+        recs = [
+            _make_person(slug="zoe-zhang", display_name="zoe zhang", in_people_yml=False),
+            _make_person(slug="alice-anderson", display_name="alice anderson", in_people_yml=False),
+            _make_person(slug="person-person-marc", display_name="person-person-marc", in_people_yml=True),
+        ]
+        rendered = render_index_md(recs)
+        # Locate each name's position; Alice → person-person-marc → Zoe (alpha by display_name).
+        idx_alice = rendered.index("Alice Anderson")
+        idx_marc = rendered.index("person-person-marc")
+        idx_zoe = rendered.index("Zoe Zhang")
+        assert idx_alice < idx_marc < idx_zoe
+
+    def test_curated_rows_get_check_badge(self) -> None:
+        recs = [
+            _make_person(slug="curated", display_name="curated person", in_people_yml=True),
+            _make_person(slug="threshold", display_name="threshold person", in_people_yml=False),
+        ]
+        rendered = render_index_md(recs)
+        # Curated row carries the badge; threshold row does not.
+        curated_line = next(
+            ln for ln in rendered.splitlines() if "Curated Person" in ln
+        )
+        threshold_line = next(
+            ln for ln in rendered.splitlines() if "Threshold Person" in ln
+        )
+        assert "✅" in curated_line
+        assert "✅" not in threshold_line
+
+    def test_each_row_carries_doc_count_and_email(self) -> None:
+        recs = [
+            _make_person(
+                slug="person-person-luke",
+                display_name="person-person-luke",
+                primary_email="person-luke@example.com",
+                docs=[
+                    DocRef(f"d{i}", f"t{i}", "krisp", None, None)
+                    for i in range(4)
+                ],
+            )
+        ]
+        rendered = render_index_md(recs)
+        assert "[[people/person-person-luke|person-person-luke]] — 4 docs · person-luke@example.com" in rendered
+
+    def test_index_render_is_idempotent(self) -> None:
+        recs = [_make_person()]
+        assert render_index_md(recs) == render_index_md(recs)
+
+
+# ==========================================================================
+# Phase B — emit_people_pages (B.3): DB → tmp_path round-trip
+# ==========================================================================
+
+
+def _seed_curated_with_docs(
+    test_db: psycopg.Connection[Any],
+    *,
+    name: str,
+    email: str,
+    n_gmail_docs: int = 0,
+    vault_path_template: str = "_ingested/gmail/2026-04-{i:02d}-abc-doc-{i}",
+) -> None:
+    """Seed one ``people_yml`` person + N Gmail docs they participate in."""
+    DirectoryStore(test_db).upsert_pair(
+        display_name=name, email=email, source="people_yml"
+    )
+    for i in range(n_gmail_docs):
+        _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id=f"gmail-{name}-{i}",
+            title=f"{name.title()} doc {i}",
+            metadata={
+                "from": f"{name} <{email}>",
+                "to": "ali@example.com",
+                "thread_id": f"t-{name}-{i}",
+                "date": f"Wed, {15 + i:02d} Apr 2026 12:00:00 -0700",
+            },
+            vault_path=vault_path_template.format(i=i),
+        )
+
+
+class TestEmitPeoplePagesRoundTrip:
+    """Aggregate → render → write — verify the disk artifact."""
+
+    def test_writes_one_page_per_record_and_index(
+        self, test_db: psycopg.Connection[Any], tmp_path: Path
+    ) -> None:
+        _seed_curated_with_docs(
+            test_db, name="person-person-luke", email="person-luke@example.com",
+            n_gmail_docs=2,
+        )
+        report = emit_people_pages(
+            test_db,
+            vault_path=tmp_path,
+            owner_keys=frozenset(),
+            min_docs=1,
+        )
+        assert isinstance(report, EmitReport)
+        assert report.pages_written == 1
+        assert report.pages_deleted == 0
+        assert report.index_written is True
+
+        people_dir = tmp_path / "people"
+        assert (people_dir / "person-person-luke.md").is_file()
+        assert (people_dir / "index.md").is_file()
+
+        # Round-trip: parse the written page's frontmatter back.
+        fm, _body = parse_frontmatter(
+            (people_dir / "person-person-luke.md").read_text(encoding="utf-8")
+        )
+        assert fm["slug"] == "person-person-luke"
+        assert fm["doc_count"] == 2
+        assert fm["emails"] == ["person-luke@example.com"]
+        assert fm["in_people_yml"] is True
+
+    def test_creates_people_dir_on_first_run(
+        self, test_db: psycopg.Connection[Any], tmp_path: Path
+    ) -> None:
+        # Vault directory exists but ``people/`` does not yet.
+        assert not (tmp_path / "people").exists()
+        _seed_curated_with_docs(
+            test_db, name="bob smith", email="bob@example.com", n_gmail_docs=1,
+        )
+        emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=1,
+        )
+        assert (tmp_path / "people").is_dir()
+
+    def test_empty_directory_still_writes_index_placeholder(
+        self, test_db: psycopg.Connection[Any], tmp_path: Path
+    ) -> None:
+        # No directory_entries rows → no per-person pages → index renders
+        # the empty-state placeholder.
+        report = emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=3,
+        )
+        assert report.pages_written == 0
+        assert report.pages_deleted == 0
+        assert report.index_written is True
+        index_text = (tmp_path / "people" / "index.md").read_text(encoding="utf-8")
+        assert "*No people yet" in index_text
+
+
+class TestEmitPeoplePagesIdempotence:
+    """Re-running with no DB drift must not re-write existing files."""
+
+    def test_second_run_writes_zero_pages(
+        self, test_db: psycopg.Connection[Any], tmp_path: Path
+    ) -> None:
+        _seed_curated_with_docs(
+            test_db, name="person-person-luke", email="person-luke@example.com",
+            n_gmail_docs=2,
+        )
+        first = emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=1,
+        )
+        assert first.pages_written == 1
+        assert first.index_written is True
+
+        second = emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=1,
+        )
+        # Bytes already match disk → nothing rewritten on either side.
+        assert second.pages_written == 0
+        assert second.skipped_unchanged == 1
+        assert second.pages_deleted == 0
+        assert second.index_written is False
+
+    def test_mtime_preserved_on_skip(
+        self, test_db: psycopg.Connection[Any], tmp_path: Path
+    ) -> None:
+        # The "skip if byte-identical" gate must preserve mtime so the
+        # Quartz watcher doesn't fire a needless rebuild on a re-run.
+        _seed_curated_with_docs(
+            test_db, name="ann arbor", email="ann@example.com", n_gmail_docs=1,
+        )
+        emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=1,
+        )
+        page = tmp_path / "people" / "ann-arbor.md"
+        index = tmp_path / "people" / "index.md"
+        page_mtime_before = page.stat().st_mtime_ns
+        index_mtime_before = index.stat().st_mtime_ns
+
+        emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=1,
+        )
+        assert page.stat().st_mtime_ns == page_mtime_before
+        assert index.stat().st_mtime_ns == index_mtime_before
+
+
+class TestEmitPeoplePagesCleanup:
+    """A removed ``_people.yml`` entry → next emit deletes the dropped page."""
+
+    def test_removed_curated_person_page_deleted_on_next_emit(
+        self, test_db: psycopg.Connection[Any], tmp_path: Path
+    ) -> None:
+        # First refresh: person-person-luke + person-person-marc both curated, both above threshold.
+        DirectoryStore(test_db).upsert_pair(
+            display_name="person-person-luke", email="person-luke@example.com",
+            source="people_yml",
+        )
+        DirectoryStore(test_db).upsert_pair(
+            display_name="person-person-marc", email="person-marc@example.com",
+            source="people_yml",
+        )
+        first = emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=1,
+        )
+        assert first.pages_written == 2
+        assert (tmp_path / "people" / "person-person-luke.md").is_file()
+        assert (tmp_path / "people" / "person-person-marc.md").is_file()
+
+        # Drop person-person-luke from the directory (simulate user removing him from
+        # _people.yml + a re-refresh).
+        test_db.execute(
+            "DELETE FROM directory_entries WHERE display_name = %s",
+            ("person-person-luke",),
+        )
+
+        second = emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=1,
+        )
+        assert second.pages_deleted == 1
+        assert tmp_path / "people" / "person-person-luke.md" in second.deleted_paths
+        assert not (tmp_path / "people" / "person-person-luke.md").exists()
+        # person-person-marc's page survives.
+        assert (tmp_path / "people" / "person-person-marc.md").is_file()
+        # The index gets re-written because person-person-marc's row stays but person-person-luke's row
+        # is gone — the rendered list changed.
+        assert second.index_written is True
+
+    def test_index_md_never_treated_as_a_person_page(
+        self, test_db: psycopg.Connection[Any], tmp_path: Path
+    ) -> None:
+        # Even with no curated people, the cleanup pass must NOT delete
+        # ``index.md`` (it's separately managed).
+        emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=3,
+        )
+        # Re-run — index.md must persist across the cleanup pass.
+        emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=3,
+        )
+        assert (tmp_path / "people" / "index.md").is_file()
+
+    def test_unrelated_files_in_people_dir_left_untouched(
+        self, test_db: psycopg.Connection[Any], tmp_path: Path
+    ) -> None:
+        # A user-authored attachment / non-.md file in people/ survives
+        # the cleanup pass unscathed.
+        people_dir = tmp_path / "people"
+        people_dir.mkdir()
+        (people_dir / "notes.txt").write_text("hand-written")
+        (people_dir / "subdir").mkdir()  # ignored — not a regular file
+
+        emit_people_pages(
+            test_db, vault_path=tmp_path,
+            owner_keys=frozenset(), min_docs=3,
+        )
+        assert (people_dir / "notes.txt").read_text() == "hand-written"
+        assert (people_dir / "subdir").is_dir()
