@@ -36,14 +36,20 @@ import { FileTrieNode } from "./quartz/util/fileTrie"
 // pages) so the pin behavior is consistent across page types.
 const PINNED_EXPLORER_FOLDER_SLUG = "people"
 
+// NOTE: this comparator is serialized via `.toString()` and re-evaluated
+// in the browser, where module-level identifiers are not in scope. The
+// pinned slug literal must therefore be inlined inside the function
+// body — keep `PINNED_EXPLORER_FOLDER_SLUG` in sync with the literals
+// below (the static test in `tests/test_quartz_people_hub_static.py`
+// pins both halves).
 function explorerSortPinningPeople(a: FileTrieNode, b: FileTrieNode): number {
   // Pin `people/` ahead of every other folder. The slug-segment is the
   // last path-component of the trie node; a pinned folder always wins
   // over any non-pinned sibling regardless of type. When neither is the
   // pinned folder, fall through to upstream's "folders first, alpha"
   // rule so the rest of the tree behaves identically to stock Quartz.
-  if (a.isFolder && a.slugSegment === PINNED_EXPLORER_FOLDER_SLUG) return -1
-  if (b.isFolder && b.slugSegment === PINNED_EXPLORER_FOLDER_SLUG) return 1
+  if (a.isFolder && a.slugSegment === "people") return -1
+  if (b.isFolder && b.slugSegment === "people") return 1
   if ((!a.isFolder && !b.isFolder) || (a.isFolder && b.isFolder)) {
     return a.displayName.localeCompare(b.displayName, undefined, {
       numeric: true,

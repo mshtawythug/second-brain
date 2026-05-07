@@ -62,6 +62,28 @@ def test_explorer_pins_people_folder_to_top_of_tree() -> None:
     assert "Component.Explorer()" not in text
 
 
+def test_explorer_sortfn_inlines_slug_literal_for_browser_serialization() -> None:
+    """The comparator body must use the literal slug, not the const.
+
+    Quartz serializes ``sortFn`` via ``.toString()`` and re-evaluates the
+    function in the browser, where module-level identifiers are out of
+    scope. Referencing ``PINNED_EXPLORER_FOLDER_SLUG`` inside the body
+    raises ``ReferenceError`` at sort time and breaks the Explorer.
+    Pin both branches to the literal so the regression can't recur.
+    """
+    text = _layout_text()
+    # Capture just the comparator body so we don't pick up the const
+    # declaration above it.
+    start = text.index("function explorerSortPinningPeople")
+    end = text.index("\n}\n", start)
+    body = text[start:end]
+    assert 'a.slugSegment === "people"' in body
+    assert 'b.slugSegment === "people"' in body
+    # The const reference must NOT appear inside the comparator — that's
+    # exactly the closure-over-module-scope bug this test guards.
+    assert "PINNED_EXPLORER_FOLDER_SLUG" not in body
+
+
 def test_people_hub_scss_partial_targets_kind_people_pages() -> None:
     """``_people_hub.scss`` exists and targets the right slug prefixes.
 
