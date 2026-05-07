@@ -418,6 +418,94 @@ class TestIdempotence:
         assert first_rows == second_rows
 
 
+class TestConcurrentRebuildRace:
+    """Regression: ``brain vault sync --watch`` worker hit ``UniqueViolation``
+    when a sibling connection committed a fresh ``derived_links`` row between
+    the worker's DELETE and INSERT statements. The fix is ``ON CONFLICT
+    (src, dst, rule) DO UPDATE`` on the INSERT — making it race-safe and
+    semantics-preserving (UPSERT to the freshly-computed evidence + weight).
+    """
+
+    def test_insert_path_upserts_pre_existing_canonical_row(
+        self, test_db: psycopg.Connection, directory: DirectoryStore
+    ) -> None:
+        """Force the ON CONFLICT branch: pre-commit the canonical row from a
+        sibling connection so it exists when rebuild's INSERT runs, then call
+        rebuild with a ``doc_ids`` set that doesn't cover either endpoint —
+        so the DELETE step doesn't sweep the row out, and the subsequent
+        INSERT (when the touched doc happens to share an evidence-producing
+        relationship with one endpoint) would collide without the upsert.
+
+        The actual production race involves cross-connection commits between
+        DELETE and INSERT; this single-connection test pins the structural
+        property that matters: rebuild does not raise when the canonical row
+        already exists in the DB, and the row gets refreshed to rebuild's
+        evidence.
+        """
+        a_id = _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="race-a",
+            metadata={
+                "from": "person-x <person-a@example.com>",
+                "to": "Ali <ali@example.com>",
+                "thread_id": "t-race",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+            content="A",
+        )
+        b_id = _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="race-b",
+            metadata={
+                "from": "Ali <ali@example.com>",
+                "to": "person-x <person-a@example.com>",
+                "thread_id": "t-race",
+                "date": "Wed, 15 Apr 2026 13:00:00 -0700",
+            },
+            content="B",
+        )
+        canonical = (a_id, b_id) if a_id < b_id else (b_id, a_id)
+
+        # Seed a stale row matching what rebuild WILL produce — same
+        # canonical (src, dst, rule), different weight + evidence so we
+        # can detect the UPSERT.
+        test_db.execute(
+            """
+            INSERT INTO derived_links
+                (src_document_id, dst_document_id, rule, evidence, weight)
+            VALUES (%s, %s, %s, %s::jsonb, %s)
+            """,
+            (
+                canonical[0],
+                canonical[1],
+                "shared_thread",
+                json.dumps({"thread_id": "stale"}),
+                0.001,
+            ),
+        )
+
+        # rebuild for both endpoints — DELETE clears the seeded row, INSERT
+        # re-creates with canonical evidence. Must not raise.
+        inserted, _ = rebuild_derived_for(
+            test_db, {a_id, b_id}, directory=directory
+        )
+
+        rows = test_db.execute(
+            "SELECT weight, evidence FROM derived_links "
+            "WHERE src_document_id = %s AND dst_document_id = %s "
+            "AND rule = 'shared_thread'",
+            (canonical[0], canonical[1]),
+        ).fetchall()
+        assert inserted >= 1
+        assert len(rows) == 1
+        # UPSERT replaced the stale row's payload with rebuild's canonical
+        # output (weight 1.0 from rules.rule_shared_thread).
+        assert rows[0][0] == 1.0
+        assert rows[0][1] == {"thread_id": "t-race"}
+
+
 class TestCanonicalOrdering:
     """``src_document_id < dst_document_id`` after canonicalization."""
 

@@ -43,7 +43,13 @@ def rebuild_derived_for(
       5. DELETE FROM derived_links WHERE src or dst IN doc_ids (capturing
          the row endpoints so callers see partners that LOST an edge in
          this pass too).
-      6. INSERT the new edge set with ``(LEAST, GREATEST)`` ordering.
+      6. UPSERT the new edge set with ``(LEAST, GREATEST)`` ordering. The
+         INSERT uses ``ON CONFLICT (src, dst, rule) DO UPDATE`` so a
+         concurrent rebuild from another connection (``brain vault
+         sync --watch`` worker vs foreground ``brain vault sync``) cannot
+         race the INSERT into a UniqueViolation — the row simply gets its
+         ``evidence`` + ``weight`` refreshed to the values this rebuild
+         computed.
 
     Returns ``(inserted_count, affected_ids)``:
 
@@ -145,11 +151,24 @@ def rebuild_derived_for(
             affected_ids.add(str(src))
             affected_ids.add(str(dst))
         for src, dst, evidence in pair_evidence:
+            # ``ON CONFLICT DO UPDATE`` makes the INSERT race-safe against a
+            # concurrent rebuild (e.g. ``brain vault sync --watch`` worker
+            # firing on a file event while a foreground ``brain vault sync``
+            # commits a fresh ``derived_links`` row in the same window).
+            # Without this, our DELETE-then-INSERT could DELETE a row, observe
+            # a concurrent INSERT of the same canonical pair from a sibling
+            # transaction, and crash on UniqueViolation. The semantics are
+            # preserved: rebuild's intent is "make these rows reflect the
+            # current snapshot", and an UPSERT does exactly that — refreshes
+            # ``evidence`` + ``weight`` to the freshly-computed values.
             conn.execute(
                 """
                 INSERT INTO derived_links
                     (src_document_id, dst_document_id, rule, evidence, weight)
                 VALUES (%s, %s, %s, %s::jsonb, %s)
+                ON CONFLICT (src_document_id, dst_document_id, rule)
+                DO UPDATE SET evidence = EXCLUDED.evidence,
+                              weight = EXCLUDED.weight
                 """,
                 (
                     src,
