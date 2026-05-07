@@ -1,6 +1,7 @@
 """Persistent name↔email directory + refresh logic for the metadata linker."""
 import json
 import logging
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -22,6 +23,71 @@ _logger = logging.getLogger(__name__)
 _VALID_SOURCES: frozenset[str] = frozenset(
     {"gmail", "calendar", "contacts", "people_yml"}
 )
+
+
+def _score_directory_rows(
+    rows: Iterable[tuple[str, int, bool]],
+    *,
+    skip_ambiguous: bool = False,
+) -> str | None:
+    """Pick a canonical winner among candidate ``(target, total, is_people_yml)`` rows.
+
+    Shared scoring core for the directory layer — used by both
+    :meth:`DirectoryStore.resolve_name_to_email` (name → email) and the
+    per-person index built by :func:`brain.wiki.build_people.aggregate_people`
+    (name → primary email *and* email → canonical name). One helper keeps
+    the precedence rules from drifting between surfaces.
+
+    Precedence (identical across both call sites, deterministic regardless
+    of input row order):
+
+    1. ``people_yml`` rows win unconditionally. When multiple rows carry
+       ``is_people_yml=True`` (caller-side bug — ``_people.yml`` should
+       map one name to one email), the alphabetically-first ``target``
+       wins so the same input always produces the same answer.
+    2. Otherwise: highest summed ``total`` count. The tail behaves per
+       ``skip_ambiguous``:
+
+       - ``skip_ambiguous=False`` (default — used by the People Hub
+         aggregator where every person needs a primary email): ties
+         broken alphabetically by ``target``.
+       - ``skip_ambiguous=True`` (used by
+         :meth:`DirectoryStore.resolve_name_to_email`, which would
+         rather refuse than guess): a tie at the top total returns
+         ``None``.
+
+    Args:
+        rows: Iterable of ``(target, total, is_people_yml)`` triples.
+            ``target`` is the candidate string (an email when scoring
+            "name → email", a display_name when scoring "email → name").
+            ``total`` is the summed ``occurrence_count`` across sources.
+            ``is_people_yml`` is True iff at least one underlying row
+            for this candidate has ``source='people_yml'``.
+        skip_ambiguous: See above. Default ``False``.
+
+    Returns:
+        The winning ``target`` string, or ``None`` when the input is
+        empty or — only with ``skip_ambiguous=True`` — when no clear
+        winner exists at the top total.
+    """
+    materialized = list(rows)
+    if not materialized:
+        return None
+
+    people_yml_targets = sorted(
+        target for target, _total, is_yml in materialized if is_yml
+    )
+    if people_yml_targets:
+        return people_yml_targets[0]
+
+    ranked = sorted(materialized, key=lambda row: (-row[1], row[0]))
+    if (
+        skip_ambiguous
+        and len(ranked) > 1
+        and ranked[0][1] == ranked[1][1]
+    ):
+        return None
+    return ranked[0][0]
 
 
 class GwsRunner(Protocol):
@@ -116,6 +182,11 @@ class DirectoryStore:
         `_people.yml` overrides win; otherwise prefer entries where exactly
         one (display_name, email) pair has highest occurrence_count across
         sources. Returns None on ambiguity.
+
+        Precedence rules are evaluated by :func:`_score_directory_rows`
+        with ``skip_ambiguous=True`` so a tied top total refuses to guess
+        — same helper backs the People Hub aggregator's primary-email
+        picker, keeping the two surfaces in lockstep.
         """
         normalized = normalize_participant(name)
         if not normalized:
@@ -129,28 +200,17 @@ class DirectoryStore:
             FROM directory_entries
             WHERE display_name = %s AND display_name <> ''
             GROUP BY email
-            ORDER BY total DESC
             """,
             (normalized,),
         ).fetchall()
 
-        if not rows:
-            return None
-
-        # ``people_yml`` wins absolutely. If multiple ``people_yml`` rows
-        # exist for this name (caller mistake — _people.yml should map one
-        # name to one email) we still treat the first as the answer.
-        for email, _total, has_people_yml in rows:
-            if has_people_yml:
-                return str(email)
-
-        # Skip-ambiguous policy: if the top-summed row ties with another,
-        # there's no winner.
-        top_total = rows[0][1]
-        top_rows = [r for r in rows if r[1] == top_total]
-        if len(top_rows) > 1:
-            return None
-        return str(top_rows[0][0])
+        return _score_directory_rows(
+            (
+                (str(email), int(total), bool(has_people_yml))
+                for email, total, has_people_yml in rows
+            ),
+            skip_ambiguous=True,
+        )
 
     def all_emails(self) -> set[str]:
         """Return the set of every email seen in any directory row.

@@ -16,6 +16,7 @@ from pytest_mock import MockerFixture
 
 from brain.vault.derived_links.directory import (
     DirectoryStore,
+    _score_directory_rows,
     _update_refresh_state,
     load_people_yml,
     refresh_calendar,
@@ -1201,3 +1202,77 @@ class TestUpdateRefreshState:
             _update_refresh_state(
                 test_db, source=invalid_source, records_seen=1
             )
+
+
+class TestScoreDirectoryRows:
+    """Direct unit tests for the shared ``_score_directory_rows`` helper.
+
+    Both :meth:`DirectoryStore.resolve_name_to_email` (skip-ambiguous) and
+    the People Hub aggregator's primary-email picker (alpha tiebreak) call
+    into this. Pinning its semantics directly here protects both surfaces
+    from future drift without requiring a full DB round-trip.
+    """
+
+    def test_empty_input_returns_none(self) -> None:
+        assert _score_directory_rows([]) is None
+        assert _score_directory_rows([], skip_ambiguous=True) is None
+
+    def test_single_row_wins(self) -> None:
+        assert (
+            _score_directory_rows([("alice@x.com", 1, False)])
+            == "alice@x.com"
+        )
+
+    def test_people_yml_row_beats_higher_count(self) -> None:
+        # Higher non-yml count must NOT override a single people_yml row.
+        rows = [
+            ("wrong@x.com", 99, False),
+            ("right@x.com", 1, True),
+        ]
+        assert _score_directory_rows(rows) == "right@x.com"
+        assert _score_directory_rows(rows, skip_ambiguous=True) == "right@x.com"
+
+    def test_multiple_people_yml_rows_resolve_alphabetically(self) -> None:
+        # Caller bug — both rows carry people_yml=True. Determinism wins:
+        # alphabetically-first target.
+        rows = [
+            ("zebra@x.com", 5, True),
+            ("alpha@x.com", 1, True),
+        ]
+        assert _score_directory_rows(rows) == "alpha@x.com"
+
+    def test_highest_count_wins_when_no_people_yml(self) -> None:
+        rows = [
+            ("a@x.com", 1, False),
+            ("b@x.com", 5, False),
+            ("c@x.com", 3, False),
+        ]
+        assert _score_directory_rows(rows) == "b@x.com"
+
+    def test_tie_alpha_default_picks_alpha_first(self) -> None:
+        rows = [
+            ("zeta@x.com", 5, False),
+            ("alpha@x.com", 5, False),
+        ]
+        assert _score_directory_rows(rows, skip_ambiguous=False) == "alpha@x.com"
+
+    def test_tie_skip_ambiguous_returns_none(self) -> None:
+        rows = [
+            ("zeta@x.com", 5, False),
+            ("alpha@x.com", 5, False),
+        ]
+        assert _score_directory_rows(rows, skip_ambiguous=True) is None
+
+    def test_skip_ambiguous_unique_top_returns_winner(self) -> None:
+        rows = [
+            ("a@x.com", 5, False),
+            ("b@x.com", 4, False),
+            ("c@x.com", 4, False),
+        ]
+        # Top is unique even though the runners-up tie — winner survives.
+        assert _score_directory_rows(rows, skip_ambiguous=True) == "a@x.com"
+
+    def test_input_order_independent(self) -> None:
+        rows_one = [("a", 1, False), ("b", 5, False)]
+        rows_two = [("b", 5, False), ("a", 1, False)]
+        assert _score_directory_rows(rows_one) == _score_directory_rows(rows_two)

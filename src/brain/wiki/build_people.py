@@ -22,10 +22,17 @@ from typing import Any
 
 import psycopg
 
+from brain.vault.derived_links.directory import _score_directory_rows
 from brain.vault.derived_links.participants import extract_gmail_addresses
 from brain.vault.slug import slugify
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "DocRef",
+    "PersonRecord",
+    "aggregate_people",
+]
 
 
 @dataclass
@@ -136,33 +143,27 @@ def _build_directory_index(conn: psycopg.Connection[Any]) -> _DirectoryIndex:
     emails_by_name: dict[str, list[str]] = {}
     in_people_yml_by_name: dict[str, bool] = {}
 
+    # Both per-name primary-email picks and per-email canonical-name picks
+    # share the same precedence rules as ``DirectoryStore.resolve_name_to_email``
+    # (people_yml wins → highest summed count → alpha tiebreak); reuse that
+    # module's helper so the rules cannot drift. ``skip_ambiguous=False``
+    # because every person needs *some* primary email and every email needs
+    # *some* canonical name — alpha tiebreak is the deterministic fallback.
     for name, items in name_emails.items():
         emails_by_name[name] = sorted({email for email, _, _ in items})
         in_people_yml_by_name[name] = any(p for _, _, p in items)
-        # people_yml rows win regardless of count. If multiple people_yml rows
-        # exist for one name (caller bug — _people.yml should map one name to
-        # one email) the alphabetically-first email wins for determinism.
-        people_yml_emails = sorted(email for email, _, p in items if p)
-        if people_yml_emails:
-            primary_email_by_name[name] = people_yml_emails[0]
-            continue
-        # Otherwise: highest-summed-count, ties broken alphabetically.
-        ranked = sorted(items, key=lambda triple: (-triple[1], triple[0]))
-        primary_email_by_name[name] = ranked[0][0]
+        winner = _score_directory_rows(items, skip_ambiguous=False)
+        # ``items`` is non-empty by construction (the outer loop only adds a
+        # name when at least one (name, email) row exists); ``_score_directory_rows``
+        # therefore returns a non-None winner. ``assert`` keeps mypy honest.
+        assert winner is not None
+        primary_email_by_name[name] = winner
 
     canonical_name_by_email: dict[str, str] = {}
     for email, candidates in email_names.items():
-        people_yml_names = sorted(
-            (name, total) for name, total, p in candidates if p
-        )
-        if people_yml_names:
-            # Prefer the highest-occurrence people_yml entry; alpha tiebreak
-            # so the same input directory always produces the same answer.
-            ranked_yml = sorted(people_yml_names, key=lambda pair: (-pair[1], pair[0]))
-            canonical_name_by_email[email] = ranked_yml[0][0]
-            continue
-        ranked = sorted(candidates, key=lambda triple: (-triple[1], triple[0]))
-        canonical_name_by_email[email] = ranked[0][0]
+        winner = _score_directory_rows(candidates, skip_ambiguous=False)
+        assert winner is not None
+        canonical_name_by_email[email] = winner
 
     return _DirectoryIndex(
         known_names=known_names,
@@ -338,6 +339,12 @@ def aggregate_people(
     """
     if min_docs < 0:
         raise ValueError(f"min_docs must be >= 0 (got {min_docs!r})")
+
+    # Self-protect against future mixed-case callers — every comparison
+    # against ``owner_keys`` already does ``.lower()`` on the haystack, so
+    # normalizing the needle once keeps that contract explicit even when a
+    # caller passes ``BRAIN_OWNER_PARTICIPANTS=Ali@Example.COM``.
+    owner_keys = frozenset(k.lower() for k in owner_keys)
 
     directory = _build_directory_index(conn)
 
