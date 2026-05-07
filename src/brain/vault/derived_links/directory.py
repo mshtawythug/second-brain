@@ -221,6 +221,40 @@ def load_people_yml(vault_path: Path) -> dict[str, str]:
     return result
 
 
+def refresh_people_yml(
+    conn: psycopg.Connection[Any], vault_path: Path
+) -> int:
+    """Replace all ``source='people_yml'`` rows from ``<vault_path>/_people.yml``.
+
+    Authoritative semantics: the YAML file is the source of truth for the
+    ``people_yml`` source. Every refresh drops the existing rows and
+    re-inserts the file's current contents — so removing an entry from
+    ``_people.yml`` removes it from the directory on the next refresh.
+
+    Missing file → 0 rows kept (any prior rows are wiped). Malformed file
+    is treated identically: ``load_people_yml`` already logs a warning,
+    and the file's effective content is empty, so the directory follows.
+
+    No ``directory_refresh_state`` row is written — ``people_yml`` is
+    excluded from ``_REFRESH_STATE_SOURCES`` (it has no refresh cadence;
+    it's loaded fresh every call).
+
+    Returns the number of pairs loaded.
+    """
+    pairs = load_people_yml(vault_path)
+    conn.execute(
+        "DELETE FROM directory_entries WHERE source = %s", ("people_yml",)
+    )
+    if not pairs:
+        return 0
+    store = DirectoryStore(conn)
+    for name, email in pairs.items():
+        store.upsert_pair(
+            display_name=name, email=email, source="people_yml"
+        )
+    return len(pairs)
+
+
 _REFRESH_STATE_SOURCES: frozenset[str] = frozenset({"gmail", "calendar", "contacts"})
 
 

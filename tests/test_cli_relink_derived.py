@@ -20,6 +20,7 @@ in two complementary ways:
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -143,6 +144,20 @@ def _seed_gmail(
     )
     assert result.document_id is not None
     return result.document_id
+
+
+@pytest.fixture(autouse=True)
+def _isolate_vault_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point ``BRAIN_VAULT_PATH`` at a per-test tmp dir.
+
+    ``vault_relink_derived`` now reads ``<vault>/_people.yml`` (Task B.7).
+    Without this, every test would inherit whatever the user's real
+    ``~/brain-vault/_people.yml`` happens to contain, making the
+    "empty corpus" assertions flake.
+    """
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
 
 
 @pytest.fixture(autouse=True)

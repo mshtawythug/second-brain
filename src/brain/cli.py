@@ -79,6 +79,7 @@ from .vault.derived_links import (
     rebuild_derived_for,
     refresh_calendar,
     refresh_contacts,
+    refresh_people_yml,
     rescan_gmail_directory,
 )
 from .vault.derived_links.fence import rewrite_derived_fences
@@ -2389,6 +2390,9 @@ def vault_relink_derived() -> None:
         contacts_seen = refresh_contacts(conn, runner=real_gws_runner)
         typer.echo(f"  - Contacts: {contacts_seen} contacts seen")
 
+        people_yml_seen = refresh_people_yml(conn, cfg.vault_path)
+        typer.echo(f"  - _people.yml: {people_yml_seen} entries")
+
         # Step 3: linker pass over the full Gmail+Krisp corpus.
         #
         # Implementation choice (per Task B.6): Option B — pass ALL linkable
@@ -2528,6 +2532,9 @@ def vault_directory_refresh() -> None:
         )
         contacts_seen = refresh_contacts(conn, runner=real_gws_runner)
         typer.echo(f"  - Contacts: {contacts_seen} contacts seen")
+
+        people_yml_seen = refresh_people_yml(conn, cfg.vault_path)
+        typer.echo(f"  - _people.yml: {people_yml_seen} entries")
 
         directory_counts = _directory_counts_by_source(conn)
 

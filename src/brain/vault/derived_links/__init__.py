@@ -5,6 +5,7 @@ from brain.vault.derived_links.directory import (
     load_people_yml,
     refresh_calendar,
     refresh_contacts,
+    refresh_people_yml,
     rescan_gmail_directory,
 )
 from brain.vault.derived_links.gws import real_gws_runner
@@ -41,6 +42,7 @@ __all__ = [
     "rebuild_derived_for",
     "refresh_calendar",
     "refresh_contacts",
+    "refresh_people_yml",
     "rescan_gmail_directory",
     "rule_same_day_participant",
     "rule_shared_participant",

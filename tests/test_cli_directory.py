@@ -9,6 +9,7 @@ already handles gracefully.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -57,6 +58,20 @@ def _stub_gws(mocker: MockerFixture) -> None:
     Google Workspace auth.
     """
     mocker.patch("brain.vault.derived_links.gws.shutil.which", return_value=None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_vault_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Point ``BRAIN_VAULT_PATH`` at a per-test tmp dir.
+
+    ``vault_directory_refresh`` now reads ``<vault>/_people.yml`` (Task
+    B.7). Without this, every test would inherit whatever the user's
+    real ``~/brain-vault/_people.yml`` happens to contain, making the
+    "empty corpus" assertions flake.
+    """
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
 
 
 @pytest.fixture(autouse=True)
@@ -164,6 +179,40 @@ def test_directory_refresh_populates_from_gmail_docs(
     ).fetchall()
     emails = {r[0] for r in rows}
     assert emails == {"redacted@example.com", "person-a@example.com"}
+
+
+def test_directory_refresh_loads_people_yml(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    patch_embedder: Any,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for Task B.7: ``refresh`` loads ``<vault>/_people.yml``.
+
+    Before this fix, the loader existed but no production caller wired
+    it into the directory refresh pipeline, so ``_people.yml`` entries
+    never reached ``directory_entries`` and the linker's name→email
+    bridge silently lost the YAML override path.
+    """
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    (tmp_path / "_people.yml").write_text(
+        "person-person-luke: person-person-luke@example.com\nperson-person-marc: person-person-marc@example.com\n"
+    )
+
+    result = CliRunner().invoke(app, ["vault", "directory", "refresh"])
+    assert result.exit_code == 0, result.stdout
+    assert "_people.yml: 2 entries" in result.stdout
+
+    rows = test_db.execute(
+        "SELECT display_name, email FROM directory_entries "
+        "WHERE source = 'people_yml' ORDER BY display_name"
+    ).fetchall()
+    assert rows == [
+        ("person-person-luke", "person-person-luke@example.com"),
+        ("person-person-marc", "person-person-marc@example.com"),
+    ]
 
 
 def test_directory_refresh_continues_when_gws_missing(

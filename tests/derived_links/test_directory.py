@@ -20,6 +20,7 @@ from brain.vault.derived_links.directory import (
     load_people_yml,
     refresh_calendar,
     refresh_contacts,
+    refresh_people_yml,
 )
 from tests.conftest import FakeRunner
 
@@ -369,6 +370,149 @@ class TestLoadPeopleYml:
         assert result == {"bob": "bob@example.com"}
         assert any(
             "unnormalizable name" in r.message for r in caplog.records
+        )
+
+
+class TestRefreshPeopleYml:
+    """End-to-end ``_people.yml`` → ``directory_entries`` wiring (Task B.7)."""
+
+    def test_missing_file_clears_existing_rows(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        """No file → 0 returned, any prior people_yml rows wiped.
+
+        Authoritative semantics: removing the file is the way to clear.
+        """
+        DirectoryStore(test_db).upsert_pair(
+            display_name="Stale", email="stale@x.com", source="people_yml"
+        )
+        assert _row_count(test_db, "source = 'people_yml'") == 1
+
+        loaded = refresh_people_yml(test_db, tmp_path)
+        assert loaded == 0
+        assert _row_count(test_db, "source = 'people_yml'") == 0
+
+    def test_valid_file_inserts_pairs(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        (tmp_path / "_people.yml").write_text(
+            "person-person-luke: person-person-luke@example.com\n"
+            "person-person-marc: person-person-marc@example.com\n"
+        )
+        loaded = refresh_people_yml(test_db, tmp_path)
+        assert loaded == 2
+
+        rows = test_db.execute(
+            "SELECT display_name, email FROM directory_entries "
+            "WHERE source = 'people_yml' ORDER BY display_name"
+        ).fetchall()
+        assert rows == [
+            ("person-person-luke", "person-person-luke@example.com"),
+            ("person-person-marc", "person-person-marc@example.com"),
+        ]
+
+    def test_replaces_existing_rows_on_re_refresh(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        """Regression: edits to ``_people.yml`` must drop old entries.
+
+        Append-only would leave stale name→email mappings haunting the
+        directory after the user removes a person from the file. The
+        delete-first contract in :func:`refresh_people_yml` prevents this.
+        """
+        path = tmp_path / "_people.yml"
+        path.write_text("Old Person: old@example.com\n")
+        refresh_people_yml(test_db, tmp_path)
+        assert _row_count(test_db, "source = 'people_yml'") == 1
+
+        path.write_text("New Person: new@example.com\n")
+        refresh_people_yml(test_db, tmp_path)
+
+        rows = test_db.execute(
+            "SELECT display_name, email FROM directory_entries "
+            "WHERE source = 'people_yml'"
+        ).fetchall()
+        assert rows == [("new person", "new@example.com")]
+
+    def test_malformed_file_clears_rows_and_returns_zero(
+        self,
+        test_db: psycopg.Connection,
+        tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Malformed YAML → 0 returned, prior rows wiped, warning logged.
+
+        ``load_people_yml`` already logs the parse warning; we just verify
+        the refresh follows the file's effective (empty) content.
+        """
+        DirectoryStore(test_db).upsert_pair(
+            display_name="Stale", email="stale@x.com", source="people_yml"
+        )
+        (tmp_path / "_people.yml").write_text("foo: bar:\n  - bad: : :")
+
+        with caplog.at_level(logging.WARNING):
+            loaded = refresh_people_yml(test_db, tmp_path)
+
+        assert loaded == 0
+        assert _row_count(test_db, "source = 'people_yml'") == 0
+        assert any(
+            "malformed _people.yml" in r.message for r in caplog.records
+        )
+
+    def test_does_not_touch_other_sources(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        """The DELETE is scoped — gmail/calendar/contacts rows must survive."""
+        store = DirectoryStore(test_db)
+        store.upsert_pair(
+            display_name="Bob", email="bob@x.com", source="gmail"
+        )
+        store.upsert_pair(
+            display_name="Bob", email="bob@x.com", source="calendar"
+        )
+        (tmp_path / "_people.yml").write_text("Bob: bob@x.com\n")
+
+        refresh_people_yml(test_db, tmp_path)
+
+        sources = {
+            r[0]
+            for r in test_db.execute(
+                "SELECT DISTINCT source FROM directory_entries"
+            ).fetchall()
+        }
+        assert sources == {"gmail", "calendar", "people_yml"}
+
+    def test_writes_no_refresh_state_row(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        """``people_yml`` is excluded from ``_REFRESH_STATE_SOURCES`` by design.
+
+        It has no refresh cadence — every refresh re-reads the file —
+        so a refresh-state row would be misleading. Verify none is written.
+        """
+        (tmp_path / "_people.yml").write_text("Bob: bob@x.com\n")
+        refresh_people_yml(test_db, tmp_path)
+
+        assert _refresh_state_row(test_db, "people_yml") is None
+
+    def test_resolution_prefers_people_yml(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        """End-to-end: a ``_people.yml`` entry beats a higher-count gmail row."""
+        store = DirectoryStore(test_db)
+        for _ in range(5):
+            store.upsert_pair(
+                display_name="person-person-luke",
+                email="wrong@example.com",
+                source="gmail",
+            )
+        (tmp_path / "_people.yml").write_text(
+            "person-person-luke: person-person-luke@example.com\n"
+        )
+        refresh_people_yml(test_db, tmp_path)
+
+        assert (
+            store.resolve_name_to_email("person-person-luke") == "person-person-luke@example.com"
         )
 
 
