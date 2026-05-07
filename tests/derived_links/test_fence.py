@@ -607,6 +607,79 @@ class TestRenderFencedSection:
         )
         assert quartz_wikilink.search(bullet) is not None, bullet
 
+    def test_render_fenced_section_is_deterministic(
+        self, test_db: psycopg.Connection
+    ) -> None:
+        # Regression for the 2026-05-08 sync-mtime-churn bug: when two or
+        # more partners tie on (weight, date), the renderer's bullet
+        # ordering MUST be deterministic so a relink → sync round-trip
+        # doesn't shuffle bullets and bump mtimes for free.
+        #
+        # Setup: ten partners, all R3 (weight 0.7), all on the same date.
+        # Without a tertiary tie-breaker the SQL row order is whatever
+        # Postgres feels like and the Python sort key (-weight,
+        # date_missing, date_ordinal) ties freely → output reshuffles
+        # across runs. With the partner-id tertiary key the output
+        # locks in across runs.
+        center_id = _seed_partner(
+            test_db,
+            title="Center",
+            vault_path="_ingested/krisp/center-determinism.md",
+            metadata={"date": "2026-04-15"},
+        )
+        # Ten partners with identical weight + identical date so weight +
+        # date keys all tie. Force partner-id ordering to dominate.
+        partner_ids = []
+        for i in range(10):
+            partner_ids.append(
+                _seed_partner(
+                    test_db,
+                    title=f"Tied Partner {i}",
+                    vault_path=f"_ingested/krisp/tied-{i}.md",
+                    metadata={"date": "2026-04-15"},
+                )
+            )
+        # Insert edges in shuffled order so the SQL row delivery would
+        # default to whatever Postgres's planner chose absent ORDER BY.
+        import random
+        rng = random.Random(42)
+        shuffled = list(partner_ids)
+        rng.shuffle(shuffled)
+        for pid in shuffled:
+            _insert_derived_link(
+                test_db, a_id=center_id, b_id=pid,
+                rule="same_day_participant", weight=0.7,
+            )
+
+        # Render twice — output must be byte-identical.
+        first = render_fenced_section(test_db, center_id)
+        second = render_fenced_section(test_db, center_id)
+        assert first is not None
+        assert first == second
+
+        # And the bullets are sorted by partner-id ASC within the tied
+        # tier (the contract the docstring promises).
+        bullet_lines = [
+            line for line in first.splitlines() if line.startswith("- [[")
+        ]
+        # Each bullet's stem encodes the partner's index (``tied-N``); we
+        # cross-reference against partner-id sort to verify the ordering.
+        stem_to_partner_id = {}
+        for pid in partner_ids:
+            row = test_db.execute(
+                "SELECT vault_path FROM documents WHERE id = %s::uuid",
+                (pid,),
+            ).fetchone()
+            assert row is not None
+            from pathlib import PurePosixPath
+            stem_to_partner_id[PurePosixPath(str(row[0])).stem] = pid
+        rendered_partner_ids = []
+        for line in bullet_lines:
+            # Extract the stem from "- [[<stem>|<alias>]] *(rule)*".
+            stem = line[len("- [["):].split("|", 1)[0]
+            rendered_partner_ids.append(stem_to_partner_id[stem])
+        assert rendered_partner_ids == sorted(rendered_partner_ids)
+
 
 @pytest.mark.parametrize(
     "raw_date",
@@ -883,8 +956,9 @@ def _seed_partner_with_path(
 class TestRewriteDerivedFences:
     """End-to-end: doc id set → fence regeneration in ``_ingested/`` files.
 
-    Q3=a (vault-tier skipped), Q4=b (always write — no byte-identical
-    skip), atomic temp+rename writes.
+    Q3=a (vault-tier skipped), skip-on-byte-identical (per the 2026-05-08
+    idempotency fix — supersedes the original Q4=b "always write"),
+    atomic temp+rename writes.
     """
 
     def test_empty_doc_ids_returns_zero_no_filesystem_touch(
@@ -946,14 +1020,17 @@ class TestRewriteDerivedFences:
         assert FENCE_END_MARKER in body
         assert "[[2026-04-15-bbb-partner|Partner Title]] *(shared_thread)*" in body
 
-    def test_q4b_always_rewrites_even_when_byte_identical(
+    def test_byte_identical_second_pass_skips_write(
         self, test_db: psycopg.Connection, tmp_path: Path
     ) -> None:
-        # Q4=b: even when the rendered fence is byte-identical to what's
-        # already on disk, the rewriter must produce a write. We assert by
-        # running the rewriter twice in a row and checking the count is
-        # the SAME on the second pass (no skip), and that the file's
-        # mtime advanced between the two passes.
+        # Per the 2026-05-08 idempotency fix (supersedes the original Q4=b
+        # "always rewrite"): when the rendered file text matches what's
+        # already on disk, the rewriter MUST skip the write. The first
+        # pass is a real write (count == 1, mtime captured). A second
+        # pass with no DB changes produces a byte-identical render, so
+        # the count is 0 AND the file's mtime is unchanged. This is the
+        # "relink → sync is a true no-op" property the user's vault
+        # depends on.
         vault = tmp_path / "vault"
         center_id, target = _seed_ingested_doc_with_file(
             test_db, vault,
@@ -978,21 +1055,25 @@ class TestRewriteDerivedFences:
         first_text = target.read_text(encoding="utf-8")
         first_mtime = target.stat().st_mtime_ns
 
+        # Sleep long enough that any actual write would bump the mtime
+        # by a detectable margin on every supported filesystem (HFS+ on
+        # macOS rounds to 1µs; APFS/ext4 are ns-precision but most CI
+        # filesystems get cached writes; 10ms keeps the assertion robust).
+        import time
+        time.sleep(0.01)
+
         second = rewrite_derived_fences(
             test_db, {center_id}, vault_path=vault
         )
         second_text = target.read_text(encoding="utf-8")
         second_mtime = target.stat().st_mtime_ns
 
-        # Same write count both passes — Q4=b: no byte-identical skip.
+        # First pass writes; second pass is a clean skip.
         assert first == 1
-        assert second == 1
-        # Content is byte-identical (same fence content from the same DB
-        # state) — but the file was rewritten anyway, so the mtime
-        # advanced. (POSIX mtime is nanosecond-precision; even a
-        # millisecond apart will differ.)
+        assert second == 0
+        # Content unchanged AND mtime unchanged — no atomic_write_text call.
         assert first_text == second_text
-        assert second_mtime >= first_mtime  # at least non-decreasing
+        assert second_mtime == first_mtime
 
     def test_only_affected_files_are_updated(
         self, test_db: psycopg.Connection, tmp_path: Path
@@ -1227,14 +1308,71 @@ class TestRewriteDerivedFences:
         # Authored body content survived intact.
         assert "the authored body" in text
 
-    def test_no_existing_fence_no_edges_is_idempotent_write(
+    def test_rewrite_derived_fences_skips_when_content_matches(
         self, test_db: psycopg.Connection, tmp_path: Path
     ) -> None:
-        # Q4=b: even when there's nothing to add (no edges) and no fence
-        # to strip (file never had one), the rewriter still writes the
-        # file. This is the "predictable mtimes" trade-off the user
-        # explicitly chose. Asserting the count and that the body bytes
-        # are unchanged after the write.
+        # Seed an ingested file pre-populated with the EXACT fence content
+        # ``render_fenced_section`` would produce — i.e. the steady state
+        # after a relink-derived has already run. ``rewrite_derived_fences``
+        # MUST detect the match, skip the write, and leave both bytes and
+        # mtime untouched. This is the regression test for the
+        # 2026-05-08 sync-mtime-churn bug.
+        vault = tmp_path / "vault"
+        center_id, target = _seed_ingested_doc_with_file(
+            test_db, vault,
+            title="Center",
+            relative_vault_path="_ingested/krisp/match.md",
+            metadata={"date": "2026-04-15"},
+        )
+        partner_id = _seed_partner_with_path(
+            test_db,
+            title="Partner",
+            vault_path="_ingested/gmail/match-partner.md",
+            metadata={"date": "2026-04-14"},
+        )
+        _insert_derived_link(
+            test_db, a_id=center_id, b_id=partner_id,
+            rule="shared_thread", weight=1.0,
+        )
+
+        # Pre-render the canonical fence and write it into the file the
+        # same way ``rewrite_derived_fences`` would. After this prep, the
+        # file is in the steady state — a subsequent rewrite call must
+        # be a clean no-op.
+        new_fence = render_fenced_section(test_db, center_id)
+        assert new_fence is not None
+        # Read the file as it sits on disk, splice the fence in via the
+        # same helper the renderer uses, dump frontmatter the same way.
+        from brain.vault.derived_links.fence import replace_fence
+        existing = target.read_text(encoding="utf-8")
+        fm, body = parse_frontmatter(existing)
+        target.write_text(
+            dump_frontmatter(fm, replace_fence(body, new_fence)),
+            encoding="utf-8",
+        )
+        before_text = target.read_text(encoding="utf-8")
+        before_mtime = target.stat().st_mtime_ns
+
+        # Sleep > FS-resolution so any actual write would be detectable.
+        import time
+        time.sleep(0.01)
+
+        written = rewrite_derived_fences(
+            test_db, {center_id}, vault_path=vault
+        )
+
+        assert written == 0
+        assert target.read_text(encoding="utf-8") == before_text
+        assert target.stat().st_mtime_ns == before_mtime
+
+    def test_no_existing_fence_no_edges_is_a_skip(
+        self, test_db: psycopg.Connection, tmp_path: Path
+    ) -> None:
+        # Idempotency fix (supersedes the original Q4=b "always rewrite"):
+        # when there's nothing to add (no edges) and no fence to strip
+        # (file never had one), strip_fence is a no-op on the body and
+        # ``new_text == text``. The rewriter MUST skip the write. The
+        # bytes on disk and the file's mtime are both unchanged.
         vault = tmp_path / "vault"
         doc_id, target = _seed_ingested_doc_with_file(
             test_db, vault,
@@ -1243,20 +1381,20 @@ class TestRewriteDerivedFences:
             metadata={"date": "2026-04-15"},
         )
         before = target.read_text(encoding="utf-8")
+        mtime_before = target.stat().st_mtime_ns
+
+        import time
+        time.sleep(0.01)
 
         written = rewrite_derived_fences(
             test_db, {doc_id}, vault_path=vault
         )
 
-        # Q4=b: write happens regardless.
-        assert written == 1
-        # Frontmatter + body round-trip identically (strip_fence is a
-        # no-op on a fence-less body).
-        after = target.read_text(encoding="utf-8")
-        fm_before, body_before = parse_frontmatter(before)
-        fm_after, body_after = parse_frontmatter(after)
-        assert fm_before == fm_after
-        assert body_before.rstrip() == body_after.rstrip()
+        # Skip on byte-identical: no write, no count.
+        assert written == 0
+        # Bytes and mtime both unchanged.
+        assert target.read_text(encoding="utf-8") == before
+        assert target.stat().st_mtime_ns == mtime_before
 
     def test_atomic_write_no_temp_files_left_behind(
         self, test_db: psycopg.Connection, tmp_path: Path

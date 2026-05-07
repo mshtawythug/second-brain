@@ -1781,6 +1781,7 @@ def vault_sync(
             f"links_resolved {report.links_resolved}, "
             f"links_unresolved {report.links_unresolved}, "
             f"links_rewritten {report.links_rewritten}, "
+            f"fences_written {report.fences_written}, "
             f"errors {len(report.errors)}"
         )
         if report.id_assigned:
@@ -1815,6 +1816,7 @@ def vault_sync(
         f"links_resolved {report.links_resolved}, "
         f"links_unresolved {report.links_unresolved}, "
         f"links_rewritten {report.links_rewritten}, "
+        f"fences_written {report.fences_written}, "
         f"errors {len(report.errors)}"
     )
     if report.id_assigned:
@@ -2417,10 +2419,12 @@ def vault_relink_derived() -> None:
             # every affected ``_ingested/`` file so Quartz's ``/graph`` view
             # picks up the edges we just rebuilt. The renderer skips
             # vault-tier rows and missing mirror files silently; the count
-            # is the number of files actually written. Q4=b semantics —
-            # writes happen even when fence content is byte-identical, so
-            # ``Fence files rewritten`` matches the count of ingested-tier
-            # affected docs that have a mirror on disk.
+            # is the number of files actually written. Per the 2026-05-08
+            # idempotency fix, the renderer also skips files whose
+            # freshly-rendered text is byte-identical to what's already on
+            # disk — so ``Fence files rewritten`` reflects real disk
+            # effect, and a relink → sync round-trip is a true no-op for
+            # unchanged docs.
             fences_written = rewrite_derived_fences(
                 conn, affected_ids, vault_path=cfg.vault_path
             )

@@ -177,9 +177,24 @@ def render_fenced_section(
 
         - [[<partner-filename-stem>|<partner-title>]] *(<rule>)*
 
-    Sort order (per Q1 decision): ``rule weight DESC``, then partner date
-    DESC (``metadata->>'date'``). Partners with a missing or unparseable
-    date sort after partners with a date.
+    Sort order (deterministic, primary→tertiary):
+
+    1. ``rule weight DESC`` — highest-weight rules surface first (R1
+       ``shared_thread`` weight 1.0 before R3 ``same_day_participant``
+       weight 0.7).
+    2. Partner ``metadata->>'date'`` DESC — within a weight tier, newer
+       partners win. Partners with a missing or unparseable date sort
+       AFTER partners with a date.
+    3. Partner document ``id`` ASC — final tie-breaker so two partners
+       with identical weight + identical date (or both undated) always
+       emit in the same order across runs. Without this every relink →
+       sync round-trip risked reshuffling the bullet list and bumping
+       file mtimes unnecessarily.
+
+    Both the SQL query and the in-memory sort are stable: SQL
+    ``ORDER BY`` pins the row delivery order, and Python's ``list.sort``
+    is guaranteed stable, so the tertiary id key dominates only when the
+    weight + date keys tie.
 
     Partners without a ``vault_path`` (not exported yet) are skipped — the
     wiki-link wouldn't resolve in Quartz anyway. If skipping leaves the
@@ -206,15 +221,22 @@ def render_fenced_section(
         WHERE (dl.src_document_id = %s::uuid
                OR dl.dst_document_id = %s::uuid)
           AND dl.rule = ANY(%s)
+        ORDER BY dl.weight DESC,
+                 partner.metadata->>'date' DESC NULLS LAST,
+                 partner.id ASC
         """,
         (doc_id, doc_id, doc_id, list(FENCE_RULES)),
     ).fetchall()
 
-    bullets: list[tuple[float, bool, int, str]] = []
+    bullets: list[tuple[float, bool, int, str, str]] = []
     # Sort key tuple meaning:
     #   index 0: -weight  → ascending sort puts highest weight first
     #   index 1: date_missing (False<True) → with-date partners first within tier
     #   index 2: -date.toordinal() → ascending puts newest date first
+    #   index 3: partner_id ASC → deterministic tertiary tie-breaker so
+    #            partners with identical weight + identical date emit in
+    #            the same order across runs (no mtime churn from
+    #            relink → sync cycles re-shuffling tied bullets).
     for partner_id, title, vault_path, metadata, rule, weight in rows:
         if not vault_path:
             _logger.debug(
@@ -226,14 +248,16 @@ def render_fenced_section(
         date_missing = partner_date is None
         date_key = -partner_date.toordinal() if partner_date else 0
         bullet = f"- [[{stem}|{_safe_alias(title)}]] *({rule})*"
-        bullets.append((-float(weight), date_missing, date_key, bullet))
+        bullets.append(
+            (-float(weight), date_missing, date_key, str(partner_id), bullet)
+        )
 
     if not bullets:
         return None
 
-    bullets.sort(key=lambda b: (b[0], b[1], b[2]))
+    bullets.sort(key=lambda b: (b[0], b[1], b[2], b[3]))
     body_lines = [FENCE_START_MARKER, _SECTION_HEADING]
-    body_lines.extend(b[3] for b in bullets)
+    body_lines.extend(b[4] for b in bullets)
     body_lines.append(FENCE_END_MARKER)
     return "\n".join(body_lines)
 
@@ -285,21 +309,27 @@ def rewrite_derived_fences(
     on disk, so Quartz's ``/graph`` view stays consistent with the latest
     ``derived_links`` rows.
 
-    Behavior per the user's Q3–Q5 decisions:
+    Behavior per the user's Q3–Q5 decisions (with the 2026-05-08 idempotency fix):
 
     - **Q3=a** vault-tier files are silently skipped — user-authored notes
       stay untouched in v1. Only docs with ``kind='ingested'`` are
       candidates.
-    - **Q4=b** ALWAYS rewrite, even when the fence content is byte-identical.
-      No no-op skip. Trade-off accepted: extra git/Quartz churn in exchange
-      for predictable mtimes and simpler relink semantics.
+    - **Skip on byte-identical** (supersedes the original Q4=b "always
+      rewrite"): if the freshly-rendered file text is byte-identical to
+      what's already on disk, the file is NOT written and is NOT counted.
+      The returned ``written`` count reflects actual disk writes, so
+      ``relink-derived → sync`` is a true no-op for unchanged docs (no
+      mtime bumps, no Quartz rebuild churn) and the caller's reported
+      counter cannot lie about disk effect.
     - **Q5=b** + Q2a fence content uses ``[[<filename-stem>|<title>]]
       *(<rule>)*`` (rendered by :func:`render_fenced_section`).
 
     Returns the count of files actually written. Docs in ``doc_ids`` that
-    map to a vault-tier row, have no ``vault_path`` set, or whose mirror
-    file is missing on disk are silently dropped from the count — those
-    skips aren't failures, they're "the renderer has no work to do here."
+    map to a vault-tier row, have no ``vault_path`` set, whose mirror
+    file is missing on disk, OR whose freshly-rendered text matches the
+    on-disk text byte-for-byte are silently dropped from the count —
+    those skips aren't failures, they're "the renderer has no work to do
+    here."
 
     Atomicity: each write goes through a sibling temp file plus
     :func:`os.replace`, which is atomic on POSIX (rename(2)). A crash
@@ -367,9 +397,14 @@ def rewrite_derived_fences(
         )
         new_text = dump_frontmatter(frontmatter, new_body)
 
-        # Q4=b: write every time, even when ``new_text == text``. The cost
-        # is one mtime bump + one Quartz rebuild per affected file per
-        # relink — accepted trade-off for predictable relink semantics.
+        # Idempotency: skip the write entirely when the rendered text is
+        # byte-identical to what's already on disk. This is the contract
+        # that lets ``relink-derived → sync`` round-trip without bumping
+        # mtimes — counters reflect real disk effect, not "we ran the
+        # renderer."  See ``docs/plans/2026-05-08-vault-sync-fence-strip-bug.md``.
+        if new_text == text:
+            continue
+
         try:
             atomic_write_text(target, new_text)
         except OSError as e:

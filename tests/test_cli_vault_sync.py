@@ -213,3 +213,30 @@ def test_cli_sync_prints_per_file_errors(
     # The file path appears in the per-file error line.
     combined = result.stdout + (result.stderr or "")
     assert str(bad) in combined
+
+
+def test_cli_sync_summary_includes_fences_written(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path, patch_embedder
+) -> None:
+    """The sync summary line surfaces the ``fences_written`` counter.
+
+    Regression for the 2026-05-08 fix: with the rewriter now
+    idempotent, ``fences_written`` is a meaningful counter (only counts
+    actual disk writes), so it belongs in the user-facing summary
+    alongside ``links_rewritten``. Both the initial-sync and the
+    steady-state branch print the same shape.
+    """
+    patch_embedder(fake_embedder)
+    vault = tmp_path / "vault"
+    note_id = str(uuid.uuid4())
+    _write(vault / "n.md", {"id": note_id, "title": "Hello"}, "world\n")
+    runner = CliRunner()
+    result = runner.invoke(app, ["vault", "sync", "--vault", str(vault)])
+    assert result.exit_code == 0, result.stdout
+    assert "fences_written 0" in result.stdout
+
+    # Run again — steady-state branch (no initial-sync prefix). Must
+    # also include the counter.
+    result2 = runner.invoke(app, ["vault", "sync", "--vault", str(vault)])
+    assert result2.exit_code == 0, result2.stdout
+    assert "fences_written 0" in result2.stdout

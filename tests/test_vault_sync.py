@@ -2039,3 +2039,234 @@ def test_sync_one_file_continues_on_unique_violation(
     assert "unique constraint" in reason
     assert report.created == 0
     assert report.updated == 0
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-08 sync fence-preservation regression tests.
+#
+# Plan: docs/plans/2026-05-08-vault-sync-fence-strip-bug.md
+#
+# Bug 1: ``rewrite_derived_fences`` always wrote on every pass (Q4=b
+# semantic), so ``relink-derived → sync`` bumped ``_ingested/`` mtimes
+# even when content was byte-identical. Counters lied about disk effect.
+#
+# Bug 2: ``render_fenced_section``'s SQL had no ``ORDER BY`` and the
+# Python sort key tied freely on (weight, date) → bullets reshuffled
+# across runs, which made the Q4=b "always write" silently mutate
+# bodies even when nothing semantic changed.
+#
+# These tests exercise the end-to-end path that the live vault hits:
+# ingest → sync → sync (no-op) and rebuild → sync.
+# ---------------------------------------------------------------------------
+
+
+def _fence_files_under(vault: Path) -> list[Path]:
+    """Every ``_ingested/`` mirror file under the vault, sorted for stable iteration."""
+    ingested = vault / "_ingested"
+    if not ingested.is_dir():
+        return []
+    return sorted(p for p in ingested.rglob("*.md") if p.is_file())
+
+
+def test_sync_no_op_does_not_touch_ingested_mtime(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """A second ``sync_vault`` against an already-synced vault is a true no-op.
+
+    Setup ingests two Gmail docs through the real pipeline so the linker
+    pass produces real ``derived_links`` rows + fences in the
+    ``_ingested/`` mirror. After the first sync settles state, capture
+    every ``_ingested/*.md`` file's mtime, sleep past FS resolution,
+    and run sync again. No file's mtime should advance.
+
+    Regression for: ``rewrite_derived_fences`` writing every pass under
+    Q4=b semantics, even when fence content was byte-identical.
+    """
+    import time
+
+    vault = tmp_path / "vault"
+    # Two Gmail docs in the same thread → R1 ``shared_thread`` edges,
+    # which materialize into fences in both files' ``_ingested/`` mirrors.
+    a_id = _ingest_gmail(
+        test_db, fake_embedder,
+        external_id="thread-a-msg-1",
+        title="Re: project alpha",
+        body="alpha body",
+        from_header="alice@example.com",
+        to_header="bob@example.com",
+        thread_id="thread-1",
+        date="Wed, 15 Apr 2026 10:00:00 -0700",
+    )
+    b_id = _ingest_gmail(
+        test_db, fake_embedder,
+        external_id="thread-a-msg-2",
+        title="Re: project alpha",
+        body="alpha reply body",
+        from_header="bob@example.com",
+        to_header="alice@example.com",
+        thread_id="thread-1",
+        date="Wed, 15 Apr 2026 11:00:00 -0700",
+    )
+    # Export both to disk so they have ``_ingested/`` mirrors with real
+    # vault_paths the renderer can target.
+    export_vault(test_db, vault_path=vault)
+
+    # First sync settles links, derived edges, and fence content.
+    _sync(test_db, fake_embedder, vault)
+
+    # Snapshot every ingested file's bytes + mtime.
+    files = _fence_files_under(vault)
+    assert files, "expected at least one _ingested/ mirror file"
+    snap = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in files}
+
+    # Sleep past FS resolution so any actual write would advance the mtime.
+    time.sleep(0.01)
+
+    # Second sync: must be a true no-op for ``_ingested/`` content.
+    second = _sync(test_db, fake_embedder, vault)
+    # The fences_written counter MUST be 0 — no idempotent doc was rewritten.
+    assert second.fences_written == 0
+
+    for path, (orig_bytes, orig_mtime) in snap.items():
+        assert path.read_bytes() == orig_bytes, (
+            f"sync mutated bytes of {path.name} on a no-op pass"
+        )
+        assert path.stat().st_mtime_ns == orig_mtime, (
+            f"sync bumped mtime of {path.name} on a no-op pass "
+            f"(orig={orig_mtime}, now={path.stat().st_mtime_ns})"
+        )
+
+    # Silence unused-var warning — both ids drive the test by side effect.
+    _ = (a_id, b_id)
+
+
+def test_relink_then_sync_keeps_fence_byte_identical_end_to_end(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """``rebuild_derived_for + rewrite_derived_fences`` → ``sync_vault`` is byte-identical.
+
+    Acceptance criterion #1 of the 2026-05-08 plan: relink-derived
+    followed by sync MUST leave fences intact, byte-for-byte. This is
+    the natural runbook order; the workaround in the owner-participant
+    plan ("sync first, then relink") was filed as a hack to dodge the
+    bug this test pins.
+    """
+    from brain.vault.derived_links import DirectoryStore
+    from brain.vault.derived_links.fence import rewrite_derived_fences
+    from brain.vault.derived_links.pass_runner import rebuild_derived_for
+
+    vault = tmp_path / "vault"
+    a_id = _ingest_gmail(
+        test_db, fake_embedder,
+        external_id="thread-rl-msg-1",
+        title="Re: kickoff",
+        body="kickoff body",
+        from_header="alice@example.com",
+        to_header="bob@example.com",
+        thread_id="thread-rl",
+        date="Wed, 15 Apr 2026 10:00:00 -0700",
+    )
+    b_id = _ingest_gmail(
+        test_db, fake_embedder,
+        external_id="thread-rl-msg-2",
+        title="Re: kickoff",
+        body="kickoff reply",
+        from_header="bob@example.com",
+        to_header="alice@example.com",
+        thread_id="thread-rl",
+        date="Wed, 15 Apr 2026 11:00:00 -0700",
+    )
+    export_vault(test_db, vault_path=vault)
+    # Sync once to settle vault_path + content_hash + derived_links.
+    _sync(test_db, fake_embedder, vault)
+
+    # Relink directly (mirroring ``brain vault relink-derived``): rebuild
+    # every derived edge, then rewrite the fence on every affected
+    # ``_ingested/`` file.
+    _, affected = rebuild_derived_for(
+        test_db, {a_id, b_id}, directory=DirectoryStore(test_db),
+    )
+    rewrite_derived_fences(test_db, affected, vault_path=vault)
+
+    # Snapshot the post-relink state.
+    snap = {
+        p: p.read_bytes()
+        for p in _fence_files_under(vault)
+    }
+    assert snap, "expected at least one _ingested/ mirror file"
+
+    # Now sync. The natural runbook order. Bytes must round-trip identically.
+    sync_report = _sync(test_db, fake_embedder, vault)
+    # No fence files should be rewritten — they're already canonical.
+    assert sync_report.fences_written == 0
+    for path, before in snap.items():
+        assert path.read_bytes() == before, (
+            f"sync mutated {path.name} after relink-derived produced canonical content"
+        )
+
+
+def test_sync_preserves_existing_fence_in_body(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """``sync_vault`` leaves an existing canonical fence in the body verbatim.
+
+    Per the plan's "Tests > Unit > test_sync_preserves_existing_fence_in_body":
+    given an ``_ingested/`` body with a fence and matching ``derived_links``
+    rows, sync must leave the fence on disk byte-for-byte equal to what
+    the renderer would produce.
+    """
+    from brain.vault.derived_links import DirectoryStore
+    from brain.vault.derived_links.fence import (
+        render_fenced_section,
+        rewrite_derived_fences,
+    )
+    from brain.vault.derived_links.pass_runner import rebuild_derived_for
+
+    vault = tmp_path / "vault"
+    a_id = _ingest_gmail(
+        test_db, fake_embedder,
+        external_id="thread-pres-msg-1",
+        title="Re: presentation",
+        body="presentation body",
+        from_header="alice@example.com",
+        to_header="bob@example.com",
+        thread_id="thread-pres",
+        date="Wed, 15 Apr 2026 10:00:00 -0700",
+    )
+    b_id = _ingest_gmail(
+        test_db, fake_embedder,
+        external_id="thread-pres-msg-2",
+        title="Re: presentation",
+        body="presentation reply",
+        from_header="bob@example.com",
+        to_header="alice@example.com",
+        thread_id="thread-pres",
+        date="Wed, 15 Apr 2026 11:00:00 -0700",
+    )
+    export_vault(test_db, vault_path=vault)
+    _sync(test_db, fake_embedder, vault)
+    # Force a clean canonical fence on disk.
+    _, affected = rebuild_derived_for(
+        test_db, {a_id, b_id}, directory=DirectoryStore(test_db),
+    )
+    rewrite_derived_fences(test_db, affected, vault_path=vault)
+
+    # Capture the renderer's truth for a_id and the on-disk fence in
+    # a_id's mirror file. They must match.
+    rendered = render_fenced_section(test_db, a_id)
+    assert rendered is not None
+    a_path_row = test_db.execute(
+        "SELECT vault_path FROM documents WHERE id = %s::uuid", (a_id,)
+    ).fetchone()
+    assert a_path_row is not None and a_path_row[0]
+    a_file = vault / str(a_path_row[0])
+
+    # Run sync — must not perturb the canonical fence.
+    _sync(test_db, fake_embedder, vault)
+
+    text = a_file.read_text(encoding="utf-8")
+    # The fence rendered at the renderer's truth is present verbatim.
+    assert rendered in text, (
+        "sync must preserve the existing fence byte-for-byte; "
+        "the renderer's canonical text was not found in the file"
+    )
