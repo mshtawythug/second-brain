@@ -32,6 +32,7 @@ from brain.queries import sync_chunk_search_metadata
 from brain.wiki.build_related import (
     DEFAULT_RELATED_LIMIT,
     _build_self_tsquery,
+    _corpus_common_lexemes,
     _iter_hybrid_neighbors,
     regenerate_related_json,
 )
@@ -208,7 +209,12 @@ def test_self_tsquery_from_descriptive_title(test_db: psycopg.Connection[Any]) -
         chunk_contents=["Body about something completely unrelated to insurance."],
     )
 
-    tsquery = _build_self_tsquery(test_db, doc_id, title="COMPANY_REDACTED Enrollment Reference Brief")
+    tsquery = _build_self_tsquery(
+        test_db,
+        doc_id,
+        title="COMPANY_REDACTED Enrollment Reference Brief",
+        corpus_common=frozenset(),
+    )
 
     assert tsquery, "title with 4 meaningful tokens must produce a non-empty tsquery"
     # Title-only path now combines ``(plainto AND-form) | <per-token OR>``
@@ -250,7 +256,9 @@ def test_self_tsquery_long_title_matches_partial_overlap(
         chunk_contents=["Body about the meeting itself, no other lexemes overlap."],
     )
 
-    tsquery = _build_self_tsquery(test_db, doc_id, title=title)
+    tsquery = _build_self_tsquery(
+        test_db, doc_id, title=title, corpus_common=frozenset()
+    )
 
     assert tsquery
     # Partial-overlap candidate: contains "person-x" and nothing else from
@@ -287,7 +295,9 @@ def test_self_tsquery_with_short_title_falls_back_to_body(
         ],
     )
 
-    tsquery = _build_self_tsquery(test_db, doc_id, title="Notes")
+    tsquery = _build_self_tsquery(
+        test_db, doc_id, title="Notes", corpus_common=frozenset()
+    )
 
     assert tsquery, "fallback path must produce a non-empty tsquery for body content"
     # The body keyword "topic-ih" was appended — a doc whose chunks contain
@@ -313,7 +323,9 @@ def test_self_tsquery_with_two_token_title_still_falls_back(
         chunk_contents=["COMPANY_REDACTED enrollment quoting platform with carrier integrations."],
     )
 
-    tsquery = _build_self_tsquery(test_db, doc_id, title="Meeting Recap")
+    tsquery = _build_self_tsquery(
+        test_db, doc_id, title="Meeting Recap", corpus_common=frozenset()
+    )
 
     assert tsquery
     # The body lexeme "topic-ih" must have been appended — it isn't in the
@@ -331,7 +343,9 @@ def test_self_tsquery_skips_stop_words_when_counting(
         chunk_contents=["COMPANY_REDACTED enrollment carrier networks."],
     )
 
-    tsquery = _build_self_tsquery(test_db, doc_id, title="On the Bus")
+    tsquery = _build_self_tsquery(
+        test_db, doc_id, title="On the Bus", corpus_common=frozenset()
+    )
 
     assert tsquery
     # Body lexemes were appended — proves "On the Bus" was counted as
@@ -350,7 +364,9 @@ def test_self_tsquery_returns_empty_when_no_signal(
     # Empty title + zero chunks = empty fallback path.
     doc_id = _doc(test_db, title="", chunk_contents=None)
 
-    tsquery = _build_self_tsquery(test_db, doc_id, title="")
+    tsquery = _build_self_tsquery(
+        test_db, doc_id, title="", corpus_common=frozenset()
+    )
 
     assert tsquery == ""
 
@@ -362,7 +378,9 @@ def test_self_tsquery_returns_empty_for_stop_word_only_title_and_empty_body(
     # (Postgres English config strips them, leaving an empty tsv).
     doc_id = _doc(test_db, title="On the", chunk_contents=["the and or for"])
 
-    tsquery = _build_self_tsquery(test_db, doc_id, title="On the")
+    tsquery = _build_self_tsquery(
+        test_db, doc_id, title="On the", corpus_common=frozenset()
+    )
 
     assert tsquery == ""
 
@@ -378,7 +396,9 @@ def test_self_tsquery_handles_punctuation_safely(
     title = "person-x [[meeting]]"
     doc_id = _doc(test_db, title=title, chunk_contents=["Body about catch-up sync."])
 
-    tsquery = _build_self_tsquery(test_db, doc_id, title=title)
+    tsquery = _build_self_tsquery(
+        test_db, doc_id, title=title, corpus_common=frozenset()
+    )
 
     assert tsquery
     assert "[[" not in tsquery
@@ -403,7 +423,9 @@ def test_self_tsquery_invalid_doc_id_falls_back_to_title_only(
     test_db: psycopg.Connection[Any],
 ) -> None:
     """A non-UUID ``doc_id`` skips the body-fallback DB read gracefully."""
-    tsquery = _build_self_tsquery(test_db, "not-a-uuid", title="Notes")
+    tsquery = _build_self_tsquery(
+        test_db, "not-a-uuid", title="Notes", corpus_common=frozenset()
+    )
 
     # Title "Notes" plainto_tsquery is non-empty (one meaningful token),
     # so the title fragment carries; body fallback was skipped because
@@ -780,3 +802,91 @@ def test_regenerate_related_json_score_in_unit_interval(
             assert isinstance(score, float)
             assert math.isfinite(score)
             assert 0.0 <= score <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Phase F.D — corpus-frequency commodity-token filter on the OR clause
+# ---------------------------------------------------------------------------
+
+
+def test_corpus_common_lexemes_drops_high_freq_tokens(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Lexemes appearing in > _CORPUS_FREQ_THRESHOLD of doc titles must be
+    flagged as commodity.
+
+    With 50 "meeting"-titled docs + 1 "zzzuniq" doc, total=51 and the
+    Phase-F.D threshold (0.025) gives ``ndoc > 1.275``. "meet" (ndoc 50)
+    is well above; "zzzuniq" (ndoc 1) is below.
+
+    Sized large enough that the threshold is comfortably > 1 — at smaller
+    corpora the percentage cutoff would round below 1 and accept every
+    lexeme.
+    """
+    for index in range(50):
+        _doc(test_db, title=f"Meeting recap {index}", chunk_contents=[])
+    _doc(test_db, title="zzzuniq distinctive", chunk_contents=[])
+
+    common = _corpus_common_lexemes(test_db)
+
+    assert "meet" in common
+    assert "zzzuniq" not in common
+
+
+def test_commodity_tokens_filtered_from_or_clause(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """When every meaningful title token is filtered as commodity, the OR
+    leg collapses and ``_build_self_tsquery`` returns just the AND form.
+
+    Title "Meeting Notes Brief" has 3 meaningful tokens — enough to enter
+    the title-only branch. With ``corpus_common`` containing all three
+    stems, the per-token OR leg drops every token, so the result is
+    ``title_tsq`` alone (no ``" | "`` join). The AND form (from
+    ``plainto_tsquery``) is intentionally untouched.
+    """
+    doc_id = _doc(
+        test_db, title="Meeting Notes Brief", chunk_contents=["body"]
+    )
+
+    tsquery = _build_self_tsquery(
+        test_db,
+        doc_id,
+        title="Meeting Notes Brief",
+        corpus_common=frozenset(["meet", "note", "brief"]),
+    )
+
+    plainto_row = test_db.execute(
+        "SELECT plainto_tsquery('english', %s)::text", ("Meeting Notes Brief",)
+    ).fetchone()
+    assert plainto_row is not None
+    assert tsquery == plainto_row[0]
+    assert " | " not in tsquery
+
+
+def test_distinctive_token_survives_filter(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A distinctive (non-commodity) lexeme survives the filter and appears
+    in the OR portion of the resulting tsquery, while a filtered lexeme
+    does not.
+    """
+    doc_id = _doc(
+        test_db,
+        title="ZZZTOKEN Meeting Sync",
+        chunk_contents=["body"],
+    )
+
+    tsquery = _build_self_tsquery(
+        test_db,
+        doc_id,
+        title="ZZZTOKEN Meeting Sync",
+        corpus_common=frozenset(["meet"]),
+    )
+
+    # The result has shape ``(<AND-form>) | <OR-of-survivors>``; isolate
+    # the OR leg and assert "zzztoken" survived while "meet" was filtered.
+    assert ") | " in tsquery, tsquery
+    or_clause = tsquery.split(") | ", 1)[1]
+    assert "zzztoken" in or_clause, or_clause
+    assert "'meet'" not in or_clause, or_clause

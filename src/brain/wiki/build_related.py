@@ -57,6 +57,23 @@ _BODY_FALLBACK_LEXEME_LIMIT = 5
 # body-fallback augmentation. Plan: "<3 alphabetic tokens after stop-words".
 _MIN_TITLE_TOKENS_FOR_TITLE_ONLY = 3
 
+# Fraction of documents a title lexeme may appear in before it is
+# considered a corpus-level commodity and dropped from the OR clause
+# of the self-tsquery. Only the OR leg is filtered; the AND form
+# (plainto_tsquery) is kept as-is.
+#
+# Empirically tuned on the live ~1,076-doc corpus (Phase F.D). At 0.025
+# (ndoc > ~27) the cut catches commodity tokens such as ``ali`` (ndoc 94),
+# ``sarki`` (53) and ``meet`` (31) — which lacked any IDF correction
+# under ``ts_rank`` and were outranking distinctive lexemes like
+# ``topic-ih`` (4) and ``person-b`` (1). The plan's original 0.30 was too
+# loose for this small personal corpus (top lexeme tops out near 13%);
+# tuning lower restores the spec's two failing acceptance criteria
+# (person-x + COMPANY_REDACTED spot-checks) without filtering anything we want to
+# keep — see Phase F.D notes in
+# ``docs/plans/2026-05-06-related-docs-rebuild.md``.
+_CORPUS_FREQ_THRESHOLD = 0.025
+
 _logger = logging.getLogger(__name__)
 
 
@@ -229,6 +246,7 @@ def _iter_hybrid_neighbors(
     finishes well under the plan's 60s ideal / 3min ceiling.
     """
     eligible = _eligible_source_docs(conn)
+    corpus_common = _corpus_common_lexemes(conn)
     rows: list[tuple[Any, ...]] = []
     for source in eligible:
         neighbors = _neighbors_for_source(
@@ -236,6 +254,7 @@ def _iter_hybrid_neighbors(
             source=source,
             k=k,
             vector_sim_floor=vector_sim_floor,
+            corpus_common=corpus_common,
         )
         for neighbor in neighbors:
             rows.append(
@@ -319,15 +338,32 @@ def _fts_candidates(
     """
     if not tsquery:
         return []
+    # ts_rank weights array (Postgres float4[] order is ``{D, C, B, A}``).
+    # Override the runtime defaults ``{0.1, 0.2, 0.4, 1.0}`` to de-emphasize
+    # title (A) and promote body content (C). Migration 009's chunks.tsv
+    # weighting is A=title_text, B=tags_text, C=content+search_extras,
+    # so A=0.1 keeps short commodity-token title matches like "min" or
+    # "refer" from outranking distinctive body matches like "person-b" or
+    # "topic-ih"; C=0.8 ensures title-form distinctive tokens reach the
+    # candidate set even when they only appear in body content.
+    # Phase F.D — see ``docs/plans/2026-05-06-related-docs-rebuild.md``.
     sql = f"""
         WITH ranked AS (
             SELECT c.id::text AS id,
                    c.document_id::text AS document_id,
                    c.content AS content,
-                   ts_rank(c.tsv, to_tsquery('english', %s)) AS score,
+                   ts_rank(
+                       '{{0.05, 0.8, 0.3, 0.1}}'::float4[],
+                       c.tsv,
+                       to_tsquery('english', %s)
+                   ) AS score,
                    ROW_NUMBER() OVER (
                        PARTITION BY c.document_id
-                       ORDER BY ts_rank(c.tsv, to_tsquery('english', %s)) DESC
+                       ORDER BY ts_rank(
+                           '{{0.05, 0.8, 0.3, 0.1}}'::float4[],
+                           c.tsv,
+                           to_tsquery('english', %s)
+                       ) DESC
                    ) AS rn
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
@@ -384,6 +420,7 @@ def _neighbors_for_source(
     source: _SourceDoc,
     k: int,
     vector_sim_floor: float,
+    corpus_common: frozenset[str],
 ) -> list[_Neighbor]:
     """RRF-blend the FTS + vector legs for one source doc and return top-K.
 
@@ -392,7 +429,9 @@ def _neighbors_for_source(
     the highest-RRF chunk's content for the winning doc, whitespace-
     collapsed and truncated to ``SNIPPET_LENGTH``.
     """
-    tsquery = _build_self_tsquery(conn, source.id, title=source.title)
+    tsquery = _build_self_tsquery(
+        conn, source.id, title=source.title, corpus_common=corpus_common
+    )
     src_embedding = _avg_embedding(conn, source.id)
 
     fts_rows = _fts_candidates(conn, tsquery=tsquery, exclude_doc_id=source.id)
@@ -483,8 +522,41 @@ def _collapse_whitespace(text: str) -> str:
     return _WHITESPACE_RE.sub(" ", text).strip()
 
 
+def _corpus_common_lexemes(conn: psycopg.Connection[Any]) -> frozenset[str]:
+    """Return title lexemes appearing in > _CORPUS_FREQ_THRESHOLD of docs.
+
+    Corpus common-lexemes are dropped from the OR leg of _build_self_tsquery
+    so commodity tokens ("meet", "note", "reference") don't outrank rare
+    distinctive ones ("person-b", "topic-ih"). Computed once per regen run and
+    passed down so the corpus scan runs exactly once.
+    """
+    total_row = conn.execute(
+        "SELECT COUNT(*) FROM documents WHERE draft = FALSE"
+        " AND title IS NOT NULL AND title <> ''"
+    ).fetchone()
+    total = int(total_row[0]) if total_row else 0
+    if total == 0:
+        return frozenset()
+    threshold_ndoc = total * _CORPUS_FREQ_THRESHOLD
+    rows = conn.execute(
+        """
+        SELECT word FROM ts_stat(
+            'SELECT to_tsvector(''english'', title)
+             FROM documents
+             WHERE draft = FALSE AND title IS NOT NULL AND title <> '''''
+        ) WHERE ndoc > %s
+        """,
+        (threshold_ndoc,),
+    ).fetchall()
+    return frozenset(str(r[0]) for r in rows if r[0] is not None)
+
+
 def _build_self_tsquery(
-    conn: psycopg.Connection[Any], doc_id: str, *, title: str
+    conn: psycopg.Connection[Any],
+    doc_id: str,
+    *,
+    title: str,
+    corpus_common: frozenset[str],
 ) -> str:
     """Build a ``to_tsquery``-compatible string for the source doc.
 
@@ -523,15 +595,27 @@ def _build_self_tsquery(
     title_tsq = _plainto_tsquery_text(conn, title)
 
     if meaningful_count >= _MIN_TITLE_TOKENS_FOR_TITLE_ONLY:
-        # OR each meaningful token alongside the AND-form. ``_to_tsquery_text``
-        # rejects tokens that don't normalise to a safe ``[a-z][a-z0-9]*``
-        # lexeme (digits-first, multi-word fragments left over from
-        # punctuation-heavy titles), so the join below silently drops
-        # those — same defensive shape the body-fallback path uses.
-        token_tsqs = [
-            _to_tsquery_text(conn, tok.lower()) for tok in meaningful_tokens
-        ]
-        token_tsqs = [t for t in token_tsqs if t]
+        # OR each meaningful token alongside the AND-form, dropping
+        # corpus-level commodity lexemes ("meet", "note", "reference")
+        # so distinctive ones ("person-b", "topic-ih") aren't outranked by
+        # commodity tokens that appear in many docs. Plan: F.D fix.
+        # ``_to_tsquery_text`` rejects tokens that don't normalise to a
+        # safe ``[a-z][a-z0-9]*`` lexeme (digits-first, multi-word
+        # fragments left over from punctuation-heavy titles), so the
+        # filter below silently drops those — same defensive shape the
+        # body-fallback path uses.
+        token_tsqs: list[str] = []
+        for tok in meaningful_tokens:
+            stemmed = _to_tsquery_text(conn, tok.lower())
+            if not stemmed:
+                continue
+            # ``_to_tsquery_text`` returns the lexeme wrapped in single
+            # quotes (Postgres tsquery::text format, e.g. ``'meet'``);
+            # ``corpus_common`` from ``ts_stat`` is bare words. Strip the
+            # quotes for the membership check.
+            if stemmed.strip("'") in corpus_common:
+                continue
+            token_tsqs.append(stemmed)
         token_or = " | ".join(token_tsqs)
         if title_tsq and token_or:
             return f"({title_tsq}) | {token_or}"
