@@ -31,6 +31,14 @@ from ..vault._atomic import atomic_write_text
 DEFAULT_RELATED_LIMIT = 10
 SNIPPET_LENGTH = 240
 
+# Minimum RRF score a candidate document must reach to appear in the
+# related-docs list. RRF scores are bounded by 1/(RRF_K+1) ≈ 0.016 for
+# a rank-1 match in a single leg. A threshold of 0.020 requires the
+# candidate to appear in BOTH legs (FTS + vector) or rank very high in
+# one leg alone, filtering docs that are only weakly related via a
+# single commodity token.
+_MIN_RRF_SCORE = 0.020
+
 # Token regex mirrors :data:`brain.search._TOKEN_RE`. Used to count
 # *meaningful* (non-stop-word) tokens in a source doc's title to decide
 # whether the title alone is a strong enough self-query or whether we need
@@ -464,6 +472,11 @@ def _neighbors_for_source(
         prev = by_doc.get(doc_id)
         if prev is None or score > prev[0]:
             by_doc[doc_id] = (score, content)
+
+    # Drop candidates below the minimum score — prevents generic-title
+    # docs (e.g. Krisp calls with "activ | call" in OR clause) from
+    # filling the list with noise-level matches.
+    by_doc = {doc_id: val for doc_id, val in by_doc.items() if val[0] >= _MIN_RRF_SCORE}
 
     if not by_doc:
         return []

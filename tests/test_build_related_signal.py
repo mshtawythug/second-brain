@@ -30,10 +30,12 @@ import psycopg
 
 from brain.queries import sync_chunk_search_metadata
 from brain.wiki.build_related import (
+    _MIN_RRF_SCORE,
     DEFAULT_RELATED_LIMIT,
     _build_self_tsquery,
     _corpus_common_lexemes,
     _iter_hybrid_neighbors,
+    _neighbors_for_source,
     regenerate_related_json,
 )
 
@@ -446,19 +448,29 @@ def test_title_overlap_outranks_vector_drift(
     test_db: psycopg.Connection[Any],
 ) -> None:
     """A doc sharing a distinctive title token must outrank vector-only
-    neighbors even when its vector overlap with the source is weaker.
+    neighbors when the vector signal is held equal — proving the title-A
+    weight on the multi-field tsv is the differentiator.
 
-    Setup:
-    - Source titled ``ZZZTOKEN`` (1 meaningful token → body-fallback path
-      contributes more lexemes). Body mentions ZZZTOKEN.
-    - Two ``ZZZTOKEN``-titled neighbors with embeddings orthogonal to the
-      source (cosine ~0 — title-only signal carries them).
-    - Two unrelated-title neighbors with embeddings near-collinear to the
-      source (cosine ~0.99 — vector-only signal carries them).
+    Construction holds vector contribution constant across all four
+    candidates (every candidate gets ``near_vec``, cosine ≈ 0.998 with the
+    source) so vector RRF is identical leg-wise. Body content also gives
+    every candidate a ``ZZZTOKEN`` body mention so all four clear
+    ``_MIN_RRF_SCORE`` via dual-leg accumulation. The ONLY remaining
+    difference is whether the candidate's title carries the ``ZZZTOKEN``
+    lexeme — and migration 009's weighted tsv puts that at weight A while
+    body matches sit at weight C. With FTS ts_rank weights ``{0.05, 0.8,
+    0.3, 0.1}`` (D, C, B, A), the title-A contribution is small (0.1) but
+    additive on top of the body-C contribution; for ZZZTOKEN-titled docs
+    the FTS rank is therefore strictly higher, RRF rank is lower, and the
+    blended score wins.
+
+    If title-A weighting were neutralised (e.g. set to 0), all four
+    candidates would receive identical FTS scores and the assertion's
+    strict ordering would no longer hold — that's the failure mode this
+    test guards against.
     """
     src_vec = _vector(1.0, 0.0)
     near_vec = _vector(0.99, 0.05)
-    far_vec = _vector(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
 
     _insert_doc(
         test_db,
@@ -474,23 +486,23 @@ def test_title_overlap_outranks_vector_drift(
         title="ZZZTOKEN canonical guide",
         vault_path="title-overlap-1.md",
         chunk_contents=[
-            "Mention without overlap to source body distinctive."
+            "ZZZTOKEN mention in body too for dual-leg signal.",
         ],
-        chunk_vectors=[far_vec],
+        chunk_vectors=[near_vec],
     )
     _insert_doc(
         test_db,
         title="ZZZTOKEN sidebar reference",
         vault_path="title-overlap-2.md",
-        chunk_contents=["Different wording entirely without distinctive."],
-        chunk_vectors=[far_vec],
+        chunk_contents=["ZZZTOKEN appears in body for dual-leg signal."],
+        chunk_vectors=[near_vec],
     )
     _insert_doc(
         test_db,
         title="QXBSOMETHING irrelevant alpha",
         vault_path="vector-only-1.md",
         chunk_contents=[
-            "QXBNORELATION QXBORTHOGONAL random body filler."
+            "ZZZTOKEN mentioned in body but no title overlap.",
         ],
         chunk_vectors=[near_vec],
     )
@@ -499,7 +511,7 @@ def test_title_overlap_outranks_vector_drift(
         title="QXBSOMETHING irrelevant beta",
         vault_path="vector-only-2.md",
         chunk_contents=[
-            "QXBOTHER QXBLEXEMES filler unrelated material."
+            "ZZZTOKEN appears here too without title overlap.",
         ],
         chunk_vectors=[near_vec],
     )
@@ -559,12 +571,23 @@ def test_per_doc_cap_prevents_long_doc_monopoly(
     The source title is a single distinctive token (``QQTOKEN``) so
     :func:`_build_self_tsquery` falls into the body-fallback branch and
     the resulting tsquery is broad enough to hit every neighbor's chunks
-    on the FTS leg. The vector leg is muted by giving every neighbor
-    embeddings orthogonal to the source — top-K is determined by the
-    FTS leg's per-doc cap, which is exactly what the test is measuring.
+    on the FTS leg.
+
+    Each candidate doc gets a distinct non-zero vector so its chunk
+    appears in BOTH the FTS and vector legs (dual-leg RRF score clears
+    ``_MIN_RRF_SCORE``). The long doc's chunks are spread across
+    dimensions far from the short docs so the vector leg can't push
+    all short docs out of CANDIDATE_LIMIT; the per-doc cap (3 chunks)
+    then ensures the long doc doesn't monopolise FTS ranks either.
     """
     src_vec = _vector(1.0, 0.0)
-    far_vec = _vector(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    # Short docs: cosine ≈ 0.99 with src_vec, ranked first in vector leg.
+    # Each short doc has 1 chunk; all 5 fit in the vector top-50 ahead of
+    # the long doc's lower-cosine chunks.
+    short_vec = _vector(0.99, 0.141)
+    # Long doc: cosine ≈ 0.30 with src_vec — still gets both FTS + vector
+    # signal (dual-leg RRF clears _MIN_RRF_SCORE) but vector rank is lower.
+    long_vec = _vector(0.30, 0.954)
 
     _insert_doc(
         test_db,
@@ -578,7 +601,7 @@ def test_per_doc_cap_prevents_long_doc_monopoly(
         title="QQTOKEN long",
         vault_path="long.md",
         chunk_contents=[f"QQTOKEN section {i} content body." for i in range(60)],
-        chunk_vectors=[far_vec] * 60,
+        chunk_vectors=[long_vec] * 60,
     )
     for index in range(5):
         _insert_doc(
@@ -586,12 +609,17 @@ def test_per_doc_cap_prevents_long_doc_monopoly(
             title=f"QQTOKEN short {index}",
             vault_path=f"short-{index}.md",
             chunk_contents=[f"QQTOKEN short snippet {index}."],
-            chunk_vectors=[far_vec],
+            chunk_vectors=[short_vec],
         )
 
-    # Use vector_sim_floor=1.1 to mute the vector leg entirely — this
-    # test is specifically about the FTS leg's per-doc cap behavior.
-    grouped = _hybrid(test_db, k=10, vector_sim_floor=1.1)
+    # Both legs active (vector_sim_floor=0.0) so all candidates clear
+    # _MIN_RRF_SCORE via dual-leg RRF; the per-doc cap is the only
+    # constraint being tested.
+    grouped = _hybrid(test_db, k=10, vector_sim_floor=0.0)
+    assert "src.md" in grouped, (
+        f"Source doc must have neighbors when all candidates clear threshold; "
+        f"grouped keys: {list(grouped.keys())}"
+    )
     related_paths = [path for (path, _, _) in grouped["src.md"]]
 
     # All 5 short docs must appear in the top-K neighbor list.
@@ -890,3 +918,187 @@ def test_distinctive_token_survives_filter(
     or_clause = tsquery.split(") | ", 1)[1]
     assert "zzztoken" in or_clause, or_clause
     assert "'meet'" not in or_clause, or_clause
+
+
+# ---------------------------------------------------------------------------
+# Phase F — _MIN_RRF_SCORE threshold filter
+# ---------------------------------------------------------------------------
+
+
+def test_min_rrf_score_excludes_weak_neighbors(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Candidates whose RRF score falls below ``_MIN_RRF_SCORE`` are excluded.
+
+    With ``_MIN_RRF_SCORE = 0.020 > 1/(RRF_K+1) ≈ 0.0164``, any single-leg
+    match (regardless of rank) is below threshold, so a candidate that hits
+    only the FTS leg is filtered out.
+
+    Setup: source doc has a unique 3-token title (``ZZZSOURCE unique
+    lexeme``) so the title-only branch is taken; one candidate shares the
+    token "unique" via FTS only. The vector leg is muted
+    (``vector_sim_floor=1.1``) so the candidate cannot earn a second-leg
+    RRF contribution.
+
+    We pass ``corpus_common=frozenset()`` so the OR clause in
+    ``_build_self_tsquery`` survives — otherwise in this 2-doc test corpus
+    every meaningful title token would be flagged as commodity (``ndoc=1 >
+    threshold_ndoc = 2 * 0.025 = 0.05``), the OR clause would collapse to
+    the AND-only form, and the FTS leg would return zero rows BEFORE the
+    ``_MIN_RRF_SCORE`` filter ever runs — defeating the test. Empty
+    ``corpus_common`` keeps the OR clause active, the candidate matches
+    via ``uniqu`` at FTS rank 1, RRF score is 1/(RRF_K+1) ≈ 0.0164 < 0.020,
+    and the filter at ``_neighbors_for_source`` line ~479 drops it.
+
+    We verify:
+    1. The constant ``_MIN_RRF_SCORE > 1 / (RRF_K + 1)`` so a single-leg
+       rank-1 match is always filtered.
+    2. ``_neighbors_for_source`` returns an empty list for the source doc.
+    """
+    from brain.search import RRF_K
+
+    # Confirm the constant guarantee: a rank-1 single-leg match is below threshold.
+    assert _MIN_RRF_SCORE > 1.0 / (RRF_K + 1), (
+        f"_MIN_RRF_SCORE={_MIN_RRF_SCORE} must exceed 1/(RRF_K+1)="
+        f"{1.0 / (RRF_K + 1):.4f} to filter single-leg rank-1 matches"
+    )
+
+    far_vec = _vector(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+    src_vec = _vector(1.0, 0.0)
+
+    # Source doc: unique distinctive title with ≥3 meaningful tokens so the
+    # title-only branch is taken and the OR clause contains "zzzsourc".
+    _insert_doc(
+        test_db,
+        title="ZZZSOURCE unique lexeme",
+        vault_path="src-threshold.md",
+        chunk_contents=["ZZZSOURCE unique lexeme body paragraph."],
+        chunk_vectors=[src_vec],
+    )
+
+    # Candidate doc: shares only the commodity-ish token "unique" with the
+    # source title via FTS, orthogonal vector. Its sole match is on the FTS
+    # leg, and at rank 1 the score is 1/(RRF_K+1+0) = 1/61 ≈ 0.0164 which
+    # is below _MIN_RRF_SCORE=0.020.
+    _insert_doc(
+        test_db,
+        title="Weakly related unique doc",
+        vault_path="weak-candidate.md",
+        chunk_contents=["Something about unique workflows and processes."],
+        chunk_vectors=[far_vec],
+    )
+
+    from brain.wiki.build_related import _SourceDoc
+
+    source = _SourceDoc(
+        id=test_db.execute(
+            "SELECT id::text FROM documents WHERE vault_path = 'src-threshold.md'"
+        ).fetchone()[0],  # type: ignore[index]
+        title="ZZZSOURCE unique lexeme",
+        vault_path="src-threshold.md",
+    )
+
+    # Mute vector leg entirely; only FTS can contribute. ``corpus_common``
+    # is empty (see docstring) so the OR clause in ``_build_self_tsquery``
+    # stays active and the candidate matches via ``uniqu`` at FTS rank 1.
+    neighbors = _neighbors_for_source(
+        test_db,
+        source=source,
+        k=DEFAULT_RELATED_LIMIT,
+        vector_sim_floor=1.1,
+        corpus_common=frozenset[str](),
+    )
+
+    neighbor_paths = [n.vault_path for n in neighbors]
+    assert "weak-candidate.md" not in neighbor_paths, (
+        f"Candidate with single-leg RRF score < {_MIN_RRF_SCORE} must be excluded; "
+        f"got neighbors: {neighbor_paths}"
+    )
+
+
+def test_min_rrf_score_does_not_prune_strong_neighbors(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A candidate that hits BOTH legs (FTS + vector) clears ``_MIN_RRF_SCORE``.
+
+    Boundary partner of :func:`test_min_rrf_score_excludes_weak_neighbors` —
+    proves the threshold filter is *not* over-aggressive: any candidate that
+    earns RRF contributions from both legs at top ranks comfortably exceeds
+    the floor and survives the filter.
+
+    Construction:
+    - Source: a 3-meaningful-token title (``ZZZSTRONG distinctive lexeme``) so
+      ``_build_self_tsquery`` enters the title-only branch and emits
+      ``(plainto AND-form) | <per-token OR>``. In this small two-doc corpus
+      every shared lexeme exceeds the 2.5% commodity-threshold and the OR
+      leg collapses, leaving only the plainto AND clause
+      (``'zzzstrong' & 'distinct' & 'lexem'``).
+    - Candidate: body deliberately contains all three source-title lexemes
+      (``ZZZSTRONG distinctive lexeme`` plus extra context) so the plainto
+      AND-form matches at FTS rank 1; chunk vector is near-collinear with
+      the source (cosine ≈ 0.998) so the vector leg also ranks it at #1.
+      Dual-leg rank-1 RRF: ``2 * 1/(RRF_K + 1) ≈ 0.0328`` — well above the
+      ``0.020`` threshold.
+    - ``vector_sim_floor=0.25`` matches the production default; the
+      candidate's cosine ≈ 0.998 clears it comfortably so the vector leg
+      stays active.
+
+    Assertions:
+    1. The candidate appears in the neighbor list.
+    2. The candidate's score exceeds ``_MIN_RRF_SCORE`` (proves the filter
+       didn't *just* accept by a hair — it had real margin).
+    """
+    src_vec = _vector(1.0, 0.0)
+    near_vec = _vector(0.99, 0.05)
+
+    _insert_doc(
+        test_db,
+        title="ZZZSTRONG distinctive lexeme",
+        vault_path="src-strong.md",
+        chunk_contents=["ZZZSTRONG distinctive lexeme body paragraph."],
+        chunk_vectors=[src_vec],
+    )
+    _insert_doc(
+        test_db,
+        title="ZZZSTRONG companion guide",
+        vault_path="strong-candidate.md",
+        chunk_contents=[
+            "ZZZSTRONG distinctive lexeme also appears in this companion body "
+            "so the plainto AND-form FTS query matches at rank 1.",
+        ],
+        chunk_vectors=[near_vec],
+    )
+
+    corpus_common = _corpus_common_lexemes(test_db)
+
+    from brain.wiki.build_related import _SourceDoc
+
+    source_id_row = test_db.execute(
+        "SELECT id::text FROM documents WHERE vault_path = 'src-strong.md'"
+    ).fetchone()
+    assert source_id_row is not None
+    source = _SourceDoc(
+        id=str(source_id_row[0]),
+        title="ZZZSTRONG distinctive lexeme",
+        vault_path="src-strong.md",
+    )
+
+    neighbors = _neighbors_for_source(
+        test_db,
+        source=source,
+        k=DEFAULT_RELATED_LIMIT,
+        vector_sim_floor=0.25,
+        corpus_common=corpus_common,
+    )
+
+    neighbor_paths = [n.vault_path for n in neighbors]
+    assert "strong-candidate.md" in neighbor_paths, (
+        f"Strong dual-leg candidate must clear _MIN_RRF_SCORE={_MIN_RRF_SCORE}; "
+        f"got neighbors: {neighbor_paths}"
+    )
+
+    candidate = next(n for n in neighbors if n.vault_path == "strong-candidate.md")
+    assert candidate.score > _MIN_RRF_SCORE, (
+        f"Strong candidate score {candidate.score:.6f} must exceed "
+        f"_MIN_RRF_SCORE={_MIN_RRF_SCORE}"
+    )
