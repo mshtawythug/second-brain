@@ -1,11 +1,31 @@
 """Static checks for brain Quartz sidebar layout overrides."""
 
+import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SIDEBAR_SCSS = (
     REPO_ROOT / "quartz_overrides" / "quartz" / "styles" / "brain" / "_sidebar.scss"
 )
+
+
+def _strip_line_comments(scss_text: str) -> str:
+    """Drop `//` line comments before grepping for rule declarations.
+
+    SCSS comment paragraphs in this file frequently quote CSS rule
+    bodies verbatim inside backticks (e.g. `// `.sidebar.right {
+    overflow-y: auto; }` — upstream...`). A naive ``"..." in text``
+    substring assertion can match the comment and pass even after the
+    real rule is deleted from the cascade. Stripping `//` line
+    comments first means the assertion can only resolve against the
+    actual rule body that ships to Sass.
+
+    Note: SCSS supports both `//` line comments and `/* ... */` block
+    comments. This helper handles only the former because that's the
+    convention used in `_sidebar.scss`; if a future maintainer adds
+    block comments, harden this further.
+    """
+    return re.sub(r"//.*", "", scss_text)
 
 
 def test_sidebar_padding_overrides_stock_quartz_spacing() -> None:
@@ -34,8 +54,17 @@ def test_sidebar_right_is_scrollable_when_contents_exceed_viewport() -> None:
     rubber-bands the inner column. Scrollbar width / colors track the
     `--lightgray` token so the scrollbar reads as part of the
     sidebar chrome rather than the OS default.
+
+    Implementation note: assertions run against the comment-stripped
+    SCSS so deleting the real rule cannot be masked by the verbatim
+    CSS quote (`` `.sidebar.right { overflow-y: auto; }` ``) sitting
+    in this file's section header comment. The other two new sidebar
+    tests don't need the same hardening — their substrings (`flex: 0
+    0 auto;` / `max-height: 40vh;`) only appear in comments without
+    the trailing `;`, so the trailing-semicolon match already shields
+    them.
     """
-    text = SIDEBAR_SCSS.read_text(encoding="utf-8")
+    text = _strip_line_comments(SIDEBAR_SCSS.read_text(encoding="utf-8"))
     assert "overflow-y: auto;" in text, (
         "expected `.sidebar.right` to declare `overflow-y: auto` so the "
         "right sidebar can scroll when its contents exceed 100vh"
