@@ -279,6 +279,77 @@ def test_brain_up_runs_cold_start_when_current_missing(
     assert not any("build_watcher" in c for c in python_calls), python_calls
 
 
+def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
+    stub_dir: Path,
+    vault_dir: Path,
+    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — used for cleanup side effect
+    tmp_path: Path,
+) -> None:
+    """brain-up calls install-launchd → launchctl bootstrap fires for both labels.
+
+    This is the "single source of truth for daemon lifecycle" regression
+    guard: the pre-2026-05-08 brain-up used `nohup ... &` to spawn the
+    daemons, which silently bypassed launchd supervision when the agents
+    happened to be unloaded (e.g. after a brain-down booted them out).
+    Now brain-up unconditionally delegates to install-launchd, which is
+    idempotent (rewrites + reboots the plists every run).
+
+    The test stubs launchctl into a tmp dir, points BRAIN_LAUNCHD_DIR at
+    a tmp directory (so we don't drop plists into the developer's real
+    ~/Library/LaunchAgents), seeds a healthy current/ to short-circuit
+    cold-start, and verifies launchctl was called with `bootstrap` for
+    both com.brain.watcher AND com.brain.build.
+    """
+    _seed_healthy_current(vault_dir)
+    _write_stub(stub_dir, "brain")
+    _write_stub(stub_dir, "python")
+    _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
+
+    launchd_dir = tmp_path / "LaunchAgents"
+    env = _make_env(
+        stub_dir=stub_dir,
+        vault_dir=vault_dir,
+        # NOTE: deliberately omit BRAIN_NO_BUILD_WATCHER so install-launchd
+        # actually runs. Override the install-launchd-internal knobs so
+        # the bootstrap calls land against our launchctl stub + tmp dir.
+        extras={
+            "BRAIN_NO_OVERLAY": "1",
+            "BRAIN_LAUNCHD_DIR": str(launchd_dir),
+            "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
+        },
+    )
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "brain-up")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    # brain-up may exit non-zero from wait_for_url's 30s timeout warning
+    # (no Caddy in the test environment) — that's fine; we assert on the
+    # observable side effect of install-launchd having fired.
+    launchctl_calls = _read_log(stub_dir / "launchctl.calls")
+    bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
+    assert len(bootstrap_calls) == 2, (
+        f"brain-up must bootstrap BOTH watcher and build LaunchAgents; "
+        f"saw {bootstrap_calls!r} (full launchctl call log: {launchctl_calls!r}; "
+        f"brain-up stdout: {result.stdout!r}; stderr: {result.stderr!r})"
+    )
+    assert any("com.brain.watcher.plist" in c for c in bootstrap_calls), bootstrap_calls
+    assert any("com.brain.build.plist" in c for c in bootstrap_calls), bootstrap_calls
+
+    # Both plists landed on disk in the tmp dir, not the developer's
+    # real ~/Library/LaunchAgents.
+    assert (launchd_dir / "com.brain.watcher.plist").is_file()
+    assert (launchd_dir / "com.brain.build.plist").is_file()
+
+    # Report line surfaces the new "supervisor: launchd (KeepAlive)" tag
+    # so the user immediately knows what's supervising.
+    assert "launchd" in result.stdout, result.stdout
+
+
 def test_brain_up_aborts_when_cold_start_fails(
     stub_dir: Path,
     vault_dir: Path,

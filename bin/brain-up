@@ -2,7 +2,7 @@
 # Start the second-brain wiki + sync watcher (blue/green serve edition).
 # Idempotent — safe to re-run.
 #
-# Architecture (post blue/green migration):
+# Architecture (post blue/green migration + 2026-05-08 launchd handoff):
 #   - Caddy serves <vault>/.quartz/current/ statically on :8080 + brain.test.
 #     This script does NOT spawn Quartz's --serve dev server anymore.
 #   - Watcher A: `brain vault sync --watch` — DB <-> vault mirror.
@@ -12,6 +12,16 @@
 #   - Watcher B: `python -m brain.wiki.build_watcher` — re-renders the site
 #     into a fresh build dir and atomically retargets `current` on every
 #     vault change.
+#
+# Daemon supervision: BOTH watchers run under launchd via the LaunchAgents
+# installed by `bin/brain-install-launchd` (KeepAlive=true → respawn within
+# ~10s of any death). The pre-launchd nohup paths were removed because
+# they silently lost daemons to terminal close / sleep-wake / unexplained
+# crashes — `brain-status` would just go quiet and the user had to notice.
+# This script delegates to install-launchd unconditionally; install-launchd
+# is idempotent (rewrites + reboots the plists every run, no-ops if already
+# loaded), so re-running brain-up is safe and self-healing if launchd has
+# booted out the agents for any reason.
 #
 # Applies the brain Quartz overlay (`quartz_overrides/`) into the workspace
 # BEFORE the cold-start build so the reload-signal transformer is wired in.
@@ -24,7 +34,14 @@
 #   BRAIN_OPEN_BROWSER      (default: 1; set 0 to skip)
 #   BRAIN_NO_OVERLAY        (default: 0; set 1 to skip the overlay step)
 #   BRAIN_WIKI_KEEP_BUILDS  (default: 3 — old build dirs retained per swap)
-#   BRAIN_NO_BUILD_WATCHER  (default: 0; set 1 to skip Watcher B — used by tests)
+#   BRAIN_NO_BUILD_WATCHER  (default: 0; set 1 to skip launchd supervision —
+#                            used by the bin-script tests so they don't
+#                            install LaunchAgents on the developer's
+#                            machine. Name kept for backward compat with
+#                            the pre-launchd nohup era.)
+#   BRAIN_LAUNCHCTL         (default: launchctl on PATH) — passed through
+#                            to install-launchd; tests stub it.
+#   BRAIN_LAUNCHD_DIR       (default: ~/Library/LaunchAgents) — same.
 
 set -euo pipefail
 
@@ -63,26 +80,6 @@ else
     echo "no python interpreter found at $VENV_PY or on PATH" >&2
     exit 1
 fi
-
-is_running() {
-    local pid_file="$1"
-    [[ -f "$pid_file" ]] && kill -0 "$(cat "$pid_file")" 2>/dev/null
-}
-
-start_watcher() {
-    if is_running "$WATCH_PID"; then
-        echo "watcher already running (pid $(cat "$WATCH_PID"))"
-        return 0
-    fi
-    if ! command -v brain >/dev/null 2>&1; then
-        echo "brain CLI not on PATH — install second-brain first" >&2
-        return 1
-    fi
-    : >"$WATCH_LOG"
-    nohup brain vault sync --watch --vault "$VAULT" >"$WATCH_LOG" 2>&1 &
-    echo $! >"$WATCH_PID"
-    echo "watcher started (pid $!) — logs at $WATCH_LOG"
-}
 
 apply_overlay() {
     if [[ "${BRAIN_NO_OVERLAY:-0}" == '1' ]]; then
@@ -147,20 +144,28 @@ cold_start_build() {
     echo "cold-start build: first build done in ${elapsed}s"
 }
 
-start_build_watcher() {
+ensure_supervised() {
+    # brain (2026-05-08): single source of truth for daemon lifecycle.
+    # `bin/brain-install-launchd` writes both LaunchAgent plists, boots out
+    # any prior incarnation (so the script self-heals if launchd has the
+    # labels in a half-loaded state), and bootstraps them into the
+    # gui/$UID domain. From there on launchd's KeepAlive=true keeps both
+    # daemons alive across crashes, terminal-close, sleep/wake — the very
+    # failure modes the pre-launchd nohup paths used to lose.
+    #
+    # `BRAIN_NO_BUILD_WATCHER=1` keeps its name (back-compat with tests
+    # that use the pre-launchd flag) but its meaning is now "don't install
+    # LaunchAgents during this brain-up run." Tests rely on this so they
+    # don't accidentally drop plists into the developer's
+    # ~/Library/LaunchAgents.
     if [[ "${BRAIN_NO_BUILD_WATCHER:-0}" == '1' ]]; then
-        echo 'build watcher: skipped (BRAIN_NO_BUILD_WATCHER=1)'
+        echo 'launchd supervision: skipped (BRAIN_NO_BUILD_WATCHER=1)'
         return 0
     fi
-    if is_running "$BUILD_PID"; then
-        echo "build watcher already running (pid $(cat "$BUILD_PID"))"
-        return 0
+    if ! "$SCRIPT_DIR/brain-install-launchd"; then
+        echo 'launchd supervision: brain-install-launchd failed — daemons NOT supervised' >&2
+        return 1
     fi
-    : >"$BUILD_LOG"
-    BRAIN_WIKI_RELOAD=1 PYTHONPATH="$SRC_DIR" nohup "$PY" -m brain.wiki.build_watcher \
-        --vault "$VAULT" --keep "$KEEP" >"$BUILD_LOG" 2>&1 &
-    echo $! >"$BUILD_PID"
-    echo "build watcher started (pid $!) — logs at $BUILD_LOG"
 }
 
 wait_for_url() {
@@ -175,10 +180,9 @@ wait_for_url() {
     return 1
 }
 
-start_watcher
 apply_overlay
 cold_start_build
-start_build_watcher
+ensure_supervised
 
 if [[ "${BRAIN_OPEN_BROWSER:-1}" == '1' ]]; then
     if wait_for_url; then
@@ -195,10 +199,20 @@ BUILD_PID_VALUE='?'
 [[ -f "$WATCH_PID" ]] && WATCH_PID_VALUE="$(cat "$WATCH_PID")"
 [[ -f "$BUILD_PID" ]] && BUILD_PID_VALUE="$(cat "$BUILD_PID")"
 
+# brain (2026-05-08): note the supervisor in the report so the user
+# knows their daemons survive terminal close + crashes. The pid '?'
+# fallback handles the brief race between launchctl bootstrap and the
+# wrapper writing the pid file (it's almost always populated by the
+# time wait_for_url succeeds, but the fallback keeps the report
+# readable in the unlikely race).
+SUPERVISOR='launchd (KeepAlive)'
+[[ "${BRAIN_NO_BUILD_WATCHER:-0}" == '1' ]] && SUPERVISOR='unsupervised (BRAIN_NO_BUILD_WATCHER=1)'
+
 echo
 echo '🧠 brain is up:'
-echo "   wiki:    $URL  (also brain.test if Caddy is configured)"
-echo "   vault:   re-syncing on file changes (pid $WATCH_PID_VALUE)"
-echo "   build:   re-rendering on vault changes (pid $BUILD_PID_VALUE)"
-echo '   stop:    brain-down'
-echo '   status:  brain-status'
+echo "   wiki:       $URL  (also brain.test if Caddy is configured)"
+echo "   vault:      re-syncing on file changes (pid $WATCH_PID_VALUE)"
+echo "   build:      re-rendering on vault changes (pid $BUILD_PID_VALUE)"
+echo "   supervisor: $SUPERVISOR"
+echo '   stop:       brain-down'
+echo '   status:     brain-status'
