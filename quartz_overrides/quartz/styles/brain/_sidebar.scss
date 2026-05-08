@@ -334,20 +334,81 @@
 }
 
 // ---------------------------------------------------------------------------
-// 3. RIGHT sidebar elevation — ToC + Backlinks as cards
+// 3. RIGHT sidebar — card chrome + scroll + flex-shrink contract
 // ---------------------------------------------------------------------------
 //
 // The graph component already styles itself with the matching surface
 // + radius via `graph.scss`. ToC and Backlinks need the same
-// treatment so the right sidebar reads as a stack of three coordinated
+// treatment so the right sidebar reads as a stack of four coordinated
 // panels rather than two flat rivers around a card.
 //
-// Stock markup: `<div class="toc">…</div>` + `<div class="backlinks">…</div>`.
-// We paint each as a `--surface-1` card with `8px` radius and `0.6rem`
-// padding (per the plan spec). The shadow is subtle (`--shadow-sm`)
-// so panels don't compete with the article column for attention.
+// Stock markup: `<div class="toc">…</div>` + `<div class="backlinks">…</div>`,
+// plus the brain-overlay `<div class="brain-related-docs">…</div>` (Phase 5.2)
+// sandwiched between them. We paint each as a `--surface-1` card with
+// `8px` radius and `0.6rem` padding (per the plan spec). The shadow is
+// subtle (`--shadow-sm`) so panels don't compete with the article column.
+//
+// brain (2026-05-08): three coordinated additions to the right-sidebar
+// section close the long-standing "TOC swallows the whole sidebar" bug
+// reported on `/company-id/ai-adoption-complete-playbook` (22 ToC entries):
+//
+//   1. `.sidebar.right { overflow-y: auto; }` — upstream `base.scss`
+//      paints `.sidebar { height: 100vh; position: sticky; display: flex }`
+//      with NO `overflow-y` declared, so the fixed viewport-tall box
+//      silently CLIPS anything past the bottom edge. The TOC's own
+//      `<ul.toc-content.overflow>` only self-scrolls inside the TOC's
+//      flex slice — never the whole right-sidebar column. Declaring
+//      `overflow-y: auto` here gives the entire panel column a single,
+//      themed scrollbar that reaches every child (graph, ToC, related,
+//      backlinks). `overscroll-behavior: contain` keeps the page
+//      underneath from scrolling when the user rubber-bands inside the
+//      sidebar; `scrollbar-width: thin` + `--lightgray` thumb keeps the
+//      scrollbar reading as part of the sidebar chrome rather than the
+//      OS default.
+//
+//   2. `.sidebar.right > {graph,toc,brain-related-docs,backlinks} { flex: 0 0 auto }`
+//      — stops the flex-shrink fight. Stock `.toc { flex: 0 0.5 auto }`
+//      shrinks 0.5x; default `flex: 0 1 auto` on siblings shrinks 1x;
+//      `.brain-related-docs` deliberately takes `min-height: 0` so a
+//      packed related list can shrink inside its OWN section box —
+//      which, combined with the upstream sticky `.sidebar { height:
+//      100vh }` ceiling, made `.brain-related-docs` collapse all the
+//      way down to ~19px (DevTools-confirmed: `256 × 19px` rendering,
+//      header-only). Pinning all four direct children to `flex: 0 0
+//      auto` removes the fight: each child holds its natural size, and
+//      overflow lives on the sidebar itself (rule 1 above) instead of
+//      stealing height from siblings.
+//
+//   3. `.sidebar.right > .toc { max-height: 40vh }` — caps the TOC at
+//      ~40% viewport height so a 22-entry table of contents can't fill
+//      the sidebar even before the sidebar scroll kicks in. The
+//      upstream `.toc { overflow-y: hidden }` already clips, and the
+//      inner `<ul.toc-content.overflow>` already has `max-height:
+//      calc(100% - 2rem)` self-scrolling — bounded by our 40vh cap,
+//      that just works: an over-tall TOC scrolls inside the cap, not
+//      by stealing space from RelatedDocs / Backlinks. Pairs with the
+//      32vh cap on `.brain-related-docs-list` so on a typical viewport
+//      the entire right-sidebar stack fits at a glance.
 
 .sidebar.right {
+  // brain: rule 1 — make the sidebar scroll. Without this declaration
+  // the upstream `.sidebar { height: 100vh; position: sticky }` silently
+  // clips anything past the viewport edge, and TOC self-scroll only
+  // covers the TOC's own slice.
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--lightgray) transparent;
+
+  &::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--lightgray);
+    border-radius: 2px;
+  }
+
   .toc,
   .backlinks {
     background: var(--surface-1);
@@ -379,4 +440,29 @@
     line-height: 1.4;
     margin: 0.2rem 0;
   }
+}
+
+// brain: rule 2 — stop the flex-shrink fight. The child-combinator `>`
+// is intentional so we only target direct children of the right
+// sidebar (avoids accidentally hitting nested ToC widgets if any).
+// Pinning all four to `flex: 0 0 auto` keeps each at its natural
+// height; the sidebar's `overflow-y: auto` above handles overflow.
+.sidebar.right > .graph,
+.sidebar.right > .toc,
+.sidebar.right > .brain-related-docs,
+.sidebar.right > .backlinks {
+  flex: 0 0 auto;
+}
+
+// brain: rule 3 — cap the TOC at 40vh. Note: the existing
+// `.sidebar.right { .toc, .backlinks { ... } }` block above already
+// paints the card chrome (background, border-radius, padding,
+// box-shadow) on `.sidebar.right .toc`. This rule is additive — keep
+// both. The child-combinator `>` scopes the cap to only the top-level
+// TOC inside the right sidebar.
+.sidebar.right > .toc {
+  // The upstream `.toc { overflow-y: hidden }` clips at this max-height,
+  // and the inner `<ul.toc-content.overflow>` (`max-height:
+  // calc(100% - 2rem)`) provides the user-facing scroll inside the cap.
+  max-height: 40vh;
 }

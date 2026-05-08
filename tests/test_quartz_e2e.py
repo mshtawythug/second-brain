@@ -312,6 +312,120 @@ def test_right_sidebar_renders_toc_above_related_docs(
     )
 
 
+def test_right_sidebar_scrolls_when_toc_long(e2e_build: str) -> None:
+    """The right sidebar scrolls + RelatedDocs stays visible on long pages.
+
+    Regression for the "can't reach RelatedDocs / Backlinks past a long
+    TOC" bug (2026-05-08): on `/company-id/ai-adoption-complete-playbook`
+    the rendered TOC had 22 entries; upstream Quartz paints
+    `.sidebar { height: 100vh; position: sticky; display: flex }` with
+    no `overflow-y` declared, so the sidebar silently clipped anything
+    past the viewport. Sibling panels (RelatedDocs at `min-height: 0`,
+    Backlinks at default `flex: 0 1 auto`) flex-shrunk under pressure
+    from `.toc { flex: 0 0.5 auto }`, collapsing `.brain-related-docs`
+    to ~19 px (DevTools-confirmed: 256 × 19 px, header-only). The fix
+    in ``_sidebar.scss``: `.sidebar.right { overflow-y: auto }` for the
+    column scroll, `flex: 0 0 auto` on every direct child to stop the
+    shrink fight, and `max-height: 40vh` capping the TOC.
+
+    The fixture ``long-toc-doc.md`` carries 18 H2/H3 headings so the
+    rendered TOC is long enough (the original bug was reproducible on
+    pages with ≥15-ish headings; we use 18 to leave headroom against
+    a future stock filter that drops trivial entries). At a 768 px-tall
+    viewport the natural stack of graph + 18-entry TOC + RelatedDocs +
+    Backlinks comfortably exceeds 100 vh, so the scroll-and-shrink
+    contract is exercised.
+
+    Skips cleanly if Playwright isn't installed — the three static
+    tests in ``test_quartz_sidebar_static.py`` already pin every SCSS
+    rule, and this Playwright test is the runtime canary that ensures
+    the rules combine correctly in a real browser layout.
+    """
+    sync_api = pytest.importorskip(
+        "playwright.sync_api",
+        reason=(
+            "Playwright not installed — install via `pip install "
+            "playwright pytest-playwright && playwright install chromium` "
+            "to run this runtime layout test"
+        ),
+    )
+
+    target_url = f"{e2e_build}/long-toc-doc"
+
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            # 768 px viewport height is below 100 vh on any modern
+            # display; combined with the ~80 vh natural stack height
+            # of graph + 18-entry TOC + RelatedDocs + Backlinks, this
+            # forces the sidebar into the overflow regime that exposed
+            # the original bug.
+            context = browser.new_context(viewport={"width": 1280, "height": 768})
+            try:
+                page = context.new_page()
+                # Quartz emits each note at `<slug>/index.html` and
+                # also as a bare `.html` — try both so the test isn't
+                # brittle to upstream emit-shape changes.
+                last_err: Exception | None = None
+                for candidate in (target_url, f"{e2e_build}/long-toc-doc/", f"{target_url}.html"):
+                    try:
+                        page.goto(candidate, wait_until="networkidle", timeout=30000)
+                        if page.locator(".right.sidebar").count() > 0:
+                            break
+                    except Exception as exc:  # noqa: BLE001 — try next candidate
+                        last_err = exc
+                else:
+                    pytest.fail(
+                        "could not load long-toc-doc page through any "
+                        f"candidate URL — last error: {last_err}"
+                    )
+
+                overflow_y = page.eval_on_selector(
+                    ".right.sidebar",
+                    "el => getComputedStyle(el).overflowY",
+                )
+                assert overflow_y == "auto", (
+                    "expected `.right.sidebar` computed `overflow-y` to "
+                    f"resolve to 'auto'; got {overflow_y!r}. The brain "
+                    "overlay declares `overflow-y: auto` so the sidebar "
+                    "scrolls when its contents exceed 100vh"
+                )
+
+                metrics = page.eval_on_selector(
+                    ".right.sidebar",
+                    """el => ({
+                        scrollHeight: el.scrollHeight,
+                        clientHeight: el.clientHeight,
+                    })""",
+                )
+                assert metrics["scrollHeight"] > metrics["clientHeight"], (
+                    "expected `.right.sidebar` to actually overflow at "
+                    "this viewport (scrollHeight > clientHeight); got "
+                    f"scrollHeight={metrics['scrollHeight']} "
+                    f"clientHeight={metrics['clientHeight']}. If this "
+                    "assertion fails, the fixture page may not be "
+                    "long enough — bump the heading count in "
+                    "`tests/fixtures/quartz_e2e_vault/long-toc-doc.md`"
+                )
+
+                related_height = page.eval_on_selector(
+                    ".brain-related-docs",
+                    "el => el.offsetHeight",
+                )
+                assert related_height > 50, (
+                    "expected `.brain-related-docs` to render taller "
+                    "than 50px; got "
+                    f"{related_height}px. The original bug rendered "
+                    "this panel at ~19px (header-only) because the "
+                    "flex-shrink fight collapsed it; this assertion "
+                    "guards against that regression"
+                )
+            finally:
+                context.close()
+        finally:
+            browser.close()
+
+
 # ---------------------------------------------------------------------------
 # Test 2 — contentIndex.json shape
 # ---------------------------------------------------------------------------
