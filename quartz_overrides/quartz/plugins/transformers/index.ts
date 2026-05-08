@@ -1,5 +1,40 @@
 // Brain wiki — transformer barrel re-export with brain extensions wired in.
 //
+// PARSER CACHE CONTRACT — READ BEFORE ADDING A TRANSFORMER:
+//
+// MDAST transformers in this directory MUST be pure functions of
+// (file bytes, slug). "Pure" means: given the same file bytes and the
+// same slug, a transformer MUST produce the same output AST every time,
+// with no dependence on sibling files, the build graph, or any mutable
+// global state.
+//
+// Why this matters: the parser cache in
+// `quartz_overrides/quartz/processors/parser_cache.ts` keys each
+// cached [MDAST, file.data] entry on:
+//
+//   sha256(CACHE_VERSION as 4 bytes || slug as UTF-8 || file bytes)
+//
+// If a transformer reads data from other files, a database, or any
+// external source at the parse stage, a cache hit for an unchanged file
+// would return stale output even though a dependency changed.
+//
+// Cross-file context (backlinks, contentIndex, related-docs, derived
+// edges) belongs in the EMITTER phase, which runs on the in-memory
+// ProcessedContent[] collection AFTER parseMarkdown returns. No
+// transformer here may reach across files at parse time.
+//
+// Version bumping: if you change a transformer in a way that alters its
+// output for the same input (e.g. new data attributes, changed tree
+// structure), bump CACHE_VERSION in parser_cache.ts in the SAME COMMIT
+// as the transformer change. A version bump invalidates all existing
+// cache entries globally (by changing every key) so the next build
+// re-derives correct output for every file.
+//
+// Audit checklist for new transformers:
+//   [x] Pure function of (file bytes, slug) — no cross-file reads
+//   [x] No mutable module-level state that varies across files
+//   [x] If output format changes: CACHE_VERSION bumped in same commit
+//
 // This file is a TEMPLATE. It is installed at
 // `<vault>/.quartz/quartz/plugins/transformers/index.ts` by `brain
 // vault render --overlay`, OVERWRITING the stock Quartz barrel. The
