@@ -315,6 +315,50 @@ def test_right_sidebar_renders_toc_above_related_docs(
 def test_right_sidebar_scrolls_when_toc_long(e2e_build: str) -> None:
     """The right sidebar scrolls + RelatedDocs stays visible on long pages.
 
+    OPT-IN — pending Playwright adoption in this repo. As of the
+    2026-05-08 sidebar fix this is the FIRST and ONLY browser-driven
+    test in the brain test tree. Playwright is not in
+    ``[project.optional-dependencies] dev`` and is not installed in
+    any sibling workspace (notably ``~/brain-vault/.quartz/``); the
+    decision to keep it that way is recorded in the team-lead thread
+    on the same date — adding a heavyweight browser dep + browser
+    binaries for one assertion was deemed out-of-scope. This test is
+    designed as a tripwire: the day someone installs Playwright for
+    another test, ``importorskip`` flips green automatically and the
+    sidebar contract gets browser coverage for free.
+
+    Until then, the LOAD-BEARING regression guard is the trio of
+    static tests in ``tests/test_quartz_sidebar_static.py``:
+
+      - ``test_sidebar_right_is_scrollable_when_contents_exceed_viewport``
+        — pins ``.sidebar.right { overflow-y: auto }`` plus the themed
+        ``scrollbar-width: thin`` / ``overscroll-behavior: contain``
+        declarations.
+      - ``test_right_sidebar_children_hold_natural_size_via_flex_zero_zero_auto``
+        — pins ``flex: 0 0 auto`` on the four direct-child selectors
+        (``.graph``, ``.toc``, ``.brain-related-docs``, ``.backlinks``).
+      - ``test_toc_capped_at_40vh_in_right_sidebar`` — pins
+        ``.sidebar.right > .toc { max-height: 40vh }``.
+
+    What this Playwright test would assert at runtime once
+    Playwright lands (verbatim from the plan spec, kept here so a
+    future maintainer doesn't have to reverse-engineer the intent):
+
+      1. ``page.eval_on_selector(".right.sidebar",
+         "el => getComputedStyle(el).overflowY") == "auto"`` — the
+         CSS rule actually resolves to a scrollable computed value
+         after the cascade (i.e. nothing in the brain overlay or
+         upstream Quartz wins specificity over our declaration).
+      2. ``.right.sidebar`` has ``scrollHeight > clientHeight`` at
+         a viewport ≤ 900 px tall — the sidebar genuinely overflows
+         on the long-TOC fixture, so rule 1 is exercised, not just
+         declared.
+      3. ``.brain-related-docs`` has ``offsetHeight > 50`` — the
+         flex-shrink fix actually keeps RelatedDocs visible
+         (the original bug rendered the panel at ~19 px,
+         header-only; 50 px is well above that ceiling and below
+         even the most cramped natural render of the section).
+
     Regression for the "can't reach RelatedDocs / Backlinks past a long
     TOC" bug (2026-05-08): on `/company-id/ai-adoption-complete-playbook`
     the rendered TOC had 22 entries; upstream Quartz paints
@@ -335,11 +379,6 @@ def test_right_sidebar_scrolls_when_toc_long(e2e_build: str) -> None:
     viewport the natural stack of graph + 18-entry TOC + RelatedDocs +
     Backlinks comfortably exceeds 100 vh, so the scroll-and-shrink
     contract is exercised.
-
-    Skips cleanly if Playwright isn't installed — the three static
-    tests in ``test_quartz_sidebar_static.py`` already pin every SCSS
-    rule, and this Playwright test is the runtime canary that ensures
-    the rules combine correctly in a real browser layout.
     """
     sync_api = pytest.importorskip(
         "playwright.sync_api",
