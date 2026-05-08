@@ -325,8 +325,9 @@ def test_brain_up_aborts_when_cold_start_fails(
 
 
 def test_brain_down_kills_all_three_pids(
-    stub_dir: Path,  # noqa: ARG001 — fixture forces test isolation
+    stub_dir: Path,
     isolated_pid_files: dict[str, Path],
+    tmp_path: Path,
 ) -> None:
     """Three live ``sleep 60`` processes are killed and pid files removed.
 
@@ -338,7 +339,13 @@ def test_brain_down_kills_all_three_pids(
     1. All three processes are no longer running (``kill -0`` fails).
     2. All three pid files are gone.
     3. The ``caddy left running`` reassurance line is in stdout.
+
+    Stubs `launchctl` (and points BRAIN_LAUNCHD_DIR at a tmp dir) so the
+    test doesn't accidentally bootout real LaunchAgents from the
+    developer's launchd state — the bootout-when-loaded path has its own
+    dedicated test, this one is just the kill-loop.
     """
+    _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
     procs: list[subprocess.Popen[bytes]] = []
     try:
         for key in ("watch_pid", "build_pid", "wiki_pid"):
@@ -346,8 +353,12 @@ def test_brain_down_kills_all_three_pids(
             procs.append(p)
             isolated_pid_files[key].write_text(f"{p.pid}\n")
 
+        env = os.environ.copy()
+        env["BRAIN_LAUNCHD_DIR"] = str(tmp_path / "LaunchAgents")
+        env["BRAIN_LAUNCHCTL"] = str(stub_dir / "launchctl")
         result = subprocess.run(  # noqa: S603 — list-form, no shell
             [str(BIN / "brain-down")],
+            env=env,
             capture_output=True,
             text=True,
             timeout=15,
@@ -507,7 +518,22 @@ def test_brain_rebuild_no_build_skips_build_swap(
 
 
 @pytest.mark.parametrize(
-    "name", ["brain-up", "brain-down", "brain-status", "brain-rebuild"]
+    "name",
+    [
+        "brain-up",
+        "brain-down",
+        "brain-status",
+        "brain-rebuild",
+        # Phase: launchd supervision (2026-05-08). The wrappers are
+        # foreground entrypoints that the LaunchAgent plists exec; the
+        # install/uninstall scripts manage the plists in
+        # ~/Library/LaunchAgents/. All four ship under bin/ and must
+        # parse + be executable.
+        "_brain-watcher-fg",
+        "_brain-build-fg",
+        "brain-install-launchd",
+        "brain-uninstall-launchd",
+    ],
 )
 def test_bin_script_is_executable_and_parses(name: str) -> None:
     """``bash -n <script>`` parses cleanly and the file is +x.
@@ -529,3 +555,348 @@ def test_bin_script_is_executable_and_parses(name: str) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Tests — launchd-friendly foreground wrappers (`_brain-{watcher,build}-fg`).
+# ---------------------------------------------------------------------------
+#
+# These wrappers exist so a LaunchAgent can supervise the daemons end-to-end
+# (KeepAlive=true). They write the pid file so `brain-status` keeps working
+# unchanged, then `exec` the underlying watcher. Tests use the same stub
+# pattern as the rest of this file: a stub `brain` / `python` on PATH (with
+# BRAIN_PY for the build wrapper, mirroring brain-up) records argv to a log
+# file we can assert on. Because exec replaces the wrapper's process image
+# with the stub's, the wrapper still completes cleanly when the stub exits 0.
+
+
+def test_brain_watcher_fg_writes_pid_and_execs_brain_sync(
+    stub_dir: Path,
+    vault_dir: Path,
+    isolated_pid_files: dict[str, Path],
+) -> None:
+    """Wrapper writes /tmp/brain-watch.pid then execs `brain vault sync --watch`.
+
+    Verifies the pid-file contract upstream from launchd supervision: the
+    file `brain-status` reads must contain the wrapper's pid (which becomes
+    the watcher's pid post-exec) and the watcher must actually be invoked
+    with the expected argv.
+
+    `BRAIN_SKIP_VENV_AUTOLOAD=1` keeps the wrapper from prepending the
+    developer's real `.venv/bin` to PATH (which would mask the stub
+    `brain` and run the actual watcher against the test vault, hanging
+    the test). Mirrors the BRAIN_PY override pattern used elsewhere.
+    """
+    _write_stub(stub_dir, "brain")
+    env = _make_env(
+        stub_dir=stub_dir,
+        vault_dir=vault_dir,
+        extras={"BRAIN_SKIP_VENV_AUTOLOAD": "1"},
+    )
+
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "_brain-watcher-fg")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    assert isolated_pid_files["watch_pid"].exists(), "wrapper must write the pid file"
+    pid_content = isolated_pid_files["watch_pid"].read_text().strip()
+    assert pid_content.isdigit(), f"pid file should contain an integer, got {pid_content!r}"
+
+    brain_calls = _read_log(stub_dir / "brain.calls")
+    assert any("vault sync --watch" in c for c in brain_calls), brain_calls
+    assert any(str(vault_dir) in c for c in brain_calls), brain_calls
+
+
+def test_brain_watcher_fg_aborts_when_brain_cli_missing(
+    stub_dir: Path,  # noqa: ARG001 — fixture forces test isolation
+    vault_dir: Path,
+    isolated_pid_files: dict[str, Path],
+) -> None:
+    """No `brain` on PATH → wrapper exits non-zero and never writes pid file.
+
+    Guards against the failure mode where launchd respawns a wrapper that
+    can't find the project venv (e.g. PATH not set in the plist's
+    EnvironmentVariables block). The wrapper must surface the error
+    instead of silently writing a pid file pointing at no real process.
+    """
+    # PATH points at an empty stub dir — no `brain`, no `python`. The
+    # BRAIN_SKIP_VENV_AUTOLOAD knob keeps the wrapper from silently
+    # prepending the developer's real `.venv/bin` (which would resolve
+    # `brain` and defeat the test).
+    empty_dir = vault_dir.parent / "empty-stubs"
+    empty_dir.mkdir()
+    env = {
+        "PATH": f"{empty_dir}:/usr/bin:/bin",
+        "HOME": str(vault_dir.parent),
+        "BRAIN_VAULT_PATH": str(vault_dir),
+        "BRAIN_SKIP_VENV_AUTOLOAD": "1",
+    }
+
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "_brain-watcher-fg")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert "brain CLI not on PATH" in result.stderr, result.stderr
+    assert not isolated_pid_files["watch_pid"].exists(), (
+        "wrapper must NOT write a pid file when it can't actually run the watcher"
+    )
+
+
+def test_brain_build_fg_writes_pid_and_execs_build_watcher(
+    stub_dir: Path,
+    vault_dir: Path,
+    isolated_pid_files: dict[str, Path],
+) -> None:
+    """Wrapper writes /tmp/brain-build.pid then execs `python -m brain.wiki.build_watcher`.
+
+    Mirrors the watcher-fg test but for the build daemon. Asserts the
+    invocation includes the env-driven `--vault` and `--keep` args that
+    `bin/brain-up` historically passed by hand.
+    """
+    _write_stub(stub_dir, "python")
+    env = _make_env(
+        stub_dir=stub_dir,
+        vault_dir=vault_dir,
+        extras={"BRAIN_WIKI_KEEP_BUILDS": "5"},
+    )
+
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "_brain-build-fg")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    assert isolated_pid_files["build_pid"].exists(), "wrapper must write the pid file"
+    pid_content = isolated_pid_files["build_pid"].read_text().strip()
+    assert pid_content.isdigit(), pid_content
+
+    python_calls = _read_log(stub_dir / "python.calls")
+    build_lines = [c for c in python_calls if "brain.wiki.build_watcher" in c]
+    assert len(build_lines) == 1, python_calls
+    assert "--vault" in build_lines[0]
+    assert str(vault_dir) in build_lines[0]
+    assert "--keep 5" in build_lines[0], build_lines[0]
+
+
+# ---------------------------------------------------------------------------
+# Tests — `bin/brain-install-launchd` + `bin/brain-uninstall-launchd`.
+# ---------------------------------------------------------------------------
+#
+# These exercise the install/uninstall lifecycle without touching the
+# developer's real launchd domain. We point BRAIN_LAUNCHD_DIR at a tmp
+# directory and pass a stub `launchctl` via BRAIN_LAUNCHCTL so every
+# `bootout` / `bootstrap` / `print` call lands in a log file we can assert on.
+
+
+def _launchctl_stub_body(stub_dir: Path, *, print_succeeds: bool) -> str:
+    """Build a launchctl stub: logs argv, controls `print` exit code.
+
+    `print` is the only subcommand whose return value drives behavior in
+    our scripts (it's the "is this label loaded?" probe). Tests pass
+    `print_succeeds=True` to simulate "loaded", `False` for "not loaded".
+    All other subcommands (`bootout`, `bootstrap`) just exit 0.
+    """
+    return (
+        "#!/usr/bin/env bash\n"
+        f"echo \"$@\" >> {stub_dir}/launchctl.calls\n"
+        'if [[ "${1:-}" == "print" ]]; then\n'
+        f"  exit {0 if print_succeeds else 1}\n"
+        "fi\n"
+        "exit 0\n"
+    )
+
+
+def test_install_launchd_writes_plists_and_bootstraps(
+    stub_dir: Path,
+    vault_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """install-launchd writes both plists with KeepAlive=true and bootstraps them.
+
+    Plist content is checked structurally (ProgramArguments line points at
+    the wrapper, KeepAlive present, Label correct). The stub launchctl
+    captures calls so we can assert the bootstrap step actually fired for
+    both labels.
+    """
+    launchd_dir = tmp_path / "LaunchAgents"
+    _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
+
+    env = _make_env(
+        stub_dir=stub_dir,
+        vault_dir=vault_dir,
+        extras={
+            "BRAIN_LAUNCHD_DIR": str(launchd_dir),
+            "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
+        },
+    )
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "brain-install-launchd")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    watcher_plist = launchd_dir / "com.brain.watcher.plist"
+    build_plist = launchd_dir / "com.brain.build.plist"
+    assert watcher_plist.is_file(), watcher_plist
+    assert build_plist.is_file(), build_plist
+
+    watcher_text = watcher_plist.read_text()
+    assert "<string>com.brain.watcher</string>" in watcher_text
+    assert "_brain-watcher-fg" in watcher_text
+    assert "<key>KeepAlive</key>" in watcher_text
+    assert "<true/>" in watcher_text  # KeepAlive=true
+    assert "<key>RunAtLoad</key>" in watcher_text
+    assert "/tmp/brain-watch.log" in watcher_text
+
+    build_text = build_plist.read_text()
+    assert "<string>com.brain.build</string>" in build_text
+    assert "_brain-build-fg" in build_text
+    assert "<key>KeepAlive</key>" in build_text
+    assert "/tmp/brain-build.log" in build_text
+
+    launchctl_calls = _read_log(stub_dir / "launchctl.calls")
+    bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
+    assert len(bootstrap_calls) == 2, launchctl_calls
+    assert any("com.brain.watcher.plist" in c for c in bootstrap_calls)
+    assert any("com.brain.build.plist" in c for c in bootstrap_calls)
+
+
+def test_uninstall_launchd_boots_out_and_removes_plists(
+    stub_dir: Path,
+    vault_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """uninstall removes both plist files and `bootout`s their labels.
+
+    Pre-seeds the tmp LaunchAgents dir with two plists (so the rm path
+    runs), points the script at a launchctl stub whose `print` succeeds
+    (= "label is loaded"), and asserts both bootout calls land + both
+    plists are gone afterward.
+    """
+    launchd_dir = tmp_path / "LaunchAgents"
+    launchd_dir.mkdir()
+    (launchd_dir / "com.brain.watcher.plist").write_text("<plist/>", encoding="utf-8")
+    (launchd_dir / "com.brain.build.plist").write_text("<plist/>", encoding="utf-8")
+
+    _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=True))
+
+    env = _make_env(
+        stub_dir=stub_dir,
+        vault_dir=vault_dir,
+        extras={
+            "BRAIN_LAUNCHD_DIR": str(launchd_dir),
+            "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
+        },
+    )
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "brain-uninstall-launchd")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    assert not (launchd_dir / "com.brain.watcher.plist").exists()
+    assert not (launchd_dir / "com.brain.build.plist").exists()
+
+    launchctl_calls = _read_log(stub_dir / "launchctl.calls")
+    bootout_calls = [c for c in launchctl_calls if c.startswith("bootout ")]
+    assert any("com.brain.watcher" in c for c in bootout_calls), launchctl_calls
+    assert any("com.brain.build" in c for c in bootout_calls), launchctl_calls
+
+
+def test_brain_down_boots_out_launchd_when_loaded(
+    stub_dir: Path,
+    isolated_pid_files: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    """brain-down bootouts both labels when launchctl reports them loaded.
+
+    Ensures that when the user has installed the LaunchAgents, plain
+    `kill` is no longer enough — brain-down must also bootout so launchd
+    stops respawning the daemons within ThrottleInterval seconds.
+    """
+    launchd_dir = tmp_path / "LaunchAgents"
+    launchd_dir.mkdir()
+    _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=True))
+
+    env = os.environ.copy()
+    env["PATH"] = f"{stub_dir}:/usr/bin:/bin"
+    env["BRAIN_LAUNCHD_DIR"] = str(launchd_dir)
+    env["BRAIN_LAUNCHCTL"] = str(stub_dir / "launchctl")
+
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "brain-down")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    launchctl_calls = _read_log(stub_dir / "launchctl.calls")
+    bootout_calls = [c for c in launchctl_calls if c.startswith("bootout ")]
+    assert any("com.brain.watcher" in c for c in bootout_calls), launchctl_calls
+    assert any("com.brain.build" in c for c in bootout_calls), launchctl_calls
+    assert "unloaded launchd" in result.stdout, result.stdout
+
+
+def test_brain_down_skips_bootout_when_not_loaded(
+    stub_dir: Path,
+    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — fixture isolation
+    tmp_path: Path,
+) -> None:
+    """brain-down does NOT bootout when launchctl `print` reports not loaded.
+
+    Backwards compat: users who never installed the LaunchAgents must see
+    the same brain-down behavior as before — no bootout call, no
+    "unloaded launchd" line, just the normal kill loop.
+    """
+    launchd_dir = tmp_path / "LaunchAgents"
+    launchd_dir.mkdir()
+    _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
+
+    env = os.environ.copy()
+    env["PATH"] = f"{stub_dir}:/usr/bin:/bin"
+    env["BRAIN_LAUNCHD_DIR"] = str(launchd_dir)
+    env["BRAIN_LAUNCHCTL"] = str(stub_dir / "launchctl")
+
+    result = subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "brain-down")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+
+    launchctl_calls = _read_log(stub_dir / "launchctl.calls")
+    bootout_calls = [c for c in launchctl_calls if c.startswith("bootout ")]
+    assert bootout_calls == [], (
+        "brain-down must not bootout labels that aren't loaded — "
+        f"saw {bootout_calls}"
+    )
+    assert "unloaded launchd" not in result.stdout, result.stdout

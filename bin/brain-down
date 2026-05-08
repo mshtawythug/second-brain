@@ -11,6 +11,29 @@ WATCH_PID='/tmp/brain-watch.pid'   # `brain vault sync --watch`
 BUILD_PID='/tmp/brain-build.pid'   # `python -m brain.wiki.build_watcher`
 WIKI_PID='/tmp/brain-wiki.pid'     # legacy: pre-blue/green `npx quartz --serve`
 
+LAUNCHD_DIR="${BRAIN_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}"
+LAUNCHCTL="${BRAIN_LAUNCHCTL:-launchctl}"
+
+# brain: if the user installed launchd supervision via
+# `bin/brain-install-launchd`, plain `kill $pid` is ineffective — launchd
+# respawns each daemon within ThrottleInterval seconds. Bootout the
+# LaunchAgents first so the kills below actually stick. We don't remove
+# the .plist files here (that's `bin/brain-uninstall-launchd`'s job);
+# bootout-only means a subsequent `bin/brain-up` won't re-supervise, but
+# `launchctl bootstrap gui/$UID <plist>` (or rerunning the install
+# script) will restore supervision without rewriting the plists.
+bootout_one() {
+    local label="$1"
+    local domain="gui/$UID/${label}"
+    if "$LAUNCHCTL" print "$domain" >/dev/null 2>&1; then
+        "$LAUNCHCTL" bootout "$domain" 2>/dev/null || true
+        echo "unloaded launchd: $domain"
+    fi
+}
+
+bootout_one com.brain.watcher
+bootout_one com.brain.build
+
 stop_one() {
     local pid_file="$1"
     local label="$2"

@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Remove the brain wiki LaunchAgents installed by `bin/brain-install-launchd`.
+# Idempotent — safe to re-run, safe to run when nothing is installed.
+#
+# What this does:
+#   1. `launchctl bootout`s `com.brain.watcher` and `com.brain.build` from
+#      the `gui/$UID` domain (if loaded). After bootout launchd no longer
+#      owns the lifecycle — the daemons stop and stay stopped.
+#   2. Removes `~/Library/LaunchAgents/com.brain.{watcher,build}.plist` if
+#      present. After this brain-up's nohup-based daemon supervision is
+#      back to being authoritative.
+#
+# This is also called transparently from `bin/brain-down` so the user can
+# stop daemons with one command regardless of which lifecycle they're on.
+#
+# Env overrides:
+#   BRAIN_LAUNCHD_DIR  (default: ~/Library/LaunchAgents)
+#   BRAIN_LAUNCHCTL    (default: launchctl on PATH)
+
+set -euo pipefail
+
+LAUNCHD_DIR="${BRAIN_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}"
+LAUNCHCTL="${BRAIN_LAUNCHCTL:-launchctl}"
+
+unload_one() {
+    local label="$1"
+    local plist_path="$LAUNCHD_DIR/${label}.plist"
+    local domain="gui/$UID/${label}"
+    local did_anything=0
+
+    if "$LAUNCHCTL" print "$domain" >/dev/null 2>&1; then
+        if "$LAUNCHCTL" bootout "$domain" 2>/dev/null; then
+            echo "unloaded $domain"
+            did_anything=1
+        fi
+    fi
+
+    if [[ -f "$plist_path" ]]; then
+        rm -f "$plist_path"
+        echo "removed $plist_path"
+        did_anything=1
+    fi
+
+    if (( did_anything == 0 )); then
+        echo "$label: nothing to remove"
+    fi
+}
+
+unload_one com.brain.watcher
+unload_one com.brain.build

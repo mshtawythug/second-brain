@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Foreground wrapper for the vault sync watcher, intended to run under launchd.
+#
+# Why a wrapper:
+#   The historical `bin/brain-up` flow uses `nohup ... &` to background-spawn
+#   the watcher, then writes the spawned pid into `/tmp/brain-watch.pid` for
+#   `brain-status` to pick up. That works in a shell session but doesn't
+#   survive the next "what kills my daemons silently?" round (terminal close,
+#   sleep/wake, OOM, …) because nothing supervises the daemon.
+#
+#   This script flips the pattern: it stays in the foreground, writes the
+#   pid file, then `exec`s the watcher so the watcher inherits the same pid.
+#   A LaunchAgent (com.brain.watcher) wraps THIS script with `KeepAlive=true`
+#   so launchd respawns us within `ThrottleInterval` seconds whenever the
+#   underlying watcher dies — no manual `brain-up` after every crash.
+#
+# PID-file contract:
+#   We write `$$` into `/tmp/brain-watch.pid` BEFORE the exec. `exec` replaces
+#   the current process image but keeps the pid, so the file points at the
+#   still-running watcher. `brain-status`'s `kill -0 $(cat …)` check then
+#   reports "running" exactly as it does for the legacy nohup path. When
+#   launchd kills us out-of-band the file becomes stale; that's fine, the
+#   `kill -0` check fails and the row flips to "stopped".
+#
+# Env contract:
+#   BRAIN_VAULT_PATH  (default: $HOME/brain-vault) — passed to `--vault`.
+#   PATH must include the project venv's bin so `brain` resolves; the
+#   LaunchAgent plist's EnvironmentVariables block sets this explicitly,
+#   but we also prepend the venv ourselves as belt + suspenders for
+#   manual invocation outside launchd.
+
+set -euo pipefail
+
+VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
+WATCH_PID='/tmp/brain-watch.pid'
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+VENV_BIN="$PROJECT_ROOT/.venv/bin"
+# brain: tests set BRAIN_SKIP_VENV_AUTOLOAD=1 to keep the wrapper from
+# silently prepending the developer's real `.venv/bin` (and thus the real
+# `brain`) ahead of the test stub on PATH. Same shape as the BRAIN_PY
+# override in `bin/brain-up`. In production the variable is unset and the
+# venv prepend just works.
+if [[ "${BRAIN_SKIP_VENV_AUTOLOAD:-0}" != "1" && -d "$VENV_BIN" ]]; then
+    export PATH="$VENV_BIN:$PATH"
+fi
+
+if ! command -v brain >/dev/null 2>&1; then
+    echo "brain CLI not on PATH (project venv expected at $VENV_BIN)" >&2
+    exit 1
+fi
+
+echo "$$" >"$WATCH_PID"
+exec brain vault sync --watch --vault "$VAULT"

@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Foreground wrapper for the Quartz build watcher, intended to run under
+# launchd. Mirrors `_brain-watcher-fg`'s contract — see that file's header
+# for the rationale + pid-file semantics.
+#
+# This wrapper specifically supervises `python -m brain.wiki.build_watcher`,
+# which re-renders the Quartz site into a fresh `<vault>/.quartz/builds/<id>/`
+# and atomically retargets `current/` on every vault change. Pre-launchd it
+# was started via `nohup ... &` from `bin/brain-up`, with the same drift
+# problem (silent death + no supervisor).
+#
+# Env contract:
+#   BRAIN_VAULT_PATH        (default: $HOME/brain-vault) — passed to `--vault`.
+#   BRAIN_WIKI_KEEP_BUILDS  (default: 3) — old build dirs retained per swap.
+#   The wrapper sets BRAIN_WIKI_RELOAD=1 + PYTHONPATH=<project>/src itself,
+#   matching the bin/brain-up invocation, so the LaunchAgent plist doesn't
+#   have to know about either.
+
+set -euo pipefail
+
+VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
+KEEP="${BRAIN_WIKI_KEEP_BUILDS:-3}"
+BUILD_PID='/tmp/brain-build.pid'
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+VENV_PY="$PROJECT_ROOT/.venv/bin/python"
+SRC_DIR="$PROJECT_ROOT/src"
+
+# `BRAIN_PY` env override mirrors `bin/brain-up` so the bin-script test
+# harness can plug in a stub interpreter without symlinking.
+if [[ -n "${BRAIN_PY:-}" ]]; then
+    PY="$BRAIN_PY"
+elif [[ -x "$VENV_PY" ]]; then
+    PY="$VENV_PY"
+else
+    echo "no python interpreter found at $VENV_PY (set BRAIN_PY=… to override)" >&2
+    exit 1
+fi
+
+export BRAIN_WIKI_RELOAD=1
+export PYTHONPATH="$SRC_DIR"
+
+echo "$$" >"$BUILD_PID"
+exec "$PY" -m brain.wiki.build_watcher --vault "$VAULT" --keep "$KEEP"
