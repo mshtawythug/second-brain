@@ -131,9 +131,12 @@ def _patch_embedder(monkeypatch: pytest.MonkeyPatch, fake_embedder: object) -> N
 def test_ingest_gmail_requires_scope_flag(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
+    tmp_path: Path,
 ) -> None:
     """Bare `ingest-gmail` with no scope flags exits non-zero with a helpful message."""
+    # Sandbox vault even though this path exits before any ingest writes.
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     result = CliRunner().invoke(app, ["ingest-gmail"])
     assert result.exit_code != 0
     combined = (result.output + (result.stderr if result.stderr_bytes else "")).lower()
@@ -144,6 +147,7 @@ def test_ingest_gmail_with_label(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """`ingest-gmail --label ...` ingests one ``email_thread`` doc per Gmail thread.
 
@@ -151,7 +155,9 @@ def test_ingest_gmail_with_label(
     single-message thread now lands as ``content_type='email_thread'`` so the
     schema invariant (one document per ``threadId``) holds uniformly.
     """
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     msgs = {
         "m1": _msg(id="m1", subject="Hi", from_addr="n@x", body="Hello there"),
     }
@@ -173,6 +179,7 @@ def test_ingest_gmail_dry_run_does_not_write(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """`--dry-run` lists thread breakdown without writing to the DB.
 
@@ -180,7 +187,9 @@ def test_ingest_gmail_dry_run_does_not_write(
     the subject for the report, but skips ``ingest_document`` entirely so
     no rows land in ``documents`` / ``sources`` / ``chunks``.
     """
+    # Sandbox vault even for dry-run (no writes occur, but keeps isolation consistent).
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     msgs = {
         "m1": _msg(id="m1", subject="Hi", from_addr="n@x", body="Hello there"),
         "m2": _msg(id="m2", subject="Bye", from_addr="n@x", body="Goodbye"),
@@ -206,6 +215,7 @@ def test_ingest_gmail_idempotent_on_re_run(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """A second run on an unchanged thread is a no-op (P2.2 same-hash short-circuit).
 
@@ -213,7 +223,9 @@ def test_ingest_gmail_idempotent_on_re_run(
     ``documents`` row + a single ``sources`` row across re-ingests, and
     that the second run reports the thread as skipped.
     """
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     msgs = {
         "m1": _msg(id="m1", subject="Hi", from_addr="n@x", body="Hello there"),
     }
@@ -243,6 +255,7 @@ def test_ingest_gmail_continues_on_per_thread_failure(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """A `GmailError` on one thread must not abort the whole batch.
 
@@ -250,7 +263,9 @@ def test_ingest_gmail_continues_on_per_thread_failure(
     thread's lone message. The good thread still ingests, the bad thread
     is logged as failed, and the final summary reports the split.
     """
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
 
     good = {
         "good1": _msg(
@@ -304,6 +319,7 @@ def test_ingest_gmail_groups_by_thread_id(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """Four messages from two threads (3+1) collapse into 2 documents.
 
@@ -311,7 +327,9 @@ def test_ingest_gmail_groups_by_thread_id(
     row per ``threadId``, with ``thread_id`` populated in metadata + the
     typed column for downstream column-promotion.
     """
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     msgs = {
         "m1": _msg(
             id="m1",
@@ -375,6 +393,7 @@ def test_ingest_gmail_existing_thread_with_new_message_updates(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """A thread that grows by one message updates the existing row in place.
 
@@ -384,7 +403,9 @@ def test_ingest_gmail_existing_thread_with_new_message_updates(
     The document UUID is preserved across the update so downstream links /
     derived_links continue to point at the same row (P2.2 invariant).
     """
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
 
     def _make_msg(idx: int) -> dict[str, Any]:
         prefix = "" if idx == 1 else "Re: "
@@ -438,6 +459,7 @@ def test_ingest_gmail_progress_output_format(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """Three threads ingested → 3 per-thread lines + 1 summary line.
 
@@ -446,7 +468,9 @@ def test_ingest_gmail_progress_output_format(
     <Y> skipped (unchanged), <Z> skipped (drafts), <W> failed`` summary
     at the end.
     """
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     msgs = {
         "m1": _msg(
             id="m1",
@@ -930,9 +954,12 @@ def test_cli_ingest_gmail_populates_directory(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """End-to-end: ``brain ingest-gmail`` writes ``directory_entries`` rows."""
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     msgs = {
         "m1": _msg(
             id="m1",
@@ -1147,6 +1174,7 @@ def test_ingest_gmail_skips_draft_only_thread(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """A thread with one DRAFT-only message is skipped, not failed.
 
@@ -1159,7 +1187,9 @@ def test_ingest_gmail_skips_draft_only_thread(
     that returns a draft anyway (e.g. from a stub built before the
     list-side filter shipped) — the per-thread extractor catches it.
     """
+    # Sandbox vault even though drafts are skipped before any write.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
 
     draft_msg = {
         "id": "d1",
@@ -1212,6 +1242,7 @@ def test_ingest_gmail_drops_draft_from_mixed_thread(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """A thread of [sent, draft, sent] yields one ingested doc with 2 sections.
 
@@ -1219,7 +1250,9 @@ def test_ingest_gmail_drops_draft_from_mixed_thread(
     only the sent messages. ``message_count=2``, body shows two
     sections (one plain H2 + one collapsed <details>).
     """
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
 
     def _build(
         msg_id: str,

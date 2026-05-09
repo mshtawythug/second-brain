@@ -25,6 +25,52 @@ TEST_DATABASE_URL = os.environ.get(
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _force_test_vault_path(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Prevent the test suite from writing fixtures into ~/brain-vault.
+
+    Without this, any test that invokes a CLI ingest command without an
+    explicit ``monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))``
+    override will resolve ``Config.load().vault_path`` to the user's real
+    ``~/brain-vault`` and write vault-mirror files there.  On 2026-05-08/09
+    ~50 test fixtures leaked into the prod vault, causing
+    ``unique constraint violation (mirror drift)`` errors that saturated the
+    file watcher.
+
+    Sets ``os.environ["BRAIN_VAULT_PATH"]`` to a session-scoped tmp dir for
+    the entire pytest session — mirroring the pattern used by
+    :func:`_force_test_database_url` for ``DATABASE_URL``.  Per-test
+    ``monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))`` calls still
+    work — ``monkeypatch`` undoes itself per-test, after which this
+    session-scope assignment continues to hold.
+
+    Hard-fails immediately if ``BRAIN_VAULT_PATH`` is already set to the real
+    vault at session start (e.g., exported in the shell environment).
+    """
+    real_vault = (Path.home() / "brain-vault").resolve()
+
+    # Pre-flight: fail now rather than silently leak into the live corpus.
+    current_env = os.environ.get("BRAIN_VAULT_PATH")
+    if current_env is not None:
+        current_resolved = Path(current_env).expanduser().resolve()
+        assert current_resolved != real_vault, (
+            f"BRAIN_VAULT_PATH is already set to the real vault ({real_vault})! "
+            "Running the test suite would write test fixtures into your live "
+            "knowledge base. Unset BRAIN_VAULT_PATH or point it at a test directory."
+        )
+
+    session_vault = tmp_path_factory.mktemp("vault")
+    original = os.environ.get("BRAIN_VAULT_PATH")
+    os.environ["BRAIN_VAULT_PATH"] = str(session_vault)
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("BRAIN_VAULT_PATH", None)
+        else:
+            os.environ["BRAIN_VAULT_PATH"] = original
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _force_test_database_url() -> Iterator[None]:
     """Bulletproof prod-DB isolation for the entire test session.
 

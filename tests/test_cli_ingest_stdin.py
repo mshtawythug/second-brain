@@ -73,8 +73,11 @@ def test_ingest_stdin_creates_document(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     result = CliRunner().invoke(
         app,
         [
@@ -106,8 +109,13 @@ def test_ingest_stdin_dedups_on_external_id(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
+    # Without this, "ts-1" + title "Thread" leaked _ingested/slack/YYYY-MM-DD-ts1-thread.md
+    # into the prod vault on 2026-05-08/09.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     args = [
         "ingest-stdin",
         "--source", "slack",
@@ -127,9 +135,12 @@ def test_ingest_stdin_empty_input_fails(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """Empty stdin content is a user error — exit 1 with a red message."""
+    # Sandbox vault even though empty input exits before any write.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     result = CliRunner().invoke(
         app,
         [
@@ -149,9 +160,12 @@ def test_ingest_stdin_date_flag_populates_metadata(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """--date is merged into source+document metadata under the 'date' key."""
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     result = CliRunner().invoke(
         app,
         [
@@ -217,9 +231,14 @@ def test_ingest_stdin_force_reingests(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """With --force, a repeat ingest of the same content replaces the prior row."""
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
+    # Without this, "ts-force" + title "Thread" leaked _ingested/slack/YYYY-MM-DD-ts-force-thread.md
+    # into the prod vault on 2026-05-08/09.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     args = [
         "ingest-stdin",
         "--source", "slack",
@@ -539,6 +558,7 @@ def test_cli_krisp_ingest_threads_real_runner(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
+    tmp_path: Path,
 ) -> None:
     """Smoke test: ``brain ingest-stdin --source krisp`` constructs ``real_gws_runner``.
 
@@ -548,7 +568,9 @@ def test_cli_krisp_ingest_threads_real_runner(
     catches and downgrades to a warning. The ingest still succeeds and the
     document lands in the DB; ``_participant_keys`` is materialized.
     """
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     # Force the real runner's PATH check to fail → DirectoryRefreshError
     # which the refresh helpers catch → soft warning, ingest continues.
     monkeypatch.setattr(

@@ -26,8 +26,11 @@ def test_ingest_single_file(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fixtures_dir: Path,
+    tmp_path: Path,
 ) -> None:
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(app, ["ingest", str(fixtures_dir / "sample.txt")])
     assert result.exit_code == 0, result.output
@@ -38,9 +41,12 @@ def test_ingest_same_file_twice_is_skipped(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fixtures_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """Second ingest of the same content should be reported as skipped."""
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     _patch_embedder(monkeypatch)
     runner = CliRunner()
     first = runner.invoke(app, ["ingest", str(fixtures_dir / "sample.txt")])
@@ -54,9 +60,12 @@ def test_ingest_force_re_ingests(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fixtures_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """With --force, a repeat ingest replaces the prior row."""
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     _patch_embedder(monkeypatch)
     runner = CliRunner()
     runner.invoke(app, ["ingest", str(fixtures_dir / "sample.txt")])
@@ -71,8 +80,11 @@ def test_ingest_dir_recursive(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fixtures_dir: Path,
+    tmp_path: Path,
 ) -> None:
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(app, ["ingest-dir", str(fixtures_dir)])
     assert result.exit_code == 0, result.output
@@ -85,8 +97,11 @@ def test_ingest_with_tag(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fixtures_dir: Path,
+    tmp_path: Path,
 ) -> None:
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(
         app, ["ingest", str(fixtures_dir / "sample.txt"), "--tag", "career"]
@@ -101,9 +116,12 @@ def test_ingest_dir_dry_run(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fixtures_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """--dry-run lists files without touching the database."""
+    # Sandbox vault even for dry-run (no writes occur, but keeps isolation consistent).
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(
         app, ["ingest-dir", str(fixtures_dir), "--dry-run"]
@@ -120,9 +138,12 @@ def test_ingest_dir_ext_filter(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fixtures_dir: Path,
+    tmp_path: Path,
 ) -> None:
     """--ext limits the file types considered."""
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     _patch_embedder(monkeypatch)
     result = CliRunner().invoke(
         app, ["ingest-dir", str(fixtures_dir), "--ext", "txt"]
@@ -139,14 +160,18 @@ def test_ingest_dir_continues_on_per_file_error(
     tmp_path: Path,
 ) -> None:
     """A corrupt file in the tree is reported but doesn't stop the run."""
+    # Sandbox vault so mirror writes don't touch ~/brain-vault.
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
     _patch_embedder(monkeypatch)
 
     # Real good file + a bogus PDF that will fail extraction
-    (tmp_path / "good.txt").write_text("hello world\n\nsecond paragraph", encoding="utf-8")
-    (tmp_path / "bad.pdf").write_bytes(b"not-a-real-pdf")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "good.txt").write_text("hello world\n\nsecond paragraph", encoding="utf-8")
+    (src / "bad.pdf").write_bytes(b"not-a-real-pdf")
 
-    result = CliRunner().invoke(app, ["ingest-dir", str(tmp_path)])
+    result = CliRunner().invoke(app, ["ingest-dir", str(src)])
     assert result.exit_code == 0, result.output
     assert "good.txt" in result.output
     assert "failed" in result.output.lower()
