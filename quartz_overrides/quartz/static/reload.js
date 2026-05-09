@@ -31,7 +31,7 @@
 // our flow (we serve via Caddy, not Quartz) — so this polling
 // loop is the replacement reload mechanism.
 //
-// Mechanism: every 3s, fetch `/.build-id` (a one-line text file
+// Mechanism: every 1s, fetch `/.build-id` (a one-line text file
 // `brain.wiki.build_swap` writes to each build dir) as a conditional
 // request after the first successful response. Caddy serves the file
 // with an ETag; this client reuses that ETag via `If-None-Match` so
@@ -60,11 +60,12 @@
 // No polyfills, no IE, no transpile. Uses `fetch`, async/await,
 // and `document.visibilityState` — all baseline since 2017.
 ;(function () {
-  // Polling cadence in ms. 3s is a good tradeoff between user
-  // perception ("my edit appeared instantly") and request
-  // overhead. 10 tabs × 3s = ~3 req/s against Caddy, which is
-  // negligible for a static file the size of a UUID.
-  var INTERVAL_MS = 3000
+  // Polling cadence in ms. 1s keeps edit-to-UI latency at ≤1s for
+  // warm builds. Server load remains trivial: responses are
+  // ETag-gated (304 No Body on unchanged builds), so
+  // 10 tabs × 1s = ~10 req/s against Caddy, still negligible for
+  // a UUID-sized static file.
+  var INTERVAL_MS = 1000
 
   // Path to the per-build identifier. `brain.wiki.build_swap`
   // writes a one-line file at the build dir's root; Caddy's
