@@ -62,6 +62,7 @@ def _slice_between(source: str, start_marker: str, end_marker: str) -> str:
     assert start != -1, f"start marker not found in source: {start_marker!r}"
     end = source.find(end_marker, start + len(start_marker))
     if end == -1:
+        # end_marker absent: slice extends to EOF (covers the last function in a file).
         return source[start:]
     return source[start:end]
 
