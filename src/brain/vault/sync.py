@@ -1072,7 +1072,8 @@ def _update_document(
           tags = %s,
           metadata = %s::jsonb,
           kind = %s,
-          vault_path = %s
+          vault_path = %s,
+          ingested_at = NOW()
         WHERE id = %s
         """,
         (

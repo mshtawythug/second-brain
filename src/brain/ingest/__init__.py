@@ -668,6 +668,11 @@ def _update_thread_doc_in_place(
         "content_type=%s",
         "tags=%s",
         "metadata=%s::jsonb",
+        # Bump ingested_at on every content update so `brain status`'s
+        # `last ingest` and the homepage recent-rail reflect actual ingest
+        # activity, not just the original creation time. Default-NOW() on
+        # INSERT means newly-created rows still get the right value.
+        "ingested_at=NOW()",
     ]
     params: list[Any] = [
         source_id,
@@ -1073,6 +1078,10 @@ def update_document(
                     )
 
         if sets:
+            # Same rationale as update_document: bump ingested_at so
+            # `brain status`'s last-ingest stat and the vault-export
+            # `updated:` frontmatter field reflect actual edits.
+            sets.append("ingested_at=NOW()")
             params.append(document_id)
             conn.execute(
                 f"UPDATE documents SET {', '.join(sets)} WHERE id=%s",
