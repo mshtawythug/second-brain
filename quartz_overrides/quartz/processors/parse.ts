@@ -10,11 +10,11 @@
 //      On each file, computes a cache key and checks the MDAST cache before
 //      running `processor.parse` + `processor.run`. Hit → push reconstituted
 //      MarkdownContent and continue. Miss → run existing path, then store.
-//   2. `createMarkdownParser` loop: similarly caches [HtmlRoot, file] keyed
-//      on sha256(serialised-MDAST + slug) — the second cache layer for the
-//      remark-rehype step. Typically a no-op speedup (remark-rehype is fast)
-//      but included for completeness.
-//   3. `parseMarkdown`: computes `cacheDir` (defaults to
+//      Only the MDAST phase is cached: the cache key is deterministic on
+//      (file_bytes, slug) and the dominant build cost is `processor.parse` +
+//      `processor.run` (remark), not the remark-rehype step that follows.
+//      The HTML phase (`createMarkdownParser`) is left identical to upstream.
+//   2. `parseMarkdown`: computes `cacheDir` (defaults to
 //      `<argv.directory>/.cache/parser` unless ctx.cacheDir is already set
 //      or `argv.noCache` is true). Propagates `cacheDir` to workers via the
 //      `serializableCtx` literal.
@@ -128,14 +128,6 @@ type MdCacheEntry = {
   data: Record<string, unknown>
 }
 
-// brain-cache: shape of a stored HTML cache entry.
-type HtmlCacheEntry = {
-  version: number
-  slug: string
-  ast: HTMLRoot
-  data: Record<string, unknown>
-}
-
 export function createFileParser(ctx: BuildCtx, fps: FilePath[]) {
   const { argv, cfg } = ctx
   return async (processor: QuartzMdProcessor) => {
@@ -167,15 +159,22 @@ export function createFileParser(ctx: BuildCtx, fps: FilePath[]) {
         const mdKey = ctx.cacheDir ? cacheKey(rawBytes, file.data.slug as string) : null
         if (mdKey !== null) {
           const cached = getCached<MdCacheEntry>(ctx.cacheDir!, mdKey)
+          // belt-and-suspenders: version is already baked into the cache key (the
+          // key hash includes CACHE_VERSION), so a stale entry at a different key
+          // path is simply a miss. The explicit version check here guards the
+          // unlikely edge case where two builds with different CACHE_VERSION values
+          // happen to collide on a key (sha256 collision) — effectively impossible,
+          // but cheap to double-check.
           if (cached !== null && cached.version === CACHE_VERSION) {
             // Reconstitute MarkdownContent from cached entry.
-            // Restore the VFile with the original path+bytes and the
-            // transformer-populated data map.
+            // value is set to the trimmed string so cache-hit and cache-miss
+            // paths produce the same file.value shape for downstream emitters.
             const cachedFile = new VFile({ path: fp as string, value: rawBytes })
+            cachedFile.value = rawBytes.toString().trim()
             cachedFile.data = cached.data as typeof file.data
             res.push([cached.ast, cachedFile])
             if (argv.verbose) {
-              console.log(`[markdown hit] ${fp} -> ${file.data.slug} (${perf.timeSince()})`)
+              console.log(`[markdown hit] ${fp} -> ${cachedFile.data.slug} (${perf.timeSince()})`)
             }
             continue
           }
@@ -215,38 +214,7 @@ export function createMarkdownParser(ctx: BuildCtx, mdContent: MarkdownContent[]
       try {
         const perf = new PerfTimer()
 
-        // brain-cache: key the HTML cache on the serialised MDAST + slug so
-        // that any change in the parse output (from either a file edit or a
-        // transformer version bump) produces a new key.
-        const slug = (file.data.slug ?? "") as string
-        const htmlKey = ctx.cacheDir
-          ? cacheKey(Buffer.from(JSON.stringify(ast)), slug)
-          : null
-
-        if (htmlKey !== null) {
-          const cached = getCached<HtmlCacheEntry>(ctx.cacheDir!, htmlKey)
-          if (cached !== null && cached.version === CACHE_VERSION) {
-            file.data = cached.data as typeof file.data
-            res.push([cached.ast, file])
-            if (ctx.argv.verbose) {
-              console.log(`[html hit] ${slug} (${perf.timeSince()})`)
-            }
-            continue
-          }
-        }
-
         const newAst = await processor.run(ast as MDRoot, file)
-
-        // brain-cache: store HTML result.
-        if (htmlKey !== null) {
-          putCached<HtmlCacheEntry>(ctx.cacheDir!, htmlKey, {
-            version: CACHE_VERSION,
-            slug,
-            ast: newAst,
-            data: file.data as Record<string, unknown>,
-          })
-        }
-
         res.push([newAst, file])
 
         if (ctx.argv.verbose) {

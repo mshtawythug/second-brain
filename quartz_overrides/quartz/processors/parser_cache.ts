@@ -12,13 +12,15 @@
 // therefore makes every existing entry unreachable without deleting them.
 // Disk: <cacheDir>/<key[0:2]>/<key[2:4]>/<key>.json (two-level sharding
 // keeps any single directory under a few thousand entries at vault scale).
-// Atomicity: write to <path>.<pid>.tmp, then fs.renameSync (POSIX-atomic).
-// Two workers writing the same key race to the same final bytes (same
-// content) so the last rename wins without corruption.
+// Atomicity: write to <path>.<pid>.<uuid>.tmp, then fs.renameSync (POSIX-atomic).
+// pid + randomUUID() guarantees a unique tmp path per write even across
+// worker_threads sharing the same pid, so concurrent writes to the same key
+// are independent: they race to rename identical content and the last rename
+// wins without corruption.
 // Eviction: none. Disk grows O(vault size). The entire cache directory
 // can be deleted at any time — the next build regenerates it.
 
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 
@@ -42,10 +44,11 @@ export function cachePath(cacheDir: string, key: string): string {
   return join(cacheDir, key.slice(0, 2), key.slice(2, 4), `${key}.json`)
 }
 
-// getCached reads and JSON-parses the cache entry for key, returning null on
-// ENOENT (clean miss). Any other error (bad JSON, permission denied, etc.) is
-// rethrown so the build surfaces it rather than silently falling back to a
-// re-parse that might also fail.
+// getCached reads and JSON-parses the cache entry for key.
+// Returns null on ENOENT (clean miss) or SyntaxError (corrupt/truncated file —
+// logged as a warning so the next build silently regenerates the entry without
+// crashing the whole build). Any other unexpected error (permissions, I/O, etc.)
+// is rethrown.
 export function getCached<T>(cacheDir: string, key: string): T | null {
   const p = cachePath(cacheDir, key)
   try {
@@ -53,6 +56,10 @@ export function getCached<T>(cacheDir: string, key: string): T | null {
     return JSON.parse(raw) as T
   } catch (err: unknown) {
     if (err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "ENOENT") {
+      return null
+    }
+    if (err instanceof SyntaxError) {
+      console.warn(`[parser_cache] discarding corrupt entry ${p}: ${err.message}`)
       return null
     }
     throw err
@@ -65,7 +72,7 @@ export function getCached<T>(cacheDir: string, key: string): T | null {
 export function putCached<T>(cacheDir: string, key: string, value: T): void {
   const p = cachePath(cacheDir, key)
   mkdirSync(dirname(p), { recursive: true })
-  const tmp = `${p}.${process.pid}.tmp`
+  const tmp = `${p}.${process.pid}.${randomUUID()}.tmp`
   writeFileSync(tmp, JSON.stringify(value))
   renameSync(tmp, p)
 }

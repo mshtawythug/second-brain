@@ -211,6 +211,31 @@ describe("getCached + putCached", () => {
     assert.deepEqual(retrieved, entry)
   })
 
+  test("corrupt JSON: getCached returns null and emits warning", () => {
+    // Simulate a truncated write (e.g. kill -9 mid-write or disk full).
+    // getCached should treat this as a soft miss, not crash the build.
+    const bytes = Buffer.from("valid content")
+    const slug = "docs/corrupt"
+    const key = cacheKey(bytes, slug)
+    const p = cachePath(tmpDir, key)
+    mkdirSync(dirname(p), { recursive: true })
+    writeFileSync(p, "{ not json") // deliberately invalid JSON
+
+    // Capture console.warn output to verify the warning is emitted
+    const warnings: string[] = []
+    const origWarn = console.warn
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "))
+    try {
+      const result = getCached(tmpDir, key)
+      assert.equal(result, null)
+      assert.ok(warnings.length > 0, "expected a warning to be emitted")
+      assert.ok(warnings[0].includes("[parser_cache]"), `warning should mention [parser_cache], got: ${warnings[0]}`)
+      assert.ok(warnings[0].includes("corrupt"), `warning should mention corrupt, got: ${warnings[0]}`)
+    } finally {
+      console.warn = origWarn
+    }
+  })
+
   test("getCached rethrows unexpected errors (not ENOENT)", () => {
     // Create the shard dir but make the cache file a directory (unreadable as file)
     const key = cacheKey(Buffer.from("bad"), "slug")
