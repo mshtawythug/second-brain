@@ -7,4 +7,4 @@ class BrainWikiError(BrainError):
 
 
 class BrainWikiBuildError(BrainWikiError):
-    """The ``npx quartz build`` subprocess exited non-zero or never produced output."""
+    """The Quartz build subprocess exited non-zero, timed out, or the workspace is broken."""

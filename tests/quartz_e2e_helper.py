@@ -181,10 +181,9 @@ def quartz_build(
     """Run ``npx quartz build --directory <vault> --output <output>``.
 
     The invocation matches ``brain.wiki.build_swap._run_build``'s
-    ``output-flag`` branch — same flag form, same workspace cwd, same
-    arg order. Reusing the canonical shape (rather than reimplementing
-    it) keeps drift between the harness and the production builder
-    minimal.
+    invocation — same flag form, same workspace cwd, same arg order.
+    Reusing the canonical shape (rather than reimplementing it) keeps
+    drift between the harness and the production builder minimal.
 
     ``output`` must NOT exist before the call (Quartz will create it).
     Raises ``subprocess.CalledProcessError`` on non-zero exit; the

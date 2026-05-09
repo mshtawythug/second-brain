@@ -511,7 +511,6 @@ def test_build_and_swap_calls_refresh_homepage(
         "brain.wiki.build_related.refresh_related",
         lambda _cfg: None,
     )
-    monkeypatch.setattr(bs, "_probe_build_method", lambda *a, **kw: "output-flag")
     monkeypatch.setattr(bs, "_run_build", fake_run_build)
 
     monkeypatch.setenv("DATABASE_URL", "postgresql://x:x@localhost:5432/x")
@@ -520,9 +519,14 @@ def test_build_and_swap_calls_refresh_homepage(
     quartz = vault / ".quartz"
     quartz.mkdir()
     (quartz / "quartz.config.ts").write_text("", encoding="utf-8")
+    # bootstrap-cli.mjs must exist for _check_workspace to pass (Task 5: node-direct).
+    (quartz / "quartz").mkdir()
+    (quartz / "quartz" / "bootstrap-cli.mjs").write_text("// stub\n")
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
 
-    bs.build_and_swap(vault, quartz_dir=quartz)
+    # Pass node_path explicitly so the test doesn't depend on node being on PATH.
+    # _run_build is already patched above; node_path just bypasses shutil.which().
+    bs.build_and_swap(vault, quartz_dir=quartz, node_path="node")
 
     assert len(refresh_calls) == 1
     # The cfg passed to refresh has vault_path == the resolved CLI vault.

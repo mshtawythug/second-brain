@@ -253,13 +253,17 @@ def test_build_and_swap_calls_refresh_related(
     monkeypatch.setattr(
         "brain.wiki.build_related.refresh_related", fake_refresh_related
     )
-    monkeypatch.setattr(bs, "_probe_build_method", lambda *a, **kw: "output-flag")
     monkeypatch.setattr(bs, "_run_build", fake_run_build)
 
     quartz = vault / ".quartz"
     quartz.mkdir()
     (quartz / "quartz.config.ts").write_text("", encoding="utf-8")
-    bs.build_and_swap(vault, quartz_dir=quartz)
+    # bootstrap-cli.mjs must exist for _check_workspace to pass (Task 5: node-direct).
+    (quartz / "quartz").mkdir()
+    (quartz / "quartz" / "bootstrap-cli.mjs").write_text("// stub\n")
+    # Pass node_path explicitly so the test doesn't depend on node being on PATH.
+    # _run_build is already patched above; node_path just bypasses shutil.which().
+    bs.build_and_swap(vault, quartz_dir=quartz, node_path="node")
 
     assert len(calls) == 1
     assert calls[0].vault_path == vault.resolve()

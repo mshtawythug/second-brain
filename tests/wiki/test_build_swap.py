@@ -1,75 +1,68 @@
 """Unit tests for ``brain.wiki.build_swap``.
 
-Exercises the build + swap + GC pipeline against a stub ``npx`` script.
+Exercises the build + swap + GC pipeline against a stub ``node`` script.
 The stub is a real executable Python file written into ``tmp_path`` and
 invoked through :func:`subprocess.run` — no monkey-patching of
-production code, just an alternate ``npx_path`` argument.
+production code, just an alternate ``node_path`` argument.
 
-The stub reads two env vars to decide what to do:
+The stub reads one env var to decide what to do:
 
-- ``STUB_OUTPUT_FLAG`` (default ``1``): whether ``--help`` advertises
-  ``--output`` (controls which build method :mod:`build_swap` picks).
 - ``STUB_FAIL`` (default ``0``): if ``1``, exit non-zero after partial
   output (lets us assert the cleanup-on-failure path).
 
-Tests set these via :func:`pytest.MonkeyPatch.setenv` so both the probe
-subprocess (which inherits the parent's env) and the build subprocess
-see the same flags. Each test gets its own ``tmp_path`` and a freshly
-cleared probe cache (see ``_clear_probe_cache``) to keep behavior
-independent across tests.
+Tests set these via :func:`pytest.MonkeyPatch.setenv` so the build
+subprocess sees the right flags.  Each test gets its own ``tmp_path``
+to keep behavior independent across tests.
 """
 from __future__ import annotations
 
 import os
 import re
 import stat
-import subprocess
 import threading
 import time
 from pathlib import Path
 
 import pytest
+from pytest_mock import MockerFixture
 
 from brain.wiki.build_swap import (
     BuildResult,
-    _cached_probe,
     _garbage_collect,
+    _run_build,
     build_and_swap,
     main,
 )
 from brain.wiki.errors import BrainWikiBuildError, BrainWikiError
 
 # ---------------------------------------------------------------------------
-# Stub npx — written into tmp_path so each test runs against a fresh exe.
+# Stub node — written into tmp_path so each test runs against a fresh exe.
 # ---------------------------------------------------------------------------
 
 
-_STUB_SOURCE = '''\
+_NODE_STUB_SOURCE = '''\
 #!/usr/bin/env python3
-"""Stub ``npx`` for build_swap tests.
+"""Stub ``node`` for build_swap tests.
 
-Reads ``STUB_OUTPUT_FLAG`` / ``STUB_FAIL`` env vars to decide what to do
-without monkey-patching production code. Argv shape mirrors what
-build_swap invokes:
+Mimics the calling convention of
+``node <workspace>/quartz/bootstrap-cli.mjs build --directory <vault> --output <out>``.
+Argv shape when invoked:
 
-  npx quartz build --help
-  npx quartz build --directory <vault> [--output <out>]
+  argv[0] = this stub (acts as the node binary)
+  argv[1] = path to bootstrap-cli.mjs (ignored — just here for shape)
+  argv[2] = "build"
+  argv[3] = "--directory"
+  argv[4] = <vault>
+  argv[5] = "--output"
+  argv[6] = <build_dir>
+
+Reads ``STUB_FAIL`` env var: if ``1``, emit partial output and exit 1.
 """
 from __future__ import annotations
 
 import os
 import pathlib
 import sys
-
-
-def _emit_help() -> int:
-    output_flag = os.environ.get("STUB_OUTPUT_FLAG", "1") == "1"
-    text = "Usage: quartz build [options]\\n"
-    if output_flag:
-        text += "  --output <dir>   write site to dir\\n"
-    text += "  --directory <dir>  read content from dir\\n"
-    sys.stdout.write(text)
-    return 0
 
 
 def _emit_site(target: pathlib.Path, *, partial: bool) -> None:
@@ -82,15 +75,8 @@ def _emit_site(target: pathlib.Path, *, partial: bool) -> None:
 
 
 def main() -> int:
-    argv = sys.argv[1:]
-    if argv[:1] != ["quartz"]:
-        sys.stderr.write(f"unexpected argv: {argv}\\n")
-        return 2
-    if argv[1:2] != ["build"]:
-        sys.stderr.write(f"unexpected argv: {argv}\\n")
-        return 2
-    if "--help" in argv:
-        return _emit_help()
+    # argv[1] = bootstrap-cli.mjs path (ignored), argv[2] = "build"
+    argv = sys.argv[1:]  # drop the stub (node) path
 
     fail = os.environ.get("STUB_FAIL", "0") == "1"
 
@@ -115,17 +101,16 @@ if __name__ == "__main__":
 '''
 
 
-def _stub_npx(tmp_path: Path) -> Path:
-    """Write an executable stub-npx script into ``tmp_path``.
+def _stub_node(tmp_path: Path) -> Path:
+    """Write an executable stub-node script into ``tmp_path``.
 
     Returns the path the test should pass to ``build_and_swap`` as
-    ``npx_path``. Behaviour is parameterized via env vars
-    (``STUB_OUTPUT_FLAG``, ``STUB_FAIL``) so a single source covers
-    every test scenario — the test sets them via
+    ``node_path``.  Behaviour is parameterized via env vars (``STUB_FAIL``)
+    so a single source covers every test scenario — the test sets them via
     :func:`pytest.MonkeyPatch.setenv` before calling.
     """
-    stub = tmp_path / "npx-stub"
-    stub.write_text(_STUB_SOURCE, encoding="utf-8")
+    stub = tmp_path / "node-stub"
+    stub.write_text(_NODE_STUB_SOURCE, encoding="utf-8")
     stub.chmod(stub.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     return stub
 
@@ -135,7 +120,8 @@ def _make_workspace(tmp_path: Path) -> tuple[Path, Path]:
 
     Returns ``(vault, quartz_dir)``. The workspace gets a stub
     ``quartz.config.ts`` so :func:`build_swap._check_workspace` lets us
-    through.
+    through, and a stub ``quartz/bootstrap-cli.mjs`` so the node-direct
+    bootstrap check passes.
     """
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -143,18 +129,10 @@ def _make_workspace(tmp_path: Path) -> tuple[Path, Path]:
     quartz = vault / ".quartz"
     quartz.mkdir()
     (quartz / "quartz.config.ts").write_text("export default {}\n")
+    # bootstrap-cli.mjs must exist for _check_workspace to pass.
+    (quartz / "quartz").mkdir()
+    (quartz / "quartz" / "bootstrap-cli.mjs").write_text("// stub\n")
     return vault, quartz
-
-
-@pytest.fixture(autouse=True)
-def _clear_probe_cache() -> None:
-    """Drop the per-process help-probe cache between tests.
-
-    Each test uses a unique ``tmp_path`` so cache keys don't collide,
-    but clearing keeps the cache small and the test ordering robust
-    against future stub-path reuse.
-    """
-    _cached_probe.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -166,11 +144,10 @@ def test_happy_path_output_flag(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """``--output`` is supported → output-flag method runs end-to-end."""
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
     vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
+    node = _stub_node(tmp_path)
 
-    result = build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
+    result = build_and_swap(vault, quartz_dir=quartz, node_path=str(node))
 
     assert isinstance(result, BuildResult)
     assert result.method == "output-flag"
@@ -188,33 +165,15 @@ def test_happy_path_output_flag(
     assert result.elapsed_seconds >= 0.0
 
 
-def test_happy_path_rename_public_fallback(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """``--output`` absent → rename-public fallback writes to public/ then renames."""
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "0")
-    vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
-
-    result = build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
-
-    assert result.method == "rename-public"
-    assert result.build_dir.is_dir()
-    assert (result.build_dir / "index.html").is_file()
-    # public/ should no longer exist — it was renamed into the build dir.
-    assert not (quartz / "public").exists()
-
-
 def test_first_build_no_existing_current(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Cold start: ``current`` symlink doesn't exist; build creates it."""
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
     vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
+    node = _stub_node(tmp_path)
 
     assert not (quartz / "current").exists()
-    result = build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
+    result = build_and_swap(vault, quartz_dir=quartz, node_path=str(node))
     assert (quartz / "current").is_symlink()
     assert (quartz / "current").resolve() == result.build_dir.resolve()
 
@@ -228,10 +187,9 @@ def test_build_id_format(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Build id = ``YYYYMMDD-HHMMSS-<6 hex>`` exactly."""
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
     vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
-    result = build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
+    node = _stub_node(tmp_path)
+    result = build_and_swap(vault, quartz_dir=quartz, node_path=str(node))
     assert re.match(r"^\d{8}-\d{6}-[0-9a-f]{6}$", result.build_id), result.build_id
 
 
@@ -239,10 +197,9 @@ def test_build_dir_under_builds_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Build dir is exactly ``<quartz_dir>/builds/<build_id>``."""
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
     vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
-    result = build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
+    node = _stub_node(tmp_path)
+    result = build_and_swap(vault, quartz_dir=quartz, node_path=str(node))
     assert result.build_dir == (quartz / "builds" / result.build_id)
 
 
@@ -260,12 +217,11 @@ def test_atomicity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     with the rename. We assert no read raised FileNotFoundError and
     that every value read was a complete, valid build id.
     """
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
     vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
+    node = _stub_node(tmp_path)
 
     # Seed an initial build so readers always have something to read.
-    first = build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
+    first = build_and_swap(vault, quartz_dir=quartz, node_path=str(node))
 
     barrier = threading.Barrier(4)  # 3 readers + main
     errors: list[BaseException] = []
@@ -289,7 +245,7 @@ def test_atomicity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         r.start()
 
     barrier.wait()
-    second = build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
+    second = build_and_swap(vault, quartz_dir=quartz, node_path=str(node))
 
     for r in readers:
         r.join(timeout=5.0)
@@ -310,13 +266,12 @@ def test_gc_keeps_n_plus_active(
     always among the most-recent — ``keep`` survives, no extra slot
     needed for the active.
     """
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
     vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
+    node = _stub_node(tmp_path)
 
     for i in range(5):
         build_and_swap(
-            vault, quartz_dir=quartz, keep=2, npx_path=str(npx)
+            vault, quartz_dir=quartz, keep=2, node_path=str(node)
         )
         # mtime resolution is 1s on some filesystems — give each build
         # a distinct mtime so GC sort order is deterministic.
@@ -395,20 +350,19 @@ def test_build_failure_no_swap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A failing build must not retarget ``current`` and must clean up."""
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
     vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
+    node = _stub_node(tmp_path)
 
     # Seed a known-good build so we can observe that ``current``
     # didn't move after the failing build.
-    good = build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
+    good = build_and_swap(vault, quartz_dir=quartz, node_path=str(node))
     assert (quartz / "current").is_symlink()
     pre_target = os.readlink(quartz / "current")
     pre_count = len(list((quartz / "builds").iterdir()))
 
     monkeypatch.setenv("STUB_FAIL", "1")
     with pytest.raises(BrainWikiBuildError):
-        build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
+        build_and_swap(vault, quartz_dir=quartz, node_path=str(node))
 
     # Symlink still points at the good build.
     assert os.readlink(quartz / "current") == pre_target
@@ -443,15 +397,12 @@ def test_timeout_raises_build_error(tmp_path: Path) -> None:
     """A subprocess that exceeds ``timeout_seconds`` surfaces as a build error."""
     vault, quartz = _make_workspace(tmp_path)
 
-    # Stub that sleeps forever — written inline so we don't have to
-    # plumb yet another env var into the shared stub.
-    stub = tmp_path / "npx-sleep"
+    # Stub node that sleeps forever — written inline so we don't need to
+    # plumb extra env vars into the shared stub.
+    stub = tmp_path / "node-sleep"
     stub.write_text(
         "#!/usr/bin/env python3\n"
-        "import sys, time\n"
-        "if '--help' in sys.argv:\n"
-        "    print('--output supported')\n"
-        "    sys.exit(0)\n"
+        "import time\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
@@ -461,7 +412,7 @@ def test_timeout_raises_build_error(tmp_path: Path) -> None:
         build_and_swap(
             vault,
             quartz_dir=quartz,
-            npx_path=str(stub),
+            node_path=str(stub),
             timeout_seconds=0.5,
         )
     # No build dir lingering after timeout.
@@ -470,73 +421,145 @@ def test_timeout_raises_build_error(tmp_path: Path) -> None:
         assert not any(builds_dir.iterdir())
 
 
-def test_npx_not_found_surfaces_build_error(tmp_path: Path) -> None:
-    """Pointing at a non-existent ``npx_path`` raises :class:`BrainWikiBuildError`.
+def test_node_path_bogus_surfaces_build_error(tmp_path: Path) -> None:
+    """Pointing ``node_path`` at a non-existent binary raises :class:`BrainWikiBuildError`.
 
-    The probe falls back to ``rename-public`` on a missing binary, but
-    the build subprocess itself then fails with FileNotFoundError —
-    which we wrap in :class:`BrainWikiBuildError` so callers don't need
-    to know about subprocess internals.
+    A missing binary causes a FileNotFoundError (OSError subclass) in the
+    build subprocess, which we wrap in :class:`BrainWikiBuildError` so
+    callers don't need to know about subprocess internals.
     """
     vault, quartz = _make_workspace(tmp_path)
     bogus = tmp_path / "does-not-exist"
 
     with pytest.raises((BrainWikiBuildError, BrainWikiError)):
-        build_and_swap(vault, quartz_dir=quartz, npx_path=str(bogus))
+        build_and_swap(vault, quartz_dir=quartz, node_path=str(bogus))
     builds_dir = quartz / "builds"
     if builds_dir.exists():
         assert not any(builds_dir.iterdir())
 
 
 # ---------------------------------------------------------------------------
-# Tests — probe caching.
+# Regression tests — hard-fail paths.
 # ---------------------------------------------------------------------------
 
 
-def test_probe_runs_only_once_per_workspace(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The help-probe is cached so subsequent builds skip ``--help``.
+def test_build_and_swap_hard_fails_on_missing_bootstrap(tmp_path: Path) -> None:
+    """``build_and_swap`` raises :class:`BrainWikiBuildError` when bootstrap-cli.mjs is absent.
 
-    Two consecutive ``build_and_swap`` calls against the same workspace
-    should issue at most one ``--help`` probe — otherwise we'd add a
-    full ``npx`` warmup tax to every build.
+    Regression guard: the node-direct build path must fail loud with a
+    repair-path message rather than silently falling back to npx or
+    producing a confusing subprocess error about a missing script.
     """
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "hello.md").write_text("# hello\n")
+    quartz = vault / ".quartz"
+    quartz.mkdir()
+    (quartz / "quartz.config.ts").write_text("export default {}\n")
+    # Deliberately do NOT create quartz/bootstrap-cli.mjs.
+
+    with pytest.raises(BrainWikiBuildError, match="repair"):
+        build_and_swap(vault, quartz_dir=quartz, node_path="/usr/local/bin/node")
+
+
+def test_build_and_swap_hard_fails_when_node_missing(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """``build_and_swap`` raises :class:`BrainWikiBuildError` when node is not on PATH.
+
+    Regression guard: when ``node_path`` is ``None`` and ``shutil.which``
+    cannot locate the node binary, we must fail immediately with a clear
+    install hint rather than attempting any subprocess or npx fallback.
+    """
     vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
 
-    build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
-    info_after_one = _cached_probe.cache_info()
-    build_and_swap(vault, quartz_dir=quartz, npx_path=str(npx))
-    info_after_two = _cached_probe.cache_info()
+    mocker.patch("brain.wiki.build_swap.shutil.which", return_value=None)
 
-    assert info_after_one.misses == 1
-    # Second call hit the cache rather than incurring another miss.
-    assert info_after_two.misses == 1
-    assert info_after_two.hits >= 1
+    with pytest.raises(BrainWikiBuildError, match="node binary not found"):
+        build_and_swap(vault, quartz_dir=quartz)
+
+
+def test_build_and_swap_warns_when_npx_path_passed(tmp_path: Path) -> None:
+    """``build_and_swap`` emits :class:`DeprecationWarning` when ``npx_path`` is non-None.
+
+    Regression guard: Task 5 made the build node-direct and deprecated
+    ``npx_path``.  The parameter is kept on the public signature for API
+    compatibility but must surface a runtime warning so any caller still
+    passing it knows the value is ignored.  Pairing the warning with a
+    forced failure (missing bootstrap) keeps the test fast and avoids
+    standing up a real subprocess stub.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    quartz = vault / ".quartz"
+    quartz.mkdir()
+    (quartz / "quartz.config.ts").write_text("export default {}\n")
+    # Bootstrap intentionally absent → BrainWikiBuildError fires after warning.
+
+    with (
+        pytest.warns(DeprecationWarning, match="npx_path is deprecated"),
+        pytest.raises(BrainWikiBuildError),
+    ):
+        build_and_swap(
+            vault,
+            quartz_dir=quartz,
+            node_path="/usr/local/bin/node",
+            npx_path="npx",
+        )
 
 
 # ---------------------------------------------------------------------------
-# Sanity check on the stub itself — keeps test failures pointing at the
-# right layer when the stub is wrong rather than the production code.
+# Regression test — output-flag + node-direct pinning.
 # ---------------------------------------------------------------------------
 
 
-def test_stub_help_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub's ``--help`` advertises ``--output`` when STUB_OUTPUT_FLAG=1."""
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
-    npx = _stub_npx(tmp_path)
-    result = subprocess.run(  # noqa: S603 — list-form, no shell
-        [str(npx), "quartz", "build", "--help"],
-        env=os.environ.copy(),
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
+def test_run_build_uses_output_flag(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """``_run_build`` invokes ``node bootstrap-cli.mjs`` and always passes ``--output``.
+
+    Regression guard covering two invariants:
+    1. The first arg to the subprocess must be the node binary (not npx).
+    2. The second arg must end with ``bootstrap-cli.mjs``.
+    3. ``--output <build_dir>`` must appear in the args.
+
+    Originally introduced in Task 4 to pin ``--output`` (eliminating the
+    lru_cache-poisoned probe).  Extended in Task 5 to also pin the
+    node-direct calling convention.
+    """
+    _vault, quartz = _make_workspace(tmp_path)
+    build_dir = quartz / "builds" / "20260101-000000-abcdef"
+    build_dir.mkdir(parents=True)
+
+    node = "/usr/local/bin/node"
+    spy = mocker.patch("subprocess.run")
+
+    _run_build(
+        node_path=node,
+        workspace=quartz,
+        vault=tmp_path / "vault",
+        build_dir=build_dir,
+        timeout_seconds=60.0,
+        env=None,
     )
-    assert result.returncode == 0
-    assert "--output" in result.stdout
+
+    spy.assert_called_once()
+    call_args: list[str] = spy.call_args.args[0]
+
+    # First arg must be the node binary.
+    assert call_args[0] == node, (
+        f"expected node binary as first arg, got: {call_args}"
+    )
+    # Second arg must be the bootstrap-cli.mjs path.
+    assert call_args[1].endswith("bootstrap-cli.mjs"), (
+        f"expected bootstrap-cli.mjs as second arg, got: {call_args}"
+    )
+    # --output flag must be present with build_dir as its value.
+    assert "--output" in call_args, (
+        f"--output not found in subprocess args: {call_args}"
+    )
+    output_idx = call_args.index("--output")
+    assert call_args[output_idx + 1] == str(build_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -556,17 +579,16 @@ def test_main_prints_build_id(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """``main()`` prints the build id + elapsed time on success and returns 0."""
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
     vault, quartz = _make_workspace(tmp_path)
-    npx = _stub_npx(tmp_path)
+    node = _stub_node(tmp_path)
 
-    # Run the real build through main() but with the stub npx + isolated
+    # Run the real build through main() but with the stub node + isolated
     # workspace — exercises the full code path including parsing, build,
     # swap, GC, and stdout formatting.
     monkeypatch.setattr(
         "brain.wiki.build_swap.build_and_swap",
         lambda v, *, quartz_dir=None, keep=3: build_and_swap(
-            v, quartz_dir=quartz_dir, keep=keep, npx_path=str(npx)
+            v, quartz_dir=quartz_dir, keep=keep, node_path=str(node)
         ),
     )
 
@@ -583,10 +605,11 @@ def test_main_prints_build_id(
 
     assert rc == 0
     captured = capsys.readouterr()
-    # Stdout has one line: ``<build_id> (<elapsed>s, method=<m>)``.
+    # Stdout has one line: ``<build_id> (<elapsed>s, method=output-flag)``.
+    # method is always output-flag — Quartz 4.5.x is pinned.
     line = captured.out.strip()
     assert re.match(
-        r"^\d{8}-\d{6}-[0-9a-f]{6} \(\d+\.\d{2}s, method=(output-flag|rename-public)\)$",
+        r"^\d{8}-\d{6}-[0-9a-f]{6} \(\d+\.\d{2}s, method=output-flag\)$",
         line,
     ), line
 
@@ -598,14 +621,13 @@ def test_main_returns_nonzero_on_failure(
 ) -> None:
     """A wrapped :class:`BrainWikiError` from the build → exit 1 with stderr msg."""
     vault, quartz = _make_workspace(tmp_path)
-    monkeypatch.setenv("STUB_OUTPUT_FLAG", "1")
     monkeypatch.setenv("STUB_FAIL", "1")
-    npx = _stub_npx(tmp_path)
+    node = _stub_node(tmp_path)
 
     monkeypatch.setattr(
         "brain.wiki.build_swap.build_and_swap",
         lambda v, *, quartz_dir=None, keep=3: build_and_swap(
-            v, quartz_dir=quartz_dir, keep=keep, npx_path=str(npx)
+            v, quartz_dir=quartz_dir, keep=keep, node_path=str(node)
         ),
     )
 

@@ -1,22 +1,22 @@
 """Atomic blue/green Quartz build + symlink swap.
 
-Each call to :func:`build_and_swap` runs ``npx quartz build`` into a fresh
+Each call to :func:`build_and_swap` runs
+``node <quartz_dir>/quartz/bootstrap-cli.mjs build`` into a fresh
 ``<quartz_dir>/builds/<ts>-<rand>/`` directory and then atomically retargets
 the ``<quartz_dir>/current`` symlink at the new build via a temp-symlink +
-``rename(2)`` dance. Caddy serves ``current/`` directly, so readers only
+``rename(2)`` dance.  Caddy serves ``current/`` directly, so readers only
 ever see a fully-written tree — even mid-build, the previous build remains
 the one on the wire.
 
-Two build paths are supported:
+The local Quartz workspace (``<quartz_dir>/quartz/bootstrap-cli.mjs``) is
+invoked directly via ``node`` rather than ``npx quartz`` to eliminate the
+~100 s of npm-exec/package-resolution overhead that ``npx`` can introduce
+before Quartz's own build timer starts.  If ``bootstrap-cli.mjs`` is absent
+or ``node`` is not on PATH, :func:`build_and_swap` hard-fails with a clear
+repair-path message — there is **no automatic npx fallback**.
 
-- **output-flag** — Quartz versions that accept ``--output`` write the site
-  straight into the build directory.
-- **rename-public** — older Quartz versions only know about ``./public``,
-  so we run the build (which writes ``<quartz_dir>/public/``) and then
-  rename ``public/`` into the build directory ourselves.
-
-The choice between the two is made by probing ``npx quartz build --help``
-once per (npx_path, quartz_dir) pair and caching the result.
+Quartz 4.5.x (pinned in ``package.json``) reliably supports ``--output``,
+so ``_run_build`` uses that flag directly without any version probing.
 
 After a successful swap, old build directories are garbage-collected: the
 N most recent (by mtime) survive plus whichever directory ``current`` now
@@ -34,13 +34,13 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import functools
 import logging
 import secrets
 import shutil
 import subprocess
 import sys
 import time
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -54,16 +54,6 @@ from .errors import BrainWikiBuildError, BrainWikiError
 logger = logging.getLogger(__name__)
 
 
-# Hard ceiling on the help-probe subprocess. ``npx quartz build --help`` is
-# fast (sub-second locally) but the surrounding npx warmup can stall if the
-# global Quartz binary isn't cached — 30s is generous without being a hang.
-_PROBE_TIMEOUT_S = 30.0
-
-# Build method discriminant returned in :class:`BuildResult` so callers can
-# log/test which code path ran.
-BuildMethod = Literal["output-flag", "rename-public"]
-
-
 @dataclass(frozen=True)
 class BuildResult:
     """Summary of a single :func:`build_and_swap` invocation.
@@ -71,17 +61,18 @@ class BuildResult:
     ``build_dir`` is the absolute path to the new build's tree; ``build_id``
     is its basename and the value written into ``build_dir/.build-id`` for
     the reload-poller to read. ``elapsed_seconds`` covers the whole call
-    (probe + build + swap + GC). ``pruned`` lists every build directory
-    deleted by garbage collection — empty on early runs, non-empty once
-    we exceed ``keep``. ``method`` records which build path ran so that
-    bin/brain-status (and tests) can tell at a glance.
+    (build + swap + GC). ``pruned`` lists every build directory deleted by
+    garbage collection — empty on early runs, non-empty once we exceed
+    ``keep``. ``method`` is always ``"output-flag"`` (Quartz 4.5.x is
+    pinned and reliably supports ``--output``); it is preserved on the
+    result for observability and test assertions.
     """
 
     build_dir: Path
     build_id: str
     elapsed_seconds: float
     pruned: list[Path]
-    method: BuildMethod
+    method: Literal["output-flag"]
 
 
 def build_and_swap(
@@ -89,10 +80,11 @@ def build_and_swap(
     *,
     quartz_dir: Path | None = None,
     keep: int = 3,
-    npx_path: str = "npx",
+    node_path: str | None = None,
     timeout_seconds: float = 600.0,
     env: dict[str, str] | None = None,
     refresh_related_inline: bool = True,
+    npx_path: str | None = None,  # Deprecated and ignored. Kept for API compatibility.
 ) -> BuildResult:
     """Build the vault into a fresh dir and atomically retarget ``current``.
 
@@ -105,9 +97,18 @@ def build_and_swap(
     garbage-collect step (separately from the active ``current`` target,
     which is *always* preserved — see :func:`_garbage_collect`).
 
-    ``npx_path`` is the executable to invoke. Tests pass a stub script;
-    production passes the resolved ``shutil.which("npx")`` (or just
-    ``"npx"`` and trusts ``$PATH``).
+    ``node_path`` is the Node.js binary to invoke for the build subprocess.
+    When ``None`` (the default), it is resolved via
+    :func:`shutil.which`\\ ``("node")`` at call time.  If ``node`` is not on
+    PATH a :class:`BrainWikiBuildError` is raised with a clear install hint.
+    Tests may pass an explicit path to a stub node script.
+
+    ``npx_path`` is **deprecated and ignored** — accepted for backwards API
+    compatibility only.  Passing any non-``None`` value emits a
+    :class:`DeprecationWarning`.  The build subprocess now invokes ``node``
+    directly via the pinned local Quartz workspace
+    (``<quartz_dir>/quartz/bootstrap-cli.mjs``) to eliminate ~100 s of
+    npm-exec overhead from the watcher hot path.
 
     ``timeout_seconds`` is a hard wall-clock ceiling on the build
     subprocess. The default (10 min) accommodates large vaults with
@@ -118,19 +119,45 @@ def build_and_swap(
     the build subprocess — used by tests to opt the stub script into
     different output modes via env vars; production passes ``None``.
 
-    Raises :class:`BrainWikiError` if the workspace is missing, or
-    :class:`BrainWikiBuildError` wrapping the underlying
-    ``CalledProcessError`` / ``TimeoutExpired`` if the build itself fails.
-    Partial output (a half-written ``build_dir`` left behind by a failing
-    build) is cleaned up before the exception propagates so retries land
-    on a clean slate.
+    Raises :class:`BrainWikiError` if the workspace is missing or
+    ``bootstrap-cli.mjs`` is absent (with a repair-path hint); raises
+    :class:`BrainWikiBuildError` if ``node`` is not on PATH or if the build
+    subprocess fails.  Partial output (a half-written ``build_dir`` left
+    behind by a failing build) is cleaned up before the exception propagates
+    so retries land on a clean slate.
     """
+    if npx_path is not None:
+        warnings.warn(
+            "npx_path is deprecated and ignored; build now invokes node directly",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     started = time.monotonic()
     workspace = quartz_dir if quartz_dir is not None else vault / ".quartz"
-    _check_workspace(workspace)
+    _check_workspace(workspace)  # Also asserts bootstrap-cli.mjs is present.
+
+    # Resolve the node binary before any other work — hard-fail loud rather
+    # than falling back to npx (which adds ~100 s of variance per Codex
+    # measurement).
+    resolved_node: str
+    if node_path is not None:
+        resolved_node = node_path
+    else:
+        found = shutil.which("node")
+        if found is None:
+            raise BrainWikiBuildError(
+                "node binary not found on PATH; install Node.js"
+                " (Homebrew: `brew install node`;"
+                " Linux: nodejs.org or your distro's package manager)"
+            )
+        resolved_node = found
+
     _refresh_pre_build_adornments(vault, refresh_related_inline=refresh_related_inline)
 
-    method = _probe_build_method(npx_path, workspace, timeout_seconds=_PROBE_TIMEOUT_S)
+    # Quartz 4.5.x is pinned in package.json and reliably supports --output.
+    # No version probe needed — always use the output-flag path.
+    method: Literal["output-flag"] = "output-flag"
 
     builds_root = workspace / "builds"
     builds_root.mkdir(parents=True, exist_ok=True)
@@ -140,8 +167,7 @@ def build_and_swap(
 
     try:
         _run_build(
-            method,
-            npx_path=npx_path,
+            node_path=resolved_node,
             workspace=workspace,
             vault=vault,
             build_dir=build_dir,
@@ -155,14 +181,14 @@ def build_and_swap(
             shutil.rmtree(build_dir, ignore_errors=True)
         if isinstance(exc, subprocess.CalledProcessError):
             raise BrainWikiBuildError(
-                f"npx quartz build failed (exit {exc.returncode}) for vault {vault}"
+                f"quartz build failed (exit {exc.returncode}) for vault {vault}"
             ) from exc
         if isinstance(exc, subprocess.TimeoutExpired):
             raise BrainWikiBuildError(
-                f"npx quartz build exceeded {timeout_seconds}s for vault {vault}"
+                f"quartz build exceeded {timeout_seconds}s for vault {vault}"
             ) from exc
         raise BrainWikiBuildError(
-            f"npx quartz build raised {type(exc).__name__} for vault {vault}: {exc}"
+            f"quartz build raised {type(exc).__name__} for vault {vault}: {exc}"
         ) from exc
 
     # Mark the build with its id. The reload-poller reads this file via
@@ -192,18 +218,31 @@ def build_and_swap(
 def _check_workspace(workspace: Path) -> None:
     """Validate that ``workspace`` looks like a Quartz workspace.
 
-    The cheapest reliable signal is ``quartz.config.ts`` — every
-    ``npx quartz create`` scaffold writes it, and our overlay step
-    refuses to run without it. We don't validate ``package.json`` /
-    ``node_modules`` here because the caller (brain-up cold start)
-    has its own friendlier preflight; this is just a guard against
-    pointing the builder at an empty directory.
+    Performs two checks:
+
+    1. ``quartz.config.ts`` — written by ``npx quartz create``, required by
+       our overlay step.  Guards against pointing the builder at an empty dir.
+
+    2. ``quartz/bootstrap-cli.mjs`` — the Node.js entry point that
+       :func:`_run_build` invokes directly (instead of ``npx quartz``).  If
+       the file is absent the workspace is incomplete — the repair path is
+       ``cd <workspace> && npm install``.
+
+    We do *not* validate ``package.json`` or ``node_modules`` beyond the
+    bootstrap-cli check; the caller (brain-up cold start) has its own
+    friendlier preflight for those.
     """
     if not workspace.is_dir():
         raise BrainWikiError(f"quartz workspace not found at {workspace}")
     if not (workspace / "quartz.config.ts").is_file():
         raise BrainWikiError(
             f"quartz workspace at {workspace} is missing quartz.config.ts"
+        )
+    bootstrap = workspace / "quartz" / "bootstrap-cli.mjs"
+    if not bootstrap.is_file():
+        raise BrainWikiBuildError(
+            f"Quartz bootstrap CLI not found at {bootstrap};"
+            f' run `cd "{workspace}" && npm install` to repair the workspace'
         )
 
 
@@ -218,70 +257,27 @@ def _generate_build_id() -> str:
     return f"{stamp}-{secrets.token_hex(3)}"
 
 
-@functools.lru_cache(maxsize=8)
-def _cached_probe(npx_path: str, workspace_str: str, timeout_seconds: float) -> BuildMethod:
-    """Memoize :func:`_probe_build_method` per (npx, workspace).
-
-    Probing runs an ``npx`` subprocess; doing it on every build adds
-    seconds for no real benefit because the Quartz binary on a given
-    workspace doesn't switch versions between calls. The cache key
-    uses ``str(Path)`` because ``Path`` is unhashable in ``frozen``
-    dataclasses on some Python builds — strings are universal.
-    """
-    workspace = Path(workspace_str)
-    args = [npx_path, "quartz", "build", "--help"]
-    try:
-        completed = subprocess.run(  # noqa: S603 — list-form args, no shell
-            args,
-            cwd=str(workspace),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
-        # Probe failure shouldn't be fatal: assume the legacy ``public/``
-        # path is available (it's the older shape). The build itself will
-        # surface a friendlier error if npx is genuinely missing.
-        logger.warning(
-            "wiki build: --help probe failed (%s); assuming rename-public method",
-            exc,
-        )
-        return "rename-public"
-    haystack = (completed.stdout or "") + (completed.stderr or "")
-    if "--output" in haystack:
-        return "output-flag"
-    return "rename-public"
-
-
-def _probe_build_method(
-    npx_path: str, workspace: Path, *, timeout_seconds: float
-) -> BuildMethod:
-    """Probe whether the installed Quartz supports ``--output``.
-
-    Thin wrapper around :func:`_cached_probe` so callers don't have to
-    stringify the workspace path themselves.
-    """
-    return _cached_probe(npx_path, str(workspace), timeout_seconds)
-
-
 def _run_build(
-    method: BuildMethod,
     *,
-    npx_path: str,
+    node_path: str,
     workspace: Path,
     vault: Path,
     build_dir: Path,
     timeout_seconds: float,
     env: dict[str, str] | None,
 ) -> None:
-    """Invoke ``npx quartz build`` into ``build_dir`` via the chosen method.
+    """Invoke ``node <workspace>/quartz/bootstrap-cli.mjs build --output <build_dir>``.
 
     Implementation is split off :func:`build_and_swap` so the parent can
     own the cleanup-on-error semantics in one place — this function just
-    runs the subprocess and (for the legacy method) renames ``public/``
-    into the build dir, and lets every exception type bubble up
-    untouched.
+    runs the subprocess and lets every exception type bubble up untouched.
+
+    ``node_path`` is the resolved Node.js binary (pre-validated by the
+    caller); ``workspace / "quartz" / "bootstrap-cli.mjs"`` is the Quartz
+    entry point (pre-validated by :func:`_check_workspace`).
+
+    Quartz 4.5.x is pinned in ``package.json`` and reliably supports
+    ``--output``, so no method probe or fallback is needed.
     """
     import os  # local import — only needed inside the build path
 
@@ -290,38 +286,14 @@ def _run_build(
         merged_env = dict(os.environ)
         merged_env.update(env)
 
-    if method == "output-flag":
-        args = [
-            npx_path,
-            "quartz",
-            "build",
-            "--directory",
-            str(vault),
-            "--output",
-            str(build_dir),
-        ]
-        subprocess.run(  # noqa: S603 — list-form args, no shell
-            args,
-            cwd=str(workspace),
-            check=True,
-            timeout=timeout_seconds,
-            env=merged_env,
-        )
-        return
-
-    # rename-public fallback: build into <workspace>/public/, then rename
-    # the directory atomically into the build slot. Both halves share the
-    # same filesystem (the Quartz workspace), so ``rename`` is O(1) and
-    # atomic on POSIX.
-    public_dir = workspace / "public"
-    if public_dir.exists():
-        shutil.rmtree(public_dir)
     args = [
-        npx_path,
-        "quartz",
+        node_path,
+        str(workspace / "quartz" / "bootstrap-cli.mjs"),
         "build",
         "--directory",
         str(vault),
+        "--output",
+        str(build_dir),
     ]
     subprocess.run(  # noqa: S603 — list-form args, no shell
         args,
@@ -330,11 +302,6 @@ def _run_build(
         timeout=timeout_seconds,
         env=merged_env,
     )
-    if not public_dir.exists():
-        raise BrainWikiBuildError(
-            f"quartz build did not produce {public_dir} (rename-public path)"
-        )
-    public_dir.rename(build_dir)
 
 
 def _atomic_swap(workspace: Path, build_id: str) -> None:
