@@ -348,3 +348,89 @@ def test_transformers_index_references_parser_cache_file(transformers_index_sour
     assert "parser_cache.ts" in transformers_index_source, (
         "expected 'parser_cache.ts' filename reference in transformers/index.ts docstring"
     )
+
+
+# ---------------------------------------------------------------------------
+# Cache-path contract — TS default must align with bash --clean-cache target
+# ---------------------------------------------------------------------------
+
+BIN_REBUILD = REPO_ROOT / "bin" / "brain-rebuild"
+
+
+@pytest.fixture(scope="module")
+def bin_rebuild_source() -> str:
+    """Read ``bin/brain-rebuild`` once per module."""
+    assert BIN_REBUILD.is_file(), f"missing bin/brain-rebuild at {BIN_REBUILD}"
+    return BIN_REBUILD.read_text(encoding="utf-8")
+
+
+def test_parse_ts_default_cache_dir_matches_bash_clean_cache_target(
+    parse_source: str, bin_rebuild_source: str
+) -> None:
+    """TS default cache-dir and bash ``--clean-cache`` rm target resolve to the same path.
+
+    Plan A specifies ``<vault>/.quartz/.cache/parser/`` as the canonical path.
+    ``parseMarkdown`` in ``parse.ts`` must default there; ``bin/brain-rebuild``'s
+    ``--clean-cache`` handler must ``rm -rf`` the same path.  Any drift between
+    the two sides means cold-cache wipes miss the actual cache directory.
+
+    Verifications:
+    1. The TS default contains the segments ``.quartz``, ``.cache``, and
+       ``parser`` in that order, rooted at ``argv.directory``.
+    2. The bash rm target contains the literal substring ``.quartz/.cache/parser``.
+    3. Both resolve to ``<base>/.quartz/.cache/parser`` with the same base.
+    """
+    # --- TS side ---
+    # Extract the default cacheDir path.join(...) call from parseMarkdown.
+    ts_section = _slice_between(
+        parse_source,
+        "export async function parseMarkdown(",
+        "\nconst clamp",  # first top-level const after the function — EOF sentinel
+    )
+    # The literal must use path.join(argv.directory, ".quartz", ".cache", "parser").
+    # Check the three sub-segments appear in the expected order within the join call.
+    join_match = re.search(
+        r'path\.join\(argv\.directory\s*,([^)]+)\)',
+        ts_section,
+    )
+    assert join_match is not None, (
+        "expected `path.join(argv.directory, ...)` call for default cacheDir in parseMarkdown"
+    )
+    join_args = join_match.group(1)
+    # Each segment must appear as a quoted string literal in the correct order.
+    quartz_pos = join_args.find('".quartz"')
+    cache_pos = join_args.find('".cache"')
+    parser_pos = join_args.find('"parser"')
+    assert quartz_pos != -1, (
+        'expected `".quartz"` segment in default cacheDir path.join call in parseMarkdown'
+    )
+    assert cache_pos != -1, (
+        'expected `".cache"` segment in default cacheDir path.join call in parseMarkdown'
+    )
+    assert parser_pos != -1, (
+        'expected `"parser"` segment in default cacheDir path.join call in parseMarkdown'
+    )
+    assert quartz_pos < cache_pos < parser_pos, (
+        'expected segment order .quartz → .cache → parser in default cacheDir path.join'
+    )
+
+    # --- Bash side ---
+    # The --clean-cache handler must rm -rf a path containing .quartz/.cache/parser.
+    assert ".quartz/.cache/parser" in bin_rebuild_source, (
+        "expected `.quartz/.cache/parser` literal in bin/brain-rebuild --clean-cache rm target — "
+        "it must match the TS default: <vault>/.quartz/.cache/parser"
+    )
+
+    # --- Cross-check: both bases are the vault root ---
+    # TS base is argv.directory which equals the vault root (set via --directory <vault>).
+    # Bash base is $VAULT (same vault root).
+    # Assert that the TS join arguments and the bash rm path agree on the
+    # sub-directory suffix so they physically resolve to the same location.
+    ts_suffix = ".quartz/.cache/parser"
+    bash_has_suffix = f"$VAULT/{ts_suffix}" in bin_rebuild_source or \
+                      f'"$VAULT/{ts_suffix}"' in bin_rebuild_source or \
+                      f"${{VAULT}}/{ts_suffix}" in bin_rebuild_source
+    assert bash_has_suffix, (
+        f'expected `$VAULT/{ts_suffix}` or `${{VAULT}}/{ts_suffix}` in bin/brain-rebuild '
+        f'--clean-cache rm target — must match TS default suffix `{ts_suffix}`'
+    )

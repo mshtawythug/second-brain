@@ -15,9 +15,9 @@
 //      `processor.run` (remark), not the remark-rehype step that follows.
 //      The HTML phase (`createMarkdownParser`) is left identical to upstream.
 //   2. `parseMarkdown`: computes `cacheDir` (defaults to
-//      `<argv.directory>/.cache/parser` unless ctx.cacheDir is already set
-//      or `argv.noCache` is true). Propagates `cacheDir` to workers via the
-//      `serializableCtx` literal.
+//      `<argv.directory>/.quartz/.cache/parser` unless ctx.cacheDir is already
+//      set or `argv.noCache` is true). Propagates `cacheDir` to workers via
+//      the `serializableCtx` literal.
 //
 // Cache module: `./parser_cache.ts` — pure Node.js, no Quartz-internal
 // imports, tested independently in `tests/test_quartz_parser_cache.ts`.
@@ -183,6 +183,11 @@ export function createFileParser(ctx: BuildCtx, fps: FilePath[]) {
         const ast = processor.parse(file)
         const newAst = await processor.run(ast, file)
 
+        // brain-cache: push BEFORE putCached so the file is always emitted
+        // even if putCached throws (ENOSPC / EACCES / readonly FS). A write
+        // failure must never silently drop a file from the build output.
+        res.push([newAst, file])
+
         // brain-cache: store result for next build.
         if (mdKey !== null) {
           putCached<MdCacheEntry>(ctx.cacheDir!, mdKey, {
@@ -192,8 +197,6 @@ export function createFileParser(ctx: BuildCtx, fps: FilePath[]) {
             data: file.data as Record<string, unknown>,
           })
         }
-
-        res.push([newAst, file])
 
         if (argv.verbose) {
           console.log(`[markdown] ${fp} -> ${file.data.slug} (${perf.timeSince()})`)
@@ -240,15 +243,17 @@ export async function parseMarkdown(ctx: BuildCtx, fps: FilePath[]): Promise<Pro
   // brain-cache: resolve cacheDir. Precedence:
   //   1. ctx.cacheDir already set by caller (string | null | undefined)
   //   2. argv.noCache === true  → null  (disable for this run)
-  //   3. default               → <argv.directory>/.cache/parser
+  //   3. default               → <argv.directory>/.quartz/.cache/parser
   // `cacheDir: undefined` from an upstream BuildCtx constructor means
   // "not set yet" and falls through to the default.
+  // NOTE: this path must match the rm target in bin/brain-rebuild's
+  // --clean-cache handler: `"$VAULT/.quartz/.cache/parser"`.
   const cacheDir: string | null =
     ctx.cacheDir !== undefined
       ? ctx.cacheDir
       : argv.noCache
         ? null
-        : path.join(argv.directory, ".cache", "parser")
+        : path.join(argv.directory, ".quartz", ".cache", "parser")
 
   const patchedCtx: BuildCtx = { ...ctx, cacheDir }
 
