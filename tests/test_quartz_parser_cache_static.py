@@ -264,6 +264,60 @@ def test_create_markdown_parser_has_no_put_cached(parse_source: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# parse.ts — Date rehydration on cache hit (regression guard for the
+# `date.toISOString is not a function` crash from JSON-stringified Dates)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_ts_defines_rehydrate_dates_helper(parse_source: str) -> None:
+    """``rehydrateDates`` helper exists in parse.ts.
+
+    Regression guard: JSON.stringify turns Date objects into ISO strings,
+    so cache hits return ``data.dates.{created,modified,published}`` as
+    strings rather than Dates. ``Date.tsx`` calls ``.toISOString()`` on
+    the value and crashes if it's a string. The helper rebuilds Date
+    instances in place after every cache hit.
+    """
+    assert "function rehydrateDates" in parse_source, (
+        "expected a `rehydrateDates` helper in parse.ts — without it, "
+        "cache hits return stringified dates and components like "
+        "Date.tsx crash with `date.toISOString is not a function`"
+    )
+
+
+def test_rehydrate_dates_covers_three_date_fields(parse_source: str) -> None:
+    """``rehydrateDates`` rebuilds Dates for created, modified, published."""
+    section = _slice_between(
+        parse_source,
+        "function rehydrateDates(",
+        "\nexport function createFileParser(",
+    )
+    for field in ("created", "modified", "published"):
+        assert f'"{field}"' in section, (
+            f"rehydrateDates must list `{field}` — the upstream lastmod "
+            f"transformer populates data.dates.{field} with a Date instance"
+        )
+    assert "new Date(" in section, (
+        "rehydrateDates must call `new Date(...)` to rebuild Date instances "
+        "from the stringified ISO values"
+    )
+
+
+def test_create_file_parser_calls_rehydrate_dates_on_hit(parse_source: str) -> None:
+    """The cache-hit branch in ``createFileParser`` calls ``rehydrateDates``."""
+    section = _slice_between(
+        parse_source,
+        "export function createFileParser(",
+        "\nexport function createMarkdownParser(",
+    )
+    assert "rehydrateDates(" in section, (
+        "expected `rehydrateDates(...)` call inside createFileParser cache-hit "
+        "branch — without it, cached data.dates.{created,modified,published} "
+        "stay as strings and Date.tsx crashes"
+    )
+
+
+# ---------------------------------------------------------------------------
 # parse.ts — serializableCtx includes cacheDir
 # ---------------------------------------------------------------------------
 

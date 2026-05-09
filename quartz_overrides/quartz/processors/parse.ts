@@ -88,6 +88,24 @@ function* chunks<T>(arr: T[], n: number) {
   }
 }
 
+// brain-cache: rehydrate Date instances inside cached file.data.
+// JSON.stringify turns Date objects into ISO strings; on read they come
+// back as strings, and components that call `.toISOString()` on them
+// crash (`date.toISOString is not a function`). The upstream `lastmod`
+// transformer populates `data.dates = { created, modified, published }`
+// with Dates; this helper restores them in place. Keep this list in sync
+// with `quartz/plugins/vfile.ts` `DataMap.dates` if upstream adds fields.
+function rehydrateDates(data: Record<string, unknown>): void {
+  const dates = data.dates as Record<string, unknown> | undefined
+  if (!dates || typeof dates !== "object") return
+  for (const key of ["created", "modified", "published"] as const) {
+    const value = dates[key]
+    if (typeof value === "string") {
+      dates[key] = new Date(value)
+    }
+  }
+}
+
 async function transpileWorkerScript() {
   // transpile worker script
   const cacheFile = "./.quartz-cache/transpiled-worker.mjs"
@@ -171,6 +189,10 @@ export function createFileParser(ctx: BuildCtx, fps: FilePath[]) {
             // paths produce the same file.value shape for downstream emitters.
             const cachedFile = new VFile({ path: fp as string, value: rawBytes })
             cachedFile.value = rawBytes.toString().trim()
+            // Rehydrate Date instances that JSON serialization stringified.
+            // Mutates cached.data in place — fine, the cache file on disk is
+            // not re-read and the entry won't be written back.
+            rehydrateDates(cached.data as Record<string, unknown>)
             cachedFile.data = cached.data as typeof file.data
             res.push([cached.ast, cachedFile])
             if (argv.verbose) {
