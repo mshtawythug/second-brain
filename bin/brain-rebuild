@@ -34,6 +34,9 @@
 #                 touched `quartz_overrides/` since the last apply).
 #   --no-build    skip the one-shot build (use if the running watcher
 #                 will pick up the changes anyway after the export).
+#   --clean-cache  wipe the parser cache (`<vault>/.quartz/.cache/parser/`)
+#                  before building. Use to debug cache issues or measure a
+#                  cold-build wall-time baseline (see Plan A spec).
 #
 # Env overrides (same as brain-up):
 #   BRAIN_VAULT_PATH        (default: ~/brain-vault)
@@ -70,13 +73,15 @@ DO_EXPORT=1
 DO_PRUNE=1
 DO_OVERLAY=1
 DO_BUILD=1
+DO_CLEAN_CACHE=0
 
 for arg in "$@"; do
     case "$arg" in
-        --no-export)  DO_EXPORT=0 ;;
-        --no-prune)   DO_PRUNE=0 ;;
-        --no-overlay) DO_OVERLAY=0 ;;
-        --no-build)   DO_BUILD=0 ;;
+        --no-export)    DO_EXPORT=0 ;;
+        --no-prune)     DO_PRUNE=0 ;;
+        --no-overlay)   DO_OVERLAY=0 ;;
+        --no-build)     DO_BUILD=0 ;;
+        --clean-cache)  DO_CLEAN_CACHE=1 ;;
         -h|--help)
             sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//; /^set -euo/d'
             exit 0
@@ -116,6 +121,11 @@ if [[ "$DO_OVERLAY" == '1' && "${BRAIN_NO_OVERLAY:-0}" != '1' ]]; then
     fi
 elif [[ "${BRAIN_NO_OVERLAY:-0}" == '1' ]]; then
     echo 'overlay: skipped (BRAIN_NO_OVERLAY=1)'
+fi
+
+if [[ "$DO_CLEAN_CACHE" == '1' ]]; then
+    echo '🔄 cleaning parser cache...'
+    rm -rf "$VAULT/.quartz/.cache/parser"
 fi
 
 if [[ "$DO_BUILD" == '1' ]]; then
