@@ -16,7 +16,8 @@
 //   * `BuildCtx.cacheDir?: string | null` — on-disk path for the parser
 //     result cache. `null` disables the cache for the run.
 //     `undefined` means "not yet set by the caller"; parseMarkdown in
-//     parse.ts defaults it to `<argv.directory>/.cache/parser`.
+//     parse.ts defaults it to `<argv.directory>/.quartz/.cache/parser`
+//     so it matches `bin/brain-rebuild --clean-cache`'s rm target.
 //     Optional so existing BuildCtx constructors (upstream handlers.ts
 //     and test fixtures) compile without modification.
 //     `WorkerSerializableBuildCtx = Omit<BuildCtx, "cfg" | "trie">` so
@@ -65,7 +66,8 @@ export interface BuildCtx {
   //   string  — active cache at this path
   //   null    — cache explicitly disabled for this run (e.g. --no-cache)
   //   undefined — not yet set; parseMarkdown.ts defaults to
-  //               <argv.directory>/.cache/parser
+  //               <argv.directory>/.quartz/.cache/parser (matches the
+  //               rm target in bin/brain-rebuild --clean-cache).
   // Optional so existing BuildCtx constructors compile without change.
   cacheDir?: string | null
 }
