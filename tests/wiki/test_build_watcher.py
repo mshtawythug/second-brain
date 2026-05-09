@@ -31,8 +31,10 @@ from watchdog.events import (
 
 from brain.wiki.build_swap import BuildResult
 from brain.wiki.build_watcher import (
+    _Handler,
     _run_initial_build,
     _should_trigger,
+    _WatcherState,
     main,
     run_watcher,
 )
@@ -103,13 +105,25 @@ def _start_watcher(
     vault: Path,
     debounce_seconds: float,
     on_build: Any = None,
+    refresh_runner: Any = None,
 ) -> tuple[threading.Thread, _FakeObserver, Any]:
     """Run ``run_watcher`` in a background thread.
 
     Returns the thread, the FakeObserver the watcher set up, and a
     ``stop()`` callable that flips the watcher's internal stop event
     so the thread exits cleanly. Tests must call ``stop()`` and join.
+
+    ``refresh_runner`` is forwarded to :func:`run_watcher` as its
+    background-refresh injection seam. Defaults to a no-op so tests
+    that don't supply a runner are isolated from the real
+    ``Config.load()`` / ``refresh_related()`` DB+vault path.
+    Pass an explicit spy if you need to assert on refresh calls.
     """
+    # Default to a no-op so tests that omit refresh_runner don't
+    # accidentally fire the real Config.load + refresh_related path
+    # against the live DB/vault via the daemon thread.
+    if refresh_runner is None:
+        refresh_runner = lambda: None  # noqa: E731
     # The watcher creates the observer via observer_factory — we
     # smuggle a reference out via the class-level registry and a
     # ``stop_event`` reference via a captured closure.
@@ -130,6 +144,7 @@ def _start_watcher(
             debounce_seconds=debounce_seconds,
             observer_factory=_factory,
             on_build=on_build,
+            refresh_runner=refresh_runner,
         )
 
     thread = threading.Thread(target=_target, daemon=True)
@@ -543,3 +558,264 @@ def test_build_failure_does_not_kill_watcher(
 
     assert calls >= 2
     assert received  # second build succeeded → on_build received it
+
+
+# ---------------------------------------------------------------------------
+# New tests — A1–A4 for Task 3 of the edit-to-UI latency closeout.
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_related_skipped_inline_in_watcher(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Pins: _run_build calls build_and_swap with refresh_related_inline=False.
+
+    The watcher deliberately defers the heavy refresh_related (~73s) off
+    the build hot path. This test asserts that the kwarg is always False
+    when invoked from the watcher, so any future accidental reversion is
+    caught immediately.
+    """
+    spy = mocker.patch(
+        "brain.wiki.build_watcher.build_and_swap",
+        return_value=_make_result(),
+    )
+    note = tmp_path / "note.md"
+    note.write_text("# hi")
+
+    # Inject a no-op refresh_runner so the daemon thread doesn't attempt
+    # the real Config.load() / refresh_related() DB path during the test.
+    thread, observer, _ = _start_watcher(
+        vault=tmp_path,
+        debounce_seconds=0.05,
+        refresh_runner=lambda: None,
+    )
+    try:
+        observer.inject(FileModifiedEvent(str(note)))
+        _wait_for(lambda: spy.call_count >= 1, timeout=2.0)
+    finally:
+        handler = observer.handler
+        handler._state.stop_event.set()
+        thread.join(timeout=2.0)
+
+    assert spy.call_count == 1
+    # The watcher MUST always pass refresh_related_inline=False to avoid
+    # blocking edit-to-UI on the 73s hybrid-search recompute.
+    assert spy.call_args.kwargs.get("refresh_related_inline") is False
+
+
+def test_should_trigger_excludes_static_related(tmp_path: Path) -> None:
+    """Pins: _should_trigger returns False for paths under <vault>/static/related/.
+
+    The post-build refresh_related thread writes JSON files there; treating
+    those writes as rebuild triggers would cause an infinite build loop.
+    Also verifies the correct-trigger side (control cases).
+    """
+    # Paths that should NOT trigger a rebuild — loop-prevention filter.
+    assert (
+        _should_trigger(
+            FileModifiedEvent(str(tmp_path / "static" / "related" / "foo.json")),
+            tmp_path,
+        )
+        is False
+    ), "static/related/foo.json should be filtered out"
+
+    assert (
+        _should_trigger(
+            FileModifiedEvent(
+                str(tmp_path / "static" / "related" / "sub" / "bar.json")
+            ),
+            tmp_path,
+        )
+        is False
+    ), "static/related/sub/bar.json should be filtered out (nested)"
+
+    # Control: paths that SHOULD trigger — correct positive cases.
+    assert (
+        _should_trigger(
+            FileModifiedEvent(str(tmp_path / "notes" / "foo.md")),
+            tmp_path,
+        )
+        is True
+    ), "notes/foo.md should trigger"
+
+    assert (
+        _should_trigger(
+            FileModifiedEvent(str(tmp_path / "static" / "other.json")),
+            tmp_path,
+        )
+        is True
+    ), "static/other.json is NOT under related/ — should trigger"
+
+    assert (
+        _should_trigger(
+            FileModifiedEvent(str(tmp_path / "_ingested" / "manual" / "x.md")),
+            tmp_path,
+        )
+        is True
+    ), "_ingested/manual/x.md should trigger"
+
+
+def test_refresh_singleflight_pending(tmp_path: Path) -> None:
+    """Pins single-flight refresh behavior: concurrent requests collapse to exactly two runs.
+
+    Exercises the Task 2 DI seam (refresh_runner injection):
+    - First _schedule_refresh_related() spawns a daemon thread that blocks.
+    - Second call while the first is in flight sets refresh_pending=True
+      instead of spawning a second thread.
+    - Releasing the block causes the loop to drain the pending flag with
+      exactly one more run.
+    Total runner invocations must be 2, regardless of concurrent scheduling.
+    Uses the refresh_runner injection point so no real DB or vault is touched.
+    """
+    call_log: list[int] = []  # each invocation appends 1; len == invocation count
+    block_event = threading.Event()  # controls when the first call unblocks
+
+    def fake_runner() -> None:
+        """Record call then block until released; subsequent calls return immediately."""
+        call_log.append(1)  # list.append is atomic in CPython
+        block_event.wait()
+
+    state = _WatcherState()
+    handler = _Handler(
+        state=state,
+        vault=tmp_path,
+        quartz_dir=None,
+        debounce_seconds=0.05,
+        keep=3,
+        on_build=None,
+        refresh_runner=fake_runner,
+    )
+
+    try:
+        # Step 1: First schedule → spawns daemon thread → calls fake_runner → blocks.
+        handler._schedule_refresh_related()
+        _wait_for(lambda: len(call_log) >= 1, timeout=2.0)
+
+        # Step 2: Second schedule while first is in flight → pending, NOT a new thread.
+        handler._schedule_refresh_related()
+        with state.refresh_lock:
+            assert state.refresh_pending, (
+                "Second _schedule_refresh_related() call should set refresh_pending=True "
+                "instead of spawning a second concurrent refresh thread."
+            )
+
+        # Step 3: Release the block → first runner returns → loop drains pending → runs once more.
+        block_event.set()
+        _wait_for(lambda: len(call_log) >= 2, timeout=2.0)
+
+        assert len(call_log) == 2, (
+            f"Expected exactly 2 runner invocations (1 in-flight + 1 drained), "
+            f"got {len(call_log)}"
+        )
+    finally:
+        # Always release so the daemon thread can exit — block_event.set() is
+        # idempotent, so this is a no-op on the happy path but prevents the
+        # thread from blocking forever if an assertion above fails early.
+        block_event.set()
+        for t in threading.enumerate():
+            if t.name == "brain-wiki-refresh-related":
+                t.join(timeout=2.0)
+                break
+
+
+def test_scoped_polling_does_not_pick_up_new_top_level_dir(tmp_path: Path) -> None:
+    """Pins: top-level dirs created after watcher start are NOT scheduled for polling.
+
+    ``run_watcher`` calls ``vault.iterdir()`` exactly once at startup to
+    schedule each non-hidden top-level subdir with ``recursive=True``. A
+    directory created after startup is invisible to the PollingObserver
+    until the watcher process is restarted.
+
+    This test ASSERTS that current behavior (Option 2 from
+    docs/plans/2026-05-09-edit-to-ui-latency-closeout.md Task 3). If this
+    test fails, runtime DirCreated handling has been added — update the
+    Known-limitation note in docs/plans/2026-05-09-edit-to-ui-latency.md.
+    """
+    notes = tmp_path / "notes"
+    notes.mkdir()
+
+    # An Observer that records all schedule() calls without actually watching.
+    class _ScheduleRecordingObserver:
+        def __init__(self) -> None:
+            self.schedule_calls: list[tuple[str, bool]] = []
+            self.started = False
+            self._handler: Any = None
+
+        def schedule(
+            self, handler: Any, path: str, recursive: bool = False
+        ) -> None:
+            self._handler = handler
+            self.schedule_calls.append((path, recursive))
+
+        def start(self) -> None:
+            self.started = True
+
+        def stop(self) -> None:
+            pass
+
+        def join(self, timeout: Any = None) -> None:
+            pass
+
+    observer_holder: list[_ScheduleRecordingObserver] = []
+
+    def _factory() -> _ScheduleRecordingObserver:
+        obs = _ScheduleRecordingObserver()
+        observer_holder.append(obs)
+        return obs
+
+    thread = threading.Thread(
+        target=run_watcher,
+        args=(tmp_path,),
+        kwargs={
+            "observer_factory": _factory,
+            "debounce_seconds": 0.05,
+            "refresh_runner": lambda: None,  # avoid real DB path
+        },
+        daemon=True,
+    )
+    thread.start()
+
+    # Wait until observer.start() fires — all schedule() calls precede it.
+    _wait_for(
+        lambda: bool(observer_holder) and observer_holder[0].started,
+        timeout=2.0,
+    )
+    obs = observer_holder[0]
+
+    # Startup must have scheduled exactly two paths:
+    # 1. vault root (non-recursive)
+    # 2. notes/ (recursive)
+    assert (str(tmp_path), False) in obs.schedule_calls, (
+        f"Root vault should be scheduled non-recursively; got {obs.schedule_calls}"
+    )
+    assert (str(notes), True) in obs.schedule_calls, (
+        f"notes/ should be scheduled recursively; got {obs.schedule_calls}"
+    )
+    assert len(obs.schedule_calls) == 2, (
+        f"Expected exactly 2 schedule() calls at startup; got {obs.schedule_calls}"
+    )
+
+    # Create a new top-level dir post-startup and add a file under it.
+    projects = tmp_path / "projects"
+    projects.mkdir()
+    (projects / "plan.md").write_text("# plan")
+
+    # Give any hypothetical runtime scheduling time to fire, then assert none did.
+    time.sleep(0.2)
+
+    # Per Task 3 Option 2 in docs/plans/2026-05-09-edit-to-ui-latency-closeout.md:
+    # "investing in runtime DirCreated handling here would likely be wasted."
+    # If this assertion fails, runtime scheduling has been added — update the
+    # Known-limitation section in docs/plans/2026-05-09-edit-to-ui-latency.md
+    # and the Task 3 Option 2 decision in the closeout plan.
+    assert len(obs.schedule_calls) == 2, (
+        "Expected no new schedule() calls for post-startup dir 'projects/'. "
+        "If this test fails, runtime DirCreated handling has been added — "
+        "update the Known-limitation note in "
+        "docs/plans/2026-05-09-edit-to-ui-latency.md."
+    )
+
+    # Cleanup: stop the watcher.
+    if obs._handler is not None:
+        obs._handler._state.stop_event.set()
+    thread.join(timeout=2.0)

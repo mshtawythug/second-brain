@@ -71,9 +71,18 @@ from watchdog.events import (
     FileSystemEvent,
     FileSystemEventHandler,
 )
-from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
+from watchdog.observers.polling import PollingObserver as Observer
 
+# brain (2026-05-08): use PollingObserver instead of watchdog's default
+# Observer (which on macOS dispatches via FSEventsObserver). On Python 3.13
+# the FSEvents backend silently stops delivering events: the Observer
+# starts cleanly and stays alive, but `on_any_event` is never called.
+# No error, no log. Both this watcher and `brain.wiki.build_watcher` were
+# affected — every edit to a vault `.md` was invisible until manual sync.
+# PollingObserver scans the tree on a timer (default 1s) and synthesizes
+# events from mtime/size diffs. CPU cost is a stat() per file per second
+# (negligible for ~1100 docs); latency is the polling interval.
 from ..ingest import Embedder
 from .derived_links.fence import strip_fence
 from .sync import SyncReport, sync_one_file, sync_vault
@@ -234,7 +243,24 @@ def run_watcher(
     factory = observer_factory or Observer
     observer = factory()
     handler = _Handler(config=config, state=state)
-    observer.schedule(handler, str(config.vault_path), recursive=True)
+    # brain (2026-05-08): schedule per non-hidden top-level subdir + root
+    # non-recursively, instead of `recursive=True` on the vault root.
+    # PollingObserver snapshots every file in the watched tree on every
+    # poll cycle; with `recursive=True` on a vault that contains
+    # `<vault>/.quartz/node_modules` (~60k+ files) the snapshot work
+    # starves the polling thread and edits stop being detected. The
+    # event filter (_filter_path) already drops paths under hidden dirs,
+    # so excluding them from the WATCHED tree is correct + cheap.
+    scheduled_names: list[str] = []
+    observer.schedule(handler, str(config.vault_path), recursive=False)
+    for child in config.vault_path.iterdir():
+        if child.is_dir() and not child.name.startswith("."):
+            observer.schedule(handler, str(child), recursive=True)
+            scheduled_names.append(child.name)
+    logger.info(
+        "vault watcher: scoped polling on top-level dirs: %s",
+        ", ".join(scheduled_names) or "(none)",
+    )
     observer.start()
 
     # 4. Signal handlers. SIGINT for Ctrl-C, SIGTERM for systemd /

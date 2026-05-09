@@ -34,10 +34,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
-from watchdog.observers import Observer
 from watchdog.observers.api import BaseObserver
+from watchdog.observers.polling import PollingObserver as Observer
 
-from .build_swap import BuildResult, build_and_swap
+# brain (2026-05-08): use PollingObserver instead of watchdog's default
+# Observer (FSEvents backend). The FSEvents backend silently stops
+# delivering events on Python 3.13 — Observer starts cleanly, stays
+# alive, but never invokes the handler. See identical comment in
+# brain/vault/watch.py for the diagnosis.
+from .build_swap import BuildResult, _replace_vault_path, build_and_swap
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +72,13 @@ class _WatcherState:
     build_lock: threading.Lock = field(default_factory=threading.Lock)
     running: bool = False
     pending: bool = False
+    # refresh_related single-flight: same pattern as build_lock/running/
+    # pending, but for the post-build refresh_related call. Builds skip
+    # refresh_related inline (it costs ~70s on a 1100-doc vault); this
+    # state coordinates the daemon thread that runs it after each build.
+    refresh_lock: threading.Lock = field(default_factory=threading.Lock)
+    refresh_running: bool = False
+    refresh_pending: bool = False
     stop_event: threading.Event = field(default_factory=threading.Event)
 
 
@@ -78,6 +90,7 @@ def run_watcher(
     keep: int = 3,
     on_build: Callable[[BuildResult], None] | None = None,
     observer_factory: Callable[[], BaseObserver] | None = None,
+    refresh_runner: Callable[[], None] | None = None,
 ) -> None:
     """Block until the stop event fires, rebuilding on debounced events.
 
@@ -98,6 +111,13 @@ def run_watcher(
     tests pass a fake to drive events synchronously without touching
     the real FSEvents/inotify subsystem.
 
+    ``refresh_runner`` is forwarded to :class:`_Handler` as its
+    background-refresh injection seam. When ``None`` (the default),
+    the handler runs the real ``refresh_related`` DB/vault path after
+    each build. Tests pass a no-op or spy runner here so they can
+    exercise handler logic without touching the real DB or vault. See
+    :class:`_Handler` for the full contract.
+
     The function returns when ``state.stop_event`` is set — production
     flips it from a SIGINT/SIGTERM handler installed by :func:`main`;
     tests flip it directly.
@@ -110,10 +130,28 @@ def run_watcher(
         debounce_seconds=debounce_seconds,
         keep=keep,
         on_build=on_build,
+        refresh_runner=refresh_runner,
     )
     factory: Callable[[], BaseObserver] = observer_factory or Observer
     observer = factory()
-    observer.schedule(handler, str(vault), recursive=True)
+    # brain (2026-05-08): schedule per non-hidden top-level subdir + root
+    # non-recursively, instead of `recursive=True` on the vault root.
+    # PollingObserver snapshots every file in the watched tree per poll
+    # cycle; with `recursive=True` on a vault containing
+    # `<vault>/.quartz/node_modules` (~60k+ files) the snapshot starves
+    # the polling thread and edits stop being detected. _should_trigger
+    # already filters hidden dirs from delivered events, so excluding
+    # them from the SCANNED tree is correct + cheap.
+    scheduled_names: list[str] = []
+    observer.schedule(handler, str(vault), recursive=False)
+    for child in vault.iterdir():
+        if child.is_dir() and not child.name.startswith("."):
+            observer.schedule(handler, str(child), recursive=True)
+            scheduled_names.append(child.name)
+    logger.info(
+        "wiki watcher: scoped polling on top-level dirs: %s",
+        ", ".join(scheduled_names) or "(none)",
+    )
     observer.start()
 
     try:
@@ -142,6 +180,18 @@ class _Handler(FileSystemEventHandler):
     lives in :func:`_schedule`, the actual build lives in
     :func:`_run_build`. The handler just wires them together so each
     piece is independently testable.
+
+    ``refresh_runner`` — optional injection seam for the background
+    refresh path. When ``None`` (the default), each refresh cycle calls
+    :meth:`_run_refresh_related_once`, which loads ``Config`` and calls
+    the real ``refresh_related`` against the DB and vault. When a
+    runner is provided, the loop calls it instead and skips the
+    ``Config.load()`` / ``refresh_related()`` path entirely. The
+    runner must be thread-safe: it is invoked from the daemon refresh
+    thread, not the main thread. It must run synchronously to
+    completion before returning; the loop's drain check depends on it.
+    Tests use this seam to inject a spy or a no-op so they can
+    exercise handler logic without touching the real DB or vault.
     """
 
     def __init__(
@@ -153,6 +203,7 @@ class _Handler(FileSystemEventHandler):
         debounce_seconds: float,
         keep: int,
         on_build: Callable[[BuildResult], None] | None,
+        refresh_runner: Callable[[], None] | None = None,
     ) -> None:
         self._state = state
         self._vault = vault
@@ -160,6 +211,7 @@ class _Handler(FileSystemEventHandler):
         self._debounce_seconds = debounce_seconds
         self._keep = keep
         self._on_build = on_build
+        self._refresh_runner = refresh_runner
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         # Funnel everything through one classifier so the filter set
@@ -234,15 +286,102 @@ class _Handler(FileSystemEventHandler):
                 self._vault,
                 quartz_dir=self._quartz_dir,
                 keep=self._keep,
+                # Skip the inline ~70s hybrid-search recompute. The
+                # post-build refresh thread below picks it up so the
+                # next build emits fresh related-docs JSON without
+                # blocking edit-to-UI on this one.
+                refresh_related_inline=False,
             )
         except Exception:
             logger.exception("wiki watcher: build failed")
             return
+        # Build succeeded — kick off (or queue) a background
+        # refresh_related run. Single-flight: if one's already in
+        # flight, mark pending so it re-runs once after it finishes.
+        self._schedule_refresh_related()
         if self._on_build is not None:
             try:
                 self._on_build(result)
             except Exception:
                 logger.exception("wiki watcher: on_build hook raised")
+
+    def _schedule_refresh_related(self) -> None:
+        """Spawn a daemon thread to run refresh_related, single-flight.
+
+        If a refresh is already running, just set ``refresh_pending`` —
+        the running thread's drain loop will see the flag when it
+        finishes and run exactly one more refresh.
+        """
+        with self._state.refresh_lock:
+            if self._state.refresh_running:
+                self._state.refresh_pending = True
+                return
+            self._state.refresh_running = True
+        t = threading.Thread(
+            target=self._refresh_related_loop,
+            name="brain-wiki-refresh-related",
+            daemon=True,
+        )
+        t.start()
+
+    def _refresh_related_loop(self) -> None:
+        """Run ``refresh_related`` until no more pending flag is set.
+
+        Mirrors ``_drain_pending`` for builds: after each refresh the
+        thread checks if another build landed during its run, and if
+        so runs exactly one more refresh. This keeps the related-docs
+        JSON converging on the latest DB state without spawning
+        unbounded concurrent refreshes.
+
+        When ``self._refresh_runner`` is set (injected via
+        :class:`_Handler.__init__`), that runner is invoked instead
+        of :meth:`_run_refresh_related_once` — no ``Config.load()``
+        or ``refresh_related`` is called. Production-default behavior
+        is ``None``; tests inject a runner here.
+        """
+        while True:
+            try:
+                if self._refresh_runner is not None:
+                    self._refresh_runner()
+                else:
+                    self._run_refresh_related_once()
+            except Exception:
+                # refresh_related catches its own DB/IO errors and returns
+                # a summary; getting here means an unexpected programmer
+                # error. Log and let the drain decide whether to retry.
+                logger.exception("wiki watcher: refresh_related raised")
+            with self._state.refresh_lock:
+                if not self._state.refresh_pending:
+                    self._state.refresh_running = False
+                    return
+                self._state.refresh_pending = False
+
+    def _run_refresh_related_once(self) -> None:
+        """Best-effort single invocation of ``refresh_related``."""
+        # Imports inside the function so a Config-load failure (no
+        # DATABASE_URL on PATH for whatever reason) doesn't kill the
+        # whole watcher process at startup.
+        try:
+            from ..config import Config, ConfigError
+            from .build_related import refresh_related
+        except ImportError:
+            logger.exception("wiki watcher: refresh_related import failed")
+            return
+        try:
+            cfg = Config.load()
+        except ConfigError as exc:
+            logger.warning(
+                "wiki watcher: refresh_related skipped (Config.load failed: %s)",
+                exc,
+            )
+            return
+        target_vault = self._vault.expanduser().resolve()
+        cfg_for_build = (
+            cfg
+            if cfg.vault_path == target_vault
+            else _replace_vault_path(cfg, target_vault)
+        )
+        refresh_related(cfg_for_build)
 
 
 def _should_trigger(event: FileSystemEvent, vault: Path) -> bool:
@@ -285,7 +424,16 @@ def _should_trigger(event: FileSystemEvent, vault: Path) -> bool:
     parts = relative.parts
     if not parts:
         return False
-    return parts[0] not in _IGNORED_TOP_DIRS
+    if parts[0] in _IGNORED_TOP_DIRS:
+        return False
+    # Exclude our own writes to <vault>/static/related/<slug>.json — the
+    # post-build refresh thread writes those, and a fresh build is the
+    # ONLY thing that would publish them. If we treat those writes as
+    # rebuild triggers we get an infinite loop:
+    #   build → spawn refresh thread → write JSON → fsevent → another
+    #   build → spawn another refresh → another JSON write → …
+    # See `_schedule_refresh_related` in this module.
+    return not (len(parts) >= 2 and parts[0] == "static" and parts[1] == "related")
 
 
 def _to_path(raw: str | bytes) -> Path:

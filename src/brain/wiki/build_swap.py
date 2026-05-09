@@ -92,6 +92,7 @@ def build_and_swap(
     npx_path: str = "npx",
     timeout_seconds: float = 600.0,
     env: dict[str, str] | None = None,
+    refresh_related_inline: bool = True,
 ) -> BuildResult:
     """Build the vault into a fresh dir and atomically retarget ``current``.
 
@@ -127,7 +128,7 @@ def build_and_swap(
     started = time.monotonic()
     workspace = quartz_dir if quartz_dir is not None else vault / ".quartz"
     _check_workspace(workspace)
-    _refresh_pre_build_adornments(vault)
+    _refresh_pre_build_adornments(vault, refresh_related_inline=refresh_related_inline)
 
     method = _probe_build_method(npx_path, workspace, timeout_seconds=_PROBE_TIMEOUT_S)
 
@@ -428,8 +429,18 @@ def _replace_vault_path(cfg: Config, vault_path: Path) -> Config:
     return dataclasses.replace(cfg, vault_path=vault_path)
 
 
-def _refresh_pre_build_adornments(vault: Path) -> None:
-    """Best-effort generated wiki adornment refresh before any Quartz build."""
+def _refresh_pre_build_adornments(
+    vault: Path, *, refresh_related_inline: bool = True
+) -> None:
+    """Best-effort generated wiki adornment refresh before any Quartz build.
+
+    ``refresh_related_inline=False`` skips ``refresh_related`` (the heavy
+    hybrid-search recompute, ~70s on a 1100-doc vault). The build watcher
+    passes ``False`` and runs ``refresh_related`` on a background daemon
+    thread post-build to keep edit-to-UI latency down. ``bin/brain-rebuild``
+    keeps the default ``True`` so manual rebuilds always emit fresh
+    related-docs JSON synchronously.
+    """
     # P4.7/P5.1 — refresh generated wiki adornments before the build
     # so the new build picks up the freshest recent rail and related-doc
     # JSON. Failures here are logged-and-swallowed by the refresh helpers
@@ -459,7 +470,8 @@ def _refresh_pre_build_adornments(vault: Path) -> None:
                 else _replace_vault_path(cfg, target_vault)
             )
             refresh_homepage(cfg_for_build)
-            refresh_related(cfg_for_build)
+            if refresh_related_inline:
+                refresh_related(cfg_for_build)
     except Exception as exc:  # noqa: BLE001 — refresh is best-effort
         logger.warning("wiki pre-build refresh: unexpected failure: %s", exc)
 
