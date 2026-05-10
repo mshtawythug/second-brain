@@ -171,6 +171,7 @@ def build_and_swap(
             workspace=workspace,
             vault=vault,
             build_dir=build_dir,
+            build_id=build_id,
             timeout_seconds=timeout_seconds,
             env=env,
         )
@@ -179,6 +180,17 @@ def build_and_swap(
         # doesn't trip over a half-written tree.
         if build_dir.exists():
             shutil.rmtree(build_dir, ignore_errors=True)
+        # Invalidate fastpath artifacts written by the Quartz subprocess before
+        # it failed.  writeFastpathArtifacts() in build.ts fires after
+        # emitContent() and is wrapped in try/catch, so it CAN succeed even
+        # when the overall build exits non-zero.  If those artifacts are left on
+        # disk, classify_edit will read fingerprints from the failed (never-
+        # swapped) build and may route the next edit to build-partial, which
+        # would emit HTML based on a stale/inconsistent contentmap.  Deleting
+        # manifest.json forces classify_edit to return NON_TRIVIAL, so the next
+        # watcher-triggered build starts fresh and writes consistent artifacts.
+        # Best-effort: _invalidate_fastpath_manifest never raises.
+        _invalidate_fastpath_manifest(workspace)
         if isinstance(exc, subprocess.CalledProcessError):
             raise BrainWikiBuildError(
                 f"quartz build failed (exit {exc.returncode}) for vault {vault}"
@@ -191,12 +203,28 @@ def build_and_swap(
             f"quartz build raised {type(exc).__name__} for vault {vault}: {exc}"
         ) from exc
 
-    # Mark the build with its id. The reload-poller reads this file via
-    # /.build-id (Caddy serves the build root directly), comparing the
-    # value across pages to detect swaps.
-    (build_dir / ".build-id").write_text(f"{build_id}\n", encoding="utf-8")
-
-    _atomic_swap(workspace, build_id)
+    # The two steps below — writing .build-id into the new build dir and
+    # atomically retargeting the ``current`` symlink — are both "post-build,
+    # pre-committed" operations: the subprocess already wrote fastpath
+    # artifacts (manifest.json + contentmap.json) tagged with ``build_id``
+    # to fastpath_dir.  If EITHER step raises, ``current`` still points at
+    # the previous build while the manifest carries fingerprints from the new
+    # (uncommitted) one.  We must invalidate the stale manifest on ANY
+    # OSError here — not only on the swap itself — so the classifier routes
+    # the next edit to a full build rather than a partial one on stale data.
+    try:
+        # Mark the build with its id. The reload-poller reads this file via
+        # /.build-id (Caddy serves the build root directly).
+        (build_dir / ".build-id").write_text(f"{build_id}\n", encoding="utf-8")
+        _atomic_swap(workspace, build_id)
+    except OSError as exc:
+        # Deleting manifest.json forces classify_edit to return NON_TRIVIAL on
+        # the next edit, routing to a full build that writes a fresh + consistent
+        # manifest once the commit succeeds.
+        _invalidate_fastpath_manifest(workspace)
+        raise BrainWikiBuildError(
+            f"quartz build swap failed for vault {vault}: {exc}"
+        ) from exc
 
     pruned = _garbage_collect(workspace, keep=keep)
 
@@ -213,6 +241,44 @@ def build_and_swap(
 # ---------------------------------------------------------------------------
 # Internal helpers.
 # ---------------------------------------------------------------------------
+
+
+def _invalidate_fastpath_manifest(workspace: Path) -> None:
+    """Delete ``fastpath_dir/manifest.json`` after a failed symlink swap.
+
+    When :func:`_run_build` succeeds, the Quartz subprocess writes
+    ``<workspace>/.cache/fastpath/manifest.json`` (and ``contentmap.json``)
+    tagged with the new ``build_id``. If the subsequent :func:`_atomic_swap`
+    then fails, ``current`` still points at the *previous* build while
+    ``manifest.json`` carries fingerprints from the *new* (unswapped) build.
+
+    Leaving the stale manifest on disk is dangerous: :func:`classify_edit`
+    would read the new fingerprints and might route the next edit as
+    ``TRIVIAL`` — launching ``build-partial`` against a live build dir whose
+    HTML is from an earlier state.  Deleting the manifest file forces
+    ``classify_edit`` to return ``NON_TRIVIAL`` (``ManifestError`` → full
+    build), so the next watcher-driven build writes a fresh, consistent
+    manifest once the swap succeeds.
+
+    This function is **best-effort**: it never raises.  A missing file is
+    silently ignored; any other ``OSError`` is logged at WARNING level so the
+    operator knows but the caller's exception path is unaffected.
+    """
+    manifest_path = workspace / ".cache" / "fastpath" / "manifest.json"
+    try:
+        manifest_path.unlink()
+        logger.debug(
+            "wiki build: invalidated stale fastpath manifest after swap failure (%s)",
+            manifest_path,
+        )
+    except FileNotFoundError:
+        pass  # already gone — nothing to do
+    except OSError as exc:
+        logger.warning(
+            "wiki build: could not invalidate stale fastpath manifest %s: %s",
+            manifest_path,
+            exc,
+        )
 
 
 def _check_workspace(workspace: Path) -> None:
@@ -263,6 +329,7 @@ def _run_build(
     workspace: Path,
     vault: Path,
     build_dir: Path,
+    build_id: str,
     timeout_seconds: float,
     env: dict[str, str] | None,
 ) -> None:
@@ -276,15 +343,26 @@ def _run_build(
     caller); ``workspace / "quartz" / "bootstrap-cli.mjs"`` is the Quartz
     entry point (pre-validated by :func:`_check_workspace`).
 
+    ``build_id`` is injected into the subprocess environment as
+    ``QUARTZ_PARENT_BUILD_ID`` so the Quartz overlay can write the
+    fastpath manifest (``manifest.json`` + ``contentmap.json``) tagged to
+    this build.  Without it the overlay logs "skipping fastpath artifact
+    write" and every subsequent :func:`build_partial` call hits an
+    envelope mismatch and falls back to a full rebuild.
+
     Quartz 4.5.x is pinned in ``package.json`` and reliably supports
     ``--output``, so no method probe or fallback is needed.
     """
     import os  # local import — only needed inside the build path
 
-    merged_env: dict[str, str] | None = None
+    # Always build a merged env so QUARTZ_PARENT_BUILD_ID reaches the
+    # Node subprocess.  Callers that pass env=None (production) still get
+    # the ID injected; callers that pass a custom dict (tests) get their
+    # overrides merged on top.
+    merged_env = dict(os.environ)
     if env is not None:
-        merged_env = dict(os.environ)
         merged_env.update(env)
+    merged_env["QUARTZ_PARENT_BUILD_ID"] = build_id
 
     args = [
         node_path,
@@ -300,7 +378,7 @@ def _run_build(
         cwd=str(workspace),
         check=True,
         timeout=timeout_seconds,
-        env=merged_env,
+        env=merged_env,  # always a dict (never None) — QUARTZ_PARENT_BUILD_ID injected above
     )
 
 

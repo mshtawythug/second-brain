@@ -173,6 +173,16 @@ export function createFileParser(ctx: BuildCtx, fps: FilePath[]) {
         file.data.relativePath = path.posix.relative(argv.directory, file.path!) as FilePath
         file.data.slug = slugifyFilePath(file.data.relativePath as FilePath)
 
+        // brain-fastpath: snapshot raw source BEFORE OFM transformer mutates vfile.value.
+        // computeFingerprint (fastpath_manifest.ts) reads vfile.data.rawSource to get the
+        // unmodified markdown text for canonical-blob building.  The OFM transformer runs
+        // later in processor.run — e.g. it appends |^blockId display aliases to transclusion
+        // links (![[target#^block]] → ![[target#^block|^block]]).  We store the raw disk
+        // bytes (rawBytes is the original Buffer from fs.readFile) so the snapshot is
+        // byte-identical to what parse.ts originally loaded, regardless of any later
+        // textTransform / trim / OFM mutations.
+        ;(file.data as Record<string, unknown>)["rawSource"] = rawBytes.toString("utf8")
+
         // brain-cache: check MDAST cache before running the expensive parse.
         const mdKey = ctx.cacheDir ? cacheKey(rawBytes, file.data.slug as string) : null
         if (mdKey !== null) {
@@ -194,6 +204,11 @@ export function createFileParser(ctx: BuildCtx, fps: FilePath[]) {
             // not re-read and the entry won't be written back.
             rehydrateDates(cached.data as Record<string, unknown>)
             cachedFile.data = cached.data as typeof file.data
+            // brain-fastpath: always inject rawSource from current rawBytes even on cache hit.
+            // Old cache entries written before this snapshot was introduced may lack rawSource;
+            // setting it here ensures computeFingerprint never encounters a missing field
+            // without requiring a CACHE_VERSION bump.
+            ;(cachedFile.data as Record<string, unknown>)["rawSource"] = rawBytes.toString("utf8")
             res.push([cached.ast, cachedFile])
             if (argv.verbose) {
               console.log(`[markdown hit] ${fp} -> ${cachedFile.data.slug} (${perf.timeSince()})`)

@@ -698,6 +698,8 @@ def test_brain_rebuild_no_build_skips_build_swap(
         "_brain-build-fg",
         "brain-install-launchd",
         "brain-uninstall-launchd",
+        # T7: end-to-end fastpath verification script.
+        "brain-verify-fastpath",
     ],
 )
 def test_bin_script_is_executable_and_parses(name: str) -> None:

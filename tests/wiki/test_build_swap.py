@@ -16,9 +16,11 @@ to keep behavior independent across tests.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import stat
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -29,6 +31,7 @@ from pytest_mock import MockerFixture
 from brain.wiki.build_swap import (
     BuildResult,
     _garbage_collect,
+    _invalidate_fastpath_manifest,
     _run_build,
     build_and_swap,
     main,
@@ -539,6 +542,7 @@ def test_run_build_uses_output_flag(
         workspace=quartz,
         vault=tmp_path / "vault",
         build_dir=build_dir,
+        build_id="20260101-000000-abcdef",
         timeout_seconds=60.0,
         env=None,
     )
@@ -636,6 +640,322 @@ def test_main_returns_nonzero_on_failure(
     assert rc == 1
     captured = capsys.readouterr()
     assert "build failed" in captured.err.lower()
+
+
+def test_swap_failure_invalidates_fastpath_manifest(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """A failed _atomic_swap must delete fastpath/manifest.json before re-raising.
+
+    Regression guard for the stale-artifact-after-failed-swap bug:
+
+    When _run_build succeeds, the Quartz subprocess writes
+    fastpath_dir/manifest.json with parent_build_id=<new_build_id>. If the
+    subsequent _atomic_swap then raises OSError, ``current`` still points at
+    the previous build. The stale manifest carries fingerprints from the
+    unswapped build — the classifier would route the next edit as TRIVIAL,
+    running build-partial against a live build dir whose HTML is from an
+    earlier state.
+
+    The fix: _atomic_swap failures in build_and_swap must call
+    _invalidate_fastpath_manifest so classify_edit returns NON_TRIVIAL (no
+    manifest → ManifestError → full build) on the next watcher tick.
+    """
+    vault, quartz = _make_workspace(tmp_path)
+
+    # Simulate what the Quartz subprocess writes into fastpath_dir before the
+    # swap happens. Use a sentinel parent_build_id so we can assert it's gone.
+    fastpath_dir = quartz / ".cache" / "fastpath"
+    fastpath_dir.mkdir(parents=True)
+    (fastpath_dir / "manifest.json").write_text(
+        '{"version":1,"parent_build_id":"pre-swap-id","built_at_ms":0,"slugs":{}}',
+        encoding="utf-8",
+    )
+
+    # Mock subprocess.run to succeed (write minimal HTML) so _run_build returns OK.
+    def _fake_run(args: list[str], **kwargs: object) -> None:  # type: ignore[return]
+        output_idx = args.index("--output")
+        out = __import__("pathlib").Path(args[output_idx + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    mocker.patch("subprocess.run", side_effect=_fake_run)
+    mocker.patch("brain.wiki.build_swap._refresh_pre_build_adornments")
+    # Inject the swap failure — OSError from _atomic_swap mirrors a
+    # filesystem-full / permission-denied scenario on the workspace.
+    mocker.patch(
+        "brain.wiki.build_swap._atomic_swap",
+        side_effect=OSError("simulated swap failure"),
+    )
+
+    with pytest.raises(BrainWikiBuildError, match="swap failed"):
+        build_and_swap(vault, quartz_dir=quartz, node_path="/fake/node")
+
+    # The stale manifest must be gone so classify_edit returns NON_TRIVIAL next time.
+    assert not (fastpath_dir / "manifest.json").exists(), (
+        "stale fastpath manifest was not deleted after swap failure — "
+        "the next classify_edit would use fingerprints from the unswapped build"
+    )
+
+
+def test_swap_failure_without_manifest_does_not_raise(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """_invalidate_fastpath_manifest is a no-op when manifest.json is already absent.
+
+    Guards against the _invalidate_fastpath_manifest helper raising
+    FileNotFoundError when the subprocess happened to not write the manifest
+    (e.g. QUARTZ_PARENT_BUILD_ID was absent in an earlier version).
+    """
+    vault, quartz = _make_workspace(tmp_path)
+
+    # fastpath_dir exists but manifest.json is absent.
+    fastpath_dir = quartz / ".cache" / "fastpath"
+    fastpath_dir.mkdir(parents=True)
+    assert not (fastpath_dir / "manifest.json").exists()
+
+    def _fake_run(args: list[str], **kwargs: object) -> None:  # type: ignore[return]
+        output_idx = args.index("--output")
+        out = __import__("pathlib").Path(args[output_idx + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    mocker.patch("subprocess.run", side_effect=_fake_run)
+    mocker.patch("brain.wiki.build_swap._refresh_pre_build_adornments")
+    mocker.patch(
+        "brain.wiki.build_swap._atomic_swap",
+        side_effect=OSError("swap failure"),
+    )
+
+    # Should raise BrainWikiBuildError but NOT FileNotFoundError.
+    with pytest.raises(BrainWikiBuildError, match="swap failed"):
+        build_and_swap(vault, quartz_dir=quartz, node_path="/fake/node")
+
+
+def test_build_id_write_failure_invalidates_fastpath_manifest(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """A failed .build-id write (pre-swap) must also invalidate fastpath/manifest.json.
+
+    Regression guard: the .build-id write lives in the same "post-build,
+    pre-committed" window as _atomic_swap.  The subprocess already wrote
+    fastpath_dir/manifest.json, so if the .build-id write raises OSError
+    (disk-full, permission-denied) the stale manifest must be removed —
+    not just when _atomic_swap itself fails.
+
+    This test exercises the structural fix: moving the .build-id write
+    INSIDE the try/except OSError block that calls _invalidate_fastpath_manifest.
+    """
+    vault, quartz = _make_workspace(tmp_path)
+
+    fastpath_dir = quartz / ".cache" / "fastpath"
+    fastpath_dir.mkdir(parents=True)
+    (fastpath_dir / "manifest.json").write_text(
+        '{"version":1,"parent_build_id":"stale-id","built_at_ms":0,"slugs":{}}',
+        encoding="utf-8",
+    )
+
+    # Track which build_dir the stub created so we can restore its permissions.
+    created_build_dir: list[Path] = []
+
+    def _fake_run(args: list[str], **kwargs: object) -> None:  # type: ignore[return]
+        output_idx = args.index("--output")
+        out = Path(args[output_idx + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "index.html").write_text("<html></html>", encoding="utf-8")
+        created_build_dir.append(out)
+        # Make the build dir unwritable so the subsequent .build-id write fails.
+        # PermissionError (OSError subclass) is the realistic failure mode for
+        # disk-full or permission-denied scenarios on the build output directory.
+        os.chmod(out, 0o555)
+
+    mocker.patch("subprocess.run", side_effect=_fake_run)
+    mocker.patch("brain.wiki.build_swap._refresh_pre_build_adornments")
+
+    try:
+        with pytest.raises(BrainWikiBuildError, match="swap failed"):
+            build_and_swap(vault, quartz_dir=quartz, node_path="/fake/node")
+    finally:
+        # Restore permissions so pytest's tmp_path cleanup can remove the dir.
+        for d in created_build_dir:
+            with contextlib.suppress(OSError):
+                os.chmod(d, 0o755)
+
+    # Stale manifest must be gone — classifier must route next edit to full build.
+    assert not (fastpath_dir / "manifest.json").exists(), (
+        "stale fastpath manifest was not invalidated after .build-id write failure — "
+        "post-build pre-swap OSError must also trigger invalidation"
+    )
+
+
+def test_invalidate_fastpath_manifest_unit(tmp_path: Path) -> None:
+    """_invalidate_fastpath_manifest deletes the file and is idempotent.
+
+    Unit test for the helper in isolation: verifies (a) the file is removed
+    when present, (b) calling it twice does not raise, and (c) the function
+    is a no-op when the fastpath dir doesn't exist.
+    """
+    workspace = tmp_path / "workspace"
+    fastpath_dir = workspace / ".cache" / "fastpath"
+    fastpath_dir.mkdir(parents=True)
+
+    manifest_path = fastpath_dir / "manifest.json"
+    manifest_path.write_text('{"test": true}', encoding="utf-8")
+    assert manifest_path.exists()
+
+    # First call removes the file.
+    _invalidate_fastpath_manifest(workspace)
+    assert not manifest_path.exists()
+
+    # Second call is a no-op (FileNotFoundError is swallowed).
+    _invalidate_fastpath_manifest(workspace)  # must not raise
+
+    # Works even when fastpath_dir itself doesn't exist.
+    _invalidate_fastpath_manifest(tmp_path / "no-such-workspace")  # must not raise
+
+
+def test_full_build_passes_quartz_parent_build_id_env(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Watcher-driven full build must inject QUARTZ_PARENT_BUILD_ID into the subprocess env.
+
+    Regression guard for the fastpath manifest bug: without this env var the
+    Quartz overlay logs "skipping fastpath artifact write" and never writes
+    manifest.json + contentmap.json.  Every subsequent build_partial then hits
+    an envelope mismatch (manifest.parent_build_id != current run) → exit 2 →
+    watcher falls back to full rebuild → fast path never lights up.
+
+    The fix: _run_build always builds a merged env dict and injects
+    QUARTZ_PARENT_BUILD_ID = build_id before spawning the Node subprocess.
+    """
+    _vault, quartz = _make_workspace(tmp_path)
+    build_dir = quartz / "builds" / "20260101-120000-aabbcc"
+    build_dir.mkdir(parents=True)
+
+    spy = mocker.patch("subprocess.run")
+
+    _run_build(
+        node_path="/usr/local/bin/node",
+        workspace=quartz,
+        vault=tmp_path / "vault",
+        build_dir=build_dir,
+        build_id="20260101-120000-aabbcc",
+        timeout_seconds=60.0,
+        env=None,
+    )
+
+    spy.assert_called_once()
+    call_kwargs = spy.call_args.kwargs
+    assert "env" in call_kwargs, "subprocess.run must receive an explicit env kwarg"
+    passed_env: dict[str, str] = call_kwargs["env"]
+    assert "QUARTZ_PARENT_BUILD_ID" in passed_env, (
+        "QUARTZ_PARENT_BUILD_ID must be present in the subprocess env so the "
+        "Quartz overlay writes manifest.json + contentmap.json"
+    )
+    assert passed_env["QUARTZ_PARENT_BUILD_ID"] == "20260101-120000-aabbcc", (
+        f"expected build_id '20260101-120000-aabbcc', "
+        f"got {passed_env['QUARTZ_PARENT_BUILD_ID']!r}"
+    )
+
+
+def test_full_build_quartz_parent_build_id_matches_result_build_id(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """QUARTZ_PARENT_BUILD_ID injected into subprocess must equal BuildResult.build_id.
+
+    Regression guard ensuring the env var is not a hardcoded stub but the
+    actual build_id used for the swap — so manifest.parent_build_id on disk
+    matches whatever build_id subsequent build_partial calls compare against.
+    """
+    vault, quartz = _make_workspace(tmp_path)
+
+    captured_env: dict[str, str] = {}
+
+    def _fake_subprocess_run(args: list[str], **kwargs: object) -> None:  # type: ignore[return]
+        # Capture env at subprocess call time so we can compare it against
+        # the BuildResult the caller ultimately returns.
+        env = kwargs.get("env")
+        if isinstance(env, dict):
+            captured_env.update(env)
+        # Mimic a minimal successful build: write index.html into build_dir.
+        output_idx = args.index("--output")
+        out = __import__("pathlib").Path(args[output_idx + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "index.html").write_text("<html></html>", encoding="utf-8")
+
+    mocker.patch("subprocess.run", side_effect=_fake_subprocess_run)
+    # Skip pre-build adornment refresh (DB not available in unit tests).
+    mocker.patch("brain.wiki.build_swap._refresh_pre_build_adornments")
+
+    # Pass a fake node_path to bypass shutil.which — subprocess.run is mocked
+    # so the path is never actually executed; without this, the test would
+    # require node on PATH.
+    result = build_and_swap(vault, quartz_dir=quartz, node_path="/fake/node")
+
+    assert "QUARTZ_PARENT_BUILD_ID" in captured_env, (
+        "QUARTZ_PARENT_BUILD_ID not found in env passed to subprocess.run"
+    )
+    assert captured_env["QUARTZ_PARENT_BUILD_ID"] == result.build_id, (
+        f"env QUARTZ_PARENT_BUILD_ID={captured_env['QUARTZ_PARENT_BUILD_ID']!r} "
+        f"does not match BuildResult.build_id={result.build_id!r}"
+    )
+
+
+def test_build_failure_invalidates_fastpath_manifest(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """A failed ``_run_build`` (subprocess non-zero exit) must invalidate manifest.json.
+
+    Regression guard for the stale-artifact-after-failed-build bug:
+
+    ``writeFastpathArtifacts()`` in the Quartz overlay fires *after*
+    ``emitContent()`` and is wrapped in try/catch, so it CAN succeed even when
+    the overall Quartz process subsequently exits non-zero (e.g. a post-emit
+    hook fails, or an error in a different code path).  If those artifacts are
+    left on disk, ``classify_edit`` reads fingerprints from the failed,
+    never-swapped build and may route the next edit to ``build-partial``, which
+    would emit HTML based on a stale contentmap while ``current/`` still
+    serves the previous build's content.
+
+    The fix: the ``except`` block that handles ``_run_build`` failures must
+    also call ``_invalidate_fastpath_manifest(workspace)`` — not just the
+    ``except OSError`` block that guards the post-build swap steps.
+
+    This test seeds a manifest.json into fastpath_dir (simulating Quartz
+    writing artifacts before failing), then triggers a CalledProcessError from
+    the subprocess, and asserts the manifest is deleted before the
+    BrainWikiBuildError propagates.
+    """
+    vault, quartz = _make_workspace(tmp_path)
+
+    fastpath_dir = quartz / ".cache" / "fastpath"
+    fastpath_dir.mkdir(parents=True)
+    (fastpath_dir / "manifest.json").write_text(
+        '{"version":1,"parent_build_id":"pre-fail-id","built_at_ms":0,"slugs":{}}',
+        encoding="utf-8",
+    )
+
+    # Simulate Quartz writing partial output then exiting non-zero.
+    def _fake_run_fails(args: list[str], **kwargs: object) -> None:
+        output_idx = args.index("--output")
+        out = Path(args[output_idx + 1])
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "index.html").write_text("<html></html>", encoding="utf-8")
+        # Quartz exits non-zero after emitting content (simulates a post-emit error).
+        raise subprocess.CalledProcessError(returncode=1, cmd=args)
+
+    mocker.patch("subprocess.run", side_effect=_fake_run_fails)
+    mocker.patch("brain.wiki.build_swap._refresh_pre_build_adornments")
+
+    with pytest.raises(BrainWikiBuildError, match="quartz build failed"):
+        build_and_swap(vault, quartz_dir=quartz, node_path="/fake/node")
+
+    # Stale manifest must be gone so classify_edit returns NON_TRIVIAL next time.
+    assert not (fastpath_dir / "manifest.json").exists(), (
+        "stale fastpath manifest was not invalidated after _run_build failure — "
+        "classify_edit would use fingerprints from a never-swapped build, "
+        "potentially routing the next edit to build-partial with stale contentmap"
+    )
 
 
 def test_main_argument_validation(
