@@ -743,9 +743,11 @@ Then `brew services reload caddy`. `localhost:8080` stays as a backwards-compat 
 echo '127.0.0.1 brain.test' | sudo tee -a /etc/hosts
 ```
 
-**Auto-reload.** When the build watcher swaps `current/` to a new build, every open tab reloads within ~3 seconds. The mechanism: `bin/brain-up` exports `BRAIN_WIKI_RELOAD=1` for the build watcher, which makes the brain Quartz overlay's `Plugin.ReloadSignal()` transformer inject a `<script src="/static/reload.js" defer>` into every page. That script polls `/.build-id` every 3 seconds while the tab is foregrounded, sends `If-None-Match` after the first ETag-bearing response so unchanged builds return `304 Not Modified`, pauses while the tab is backgrounded (so an idle tab in the background doesn't generate traffic), and calls `location.reload()` when the build ID changes. `brain vault render` (the one-shot prod build path) leaves `BRAIN_WIKI_RELOAD` unset, so production builds ship without the polling script — only the dev daily-use flow gates it on.
+**Auto-reload.** When the build watcher swaps `current/` to a new build, every open tab reloads within ~1-2 seconds. The mechanism: `bin/brain-up` exports `BRAIN_WIKI_RELOAD=1` for the build watcher, which makes the brain Quartz overlay's `Plugin.ReloadSignal()` transformer inject a `<script src="/static/reload.js" defer>` into every page. That script polls `/.build-id` every 1 second while the tab is foregrounded, sends `If-None-Match` after the first ETag-bearing response so unchanged builds return `304 Not Modified`, pauses while the tab is backgrounded (so an idle tab in the background doesn't generate traffic), and calls `location.reload()` when the build ID changes. `brain vault render` (the one-shot prod build path) leaves `BRAIN_WIKI_RELOAD` unset, so production builds ship without the polling script — only the dev daily-use flow gates it on.
 
-**First-build cost.** Cold start (`brain-up` against an empty `.quartz/current`) takes ~40s for a ~450-doc vault — the user sees a "first build, ~40s" message in the foreground before the script returns. Subsequent rebuilds are also ~40s, but they happen entirely in the background under `builds/<ts>-<hash>/`; open tabs keep seeing the previous build right up to the atomic swap. The build watcher coalesces rapid edits with a 1.5s debounce, so a flurry of saves produces one rebuild rather than one per save. Old build dirs are GC'd after each swap (default keep=3, tunable via `BRAIN_WIKI_KEEP_BUILDS`); the build that `current` points at is never deleted, even if it's beyond the keep window.
+**First-build cost.** Cold start (`brain-up` against an empty `.quartz/current`) takes ~40s for a ~450-doc vault — the user sees a "first build, ~40s" message in the foreground before the script returns. Full rebuilds (rename, frontmatter change, structural edit) are also ~40s, but they happen entirely in the background under `builds/<ts>-<hash>/`; open tabs keep seeing the previous build right up to the atomic swap. The build watcher coalesces rapid edits with a 1.5s debounce, so a flurry of saves produces one rebuild rather than one per save. Old build dirs are GC'd after each swap (default keep=3, tunable via `BRAIN_WIKI_KEEP_BUILDS`); the build that `current` points at is never deleted, even if it's beyond the keep window.
+
+**Per-file fastpath (trivial edits).** When you edit one Markdown file's body without changing structural fields (title, tags, slug, etc.), the watcher routes the edit through a per-file partial emit instead of a full rebuild. Warm fastpath builds land in ~700ms-1.8s on a ~1100-doc vault; combined with the 1s reload poll, the total edit-to-UI latency is ~2 seconds. The mechanism is documented in [`docs/plans/2026-05-09-plan-b-per-file-emit.md`](docs/plans/2026-05-09-plan-b-per-file-emit.md): a full build writes a `manifest.json` + `contentmap.json` envelope under `<vault>/.quartz/.cache/fastpath/` keyed by canonical structural fingerprints; `brain.wiki.edit_classifier` recomputes the fingerprint after each edit and routes TRIVIAL edits to a Quartz `build-partial` subcommand that re-emits only the changed file's HTML (cross-file emitters like backlinks/graph see a synthesized full corpus so they don't break). Anything non-trivial (rename, tag change, slug collision, manifest miss) falls back to the full build path. Set `BRAIN_FASTPATH_ENABLED=false` to disable the fastpath if you ever need to.
 
 Backlinks, graph view, and full-text search all work out of the box — that's Quartz's job, not brain's.
 
@@ -762,7 +764,11 @@ brain-down     # stop both watchers. Caddy is left running so brain.test keeps
 brain-rebuild  # one-shot rebuild + atomic swap. Use after overlay or config
                # edits the watcher won't catch (since nothing in the vault tree
                # changed). --no-export skips the DB→vault export step;
-               # --no-build skips the build itself.
+               # --no-prune skips the orphan-mirror prune; --no-overlay skips
+               # the Quartz overlay re-apply; --no-build skips the build
+               # itself; --clean-cache wipes the parser cache at
+               # <vault>/.quartz/.cache/parser/ before building (use to
+               # debug cache issues or measure a cold-build baseline).
 brain-status   # show watcher state, the active build dir, the build-id pinned
                # by current/, and whether the wiki URL is reachable.
 ```
@@ -779,6 +785,7 @@ Env overrides:
 | `BRAIN_WIKI_KEEP_BUILDS` | `3` | How many old build dirs under `builds/` to retain after each swap. Lets you `git diff`-style inspect prior builds. |
 | `BRAIN_NO_OVERLAY` | `0` | Set `1` to skip the Quartz overlay step at startup. Useful when iterating on stock Quartz behavior. |
 | `BRAIN_NO_BUILD_WATCHER` | `0` | Set `1` to skip starting the build watcher (used by the bin-script tests; also handy when debugging the sync watcher in isolation). |
+| `BRAIN_FASTPATH_ENABLED` | `true` | Set `false`/`0`/`no` to disable the per-file partial-emit fastpath and force every vault edit through a full rebuild. See [Serve locally → Per-file fastpath](#serve-locally) for the trade-off. |
 | `BRAIN_PY` | (unset) | Test/CI knob — overrides the Python interpreter `bin/brain-{up,rebuild}` invoke for the watcher + build subprocesses. Defaults to `<repo>/.venv/bin/python`. |
 
 PIDs are tracked at `/tmp/brain-{watch,build}.pid`; logs at `/tmp/brain-{watch,build}.log`. (The legacy `/tmp/brain-wiki.pid` from the old `quartz --serve` setup is still cleaned up by `brain-down` for backward compat — fresh installs won't see it.)
@@ -812,6 +819,10 @@ The design is captured across three specs and one set of phase-by-phase implemen
 | [`2026-04-27-mcp-server.md`](docs/plans/2026-04-27-mcp-server.md) | MCP server implementation per the design above. |
 | [`2026-04-28-local-embeddings-qwen3-8b.md`](docs/plans/2026-04-28-local-embeddings-qwen3-8b.md) | Pluggable embedder backends (arctic / voyage / qwen3) behind a single `Embedder` Protocol. |
 | `2026-04-{28,29}-vault-model-phase-{1..7}.md` | Vault model rollout: schema + export, sync engine + wiki-link parser, authoring CLI, link graph queries, watcher, Quartz render integration, MCP additions. Each phase shipped independently with its own review + audit loop. |
+| [`2026-05-07-people-hub.md`](docs/plans/2026-05-07-people-hub.md) | People Hub — per-person vault pages under `<vault>/people/<slug>.md` aggregated from frontmatter, plus a `brain people [NAME]` CLI. Curated `_people.yml` always emits; anyone with ≥`BRAIN_PEOPLE_HUB_MIN_DOCS` documents joins automatically. |
+| [`2026-05-08-quartz-incremental-builds.md`](docs/plans/2026-05-08-quartz-incremental-builds.md) | Plan A — TypeScript parser cache at `<vault>/.quartz/.cache/parser/` so unchanged Markdown files skip the parse phase between builds. Surfaced via `bin/brain-rebuild --clean-cache`. |
+| [`2026-05-09-edit-to-ui-latency.md`](docs/plans/2026-05-09-edit-to-ui-latency.md) / [`-closeout.md`](docs/plans/2026-05-09-edit-to-ui-latency-closeout.md) | Edit-to-UI latency reduction — PollingObserver swap, scoped polling, deferred refresh_related, node-direct Quartz invocation, reload poll 3s→1s. Median 29.7s edit-to-UI on a 1100-doc vault. |
+| [`2026-05-09-plan-b-per-file-emit.md`](docs/plans/2026-05-09-plan-b-per-file-emit.md) | Plan B — per-file partial emit fastpath. Trivial edits route to a single-file Quartz emit instead of a full rebuild, taking edit-to-UI from ~30s down to ~2s. See [Serve locally](#serve-locally) for the user-facing description. |
 
 ### Codebase layout
 
@@ -841,7 +852,19 @@ src/brain/
     graph.py          — backlinks / outgoing / orphans / graph queries
     graph_format.py   — JSON / DOT / Mermaid emitters
     watch.py          — fsnotify watcher with debounce + drain on shutdown
-migrations/           — numbered SQL files (001..004) + schema_migrations tracking
+    paths.py          — shared path/wiki-link helpers
+  wiki/               — wiki rendering + serve
+    build_swap.py     — full Quartz build + atomic current/ symlink swap
+    build_watcher.py  — vault-change watcher; routes to fastpath or full
+    build_partial.py  — Python wrapper for the Quartz build-partial subcommand
+    edit_classifier.py — fingerprint-based trivial/non-trivial routing
+    fastpath_manifest.py — manifest.json + contentmap.json reader/writer
+    fastpath_state.py — state.json (last_partial_at_ms, failure counter)
+    build_homepage.py — recent rail + homepage emit
+    build_people.py   — People Hub (per-person vault pages + roster)
+    build_related.py  — refresh_related daemon (per-doc related JSON)
+    slug.py           — Quartz-compatible slug → vault-path conversion
+migrations/           — numbered SQL files (001..009) + schema_migrations tracking
 bin/                  — brain-up / brain-down / brain-status convenience scripts
 quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
 docs/specs/           — design specs (above)
