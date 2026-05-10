@@ -131,6 +131,95 @@ def test_reload_client_uses_conditional_build_id_requests(tmp_path: Path) -> Non
     subprocess.run([node, str(harness)], check=True)
 
 
+def test_reload_client_reloads_on_fastpath_build_id(tmp_path: Path) -> None:
+    """Partial builds write fastpath build ids and must trigger a reload."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is required for the reload.js runtime harness")
+
+    source = _read(RELOAD_JS)
+    harness = tmp_path / "reload-fastpath-harness.mjs"
+    harness.write_text(
+        textwrap.dedent(
+            f"""
+            import vm from "node:vm"
+
+            const source = {json.dumps(source)}
+            const intervals = []
+            let reloads = 0
+
+            const responses = [
+              {{ status: 200, ok: true, etag: '"build-a"', body: "20260505-200000-aaaaaa\\n" }},
+              {{
+                status: 200,
+                ok: true,
+                etag: '"fastpath-a"',
+                body: "fastpath-1778420119296-557d3cb7\\n",
+              }},
+            ]
+
+            function responseFor(entry) {{
+              return {{
+                status: entry.status,
+                ok: entry.ok,
+                headers: {{
+                  get(name) {{
+                    return name.toLowerCase() === "etag" ? entry.etag : null
+                  }},
+                }},
+                async text() {{
+                  return entry.body
+                }},
+              }}
+            }}
+
+            const context = {{
+              console: {{ log() {{}} }},
+              document: {{
+                visibilityState: "visible",
+                addEventListener() {{}},
+              }},
+              location: {{
+                reload() {{
+                  reloads += 1
+                }},
+              }},
+              setInterval(fn, ms) {{
+                intervals.push({{ fn, ms }})
+                return intervals.length
+              }},
+              clearInterval() {{}},
+              fetch() {{
+                const entry = responses.shift()
+                if (!entry) throw new Error("unexpected fetch call")
+                return Promise.resolve(responseFor(entry))
+              }},
+            }}
+
+            function assert(condition, message) {{
+              if (!condition) throw new Error(message)
+            }}
+
+            async function flush() {{
+              await new Promise((resolve) => setImmediate(resolve))
+              await new Promise((resolve) => setImmediate(resolve))
+            }}
+
+            vm.runInNewContext(source, context)
+            await flush()
+
+            await intervals[0].fn()
+            await flush()
+
+            assert(reloads === 1, "fastpath build id should trigger one reload")
+            """
+        ),
+        encoding="utf-8",
+    )
+
+    subprocess.run([node, str(harness)], check=True)
+
+
 def test_reload_client_does_not_store_etag_until_body_is_valid(
     tmp_path: Path,
 ) -> None:

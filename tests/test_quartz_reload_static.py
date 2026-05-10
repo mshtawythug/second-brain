@@ -49,3 +49,10 @@ def test_interval_ms_is_1000(reload_js_source: str) -> None:
         "1000ms per Task 6 of the 2026-05-09 closeout plan; "
         "a higher value inflates perceived edit-to-UI latency"
     )
+
+
+def test_reload_accepts_fastpath_build_ids(reload_js_source: str) -> None:
+    """Partial builds write ``fastpath-...`` ids that must reload open tabs."""
+    assert "fastpath-\\d+-[0-9a-f]{8}" in reload_js_source, (
+        "reload.js must accept fastpath build ids written by build-partial"
+    )

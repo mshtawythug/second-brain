@@ -74,10 +74,11 @@
   // comparing.
   var BUILD_ID_PATH = "/.build-id"
 
-  // Must match `brain.wiki.build_swap._generate_build_id()`. Rejecting
+  // Must match full-build ids from `brain.wiki.build_swap._generate_build_id()`
+  // and fast-path ids from `quartz/cli/build_partial_handler.js`. Rejecting
   // non-empty garbage bodies (for example an HTML fallback) prevents a
   // bad 200 response from poisoning the ETag baseline.
-  var BUILD_ID_PATTERN = /^\d{8}-\d{6}-[0-9a-f]{6}$/
+  var BUILD_ID_PATTERN = /^(?:\d{8}-\d{6}-[0-9a-f]{6}|fastpath-\d+-[0-9a-f]{8})$/
 
   // Last ETag returned by Caddy for `/.build-id`. `null` means the
   // first request has not completed yet, so no conditional header can
