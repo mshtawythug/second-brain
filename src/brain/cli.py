@@ -1,4 +1,6 @@
 """brain — second brain CLI."""
+from __future__ import annotations
+
 import json as _json  # aliased — `json` conflicts with the --json output flag name
 import logging
 import os
@@ -10,7 +12,7 @@ import uuid
 from datetime import UTC, datetime
 from datetime import date as date_cls
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import psycopg
@@ -34,13 +36,18 @@ from .editor import EditorError as RawEditorError
 from .editor import run_editor_on
 from .embeddings import make_embedder
 from .errors import (
+    EnrichmentError,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
     IdPrefixTooShort,
+    OllamaUnavailable,
     PersonAmbiguous,
     PersonNotFound,
 )
+
+if TYPE_CHECKING:
+    from .enrichment import OllamaEnricher
 from .eval import (
     EvalBaselineError,
     EvalCorpusError,
@@ -77,13 +84,16 @@ from .queries import (
     MirrorDriftSummary,
     PersonMatch,
     count_chunks_missing_embedding,
+    count_unenriched_documents,
     embedding_column_state,
     fetch_document,
     finalize_embedding_index,
     iter_chunks_missing_embedding,
     iter_orphan_mirror_files,
     iter_stale_mirror_files,
+    iter_unenriched_documents,
     list_documents,
+    list_existing_tags,
     mirror_drift_summary,
     resolve_document_prefix,
     resolve_person_to_keys,
@@ -292,7 +302,14 @@ def _check_voyage(cfg: Config, failures: list[str]) -> None:
 
 
 def _check_ollama(cfg: Config, failures: list[str]) -> None:
-    """Doctor sub-check: ping Ollama and verify the backend's model is loaded."""
+    """Doctor sub-check: ping Ollama and verify the backend's model is loaded.
+
+    Also reports presence of ``cfg.enrich_model`` (Wave Q1-D auto-summary
+    backend) on the same ``/api/tags`` payload — one HTTP call, two checks.
+    The enrich-model check is informational only (yellow warn when missing);
+    the user can disable enrichment with ``--no-enrich`` if the model isn't
+    available.
+    """
     if cfg.embedder == "qwen3":
         wanted = cfg.qwen3_model
     else:
@@ -314,6 +331,15 @@ def _check_ollama(cfg: Config, failures: list[str]) -> None:
             typer.secho(
                 f"ollama          OK ({cfg.ollama_host}) — model {wanted} "
                 f"NOT loaded — run `ollama pull {wanted}`",
+                fg="yellow",
+            )
+        # Wave Q1-D — enrich model check. Soft (never failure).
+        if _model_loaded(cfg.enrich_model, loaded_models):
+            typer.echo(f"enrich model    OK ({cfg.enrich_model} loaded)")
+        else:
+            typer.secho(
+                f"enrich model    WARN ({cfg.enrich_model} not in /api/tags — "
+                f"run `ollama pull {cfg.enrich_model}` to enable auto-summary)",
                 fg="yellow",
             )
     except (httpx.HTTPError, ValueError) as e:
@@ -536,6 +562,20 @@ def _build_embedder(cfg: Config) -> Embedder:
     return make_embedder(cfg)
 
 
+def _build_enricher(cfg: Config) -> OllamaEnricher:
+    """Build the configured Ollama enricher.
+
+    Indirected so tests can monkeypatch this single point to swap in a fake
+    enricher (mirrors :func:`_build_embedder`). Production code goes
+    through this factory so the wave-Q1-D env-var surface
+    (``BRAIN_ENRICH_MODEL`` / ``BRAIN_ENRICH_MAX_INPUT_TOKENS`` /
+    ``BRAIN_ENRICH_TIMEOUT_SECONDS``) is honored everywhere.
+    """
+    from .enrichment import make_enricher
+
+    return make_enricher(cfg)
+
+
 @app.command()
 def ingest(
     path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
@@ -543,10 +583,19 @@ def ingest(
     force: bool = typer.Option(
         False, "--force", help="Re-ingest even if content already exists."
     ),
+    no_enrich: bool = typer.Option(
+        False, "--no-enrich",
+        help=(
+            "Skip the local-Ollama auto-summary post-ingest hook (Q1-D). "
+            "Default: enrichment runs on every ingest; Ollama-down never "
+            "fails the ingest (logged WARN, row stays unenriched)."
+        ),
+    ),
 ) -> None:
     """Ingest a single file (TXT/MD/PDF/DOCX)."""
     cfg = Config.load()
     embedder = _build_embedder(cfg)
+    enricher = None if no_enrich else _build_enricher(cfg)
     doc = extract_path(path)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
@@ -558,6 +607,9 @@ def ingest(
             tags=list(tag),
             force=force,
             vault_root=cfg.vault_path,
+            enricher=enricher,
+            enrich=not no_enrich,
+            enrich_min_tokens=cfg.enrich_min_tokens,
         )
     verb = "ingested" if result.created else "skipped (already ingested)"
     typer.echo(f"{verb}: {path.name} → {result.document_id}")
@@ -574,6 +626,10 @@ def ingest_dir(
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="List files that would be ingested without writing."
+    ),
+    no_enrich: bool = typer.Option(
+        False, "--no-enrich",
+        help="Skip the local-Ollama auto-summary post-ingest hook (Q1-D).",
     ),
 ) -> None:
     """Recursively ingest a directory of files."""
@@ -595,6 +651,7 @@ def ingest_dir(
         return
 
     embedder = _build_embedder(cfg)
+    enricher = None if no_enrich else _build_enricher(cfg)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         for f in files:
@@ -607,6 +664,9 @@ def ingest_dir(
                     source_kind="manual",
                     tags=list(tag),
                     vault_root=cfg.vault_path,
+                    enricher=enricher,
+                    enrich=not no_enrich,
+                    enrich_min_tokens=cfg.enrich_min_tokens,
                 )
                 verb = "ingested" if result.created else "skipped"
                 typer.echo(f"  {verb}: {f.name}")
@@ -636,6 +696,10 @@ def ingest_stdin(
     force: bool = typer.Option(
         False, "--force", help="Re-ingest even if content already exists."
     ),
+    no_enrich: bool = typer.Option(
+        False, "--no-enrich",
+        help="Skip the local-Ollama auto-summary post-ingest hook (Q1-D).",
+    ),
 ) -> None:
     """Ingest content piped on stdin (used by Claude for Krisp/Slack)."""
     content = sys.stdin.read()
@@ -645,6 +709,15 @@ def ingest_stdin(
     meta: dict[str, Any] = _json.loads(metadata) if metadata else {}
     if date:
         meta.setdefault("date", date)
+    # Wave Q1-D — action-items docs require a parent_meeting_external_id so
+    # the parent transcript is discoverable. Without it `brain todo` loses
+    # the link; surfacing a clean BadParameter here is friendlier than
+    # letting a malformed row into the DB.
+    if content_type == "krisp_action_items" and "parent_meeting_external_id" not in meta:
+        raise typer.BadParameter(
+            "--content-type krisp_action_items requires "
+            '--metadata \'{"parent_meeting_external_id": "<id>"}\''
+        )
     doc = _stdin_make_doc(
         content=content,
         title=title,
@@ -654,6 +727,7 @@ def ingest_stdin(
 
     cfg = Config.load()
     embedder = _build_embedder(cfg)
+    enricher = None if no_enrich else _build_enricher(cfg)
     # Krisp ingest triggers Calendar/Contacts directory refresh via the gws
     # CLI; other sources don't need a runner. Refresh failures are warnings,
     # not errors — the ingest itself still succeeds.
@@ -671,6 +745,9 @@ def ingest_stdin(
             force=force,
             gws_runner=gws_runner,
             vault_root=cfg.vault_path,
+            enricher=enricher,
+            enrich=not no_enrich,
+            enrich_min_tokens=cfg.enrich_min_tokens,
         )
     verb = "ingested" if result.created else "skipped (already ingested)"
     typer.echo(f"{verb}: {title} → {result.document_id}")
@@ -687,6 +764,10 @@ def ingest_gmail(
     max_results: int = typer.Option(50, "--max", help="Max messages to fetch."),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="List matches without ingesting."
+    ),
+    no_enrich: bool = typer.Option(
+        False, "--no-enrich",
+        help="Skip the local-Ollama auto-summary post-ingest hook (Q1-D).",
     ),
 ) -> None:
     """Ingest Gmail messages via the `gws` CLI, batched per thread.
@@ -750,6 +831,7 @@ def ingest_gmail(
         return
 
     embedder = _build_embedder(cfg)
+    enricher = None if no_enrich else _build_enricher(cfg)
     ingested = 0
     ingested_draft = 0
     skipped = 0
@@ -774,6 +856,9 @@ def ingest_gmail(
                     tags=list(tag),
                     vault_root=cfg.vault_path,
                     draft=bool(doc.metadata.get("_is_draft", False)),
+                    enricher=enricher,
+                    enrich=not no_enrich,
+                    enrich_min_tokens=cfg.enrich_min_tokens,
                 )
                 # P2.2 thread upsert: ``created`` is True only on first
                 # insert; ``body_changed`` is True when an existing thread
@@ -922,6 +1007,269 @@ def reembed(
                 typer.echo(
                     f"finalize skipped: {remaining} chunk(s) still have NULL embedding"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Wave Q1-D — brain enrich
+# ---------------------------------------------------------------------------
+
+
+# `brain enrich --krisp-action-items` prints copy-pasteable commands for
+# Claude to execute against the Krisp MCP. The CLI does NOT call MCP itself
+# (R4 — MCP tools live in agent context, not the Python process); it renders
+# the actual Krisp MCP tools the agent should invoke + the literal
+# ``brain ingest-stdin`` shape that pipes the extracted action items back in.
+# Locked-text so test fixtures stay byte-stable across runs.
+#
+# Why this shape (Codex re-review fix 2026-05-11): Krisp's claude.ai MCP
+# does NOT expose a standalone ``list_action_items`` tool. Action items are
+# part of the per-meeting Note/transcript payload returned by
+# ``mcp__claude_ai_Krisp__search_meetings`` (the documented entry point per
+# ``~/.claude/CLAUDE.md`` Second Brain section). The agent is expected to:
+#
+#   1. ``search_meetings(query="action items", ...)`` to list meetings in
+#      the lookback window. Krisp's search supports a free-text ``query``
+#      so the simplest entry is to ask for meetings that contain action
+#      items; the agent can also pass ``query=""`` for the full window.
+#   2. For each meeting, read the transcript / Note. The action-items
+#      section is rendered as a checklist in Krisp's Note body, or as a
+#      structured array in the API response (field name varies — the
+#      agent extracts whichever is present).
+#   3. Pipe the extracted action-items markdown into ``brain ingest-stdin
+#      --content-type krisp_action_items`` once per meeting, using the
+#      meeting id as the ``parent_meeting_external_id`` metadata key.
+#
+# Format choices:
+# - Concrete ISO date strings, not placeholders like ``<since>``, so the
+#   agent can use them verbatim instead of re-computing.
+# - Tool call rendered as a Python kwarg-style signature so an agent
+#   reading the output emits an exact MCP call.
+# - The ``brain ingest-stdin`` recipe shows the exact flags Claude needs;
+#   the action-items body itself is rendered by the agent from the Krisp
+#   response (transcript-derived OR structured field, both work).
+_KRISP_ACTION_ITEMS_OUTPUT = """\
+Krisp action-items pipeline — Claude orchestrates the MCP call.
+
+Krisp's MCP does not expose a standalone action-items tool; action items
+are part of each meeting's Note/transcript payload returned by
+``search_meetings``. Run this two-step:
+
+  Step 1 — list meetings in the window:
+
+    mcp__claude_ai_Krisp__search_meetings(
+        query="action items",
+{kwargs}
+    )
+
+  Step 2 — for each meeting in the response, extract the action-items
+  section from the Note/transcript body (Krisp renders it as a Markdown
+  checklist), then pipe each meeting's items into the brain:
+
+    echo '<action-items markdown body>' | brain ingest-stdin \\
+        --source krisp \\
+        --external-id "<meeting_id>--action-items" \\
+        --content-type krisp_action_items \\
+        --title "Action items: <meeting title>" \\
+        --metadata '{{"parent_meeting_external_id": "<meeting_id>"}}'
+
+The ``parent_meeting_external_id`` key is required at the ingest-stdin
+CLI boundary (BadParameter otherwise) so ``brain todo`` can trace each
+item back to the originating Krisp meeting.
+"""
+
+
+def _krisp_action_items_kwargs_block(
+    since_days: int | None, source_id: str | None
+) -> str:
+    """Render the kwarg lines for the ``search_meetings`` MCP invocation.
+
+    Computes concrete ISO 8601 ``start_date`` / ``end_date`` strings from
+    ``--since N`` (now → now - N days). When ``--source-id`` is supplied,
+    adds a ``meeting_id`` kwarg pinning the call to one transcript.
+    Returns an empty string when no kwargs apply so the caller's printed
+    signature collapses cleanly.
+    """
+    lines: list[str] = []
+    now = datetime.now(tz=UTC).replace(microsecond=0)
+    if since_days is not None:
+        from datetime import timedelta
+
+        start = (now - timedelta(days=since_days)).isoformat()
+        end = now.isoformat()
+        lines.append(f'        start_date="{start}",')
+        lines.append(f'        end_date="{end}",')
+    if source_id is not None:
+        lines.append(f'        meeting_id="{source_id}",')
+    if not lines:
+        # No filters supplied — still render a comment placeholder so the
+        # signature has at least one body line and the output is
+        # recognizably the same shape.
+        lines.append(
+            "        # no scope filters supplied — defaults to recent meetings"
+        )
+    return "\n".join(lines)
+
+
+def _enrich_backfill(
+    cfg: Config,
+    *,
+    enricher: OllamaEnricher,
+    limit: int | None,
+) -> int:
+    """Drive the ``brain enrich --backfill`` loop.
+
+    Returns the number of rows for which ``documents.summary`` was written.
+    Per-row enrichment failures (malformed JSON, persistent errors) are
+    logged at WARN; the loop continues to the next row. Ollama unavailable
+    on the very first row exits with code 1 (the user almost certainly
+    forgot to start Ollama; bailing out is friendlier than logging the
+    same warning for every row).
+    """
+    updated = 0
+    failed = 0
+    first_row = True
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        total = count_unenriched_documents(conn, current_model=enricher.model)
+        if total == 0:
+            typer.echo(
+                "nothing to enrich (all documents have a summary from "
+                f"{enricher.model})"
+            )
+            return 0
+        ceiling = limit if limit is not None else total
+        typer.echo(
+            f"enriching up to {ceiling} of {total} doc(s) "
+            f"(NULL summary OR summary_model != {enricher.model})"
+        )
+        for batch in iter_unenriched_documents(conn, current_model=enricher.model):
+            for row in batch:
+                if limit is not None and updated >= limit:
+                    if failed:
+                        typer.echo(
+                            f"enriched {updated} document(s); {failed} failed "
+                            "(see warnings)"
+                        )
+                    else:
+                        typer.echo(f"enriched {updated} document(s)")
+                    return updated
+                if enricher.count_tokens(row.content) < cfg.enrich_min_tokens:
+                    # Same skip rule as the post-ingest hook — short content
+                    # never warrants a summary.
+                    continue
+                try:
+                    result = enricher.summarize(row.title, row.content)
+                except OllamaUnavailable as exc:
+                    if first_row:
+                        typer.secho(
+                            f"Ollama unavailable: {exc}\n"
+                            "Is Ollama running? (`brew services start ollama` "
+                            "on macOS)",
+                            fg="red",
+                            err=True,
+                        )
+                        raise typer.Exit(code=1) from exc
+                    typer.secho(
+                        f"  WARN: {row.id[:8]} Ollama unavailable: {exc}",
+                        fg="yellow",
+                        err=True,
+                    )
+                    failed += 1
+                    continue
+                except EnrichmentError as exc:
+                    typer.secho(
+                        f"  WARN: {row.id[:8]} enrichment failed: {exc}",
+                        fg="yellow",
+                        err=True,
+                    )
+                    failed += 1
+                    continue
+                finally:
+                    first_row = False
+                conn.execute(
+                    "UPDATE documents SET summary=%s, summary_model=%s, "
+                    "summary_at=NOW() WHERE id=%s",
+                    (result.summary, result.model, row.id),
+                )
+                updated += 1
+                typer.echo(f"  enriched {row.id[:8]} {row.title[:60]}")
+    if failed:
+        typer.echo(
+            f"enriched {updated} document(s); {failed} failed (see warnings)"
+        )
+    else:
+        typer.echo(f"enriched {updated} document(s)")
+    return updated
+
+
+@app.command()
+def enrich(
+    backfill: bool = typer.Option(
+        False, "--backfill",
+        help=(
+            "Backfill documents missing a summary OR whose summary was "
+            "generated by a different model than the current "
+            "BRAIN_ENRICH_MODEL. Lets a model upgrade propagate to the "
+            "whole corpus without an explicit reset step."
+        ),
+    ),
+    krisp_action_items: bool = typer.Option(
+        False, "--krisp-action-items",
+        help=(
+            "Print the Krisp MCP request shape that Claude should execute "
+            "to pull action items, then exit. The CLI does NOT call MCP "
+            "itself — Claude pipes the action items back via "
+            "`brain ingest-stdin --content-type krisp_action_items`."
+        ),
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n",
+        help="Max docs to enrich in --backfill mode.",
+    ),
+    since: int | None = typer.Option(
+        None, "--since",
+        help="Days lookback (used by --krisp-action-items only).",
+    ),
+    source_id: str | None = typer.Option(
+        None, "--source-id",
+        help="Restrict --krisp-action-items to one transcript id.",
+    ),
+) -> None:
+    """Catch-up enrichment runner — auto-summary + Krisp action items.
+
+    Two mutually-exclusive modes (BadParameter if both/neither):
+
+    - ``--backfill`` iterates rows that need enrichment (``summary IS NULL``
+      OR ``summary_model`` differs from the current ``BRAIN_ENRICH_MODEL``)
+      and calls the enricher for each. The NULL-summary set is backed by
+      partial index ``idx_documents_summary_null``; model-mismatch rows
+      fall through to a sequential scan, which is acceptable at
+      personal-corpus scale and only material right after a model upgrade.
+      Honors ``--limit``; idempotent — re-runs pick up only still-stale
+      rows.
+
+    - ``--krisp-action-items`` prints copy-pasteable MCP + ingest-stdin
+      commands Claude can run to pull action items from Krisp, then exits
+      0 without contacting MCP itself.
+    """
+    if backfill and krisp_action_items:
+        raise typer.BadParameter(
+            "--backfill and --krisp-action-items are mutually exclusive"
+        )
+    if not backfill and not krisp_action_items:
+        raise typer.BadParameter(
+            "expected --backfill or --krisp-action-items"
+        )
+    if krisp_action_items:
+        typer.echo(
+            _KRISP_ACTION_ITEMS_OUTPUT.format(
+                kwargs=_krisp_action_items_kwargs_block(since, source_id)
+            )
+        )
+        return
+    cfg = Config.load()
+    enricher = _build_enricher(cfg)
+    _enrich_backfill(cfg, enricher=enricher, limit=limit)
 
 
 def _reconcile_tag_flags(
@@ -1342,6 +1690,72 @@ def rate(
 
 
 @app.command()
+def todo(
+    source: str = typer.Option(
+        "krisp", "--source",
+        help="Filter to one source kind. Today only 'krisp' is supported.",
+    ),
+    since: int | None = typer.Option(
+        None, "--since",
+        help="Only items from docs ingested in the last N days.",
+    ),
+    closed: bool = typer.Option(
+        False, "--closed",
+        help="Include closed [x] items (default: open only).",
+    ),
+    limit: int = typer.Option(50, "--limit", "-n"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List action items parsed from ``krisp_action_items`` documents.
+
+    Walks every ``content_type='krisp_action_items'`` doc, parses each
+    body for ``- [ ]`` / ``- [x]`` lines, and prints one row per parsed
+    item. Default: open items only (use ``--closed`` to include done).
+    JSON output is a flat list of ``{document_id, document_title,
+    ingested_at, state, text}`` dicts.
+    """
+    from .todo import iter_action_item_docs
+
+    cfg = Config.load()
+    rows = []
+    with connect(cfg.database_url) as conn:
+        for row in iter_action_item_docs(
+            conn,
+            source_kind=source,
+            since_days=since,
+            include_closed=closed,
+        ):
+            rows.append(row)
+            if len(rows) >= limit:
+                break
+    if json_output:
+        emit_json(
+            [
+                {
+                    "document_id": r.document_id,
+                    "document_title": r.document_title,
+                    "ingested_at": (
+                        r.ingested_at.isoformat() if r.ingested_at else None
+                    ),
+                    "state": r.state,
+                    "text": r.text,
+                }
+                for r in rows
+            ]
+        )
+        return
+    if not rows:
+        typer.echo("(no action items)")
+        return
+    for r in rows:
+        date_str = r.ingested_at.date().isoformat() if r.ingested_at else "(no date)"
+        marker = "[done]" if r.state == "done" else "[open]"
+        typer.echo(
+            f"{marker:<7} {r.document_id[:8]}  {date_str}  {r.text}"
+        )
+
+
+@app.command()
 def show(
     id: str = typer.Argument(...),
     json_output: bool = typer.Option(False, "--json"),
@@ -1353,24 +1767,32 @@ def show(
         doc = fetch_document(conn, doc_id)
     assert doc is not None  # _resolve_id confirmed the doc exists
     if json_output:
-        emit_json(
-            {
-                "id": doc.id,
-                "title": doc.title,
-                "content": doc.content,
-                "content_type": doc.content_type,
-                "tags": doc.tags,
-                "source_path": doc.source_path,
-                "ingested_at": doc.ingested_at,
-                "source_kind": doc.source_kind,
-            }
-        )
+        # Wave Q1-D — emit ``summary`` only when populated (additive,
+        # back-compatible; scripts parsing the JSON shape still work when
+        # the key is absent).
+        payload: dict[str, Any] = {
+            "id": doc.id,
+            "title": doc.title,
+            "content": doc.content,
+            "content_type": doc.content_type,
+            "tags": doc.tags,
+            "source_path": doc.source_path,
+            "ingested_at": doc.ingested_at,
+            "source_kind": doc.source_kind,
+        }
+        if doc.summary is not None:
+            payload["summary"] = doc.summary
+        emit_json(payload)
         return
     typer.echo(f"# {doc.title}")
     typer.echo(f"id:           {doc.id}")
     typer.echo(f"source:       {doc.source_kind or 'manual'} ({doc.content_type})")
     typer.echo(f"tags:         {', '.join(doc.tags) or '(none)'}")
     typer.echo(f"ingested:     {doc.ingested_at}")
+    if doc.summary is not None:
+        # Wave Q1-D — between ``ingested:`` and the body so existing scripts
+        # parsing the labeled-prefix lines stay unaffected (R7).
+        typer.echo(f"summary:      {doc.summary}")
     typer.echo("")
     typer.echo(doc.content or "")
 
@@ -1409,7 +1831,7 @@ def list_docs(
 @app.command(context_settings={"ignore_unknown_options": True})
 def tag(
     id: str = typer.Argument(...),
-    mods: list[str] = typer.Argument(...),
+    mods: list[str] | None = typer.Argument(None),
     regenerate_file: bool = typer.Option(
         False,
         "--regenerate-file",
@@ -1418,18 +1840,51 @@ def tag(
             "before applying tags. Errors out for vault-tier authored notes."
         ),
     ),
+    auto: bool = typer.Option(
+        False, "--auto",
+        help=(
+            "Auto-propose tags via the local-Ollama enricher (Q1-D) and "
+            "prompt accept/reject. Mutually exclusive with +tag/-tag mods. "
+            "Requires the doc to have a non-NULL `summary` (run "
+            "`brain enrich --backfill` first)."
+        ),
+    ),
+    accept_all: bool = typer.Option(
+        False, "--accept-all",
+        help="Non-interactive: accept every proposed tag. Requires --auto.",
+    ),
 ) -> None:
-    """Add (+name) or remove (-name) tags. Example: brain tag abc1234 +interview -draft
+    """Add (+name) or remove (-name) tags, or auto-propose via the LLM.
 
-    When the document has a ``vault_path``, the change is also written to the
-    file's frontmatter so the next ``brain vault sync`` does not re-read
-    stale ``tags: []`` from disk and overwrite the DB. The rewrite is
-    idempotent — re-running with the same arguments touches neither DB nor
-    file. Pass ``--regenerate-file`` to recreate a missing ``_ingested/``
-    mirror from the DB row (vault-tier authored notes are refused).
+    Modes:
+        brain tag <id> +foo -bar            # explicit add/remove (legacy)
+        brain tag <id> --auto               # interactive LLM proposal
+        brain tag <id> --auto --accept-all  # non-interactive accept-everything
+
+    When the document has a ``vault_path``, every accepted change is also
+    written to the file's frontmatter so the next ``brain vault sync`` does
+    not re-read stale ``tags: []`` from disk and overwrite the DB. Pass
+    ``--regenerate-file`` to recreate a missing ``_ingested/`` mirror from
+    the DB row (vault-tier authored notes are refused).
     """
-    add = [m[1:] for m in mods if m.startswith("+") and len(m) > 1]
-    remove = [m[1:] for m in mods if m.startswith("-") and len(m) > 1]
+    mods_list = mods or []
+    if accept_all and not auto:
+        raise typer.BadParameter("--accept-all requires --auto")
+    if auto and mods_list:
+        raise typer.BadParameter(
+            "--auto cannot combine with +tag/-tag arguments"
+        )
+    if not auto and not mods_list:
+        raise typer.BadParameter(
+            "expected --auto or +tag/-tag arguments"
+        )
+    if auto:
+        _run_auto_tag(
+            id, accept_all=accept_all, regenerate_file=regenerate_file
+        )
+        return
+    add = [m[1:] for m in mods_list if m.startswith("+") and len(m) > 1]
+    remove = [m[1:] for m in mods_list if m.startswith("-") and len(m) > 1]
     if not (add or remove):
         raise typer.BadParameter("expected +tag or -tag arguments")
     cfg = Config.load()
@@ -1456,6 +1911,112 @@ def tag(
             regenerate_file=regenerate_file,
         )
     typer.echo(f"updated tags on {doc_id[:8]}{suffix}")
+
+
+def _run_auto_tag(
+    id_prefix: str, *, accept_all: bool, regenerate_file: bool
+) -> None:
+    """Interactive auto-tag proposal flow (Wave Q1-D 3.2).
+
+    Resolves the id; fetches title + summary + current_tags; surfaces an
+    error if ``summary IS NULL`` (the LLM is unreliable on raw bodies and
+    cheaper on summaries — D5 / R2 mitigation); calls the enricher;
+    presents the proposal; applies accepted tags via :func:`apply_tags`
+    (which routes through :func:`brain.tags.normalize_tags` and the
+    vault writeback helper).
+    """
+    cfg = Config.load()
+    enricher = _build_enricher(cfg)
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        doc_id = _resolve_id(conn, id_prefix)
+        row = conn.execute(
+            "SELECT title, summary, tags, vault_path, kind "
+            "FROM documents WHERE id=%s",
+            (doc_id,),
+        ).fetchone()
+        assert row is not None  # _resolve_id confirmed
+        title, summary, current_tags, vault_path_rel, kind = row
+        current_tags = list(current_tags or [])
+        if summary is None:
+            typer.secho(
+                "auto-tag requires a non-NULL summary on the document.\n"
+                "Run `brain enrich --backfill` first.",
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        vocab = list_existing_tags(conn)
+        try:
+            proposal = enricher.propose_tags(
+                title=title,
+                summary=summary,
+                existing_vocab=vocab,
+                current_tags=current_tags,
+                max_new=1,
+            )
+        except OllamaUnavailable as exc:
+            typer.secho(f"Ollama unavailable: {exc}", fg="red", err=True)
+            raise typer.Exit(code=1) from exc
+        except EnrichmentError as exc:
+            typer.secho(f"enrichment failed: {exc}", fg="red", err=True)
+            raise typer.Exit(code=1) from exc
+
+        all_proposed = proposal.existing + proposal.new
+        if not all_proposed:
+            typer.echo("(no tags proposed)")
+            return
+
+        typer.echo("Proposed tags:")
+        for t in proposal.existing:
+            typer.echo(f"  [existing]  + {t}")
+        for t in proposal.new:
+            typer.echo(f"  [new]       + {t}")
+        if not accept_all:
+            choice = typer.prompt(
+                "Apply tags? [a]ll / [s]ome / [r]eject",
+                default="r",
+                show_default=True,
+            ).strip().lower()
+        else:
+            choice = "a"
+        if choice == "r" or choice == "q":
+            typer.echo("rejected; no changes")
+            return
+        accepted: list[str]
+        if choice == "a":
+            accepted = list(all_proposed)
+        elif choice == "s":
+            accepted = []
+            for t in all_proposed:
+                yn = typer.prompt(
+                    f"  accept {t}? [y/n]", default="n"
+                ).strip().lower()
+                if yn == "y":
+                    accepted.append(t)
+        else:
+            typer.secho(
+                f"unknown choice {choice!r}; treating as reject",
+                fg="yellow",
+                err=True,
+            )
+            return
+        if not accepted:
+            typer.echo("nothing accepted; no changes")
+            return
+        new_tag_list = apply_tags(conn, doc_id, add=accepted)
+        suffix = _tag_file_writeback(
+            conn,
+            cfg=cfg,
+            vault_path_rel=vault_path_rel,
+            kind=kind,
+            new_tags=new_tag_list,
+            doc_id=doc_id,
+            regenerate_file=regenerate_file,
+        )
+        typer.echo(
+            f"updated tags on {doc_id[:8]}{suffix}: +{' +'.join(accepted)}"
+        )
 
 
 def _tag_file_writeback(
