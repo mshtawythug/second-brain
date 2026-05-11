@@ -55,6 +55,31 @@ DEFAULT_VAULT_PATH = Path.home() / "brain-vault"
 # regardless. Override via ``BRAIN_PEOPLE_HUB_MIN_DOCS``.
 DEFAULT_PEOPLE_HUB_MIN_DOCS = 3
 
+# Wave Q1-D — enrichment (auto-summary + auto-tag) defaults.
+#
+# ``DEFAULT_ENRICH_MODEL`` is the Ollama model name passed to ``/api/chat``.
+# llama3.1:8b is the only model authorized by the roadmap intake brief for
+# Q1-D. Users override via ``BRAIN_ENRICH_MODEL`` — anything pullable via
+# ``ollama pull <name>`` works as long as it supports JSON-mode output.
+DEFAULT_ENRICH_MODEL = "llama3.1:8b"
+
+# Min content tokens (tiktoken ``cl100k_base``) below which the post-ingest
+# enrichment hook silently skips. A 50-token doc is roughly two sentences;
+# the title alone is already a fine summary. Conservative default mirrors
+# the planner's recommendation (D3 in the wave plan).
+DEFAULT_ENRICH_MIN_TOKENS = 50
+
+# Max content tokens fed to the model. llama3.1:8b has a 128K context window
+# but we never need more than the opening of a doc to summarize it. Capping
+# at 4K keeps the LLM round-trip predictable (~3-8 s on M-series silicon)
+# and bounds the prompt cost.
+DEFAULT_ENRICH_MAX_INPUT_TOKENS = 4000
+
+# Ollama HTTP timeout for ``/api/chat`` calls. 60 s gives headroom for a
+# cold-model swap-in on first call without spiraling. Override via
+# ``BRAIN_ENRICH_TIMEOUT_SECONDS``.
+DEFAULT_ENRICH_TIMEOUT_SECONDS = 60.0
+
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
 # :func:`brain.ingest.gmail.strip_boilerplate`. Default-deny for ``re.DOTALL``;
@@ -145,6 +170,13 @@ class Config:
     # context are stitched around it. 0 = disabled. Loaded from
     # ``BRAIN_SNIPPET_CONTEXT_TOKENS``; must be a non-negative integer.
     snippet_context_tokens: int = DEFAULT_SNIPPET_CONTEXT_TOKENS
+    # Wave Q1-D — per-document auto-summary + auto-tag enrichment.
+    # The four fields are tightly coupled (they all feed ``OllamaEnricher``)
+    # so they live together at the tail of the dataclass.
+    enrich_model: str = DEFAULT_ENRICH_MODEL
+    enrich_min_tokens: int = DEFAULT_ENRICH_MIN_TOKENS
+    enrich_max_input_tokens: int = DEFAULT_ENRICH_MAX_INPUT_TOKENS
+    enrich_timeout_seconds: float = DEFAULT_ENRICH_TIMEOUT_SECONDS
 
     @classmethod
     def load(cls) -> "Config":
@@ -283,6 +315,67 @@ class Config:
                     f"BRAIN_SNIPPET_CONTEXT_TOKENS must be a non-negative integer "
                     f"(got {snippet_context_tokens!r})"
                 )
+        # Wave Q1-D — enrichment env vars. Same validation pattern as the
+        # snippet-context / recency-halflife knobs above: unset/blank →
+        # default; non-parseable / out-of-range → ConfigError eagerly so a
+        # config typo surfaces at startup instead of mid-ingest.
+        enrich_model_raw = os.environ.get("BRAIN_ENRICH_MODEL")
+        if enrich_model_raw is None or enrich_model_raw.strip() == "":
+            enrich_model = DEFAULT_ENRICH_MODEL
+        else:
+            enrich_model = enrich_model_raw.strip()
+
+        enrich_min_raw = os.environ.get("BRAIN_ENRICH_MIN_TOKENS")
+        if enrich_min_raw is None or enrich_min_raw.strip() == "":
+            enrich_min_tokens = DEFAULT_ENRICH_MIN_TOKENS
+        else:
+            try:
+                enrich_min_tokens = int(enrich_min_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ENRICH_MIN_TOKENS must be a non-negative integer "
+                    f"(got {enrich_min_raw!r})"
+                ) from exc
+            if enrich_min_tokens < 0:
+                raise ConfigError(
+                    f"BRAIN_ENRICH_MIN_TOKENS must be a non-negative integer "
+                    f"(got {enrich_min_tokens!r})"
+                )
+
+        enrich_max_raw = os.environ.get("BRAIN_ENRICH_MAX_INPUT_TOKENS")
+        if enrich_max_raw is None or enrich_max_raw.strip() == "":
+            enrich_max_input_tokens = DEFAULT_ENRICH_MAX_INPUT_TOKENS
+        else:
+            try:
+                enrich_max_input_tokens = int(enrich_max_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ENRICH_MAX_INPUT_TOKENS must be a positive integer "
+                    f"(got {enrich_max_raw!r})"
+                ) from exc
+            if enrich_max_input_tokens <= 0:
+                raise ConfigError(
+                    f"BRAIN_ENRICH_MAX_INPUT_TOKENS must be a positive integer "
+                    f"(got {enrich_max_input_tokens!r})"
+                )
+
+        enrich_timeout_raw = os.environ.get("BRAIN_ENRICH_TIMEOUT_SECONDS")
+        if enrich_timeout_raw is None or enrich_timeout_raw.strip() == "":
+            enrich_timeout_seconds = DEFAULT_ENRICH_TIMEOUT_SECONDS
+        else:
+            try:
+                enrich_timeout_seconds = float(enrich_timeout_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ENRICH_TIMEOUT_SECONDS must be a positive float "
+                    f"(got {enrich_timeout_raw!r})"
+                ) from exc
+            if enrich_timeout_seconds <= 0:
+                raise ConfigError(
+                    f"BRAIN_ENRICH_TIMEOUT_SECONDS must be a positive float "
+                    f"(got {enrich_timeout_seconds!r})"
+                )
+
         return cls(
             database_url=database_url,
             ollama_host=ollama_host,
@@ -296,4 +389,8 @@ class Config:
             people_hub_min_docs=people_hub_min_docs,
             recency_halflife_days=recency_halflife_days,
             snippet_context_tokens=snippet_context_tokens,
+            enrich_model=enrich_model,
+            enrich_min_tokens=enrich_min_tokens,
+            enrich_max_input_tokens=enrich_max_input_tokens,
+            enrich_timeout_seconds=enrich_timeout_seconds,
         )

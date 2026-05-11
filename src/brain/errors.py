@@ -73,6 +73,28 @@ class PersonNotFound(BrainError):
         self.query = query
 
 
+class EnrichmentError(BrainError):
+    """Raised when a per-document enrichment call fails unrecoverably.
+
+    "Unrecoverable" means the caller must NOT retry within this transaction
+    (e.g., the model returned malformed JSON twice in a row). The Q1-D
+    post-ingest hook catches this, logs a warning, and lets the ingest
+    commit with ``documents.summary`` still NULL — ``brain enrich --backfill``
+    can pick the row up later.
+    """
+
+
+class OllamaUnavailable(EnrichmentError):
+    """The Ollama server is unreachable / returned a connection error / 5xx.
+
+    Distinct subclass of :class:`EnrichmentError` so the ingest hook can
+    ``except OllamaUnavailable`` specifically — the message it logs guides
+    the user to ``brain enrich --backfill`` once Ollama is back, while the
+    ``brain enrich --backfill`` CLI surfaces it as a clear "is Ollama
+    running?" error on the first row.
+    """
+
+
 class DraftSkipped(BrainError):
     """Reserved for future opt-in draft-skip paths.
 
