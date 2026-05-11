@@ -8,7 +8,7 @@
 
 BEGIN;
 
-CREATE TABLE interactions (
+CREATE TABLE IF NOT EXISTS interactions (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   document_id  UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   query        TEXT,
@@ -22,9 +22,9 @@ CREATE TABLE interactions (
   at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX interactions_document_at_idx ON interactions (document_id, at DESC);
-CREATE INDEX interactions_action_idx      ON interactions (action);
-CREATE INDEX interactions_session_idx     ON interactions (session_id)
+CREATE INDEX IF NOT EXISTS interactions_document_at_idx ON interactions (document_id, at DESC);
+CREATE INDEX IF NOT EXISTS interactions_action_idx      ON interactions (action);
+CREATE INDEX IF NOT EXISTS interactions_session_idx     ON interactions (session_id)
   WHERE session_id IS NOT NULL;
 
 COMMIT;
