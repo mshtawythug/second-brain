@@ -16,6 +16,15 @@
         <string>{{ pipx_bin_dir }}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>BRAIN_VAULT_PATH</key>
         <string>{{ vault_path }}</string>
+        <!-- BRAIN_PY pins the exact Python interpreter that has `brain` importable.
+             For a pipx install this is the pipx venv Python
+             (e.g. ~/.local/pipx/venvs/second-brain/bin/python).
+             T1.7's plist generator resolves and substitutes this variable.
+             Without it the shell scripts fall back to system python3 which
+             does NOT have brain on sys.path and every `python -m brain.*`
+             call would fail with ModuleNotFoundError. -->
+        <key>BRAIN_PY</key>
+        <string>{{ brain_py }}</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
