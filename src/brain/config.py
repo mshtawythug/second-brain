@@ -111,11 +111,32 @@ def _project_dotenv() -> Path:
     return Path(__file__).resolve().parent.parent.parent / ".env"
 
 
+def _brain_home_root(_config_file: Path | None = None) -> Path:
+    """Resolve the $BRAIN_HOME directory per T1.1 priority order.
+
+    Priority:
+      1. $BRAIN_HOME env var (expanduser applied).
+      2. Repo-root walk-up: if <three-levels-up>/pyproject.toml exists, that's
+         a dev checkout — use the repo root (dev backcompat).
+      3. ~/.brain — NOT created here; ``brain setup`` creates it lazily.
+
+    The optional ``_config_file`` parameter is a test-only seam: production
+    code never passes it.  Tests exercise the dev-checkout branch by passing a
+    synthetic path whose three-levels-up ancestor contains ``pyproject.toml``.
+    """
+    env = os.environ.get("BRAIN_HOME")
+    if env:
+        return Path(env).expanduser()
+    config_file = _config_file or Path(__file__).resolve()
+    repo_root = config_file.parent.parent.parent
+    if (repo_root / "pyproject.toml").is_file():
+        return repo_root
+    return Path.home() / ".brain"
+
+
 def _brain_home_dotenv() -> Path:
-    """Path to the .env file under $BRAIN_HOME (default ~/.brain/.env)."""
-    brain_home_raw = os.environ.get("BRAIN_HOME")
-    brain_home = Path(brain_home_raw).expanduser() if brain_home_raw else Path.home() / ".brain"
-    return brain_home / ".env"
+    """Path to $BRAIN_HOME/.env (resolved via _brain_home_root)."""
+    return _brain_home_root() / ".env"
 
 
 class ConfigError(RuntimeError):
@@ -141,6 +162,7 @@ class Config:
     matching no-ops).
     """
 
+    brain_home: Path
     database_url: str
     ollama_host: str = DEFAULT_OLLAMA_HOST
     qwen3_model: str = DEFAULT_QWEN3_MODEL
@@ -397,6 +419,7 @@ class Config:
                 )
 
         return cls(
+            brain_home=_brain_home_root(),
             database_url=database_url,
             ollama_host=ollama_host,
             qwen3_model=qwen3_model,

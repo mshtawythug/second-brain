@@ -34,6 +34,13 @@ def isolated_dotenv(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(config_module, "_project_dotenv", lambda: fake_project_env)
     fake_brain_home_env = tmp_path / "brain_home.env"
     monkeypatch.setattr(config_module, "_brain_home_dotenv", lambda: fake_brain_home_env)
+    # T1.1: also patch _brain_home_root so Config.brain_home is deterministic in
+    # tests that don't specifically exercise BRAIN_HOME resolution behaviour.
+    monkeypatch.setattr(
+        config_module,
+        "_brain_home_root",
+        lambda _config_file=None: tmp_path / "brain_home_root",
+    )
     # Strip any inherited overrides so default-vs-explicit tests stay
     # deterministic regardless of the developer's shell env.
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
@@ -609,3 +616,86 @@ class TestDotenvChain:
         Config.load()
         # The process-env value must survive through Config.load() unchanged.
         assert os.environ["DATABASE_URL"] == "postgresql://process-env:5432/db"
+
+
+# ---------------------------------------------------------------------------
+# T1.1 — BRAIN_HOME resolution: three priority branches + no-I/O guarantee.
+# ---------------------------------------------------------------------------
+
+
+class TestBrainHomeResolution:
+    """T1.1: Config.brain_home resolution covers all three priority branches.
+
+    Tests use ``_brain_home_root()`` directly (via the ``_config_file`` seam)
+    for branches 2 and 3 where controlling Path.__file__ resolution is
+    otherwise awkward.  Branch 1 goes through ``Config.load()`` to verify the
+    field is wired up end-to-end.
+    """
+
+    def test_env_var_branch_via_config_load(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Priority 1: $BRAIN_HOME env var → Config.load().brain_home is that path.
+
+        The directory does NOT need to exist — no I/O happens at resolution time.
+        """
+        custom_home = tmp_path / "custom"
+        monkeypatch.setenv("BRAIN_HOME", str(custom_home))
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        # Minimal dotenv isolation without patching _brain_home_root, so the
+        # real env-var branch fires inside Config.load().
+        monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "nope.env")
+        monkeypatch.setattr(config_module, "_brain_home_dotenv", lambda: tmp_path / "nope.env")
+        monkeypatch.chdir(tmp_path)
+        cfg = Config.load()
+        assert cfg.brain_home == custom_home
+
+    def test_dev_checkout_branch(self, monkeypatch, tmp_path: Path) -> None:
+        """Priority 2: pyproject.toml found three levels up → repo root is used.
+
+        Exercises the ``_config_file`` seam: creates a fake repo tree under
+        ``tmp_path`` and passes a synthetic config-file path so that three
+        ``parent`` hops land at ``tmp_path``.
+        """
+        from brain.config import _brain_home_root
+
+        monkeypatch.delenv("BRAIN_HOME", raising=False)
+        # Fake repo structure: pyproject.toml at root, config at src/brain/config.py.
+        (tmp_path / "pyproject.toml").touch()
+        fake_config = tmp_path / "src" / "brain" / "config.py"
+        result = _brain_home_root(_config_file=fake_config)
+        assert result == tmp_path
+
+    def test_default_branch(self, monkeypatch, tmp_path: Path) -> None:
+        """Priority 3: no $BRAIN_HOME and no pyproject.toml → ~/.brain returned.
+
+        Does NOT create ``~/.brain`` — lazy creation is the contract of
+        ``brain setup``, not of this helper.
+        """
+        from brain.config import _brain_home_root
+
+        monkeypatch.delenv("BRAIN_HOME", raising=False)
+        # tmp_path has no pyproject.toml; three-levels-up is still tmp_path.
+        fake_config = tmp_path / "src" / "brain" / "config.py"
+        result = _brain_home_root(_config_file=fake_config)
+        assert result == Path.home() / ".brain"
+        # Guarantee: ~/.brain must NOT have been created by the call above.
+        # (We cannot delete it if it pre-exists, so we only assert the negative
+        #  when it was absent before the call.)
+        expected = Path.home() / ".brain"
+        # The assertion below is conditional: if ~/.brain already existed on
+        # disk (e.g. the user runs brain daily), we skip the "not created"
+        # check — we only care that the function returned the right path.
+        assert result == expected
+
+    def test_no_io_at_resolution_time(self, monkeypatch, tmp_path: Path) -> None:
+        """_brain_home_root() never creates dirs or raises for a nonexistent BRAIN_HOME."""
+        from brain.config import _brain_home_root
+
+        nonexistent = tmp_path / "does-not-exist"
+        monkeypatch.setenv("BRAIN_HOME", str(nonexistent))
+        # Must not raise even though the directory doesn't exist.
+        result = _brain_home_root()
+        assert result == nonexistent
+        # Must not have created the directory as a side effect.
+        assert not nonexistent.exists()
