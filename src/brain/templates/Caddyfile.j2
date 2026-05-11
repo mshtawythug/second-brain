@@ -1,0 +1,8 @@
+:{{ wiki_port }} {
+    root * {{ vault_path }}/.quartz/current
+    file_server
+    encode gzip
+    # ETag-driven reload (P6.1) — keep cache short on the build-id file
+    @buildid path /.build-id
+    header @buildid Cache-Control "max-age=2, must-revalidate"
+}
