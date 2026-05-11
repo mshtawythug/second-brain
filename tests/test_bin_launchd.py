@@ -233,3 +233,27 @@ def test_resolve_pipx_bin_dir_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
         result = resolve_pipx_bin_dir()
 
     assert result == Path.home() / ".local" / "bin"
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — install_plists ensures the foreground wrapper shims are installed
+# ---------------------------------------------------------------------------
+
+
+def test_install_plists_installs_foreground_wrappers(
+    tmp_path: Path,
+) -> None:
+    """install_plists writes _brain-watcher-fg and _brain-build-fg into brain_home/bin/."""
+    brain_home = tmp_path / "brain"
+    launchd_dir = tmp_path / "agents"
+
+    install_plists(
+        brain_home=brain_home,
+        launchd_dir=launchd_dir,
+        launchctl="/usr/bin/true",
+    )
+
+    for wrapper in ("_brain-watcher-fg", "_brain-build-fg"):
+        shim = brain_home / "bin" / wrapper
+        assert shim.exists(), f"expected shim {shim} to be installed"
+        assert shim.stat().st_mode & 0o111, f"expected {shim} to be executable"

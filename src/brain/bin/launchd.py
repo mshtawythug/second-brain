@@ -23,6 +23,7 @@ from xml.sax.saxutils import escape as xml_escape
 
 from ..config import _brain_home_root
 from ..errors import BrainError
+from ._launcher import ensure_shim
 
 # The two launchd labels managed by brain.
 _LABELS = ("com.brain.watcher", "com.brain.build")
@@ -120,6 +121,11 @@ def install_plists(
     4. ``launchctl bootstrap`` (fail loudly on error).
     """
     launchd_dir.mkdir(parents=True, exist_ok=True)
+
+    # Install the foreground wrapper scripts the plists reference.
+    # ensure_shim() is idempotent — skips the write if the shim is current.
+    for wrapper in ("_brain-watcher-fg", "_brain-build-fg"):
+        ensure_shim(wrapper, brain_home)
 
     effective_vault_path = vault_path if vault_path is not None else Path.home() / "brain-vault"
     pipx_bin_dir = resolve_pipx_bin_dir()
