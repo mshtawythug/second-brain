@@ -138,6 +138,12 @@ def test_doctor_voyage_backend_fails_when_key_missing(
     monkeypatch.setattr(
         config_module, "_project_dotenv", lambda: tmp_path / "no.env"
     )
+    # Block the BRAIN_HOME source so a real ~/.brain/.env with VOYAGE_API_KEY
+    # can't leak in and make this test pass for the wrong reason.
+    monkeypatch.setattr(
+        config_module, "_brain_home_dotenv", lambda: tmp_path / "no_brain_home.env"
+    )
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setenv("BRAIN_EMBEDDER", "voyage")
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)

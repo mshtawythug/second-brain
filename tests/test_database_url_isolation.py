@@ -35,9 +35,9 @@ def test_database_url_env_var_points_at_test_db() -> None:
 def test_config_load_resolves_to_test_database_url() -> None:
     """``Config.load()`` reads from os.environ — must yield the test DB.
 
-    Even though ``Config.load()`` calls ``load_dotenv(override=False)``
-    internally, it doesn't override an existing env var, so the autouse
-    fixture's assignment wins.
+    Even though ``Config.load()`` reads ``.env`` files internally via
+    ``dotenv_values`` + ``os.environ.setdefault``, it never overwrites an
+    existing env var, so the autouse fixture's assignment wins.
     """
     cfg = Config.load()
     assert cfg.database_url == TEST_DATABASE_URL, (

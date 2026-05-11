@@ -30,6 +30,8 @@ def isolated_env(
       ``Config.load()``'s dotenv discovery.
     - Patching ``config._project_dotenv`` redirects both the project-fallback
       load AND the owner-subcommand writer (which goes through the same helper).
+    - Patching ``config._brain_home_dotenv`` blocks the BRAIN_HOME source so a
+      real ``~/.brain/.env`` can't leak keys into these tests.
     - Strips any inherited ``BRAIN_OWNER_PARTICIPANTS`` so each test starts
       from a known state. ``DATABASE_URL`` is left to the session-scope
       fixture in ``conftest.py``.
@@ -37,7 +39,11 @@ def isolated_env(
     monkeypatch.chdir(tmp_path)
     fake_env = tmp_path / ".env"
     monkeypatch.setattr(config_module, "_project_dotenv", lambda: fake_env)
+    monkeypatch.setattr(
+        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    )
     monkeypatch.delenv("BRAIN_OWNER_PARTICIPANTS", raising=False)
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
     yield fake_env
 
 
