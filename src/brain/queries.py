@@ -101,6 +101,30 @@ class PersonMatch:
     keys: list[str]
 
 
+def _canonicalize_display_name(name: str) -> str:
+    """Reduce a display name to a comparison-only canonical form.
+
+    Treats common identity-equivalent variants as the same person:
+    ``"person-x person-j"`` and ``"person-x.person-j"`` and ``"person-j"`` and
+    ``"person-x  person-j"`` all canonicalize to ``"person-j person-j"``. Used
+    inside :func:`resolve_person_to_keys` to dedupe step-3 substring hits
+    that point at one logical person stored under several formattings —
+    common when directory entries come from both Gmail header names and
+    Krisp speaker labels for the same individual.
+
+    The canonical form is NOT used for storage or display — only for
+    grouping aggregate_people records inside the resolver. Mirror writes
+    keep the original casing.
+    """
+    folded = name.strip().casefold()
+    # Treat dots / underscores / hyphens as word separators so
+    # "person-x.person-j" canonicalizes to "person-j person-j".
+    for sep in (".", "_", "-"):
+        folded = folded.replace(sep, " ")
+    # Collapse runs of whitespace (incl. NBSP) to a single space.
+    return " ".join(folded.split())
+
+
 def _expand_person_keys(display_name: str, emails: list[str]) -> list[str]:
     """Build the SQL-overlap key list for one person.
 
@@ -185,37 +209,67 @@ def resolve_person_to_keys(
                     keys=_expand_person_keys(rec.display_name, rec.all_emails),
                 )
 
-    # Step 2 — exact display-name match (case-folded).
-    exact_name_hits = [
-        rec for rec in records if rec.display_name.casefold() == needle
-    ]
-    if len(exact_name_hits) == 1:
-        rec = exact_name_hits[0]
-        return PersonMatch(
-            display_name=humanize_display_name(rec.display_name),
-            keys=_expand_person_keys(rec.display_name, rec.all_emails),
-        )
-    if len(exact_name_hits) > 1:
+    def _merge_or_ambiguous(hits: list[Any]) -> PersonMatch | None:
+        """Group hits by canonical display name. Single canonical group →
+        merge all hit records' keys into one PersonMatch. Multiple canonical
+        groups → raise PersonAmbiguous with the deduplicated candidate set.
+        Returns None when ``hits`` is empty so callers fall through.
+
+        This is what distinguishes "person-x person-j" + "person-x.person-j" (same
+        canonical, one logical person, MERGE) from "John Smith" + "John
+        Smith Jr" (different canonicals, two people, AMBIGUOUS).
+        """
+        if not hits:
+            return None
+        grouped: dict[str, list[Any]] = {}
+        for rec in hits:
+            grouped.setdefault(_canonicalize_display_name(rec.display_name), []).append(rec)
+        if len(grouped) == 1:
+            members = next(iter(grouped.values()))
+            merged_emails: list[str] = []
+            seen: set[str] = set()
+            for rec in members:
+                for email in rec.all_emails:
+                    if email and email.lower() not in seen:
+                        seen.add(email.lower())
+                        merged_emails.append(email)
+            # Prefer the humanized display name from the alphabetically-first
+            # record so output stays deterministic across runs.
+            canonical_rec = sorted(members, key=lambda r: r.display_name)[0]
+            return PersonMatch(
+                display_name=humanize_display_name(canonical_rec.display_name),
+                keys=_expand_person_keys(canonical_rec.display_name, merged_emails),
+            )
         raise PersonAmbiguous(
             name_or_email,
-            sorted(humanize_display_name(r.display_name) for r in exact_name_hits),
+            sorted(humanize_display_name(members[0].display_name) for members in grouped.values()),
         )
 
-    # Step 3 — substring on display_name (case-folded), alpha-first tiebreak.
-    substring_hits = [
-        rec for rec in records if needle in rec.display_name.casefold()
+    # Step 2 — canonical-name exact match. Compares the canonical form of
+    # each record against the canonical form of the needle so equivalents
+    # like ``"person-x person-j"`` / ``"person-x.person-j"`` / ``"person-j"``
+    # all match the query ``"person-j person-j"`` at this strict-identity tier.
+    canonical_needle = _canonicalize_display_name(name_or_email)
+    exact_name_hits = [
+        rec
+        for rec in records
+        if _canonicalize_display_name(rec.display_name) == canonical_needle
     ]
-    if len(substring_hits) == 1:
-        rec = substring_hits[0]
-        return PersonMatch(
-            display_name=humanize_display_name(rec.display_name),
-            keys=_expand_person_keys(rec.display_name, rec.all_emails),
-        )
-    if len(substring_hits) > 1:
-        raise PersonAmbiguous(
-            name_or_email,
-            sorted(humanize_display_name(r.display_name) for r in substring_hits),
-        )
+    if (match := _merge_or_ambiguous(exact_name_hits)) is not None:
+        return match
+
+    # Step 3 — canonical-name substring match. Same canonicalization rules
+    # so a query like ``"person-j"`` catches both ``"person-x person-j"`` and
+    # ``"person-x.person-j"`` (both canonicalize to ``"person-j person-j"``, both
+    # contain ``"person-j"``). The merge pass then collapses them into one
+    # PersonMatch.
+    substring_hits = [
+        rec
+        for rec in records
+        if canonical_needle in _canonicalize_display_name(rec.display_name)
+    ]
+    if (match := _merge_or_ambiguous(substring_hits)) is not None:
+        return match
 
     raise PersonNotFound(name_or_email)
 
