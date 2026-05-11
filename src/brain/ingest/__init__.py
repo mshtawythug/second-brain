@@ -1,4 +1,6 @@
 """Ingest pipeline: extract → chunk → embed → store."""
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
@@ -6,12 +8,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import psycopg
 from pgvector.psycopg import register_vector  # noqa: F401  (ensures adapter loaded)
 
+from brain.errors import EnrichmentError, OllamaUnavailable
 from brain.tags import normalize_tags
+
+if TYPE_CHECKING:
+    from brain.enrichment import OllamaEnricher
 from brain.vault.derived_links.directory import (
     DirectoryStore,
     GwsRunner,
@@ -308,6 +314,9 @@ def ingest_document(
     gws_runner: GwsRunner | None = None,
     vault_root: Path | None = None,
     draft: bool = False,
+    enricher: OllamaEnricher | None = None,
+    enrich: bool = True,
+    enrich_min_tokens: int = 50,
 ) -> IngestResult:
     """Ingest a single extracted document.
 
@@ -355,6 +364,18 @@ def ingest_document(
     ``vault_root`` and get the legacy DB-only behavior unchanged. Named
     ``vault_root`` to distinguish from the per-document
     ``documents.vault_path`` relative path.
+
+    Wave Q1-D enrichment: when ``enrich=True`` (default) AND ``enricher`` is
+    not None, a post-ingest hook generates a 2-3 sentence summary via local
+    Ollama and writes it to ``documents.summary`` inside the same
+    transaction. Skip rules: caller passes ``enrich=False``, content is
+    shorter than ``enrich_min_tokens`` tokens, ``documents.summary`` is
+    already populated with the same ``content_hash``, or Ollama is
+    unavailable (logged at WARNING — the ingest still commits;
+    ``brain enrich --backfill`` picks the row up later). Passing
+    ``enricher=None`` with ``enrich=True`` is a no-op with a debug log
+    (library callers / tests that don't care about enrichment leave it
+    None).
     """
     if doc.source_path is not None:
         if source_kind is None:
@@ -397,6 +418,9 @@ def ingest_document(
         gws_runner=gws_runner,
         content_hash=h,
         draft=draft,
+        enricher=enricher,
+        enrich=enrich,
+        enrich_min_tokens=enrich_min_tokens,
     )
 
     # Mirror writes happen OUTSIDE the transaction so a filesystem error
@@ -448,6 +472,9 @@ def _ingest_within_transaction(
     gws_runner: GwsRunner | None,
     content_hash: str,
     draft: bool = False,
+    enricher: OllamaEnricher | None = None,
+    enrich: bool = True,
+    enrich_min_tokens: int = 50,
 ) -> IngestResult:
     """Body of :func:`ingest_document` that runs inside the DB transaction.
 
@@ -517,6 +544,9 @@ def _ingest_within_transaction(
                     content_hash=h,
                     gws_runner=gws_runner,
                     draft=draft,
+                    enricher=enricher,
+                    enrich=enrich,
+                    enrich_min_tokens=enrich_min_tokens,
                 )
                 return IngestResult(
                     document_id=str(existing_id),
@@ -625,6 +655,27 @@ def _ingest_within_transaction(
                 ),
             )
 
+        # Wave Q1-D — Krisp action-items docs always carry the
+        # ``action-items`` tag so ``brain list --tag action-items`` and
+        # ``brain todo`` work out of the box. Mechanical, not LLM-derived;
+        # never re-proposed by ``brain tag --auto`` (D19 + D20).
+        _maybe_autotag_action_items(conn, document_id=document_id, doc=doc, tags=tags)
+
+        # Wave Q1-D — auto-summary hook. Runs BEFORE the source-specific
+        # hook (D14) so a future gmail/krisp hook that wants to consume the
+        # freshly-written summary can do so. Skip rules live inside the
+        # helper; failure modes (Ollama down, malformed JSON) are caught and
+        # logged — the ingest itself always commits.
+        _enrich_post_ingest_hook(
+            conn,
+            document_id=document_id,
+            doc=doc,
+            enricher=enricher,
+            enrich=enrich,
+            min_tokens=enrich_min_tokens,
+            content_hash=h,
+        )
+
         _run_source_hooks(
             conn,
             source_kind=source_kind,
@@ -651,6 +702,9 @@ def _update_thread_doc_in_place(
     content_hash: str,
     gws_runner: GwsRunner | None,
     draft: bool = False,
+    enricher: OllamaEnricher | None = None,
+    enrich: bool = True,
+    enrich_min_tokens: int = 50,
 ) -> None:
     """Replace title / body / metadata / tags / typed columns on an existing
     gmail-thread doc and rebuild its chunks. Used by the P2.2 upsert path.
@@ -771,12 +825,128 @@ def _update_thread_doc_in_place(
             ),
         )
 
+    # Wave Q1-D — re-enrich the thread doc when its body actually changed.
+    # The skip rule inside ``_enrich_post_ingest_hook`` compares the new
+    # content_hash against documents.summary to decide whether the existing
+    # summary is still valid (idempotency rule D11).
+    _enrich_post_ingest_hook(
+        conn,
+        document_id=document_id,
+        doc=doc,
+        enricher=enricher,
+        enrich=enrich,
+        min_tokens=enrich_min_tokens,
+        content_hash=content_hash,
+    )
+
     _run_source_hooks(
         conn,
         source_kind=source_kind,
         doc=doc,
         document_id=document_id,
         gws_runner=gws_runner,
+    )
+
+
+def _maybe_autotag_action_items(
+    conn: psycopg.Connection,
+    *,
+    document_id: str,
+    doc: ExtractedDoc,
+    tags: list[str],
+) -> None:
+    """Apply the ``action-items`` tag to ``krisp_action_items`` docs.
+
+    Mechanical (no LLM), idempotent (the tag rewrite below collapses
+    duplicates), and silent on non-action-items docs. Called once after
+    the documents INSERT in :func:`_ingest_within_transaction`.
+    """
+    if doc.content_type != "krisp_action_items":
+        return
+    if "action-items" in tags:
+        return  # already present in the caller-supplied list
+    # apply_tags re-normalizes; doing this in-transaction keeps the
+    # documents row + tags atomic with the original ingest.
+    apply_tags(conn, document_id, add=["action-items"])
+
+
+def _enrich_post_ingest_hook(
+    conn: psycopg.Connection,
+    *,
+    document_id: str,
+    doc: ExtractedDoc,
+    enricher: OllamaEnricher | None,
+    enrich: bool,
+    min_tokens: int,
+    content_hash: str,
+) -> None:
+    """Generate + persist a 2-3 sentence summary on ``documents.summary``.
+
+    Runs inside the caller's open transaction so the documents row + its
+    summary commit atomically. Skips silently (with a debug log) when any
+    of the wave-plan §3.a rules apply:
+
+    1. ``enrich=False`` — caller passed ``--no-enrich`` or a library caller
+       deliberately disabled it.
+    2. ``enricher is None`` — caller didn't wire one up (legit for tests
+       and internal pipelines that don't want LLM round-trips).
+    3. Content shorter than ``min_tokens`` tokens — the title alone is
+       already a fine summary; no point spending an LLM round-trip.
+    4. ``documents.summary IS NOT NULL`` AND ``content_hash`` unchanged —
+       idempotency: same body, same model → reuse the prior summary (D11).
+    5. ``OllamaUnavailable`` — Ollama is down / 5xx; logged at WARN. The
+       ingest still commits; ``brain enrich --backfill`` picks the row up
+       later.
+    6. :class:`EnrichmentError` (model returned malformed JSON twice in a
+       row) — logged at WARN; row stays unenriched.
+    """
+    if not enrich:
+        return
+    if enricher is None:
+        _logger.debug(
+            "enrich hook: no enricher supplied for %s; skipping", document_id
+        )
+        return
+    if enricher.count_tokens(doc.content) < min_tokens:
+        return
+    row = conn.execute(
+        "SELECT summary, content_hash, summary_model FROM documents WHERE id=%s",
+        (document_id,),
+    ).fetchone()
+    if row is None:
+        return  # defensive — the row was just INSERTed
+    existing_summary, existing_hash, existing_model = row
+    # Idempotency D11: reuse prior summary ONLY when the body AND model both
+    # match the current enricher. After a ``BRAIN_ENRICH_MODEL`` upgrade
+    # (e.g., llama3.1:8b → llama3.2:8b), the existing summary is stale
+    # relative to the new model — re-enrich so improvements propagate.
+    if (
+        existing_summary is not None
+        and existing_hash == content_hash
+        and existing_model == enricher.model
+    ):
+        return
+    try:
+        result = enricher.summarize(doc.title, doc.content)
+    except OllamaUnavailable as exc:
+        _logger.warning(
+            "auto-summary skipped for %s: Ollama unavailable (%s); "
+            "run `brain enrich --backfill` later",
+            document_id,
+            exc,
+        )
+        return
+    except EnrichmentError as exc:
+        _logger.warning(
+            "auto-summary failed for %s: %s; row marked unenriched",
+            document_id,
+            exc,
+        )
+        return
+    conn.execute(
+        "UPDATE documents SET summary=%s, summary_model=%s, summary_at=NOW() "
+        "WHERE id=%s",
+        (result.summary, result.model, document_id),
     )
 
 
@@ -963,6 +1133,9 @@ def update_document(
     new_tags: list[str] | None = None,
     new_draft: bool | None = None,
     vault_root: Path | None = None,
+    enricher: OllamaEnricher | None = None,
+    enrich: bool = True,
+    enrich_min_tokens: int = 50,
 ) -> UpdateResult:
     """Update one document in place.
 
@@ -1151,6 +1324,34 @@ def update_document(
         if "title" in fields_changed or "tags" in fields_changed:
             from ..queries import sync_chunk_search_metadata
             sync_chunk_search_metadata(conn, document_id)
+
+        # Wave Q1-D — re-enrich on body change. The hook's idempotency rule
+        # (D11) handles the no-op case (summary present + content_hash
+        # matches), so passing through whenever the row exists is safe.
+        # Build an ExtractedDoc-shaped object lazily — we only need ``title``
+        # and ``content`` (the parts the enricher reads). Re-uses the
+        # post-update title/content so an in-flight title edit sees the new
+        # one.
+        if rechunked:
+            final_title = new_title if new_title is not None else cur_title
+            assert new_content is not None  # rechunked implies new_content set
+            new_doc = ExtractedDoc(
+                title=final_title,
+                content=new_content,
+                content_type=cur_type,
+                source_path=None,
+                metadata={},
+            )
+            assert new_hash is not None  # rechunked implies new_hash set
+            _enrich_post_ingest_hook(
+                conn,
+                document_id=document_id,
+                doc=new_doc,
+                enricher=enricher,
+                enrich=enrich,
+                min_tokens=enrich_min_tokens,
+                content_hash=new_hash,
+            )
 
     # Mirror writes happen OUTSIDE the transaction so a filesystem error
     # cannot roll back the DB update. Triggered when the body was rechunked

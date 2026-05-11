@@ -397,7 +397,7 @@ def brain_show(
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     assert doc is not None  # _resolve_id confirmed the doc exists
-    return {
+    payload: dict[str, Any] = {
         "id": doc.id,
         "title": doc.title,
         "content": doc.content,
@@ -407,6 +407,13 @@ def brain_show(
         "ingested_at": doc.ingested_at.isoformat() if doc.ingested_at else None,
         "source_kind": doc.source_kind,
     }
+    # Wave Q1-D — additive ``summary`` key (D16). Omitted when NULL so
+    # existing consumers that don't expect the key still parse cleanly.
+    # Reachable only via brain_show, never brain_search — per the wave plan
+    # we explicitly do NOT change the brain_search return shape this wave.
+    if doc.summary is not None:
+        payload["summary"] = doc.summary
+    return payload
 
 
 @mcp_app.tool()
