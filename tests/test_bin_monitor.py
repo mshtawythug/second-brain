@@ -235,3 +235,51 @@ def test_main_probe_positional_timeout(
     rc = main(["probe", "5"])
     # No watcher running → _probe returns 1 without touching the vault.
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# Unknown-argument rejection — regression for parse_known_args silent-swallow.
+# Any unrecognised flag / word outside the narrow probe-timeout carve-out
+# must still cause exit 2, not be silently ignored.
+# ---------------------------------------------------------------------------
+
+
+def test_main_rejects_unknown_flag() -> None:
+    """Unknown flags must still be rejected (exit 2), not silently swallowed."""
+    rc = main(["--bogus-flag"])
+    assert rc == 2
+
+
+def test_main_rejects_unknown_flag_after_snapshot() -> None:
+    """Unknown flags after a valid positional command are still rejected."""
+    rc = main(["snapshot", "--no-such-option"])
+    assert rc == 2
+
+
+def test_main_rejects_extra_positional_after_non_probe_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Extra positional args are only valid for probe, not for other commands."""
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
+    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
+    monkeypatch.setattr("brain.bin.monitor.WATCH_LOG", tmp_path / "watch.log")
+    monkeypatch.setattr("brain.bin.monitor.BUILD_LOG", tmp_path / "build.log")
+    rc = main(["snapshot", "extra"])
+    assert rc == 2
+
+
+def test_main_probe_rejects_non_digit_extra() -> None:
+    """'probe --flag' must be rejected even though 'probe 60' is valid."""
+    rc = main(["probe", "--no-such"])
+    assert rc == 2
+
+
+def test_main_probe_rejects_multiple_extra_positionals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'probe 60 extra' (two extra tokens) must be rejected."""
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
+    rc = main(["probe", "5", "extra"])
+    assert rc == 2

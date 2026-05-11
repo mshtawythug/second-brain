@@ -480,8 +480,9 @@ def _make_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Parse args and dispatch to the appropriate mode. Returns exit code."""
     parser = _make_parser()
-    # parse_known_args lets `brain-monitor probe 60` work: "60" ends up in
-    # `extra` and we pick it up as the positional timeout (bash compat).
+    # parse_known_args is used solely to allow `brain-monitor probe 60`
+    # (positional timeout — bash backward-compat). The leftover `extra` list
+    # is validated immediately below; anything unexpected is still an error.
     try:
         args, extra = parser.parse_known_args(argv)
     except SystemExit as exc:
@@ -498,6 +499,20 @@ def main(argv: list[str] | None = None) -> int:
         return _tail(vault)
 
     cmd: str = str(args.command) if args.command else "snapshot"
+
+    # Validate leftover tokens from parse_known_args.  The only valid case is
+    # `probe <N>` where N is a bare integer (bash compat for the positional
+    # timeout). Anything else — unknown flags, extra words — is an error so
+    # that `brain-monitor --bogus` or `brain-monitor snapshot --x` fail loudly.
+    if extra:
+        probe_timeout_ok = cmd == "probe" and len(extra) == 1 and extra[0].isdigit()
+        if not probe_timeout_ok:
+            print(
+                f"brain-monitor: error: unrecognized arguments: {' '.join(extra)}",
+                file=sys.stderr,
+            )
+            parser.print_usage(sys.stderr)
+            return 2
 
     if cmd in ("snapshot", "status"):
         return _snapshot(vault, port)
