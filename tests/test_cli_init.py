@@ -1,17 +1,30 @@
 """Tests for the `brain init` CLI command."""
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import psycopg
 import pytest
 from typer.testing import CliRunner
 
+from brain import config as config_module
 from brain.cli import app
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql://brain:brain@localhost:5433/second_brain_test",
 )
+
+
+@pytest.fixture()
+def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
+    monkeypatch.setattr(
+        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    )
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
 
 
 def test_init_applies_migrations(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -71,6 +84,7 @@ def _wipe_db() -> None:
 
 def test_init_default_arctic_produces_1024_column(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
 ) -> None:
     """Default ``BRAIN_EMBEDDER=arctic`` → column resized to vector(1024)."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)

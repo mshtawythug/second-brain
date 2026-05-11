@@ -11,14 +11,27 @@ Three behaviors covered here:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 
+from brain import config as config_module
 from brain.config import DEFAULT_VECTOR_SIM_FLOOR, Config, ConfigError
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.search import hybrid_search
+
+
+@pytest.fixture()
+def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
+    monkeypatch.setattr(
+        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    )
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
 
 
 def _ingest(
@@ -123,6 +136,7 @@ def test_floor_does_not_affect_fts_only_path(
 # ---------------------------------------------------------------------------
 def test_default_floor_applied_when_env_missing(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
 ) -> None:
     """Unset ``BRAIN_VECTOR_SIM_FLOOR`` ⇒ ``cfg.vector_sim_floor`` is the default."""
     monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@localhost:5/z")

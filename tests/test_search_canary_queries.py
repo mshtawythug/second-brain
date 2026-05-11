@@ -10,16 +10,30 @@ Skipped when the live DB or Ollama is unreachable. Set
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import psycopg
 import pytest
 
+from brain import config as config_module
 from brain.config import Config
 from brain.db import connect
 from brain.embeddings import OllamaEmbedError, make_embedder
 from brain.search import hybrid_search
 
 LIVE_DB_URL = "postgresql://brain:brain@localhost:5433/second_brain"
+
+
+@pytest.fixture()
+def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
+    monkeypatch.setattr(
+        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    )
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
+
 
 # Each canary: (raw_query, expected_pre_fix_top1_doc_id_prefix). The
 # prefix is what the audit doc records (8 hex chars). Acceptance:
@@ -47,6 +61,7 @@ def test_canary_pre_fix_top1_remains_in_post_fix_top3(
     query: str,
     expected_prefix: str,
     monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
 ) -> None:
     """Pre-fix top-1 doc still ranks in post-fix top-3 for each canary.
 

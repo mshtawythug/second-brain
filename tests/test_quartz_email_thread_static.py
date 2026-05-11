@@ -36,6 +36,7 @@ from pathlib import Path
 
 import pytest
 
+from brain import config as config_module
 from brain.config import Config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -459,7 +460,21 @@ def test_custom_scss_imports_email_thread_partial(custom_scss_source: str) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_config_defaults_user_email_to_none(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture()
+def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
+    monkeypatch.setattr(
+        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    )
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
+
+
+def test_config_defaults_user_email_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
+) -> None:
     """``Config.load()`` defaults ``user_email`` to ``None`` when env is unset.
 
     BRAIN_USER_EMAIL is optional — the wiki transformer accepts an

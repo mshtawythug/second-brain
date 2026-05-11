@@ -3,17 +3,30 @@ import hashlib
 import json
 import os
 import uuid
+from pathlib import Path
 
 import psycopg
 import pytest
 from typer.testing import CliRunner
 
+from brain import config as config_module
 from brain.cli import app
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
     "postgresql://brain:brain@localhost:5433/second_brain_test",
 )
+
+
+@pytest.fixture()
+def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
+    monkeypatch.setattr(
+        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    )
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
 
 
 def _wipe_db() -> None:
@@ -58,6 +71,7 @@ def _seed_legacy_chunk_with_email(conn) -> tuple[str, str]:
 
 def test_init_runs_backfill_when_migration_009_is_freshly_applied(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
 ) -> None:
     """A DB at the 008 schema state — re-running init applies 009 + backfill."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
@@ -111,6 +125,7 @@ def test_init_runs_backfill_when_migration_009_is_freshly_applied(
 
 def test_init_skips_backfill_when_no_new_migrations(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
 ) -> None:
     """Subsequent ``brain init`` runs don't re-execute the backfill."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
@@ -136,6 +151,7 @@ def test_init_skips_backfill_when_no_new_migrations(
 
 def test_init_auto_backfill_handles_empty_db(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
 ) -> None:
     """Fresh DB — backfill runs on the first init but reports zeros."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)

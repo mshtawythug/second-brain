@@ -1,8 +1,11 @@
 """Tests for the Wave Q1-D enrichment env-var surface on :class:`Config`."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from brain import config as config_module
 from brain.config import (
     DEFAULT_ENRICH_MAX_INPUT_TOKENS,
     DEFAULT_ENRICH_MIN_TOKENS,
@@ -15,8 +18,25 @@ from brain.config import (
 _TEST_DATABASE_URL = "postgresql://brain:brain@localhost:5433/second_brain_test"
 
 
+@pytest.fixture()
+def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Block all .env file sources so only os.environ values reach Config.load().
+
+    Without this, T1.0's merged-dict + setdefault algorithm would re-inject
+    keys from the developer's project .env (e.g. BRAIN_ENRICH_MODEL=gemma3:27b)
+    after monkeypatch.delenv removes them from os.environ.
+    """
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
+    monkeypatch.setattr(
+        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    )
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
+
+
 def test_enrich_defaults_apply_when_envvars_match_defaults(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
 ) -> None:
     """``Config`` parses each enrich env var into its documented default value.
 

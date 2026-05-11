@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import math
 import os
+from pathlib import Path
 
 import psycopg
 import pytest
 
+from brain import config as config_module
 from brain.config import DEFAULT_VECTOR_SIM_FLOOR, Config
 from brain.db import connect
 from brain.embeddings import OllamaEmbedError, make_embedder
@@ -49,9 +51,21 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+@pytest.fixture()
+def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Block .env file sources so delenv tests aren't undone by T1.0 setdefault."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(config_module, "_project_dotenv", lambda: tmp_path / "project.env")
+    monkeypatch.setattr(
+        config_module, "_brain_home_dotenv", lambda: tmp_path / "brain_home.env"
+    )
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
+
+
 @pytest.mark.live_db
 def test_default_floor_excludes_known_bad_person-b_match(
     monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
 ) -> None:
     """``DEFAULT_VECTOR_SIM_FLOOR`` must sit ≥0.05 above the cheatsheet doc's
     max cosine to the real ``person-x`` query embedding."""

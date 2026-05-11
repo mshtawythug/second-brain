@@ -196,7 +196,9 @@ class Config:
         # Files are layered in REVERSE priority order (lowest first) into a
         # merged dict; higher-priority files overwrite lower-priority ones on
         # key collisions. Process env is applied last via os.environ.setdefault
-        # so an existing value is never clobbered — making this concurrency-safe.
+        # so an existing value is never clobbered — preserving the precedence
+        # contract regardless of who set it (shell, parent process, or
+        # monkeypatch.setenv).
         merged: dict[str, str] = {}
         cwd_env_str = find_dotenv(usecwd=True)
         for candidate in (
