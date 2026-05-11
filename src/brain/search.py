@@ -34,6 +34,32 @@ import psycopg
 from .ingest import Embedder
 
 
+@dataclass(frozen=True)
+class SearchExplanation:
+    """Per-document ranking diagnostic.
+
+    Attached to :class:`SearchResult` when ``hybrid_search(..., explain=True)``.
+    Fields are nullable where the corresponding leg didn't contribute — e.g. a
+    doc that only appears in the FTS leg has ``vector_rank=None`` /
+    ``vector_cosine=None`` / ``vector_rrf_contribution=0.0``.
+    """
+
+    fts_rank: int | None  # 1-indexed; None if the best chunk didn't appear in FTS
+    fts_score: float | None  # ts_rank value; None if absent from FTS leg
+    fts_rrf_contribution: float  # 1/(60+fts_rank) or 0.0
+    vector_rank: int | None  # 1-indexed; None if absent from vector leg
+    vector_cosine: float | None  # 1 - (embedding <=> query); None if absent
+    vector_rrf_contribution: float  # 1/(60+vector_rank) or 0.0
+    rrf_score: float  # raw RRF sum before recency boost
+    recency_age_days: float | None  # None if recency disabled or no timestamp
+    recency_boost: float  # 1.0 when disabled / unaffected
+    final_score: float  # post-recency; matches SearchResult.score
+    best_chunk_id: str  # UUID of the highest-scoring chunk for this doc
+    best_chunk_index: int  # 0-based chunk index within the document
+    matched_filters: dict[str, Any]  # {"source_kind", "tag", "since_days", "fts_only"}
+    reranker_score: float | None = None  # Q3-A will populate; today always None
+
+
 @dataclass
 class SearchResult:
     """A single search hit grouped at document granularity with its best chunk."""
@@ -45,6 +71,7 @@ class SearchResult:
     score: float
     content_type: str
     tags: list[str]
+    explain: SearchExplanation | None = None  # opt-in; populated only when explain=True
 
 
 RRF_K = 60
@@ -106,6 +133,7 @@ def hybrid_search(
     vector_sim_floor: float = 0.0,
     recency_halflife_days: float | None = None,
     snippet_context_tokens: int = 0,
+    explain: bool = False,
 ) -> list[SearchResult]:
     """Combine FTS and vector ranks via Reciprocal Rank Fusion.
 
@@ -190,25 +218,45 @@ def hybrid_search(
             [q_emb, *where_params, q_emb, vector_sim_floor, q_emb],
         ).fetchall()
 
+    # Per-chunk rank tables (built only when explain=True; zero overhead otherwise).
+    fts_rank_by_chunk: dict[str, int] = {}
+    fts_score_by_chunk: dict[str, float] = {}
+    vec_rank_by_chunk: dict[str, int] = {}
+    vec_cosine_by_chunk: dict[str, float] = {}
+    if explain:
+        fts_rank_by_chunk = {str(row[0]): i + 1 for i, row in enumerate(fts_rows)}
+        fts_score_by_chunk = {str(row[0]): float(row[4]) for row in fts_rows}
+        vec_rank_by_chunk = {str(row[0]): i + 1 for i, row in enumerate(vec_rows)}
+        vec_cosine_by_chunk = {str(row[0]): float(row[4]) for row in vec_rows}
+
     rrf: dict[str, float] = {}
+    # Per-chunk RRF leg contributions (explain only).
+    rrf_fts: dict[str, float] = {}
+    rrf_vec: dict[str, float] = {}
     # chunk_id → (document_id, chunk_index, content)
     chunk_meta: dict[str, tuple[str, int, str]] = {}
     for rank, row in enumerate(fts_rows):
         cid = str(row[0])
-        rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        contrib = 1.0 / (RRF_K + rank + 1)
+        rrf[cid] = rrf.get(cid, 0.0) + contrib
+        if explain:
+            rrf_fts[cid] = contrib
         chunk_meta[cid] = (str(row[1]), int(row[2]), row[3])
     for rank, row in enumerate(vec_rows):
         cid = str(row[0])
-        rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        contrib = 1.0 / (RRF_K + rank + 1)
+        rrf[cid] = rrf.get(cid, 0.0) + contrib
+        if explain:
+            rrf_vec[cid] = contrib
         chunk_meta[cid] = (str(row[1]), int(row[2]), row[3])
 
-    # document_id → (best_score, best_chunk_index, snippet_content)
-    by_doc: dict[str, tuple[float, int, str]] = {}
-    for cid, score in rrf.items():
+    # document_id → (best_rrf_score, best_chunk_index, snippet_content, best_chunk_id)
+    by_doc: dict[str, tuple[float, int, str, str]] = {}
+    for cid, rrf_val in rrf.items():
         doc_id, chunk_idx, content = chunk_meta[cid]
         prev = by_doc.get(doc_id)
-        if prev is None or score > prev[0]:
-            by_doc[doc_id] = (score, chunk_idx, content)
+        if prev is None or rrf_val > prev[0]:
+            by_doc[doc_id] = (rrf_val, chunk_idx, content, cid)
 
     if not by_doc:
         return []
@@ -228,8 +276,12 @@ def hybrid_search(
 
     now = datetime.now(tz=UTC)
     results: list[SearchResult] = []
-    for doc_id, (score, best_chunk_idx, snippet_content) in by_doc.items():
+    for doc_id, (rrf_score, best_chunk_idx, snippet_content, best_cid) in by_doc.items():
         meta = docs[doc_id]
+
+        score = rrf_score
+        recency_age_days: float | None = None
+        recency_boost_factor = 1.0
 
         # Recency boost: multiplicative decay over coalesce(sent_at, ingested_at).
         if recency_halflife_days is not None:
@@ -238,8 +290,9 @@ def hybrid_search(
                 # Make the timestamp tz-aware if the DB returned a naive value.
                 if recency_ts.tzinfo is None:
                     recency_ts = recency_ts.replace(tzinfo=UTC)
-                age_days = max(0.0, (now - recency_ts).total_seconds() / 86400.0)
-                score = score * (0.5 ** (age_days / recency_halflife_days))
+                recency_age_days = max(0.0, (now - recency_ts).total_seconds() / 86400.0)
+                recency_boost_factor = 0.5 ** (recency_age_days / recency_halflife_days)
+                score = rrf_score * recency_boost_factor
 
         # Snippet context expansion: pull neighboring chunks from the same doc.
         if snippet_context_tokens > 0:
@@ -263,6 +316,30 @@ def hybrid_search(
         if len(snippet) > 4 * SNIPPET_LENGTH:
             snippet = snippet[: 4 * SNIPPET_LENGTH]
 
+        # Build the optional ranking diagnostic payload.
+        explain_obj: SearchExplanation | None = None
+        if explain:
+            explain_obj = SearchExplanation(
+                fts_rank=fts_rank_by_chunk.get(best_cid),
+                fts_score=fts_score_by_chunk.get(best_cid),
+                fts_rrf_contribution=rrf_fts.get(best_cid, 0.0),
+                vector_rank=vec_rank_by_chunk.get(best_cid),
+                vector_cosine=vec_cosine_by_chunk.get(best_cid),
+                vector_rrf_contribution=rrf_vec.get(best_cid, 0.0),
+                rrf_score=rrf_score,
+                recency_age_days=recency_age_days,
+                recency_boost=recency_boost_factor,
+                final_score=score,
+                best_chunk_id=best_cid,
+                best_chunk_index=best_chunk_idx,
+                matched_filters={
+                    "source_kind": source_kind,
+                    "tag": tag,
+                    "since_days": since_days,
+                    "fts_only": fts_only,
+                },
+            )
+
         results.append(
             SearchResult(
                 document_id=doc_id,
@@ -272,6 +349,7 @@ def hybrid_search(
                 source_kind=meta[4],
                 snippet=snippet,
                 score=score,
+                explain=explain_obj,
             )
         )
     results.sort(key=lambda r: r.score, reverse=True)

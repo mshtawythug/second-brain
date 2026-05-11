@@ -39,7 +39,25 @@ from .errors import (
     IdPrefixNotHex,
     IdPrefixTooShort,
 )
-from .format import console, emit_json, search_table
+from .eval import (
+    EvalBaselineError,
+    EvalCorpusError,
+    diff_reports,
+    load_baseline,
+    load_corpus,
+    run_eval,
+    save_baseline,
+)
+from .eval.baseline import _assert_baseline_name
+from .eval.corpus import _DEFAULT_CORPUS_PATH
+from .format import (
+    console,
+    emit_json,
+    eval_diff_table,
+    eval_report_table,
+    explain_table,
+    search_table,
+)
 from .ingest import (
     Embedder,
     UpdateResult,
@@ -106,6 +124,9 @@ from .wiki.build_people import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Baseline JSON files live next to the golden corpus: tests/eval/baselines/.
+_BASELINES_DIR: Path = _DEFAULT_CORPUS_PATH.parent / "baselines"
 
 _KRISP_INGEST_HELP = (
     "Importing Krisp calls — Krisp has no CLI, so transcripts are pulled by "
@@ -946,6 +967,188 @@ def search(
         typer.echo("(no results)")
         return
     console.print(search_table(results))
+
+
+@app.command()
+def explain(
+    query: str = typer.Argument(...),
+    limit: int = typer.Option(10, "--limit", "-n"),
+    source: str | None = typer.Option(None, "--source"),
+    tag: str | None = typer.Option(None, "--tag"),
+    since_days: int | None = typer.Option(None, "--since", help="Days lookback"),
+    json_output: bool = typer.Option(False, "--json"),
+    fts_only: bool = typer.Option(False, "--fts-only"),
+    verbose: bool = typer.Option(False, "--verbose", "-v"),
+) -> None:
+    """Show per-result ranking diagnostics for a query.
+
+    Displays FTS rank, vector cosine, RRF contributions, recency boost, and
+    the best-matching chunk for each result.  Use ``--verbose`` to also show
+    which filter flags were active.  Use ``--json`` for the full machine-readable
+    payload including all :class:`~brain.search.SearchExplanation` fields.
+    """
+    cfg = Config.load()
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        results = hybrid_search(
+            conn,
+            embedder=embedder,
+            query=query,
+            limit=limit,
+            source_kind=source,
+            tag=tag,
+            since_days=since_days,
+            fts_only=fts_only,
+            vector_sim_floor=cfg.vector_sim_floor,
+            recency_halflife_days=cfg.recency_halflife_days,
+            snippet_context_tokens=cfg.snippet_context_tokens,
+            explain=True,
+        )
+
+    if json_output:
+        emit_json(
+            [
+                {
+                    "id": r.document_id,
+                    "title": r.title,
+                    "source_kind": r.source_kind,
+                    "snippet": r.snippet,
+                    "score": r.score,
+                    "content_type": r.content_type,
+                    "tags": r.tags,
+                    "explain": (
+                        {
+                            "fts_rank": r.explain.fts_rank,
+                            "fts_score": r.explain.fts_score,
+                            "fts_rrf_contribution": r.explain.fts_rrf_contribution,
+                            "vector_rank": r.explain.vector_rank,
+                            "vector_cosine": r.explain.vector_cosine,
+                            "vector_rrf_contribution": r.explain.vector_rrf_contribution,
+                            "rrf_score": r.explain.rrf_score,
+                            "recency_age_days": r.explain.recency_age_days,
+                            "recency_boost": r.explain.recency_boost,
+                            "final_score": r.explain.final_score,
+                            "best_chunk_id": r.explain.best_chunk_id,
+                            "best_chunk_index": r.explain.best_chunk_index,
+                            "matched_filters": r.explain.matched_filters,
+                            "reranker_score": r.explain.reranker_score,
+                        }
+                        if r.explain is not None
+                        else None
+                    ),
+                }
+                for r in results
+            ]
+        )
+        return
+    if not results:
+        typer.echo("(no results)")
+        return
+    console.print(explain_table(results, verbose=verbose))
+
+
+@app.command("eval")
+def eval_cmd(
+    category: list[str] = typer.Option(
+        [], "--category", "-c", help="Restrict to one or more categories (repeatable)."
+    ),
+    limit: int | None = typer.Option(None, "--limit", "-n", min=1, help="Max queries to run."),
+    baseline: str | None = typer.Option(
+        None, "--baseline", help="Baseline name for --diff comparison."
+    ),
+    diff: bool = typer.Option(False, "--diff", help="Show delta vs --baseline."),
+    record_baseline: str | None = typer.Option(
+        None, "--record-baseline", help="Write result as named baseline file."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON output."),
+    corpus_path: Path | None = typer.Option(
+        None, "--corpus", help="Override the default corpus YAML path."
+    ),
+) -> None:
+    """Run the eval harness over the golden corpus and display ranking metrics.
+
+    By default runs all queries in ``tests/eval/golden_corpus.yaml`` and prints
+    a Rich table of nDCG@5 / MRR / Recall@20 per query plus aggregate means.
+
+    Use ``--record-baseline NAME`` to persist the result for future comparison,
+    and ``--baseline NAME --diff`` to compare the current run against a saved
+    baseline.  Baseline files live in ``tests/eval/baselines/<NAME>.json``.
+    """
+    import dataclasses
+
+    # Validate mutual-exclusion and dependency constraints.
+    if diff and not baseline:
+        raise typer.BadParameter("--diff requires --baseline")
+    if diff and record_baseline is not None:
+        raise typer.BadParameter("--diff and --record-baseline are mutually exclusive")
+
+    # Validate baseline names (prevent path traversal).
+    if baseline is not None:
+        try:
+            _assert_baseline_name(baseline)
+        except EvalBaselineError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    if record_baseline is not None:
+        try:
+            _assert_baseline_name(record_baseline)
+        except EvalBaselineError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+
+    # Load corpus.
+    effective_corpus_path = corpus_path or _DEFAULT_CORPUS_PATH
+    try:
+        queries = load_corpus(effective_corpus_path)
+    except EvalCorpusError as exc:
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    # Apply category filter (empty list = no filter).
+    if category:
+        queries = [q for q in queries if q.category in category]
+
+    # Apply limit.
+    if limit is not None:
+        queries = queries[:limit]
+
+    # Run eval.
+    cfg = Config.load()
+    embedder = _build_embedder(cfg)
+    with connect(cfg.database_url) as conn:
+        report = run_eval(
+            conn,
+            embedder=embedder,
+            queries=queries,
+            recency_halflife_days=cfg.recency_halflife_days,
+            snippet_context_tokens=cfg.snippet_context_tokens,
+            vector_sim_floor=cfg.vector_sim_floor,
+            embedder_name=cfg.embedder,
+        )
+
+    # Persist baseline if requested.
+    if record_baseline is not None:
+        baseline_file = _BASELINES_DIR / f"{record_baseline}.json"
+        save_baseline(report, path=baseline_file)
+        typer.echo(f"baseline saved: {baseline_file}")
+
+    # Diff mode: compare against a saved baseline.
+    if diff and baseline is not None:
+        try:
+            baseline_report = load_baseline(_BASELINES_DIR / f"{baseline}.json")
+        except EvalBaselineError as exc:
+            typer.secho(str(exc), fg="red", err=True)
+            raise typer.Exit(code=1) from exc
+        diff_result = diff_reports(baseline_report, report)
+        if json_output:
+            emit_json(dataclasses.asdict(diff_result))
+        else:
+            console.print(eval_diff_table(diff_result))
+        return
+
+    # Default: display report.
+    if json_output:
+        emit_json(dataclasses.asdict(report))
+    else:
+        console.print(eval_report_table(report))
 
 
 def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
