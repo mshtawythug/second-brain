@@ -18,7 +18,7 @@ def _sha256(data: bytes) -> str:
 
 
 def ensure_shim(name: str, brain_home: Path) -> Path:
-    """Ensure $BRAIN_HOME/bin/<name> is installed and up-to-date.
+    """Ensure $BRAIN_HOME/.shims/<name> is installed and up-to-date.
 
     Copies from package data brain.templates.bin/<name>.sh, stripping the
     .sh suffix at the installed path. Idempotent — safe to re-run.
@@ -28,6 +28,12 @@ def ensure_shim(name: str, brain_home: Path) -> Path:
     + os.replace. Concurrent-launcher races are safe because tempfile
     names are unique.
 
+    Shims live under .shims/ (not bin/) to avoid colliding with the
+    dev-checkout bin/ wrappers when $BRAIN_HOME resolves to the repo
+    root. A pipx-installed user has $BRAIN_HOME = ~/.brain so .shims/
+    is fresh under that root; either way the shim location is
+    repo-bin-independent.
+
     Returns the installed shim path.
     """
     # Read source bytes from package data (brain.templates.bin/<name>.sh).
@@ -35,8 +41,8 @@ def ensure_shim(name: str, brain_home: Path) -> Path:
     src_bytes: bytes = src.read_bytes()
     src_hash = _sha256(src_bytes)
 
-    # Target path: <brain_home>/bin/<name>  (no .sh suffix).
-    bin_dir = brain_home / "bin"
+    # Target path: <brain_home>/.shims/<name>  (no .sh suffix).
+    bin_dir = brain_home / ".shims"
     bin_dir.mkdir(parents=True, exist_ok=True)
     installed_path = bin_dir / name
 

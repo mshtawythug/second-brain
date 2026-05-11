@@ -254,6 +254,6 @@ def test_install_plists_installs_foreground_wrappers(
     )
 
     for wrapper in ("_brain-watcher-fg", "_brain-build-fg"):
-        shim = brain_home / "bin" / wrapper
+        shim = brain_home / ".shims" / wrapper
         assert shim.exists(), f"expected shim {shim} to be installed"
         assert shim.stat().st_mode & 0o111, f"expected {shim} to be executable"

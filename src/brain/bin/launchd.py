@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from importlib.resources import files as resource_files
 from pathlib import Path
@@ -154,14 +155,22 @@ def install_plists(
             capture_output=True,
         )
 
-        # Bootstrap — fail loudly if this step fails.
-        result = subprocess.run(
-            [launchctl, "bootstrap", f"gui/{uid}", str(plist_path)],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
+        # Bootstrap — fail loudly if this step fails. Retry once on the
+        # "Bootstrap failed: 5: Input/output error" race that happens when
+        # the prior service hasn't fully torn down before the new one tries
+        # to load (observed on Apple Silicon under load).
+        for attempt in range(2):
+            result = subprocess.run(
+                [launchctl, "bootstrap", f"gui/{uid}", str(plist_path)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                break
+            if attempt == 0:
+                time.sleep(1.0)
+                continue
             stderr = result.stderr.strip()
             raise LaunchdError(
                 f"launchctl bootstrap failed for {label}"

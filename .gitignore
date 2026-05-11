@@ -15,3 +15,9 @@ dist/
 .claude/worktrees/
 backups/
 tests/eval/baselines/*.json
+
+# Runtime shim cache for the brain CLI launcher (T1.5).
+# `_launcher.ensure_shim()` copies package-data bash templates here on
+# first invocation. Dev-checkouts get `<repo>/.shims/`; pipx users get
+# `~/.brain/.shims/`. Never tracked.
+.shims/

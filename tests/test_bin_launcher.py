@@ -36,7 +36,7 @@ def _source_bytes(name: str) -> bytes:
 
 
 def test_ensure_shim_fresh_install(tmp_path: Path) -> None:
-    """ensure_shim installs the shim at <brain_home>/bin/<name> on a fresh call."""
+    """ensure_shim installs the shim at <brain_home>/.shims/<name> on a fresh call."""
     # Setup: empty brain_home
     brain_home = tmp_path / "brain_home"
 
@@ -44,7 +44,7 @@ def test_ensure_shim_fresh_install(tmp_path: Path) -> None:
     installed = ensure_shim("brain-up", brain_home)
 
     # Verify: path, content, executable bit
-    expected = brain_home / "bin" / "brain-up"
+    expected = brain_home / ".shims" / "brain-up"
     assert installed == expected
     assert installed.exists(), "installed shim must exist"
     src_bytes = _source_bytes("brain-up")
@@ -63,7 +63,7 @@ def test_ensure_shim_up_to_date_no_op(tmp_path: Path, capsys: Any) -> None:
 
     # First call — installs
     ensure_shim("brain-up", brain_home)
-    installed = brain_home / "bin" / "brain-up"
+    installed = brain_home / ".shims" / "brain-up"
     mtime_before = installed.stat().st_mtime_ns
 
     # Drain first-call stderr
@@ -86,7 +86,7 @@ def test_ensure_shim_up_to_date_no_op(tmp_path: Path, capsys: Any) -> None:
 def test_ensure_shim_stale_bytes_replaced(tmp_path: Path, capsys: Any) -> None:
     """ensure_shim replaces a stale shim (wrong sha256) and logs to stderr."""
     brain_home = tmp_path / "brain_home"
-    bin_dir = brain_home / "bin"
+    bin_dir = brain_home / ".shims"
     bin_dir.mkdir(parents=True)
     stale_path = bin_dir / "brain-up"
     stale_path.write_bytes(b"#!/bin/bash\n# stale content\n")
@@ -121,7 +121,7 @@ def test_ensure_shim_concurrent_race_safe(tmp_path: Path) -> None:
         futures = [executor.submit(call_ensure) for _ in range(4)]
         results = [f.result() for f in futures]
 
-    installed = brain_home / "bin" / "brain-up"
+    installed = brain_home / ".shims" / "brain-up"
     assert installed.exists(), "installed shim must exist after concurrent installs"
     assert _sha256(installed.read_bytes()) == src_hash, "no torn write — sha256 must match source"
     # All returned the same path
@@ -143,7 +143,7 @@ def test_ensure_shim_error_cleanup(tmp_path: Path) -> None:
     ):
         ensure_shim("brain-up", brain_home)
 
-    bin_dir = brain_home / "bin"
+    bin_dir = brain_home / ".shims"
     if bin_dir.exists():
         leftover = list(bin_dir.iterdir())
         assert leftover == [], f"leftover tmpfiles found: {leftover}"
@@ -196,8 +196,8 @@ def test_exec_shim_passes_argv(tmp_path: Path) -> None:
         exec_shim("brain-up", ["arg1", "arg2"])
 
     shim_path = captured["path"]
-    assert shim_path.endswith("/bin/brain-up"), (
-        f"shim path must end in /bin/brain-up, got {shim_path!r}"
+    assert shim_path.endswith("/.shims/brain-up"), (
+        f"shim path must end in /.shims/brain-up, got {shim_path!r}"
     )
     assert not shim_path.endswith(".sh"), "installed path must not have .sh suffix"
     assert captured["args"] == [shim_path, "arg1", "arg2"], (
