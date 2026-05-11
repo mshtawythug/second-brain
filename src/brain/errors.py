@@ -42,6 +42,37 @@ class DirectoryRefreshError(BrainError):
     """Raised when a Calendar / Contacts refresh fails (gws missing, JSON parse, etc.)."""
 
 
+class InteractionError(BrainError):
+    """Raised on invalid interaction inputs (unknown action / source).
+
+    The DB-level ``CHECK`` constraints on ``interactions.action`` and
+    ``interactions.source`` are the authoritative gate; this Python-side
+    error gives Typer / MCP a clean message before the SQL round-trip
+    when the enum value is obviously wrong (e.g., typo at the call site).
+    """
+
+
+class PersonAmbiguous(BrainError):
+    """Multiple persons match a ``--person`` argument; caller must disambiguate."""
+
+    def __init__(self, query: str, candidates: list[str]) -> None:
+        candidate_list = ", ".join(candidates[:5])
+        super().__init__(
+            f"--person {query!r} matched {len(candidates)} people "
+            f"(candidates: {candidate_list}). Use a more specific name."
+        )
+        self.query = query
+        self.candidates = candidates
+
+
+class PersonNotFound(BrainError):
+    """No person matched the ``--person`` argument."""
+
+    def __init__(self, query: str) -> None:
+        super().__init__(f"--person {query!r} matched no one in the directory")
+        self.query = query
+
+
 class DraftSkipped(BrainError):
     """Reserved for future opt-in draft-skip paths.
 
