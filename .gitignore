@@ -14,3 +14,4 @@ dist/
 .ruff_cache/
 .claude/worktrees/
 backups/
+tests/eval/baselines/*.json

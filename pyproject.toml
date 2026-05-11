@@ -39,7 +39,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85"
+addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval'"
 markers = [
   # P3.5 — frontend integration harness. Tests under this marker shell
   # out to `npx quartz build` and serve the artifact over HTTP, so they
@@ -54,6 +54,11 @@ markers = [
   # canary-check the post-fix corpus. Skipped on hosts without those
   # services; opt out via `-m "not live_db"`.
   "live_db: requires live local Postgres + Ollama (Phase D verification)",
+  # Wave Q1-B — Eval harness. Tests under this marker run the 20-query
+  # golden corpus against the live local Postgres + Ollama, scoring
+  # nDCG@5 / MRR / Recall@20.  Excluded from the default suite; opt-IN
+  # via `-m eval`.  Skips cleanly when Postgres or Ollama is unreachable.
+  "eval: live golden-corpus run; gated, requires explicit -m eval invocation",
 ]
 
 [tool.ruff]
