@@ -11,8 +11,6 @@ Guards four properties:
 4. No broad ``'**/*'`` or bare ``'*'`` globs appear in brain.templates*
    package-data patterns (mirrors the quartz_overrides defensive regression).
 """
-from __future__ import annotations
-
 import importlib.resources
 import tomllib
 from pathlib import Path
