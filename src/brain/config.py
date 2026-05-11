@@ -1,6 +1,6 @@
 """Configuration loading from environment / .env."""
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import dotenv_values, find_dotenv
@@ -162,8 +162,8 @@ class Config:
     matching no-ops).
     """
 
-    brain_home: Path
     database_url: str
+    brain_home: Path = field(default_factory=_brain_home_root)
     ollama_host: str = DEFAULT_OLLAMA_HOST
     qwen3_model: str = DEFAULT_QWEN3_MODEL
     embedder: str = DEFAULT_EMBEDDER
