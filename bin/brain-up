@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
 # Dev-checkout backcompat wrapper — delegates to the brain-up console script.
-# The console script (brain.bin.up:main) is registered in pyproject.toml and
-# available after `pip install -e .` or `pipx install .`.
-#
-# Requires the project venv to be activated OR brain-up on PATH (e.g. via
-# `pipx ensurepath`). This file is only used in dev-checkout sessions; pipx
-# and installer users get the console script directly.
-#
-# NOTE: the launchd plists installed by brain-install-launchd reference
-# $BRAIN_HOME/bin/brain-up (the installed shim), NOT this file. After the
-# first `brain-install-launchd` run the plists are self-contained; re-running
-# `brain-install-launchd` (idempotent) is the only step needed when upgrading.
-exec brain-up "$@"
+# Resolves the console script via the project venv (not PATH) to avoid an
+# infinite-exec loop when bin/ appears before .venv/bin/ on PATH.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+exec "$SCRIPT_DIR/../.venv/bin/brain-up" "$@"

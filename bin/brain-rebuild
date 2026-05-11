@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # Dev-checkout backcompat wrapper — delegates to the brain-rebuild console script.
-# The console script (brain.bin.rebuild:main) is registered in pyproject.toml and
-# available after `pip install -e .` or `pipx install .`.
-#
-# Requires the project venv to be activated OR brain-rebuild on PATH (e.g. via
-# `pipx ensurepath`).
-exec brain-rebuild "$@"
+# Resolves the console script via the project venv (not PATH) to avoid an
+# infinite-exec loop when bin/ appears before .venv/bin/ on PATH.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+exec "$SCRIPT_DIR/../.venv/bin/brain-rebuild" "$@"

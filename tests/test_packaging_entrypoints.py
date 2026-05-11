@@ -47,3 +47,34 @@ def test_dev_backcompat_wrappers_exist_and_are_executable() -> None:
         path = bin_dir / name
         assert path.is_file(), f"missing dev-checkout wrapper: {path}"
         assert os.access(path, os.X_OK), f"not executable: {path}"
+
+
+def test_dev_backcompat_wrappers_exec_venv_not_path() -> None:
+    """Wrappers must exec the venv console script by absolute path, not via PATH.
+
+    When bin/ precedes .venv/bin/ on PATH (the normal dev-checkout state),
+    `exec brain-up` would re-exec bin/brain-up itself — an infinite loop.
+    The correct form is `exec "$SCRIPT_DIR/../.venv/bin/brain-<name>"`.
+    """
+    bin_dir = Path(__file__).resolve().parent.parent / "bin"
+    for name in [
+        "brain-up",
+        "brain-down",
+        "brain-status",
+        "brain-rebuild",
+        "brain-install-launchd",
+        "brain-uninstall-launchd",
+    ]:
+        text = (bin_dir / name).read_text(encoding="utf-8")
+        # Must reference the venv-relative path, not bare `exec brain-*`
+        assert f".venv/bin/{name}" in text, (
+            f"bin/{name} execs via PATH (infinite-loop risk when bin/ is on PATH "
+            f"before .venv/bin/); use: exec \"$SCRIPT_DIR/../.venv/bin/{name}\" \"$@\""
+        )
+        # Must NOT contain `exec brain-` without a path prefix
+        import re
+        bare_exec = re.search(r'\bexec\s+brain-', text)
+        assert bare_exec is None, (
+            f"bin/{name} contains a bare `exec brain-*` which loops when bin/ precedes "
+            f".venv/bin/ on PATH"
+        )
