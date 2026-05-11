@@ -38,14 +38,27 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# Include all non-Python overlay assets (TypeScript, SCSS, JS, images, etc.)
-# that live inside brain.quartz_overrides/. Without this declaration, a wheel
-# or pipx install would silently drop every non-.py file and
-# importlib.resources.files("brain.quartz_overrides") would return an empty tree.
-# "**/*" captures both root-level files (quartz.config.ts, quartz.layout.ts)
-# and all deeply nested files under quartz/ (confirmed via glob test: Python 3.11
-# glob.glob("**/*", recursive=True) matches zero-component ** case at root).
-"brain.quartz_overrides" = ["**/*"]
+# Include only the specific asset extensions used by the Quartz overlay tree.
+# Explicit patterns rather than "**/*" so .pyc bytecode and __pycache__ dirs
+# are never shipped into the wheel.
+# Root-level files: quartz.config.ts, quartz.layout.ts  (*.ts covers them)
+# Nested files under quartz/: TS/TSX components, JS/MJS CLI scripts, SCSS
+# stylesheets, and PNG/ICO branding assets.
+"brain.quartz_overrides" = [
+    "*.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.js",
+    "**/*.mjs",
+    "**/*.scss",
+    "**/*.png",
+    "**/*.ico",
+]
+
+[tool.setuptools.exclude-package-data]
+# Strip bytecode caches that Python creates on-disk when the package is imported
+# during a dev install — they are local artefacts and must not appear in wheels.
+"brain.quartz_overrides" = ["__pycache__/*", "*.pyc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
