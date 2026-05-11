@@ -2,12 +2,15 @@
 
 import json
 import os
+from datetime import datetime
+from typing import Any
 
 import psycopg
 import pytest
 from typer.testing import CliRunner
 
 from brain.cli import app
+from brain.errors import PersonAmbiguous
 from brain.ingest import ExtractedDoc, ingest_document
 
 TEST_DATABASE_URL = os.environ.get(
@@ -222,3 +225,103 @@ def test_brain_explain_empty_results_message(
     )
     assert result.exit_code == 0, result.output
     assert "(no results)" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Q1-C metadata filter flags (representative subset — full coverage for the
+# CLI plumbing lives in tests/test_cli_search.py; this file locks the
+# brain explain twin).
+# ---------------------------------------------------------------------------
+
+
+def _spy_hybrid_search(captured: dict[str, Any]) -> Any:
+    def _spy(*_args: Any, **kwargs: Any) -> list[Any]:
+        captured.update(kwargs)
+        return []
+
+    return _spy
+
+
+def _install_explain_spy(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> dict[str, Any]:
+    _setup(monkeypatch, test_db, fake_embedder)
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr("brain.cli.hybrid_search", _spy_hybrid_search(captured))
+    return captured
+
+
+def test_brain_explain_after_threads_to_hybrid_search(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    captured = _install_explain_spy(monkeypatch, test_db, fake_embedder)
+    result = CliRunner().invoke(app, ["explain", "foo", "--after", "2026-01-01"])
+    assert result.exit_code == 0, result.output
+    assert captured["after"] == datetime(2026, 1, 1)
+
+
+def test_brain_explain_has_tag_aliases_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    captured = _install_explain_spy(monkeypatch, test_db, fake_embedder)
+    result = CliRunner().invoke(
+        app, ["explain", "foo", "--has-tag", "interview"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["tag"] == "interview"
+
+
+def test_brain_explain_without_tag_threads_through(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    captured = _install_explain_spy(monkeypatch, test_db, fake_embedder)
+    result = CliRunner().invoke(
+        app, ["explain", "foo", "--without-tag", "private"]
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["without_tag"] == "private"
+
+
+def test_brain_explain_draft_flag_maps_to_true(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    captured = _install_explain_spy(monkeypatch, test_db, fake_embedder)
+    result = CliRunner().invoke(app, ["explain", "foo", "--draft"])
+    assert result.exit_code == 0, result.output
+    assert captured["draft"] is True
+
+
+def test_brain_explain_kind_threads_to_content_type(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    captured = _install_explain_spy(monkeypatch, test_db, fake_embedder)
+    result = CliRunner().invoke(app, ["explain", "foo", "--kind", "email"])
+    assert result.exit_code == 0, result.output
+    assert captured["content_type"] == "email"
+
+
+def test_brain_explain_person_ambiguous_exits_nonzero(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    _install_explain_spy(monkeypatch, test_db, fake_embedder)
+
+    def _raise(_conn: object, name: str) -> Any:
+        raise PersonAmbiguous(name, ["Alice Doe", "Alice Xanthus"])
+
+    monkeypatch.setattr("brain.cli.resolve_person_to_keys", _raise)
+    result = CliRunner().invoke(app, ["explain", "foo", "--person", "Alice"])
+    assert result.exit_code != 0

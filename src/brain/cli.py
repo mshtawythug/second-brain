@@ -38,6 +38,8 @@ from .errors import (
     IdPrefixNotFound,
     IdPrefixNotHex,
     IdPrefixTooShort,
+    PersonAmbiguous,
+    PersonNotFound,
 )
 from .eval import (
     EvalBaselineError,
@@ -49,7 +51,7 @@ from .eval import (
     save_baseline,
 )
 from .eval.baseline import _assert_baseline_name
-from .eval.corpus import _DEFAULT_CORPUS_PATH
+from .eval.corpus import _DEFAULT_CORPUS_PATH, _VALID_CATEGORIES
 from .format import (
     console,
     emit_json,
@@ -70,8 +72,10 @@ from .ingest import (
 from .ingest import gmail as gmail_ingest
 from .ingest.gmail import GmailError
 from .ingest.stdin import make_doc as _stdin_make_doc
+from .interactions import record_interaction
 from .queries import (
     MirrorDriftSummary,
+    PersonMatch,
     count_chunks_missing_embedding,
     embedding_column_state,
     fetch_document,
@@ -82,6 +86,7 @@ from .queries import (
     list_documents,
     mirror_drift_summary,
     resolve_document_prefix,
+    resolve_person_to_keys,
     summary_counts,
     sync_chunk_search_metadata,
 )
@@ -919,6 +924,42 @@ def reembed(
                 )
 
 
+def _reconcile_tag_flags(
+    tag: str | None, has_tag: str | None
+) -> str | None:
+    """Reconcile ``--tag`` and its ``--has-tag`` alias for ``search`` / ``explain``.
+
+    ``--has-tag`` is a strict alias of ``--tag`` per plan D3. Both flags
+    add the same ``%s = ANY(d.tags)`` predicate; supplying both with
+    different values is a user error and exits with ``BadParameter``.
+    Returns the single effective tag value to thread into ``hybrid_search``.
+    """
+    if tag is not None and has_tag is not None and tag != has_tag:
+        raise typer.BadParameter(
+            "--tag and --has-tag both given with different values"
+        )
+    return tag if tag is not None else has_tag
+
+
+def _resolve_search_person(
+    conn: psycopg.Connection[Any], person: str | None
+) -> PersonMatch | None:
+    """Resolve a ``--person`` argument or return ``None`` for the absent case.
+
+    Maps :class:`brain.errors.PersonNotFound` / :class:`PersonAmbiguous`
+    to Typer's :class:`BadParameter` so the CLI surface stays consistent
+    with the rest of the flag-validation path. Returns ``None`` when
+    ``person`` is itself ``None`` so the caller threads ``person_keys=None``
+    / ``person_display_name=None`` into ``hybrid_search`` unchanged.
+    """
+    if person is None:
+        return None
+    try:
+        return resolve_person_to_keys(conn, person)
+    except (PersonNotFound, PersonAmbiguous) as e:
+        raise typer.BadParameter(str(e)) from e
+
+
 @app.command()
 def search(
     query: str = typer.Argument(...),
@@ -928,23 +969,72 @@ def search(
     since_days: int | None = typer.Option(None, "--since", help="Days lookback"),
     json_output: bool = typer.Option(False, "--json"),
     fts_only: bool = typer.Option(False, "--fts-only"),
+    # — Q1-C metadata filters — same set on `brain explain` below.
+    person: str | None = typer.Option(
+        None, "--person",
+        help="Match docs where this person participated. "
+             "Resolved through the directory (same as `brain people`).",
+    ),
+    after: datetime | None = typer.Option(
+        None, "--after",
+        formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
+        help="Only docs sent/ingested on or after this ISO date "
+             "(YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).",
+    ),
+    before: datetime | None = typer.Option(
+        None, "--before",
+        formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
+        help="Only docs sent/ingested strictly before this ISO date.",
+    ),
+    kind: str | None = typer.Option(
+        None, "--kind",
+        help="Filter by documents.content_type "
+             "(transcript, email, email_thread, note, markdown, pdf, ...).",
+    ),
+    thread: str | None = typer.Option(
+        None, "--thread", help="Filter by Gmail thread id.",
+    ),
+    draft: bool | None = typer.Option(
+        None, "--draft/--no-draft",
+        help="Include only drafts (--draft) or only published "
+             "(--no-draft). Default: both.",
+    ),
+    has_tag: str | None = typer.Option(
+        None, "--has-tag", help="Strict alias for --tag.",
+    ),
+    without_tag: str | None = typer.Option(
+        None, "--without-tag",
+        help="Exclude docs carrying this tag (combines with --tag).",
+    ),
 ) -> None:
     """Hybrid search across the brain."""
+    effective_tag = _reconcile_tag_flags(tag, has_tag)
     cfg = Config.load()
     embedder = _build_embedder(cfg)
     with connect(cfg.database_url) as conn:
+        person_match = _resolve_search_person(conn, person)
         results = hybrid_search(
             conn,
             embedder=embedder,
             query=query,
             limit=limit,
             source_kind=source,
-            tag=tag,
+            tag=effective_tag,
             since_days=since_days,
             fts_only=fts_only,
             vector_sim_floor=cfg.vector_sim_floor,
             recency_halflife_days=cfg.recency_halflife_days,
             snippet_context_tokens=cfg.snippet_context_tokens,
+            person_keys=person_match.keys if person_match else None,
+            person_display_name=(
+                person_match.display_name if person_match else None
+            ),
+            after=after,
+            before=before,
+            content_type=kind,
+            thread_id=thread,
+            draft=draft,
+            without_tag=without_tag,
         )
 
     if json_output:
@@ -979,6 +1069,40 @@ def explain(
     json_output: bool = typer.Option(False, "--json"),
     fts_only: bool = typer.Option(False, "--fts-only"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
+    # — Q1-C metadata filters — same set as `brain search` above.
+    person: str | None = typer.Option(
+        None, "--person",
+        help="Match docs where this person participated.",
+    ),
+    after: datetime | None = typer.Option(
+        None, "--after",
+        formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
+        help="Only docs sent/ingested on or after this ISO date.",
+    ),
+    before: datetime | None = typer.Option(
+        None, "--before",
+        formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
+        help="Only docs sent/ingested strictly before this ISO date.",
+    ),
+    kind: str | None = typer.Option(
+        None, "--kind",
+        help="Filter by documents.content_type "
+             "(transcript, email, email_thread, note, ...).",
+    ),
+    thread: str | None = typer.Option(
+        None, "--thread", help="Filter by Gmail thread id.",
+    ),
+    draft: bool | None = typer.Option(
+        None, "--draft/--no-draft",
+        help="Include only drafts (--draft) or only published (--no-draft).",
+    ),
+    has_tag: str | None = typer.Option(
+        None, "--has-tag", help="Strict alias for --tag.",
+    ),
+    without_tag: str | None = typer.Option(
+        None, "--without-tag",
+        help="Exclude docs carrying this tag.",
+    ),
 ) -> None:
     """Show per-result ranking diagnostics for a query.
 
@@ -987,22 +1111,34 @@ def explain(
     which filter flags were active.  Use ``--json`` for the full machine-readable
     payload including all :class:`~brain.search.SearchExplanation` fields.
     """
+    effective_tag = _reconcile_tag_flags(tag, has_tag)
     cfg = Config.load()
     embedder = _build_embedder(cfg)
     with connect(cfg.database_url) as conn:
+        person_match = _resolve_search_person(conn, person)
         results = hybrid_search(
             conn,
             embedder=embedder,
             query=query,
             limit=limit,
             source_kind=source,
-            tag=tag,
+            tag=effective_tag,
             since_days=since_days,
             fts_only=fts_only,
             vector_sim_floor=cfg.vector_sim_floor,
             recency_halflife_days=cfg.recency_halflife_days,
             snippet_context_tokens=cfg.snippet_context_tokens,
             explain=True,
+            person_keys=person_match.keys if person_match else None,
+            person_display_name=(
+                person_match.display_name if person_match else None
+            ),
+            after=after,
+            before=before,
+            content_type=kind,
+            thread_id=thread,
+            draft=draft,
+            without_tag=without_tag,
         )
 
     if json_output:
@@ -1104,6 +1240,12 @@ def eval_cmd(
 
     # Apply category filter (empty list = no filter).
     if category:
+        unknown_cats = set(category) - _VALID_CATEGORIES
+        if unknown_cats:
+            raise typer.BadParameter(
+                f"unknown category/categories: {', '.join(sorted(unknown_cats))}. "
+                f"Valid: {', '.join(sorted(_VALID_CATEGORIES))}"
+            )
         queries = [q for q in queries if q.category in category]
 
     # Apply limit.
@@ -1128,7 +1270,7 @@ def eval_cmd(
     if record_baseline is not None:
         baseline_file = _BASELINES_DIR / f"{record_baseline}.json"
         save_baseline(report, path=baseline_file)
-        typer.echo(f"baseline saved: {baseline_file}")
+        typer.echo(f"baseline saved: {baseline_file}", err=True)
 
     # Diff mode: compare against a saved baseline.
     if diff and baseline is not None:
@@ -1165,6 +1307,38 @@ def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
     except (IdPrefixNotFound, IdPrefixAmbiguous) as e:
         typer.secho(str(e), fg="red", err=True)
         raise typer.Exit(code=1) from e
+
+
+@app.command()
+def rate(
+    id: str = typer.Argument(..., help="Document id prefix (6+ hex chars)."),
+    verdict: str = typer.Argument(
+        ..., help="One of: useful, irrelevant.",
+    ),
+) -> None:
+    """Record a thumbs-up / thumbs-down on a document.
+
+    Persists to the ``interactions`` table (action=``rated_useful`` or
+    ``rated_irrelevant``, source='cli', session_id=NULL). Ratings APPEND
+    every call — re-rating the same doc creates a new row with a fresh
+    timestamp; the full history is preserved. A future aggregation query
+    will collapse to "most recent rating wins" but that is a read-side
+    concern; not in Q1-C.
+    """
+    if verdict not in {"useful", "irrelevant"}:
+        raise typer.BadParameter("verdict must be 'useful' or 'irrelevant'")
+    action: str = "rated_useful" if verdict == "useful" else "rated_irrelevant"
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        doc_id = _resolve_id(conn, id)
+        new_id = record_interaction(
+            conn,
+            document_id=doc_id,
+            action=action,  # type: ignore[arg-type]
+            source="cli",
+        )
+    typer.echo(f"recorded {action} ({new_id[:8]}) for doc {doc_id[:8]}")
 
 
 @app.command()

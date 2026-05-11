@@ -25,6 +25,8 @@ from .errors import (
     IdPrefixNotFound,
     IdPrefixNotHex,
     IdPrefixTooShort,
+    PersonAmbiguous,
+    PersonNotFound,
 )
 from .ingest import (
     Embedder,
@@ -33,10 +35,12 @@ from .ingest import (
     update_document,
 )
 from .ingest.stdin import make_doc as _stdin_make_doc
+from .interactions import record_interaction
 from .queries import (
     fetch_document,
     list_documents,
     resolve_document_prefix,
+    resolve_person_to_keys,
     summary_counts,
 )
 from .search import hybrid_search
@@ -185,6 +189,24 @@ def _ensure_template_path(vault_path: Path, name: str) -> Path:
 mcp_app: FastMCP = FastMCP(name="brain")
 
 
+def _parse_iso_datetime(value: str, *, field: str) -> datetime:
+    """Parse an ISO date/datetime string from an MCP arg or raise INVALID_PARAMS.
+
+    Accepts ``YYYY-MM-DD`` and ``YYYY-MM-DDTHH:MM:SS`` (the CLI takes the
+    same two formats — kept in sync per plan D5 / D8 CLI↔MCP parity).
+    A bad string surfaces to the MCP caller as ``INVALID_PARAMS`` with
+    the underlying error appended for debuggability.
+    """
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError as e:
+        raise _mcp_error(
+            INVALID_PARAMS,
+            f"{field} must be an ISO date (YYYY-MM-DD or "
+            f"YYYY-MM-DDTHH:MM:SS); got {value!r}: {e}",
+        ) from e
+
+
 @mcp_app.tool()
 def brain_search(
     query: str,
@@ -193,62 +215,185 @@ def brain_search(
     tag: str | None = None,
     since_days: int | None = None,
     fts_only: bool = False,
-) -> list[dict[str, Any]]:
+    # — Q1-C metadata filters — names mirror the CLI flags 1:1.
+    person: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    kind: str | None = None,
+    thread: str | None = None,
+    draft: bool | None = None,
+    has_tag: str | None = None,
+    without_tag: str | None = None,
+) -> dict[str, Any]:
     """Hybrid search across the second brain.
 
-    Returns up to ``limit`` matching documents ranked by RRF over FTS + vector
-    cosine similarity. Filter by ``source`` kind, ``tag``, or ``since_days``
-    recency. Set ``fts_only=True`` to skip the local Ollama embed call.
+    Returns a dict with two keys:
+
+    - ``session_id``: a fresh ``uuid.uuid4()`` minted on every call. Pass
+      it back via ``brain_show(..., session_id=...)`` to record the open
+      as part of the same search session (powers Q1-C interaction logging).
+    - ``results``: up to ``limit`` matching documents ranked by RRF over
+      FTS + vector cosine similarity. Each entry is shaped
+      ``{id, title, source_kind, snippet, score, content_type, tags}``.
+
+    **Breaking shape change in Q1-C:** prior versions returned the
+    results list directly; the new top-level dict carries ``session_id``
+    alongside ``results``. Update callers that assume a top-level list.
+
+    Filters (all optional, default = no filter):
+
+    - ``source``: source kind (``manual``, ``gmail``, ``krisp``, ...).
+    - ``tag`` / ``has_tag``: ``has_tag`` is a strict alias of ``tag``;
+      conflicting values raise ``INVALID_PARAMS``.
+    - ``without_tag``: exclude docs carrying this tag.
+    - ``since_days``: relative-window recency (N days lookback).
+    - ``person``: match docs where this person participated. Resolved
+      via the directory (same logic as ``brain people``).
+    - ``after`` / ``before``: ISO date strings (``YYYY-MM-DD`` or
+      ``YYYY-MM-DDTHH:MM:SS``). ``after`` is inclusive; ``before`` is
+      exclusive.
+    - ``kind``: filter by ``documents.content_type`` (``email``,
+      ``email_thread``, ``note``, ``transcript``, ...).
+    - ``thread``: filter by Gmail thread id.
+    - ``draft``: ``True`` → drafts only; ``False`` → published only;
+      ``None`` (default) → both.
+    - ``fts_only``: skip the local Ollama embed call (FTS-only mode).
     """
     state = _get_state()
     logger.debug("brain_search: query=%r limit=%d", query, limit)
+
+    if tag is not None and has_tag is not None and tag != has_tag:
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "tag and has_tag both given with different values",
+        )
+    effective_tag = tag if tag is not None else has_tag
+
+    after_dt = _parse_iso_datetime(after, field="after") if after else None
+    before_dt = _parse_iso_datetime(before, field="before") if before else None
+
+    session_id = str(uuid.uuid4())
+
     try:
         with connect(state.cfg.database_url) as conn:
+            person_match = None
+            if person is not None:
+                try:
+                    person_match = resolve_person_to_keys(conn, person)
+                except (PersonNotFound, PersonAmbiguous) as e:
+                    raise _mcp_error(INVALID_PARAMS, str(e)) from e
             results = hybrid_search(
                 conn,
                 embedder=state.embedder,
                 query=query,
                 limit=limit,
                 source_kind=source,
-                tag=tag,
+                tag=effective_tag,
                 since_days=since_days,
                 fts_only=fts_only,
                 vector_sim_floor=state.cfg.vector_sim_floor,
                 recency_halflife_days=state.cfg.recency_halflife_days,
                 snippet_context_tokens=state.cfg.snippet_context_tokens,
+                person_keys=person_match.keys if person_match else None,
+                person_display_name=(
+                    person_match.display_name if person_match else None
+                ),
+                after=after_dt,
+                before=before_dt,
+                content_type=kind,
+                thread_id=thread,
+                draft=draft,
+                without_tag=without_tag,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     except OllamaEmbedError as e:
         raise _wrap_embed_error(e) from e
-    return [
-        {
-            "id": r.document_id,
-            "title": r.title,
-            "source_kind": r.source_kind,
-            "snippet": r.snippet,
-            "score": r.score,
-            "content_type": r.content_type,
-            "tags": r.tags,
-        }
-        for r in results
-    ]
+    return {
+        "session_id": session_id,
+        "results": [
+            {
+                "id": r.document_id,
+                "title": r.title,
+                "source_kind": r.source_kind,
+                "snippet": r.snippet,
+                "score": r.score,
+                "content_type": r.content_type,
+                "tags": r.tags,
+            }
+            for r in results
+        ],
+    }
 
 
 @mcp_app.tool()
-def brain_show(id_prefix: str) -> dict[str, Any]:
+def brain_show(
+    id_prefix: str,
+    originating_query: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     """Return the full body and metadata of a single document by id prefix.
 
-    The prefix must be at least 6 hex characters and must uniquely identify a
-    document. Raises :class:`McpError` (``INVALID_PARAMS``) if the prefix is
-    too short, non-hex, unknown, or ambiguous.
+    The prefix must be at least 6 hex characters and must uniquely identify
+    a document. Raises :class:`McpError` (``INVALID_PARAMS``) if the prefix
+    is too short, non-hex, unknown, or ambiguous.
+
+    Q1-C interaction logging: when ``originating_query`` is provided, also
+    records an ``opened`` row in the ``interactions`` table (source='mcp',
+    query=originating_query, session_id=parsed UUID or NULL). Supplying
+    ``session_id`` without ``originating_query`` is rejected — a session
+    id alone carries no useful signal. ``session_id`` must be a valid UUID
+    string (the one returned from a prior ``brain_search`` call); a
+    malformed value raises ``INVALID_PARAMS``.
     """
     state = _get_state()
-    logger.debug("brain_show: id_prefix=%s", id_prefix)
+    logger.debug(
+        "brain_show: id_prefix=%s originating_query?=%s session_id?=%s",
+        id_prefix,
+        originating_query is not None,
+        session_id is not None,
+    )
+
+    # D15: session_id without originating_query is rejected outright —
+    # there is no useful signal to log.
+    if session_id is not None and originating_query is None:
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "session_id requires originating_query (the query that "
+            "produced this session). Pass originating_query alongside, "
+            "or omit session_id.",
+        )
+
+    # Parse session_id eagerly so a bad UUID surfaces as INVALID_PARAMS
+    # before we hit the DB. Done outside the connect() block so we don't
+    # mask a parse error behind a connection cost.
+    session_uuid: uuid.UUID | None = None
+    if session_id is not None:
+        try:
+            session_uuid = uuid.UUID(session_id)
+        except ValueError as e:
+            raise _mcp_error(
+                INVALID_PARAMS,
+                f"session_id is not a valid UUID: {session_id!r} ({e})",
+            ) from e
+
     try:
         with connect(state.cfg.database_url) as conn:
+            conn.autocommit = True
             doc_id = _resolve_id(conn, id_prefix)
             doc = fetch_document(conn, doc_id)
+            # Log the open AFTER the fetch succeeded. A logging failure
+            # propagates as INTERNAL_ERROR via _wrap_db_error so we don't
+            # silently lose signal (per plan D13).
+            if originating_query is not None:
+                record_interaction(
+                    conn,
+                    document_id=doc_id,
+                    action="opened",
+                    source="mcp",
+                    query=originating_query,
+                    session_id=session_uuid,
+                )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     assert doc is not None  # _resolve_id confirmed the doc exists

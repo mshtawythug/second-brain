@@ -156,7 +156,13 @@ def test_brain_search_returns_expected_shape(
         title="Doc B",
         content="Doc B: krisp meeting transcript about pizza",
     )
-    results = mcp_server.brain_search(query="company-id")
+    payload = mcp_server.brain_search(query="company-id")
+    # Q1-C: brain_search now returns {session_id, results} (breaking shape).
+    assert set(payload.keys()) == {"session_id", "results"}
+    import uuid as _uuid
+
+    _uuid.UUID(payload["session_id"])  # parses cleanly
+    results = payload["results"]
     assert results, "expected at least one search hit"
     expected_keys = {
         "id",
@@ -241,7 +247,8 @@ def test_brain_search_respects_filters(
         source_kind="krisp",
         source_external_id="krisp:two",
     )
-    results = mcp_server.brain_search(query="company-id", source="krisp")
+    payload = mcp_server.brain_search(query="company-id", source="krisp")
+    results = payload["results"]
     assert results
     for r in results:
         assert r["source_kind"] == "krisp"
@@ -482,8 +489,8 @@ def test_brain_ingest_stdin_creates_document(
     assert payload["created"] is True
     assert payload["document_id"] is not None
     # The doc should now show up in search.
-    results = mcp_server.brain_search(query="company-id")
-    titles = {r["title"] for r in results}
+    search_payload = mcp_server.brain_search(query="company-id")
+    titles = {r["title"] for r in search_payload["results"]}
     assert "Q1 review" in titles
 
 
