@@ -37,6 +37,16 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+# Include all non-Python overlay assets (TypeScript, SCSS, JS, images, etc.)
+# that live inside brain.quartz_overrides/. Without this declaration, a wheel
+# or pipx install would silently drop every non-.py file and
+# importlib.resources.files("brain.quartz_overrides") would return an empty tree.
+# "**/*" captures both root-level files (quartz.config.ts, quartz.layout.ts)
+# and all deeply nested files under quartz/ (confirmed via glob test: Python 3.11
+# glob.glob("**/*", recursive=True) matches zero-component ** case at root).
+"brain.quartz_overrides" = ["**/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval'"
