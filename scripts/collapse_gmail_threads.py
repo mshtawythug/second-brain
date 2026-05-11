@@ -69,7 +69,7 @@ import psycopg
 from brain.config import Config, ConfigError
 from brain.db import connect
 from brain.embeddings import make_embedder
-from brain.errors import BrainError, DraftSkipped
+from brain.errors import BrainError
 from brain.ingest import Embedder, ingest_document
 from brain.ingest.gmail import GmailError, Runner, read_message, to_extracted_thread
 from brain.tags import normalize_tags
@@ -481,20 +481,18 @@ def _collapse_thread(
                 )
             messages.append(read_message(old.message_id, runner=runner))
         merged_doc = to_extracted_thread(messages)
-    except DraftSkipped as exc:
-        # All-draft thread: no merged doc to insert, but drop the legacy
-        # per-message rows is *not* this script's responsibility — the
-        # operator already cleaned out drafts before running collapse,
-        # and a future re-ingest under the post-fix pipeline won't see
-        # them. Surface the skip with a sentinel error string the report
-        # formatter recognises so it doesn't get lumped in with hard
-        # failures (count goes to ``skipped_drafts`` instead of
-        # ``failed`` in the printed summary).
-        report.error = f"draft-only thread skipped: {exc}"
-        report.skipped_draft = True
-        return report
     except (GmailError, ValueError) as exc:
         report.error = f"thread fetch/assemble failed: {exc}"
+        return report
+
+    # Q1-A: to_extracted_thread now includes drafts (marks _is_draft=True on
+    # all-draft threads) instead of raising DraftSkipped. Surface the skip
+    # with a sentinel error string the report formatter recognises so it
+    # doesn't get lumped in with hard failures (count goes to
+    # ``skipped_drafts`` instead of ``failed`` in the printed summary).
+    if merged_doc.metadata.get("_is_draft"):
+        report.error = "draft-only thread skipped"
+        report.skipped_draft = True
         return report
 
     union_tags = group.union_tags()

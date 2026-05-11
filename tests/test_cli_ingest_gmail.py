@@ -26,7 +26,6 @@ from pytest_mock import MockerFixture
 from typer.testing import CliRunner
 
 from brain.cli import app
-from brain.errors import DraftSkipped
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.ingest import gmail as gmail_ingest
 
@@ -238,7 +237,7 @@ def test_ingest_gmail_idempotent_on_re_run(
     assert second.exit_code == 0, second.output
     assert "skipped thread tm1 (unchanged)" in second.output
     assert (
-        "0 ingested, 1 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        "0 ingested, 1 skipped (unchanged), 0 failed"
         in second.output
     )
 
@@ -304,7 +303,7 @@ def test_ingest_gmail_continues_on_per_thread_failure(
     assert "ingested thread tgood" in result.output
     assert "failed thread tbad" in result.output
     assert (
-        "1 ingested, 0 skipped (unchanged), 0 skipped (drafts), 1 failed"
+        "1 ingested, 0 skipped (unchanged), 1 failed"
         in result.output
     )
     with psycopg.connect(TEST_DATABASE_URL) as conn:
@@ -368,7 +367,7 @@ def test_ingest_gmail_groups_by_thread_id(
     result = CliRunner().invoke(app, ["ingest-gmail", "--label", "interviews"])
     assert result.exit_code == 0, result.output
     assert (
-        "2 ingested, 0 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        "2 ingested, 0 skipped (unchanged), 0 failed"
         in result.output
     )
 
@@ -465,8 +464,9 @@ def test_ingest_gmail_progress_output_format(
 
     Pins the user-visible output format: one ``ingested thread <tid>
     (<n> messages)`` line per thread plus a ``<X> ingested,
-    <Y> skipped (unchanged), <Z> skipped (drafts), <W> failed`` summary
-    at the end.
+    <Y> skipped (unchanged), <W> failed`` summary at the end.
+    The legacy ``<Z> skipped (drafts)`` segment was removed in wave Q1-A
+    (2026-05-11); drafts are now ingested as draft-stamped documents.
     """
     # Sandbox vault so mirror writes don't touch ~/brain-vault.
     _patch_embedder(monkeypatch, fake_embedder)
@@ -501,7 +501,7 @@ def test_ingest_gmail_progress_output_format(
     assert "ingested thread tb (1 messages)" in result.output
     assert "ingested thread tc (1 messages)" in result.output
     assert (
-        "3 ingested, 0 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        "3 ingested, 0 skipped (unchanged), 0 failed"
         in result.output
     )
 
@@ -538,21 +538,20 @@ def test_list_messages_builds_full_query() -> None:
     assert cmd[-2:] == ["--format", "json"]
 
 
-def test_list_messages_no_scope_still_excludes_drafts() -> None:
-    """Even with no scope flags, ``-in:drafts`` is appended so drafts are filtered.
+def test_list_messages_no_scope_omits_q_param() -> None:
+    """With no scope flags, ``list_messages`` sends no ``q`` param.
 
-    Pre-fix this test asserted ``q`` was omitted entirely. Post-fix the
-    drafts exclusion is unconditional: every call to the Gmail list
-    surface excludes drafts as a belt-and-braces filter. The CLI
-    ``ingest-gmail`` command refuses to run without at least one user-
-    supplied scope flag, but ``list_messages`` itself is callable
-    without scopes (e.g. from internal tooling) and that path must
-    still filter drafts.
+    Wave Q1-A (2026-05-11) removed the ``-in:drafts`` belt-and-braces
+    filter from ``list_messages``. Drafts are now included in query
+    results and stamped ``draft=TRUE`` at ingest time instead of being
+    skipped. With no scope flags and no explicit query the ``q`` key is
+    omitted entirely, letting Gmail return all messages.
     """
 
     def runner(cmd: list[str]) -> str:
         params = json.loads(cmd[6])
-        assert params.get("q") == "-in:drafts"
+        # No q key at all — omitting the param returns everything.
+        assert "q" not in params
         assert params["userId"] == "me"
         return json.dumps({"resultSizeEstimate": 0})
 
@@ -1092,35 +1091,27 @@ def test_to_extracted_doc_naive_date_treated_as_utc() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Drafts excluded at ingest end-to-end (P2.4 follow-up).
+# Draft handling — wave Q1-A (2026-05-11).
 #
-# Draft Gmail messages — ``labelIds`` containing ``DRAFT`` — are unsent
-# emails the user typed but never sent. Ingesting them pollutes search:
-# "did I send X to Y?" returns drafts as evidence of sent messages, which
-# is the wrong answer. Three layers filter drafts:
+# Draft Gmail messages (``labelIds`` containing ``DRAFT``) are now
+# INCLUDED rather than skipped. Two layers handle them:
 #
-# 1. ``list_messages`` appends ``-in:drafts`` to every Gmail query so
-#    drafts never appear in the message-stub list.
-# 2. ``to_extracted_doc`` raises :class:`DraftSkipped` if it sees a
-#    DRAFT-labelled message anyway (belt-and-braces).
-# 3. ``to_extracted_thread`` filters drafts from mixed threads and
-#    raises :class:`DraftSkipped` for all-draft threads.
-#
-# The CLI catches :class:`DraftSkipped` per thread and tracks it with a
-# dedicated ``skipped (drafts)`` counter so the user can see how many
-# threads were filtered for this reason vs failed for other reasons.
+# 1. ``list_messages`` no longer appends ``-in:drafts`` — drafts appear
+#    in the stub list and are fetched + assembled like any other message.
+# 2. ``to_extracted_doc`` / ``to_extracted_thread`` set
+#    ``metadata["_is_draft"] = True`` on all-draft docs so the ingest
+#    pipeline stamps ``documents.draft = TRUE``.
+# 3. The P1.6 wiki quarantine (``contentIndex.ts:397``) hides
+#    ``draft=TRUE`` rows from Quartz; ``brain search`` still surfaces them.
 # ---------------------------------------------------------------------------
 
 
-def test_list_messages_query_excludes_drafts() -> None:
-    """``list_messages`` appends ``-in:drafts`` to the Gmail ``q`` string.
+def test_list_messages_query_includes_all_user_scope_flags() -> None:
+    """``list_messages`` with scope flags composes them into the Gmail ``q`` string.
 
-    Cheap belt-and-braces filter at the source: even before ``to_extracted_doc``
-    /``to_extracted_thread`` get a chance to inspect ``labelIds``, the
-    Gmail API itself returns no drafts in the message-stub list because
-    ``-in:drafts`` is part of every query. Combined with all three scope
-    flags so the test pins both the user-supplied parts and the
-    auto-appended exclusion.
+    Wave Q1-A (2026-05-11) removed the ``-in:drafts`` auto-append.
+    This test pins that user-supplied scope flags (query, label, from)
+    are still composed correctly and ``-in:drafts`` is NOT added.
     """
     captured: dict[str, list[str]] = {}
 
@@ -1137,21 +1128,22 @@ def test_list_messages_query_excludes_drafts() -> None:
     cmd = captured["cmd"]
     params = json.loads(cmd[6])
     q = params["q"]
-    assert "-in:drafts" in q
     # User-supplied parts still present.
     assert "project foo" in q
     assert "label:interviews" in q
     assert "from:a@b" in q
+    # Drafts are no longer excluded at the list level (wave Q1-A).
+    assert "-in:drafts" not in q
 
 
-def test_to_extracted_doc_raises_draft_skipped() -> None:
-    """``to_extracted_doc`` raises ``DraftSkipped`` when ``labelIds`` contains ``DRAFT``.
+def test_to_extracted_doc_returns_draft_with_is_draft_true() -> None:
+    """``to_extracted_doc`` returns an ExtractedDoc with ``_is_draft=True`` for drafts.
 
-    Even if a draft message somehow reaches the per-message extractor
-    (e.g. the ``-in:drafts`` filter on ``list_messages`` was bypassed
-    by a direct ``read_message`` call), the extractor refuses to emit
-    an ``ExtractedDoc`` for it. Callers catch this and increment a
-    "skipped (drafts)" counter rather than treating it as a failure.
+    Wave Q1-A (2026-05-11): draft messages are now included in the corpus
+    rather than rejected. ``metadata["_is_draft"] = True`` signals to the
+    ingest pipeline that the document should receive ``documents.draft = TRUE``
+    (the P1.6 wiki quarantine hides it from Quartz; ``brain search`` still
+    surfaces it).
     """
     msg = {
         "id": "draft-msg-1",
@@ -1166,28 +1158,26 @@ def test_to_extracted_doc_raises_draft_skipped() -> None:
             "body": {"data": _b64url("draft body"), "size": 10},
         },
     }
-    with pytest.raises(DraftSkipped, match="draft-msg-1"):
-        gmail_ingest.to_extracted_doc(msg)
+    doc = gmail_ingest.to_extracted_doc(msg)
+    assert doc.metadata["_is_draft"] is True
+    assert doc.title == "unsent draft"
+    assert doc.content_type == "email"
 
 
-def test_ingest_gmail_skips_draft_only_thread(
+def test_ingest_gmail_ingests_draft_only_thread_with_draft_flag(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
     tmp_path: Path,
 ) -> None:
-    """A thread with one DRAFT-only message is skipped, not failed.
+    """A thread with only DRAFT messages is now ingested with ``draft=TRUE``.
 
-    The summary line surfaces the count under "skipped (drafts)" rather
-    than "failed", so the user can tell apart "Gmail returned a draft I
-    don't want" from "the ingest pipeline broke".
-
-    Note: in production ``-in:drafts`` on the list query means drafts
-    don't reach the ingest path at all. This test simulates a runner
-    that returns a draft anyway (e.g. from a stub built before the
-    list-side filter shipped) — the per-thread extractor catches it.
+    Wave Q1-A (2026-05-11): draft threads are no longer skipped. The
+    assembled doc lands in ``documents`` with ``draft=TRUE`` so the P1.6
+    wiki quarantine hides it from Quartz while ``brain search`` still
+    surfaces it. The summary line shows ``1 ingested (1 draft)`` instead
+    of the old ``1 skipped (drafts)`` format.
     """
-    # Sandbox vault even though drafts are skipped before any write.
     _patch_embedder(monkeypatch, fake_embedder)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
 
@@ -1195,12 +1185,13 @@ def test_ingest_gmail_skips_draft_only_thread(
         "id": "d1",
         "threadId": "td",
         "labelIds": ["DRAFT"],
+        "internalDate": "1000",
         "payload": {
             "mimeType": "text/plain",
             "headers": [
                 {"name": "From", "value": "ali@example.com"},
                 {"name": "To", "value": "person-a@example.com"},
-                {"name": "Subject", "value": "discarded draft"},
+                {"name": "Subject", "value": "draft thread subject"},
                 {"name": "Date", "value": "Mon, 04 May 2026 12:00:00 +0000"},
             ],
             "body": {"data": _b64url("draft body that was never sent"), "size": 30},
@@ -1224,18 +1215,18 @@ def test_ingest_gmail_skips_draft_only_thread(
     result = CliRunner().invoke(app, ["ingest-gmail", "--label", "anything"])
 
     assert result.exit_code == 0, result.output
-    assert "skipped thread td (draft)" in result.output
-    assert (
-        "0 ingested, 0 skipped (unchanged), 1 skipped (drafts), 0 failed"
-        in result.output
-    )
-    # No documents were written.
+    assert "ingested thread td" in result.output
+    # Summary shows "1 ingested (1 draft)" — the (N draft) note signals
+    # that the document is quarantined from the wiki.
+    assert "1 ingested (1 draft)" in result.output
+    assert "0 skipped (unchanged)" in result.output
+    # Document was written with draft=TRUE.
     with psycopg.connect(TEST_DATABASE_URL) as conn:
-        n = conn.execute(
-            "SELECT count(*) FROM documents WHERE content_type='email_thread'"
+        row = conn.execute(
+            "SELECT draft FROM documents WHERE content_type='email_thread'"
         ).fetchone()
-    assert n is not None
-    assert n[0] == 0
+    assert row is not None
+    assert row[0] is True
 
 
 def test_ingest_gmail_drops_draft_from_mixed_thread(
@@ -1331,7 +1322,7 @@ def test_ingest_gmail_drops_draft_from_mixed_thread(
     assert result.exit_code == 0, result.output
     assert "ingested thread tmix" in result.output
     assert (
-        "1 ingested, 0 skipped (unchanged), 0 skipped (drafts), 0 failed"
+        "1 ingested, 0 skipped (unchanged), 0 failed"
         in result.output
     )
     with psycopg.connect(TEST_DATABASE_URL) as conn:

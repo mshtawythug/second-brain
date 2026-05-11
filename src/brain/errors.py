@@ -43,11 +43,14 @@ class DirectoryRefreshError(BrainError):
 
 
 class DraftSkipped(BrainError):
-    """Raised when a Gmail message or thread is skipped because it's a draft.
+    """Reserved for future opt-in draft-skip paths.
 
-    Drafts (labelIds containing ``DRAFT``) are unsent emails the user typed
-    but never sent. Ingesting them pollutes search ("did I send X to Y?"
-    returns drafts as evidence of sent messages → wrong answer). Callers
-    catch this exception and increment a "skipped (drafts)" counter
-    instead of treating it as a failure.
+    .. deprecated::
+        No longer raised by the default Gmail ingest path (wave Q1-A,
+        2026-05-11). All Gmail drafts are now ingested with
+        ``documents.draft = TRUE`` so the wiki quarantine (P1.6,
+        ``contentIndex.ts:397``) hides them from Quartz while
+        ``brain search`` / ``brain show`` still surface them. This class
+        is kept so future callers (e.g. a ``--skip-drafts`` flag) can
+        raise it without a schema change.
     """

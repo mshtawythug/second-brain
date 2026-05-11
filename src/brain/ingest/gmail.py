@@ -18,7 +18,6 @@ from email.utils import parsedate_to_datetime
 from typing import Any
 
 from brain.config import BOILERPLATE_PATTERNS
-from brain.errors import DraftSkipped
 
 # Re-using the shared Re/Fwd-prefix helper from vault.slug rather than
 # duplicating the regex — it's marked private (leading underscore) but the
@@ -49,9 +48,6 @@ class GmailError(RuntimeError):
 Runner = Callable[[list[str]], str]
 
 
-_DRAFTS_EXCLUSION = "-in:drafts"
-
-
 def _build_query(
     *,
     query: str | None,
@@ -62,13 +58,14 @@ def _build_query(
 ) -> str:
     """Compose the Gmail search ``q`` string from the CLI scope flags.
 
-    Always appends ``-in:drafts`` so unsent draft messages never appear in
-    the message-stub list. Drafts are unsent emails the user typed but
-    never sent — ingesting them pollutes search results ("did I send X to
-    Y?" returns drafts as evidence of sent messages → wrong answer). The
-    per-message extractor (`to_extracted_doc`) and per-thread extractor
-    (`to_extracted_thread`) repeat the filter at the DRAFT-label level as
-    belt-and-braces in case Gmail hands a draft back anyway.
+    Drafts are now **included** by default (wave Q1-A, 2026-05-11). The
+    per-message extractor (:func:`to_extracted_doc`) and per-thread
+    extractor (:func:`to_extracted_thread`) stamp
+    ``metadata["_is_draft"] = True`` on all-draft documents so the ingest
+    pipeline can set ``documents.draft = TRUE``. The P1.6 wiki quarantine
+    (``contentIndex.ts:397``) hides those rows from the Quartz build;
+    ``brain search`` / ``brain show`` still surface them so "what was I
+    going to email person-x about?" is answerable.
     """
     parts: list[str] = []
     if query:
@@ -81,7 +78,6 @@ def _build_query(
         parts.append(f"after:{since}")
     if until:
         parts.append(f"before:{until}")
-    parts.append(_DRAFTS_EXCLUSION)
     return " ".join(parts)
 
 
@@ -272,16 +268,14 @@ def _is_draft(msg: dict[str, Any]) -> bool:
 def to_extracted_doc(msg: dict[str, Any]) -> ExtractedDoc:
     """Build an :class:`ExtractedDoc` from a Gmail ``users.messages.get`` response.
 
-    Raises:
-        DraftSkipped: ``msg`` carries the ``DRAFT`` label. Callers should
-            catch this and increment a "skipped (drafts)" counter rather
-            than treating it as a failure. Drafts are unsent; ingesting
-            them would pollute search.
+    Draft messages (``labelIds`` containing ``DRAFT``) are now included
+    rather than rejected. ``metadata["_is_draft"]`` (leading underscore
+    signals a derived/internal key, mirroring ``_participant_keys``) is
+    set to ``True`` so the ingest pipeline can stamp
+    ``documents.draft = TRUE`` and the P1.6 wiki quarantine hides the
+    doc from Quartz while ``brain search`` / ``brain show`` still
+    surface it.
     """
-    if _is_draft(msg):
-        raise DraftSkipped(
-            f"message {msg.get('id')!r} is a draft (labelIds contains DRAFT)"
-        )
     payload = msg.get("payload") or {}
     headers = _headers_to_dict(payload.get("headers") or [])
     title = headers.get("subject") or "(no subject)"
@@ -293,6 +287,7 @@ def to_extracted_doc(msg: dict[str, Any]) -> ExtractedDoc:
         "message_id": msg.get("id"),
         "thread_id": msg.get("threadId"),
         "label_ids": msg.get("labelIds") or [],
+        "_is_draft": _is_draft(msg),
     }
     # New typed-column feeders (P1.3). Each key is omitted when the source
     # header is absent so downstream column-promotion stays NULL rather than
@@ -500,29 +495,39 @@ def to_extracted_thread(messages: list[dict[str, Any]]) -> ExtractedDoc:
     unioning across the source per-message rows; new threaded ingests
     pick tags up via ``brain tag <id> +foo`` post-ingest.
 
-    Drafts are filtered out before assembly. A mixed thread (some drafts,
-    some sent) keeps only the sent messages — body, participants,
-    label_ids, message_count all reflect the post-filter set. A thread
-    where every message is a draft raises :class:`DraftSkipped` so the
-    caller can route it to the "skipped (drafts)" counter rather than
-    emit an empty document. Empty input still raises ``ValueError``
-    (programmer error — callers must supply at least one message).
+    Draft handling is asymmetric on purpose:
+
+    - **All-draft thread**: every message carries the ``DRAFT`` label →
+      the full thread is assembled intact and
+      ``metadata["_is_draft"] = True`` is set. The ingest pipeline stamps
+      ``documents.draft = TRUE``; the P1.6 wiki quarantine hides the doc
+      from Quartz while ``brain search`` can still find it ("what was I
+      going to email person-x about?").
+    - **Mixed thread**: at least one sent message → drafts are dropped
+      from the rendered body (body, participants, label_ids, message_count
+      all reflect the post-filter sent set) and
+      ``metadata["_is_draft"] = False`` is set. This prevents a WIP
+      unsent reply from appearing as the visible H2 in a published thread.
+    - **Empty input**: raises ``ValueError`` (programmer error — callers
+      must supply at least one message).
 
     Raises:
         ValueError: ``messages`` is empty.
-        DraftSkipped: every message in ``messages`` carries the ``DRAFT``
-            label. The thread has nothing left to ingest after filtering.
     """
     if not messages:
         raise ValueError("to_extracted_thread requires at least one message")
 
-    non_draft = [m for m in messages if not _is_draft(m)]
-    if not non_draft:
-        thread_id = messages[0].get("threadId")
-        raise DraftSkipped(
-            f"thread {thread_id!r} contains only draft messages"
+    all_drafts = all(_is_draft(m) for m in messages)
+    if all_drafts:
+        # All-draft thread: assemble the full list; the wiki quarantine
+        # hides the resulting doc; brain search still surfaces it.
+        sorted_msgs = sorted(messages, key=_message_sort_key)
+    else:
+        # Mixed or fully-sent thread: drop drafts from the rendered body
+        # so a WIP unsent reply doesn't appear as the visible H2.
+        sorted_msgs = sorted(
+            [m for m in messages if not _is_draft(m)], key=_message_sort_key
         )
-    sorted_msgs = sorted(non_draft, key=_message_sort_key)
     first = sorted_msgs[0]
     latest = sorted_msgs[-1]
 
@@ -576,6 +581,12 @@ def to_extracted_thread(messages: list[dict[str, Any]]) -> ExtractedDoc:
         "label_ids": sorted(label_ids),
         "participants": participants,
         "message_count": len(sorted_msgs),
+        # Internal flag for the ingest pipeline: True when every message
+        # in the original (unfiltered) input was a DRAFT. The pipeline
+        # uses this to stamp documents.draft = TRUE and route the doc
+        # through the P1.6 wiki quarantine. Leading underscore mirrors
+        # the ``_participant_keys`` convention for derived fields.
+        "_is_draft": all_drafts,
     }
     rfc_id = latest_headers.get("message-id")
     if rfc_id:

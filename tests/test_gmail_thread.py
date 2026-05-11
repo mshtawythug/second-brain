@@ -12,7 +12,6 @@ from typing import Any
 
 import pytest
 
-from brain.errors import DraftSkipped
 from brain.ingest.gmail import to_extracted_thread
 
 
@@ -747,8 +746,15 @@ def test_summary_html_escapes_angle_bracketed_email() -> None:
     ), "latest H2 should keep the unescaped form for markdown autolink"
 
 
-def test_to_extracted_thread_raises_for_all_draft_thread() -> None:
-    """A thread where every message is a draft raises ``DraftSkipped``."""
+def test_to_extracted_thread_all_draft_assembles_with_flag() -> None:
+    """A thread where every message is a draft now assembles successfully.
+
+    Wave Q1-A (2026-05-11) changed the all-draft path: instead of raising
+    ``DraftSkipped``, the full thread is assembled intact and
+    ``metadata["_is_draft"] = True`` is set. The ingest pipeline stamps
+    ``documents.draft = TRUE``; the wiki quarantine hides the doc from
+    Quartz while ``brain search`` still surfaces it.
+    """
     msgs = [
         _make_message(
             msg_id="m1",
@@ -775,5 +781,9 @@ def test_to_extracted_thread_raises_for_all_draft_thread() -> None:
             label_ids=["DRAFT"],
         ),
     ]
-    with pytest.raises(DraftSkipped, match="all-draft-thread"):
-        to_extracted_thread(msgs)
+    doc = to_extracted_thread(msgs)
+    assert doc.metadata["_is_draft"] is True
+    assert doc.metadata["message_count"] == 2
+    # Both draft bodies appear in the assembled content.
+    assert "draft body 1" in doc.content
+    assert "draft body 2" in doc.content

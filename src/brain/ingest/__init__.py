@@ -307,6 +307,7 @@ def ingest_document(
     force: bool = False,
     gws_runner: GwsRunner | None = None,
     vault_root: Path | None = None,
+    draft: bool = False,
 ) -> IngestResult:
     """Ingest a single extracted document.
 
@@ -395,6 +396,7 @@ def ingest_document(
         force=force,
         gws_runner=gws_runner,
         content_hash=h,
+        draft=draft,
     )
 
     # Mirror writes happen OUTSIDE the transaction so a filesystem error
@@ -445,6 +447,7 @@ def _ingest_within_transaction(
     force: bool,
     gws_runner: GwsRunner | None,
     content_hash: str,
+    draft: bool = False,
 ) -> IngestResult:
     """Body of :func:`ingest_document` that runs inside the DB transaction.
 
@@ -468,13 +471,34 @@ def _ingest_within_transaction(
             thread_id = doc.metadata.get("thread_id")
             assert isinstance(thread_id, str) and thread_id  # _is_gmail_thread_doc
             existing_thread = conn.execute(
-                "SELECT id, content_hash FROM documents "
+                "SELECT id, content_hash, draft FROM documents "
                 "WHERE thread_id=%s AND kind='ingested' "
                 "AND content_type='email_thread'",
                 (thread_id,),
             ).fetchone()
             if existing_thread is not None:
-                existing_id, existing_hash = existing_thread
+                existing_id, existing_hash, existing_draft = existing_thread
+                # Q1-A safety rule: if the incoming ingest is draft-only
+                # (``draft=True``) but the stored thread is already published
+                # (``existing_draft=False``), skip the update entirely.
+                #
+                # Why: ``brain ingest-gmail --since N`` returns only messages
+                # that arrived within the time window. When the window captures
+                # a draft reply on a thread whose sent messages are older than
+                # N days, ``to_extracted_thread`` sees only the draft message
+                # and returns a draft-only body. Updating the stored doc with
+                # that partial body would overwrite the full sent-message
+                # content with a draft-only view — "publishing draft-only
+                # content" even though ``draft`` is blocked from flipping.
+                # The stored doc already reflects the true (published) state of
+                # the thread; the draft reply is ephemeral and may never be
+                # sent, so the safest action is a no-op.
+                if draft and not existing_draft:
+                    return IngestResult(
+                        document_id=str(existing_id),
+                        created=False,
+                        body_changed=False,
+                    )
                 if not force and existing_hash == h:
                     return IngestResult(
                         document_id=str(existing_id),
@@ -492,6 +516,7 @@ def _ingest_within_transaction(
                     tags=tags,
                     content_hash=h,
                     gws_runner=gws_runner,
+                    draft=draft,
                 )
                 return IngestResult(
                     document_id=str(existing_id),
@@ -563,8 +588,8 @@ def _ingest_within_transaction(
         doc_row = conn.execute(
             f"""
             INSERT INTO documents (source_id, title, content, content_hash, content_type,
-                                   source_path, tags, metadata{extra_cols})
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s{extra_placeholders})
+                                   source_path, tags, metadata, draft{extra_cols})
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s{extra_placeholders})
             RETURNING id
             """,
             (
@@ -576,6 +601,7 @@ def _ingest_within_transaction(
                 doc.source_path,
                 tags,
                 json.dumps(doc.metadata),
+                draft,
                 *promoted_values,
             ),
         ).fetchone()
@@ -624,6 +650,7 @@ def _update_thread_doc_in_place(
     tags: list[str],
     content_hash: str,
     gws_runner: GwsRunner | None,
+    draft: bool = False,
 ) -> None:
     """Replace title / body / metadata / tags / typed columns on an existing
     gmail-thread doc and rebuild its chunks. Used by the P2.2 upsert path.
@@ -636,6 +663,22 @@ def _update_thread_doc_in_place(
     Source-specific post-ingest hooks (gmail directory upsert) re-run so
     headers from the latest message in the rebuilt thread propagate.
     """
+    # Partial-window guard: if the incoming extraction is all-draft but the
+    # existing row is published, the ingest window is a subset of the full
+    # thread (e.g. ``brain ingest-gmail --since 7d`` where only a fresh
+    # draft reply falls in the window but the thread's sent messages are
+    # older). The draft-only extraction is NOT authoritative — refusing the
+    # UPDATE preserves the published body, metadata, chunks, and links.
+    # The legitimate auto-flip direction (TRUE→FALSE when a sent reply
+    # arrives) is unaffected because this guard only triggers on draft=True.
+    if draft:
+        existing = conn.execute(
+            "SELECT draft FROM documents WHERE id=%s",
+            (document_id,),
+        ).fetchone()
+        if existing is not None and not existing[0]:
+            return
+
     # Re-evaluate the source row — same ``(kind, external_id)`` as the
     # initial insert, so this is a SELECT-with-fallback-INSERT no-op in
     # practice. Kept here so a future caller passing different
@@ -683,6 +726,16 @@ def _update_thread_doc_in_place(
         list(tags),
         json.dumps(doc.metadata),
     ]
+    # Write the draft column directly. The entry-level partial-window
+    # guard above already returned early if (existing=published,
+    # incoming=draft-only), so reaching this point means either:
+    #   (a) draft=False — a normal sent-message update (auto-flip TRUE→FALSE
+    #       included), or
+    #   (b) draft=True AND existing was also draft=True (legitimate
+    #       all-draft refresh, e.g. a new draft was added to the thread).
+    # In both cases the incoming ``draft`` value is authoritative.
+    set_parts.append("draft=%s")
+    params.append(draft)
     # Project the rebuilt thread's metadata onto the typed columns so they
     # stay in lockstep with the JSONB blob: a key that's present in the
     # new metadata writes the column; a key that's gone (e.g. an old
