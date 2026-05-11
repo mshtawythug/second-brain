@@ -154,7 +154,7 @@ ensure_supervised() {
         echo 'launchd supervision: skipped (BRAIN_NO_BUILD_WATCHER=1)'
         return 0
     fi
-    if ! "$SCRIPT_DIR/brain-install-launchd"; then
+    if ! "${BRAIN_INSTALL_LAUNCHD:-brain-install-launchd}"; then
         echo 'launchd supervision: brain-install-launchd failed — daemons NOT supervised' >&2
         return 1
     fi

@@ -26,8 +26,12 @@
 #      is atomic and the watcher only cares about vault changes.
 #
 # Flags:
-#   --no-export   skip the DB→vault export step (use if you only edited
-#                 vault files directly).
+#   --no-export         skip the DB→vault export step (use if you only edited
+#                       vault files directly). IMPLIES --no-sync-summaries
+#                       since sync-summaries is also a DB→vault write.
+#   --no-sync-summaries skip the summary-frontmatter sync step (use if you
+#                       know no docs have been enriched out-of-band since
+#                       the last rebuild).
 #   --no-prune    skip the prune-orphans step (use if you intentionally
 #                 want to keep DB-orphaned files around for inspection).
 #   --no-overlay  skip the overlay re-apply step (use if you haven't
@@ -65,6 +69,7 @@ else
 fi
 
 DO_EXPORT=1
+DO_SYNC_SUMMARIES=1
 DO_PRUNE=1
 DO_OVERLAY=1
 DO_BUILD=1
@@ -72,11 +77,12 @@ DO_CLEAN_CACHE=0
 
 for arg in "$@"; do
     case "$arg" in
-        --no-export)    DO_EXPORT=0 ;;
-        --no-prune)     DO_PRUNE=0 ;;
-        --no-overlay)   DO_OVERLAY=0 ;;
-        --no-build)     DO_BUILD=0 ;;
-        --clean-cache)  DO_CLEAN_CACHE=1 ;;
+        --no-export)          DO_EXPORT=0; DO_SYNC_SUMMARIES=0 ;;
+        --no-sync-summaries)  DO_SYNC_SUMMARIES=0 ;;
+        --no-prune)           DO_PRUNE=0 ;;
+        --no-overlay)         DO_OVERLAY=0 ;;
+        --no-build)           DO_BUILD=0 ;;
+        --clean-cache)        DO_CLEAN_CACHE=1 ;;
         -h|--help)
             sed -n '2,/^set -euo/p' "$0" | sed 's/^# \?//; /^set -euo/d'
             exit 0
@@ -97,6 +103,19 @@ fi
 if [[ "$DO_EXPORT" == '1' ]]; then
     echo "🔄 exporting DB → vault ($VAULT)..."
     brain vault export --to "$VAULT"
+fi
+
+if [[ "$DO_SYNC_SUMMARIES" == '1' ]]; then
+    # Export skips files whose body hash matches the DB (idempotent fast
+    # path). That means a doc enriched out-of-band via `brain enrich
+    # --backfill` never reaches the wiki via export alone — its body
+    # didn't change, only `documents.summary`. `sync-summaries` rewrites
+    # mirror frontmatter for those rows. Idempotent — exits as no-op when
+    # on-disk frontmatter already matches the DB summary.
+    echo "🔄 syncing summary frontmatter for enriched docs..."
+    brain vault sync-summaries --vault "$VAULT" || {
+        echo 'sync-summaries: failed (continuing — frontmatter may be stale)' >&2
+    }
 fi
 
 if [[ "$DO_PRUNE" == '1' ]]; then

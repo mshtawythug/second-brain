@@ -29,6 +29,12 @@ dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.13", "pytest-mock>=3.14", "
 [project.scripts]
 brain = "brain.cli:app"
 brain-mcp = "brain.mcp_server:main"
+brain-up = "brain.bin.up:main"
+brain-down = "brain.bin.down:main"
+brain-status = "brain.bin.status:main"
+brain-rebuild = "brain.bin.rebuild:main"
+brain-install-launchd = "brain.bin.launchd:install_main"
+brain-uninstall-launchd = "brain.bin.launchd:uninstall_main"
 
 [build-system]
 requires = ["setuptools>=68"]
