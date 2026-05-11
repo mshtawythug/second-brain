@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -202,3 +203,62 @@ def test_exec_shim_passes_argv(tmp_path: Path) -> None:
     assert captured["args"] == [shim_path, "arg1", "arg2"], (
         f"argv mismatch: {captured['args']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests 8-10: T1.6 entry-point launchers — brain-down, brain-status, brain-rebuild
+# ---------------------------------------------------------------------------
+
+
+def test_brain_down_main_dispatches_to_shim(monkeypatch: Any) -> None:
+    """brain-down's main() calls exec_shim with the correct shim name."""
+    from brain.bin import down
+
+    captured: dict[str, Any] = {}
+
+    def fake_exec_shim(name: str, args: Sequence[str]) -> None:
+        captured["name"] = name
+        captured["args"] = list(args)
+
+    monkeypatch.setattr("brain.bin.down.exec_shim", fake_exec_shim)
+    monkeypatch.setattr(sys, "argv", ["brain-down", "--verbose"])
+    down.main()
+
+    assert captured["name"] == "brain-down"
+    assert captured["args"] == ["--verbose"]
+
+
+def test_brain_status_main_dispatches_to_shim(monkeypatch: Any) -> None:
+    """brain-status's main() calls exec_shim with the correct shim name."""
+    from brain.bin import status
+
+    captured: dict[str, Any] = {}
+
+    def fake_exec_shim(name: str, args: Sequence[str]) -> None:
+        captured["name"] = name
+        captured["args"] = list(args)
+
+    monkeypatch.setattr("brain.bin.status.exec_shim", fake_exec_shim)
+    monkeypatch.setattr(sys, "argv", ["brain-status", "--json"])
+    status.main()
+
+    assert captured["name"] == "brain-status"
+    assert captured["args"] == ["--json"]
+
+
+def test_brain_rebuild_main_dispatches_to_shim(monkeypatch: Any) -> None:
+    """brain-rebuild's main() calls exec_shim with the correct shim name."""
+    from brain.bin import rebuild
+
+    captured: dict[str, Any] = {}
+
+    def fake_exec_shim(name: str, args: Sequence[str]) -> None:
+        captured["name"] = name
+        captured["args"] = list(args)
+
+    monkeypatch.setattr("brain.bin.rebuild.exec_shim", fake_exec_shim)
+    monkeypatch.setattr(sys, "argv", ["brain-rebuild", "--clean-cache"])
+    rebuild.main()
+
+    assert captured["name"] == "brain-rebuild"
+    assert captured["args"] == ["--clean-cache"]
