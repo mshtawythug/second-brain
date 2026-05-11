@@ -56,6 +56,13 @@ write_plist() {
     # Heredoc with explicit ${HOME}/${PROJECT_ROOT} expansion. macOS
     # plists are XML; we keep the indentation flat so a future maintainer
     # can diff against `man launchd.plist` examples without squinting.
+    #
+    # BRAIN_PY must be pinned to the venv Python (not just PATH-prepended)
+    # so `python -m brain.*` calls in the foreground wrappers always use
+    # the interpreter that has `brain` on sys.path. Without this, launchd's
+    # PATH resolution picks up system python3 which lacks the brain package
+    # and every `python -m brain.wiki.build_watcher` call fails with
+    # ModuleNotFoundError — causing the daemon to crash-loop under KeepAlive.
     cat >"$plist_path" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -75,6 +82,8 @@ write_plist() {
         <string>${PROJECT_ROOT}/.venv/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>BRAIN_VAULT_PATH</key>
         <string>${BRAIN_VAULT_PATH:-${HOME}/brain-vault}</string>
+        <key>BRAIN_PY</key>
+        <string>${PROJECT_ROOT}/.venv/bin/python</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

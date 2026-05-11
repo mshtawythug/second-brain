@@ -933,12 +933,24 @@ def test_install_launchd_writes_plists_and_bootstraps(
     assert "<true/>" in watcher_text  # KeepAlive=true
     assert "<key>RunAtLoad</key>" in watcher_text
     assert "/tmp/brain-watch.log" in watcher_text
+    # BRAIN_PY must be in the plist so launchd-launched scripts use the venv
+    # Python (not system python3 which lacks the brain package on sys.path).
+    assert "<key>BRAIN_PY</key>" in watcher_text, (
+        "com.brain.watcher.plist is missing BRAIN_PY — without it the "
+        "foreground wrappers fall back to system python3 and every "
+        "`python -m brain.*` call fails with ModuleNotFoundError"
+    )
 
     build_text = build_plist.read_text()
     assert "<string>com.brain.build</string>" in build_text
     assert "_brain-build-fg" in build_text
     assert "<key>KeepAlive</key>" in build_text
     assert "/tmp/brain-build.log" in build_text
+    # Same BRAIN_PY regression guard for the build daemon plist.
+    assert "<key>BRAIN_PY</key>" in build_text, (
+        "com.brain.build.plist is missing BRAIN_PY — without it "
+        "`python -m brain.wiki.build_watcher` fails at launchd start"
+    )
 
     launchctl_calls = _read_log(stub_dir / "launchctl.calls")
     bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
