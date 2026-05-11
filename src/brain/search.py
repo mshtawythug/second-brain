@@ -134,6 +134,15 @@ def hybrid_search(
     recency_halflife_days: float | None = None,
     snippet_context_tokens: int = 0,
     explain: bool = False,
+    # — Q1-C metadata filters —
+    person_keys: list[str] | None = None,
+    person_display_name: str | None = None,
+    after: datetime | None = None,
+    before: datetime | None = None,
+    content_type: str | None = None,
+    thread_id: str | None = None,
+    draft: bool | None = None,
+    without_tag: str | None = None,
 ) -> list[SearchResult]:
     """Combine FTS and vector ranks via Reciprocal Rank Fusion.
 
@@ -159,6 +168,37 @@ def hybrid_search(
     pulling neighboring chunks (``chunk_index ± W``) from the same document
     and stitching them together up to the token budget. ``0`` (default)
     returns the single-chunk snippet unchanged.
+
+    Q1-C metadata filters (all optional, default ``None`` = no filter):
+
+    - ``person_keys`` — case-insensitive overlap against
+      ``documents.participants``. Caller is responsible for resolving the
+      ``--person <name>`` argument via
+      :func:`brain.queries.resolve_person_to_keys` before calling
+      ``hybrid_search`` (the resolver may raise
+      :class:`brain.errors.PersonNotFound` / :class:`PersonAmbiguous`
+      which the CLI / MCP layer maps to its framework's error type).
+      ``person_display_name`` rides along into ``matched_filters`` for
+      explain readability — it does not affect the SQL. Gmail stores
+      participants in case-preserved form (``"Alice Doe <alice@x.com>"``)
+      while the resolver returns lowercased keys, so the SQL lowercases
+      each stored entry via ``unnest`` before comparing — at the cost of
+      bypassing the GIN index on ``participants``, which is acceptable
+      for a personal-corpus scale.
+    - ``after`` / ``before`` — date-range predicate on
+      ``coalesce(sent_at, ingested_at)``. Inclusive lower bound,
+      exclusive upper bound (so ``after=X, before=X`` returns nothing).
+    - ``content_type`` — exact match on ``documents.content_type``
+      (``email``, ``email_thread``, ``note``, ``transcript``, …). NOT
+      ``documents.kind`` (which is the vault/ingested tier enum).
+    - ``thread_id`` — exact match on ``documents.thread_id`` (Gmail
+      thread id; indexed via migration 007).
+    - ``draft`` — three-state filter on ``documents.draft``: ``True``
+      → drafts only, ``False`` → published only, ``None`` → both
+      (default, matches pre-Q1-C behavior).
+    - ``without_tag`` — exclude docs whose ``tags`` array contains the
+      given tag. Combines with ``tag`` (AND) so callers can express
+      "tagged X but not Y".
     """
     where_clauses = ["TRUE"]
     where_params: list[Any] = []
@@ -171,6 +211,39 @@ def hybrid_search(
     if since_days:
         where_clauses.append("d.ingested_at >= NOW() - make_interval(days => %s)")
         where_params.append(since_days)
+    if person_keys:
+        # Case-insensitive overlap. ``documents.participants`` is written
+        # by ingest extractors in source-preserved case (Gmail emits
+        # ``"Alice Doe <alice@x.com>"``); the resolver's keys are
+        # lowercased + expanded. A plain ``&&`` overlap would miss every
+        # mixed-case stored value, so we unnest the array and lower each
+        # element before comparing. Empty ``keys`` is "no filter" — the
+        # resolver itself raises PersonNotFound on no match, so an empty
+        # list here can only be a caller's explicit "no person filter"
+        # intent.
+        where_clauses.append(
+            "EXISTS (SELECT 1 FROM unnest(d.participants) AS _p "
+            "WHERE lower(_p) = ANY(%s::text[]))"
+        )
+        where_params.append(person_keys)
+    if after is not None:
+        where_clauses.append("coalesce(d.sent_at, d.ingested_at) >= %s")
+        where_params.append(after)
+    if before is not None:
+        where_clauses.append("coalesce(d.sent_at, d.ingested_at) < %s")
+        where_params.append(before)
+    if content_type is not None:
+        where_clauses.append("d.content_type = %s")
+        where_params.append(content_type)
+    if thread_id is not None:
+        where_clauses.append("d.thread_id = %s")
+        where_params.append(thread_id)
+    if draft is not None:
+        where_clauses.append("d.draft = %s")
+        where_params.append(draft)
+    if without_tag is not None:
+        where_clauses.append("NOT (%s = ANY(d.tags))")
+        where_params.append(without_tag)
     where_sql = " AND ".join(where_clauses)
 
     tsquery = _build_tsquery(conn, query)
@@ -337,6 +410,18 @@ def hybrid_search(
                     "tag": tag,
                     "since_days": since_days,
                     "fts_only": fts_only,
+                    # Q1-C additions — datetimes serialize as ISO strings
+                    # so the dict round-trips through JSON without a custom
+                    # encoder. ``None`` values stay in the dict; the
+                    # explain formatter skips them at render time.
+                    "person_keys": list(person_keys) if person_keys else None,
+                    "person_display_name": person_display_name,
+                    "after": after.isoformat() if after is not None else None,
+                    "before": before.isoformat() if before is not None else None,
+                    "content_type": content_type,
+                    "thread_id": thread_id,
+                    "draft": draft,
+                    "without_tag": without_tag,
                 },
             )
 

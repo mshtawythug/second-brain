@@ -20,6 +20,8 @@ from .errors import (
     IdPrefixNotFound,
     IdPrefixNotHex,
     IdPrefixTooShort,
+    PersonAmbiguous,
+    PersonNotFound,
 )
 from .ingest import Embedder
 from .vault.frontmatter import parse_frontmatter
@@ -75,6 +77,140 @@ def resolve_document_prefix(conn: psycopg.Connection[Any], prefix: str) -> str:
     if len(rows) > 1:
         raise IdPrefixAmbiguous(prefix)
     return str(rows[0][0])
+
+
+@dataclass(frozen=True)
+class PersonMatch:
+    """Resolved person → participant-key list for SQL array-overlap filtering.
+
+    ``keys`` is the lower-cased list of every identifier (display name +
+    emails + their ``"Display <email>"`` combination forms) that should
+    overlap with a doc's ``documents.participants`` array to count as a
+    match. Q1-C uses this to power ``--person`` on ``brain search`` /
+    ``brain explain`` / MCP ``brain_search``.
+    """
+
+    display_name: str
+    keys: list[str]
+
+
+def _expand_person_keys(display_name: str, emails: list[str]) -> list[str]:
+    """Build the SQL-overlap key list for one person.
+
+    ``documents.participants`` is a free-form ``TEXT[]`` written by ingest
+    extractors. Gmail emits a mix of bare emails (``alice@x.com``) and
+    ``"Display <email>"`` combination strings; Krisp emits display names
+    only. To match all three forms with a single GIN-friendly ``&&``
+    overlap predicate, we expand each person's identity into every form
+    they might have been recorded under and let the array operator do
+    the union.
+
+    Returns the deduplicated list, sorted for determinism so tests +
+    explain payloads stay byte-stable across runs.
+    """
+    keys: set[str] = set()
+    name = (display_name or "").strip().lower()
+    if name:
+        keys.add(name)
+    lowered_emails: list[str] = []
+    for raw in emails:
+        if not raw:
+            continue
+        normalized = raw.strip().lower()
+        if not normalized:
+            continue
+        keys.add(normalized)
+        lowered_emails.append(normalized)
+    # ``Display <email>`` combination form — Gmail emits this for any
+    # header where the sender / recipient had a display-name component.
+    if name:
+        for email in lowered_emails:
+            keys.add(f"{name} <{email}>")
+    return sorted(keys)
+
+
+def resolve_person_to_keys(
+    conn: psycopg.Connection[Any], name_or_email: str
+) -> PersonMatch:
+    """Resolve a ``--person`` argument to a participant-key set.
+
+    Resolution order (mirrors ``brain people <name>``):
+
+    1. Exact email match (case-insensitive) against any
+       ``directory_entries.email``.
+    2. Exact display-name match against ``directory_entries.display_name``
+       (case-folded).
+    3. Case-insensitive substring on ``display_name``; alpha-first
+       tiebreak when multiple records match.
+
+    Per plan §3.b D16, the resolver calls
+    :func:`brain.wiki.build_people.aggregate_people` with
+    ``min_docs=0`` and ``owner_keys=frozenset()`` so query-time
+    ``--person`` filters see every known person — including the corpus
+    owner and curated-but-low-doc-count entries that the People Hub UI
+    threshold would filter out. The UI's display rules should not gate
+    a query filter.
+
+    Raises:
+        PersonAmbiguous: Multiple persons matched at step (2) or (3).
+            The ``candidates`` attribute carries the top-5 display names
+            for caller-side disambiguation messages.
+        PersonNotFound: No match at any step.
+    """
+    # Late import: avoid a top-level dependency on the wiki package so
+    # ``brain.queries`` stays import-cheap for non-search code paths.
+    from .wiki.build_people import aggregate_people, humanize_display_name
+
+    needle = name_or_email.strip().casefold()
+    if not needle:
+        raise PersonNotFound(name_or_email)
+
+    records = aggregate_people(
+        conn, owner_keys=frozenset(), min_docs=0
+    )
+
+    # Step 1 — exact email match.
+    for rec in records:
+        for email in rec.all_emails:
+            if email.casefold() == needle:
+                return PersonMatch(
+                    display_name=humanize_display_name(rec.display_name),
+                    keys=_expand_person_keys(rec.display_name, rec.all_emails),
+                )
+
+    # Step 2 — exact display-name match (case-folded).
+    exact_name_hits = [
+        rec for rec in records if rec.display_name.casefold() == needle
+    ]
+    if len(exact_name_hits) == 1:
+        rec = exact_name_hits[0]
+        return PersonMatch(
+            display_name=humanize_display_name(rec.display_name),
+            keys=_expand_person_keys(rec.display_name, rec.all_emails),
+        )
+    if len(exact_name_hits) > 1:
+        raise PersonAmbiguous(
+            name_or_email,
+            sorted(humanize_display_name(r.display_name) for r in exact_name_hits),
+        )
+
+    # Step 3 — substring on display_name (case-folded), alpha-first tiebreak.
+    substring_hits = [
+        rec for rec in records if needle in rec.display_name.casefold()
+    ]
+    if len(substring_hits) == 1:
+        rec = substring_hits[0]
+        return PersonMatch(
+            display_name=humanize_display_name(rec.display_name),
+            keys=_expand_person_keys(rec.display_name, rec.all_emails),
+        )
+    if len(substring_hits) > 1:
+        raise PersonAmbiguous(
+            name_or_email,
+            sorted(humanize_display_name(r.display_name) for r in substring_hits),
+        )
+
+    raise PersonNotFound(name_or_email)
 
 
 def fetch_document(conn: psycopg.Connection[Any], document_id: str) -> DocumentRow | None:
