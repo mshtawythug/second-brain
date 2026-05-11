@@ -282,12 +282,17 @@ def test_brain_enrich_both_modes_errors(
 # ---------------------------------------------------------------------------
 
 
-def test_brain_enrich_krisp_action_items_prints_mcp_request_shape(
+def test_brain_enrich_krisp_action_items_names_real_mcp_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The output must point at the actually-available Krisp MCP tool
-    (``search_meetings``, not the speculative ``list_action_items``) and
-    include concrete ISO dates so an agent can copy-paste it."""
+    """The output must name the actual Krisp MCP tools per
+    ``docs/specs/2026-04-24-second-brain-design.md`` and MUST NOT invent
+    parameter syntax for any of them (Codex stop-time finding 2x).
+
+    The CLI cannot know the live MCP parameter schema, so it points the
+    agent at the tools + provides a plain-English window. The agent calls
+    the tools with whatever signature its loaded MCP exposes.
+    """
     import re
 
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
@@ -295,46 +300,57 @@ def test_brain_enrich_krisp_action_items_prints_mcp_request_shape(
         app, ["enrich", "--krisp-action-items", "--since", "7"]
     )
     assert result.exit_code == 0, result.output
-    # Codex re-review fix: must reference the real Krisp MCP entry point
-    # (``search_meetings``), NOT the speculative ``list_action_items``.
+    # Both real Krisp tools named explicitly so the agent picks the one
+    # its MCP surface exposes.
     assert "mcp__claude_ai_Krisp__search_meetings" in result.output
+    assert "mcp__claude_ai_Krisp__list_activities" in result.output
+    assert "mcp__claude_ai_Krisp__get_multiple_documents" in result.output
+    # Speculative tool name from the original plan must NOT appear.
     assert "list_action_items" not in result.output
-    # Concrete ISO 8601 dates (not placeholders).
+    # No invented kwargs — the CLI never knows the real signature.
+    assert "start_date=" not in result.output
+    assert "end_date=" not in result.output
+    assert "query=" not in result.output
+    # Concrete ISO 8601 date for the lookback window, as a plain string the
+    # agent can hand to whatever parameter the live tool exposes.
     iso_re = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
     assert iso_re.search(result.output), (
-        f"expected concrete ISO date in output:\n{result.output}"
+        f"expected concrete ISO date for lookback window:\n{result.output}"
     )
-    # The ingest-stdin recipe references the action-items content_type +
-    # the required parent_meeting_external_id metadata key.
+    # The ingest-stdin recipe — which IS owned by this CLI — keeps its
+    # exact flag shape so the agent can copy-paste.
     assert "brain ingest-stdin" in result.output
+    assert "--source krisp" in result.output
     assert "--content-type krisp_action_items" in result.output
     assert "parent_meeting_external_id" in result.output
-    # Defensive: no placeholder shapes the user would have to compute.
-    assert "<since>" not in result.output
-    assert "since_days" not in result.output
+    assert "--action-items" in result.output  # external-id suffix convention
 
 
-def test_brain_enrich_krisp_action_items_with_source_id(
+def test_brain_enrich_krisp_action_items_with_source_id_renders_hint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """``--source-id`` flows through as a plain-English scope hint — no
+    invented MCP kwarg."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     result = CliRunner().invoke(
         app, ["enrich", "--krisp-action-items", "--source-id", "meeting-42"]
     )
     assert result.exit_code == 0, result.output
-    assert 'meeting_id="meeting-42"' in result.output
+    assert "meeting-42" in result.output
     assert "mcp__claude_ai_Krisp__search_meetings" in result.output
 
 
-def test_brain_enrich_krisp_action_items_no_filters_renders_balanced_call(
+def test_brain_enrich_krisp_action_items_no_filters(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """No filters → still render a recognizable MCP signature pointing at
-    the real Krisp entry point."""
+    """No filters → still emit the named-tools handoff, just without a
+    date window or meeting-id hint."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     result = CliRunner().invoke(app, ["enrich", "--krisp-action-items"])
     assert result.exit_code == 0, result.output
     assert "mcp__claude_ai_Krisp__search_meetings" in result.output
-    # Recognizable signature parentheses with a body comment placeholder.
-    assert "search_meetings(" in result.output
-    assert "no scope filters supplied" in result.output
+    assert "mcp__claude_ai_Krisp__get_multiple_documents" in result.output
+    # No lookback window text when --since omitted.
+    assert " since " not in result.output
+    # And no invented kwargs.
+    assert "start_date=" not in result.output

@@ -1014,100 +1014,101 @@ def reembed(
 # ---------------------------------------------------------------------------
 
 
-# `brain enrich --krisp-action-items` prints copy-pasteable commands for
+# `brain enrich --krisp-action-items` prints plain-English instructions for
 # Claude to execute against the Krisp MCP. The CLI does NOT call MCP itself
-# (R4 — MCP tools live in agent context, not the Python process); it renders
-# the actual Krisp MCP tools the agent should invoke + the literal
-# ``brain ingest-stdin`` shape that pipes the extracted action items back in.
-# Locked-text so test fixtures stay byte-stable across runs.
+# (R4 — MCP tools live in agent context, not the Python process), and it
+# does NOT invent MCP parameter names. Why: per
+# ``docs/specs/2026-04-24-second-brain-design.md:305-306`` the actual Krisp
+# flow uses two tools (``search_meetings`` / ``list_activities`` to
+# enumerate, then ``get_multiple_documents`` to fetch transcripts), and the
+# Python process has no access to either tool's parameter schema. Anything
+# the CLI prints about kwargs is speculation that may not match the live
+# MCP signature, which is exactly what Codex's stop-time review caught
+# twice (first my fake ``list_action_items`` tool, then my fake
+# ``query=`` / ``start_date=`` / ``end_date=`` / ``meeting_id=`` kwargs on
+# ``search_meetings``).
 #
-# Why this shape (Codex re-review fix 2026-05-11): Krisp's claude.ai MCP
-# does NOT expose a standalone ``list_action_items`` tool. Action items are
-# part of the per-meeting Note/transcript payload returned by
-# ``mcp__claude_ai_Krisp__search_meetings`` (the documented entry point per
-# ``~/.claude/CLAUDE.md`` Second Brain section). The agent is expected to:
+# Correct contract:
 #
-#   1. ``search_meetings(query="action items", ...)`` to list meetings in
-#      the lookback window. Krisp's search supports a free-text ``query``
-#      so the simplest entry is to ask for meetings that contain action
-#      items; the agent can also pass ``query=""`` for the full window.
-#   2. For each meeting, read the transcript / Note. The action-items
-#      section is rendered as a checklist in Krisp's Note body, or as a
-#      structured array in the API response (field name varies — the
-#      agent extracts whichever is present).
-#   3. Pipe the extracted action-items markdown into ``brain ingest-stdin
-#      --content-type krisp_action_items`` once per meeting, using the
-#      meeting id as the ``parent_meeting_external_id`` metadata key.
-#
-# Format choices:
-# - Concrete ISO date strings, not placeholders like ``<since>``, so the
-#   agent can use them verbatim instead of re-computing.
-# - Tool call rendered as a Python kwarg-style signature so an agent
-#   reading the output emits an exact MCP call.
-# - The ``brain ingest-stdin`` recipe shows the exact flags Claude needs;
-#   the action-items body itself is rendered by the agent from the Krisp
-#   response (transcript-derived OR structured field, both work).
+# 1. Name the tools by exact ``mcp__claude_ai_Krisp__*`` identifier so the
+#    agent knows which surface to call.
+# 2. Describe the lookback window in PLAIN ENGLISH (concrete ISO date
+#    string from ``--since N``) so the agent can pass it to whichever
+#    parameter the real tool exposes. No invented kwarg names.
+# 3. Show the LITERAL ``brain ingest-stdin`` invocation, which IS owned
+#    by this CLI and whose flag shape we control.
+# 4. Let the agent extract the action items from whichever field the
+#    transcript payload exposes (Krisp renders them as a Markdown
+#    checklist in Notes, or as a structured field — the agent decides).
 _KRISP_ACTION_ITEMS_OUTPUT = """\
 Krisp action-items pipeline — Claude orchestrates the MCP call.
+The brain CLI cannot reach MCP tools and does not know their parameter
+schemas; only the agent does. Follow these steps:
 
-Krisp's MCP does not expose a standalone action-items tool; action items
-are part of each meeting's Note/transcript payload returned by
-``search_meetings``. Run this two-step:
+  1. Enumerate Krisp meetings{window} using either
+       mcp__claude_ai_Krisp__search_meetings
+     or
+       mcp__claude_ai_Krisp__list_activities
+     (whichever your Krisp MCP surface exposes — call with the standard
+     date/scope params for that tool).{meeting_filter}
 
-  Step 1 — list meetings in the window:
+  2. For each meeting, fetch its transcript / Note via
+       mcp__claude_ai_Krisp__get_multiple_documents
+     (passing the meeting id from step 1's response).
 
-    mcp__claude_ai_Krisp__search_meetings(
-        query="action items",
-{kwargs}
-    )
+  3. Extract the action-items section from each transcript. Krisp renders
+     it as a Markdown checklist (``- [ ] item``) in the Note body, or as
+     a structured field in the API response. Either source works.
 
-  Step 2 — for each meeting in the response, extract the action-items
-  section from the Note/transcript body (Krisp renders it as a Markdown
-  checklist), then pipe each meeting's items into the brain:
+  4. For each meeting's extracted action items, run:
 
-    echo '<action-items markdown body>' | brain ingest-stdin \\
-        --source krisp \\
-        --external-id "<meeting_id>--action-items" \\
-        --content-type krisp_action_items \\
-        --title "Action items: <meeting title>" \\
-        --metadata '{{"parent_meeting_external_id": "<meeting_id>"}}'
+       echo '<action-items markdown body>' | brain ingest-stdin \\
+           --source krisp \\
+           --external-id "<meeting_id>--action-items" \\
+           --content-type krisp_action_items \\
+           --title "Action items: <meeting title>" \\
+           --metadata '{{"parent_meeting_external_id": "<meeting_id>"}}'
 
 The ``parent_meeting_external_id`` key is required at the ingest-stdin
 CLI boundary (BadParameter otherwise) so ``brain todo`` can trace each
-item back to the originating Krisp meeting.
+item back to the originating Krisp meeting. The ``--external-id`` suffix
+``--action-items`` keeps the action-items child row from colliding with
+its parent transcript on the ``sources(kind, external_id)`` UNIQUE
+constraint.
 """
 
 
-def _krisp_action_items_kwargs_block(
-    since_days: int | None, source_id: str | None
-) -> str:
-    """Render the kwarg lines for the ``search_meetings`` MCP invocation.
+def _krisp_action_items_window(since_days: int | None) -> str:
+    """Render the plain-English lookback window for the printed handoff.
 
-    Computes concrete ISO 8601 ``start_date`` / ``end_date`` strings from
-    ``--since N`` (now → now - N days). When ``--source-id`` is supplied,
-    adds a ``meeting_id`` kwarg pinning the call to one transcript.
-    Returns an empty string when no kwargs apply so the caller's printed
-    signature collapses cleanly.
+    Computes a concrete ISO 8601 ``since`` date from ``--since N``
+    (now - N days) and embeds it in the output so the agent can pass it
+    to whichever date parameter the real MCP tool uses. No invented kwarg
+    name — just the date string the agent needs.
     """
-    lines: list[str] = []
-    now = datetime.now(tz=UTC).replace(microsecond=0)
-    if since_days is not None:
-        from datetime import timedelta
+    if since_days is None:
+        return ""
+    from datetime import timedelta
 
-        start = (now - timedelta(days=since_days)).isoformat()
-        end = now.isoformat()
-        lines.append(f'        start_date="{start}",')
-        lines.append(f'        end_date="{end}",')
-    if source_id is not None:
-        lines.append(f'        meeting_id="{source_id}",')
-    if not lines:
-        # No filters supplied — still render a comment placeholder so the
-        # signature has at least one body line and the output is
-        # recognizably the same shape.
-        lines.append(
-            "        # no scope filters supplied — defaults to recent meetings"
-        )
-    return "\n".join(lines)
+    now = datetime.now(tz=UTC).replace(microsecond=0)
+    since = (now - timedelta(days=since_days)).isoformat()
+    return f" since {since}"
+
+
+def _krisp_action_items_meeting_filter(source_id: str | None) -> str:
+    """Render the optional meeting-id scope hint.
+
+    When ``--source-id`` is set, the agent should restrict the pipeline to
+    a single meeting. The hint is plain English (no fake kwarg) so the
+    agent passes the id to whichever parameter the real tool accepts.
+    """
+    if source_id is None:
+        return ""
+    return (
+        f"\n     Scope to one meeting: meeting_id == {source_id!r} "
+        f"(filter the response or pass to whichever parameter your "
+        f"Krisp MCP exposes)."
+    )
 
 
 def _enrich_backfill(
@@ -1263,7 +1264,8 @@ def enrich(
     if krisp_action_items:
         typer.echo(
             _KRISP_ACTION_ITEMS_OUTPUT.format(
-                kwargs=_krisp_action_items_kwargs_block(since, source_id)
+                window=_krisp_action_items_window(since),
+                meeting_filter=_krisp_action_items_meeting_filter(source_id),
             )
         )
         return
