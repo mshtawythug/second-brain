@@ -194,3 +194,44 @@ def test_main_status_alias_returns_zero(
     monkeypatch.setattr("brain.bin.monitor.BUILD_LOG", tmp_path / "build.log")
     rc = main(["status"])
     assert rc == 0
+
+
+# ---------------------------------------------------------------------------
+# Bash-compat CLI aliases — regression tests for the positional aliases that
+# the bash case statement handled but the initial argparse port missed.
+# ---------------------------------------------------------------------------
+
+
+def test_main_help_positional_alias(capsys: pytest.CaptureFixture[str]) -> None:
+    """'brain-monitor help' (positional) must print usage and exit 0."""
+    rc = main(["help"])
+    assert rc == 0
+    captured = capsys.readouterr().out
+    assert "brain-monitor" in captured
+
+
+def test_main_tail_positional_alias_errors_without_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'brain-monitor tail' (positional) must be accepted and route to tail mode.
+
+    When no logs exist, _tail() returns 1 — that's the correct fast-exit path.
+    """
+    monkeypatch.setattr("brain.bin.monitor.BUILD_LOG", tmp_path / "build.log")
+    monkeypatch.setattr("brain.bin.monitor.WATCH_LOG", tmp_path / "watch.log")
+    rc = main(["tail"])
+    assert rc == 1  # both logs absent → "no logs to tail"
+
+
+def test_main_probe_positional_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """'brain-monitor probe 5' (positional timeout, bash compat) must be accepted.
+
+    Probe exits 1 immediately because the build watcher is not running.
+    """
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
+    rc = main(["probe", "5"])
+    # No watcher running → _probe returns 1 without touching the vault.
+    assert rc == 1

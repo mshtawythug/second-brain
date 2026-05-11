@@ -301,6 +301,7 @@ def _tail(vault: Path) -> int:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
+                bufsize=1,  # line-buffered: each line flushed immediately (matches sed -u)
             )
             procs.append(proc)
             if proc.stdout is None:
@@ -436,7 +437,7 @@ def _make_parser() -> argparse.ArgumentParser:
             "Modes:\n"
             "  (default)   Snapshot of both watchers and recent activity.\n"
             "  -f/--tail   Live stream of relevant events from both logs.\n"
-            "  probe       Touch a vault file and time the rebuild.\n"
+            "  probe [N]   Touch a vault file and time the rebuild (timeout N sec).\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -445,13 +446,15 @@ def _make_parser() -> argparse.ArgumentParser:
             "  BRAIN_WIKI_PORT    default 8080"
         ),
     )
+    # Accept all bash-compatible positional aliases.  "tail" and "help" are
+    # kept as aliases so existing scripts using the bash form still work.
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["probe", "snapshot", "status"],
+        choices=["probe", "snapshot", "status", "tail", "help"],
         default=None,
         metavar="COMMAND",
-        help="probe | snapshot | status (default: snapshot)",
+        help="probe | snapshot | status | tail | help (default: snapshot)",
     )
     parser.add_argument(
         "-f",
@@ -477,8 +480,10 @@ def _make_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     """Parse args and dispatch to the appropriate mode. Returns exit code."""
     parser = _make_parser()
+    # parse_known_args lets `brain-monitor probe 60` work: "60" ends up in
+    # `extra` and we pick it up as the positional timeout (bash compat).
     try:
-        args = parser.parse_args(argv)
+        args, extra = parser.parse_known_args(argv)
     except SystemExit as exc:
         code = exc.code
         if isinstance(code, int):
@@ -488,16 +493,32 @@ def main(argv: list[str] | None = None) -> int:
     vault = _vault()
     port = _port()
 
+    # -f / --tail flag takes precedence over any positional.
     if args.tail:
         return _tail(vault)
 
     cmd: str = str(args.command) if args.command else "snapshot"
+
     if cmd in ("snapshot", "status"):
         return _snapshot(vault, port)
-    if cmd == "probe":
-        return _probe(vault, int(args.timeout))
 
-    # Defensive: argparse choices= already rejects unknown values above.
+    # "tail" as a bare positional: bash-compat alias for -f/--tail.
+    if cmd == "tail":
+        return _tail(vault)
+
+    # "help" as a bare positional: bash-compat alias for -h/--help.
+    if cmd == "help":
+        parser.print_help()
+        return 0
+
+    if cmd == "probe":
+        # Accept positional timeout for bash compat: `brain-monitor probe 60`
+        timeout = args.timeout
+        if extra and extra[0].isdigit():
+            timeout = int(extra[0])
+        return _probe(vault, timeout)
+
+    # Defensive: argparse choices= already rejects truly unknown values.
     print(f"unknown command: {cmd}", file=sys.stderr)
     parser.print_help(sys.stderr)
     return 2
