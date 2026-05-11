@@ -54,11 +54,25 @@ where = ["src"]
     "**/*.png",
     "**/*.ico",
 ]
+# Templates shipped with the brain package for use by the installer.
+# Explicit extension patterns (not "**/*") to avoid shipping bytecode.
+# brain.templates root: docker-compose.yml.j2, Caddyfile.j2, env.example
+# brain.templates.bin: shell launcher/helper scripts
+# brain.templates.launchd: launchd plist Jinja2 templates
+# brain.templates.skill: SKILL.md prose for Claude Code skill setup
+"brain.templates" = ["*.j2", "env.example"]
+"brain.templates.bin" = ["*.sh"]
+"brain.templates.launchd" = ["*.j2"]
+"brain.templates.skill" = ["*.md"]
 
 [tool.setuptools.exclude-package-data]
 # Strip bytecode caches that Python creates on-disk when the package is imported
 # during a dev install — they are local artefacts and must not appear in wheels.
 "brain.quartz_overrides" = ["__pycache__/*", "*.pyc"]
+"brain.templates" = ["__pycache__/*", "*.pyc"]
+"brain.templates.bin" = ["__pycache__/*", "*.pyc"]
+"brain.templates.launchd" = ["__pycache__/*", "*.pyc"]
+"brain.templates.skill" = ["__pycache__/*", "*.pyc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
