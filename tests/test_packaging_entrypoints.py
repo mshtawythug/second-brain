@@ -1,4 +1,4 @@
-"""Regression: pyproject.toml [project.scripts] declares all 8 brain console scripts."""
+"""Regression: pyproject.toml [project.scripts] declares all 9 brain console scripts."""
 import importlib
 import os
 import tomllib
@@ -15,6 +15,7 @@ EXPECTED_ENTRY_POINTS = {
     "brain-rebuild": "brain.bin.rebuild:main",
     "brain-install-launchd": "brain.bin.launchd:install_main",
     "brain-uninstall-launchd": "brain.bin.launchd:uninstall_main",
+    "brain-monitor": "brain.bin.monitor:cli_main",
 }
 
 
