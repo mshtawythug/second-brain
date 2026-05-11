@@ -21,20 +21,20 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def _layout_text() -> str:
     return (
-        REPO_ROOT / "quartz_overrides" / "quartz.layout.ts"
+        REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz.layout.ts"
     ).read_text(encoding="utf-8")
 
 
 def _custom_scss_text() -> str:
     return (
-        REPO_ROOT / "quartz_overrides" / "quartz" / "styles" / "custom.scss"
+        REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz" / "styles" / "custom.scss"
     ).read_text(encoding="utf-8")
 
 
 def _people_hub_scss_text() -> str:
     return (
         REPO_ROOT
-        / "quartz_overrides"
+        / "src" / "brain" / "quartz_overrides"
         / "quartz"
         / "styles"
         / "brain"

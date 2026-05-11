@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OVERRIDES_UTIL = REPO_ROOT / "quartz_overrides" / "quartz" / "util"
+OVERRIDES_UTIL = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz" / "util"
 MANIFEST_TS = OVERRIDES_UTIL / "fastpath_manifest.ts"
 
 

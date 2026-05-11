@@ -35,7 +35,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OVERRIDES_ROOT = REPO_ROOT / "quartz_overrides"
+OVERRIDES_ROOT = REPO_ROOT / "src" / "brain" / "quartz_overrides"
 TAG_CONTENT_TSX = (
     OVERRIDES_ROOT / "quartz" / "components" / "pages" / "TagContent.tsx"
 )

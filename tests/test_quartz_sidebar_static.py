@@ -4,9 +4,8 @@ import re
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SIDEBAR_SCSS = (
-    REPO_ROOT / "quartz_overrides" / "quartz" / "styles" / "brain" / "_sidebar.scss"
-)
+BRAIN_OVERRIDES = REPO_ROOT / "src" / "brain" / "quartz_overrides"
+SIDEBAR_SCSS = BRAIN_OVERRIDES / "quartz" / "styles" / "brain" / "_sidebar.scss"
 
 
 def _strip_line_comments(scss_text: str) -> str:

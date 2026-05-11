@@ -40,7 +40,7 @@ from brain import config as config_module
 from brain.config import Config
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OVERRIDES_DIR = REPO_ROOT / "quartz_overrides"
+OVERRIDES_DIR = REPO_ROOT / "src" / "brain" / "quartz_overrides"
 TRANSFORMERS_DIR = OVERRIDES_DIR / "quartz" / "plugins" / "transformers"
 EMAIL_TRANSFORMER = TRANSFORMERS_DIR / "emailThread.ts"
 TRANSFORMERS_INDEX = TRANSFORMERS_DIR / "index.ts"

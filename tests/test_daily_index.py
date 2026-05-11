@@ -40,13 +40,13 @@ from brain.vault.frontmatter import dump_frontmatter, parse_frontmatter
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _TRANSFORMER_PATH = (
     _REPO_ROOT
-    / "quartz_overrides"
+    / "src" / "brain" / "quartz_overrides"
     / "quartz"
     / "plugins"
     / "transformers"
     / "emptyDoorFilter.ts"
 )
-_QUARTZ_CONFIG_PATH = _REPO_ROOT / "quartz_overrides" / "quartz.config.ts"
+_QUARTZ_CONFIG_PATH = _REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz.config.ts"
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +310,7 @@ def test_emptyDoorFilter_exported_from_transformer_barrel() -> None:
     under ``Plugin.*`` so ``quartz.config.ts`` can register it."""
     barrel = (
         _REPO_ROOT
-        / "quartz_overrides"
+        / "src" / "brain" / "quartz_overrides"
         / "quartz"
         / "plugins"
         / "transformers"

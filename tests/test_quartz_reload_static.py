@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RELOAD_JS = REPO_ROOT / "quartz_overrides" / "quartz" / "static" / "reload.js"
+RELOAD_JS = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz" / "static" / "reload.js"
 
 
 # ---------------------------------------------------------------------------

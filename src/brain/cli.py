@@ -125,7 +125,6 @@ from .vault.graph import (
 from .vault.graph import orphans as _orphans_query
 from .vault.graph_format import to_dot, to_json, to_mermaid
 from .vault.quartz_overlay import OverlayError, apply_overlay, plan_overlay
-from .vault.quartz_overlay import repo_root as _brain_repo_root
 from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
@@ -3076,8 +3075,8 @@ def vault_render(
         True,
         "--overlay/--no-overlay",
         help=(
-            "Copy `quartz_overrides/` over the Quartz workspace before "
-            "building. Use `--no-overlay` to skip and use whatever is "
+            "Copy the brain package's quartz_overrides/ tree over the Quartz workspace "
+            "before building. Use `--no-overlay` to skip and use whatever is "
             "already in the workspace."
         ),
     ),
@@ -3099,10 +3098,10 @@ def vault_render(
     `<vault>/.quartz/` with `npx quartz create`, then copy the sample
     `quartz.config.ts` from the brain repo root.
 
-    Before the build, the overlay step copies `quartz_overrides/` over
-    the Quartz workspace (custom Graph component, contentIndex emitter,
-    etc.). Use `--no-overlay` to skip, or `--print-overlay` to see what
-    would be copied without applying.
+    Before the build, the overlay step copies the brain package's
+    ``quartz_overrides/`` tree over the Quartz workspace (custom Graph
+    component, contentIndex emitter, etc.). Use `--no-overlay` to skip,
+    or `--print-overlay` to see what would be copied without applying.
 
     Honours stdout/stderr passthrough so the user sees Quartz's
     progress live. Propagates a non-zero exit code from npx as exit 1.
@@ -3136,7 +3135,7 @@ def vault_render(
     _check_quartz_workspace(workspace)
 
     try:
-        plan = plan_overlay(_brain_repo_root(), workspace)
+        plan = plan_overlay(workspace)
     except OverlayError as e:
         typer.secho(str(e), fg="red", err=True)
         raise typer.Exit(code=2) from e

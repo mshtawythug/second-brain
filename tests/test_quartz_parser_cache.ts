@@ -1,4 +1,4 @@
-// Unit tests for quartz_overrides/quartz/processors/parser_cache.ts
+// Unit tests for src/brain/quartz_overrides/quartz/processors/parser_cache.ts
 //
 // Run with:
 //   /Users/mshtawythug/brain-vault/.quartz/node_modules/.bin/tsx --test \
@@ -19,7 +19,7 @@ import {
   cachePath,
   getCached,
   putCached,
-} from "../quartz_overrides/quartz/processors/parser_cache"
+} from "../src/brain/quartz_overrides/quartz/processors/parser_cache"
 
 // ---------------------------------------------------------------------------
 // Helpers

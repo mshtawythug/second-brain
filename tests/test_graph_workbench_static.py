@@ -1,10 +1,11 @@
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-GRAPH_TSX = REPO_ROOT / "quartz_overrides/quartz/components/Graph.tsx"
-GRAPH_INLINE = REPO_ROOT / "quartz_overrides/quartz/components/scripts/graph.inline.ts"
-GRAPH_SCSS = REPO_ROOT / "quartz_overrides/quartz/styles/graph.scss"
-LAYOUT = REPO_ROOT / "quartz_overrides/quartz.layout.ts"
+BRAIN_OVERRIDES = REPO_ROOT / "src" / "brain" / "quartz_overrides"
+GRAPH_TSX = BRAIN_OVERRIDES / "quartz" / "components" / "Graph.tsx"
+GRAPH_INLINE = BRAIN_OVERRIDES / "quartz" / "components" / "scripts" / "graph.inline.ts"
+GRAPH_SCSS = BRAIN_OVERRIDES / "quartz" / "styles" / "graph.scss"
+LAYOUT = BRAIN_OVERRIDES / "quartz.layout.ts"
 
 
 def _selector_block(text: str, selector: str) -> str:

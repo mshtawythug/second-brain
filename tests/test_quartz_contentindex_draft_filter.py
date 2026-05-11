@@ -30,7 +30,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EMITTER_PATH = (
     REPO_ROOT
-    / "quartz_overrides"
+    / "src" / "brain" / "quartz_overrides"
     / "quartz"
     / "plugins"
     / "emitters"

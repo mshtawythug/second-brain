@@ -22,7 +22,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BUILD_TS = REPO_ROOT / "quartz_overrides" / "quartz" / "build.ts"
+BUILD_TS = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz" / "build.ts"
 
 
 # ---------------------------------------------------------------------------

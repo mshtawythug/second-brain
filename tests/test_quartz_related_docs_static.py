@@ -4,12 +4,12 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OVERRIDES_ROOT = REPO_ROOT / "quartz_overrides" / "quartz"
+OVERRIDES_ROOT = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz"
 COMPONENTS_DIR = OVERRIDES_ROOT / "components"
 RELATED_TSX = COMPONENTS_DIR / "RelatedDocs.tsx"
 RELATED_INLINE = COMPONENTS_DIR / "scripts" / "relatedDocs.inline.ts"
 COMPONENTS_INDEX = COMPONENTS_DIR / "index.ts"
-LAYOUT_TS = REPO_ROOT / "quartz_overrides" / "quartz.layout.ts"
+LAYOUT_TS = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz.layout.ts"
 RELATED_SCSS = OVERRIDES_ROOT / "styles" / "brain" / "_related_docs.scss"
 CUSTOM_SCSS = OVERRIDES_ROOT / "styles" / "custom.scss"
 

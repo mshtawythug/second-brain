@@ -33,7 +33,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LINKS_SCSS = (
     REPO_ROOT
-    / "quartz_overrides"
+    / "src" / "brain" / "quartz_overrides"
     / "quartz"
     / "styles"
     / "brain"

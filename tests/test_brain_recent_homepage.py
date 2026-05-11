@@ -472,7 +472,7 @@ def test_quartz_config_ignores_partials_dir() -> None:
     becomes its own Quartz page (the home rail would render twice)."""
     cfg_path = (
         Path(__file__).resolve().parent.parent
-        / "quartz_overrides"
+        / "src" / "brain" / "quartz_overrides"
         / "quartz.config.ts"
     )
     src = cfg_path.read_text(encoding="utf-8")

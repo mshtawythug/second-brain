@@ -3,10 +3,10 @@
 Two layers covered here:
 
 1. ``brain.vault.quartz_overlay`` — pure planning + apply functions.
-   Tests use ``tmp_path`` to stand up a fake brain repo (with a tiny
-   ``quartz_overrides/`` tree) and a fake Quartz workspace, then
-   exercise ``plan_overlay`` / ``apply_overlay`` directly. No CLI
-   involvement at this layer.
+   Tests use ``tmp_path`` to stand up a fake overlay tree and a fake
+   Quartz workspace, then exercise ``plan_overlay`` / ``apply_overlay``
+   directly. ``_overlay_source_root`` is monkeypatched so the tests
+   don't depend on the real ``brain/quartz_overrides/`` package contents.
 2. ``brain vault render`` CLI — the overlay/no-overlay/print-overlay
    flag wiring + the order-of-operations contract that the overlay
    apply step runs strictly before ``subprocess.run``.
@@ -38,17 +38,15 @@ from brain.vault.quartz_overlay import (
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_repo(
+def _make_fake_overlay_root(
     tmp_path: Path, files: dict[str, str] | None = None
 ) -> Path:
-    """Build a fake brain repo with a tiny ``quartz_overrides/`` tree.
+    """Build a fake overlay tree rooted at ``tmp_path`` and return the root.
 
-    ``files`` maps relative paths under ``quartz_overrides/`` to content.
-    The overlay's source tree mirrors ``<quartz_dir>/`` 1:1 — top-level
-    workspace configs (``quartz.layout.ts``) live at the root, and
-    Quartz source files live under ``quartz/``. Defaults cover both
-    placement classes plus the four shapes seen in the real repo
-    (components/, plugins/, styles/, util/, scripts/).
+    ``files`` maps relative paths (mirroring the ``<quartz_dir>/`` layout) to
+    content strings.  Defaults cover both placement classes plus the four
+    shapes seen in the real repo (components/, plugins/, styles/, util/,
+    scripts/).
     """
     if files is None:
         files = {
@@ -62,12 +60,12 @@ def _make_fake_repo(
             "quartz/styles/graph.scss": "// stub scss\n",
             "quartz/util/path.ts": "// stub util\n",
         }
-    overrides = tmp_path / "quartz_overrides"
+    overlay_root = tmp_path
     for rel, content in files.items():
-        dest = overrides / rel
+        dest = overlay_root / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(content, encoding="utf-8")
-    return tmp_path
+    return overlay_root
 
 
 def _make_quartz_workspace(
@@ -99,14 +97,19 @@ def _make_quartz_workspace(
 # ---------------------------------------------------------------------------
 
 
-def test_overlay_copies_all_files(tmp_path: Path) -> None:
-    """Every file under ``quartz_overrides/`` lands at the right place."""
+def test_overlay_copies_all_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every file under the overlay root lands at the right place."""
     # Setup
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     workspace = _make_quartz_workspace(tmp_path)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise
-    plan = plan_overlay(repo, workspace)
+    plan = plan_overlay(workspace)
     copied = apply_overlay(plan)
 
     # Verify — every source maps to its 1:1 mirror under <workspace>/.
@@ -135,7 +138,7 @@ def test_overlay_copies_all_files(tmp_path: Path) -> None:
     }
     actual_pairs = {
         (
-            str(src.relative_to(repo / "quartz_overrides")),
+            str(src.relative_to(overlay_root)),
             str(dest.relative_to(workspace.resolve())),
         )
         for src, dest in copied
@@ -148,37 +151,47 @@ def test_overlay_copies_all_files(tmp_path: Path) -> None:
         assert dest.read_text(encoding="utf-8") == src.read_text(encoding="utf-8")
 
 
-def test_overlay_overwrites_existing(tmp_path: Path) -> None:
+def test_overlay_overwrites_existing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Pre-populated destinations are overwritten by the overlay copy."""
     # Setup
-    repo = _make_fake_repo(
-        tmp_path / "repo",
+    overlay_root = _make_fake_overlay_root(
+        tmp_path / "overlay",
         files={"quartz/components/Graph.tsx": "// brain Graph (new)\n"},
     )
     workspace = _make_quartz_workspace(tmp_path)
     stub_dest = workspace / "quartz" / "components" / "Graph.tsx"
     stub_dest.parent.mkdir(parents=True, exist_ok=True)
     stub_dest.write_text("// stale stub Graph (old)\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise
-    plan = plan_overlay(repo, workspace)
+    plan = plan_overlay(workspace)
     apply_overlay(plan)
 
     # Verify
     assert stub_dest.read_text(encoding="utf-8") == "// brain Graph (new)\n"
 
 
-def test_overlay_renames_upstream_contentindex(tmp_path: Path) -> None:
+def test_overlay_renames_upstream_contentindex(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """When stock ``contentIndex.tsx`` is present, it gets renamed first."""
     # Setup
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     workspace = _make_quartz_workspace(tmp_path, with_upstream_contentindex=True)
     upstream = workspace / "quartz" / "plugins" / "emitters" / "contentIndex.tsx"
     renamed = workspace / "quartz" / "plugins" / "emitters" / "_upstreamContentIndex.tsx"
     assert upstream.is_file() and not renamed.is_file()
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise
-    plan = plan_overlay(repo, workspace)
+    plan = plan_overlay(workspace)
     assert plan.rename is not None
     assert plan.rename_state == "needed"
     apply_overlay(plan)
@@ -189,68 +202,89 @@ def test_overlay_renames_upstream_contentindex(tmp_path: Path) -> None:
     assert renamed.read_text(encoding="utf-8") == "// upstream stock emitter\n"
 
 
-def test_overlay_skips_rename_when_already_applied(tmp_path: Path) -> None:
+def test_overlay_skips_rename_when_already_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """If only ``_upstreamContentIndex.tsx`` exists, no rename is needed."""
     # Setup
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     workspace = _make_quartz_workspace(tmp_path, with_upstream_contentindex=False)
     renamed = workspace / "quartz" / "plugins" / "emitters" / "_upstreamContentIndex.tsx"
     renamed.write_text("// already renamed\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise
-    plan = plan_overlay(repo, workspace)
+    plan = plan_overlay(workspace)
 
     # Verify
     assert plan.rename is None
     assert plan.rename_state == "already_applied"
 
 
-def test_overlay_rename_missing_both(tmp_path: Path) -> None:
+def test_overlay_rename_missing_both(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Neither contentIndex variant present → ``missing_both`` state."""
     # Setup
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     workspace = _make_quartz_workspace(tmp_path, with_upstream_contentindex=False)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise
-    plan = plan_overlay(repo, workspace)
+    plan = plan_overlay(workspace)
 
     # Verify
     assert plan.rename is None
     assert plan.rename_state == "missing_both"
 
 
-def test_overlay_raises_when_both_contentindex_files_present(tmp_path: Path) -> None:
+def test_overlay_raises_when_both_contentindex_files_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Both upstream and renamed files at once → refuse to auto-resolve."""
     # Setup
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     workspace = _make_quartz_workspace(tmp_path, with_upstream_contentindex=True)
     renamed = workspace / "quartz" / "plugins" / "emitters" / "_upstreamContentIndex.tsx"
     renamed.write_text("// also already renamed\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise + Verify
     with pytest.raises(OverlayError) as excinfo:
-        plan_overlay(repo, workspace)
+        plan_overlay(workspace)
     assert "both upstream and renamed contentIndex files exist" in str(excinfo.value)
 
 
-def test_overlay_raises_when_overrides_dir_missing(tmp_path: Path) -> None:
-    """Missing ``quartz_overrides/`` is a hard failure (broken brain repo)."""
-    # Setup — repo dir exists but has no quartz_overrides subdir.
-    repo = tmp_path / "repo"
-    repo.mkdir()
+def test_overlay_raises_when_overrides_dir_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing overlay source dir is a hard failure (broken brain package)."""
+    # Setup — point _overlay_source_root at a path that doesn't exist.
+    nonexistent = tmp_path / "does_not_exist"
     workspace = _make_quartz_workspace(tmp_path)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: nonexistent
+    )
 
     # Exercise + Verify
     with pytest.raises(OverlayError) as excinfo:
-        plan_overlay(repo, workspace)
+        plan_overlay(workspace)
     assert "overlay source directory not found" in str(excinfo.value)
 
 
-def test_overlay_skips_dotfiles(tmp_path: Path) -> None:
+def test_overlay_skips_dotfiles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Macos metadata + dotfiles are skipped defensively."""
     # Setup
-    repo = _make_fake_repo(
-        tmp_path / "repo",
+    overlay_root = _make_fake_overlay_root(
+        tmp_path / "overlay",
         files={
             "quartz/components/Graph.tsx": "// keep\n",
             ".DS_Store": "macOS metadata\n",
@@ -258,9 +292,12 @@ def test_overlay_skips_dotfiles(tmp_path: Path) -> None:
         },
     )
     workspace = _make_quartz_workspace(tmp_path)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise
-    plan = plan_overlay(repo, workspace)
+    plan = plan_overlay(workspace)
 
     # Verify — only the non-dotfile is in the plan.
     src_names = {src.name for src, _ in plan.pairs}
@@ -269,35 +306,76 @@ def test_overlay_skips_dotfiles(tmp_path: Path) -> None:
     assert ".hidden" not in src_names
 
 
-def test_overlay_rejects_symlink_escape(tmp_path: Path) -> None:
-    """A symlink under quartz_overrides pointing outside is rejected."""
+def test_overlay_skips_python_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Python package files and bytecode caches are excluded from the overlay."""
+    # Setup — put Python packaging artefacts alongside a real overlay file.
+    overlay_root = _make_fake_overlay_root(
+        tmp_path / "overlay",
+        files={
+            "quartz/components/Graph.tsx": "// keep\n",
+            "__init__.py": "# package marker\n",
+        },
+    )
+    # Also create a simulated __pycache__ entry.
+    pycache = overlay_root / "__pycache__"
+    pycache.mkdir()
+    (pycache / "__init__.cpython-313.pyc").write_bytes(b"fake pyc")
+    workspace = _make_quartz_workspace(tmp_path)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
+
+    # Exercise
+    plan = plan_overlay(workspace)
+
+    # Verify — only the .tsx file makes it through.
+    src_names = {src.name for src, _ in plan.pairs}
+    assert "Graph.tsx" in src_names
+    assert "__init__.py" not in src_names
+    assert "__init__.cpython-313.pyc" not in src_names
+
+
+def test_overlay_rejects_symlink_escape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlink under the overlay root pointing outside is rejected."""
     # Setup
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "evil.tsx").write_text("// evil\n", encoding="utf-8")
-    link = repo / "quartz_overrides" / "quartz" / "components" / "linked.tsx"
+    link = overlay_root / "quartz" / "components" / "linked.tsx"
     link.parent.mkdir(parents=True, exist_ok=True)
     try:
         link.symlink_to(outside / "evil.tsx")
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
     workspace = _make_quartz_workspace(tmp_path)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise + Verify
     with pytest.raises(OverlayError) as excinfo:
-        plan_overlay(repo, workspace)
+        plan_overlay(workspace)
     assert "escaped" in str(excinfo.value)
 
 
-def test_overlay_pairs_are_sorted(tmp_path: Path) -> None:
+def test_overlay_pairs_are_sorted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Plan pairs come back in deterministic Path-sorted-by-src order."""
     # Setup
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     workspace = _make_quartz_workspace(tmp_path)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise
-    plan = plan_overlay(repo, workspace)
+    plan = plan_overlay(workspace)
 
     # Verify — sorted by source ``Path`` (the same order ``rglob`` is
     # piped through inside ``plan_overlay``). Path-sort ≠ str-sort
@@ -307,15 +385,20 @@ def test_overlay_pairs_are_sorted(tmp_path: Path) -> None:
     assert srcs == sorted(srcs)
 
 
-def test_overlay_pairs_idempotent(tmp_path: Path) -> None:
+def test_overlay_pairs_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Repeated planning produces an identical plan (deterministic)."""
     # Setup
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     workspace = _make_quartz_workspace(tmp_path)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
 
     # Exercise
-    plan_a = plan_overlay(repo, workspace)
-    plan_b = plan_overlay(repo, workspace)
+    plan_a = plan_overlay(workspace)
+    plan_b = plan_overlay(workspace)
 
     # Verify
     assert plan_a.pairs == plan_b.pairs
@@ -324,7 +407,7 @@ def test_overlay_pairs_idempotent(tmp_path: Path) -> None:
 
 
 def test_overlay_apply_wraps_oserror_as_overlay_error(
-    tmp_path: Path, mocker: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
 ) -> None:
     """A ``shutil.copy2`` failure surfaces as ``OverlayError`` with context.
 
@@ -335,9 +418,12 @@ def test_overlay_apply_wraps_oserror_as_overlay_error(
     friendly ``typer.secho(..., fg="red") + Exit(2)`` path.
     """
     # Setup
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     workspace = _make_quartz_workspace(tmp_path)
-    plan = plan_overlay(repo, workspace)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
+    plan = plan_overlay(workspace)
     mocker.patch(
         "brain.vault.quartz_overlay.shutil.copy2",
         side_effect=PermissionError("perm denied"),
@@ -356,7 +442,7 @@ def test_overlay_apply_wraps_oserror_as_overlay_error(
 
 
 def test_overlay_apply_wraps_rename_oserror(
-    tmp_path: Path, mocker: Any
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
 ) -> None:
     """A ``Path.rename`` failure surfaces as ``OverlayError`` with context.
 
@@ -367,9 +453,12 @@ def test_overlay_apply_wraps_rename_oserror(
     """
     # Setup — use a workspace with the upstream contentIndex.tsx in
     # place so the rename branch fires.
-    repo = _make_fake_repo(tmp_path / "repo")
+    overlay_root = _make_fake_overlay_root(tmp_path / "overlay")
     workspace = _make_quartz_workspace(tmp_path, with_upstream_contentindex=True)
-    plan = plan_overlay(repo, workspace)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
+    plan = plan_overlay(workspace)
     assert plan.rename is not None  # precondition: rename branch will run
     mocker.patch.object(
         Path, "rename", side_effect=PermissionError("read-only fs")
@@ -777,7 +866,7 @@ def test_overlay_plan_error_aborts_before_apply(
     vault, _workspace = _make_vault_with_quartz_workspace(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    def fake_plan(repo: Path, qd: Path) -> Any:
+    def fake_plan(qd: Path) -> Any:
         raise OverlayError("simulated plan failure")
 
     apply_mock = mock.Mock()

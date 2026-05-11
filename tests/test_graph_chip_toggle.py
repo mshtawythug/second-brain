@@ -65,7 +65,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 GRAPH_INLINE = (
     REPO_ROOT
-    / "quartz_overrides"
+    / "src" / "brain" / "quartz_overrides"
     / "quartz"
     / "components"
     / "scripts"

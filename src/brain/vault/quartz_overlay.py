@@ -1,6 +1,6 @@
-"""Quartz overlay step — copies `quartz_overrides/` into a Quartz workspace.
+"""Quartz overlay step — copies ``brain/quartz_overrides/`` into a Quartz workspace.
 
-The brain repo ships a small set of overrides under ``quartz_overrides/``
+The brain package ships a small set of overrides under ``brain/quartz_overrides/``
 that customize how Quartz renders the vault (custom Graph component,
 extended contentIndex emitter, derived-fence transformer, layout, scss).
 ``brain vault render --overlay`` copies these files over the user's
@@ -23,28 +23,17 @@ separately.
 """
 import shutil
 from dataclasses import dataclass
+from importlib.resources import files as _importlib_files
 from pathlib import Path
 from typing import Literal
 
 from ..errors import BrainError
 
-# brain: special case — see quartz_overrides/quartz/plugins/emitters/contentIndex.ts
+# brain: special case — see brain/quartz_overrides/quartz/plugins/emitters/contentIndex.ts
 # header for the why. The wrapper imports from `./_upstreamContentIndex`,
 # so we rename Quartz's stock emitter out of the way before the copy.
 _UPSTREAM_RENAME_FROM = Path("quartz/plugins/emitters/contentIndex.tsx")
 _UPSTREAM_RENAME_TO = Path("quartz/plugins/emitters/_upstreamContentIndex.tsx")
-
-# Where overlay sources live inside the brain repo. The directory tree
-# under ``quartz_overrides/`` mirrors ``<quartz_dir>/`` 1:1 — e.g.
-# ``quartz_overrides/quartz.layout.ts`` → ``<quartz_dir>/quartz.layout.ts``
-# (workspace root) and ``quartz_overrides/quartz/components/Graph.tsx``
-# → ``<quartz_dir>/quartz/components/Graph.tsx`` (Quartz source tree).
-# Quartz's workspace splits into two worlds — workspace-root configs
-# like ``quartz.layout.ts`` whose own imports resolve via
-# ``./quartz/cfg``, and Quartz source under ``quartz/``. Encoding the
-# destination layout directly in the source tree keeps the helper a
-# pure 1:1 copy with no per-file routing logic.
-_OVERLAY_SUBDIR = "quartz_overrides"
 
 
 RenameState = Literal["needed", "already_applied", "missing_both"]
@@ -53,8 +42,8 @@ RenameState = Literal["needed", "already_applied", "missing_both"]
 class OverlayError(BrainError):
     """Raised when the overlay step cannot proceed safely.
 
-    Two cases trigger this: a missing ``quartz_overrides/`` source dir
-    (brain repo layout is broken), or an inconsistent Quartz workspace
+    Two cases trigger this: a missing ``brain/quartz_overrides/`` source dir
+    (brain package is broken), or an inconsistent Quartz workspace
     where BOTH the upstream ``contentIndex.tsx`` AND the renamed
     ``_upstreamContentIndex.tsx`` are present at the same time. The
     second case we refuse to auto-resolve — picking one would silently
@@ -74,38 +63,47 @@ class OverlayPlan:
     file present) so ``--print-overlay`` can surface the difference.
     """
 
-    repo_root: Path
     quartz_dir: Path
     pairs: tuple[tuple[Path, Path], ...]
     rename: tuple[Path, Path] | None
     rename_state: RenameState
 
 
-def repo_root() -> Path:
-    """Resolve the brain repo root from this module's location.
+def _overlay_source_root() -> Path:
+    """Resolve the ``quartz_overrides/`` tree from inside the installed brain package.
 
-    ``src/brain/vault/quartz_overlay.py`` → ``parents[3]`` is the
-    repo root. Computed (not user-supplied) so there's no path-
-    traversal vector here.
+    Uses ``importlib.resources.files("brain.quartz_overrides")`` so the path is
+    valid in both editable installs (``pip install -e``) and wheel-installed pipx
+    environments — importlib.resources handles both cases.
+
+    Raises :class:`OverlayError` if the package resource is not backed by a regular
+    filesystem directory (e.g. if the package were installed inside a zip archive,
+    which is not expected for brain).
     """
-    return Path(__file__).resolve().parents[3]
+    root = _importlib_files("brain.quartz_overrides")
+    if not hasattr(root, "__fspath__"):
+        raise OverlayError(
+            "brain.quartz_overrides must be installed as a directory, not inside a "
+            "zip archive. Re-install brain with 'pip install brain' (not as a zipapp)."
+        )
+    return Path(str(root))
 
 
-def plan_overlay(repo_root_path: Path, quartz_dir: Path) -> OverlayPlan:
+def plan_overlay(quartz_dir: Path) -> OverlayPlan:
     """Enumerate every overlay file + figure out the upstream rename.
 
     Pure planning step — no filesystem mutations. Raises
-    :class:`OverlayError` if the brain repo's ``quartz_overrides/``
-    directory is missing, or if the Quartz workspace is in an
-    inconsistent state we won't auto-resolve.
+    :class:`OverlayError` if the brain package's ``quartz_overrides/``
+    directory is missing or unreadable, or if the Quartz workspace is in
+    an inconsistent state we won't auto-resolve.
     """
-    repo_root_resolved = repo_root_path.resolve()
+    overrides_root = _overlay_source_root()
     quartz_dir_resolved = quartz_dir.resolve()
-    overrides_root = (repo_root_resolved / _OVERLAY_SUBDIR).resolve()
     if not overrides_root.is_dir():
         raise OverlayError(
             f"overlay source directory not found: {overrides_root}\n"
-            f"  Expected `{_OVERLAY_SUBDIR}/` to live at the brain repo root."
+            f"  Expected the brain package's quartz_overrides/ tree to be installed "
+            f"at that path. Try reinstalling brain."
         )
 
     pairs: list[tuple[Path, Path]] = []
@@ -115,6 +113,13 @@ def plan_overlay(repo_root_path: Path, quartz_dir: Path) -> OverlayPlan:
         # Skip macOS metadata + dotfiles defensively; never legitimate
         # overlay content.
         if src.name.startswith("."):
+            continue
+        # Skip Python package metadata files and bytecode caches — they are
+        # not overlay content. __pycache__/ is generated by the Python
+        # interpreter when the package is imported and must not be copied.
+        if src.suffix in {".py", ".pyc"}:
+            continue
+        if "__pycache__" in src.parts:
             continue
         # Defense in depth: confirm src resolves inside overrides_root
         # before we honor it (in case a future symlink ever points out).
@@ -129,7 +134,6 @@ def plan_overlay(repo_root_path: Path, quartz_dir: Path) -> OverlayPlan:
 
     rename, rename_state = _plan_upstream_rename(quartz_dir_resolved)
     return OverlayPlan(
-        repo_root=repo_root_resolved,
         quartz_dir=quartz_dir_resolved,
         pairs=tuple(pairs),
         rename=rename,

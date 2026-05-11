@@ -28,8 +28,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-CLI_OVERLAY = REPO_ROOT / "quartz_overrides" / "quartz" / "cli"
-QUARTZ_OVERLAY = REPO_ROOT / "quartz_overrides" / "quartz"
+CLI_OVERLAY = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz" / "cli"
+QUARTZ_OVERLAY = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz"
 
 HANDLERS_JS = CLI_OVERLAY / "handlers.js"
 ARGS_JS = CLI_OVERLAY / "args.js"

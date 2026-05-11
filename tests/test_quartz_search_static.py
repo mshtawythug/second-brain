@@ -38,14 +38,14 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-COMPONENTS_DIR = REPO_ROOT / "quartz_overrides" / "quartz" / "components"
+COMPONENTS_DIR = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz" / "components"
 SEARCH_TSX = COMPONENTS_DIR / "Search.tsx"
 SEARCH_INLINE = COMPONENTS_DIR / "scripts" / "search.inline.ts"
 COMPONENTS_INDEX = COMPONENTS_DIR / "index.ts"
-STYLES_DIR = REPO_ROOT / "quartz_overrides" / "quartz" / "styles"
+STYLES_DIR = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz" / "styles"
 SEARCH_SCSS = STYLES_DIR / "brain" / "_search.scss"
 CUSTOM_SCSS = STYLES_DIR / "custom.scss"
-LAYOUT_TS = REPO_ROOT / "quartz_overrides" / "quartz.layout.ts"
+LAYOUT_TS = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz.layout.ts"
 
 EXPECTED_SOURCES = ("gmail", "krisp", "slack", "manual", "vault")
 

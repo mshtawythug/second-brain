@@ -31,7 +31,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 EXPLORER_INLINE = (
     REPO_ROOT
-    / "quartz_overrides"
+    / "src" / "brain" / "quartz_overrides"
     / "quartz"
     / "components"
     / "scripts"
@@ -39,7 +39,7 @@ EXPLORER_INLINE = (
 )
 EXPLORER_SCSS = (
     REPO_ROOT
-    / "quartz_overrides"
+    / "src" / "brain" / "quartz_overrides"
     / "quartz"
     / "styles"
     / "brain"
@@ -47,7 +47,7 @@ EXPLORER_SCSS = (
 )
 CUSTOM_SCSS = (
     REPO_ROOT
-    / "quartz_overrides"
+    / "src" / "brain" / "quartz_overrides"
     / "quartz"
     / "styles"
     / "custom.scss"

@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OVERRIDES_ROOT = REPO_ROOT / "quartz_overrides" / "quartz"
+OVERRIDES_ROOT = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz"
 COMPONENTS_DIR = OVERRIDES_ROOT / "components"
 COMMAND_TSX = COMPONENTS_DIR / "CommandPalette.tsx"
 COMMAND_INLINE = COMPONENTS_DIR / "scripts" / "commandPalette.inline.ts"

@@ -4,16 +4,16 @@ No JS toolchain is available in this test image, so we cannot compile
 the TypeScript or exercise it at runtime. Instead, this file follows
 the pattern established in ``tests/test_quartz_email_thread_static.py``
 and ``tests/test_quartz_search_static.py``: regex / substring assertions
-directly against the TS source files in ``quartz_overrides/``.
+directly against the TS source files in ``src/brain/quartz_overrides/``.
 
 Covered contracts:
-- ``quartz_overrides/quartz/processors/parser_cache.ts`` exists and
+- ``src/brain/quartz_overrides/quartz/processors/parser_cache.ts`` exists and
   exports a numeric ``CACHE_VERSION`` constant plus ``cacheKey``,
   ``cachePath``, ``getCached``, and ``putCached`` with the expected
   function signatures.
 - The sha256 cache key mixes ``CACHE_VERSION`` into the hash via a
   4-byte big-endian write before the slug and file bytes.
-- ``quartz_overrides/quartz/processors/parse.ts`` exists, and its
+- ``src/brain/quartz_overrides/quartz/processors/parse.ts`` exists, and its
   ``createFileParser`` body contains both ``getCached`` and ``putCached``
   (i.e. the cache hooks are wired in).
 - ``createMarkdownParser`` in ``parse.ts`` does NOT contain ``getCached``
@@ -21,9 +21,9 @@ Covered contracts:
   from the quality review stays fixed).
 - The ``serializableCtx`` literal in ``parse.ts`` includes ``cacheDir``
   in the pattern ``cacheDir: <ident>.cacheDir``.
-- ``quartz_overrides/quartz/util/ctx.ts`` exists and declares ``cacheDir``
+- ``src/brain/quartz_overrides/quartz/util/ctx.ts`` exists and declares ``cacheDir``
   inside the ``BuildCtx`` interface block.
-- ``quartz_overrides/quartz/plugins/transformers/index.ts`` documents the
+- ``src/brain/quartz_overrides/quartz/plugins/transformers/index.ts`` documents the
   transformer-purity contract, references ``CACHE_VERSION``, and names
   ``parser_cache.ts``.
 
@@ -39,7 +39,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-OVERRIDES_DIR = REPO_ROOT / "quartz_overrides"
+OVERRIDES_DIR = REPO_ROOT / "src" / "brain" / "quartz_overrides"
 PROCESSORS_DIR = OVERRIDES_DIR / "quartz" / "processors"
 PARSER_CACHE_TS = PROCESSORS_DIR / "parser_cache.ts"
 PARSE_TS = PROCESSORS_DIR / "parse.ts"
