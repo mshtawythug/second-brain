@@ -34,7 +34,6 @@ from .editor import EditorError as RawEditorError
 from .editor import run_editor_on
 from .embeddings import make_embedder
 from .errors import (
-    DraftSkipped,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
@@ -726,8 +725,8 @@ def ingest_gmail(
 
     embedder = _build_embedder(cfg)
     ingested = 0
+    ingested_draft = 0
     skipped = 0
-    skipped_drafts = 0
     failed = 0
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
@@ -748,6 +747,7 @@ def ingest_gmail(
                     },
                     tags=list(tag),
                     vault_root=cfg.vault_path,
+                    draft=bool(doc.metadata.get("_is_draft", False)),
                 )
                 # P2.2 thread upsert: ``created`` is True only on first
                 # insert; ``body_changed`` is True when an existing thread
@@ -759,18 +759,11 @@ def ingest_gmail(
                         f"  ingested thread {tid} ({len(ts)} messages)"
                     )
                     ingested += 1
+                    if result.created and doc.metadata.get("_is_draft"):
+                        ingested_draft += 1
                 else:
                     typer.echo(f"  skipped thread {tid} (unchanged)")
                     skipped += 1
-            except DraftSkipped as e:
-                # Drafts are unsent emails the user typed but never sent —
-                # ingesting them pollutes search ("did I send X?" returns
-                # drafts as evidence of sent messages). Skip and surface
-                # the count separately so it's clear how many threads were
-                # filtered for this reason vs failed for other reasons.
-                typer.echo(f"  skipped thread {tid} (draft): {e}")
-                skipped_drafts += 1
-                continue
             except (GmailError, psycopg.Error, ValueError, KeyError) as e:
                 typer.secho(
                     f"  failed thread {tid} ({len(ts)} messages): {e}",
@@ -778,9 +771,10 @@ def ingest_gmail(
                 )
                 failed += 1
                 continue
+    draft_note = f" ({ingested_draft} draft)" if ingested_draft else ""
     typer.echo(
-        f"{ingested} ingested, {skipped} skipped (unchanged), "
-        f"{skipped_drafts} skipped (drafts), {failed} failed"
+        f"{ingested} ingested{draft_note}, {skipped} skipped (unchanged), "
+        f"{failed} failed"
     )
 
 
@@ -928,6 +922,8 @@ def search(
             since_days=since_days,
             fts_only=fts_only,
             vector_sim_floor=cfg.vector_sim_floor,
+            recency_halflife_days=cfg.recency_halflife_days,
+            snippet_context_tokens=cfg.snippet_context_tokens,
         )
 
     if json_output:

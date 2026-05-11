@@ -29,6 +29,19 @@ _VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
 # dropped from the vector leg. Override via ``BRAIN_VECTOR_SIM_FLOOR``.
 DEFAULT_VECTOR_SIM_FLOOR = 0.25
 
+# Default exponential-decay half-life for the recency boost applied after RRF.
+# At 180 days a document is a year old (365 days) → boost ≈ 0.25×. Tuned as
+# a reasonable default for a personal corpus that spans years; override via
+# ``BRAIN_RECENCY_HALFLIFE_DAYS``. Set to a very large value (e.g. 999999)
+# to effectively disable the boost.
+DEFAULT_RECENCY_HALFLIFE_DAYS = 180.0
+
+# Default token budget for snippet-context expansion. After the best-matching
+# chunk is selected, this many tokens of neighboring-chunk context are
+# stitched around it to give Claude / the user richer reading context. Set to
+# 0 to disable expansion. Override via ``BRAIN_SNIPPET_CONTEXT_TOKENS``.
+DEFAULT_SNIPPET_CONTEXT_TOKENS = 200
+
 # Default vault location — clean, no implicit cloud sync. Users who want iCloud
 # can either symlink ``~/brain-vault`` to an iCloud Drive folder or set
 # ``BRAIN_VAULT_PATH`` to an iCloud path.
@@ -122,6 +135,16 @@ class Config:
     # threshold would silently flip the filter (no effective filtering)
     # and is almost certainly a config bug.
     people_hub_min_docs: int = DEFAULT_PEOPLE_HUB_MIN_DOCS
+    # Exponential-decay half-life (days) for the recency boost applied after
+    # RRF. ``boost = 0.5 ** (age_days / recency_halflife_days)`` where
+    # ``age_days`` is clamped to [0, +∞) so future-dated rows get boost=1.0.
+    # Loaded from ``BRAIN_RECENCY_HALFLIFE_DAYS``; must be a positive float.
+    recency_halflife_days: float = DEFAULT_RECENCY_HALFLIFE_DAYS
+    # Token budget for per-search snippet-context expansion. After the
+    # best-matching chunk is selected, this many tokens of neighboring-chunk
+    # context are stitched around it. 0 = disabled. Loaded from
+    # ``BRAIN_SNIPPET_CONTEXT_TOKENS``; must be a non-negative integer.
+    snippet_context_tokens: int = DEFAULT_SNIPPET_CONTEXT_TOKENS
 
     @classmethod
     def load(cls) -> "Config":
@@ -220,6 +243,46 @@ class Config:
                     f"BRAIN_PEOPLE_HUB_MIN_DOCS must be a non-negative integer "
                     f"(got {people_hub_min_docs!r})"
                 )
+        # Recency half-life — see DEFAULT_RECENCY_HALFLIFE_DAYS.
+        # Validation: must parse as a positive float. Zero is invalid
+        # (produces 0 ** inf = 0 for any finite age, degenerate). Negative
+        # is invalid — flips the decay direction so old docs score higher.
+        halflife_raw = os.environ.get("BRAIN_RECENCY_HALFLIFE_DAYS")
+        if halflife_raw is None or halflife_raw.strip() == "":
+            recency_halflife_days = DEFAULT_RECENCY_HALFLIFE_DAYS
+        else:
+            try:
+                recency_halflife_days = float(halflife_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_RECENCY_HALFLIFE_DAYS must be a positive float "
+                    f"(got {halflife_raw!r})"
+                ) from exc
+            if recency_halflife_days <= 0:
+                raise ConfigError(
+                    f"BRAIN_RECENCY_HALFLIFE_DAYS must be a positive float "
+                    f"(got {recency_halflife_days!r})"
+                )
+        # Snippet context tokens — see DEFAULT_SNIPPET_CONTEXT_TOKENS.
+        # Validation: must parse as a non-negative integer. 0 = disabled.
+        # Negative is invalid — there is no sensible semantic for a negative
+        # token budget.
+        ctx_raw = os.environ.get("BRAIN_SNIPPET_CONTEXT_TOKENS")
+        if ctx_raw is None or ctx_raw.strip() == "":
+            snippet_context_tokens = DEFAULT_SNIPPET_CONTEXT_TOKENS
+        else:
+            try:
+                snippet_context_tokens = int(ctx_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_SNIPPET_CONTEXT_TOKENS must be a non-negative integer "
+                    f"(got {ctx_raw!r})"
+                ) from exc
+            if snippet_context_tokens < 0:
+                raise ConfigError(
+                    f"BRAIN_SNIPPET_CONTEXT_TOKENS must be a non-negative integer "
+                    f"(got {snippet_context_tokens!r})"
+                )
         return cls(
             database_url=database_url,
             ollama_host=ollama_host,
@@ -231,4 +294,6 @@ class Config:
             vector_sim_floor=vector_sim_floor,
             owner_participants=owner_participants,
             people_hub_min_docs=people_hub_min_docs,
+            recency_halflife_days=recency_halflife_days,
+            snippet_context_tokens=snippet_context_tokens,
         )

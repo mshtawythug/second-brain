@@ -327,3 +327,132 @@ class TestPeopleHubMinDocs:
         monkeypatch.setenv("BRAIN_PEOPLE_HUB_MIN_DOCS", "three")
         with pytest.raises(ConfigError, match="non-negative integer"):
             Config.load()
+
+
+# ---------------------------------------------------------------------------
+# BRAIN_RECENCY_HALFLIFE_DAYS — exponential-decay half-life for the recency
+# boost applied after RRF (Wave Q1-A, 2026-05-11).
+# ---------------------------------------------------------------------------
+
+
+class TestRecencyHalflifeDays:
+    """Env parsing + validation for ``BRAIN_RECENCY_HALFLIFE_DAYS``."""
+
+    def test_unset_yields_default(self, monkeypatch, isolated_dotenv) -> None:
+        from brain.config import DEFAULT_RECENCY_HALFLIFE_DAYS
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_RECENCY_HALFLIFE_DAYS", raising=False)
+        cfg = Config.load()
+        assert cfg.recency_halflife_days == DEFAULT_RECENCY_HALFLIFE_DAYS
+        assert cfg.recency_halflife_days == 180.0
+
+    def test_blank_value_falls_back_to_default(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        from brain.config import DEFAULT_RECENCY_HALFLIFE_DAYS
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RECENCY_HALFLIFE_DAYS", "   ")
+        cfg = Config.load()
+        assert cfg.recency_halflife_days == DEFAULT_RECENCY_HALFLIFE_DAYS
+
+    def test_valid_float_honored(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RECENCY_HALFLIFE_DAYS", "365.0")
+        cfg = Config.load()
+        assert cfg.recency_halflife_days == 365.0
+
+    def test_integer_string_accepted(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RECENCY_HALFLIFE_DAYS", "90")
+        cfg = Config.load()
+        assert cfg.recency_halflife_days == 90.0
+
+    def test_zero_is_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RECENCY_HALFLIFE_DAYS", "0")
+        with pytest.raises(ConfigError, match="positive float"):
+            Config.load()
+
+    def test_negative_is_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RECENCY_HALFLIFE_DAYS", "-1")
+        with pytest.raises(ConfigError, match="positive float"):
+            Config.load()
+
+    def test_non_numeric_raises(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RECENCY_HALFLIFE_DAYS", "abc")
+        with pytest.raises(ConfigError, match="positive float"):
+            Config.load()
+
+    def test_large_value_effectively_disables_boost(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        """A very large half-life is valid — caller treats it as 'no boost'."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RECENCY_HALFLIFE_DAYS", "999999")
+        cfg = Config.load()
+        assert cfg.recency_halflife_days == 999999.0
+
+
+# ---------------------------------------------------------------------------
+# BRAIN_SNIPPET_CONTEXT_TOKENS — neighboring-chunk token budget (Wave Q1-A).
+# ---------------------------------------------------------------------------
+
+
+class TestSnippetContextTokens:
+    """Env parsing + validation for ``BRAIN_SNIPPET_CONTEXT_TOKENS``."""
+
+    def test_unset_yields_default(self, monkeypatch, isolated_dotenv) -> None:
+        from brain.config import DEFAULT_SNIPPET_CONTEXT_TOKENS
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_SNIPPET_CONTEXT_TOKENS", raising=False)
+        cfg = Config.load()
+        assert cfg.snippet_context_tokens == DEFAULT_SNIPPET_CONTEXT_TOKENS
+        assert cfg.snippet_context_tokens == 200
+
+    def test_blank_value_falls_back_to_default(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        from brain.config import DEFAULT_SNIPPET_CONTEXT_TOKENS
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_SNIPPET_CONTEXT_TOKENS", "   ")
+        cfg = Config.load()
+        assert cfg.snippet_context_tokens == DEFAULT_SNIPPET_CONTEXT_TOKENS
+
+    def test_valid_integer_honored(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_SNIPPET_CONTEXT_TOKENS", "500")
+        cfg = Config.load()
+        assert cfg.snippet_context_tokens == 500
+
+    def test_zero_is_valid_disables_expansion(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        """Zero is explicitly allowed — it disables snippet expansion."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_SNIPPET_CONTEXT_TOKENS", "0")
+        cfg = Config.load()
+        assert cfg.snippet_context_tokens == 0
+
+    def test_negative_is_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_SNIPPET_CONTEXT_TOKENS", "-1")
+        with pytest.raises(ConfigError, match="non-negative integer"):
+            Config.load()
+
+    def test_non_integer_raises(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_SNIPPET_CONTEXT_TOKENS", "3.5")
+        with pytest.raises(ConfigError, match="non-negative integer"):
+            Config.load()
+
+    def test_non_numeric_raises(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_SNIPPET_CONTEXT_TOKENS", "many")
+        with pytest.raises(ConfigError, match="non-negative integer"):
+            Config.load()
