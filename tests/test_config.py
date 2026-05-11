@@ -1,4 +1,5 @@
 """Tests for brain.config — env loading."""
+import os
 from pathlib import Path
 
 import pytest
@@ -17,9 +18,13 @@ from brain.config import (
 def isolated_dotenv(monkeypatch, tmp_path: Path) -> Path:
     """Isolate Config.load() from any real .env discovery.
 
-    Redirects both lookup paths:
-      - cwd walk-up: chdir into an empty tmp dir.
-      - project .env: point _project_dotenv at a tmp path the caller controls.
+    Redirects all three lookup paths:
+      - cwd walk-up: chdir into an empty tmp dir (write tmp_path/.env to
+        exercise this branch).
+      - project .env: point _project_dotenv at tmp_path/project.env (caller
+        writes to enable this branch).
+      - BRAIN_HOME .env: point _brain_home_dotenv at tmp_path/brain_home.env
+        (caller writes to enable this branch).
 
     Returns the tmp path the project_dotenv shim points at; tests can write a
     fake .env there to exercise the project-fallback branch.
@@ -27,7 +32,9 @@ def isolated_dotenv(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.chdir(tmp_path)
     fake_project_env = tmp_path / "project.env"
     monkeypatch.setattr(config_module, "_project_dotenv", lambda: fake_project_env)
-    # Strip any inherited Ollama overrides so default-vs-explicit tests stay
+    fake_brain_home_env = tmp_path / "brain_home.env"
+    monkeypatch.setattr(config_module, "_brain_home_dotenv", lambda: fake_brain_home_env)
+    # Strip any inherited overrides so default-vs-explicit tests stay
     # deterministic regardless of the developer's shell env.
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
     monkeypatch.delenv("QWEN3_MODEL", raising=False)
@@ -35,6 +42,7 @@ def isolated_dotenv(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     monkeypatch.delenv("BRAIN_OWNER_PARTICIPANTS", raising=False)
     monkeypatch.delenv("BRAIN_PEOPLE_HUB_MIN_DOCS", raising=False)
+    monkeypatch.delenv("BRAIN_HOME", raising=False)
     return fake_project_env
 
 
@@ -456,3 +464,148 @@ class TestSnippetContextTokens:
         monkeypatch.setenv("BRAIN_SNIPPET_CONTEXT_TOKENS", "many")
         with pytest.raises(ConfigError, match="non-negative integer"):
             Config.load()
+
+
+# ---------------------------------------------------------------------------
+# T1.0 — four-source dotenv chain with process-env precedence
+#
+# Priority (highest → lowest):
+#   1. os.environ  (process env, never overwritten)
+#   2. <repo-root>/.env  (_project_dotenv, shim → tmp_path/project.env)
+#   3. <cwd>/.env        (find_dotenv(usecwd=True) → tmp_path/.env when cwd=tmp_path)
+#   4. $BRAIN_HOME/.env  (_brain_home_dotenv, shim → tmp_path/brain_home.env)
+# ---------------------------------------------------------------------------
+
+
+class TestDotenvChain:
+    """Dotenv chain: per-source presence + all required conflict cases (T1.0)."""
+
+    # ------------------------------------------------------------------
+    # Per-source presence tests — each branch alone produces the right value
+    # ------------------------------------------------------------------
+
+    def test_brain_home_env_loaded_as_lowest_priority(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """BRAIN_HOME/.env is read when no other source defines the key."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        (tmp_path / "brain_home.env").write_text(
+            "DATABASE_URL=postgresql://from-brain-home:5432/db\n"
+        )
+        cfg = Config.load()
+        assert cfg.database_url == "postgresql://from-brain-home:5432/db"
+
+    def test_cwd_env_loaded_alone(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """cwd/.env is read when BRAIN_HOME/.env is absent."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        (tmp_path / ".env").write_text(
+            "DATABASE_URL=postgresql://from-cwd:5432/db\n"
+        )
+        cfg = Config.load()
+        assert cfg.database_url == "postgresql://from-cwd:5432/db"
+
+    def test_project_env_loaded_alone(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """repo-root/.env is read when cwd and BRAIN_HOME sources are absent."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        isolated_dotenv.write_text(
+            "DATABASE_URL=postgresql://from-project:5432/db\n"
+        )
+        cfg = Config.load()
+        assert cfg.database_url == "postgresql://from-project:5432/db"
+
+    def test_nothing_found_env_vars_only_fallback(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """Config.load() works with no .env files — process env alone is sufficient."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://env-only:5432/db")
+        assert not (tmp_path / ".env").exists()
+        assert not isolated_dotenv.exists()
+        assert not (tmp_path / "brain_home.env").exists()
+        cfg = Config.load()
+        assert cfg.database_url == "postgresql://env-only:5432/db"
+
+    # ------------------------------------------------------------------
+    # Conflict cases — when two sources define the same key, higher wins
+    # ------------------------------------------------------------------
+
+    def test_conflict_a_process_env_beats_brain_home(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """(a) os.environ beats BRAIN_HOME/.env for the same key."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://process-wins:5432/db")
+        (tmp_path / "brain_home.env").write_text(
+            "DATABASE_URL=postgresql://brain-home-loses:5432/db\n"
+        )
+        cfg = Config.load()
+        assert cfg.database_url == "postgresql://process-wins:5432/db"
+
+    def test_conflict_b_project_env_beats_brain_home(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """(b) repo-root/.env beats BRAIN_HOME/.env for the same key."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        (tmp_path / "brain_home.env").write_text(
+            "DATABASE_URL=postgresql://x:5432/d\nOLLAMA_HOST=http://brain-home:11434\n"
+        )
+        isolated_dotenv.write_text(
+            "DATABASE_URL=postgresql://x:5432/d\nOLLAMA_HOST=http://project-root:11434\n"
+        )
+        cfg = Config.load()
+        assert cfg.ollama_host == "http://project-root:11434"
+
+    def test_conflict_c_cwd_env_beats_brain_home(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """(c) cwd/.env beats BRAIN_HOME/.env for the same key."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        (tmp_path / "brain_home.env").write_text(
+            "DATABASE_URL=postgresql://x:5432/d\nOLLAMA_HOST=http://brain-home:11434\n"
+        )
+        (tmp_path / ".env").write_text("OLLAMA_HOST=http://cwd:11434\n")
+        cfg = Config.load()
+        assert cfg.ollama_host == "http://cwd:11434"
+
+    def test_conflict_d_project_env_beats_cwd_env(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """(d) repo-root/.env beats cwd/.env for the same key."""
+        monkeypatch.delenv("DATABASE_URL", raising=False)
+        monkeypatch.delenv("OLLAMA_HOST", raising=False)
+        (tmp_path / ".env").write_text(
+            "DATABASE_URL=postgresql://x:5432/d\nOLLAMA_HOST=http://cwd:11434\n"
+        )
+        isolated_dotenv.write_text("OLLAMA_HOST=http://project-root:11434\n")
+        cfg = Config.load()
+        assert cfg.ollama_host == "http://project-root:11434"
+
+    # ------------------------------------------------------------------
+    # Explicit non-overwrite guarantee
+    # ------------------------------------------------------------------
+
+    def test_process_env_never_overwritten(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """os.environ value is never replaced by ANY .env file source.
+
+        Sets DATABASE_URL in process env BEFORE calling Config.load(), then
+        checks that all three .env files cannot clobber it.
+        """
+        monkeypatch.setenv("DATABASE_URL", "postgresql://process-env:5432/db")
+        (tmp_path / "brain_home.env").write_text(
+            "DATABASE_URL=postgresql://brain-home-should-not-win:5432/db\n"
+        )
+        (tmp_path / ".env").write_text(
+            "DATABASE_URL=postgresql://cwd-should-not-win:5432/db\n"
+        )
+        isolated_dotenv.write_text(
+            "DATABASE_URL=postgresql://project-should-not-win:5432/db\n"
+        )
+        Config.load()
+        # The process-env value must survive through Config.load() unchanged.
+        assert os.environ["DATABASE_URL"] == "postgresql://process-env:5432/db"
