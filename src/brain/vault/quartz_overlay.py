@@ -21,9 +21,10 @@ two-step shape lets the CLI implement ``--print-overlay`` (plan
 without applying) and lets unit tests exercise planning and applying
 separately.
 """
+import os
 import shutil
 from dataclasses import dataclass
-from importlib.resources import files as _importlib_files
+from importlib.resources import files as resource_files
 from pathlib import Path
 from typing import Literal
 
@@ -80,13 +81,13 @@ def _overlay_source_root() -> Path:
     filesystem directory (e.g. if the package were installed inside a zip archive,
     which is not expected for brain).
     """
-    root = _importlib_files("brain.quartz_overrides")
-    if not hasattr(root, "__fspath__"):
+    root = resource_files("brain.quartz_overrides")
+    if not isinstance(root, os.PathLike):
         raise OverlayError(
             "brain.quartz_overrides must be installed as a directory, not inside a "
             "zip archive. Re-install brain with 'pip install brain' (not as a zipapp)."
         )
-    return Path(str(root))
+    return Path(root)
 
 
 def plan_overlay(quartz_dir: Path) -> OverlayPlan:

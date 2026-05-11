@@ -1,6 +1,6 @@
 """Fast-path manifest: per-slug structural fingerprint + manifest I/O.
 
-Python counterpart to ``quartz_overrides/quartz/util/fastpath_manifest.ts``.
+Python counterpart to ``brain/quartz_overrides/quartz/util/fastpath_manifest.ts``.
 Both implementations MUST produce byte-identical canonical blobs for the same
 input — verified by ``tests/wiki/test_fastpath_fingerprint_parity.py``.
 

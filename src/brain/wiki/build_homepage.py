@@ -62,7 +62,7 @@ FENCE_END_MARKER: str = "<!-- BRAIN_RECENT_END -->"
 # consumer.
 RECENT_LIMIT: int = 12
 
-# Source-icon vocabulary mirrors `quartz_overrides/quartz/util/sourceIcons.ts`
+# Source-icon vocabulary mirrors `brain/quartz_overrides/quartz/util/sourceIcons.ts`
 # (the SOURCE_ICONS map there is the canonical client-side copy). Keeping a
 # server-side duplicate here is intentional: the partial is rendered by Python
 # *before* Quartz is invoked, so we can't import the .ts module. The two
