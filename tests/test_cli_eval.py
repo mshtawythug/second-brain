@@ -255,3 +255,46 @@ def test_brain_eval_record_and_diff_mutually_exclusive(
         ],
     )
     assert result.exit_code == 2, result.output
+
+
+def test_brain_eval_unknown_category_raises_bad_parameter(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """--category with an unknown value exits 2 (BadParameter) instead of silently
+    returning an empty report."""
+    _setup(monkeypatch, test_db, fake_embedder)
+    corpus_path = _write_corpus(tmp_path, _MINI_CORPUS)
+    result = CliRunner().invoke(
+        app, ["eval", "--corpus", str(corpus_path), "--category", "bogus_cat"]
+    )
+    assert result.exit_code == 2, result.output
+    assert "bogus_cat" in result.output
+
+
+def test_brain_eval_json_record_baseline_no_stdout_pollution(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """--json --record-baseline must not emit 'baseline saved:' to stdout,
+    which would corrupt the JSON stream."""
+    baselines_dir = tmp_path / "baselines"
+    baselines_dir.mkdir()
+    monkeypatch.setattr("brain.cli._BASELINES_DIR", baselines_dir)
+    _setup(monkeypatch, test_db, fake_embedder)
+    corpus_path = _write_corpus(tmp_path, _MINI_CORPUS)
+    result = CliRunner().invoke(
+        app,
+        ["eval", "--corpus", str(corpus_path), "--json", "--record-baseline", "noisy"],
+    )
+    assert result.exit_code == 0, result.output
+    # result.stdout is stdout-only (Typer CliRunner separates streams internally).
+    # With err=True on the typer.echo call, the "baseline saved:" notice goes to
+    # stderr; stdout must be pure JSON.
+    data = json.loads(result.stdout)
+    assert "results" in data
+    assert (baselines_dir / "noisy.json").exists()

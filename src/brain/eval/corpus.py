@@ -30,6 +30,9 @@ _VALID_CATEGORIES: frozenset[str] = frozenset(
 )
 
 _REQUIRED_FIELDS: frozenset[str] = frozenset(("query", "expected_doc_ids", "category"))
+_ALLOWED_FIELDS: frozenset[str] = frozenset(
+    ("query", "expected_doc_ids", "category", "source_filter", "tag_filter", "since_days", "notes")
+)
 _CORPUS_VERSION = 1
 
 
@@ -99,6 +102,14 @@ def load_corpus(path: Path | None = None) -> list[EvalQuery]:
             raise EvalCorpusError(
                 f"corpus query #{i + 1} is missing required field(s): "
                 f"{', '.join(sorted(missing))}"
+            )
+
+        unknown = entry.keys() - _ALLOWED_FIELDS
+        if unknown:
+            raise EvalCorpusError(
+                f"corpus query #{i + 1} has unknown field(s): "
+                f"{', '.join(sorted(unknown))}. "
+                f"Allowed: {', '.join(sorted(_ALLOWED_FIELDS))}"
             )
 
         category = entry["category"]

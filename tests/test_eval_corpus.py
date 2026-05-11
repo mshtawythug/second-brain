@@ -300,3 +300,20 @@ def test_load_corpus_expected_doc_ids_not_a_list_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(EvalCorpusError, match="must be a list"):
         load_corpus(path)
+
+
+def test_load_corpus_rejects_unknown_fields(tmp_path: Path) -> None:
+    """An entry with an unrecognised field raises EvalCorpusError (spec §3.a)."""
+    path = _write_corpus(
+        tmp_path,
+        """\
+        version: 1
+        queries:
+          - query: "test"
+            category: semantic
+            expected_doc_ids: [abcd1234]
+            bogus_field: "this should fail"
+        """,
+    )
+    with pytest.raises(EvalCorpusError, match="unknown field"):
+        load_corpus(path)
