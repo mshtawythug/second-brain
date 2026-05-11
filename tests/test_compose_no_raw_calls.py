@@ -11,6 +11,10 @@ import pytest
 
 _BRAIN_SRC = Path(__file__).resolve().parents[1] / "src" / "brain"
 _ALLOWED_EXCEPTION = _BRAIN_SRC / "_compose.py"
+# __pycache__: bytecode caches, not source. quartz_overrides: the only .py file
+# inside this packaged tree is its empty __init__.py marker; skipping the whole
+# directory keeps the test honest about what we actually guard (the brain source
+# tree, not packaged static assets that happen to contain a Python init file).
 _SKIP_DIRS = {"__pycache__", "quartz_overrides"}
 
 
@@ -24,7 +28,13 @@ def _python_files() -> list[Path]:
 
 
 def _is_subprocess_call(node: ast.AST) -> bool:
-    """Return True if node is a call to subprocess.{run,Popen,check_call,check_output}."""
+    """Return True if node is a call to subprocess.{run,Popen,check_call,check_output}.
+
+    Deliberately narrow scope: we don't guard against `subprocess.call` (legacy
+    2.x form), `os.system("docker compose …")`, or shell-string invocations
+    (`subprocess.run("docker compose …", shell=True)`). The codebase doesn't
+    use any of these shapes today; add to the matcher set if they appear.
+    """
     if not isinstance(node, ast.Call):
         return False
     fn = node.func

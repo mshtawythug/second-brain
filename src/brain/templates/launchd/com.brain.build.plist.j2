@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Jinja variables: brain_home, user_home, pipx_bin_dir, vault_path, brain_py
+     T1.7 renderer MUST XML-escape every value before substitution
+     (Path strings with '&' / '<' / '>' would otherwise produce invalid
+     plist XML and launchctl bootstrap would fail with a parse error). -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
