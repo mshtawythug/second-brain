@@ -419,7 +419,7 @@ class Config:
                 )
 
         return cls(
-            brain_home=_brain_home_root(),
+            # brain_home resolves via default_factory=_brain_home_root.
             database_url=database_url,
             ollama_host=ollama_host,
             qwen3_model=qwen3_model,

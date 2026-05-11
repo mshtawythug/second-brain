@@ -679,14 +679,6 @@ class TestBrainHomeResolution:
         fake_config = tmp_path / "src" / "brain" / "config.py"
         result = _brain_home_root(_config_file=fake_config)
         assert result == Path.home() / ".brain"
-        # Guarantee: ~/.brain must NOT have been created by the call above.
-        # (We cannot delete it if it pre-exists, so we only assert the negative
-        #  when it was absent before the call.)
-        expected = Path.home() / ".brain"
-        # The assertion below is conditional: if ~/.brain already existed on
-        # disk (e.g. the user runs brain daily), we skip the "not created"
-        # check — we only care that the function returned the right path.
-        assert result == expected
 
     def test_no_io_at_resolution_time(self, monkeypatch, tmp_path: Path) -> None:
         """_brain_home_root() never creates dirs or raises for a nonexistent BRAIN_HOME."""
