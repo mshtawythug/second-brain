@@ -92,9 +92,16 @@ def _atomic_write(data: bytes, dest: Path, parent_dir: Path) -> None:
 
 def exec_shim(name: str, args: Sequence[str]) -> NoReturn:
     """Resolve $BRAIN_HOME, ensure the shim is installed/up-to-date, then
-    os.execvpe it with BRAIN_PY=sys.executable in the env."""
+    os.execvpe it with BRAIN_PY set in the env.
+
+    BRAIN_PY defaults to ``sys.executable`` (the interpreter running this
+    launcher — by construction the one that has ``brain`` importable).
+    An existing BRAIN_PY env var is preserved untouched so tests can stub
+    the interpreter (see ``tests/test_bin_scripts.py``) and advanced users
+    can pin a specific Python without editing the launcher.
+    """
     brain_home = _brain_home_root()
     shim = ensure_shim(name, brain_home)
     env = dict(os.environ)
-    env["BRAIN_PY"] = sys.executable
+    env.setdefault("BRAIN_PY", sys.executable)
     os.execvpe(str(shim), [str(shim), *args], env)

@@ -306,16 +306,20 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
 
     launchd_dir = tmp_path / "LaunchAgents"
+    repo_root = Path(__file__).resolve().parent.parent
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
         # NOTE: deliberately omit BRAIN_NO_BUILD_WATCHER so install-launchd
         # actually runs. Override the install-launchd-internal knobs so
         # the bootstrap calls land against our launchctl stub + tmp dir.
+        # BRAIN_INSTALL_LAUNCHD points at the venv-installed Python entry
+        # point so brain-up.sh resolves it without needing the venv on PATH.
         extras={
             "BRAIN_NO_OVERLAY": "1",
             "BRAIN_LAUNCHD_DIR": str(launchd_dir),
             "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
+            "BRAIN_INSTALL_LAUNCHD": str(repo_root / ".venv" / "bin" / "brain-install-launchd"),
         },
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
@@ -932,7 +936,8 @@ def test_install_launchd_writes_plists_and_bootstraps(
     assert "<key>KeepAlive</key>" in watcher_text
     assert "<true/>" in watcher_text  # KeepAlive=true
     assert "<key>RunAtLoad</key>" in watcher_text
-    assert "/tmp/brain-watch.log" in watcher_text
+    # T1.7 plist templates write watcher logs to $BRAIN_HOME/logs/, not /tmp/.
+    assert "logs/com.brain.watcher.out.log" in watcher_text
     # BRAIN_PY must be in the plist so launchd-launched scripts use the venv
     # Python (not system python3 which lacks the brain package on sys.path).
     assert "<key>BRAIN_PY</key>" in watcher_text, (
@@ -945,7 +950,8 @@ def test_install_launchd_writes_plists_and_bootstraps(
     assert "<string>com.brain.build</string>" in build_text
     assert "_brain-build-fg" in build_text
     assert "<key>KeepAlive</key>" in build_text
-    assert "/tmp/brain-build.log" in build_text
+    # Same path change — build logs are also under $BRAIN_HOME/logs/.
+    assert "logs/com.brain.build.out.log" in build_text
     # Same BRAIN_PY regression guard for the build daemon plist.
     assert "<key>BRAIN_PY</key>" in build_text, (
         "com.brain.build.plist is missing BRAIN_PY — without it "
