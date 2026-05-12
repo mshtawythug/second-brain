@@ -334,7 +334,7 @@ def run_setup(
     follow-on dispatch.
     """
     # ------------------------------------------------------------------
-    # Resolve $BRAIN_HOME
+    # Resolve $BRAIN_HOME and $BRAIN_VAULT_PATH
     # ------------------------------------------------------------------
     if brain_home_override is not None:
         brain_home: Path = brain_home_override
@@ -342,6 +342,14 @@ def run_setup(
         brain_home = Path(os.environ["BRAIN_HOME"]).expanduser()
     else:
         brain_home = _brain_home_root()
+
+    # Resolve vault path: --vault arg > $BRAIN_VAULT_PATH env > None (use
+    # the template default ~/brain-vault when None).
+    vault_path: Path | None = None
+    if vault_override is not None:
+        vault_path = vault_override
+    elif os.environ.get("BRAIN_VAULT_PATH"):
+        vault_path = Path(os.environ["BRAIN_VAULT_PATH"]).expanduser()
 
     # ------------------------------------------------------------------
     # T3.1 — Reset handling (DESTRUCTIVE; typed confirmation required)
@@ -395,9 +403,16 @@ def run_setup(
         raise typer.Exit(code=1)
     typer.echo("")
 
-    # Expose BRAIN_HOME to downstream subprocess calls (idempotent).
-    if not dry_run:
+    # Expose BRAIN_HOME (and optionally BRAIN_VAULT_PATH) to downstream
+    # subprocess calls (idempotent; dry-run prints without mutating).
+    if dry_run:
+        typer.echo(f"[dry-run] would: export BRAIN_HOME={brain_home}")
+        if vault_path is not None:
+            typer.echo(f"[dry-run] would: export BRAIN_VAULT_PATH={vault_path}")
+    else:
         os.environ["BRAIN_HOME"] = str(brain_home)
+        if vault_path is not None:
+            os.environ["BRAIN_VAULT_PATH"] = str(vault_path)
 
     # ------------------------------------------------------------------
     # T3.3 — Idempotent state creation
@@ -441,11 +456,25 @@ def run_setup(
     env_dest = brain_home / ".env"
     if not dry_run and env_dest.exists():
         typer.echo(f"  [skipped] {env_dest} (already exists)")
+        # If --vault was given and BRAIN_VAULT_PATH isn't already in the file,
+        # append it so the running .env reflects the chosen vault location.
+        if vault_path is not None:
+            existing_env = env_dest.read_text(encoding="utf-8")
+            if "BRAIN_VAULT_PATH" not in existing_env:
+                with open(env_dest, "a", encoding="utf-8") as fh:
+                    fh.write(f"\nBRAIN_VAULT_PATH={vault_path}\n")
+                typer.echo(f"  [ok] BRAIN_VAULT_PATH={vault_path} appended to existing .env")
     else:
 
         def _write_env() -> None:
             template_src = resource_files("brain.templates") / "env.example"
             env_text = template_src.read_text(encoding="utf-8")
+            # Activate the commented-out BRAIN_VAULT_PATH line if --vault was given.
+            if vault_path is not None:
+                env_text = env_text.replace(
+                    "# BRAIN_VAULT_PATH=",
+                    f"BRAIN_VAULT_PATH={vault_path}",
+                )
             env_dest.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(env_dest, env_text)
             typer.echo(f"  [ok] wrote {env_dest}")

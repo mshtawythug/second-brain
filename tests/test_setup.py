@@ -161,3 +161,66 @@ def test_setup_preflight_fails_when_docker_missing(
     assert "remediation" in combined, (
         "output must contain a Remediation hint"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — --vault is consumed: written into fresh .env and appended to existing
+# ---------------------------------------------------------------------------
+
+
+def _run_through_state_creation(
+    brain_home: Path,
+    vault_override: Path,
+    *,
+    pre_create_env: bool = False,
+) -> None:
+    """Helper: run setup past T3.3 with all external calls mocked out."""
+    if pre_create_env:
+        # Write a minimal existing .env (no BRAIN_VAULT_PATH line).
+        brain_home.mkdir(parents=True, exist_ok=True)
+        (brain_home / ".env").write_text("DATABASE_URL=postgresql://x\n")
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+        patch("brain.setup.ensure_shim"),  # skip real shim install
+    ):
+        from brain.setup import run_setup
+
+        run_setup(
+            dry_run=False,
+            non_interactive=True,
+            brain_home_override=brain_home,
+            vault_override=vault_override,
+            pg_port=0,
+            skip_wiki=True,
+            skip_skill=True,
+        )
+
+
+def test_setup_vault_override_written_into_fresh_env(tmp_path: Path) -> None:
+    """--vault must appear as BRAIN_VAULT_PATH=... in a freshly rendered .env."""
+    brain_home = tmp_path / ".brain"
+    vault = tmp_path / "my-vault"
+
+    _run_through_state_creation(brain_home, vault)
+
+    env_text = (brain_home / ".env").read_text()
+    assert f"BRAIN_VAULT_PATH={vault}" in env_text, (
+        f"BRAIN_VAULT_PATH={vault} not found in rendered .env:\n{env_text}"
+    )
+    # Commented-out placeholder must be gone (replaced by the live value).
+    assert "# BRAIN_VAULT_PATH=" not in env_text
+
+
+def test_setup_vault_override_appended_to_existing_env(tmp_path: Path) -> None:
+    """--vault must be appended to an existing .env that lacks BRAIN_VAULT_PATH."""
+    brain_home = tmp_path / ".brain"
+    vault = tmp_path / "my-vault"
+
+    _run_through_state_creation(brain_home, vault, pre_create_env=True)
+
+    env_text = (brain_home / ".env").read_text()
+    assert f"BRAIN_VAULT_PATH={vault}" in env_text, (
+        f"BRAIN_VAULT_PATH={vault} not appended to existing .env:\n{env_text}"
+    )
