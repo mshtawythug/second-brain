@@ -111,3 +111,44 @@ def test_uninstall_preserves_dir_with_other_files(
 
     captured = capsys.readouterr()
     assert "not empty" in captured.err, "warning about non-empty dir should appear on stderr"
+
+
+# ---------------------------------------------------------------------------
+# 6. Integration with T2.3 content — installed bytes match the rev-9 skill
+#    body (description / when_to_use keys + the brain CLI command map).
+# ---------------------------------------------------------------------------
+
+
+def test_installed_skill_has_required_frontmatter_keys(tmp_path: Path) -> None:
+    """Installed SKILL.md must carry the T2.3 rev-9 frontmatter + body shape.
+
+    Locks in the integration between T2.2 (file copy) and T2.3 (content
+    population) — if the content drifts away from the verified shape
+    (description + when_to_use keys, the brain CLI command sections),
+    the test fails loudly.
+    """
+    install_skill(target_root=tmp_path)
+    content = (tmp_path / "brain" / "SKILL.md").read_text(encoding="utf-8")
+
+    # YAML frontmatter must be a real fenced block at the very start
+    assert content.startswith("---\n"), "SKILL.md must open with `---`"
+    head, frontmatter, body = content.split("---", 2)
+    assert head == "", "no preamble allowed before the frontmatter fence"
+    assert "description:" in frontmatter, "frontmatter must declare `description`"
+    assert "when_to_use:" in frontmatter, "frontmatter must declare `when_to_use`"
+
+    # Body must reference the core brain commands the skill teaches Claude
+    # about. Anchor on the user-facing command names so a future content
+    # refresh doesn't silently drop one.
+    for command in [
+        "brain search",
+        "brain explain",
+        "brain show",
+        "brain people",
+        "brain todo",
+        "brain rate",
+        "brain ingest-gmail",
+        "brain ingest-stdin",
+        "brain doctor",
+    ]:
+        assert command in body, f"installed SKILL.md missing reference to `{command}`"
