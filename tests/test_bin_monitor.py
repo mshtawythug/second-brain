@@ -250,6 +250,22 @@ def test_main_rejects_unknown_flag() -> None:
     assert rc == 2
 
 
+def test_main_tail_flag_rejects_unknown_extra() -> None:
+    """--tail with an unknown flag must be rejected before dispatch (exit 2).
+
+    Regression: validation was placed AFTER the early `if args.tail` return,
+    so `brain-monitor --tail --bogus` was silently accepted.
+    """
+    rc = main(["--tail", "--bogus"])
+    assert rc == 2
+
+
+def test_main_f_flag_rejects_unknown_extra() -> None:
+    """-f with an unknown flag must also be rejected (exit 2)."""
+    rc = main(["-f", "--bogus"])
+    assert rc == 2
+
+
 def test_main_rejects_unknown_flag_after_snapshot() -> None:
     """Unknown flags after a valid positional command are still rejected."""
     rc = main(["snapshot", "--no-such-option"])

@@ -494,16 +494,15 @@ def main(argv: list[str] | None = None) -> int:
     vault = _vault()
     port = _port()
 
-    # -f / --tail flag takes precedence over any positional.
-    if args.tail:
-        return _tail(vault)
-
     cmd: str = str(args.command) if args.command else "snapshot"
 
-    # Validate leftover tokens from parse_known_args.  The only valid case is
+    # Validate leftover tokens from parse_known_args BEFORE dispatching to any
+    # mode (including --tail).  The only valid case for a non-empty `extra` is
     # `probe <N>` where N is a bare integer (bash compat for the positional
-    # timeout). Anything else — unknown flags, extra words — is an error so
-    # that `brain-monitor --bogus` or `brain-monitor snapshot --x` fail loudly.
+    # timeout). Anything else — unknown flags, extra words on --tail or any
+    # other command — is an error so that e.g. `brain-monitor --tail --bogus`
+    # or `brain-monitor snapshot --x` fail loudly rather than being silently
+    # swallowed.
     if extra:
         probe_timeout_ok = cmd == "probe" and len(extra) == 1 and extra[0].isdigit()
         if not probe_timeout_ok:
@@ -513,6 +512,10 @@ def main(argv: list[str] | None = None) -> int:
             )
             parser.print_usage(sys.stderr)
             return 2
+
+    # -f / --tail flag takes precedence over any positional.
+    if args.tail:
+        return _tail(vault)
 
     if cmd in ("snapshot", "status"):
         return _snapshot(vault, port)
