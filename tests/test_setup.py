@@ -464,3 +464,102 @@ def test_setup_init_failure_aborts(tmp_path: Path) -> None:
             skip_wiki=True,
             skip_skill=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression: Bug 1 — launchd must pass the resolved vault_path, not re-derive
+# ---------------------------------------------------------------------------
+
+
+def test_launchd_receives_resolved_vault_path(tmp_path: Path) -> None:
+    """Regression: install_plists must receive the caller-supplied vault_path.
+
+    Before the fix, _maybe_install_launchd called install_main() which
+    re-resolved brain_home from the env and hardcoded ~/brain-vault as the
+    vault path.  A --vault override was silently discarded, so launchd would
+    supervise the wrong vault.
+    """
+    from brain.setup import _maybe_install_launchd
+
+    custom_vault = tmp_path / "custom-vault"
+    brain_home = tmp_path / ".brain"
+    captured: dict[str, object] = {}
+
+    def _fake_install_plists(
+        bh: Path,
+        launchd_dir: Path,
+        launchctl: str = "launchctl",
+        *,
+        vault_path: Path | None = None,
+    ) -> None:
+        captured["vault_path"] = vault_path
+        captured["brain_home"] = bh
+
+    with (
+        patch("brain.bin.launchd.install_plists", side_effect=_fake_install_plists),
+        patch("sys.platform", "darwin"),
+    ):
+        _maybe_install_launchd(
+            wiki_installed=True,
+            vault_path=custom_vault,
+            brain_home=brain_home,
+            dry_run=False,
+        )
+
+    assert captured.get("vault_path") == custom_vault, (
+        f"install_plists must receive vault_path={custom_vault}, "
+        f"got {captured.get('vault_path')}"
+    )
+    assert captured.get("brain_home") == brain_home, (
+        f"install_plists must receive brain_home={brain_home}, "
+        f"got {captured.get('brain_home')}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Regression: Bug 2 — interactive wiki decline must suppress launchd
+# ---------------------------------------------------------------------------
+
+
+def test_launchd_skipped_when_wiki_interactively_declined(tmp_path: Path) -> None:
+    """Regression: user declining wiki via confirm must prevent launchd install.
+
+    Before the fix, _maybe_install_launchd was gated on the --skip-wiki flag,
+    not on whether the wiki was actually installed.  A user answering 'no' to
+    the typer.confirm prompt would still trigger launchd registration against a
+    Quartz workspace that was never created.
+    """
+    from brain.setup import _maybe_install_launchd, _maybe_install_wiki
+
+    install_plists_calls: list[Any] = []
+
+    def _record_install_plists(*args: Any, **kwargs: Any) -> None:
+        install_plists_calls.append((args, kwargs))
+
+    with (
+        patch("typer.confirm", return_value=False),  # user declines wiki
+        patch("brain.bin.launchd.install_plists", side_effect=_record_install_plists),
+        patch("sys.platform", "darwin"),
+    ):
+        wiki_installed = _maybe_install_wiki(
+            skip=False,
+            non_interactive=False,
+            dry_run=False,
+            vault=tmp_path / "vault",
+            brain_home=tmp_path / ".brain",
+            wiki_port=8080,
+        )
+        assert not wiki_installed, (
+            "_maybe_install_wiki must return False when the user declines"
+        )
+
+        _maybe_install_launchd(
+            wiki_installed=wiki_installed,
+            vault_path=tmp_path / "vault",
+            brain_home=tmp_path / ".brain",
+            dry_run=False,
+        )
+
+    assert install_plists_calls == [], (
+        "install_plists must NOT be called when wiki was interactively declined"
+    )
