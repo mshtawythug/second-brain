@@ -137,6 +137,8 @@ from .wiki.build_people import (
     emit_people_pages,
     humanize_display_name,
 )
+from .wiki.install import WikiInstallError
+from .wiki.install import wiki_install as _wiki_install
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +202,13 @@ owner_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(owner_app, name="owner")
+
+wiki_app = typer.Typer(
+    name="wiki",
+    help="Wiki workspace management (Quartz install, Caddyfile rendering).",
+    no_args_is_help=True,
+)
+app.add_typer(wiki_app, name="wiki")
 
 
 @app.callback()
@@ -5193,3 +5202,60 @@ def owner_remove(
     current = [e for e in current if e != norm]
     _owner_write_dotenv(path, current)
     typer.echo(_OWNER_RELINK_HINT)
+
+
+# ---------------------------------------------------------------------------
+# brain wiki — wiki workspace management
+# ---------------------------------------------------------------------------
+
+
+@wiki_app.command("install")
+def wiki_install_cmd(
+    vault: Path | None = typer.Option(
+        None,
+        "--vault",
+        help="Vault path; defaults to $BRAIN_VAULT_PATH or ~/brain-vault.",
+    ),
+    port: int = typer.Option(
+        8080,
+        "--port",
+        help="Caddy listening port written into the Caddyfile template.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Re-clone even if workspace exists (destructive — rmtrees .quartz/).",
+    ),
+    no_npm: bool = typer.Option(
+        False,
+        "--no-npm",
+        help="Skip npm install (useful in tests and offline environments).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print planned actions; touch nothing.",
+    ),
+) -> None:
+    """Install Quartz workspace, apply brain overlay, render Caddyfile.
+
+    On a fresh vault this clones jackyzha0/quartz at the pinned commit,
+    applies the brain overlay (quartz_overrides/), runs ``npm install``,
+    and writes ``$BRAIN_HOME/Caddyfile`` ready for ``caddy run``.
+
+    Re-running on an existing workspace re-applies the overlay and
+    re-renders the Caddyfile without re-cloning.  Use ``--force`` to
+    wipe and re-clone.  Does NOT auto-install Caddy or npm — prints
+    remediation messages if either is missing.
+    """
+    try:
+        _wiki_install(
+            vault=vault,
+            port=port,
+            force=force,
+            no_npm=no_npm,
+            dry_run=dry_run,
+        )
+    except WikiInstallError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
