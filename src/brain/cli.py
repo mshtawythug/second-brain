@@ -225,6 +225,64 @@ def _main() -> None:
     """brain — second brain CLI root."""
 
 
+@app.command("setup")
+def setup_cmd(
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", help="Use defaults for every prompt"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print planned actions; touch nothing"
+    ),
+    brain_home: Path | None = typer.Option(
+        None, "--brain-home", help="Override $BRAIN_HOME (default ~/.brain)"
+    ),
+    vault: Path | None = typer.Option(
+        None, "--vault", help="Override $BRAIN_VAULT_PATH"
+    ),
+    port: int = typer.Option(5433, "--port", help="Postgres host port"),
+    wiki_port: int = typer.Option(8080, "--wiki-port", help="Caddy port for the wiki"),
+    embedder: str | None = typer.Option(
+        None, "--embedder", help="arctic|voyage|qwen3 (non-interactive choice)"
+    ),
+    skip_wiki: bool = typer.Option(False, "--skip-wiki", help="Don't install the wiki UI"),
+    skip_skill: bool = typer.Option(
+        False, "--skip-skill", help="Don't install the Claude Code skill"
+    ),
+    reset: bool = typer.Option(
+        False,
+        "--reset",
+        help="Destructive reset of $BRAIN_HOME (requires typed confirmation)",
+    ),
+) -> None:
+    """One-command installer for the second-brain runtime.
+
+    Sets up $BRAIN_HOME, installs shims, starts Postgres via Docker, and
+    optionally configures the wiki (Caddy + Quartz) and the Claude Code skill.
+
+    Use --dry-run to preview every action without touching the filesystem.
+    Use --reset to wipe an existing $BRAIN_HOME before re-running (typed
+    confirmation required — cannot be bypassed even with --non-interactive).
+    """
+    from .setup import SetupError, run_setup
+
+    try:
+        run_setup(
+            non_interactive=non_interactive,
+            dry_run=dry_run,
+            brain_home_override=brain_home,
+            vault_override=vault,
+            pg_port=port,
+            wiki_port=wiki_port,
+            embedder_choice=embedder,
+            skip_wiki=skip_wiki,
+            skip_skill=skip_skill,
+            reset=reset,
+        )
+    except SetupError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+
 @app.command()
 def init() -> None:
     """Apply database migrations and align embedding column with active embedder.
