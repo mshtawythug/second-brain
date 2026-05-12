@@ -3,18 +3,30 @@
 #
 # Run this inside a fresh Ubuntu 22.04 VM or Docker container AFTER you have:
 #   - installed Docker (the daemon, not just the CLI — `docker info` must work),
-#   - installed Python 3.11+ (apt + deadsnakes or pyenv), AND
+#   - installed Python 3.11+ (apt + deadsnakes or pyenv),
+#   - installed Caddy (`brain setup` refuses to bring the wiki up without it),
 #   - tagged + pushed v0.2.0 (or set BRAIN_INSTALL_REF / BRAIN_INSECURE=1
 #     to test against a branch / commit).
 #
-# Differences from smoke-macos.sh:
-#   - No launchd. The watcher + build daemon are started via `brain-up` in
-#     a background nohup so the rebuild check can verify them.
-#   - The script tears down `brain-down` at the end so re-runs are clean.
-#   - The Claude Code skill step is identical — the skill is OS-agnostic.
+# Important difference from smoke-macos.sh:
+#   `brain-up` is NOT used. Linux has no launchd, and `brain-up`
+#   unconditionally delegates daemon supervision to `brain-install-launchd`
+#   (a macOS-only helper that calls `launchctl bootstrap`). Calling brain-up
+#   on Linux would therefore fail at supervisor install. Instead this script
+#   starts Caddy + watcher + build-watcher itself with `nohup`, tracks the
+#   PIDs, and kills them via an EXIT trap when it finishes. That mirrors the
+#   pre-launchd-era manual bring-up flow exactly.
 #
-# Re-runnable: yes. Cleanup at end stops the daemons but keeps the install.
-# Full reset: `brain uninstall --yes --remove-db --remove-vault && pipx uninstall second-brain`.
+#   This is also why T4.5 is documented as "best-effort": background
+#   supervision on Linux is not yet shipped (systemd-user unit is a v0.2.1+
+#   follow-up). The smoke proves the install path works end-to-end; the
+#   long-lived daemon story still requires the user to run Caddy + the
+#   watchers inside tmux / systemd-user themselves.
+#
+# Re-runnable: yes. The EXIT trap stops the daemons this run started; the
+# install itself is preserved.  Full reset:
+#   brain uninstall --yes --remove-db --remove-vault
+#   pipx uninstall second-brain
 #
 # Env overrides:
 #   BRAIN_INSTALL_REF   (default: v0.2.0)
@@ -26,6 +38,8 @@ set -euo pipefail
 REPO_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
 INSTALL_SH="${INSTALL_SH:-$REPO_ROOT/install.sh}"
 VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
+BRAIN_HOME_DIR="${BRAIN_HOME:-$HOME/.brain}"
+CADDYFILE="$BRAIN_HOME_DIR/Caddyfile"
 WIKI_URL="${WIKI_URL:-http://localhost:8080}"
 SMOKE_NOTE_BASENAME="smoke-$(date +%Y%m%d-%H%M%S).md"
 REBUILD_WAIT_SECONDS="${REBUILD_WAIT_SECONDS:-90}"
@@ -33,7 +47,11 @@ REBUILD_WAIT_SECONDS="${REBUILD_WAIT_SECONDS:-90}"
 PASSED=0
 FAILED=0
 FAILURES=()
-TEARDOWN_DAEMONS=0
+
+# PIDs of daemons we start; killed by the EXIT trap.
+CADDY_PID=""
+WATCH_PID=""
+BUILD_PID=""
 
 _pass() { printf '\033[32m[PASS]\033[0m %s\n' "$*"; PASSED=$((PASSED + 1)); }
 _fail() {
@@ -45,10 +63,13 @@ _info() { printf '\033[36m[..]\033[0m %s\n' "$*"; }
 _section() { printf '\n\033[1m=== %s ===\033[0m\n' "$*"; }
 
 _cleanup() {
-    if (( TEARDOWN_DAEMONS == 1 )); then
-        _info "Tearing down brain daemons (brain-down)"
-        brain-down >/dev/null 2>&1 || true
-    fi
+    local pid
+    for pid in "$CADDY_PID" "$WATCH_PID" "$BUILD_PID"; do
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            _info "Stopping daemon pid=$pid"
+            kill "$pid" 2>/dev/null || true
+        fi
+    done
 }
 trap _cleanup EXIT
 
@@ -80,6 +101,12 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 _pass "Docker daemon reachable"
+
+if ! command -v caddy >/dev/null 2>&1; then
+    _fail "caddy not on PATH. Install it: https://caddyserver.com/docs/install"
+    exit 1
+fi
+_pass "Caddy: $(caddy version 2>/dev/null | head -1)"
 
 FREE_KB="$(df -P "$HOME" | awk 'NR==2 {print $4}')"
 FREE_GB=$(( FREE_KB / 1024 / 1024 ))
@@ -131,39 +158,85 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Step 4 — start daemons via brain-up (no launchd on Linux)
+# Step 4 — bring up Caddy + cold-start build + watchers MANUALLY.
+#
+# Linux has no launchd; we cannot use `brain-up` (it execs
+# brain-install-launchd, which only works on macOS). The pre-launchd
+# `nohup ... &` shape below is exactly what brain-up did before the
+# 2026-05-08 launchd handoff.
 # ---------------------------------------------------------------------------
-_section "4. Start daemons (brain-up — Linux has no launchd)"
+_section "4. Start Caddy + cold-start build + watchers (manual, no launchd)"
 
-if command -v brain-up >/dev/null 2>&1; then
-    _info "Running brain-up to start watcher + build daemons"
-    if brain-up >/tmp/brain-up-smoke.log 2>&1; then
-        TEARDOWN_DAEMONS=1
-        _pass "brain-up completed (see /tmp/brain-up-smoke.log)"
-    else
-        _fail "brain-up failed (see /tmp/brain-up-smoke.log)"
-    fi
-else
-    _fail "brain-up not on PATH (expected via pipx shim dir)"
+if [[ ! -f "$CADDYFILE" ]]; then
+    _fail "Caddyfile missing at $CADDYFILE — did brain setup --skip-wiki run?"
+    exit 1
 fi
 
-_info "Waiting 5s for daemons to settle…"
-sleep 5
+# 4a. Apply the Quartz overlay (no build — we cold-start below).
+if ! brain vault render --overlay --no-build --vault "$VAULT" \
+        >/tmp/brain-overlay-smoke.log 2>&1; then
+    _fail "Quartz overlay apply failed (see /tmp/brain-overlay-smoke.log)"
+else
+    _pass "Quartz overlay applied"
+fi
 
-if command -v brain-status >/dev/null 2>&1; then
-    STATUS_OUT="$(brain-status 2>&1 || true)"
-    echo "$STATUS_OUT"
-    if echo "$STATUS_OUT" | grep -q 'running'; then
-        _pass "brain-status reports at least one daemon running"
-    else
-        _fail "brain-status shows no daemons running"
-    fi
+# 4b. Cold-start build (synchronous): ensures <vault>/.quartz/current
+# resolves to a real build before we curl the wiki.
+_info "Cold-start build (python -m brain.wiki.build_swap) — first run can take ~60s"
+if BRAIN_WIKI_RELOAD=1 python3 -m brain.wiki.build_swap \
+        --vault "$VAULT" --keep 3 >/tmp/brain-build-swap-smoke.log 2>&1; then
+    _pass "Cold-start build succeeded"
+else
+    _fail "Cold-start build failed (see /tmp/brain-build-swap-smoke.log)"
+    exit 1
+fi
+
+# 4c. Start Caddy in background.
+_info "Starting Caddy in background"
+nohup caddy run --config "$CADDYFILE" >/tmp/brain-caddy-smoke.log 2>&1 &
+CADDY_PID=$!
+sleep 2
+if kill -0 "$CADDY_PID" 2>/dev/null; then
+    _pass "Caddy running (pid=$CADDY_PID)"
+else
+    _fail "Caddy died on startup (see /tmp/brain-caddy-smoke.log)"
+    CADDY_PID=""
+fi
+
+# 4d. Start vault sync watcher in background.
+_info "Starting vault sync watcher in background"
+nohup brain vault sync --watch --vault "$VAULT" \
+        >/tmp/brain-watch-smoke.log 2>&1 &
+WATCH_PID=$!
+sleep 2
+if kill -0 "$WATCH_PID" 2>/dev/null; then
+    _pass "Vault sync watcher running (pid=$WATCH_PID)"
+else
+    _fail "Vault sync watcher died (see /tmp/brain-watch-smoke.log)"
+    WATCH_PID=""
+fi
+
+# 4e. Start build watcher in background.
+_info "Starting build watcher in background"
+nohup python3 -m brain.wiki.build_watcher \
+        --vault "$VAULT" --keep 3 \
+        >/tmp/brain-build-watcher-smoke.log 2>&1 &
+BUILD_PID=$!
+sleep 2
+if kill -0 "$BUILD_PID" 2>/dev/null; then
+    _pass "Build watcher running (pid=$BUILD_PID)"
+else
+    _fail "Build watcher died (see /tmp/brain-build-watcher-smoke.log)"
+    BUILD_PID=""
 fi
 
 # ---------------------------------------------------------------------------
 # Step 5 — wiki HTTP probe
 # ---------------------------------------------------------------------------
 _section "5. Wiki at $WIKI_URL"
+
+# Caddy needs a moment to bind after process spawn.
+sleep 3
 
 HTTP_CODE="$(curl -s -o /tmp/brain-smoke-wiki.html -w '%{http_code}' "$WIKI_URL" || echo 000)"
 if [[ "$HTTP_CODE" == "200" ]]; then
@@ -260,12 +333,13 @@ Manual step that cannot be automated:
   Confirm Claude invokes `brain search` via the skill.
   (If you skipped the skill above: run `brain claude install-skill` first.)
 
-Known Linux gaps (document in plan if any reproduce):
-  - No launchd supervision — the script started daemons via brain-up.
-    For a long-lived install, run brain-up inside a tmux/systemd-user
-    unit, or contribute a systemd-user template (post-v0.2.0 follow-up).
-  - Caddy must be installed manually (apt install caddy or the official repo).
-    brain setup refuses with remediation if Caddy is missing.
+Known Linux gaps:
+  - No launchd → no auto-supervision. This script started Caddy + the two
+    watchers in background and will tear them down on exit. For a real
+    long-lived install on Linux, run Caddy + `brain vault sync --watch` +
+    `python -m brain.wiki.build_watcher` inside tmux panes or a
+    systemd-user unit. A first-class systemd-user template is a
+    post-v0.2.0 follow-up.
 
 To clean up the install entirely:
   brain uninstall --yes --remove-db --remove-vault
