@@ -12,9 +12,8 @@
 # Env contract:
 #   BRAIN_VAULT_PATH        (default: $HOME/brain-vault) — passed to `--vault`.
 #   BRAIN_WIKI_KEEP_BUILDS  (default: 3) — old build dirs retained per swap.
-#   The wrapper sets BRAIN_WIKI_RELOAD=1 + PYTHONPATH=<project>/src itself,
-#   matching the bin/brain-up invocation, so the LaunchAgent plist doesn't
-#   have to know about either.
+#   The wrapper sets BRAIN_WIKI_RELOAD=1 itself, matching the bin/brain-up
+#   invocation, so the LaunchAgent plist doesn't have to know about it.
 
 set -euo pipefail
 
@@ -22,24 +21,22 @@ VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
 KEEP="${BRAIN_WIKI_KEEP_BUILDS:-3}"
 BUILD_PID='/tmp/brain-build.pid'
 
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
-VENV_PY="$PROJECT_ROOT/.venv/bin/python"
-SRC_DIR="$PROJECT_ROOT/src"
-
-# `BRAIN_PY` env override mirrors `bin/brain-up` so the bin-script test
-# harness can plug in a stub interpreter without symlinking.
+# Pick the Python interpreter once. BRAIN_PY (env var) wins; otherwise
+# prefer python3 on PATH. The installed-shim flow (in $BRAIN_HOME/bin/)
+# always has BRAIN_PY exported by the Python launcher in
+# src/brain/bin/_launcher.py — but we keep the python3 fallback for
+# users who invoke the shims directly outside the launcher (e.g. via
+# launchd plists that themselves set PATH but not BRAIN_PY).
 if [[ -n "${BRAIN_PY:-}" ]]; then
     PY="$BRAIN_PY"
-elif [[ -x "$VENV_PY" ]]; then
-    PY="$VENV_PY"
+elif command -v python3 >/dev/null 2>&1; then
+    PY="$(command -v python3)"
 else
-    echo "no python interpreter found at $VENV_PY (set BRAIN_PY=… to override)" >&2
+    echo "no python interpreter found (set BRAIN_PY=… to override)" >&2
     exit 1
 fi
 
 export BRAIN_WIKI_RELOAD=1
-export PYTHONPATH="$SRC_DIR"
 
 echo "$$" >"$BUILD_PID"
 exec "$PY" -m brain.wiki.build_watcher --vault "$VAULT" --keep "$KEEP"

@@ -1,6 +1,6 @@
 """Regression tests for pyproject.toml package-data declarations for brain.templates.
 
-Guards four properties:
+Guards five properties:
 1. All four ``__init__.py`` marker files are present so importlib.resources
    can resolve template sub-packages in pipx-installed wheels.
 2. Every file extension present in the actual templates tree is covered by a
@@ -10,6 +10,9 @@ Guards four properties:
    loadable end-to-end, and a known file is readable from each.
 4. No broad ``'**/*'`` or bare ``'*'`` globs appear in brain.templates*
    package-data patterns (mirrors the quartz_overrides defensive regression).
+5. The dev-checkout copies of the internal ``_brain-*-fg`` launchd helpers
+   stay byte-identical to their packaged templates — the two-source drift
+   that previously slipped past T1.8's user-facing-wrapper audit.
 """
 import importlib.resources
 import tomllib
@@ -169,3 +172,39 @@ def test_no_broad_template_glob() -> None:
         "brain.templates* package-data must not use bare '*' — "
         "use explicit extension patterns"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — internal _brain-*-fg helpers stay in sync with their templates
+# ---------------------------------------------------------------------------
+
+# Pairs the dev-checkout launchd helper with its packaged template.  The two
+# files MUST be byte-identical: pipx-installed users execute the template
+# (materialised into ``$BRAIN_HOME/.shims/``) while dev-checkout users execute
+# the ``bin/`` copy directly under launchd.  Any divergence means the two
+# install paths run different code — exactly the drift that earlier T1.8/T1.9
+# audits missed because these helpers are leading-underscore "internal" and
+# weren't on the user-facing wrapper list.
+_FG_HELPER_PAIRS = [
+    ("_brain-build-fg", "_brain-build-fg.sh"),
+    ("_brain-watcher-fg", "_brain-watcher-fg.sh"),
+]
+
+
+def test_fg_helpers_match_packaged_templates() -> None:
+    """Every dev-checkout ``bin/_brain-*-fg`` is byte-identical to its template."""
+    bin_dir = REPO_ROOT / "bin"
+    tpl_dir = BRAIN_TEMPLATES / "bin"
+    for dev_name, tpl_name in _FG_HELPER_PAIRS:
+        dev_path = bin_dir / dev_name
+        tpl_path = tpl_dir / tpl_name
+        assert dev_path.is_file(), f"missing dev-checkout helper: {dev_path}"
+        assert tpl_path.is_file(), f"missing packaged template: {tpl_path}"
+        dev_bytes = dev_path.read_bytes()
+        tpl_bytes = tpl_path.read_bytes()
+        assert dev_bytes == tpl_bytes, (
+            f"bin/{dev_name} has drifted from src/brain/templates/bin/{tpl_name}.\n"
+            f"Both files MUST stay byte-identical so pipx-installed and "
+            f"dev-checkout launchd flows execute the same code. Re-sync them "
+            f"(usually `cp src/brain/templates/bin/{tpl_name} bin/{dev_name}`)."
+        )

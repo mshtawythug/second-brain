@@ -24,10 +24,9 @@
 #
 # Env contract:
 #   BRAIN_VAULT_PATH  (default: $HOME/brain-vault) — passed to `--vault`.
-#   PATH must include the project venv's bin so `brain` resolves; the
-#   LaunchAgent plist's EnvironmentVariables block sets this explicitly,
-#   but we also prepend the venv ourselves as belt + suspenders for
-#   manual invocation outside launchd.
+#   PATH must include the pipx bin dir (or wherever `brain` is installed)
+#   so `brain` resolves; the LaunchAgent plist's EnvironmentVariables block
+#   sets this explicitly.
 
 set -euo pipefail
 
@@ -41,13 +40,14 @@ VENV_BIN="$PROJECT_ROOT/.venv/bin"
 # silently prepending the developer's real `.venv/bin` (and thus the real
 # `brain`) ahead of the test stub on PATH. Same shape as the BRAIN_PY
 # override in `bin/brain-up`. In production the variable is unset and the
-# venv prepend just works.
+# venv prepend just works (for dev-checkout users with a local .venv;
+# pipx-installed users have brain on PATH via the launchd plist already).
 if [[ "${BRAIN_SKIP_VENV_AUTOLOAD:-0}" != "1" && -d "$VENV_BIN" ]]; then
     export PATH="$VENV_BIN:$PATH"
 fi
 
 if ! command -v brain >/dev/null 2>&1; then
-    echo "brain CLI not on PATH (project venv expected at $VENV_BIN)" >&2
+    echo "brain CLI not on PATH (expected via launchd PATH or local .venv)" >&2
     exit 1
 fi
 
