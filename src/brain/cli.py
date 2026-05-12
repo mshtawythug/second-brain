@@ -48,6 +48,8 @@ from .errors import (
 
 if TYPE_CHECKING:
     from .enrichment import OllamaEnricher
+from .cli_claude import SkillInstallError
+from .cli_claude import install_skill as _install_skill
 from .eval import (
     EvalBaselineError,
     EvalCorpusError,
@@ -209,6 +211,13 @@ wiki_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(wiki_app, name="wiki")
+
+claude_app = typer.Typer(
+    name="claude",
+    help="Claude Code integration.",
+    no_args_is_help=True,
+)
+app.add_typer(claude_app, name="claude")
 
 
 @app.callback()
@@ -5257,5 +5266,49 @@ def wiki_install_cmd(
             dry_run=dry_run,
         )
     except WikiInstallError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+
+# ---------------------------------------------------------------------------
+# brain claude — Claude Code integration
+# ---------------------------------------------------------------------------
+
+
+@claude_app.command("install-skill")
+def claude_install_skill_cmd(
+    target: Path | None = typer.Option(
+        None,
+        "--target",
+        help=(
+            "Override target root (default ~/.claude/skills); "
+            "installs to <target>/brain/SKILL.md"
+        ),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite differing target without prompting.",
+    ),
+    uninstall: bool = typer.Option(
+        False,
+        "--uninstall",
+        help="Remove the skill and its directory if empty.",
+    ),
+) -> None:
+    """Install (or uninstall) the brain Claude Code skill.
+
+    Copies the packaged SKILL.md to ``~/.claude/skills/brain/SKILL.md`` so a
+    fresh Claude Code conversation knows about the ``brain`` CLI.  The install
+    is idempotent: if the target already has identical bytes it prints "skill
+    up to date" and exits 0.  When the target exists but differs, the command
+    prompts for confirmation unless ``--force`` is given.
+
+    ``--uninstall`` removes the file and the ``brain/`` directory (only if it
+    is empty; never ``rm -rf``).
+    """
+    try:
+        _install_skill(target_root=target, force=force, uninstall=uninstall)
+    except SkillInstallError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(code=1) from exc
