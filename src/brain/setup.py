@@ -13,7 +13,7 @@ import typer
 
 from ._compose import compose_cmd
 from .bin._launcher import ensure_shim
-from .config import _brain_home_root
+from .config import DEFAULT_VAULT_PATH, _brain_home_root
 from .errors import BrainError
 from .vault._atomic import atomic_write_text
 from .wiki import QUARTZ_PINNED_COMMIT, QUARTZ_REPO_URL
@@ -304,6 +304,160 @@ def _perform_action(label: str, fn: object, dry_run: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# T3.5 — brain init + doctor
+# ---------------------------------------------------------------------------
+
+
+def _run_brain_init(dry_run: bool) -> None:
+    """Run `brain init` to apply migrations + reconcile chunks.embedding dim."""
+    if dry_run:
+        typer.echo("[dry-run] would: brain init")
+        return
+    typer.echo("Running brain init …")
+    result = subprocess.run(
+        [sys.executable, "-m", "brain", "init"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SetupError("brain init failed — see output above")
+
+
+def _run_brain_doctor(dry_run: bool) -> None:
+    """Run `brain doctor` and surface non-zero exit as a setup failure."""
+    if dry_run:
+        typer.echo("[dry-run] would: brain doctor")
+        return
+    typer.echo("Running brain doctor …")
+    result = subprocess.run(
+        [sys.executable, "-m", "brain", "doctor"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SetupError(
+            "brain doctor reported issues — fix them and re-run `brain setup`"
+        )
+
+
+# ---------------------------------------------------------------------------
+# T3.6 — interactive wiki + skill installs
+# ---------------------------------------------------------------------------
+
+
+def _maybe_install_wiki(
+    skip: bool,
+    non_interactive: bool,
+    dry_run: bool,
+    vault: Path,
+    brain_home: Path,
+    wiki_port: int,
+) -> None:
+    """Prompt for (and optionally perform) the wiki sub-install."""
+    if skip:
+        typer.echo("[skipped] wiki install (--skip-wiki)")
+        return
+    if non_interactive:
+        do_install = True
+    else:
+        do_install = typer.confirm(
+            "Install the wiki UI? Adds ~150 MB of node_modules.",
+            default=True,
+        )
+    if not do_install:
+        typer.echo("[skipped] wiki install (user declined)")
+        return
+    if dry_run:
+        typer.echo(
+            f"[dry-run] would: brain wiki install --vault {vault} --port {wiki_port}"
+        )
+        return
+    from .wiki.install import wiki_install
+
+    wiki_install(vault=vault, port=wiki_port)
+
+
+def _maybe_install_skill(
+    skip: bool,
+    non_interactive: bool,
+    dry_run: bool,
+) -> None:
+    """Prompt for (and optionally perform) the Claude Code skill sub-install."""
+    if skip:
+        typer.echo("[skipped] Claude Code skill (--skip-skill)")
+        return
+    if non_interactive:
+        do_install = True
+    else:
+        do_install = typer.confirm(
+            "Install the Claude Code skill at ~/.claude/skills/brain/SKILL.md?",
+            default=True,
+        )
+    if not do_install:
+        typer.echo("[skipped] Claude Code skill (user declined)")
+        return
+    if dry_run:
+        typer.echo("[dry-run] would: brain claude install-skill")
+        return
+    from .cli_claude import install_skill
+
+    install_skill()
+
+
+# ---------------------------------------------------------------------------
+# T3.7 — launchd install (LAST, after all prereqs pass)
+# ---------------------------------------------------------------------------
+
+
+def _maybe_install_launchd(skip_wiki: bool, dry_run: bool) -> None:
+    """Install launchd plists ONLY after every prereq passed.
+
+    Runs LAST so DB + wiki are healthy before supervisors start.
+    Skipped entirely when --skip-wiki was set (no wiki to supervise) or
+    when not on macOS.
+    """
+    if skip_wiki:
+        typer.echo("[skipped] launchd install (--skip-wiki, no wiki to supervise)")
+        return
+    if sys.platform != "darwin":
+        typer.echo("[skipped] launchd install (not macOS)")
+        return
+    if dry_run:
+        typer.echo("[dry-run] would: brain-install-launchd")
+        return
+    from .bin.launchd import install_main
+
+    install_main()
+
+
+# ---------------------------------------------------------------------------
+# T3.8 — final report
+# ---------------------------------------------------------------------------
+
+
+def _print_final_report(
+    brain_home: Path,
+    vault: Path,
+    wiki_port: int,
+    skip_wiki: bool,
+    skip_skill: bool,
+) -> None:
+    """Print the closing banner matching brain-up's visual style."""
+    typer.echo("")
+    typer.echo("🧠 brain setup complete:")
+    typer.echo(f"   brain_home: {brain_home}")
+    typer.echo(f"   vault:      {vault}")
+    if not skip_wiki:
+        typer.echo(f"   wiki url:   http://localhost:{wiki_port}")
+        typer.echo(f"   start wiki: caddy run --config {brain_home}/Caddyfile")
+    if not skip_skill:
+        typer.echo("   skill:      ~/.claude/skills/brain/SKILL.md")
+    typer.echo("")
+    typer.echo("   next steps:")
+    typer.echo("     brain ingest <path>            # ingest a file or directory")
+    typer.echo('     brain search "..."             # query the corpus')
+    typer.echo("     brain doctor                   # re-check health")
+
+
+# ---------------------------------------------------------------------------
 # Public orchestrator
 # ---------------------------------------------------------------------------
 
@@ -329,12 +483,9 @@ def run_setup(
     ``--non-interactive`` mode the confirmation prompt cannot be bypassed;
     the only valid input is the exact string ``"yes, delete my data"``.
 
-    T3.5-T3.8 (brain init / doctor, interactive wiki + skill installs,
-    launchd, final report) are stubbed and will be added in the
-    follow-on dispatch.
     """
     # ------------------------------------------------------------------
-    # Resolve $BRAIN_HOME and $BRAIN_VAULT_PATH
+    # Resolve $BRAIN_HOME and vault path
     # ------------------------------------------------------------------
     if brain_home_override is not None:
         brain_home: Path = brain_home_override
@@ -343,13 +494,13 @@ def run_setup(
     else:
         brain_home = _brain_home_root()
 
-    # Resolve vault path: --vault arg > $BRAIN_VAULT_PATH env > None (use
-    # the template default ~/brain-vault when None).
-    vault_path: Path | None = None
+    # Vault: explicit override > env var > DEFAULT_VAULT_PATH.
     if vault_override is not None:
-        vault_path = vault_override
+        vault_path: Path = vault_override
     elif os.environ.get("BRAIN_VAULT_PATH"):
         vault_path = Path(os.environ["BRAIN_VAULT_PATH"]).expanduser()
+    else:
+        vault_path = DEFAULT_VAULT_PATH
 
     # ------------------------------------------------------------------
     # T3.1 — Reset handling (DESTRUCTIVE; typed confirmation required)
@@ -561,16 +712,42 @@ def run_setup(
         _perform_action(f"ollama pull {model}", _ollama_pull, dry_run)
 
     # ------------------------------------------------------------------
-    # T3.5-T3.8 stubs — follow-on dispatch
+    # T3.5 — brain init + doctor
     # ------------------------------------------------------------------
-    # T3.5: brain init (apply migrations, align embedding column) + brain doctor
-    # T3.6: interactive wiki install (brain wiki install) + skill install
-    # T3.7: launchd install (brain bin launchd install)
-    # T3.8: final report (vault path, wiki URL, next-step commands)
+    typer.echo("\n── Database initialisation ────────────────────────")
+    _run_brain_init(dry_run)
+    _run_brain_doctor(dry_run)
 
-    typer.echo(
-        "\n── Setup complete ─────────────────────────────────\n"
-        "  Postgres is running. Next steps (T3.5-T3.8 pending):\n"
-        "    brain init    — apply migrations and align embedding column\n"
-        "    brain doctor  — verify the full runtime health\n"
+    # ------------------------------------------------------------------
+    # T3.6 — interactive sub-installs (wiki + Claude Code skill)
+    # ------------------------------------------------------------------
+    typer.echo("\n── Optional components ────────────────────────────")
+    _maybe_install_wiki(
+        skip=skip_wiki,
+        non_interactive=non_interactive,
+        dry_run=dry_run,
+        vault=vault_path,
+        brain_home=brain_home,
+        wiki_port=wiki_port,
+    )
+    _maybe_install_skill(
+        skip=skip_skill,
+        non_interactive=non_interactive,
+        dry_run=dry_run,
+    )
+
+    # ------------------------------------------------------------------
+    # T3.7 — launchd install LAST (after DB + wiki are healthy)
+    # ------------------------------------------------------------------
+    _maybe_install_launchd(skip_wiki=skip_wiki, dry_run=dry_run)
+
+    # ------------------------------------------------------------------
+    # T3.8 — final report
+    # ------------------------------------------------------------------
+    _print_final_report(
+        brain_home=brain_home,
+        vault=vault_path,
+        wiki_port=wiki_port,
+        skip_wiki=skip_wiki,
+        skip_skill=skip_skill,
     )

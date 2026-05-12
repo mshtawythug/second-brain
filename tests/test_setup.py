@@ -8,6 +8,9 @@ Three cases:
 """
 from __future__ import annotations
 
+import io
+import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -224,3 +227,240 @@ def test_setup_vault_override_appended_to_existing_env(tmp_path: Path) -> None:
     assert f"BRAIN_VAULT_PATH={vault}" in env_text, (
         f"BRAIN_VAULT_PATH={vault} not appended to existing .env:\n{env_text}"
     )
+
+
+# ---------------------------------------------------------------------------
+# T3.9 tests — T3.5-T3.8 behaviour
+# ---------------------------------------------------------------------------
+
+
+def _dry_run_output(
+    tmp_path: Path,
+    *,
+    skip_wiki: bool = True,
+    skip_skill: bool = True,
+    vault_override: Path | None = None,
+    pg_port: int = 0,
+    wiki_port: int = 0,
+    which_returns: str | None = "/usr/bin/fake",
+) -> str:
+    """Run setup in dry-run + non-interactive mode; return stdout as a string.
+
+    Uses redirect_stdout so typer.echo() output is captured directly without
+    patching click internals (which are already bound at import time).
+    Stderr (typer.secho(..., err=True)) is NOT captured — tests that need stderr
+    should use capsys directly instead of this helper.
+
+    Both pg_port and wiki_port default to 0 so the socket.bind probe always
+    succeeds regardless of what's running on the developer's machine.
+    """
+    brain_home = tmp_path / ".brain"
+    _vault = vault_override or (tmp_path / "vault")
+    buf = io.StringIO()
+
+    with (
+        patch("shutil.which", return_value=which_returns),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+        redirect_stdout(buf),
+    ):
+        from brain.setup import run_setup
+
+        run_setup(
+            dry_run=True,
+            non_interactive=True,
+            brain_home_override=brain_home,
+            vault_override=_vault,
+            pg_port=pg_port,
+            wiki_port=wiki_port,
+            skip_wiki=skip_wiki,
+            skip_skill=skip_skill,
+        )
+
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — idempotent second run (dry-run, no state changes)
+# ---------------------------------------------------------------------------
+
+
+def test_setup_idempotent_second_run(tmp_path: Path) -> None:
+    """Calling run_setup twice with dry_run=True must not error and produce matching output."""
+    vault = tmp_path / "vault"
+
+    def _one_run() -> str:
+        return _dry_run_output(tmp_path / "run", vault_override=vault)
+
+    out1 = _one_run()
+    out2 = _one_run()
+
+    # Neither call should raise.  If they both returned, they didn't error.
+    # The output doesn't have to be byte-for-byte identical (e.g. paths could
+    # differ on tmp_path), but both must contain the closing 🧠 banner line.
+    assert "brain setup complete" in out1, f"first run missing banner:\n{out1}"
+    assert "brain setup complete" in out2, f"second run missing banner:\n{out2}"
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — caddy preflight only fails when wiki is enabled
+# ---------------------------------------------------------------------------
+
+
+def test_setup_preflight_caddy_missing_only_when_wiki_enabled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """caddy check must be skipped with --skip-wiki and fail without it."""
+    brain_home = tmp_path / ".brain"
+
+    def _which_no_caddy(name: str) -> str | None:
+        if name == "caddy":
+            return None
+        return f"/usr/bin/{name}"
+
+    # --- skip_wiki=True: caddy check is bypassed; setup succeeds ---
+    with (
+        patch("shutil.which", side_effect=_which_no_caddy),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+    ):
+        from brain.setup import run_setup
+
+        # Should NOT raise
+        run_setup(
+            dry_run=True,
+            non_interactive=True,
+            brain_home_override=brain_home,
+            vault_override=tmp_path / "vault",
+            pg_port=0,
+            skip_wiki=True,
+            skip_skill=True,
+        )
+
+    # --- skip_wiki=False: caddy check runs and fails ---
+    with (
+        pytest.raises((typer.Exit, SystemExit)) as exc_info,
+        patch("shutil.which", side_effect=_which_no_caddy),
+    ):
+        run_setup(
+            dry_run=True,
+            non_interactive=True,
+            brain_home_override=brain_home,
+            vault_override=tmp_path / "vault",
+            pg_port=0,
+            wiki_port=0,
+            skip_wiki=False,
+            skip_skill=True,
+        )
+
+    assert _exit_code(exc_info.value) != 0, (
+        "setup must exit non-zero when caddy is missing and --skip-wiki is not set"
+    )
+    captured = capsys.readouterr()
+    assert "caddy" in (captured.out + captured.err).lower(), (
+        "output must mention 'caddy' when the caddy check fails"
+    )
+    assert "remediation" in (captured.out + captured.err).lower(), (
+        "output must include remediation hint for missing caddy"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — launchd gating by --skip-wiki
+# ---------------------------------------------------------------------------
+
+
+def test_setup_launchd_skipped_when_skip_wiki(tmp_path: Path) -> None:
+    """With --skip-wiki the launchd-skip line appears; without it the dry-run line appears."""
+    # skip_wiki=True → launchd entirely skipped
+    out_skipped = _dry_run_output(tmp_path / "skip", skip_wiki=True)
+    assert "launchd" in out_skipped.lower(), (
+        "expected launchd mention when --skip-wiki"
+    )
+    assert "--skip-wiki" in out_skipped or "no wiki to supervise" in out_skipped, (
+        "expected --skip-wiki rationale in launchd skip message"
+    )
+
+    # skip_wiki=False → launchd either dry-runs (macOS) or reports not-macOS
+    out_enabled = _dry_run_output(tmp_path / "enabled", skip_wiki=False)
+    assert "launchd" in out_enabled.lower(), (
+        "expected launchd mention when wiki is enabled"
+    )
+    if sys.platform == "darwin":
+        assert "brain-install-launchd" in out_enabled, (
+            "expected dry-run launchd line on macOS"
+        )
+    else:
+        assert "not macos" in out_enabled.lower(), (
+            "expected 'not macOS' skip message on Linux"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 9 — --skip-skill prevents skill install
+# ---------------------------------------------------------------------------
+
+
+def test_setup_skill_install_skipped_via_flag(tmp_path: Path) -> None:
+    """--skip-skill must print the skip message and never call install_skill."""
+    install_skill_calls: list[Any] = []
+
+    with patch(
+        "brain.cli_claude.install_skill",
+        side_effect=lambda **kw: install_skill_calls.append(kw),
+    ):
+        out = _dry_run_output(tmp_path, skip_skill=True, skip_wiki=True)
+
+    assert "skip" in out.lower() and "skill" in out.lower(), (
+        f"expected skill-skip message in output:\n{out}"
+    )
+    assert install_skill_calls == [], (
+        "install_skill must not be called when --skip-skill is set"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 10 — brain init failure aborts with SetupError
+# ---------------------------------------------------------------------------
+
+
+def test_setup_init_failure_aborts(tmp_path: Path) -> None:
+    """If brain init exits non-zero, run_setup must raise SetupError."""
+    from brain.setup import SetupError
+
+    brain_home = tmp_path / ".brain"
+
+    def _smart_subprocess_run(*args: Any, **kwargs: Any) -> MagicMock:
+        cmd = args[0] if args else kwargs.get("args", [])
+        m = MagicMock()
+        # Detect the `brain init` invocation: [sys.executable, "-m", "brain", "init"]
+        is_brain_init = (
+            isinstance(cmd, list)
+            and len(cmd) >= 4
+            and cmd[-1] == "init"
+            and "-m" in cmd
+            and "brain" in cmd
+        )
+        m.returncode = 1 if is_brain_init else 0
+        m.stdout = ""
+        m.stderr = ""
+        return m
+
+    with (
+        pytest.raises(SetupError, match="brain init failed"),
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", side_effect=_smart_subprocess_run),
+        patch("brain.setup.ensure_shim"),
+    ):
+        from brain.setup import run_setup
+
+        run_setup(
+            dry_run=False,
+            non_interactive=True,
+            brain_home_override=brain_home,
+            vault_override=tmp_path / "vault",
+            # embedder_choice=None → defaults to arctic; ollama pull is also
+            # intercepted by _smart_subprocess_run (returns 0).
+            # pg_port=0 makes the socket.bind probe always succeed.
+            pg_port=0,
+            skip_wiki=True,
+            skip_skill=True,
+        )
