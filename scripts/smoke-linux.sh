@@ -177,19 +177,63 @@ if [[ ! -f "$CADDYFILE" ]]; then
     exit 1
 fi
 
-# Derive the pipx-managed Python from `brain`'s shebang. `brain` is a
-# pipx-installed console script whose first line is e.g.
-#   #!/home/user/.local/share/pipx/venvs/second-brain/bin/python
-# That interpreter has `brain` (and its deps) installed; system python3
-# does NOT, so `python3 -m brain.wiki.*` would fail with ModuleNotFoundError.
-BRAIN_BIN_PATH="$(command -v brain)"
-if [[ -z "$BRAIN_BIN_PATH" ]]; then
-    _fail "brain not on PATH — install.sh must have failed"
-    exit 1
-fi
-BRAIN_PY="$(head -1 "$BRAIN_BIN_PATH" | sed 's/^#!//;s/[[:space:]].*//')"
-if [[ -z "$BRAIN_PY" || ! -x "$BRAIN_PY" ]]; then
-    _fail "Could not resolve pipx Python from $BRAIN_BIN_PATH shebang (got: '$BRAIN_PY')"
+# Resolve the pipx-managed Python interpreter where `brain` is installed.
+# System python3 does NOT have the brain package, so `python3 -m brain.wiki.*`
+# would fail with ModuleNotFoundError.
+#
+# Two paths:
+#   1. Preferred — `pipx environment --value PIPX_LOCAL_VENVS` returns the
+#      venvs dir; the interpreter lives at <venvs>/second-brain/bin/python.
+#      This is robust across pipx versions and across pip's long-shebang
+#      workaround.
+#   2. Fallback — parse the shebang on the `brain` console script. ONLY
+#      trust shebangs that point at a python interpreter; pip/setuptools
+#      falls back to a `#!/bin/sh` shebang on systems where the venv path
+#      exceeds the Linux 128-byte BINPRM_BUF_SIZE limit (the actual Python
+#      invocation is then embedded inside the script body). A naive
+#      `head -1 | sed` would extract `/bin/sh` and try to run
+#      `/bin/sh -m brain.wiki.build_swap`, which fails opaquely.
+#
+# We also sanity-check the result: must be executable AND must report
+# `Python 3.x` from --version, otherwise we abort.
+resolve_pipx_python() {
+    local py=""
+
+    if command -v pipx >/dev/null 2>&1; then
+        local venvs
+        venvs="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
+        if [[ -n "$venvs" && -x "$venvs/second-brain/bin/python" ]]; then
+            py="$venvs/second-brain/bin/python"
+        fi
+    fi
+
+    if [[ -z "$py" ]]; then
+        local brain_bin shebang
+        brain_bin="$(command -v brain)"
+        [[ -z "$brain_bin" ]] && return 1
+        shebang="$(head -1 "$brain_bin" | sed 's/^#!//;s/[[:space:]].*//')"
+        case "$shebang" in
+            */python|*/python3|*/python3.[0-9]|*/python3.[0-9][0-9])
+                py="$shebang"
+                ;;
+            *)
+                # /bin/sh long-shebang trick, empty, or junk — bail.
+                return 1
+                ;;
+        esac
+    fi
+
+    [[ -x "$py" ]] || return 1
+    "$py" --version 2>&1 | grep -qE '^Python 3\.' || return 1
+    printf '%s\n' "$py"
+}
+
+if ! BRAIN_PY="$(resolve_pipx_python)"; then
+    _fail "Could not resolve the pipx-managed Python for second-brain.
+       Tried: 'pipx environment --value PIPX_LOCAL_VENVS' then 'brain'
+       shebang. If pipx put the venv in a path >128 bytes the shebang
+       fallback is /bin/sh — ensure 'pipx' is on PATH so the preferred
+       lookup succeeds."
     exit 1
 fi
 _pass "Resolved pipx Python: $BRAIN_PY"
@@ -363,7 +407,7 @@ Known Linux gaps:
     long-lived install on Linux, run Caddy + `brain vault sync --watch` +
     `<pipx-venv-python> -m brain.wiki.build_watcher` inside tmux panes or
     a systemd-user unit. Find the pipx Python with:
-        head -1 "$(command -v brain)" | sed 's|^#!||'
+        echo "$(pipx environment --value PIPX_LOCAL_VENVS)/second-brain/bin/python"
     A first-class systemd-user template is a post-v0.2.0 follow-up.
 
 To clean up the install entirely:
