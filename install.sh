@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # install.sh — one-liner installer for second-brain / brain CLI.
-# Usage: curl -fsSL https://raw.githubusercontent.com/<user>/second-brain/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/mshtawythug/second-brain/main/install.sh | bash
 # Env overrides: BRAIN_INSTALL_REF  BRAIN_REPO  BRAIN_INSECURE  BRAIN_INSTALL_SH_DRY_RUN
 set -euo pipefail
 
 BRAIN_INSTALL_REF="${BRAIN_INSTALL_REF:-v0.2.0}"
-BRAIN_REPO="${BRAIN_REPO:-https://github.com/<your-github-username>/second-brain.git}"
+BRAIN_REPO="${BRAIN_REPO:-https://github.com/mshtawythug/second-brain.git}"
 BRAIN_INSECURE="${BRAIN_INSECURE:-0}"
 DRY="${BRAIN_INSTALL_SH_DRY_RUN:-0}"
 
@@ -50,6 +50,8 @@ ensure_pipx() {
 }
 
 install_brain() {
+  [[ "$BRAIN_REPO" == *"<"* ]] && \
+    _fail "BRAIN_REPO still contains a placeholder. Set BRAIN_REPO=https://github.com/<your-fork>/second-brain.git"
   [[ "$BRAIN_INSTALL_REF" != v* ]] && [[ "$BRAIN_INSECURE" != "1" ]] && \
     _fail "Installing from non-tag refs is opt-in. Set BRAIN_INSECURE=1 to override."
   [[ "$DRY" == "1" ]] && { _ok "brain install [dry-run] ref=${BRAIN_INSTALL_REF}"; return; }

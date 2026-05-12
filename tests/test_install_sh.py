@@ -127,3 +127,53 @@ def test_install_sh_under_100_lines() -> None:
     assert len(lines) < 100, (
         f"install.sh must be under 100 lines (currently {len(lines)})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — default BRAIN_REPO is a real URL (no placeholder angle brackets)
+# ---------------------------------------------------------------------------
+
+
+def test_install_sh_default_repo_has_no_placeholder() -> None:
+    """The default BRAIN_REPO must not contain literal '<' angle brackets."""
+    text = INSTALL_SH.read_text()
+    # Extract the default value from the BRAIN_REPO line.
+    for line in text.splitlines():
+        if line.startswith("BRAIN_REPO="):
+            # Should NOT contain a placeholder like <your-github-username>
+            assert "<" not in line, (
+                f"BRAIN_REPO default still contains a placeholder: {line!r}"
+            )
+            assert ">" not in line, (
+                f"BRAIN_REPO default still contains a placeholder: {line!r}"
+            )
+            # Must look like a real HTTPS git URL.
+            assert "https://github.com/" in line, (
+                f"BRAIN_REPO default must be a real https://github.com/ URL: {line!r}"
+            )
+            return
+    pytest.fail("BRAIN_REPO= line not found in install.sh")
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — placeholder guard: BRAIN_REPO with '<' refused at install step
+# ---------------------------------------------------------------------------
+
+
+def test_install_sh_refuses_placeholder_repo() -> None:
+    """If someone passes a BRAIN_REPO with angle brackets it must fail fast."""
+    result = _run(
+        {
+            "BRAIN_REPO": "https://github.com/<your-fork>/second-brain.git",
+            "BRAIN_INSTALL_REF": "v0.2.0",
+            "OSTYPE": "darwin21.0",
+            "BRAIN_INSTALL_SH_DRY_RUN": "1",
+        }
+    )
+    assert result.returncode != 0, (
+        "install.sh must refuse a BRAIN_REPO that still contains a placeholder"
+    )
+    combined = result.stdout + result.stderr
+    assert "placeholder" in combined.lower(), (
+        f"output must mention 'placeholder':\n{combined}"
+    )
