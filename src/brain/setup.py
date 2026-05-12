@@ -350,11 +350,20 @@ def _maybe_install_wiki(
     vault: Path,
     brain_home: Path,
     wiki_port: int,
-) -> None:
-    """Prompt for (and optionally perform) the wiki sub-install."""
+) -> bool:
+    """Prompt for and optionally perform the wiki sub-install.
+
+    Returns:
+        True  — wiki was installed (or dry-run would install it).
+        False — skipped via flag or user declined interactively.
+
+    The return value is forwarded to ``_maybe_install_launchd`` so the
+    watcher supervisors are only registered when there is actually a wiki
+    workspace to supervise.
+    """
     if skip:
         typer.echo("[skipped] wiki install (--skip-wiki)")
-        return
+        return False
     if non_interactive:
         do_install = True
     else:
@@ -364,26 +373,31 @@ def _maybe_install_wiki(
         )
     if not do_install:
         typer.echo("[skipped] wiki install (user declined)")
-        return
+        return False
     if dry_run:
         typer.echo(
             f"[dry-run] would: brain wiki install --vault {vault} --port {wiki_port}"
         )
-        return
+        return True  # dry-run counts as "would have installed"
     from .wiki.install import wiki_install
 
     wiki_install(vault=vault, port=wiki_port)
+    return True
 
 
 def _maybe_install_skill(
     skip: bool,
     non_interactive: bool,
     dry_run: bool,
-) -> None:
-    """Prompt for (and optionally perform) the Claude Code skill sub-install."""
+) -> bool:
+    """Prompt for and optionally perform the Claude Code skill sub-install.
+
+    Returns True if the skill was installed (or dry-run would install it),
+    False if skipped via flag or user declined.
+    """
     if skip:
         typer.echo("[skipped] Claude Code skill (--skip-skill)")
-        return
+        return False
     if non_interactive:
         do_install = True
     else:
@@ -393,13 +407,14 @@ def _maybe_install_skill(
         )
     if not do_install:
         typer.echo("[skipped] Claude Code skill (user declined)")
-        return
+        return False
     if dry_run:
         typer.echo("[dry-run] would: brain claude install-skill")
-        return
+        return True
     from .cli_claude import install_skill
 
     install_skill()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -407,15 +422,28 @@ def _maybe_install_skill(
 # ---------------------------------------------------------------------------
 
 
-def _maybe_install_launchd(skip_wiki: bool, dry_run: bool) -> None:
+def _maybe_install_launchd(
+    wiki_installed: bool,
+    vault_path: Path,
+    brain_home: Path,
+    dry_run: bool,
+) -> None:
     """Install launchd plists ONLY after every prereq passed.
 
     Runs LAST so DB + wiki are healthy before supervisors start.
-    Skipped entirely when --skip-wiki was set (no wiki to supervise) or
-    when not on macOS.
+
+    Guarded by ``wiki_installed`` (not the raw ``--skip-wiki`` flag) so
+    that an interactive decline also suppresses the launchd registration
+    — there would be no Quartz workspace for the watcher to supervise.
+
+    Passes ``vault_path`` and ``brain_home`` directly to
+    ``install_plists`` rather than going through ``install_main()``,
+    which would silently use the default vault and brain_home resolved
+    from env/config at call time instead of the values chosen for this
+    setup run.
     """
-    if skip_wiki:
-        typer.echo("[skipped] launchd install (--skip-wiki, no wiki to supervise)")
+    if not wiki_installed:
+        typer.echo("[skipped] launchd install (wiki not installed)")
         return
     if sys.platform != "darwin":
         typer.echo("[skipped] launchd install (not macOS)")
@@ -423,9 +451,14 @@ def _maybe_install_launchd(skip_wiki: bool, dry_run: bool) -> None:
     if dry_run:
         typer.echo("[dry-run] would: brain-install-launchd")
         return
-    from .bin.launchd import install_main
+    from .bin.launchd import install_plists
 
-    install_main()
+    launchd_dir = Path(
+        os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
+    )
+    launchctl = os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
+    install_plists(brain_home, launchd_dir, launchctl, vault_path=vault_path)
+    typer.echo(f"  [ok] brain LaunchAgents installed in {launchd_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -437,18 +470,22 @@ def _print_final_report(
     brain_home: Path,
     vault: Path,
     wiki_port: int,
-    skip_wiki: bool,
-    skip_skill: bool,
+    wiki_installed: bool,
+    skill_installed: bool,
 ) -> None:
-    """Print the closing banner matching brain-up's visual style."""
+    """Print the closing banner matching brain-up's visual style.
+
+    Uses the actual install results (not the raw skip flags) so that an
+    interactive decline is reflected correctly in the summary.
+    """
     typer.echo("")
     typer.echo("🧠 brain setup complete:")
     typer.echo(f"   brain_home: {brain_home}")
     typer.echo(f"   vault:      {vault}")
-    if not skip_wiki:
+    if wiki_installed:
         typer.echo(f"   wiki url:   http://localhost:{wiki_port}")
         typer.echo(f"   start wiki: caddy run --config {brain_home}/Caddyfile")
-    if not skip_skill:
+    if skill_installed:
         typer.echo("   skill:      ~/.claude/skills/brain/SKILL.md")
     typer.echo("")
     typer.echo("   next steps:")
@@ -722,7 +759,7 @@ def run_setup(
     # T3.6 — interactive sub-installs (wiki + Claude Code skill)
     # ------------------------------------------------------------------
     typer.echo("\n── Optional components ────────────────────────────")
-    _maybe_install_wiki(
+    wiki_installed = _maybe_install_wiki(
         skip=skip_wiki,
         non_interactive=non_interactive,
         dry_run=dry_run,
@@ -730,7 +767,7 @@ def run_setup(
         brain_home=brain_home,
         wiki_port=wiki_port,
     )
-    _maybe_install_skill(
+    skill_installed = _maybe_install_skill(
         skip=skip_skill,
         non_interactive=non_interactive,
         dry_run=dry_run,
@@ -739,7 +776,12 @@ def run_setup(
     # ------------------------------------------------------------------
     # T3.7 — launchd install LAST (after DB + wiki are healthy)
     # ------------------------------------------------------------------
-    _maybe_install_launchd(skip_wiki=skip_wiki, dry_run=dry_run)
+    _maybe_install_launchd(
+        wiki_installed=wiki_installed,
+        vault_path=vault_path,
+        brain_home=brain_home,
+        dry_run=dry_run,
+    )
 
     # ------------------------------------------------------------------
     # T3.8 — final report
@@ -748,6 +790,6 @@ def run_setup(
         brain_home=brain_home,
         vault=vault_path,
         wiki_port=wiki_port,
-        skip_wiki=skip_wiki,
-        skip_skill=skip_skill,
+        wiki_installed=wiki_installed,
+        skill_installed=skill_installed,
     )

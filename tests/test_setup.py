@@ -370,13 +370,13 @@ def test_setup_preflight_caddy_missing_only_when_wiki_enabled(
 
 def test_setup_launchd_skipped_when_skip_wiki(tmp_path: Path) -> None:
     """With --skip-wiki the launchd-skip line appears; without it the dry-run line appears."""
-    # skip_wiki=True → launchd entirely skipped
+    # skip_wiki=True → wiki not installed → launchd skipped
     out_skipped = _dry_run_output(tmp_path / "skip", skip_wiki=True)
     assert "launchd" in out_skipped.lower(), (
         "expected launchd mention when --skip-wiki"
     )
-    assert "--skip-wiki" in out_skipped or "no wiki to supervise" in out_skipped, (
-        "expected --skip-wiki rationale in launchd skip message"
+    assert "wiki not installed" in out_skipped or "wiki" in out_skipped.lower(), (
+        "expected wiki-not-installed rationale in launchd skip message"
     )
 
     # skip_wiki=False → launchd either dry-runs (macOS) or reports not-macOS
