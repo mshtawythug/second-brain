@@ -33,7 +33,8 @@
 #
 # Flags:
 #   --no-export         skip the DB→vault export step (use if you only edited
-#                       vault files directly).
+#                       vault files directly). IMPLIES --no-sync-summaries
+#                       since sync-summaries is also a DB→vault write.
 #   --no-sync-summaries skip the summary-frontmatter sync step (use if you
 #                       know no docs have been enriched out-of-band since
 #                       the last rebuild).
@@ -87,7 +88,7 @@ DO_CLEAN_CACHE=0
 
 for arg in "$@"; do
     case "$arg" in
-        --no-export)          DO_EXPORT=0 ;;
+        --no-export)          DO_EXPORT=0; DO_SYNC_SUMMARIES=0 ;;
         --no-sync-summaries)  DO_SYNC_SUMMARIES=0 ;;
         --no-prune)           DO_PRUNE=0 ;;
         --no-overlay)         DO_OVERLAY=0 ;;
