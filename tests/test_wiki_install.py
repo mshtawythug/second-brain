@@ -104,8 +104,9 @@ def test_wiki_install_idempotent_refresh(mock_config: tuple) -> None:
     brain_home: Path = dirs["brain_home"]
     quartz_dir = vault_path / ".quartz"
 
-    # Pre-create the workspace directory to simulate an existing install.
+    # Pre-create a valid-looking workspace (needs package.json to pass validation).
     quartz_dir.mkdir()
+    (quartz_dir / "package.json").write_text('{"name": "quartz"}\n')
 
     subprocess_calls: list[list[str]] = []
 
@@ -217,3 +218,27 @@ def test_wiki_install_force_destroys_existing(mock_config: tuple) -> None:
     # git clone must have been called.
     clone_calls = [c for c in subprocess_calls if "clone" in c]
     assert len(clone_calls) == 1, f"git clone must be called with --force: {clone_calls}"
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — broken workspace (dir exists, no package.json) raises WikiInstallError
+# ---------------------------------------------------------------------------
+
+
+def test_wiki_install_broken_workspace_raises(mock_config: tuple) -> None:
+    """A .quartz/ dir without package.json raises WikiInstallError, not 'refreshed'."""
+    from brain.wiki.install import WikiInstallError
+
+    _, dirs = mock_config
+    vault_path: Path = dirs["vault"]
+    quartz_dir = vault_path / ".quartz"
+
+    # Simulate an interrupted clone: directory exists but has no package.json.
+    quartz_dir.mkdir()
+    (quartz_dir / "some_other_file.txt").write_text("incomplete\n")
+
+    with (
+        patch("brain.wiki.install.subprocess.run"),
+        pytest.raises(WikiInstallError, match="incomplete"),
+    ):
+        wiki_install(vault=vault_path, no_npm=True)

@@ -55,6 +55,14 @@ def wiki_install(
     if force and quartz_dir.exists():
         print(f"--force: removing existing workspace {quartz_dir}", flush=True)
         shutil.rmtree(quartz_dir)
+    elif quartz_dir.exists() and not _is_valid_quartz_workspace(quartz_dir):
+        raise WikiInstallError(
+            f"Quartz workspace at {quartz_dir} exists but appears incomplete "
+            f"(missing package.json). The directory may be from a failed or "
+            f"interrupted clone.\n"
+            f"  Re-run with --force to wipe and re-clone:\n"
+            f"    brain wiki install --force"
+        )
 
     if fresh_install:
         print(f"Cloning Quartz into {quartz_dir} …", flush=True)
@@ -116,6 +124,17 @@ def wiki_install(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _is_valid_quartz_workspace(quartz_dir: Path) -> bool:
+    """Return True if *quartz_dir* looks like a healthy Quartz checkout.
+
+    We require ``package.json`` to be present — every Quartz checkout ships
+    one, and its absence is a reliable signal of a truncated or otherwise
+    incomplete clone (e.g. the clone was interrupted mid-transfer, or the
+    directory was created by something other than ``git clone``).
+    """
+    return (quartz_dir / "package.json").is_file()
 
 
 def _clone_quartz(quartz_dir: Path) -> None:
