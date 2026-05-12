@@ -691,3 +691,46 @@ class TestBrainHomeResolution:
         assert result == nonexistent
         # Must not have created the directory as a side effect.
         assert not nonexistent.exists()
+
+
+# ---------------------------------------------------------------------------
+# T2.0 -- Config.load_minimal() for pre-setup callers (shareable-installer).
+# ---------------------------------------------------------------------------
+
+
+def test_config_minimal_no_db(monkeypatch, isolated_dotenv: Path) -> None:
+    """load_minimal() succeeds with no DATABASE_URL and sets database_url to ""."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert not isolated_dotenv.exists()
+    cfg = Config.load_minimal()
+    assert cfg.database_url == ""
+
+
+def test_config_minimal_field_parity(monkeypatch, isolated_dotenv: Path) -> None:
+    """Drift guard: load_minimal() and load() produce identical values on all fields.
+
+    Iterates every dataclass field and asserts that, given the same env inputs,
+    both factory methods return the same parsed value. This makes overlapping-field
+    divergence in _load_field_dict structurally impossible to hide.
+    """
+    import dataclasses
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("OLLAMA_HOST", "http://testhost:11434")
+    monkeypatch.setenv("BRAIN_EMBEDDER", "arctic")
+    minimal = Config.load_minimal()
+    full = Config.load()
+    for f in dataclasses.fields(Config):
+        assert getattr(minimal, f.name) == getattr(full, f.name), (
+            f"Field {f.name!r} differs between load_minimal() and load()"
+        )
+
+
+def test_config_load_still_requires_database_url(
+    monkeypatch, isolated_dotenv: Path
+) -> None:
+    """Regression: Config.load() still raises ConfigError when DATABASE_URL is absent."""
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    assert not isolated_dotenv.exists()
+    with pytest.raises(ConfigError, match="DATABASE_URL"):
+        Config.load()

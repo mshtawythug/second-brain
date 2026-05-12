@@ -2,6 +2,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from dotenv import dotenv_values, find_dotenv
 
@@ -19,7 +20,7 @@ _VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
 # vs. stored chunk embeddings on the live corpus.
 #
 # * Known-bad docs (interview prep / cheatsheet false positives):
-#   max cosine ≤ 0.20.
+#   max cosine <= 0.20.
 # * True positives kept by acceptance criterion #1: Krisp meeting
 #   ``3508c63e`` max 0.36; Gmail thread ``bc9f06c9`` max 0.27.
 #
@@ -30,7 +31,7 @@ _VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
 DEFAULT_VECTOR_SIM_FLOOR = 0.25
 
 # Default exponential-decay half-life for the recency boost applied after RRF.
-# At 180 days a document is a year old (365 days) → boost ≈ 0.25×. Tuned as
+# At 180 days a document is a year old (365 days) => boost ~0.25x. Tuned as
 # a reasonable default for a personal corpus that spans years; override via
 # ``BRAIN_RECENCY_HALFLIFE_DAYS``. Set to a very large value (e.g. 999999)
 # to effectively disable the boost.
@@ -42,7 +43,7 @@ DEFAULT_RECENCY_HALFLIFE_DAYS = 180.0
 # 0 to disable expansion. Override via ``BRAIN_SNIPPET_CONTEXT_TOKENS``.
 DEFAULT_SNIPPET_CONTEXT_TOKENS = 200
 
-# Default vault location — clean, no implicit cloud sync. Users who want iCloud
+# Default vault location -- clean, no implicit cloud sync. Users who want iCloud
 # can either symlink ``~/brain-vault`` to an iCloud Drive folder or set
 # ``BRAIN_VAULT_PATH`` to an iCloud path.
 DEFAULT_VAULT_PATH = Path.home() / "brain-vault"
@@ -55,11 +56,11 @@ DEFAULT_VAULT_PATH = Path.home() / "brain-vault"
 # regardless. Override via ``BRAIN_PEOPLE_HUB_MIN_DOCS``.
 DEFAULT_PEOPLE_HUB_MIN_DOCS = 3
 
-# Wave Q1-D — enrichment (auto-summary + auto-tag) defaults.
+# Wave Q1-D -- enrichment (auto-summary + auto-tag) defaults.
 #
 # ``DEFAULT_ENRICH_MODEL`` is the Ollama model name passed to ``/api/chat``.
 # llama3.1:8b is the only model authorized by the roadmap intake brief for
-# Q1-D. Users override via ``BRAIN_ENRICH_MODEL`` — anything pullable via
+# Q1-D. Users override via ``BRAIN_ENRICH_MODEL`` -- anything pullable via
 # ``ollama pull <name>`` works as long as it supports JSON-mode output.
 DEFAULT_ENRICH_MODEL = "llama3.1:8b"
 
@@ -90,7 +91,7 @@ DEFAULT_ENRICH_TIMEOUT_SECONDS = 60.0
 #
 # Single-source-of-truth: tweak the list here, no code change required.
 BOILERPLATE_PATTERNS: tuple[str, ...] = (
-    # Common mobile-app footers — single line, terminated by EOL.
+    # Common mobile-app footers -- single line, terminated by EOL.
     r"^Sent from my (iPhone|iPad|Android|BlackBerry|Windows Phone)\.?$",
     r"^Get Outlook for (iOS|Android)\s*<https?://[^>]+>\s*$",
     # Confidentiality / corporate-disclaimer footers run multiple lines.
@@ -117,8 +118,8 @@ def _brain_home_root(_config_file: Path | None = None) -> Path:
     Priority:
       1. $BRAIN_HOME env var (expanduser applied).
       2. Repo-root walk-up: if <three-levels-up>/pyproject.toml exists, that's
-         a dev checkout — use the repo root (dev backcompat).
-      3. ~/.brain — NOT created here; ``brain setup`` creates it lazily.
+         a dev checkout -- use the repo root (dev backcompat).
+      3. ~/.brain -- NOT created here; ``brain setup`` creates it lazily.
 
     The optional ``_config_file`` parameter is a test-only seam: production
     code never passes it.  Tests exercise the dev-checkout branch by passing a
@@ -154,7 +155,7 @@ class Config:
 
     ``user_email`` (P4.4) is the owner's primary email address, optionally
     set via ``BRAIN_USER_EMAIL``. Consumed by the email-thread reading
-    mode in the rendered wiki — the Quartz transformer reads
+    mode in the rendered wiki -- the Quartz transformer reads
     ``process.env.BRAIN_USER_EMAIL`` at build time and bakes it into a
     ``window.BRAIN_USER_EMAIL`` global so the runtime "Show only my
     replies" filter knows whose ``From:`` address counts as the user's.
@@ -185,13 +186,13 @@ class Config:
     # (anyone in ``<vault>/_people.yml``) always render regardless of
     # this threshold. Loaded from ``BRAIN_PEOPLE_HUB_MIN_DOCS``; default
     # is :data:`DEFAULT_PEOPLE_HUB_MIN_DOCS`. Negative values are
-    # rejected at load time via :class:`ConfigError` — a negative
+    # rejected at load time via :class:`ConfigError` -- a negative
     # threshold would silently flip the filter (no effective filtering)
     # and is almost certainly a config bug.
     people_hub_min_docs: int = DEFAULT_PEOPLE_HUB_MIN_DOCS
     # Exponential-decay half-life (days) for the recency boost applied after
     # RRF. ``boost = 0.5 ** (age_days / recency_halflife_days)`` where
-    # ``age_days`` is clamped to [0, +∞) so future-dated rows get boost=1.0.
+    # ``age_days`` is clamped to [0, +inf) so future-dated rows get boost=1.0.
     # Loaded from ``BRAIN_RECENCY_HALFLIFE_DAYS``; must be a positive float.
     recency_halflife_days: float = DEFAULT_RECENCY_HALFLIFE_DAYS
     # Token budget for per-search snippet-context expansion. After the
@@ -199,7 +200,7 @@ class Config:
     # context are stitched around it. 0 = disabled. Loaded from
     # ``BRAIN_SNIPPET_CONTEXT_TOKENS``; must be a non-negative integer.
     snippet_context_tokens: int = DEFAULT_SNIPPET_CONTEXT_TOKENS
-    # Wave Q1-D — per-document auto-summary + auto-tag enrichment.
+    # Wave Q1-D -- per-document auto-summary + auto-tag enrichment.
     # The four fields are tightly coupled (they all feed ``OllamaEnricher``)
     # so they live together at the tail of the dataclass.
     enrich_model: str = DEFAULT_ENRICH_MODEL
@@ -209,8 +210,36 @@ class Config:
 
     @classmethod
     def load(cls) -> "Config":
+        """Load config from env / .env files. Raises ConfigError if DATABASE_URL is unset."""
+        fields = cls._load_field_dict(require_db=True)
+        return cls(**fields)
+
+    @classmethod
+    def load_minimal(cls) -> "Config":
+        """Same as load() but doesn't require DATABASE_URL.
+
+        Used by purely-filesystem commands (brain vault render --overlay,
+        brain wiki install, brain claude install-skill) that run BEFORE
+        brain setup writes .env. The brain_home field still resolves, but
+        database_url defaults to an empty string sentinel and any caller
+        that tries to actually USE database_url on this config will fail
+        at the first DB connection attempt -- which is the right level to
+        fail.
+        """
+        fields = cls._load_field_dict(require_db=False)
+        return cls(**fields)
+
+    @classmethod
+    def _load_field_dict(cls, *, require_db: bool) -> dict[str, Any]:
+        """Shared parser. Loads the dotenv chain, then parses every field.
+
+        If require_db=True, raises ConfigError on missing DATABASE_URL;
+        if False, sets it to "" (empty string sentinel). This is the single
+        source of truth for all field parsing -- load() and load_minimal()
+        both delegate here so overlapping fields can never drift.
+        """
         # Load .env files using a merged-dict + setdefault algorithm so that:
-        #   1. os.environ (process env) is NEVER overwritten — highest priority.
+        #   1. os.environ (process env) is NEVER overwritten -- highest priority.
         #   2. <repo-root>/.env wins over cwd and BRAIN_HOME .env files.
         #   3. <cwd>/.env (via walk-up) wins over BRAIN_HOME .env.
         #   4. $BRAIN_HOME/.env is the lowest-priority file source.
@@ -218,7 +247,7 @@ class Config:
         # Files are layered in REVERSE priority order (lowest first) into a
         # merged dict; higher-priority files overwrite lower-priority ones on
         # key collisions. Process env is applied last via os.environ.setdefault
-        # so an existing value is never clobbered — preserving the precedence
+        # so an existing value is never clobbered -- preserving the precedence
         # contract regardless of who set it (shell, parent process, or
         # monkeypatch.setenv).
         merged: dict[str, str] = {}
@@ -235,8 +264,9 @@ class Config:
         for key, value in merged.items():
             os.environ.setdefault(key, value)
         database_url = os.environ.get("DATABASE_URL")
-        if not database_url:
+        if require_db and not database_url:
             raise ConfigError("DATABASE_URL is not set (see .env.example)")
+        database_url = database_url or ""  # empty sentinel when require_db=False
         ollama_host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
         qwen3_model = os.environ.get("QWEN3_MODEL", DEFAULT_QWEN3_MODEL)
         embedder = os.environ.get("BRAIN_EMBEDDER", DEFAULT_EMBEDDER).lower()
@@ -252,19 +282,19 @@ class Config:
             if vault_path_env
             else DEFAULT_VAULT_PATH
         )
-        # P4.4 — owner identity for the email-thread "Show only my replies"
+        # P4.4 -- owner identity for the email-thread "Show only my replies"
         # filter. Optional; an unset/empty value renders the button but
         # the runtime filter no-ops (no message ever matches the empty
-        # user identity, so toggling the button hides every section —
+        # user identity, so toggling the button hides every section --
         # which is the right "I forgot to set this" feedback signal).
         # ``.strip()`` so trailing newlines from a `.env` quirk don't
         # bleed into the JS global.
         user_email_raw = os.environ.get("BRAIN_USER_EMAIL")
         user_email = (user_email_raw or "").strip() or None
-        # Vector cosine floor — see DEFAULT_VECTOR_SIM_FLOOR. Validation:
+        # Vector cosine floor -- see DEFAULT_VECTOR_SIM_FLOOR. Validation:
         # must parse as float in [0.0, 1.0] (cosine similarity range).
         # Negative values would silently re-admit the noise tail; >1
-        # would exclude every chunk. Either is a config bug — surface it
+        # would exclude every chunk. Either is a config bug -- surface it
         # eagerly with ``ConfigError`` (per plan revision #6).
         floor_raw = os.environ.get("BRAIN_VECTOR_SIM_FLOOR")
         if floor_raw is None or floor_raw.strip() == "":
@@ -282,7 +312,7 @@ class Config:
                     f"BRAIN_VECTOR_SIM_FLOOR must be a float in [0.0, 1.0] "
                     f"(got {vector_sim_floor!r})"
                 )
-        # Owner participants — identifiers (emails and/or display names)
+        # Owner participants -- identifiers (emails and/or display names)
         # whose presence in a doc's participant set is treated as
         # ``corpus owner``. Comma-separated; trim + lowercase + drop empty
         # entries at load time so the downstream filter is a fast
@@ -295,10 +325,10 @@ class Config:
             for piece in (entry.strip().lower() for entry in owner_raw.split(","))
             if piece
         )
-        # People Hub doc-count threshold — see DEFAULT_PEOPLE_HUB_MIN_DOCS.
+        # People Hub doc-count threshold -- see DEFAULT_PEOPLE_HUB_MIN_DOCS.
         # Validation: must parse as a non-negative integer. A negative
         # threshold is almost certainly a config typo (it would render every
-        # person, since ``len(docs) < negative`` is never true) — surface
+        # person, since ``len(docs) < negative`` is never true) -- surface
         # eagerly via ConfigError so the user fixes the typo rather than
         # silently getting a hub flooded with one-off recipients.
         people_min_raw = os.environ.get("BRAIN_PEOPLE_HUB_MIN_DOCS")
@@ -317,10 +347,10 @@ class Config:
                     f"BRAIN_PEOPLE_HUB_MIN_DOCS must be a non-negative integer "
                     f"(got {people_hub_min_docs!r})"
                 )
-        # Recency half-life — see DEFAULT_RECENCY_HALFLIFE_DAYS.
+        # Recency half-life -- see DEFAULT_RECENCY_HALFLIFE_DAYS.
         # Validation: must parse as a positive float. Zero is invalid
         # (produces 0 ** inf = 0 for any finite age, degenerate). Negative
-        # is invalid — flips the decay direction so old docs score higher.
+        # is invalid -- flips the decay direction so old docs score higher.
         halflife_raw = os.environ.get("BRAIN_RECENCY_HALFLIFE_DAYS")
         if halflife_raw is None or halflife_raw.strip() == "":
             recency_halflife_days = DEFAULT_RECENCY_HALFLIFE_DAYS
@@ -337,9 +367,9 @@ class Config:
                     f"BRAIN_RECENCY_HALFLIFE_DAYS must be a positive float "
                     f"(got {recency_halflife_days!r})"
                 )
-        # Snippet context tokens — see DEFAULT_SNIPPET_CONTEXT_TOKENS.
+        # Snippet context tokens -- see DEFAULT_SNIPPET_CONTEXT_TOKENS.
         # Validation: must parse as a non-negative integer. 0 = disabled.
-        # Negative is invalid — there is no sensible semantic for a negative
+        # Negative is invalid -- there is no sensible semantic for a negative
         # token budget.
         ctx_raw = os.environ.get("BRAIN_SNIPPET_CONTEXT_TOKENS")
         if ctx_raw is None or ctx_raw.strip() == "":
@@ -357,9 +387,9 @@ class Config:
                     f"BRAIN_SNIPPET_CONTEXT_TOKENS must be a non-negative integer "
                     f"(got {snippet_context_tokens!r})"
                 )
-        # Wave Q1-D — enrichment env vars. Same validation pattern as the
-        # snippet-context / recency-halflife knobs above: unset/blank →
-        # default; non-parseable / out-of-range → ConfigError eagerly so a
+        # Wave Q1-D -- enrichment env vars. Same validation pattern as the
+        # snippet-context / recency-halflife knobs above: unset/blank ->
+        # default; non-parseable / out-of-range -> ConfigError eagerly so a
         # config typo surfaces at startup instead of mid-ingest.
         enrich_model_raw = os.environ.get("BRAIN_ENRICH_MODEL")
         if enrich_model_raw is None or enrich_model_raw.strip() == "":
@@ -381,7 +411,7 @@ class Config:
             if enrich_min_tokens < 0:
                 raise ConfigError(
                     f"BRAIN_ENRICH_MIN_TOKENS must be a non-negative integer "
-                    f"(got {enrich_min_tokens!r})"
+                    f"(got {enrich_min_raw!r})"
                 )
 
         enrich_max_raw = os.environ.get("BRAIN_ENRICH_MAX_INPUT_TOKENS")
@@ -415,25 +445,25 @@ class Config:
             if enrich_timeout_seconds <= 0:
                 raise ConfigError(
                     f"BRAIN_ENRICH_TIMEOUT_SECONDS must be a positive float "
-                    f"(got {enrich_timeout_seconds!r})"
+                    f"(got {enrich_timeout_raw!r})"
                 )
 
-        return cls(
+        return {
             # brain_home resolves via default_factory=_brain_home_root.
-            database_url=database_url,
-            ollama_host=ollama_host,
-            qwen3_model=qwen3_model,
-            embedder=embedder,
-            voyage_api_key=voyage_api_key,
-            vault_path=vault_path,
-            user_email=user_email,
-            vector_sim_floor=vector_sim_floor,
-            owner_participants=owner_participants,
-            people_hub_min_docs=people_hub_min_docs,
-            recency_halflife_days=recency_halflife_days,
-            snippet_context_tokens=snippet_context_tokens,
-            enrich_model=enrich_model,
-            enrich_min_tokens=enrich_min_tokens,
-            enrich_max_input_tokens=enrich_max_input_tokens,
-            enrich_timeout_seconds=enrich_timeout_seconds,
-        )
+            "database_url": database_url,
+            "ollama_host": ollama_host,
+            "qwen3_model": qwen3_model,
+            "embedder": embedder,
+            "voyage_api_key": voyage_api_key,
+            "vault_path": vault_path,
+            "user_email": user_email,
+            "vector_sim_floor": vector_sim_floor,
+            "owner_participants": owner_participants,
+            "people_hub_min_docs": people_hub_min_docs,
+            "recency_halflife_days": recency_halflife_days,
+            "snippet_context_tokens": snippet_context_tokens,
+            "enrich_model": enrich_model,
+            "enrich_min_tokens": enrich_min_tokens,
+            "enrich_max_input_tokens": enrich_max_input_tokens,
+            "enrich_timeout_seconds": enrich_timeout_seconds,
+        }
