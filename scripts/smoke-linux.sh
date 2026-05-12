@@ -164,6 +164,11 @@ fi
 # brain-install-launchd, which only works on macOS). The pre-launchd
 # `nohup ... &` shape below is exactly what brain-up did before the
 # 2026-05-08 launchd handoff.
+#
+# CRITICAL: `python -m brain.wiki.*` MUST run in the pipx-managed venv
+# (where `second-brain` is installed), NOT the system python3. Resolve
+# the pipx Python from the brain script's shebang — robust regardless
+# of pipx version or whether `pipx environment` is on PATH.
 # ---------------------------------------------------------------------------
 _section "4. Start Caddy + cold-start build + watchers (manual, no launchd)"
 
@@ -171,6 +176,23 @@ if [[ ! -f "$CADDYFILE" ]]; then
     _fail "Caddyfile missing at $CADDYFILE — did brain setup --skip-wiki run?"
     exit 1
 fi
+
+# Derive the pipx-managed Python from `brain`'s shebang. `brain` is a
+# pipx-installed console script whose first line is e.g.
+#   #!/home/user/.local/share/pipx/venvs/second-brain/bin/python
+# That interpreter has `brain` (and its deps) installed; system python3
+# does NOT, so `python3 -m brain.wiki.*` would fail with ModuleNotFoundError.
+BRAIN_BIN_PATH="$(command -v brain)"
+if [[ -z "$BRAIN_BIN_PATH" ]]; then
+    _fail "brain not on PATH — install.sh must have failed"
+    exit 1
+fi
+BRAIN_PY="$(head -1 "$BRAIN_BIN_PATH" | sed 's/^#!//;s/[[:space:]].*//')"
+if [[ -z "$BRAIN_PY" || ! -x "$BRAIN_PY" ]]; then
+    _fail "Could not resolve pipx Python from $BRAIN_BIN_PATH shebang (got: '$BRAIN_PY')"
+    exit 1
+fi
+_pass "Resolved pipx Python: $BRAIN_PY"
 
 # 4a. Apply the Quartz overlay (no build — we cold-start below).
 if ! brain vault render --overlay --no-build --vault "$VAULT" \
@@ -181,9 +203,11 @@ else
 fi
 
 # 4b. Cold-start build (synchronous): ensures <vault>/.quartz/current
-# resolves to a real build before we curl the wiki.
-_info "Cold-start build (python -m brain.wiki.build_swap) — first run can take ~60s"
-if BRAIN_WIKI_RELOAD=1 python3 -m brain.wiki.build_swap \
+# resolves to a real build before we curl the wiki.  MUST use $BRAIN_PY
+# (the pipx venv interpreter), not system python3 — system python3 has
+# no `brain` package installed.
+_info "Cold-start build ($BRAIN_PY -m brain.wiki.build_swap) — first run can take ~60s"
+if BRAIN_WIKI_RELOAD=1 "$BRAIN_PY" -m brain.wiki.build_swap \
         --vault "$VAULT" --keep 3 >/tmp/brain-build-swap-smoke.log 2>&1; then
     _pass "Cold-start build succeeded"
 else
@@ -216,9 +240,9 @@ else
     WATCH_PID=""
 fi
 
-# 4e. Start build watcher in background.
+# 4e. Start build watcher in background.  Same rule as 4b — pipx Python only.
 _info "Starting build watcher in background"
-nohup python3 -m brain.wiki.build_watcher \
+nohup "$BRAIN_PY" -m brain.wiki.build_watcher \
         --vault "$VAULT" --keep 3 \
         >/tmp/brain-build-watcher-smoke.log 2>&1 &
 BUILD_PID=$!
@@ -337,9 +361,10 @@ Known Linux gaps:
   - No launchd → no auto-supervision. This script started Caddy + the two
     watchers in background and will tear them down on exit. For a real
     long-lived install on Linux, run Caddy + `brain vault sync --watch` +
-    `python -m brain.wiki.build_watcher` inside tmux panes or a
-    systemd-user unit. A first-class systemd-user template is a
-    post-v0.2.0 follow-up.
+    `<pipx-venv-python> -m brain.wiki.build_watcher` inside tmux panes or
+    a systemd-user unit. Find the pipx Python with:
+        head -1 "$(command -v brain)" | sed 's|^#!||'
+    A first-class systemd-user template is a post-v0.2.0 follow-up.
 
 To clean up the install entirely:
   brain uninstall --yes --remove-db --remove-vault
