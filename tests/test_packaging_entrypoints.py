@@ -1,6 +1,8 @@
 """Regression: pyproject.toml [project.scripts] declares all 9 brain console scripts."""
 import importlib
 import os
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -76,3 +78,32 @@ def test_dev_backcompat_wrappers_exec_venv_not_path() -> None:
             f"bin/{name} contains a bare `exec brain-*` which loops when bin/ precedes "
             f".venv/bin/ on PATH"
         )
+
+
+def test_python_m_brain_entry_point() -> None:
+    """Regression for brain/__main__.py: `python -m brain --help` must exit 0.
+
+    brain.setup._run_brain_init / _run_brain_doctor invoke:
+        subprocess.run([sys.executable, "-m", "brain", "init"], ...)
+        subprocess.run([sys.executable, "-m", "brain", "doctor"], ...)
+
+    Without brain/__main__.py Python rejects the -m flag with:
+        "No module named brain.__main__; 'brain' is a package and cannot
+         be directly executed"
+
+    This test catches any future deletion of __main__.py before the CI gate
+    would; the fix is to restore src/brain/__main__.py.
+    """
+    result = subprocess.run(
+        [sys.executable, "-m", "brain", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"`python -m brain --help` exited {result.returncode}.\n"
+        f"stderr: {result.stderr}\n"
+        "Likely cause: src/brain/__main__.py is missing."
+    )
+    assert "brain" in result.stdout.lower(), (
+        f"Expected 'brain' in --help output; got:\n{result.stdout}"
+    )
