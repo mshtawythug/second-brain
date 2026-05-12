@@ -178,7 +178,7 @@ def test_main_snapshot_returns_zero_with_no_daemons(
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
     monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
-    
+
     rc = main([])
     assert rc == 0
 
@@ -191,7 +191,7 @@ def test_main_status_alias_returns_zero(
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
     monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
-    
+
     rc = main(["status"])
     assert rc == 0
 
@@ -217,7 +217,7 @@ def test_main_tail_positional_alias_errors_without_logs(
 
     When no logs exist, _tail() returns 1 — that's the correct fast-exit path.
     """
-    
+
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
     rc = main(["tail"])
     assert rc == 1  # both logs absent → "no logs to tail"
@@ -280,7 +280,7 @@ def test_main_rejects_extra_positional_after_non_probe_command(
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
     monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
-    
+
     rc = main(["snapshot", "extra"])
     assert rc == 2
 
