@@ -1,0 +1,56 @@
+// Brain summary-lede styles — wave Q2-SUMMARY-WIKI.
+//
+// This file is installed at `<vault>/.quartz/quartz/styles/brain/_summary_lede.scss`
+// by `brain vault render --overlay` and loaded globally via
+// `custom.scss`'s `@use "./brain/summary_lede"` line.
+//
+// Renders the `<aside class="brain-summary-lede">` block (emitted by
+// `SummaryLede.tsx` when `frontmatter.summary` is a non-empty string)
+// as a soft TL;DR card above the article body. Visual weight stays
+// LOW so the lede doesn't compete with the page title for first
+// fixation — the eyebrow ("AI summary") uses the ink-2 muted tier,
+// and the body copy reads at the regular body type scale.
+//
+// The selector is anchored on the dedicated class so the rules only
+// fire on pages where `SummaryLede.tsx` renders. No `[data-*]` hooks
+// are needed — the component returns `null` when no summary is
+// present, so we never paint an empty aside.
+
+.brain-summary-lede {
+  // Surface card matching the related-docs panel — soft accent tint
+  // pulled from the design tokens, so a dark-mode swap inherits the
+  // right contrast for free.
+  background: var(--surface-1);
+  border-left: 3px solid var(--accent-strong);
+  border-radius: 6px;
+  padding: 0.65rem 0.9rem 0.75rem;
+  margin: 1rem 0 1.5rem;
+  // Same shadow tier as the related-docs section so the two cards
+  // read as siblings.
+  box-shadow: var(--shadow-sm);
+
+  // The eyebrow is a low-emphasis label — small caps + ink-2 muted
+  // tier so the title of the lede doesn't shout louder than the
+  // body. Display-block so it sits on its own line above the
+  // summary paragraph.
+  .brain-summary-lede-eyebrow {
+    display: block;
+    font-family: var(--displayFont);
+    font-weight: 600;
+    font-size: var(--fs-xs);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-2);
+    margin-bottom: 0.3rem;
+  }
+
+  // Body copy at the regular body type scale (no italic, no smaller-
+  // than-body shrinkage — the lede is a first-class read, not an
+  // afterthought).
+  .brain-summary-lede-body {
+    margin: 0;
+    color: var(--ink-1);
+    font-size: var(--fs-sm);
+    line-height: 1.55;
+  }
+}

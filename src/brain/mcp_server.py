@@ -19,6 +19,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 from .config import Config
 from .db import connect
 from .embeddings import OllamaEmbedError, make_embedder
+from .enrichment import OllamaEnricher, make_enricher
 from .errors import (
     BrainError,
     IdPrefixAmbiguous,
@@ -81,10 +82,19 @@ class _State:
 
     Tests build this directly and assign to ``_state`` (via
     ``monkeypatch.setattr``) instead of calling :func:`main`.
+
+    Wave Q2-SUMMARY-WIKI (2026-05-11): added ``enricher`` so the
+    ``brain_edit`` MCP tool can refresh ``documents.summary`` on
+    body-changing edits — without it the post-ingest hook hits the
+    "no enricher supplied" skip and the Q2 wiki lede shows the
+    pre-edit summary above the new body. ``None`` is an allowed
+    value so tests can opt out of the LLM round-trip; production
+    :func:`main` always populates it via :func:`make_enricher`.
     """
 
     cfg: Config
     embedder: Embedder
+    enricher: OllamaEnricher | None = None
 
 
 _state: _State | None = None
@@ -638,6 +648,16 @@ def brain_edit(
         replace_metadata,
     )
     embedder = state.embedder if content is not None else None
+    # Wave Q2-SUMMARY-WIKI smoke gap (Codex finding 1 follow-up,
+    # 2026-05-11): wire ``state.enricher`` on body-changing edits so the
+    # auto-summary refreshes alongside the new body. Without this the
+    # Q2 wiki lede shows the pre-edit summary above a freshly-edited
+    # body when the user (or Claude via MCP) edits via ``brain_edit``.
+    # Reuses the long-lived enricher built in :func:`main`; no new
+    # Ollama probe per request. Ollama failures inside the hook
+    # degrade soft — the row keeps its prior summary and
+    # ``brain enrich --backfill`` recovers it later.
+    enricher = state.enricher if content is not None else None
     try:
         with connect(state.cfg.database_url) as conn:
             conn.autocommit = True
@@ -653,6 +673,7 @@ def brain_edit(
                     metadata_patch=metadata,
                     replace_metadata=replace_metadata,
                     vault_root=state.cfg.vault_path,
+                    enricher=enricher,
                 )
             except ValueError as e:
                 raise _mcp_error(INVALID_PARAMS, str(e)) from e
@@ -1248,7 +1269,14 @@ def main() -> None:
     _configure_logging()
     cfg = Config.load()
     embedder = make_embedder(cfg)
-    _state = _State(cfg=cfg, embedder=embedder)
+    # Wave Q2-SUMMARY-WIKI: build the long-lived enricher so the
+    # ``brain_edit`` MCP tool can refresh ``documents.summary`` on
+    # body-changing edits. Construction is cheap (no Ollama probe — the
+    # hook handles unavailability inline). Per CLAUDE.md, every external
+    # service has explicit timeouts; the enricher reads
+    # ``Config.enrich_timeout_seconds`` from env.
+    enricher = make_enricher(cfg)
+    _state = _State(cfg=cfg, embedder=embedder, enricher=enricher)
     # One-shot warmup embed to cut cold-start latency on the first real
     # ``brain_search``. Failure must NOT abort startup — search will retry on
     # demand. Catch ``OllamaEmbedError`` so import / programming errors still

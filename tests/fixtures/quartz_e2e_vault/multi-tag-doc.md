@@ -3,6 +3,7 @@ title: Multi Tag Doc
 date: 2026-05-02
 tags: [demo, harness, integration]
 kind: vault
+summary: A second vault-tier doc tagged demo, harness, integration — used as the SummaryLede canary in the E2E harness.
 ---
 
 A second vault-tier doc tagged with `demo`, `harness`, and

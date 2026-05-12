@@ -591,6 +591,72 @@ def test_tag_page_renders_brain_tag_content_rows(e2e_build: str) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Wave Q2-SUMMARY-WIKI — SummaryLede component renders frontmatter.summary
+# ---------------------------------------------------------------------------
+
+
+def test_summary_lede_renders_on_doc_with_frontmatter_summary(
+    e2e_build: str,
+) -> None:
+    """A fixture doc carrying ``summary:`` in its frontmatter renders the lede.
+
+    Pins the Q2 contract: the new ``SummaryLede`` component (registered
+    in ``quartz.layout.ts`` `beforeBody`) reads
+    ``fileData.frontmatter.summary`` and renders an
+    ``<aside class="brain-summary-lede">`` block with the summary text.
+    The fixture ``multi-tag-doc.md`` was extended for this wave to
+    carry a ``summary:`` line — its rendered HTML must include both
+    the aside markup AND the summary text body.
+    """
+    html = _fetch_first_text(
+        e2e_build,
+        (
+            "/multi-tag-doc",
+            "/multi-tag-doc/",
+            "/multi-tag-doc.html",
+            "/multi-tag-doc/index.html",
+        ),
+    )
+    assert "brain-summary-lede" in html, (
+        "expected `.brain-summary-lede` aside in the multi-tag-doc HTML — "
+        "the SummaryLede component should mount when frontmatter carries "
+        "a non-empty `summary:` string"
+    )
+    assert "brain-summary-lede-eyebrow" in html, (
+        "expected the AI-summary eyebrow span inside the lede"
+    )
+    assert "SummaryLede canary in the E2E harness" in html, (
+        "expected the fixture's summary text to surface in the rendered HTML"
+    )
+
+
+def test_summary_lede_absent_on_doc_without_frontmatter_summary(
+    e2e_build: str,
+) -> None:
+    """A fixture doc without ``summary:`` must NOT render the lede block.
+
+    Negative case: ``demo-vault-doc.md`` carries no ``summary:`` line,
+    so the SummaryLede component should return `null` and the rendered
+    HTML must NOT carry the `.brain-summary-lede` class hook. Guards
+    against an empty-aside regression.
+    """
+    html = _fetch_first_text(
+        e2e_build,
+        (
+            "/demo-vault-doc",
+            "/demo-vault-doc/",
+            "/demo-vault-doc.html",
+            "/demo-vault-doc/index.html",
+        ),
+    )
+    assert "brain-summary-lede" not in html, (
+        "expected NO `.brain-summary-lede` aside on demo-vault-doc — its "
+        "frontmatter has no `summary:` field, so the component must "
+        "render null"
+    )
+
+
 def test_tag_page_lowercases_pill_text(e2e_build: str) -> None:
     """The P3.4 lowercase-tag fix is reflected in the rendered tag pills.
 

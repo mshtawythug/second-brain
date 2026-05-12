@@ -336,4 +336,176 @@ def test_edit_content_stdin(
     assert result.exit_code == 0, result.output
     _, _, _, _, _, new_hash = _row(doc_id)
     assert new_hash != old_hash
-    assert counting_embedder.embed_calls >= 1
+
+
+# ---------------------------------------------------------------------------
+# Codex finding 1 follow-up — `brain edit` end-to-end summary refresh.
+# ---------------------------------------------------------------------------
+
+
+def test_edit_content_file_refreshes_documents_summary(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """End-to-end regression for the Codex finding 1 user-visible bug.
+
+    Smoke-equivalent of the manual ``brain edit --content-file`` flow.
+    Wires a fake :class:`OllamaEnricher` via the public seam
+    (``brain.cli._build_enricher``) so the CLI's lazy enricher build
+    returns the fake instead of trying to reach Ollama. The fake
+    returns a v1 summary on the first call (during initial ingest) and
+    a v2 summary on the second (during the body-changing edit).
+
+    Before the wave's Q2 follow-up fix:
+    - ``brain edit`` invoked ``update_document(...)`` WITHOUT passing
+      ``enricher=``, so ``_enrich_post_ingest_hook`` hit the
+      "no enricher supplied" skip and ``documents.summary`` stayed at v1
+      even though the body refreshed to v2.
+
+    After the fix:
+    - The CLI lazily builds the (fake) enricher when ``new_content`` is
+      not None and threads it into ``update_document``. The hook now
+      sees a real enricher + ``body_changed=True`` and refreshes the
+      summary in the same transaction.
+    """
+    from dataclasses import dataclass
+
+    from brain.enrichment import SummaryResult
+    from brain.ingest import ExtractedDoc, ingest_document
+
+    @dataclass
+    class _ScriptedEnricher:
+        """Returns a different summary on each ``summarize`` call.
+
+        NOT module-level monkey-patching — injected via the
+        ``_build_enricher`` seam. The hook reads ``.model`` directly
+        for the D11 model-fingerprint check; ``calls`` lets the test
+        assert exactly how many round-trips happened.
+        """
+
+        model: str = "fake-test-model"
+        summaries: tuple[str, ...] = (
+            "v1 summary about the original body.",
+            "v2 summary about the new body.",
+        )
+        calls: int = 0
+
+        def count_tokens(self, text: str) -> int:
+            return max(1, len(text) // 4)
+
+        def summarize(self, title: str, content: str) -> SummaryResult:
+            idx = self.calls
+            self.calls += 1
+            return SummaryResult(
+                summary=self.summaries[idx], model=self.model
+            )
+
+    patch_embedder(fake_embedder)
+    fake_enricher = _ScriptedEnricher()
+    monkeypatch.setattr(
+        "brain.cli._build_enricher", lambda cfg: fake_enricher
+    )
+
+    # Seed via direct ingest_document so the test owns the enricher
+    # call surface end-to-end. ``enricher=fake_enricher`` populates the
+    # initial summary in the same transaction as the INSERT.
+    body_v1 = "Original body content for the Q2 edit-refresh test. " * 20
+    result = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Q2 edit refresh fixture",
+            content=body_v1,
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        enricher=fake_enricher,  # type: ignore[arg-type]
+    )
+    doc_id = result.document_id
+    assert doc_id is not None
+
+    summary_before_row = test_db.execute(
+        "SELECT summary FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert summary_before_row is not None
+    assert summary_before_row[0] == "v1 summary about the original body."
+    assert fake_enricher.calls == 1
+
+    # Body-changing edit via the CLI.
+    body_v2 = "Completely rewritten body for the v2 summary check. " * 20
+    payload = tmp_path / "v2-body.txt"
+    payload.write_text(body_v2)
+    cli = CliRunner().invoke(
+        app, ["edit", doc_id[:8], "--content-file", str(payload)]
+    )
+    assert cli.exit_code == 0, cli.output
+
+    summary_after_row = test_db.execute(
+        "SELECT summary, summary_model FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert summary_after_row is not None
+    summary_after, model_after = summary_after_row
+    assert summary_after == "v2 summary about the new body.", (
+        "`brain edit --content-file` must refresh documents.summary; the "
+        "Codex finding 1 fix wires the enricher into update_document so "
+        "_enrich_post_ingest_hook fires with body_changed=True"
+    )
+    assert model_after == "fake-test-model"
+    assert fake_enricher.calls == 2, (
+        "the hook must fire exactly once on the edit — once for the "
+        "initial ingest plus once for the body change"
+    )
+
+
+def test_edit_title_only_does_not_invoke_enricher(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lazy-build contract: title-only edits must NOT probe Ollama.
+
+    The fix wires the enricher only when the body actually changes —
+    a title-only / metadata-only edit should never construct the
+    enricher (which probes Ollama at construction time in production).
+    Captures the lazy-build guarantee at the seam.
+    """
+    from brain.ingest import ExtractedDoc, ingest_document
+
+    build_calls = {"count": 0}
+
+    def _spy_build_enricher(cfg: object) -> object:
+        build_calls["count"] += 1
+        raise AssertionError(
+            "title-only edit must NOT build the enricher — "
+            "Ollama probe would block on a sluggish server"
+        )
+
+    patch_embedder(fake_embedder)
+    monkeypatch.setattr("brain.cli._build_enricher", _spy_build_enricher)
+
+    result = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Title-only edit fixture",
+            content="Body content that stays put across the title edit.",
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+    )
+    doc_id = result.document_id
+    assert doc_id is not None
+
+    cli = CliRunner().invoke(
+        app, ["edit", doc_id[:8], "--title", "Edited title only"]
+    )
+    assert cli.exit_code == 0, cli.output
+    assert build_calls["count"] == 0

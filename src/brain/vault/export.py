@@ -22,6 +22,7 @@ import psycopg
 import yaml
 
 from . import init_vault
+from ._atomic import atomic_write_text
 from .frontmatter import dump_frontmatter, parse_frontmatter
 from .slug import gmail_slug, slugify
 
@@ -40,6 +41,20 @@ _EXPORT_OWNED_FRONTMATTER_KEYS = frozenset(
         "created",
         "updated",
         "vault_path",
+        # NOTE: ``summary`` is intentionally NOT in this strip set.
+        # Wave Q2-SUMMARY-WIKI's first cut stripped it always (the
+        # documented theory was that vault-tier hand-authored
+        # ``summary:`` lines round-trip through ``documents.summary``).
+        # That theory was wrong — sync's ``_build_metadata`` puts every
+        # non-reserved frontmatter key into ``documents.metadata`` for
+        # vault-tier rows, so a user's ``summary:`` lands in
+        # ``metadata["summary"]``, NOT in ``documents.summary``. Stripping
+        # it here deleted the user's content on the next export.
+        # Codex finding 2 (2026-05-11) caught the regression. The fix:
+        # leave ``summary`` in freeform passthrough for vault-tier; let
+        # :func:`_build_frontmatter` resolve precedence (Q1-D
+        # ``documents.summary`` wins; vault-tier metadata.summary serves
+        # as the fallback when ``documents.summary`` is NULL).
     }
 )
 
@@ -70,6 +85,12 @@ class _DocumentForExport:
     source_kind: str | None
     source_external_id: str | None
     draft: bool
+    # Wave Q2-SUMMARY-WIKI: ``documents.summary`` written by the Q1-D
+    # ``OllamaEnricher`` post-ingest hook. Plumbed onto the export
+    # projection so :func:`_build_frontmatter` can emit it as a wiki-
+    # readable field. ``None`` for any doc the enricher hasn't touched
+    # yet (short docs, Ollama unavailable, ``enrich=False``).
+    summary: str | None
 
 
 def _is_directory_unmanaged(target: Path) -> bool:
@@ -101,7 +122,11 @@ def _is_directory_unmanaged(target: Path) -> bool:
 _DOCUMENT_FOR_EXPORT_COLUMNS = (
     "d.id::text, d.title, d.content, d.content_hash, "
     "d.content_type, d.tags, d.metadata, d.ingested_at, "
-    "d.kind, d.vault_path, s.kind, s.external_id, d.draft"
+    "d.kind, d.vault_path, s.kind, s.external_id, d.draft, "
+    # Wave Q2-SUMMARY-WIKI: pull the Q1-D auto-summary onto the export
+    # projection so :func:`_build_frontmatter` can emit it as a
+    # ``summary:`` field in the per-doc mirror.
+    "d.summary"
 )
 
 
@@ -126,6 +151,11 @@ def _row_to_document_for_export(row: tuple[Any, ...]) -> _DocumentForExport:
         source_kind=row[10],
         source_external_id=row[11],
         draft=bool(row[12]),
+        # ``documents.summary`` is NULL until the Q1-D enrich hook
+        # populates it (or a future ``brain enrich --backfill`` run).
+        # Coerce to ``str`` only when set so ``_build_frontmatter`` can
+        # gate the emit on a truthy check.
+        summary=str(row[13]) if row[13] is not None else None,
     )
 
 
@@ -340,18 +370,27 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
     """Return the ordered frontmatter mapping for ``doc``.
 
     Field order is intentional and stable: id, title, created, updated, tags,
-    aliases (when non-empty), kind, content_type, then ingested-tier extras
+    aliases (when non-empty), kind, content_type, ``summary`` (when the Q1-D
+    enricher has populated ``documents.summary``), then ingested-tier extras
     (source / external_id) when present, and finally ``draft: true`` when the
     document is quarantined. Anything not applicable (e.g. ingested extras
-    for a vault-tier doc, or an empty alias list) is omitted entirely rather
-    than written as ``null`` / ``[]`` — keeps the vault file readable and
-    round-trips cleanly through sync.
+    for a vault-tier doc, an empty alias list, or a NULL summary) is omitted
+    entirely rather than written as ``null`` / ``[]`` — keeps the vault file
+    readable and round-trips cleanly through sync.
 
     The ``draft`` line is emitted ONLY when ``documents.draft`` is true. The
     default-false case is the vast majority of files; writing ``draft: false``
     on every export would be visual noise. The Quartz contentIndex emitter
     reads this key (or the absence of it) to filter quarantined docs out of
     the wiki's explorer / graph / search index without touching the DB row.
+
+    The ``summary`` line (wave Q2-SUMMARY-WIKI) is emitted whenever
+    ``documents.summary`` is non-NULL — that is the same surface
+    ``brain show`` / MCP ``brain_show`` expose. The Quartz
+    ``SummaryLede`` component renders it as an inline TL;DR above the
+    article body. Summaries are NOT indexed (the Q1-D spec keeps them
+    out of tsv / embeddings / SearchExplanation); this writer is the
+    read-surface pipeline only.
 
     Vault-tier rows also preserve freeform metadata keys because sync stores
     user-authored frontmatter there. Export-owned keys stay canonical here,
@@ -377,6 +416,25 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
         fields["aliases"] = aliases
     fields["kind"] = doc.kind
     fields["content_type"] = doc.content_type
+    # Wave Q2-SUMMARY-WIKI: emit ``summary`` with tier-aware precedence.
+    # 1. ``documents.summary`` (Q1-D ``OllamaEnricher``) — authoritative
+    #    whenever non-NULL. The wiki's ``SummaryLede`` reads this key.
+    # 2. For vault-tier docs only, fall back to a hand-authored
+    #    ``summary:`` line that sync stored in ``documents.metadata``.
+    #    Ingested-tier docs never fall back — their metadata is
+    #    DB-authoritative, not user-authored.
+    # The early write here pins the field's position right after
+    # ``content_type`` so YAML field order stays stable regardless of
+    # which source the value came from. The later vault-tier freeform
+    # merge may overwrite this with the metadata value; we re-assert
+    # ``documents.summary`` after the merge to keep it authoritative.
+    effective_summary: str | None = doc.summary
+    if effective_summary is None and doc.kind == "vault":
+        metadata_summary = doc.metadata.get("summary")
+        if isinstance(metadata_summary, str) and metadata_summary:
+            effective_summary = metadata_summary
+    if effective_summary:
+        fields["summary"] = effective_summary
     if doc.kind == "ingested":
         if doc.source_kind:
             fields["source"] = doc.source_kind
@@ -384,6 +442,14 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
             fields["external_id"] = doc.source_external_id
     if doc.kind == "vault":
         fields.update(_freeform_vault_metadata(doc.metadata))
+        # Re-assert Q1-D precedence: the freeform merge above may have
+        # overwritten ``fields["summary"]`` with ``metadata["summary"]``
+        # (Codex finding 2 fix removed ``summary`` from the strip set so
+        # vault-tier hand-authored values survive). When
+        # ``documents.summary`` is also set, it wins — re-pin it at the
+        # field's existing dict position so YAML order is unchanged.
+        if doc.summary:
+            fields["summary"] = doc.summary
     if doc.draft:
         fields["draft"] = True
     return fields
@@ -483,7 +549,14 @@ def _write_doc_file(
     target.parent.mkdir(parents=True, exist_ok=True)
     fields = _build_frontmatter(doc)
     text = dump_frontmatter(fields, doc.content)
-    target.write_text(text, encoding="utf-8")
+    # Atomic rewrite — sibling tempfile + ``os.replace`` so a crash between
+    # the write and the rename never leaves a truncated mirror file on disk.
+    # All writeback callers (``brain edit`` / ``brain tag`` / ``brain mark-draft`` /
+    # ``brain vault sync-summaries`` / full ``brain vault export``) funnel through
+    # here, so this single line gives the whole mirror-write surface crash
+    # safety. Matches the convention used by every other body-rewriter under
+    # ``vault/`` (see :mod:`brain.vault._atomic`).
+    atomic_write_text(target, text)
     return target, True
 
 

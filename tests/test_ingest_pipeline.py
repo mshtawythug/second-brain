@@ -956,6 +956,163 @@ def test_update_document_frontmatter_only_rewrites_mirror(
         assert fm["content_type"] == new_value
 
 
+# --- Wave Q2-SUMMARY-WIKI: `summary` is mirrored into frontmatter ----------
+#
+# Q1-D writes `documents.summary` via the post-ingest enrich hook (inside the
+# same transaction as the INSERT). Q2 plumbs that value into the mirror
+# writer so the on-disk `.md` carries `summary: …` in its YAML frontmatter,
+# which the Quartz `SummaryLede` component reads at render time. These tests
+# pin two contracts: (1) a fresh ingest with an enricher writes summary
+# frontmatter end-to-end, and (2) a body update that re-enriches refreshes
+# the mirror's summary line.
+
+
+def _stub_enricher(text: str = "A canned two-sentence summary used by Q2 tests."):
+    """Return a minimal enricher honoring the OllamaEnricher surface.
+
+    NOT a monkey-patch — it's an explicit test double the ingest pipeline
+    accepts via its public ``enricher=`` kwarg.
+    """
+    from dataclasses import dataclass
+
+    from brain.enrichment import SummaryResult
+
+    @dataclass
+    class _Enricher:
+        model: str = "llama3.1:8b"
+        summary_text: str = text
+        calls: int = 0
+
+        def count_tokens(self, text: str) -> int:
+            return max(1, len(text) // 4)
+
+        def summarize(self, title: str, content: str):
+            self.calls += 1
+            return SummaryResult(summary=self.summary_text, model=self.model)
+
+    return _Enricher()
+
+
+def test_ingest_document_writes_summary_into_mirror_frontmatter(
+    test_db, fake_embedder, tmp_path: Path
+) -> None:
+    """A fresh ingest with an enricher mirrors `summary:` to the on-disk file.
+
+    The enrich post-ingest hook writes ``documents.summary`` INSIDE the
+    ingest transaction. The mirror write at the bottom of ``ingest_document``
+    runs after commit — by that point the DB already carries the summary,
+    so :func:`brain.vault.export._build_frontmatter` picks it up and the
+    resulting `.md` file's frontmatter carries `summary: …`.
+    """
+    vault = tmp_path / "vault"
+    enricher = _stub_enricher("Two-sentence wiki TL;DR.")
+    # Long-enough body that the enrich min-tokens gate (50) passes.
+    long_body = "Body text. " * 50
+
+    result = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Summary Mirror Note",
+            content=long_body,
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        vault_root=vault,
+        enricher=enricher,
+    )
+
+    assert result.document_id is not None
+    assert enricher.calls == 1, "enrich hook should fire once on a fresh ingest"
+    target = vault / "_ingested" / "manual" / "summary-mirror-note.md"
+    assert target.is_file()
+    fields, _body = parse_frontmatter(target.read_text(encoding="utf-8"))
+    assert fields.get("summary") == "Two-sentence wiki TL;DR.", (
+        "expected the enrich hook's summary to land in the mirror frontmatter"
+    )
+
+
+def test_ingest_document_without_enricher_omits_summary_from_mirror(
+    test_db, fake_embedder, tmp_path: Path
+) -> None:
+    """No enricher → DB summary stays NULL → mirror has no `summary:` key.
+
+    The lede component returns ``null`` for missing/non-string summaries,
+    so leaving the frontmatter key absent (rather than ``summary: null``)
+    keeps the rendered HTML clean.
+    """
+    vault = tmp_path / "vault"
+    result = _ingest_manual_with_mirror(
+        test_db,
+        fake_embedder,
+        vault_root=vault,
+        title="No Enricher Note",
+        content="hello brain",
+    )
+    assert result.document_id is not None
+    target = vault / "_ingested" / "manual" / "no-enricher-note.md"
+    assert target.is_file()
+    fields, _body = parse_frontmatter(target.read_text(encoding="utf-8"))
+    assert "summary" not in fields, (
+        "no enricher should leave the mirror frontmatter free of a `summary:` key"
+    )
+
+
+def test_update_document_frontmatter_edit_preserves_summary_in_mirror(
+    test_db, fake_embedder, tmp_path: Path
+) -> None:
+    """A frontmatter-only edit on an enriched doc keeps `summary:` on disk.
+
+    ``_MIRROR_FRONTMATTER_FIELDS`` (extended in Q2 to include
+    ``summary``) is the gating set for "did this change require a
+    mirror rewrite?". When the user renames a doc whose
+    ``documents.summary`` is already populated, the post-update mirror
+    rewrite re-emits the existing summary from the DB column — no
+    enricher call needed, no on-disk drift.
+    """
+    vault = tmp_path / "vault"
+    enricher = _stub_enricher("Persistent canned summary.")
+    long_body = "Initial body content. " * 50
+
+    initial = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Original Title",
+            content=long_body,
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        vault_root=vault,
+        enricher=enricher,
+    )
+    assert initial.document_id is not None
+    original_target = vault / "_ingested" / "manual" / "original-title.md"
+    fields, _ = parse_frontmatter(original_target.read_text(encoding="utf-8"))
+    assert fields.get("summary") == "Persistent canned summary."
+
+    # Title-only edit — body unchanged, summary unchanged in the DB.
+    # Mirror rewrite triggers via ``title`` ∈ _MIRROR_FRONTMATTER_FIELDS;
+    # the rewritten file must still carry the original summary line so
+    # the lede component keeps rendering on the next Quartz build.
+    update_document(
+        test_db,
+        document_id=initial.document_id,
+        new_title="Renamed Title",
+        vault_root=vault,
+    )
+    fields, _ = parse_frontmatter(original_target.read_text(encoding="utf-8"))
+    assert fields["title"] == "Renamed Title"
+    assert fields.get("summary") == "Persistent canned summary.", (
+        "the title-edit mirror rewrite must preserve the existing summary "
+        "frontmatter (sourced from documents.summary)"
+    )
+
+
 def test_update_document_vault_kind_skipped(
     test_db, fake_embedder, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

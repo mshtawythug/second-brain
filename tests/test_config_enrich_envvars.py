@@ -15,13 +15,41 @@ from brain.config import (
 _TEST_DATABASE_URL = "postgresql://brain:brain@localhost:5433/second_brain_test"
 
 
-def test_enrich_defaults_apply_when_envvars_unset(
+def test_enrich_defaults_apply_when_envvars_match_defaults(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("BRAIN_ENRICH_MODEL", raising=False)
-    monkeypatch.delenv("BRAIN_ENRICH_MIN_TOKENS", raising=False)
-    monkeypatch.delenv("BRAIN_ENRICH_MAX_INPUT_TOKENS", raising=False)
-    monkeypatch.delenv("BRAIN_ENRICH_TIMEOUT_SECONDS", raising=False)
+    """``Config`` parses each enrich env var into its documented default value.
+
+    Originally this test used ``monkeypatch.delenv`` to "remove" each
+    ``BRAIN_ENRICH_*`` var and then asserted that ``Config.load()`` fell
+    back to ``DEFAULT_ENRICH_*``. That assertion was a lie: ``Config.load()``
+    calls ``load_dotenv(..., override=False)`` internally, which silently
+    re-reads the user's on-disk ``.env`` and re-populates any var the test
+    just deleted (only ``override=False`` honors values already in the
+    process env — but ``delenv`` removed them, so the ``.env`` line wins).
+
+    The test only "passed" by accident — i.e. when the developer's local
+    ``.env`` happened not to carry the relevant key. The moment someone
+    set ``BRAIN_ENRICH_MODEL=gemma3:27b`` in ``.env`` (as happened during
+    Wave Q2-SUMMARY-WIKI verification, 2026-05-11), the test deterministically
+    failed with ``AssertionError: assert 'gemma3:27b' == 'llama3.1:8b'``.
+
+    Fix: instead of trying to assert "no env var set" (which we can't
+    guarantee while ``load_dotenv`` runs inside ``Config.load()``), assert
+    the equivalent contract — when each env var is explicitly set to the
+    documented default string, ``Config`` parses it into the typed default.
+    This covers the two things that can actually break: (1) the parser
+    drifts from the documented default constant, (2) the env-var name
+    drifts from the one ``Config.load`` reads.
+    """
+    monkeypatch.setenv("BRAIN_ENRICH_MODEL", DEFAULT_ENRICH_MODEL)
+    monkeypatch.setenv("BRAIN_ENRICH_MIN_TOKENS", str(DEFAULT_ENRICH_MIN_TOKENS))
+    monkeypatch.setenv(
+        "BRAIN_ENRICH_MAX_INPUT_TOKENS", str(DEFAULT_ENRICH_MAX_INPUT_TOKENS)
+    )
+    monkeypatch.setenv(
+        "BRAIN_ENRICH_TIMEOUT_SECONDS", str(DEFAULT_ENRICH_TIMEOUT_SECONDS)
+    )
     monkeypatch.setenv("DATABASE_URL", _TEST_DATABASE_URL)
     cfg = Config.load()
     assert cfg.enrich_model == DEFAULT_ENRICH_MODEL

@@ -1150,3 +1150,175 @@ def test_regenerate_vault_file_existing_vault_path_preserved_after_title_change(
     )
     # The DB column also stayed pinned to the original path.
     assert _vault_path_for(test_db, doc_id) == original_relative
+
+
+# ---------------------------------------------------------------------------
+# Wave Q2-SUMMARY-WIKI — `documents.summary` round-trips into frontmatter.
+# ---------------------------------------------------------------------------
+
+
+def test_export_emits_summary_when_present(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """A doc with ``documents.summary`` set emits `summary:` in frontmatter.
+
+    Pins the Q2 wave contract: the export writer is the source-of-truth
+    mirror for ``documents.summary``. The Quartz ``SummaryLede`` component
+    reads this exact key.
+    """
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="Summary Doc",
+        content="body here",
+        source_kind="manual",
+    )
+    test_db.execute(
+        "UPDATE documents SET summary=%s, summary_model='llama3.1:8b', "
+        "summary_at=NOW() WHERE id=%s",
+        ("Canned export-side summary.", doc_id),
+    )
+
+    summary = export_vault(test_db, vault_path=tmp_path / "vault", force=True)
+    assert summary.written == 1
+    target = next((tmp_path / "vault" / "_ingested" / "manual").glob("*.md"))
+    fields, _body = parse_frontmatter(target.read_text(encoding="utf-8"))
+    assert fields.get("summary") == "Canned export-side summary."
+
+
+def test_export_omits_summary_key_when_null(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """A doc without a summary must NOT carry a `summary:` key at all.
+
+    Emitting ``summary: null`` would still trigger the lede component's
+    string-check (it would reject it, but the YAML would carry an
+    awkward ``null`` literal). Omitting the key entirely is the
+    contract.
+    """
+    _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="No Summary Doc",
+        content="body here",
+        source_kind="manual",
+    )
+
+    summary = export_vault(test_db, vault_path=tmp_path / "vault")
+    assert summary.written == 1
+    target = next((tmp_path / "vault" / "_ingested" / "manual").glob("*.md"))
+    fields, _body = parse_frontmatter(target.read_text(encoding="utf-8"))
+    assert "summary" not in fields
+
+
+def test_vault_tier_hand_authored_summary_round_trips(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    """Codex finding 2 (HIGH) regression: a vault-tier doc with a
+    hand-authored ``summary:`` line in its metadata must round-trip
+    through export. Before the fix, ``_EXPORT_OWNED_FRONTMATTER_KEYS``
+    included ``summary``, so the freeform-vault-metadata passthrough
+    stripped it — every export silently deleted the user's authored
+    summary.
+    """
+    test_db.execute(
+        """
+        INSERT INTO documents
+          (title, content, content_hash, content_type, kind, vault_path, metadata)
+        VALUES
+          (
+            'Hand-Authored Vault Note',
+            'body here\n',
+            'hand-authored-hash',
+            'note',
+            'vault',
+            'notes/hand-authored.md',
+            '{"summary": "Hand-authored summary the user wants kept."}'::jsonb
+          )
+        """
+    )
+
+    result = export_vault(test_db, vault_path=tmp_path / "vault")
+    assert result.written == 1
+    fields, _body = parse_frontmatter(
+        (tmp_path / "vault" / "notes" / "hand-authored.md").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert fields.get("summary") == "Hand-authored summary the user wants kept."
+
+
+def test_vault_tier_documents_summary_wins_over_metadata_summary(
+    test_db: psycopg.Connection, tmp_path: Path
+) -> None:
+    """Precedence contract: when a vault-tier row has BOTH
+    ``documents.summary`` (Q1-D enriched) AND a hand-authored
+    ``summary:`` in ``documents.metadata``, the Q1-D value wins. The
+    rationale: the enricher just ran against the current body and is
+    authoritative; the metadata copy may pre-date a body refresh.
+    """
+    test_db.execute(
+        """
+        INSERT INTO documents
+          (title, content, content_hash, content_type, kind, vault_path,
+           metadata, summary, summary_model, summary_at)
+        VALUES
+          (
+            'Both-Sources Vault Note',
+            'body here\n',
+            'both-sources-hash',
+            'note',
+            'vault',
+            'notes/both-sources.md',
+            '{"summary": "Stale hand-authored copy."}'::jsonb,
+            'Fresh Q1-D enricher output.',
+            'llama3.1:8b',
+            NOW()
+          )
+        """
+    )
+
+    result = export_vault(test_db, vault_path=tmp_path / "vault")
+    assert result.written == 1
+    fields, _body = parse_frontmatter(
+        (tmp_path / "vault" / "notes" / "both-sources.md").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert fields.get("summary") == "Fresh Q1-D enricher output."
+
+
+def test_ingested_tier_metadata_summary_not_emitted(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """Tier gate: an ingested-tier doc whose metadata happens to contain
+    a ``summary`` key (e.g., from an unusual MCP payload) must NOT
+    promote that metadata into the frontmatter — only ``documents.summary``
+    is authoritative for ingested-tier rows. Without this gate the
+    Codex finding 2 fix would over-correct and start leaking
+    source-metadata summaries into the wiki UI.
+    """
+    doc_id = _ingest(
+        test_db,
+        embedder=fake_embedder,
+        title="Ingested With Metadata Summary",
+        content="body here",
+        source_kind="manual",
+    )
+    # Backfill metadata with a stray `summary` key. ``documents.summary``
+    # remains NULL.
+    test_db.execute(
+        "UPDATE documents SET metadata = metadata || "
+        "'{\"summary\": \"Stray source-metadata summary.\"}'::jsonb "
+        "WHERE id=%s",
+        (doc_id,),
+    )
+
+    result = export_vault(test_db, vault_path=tmp_path / "vault", force=True)
+    assert result.written == 1
+    target = next((tmp_path / "vault" / "_ingested" / "manual").glob("*.md"))
+    fields, _body = parse_frontmatter(target.read_text(encoding="utf-8"))
+    assert "summary" not in fields, (
+        "ingested-tier metadata.summary must not leak into the export — "
+        "only documents.summary is the source of truth for ingested rows"
+    )

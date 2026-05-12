@@ -129,6 +129,7 @@ from .vault.quartz_overlay import repo_root as _brain_repo_root
 from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
+from .vault.sync_summaries import sync_summaries
 from .vault.templates import list_template_names, render_template
 from .vault.watch import WatchConfig, run_watcher
 from .wiki.build_people import (
@@ -2181,6 +2182,16 @@ def _edit_via_editor(cfg: Config, doc_id: str) -> int:
 
     # Phase 3: apply.
     embedder: Any = _build_embedder(cfg) if body_changed else None
+    # Wave Q2-SUMMARY-WIKI smoke gap (Codex finding 1 follow-up,
+    # 2026-05-11): wire the enricher whenever the body is changing so
+    # ``_enrich_post_ingest_hook`` can refresh ``documents.summary``
+    # against the new body. Without this the Q2 wiki lede would render
+    # the pre-edit summary above a freshly-edited body. Build lazily —
+    # only when the body actually changed (the enricher constructor
+    # probes Ollama, which we don't want on a title-only / metadata-only
+    # edit). Ollama failures inside the hook degrade soft (logged WARN;
+    # ``brain enrich --backfill`` recovers the row later).
+    enricher: Any = _build_enricher(cfg) if body_changed else None
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         try:
@@ -2195,6 +2206,7 @@ def _edit_via_editor(cfg: Config, doc_id: str) -> int:
                 replace_metadata=True,
                 new_tags=new_tags,
                 vault_root=cfg.vault_path,
+                enricher=enricher,
             )
         except ValueError as e:
             typer.secho(str(e), fg="red", err=True)
@@ -2391,6 +2403,14 @@ def edit(
         raise typer.Exit(code=1)
 
     embedder: Any = _build_embedder(cfg) if new_content is not None else None
+    # Wave Q2-SUMMARY-WIKI smoke gap (Codex finding 1 follow-up,
+    # 2026-05-11): wire the enricher on body change so the auto-summary
+    # refreshes alongside the new body. Lazy build — title-only /
+    # content-type-only / metadata-only edits don't need an Ollama
+    # probe, and the body-only flag set (``--content-file`` /
+    # ``--content-stdin``) is the only path that re-triggers
+    # ``_enrich_post_ingest_hook``'s body-changed branch.
+    enricher: Any = _build_enricher(cfg) if new_content is not None else None
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         try:
@@ -2404,6 +2424,7 @@ def edit(
                 metadata_patch=metadata_patch,
                 replace_metadata=replace_metadata,
                 vault_root=cfg.vault_path,
+                enricher=enricher,
             )
         except ValueError as e:
             typer.secho(str(e), fg="red", err=True)
@@ -2610,6 +2631,76 @@ def vault_export(
     for err in summary.errors:
         typer.secho(f"  error: {err}", fg="red", err=True)
     if summary.errors:
+        raise typer.Exit(code=1)
+
+
+@vault_app.command("sync-summaries")
+def vault_sync_summaries(
+    vault: Path | None = typer.Option(
+        None,
+        "--vault",
+        help="Override the configured vault path for this invocation.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Inspect every doc + report would-update counts without "
+            "touching any files. Reads the DB; writes nothing."
+        ),
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        help=(
+            "Cap the total number of documents inspected. Pairs with "
+            "``--dry-run`` for incremental drains on a large corpus."
+        ),
+    ),
+) -> None:
+    """Backfill ``summary:`` frontmatter into existing vault mirror files.
+
+    Wave Q2-SUMMARY-WIKI's one-shot reconciliation pass. The Q1-D
+    enricher writes ``documents.summary``, and post-Q2 ingests carry
+    that summary into the mirror frontmatter on first write — but
+    documents enriched BEFORE the writer learned the ``summary`` field
+    have stale frontmatter on disk. This command reads each row where
+    ``documents.summary IS NOT NULL`` and ``vault_path IS NOT NULL``,
+    parses the mirror file's frontmatter, and rewrites it atomically
+    when the on-disk ``summary:`` is missing or stale.
+
+    Idempotent: rerunning on a fully-synced vault reports every row as
+    ``unchanged`` and writes nothing. Non-destructive: only the
+    ``summary:`` key is touched; the file body, tags, aliases, and
+    user-authored freeform keys round-trip verbatim.
+
+    Counters printed at the end:
+
+    - ``inspected``  total rows pulled from the DB
+    - ``updated``    rewrote the mirror (or, under ``--dry-run``, would)
+    - ``unchanged``  on-disk summary already matched
+    - ``missing``    DB row's ``vault_path`` resolved to no file on disk
+    - ``errored``    parse / write failure (see warnings on stderr)
+    """
+    cfg = Config.load()
+    target = vault.expanduser() if vault is not None else cfg.vault_path
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        report = sync_summaries(
+            conn, vault_root=target, dry_run=dry_run, limit=limit
+        )
+
+    label = "would update" if dry_run else "updated"
+    typer.echo(
+        f"inspected {report.inspected}, "
+        f"{label} {report.updated}, "
+        f"unchanged {report.unchanged}, "
+        f"missing {report.missing_file}, "
+        f"errored {report.errored}"
+    )
+    for err in report.errors:
+        typer.secho(f"  error: {err}", fg="red", err=True)
+    if report.errored:
         raise typer.Exit(code=1)
 
 

@@ -53,6 +53,11 @@ import ConditionalRender from "./ConditionalRender"
 //     search lifecycle.
 import CommandPalette from "./CommandPalette"
 import RelatedDocs from "./RelatedDocs"
+//   * SummaryLede — wave Q2-SUMMARY-WIKI — renders the auto-summary
+//     stored in `frontmatter.summary` (sourced from Q1-D
+//     `documents.summary`) as a TL;DR block above the article body.
+//     Pin: `defaultContentPageLayout.beforeBody` slot.
+import SummaryLede from "./SummaryLede"
 
 export {
   ArticleTitle,
@@ -83,4 +88,5 @@ export {
   // brain-extension exports
   CommandPalette,
   RelatedDocs,
+  SummaryLede,
 }

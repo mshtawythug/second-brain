@@ -92,6 +92,14 @@ export const defaultContentPageLayout: PageLayout = {
     Component.ArticleTitle(),
     Component.ContentMeta(),
     Component.TagList(),
+    // brain (Wave Q2-SUMMARY-WIKI): render the Q1-D auto-summary as a
+    // TL;DR block above the article body. Sits below the meta strip
+    // (title, tags, dates) and above Breadcrumbs's natural reading
+    // position — once the reader has identified the page, the lede
+    // gives them the gist before the body. Renders `null` when
+    // `fileData.frontmatter.summary` is missing or non-string, so
+    // unenriched docs never see an empty aside.
+    Component.SummaryLede(),
   ],
   left: [
     Component.PageTitle(),

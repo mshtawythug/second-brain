@@ -882,6 +882,93 @@ def test_brain_edit_metadata_replace_swaps_blob(
     assert _doc_metadata(doc_id) == {"only": "this"}
 
 
+def test_brain_edit_content_change_refreshes_summary(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex finding 1 follow-up — MCP-side regression.
+
+    Mirrors the CLI ``brain edit --content-file`` smoke gap test, but
+    exercises the ``brain_edit`` MCP tool. Verifies that when
+    ``_State`` carries a non-None enricher, a content-changing edit
+    refreshes ``documents.summary`` via the post-ingest hook (the
+    Q2-SUMMARY-WIKI lede otherwise renders the pre-edit summary above
+    the new body).
+    """
+    from dataclasses import dataclass
+
+    from brain.enrichment import SummaryResult
+
+    @dataclass
+    class _ScriptedEnricher:
+        model: str = "fake-mcp-test-model"
+        summaries: tuple[str, ...] = (
+            "MCP v1 summary about the original body.",
+            "MCP v2 summary about the refreshed body.",
+        )
+        calls: int = 0
+
+        def count_tokens(self, text: str) -> int:
+            return max(1, len(text) // 4)
+
+        def summarize(self, title: str, content: str) -> SummaryResult:
+            idx = self.calls
+            self.calls += 1
+            return SummaryResult(
+                summary=self.summaries[idx], model=self.model
+            )
+
+    fake_enricher = _ScriptedEnricher()
+    state = mcp_server._State(
+        cfg=Config(database_url=TEST_DATABASE_URL),
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        enricher=fake_enricher,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+
+    doc_id = ingest_document(
+        test_db,
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        doc=ExtractedDoc(
+            title="MCP summary refresh fixture",
+            content="Original body content for the MCP refresh test. " * 20,
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        enricher=fake_enricher,  # type: ignore[arg-type]
+    ).document_id
+    assert doc_id is not None
+
+    summary_before_row = test_db.execute(
+        "SELECT summary FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert summary_before_row is not None
+    assert summary_before_row[0] == "MCP v1 summary about the original body."
+    assert fake_enricher.calls == 1
+
+    mcp_server.brain_edit(
+        id_prefix=doc_id[:8],
+        content="Refreshed body content for the MCP refresh test. " * 20,
+    )
+
+    summary_after_row = test_db.execute(
+        "SELECT summary, summary_model FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert summary_after_row is not None
+    summary_after, model_after = summary_after_row
+    assert summary_after == "MCP v2 summary about the refreshed body.", (
+        "`brain_edit` MCP tool must refresh documents.summary on body "
+        "change; without state.enricher wiring the hook hits the "
+        "'no enricher supplied' skip and the wiki lede shows a stale "
+        "summary above the new body"
+    )
+    assert model_after == "fake-mcp-test-model"
+    assert fake_enricher.calls == 2
+
+
 def test_brain_edit_no_args_errors(
     test_db: psycopg.Connection,
     fake_embedder: object,

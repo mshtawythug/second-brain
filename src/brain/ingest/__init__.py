@@ -532,6 +532,15 @@ def _ingest_within_transaction(
                         created=False,
                         body_changed=False,
                     )
+                # Body changed iff the existing row's hash differs from
+                # the incoming. ``force=True`` may have brought us here
+                # with identical hashes (an explicit re-process request) —
+                # in that case the body has NOT changed; the D11 skip
+                # inside ``_enrich_post_ingest_hook`` will short-circuit
+                # the re-summary correctly. When hashes differ, the
+                # update is a real body refresh and the hook must
+                # re-enrich (Codex finding 1 fix).
+                body_changed = existing_hash != h
                 _update_thread_doc_in_place(
                     conn,
                     embedder=embedder,
@@ -542,6 +551,7 @@ def _ingest_within_transaction(
                     source_metadata=source_metadata,
                     tags=tags,
                     content_hash=h,
+                    body_changed=body_changed,
                     gws_runner=gws_runner,
                     draft=draft,
                     enricher=enricher,
@@ -551,7 +561,7 @@ def _ingest_within_transaction(
                 return IngestResult(
                     document_id=str(existing_id),
                     created=False,
-                    body_changed=True,
+                    body_changed=body_changed,
                 )
             # No existing thread doc — fall through to the standard INSERT
             # path. The partial unique index ``uq_documents_gmail_thread``
@@ -700,6 +710,7 @@ def _update_thread_doc_in_place(
     source_metadata: dict[str, Any],
     tags: list[str],
     content_hash: str,
+    body_changed: bool,
     gws_runner: GwsRunner | None,
     draft: bool = False,
     enricher: OllamaEnricher | None = None,
@@ -826,9 +837,13 @@ def _update_thread_doc_in_place(
         )
 
     # Wave Q1-D — re-enrich the thread doc when its body actually changed.
-    # The skip rule inside ``_enrich_post_ingest_hook`` compares the new
-    # content_hash against documents.summary to decide whether the existing
-    # summary is still valid (idempotency rule D11).
+    # The hook's D11 idempotency rule needs ``body_changed`` because the
+    # ``UPDATE documents SET content_hash=%s`` above has already overwritten
+    # the row's stored hash — without an explicit body-changed signal the
+    # hook would always see ``existing_hash == content_hash`` and skip,
+    # leaving a stale summary on disk after a body refresh (Codex
+    # finding 1, 2026-05-11). The caller computed ``body_changed`` from
+    # the pre-UPDATE hash diff in :func:`_ingest_within_transaction`.
     _enrich_post_ingest_hook(
         conn,
         document_id=document_id,
@@ -837,6 +852,7 @@ def _update_thread_doc_in_place(
         enrich=enrich,
         min_tokens=enrich_min_tokens,
         content_hash=content_hash,
+        body_changed=body_changed,
     )
 
     _run_source_hooks(
@@ -879,6 +895,7 @@ def _enrich_post_ingest_hook(
     enrich: bool,
     min_tokens: int,
     content_hash: str,
+    body_changed: bool = False,
 ) -> None:
     """Generate + persist a 2-3 sentence summary on ``documents.summary``.
 
@@ -892,13 +909,30 @@ def _enrich_post_ingest_hook(
        and internal pipelines that don't want LLM round-trips).
     3. Content shorter than ``min_tokens`` tokens — the title alone is
        already a fine summary; no point spending an LLM round-trip.
-    4. ``documents.summary IS NOT NULL`` AND ``content_hash`` unchanged —
-       idempotency: same body, same model → reuse the prior summary (D11).
+    4. ``documents.summary IS NOT NULL`` AND ``content_hash`` unchanged
+       AND ``body_changed`` is False — idempotency: same body, same model
+       → reuse the prior summary (D11).
     5. ``OllamaUnavailable`` — Ollama is down / 5xx; logged at WARN. The
        ingest still commits; ``brain enrich --backfill`` picks the row up
        later.
     6. :class:`EnrichmentError` (model returned malformed JSON twice in a
        row) — logged at WARN; row stays unenriched.
+
+    The ``body_changed`` kwarg is the Codex finding 1 (2026-05-11) fix.
+    Update-path callers (:func:`_update_thread_doc_in_place`,
+    :func:`update_document`) UPDATE ``documents.content_hash`` to the new
+    value BEFORE invoking this hook. The hook then SELECTs the row, reads
+    the just-overwritten hash, and the ``existing_hash == content_hash``
+    comparison is meaningless — both sides equal the new hash. The
+    pre-fix behavior fell through the D11 skip and left the prior
+    (stale) summary in place even when the body had changed, which
+    Q2-SUMMARY-WIKI then rendered above the article body as a wiki
+    lede — user-visible drift. The fix: callers that know the body
+    changed (or might have) pass ``body_changed=True``; the D11 skip
+    only fires when ``body_changed`` is False AND the other conditions
+    hold. The INSERT call site keeps the default ``False`` because the
+    row is freshly INSERTed with ``summary IS NULL`` — the first clause
+    of the D11 guard naturally short-circuits there.
     """
     if not enrich:
         return
@@ -917,11 +951,13 @@ def _enrich_post_ingest_hook(
         return  # defensive — the row was just INSERTed
     existing_summary, existing_hash, existing_model = row
     # Idempotency D11: reuse prior summary ONLY when the body AND model both
-    # match the current enricher. After a ``BRAIN_ENRICH_MODEL`` upgrade
-    # (e.g., llama3.1:8b → llama3.2:8b), the existing summary is stale
-    # relative to the new model — re-enrich so improvements propagate.
+    # match the current enricher AND the caller hasn't told us the body
+    # just changed. After a ``BRAIN_ENRICH_MODEL`` upgrade (e.g.,
+    # llama3.1:8b → llama3.2:8b), the existing summary is stale relative
+    # to the new model — re-enrich so improvements propagate.
     if (
         existing_summary is not None
+        and not body_changed
         and existing_hash == content_hash
         and existing_model == enricher.model
     ):
@@ -1116,7 +1152,7 @@ def apply_tags(
 
 
 _MIRROR_FRONTMATTER_FIELDS = frozenset(
-    {"title", "tags", "metadata", "content_type", "draft"}
+    {"title", "tags", "metadata", "content_type", "draft", "summary"}
 )
 
 
@@ -1325,13 +1361,21 @@ def update_document(
             from ..queries import sync_chunk_search_metadata
             sync_chunk_search_metadata(conn, document_id)
 
-        # Wave Q1-D — re-enrich on body change. The hook's idempotency rule
-        # (D11) handles the no-op case (summary present + content_hash
-        # matches), so passing through whenever the row exists is safe.
-        # Build an ExtractedDoc-shaped object lazily — we only need ``title``
-        # and ``content`` (the parts the enricher reads). Re-uses the
-        # post-update title/content so an in-flight title edit sees the new
-        # one.
+        # Wave Q1-D — re-enrich on body change. The ``rechunked`` gate
+        # above only fires when ``new_content != cur_content``, so reaching
+        # this point means the body provably changed — pass
+        # ``body_changed=True`` so the D11 idempotency check inside
+        # ``_enrich_post_ingest_hook`` knows the existing summary is now
+        # stale relative to the just-written body (Codex finding 1 fix —
+        # without this kwarg the hook reads back the just-updated row
+        # whose ``content_hash`` already matches ``new_hash``, the
+        # ``existing_hash == content_hash`` check trivially passes, and
+        # the hook short-circuits leaving the prior body's summary
+        # rendered in the Q2-SUMMARY-WIKI lede above the new body).
+        # Build an ExtractedDoc-shaped object lazily — we only need
+        # ``title`` and ``content`` (the parts the enricher reads).
+        # Re-uses the post-update title/content so an in-flight title
+        # edit sees the new one.
         if rechunked:
             final_title = new_title if new_title is not None else cur_title
             assert new_content is not None  # rechunked implies new_content set
@@ -1351,6 +1395,7 @@ def update_document(
                 enrich=enrich,
                 min_tokens=enrich_min_tokens,
                 content_hash=new_hash,
+                body_changed=True,
             )
 
     # Mirror writes happen OUTSIDE the transaction so a filesystem error

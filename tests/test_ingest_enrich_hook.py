@@ -327,3 +327,195 @@ def test_enrich_hook_runs_before_source_specific_hook(
     enricher = _FakeEnricher()
     _ingest(test_db, fake_embedder, enricher=enricher)
     assert enricher.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Codex finding 1 regression — D11 idempotency on the UPDATE path
+# ---------------------------------------------------------------------------
+
+
+def test_update_document_body_change_refreshes_summary(
+    test_db: psycopg.Connection, fake_embedder: object
+) -> None:
+    """Codex finding 1 (HIGH) regression: ``update_document`` with new
+    content must trigger re-summarization. Before the fix the hook read
+    the just-updated ``documents.content_hash`` (already equal to the new
+    hash), passed the ``existing_hash == content_hash`` D11 check, and
+    short-circuited — leaving the pre-update body's summary rendered above
+    the new body in the Q2-SUMMARY-WIKI lede.
+    """
+    from brain.ingest import update_document
+
+    enricher = _FakeEnricher(summary_text="OLD body summary.")
+    initial_body = "Initial body content used for the first summary. " * 20
+    doc_id = _ingest(test_db, fake_embedder, content=initial_body, enricher=enricher)
+    summary_before, _ = _read_summary(test_db, doc_id)
+    assert summary_before == "OLD body summary."
+    assert enricher.calls == 1
+
+    # Re-arm the fake to return a NEW summary on the next call.
+    enricher.summary_text = "NEW body summary."
+
+    update_document(
+        test_db,
+        document_id=doc_id,
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        new_content="Refreshed body content for the second summary. " * 20,
+        enricher=enricher,  # type: ignore[arg-type]
+    )
+
+    summary_after, _ = _read_summary(test_db, doc_id)
+    assert summary_after == "NEW body summary.", (
+        "update_document with new_content must re-enrich — the D11 hash check "
+        "is meaningless on the UPDATE path because the UPDATE already wrote "
+        "the new content_hash before the hook read it"
+    )
+    assert enricher.calls == 2, "hook must fire exactly once per body change"
+
+
+def test_update_document_title_only_preserves_summary(
+    test_db: psycopg.Connection, fake_embedder: object
+) -> None:
+    """Idempotency complement: a title-only / tags-only edit does NOT
+    rechunk → the enrich hook isn't called at all → summary_at unchanged.
+
+    Belt-and-suspenders for the ``if rechunked`` gate inside
+    :func:`update_document`. If a future refactor moves the hook outside
+    that gate without also passing ``body_changed=False``, this test
+    flips red.
+    """
+    from brain.ingest import update_document
+
+    enricher = _FakeEnricher(summary_text="Original summary.")
+    body = "Body content stable across the title edit. " * 20
+    doc_id = _ingest(test_db, fake_embedder, content=body, enricher=enricher)
+    assert enricher.calls == 1
+
+    # Snapshot summary_at + summary.
+    before = test_db.execute(
+        "SELECT summary, summary_at FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert before is not None
+    summary_before, summary_at_before = before
+    assert summary_before == "Original summary."
+
+    update_document(
+        test_db,
+        document_id=doc_id,
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        new_title="Edited title — body unchanged",
+        enricher=enricher,  # type: ignore[arg-type]
+    )
+
+    after = test_db.execute(
+        "SELECT summary, summary_at FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert after is not None
+    summary_after, summary_at_after = after
+    assert summary_after == "Original summary.", "title edit must not touch summary"
+    assert summary_at_after == summary_at_before, "summary_at must be byte-stable"
+    assert enricher.calls == 1, "title-only edit must NOT re-call the enricher"
+
+
+def test_update_thread_doc_body_change_refreshes_summary(
+    test_db: psycopg.Connection, fake_embedder: object
+) -> None:
+    """Codex finding 1 regression — second leg. Same bug, different call
+    path: ``_update_thread_doc_in_place`` is the gmail-thread upsert path.
+    A new message in the thread changes the body bytes and must trigger
+    re-summary. Before the fix the hook read the just-updated content_hash
+    and short-circuited, leaving stale summaries on every thread refresh.
+    """
+    from brain.ingest import (
+        _content_hash,
+        _update_thread_doc_in_place,
+    )
+
+    # Seed: ingest a thread doc directly via ingest_document so the
+    # initial INSERT path populates summary normally.
+    enricher = _FakeEnricher(summary_text="Thread v1 summary.")
+    initial_body = "Thread message v1. " * 30
+    doc_id = _ingest(test_db, fake_embedder, content=initial_body, enricher=enricher)
+    summary_before, _ = _read_summary(test_db, doc_id)
+    assert summary_before == "Thread v1 summary."
+    assert enricher.calls == 1
+
+    # Re-arm + call the in-place upsert with a NEW body.
+    enricher.summary_text = "Thread v2 summary."
+    new_body = "Thread message v2 (added a reply). " * 30
+    new_hash = _content_hash(new_body)
+    new_doc = ExtractedDoc(
+        title="Doc title",
+        content=new_body,
+        content_type="note",
+        source_path=None,
+        metadata={},
+    )
+    with test_db.transaction():
+        _update_thread_doc_in_place(
+            test_db,
+            embedder=fake_embedder,  # type: ignore[arg-type]
+            document_id=doc_id,
+            doc=new_doc,
+            source_kind="manual",
+            source_external_id=None,
+            source_metadata={},
+            tags=[],
+            content_hash=new_hash,
+            body_changed=True,
+            gws_runner=None,
+            enricher=enricher,  # type: ignore[arg-type]
+        )
+
+    summary_after, _ = _read_summary(test_db, doc_id)
+    assert summary_after == "Thread v2 summary.", (
+        "thread-upsert body refresh must re-enrich"
+    )
+    assert enricher.calls == 2
+
+
+def test_update_thread_doc_body_unchanged_preserves_summary(
+    test_db: psycopg.Connection, fake_embedder: object
+) -> None:
+    """Idempotency complement: a byte-identical thread re-ingest (caller
+    passes ``body_changed=False``) must NOT re-call the enricher, even
+    though the row's content_hash matches what's already stored.
+    """
+    from brain.ingest import (
+        _content_hash,
+        _update_thread_doc_in_place,
+    )
+
+    enricher = _FakeEnricher(summary_text="Stable summary.")
+    body = "Identical thread body across both passes. " * 30
+    doc_id = _ingest(test_db, fake_embedder, content=body, enricher=enricher)
+    assert enricher.calls == 1
+
+    same_doc = ExtractedDoc(
+        title="Doc title",
+        content=body,
+        content_type="note",
+        source_path=None,
+        metadata={},
+    )
+    with test_db.transaction():
+        _update_thread_doc_in_place(
+            test_db,
+            embedder=fake_embedder,  # type: ignore[arg-type]
+            document_id=doc_id,
+            doc=same_doc,
+            source_kind="manual",
+            source_external_id=None,
+            source_metadata={},
+            tags=[],
+            content_hash=_content_hash(body),
+            body_changed=False,
+            gws_runner=None,
+            enricher=enricher,  # type: ignore[arg-type]
+        )
+
+    summary, _ = _read_summary(test_db, doc_id)
+    assert summary == "Stable summary."
+    assert enricher.calls == 1, (
+        "thread-upsert with body_changed=False must hit the D11 skip"
+    )
