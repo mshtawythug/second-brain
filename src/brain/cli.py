@@ -5370,3 +5370,45 @@ def claude_install_skill_cmd(
     except SkillInstallError as exc:
         typer.secho(f"error: {exc}", fg="red", err=True)
         raise typer.Exit(code=1) from exc
+
+
+# ---------------------------------------------------------------------------
+# brain uninstall
+# ---------------------------------------------------------------------------
+
+
+@app.command("uninstall")
+def uninstall_cmd(
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation prompt"),
+    remove_db: bool = typer.Option(
+        False,
+        "--remove-db",
+        help="Also remove $BRAIN_HOME/data/postgres/ (typed confirmation required; DESTROYS DATA)",
+    ),
+    remove_vault: bool = typer.Option(
+        False,
+        "--remove-vault",
+        help="Also remove $BRAIN_VAULT_PATH (YOUR NOTES — be careful)",
+    ),
+) -> None:
+    """Remove brain runtime state and supervised daemons.
+
+    Removes launchd plists (macOS), stops Docker compose, and deletes the
+    $BRAIN_HOME runtime files (.env, .shims/, Caddyfile, etc.).
+
+    By default, $BRAIN_HOME/data/postgres/ (your document database) and
+    $BRAIN_VAULT_PATH (your notes) are KEPT.  Use --remove-db and/or
+    --remove-vault to delete them explicitly.
+
+    The pipx installation itself is NOT removed — a CLI cannot safely
+    uninstall its own running process.  After this command completes, run:
+
+        pipx uninstall second-brain
+    """
+    from .uninstall import run_uninstall
+
+    try:
+        run_uninstall(yes=yes, remove_db=remove_db, remove_vault=remove_vault)
+    except typer.Abort:
+        typer.secho("Aborted.", fg="yellow")
+        raise typer.Exit(code=1) from None
