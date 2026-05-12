@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from types import FrameType
 
+from ..config import _brain_home_root
+
 # ---------------------------------------------------------------------------
 # Env defaults
 # ---------------------------------------------------------------------------
@@ -29,13 +31,26 @@ def _port() -> int:
 
 
 # ---------------------------------------------------------------------------
-# Fixed /tmp paths
+# Runtime state paths.
+#
+# PID files stay at /tmp/brain-{watch,build}.pid because the foreground
+# wrapper scripts (`_brain-{watcher,build}-fg.sh`) hard-code those paths.
+# Log files used to live at /tmp/brain-{watch,build}.log under the legacy
+# nohup era, but T1.7's launchd plist templates redirect both StandardOut
+# and StandardError to `$BRAIN_HOME/logs/com.brain.{watcher,build}.{out,err}.log`,
+# so that's where we read them from now.
 # ---------------------------------------------------------------------------
 
 WATCH_PID = Path("/tmp/brain-watch.pid")
-WATCH_LOG = Path("/tmp/brain-watch.log")
 BUILD_PID = Path("/tmp/brain-build.pid")
-BUILD_LOG = Path("/tmp/brain-build.log")
+
+
+def _watch_log() -> Path:
+    return _brain_home_root() / "logs" / "com.brain.watcher.out.log"
+
+
+def _build_log() -> Path:
+    return _brain_home_root() / "logs" / "com.brain.build.out.log"
 
 # Directories to skip when walking the vault tree (mirrors the bash `find`
 # -not -path invocations that used BSD-only stat -f flags).
@@ -185,8 +200,8 @@ def _snapshot(vault: Path, port: int) -> int:
 
     print(f"🧠 brain-monitor   vault={vault}")
     print()
-    print(f"  sync watcher   {sync_state:<7}  pid={sync_pid:<7}  log={WATCH_LOG}")
-    print(f"  build watcher  {build_state:<7}  pid={build_pid:<7}  log={BUILD_LOG}")
+    print(f"  sync watcher   {sync_state:<7}  pid={sync_pid:<7}  log={_watch_log()}")
+    print(f"  build watcher  {build_state:<7}  pid={build_pid:<7}  log={_build_log()}")
 
     # Cross-check: PID file says one thing; ps may say another. Surface mismatches.
     sync_seen = _pgrep_count("brain vault sync --watch")
@@ -242,9 +257,9 @@ def _snapshot(vault: Path, port: int) -> int:
     # Last 8 build-log lines (filtered)
     print()
     print("  last 8 build-log lines (filtered):")
-    if BUILD_LOG.is_file() and BUILD_LOG.stat().st_size > 0:
+    if _build_log().is_file() and _build_log().stat().st_size > 0:
         try:
-            tail_lines = BUILD_LOG.read_text(errors="replace").splitlines()[-1000:]
+            tail_lines = _build_log().read_text(errors="replace").splitlines()[-1000:]
             filtered = [ln for ln in tail_lines if _filter_build_log_line(ln)]
             last_8 = filtered[-8:]
         except OSError:
@@ -262,9 +277,9 @@ def _snapshot(vault: Path, port: int) -> int:
     # Last 5 sync-log lines
     print()
     print("  last 5 sync-log lines:")
-    if WATCH_LOG.is_file() and WATCH_LOG.stat().st_size > 0:
+    if _watch_log().is_file() and _watch_log().stat().st_size > 0:
         try:
-            watch_lines = WATCH_LOG.read_text(errors="replace").splitlines()[-5:]
+            watch_lines = _watch_log().read_text(errors="replace").splitlines()[-5:]
             for ln in watch_lines:
                 print(f"    {ln}")
         except OSError:
@@ -282,13 +297,13 @@ def _snapshot(vault: Path, port: int) -> int:
 
 def _tail(vault: Path) -> int:
     """Stream both watcher logs to stdout with source prefixes."""
-    if not BUILD_LOG.is_file() and not WATCH_LOG.is_file():
+    if not _build_log().is_file() and not _watch_log().is_file():
         print("no logs to tail (neither watcher has started)", file=sys.stderr)
         return 1
 
     print("tailing watchers — Ctrl-C to stop")
-    print(f"  sync:  {WATCH_LOG}")
-    print(f"  build: {BUILD_LOG}  (KaTeX/git-warnings filtered)")
+    print(f"  sync:  {_watch_log()}")
+    print(f"  build: {_build_log()}  (KaTeX/git-warnings filtered)")
     print()
 
     procs: list[subprocess.Popen[str]] = []
@@ -324,8 +339,8 @@ def _tail(vault: Path) -> int:
     signal.signal(signal.SIGTERM, _cleanup)
 
     threads = [
-        threading.Thread(target=_stream, args=(WATCH_LOG, "[sync ] ", False), daemon=True),
-        threading.Thread(target=_stream, args=(BUILD_LOG, "[build] ", True), daemon=True),
+        threading.Thread(target=_stream, args=(_watch_log(), "[sync ] ", False), daemon=True),
+        threading.Thread(target=_stream, args=(_build_log(), "[build] ", True), daemon=True),
     ]
     for t in threads:
         t.start()
@@ -408,7 +423,7 @@ def _probe(vault: Path, timeout: int = 90) -> int:
     elif swap_elapsed is not None:
         print(f"    ⚠️ build ran ({swap_elapsed}) but probe HTML never appeared in current/")
         print("       likely a build_swap mismatch or the probe was filtered out")
-        print(f"       inspect: tail -n 200 {BUILD_LOG} | grep -i {probe_id}")
+        print(f"       inspect: tail -n 200 {_build_log()} | grep -i {probe_id}")
     else:
         print(f"    ❌ no rebuild within {timeout}s — watcher is not seeing the vault")
         print("       things to check:")
@@ -417,8 +432,8 @@ def _probe(vault: Path, timeout: int = 90) -> int:
             "        # one process? right --vault?"
         )
         print("         pgrep -af 'brain vault sync --watch'      # same")
-        print(f"         tail -n 50 {BUILD_LOG}")
-        print(f"         tail -n 50 {WATCH_LOG}")
+        print(f"         tail -n 50 {_build_log()}")
+        print(f"         tail -n 50 {_watch_log()}")
         print("         brain-down && brain-up                    # nuclear option")
 
     return 0

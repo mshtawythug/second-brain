@@ -65,14 +65,29 @@ def test_render_plist_substitutes_all_variables() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_render_plist_xml_escapes_values() -> None:
-    """Values containing & are XML-escaped so the plist stays valid XML."""
-    text = _render(brain_home=Path("/te&st/home"))
+@pytest.mark.parametrize(
+    "raw,escaped",
+    [
+        ("/te&st/home", "/te&amp;st/home"),
+        ("/te<st/home", "/te&lt;st/home"),
+        ("/te>st/home", "/te&gt;st/home"),
+    ],
+    ids=["ampersand", "less-than", "greater-than"],
+)
+def test_render_plist_xml_escapes_values(raw: str, escaped: str) -> None:
+    """Values containing XML metacharacters are escaped so the plist stays valid XML.
 
-    # Raw ampersand must NOT appear anywhere in the output.
-    assert "/te&st/home" not in text
+    xml.sax.saxutils.escape covers & / < / > by default. Parametrising over
+    all three locks in the contract — without escaping, a path containing
+    any of these characters would produce invalid plist XML and
+    launchctl bootstrap would fail with a parse error.
+    """
+    text = _render(brain_home=Path(raw))
+
+    # Raw form must NOT appear anywhere in the output.
+    assert raw not in text
     # Escaped form must be present.
-    assert "/te&amp;st/home" in text
+    assert escaped in text
     # Full document must parse.
     ET.fromstring(text)
 

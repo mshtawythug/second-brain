@@ -34,17 +34,21 @@ def test_entry_point_targets_are_importable() -> None:
         assert callable(callable_obj), f"{name} target {target} is not callable"
 
 
+_USER_FACING_WRAPPERS = [
+    "brain-up",
+    "brain-down",
+    "brain-status",
+    "brain-rebuild",
+    "brain-install-launchd",
+    "brain-uninstall-launchd",
+    "brain-monitor",
+]
+
+
 def test_dev_backcompat_wrappers_exist_and_are_executable() -> None:
-    """The 6 user-facing bin/ scripts still exist as thin wrappers (post-T1.8)."""
+    """All user-facing bin/ scripts still exist as thin wrappers (post-T1.8 + T1.9)."""
     bin_dir = Path(__file__).resolve().parent.parent / "bin"
-    for name in [
-        "brain-up",
-        "brain-down",
-        "brain-status",
-        "brain-rebuild",
-        "brain-install-launchd",
-        "brain-uninstall-launchd",
-    ]:
+    for name in _USER_FACING_WRAPPERS:
         path = bin_dir / name
         assert path.is_file(), f"missing dev-checkout wrapper: {path}"
         assert os.access(path, os.X_OK), f"not executable: {path}"
@@ -58,14 +62,7 @@ def test_dev_backcompat_wrappers_exec_venv_not_path() -> None:
     The correct form is `exec "$SCRIPT_DIR/../.venv/bin/brain-<name>"`.
     """
     bin_dir = Path(__file__).resolve().parent.parent / "bin"
-    for name in [
-        "brain-up",
-        "brain-down",
-        "brain-status",
-        "brain-rebuild",
-        "brain-install-launchd",
-        "brain-uninstall-launchd",
-    ]:
+    for name in _USER_FACING_WRAPPERS:
         text = (bin_dir / name).read_text(encoding="utf-8")
         # Must reference the venv-relative path, not bare `exec brain-*`
         assert f".venv/bin/{name}" in text, (

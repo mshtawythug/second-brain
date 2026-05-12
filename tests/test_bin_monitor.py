@@ -177,8 +177,8 @@ def test_main_snapshot_returns_zero_with_no_daemons(
     # Remove any stale /tmp pid files from view by patching the constants.
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
     monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
-    monkeypatch.setattr("brain.bin.monitor.WATCH_LOG", tmp_path / "watch.log")
-    monkeypatch.setattr("brain.bin.monitor.BUILD_LOG", tmp_path / "build.log")
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
+    
     rc = main([])
     assert rc == 0
 
@@ -190,8 +190,8 @@ def test_main_status_alias_returns_zero(
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
     monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
-    monkeypatch.setattr("brain.bin.monitor.WATCH_LOG", tmp_path / "watch.log")
-    monkeypatch.setattr("brain.bin.monitor.BUILD_LOG", tmp_path / "build.log")
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
+    
     rc = main(["status"])
     assert rc == 0
 
@@ -217,8 +217,8 @@ def test_main_tail_positional_alias_errors_without_logs(
 
     When no logs exist, _tail() returns 1 — that's the correct fast-exit path.
     """
-    monkeypatch.setattr("brain.bin.monitor.BUILD_LOG", tmp_path / "build.log")
-    monkeypatch.setattr("brain.bin.monitor.WATCH_LOG", tmp_path / "watch.log")
+    
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
     rc = main(["tail"])
     assert rc == 1  # both logs absent → "no logs to tail"
 
@@ -279,8 +279,8 @@ def test_main_rejects_extra_positional_after_non_probe_command(
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
     monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
-    monkeypatch.setattr("brain.bin.monitor.WATCH_LOG", tmp_path / "watch.log")
-    monkeypatch.setattr("brain.bin.monitor.BUILD_LOG", tmp_path / "build.log")
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
+    
     rc = main(["snapshot", "extra"])
     assert rc == 2
 

@@ -8,11 +8,19 @@ QUARTZ_DIR="$VAULT/.quartz"
 PORT="${BRAIN_WIKI_PORT:-8080}"
 URL="http://localhost:$PORT"
 
+# Shim is installed at $BRAIN_HOME/.shims/brain-status, so $BRAIN_HOME is
+# two parent-traversals up (.shims/ → $BRAIN_HOME). Honor an explicit
+# BRAIN_HOME override if the launcher set one.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
+
 WATCH_PID='/tmp/brain-watch.pid'
-WATCH_LOG='/tmp/brain-watch.log'
 BUILD_PID='/tmp/brain-build.pid'
-BUILD_LOG='/tmp/brain-build.log'
 WIKI_PID='/tmp/brain-wiki.pid'   # legacy quartz --serve install
+# T1.7 plist templates redirect StandardOut to $BRAIN_HOME/logs/com.brain.*.out.log,
+# not the legacy /tmp paths the pre-launchd nohup era used.
+WATCH_LOG="$BRAIN_HOME_RESOLVED/logs/com.brain.watcher.out.log"
+BUILD_LOG="$BRAIN_HOME_RESOLVED/logs/com.brain.build.out.log"
 
 check_one() {
     local pid_file="$1"

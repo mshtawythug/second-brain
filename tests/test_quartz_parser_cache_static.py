@@ -408,7 +408,12 @@ def test_transformers_index_references_parser_cache_file(transformers_index_sour
 # Cache-path contract — TS default must align with bash --clean-cache target
 # ---------------------------------------------------------------------------
 
-BIN_REBUILD = REPO_ROOT / "bin" / "brain-rebuild"
+# Post-T1.8: bin/brain-rebuild is a 6-line dev-checkout wrapper that
+# delegates to the brain-rebuild console script. The actual rebuild
+# logic — including the `--clean-cache` rm target the parser cache test
+# guards — lives in the packaged template that the launcher copies into
+# $BRAIN_HOME/.shims/brain-rebuild at first invocation.
+BIN_REBUILD = REPO_ROOT / "src" / "brain" / "templates" / "bin" / "brain-rebuild.sh"
 
 
 @pytest.fixture(scope="module")
