@@ -69,6 +69,10 @@ def wiki_install(
         _clone_quartz(quartz_dir)
         print(f"Checked out pinned commit {QUARTZ_PINNED_COMMIT[:12]}", flush=True)
     else:
+        # Structural check already passed; now verify the pinned commit so a
+        # workspace left at the wrong Quartz version (e.g. a failed checkout
+        # step) is caught before the overlay is applied.
+        _check_quartz_pinned_commit(quartz_dir)
         print(f"Existing workspace found at {quartz_dir} — refreshing overlay", flush=True)
 
     # Apply (or re-apply) the brain overlay.
@@ -127,14 +131,71 @@ def wiki_install(
 
 
 def _is_valid_quartz_workspace(quartz_dir: Path) -> bool:
-    """Return True if *quartz_dir* looks like a healthy Quartz checkout.
+    """Return True if *quartz_dir* has the minimum filesystem structure of a Quartz checkout.
 
-    We require ``package.json`` to be present — every Quartz checkout ships
-    one, and its absence is a reliable signal of a truncated or otherwise
-    incomplete clone (e.g. the clone was interrupted mid-transfer, or the
-    directory was created by something other than ``git clone``).
+    Two signals are required:
+
+    * ``package.json`` — every Quartz clone ships one; absence means the clone
+      was interrupted before files were written.
+    * ``.git/`` directory — proves the directory was produced by ``git clone``,
+      not by hand-placing a ``package.json``.  A dir that has ``package.json``
+      but no ``.git/`` is not a git repository at all and cannot be refreshed.
+
+    This is a pure filesystem check; it says nothing about which commit is
+    checked out.  Use :func:`_check_quartz_pinned_commit` for the commit check.
     """
-    return (quartz_dir / "package.json").is_file()
+    return (
+        (quartz_dir / "package.json").is_file()
+        and (quartz_dir / ".git").is_dir()
+    )
+
+
+def _check_quartz_pinned_commit(quartz_dir: Path) -> None:
+    """Verify the workspace HEAD matches QUARTZ_PINNED_COMMIT.
+
+    ``git clone`` writes all files (including ``package.json``) before the
+    subsequent ``git checkout <sha>`` step completes.  If that checkout step
+    failed, the workspace is at the default branch HEAD rather than the pinned
+    commit — the overlay is version-specific and will silently misbehave when
+    applied to the wrong Quartz version.
+
+    Runs ``git rev-parse HEAD`` inside *quartz_dir* and raises
+    :class:`WikiInstallError` if the result does not match
+    :data:`brain.wiki.QUARTZ_PINNED_COMMIT`.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(quartz_dir), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise WikiInstallError(
+            f"Could not read the Quartz workspace commit "
+            f"(git rev-parse HEAD failed, exit {exc.returncode}).\n"
+            f"  Re-run with --force to wipe and re-clone:\n"
+            f"    brain wiki install --force"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise WikiInstallError(
+            "git rev-parse HEAD timed out (>10 s). "
+            "Check that the .git/ directory is not corrupted."
+        ) from exc
+
+    head = result.stdout.strip()
+    if head != QUARTZ_PINNED_COMMIT:
+        raise WikiInstallError(
+            f"Quartz workspace is at commit {head[:12]}, "
+            f"expected {QUARTZ_PINNED_COMMIT[:12]}.\n"
+            f"  The brain overlay is pinned to a specific Quartz version and\n"
+            f"  may not work correctly at a different commit.  This can happen\n"
+            f"  when the pinned-checkout step failed or a newer brain release\n"
+            f"  bumped the pinned commit.\n"
+            f"  Re-run with --force to wipe and re-clone at the correct commit:\n"
+            f"    brain wiki install --force"
+        )
 
 
 def _clone_quartz(quartz_dir: Path) -> None:

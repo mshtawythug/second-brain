@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from brain.wiki import QUARTZ_PINNED_COMMIT, QUARTZ_REPO_URL
-from brain.wiki.install import wiki_install
+from brain.wiki.install import WikiInstallError, wiki_install
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -39,6 +39,29 @@ def mock_config(dirs: dict[str, Path]):
     with patch("brain.wiki.install.Config") as MockConfig:
         MockConfig.load_minimal.return_value = fake_cfg
         yield MockConfig, dirs
+
+
+def _make_valid_workspace(quartz_dir: Path) -> None:
+    """Create a minimal valid-looking Quartz workspace on disk."""
+    quartz_dir.mkdir(exist_ok=True)
+    (quartz_dir / "package.json").write_text('{"name": "quartz"}\n')
+    (quartz_dir / ".git").mkdir()
+
+
+def _subprocess_stub_pinned(
+    subprocess_calls: list[list[str]],
+) -> "MagicMock":
+    """Return a subprocess.run side_effect that records calls and returns the
+    pinned commit SHA for ``git rev-parse HEAD`` invocations."""
+
+    def _run(cmd: list[str], **kwargs: object) -> MagicMock:
+        subprocess_calls.append(list(cmd))
+        result = MagicMock(returncode=0)
+        if "rev-parse" in cmd:
+            result.stdout = QUARTZ_PINNED_COMMIT + "\n"
+        return result
+
+    return _run  # type: ignore[return-value]
 
 
 # ---------------------------------------------------------------------------
@@ -93,29 +116,27 @@ def test_wiki_install_fresh_clone(mock_config: tuple) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — idempotent refresh: no clone when .quartz/ already exists
+# Test 2 — idempotent refresh: no clone when valid workspace already exists
 # ---------------------------------------------------------------------------
 
 
 def test_wiki_install_idempotent_refresh(mock_config: tuple) -> None:
-    """Re-running on an existing workspace skips git clone but re-applies overlay."""
+    """Re-running on a valid workspace skips git clone but re-applies overlay."""
     _, dirs = mock_config
     vault_path: Path = dirs["vault"]
     brain_home: Path = dirs["brain_home"]
     quartz_dir = vault_path / ".quartz"
 
-    # Pre-create a valid-looking workspace (needs package.json to pass validation).
-    quartz_dir.mkdir()
-    (quartz_dir / "package.json").write_text('{"name": "quartz"}\n')
+    # Pre-create a valid workspace: package.json + .git/ + correct HEAD commit.
+    _make_valid_workspace(quartz_dir)
 
     subprocess_calls: list[list[str]] = []
 
-    def _fake_subprocess_run(cmd: list[str], **kwargs: object) -> MagicMock:
-        subprocess_calls.append(list(cmd))
-        return MagicMock(returncode=0)
-
     with (
-        patch("brain.wiki.install.subprocess.run", side_effect=_fake_subprocess_run),
+        patch(
+            "brain.wiki.install.subprocess.run",
+            side_effect=_subprocess_stub_pinned(subprocess_calls),
+        ),
         patch("brain.wiki.install.apply_overlay") as mock_apply,
         patch("brain.wiki.install.plan_overlay") as mock_plan,
     ):
@@ -127,6 +148,10 @@ def test_wiki_install_idempotent_refresh(mock_config: tuple) -> None:
     # No git clone should have been called.
     clone_calls = [c for c in subprocess_calls if "clone" in c]
     assert clone_calls == [], f"git clone should NOT be called on refresh: {clone_calls}"
+
+    # rev-parse must have been called (commit verification).
+    revparse_calls = [c for c in subprocess_calls if "rev-parse" in c]
+    assert len(revparse_calls) == 1, "git rev-parse HEAD must be called on refresh"
 
     # Overlay must still be applied.
     mock_apply.assert_called_once()
@@ -221,14 +246,12 @@ def test_wiki_install_force_destroys_existing(mock_config: tuple) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 5 — broken workspace (dir exists, no package.json) raises WikiInstallError
+# Test 5 — broken workspace: dir exists but no package.json/no .git/
 # ---------------------------------------------------------------------------
 
 
-def test_wiki_install_broken_workspace_raises(mock_config: tuple) -> None:
+def test_wiki_install_broken_workspace_no_package_json(mock_config: tuple) -> None:
     """A .quartz/ dir without package.json raises WikiInstallError, not 'refreshed'."""
-    from brain.wiki.install import WikiInstallError
-
     _, dirs = mock_config
     vault_path: Path = dirs["vault"]
     quartz_dir = vault_path / ".quartz"
@@ -242,3 +265,64 @@ def test_wiki_install_broken_workspace_raises(mock_config: tuple) -> None:
         pytest.raises(WikiInstallError, match="incomplete"),
     ):
         wiki_install(vault=vault_path, no_npm=True)
+
+
+def test_wiki_install_broken_workspace_no_git_dir(mock_config: tuple) -> None:
+    """A .quartz/ with package.json but no .git/ raises WikiInstallError."""
+    _, dirs = mock_config
+    vault_path: Path = dirs["vault"]
+    quartz_dir = vault_path / ".quartz"
+
+    # package.json present but no .git/ — not a git repo (hand-crafted dir).
+    quartz_dir.mkdir()
+    (quartz_dir / "package.json").write_text('{"name": "quartz"}\n')
+
+    with (
+        patch("brain.wiki.install.subprocess.run"),
+        pytest.raises(WikiInstallError, match="incomplete"),
+    ):
+        wiki_install(vault=vault_path, no_npm=True)
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — wrong commit: package.json + .git/ present but HEAD ≠ pinned SHA
+# ---------------------------------------------------------------------------
+
+
+def test_wiki_install_wrong_commit_raises(mock_config: tuple) -> None:
+    """A workspace at the wrong commit raises WikiInstallError with --force hint.
+
+    This is the key regression: git clone writes package.json before the
+    subsequent git checkout step.  If checkout fails the workspace is at
+    the default branch HEAD, not the pinned SHA — the overlay is version-
+    specific and must not be applied to the wrong commit.
+    """
+    _, dirs = mock_config
+    vault_path: Path = dirs["vault"]
+    quartz_dir = vault_path / ".quartz"
+
+    # Valid structural workspace but at a *different* commit.
+    _make_valid_workspace(quartz_dir)
+    wrong_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    assert wrong_sha != QUARTZ_PINNED_COMMIT
+
+    subprocess_calls: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd: list[str], **kwargs: object) -> MagicMock:
+        subprocess_calls.append(list(cmd))
+        result = MagicMock(returncode=0)
+        if "rev-parse" in cmd:
+            result.stdout = wrong_sha + "\n"
+        return result
+
+    with (
+        patch("brain.wiki.install.subprocess.run", side_effect=_fake_subprocess_run),
+        patch("brain.wiki.install.apply_overlay"),
+        patch("brain.wiki.install.plan_overlay"),
+        pytest.raises(WikiInstallError, match=wrong_sha[:12]),
+    ):
+        wiki_install(vault=vault_path, no_npm=True)
+
+    # rev-parse must have been called.
+    revparse_calls = [c for c in subprocess_calls if "rev-parse" in c]
+    assert len(revparse_calls) == 1, "git rev-parse HEAD must have been invoked"
