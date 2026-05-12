@@ -84,6 +84,34 @@ Caveats:
 
 ### Install
 
+#### One-liner (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<your-github-username>/second-brain/v0.2.0/install.sh | bash
+```
+
+Replace `<your-github-username>` with your GitHub user/org. The script:
+- Refuses Windows (use WSL2 + Ubuntu and re-run inside WSL).
+- Checks that Python ≥ 3.11 is on PATH; refuses with a clear remediation if not.
+- Installs `pipx` if missing (`brew install pipx` on macOS, `pip install --user pipx` on Linux), then `pipx ensurepath`.
+- `pipx install`s the `brain` CLI from the tagged release (default `v0.2.0`; override with `BRAIN_INSTALL_REF=...`). Refuses non-tag refs unless `BRAIN_INSECURE=1` is set.
+- Resolves the pipx bin directory explicitly (doesn't rely on PATH) and execs `brain setup`, which runs:
+  - 8 pre-flight checks (Docker daemon, Ollama, port 5433 + 8080 free, Caddy installed, `~/.claude/skills/` writable, pinned Quartz commit reachable on GitHub).
+  - Creates `$BRAIN_HOME` (default `~/.brain`) with `data/postgres/`, `logs/`, `.shims/`.
+  - Renders `docker-compose.yml` + `.env` from packaged templates, brings up the Postgres + pgvector container, waits for `pg_isready`, and runs `brain init` + `brain doctor`.
+  - Prompts (default Y) to install the wiki UI (`brain wiki install` — clones Quartz at a pinned commit + applies the overlay + `npm install`) and the Claude Code skill (`~/.claude/skills/brain/SKILL.md`).
+  - On macOS, installs the launchd LaunchAgents for the watcher + build daemons LAST, after every prerequisite has passed.
+
+Pass `--non-interactive` (default Y for every prompt) or `--skip-wiki` / `--skip-skill` through to setup:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<your-github-username>/second-brain/v0.2.0/install.sh | bash -s -- --non-interactive
+```
+
+#### Step by step (if you'd rather)
+
+If you prefer to drive each step yourself or you're hacking on the code:
+
 ```bash
 # 1. Clone the repo and enter it
 git clone <repo> ~/workspace/second-brain
@@ -126,6 +154,23 @@ isn't pulled (`ollama pull snowflake-arctic-embed2`), or — only when
 `BRAIN_EMBEDDER=voyage` — `VOYAGE_API_KEY` is missing from `.env`. Missing
 `gws` only disables Gmail ingest and Google directory refreshes; missing `npx`
 only disables `brain vault render`.
+
+### Uninstall
+
+```bash
+# 1. Tear down the runtime (launchd plists, $BRAIN_HOME files, Docker compose).
+#    By default this KEEPS the database at $BRAIN_HOME/data/postgres/ and the
+#    vault at $BRAIN_VAULT_PATH — both are user data.
+brain uninstall
+
+# 2. (Destructive — opt in explicitly.) Also remove the DB and/or vault:
+brain uninstall --remove-db --remove-vault   # --remove-db requires a typed
+                                             # confirmation: "yes, delete my data"
+
+# 3. Remove the pipx-installed CLI itself (must be a separate command —
+#    a Python CLI can't safely uninstall its own running process).
+pipx uninstall second-brain
+```
 
 ### Wiki (optional)
 
