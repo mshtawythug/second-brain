@@ -373,6 +373,48 @@ def test_update_document_body_change_refreshes_summary(
     assert enricher.calls == 2, "hook must fire exactly once per body change"
 
 
+def test_update_document_body_change_without_enricher_clears_stale_summary(
+    test_db: psycopg.Connection, fake_embedder: object
+) -> None:
+    """Codex stop-gate finding (2026-05-13): when ``update_document`` rewrites
+    the body but no enricher is available (``enrich=False``, ``enricher=None``,
+    or content < min_tokens), the post-update enrich hook returns early WITHOUT
+    touching the stored summary — so the OLD summary lingers, now describing a
+    body that no longer exists.
+
+    The fix: the UPDATE that overwrites ``content_hash`` must also NULL out
+    ``summary``, ``summary_model``, and ``summary_at``. This test asserts
+    that after a body change with no enricher provided, the summary column
+    is NULL — preferable to a stale lie. ``brain enrich --backfill`` picks
+    NULL rows up later.
+    """
+    from brain.ingest import update_document
+
+    enricher = _FakeEnricher(summary_text="Stale summary describing OLD body.")
+    initial_body = "Original body content for the seed summary. " * 20
+    doc_id = _ingest(test_db, fake_embedder, content=initial_body, enricher=enricher)
+    summary_before, _ = _read_summary(test_db, doc_id)
+    assert summary_before == "Stale summary describing OLD body."
+    assert enricher.calls == 1
+
+    # Rewrite the body WITHOUT passing an enricher — the hook will return
+    # early and not regenerate. The fix ensures summary is NULL'd by the
+    # UPDATE itself so it can't lie about the new body.
+    update_document(
+        test_db,
+        document_id=doc_id,
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        new_content="Completely different body that the old summary doesn't describe. " * 20,
+        # no enricher kwarg → defaults to None
+    )
+
+    summary_after, _ = _read_summary(test_db, doc_id)
+    assert summary_after is None, (
+        "update_document body-change with no enricher must NULL the summary, "
+        "not leave the old one to misdescribe the new body"
+    )
+
+
 def test_update_document_title_only_preserves_summary(
     test_db: psycopg.Connection, fake_embedder: object
 ) -> None:

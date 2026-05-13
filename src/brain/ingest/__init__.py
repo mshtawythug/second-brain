@@ -1497,6 +1497,18 @@ def update_document(
             sets.append("content_hash=%s")
             params.append(new_hash)
             fields_changed.append("content")
+            # Same rationale as ``_update_doc_in_place``: NULL the stored
+            # summary in the SAME UPDATE that overwrites content_hash so a
+            # stale summary describing the old body can never linger when
+            # the post-update enrich hook can't regenerate (``enrich=False``,
+            # ``enricher=None``, or content < min_tokens). The hook below
+            # regenerates from NULL when an enricher is available; otherwise
+            # the row is correctly NULL-summary rather than a misleading
+            # description of the previous content. (Codex stop-gate finding,
+            # 2026-05-13.)
+            sets.append("summary=NULL")
+            sets.append("summary_model=NULL")
+            sets.append("summary_at=NULL")
 
             conn.execute(
                 "DELETE FROM chunks WHERE document_id=%s", (document_id,)
