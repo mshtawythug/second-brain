@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Re-auth the gws CLI with the full scope set the second-brain stack uses,
+# including the People API scopes that `gws auth login --full` omits.
+#
+# Run this when:
+#   - gws auth status shows token_error: invalid_rapt
+#   - brain ingest logs "gws people refresh failed" or "gws calendar refresh failed"
+#   - any gws call returns 403 "Request had insufficient authentication scopes"
+#
+# Opens a browser tab for OAuth consent. Approve the new scope set, then
+# verify with: gws people otherContacts list --format json | head -20
+set -euo pipefail
+
+SCOPES=(
+  https://www.googleapis.com/auth/contacts.other.readonly
+  https://www.googleapis.com/auth/contacts.readonly
+  https://www.googleapis.com/auth/directory.readonly
+  https://www.googleapis.com/auth/calendar
+  https://www.googleapis.com/auth/gmail.modify
+  https://www.googleapis.com/auth/drive
+  https://www.googleapis.com/auth/spreadsheets
+  https://www.googleapis.com/auth/documents
+  https://www.googleapis.com/auth/presentations
+  https://www.googleapis.com/auth/tasks
+  https://www.googleapis.com/auth/cloud-platform
+  https://www.googleapis.com/auth/pubsub
+  email
+  profile
+  openid
+)
+
+IFS=, ; SCOPES_CSV="${SCOPES[*]}" ; unset IFS
+
+# gws caches the access token in token_cache.json and does NOT invalidate it
+# when credentials.enc is rewritten by `auth login`. Without this, the next
+# API call reuses an old, scope-less access token and 403s with
+# "insufficient authentication scopes" even though the new refresh token
+# is correctly scoped. Nuke the cache so gws mints a fresh access token.
+rm -f "${HOME}/.config/gws/token_cache.json"
+
+exec gws auth login --scopes "$SCOPES_CSV" "$@"
