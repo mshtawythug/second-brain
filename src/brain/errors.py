@@ -95,6 +95,20 @@ class OllamaUnavailable(EnrichmentError):
     """
 
 
+class IngestAmbiguousSource(BrainError):
+    """Raised when multiple documents share a single ``(source_kind, source_external_id)`` key.
+
+    This normally cannot happen — ``sources(kind, external_id)`` is UNIQUE
+    (migration 001), so one source row maps to exactly one document for
+    Krisp/Slack stdin ingests. The edge case arises when ``brain rm`` deletes
+    the document row but leaves the orphaned ``sources`` row behind, and two
+    concurrent ingests then both INSERT against that orphaned row. The result
+    is two ``documents`` rows sharing one source; the next re-ingest via
+    ``(kind, external_id)`` raises this error so the user can resolve the
+    duplicate manually rather than having ``--force`` silently pick one.
+    """
+
+
 class DraftSkipped(BrainError):
     """Reserved for future opt-in draft-skip paths.
 

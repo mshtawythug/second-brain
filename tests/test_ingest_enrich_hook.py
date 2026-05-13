@@ -421,14 +421,14 @@ def test_update_thread_doc_body_change_refreshes_summary(
     test_db: psycopg.Connection, fake_embedder: object
 ) -> None:
     """Codex finding 1 regression — second leg. Same bug, different call
-    path: ``_update_thread_doc_in_place`` is the gmail-thread upsert path.
+    path: ``_update_doc_in_place`` is the gmail-thread upsert path.
     A new message in the thread changes the body bytes and must trigger
     re-summary. Before the fix the hook read the just-updated content_hash
     and short-circuited, leaving stale summaries on every thread refresh.
     """
     from brain.ingest import (
         _content_hash,
-        _update_thread_doc_in_place,
+        _update_doc_in_place,
     )
 
     # Seed: ingest a thread doc directly via ingest_document so the
@@ -452,7 +452,7 @@ def test_update_thread_doc_body_change_refreshes_summary(
         metadata={},
     )
     with test_db.transaction():
-        _update_thread_doc_in_place(
+        _update_doc_in_place(
             test_db,
             embedder=fake_embedder,  # type: ignore[arg-type]
             document_id=doc_id,
@@ -483,7 +483,7 @@ def test_update_thread_doc_body_unchanged_preserves_summary(
     """
     from brain.ingest import (
         _content_hash,
-        _update_thread_doc_in_place,
+        _update_doc_in_place,
     )
 
     enricher = _FakeEnricher(summary_text="Stable summary.")
@@ -499,7 +499,7 @@ def test_update_thread_doc_body_unchanged_preserves_summary(
         metadata={},
     )
     with test_db.transaction():
-        _update_thread_doc_in_place(
+        _update_doc_in_place(
             test_db,
             embedder=fake_embedder,  # type: ignore[arg-type]
             document_id=doc_id,

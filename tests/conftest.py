@@ -101,6 +101,38 @@ def _force_test_database_url() -> Iterator[None]:
             os.environ["DATABASE_URL"] = original
 
 
+def _reset_schema_and_migrate(conn: psycopg.Connection) -> None:
+    """Drop and recreate the public schema then run all migrations.
+
+    ``DROP SCHEMA public CASCADE`` orphans the vector and pgcrypto extensions
+    in pg_extension (the namespace OID dies, but the pg_extension row stays).
+    A subsequent ``CREATE EXTENSION IF NOT EXISTS vector`` then silently no-ops
+    because pg_extension still has the row — leaving the new public schema
+    without the vector type.
+
+    Workaround for vector: move it to pg_catalog (which survives the DROP)
+    before dropping the schema, then move it back to public afterwards.
+    pgcrypto's gen_random_uuid() conflicts with pg_catalog, so we handle it
+    by dropping and reinstalling it explicitly.
+    """
+    # Move vector to pg_catalog before the schema drop so it survives.
+    # pgcrypto cannot go to pg_catalog (DuplicateFunction on gen_random_uuid).
+    if conn.execute("SELECT 1 FROM pg_extension WHERE extname='vector'").fetchone():
+        conn.execute("ALTER EXTENSION vector SET SCHEMA pg_catalog")
+
+    # Drop pgcrypto explicitly: chunks has no pgcrypto dependency, so no cascade needed.
+    conn.execute("DROP EXTENSION IF EXISTS pgcrypto")
+
+    conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+
+    # Move vector back to public — run_migrations will see it there and skip re-install.
+    if conn.execute("SELECT 1 FROM pg_extension WHERE extname='vector'").fetchone():
+        conn.execute("ALTER EXTENSION vector SET SCHEMA public")
+
+    # pgcrypto is gone, so run_migrations will reinstall it from migration 001.
+    run_migrations(conn)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _ensure_test_db_initialized(_force_test_database_url: None) -> Iterator[None]:
     """Reset the test DB to a known migrated state at session start.
@@ -115,8 +147,7 @@ def _ensure_test_db_initialized(_force_test_database_url: None) -> Iterator[None
     """
     with connect(TEST_DATABASE_URL) as conn:
         conn.autocommit = True
-        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-        run_migrations(conn)
+        _reset_schema_and_migrate(conn)
     yield
 
 
@@ -125,8 +156,7 @@ def test_db() -> Iterator[psycopg.Connection]:
     """Fresh schema in the test DB for each test."""
     with connect(TEST_DATABASE_URL) as conn:
         conn.autocommit = True
-        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
-        run_migrations(conn)
+        _reset_schema_and_migrate(conn)
         yield conn
 
 

@@ -687,7 +687,12 @@ def ingest(
             enrich=not no_enrich,
             enrich_min_tokens=cfg.enrich_min_tokens,
         )
-    verb = "ingested" if result.created else "skipped (already ingested)"
+    if result.created:
+        verb = "ingested"
+    elif result.body_changed or force:
+        verb = "updated"
+    else:
+        verb = "skipped (already ingested)"
     typer.echo(f"{verb}: {path.name} → {result.document_id}")
 
 
@@ -744,7 +749,12 @@ def ingest_dir(
                     enrich=not no_enrich,
                     enrich_min_tokens=cfg.enrich_min_tokens,
                 )
-                verb = "ingested" if result.created else "skipped"
+                if result.created:
+                    verb = "ingested"
+                elif result.body_changed:
+                    verb = "updated"
+                else:
+                    verb = "skipped"
                 typer.echo(f"  {verb}: {f.name}")
             except (ValueError, OSError, psycopg.Error) as e:
                 typer.secho(f"  failed: {f.name} — {e}", fg="red")
@@ -825,7 +835,12 @@ def ingest_stdin(
             enrich=not no_enrich,
             enrich_min_tokens=cfg.enrich_min_tokens,
         )
-    verb = "ingested" if result.created else "skipped (already ingested)"
+    if result.created:
+        verb = "ingested"
+    elif result.body_changed or force:
+        verb = "updated"
+    else:
+        verb = "skipped (already ingested)"
     typer.echo(f"{verb}: {title} → {result.document_id}")
 
 

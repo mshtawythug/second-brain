@@ -1,11 +1,16 @@
 """Integration tests for the ingest pipeline (extract → chunk → embed → store)."""
 import hashlib
 import logging
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
+import psycopg
 import pytest
 from pytest_mock import MockerFixture
 
+from brain.enrichment import SummaryResult
+from brain.errors import IngestAmbiguousSource
 from brain.ingest import ExtractedDoc, IngestResult, ingest_document, update_document
 from brain.vault.frontmatter import parse_frontmatter
 
@@ -203,11 +208,14 @@ def test_ingest_with_external_id_creates_source_row(test_db, fake_embedder):
 
 
 def test_ingest_reuses_source_on_repeat(test_db, fake_embedder):
+    """Re-ingesting the same external_id reuses the source row AND updates the doc in place.
+
+    Post-fix behavior: the second ingest with the same (kind, external_id) finds the
+    existing document and UPDATEs it in place. Both r1 and r2 reference the same doc UUID.
+    The source row is reused (same source_id before and after).
+    """
     doc1 = ExtractedDoc(
         title="T1", content="c1", content_type="email", source_path=None, metadata={}
-    )
-    doc2 = ExtractedDoc(
-        title="T2", content="c2", content_type="email", source_path=None, metadata={}
     )
     r1 = ingest_document(
         test_db,
@@ -216,6 +224,14 @@ def test_ingest_reuses_source_on_repeat(test_db, fake_embedder):
         source_kind="gmail",
         source_external_id="msg-1",
     )
+    # Capture source_id of the first doc.
+    src_id_before = test_db.execute(
+        "SELECT source_id FROM documents WHERE id=%s", (r1.document_id,)
+    ).fetchone()[0]
+
+    doc2 = ExtractedDoc(
+        title="T2", content="c2", content_type="email", source_path=None, metadata={}
+    )
     r2 = ingest_document(
         test_db,
         embedder=fake_embedder,
@@ -223,11 +239,12 @@ def test_ingest_reuses_source_on_repeat(test_db, fake_embedder):
         source_kind="gmail",
         source_external_id="msg-1",
     )
-    src_ids = test_db.execute(
-        "SELECT source_id FROM documents WHERE id IN (%s, %s)",
-        (r1.document_id, r2.document_id),
-    ).fetchall()
-    assert src_ids[0][0] == src_ids[1][0]
+    # Post-fix: UPDATE-in-place — doc UUID is stable, source row is the same.
+    assert r2.document_id == r1.document_id
+    src_id_after = test_db.execute(
+        "SELECT source_id FROM documents WHERE id=%s", (r1.document_id,)
+    ).fetchone()[0]
+    assert src_id_after == src_id_before  # source row reused
 
 
 def test_ingest_empty_content_is_noop(test_db, fake_embedder):
@@ -260,9 +277,8 @@ def test_file_ingest_unchanged_content_is_idempotent_noop(test_db, fake_embedder
 
 
 def test_file_ingest_replaces_in_place_when_content_changes(test_db, fake_embedder):
-    """File ingest at the same ``source_path`` with new content replaces the row
-    in place — DELETE + INSERT yields a new ``documents.id`` and a new
-    ``content_hash``, and a single row remains at that ``source_path``."""
+    """File ingest at the same ``source_path`` with new content UPDATEs the row
+    in place — the document UUID is preserved and body_changed=True."""
     path = "/tmp/notes/career.md"
     first = _ingest(
         test_db,
@@ -282,8 +298,10 @@ def test_file_ingest_replaces_in_place_when_content_changes(test_db, fake_embedd
             source_path=path, metadata={},
         ),
     )
-    assert second.created is True
-    assert second.document_id != first.document_id  # row replaced (delete + insert)
+    # Post-fix: UPDATE-in-place — UUID is stable, created=False, body_changed=True.
+    assert second.created is False
+    assert second.body_changed is True
+    assert second.document_id == first.document_id  # UUID preserved across content change
 
     rows = test_db.execute(
         "SELECT id, content, content_hash FROM documents WHERE source_path=%s",
@@ -291,17 +309,16 @@ def test_file_ingest_replaces_in_place_when_content_changes(test_db, fake_embedd
     ).fetchall()
     assert len(rows) == 1
     surviving_id, content, content_hash = rows[0]
-    assert str(surviving_id) == second.document_id
+    assert str(surviving_id) == first.document_id
     assert content == "version two — updated"
     # The hash for the new body must differ from the original content's hash.
-    import hashlib
     assert content_hash == hashlib.sha256(b"version two \xe2\x80\x94 updated").hexdigest()
 
 
 def test_file_ingest_with_force_replaces_even_when_content_unchanged(
     test_db, fake_embedder
 ):
-    """``force=True`` reinserts even when content (and hence hash) is unchanged."""
+    """``force=True`` on same content UPDATEs in place — UUID preserved, body_changed=False."""
     doc = ExtractedDoc(
         title="Resume", content="same body bytes", content_type="markdown",
         source_path="/tmp/resume.md", metadata={},
@@ -309,8 +326,10 @@ def test_file_ingest_with_force_replaces_even_when_content_unchanged(
     first = _ingest(test_db, fake_embedder, doc)
     second = _ingest(test_db, fake_embedder, doc, force=True)
     assert first.created is True
-    assert second.created is True
-    assert second.document_id != first.document_id
+    # Post-fix: UPDATE-in-place — created=False (row exists), body_changed=False (same body).
+    assert second.created is False
+    assert second.body_changed is False
+    assert second.document_id == first.document_id  # UUID preserved
 
     count = test_db.execute(
         "SELECT count(*) FROM documents WHERE source_path=%s", (doc.source_path,)
@@ -1170,3 +1189,833 @@ def test_update_document_vault_kind_skipped(
         f"vault-tier skip must not log a mirror-failure WARNING; got "
         f"{[r.message for r in mirror_warnings]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Force re-ingest UPDATE-in-place regression tests (plan 2026-05-12)
+# ---------------------------------------------------------------------------
+
+# --------------- Shared helpers for this section ----------------------------
+
+@dataclass
+class _FakeEnricher:
+    """Minimal in-memory enricher for regression tests.
+
+    Not a monkey-patch — accepted via the public ``enricher=`` kwarg on
+    ingest_document. Counts calls so tests can verify skip rules fire.
+    """
+
+    model: str = "test-model"
+    summary_text: str = "Canned summary for tests."
+    calls: int = 0
+
+    def count_tokens(self, text: str) -> int:
+        return max(1, len(text) // 4)
+
+    def summarize(self, title: str, content: str) -> SummaryResult:
+        self.calls += 1
+        return SummaryResult(summary=self.summary_text, model=self.model)
+
+
+def _ingest_sourced(
+    conn: psycopg.Connection,
+    embedder: object,
+    *,
+    external_id: str,
+    content: str = "krisp body content for testing purposes.",
+    title: str = "Sourced doc",
+    tags: list[str] | None = None,
+    force: bool = False,
+) -> IngestResult:
+    """Helper: ingest a krisp stdin doc with a stable external_id."""
+    return ingest_document(
+        conn,
+        embedder=embedder,  # type: ignore[arg-type]
+        doc=ExtractedDoc(
+            title=title,
+            content=content,
+            content_type="transcript",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="krisp",
+        source_external_id=external_id,
+        tags=tags or [],
+        force=force,
+    )
+
+
+# Test #1
+def test_force_reingest_sourced_preserves_document_id(test_db, fake_embedder):
+    """Re-ingest with --force (same body) keeps the UUID and tags; body_changed=False."""
+    r1 = _ingest_sourced(test_db, fake_embedder, external_id="meet-001", tags=["a", "b"])
+    assert r1.created is True
+    doc_id = r1.document_id
+
+    r2 = _ingest_sourced(test_db, fake_embedder, external_id="meet-001", force=True)
+    assert r2.created is False
+    assert r2.body_changed is False
+    assert r2.document_id == doc_id  # UUID preserved
+
+    tags_row = test_db.execute(
+        "SELECT tags FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert tags_row is not None
+    assert sorted(tags_row[0]) == ["a", "b"]  # curated tags preserved
+
+
+# Test #2
+def test_force_reingest_sourced_with_changed_body_updates_in_place(test_db, fake_embedder):
+    """Same external_id, different content, --force → UUID stable, body_changed=True."""
+    r1 = _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-002", content="version one body text."
+    )
+    assert r1.created is True
+    doc_id = r1.document_id
+    old_chunk_ids = {
+        row[0] for row in test_db.execute(
+            "SELECT id FROM chunks WHERE document_id=%s", (doc_id,)
+        ).fetchall()
+    }
+
+    r2 = _ingest_sourced(
+        test_db, fake_embedder,
+        external_id="meet-002",
+        content="version two body text — completely different.",
+        force=True,
+    )
+    assert r2.created is False
+    assert r2.body_changed is True
+    assert r2.document_id == doc_id  # UUID stable
+
+    content_row = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert content_row is not None
+    assert content_row[0] == "version two body text — completely different."
+
+    new_chunk_ids = {
+        row[0] for row in test_db.execute(
+            "SELECT id FROM chunks WHERE document_id=%s", (doc_id,)
+        ).fetchall()
+    }
+    assert new_chunk_ids  # chunks rebuilt
+    assert new_chunk_ids.isdisjoint(old_chunk_ids)  # row UUIDs changed
+
+
+# Test #3
+def test_no_force_same_hash_sourced_short_circuits(test_db, fake_embedder):
+    """Same external_id + same content + no --force → no-op, no chunks rebuilt."""
+    r1 = _ingest_sourced(test_db, fake_embedder, external_id="meet-003")
+    chunk_ids_before = {
+        row[0] for row in test_db.execute(
+            "SELECT id FROM chunks WHERE document_id=%s", (r1.document_id,)
+        ).fetchall()
+    }
+
+    r2 = _ingest_sourced(test_db, fake_embedder, external_id="meet-003")
+    assert r2.created is False
+    assert r2.body_changed is False
+    assert r2.document_id == r1.document_id
+
+    chunk_ids_after = {
+        row[0] for row in test_db.execute(
+            "SELECT id FROM chunks WHERE document_id=%s", (r1.document_id,)
+        ).fetchall()
+    }
+    assert chunk_ids_after == chunk_ids_before  # chunks untouched
+
+
+# Test #4
+def test_force_reingest_unions_tags_with_existing_sourced(test_db, fake_embedder):
+    """Re-ingest with --force unions incoming tags with existing curated tags.
+    Also verifies chunks.tags_text reflects merged_tags not just incoming tags.
+    """
+    r1 = _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-004", tags=["a", "b"]
+    )
+    doc_id = r1.document_id
+
+    r2 = _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-004", tags=["c"], force=True
+    )
+    assert r2.created is False
+    assert r2.document_id == doc_id
+
+    tags_row = test_db.execute(
+        "SELECT tags FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert tags_row is not None
+    merged = tags_row[0]
+    # Insertion-order union: a, b from existing; c from incoming.
+    # normalize_tags preserves first-seen insertion order.
+    assert "a" in merged
+    assert "b" in merged
+    assert "c" in merged
+
+    # chunks.tags_text must reflect merged_tags (not just incoming "c").
+    chunk_tags = test_db.execute(
+        "SELECT DISTINCT tags_text FROM chunks WHERE document_id=%s", (doc_id,)
+    ).fetchall()
+    assert chunk_tags, "expected at least one chunk"
+    tags_text = chunk_tags[0][0]
+    assert "a" in tags_text
+    assert "b" in tags_text
+    assert "c" in tags_text
+
+
+# Test #5
+def test_stdin_with_no_external_id_uses_content_hash_dedup(test_db, fake_embedder):
+    """stdin ingest with no source_external_id still hits the content_hash fallback."""
+    content = "stdin manual body for hash dedup test."
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Manual stdin", content=content, content_type="note",
+            source_path=None, metadata={},
+        ),
+        source_kind="manual",
+    )
+    assert r1.created is True
+
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Manual stdin", content=content, content_type="note",
+            source_path=None, metadata={},
+        ),
+        source_kind="manual",
+    )
+    assert r2.created is False
+    assert r2.document_id == r1.document_id  # same-hash dedup
+
+
+# Test #6
+def test_force_reingest_file_path_preserves_document_id(test_db, fake_embedder):
+    """--force on same file preserves UUID and existing tags."""
+    path = "/tmp/file006.txt"
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="File 6", content="file six body.", content_type="txt",
+            source_path=path, metadata={},
+        ),
+        tags=["keep-this"],
+    )
+    assert r1.created is True
+    doc_id = r1.document_id
+
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="File 6", content="file six body.", content_type="txt",
+            source_path=path, metadata={},
+        ),
+        tags=[],
+        force=True,
+    )
+    assert r2.created is False
+    assert r2.body_changed is False
+    assert r2.document_id == doc_id  # UUID preserved
+
+    tags_row = test_db.execute(
+        "SELECT tags FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert tags_row is not None
+    assert "keep-this" in tags_row[0]  # curated tag preserved
+
+
+# Test #7
+def test_force_reingest_file_path_with_changed_body_updates_in_place(test_db, fake_embedder):
+    """Same source_path, different body, --force → UUID stable, body_changed=True."""
+    path = "/tmp/file007.txt"
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="File 7", content="version one file body.", content_type="txt",
+            source_path=path, metadata={},
+        ),
+    )
+    assert r1.created is True
+    doc_id = r1.document_id
+
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="File 7", content="version two file body — updated.", content_type="txt",
+            source_path=path, metadata={},
+        ),
+        force=True,
+    )
+    assert r2.created is False
+    assert r2.body_changed is True
+    assert r2.document_id == doc_id
+
+    content_row = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert content_row is not None
+    assert content_row[0] == "version two file body — updated."
+
+
+# Test #8
+def test_force_reingest_unions_tags_with_existing_file(test_db, fake_embedder):
+    """File re-ingest unions incoming tags with existing curated tags.
+    Also verifies chunks.tags_text reflects merged_tags.
+    """
+    path = "/tmp/file008.txt"
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="File 8", content="file eight body.", content_type="txt",
+            source_path=path, metadata={},
+        ),
+        tags=["a"],
+    )
+    doc_id = r1.document_id
+
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="File 8", content="file eight body.", content_type="txt",
+            source_path=path, metadata={},
+        ),
+        tags=["b"],
+        force=True,
+    )
+    assert r2.document_id == doc_id
+
+    tags_row = test_db.execute(
+        "SELECT tags FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert tags_row is not None
+    assert "a" in tags_row[0]
+    assert "b" in tags_row[0]
+
+    chunk_tags = test_db.execute(
+        "SELECT DISTINCT tags_text FROM chunks WHERE document_id=%s", (doc_id,)
+    ).fetchall()
+    assert chunk_tags
+    tags_text = chunk_tags[0][0]
+    assert "a" in tags_text
+    assert "b" in tags_text
+
+
+# Test #9
+def test_force_reingest_gmail_thread_unions_tags(test_db, fake_embedder):
+    """Gmail-thread re-ingest also uses union semantics (was overwrite before)."""
+    thread_id = "thread-009"
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Thread 9", content="email thread body for testing.",
+            content_type="email_thread", source_path=None,
+            metadata={"thread_id": thread_id},
+        ),
+        source_kind="gmail",
+        source_external_id="msg-9a",
+        tags=["curated"],
+    )
+    assert r1.created is True
+    doc_id = r1.document_id
+
+    # Re-ingest with new body and NO tags — old behavior would wipe "curated".
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Thread 9 updated", content="email thread body updated with new message.",
+            content_type="email_thread", source_path=None,
+            metadata={"thread_id": thread_id},
+        ),
+        source_kind="gmail",
+        source_external_id="msg-9b",
+        tags=[],
+    )
+    assert r2.created is False
+    assert r2.document_id == doc_id
+
+    tags_row = test_db.execute(
+        "SELECT tags FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert tags_row is not None
+    assert "curated" in tags_row[0]  # preserved under union semantics
+
+
+# Test #10
+def test_force_reingest_preserves_links_derived_unresolved_rows(test_db, fake_embedder):
+    """UPDATE-in-place preserves links/derived_links/unresolved_links referencing the doc.
+
+    The old DELETE+INSERT would CASCADE-delete these rows. The new UPDATE-in-place
+    keeps them. Fixture inserts rows directly via SQL (ingest_document does NOT
+    materialize wiki links — that's a vault-sync responsibility).
+    """
+    # Setup: ingest doc A (target) and doc C (source of links)
+    r_a = _ingest_sourced(
+        test_db, fake_embedder, external_id="fk-test-a",
+        content="target document body for FK test."
+    )
+    r_c = _ingest_sourced(
+        test_db, fake_embedder, external_id="fk-test-c",
+        content="source document body for FK test."
+    )
+    a_id = r_a.document_id
+    c_id = r_c.document_id
+
+    # Direct SQL: insert links, derived_links, unresolved_links.
+    # Verified column names against migrations/003_vault_model.sql (links +
+    # unresolved_links) and migrations/005_derived_links.sql (derived_links).
+    test_db.execute(
+        "INSERT INTO links (src_document_id, dst_document_id, link_text, link_kind, display_text) "
+        "VALUES (%s, %s, 'A', 'wiki', NULL)",
+        (c_id, a_id),
+    )
+    test_db.execute(
+        "INSERT INTO derived_links (src_document_id, dst_document_id, rule, evidence, weight) "
+        "VALUES (%s, %s, 'shared_thread', '{}'::jsonb, 1.0)",
+        (c_id, a_id),
+    )
+    test_db.execute(
+        "INSERT INTO unresolved_links (src_document_id, link_text, link_kind, display_text) "
+        "VALUES (%s, 'NonExistent', 'wiki', NULL)",
+        (c_id,),
+    )
+
+    # Action: re-ingest A with --force (same body). UUID must be preserved.
+    r_a2 = _ingest_sourced(
+        test_db, fake_embedder, external_id="fk-test-a",
+        content="target document body for FK test.",
+        force=True,
+    )
+    assert r_a2.document_id == a_id
+
+    # Verify links and derived_links still reference A's original UUID.
+    links_count = test_db.execute(
+        "SELECT count(*) FROM links WHERE dst_document_id=%s", (a_id,)
+    ).fetchone()[0]
+    assert links_count == 1, "links row referencing A's UUID must survive UPDATE-in-place"
+
+    derived_count = test_db.execute(
+        "SELECT count(*) FROM derived_links WHERE dst_document_id=%s", (a_id,)
+    ).fetchone()[0]
+    assert derived_count == 1, "derived_links row must survive UPDATE-in-place"
+
+    # Re-ingest C with --force. unresolved_links row (src=C) must survive.
+    r_c2 = _ingest_sourced(
+        test_db, fake_embedder, external_id="fk-test-c",
+        content="source document body for FK test.",
+        force=True,
+    )
+    assert r_c2.document_id == c_id
+
+    unresolved_count = test_db.execute(
+        "SELECT count(*) FROM unresolved_links WHERE src_document_id=%s", (c_id,)
+    ).fetchone()[0]
+    assert unresolved_count == 1, "unresolved_links row (src=C) must survive UPDATE-in-place"
+
+
+# Test #11
+def test_force_reingest_same_body_still_replaces_chunks(test_db, fake_embedder):
+    """_update_doc_in_place always rebuilds chunks, even on same-body force re-ingest.
+
+    chunk row UUIDs change; per-chunk content stays identical. body_changed=False
+    (content_hash invariant) but chunks are mechanically rebuilt. These two
+    assertions are NOT contradictory — see plan §body_changed contract.
+    """
+    r1 = _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-011",
+        content="chunk test body paragraph one.\n\nparagraph two."
+    )
+    doc_id = r1.document_id
+    chunks_before = test_db.execute(
+        "SELECT id, content FROM chunks WHERE document_id=%s ORDER BY chunk_index",
+        (doc_id,),
+    ).fetchall()
+    old_chunk_ids = {row[0] for row in chunks_before}
+    old_contents = [row[1] for row in chunks_before]
+
+    r2 = _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-011",
+        content="chunk test body paragraph one.\n\nparagraph two.",
+        force=True,
+    )
+    assert r2.body_changed is False  # same content_hash
+    assert r2.document_id == doc_id
+
+    chunks_after = test_db.execute(
+        "SELECT id, content FROM chunks WHERE document_id=%s ORDER BY chunk_index",
+        (doc_id,),
+    ).fetchall()
+    new_chunk_ids = {row[0] for row in chunks_after}
+    new_contents = [row[1] for row in chunks_after]
+
+    # Chunk row UUIDs changed (DELETE + INSERT).
+    assert new_chunk_ids.isdisjoint(old_chunk_ids), (
+        "chunk row UUIDs must be replaced by _update_doc_in_place even on same-body force"
+    )
+    # But per-chunk content is identical (same body, same chunker output).
+    assert new_contents == old_contents
+
+    # documents.content_hash is stable.
+    hash_row = test_db.execute(
+        "SELECT content_hash FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    expected = hashlib.sha256(
+        b"chunk test body paragraph one.\n\nparagraph two."
+    ).hexdigest()
+    assert hash_row is not None
+    assert hash_row[0] == expected
+
+
+# Test #12
+def test_force_reingest_with_vault_root_regenerates_mirror_without_orphan(
+    test_db, fake_embedder, tmp_path: Path
+):
+    """--force with same body regenerates mirror (tags may have changed); no orphan file."""
+    vault = tmp_path / "vault"
+    path = "/tmp/file012.txt"
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Mirror Test", content="mirror test body content.",
+            content_type="txt", source_path=path, metadata={},
+        ),
+        tags=["initial-tag"],
+        vault_root=vault,
+    )
+    assert r1.created is True
+    doc_id = r1.document_id
+
+    mirror_dir = vault / "_ingested" / "manual"
+    mirrors = list(mirror_dir.glob("*.md"))
+    assert len(mirrors) == 1
+    mirror_file = mirrors[0]
+
+    # Re-ingest with --force, adding a new tag.
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Mirror Test", content="mirror test body content.",
+            content_type="txt", source_path=path, metadata={},
+        ),
+        tags=["new-tag"],
+        force=True,
+        vault_root=vault,
+    )
+    assert r2.created is False
+    assert r2.document_id == doc_id
+
+    # Mirror still at the original slug — no orphan file created.
+    assert mirror_file.is_file(), f"mirror file must still exist: {mirror_file}"
+    mirrors_after = list(mirror_dir.glob("*.md"))
+    assert len(mirrors_after) == 1, "no orphan mirror files must be created on --force"
+
+    # Frontmatter reflects union of tags.
+    from brain.vault.frontmatter import parse_frontmatter
+    fm, _ = parse_frontmatter(mirror_file.read_text(encoding="utf-8"))
+    assert "initial-tag" in (fm.get("tags") or [])
+    assert "new-tag" in (fm.get("tags") or [])
+
+
+# Test #13
+def test_force_reingest_skips_reenrichment_when_summary_matches(test_db, fake_embedder):
+    """D11 idempotency: same body + same model → summary unchanged. Changed body → regenerates."""
+    enricher = _FakeEnricher()
+    long_content = "Enrichment test body content. " * 60  # well above min_tokens
+
+    r1 = _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-013", content=long_content,
+    )
+    doc_id = r1.document_id
+    # Manually set a summary (simulating a prior enrich run).
+    test_db.execute(
+        "UPDATE documents SET summary=%s, summary_model=%s, summary_at=NOW() WHERE id=%s",
+        ("Prior summary text.", enricher.model, doc_id),
+    )
+
+    # Re-ingest with --force, same body → D11 skip (same hash + same model).
+    _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-013",
+        content=long_content, force=True,
+    )
+    # enricher was NOT passed — enrich hook won't fire regardless. Just verify summary preserved.
+    summary_row = test_db.execute(
+        "SELECT summary FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert summary_row is not None
+    assert summary_row[0] == "Prior summary text."
+
+    # Now re-ingest with DIFFERENT content + enricher provided → summary regenerated.
+    # Under the body_changed-kwarg approach, the helper signals the hook that
+    # the body changed; the hook regenerates rather than skipping via D11.
+    new_content = "Completely different body content. " * 60
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Sourced doc", content=new_content,
+            content_type="transcript", source_path=None, metadata={},
+        ),
+        source_kind="krisp",
+        source_external_id="meet-013",
+        tags=[],
+        force=True,
+        enricher=enricher,  # type: ignore[arg-type]
+        enrich=True,
+        enrich_min_tokens=10,
+    )
+    summary_row2 = test_db.execute(
+        "SELECT summary FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert summary_row2 is not None
+    assert summary_row2[0] == enricher.summary_text  # regenerated by hook
+
+    # And confirm same-body re-ingest WITH the enricher still D11-skips:
+    # existing summary matches the regenerated content_hash + same model, so
+    # the hook short-circuits and the summary stays.
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Sourced doc", content=new_content,
+            content_type="transcript", source_path=None, metadata={},
+        ),
+        source_kind="krisp",
+        source_external_id="meet-013",
+        tags=[],
+        force=True,
+        enricher=enricher,  # type: ignore[arg-type]
+        enrich=True,
+        enrich_min_tokens=10,
+    )
+    summary_row3 = test_db.execute(
+        "SELECT summary FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert summary_row3 is not None
+    assert summary_row3[0] == enricher.summary_text  # unchanged via D11 skip
+
+
+# Test #14
+def test_sourced_branch_raises_on_ambiguous_source(test_db, fake_embedder):
+    """Multiple documents sharing one source key → IngestAmbiguousSource raised, no mutation."""
+    # Ingest two different docs against the SAME external_id to create the ambiguous state.
+    # We do this by inserting a second document row directly, bypassing the dedup logic.
+    r1 = _ingest_sourced(
+        test_db, fake_embedder, external_id="dup-src-014",
+        content="doc A body content."
+    )
+    a_id = r1.document_id
+
+    # Get the source_id so we can point a second doc at the same source row.
+    source_id_row = test_db.execute(
+        "SELECT source_id FROM documents WHERE id=%s", (a_id,)
+    ).fetchone()
+    assert source_id_row is not None
+    source_id = source_id_row[0]
+
+    # Manually insert a second document sharing the same source_id.
+    content_b = "doc B body — completely different."
+    h_b = hashlib.sha256(content_b.encode()).hexdigest()
+    test_db.execute(
+        """
+        INSERT INTO documents (source_id, title, content, content_hash, content_type, kind)
+        VALUES (%s, %s, %s, %s, %s, 'ingested')
+        """,
+        (source_id, "Dup B", content_b, h_b, "transcript"),
+    )
+
+    # Now attempt to re-ingest via the sourced branch. Should raise IngestAmbiguousSource.
+    doc_count_before = test_db.execute("SELECT count(*) FROM documents").fetchone()[0]
+    with pytest.raises(IngestAmbiguousSource, match="Multiple documents share source"):
+        _ingest_sourced(
+            test_db, fake_embedder, external_id="dup-src-014", force=True
+        )
+
+    # No DB mutation occurred (the exception aborted the transaction).
+    doc_count_after = test_db.execute("SELECT count(*) FROM documents").fetchone()[0]
+    assert doc_count_after == doc_count_before
+
+
+# Test #15
+def test_sourced_branch_falls_through_to_content_hash_when_no_match(test_db, fake_embedder):
+    """Sourced lookup returns 0 rows → falls through to content_hash fallback."""
+    content = "unique fallback content for test 15."
+    # First: ingest manually (no external_id) so the content_hash row exists.
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Fallback", content=content, content_type="note",
+            source_path=None, metadata={},
+        ),
+        source_kind="manual",
+    )
+    assert r1.created is True
+    doc_id = r1.document_id
+
+    # Now ingest via sourced branch with a NEW external_id.
+    # Sourced lookup finds 0 rows (no source with this kind+external_id).
+    # Falls through to content_hash fallback — finds the existing row.
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Fallback", content=content, content_type="note",
+            source_path=None, metadata={},
+        ),
+        source_kind="krisp",
+        source_external_id="new-id-015",
+    )
+    assert r2.created is False
+    assert r2.document_id == doc_id  # content_hash fallback found the existing row
+
+    # With --force, the content_hash fallback does DELETE+INSERT (new UUID).
+    r3 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Fallback", content=content, content_type="note",
+            source_path=None, metadata={},
+        ),
+        source_kind="krisp",
+        source_external_id="new-id-015",
+        force=True,
+    )
+    assert r3.created is True
+    assert r3.document_id != doc_id  # DELETE+INSERT (no sourced row existed to UPDATE)
+
+
+# Test #16
+def test_no_force_changed_body_sourced_still_updates_in_place(test_db, fake_embedder):
+    """Same external_id, different body, NO --force → still UPDATEs in place."""
+    r1 = _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-016",
+        content="version one body sixteen."
+    )
+    doc_id = r1.document_id
+
+    r2 = _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-016",
+        content="version two body sixteen — different hash.",
+    )
+    assert r2.created is False
+    assert r2.body_changed is True
+    assert r2.document_id == doc_id  # UUID stable
+
+    content_row = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert content_row is not None
+    assert content_row[0] == "version two body sixteen — different hash."
+
+
+# Test #17
+def test_no_force_changed_body_file_still_updates_in_place(test_db, fake_embedder):
+    """Same source_path, different body, NO --force → UPDATEs in place."""
+    path = "/tmp/file017.txt"
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="File 17", content="version one file seventeen.",
+            content_type="txt", source_path=path, metadata={},
+        ),
+    )
+    assert r1.created is True
+    doc_id = r1.document_id
+
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="File 17", content="version two file seventeen — updated.",
+            content_type="txt", source_path=path, metadata={},
+        ),
+    )
+    assert r2.created is False
+    assert r2.body_changed is True
+    assert r2.document_id == doc_id
+
+    content_row = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert content_row is not None
+    assert content_row[0] == "version two file seventeen — updated."
+
+
+# Test #19
+def test_content_hash_fallback_does_not_match_file_or_vault_rows(test_db, fake_embedder):
+    """Scoped content_hash fallback never matches file-based or vault-tier docs.
+
+    Regression for Codex pass 12 finding #3: the old unscoped SELECT would match
+    any row with the same content_hash, including file-based ingests and vault-tier
+    rows, causing --force to DELETE the wrong row silently.
+
+    The new query scopes to: WHERE content_hash=%s AND kind='ingested' AND source_path IS NULL
+    """
+    shared_body = "shared body content for cross-tier test nineteen."
+    file_path = "/tmp/file019.txt"
+
+    # 1. File-based ingest (source_path IS NOT NULL).
+    r_file = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="File 19", content=shared_body, content_type="txt",
+            source_path=file_path, metadata={},
+        ),
+    )
+    file_doc_id = r_file.document_id
+    assert file_doc_id is not None
+
+    # 2. Vault-tier row — inserted directly via SQL (no ingestion path).
+    h_shared = hashlib.sha256(shared_body.encode()).hexdigest()
+    vault_doc_id = str(uuid.uuid4())
+    test_db.execute(
+        """
+        INSERT INTO documents (id, source_id, title, content, content_hash,
+                               content_type, kind, source_path)
+        VALUES (%s, NULL, 'Vault 19', %s, %s, 'note', 'vault', NULL)
+        """,
+        (vault_doc_id, shared_body, h_shared),
+    )
+
+    # 3. stdin ingest (source_path IS NULL, no external_id) of the SAME body with --force.
+    r_stdin = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Stdin 19", content=shared_body, content_type="note",
+            source_path=None, metadata={},
+        ),
+        source_kind="manual",
+        force=True,
+    )
+    # A NEW stdin row is inserted — the scoped fallback query did NOT match the file or vault rows.
+    assert r_stdin.created is True
+    assert r_stdin.document_id != file_doc_id
+    assert r_stdin.document_id != vault_doc_id
+
+    # The file row at the original path still exists.
+    file_row = test_db.execute(
+        "SELECT id FROM documents WHERE source_path=%s", (file_path,)
+    ).fetchone()
+    assert file_row is not None
+    assert str(file_row[0]) == file_doc_id
+
+    # The vault-tier row still exists.
+    vault_row = test_db.execute(
+        "SELECT id FROM documents WHERE id=%s", (vault_doc_id,)
+    ).fetchone()
+    assert vault_row is not None

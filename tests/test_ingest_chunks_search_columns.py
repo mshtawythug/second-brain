@@ -5,7 +5,7 @@ migration 009.
 Four insert paths are exercised:
 
 1. :func:`brain.ingest.ingest_document` — new-doc create.
-2. :func:`brain.ingest._update_thread_doc_in_place` — gmail-thread upsert that
+2. :func:`brain.ingest._update_doc_in_place` — gmail-thread upsert that
    replaces the body of an existing ``content_type='email_thread'`` row.
 3. :func:`brain.ingest.update_document` — ``brain edit`` content rewrite.
 4. :func:`brain.vault.sync._embed_and_insert_chunks` (via ``sync_vault``) —
@@ -106,7 +106,7 @@ def test_ingest_document_empty_tags_emits_empty_string(
 
 
 # ---------------------------------------------------------------------------
-# 2. gmail-thread upsert — _update_thread_doc_in_place
+# 2. gmail-thread upsert — _update_doc_in_place
 # ---------------------------------------------------------------------------
 def test_thread_update_in_place_repopulates_chunk_columns(
     test_db: psycopg.Connection[Any], fake_embedder: Any

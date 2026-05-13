@@ -233,7 +233,7 @@ def test_ingest_stdin_force_reingests(
     fake_embedder: object,
     tmp_path: Path,
 ) -> None:
-    """With --force, a repeat ingest of the same content replaces the prior row."""
+    """With --force, a repeat ingest of the same content UPDATEs in place."""
     # Sandbox vault so mirror writes don't touch ~/brain-vault.
     # Without this, "ts-force" + title "Thread" leaked _ingested/slack/YYYY-MM-DD-ts-force-thread.md
     # into the prod vault on 2026-05-08/09.
@@ -250,7 +250,9 @@ def test_ingest_stdin_force_reingests(
     assert first.exit_code == 0, first.output
     second = CliRunner().invoke(app, [*args, "--force"], input="same content")
     assert second.exit_code == 0, second.output
-    assert "ingested" in second.output.lower()
+    # Post-fix: --force on an existing sourced doc returns "updated" (in-place UPDATE,
+    # UUID preserved), not "ingested" (new UUID via DELETE+INSERT).
+    assert "updated" in second.output.lower()
     with psycopg.connect(TEST_DATABASE_URL) as conn:
         n_row = conn.execute("SELECT count(*) FROM documents").fetchone()
     assert n_row is not None

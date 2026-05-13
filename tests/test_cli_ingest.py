@@ -62,7 +62,7 @@ def test_ingest_force_re_ingests(
     fixtures_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """With --force, a repeat ingest replaces the prior row."""
+    """With --force, a repeat ingest UPDATEs in place and reports 'updated'."""
     # Sandbox vault so mirror writes don't touch ~/brain-vault.
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
@@ -73,7 +73,9 @@ def test_ingest_force_re_ingests(
         app, ["ingest", str(fixtures_dir / "sample.txt"), "--force"]
     )
     assert forced.exit_code == 0, forced.output
-    assert "ingested" in forced.output.lower()
+    # Post-fix: --force on an existing file path returns "updated" (in-place UPDATE),
+    # not "ingested" (new UUID). The old DELETE+INSERT semantics no longer apply.
+    assert "updated" in forced.output.lower()
 
 
 def test_ingest_dir_recursive(
@@ -261,3 +263,103 @@ def test_extract_path_wraps_malformed_docx_as_value_error(tmp_path: Path) -> Non
     bad.write_bytes(b"not a real docx")
     with pytest.raises(ValueError, match="malformed DOCX"):
         extract_path(bad)
+
+
+# Test #18 — CLI verb output covers all three states for ingest / ingest-stdin / ingest-dir
+
+def test_cli_ingest_verb_reflects_in_place_update(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    """Verb output maps created/body_changed/force correctly for all three CLI commands.
+
+    States verified:
+      - "ingested:"  → created=True (first ingest)
+      - "updated:"   → created=False AND (body_changed=True OR force=True)
+      - "skipped:"   → created=False AND body_changed=False AND not force
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    _patch_embedder(monkeypatch)
+    runner = CliRunner()
+
+    # ---- brain ingest ----
+    # Write a file we can control the content of.
+    src = tmp_path / "src"
+    src.mkdir()
+    test_file = src / "cli18.txt"
+    test_file.write_text("version one content for cli test 18.", encoding="utf-8")
+
+    # First ingest → "ingested:"
+    r1 = runner.invoke(app, ["ingest", str(test_file)])
+    assert r1.exit_code == 0, r1.output
+    assert "ingested:" in r1.output.lower()
+
+    # Same file, same content, no --force → "skipped:"
+    r2 = runner.invoke(app, ["ingest", str(test_file)])
+    assert r2.exit_code == 0, r2.output
+    assert "skipped" in r2.output.lower()
+
+    # Same file, same content, --force → "updated:" (in-place UPDATE, body_changed=False)
+    r3 = runner.invoke(app, ["ingest", str(test_file), "--force"])
+    assert r3.exit_code == 0, r3.output
+    assert "updated:" in r3.output.lower()
+
+    # Update file content, no --force → "updated:" (body_changed=True)
+    test_file.write_text("version two content — body changed.", encoding="utf-8")
+    r4 = runner.invoke(app, ["ingest", str(test_file)])
+    assert r4.exit_code == 0, r4.output
+    assert "updated:" in r4.output.lower()
+
+    # ---- brain ingest-dir ----
+    # ingest-dir has no --force flag; verb states are ingested / updated / skipped.
+    dir_src = tmp_path / "dir_src"
+    dir_src.mkdir()
+    dir_file = dir_src / "dir18.txt"
+    dir_file.write_text("dir ingest version one.", encoding="utf-8")
+
+    # First ingest-dir → "ingested:"
+    rd1 = runner.invoke(app, ["ingest-dir", str(dir_src)])
+    assert rd1.exit_code == 0, rd1.output
+    assert "ingested:" in rd1.output.lower()
+
+    # Same content, no --force → "skipped:"
+    rd2 = runner.invoke(app, ["ingest-dir", str(dir_src)])
+    assert rd2.exit_code == 0, rd2.output
+    assert "skipped:" in rd2.output.lower()
+
+    # Changed content, no --force → "updated:"
+    dir_file.write_text("dir ingest version two — changed.", encoding="utf-8")
+    rd3 = runner.invoke(app, ["ingest-dir", str(dir_src)])
+    assert rd3.exit_code == 0, rd3.output
+    assert "updated:" in rd3.output.lower()
+
+    # ---- brain ingest-stdin ----
+    stdin_args = [
+        "ingest-stdin",
+        "--source", "slack",
+        "--external-id", "cli18-stdin",
+        "--title", "CLI 18 stdin",
+        "--content-type", "transcript",
+    ]
+
+    # First ingest → "ingested:"
+    rs1 = runner.invoke(app, stdin_args, input="stdin version one content.")
+    assert rs1.exit_code == 0, rs1.output
+    assert "ingested:" in rs1.output.lower()
+
+    # Same content, no --force → "skipped:"
+    rs2 = runner.invoke(app, stdin_args, input="stdin version one content.")
+    assert rs2.exit_code == 0, rs2.output
+    assert "skipped" in rs2.output.lower()
+
+    # Same content, --force → "updated:"
+    rs3 = runner.invoke(app, [*stdin_args, "--force"], input="stdin version one content.")
+    assert rs3.exit_code == 0, rs3.output
+    assert "updated:" in rs3.output.lower()
+
+    # Changed content, no --force → "updated:" (body_changed=True)
+    rs4 = runner.invoke(app, stdin_args, input="stdin version two — changed body.")
+    assert rs4.exit_code == 0, rs4.output
+    assert "updated:" in rs4.output.lower()

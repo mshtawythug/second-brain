@@ -8,18 +8,24 @@
 #   1. Run `brain vault export` so any DB-side changes (e.g. new ingested
 #      docs that haven't been mirrored into the vault yet) are materialized
 #      as Markdown files Quartz can render.
-#   2. Run `brain vault prune-orphans --apply` to delete `_ingested/`
+#   2. Run `brain vault sync-summaries` to propagate `documents.summary`
+#      into mirror frontmatter for docs whose body hasn't changed (export's
+#      body-hash skip won't rewrite them otherwise, so a doc enriched
+#      out-of-band via `brain enrich --backfill` would otherwise never
+#      reach the wiki). Idempotent — no-op when on-disk frontmatter
+#      already matches the DB.
+#   3. Run `brain vault prune-orphans --apply` to delete `_ingested/`
 #      mirror files whose frontmatter id has no matching `documents` row
 #      (e.g. test fixtures that leaked from pytest into prod, or stale
 #      mirrors left behind after a `brain rm`). Safe by construction:
 #      files without parseable frontmatter or with ids that resolve to a
 #      live DB row are NEVER touched.
-#   3. Apply the brain Quartz overlay (`quartz_overrides/`) into the
+#   4. Apply the brain Quartz overlay (`quartz_overrides/`) into the
 #      workspace via `brain vault render --overlay --no-build`, so any
 #      edits to overlay sources land in `<vault>/.quartz/` before the
 #      build picks them up. (`brain-up` does the same on cold start —
 #      this mirrors that behaviour for in-place rebuilds.)
-#   4. Run `python -m brain.wiki.build_swap` once: builds into a fresh
+#   5. Run `python -m brain.wiki.build_swap` once: builds into a fresh
 #      `<vault>/.quartz/builds/<id>/`, atomically retargets `current/`,
 #      and prunes old build dirs. The build watcher (started by
 #      `brain-up`) keeps running — no restart needed because the swap
