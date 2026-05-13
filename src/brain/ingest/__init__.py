@@ -875,12 +875,18 @@ def _update_doc_in_place(
     existing tags are never removed — ``brain tag`` is the only explicit
     tag-modification surface.
 
-    Summary-regen ordering signal: the caller passes ``body_changed`` (computed
-    from the pre-UPDATE hash diff) through to ``_enrich_post_ingest_hook`` so
-    the D11 idempotency check has an authoritative signal — without it the
-    hook would read the freshly-updated ``documents.content_hash`` and always
-    find a match, silently skipping regeneration on real body changes
-    (Codex finding 1, 2026-05-11).
+    Summary-regen ordering signal: when ``body_changed`` is True this helper
+    does TWO things — (1) NULL out ``summary`` / ``summary_model`` / ``summary_at``
+    in the same UPDATE that overwrites ``content_hash``, so a stale summary
+    describing the old body can never linger on disk, and (2) pass
+    ``body_changed`` through to ``_enrich_post_ingest_hook`` so it bypasses the
+    D11 idempotency check (the hook reads the freshly-updated content_hash and
+    would otherwise see a match). Together, (1) handles the case where the
+    hook can't regenerate (``enrich=False`` / ``enricher=None`` / content
+    < min_tokens) and (2) handles the case where it can. Without (1), a body
+    change with no enricher would leave the old summary on disk, misdescribing
+    the new content. (Codex finding 1, 2026-05-11; Codex stop-gate finding,
+    2026-05-13.)
     """
     # Partial-window guard: if the incoming extraction is all-draft but the
     # existing row is published, the ingest window is a subset of the full
@@ -961,6 +967,19 @@ def _update_doc_in_place(
         merged_tags,
         json.dumps(doc.metadata),
     ]
+
+    # When the body changed, NULL out the stored summary so a stale summary
+    # describing the OLD body can never be left on disk. The post-ingest
+    # enrich hook regenerates the summary from NULL when an enricher is
+    # available; when it isn't (enrich=False, enricher=None, or content
+    # shorter than min_tokens) the hook returns early — but the row is
+    # now correctly NULL-summary rather than carrying a misleading
+    # description of the previous body. Complements master's body_changed
+    # kwarg fix to _enrich_post_ingest_hook, which handles the
+    # "regenerate when possible" path; this handles the "can't regenerate,
+    # don't lie" path. (Codex stop-gate finding, 2026-05-13.)
+    if body_changed:
+        set_parts.extend(["summary=NULL", "summary_model=NULL", "summary_at=NULL"])
 
     # Write the draft column directly. The entry-level partial-window
     # guard above already returned early if (existing=published,

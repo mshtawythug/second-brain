@@ -1805,6 +1805,22 @@ def test_force_reingest_skips_reenrichment_when_summary_matches(test_db, fake_em
     assert summary_row3 is not None
     assert summary_row3[0] == enricher.summary_text  # unchanged via D11 skip
 
+    # Codex stop-gate regression: changed body + NO enricher must NOT leave
+    # the old summary on disk (which would now misdescribe the new body).
+    # The helper NULLs summary at UPDATE time when body_changed=True; the
+    # hook can't regenerate without an enricher, so summary stays NULL —
+    # preferable to a stale lie.
+    even_newer_content = "Third distinct body. " * 60
+    _ingest_sourced(
+        test_db, fake_embedder, external_id="meet-013",
+        content=even_newer_content, force=True,
+    )
+    summary_row4 = test_db.execute(
+        "SELECT summary FROM documents WHERE id=%s", (doc_id,)
+    ).fetchone()
+    assert summary_row4 is not None
+    assert summary_row4[0] is None  # body changed + no enricher → NULL, not stale
+
 
 # Test #14
 def test_sourced_branch_raises_on_ambiguous_source(test_db, fake_embedder):
