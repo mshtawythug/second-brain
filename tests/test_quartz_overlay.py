@@ -475,6 +475,61 @@ def test_overlay_apply_wraps_rename_oserror(
     assert isinstance(excinfo.value.__cause__, PermissionError)
 
 
+def test_overlay_makes_shebanged_files_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shebanged overlay files land in the workspace with +x set.
+
+    Regression for: the brain overlay's ``quartz/bootstrap-cli.mjs``
+    was checked in without the executable bit, so ``shutil.copy2``
+    propagated mode ``0o644`` to the workspace and from there into
+    the npx-cache install. ``npx quartz build`` then died with
+    ``sh: …/quartz: Permission denied`` (exit 126) before Quartz
+    ran a line. ``apply_overlay`` now restores +x on any shebanged
+    destination regardless of the source mode.
+    """
+    # Setup — overlay tree containing one shebanged file at 0o644
+    # plus a plain (non-shebang) file at 0o644 for negative-case
+    # contrast. The plain file's mode must NOT be touched.
+    overlay_root = _make_fake_overlay_root(
+        tmp_path / "overlay",
+        files={
+            "quartz/bootstrap-cli.mjs": (
+                "#!/usr/bin/env node\n// entry point\n"
+            ),
+            "quartz/components/Graph.tsx": "// stub Graph\n",
+        },
+    )
+    shebanged_src = overlay_root / "quartz" / "bootstrap-cli.mjs"
+    plain_src = overlay_root / "quartz" / "components" / "Graph.tsx"
+    shebanged_src.chmod(0o644)
+    plain_src.chmod(0o644)
+    workspace = _make_quartz_workspace(tmp_path)
+    monkeypatch.setattr(
+        "brain.vault.quartz_overlay._overlay_source_root", lambda: overlay_root
+    )
+
+    # Exercise
+    plan = plan_overlay(workspace)
+    apply_overlay(plan)
+
+    # Verify — shebanged destination has all three execute bits
+    # (apply_overlay ORs in 0o111 unconditionally on shebang hit).
+    shebanged_dest = workspace / "quartz" / "bootstrap-cli.mjs"
+    plain_dest = workspace / "quartz" / "components" / "Graph.tsx"
+    assert shebanged_dest.is_file()
+    assert shebanged_dest.stat().st_mode & 0o111 == 0o111, (
+        f"shebanged dest missing +x bits: "
+        f"mode={oct(shebanged_dest.stat().st_mode)}"
+    )
+    # Plain (non-shebang) file is left at whatever copy2 produced.
+    assert plain_dest.is_file()
+    assert plain_dest.stat().st_mode & 0o111 == 0, (
+        f"non-shebang dest unexpectedly executable: "
+        f"mode={oct(plain_dest.stat().st_mode)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # CLI tests — overlay flag wiring
 # ---------------------------------------------------------------------------

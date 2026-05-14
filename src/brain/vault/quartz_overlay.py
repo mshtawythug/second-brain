@@ -211,8 +211,26 @@ def apply_overlay(plan: OverlayPlan) -> list[tuple[Path, Path]]:
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
+            # Shebanged files must be executable. shutil.copy2 preserves
+            # mode bits, so an overlay source checked in without +x
+            # produces a non-executable workspace copy (and an npx-cache
+            # install with the same mode), which makes `npx <bin>` fail
+            # with "Permission denied" at the shell layer. Restoring +x
+            # here guarantees the destination is runnable regardless of
+            # the source-file's tracked mode.
+            if _has_shebang(dest):
+                dest.chmod(dest.stat().st_mode | 0o111)
         except OSError as e:
             raise OverlayError(
                 f"overlay copy failed: {src} → {dest}: {e}"
             ) from e
     return list(plan.pairs)
+
+
+def _has_shebang(path: Path) -> bool:
+    """Return True when ``path`` starts with ``#!`` (Unix shebang)."""
+    try:
+        with path.open("rb") as f:
+            return f.read(2) == b"#!"
+    except OSError:
+        return False
