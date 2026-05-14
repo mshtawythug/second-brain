@@ -31,8 +31,10 @@ authoring, see `brain-authoring`. For action items, see `brain-todo`.
 
 The single entry point for "is the brain healthy?". Verifies:
 
-- `.env` present, required vars set (`DATABASE_URL`, plus `VOYAGE_API_KEY` if
-  `BRAIN_EMBEDDER=voyage`).
+- Config loads successfully — required env vars are set (`DATABASE_URL`,
+  plus `VOYAGE_API_KEY` when `BRAIN_EMBEDDER=voyage`). Doctor does not
+  separately assert a `.env` file exists; the env vars just need to be
+  resolvable (any of `.env`, the shell, or a wrapper script is fine).
 - Postgres + pgvector reachable.
 - `chunks.embedding` column shape (type, NOT NULL, HNSW index when applicable).
 - Embedder runtime: Ollama daemon + model loaded (`arctic` / `qwen3`), or

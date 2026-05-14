@@ -75,7 +75,12 @@ Renames a vault note, including:
 
 - Frontmatter `title` + `updated` rewrite
 - File move (when slug changes)
-- Every `[[old-title]]` reference across the vault rewritten to `[[<new-slug>|<new-title>]]`
+- Every matching `[[old-title]]` reference across the vault retargeted to the new title:
+  - Bare `[[Old Title]]` → `[[New Title]]`
+  - User-aliased `[[Old Title|user alias]]` → `[[New Title|user alias]]` (alias preserved verbatim)
+  - Headings `[[Old Title#section]]` → `[[New Title#section]]` (heading preserved)
+  - Synthetic `[[Old Title|Old Title]]` form (where display equals old title) collapses to bare `[[New Title]]`
+  - A subsequent `brain vault sync` may further rewrite to path-form `[[<vault-rel-path>|New Title]]` for Quartz
 - Atomic — every file we touch is snapshotted to `tempfile.mkdtemp(prefix="brain-rename-")` first. On any error the snapshots are restored byte-for-byte and the snapshot dir path is logged.
 
 ```bash
