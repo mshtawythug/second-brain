@@ -24,3 +24,6 @@ tests/eval/baselines/*.json
 
 # Brainstorm artifacts (kept local-only — can contain PII / personal references)
 .superpowers/
+
+# Plans / specs / audits / QA — local-only working docs (may contain personal references)
+docs/
