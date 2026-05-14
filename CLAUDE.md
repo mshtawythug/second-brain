@@ -76,6 +76,29 @@ Run after every change: `ruff check` (lint) or `ruff check --fix` (auto-fix), th
 
 **Key rules:** Line length 100, target Python 3.11, `from __future__ import annotations` not needed (3.11+ has native PEP 604 union syntax). Sort imports with `ruff check --select I --fix`.
 
+### Eval gate (CI)
+The eval-marker harness (`tests/test_eval_harness_live.py`) is **excluded from the default pytest invocation** (`pyproject.toml` → `addopts = "... -m 'not eval'"`). Rationale: it requires a live Postgres + Ollama, would slow every local `pytest` run, and the threshold assertions assume the live brain corpus.
+
+**CI enforces it separately.** `.github/workflows/eval.yml` runs on every PR + every push to `master`:
+
+1. Spins up Postgres 16 + pgvector as a service container on port 5433.
+2. Installs the package with `pip install -e ".[dev]"`.
+3. Runs `pytest -m eval --no-cov -v` — gate fails on any harness regression.
+4. Conditionally runs `brain eval --baseline ci --diff --fail-below` when `tests/eval/baselines/ci.json` exists (added by Wave A.4).
+
+**Decision recorded (Wave A.1):** the eval marker stays OFF in the default `pytest` invocation. Gate lives in CI only. Local devs run `pytest -m eval` manually when needed.
+
+**Updating a committed baseline:**
+1. Locally with a populated brain + Ollama: `brain eval --record-baseline ci`
+2. Inspect the diff: `git diff tests/eval/baselines/ci.json`
+3. Commit the new baseline JSON alongside the change that justifies the new numbers.
+
+The `--fail-below` flag exits with code `3` (distinct from `1` = generic error and `2` = Typer BadParameter) when any mean metric — nDCG@5, MRR, or Recall@20 — regresses by more than `1e-4` (one unit at the baseline's 4-decimal serialization precision). Uniform threshold across all three metrics — no per-metric overrides (kept simple; the one downstream consumer is the CI workflow). `--fail-below` requires `--diff`; passing it alone exits `2` (Typer BadParameter).
+
+`tests/eval/baselines/.gitignore` ignores `*.json` by default; explicitly-named committed baselines (currently `ci.json`) are allowlisted with `!ci.json`. Add new committed baselines the same way — do not blanket-allow.
+
+**Wave A.1 source:** audit `docs/audits/2026-05-14-q1-codex-cumulative-review.md`, plan `docs/plans/2026-05-14-plan-audit-gap-remediation.md`. The plan tracks the remaining waves (A.2 person-variant key expansion, A.3 EXEC tracker reconciliation, A.4 first committed `ci.json` baseline).
+
 ### Migration Safety
 - Migrations are raw SQL files in `migrations/`, applied in name order by `brain init`.
 - **Never reference Python code in migrations** — they are pure SQL, frozen in time.
