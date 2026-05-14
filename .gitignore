@@ -21,3 +21,6 @@ tests/eval/baselines/*.json
 # first invocation. Dev-checkouts get `<repo>/.shims/`; pipx users get
 # `~/.brain/.shims/`. Never tracked.
 .shims/
+
+# Brainstorm artifacts (kept local-only — can contain PII / personal references)
+.superpowers/
