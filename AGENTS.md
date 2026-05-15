@@ -17,6 +17,7 @@ work*; these two files configure the workers themselves).
 6. Bug fixes require regression tests that reproduce the original failure.
 7. Do not revert unrelated user changes. Work with the current dirty tree.
 8. Plans, specs, and new Markdown docs created during work belong under `docs/`: specs in `docs/specs/YYYY-MM-DD-<topic>-design.md`, plans in `docs/plans/YYYY-MM-DD-<topic>.md`.
+9. No real personal data in checked-in code, tests, fixtures, docs, comments, commit messages, or PR descriptions. The repo has been explicitly PII-scrubbed — use synthetic / redacted values for names, email addresses, phone numbers, postal addresses, meeting attendees, calendar specifics, company names, customer references, and internal codenames. If a test seems to need real data, the test is wrong: parameterize the fixture or refactor the production code so it's testable with synthetic values.
 
 ## Codex Agenting
 
