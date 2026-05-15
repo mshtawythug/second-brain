@@ -256,3 +256,11 @@ These are universal mistakes — never repeat them.
 5. **Four Phase Tests** — Every test follows setup → exercise → verify → teardown. Clear separation between phases. No mystery guests — make test data explicit, don't rely on invisible factory defaults.
 6. **No test failures are pre-existing** — Every failure is a regression until proven otherwise. Investigate immediately, never dismiss as "pre-existing" or "flaky" without evidence.
 7. **The Scout Law — leave the code better than you found it** — Before completing any task, ALL tests in the suite must pass — not just the ones related to your changes. If you encounter broken tests from other areas, fix them.
+
+## Default Design Skill: open-design
+
+For any design work — UI/UX, components, slides/decks, branding, motion, design reviews, image/video generation, design systems — prefer skills from the **open-design** collection (installed in `~/.claude/skills/`).
+
+Examples: `frontend-design`, `design-review`, `design-brief`, `creative-director`, `ui-ux-pro-max`, `web-design-guidelines`, `color-expert`, `brand-guidelines`, `theme-factory`, `pptx-generator`, `slides`, `apple-hig`, plus 70+ design-system templates.
+
+The Anthropic `frontend-design` plugin has been disabled in favor of this collection. The local open-design app also runs at http://localhost:7456 (Docker).
