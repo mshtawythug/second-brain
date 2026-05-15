@@ -89,7 +89,7 @@ def test_backfill_stage_b_computes_search_extras(test_db):
     _, chunk_ids = _seed_doc_with_chunks(
         test_db,
         title="Email contacts",
-        chunk_contents=["Reach person-b@example.com about the call."],
+        chunk_contents=["Reach person-b@example-group.com about the call."],
     )
 
     report = backfill_search.run(test_db)

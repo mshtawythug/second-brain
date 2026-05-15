@@ -43,7 +43,7 @@ def _seed_legacy_chunk_with_email(conn) -> tuple[str, str]:
     """
     title = "Outreach"
     tags = ["intro"]
-    content = "Email person-b@example.com about the next session."
+    content = "Email person-b@example-group.com about the next session."
     h = hashlib.sha256(content.encode()).hexdigest()
     doc_row = conn.execute(
         """

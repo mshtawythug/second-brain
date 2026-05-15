@@ -317,18 +317,18 @@ def test_rewrite_tags_round_trips_unicode_titles(tmp_path: Path) -> None:
 
 
 def test_rewrite_tags_normalizes_brand_casing(tmp_path: Path) -> None:
-    """A caller passing ``COMPANY_REDACTED`` writes the canonical lowercase form."""
+    """A caller passing ``BrandName`` writes the canonical lowercase form."""
     path = _seed_vault_file(
         tmp_path,
         {"id": "abc", "title": "S", "tags": []},
         "b\n",
     )
 
-    changed = rewrite_tags(path, ["COMPANY_REDACTED"])
+    changed = rewrite_tags(path, ["BrandName"])
 
     assert changed is True
     fields, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
-    assert fields["tags"] == ["company-ko"]
+    assert fields["tags"] == ["brandname"]
 
 
 def test_rewrite_tags_dedupes_case_variants(tmp_path: Path) -> None:

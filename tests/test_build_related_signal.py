@@ -207,14 +207,14 @@ def _matches(conn: psycopg.Connection[Any], tsquery: str, text: str) -> bool:
 def test_self_tsquery_from_descriptive_title(test_db: psycopg.Connection[Any]) -> None:
     doc_id = _doc(
         test_db,
-        title="COMPANY_REDACTED Enrollment Reference Brief",
+        title="BrandName Enrollment Reference Brief",
         chunk_contents=["Body about something completely unrelated to insurance."],
     )
 
     tsquery = _build_self_tsquery(
         test_db,
         doc_id,
-        title="COMPANY_REDACTED Enrollment Reference Brief",
+        title="BrandName Enrollment Reference Brief",
         corpus_common=frozenset(),
     )
 
@@ -223,13 +223,13 @@ def test_self_tsquery_from_descriptive_title(test_db: psycopg.Connection[Any]) -
     # (Phase F.C tuning) so a doc containing every title lexeme still
     # matches via the AND clause:
     assert _matches(
-        test_db, tsquery, "An COMPANY_REDACTED enrollment reference brief document"
+        test_db, tsquery, "An BrandName enrollment reference brief document"
     )
     # And — the F.C fix — a doc with even ONE distinctive title token
-    # ("COMPANY_REDACTED" alone) now matches via the OR clause. The pre-fix
+    # ("BrandName" alone) now matches via the OR clause. The pre-fix
     # title-only path rejected this and produced zero FTS candidates for
-    # long distinctive titles such as "COMPANY_REDACTED — SVP of Engineering …".
-    assert _matches(test_db, tsquery, "An COMPANY_REDACTED overview document")
+    # long distinctive titles such as "BrandName — SVP of Engineering …".
+    assert _matches(test_db, tsquery, "An BrandName overview document")
     assert "[" not in tsquery and "]" not in tsquery
     # No body augmentation happened — body-only words must NOT appear.
     assert not _matches(test_db, tsquery, "insurance carrier networks")
@@ -292,8 +292,8 @@ def test_self_tsquery_with_short_title_falls_back_to_body(
         test_db,
         title="Notes",
         chunk_contents=[
-            "COMPANY_REDACTED enrollment quoting platform with carrier integrations.",
-            "COMPANY_REDACTED workflows replace traditional group health plans.",
+            "BrandName enrollment quoting platform with carrier integrations.",
+            "BrandName workflows replace traditional group health plans.",
         ],
     )
 
@@ -303,9 +303,9 @@ def test_self_tsquery_with_short_title_falls_back_to_body(
 
     assert tsquery, "fallback path must produce a non-empty tsquery for body content"
     # The body keyword "topic-ih" was appended — a doc whose chunks contain
-    # "COMPANY_REDACTED" should match this self-query even though the title alone
+    # "BrandName" should match this self-query even though the title alone
     # ("Notes") would not.
-    assert _matches(test_db, tsquery, "COMPANY_REDACTED reference brief on enrollment quoting")
+    assert _matches(test_db, tsquery, "BrandName reference brief on enrollment quoting")
     # And the title alone doesn't carry the signal — sanity check that
     # the fallback meaningfully widened the query.
     title_only = test_db.execute(
@@ -322,7 +322,7 @@ def test_self_tsquery_with_two_token_title_still_falls_back(
     doc_id = _doc(
         test_db,
         title="Meeting Recap",
-        chunk_contents=["COMPANY_REDACTED enrollment quoting platform with carrier integrations."],
+        chunk_contents=["BrandName enrollment quoting platform with carrier integrations."],
     )
 
     tsquery = _build_self_tsquery(
@@ -332,7 +332,7 @@ def test_self_tsquery_with_two_token_title_still_falls_back(
     assert tsquery
     # The body lexeme "topic-ih" must have been appended — it isn't in the
     # title, so a match here proves the fallback fired.
-    assert _matches(test_db, tsquery, "COMPANY_REDACTED carrier networks")
+    assert _matches(test_db, tsquery, "BrandName carrier networks")
 
 
 def test_self_tsquery_skips_stop_words_when_counting(
@@ -342,7 +342,7 @@ def test_self_tsquery_skips_stop_words_when_counting(
     doc_id = _doc(
         test_db,
         title="On the Bus",
-        chunk_contents=["COMPANY_REDACTED enrollment carrier networks."],
+        chunk_contents=["BrandName enrollment carrier networks."],
     )
 
     tsquery = _build_self_tsquery(
@@ -352,7 +352,7 @@ def test_self_tsquery_skips_stop_words_when_counting(
     assert tsquery
     # Body lexemes were appended — proves "On the Bus" was counted as
     # 1 meaningful token, not 3, and triggered the fallback path.
-    assert _matches(test_db, tsquery, "COMPANY_REDACTED carrier networks")
+    assert _matches(test_db, tsquery, "BrandName carrier networks")
 
 
 # ---------------------------------------------------------------------------
@@ -770,19 +770,19 @@ def test_regenerate_related_json_uses_chunk_content_for_snippet(
     src_vec = _vector(1.0, 0.0)
     _insert_doc(
         test_db,
-        title="COMPANY_REDACTED source",
+        title="BrandName source",
         vault_path="src.md",
         chunk_contents=[
-            "COMPANY_REDACTED reference\nwith\nweird whitespace\tin\tit.",
+            "BrandName reference\nwith\nweird whitespace\tin\tit.",
         ],
         chunk_vectors=[src_vec],
     )
     _insert_doc(
         test_db,
-        title="COMPANY_REDACTED neighbor",
+        title="BrandName neighbor",
         vault_path="neighbor.md",
         chunk_contents=[
-            "COMPANY_REDACTED enrollment context paragraph one.",
+            "BrandName enrollment context paragraph one.",
         ],
         chunk_vectors=[src_vec],
     )
@@ -801,7 +801,7 @@ def test_regenerate_related_json_uses_chunk_content_for_snippet(
     assert "\n" not in snippet
     assert "\t" not in snippet
     # Snippet is from the matching chunk's content.
-    assert "COMPANY_REDACTED enrollment context" in snippet
+    assert "BrandName enrollment context" in snippet
 
 
 def test_regenerate_related_json_score_in_unit_interval(

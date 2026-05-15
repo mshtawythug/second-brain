@@ -29,8 +29,8 @@ def _setup(
         test_db,
         embedder=fake_embedder,  # type: ignore[arg-type]
         doc=ExtractedDoc(
-            title="COMPANY_REDACTED Notes",
-            content="COMPANY_REDACTED was a great gig",
+            title="BrandName Notes",
+            content="BrandName was a great gig",
             content_type="txt",
             source_path=None,
             metadata={},
@@ -45,9 +45,9 @@ def test_search_returns_results(
     fake_embedder: object,
 ) -> None:
     _setup(monkeypatch, test_db, fake_embedder)
-    result = CliRunner().invoke(app, ["search", "company-id"])
+    result = CliRunner().invoke(app, ["search", "BrandName"])
     assert result.exit_code == 0, result.output
-    assert "COMPANY_REDACTED Notes" in result.output
+    assert "BrandName Notes" in result.output
 
 
 def test_search_json_output(
@@ -56,10 +56,10 @@ def test_search_json_output(
     fake_embedder: object,
 ) -> None:
     _setup(monkeypatch, test_db, fake_embedder)
-    result = CliRunner().invoke(app, ["search", "company-id", "--json"])
+    result = CliRunner().invoke(app, ["search", "BrandName", "--json"])
     assert result.exit_code == 0, result.output
     # Rich's print_json may emit pretty-printed JSON across lines; relax:
-    assert "COMPANY_REDACTED Notes" in result.stdout
+    assert "BrandName Notes" in result.stdout
 
 
 def test_search_no_results_message(

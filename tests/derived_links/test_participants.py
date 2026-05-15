@@ -86,7 +86,7 @@ class TestNormalizeParticipant:
         assert normalize_participant(token) is None
 
     def test_mixed_case_name_lowercased(self) -> None:
-        assert normalize_participant("person-x last-a") == "person-a last-a"
+        assert normalize_participant("person-x last-a") == "person-x last-a"
 
     def test_unicode_name_preserved_lowercased(self) -> None:
         # No transliteration here — that's slug's job. We only lowercase + strip.
@@ -113,7 +113,7 @@ class TestExtractKrispSpeakers:
             "**person-x last-a | 00:35**\nHi back.\n"
             "**person-erik | 01:02**\nHey.\n"
         )
-        assert extract_krisp_speakers(body) == {"ali sarkis", "person-a last-a", "person-erik"}
+        assert extract_krisp_speakers(body) == {"ali sarkis", "person-x last-a", "person-erik"}
 
     def test_repeated_speaker_returns_single_entry(self) -> None:
         body = (
@@ -122,7 +122,7 @@ class TestExtractKrispSpeakers:
             "**Ali Sarkis | 00:20**\nSecond turn.\n"
             "**Ali Sarkis | 00:35**\nThird turn.\n"
         )
-        assert extract_krisp_speakers(body) == {"ali sarkis", "person-a last-a"}
+        assert extract_krisp_speakers(body) == {"ali sarkis", "person-x last-a"}
 
     def test_speaker_n_placeholders_dropped(self) -> None:
         body = (
@@ -131,7 +131,7 @@ class TestExtractKrispSpeakers:
             "**Speaker_2 | 00:25**\nAnother unknown.\n"
             "**person-x last-a | 00:40**\nReply.\n"
         )
-        assert extract_krisp_speakers(body) == {"ali sarkis", "person-a last-a"}
+        assert extract_krisp_speakers(body) == {"ali sarkis", "person-x last-a"}
 
     def test_extract_krisp_speakers_drops_space_placeholders(self) -> None:
         # Real Krisp transcripts label unidentified speakers with a SPACE

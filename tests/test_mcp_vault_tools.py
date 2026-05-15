@@ -306,8 +306,8 @@ def test_brain_note_new_happy_path(
         title="person-x Q1 review",
         body="A few thoughts on the quarter.",
     )
-    assert payload["vault_path"] == "person-a-q1-review.md"
-    target = vault_dir / "person-a-q1-review.md"
+    assert payload["vault_path"] == "person-x-q1-review.md"
+    target = vault_dir / "person-x-q1-review.md"
     assert target.is_file()
     fields, body = parse_frontmatter(target.read_text())
     assert fields["title"] == "person-x Q1 review"

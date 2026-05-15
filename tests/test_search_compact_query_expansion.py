@@ -58,7 +58,7 @@ def test_multi_word_query_matches_compact_token_doc(
         test_db,
         fake_embedder,
         title="Separated Token Doc",
-        content="A discussion of CTO lunches and recruiting practices.",
+        content="A discussion of example groups and recruiting practices.",
     )
 
     results = hybrid_search(
@@ -102,7 +102,7 @@ def test_build_tsquery_single_token_returns_standard_form(
     test_db: psycopg.Connection[Any],
 ) -> None:
     """Single-alphabetic-token input bypasses the OR expansion."""
-    out = _build_tsquery(test_db, "company-id")
+    out = _build_tsquery(test_db, "companyid")
     # The result is whatever plainto_tsquery emits — must NOT contain the
     # OR operator, since the compact form == the standard form here.
     assert "|" not in out
@@ -124,14 +124,14 @@ def test_build_tsquery_two_tokens_emits_or_form(
 ) -> None:
     """Two-token input produces a parenthesized OR of standard | compact."""
     out = _build_tsquery(test_db, "Example Group")
-    # Should contain both the standard stems (cto/lunch) and the compact
-    # stem (ctolunch), connected by `|`.
+    # Should contain both the standard stems (exampl/group) and the compact
+    # stem (examplegroup), connected by `|`.
     assert "|" in out
-    assert "cto" in out
-    assert "lunch" in out
-    # The compact form `example-group` stems to `ctolunch` — appears as a
-    # standalone alternative.
-    assert "ctolunch" in out
+    assert "exampl" in out
+    assert "group" in out
+    # The compact form `example-group` stems to `examplegroup` — appears as
+    # a standalone alternative.
+    assert "examplegroup" in out
 
 
 def test_build_tsquery_skips_or_when_compact_equals_standard(

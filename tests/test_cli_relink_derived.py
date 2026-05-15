@@ -416,7 +416,7 @@ def test_relink_derived_backfills_krisp_participant_keys(
     # ``extract_krisp_speakers`` returns normalized lowercase names; the
     # backfill stores the sorted list. Both labels in the body resolve, so
     # we expect both keys, sorted alphabetically.
-    assert keys == ["ali sarkis", "person-a"]
+    assert keys == ["ali sarkis", "person-x"]
     # The user-facing summary surfaces the backfill count.
     assert "backfilled" in result.stdout.lower()
 
@@ -457,7 +457,7 @@ def test_relink_derived_overwrites_stale_krisp_keys(
     assert post is not None
     keys = (post[0] or {}).get("_participant_keys")
     # Stale value gone; current-body-derived value present.
-    assert keys == ["ali sarkis", "person-a"]
+    assert keys == ["ali sarkis", "person-x"]
     assert "someone-who-doesnt-exist" not in (keys or [])
 
 
@@ -506,7 +506,7 @@ def test_relink_derived_emits_people_pages_for_curated_entry(
     assert "kind: people" in body
     assert "slug: person-person-luke" in body
     # Body H1 carries the title-cased name.
-    assert "# person-person-luke" in body
+    assert "# Person-Person-Luke" in body
 
     # Index page also written.
     index = tmp_path / "people" / "index.md"

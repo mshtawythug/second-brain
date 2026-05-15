@@ -36,12 +36,12 @@ def test_plain_text_with_no_urls_returns_empty() -> None:
 # Spec examples from the Phase A brief.
 # ---------------------------------------------------------------------------
 def test_email_plus_hostname_example() -> None:
-    text = "contact person-b@example.com or visit example.com/groups"
+    text = "contact person-b@example-group.com or visit example.com/groups"
     tokens = _tokens(text)
     # Required sub-tokens.
     assert "person-b" in tokens
     assert "example-group" in tokens
-    assert "groups" in tokens
+    assert "example" in tokens
     # Noise TLDs / suffixes are dropped.
     assert "com" not in tokens
     assert "io" not in tokens
@@ -49,13 +49,12 @@ def test_email_plus_hostname_example() -> None:
 
 def test_url_components_example() -> None:
     text = (
-        "https://files.example.com/recording/example-team/123.mp3"
+        "https://files-example.s3-amazonaws.test/recording/example-team/123.mp3"
     )
     tokens = _tokens(text)
     for expected in {
         "files-example",
-        "s3",
-        "amazonaws",
+        "s3-amazonaws",
         "recording",
         "example-team",
     }:
@@ -70,19 +69,19 @@ def test_url_components_example() -> None:
 # Mixed punctuation around the captured artefact.
 # ---------------------------------------------------------------------------
 def test_email_inside_parens() -> None:
-    tokens = _tokens("(person-b@example.com)")
+    tokens = _tokens("(person-b@example-group.com)")
     assert "person-b" in tokens
     assert "example-group" in tokens
 
 
 def test_email_with_trailing_period() -> None:
-    tokens = _tokens("Email person-b@example.com.")
+    tokens = _tokens("Email person-b@example-group.com.")
     assert "person-b" in tokens
     assert "example-group" in tokens
 
 
 def test_url_with_trailing_punctuation() -> None:
-    tokens = _tokens("see https://example.com/groups/g/worldwide).")
+    tokens = _tokens("see https://example-group.test/groups/g/worldwide).")
     assert "example-group" in tokens
     assert "groups" in tokens
     assert "worldwide" in tokens
@@ -137,7 +136,7 @@ def test_output_is_deterministic_for_same_input() -> None:
 
 def test_first_seen_order_preserved() -> None:
     # 'person-b' appears before 'example-group'; output should reflect that.
-    text = "person-b@example.com"
+    text = "person-b@example-group.com"
     tokens = _tokens(text)
     assert tokens.index("person-b") < tokens.index("example-group")
 
@@ -217,7 +216,7 @@ def test_scheme_not_emitted_as_sub_token() -> None:
 # captures dotted word groups too).
 # ---------------------------------------------------------------------------
 def test_bare_hostname_emits_components() -> None:
-    tokens = _tokens("example.com/groups")
+    tokens = _tokens("groups.example-group.test")
     assert "example-group" in tokens
     assert "groups" in tokens
     assert "io" not in tokens  # noise TLD

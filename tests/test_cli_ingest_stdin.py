@@ -551,7 +551,7 @@ def test_gmail_hook_unchanged_after_b3_refactor(
         "ORDER BY email"
     ).fetchall()
     assert rows == [
-        ("person-a last-a", "person-a@example.com", "gmail"),
+        ("person-x last-a", "person-a@example.com", "gmail"),
         ("ali sarkis", "redacted@example.com", "gmail"),
     ]
 

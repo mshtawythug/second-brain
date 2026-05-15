@@ -850,7 +850,7 @@ def test_title_collision_logs_disambiguation_hint(
     b_id = str(uuid.uuid4())
     c_id = str(uuid.uuid4())
     _write(vault / "a.md", {"id": a_id, "title": "person-x"}, "x\n")
-    _write(vault / "b.md", {"id": b_id, "title": "person-a"}, "y\n")
+    _write(vault / "b.md", {"id": b_id, "title": "PERSON-X"}, "y\n")
     _write(
         vault / "c.md",
         {"id": c_id, "title": "Source"},

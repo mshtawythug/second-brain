@@ -151,7 +151,7 @@ def test_resolves_exact_title_case_insensitive(
     test_db: psycopg.Connection,
 ) -> None:
     doc_id = _insert_doc(test_db, title="person-x conversation")
-    parsed = _link("person-a conversation")
+    parsed = _link("PERSON-X CONVERSATION")
     target = resolve_link(test_db, parsed)
     assert target == ResolvedTarget(document_id=doc_id, kind="vault")
 
@@ -159,7 +159,7 @@ def test_resolves_exact_title_case_insensitive(
 def test_title_collision_returns_none(test_db: psycopg.Connection) -> None:
     """Two docs with the same title → ambiguous → ``None``."""
     _insert_doc(test_db, title="person-x", content="first")
-    _insert_doc(test_db, title="person-a", content="second")  # case-insensitive collision
+    _insert_doc(test_db, title="PERSON-X", content="second")  # case-insensitive collision
     parsed = _link("person-x")
     assert resolve_link(test_db, parsed) is None
 
@@ -266,14 +266,14 @@ def test_title_collisions_returns_all_matching_ids(
     test_db: psycopg.Connection,
 ) -> None:
     a = _insert_doc(test_db, title="person-x")
-    b = _insert_doc(test_db, title="person-a", content="other body")
+    b = _insert_doc(test_db, title="PERSON-X", content="other body")
     ids = title_collisions(test_db, "person-x")
     assert sorted(ids) == sorted([a, b])
 
 
 def test_title_collisions_excludes_self(test_db: psycopg.Connection) -> None:
     a = _insert_doc(test_db, title="person-x")
-    b = _insert_doc(test_db, title="person-a", content="other body")
+    b = _insert_doc(test_db, title="PERSON-X", content="other body")
     others = title_collisions(test_db, "person-x", exclude_doc_id=a)
     assert others == [b]
 

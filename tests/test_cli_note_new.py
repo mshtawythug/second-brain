@@ -47,7 +47,7 @@ def test_note_new_writes_file_and_syncs(
         app, ["note", "new", "person-x Q1 review", "--no-edit"]
     )
     assert result.exit_code == 0, result.output
-    target = vault / "person-a-q1-review.md"
+    target = vault / "person-x-q1-review.md"
     assert target.is_file()
 
     fields, body = parse_frontmatter(target.read_text())

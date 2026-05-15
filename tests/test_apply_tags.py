@@ -94,31 +94,31 @@ def test_apply_tags_normalizes_added_tag_casing(
 ) -> None:
     """Phase 3: brand-cased input is silently lowercased before the DB write.
 
-    Effect: ``brain tag <id> +COMPANY_REDACTED`` ends up storing ``company-ko`` in
+    Effect: ``brain tag <id> +BrandName`` ends up storing ``brandname`` in
     ``documents.tags`` regardless of what the caller typed. We verify by
     SELECTing the column directly so we don't trust the function's return
     value alone.
     """
     doc_id = _seed(test_db, fake_embedder, tags=[])
-    apply_tags(test_db, doc_id, add=["COMPANY_REDACTED"])
+    apply_tags(test_db, doc_id, add=["BrandName"])
     row = test_db.execute(
         "SELECT tags FROM documents WHERE id = %s", (doc_id,)
     ).fetchone()
     assert row is not None
-    assert list(row[0]) == ["company-ko"]
+    assert list(row[0]) == ["brandname"]
 
 
 def test_apply_tags_remove_matches_canonical_form_case_insensitive(
     test_db: psycopg.Connection, fake_embedder: Any
 ) -> None:
-    """A remove of ``COMPANY_REDACTED`` matches a row stored as ``company-ko``.
+    """A remove of ``BrandName`` matches a row stored as ``brandname``.
 
     Without normalization the SQL ``<> ALL`` comparator is case-sensitive
     and would silently no-op. The boundary normalization is what makes
     case-insensitive removal work.
     """
-    doc_id = _seed(test_db, fake_embedder, tags=["company-ko"])
-    final = apply_tags(test_db, doc_id, remove=["COMPANY_REDACTED"])
+    doc_id = _seed(test_db, fake_embedder, tags=["brandname"])
+    final = apply_tags(test_db, doc_id, remove=["BrandName"])
     assert final == []
 
 

@@ -198,7 +198,8 @@ def test_directory_refresh_loads_people_yml(
     patch_embedder(fake_embedder)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     (tmp_path / "_people.yml").write_text(
-        "person-person-luke: person-person-luke@example.com\nperson-person-marc: person-person-marc@example.com\n"
+        "person-person-luke: person-person-luke@example.com\n"
+        "person-person-marc: person-person-marc@example.com\n"
     )
 
     result = CliRunner().invoke(app, ["vault", "directory", "refresh"])

@@ -289,7 +289,7 @@ class TestLoadPeopleYml:
         )
         result = load_people_yml(tmp_path)
         assert result == {
-            "person-a last-a": "person-a@example.com",
+            "person-x last-a": "person-a@example.com",
             "bob": "bob@example.com",
         }
 
@@ -331,7 +331,7 @@ class TestLoadPeopleYml:
             "  person-x last-a  : person-x@example.com\n"
         )
         result = load_people_yml(tmp_path)
-        assert result == {"person-a last-a": "person-a@example.com"}
+        assert result == {"person-x last-a": "person-x@example.com"}
 
     def test_invalid_email_skipped(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
@@ -913,7 +913,7 @@ class TestRefreshContacts:
         rows = test_db.execute(
             "SELECT display_name, email FROM directory_entries"
         ).fetchall()
-        assert rows == [("person-a last-a", "person-a@example.com")]
+        assert rows == [("person-x last-a", "person-a@example.com")]
 
     def test_contact_with_multiple_emails(
         self, test_db: psycopg.Connection

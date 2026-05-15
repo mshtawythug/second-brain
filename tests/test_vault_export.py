@@ -82,7 +82,7 @@ def test_writes_one_file_per_document(
     assert len(krisp_files) == 1
     assert len(slack_files) == 1
     assert krisp_files[0].name.startswith("2026-04-15-abc12345")
-    assert "person-a-q1-review" in krisp_files[0].name
+    assert "person-x-q1-review" in krisp_files[0].name
 
 
 def test_manual_source_uses_simple_filename(

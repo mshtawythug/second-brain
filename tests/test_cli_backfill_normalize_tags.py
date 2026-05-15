@@ -104,10 +104,10 @@ def test_backfill_skips_already_canonical_doc(
     vault = tmp_path / "vault"
     vault.mkdir()
     file_path = _write_vault_file(
-        vault, "n.md", {"id": "ignored", "title": "N", "tags": ["company-ko"]}, "b\n"
+        vault, "n.md", {"id": "ignored", "title": "N", "tags": ["brandname"]}, "b\n"
     )
     doc_id = _seed_doc_with_tags(
-        test_db, title="N", tags=["company-ko"], vault_path_rel="n.md"
+        test_db, title="N", tags=["brandname"], vault_path_rel="n.md"
     )
     before_bytes = file_path.read_bytes()
     _set_env(monkeypatch, vault)
@@ -117,7 +117,7 @@ def test_backfill_skips_already_canonical_doc(
     assert result.exit_code == 0, result.output
     assert "1 already-canonical skipped" in result.output
     assert "normalized 0 doc(s)" in result.output
-    assert _db_tags(test_db, doc_id) == ["company-ko"]
+    assert _db_tags(test_db, doc_id) == ["brandname"]
     assert file_path.read_bytes() == before_bytes
 
 
@@ -134,10 +134,10 @@ def test_backfill_rewrites_uppercase_in_db_and_file(
     vault = tmp_path / "vault"
     vault.mkdir()
     file_path = _write_vault_file(
-        vault, "n.md", {"id": "ignored", "title": "N", "tags": ["COMPANY_REDACTED"]}, "b\n"
+        vault, "n.md", {"id": "ignored", "title": "N", "tags": ["BrandName"]}, "b\n"
     )
     doc_id = _seed_doc_with_tags(
-        test_db, title="N", tags=["COMPANY_REDACTED"], vault_path_rel="n.md"
+        test_db, title="N", tags=["BrandName"], vault_path_rel="n.md"
     )
     _set_env(monkeypatch, vault)
 
@@ -146,8 +146,8 @@ def test_backfill_rewrites_uppercase_in_db_and_file(
     assert result.exit_code == 0, result.output
     assert "normalized 1 doc(s)" in result.output
     assert "rewrote 1 file(s)" in result.output
-    assert _db_tags(test_db, doc_id) == ["company-ko"]
-    assert _file_tags(file_path) == ["company-ko"]
+    assert _db_tags(test_db, doc_id) == ["brandname"]
+    assert _file_tags(file_path) == ["brandname"]
 
 
 # ---------------------------------------------------------------------------
@@ -165,13 +165,13 @@ def test_backfill_collapses_case_duplicates(
     file_path = _write_vault_file(
         vault,
         "n.md",
-        {"id": "ignored", "title": "N", "tags": ["COMPANY_REDACTED", "company-ko"]},
+        {"id": "ignored", "title": "N", "tags": ["BrandName", "brandname"]},
         "b\n",
     )
     doc_id = _seed_doc_with_tags(
         test_db,
         title="N",
-        tags=["COMPANY_REDACTED", "company-ko"],
+        tags=["BrandName", "brandname"],
         vault_path_rel="n.md",
     )
     _set_env(monkeypatch, vault)
@@ -179,8 +179,8 @@ def test_backfill_collapses_case_duplicates(
     result = CliRunner().invoke(app, ["backfill", "normalize-tags"])
 
     assert result.exit_code == 0, result.output
-    assert _db_tags(test_db, doc_id) == ["company-ko"]
-    assert _file_tags(file_path) == ["company-ko"]
+    assert _db_tags(test_db, doc_id) == ["brandname"]
+    assert _file_tags(file_path) == ["brandname"]
 
 
 # ---------------------------------------------------------------------------
@@ -196,10 +196,10 @@ def test_backfill_dry_run_makes_no_changes(
     vault = tmp_path / "vault"
     vault.mkdir()
     file_path = _write_vault_file(
-        vault, "n.md", {"id": "ignored", "title": "N", "tags": ["COMPANY_REDACTED"]}, "b\n"
+        vault, "n.md", {"id": "ignored", "title": "N", "tags": ["BrandName"]}, "b\n"
     )
     doc_id = _seed_doc_with_tags(
-        test_db, title="N", tags=["COMPANY_REDACTED"], vault_path_rel="n.md"
+        test_db, title="N", tags=["BrandName"], vault_path_rel="n.md"
     )
     before_bytes = file_path.read_bytes()
     _set_env(monkeypatch, vault)
@@ -208,10 +208,10 @@ def test_backfill_dry_run_makes_no_changes(
 
     assert result.exit_code == 0, result.output
     assert "would normalize" in result.output
-    assert "[COMPANY_REDACTED]" in result.output or "['COMPANY_REDACTED']" in result.output
-    assert "['company-ko']" in result.output
+    assert "[BrandName]" in result.output or "['BrandName']" in result.output
+    assert "['brandname']" in result.output
     # No DB or file write happened.
-    assert _db_tags(test_db, doc_id) == ["COMPANY_REDACTED"]
+    assert _db_tags(test_db, doc_id) == ["BrandName"]
     assert file_path.read_bytes() == before_bytes
 
 
@@ -231,7 +231,7 @@ def test_backfill_vault_path_set_but_file_missing_warns(
     doc_id = _seed_doc_with_tags(
         test_db,
         title="N",
-        tags=["COMPANY_REDACTED"],
+        tags=["BrandName"],
         vault_path_rel="missing.md",
     )
     _set_env(monkeypatch, vault)
@@ -240,7 +240,7 @@ def test_backfill_vault_path_set_but_file_missing_warns(
 
     assert result.exit_code == 0, result.output
     # DB updated.
-    assert _db_tags(test_db, doc_id) == ["company-ko"]
+    assert _db_tags(test_db, doc_id) == ["brandname"]
     # Warn surfaced on stderr (CliRunner merges by default — assert by content).
     assert "1 file-missing skipped" in result.output
     assert "file missing on disk" in result.output
@@ -296,10 +296,10 @@ def test_backfill_is_idempotent_on_second_run(
     vault = tmp_path / "vault"
     vault.mkdir()
     file_path = _write_vault_file(
-        vault, "n.md", {"id": "ignored", "title": "N", "tags": ["COMPANY_REDACTED"]}, "b\n"
+        vault, "n.md", {"id": "ignored", "title": "N", "tags": ["BrandName"]}, "b\n"
     )
     _seed_doc_with_tags(
-        test_db, title="N", tags=["COMPANY_REDACTED"], vault_path_rel="n.md"
+        test_db, title="N", tags=["BrandName"], vault_path_rel="n.md"
     )
     _set_env(monkeypatch, vault)
     runner = CliRunner()

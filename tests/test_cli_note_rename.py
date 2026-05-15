@@ -209,7 +209,7 @@ def test_rename_full_flow(
     assert result.exit_code == 0, result.output
     # Old file gone, new file exists.
     assert not (vault / "target.md").exists()
-    assert (vault / "person-a-conversation.md").is_file()
+    assert (vault / "person-x-conversation.md").is_file()
     # References rewritten.
     alpha = (vault / "alpha.md").read_text()
     assert "[[person-x conversation]]" in alpha
@@ -378,7 +378,7 @@ def test_rename_atomic_restore_on_failure(
     assert (vault / "alpha.md").read_text() == pre_alpha
     assert (vault / "beta.md").read_text() == pre_beta
     # The new path was never created (or was cleaned up).
-    assert not (vault / "person-a-conversation.md").exists()
+    assert not (vault / "person-x-conversation.md").exists()
 
 
 def test_rename_invalid_id_errors(

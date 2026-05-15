@@ -149,9 +149,10 @@ def test_people_roster_lists_seeded_correspondents(
     result = CliRunner().invoke(app, ["people"])
     assert result.exit_code == 0, result.stdout
     out = result.stdout
-    # Both seeded names show up (title-cased) — the table headers + rows.
+    # Both seeded names show up (title-cased via humanize_display_name) — the
+    # table headers + rows.
     assert "Display name" in out
-    assert "person-x last-a" in out
+    assert "Person-X Last-A" in out
     assert "Ali Sarkis" in out
     # Primary email surfaces too.
     assert "person-a@example.com" in out
@@ -200,7 +201,7 @@ def test_people_roster_curated_badge_for_people_yml(
     result = CliRunner().invoke(app, ["people"])
     assert result.exit_code == 0, result.stdout
     # The person-x row should carry the curated checkmark; the Ali row should not.
-    assert "person-x last-a" in result.stdout
+    assert "Person-X Last-A" in result.stdout
     assert "✅" in result.stdout
 
 
@@ -273,7 +274,7 @@ def test_people_roster_owner_filter_strips_owner(
     result = CliRunner().invoke(app, ["people"])
     assert result.exit_code == 0, result.stdout
     # Counterparty stays.
-    assert "person-x last-a" in result.stdout
+    assert "Person-X Last-A" in result.stdout
     # Owner gone.
     assert "Ali Sarkis" not in result.stdout
 
@@ -294,11 +295,11 @@ def test_people_detail_shows_one_record_with_docs(
         test_db, fake_embedder, external_id="m1", title="Hello person-x"
     )
 
-    result = CliRunner().invoke(app, ["people", "person-x"])
+    result = CliRunner().invoke(app, ["people", "Person-X"])
     assert result.exit_code == 0, result.stdout
     out = result.stdout
     # Title line carries the title-cased name + doc count.
-    assert "person-x last-a" in out
+    assert "Person-X Last-A" in out
     assert "1 doc" in out  # "1 doc(s)" with optional plural
     # Doc title row appears.
     assert "Hello person-x" in out
@@ -315,9 +316,9 @@ def test_people_detail_case_insensitive_match(
     patch_embedder(fake_embedder)
     _seed_gmail(test_db, fake_embedder, external_id="m1")
 
-    result = CliRunner().invoke(app, ["people", "person-a"])
+    result = CliRunner().invoke(app, ["people", "PERSON-X"])
     assert result.exit_code == 0, result.stdout
-    assert "person-x last-a" in result.stdout
+    assert "Person-X Last-A" in result.stdout
 
 
 def test_people_detail_substring_match(
@@ -325,13 +326,13 @@ def test_people_detail_substring_match(
     fake_embedder: Any,
     patch_embedder: Any,
 ) -> None:
-    """Partial substring (``"meh"`` → "person-x last-a") resolves cleanly."""
+    """Partial substring (``"last"`` → "person-x last-a") resolves cleanly."""
     patch_embedder(fake_embedder)
     _seed_gmail(test_db, fake_embedder, external_id="m1")
 
-    result = CliRunner().invoke(app, ["people", "meh"])
+    result = CliRunner().invoke(app, ["people", "last"])
     assert result.exit_code == 0, result.stdout
-    assert "person-x last-a" in result.stdout
+    assert "Person-X Last-A" in result.stdout
 
 
 def test_people_detail_no_match_exits_nonzero(
@@ -397,10 +398,10 @@ def test_people_detail_json_emits_single_object(
     patch_embedder(fake_embedder)
     _seed_gmail(test_db, fake_embedder, external_id="m1")
 
-    result = CliRunner().invoke(app, ["people", "person-x", "--json"])
+    result = CliRunner().invoke(app, ["people", "Person-X", "--json"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert isinstance(payload, dict)
-    assert payload["display_name"] == "person-x last-a"
+    assert payload["display_name"] == "Person-X Last-A"
     assert payload["doc_count"] == 1
     assert isinstance(payload["docs"], list)

@@ -18,7 +18,7 @@ def test_strips_leading_and_trailing_dashes() -> None:
 def test_unicode_transliterated_via_nfkd() -> None:
     # NFKD-normalize: "é" → "e", "ñ" → "n"; bytes that don't decompose to
     # ASCII (like "中") are dropped entirely.
-    assert slugify("person-x Q1 réview") == "person-a-q1-review"
+    assert slugify("person-x Q1 réview") == "person-x-q1-review"
     assert slugify("Señor año") == "senor-ano"
 
 

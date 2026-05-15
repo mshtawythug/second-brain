@@ -16,7 +16,7 @@ from brain.tags import normalize_tag, normalize_tags
 
 def test_normalize_tag_lowercases_brand_casing() -> None:
     # (a) Brand/proper-noun casing is collapsed to lowercase storage form.
-    assert normalize_tag("COMPANY_REDACTED") == "company-ko"
+    assert normalize_tag("BrandName") == "brandname"
 
 
 def test_normalize_tag_replaces_spaces_with_hyphen() -> None:

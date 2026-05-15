@@ -186,12 +186,12 @@ class TestKrispNameAndEmailKeysDedupe:
             test_db, owner_keys=frozenset(), min_docs=1
         )
 
-        person-luke = _record_by_name(records, "person-person-luke")
-        assert person-luke.in_people_yml is True
-        assert person-luke.primary_email == "person-luke@example.com"
+        luke = _record_by_name(records, "person-person-luke")
+        assert luke.in_people_yml is True
+        assert luke.primary_email == "person-luke@example.com"
         # The doc is listed once even though both keys resolved to person-person-luke.
-        assert len(person-luke.docs) == 1
-        assert person-luke.docs[0].source_kind == "krisp"
+        assert len(luke.docs) == 1
+        assert luke.docs[0].source_kind == "krisp"
 
     def test_krisp_name_only_key_resolves_via_directory(
         self, test_db: psycopg.Connection[Any]
@@ -221,8 +221,8 @@ class TestKrispNameAndEmailKeysDedupe:
             test_db, owner_keys=frozenset(), min_docs=1
         )
 
-        person-luke = _record_by_name(records, "person-person-luke")
-        assert len(person-luke.docs) == 1
+        luke = _record_by_name(records, "person-person-luke")
+        assert len(luke.docs) == 1
 
 
 # --------------------------------------------------------------------------
@@ -286,9 +286,9 @@ class TestThresholdAndPeopleYmlOverride:
         assert "person-person-luke" in names
         assert "dan jones" not in names
 
-        person-luke = _record_by_name(records, "person-person-luke")
-        assert person-luke.in_people_yml is True
-        assert len(person-luke.docs) == 1
+        luke = _record_by_name(records, "person-person-luke")
+        assert luke.in_people_yml is True
+        assert len(luke.docs) == 1
 
     def test_threshold_person_at_or_above_min_docs_emits(
         self, test_db: psycopg.Connection[Any]
@@ -402,8 +402,8 @@ class TestOwnerExclusion:
             source="people_yml",
         )
 
-        # Gmail thread Ali↔person-person-luke. Owner_keys strips Ali → only person-person-luke gets a
-        # record, with this doc on his roster.
+        # Gmail thread Ali↔person-person-luke. Owner_keys strips Ali → only
+        # person-person-luke gets a record, with this doc on his roster.
         _seed_doc(
             test_db,
             source_kind="gmail",
@@ -442,10 +442,10 @@ class TestOwnerExclusion:
         names = [r.display_name for r in records]
         assert names == ["person-person-luke"]
 
-        person-luke = _record_by_name(records, "person-person-luke")
+        luke = _record_by_name(records, "person-person-luke")
         # Two docs (gmail + krisp) — both list person-person-luke once (owner stripped).
-        assert len(person-luke.docs) == 2
-        sources = sorted(d.source_kind for d in person-luke.docs)
+        assert len(luke.docs) == 2
+        sources = sorted(d.source_kind for d in luke.docs)
         assert sources == ["gmail", "krisp"]
 
     def test_owner_strip_drops_doc_with_only_owner_participants(
@@ -485,8 +485,8 @@ class TestOwnerExclusion:
         # owner-only doc contributed nothing to his roster.
         names = [r.display_name for r in records]
         assert names == ["person-person-luke"]
-        person-luke = _record_by_name(records, "person-person-luke")
-        assert person-luke.docs == []
+        luke = _record_by_name(records, "person-person-luke")
+        assert luke.docs == []
 
 
 # --------------------------------------------------------------------------
@@ -869,7 +869,7 @@ class TestRenderPersonMdFrontmatter:
         )
         rendered = render_person_md(rec)
         fm, _body = parse_frontmatter(rendered)
-        assert fm["title"] == "person-person-luke"
+        assert fm["title"] == "Person-Person-Luke"
         assert fm["slug"] == "person-person-luke"
         assert fm["kind"] == "people"
         assert fm["emails"] == ["person-luke@example.com", "person-luke@home.com"]
@@ -898,11 +898,15 @@ class TestRenderPersonMdBody:
     def test_body_contains_h1_humanized_name(self) -> None:
         rec = _make_person(display_name="person-person-luke")
         rendered = render_person_md(rec)
-        assert "# person-person-luke" in rendered
+        assert "# Person-Person-Luke" in rendered
 
     def test_primary_email_rendered_as_mailto(self) -> None:
         rendered = render_person_md(_make_person())
-        assert "**Primary email:** [person-luke@example.com](mailto:person-luke@example.com)" in rendered
+        expected = (
+            "**Primary email:** "
+            "[person-luke@example.com](mailto:person-luke@example.com)"
+        )
+        assert expected in rendered
 
     def test_other_emails_listed_when_multiple(self) -> None:
         rec = _make_person(
@@ -1019,7 +1023,11 @@ class TestRenderIndexMd:
         recs = [
             _make_person(slug="zoe-zhang", display_name="zoe zhang", in_people_yml=False),
             _make_person(slug="alice-anderson", display_name="alice anderson", in_people_yml=False),
-            _make_person(slug="person-person-marc", display_name="person-person-marc", in_people_yml=True),
+            _make_person(
+                slug="person-person-marc",
+                display_name="person-person-marc",
+                in_people_yml=True,
+            ),
         ]
         rendered = render_index_md(recs)
         # Locate each name's position; Alice → person-person-marc → Zoe (alpha by display_name).
@@ -1057,7 +1065,11 @@ class TestRenderIndexMd:
             )
         ]
         rendered = render_index_md(recs)
-        assert "[[people/person-person-luke|person-person-luke]] — 4 docs · person-luke@example.com" in rendered
+        expected = (
+            "[[people/person-person-luke|Person-Person-Luke]] — 4 docs"
+            " · person-luke@example.com"
+        )
+        assert expected in rendered
 
     def test_index_render_is_idempotent(self) -> None:
         recs = [_make_person()]
@@ -1252,8 +1264,8 @@ class TestEmitPeoplePagesCleanup:
         assert not (tmp_path / "people" / "person-person-luke.md").exists()
         # person-person-marc's page survives.
         assert (tmp_path / "people" / "person-person-marc.md").is_file()
-        # The index gets re-written because person-person-marc's row stays but person-person-luke's row
-        # is gone — the rendered list changed.
+        # The index gets re-written because person-person-marc's row stays
+        # but person-person-luke's row is gone — the rendered list changed.
         assert second.index_written is True
 
     def test_index_md_never_treated_as_a_person_page(

@@ -745,7 +745,7 @@ def test_gmail_ingest_upserts_directory_entries(
         "FROM directory_entries ORDER BY email"
     ).fetchall()
     assert rows == [
-        ("person-a last-a", "person-a@example.com", "gmail", 1),
+        ("person-x last-a", "person-a@example.com", "gmail", 1),
         ("ali sarkis", "redacted@example.com", "gmail", 1),
     ]
 
@@ -978,7 +978,7 @@ def test_cli_ingest_gmail_populates_directory(
             "ORDER BY email"
         ).fetchall()
     assert rows == [
-        ("person-a last-a", "person-a@example.com", "gmail"),
+        ("person-x last-a", "person-a@example.com", "gmail"),
         ("ali sarkis", "redacted@example.com", "gmail"),
     ]
 

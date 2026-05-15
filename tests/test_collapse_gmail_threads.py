@@ -299,7 +299,7 @@ def test_tag_union_preserved(
         ("thread-A",),
     ).fetchone()
     assert row is not None
-    assert sorted(row[0]) == ["email", "vendor-ev", "follow-up", "recruiter"]
+    assert sorted(row[0]) == ["email", "follow-up", "recruiter", "vendor-ev"]
 
 
 # ---------------------------------------------------------------------------

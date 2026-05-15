@@ -63,7 +63,7 @@ def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.mark.live_db
-def test_default_floor_excludes_known_bad_person-b_match(
+def test_default_floor_excludes_known_bad_person_b_match(
     monkeypatch: pytest.MonkeyPatch,
     isolated_dotenv: None,
 ) -> None:
