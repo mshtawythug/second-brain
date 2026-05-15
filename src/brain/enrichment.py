@@ -101,8 +101,10 @@ class SummaryResult:
     """One enrichment summary. Stored byte-for-byte on ``documents.summary``.
 
     ``model`` is the model fingerprint (e.g. ``"llama3.1:8b"``) so the
-    post-ingest hook can persist it onto ``documents.summary_model`` and a
-    future ``brain enrich --backfill --model-changed`` flag can detect drift.
+    post-ingest hook can persist it onto ``documents.summary_model`` and
+    ``brain enrich --backfill --remodel`` can detect drift after a model
+    swap (without ``--remodel``, backfill is NULL-only and ignores
+    fingerprint mismatches).
     """
 
     summary: str

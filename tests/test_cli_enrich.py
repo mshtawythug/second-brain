@@ -169,8 +169,8 @@ def test_brain_enrich_backfill_re_enriches_after_model_upgrade(
     test_db: psycopg.Connection,
     fake_embedder: object,
 ) -> None:
-    """Codex finding 1 (HIGH): a row whose summary_model differs from the
-    current BRAIN_ENRICH_MODEL must be re-enriched by ``--backfill``."""
+    """A row whose summary_model differs from the current
+    BRAIN_ENRICH_MODEL is re-enriched when ``--remodel`` is passed."""
     # Seed one doc already enriched by the OLD model.
     doc_ids = _seed_docs(test_db, fake_embedder, count=1)
     test_db.execute(
@@ -179,16 +179,14 @@ def test_brain_enrich_backfill_re_enriches_after_model_upgrade(
         (doc_ids[0],),
     )
 
-    # Switch to a NEW model and run backfill.
+    # Switch to a NEW model and run backfill with --remodel.
     enricher = _FakeEnricher(
         model="llama3.2:8b", summary_text="NEW summary"
     )
     _patch_enricher(monkeypatch, enricher)
 
-    result = CliRunner().invoke(app, ["enrich", "--backfill"])
+    result = CliRunner().invoke(app, ["enrich", "--backfill", "--remodel"])
     assert result.exit_code == 0, result.output
-    # The doc had a non-NULL summary but with the OLD model, so it must
-    # be re-enriched.
     assert enricher.calls == 1
     row = test_db.execute(
         "SELECT summary, summary_model FROM documents WHERE id=%s",
@@ -197,6 +195,77 @@ def test_brain_enrich_backfill_re_enriches_after_model_upgrade(
     assert row is not None
     assert row[0] == f"NEW summary ({_get_title(test_db, doc_ids[0])})"
     assert row[1] == "llama3.2:8b"
+
+
+def test_brain_enrich_backfill_default_skips_model_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """Without ``--remodel``, a row whose summary_model differs from the
+    current BRAIN_ENRICH_MODEL is left untouched — the default backfill
+    only touches NULL-summary rows."""
+    doc_ids = _seed_docs(test_db, fake_embedder, count=1)
+    test_db.execute(
+        "UPDATE documents SET summary='OLD summary', "
+        "summary_model='llama3.1:8b', summary_at=NOW() WHERE id=%s",
+        (doc_ids[0],),
+    )
+
+    enricher = _FakeEnricher(
+        model="llama3.2:8b", summary_text="NEW summary"
+    )
+    _patch_enricher(monkeypatch, enricher)
+
+    result = CliRunner().invoke(app, ["enrich", "--backfill"])
+    assert result.exit_code == 0, result.output
+    assert "nothing to enrich" in result.output
+    assert enricher.calls == 0
+    row = test_db.execute(
+        "SELECT summary, summary_model FROM documents WHERE id=%s",
+        (doc_ids[0],),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "OLD summary"
+    assert row[1] == "llama3.1:8b"
+
+
+def test_brain_enrich_remodel_without_backfill_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """``--remodel`` paired with ``--krisp-action-items`` is a usage error."""
+    enricher = _FakeEnricher()
+    _patch_enricher(monkeypatch, enricher)
+    result = CliRunner().invoke(
+        app, ["enrich", "--remodel", "--krisp-action-items"]
+    )
+    assert result.exit_code != 0
+    combined = result.output + (
+        result.stderr if hasattr(result, "stderr") else ""
+    )
+    assert "--remodel requires --backfill" in combined
+
+
+def test_brain_enrich_standalone_remodel_errors_clearly(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """``brain enrich --remodel`` alone (no mode flag) surfaces the
+    actionable ``--remodel requires --backfill`` message, NOT the generic
+    ``expected --backfill or --krisp-action-items`` one. Locks in the
+    guard ordering so a future refactor doesn't regress the UX."""
+    enricher = _FakeEnricher()
+    _patch_enricher(monkeypatch, enricher)
+    result = CliRunner().invoke(app, ["enrich", "--remodel"])
+    assert result.exit_code != 0
+    combined = result.output + (
+        result.stderr if hasattr(result, "stderr") else ""
+    )
+    assert "--remodel requires --backfill" in combined
+    assert "expected --backfill or --krisp-action-items" not in combined
 
 
 def _get_title(test_db: psycopg.Connection, doc_id: str) -> str:
