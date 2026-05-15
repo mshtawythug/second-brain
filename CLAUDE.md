@@ -24,6 +24,7 @@ IMPORTANT:
     - **Code review:** Dispatch `superpowers:code-reviewer` on ALL changes in the phase against the plan spec.
     - **Completion audit:** Dispatch a separate completion auditor checking: (a) every task implemented — nothing skipped, (b) every fix matches spec exactly, (c) every required test exists and passes, (d) no regressions, (e) no dead code — no orphaned modules, unused functions, or untested branches.
     - **THE LOOP:** If EITHER review finds issues → fix ALL issues → re-run BOTH → repeat. Exit condition: code reviewer says "APPROVED" AND auditor says "AUDIT PASSED". No phase is complete until the loop exits clean.
+15. **No PII in checked-in code. NO EXCEPTIONS.** The repo has been explicitly PII-scrubbed across tests, fixtures, docs, and comments — never reintroduce real personal data. Use synthetic / redacted values for names, email addresses, phone numbers, postal addresses, meeting attendees, calendar specifics, company names, customer references, and internal project codenames. When fixing or extending tests, copy the existing synthetic pattern; never paste production data (e.g. real meeting transcripts, real email bodies, real chat threads, employer / coworker names) even temporarily. If a real value seems required for a test to be meaningful, the test is wrong — parameterize the fixture or refactor the production code so it's testable with synthetic data. This rule covers commit messages and PR descriptions too.
 
 ## Team Mode Override (MANDATORY — overrides superpowers skill routing)
 
