@@ -1,0 +1,4 @@
+# The golden_corpus.yaml is intentionally not committed. Tests under
+# test_eval_corpus.py that depend on the default bundled corpus skip when
+# this file is absent (it must be a real curated set, not a placeholder).
+golden_corpus.yaml
