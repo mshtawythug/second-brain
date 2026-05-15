@@ -1216,6 +1216,34 @@ class _BoomEmbedderFactory(_RecordingEmbedder):
         raise OllamaEmbedError("simulated cold start failure")
 
 
+class _ColdStartEmbedder(_RecordingEmbedder):
+    """Variant whose first ``embed`` call raises ``OllamaEmbedError`` (Ollama
+    daemon up but model still loading) and whose second call succeeds — used to
+    verify the warmup-retry path covers the 2026-05-13 cold-boot race."""
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        self.embed_calls += 1
+        self.embed_inputs.append((list(texts), input_type))
+        if self.embed_calls == 1:
+            raise OllamaEmbedError("simulated cold start, model still loading")
+        return [[0.0] * 4096 for _ in texts]
+
+
+class _NonOllamaErrorEmbedder(_RecordingEmbedder):
+    """Variant whose ``embed`` raises a ``RuntimeError`` — used to verify the
+    warmup block's narrow ``except OllamaEmbedError`` does NOT swallow other
+    exception classes (import / programming errors must propagate so the
+    operator notices)."""
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        self.embed_calls += 1
+        raise RuntimeError("simulated non-Ollama failure")
+
+
 def _install_main_doubles(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -1278,24 +1306,77 @@ def test_main_continues_when_warmup_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A OllamaEmbedError during warmup must be swallowed — main() must still
-    hand off to mcp_app.run() so the server stays up and search can retry on
-    demand."""
+    """If both warmup attempts raise ``OllamaEmbedError``, main() must still
+    hand off to ``mcp_app.run()`` so the server stays up and search can retry
+    on demand. The warning still names the exception class."""
     captured = _install_main_doubles(
         monkeypatch, embedder_cls=_BoomEmbedderFactory
     )
+    sleeps: list[float] = []
+    monkeypatch.setattr(mcp_server.time, "sleep", lambda s: sleeps.append(s))
     with caplog.at_level("WARNING", logger="brain.mcp"):
         mcp_server.main()
-    # Server still started despite the warmup blowing up.
+    # Server still started despite both warmup attempts blowing up.
     assert captured["transport"] == "stdio"
     state = captured["state"]
     assert isinstance(state, mcp_server._State)
     embedder = state.embedder
     assert isinstance(embedder, _BoomEmbedderFactory)
-    assert embedder.embed_calls == 1
+    # Initial attempt + one bounded retry, both raised.
+    assert embedder.embed_calls == 2
+    assert sleeps == [mcp_server._WARMUP_RETRY_DELAY_SECONDS]
     # And we logged a warning naming the exception class so an operator can
     # see why warmup didn't take.
     assert any(
         "warmup embed failed" in rec.message and "OllamaEmbedError" in rec.message
         for rec in caplog.records
     )
+
+
+def test_main_warmup_retries_after_cold_start(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """When the first warmup embed fails (cold-boot race: Ollama daemon up but
+    model still loading) and the retry succeeds, main() must log
+    ``warmup embed completed (after retry)`` and emit no warning."""
+    captured = _install_main_doubles(
+        monkeypatch, embedder_cls=_ColdStartEmbedder
+    )
+    sleeps: list[float] = []
+    monkeypatch.setattr(mcp_server.time, "sleep", lambda s: sleeps.append(s))
+    with caplog.at_level("INFO", logger="brain.mcp"):
+        mcp_server.main()
+    assert captured["transport"] == "stdio"
+    state = captured["state"]
+    assert isinstance(state, mcp_server._State)
+    embedder = state.embedder
+    assert isinstance(embedder, _ColdStartEmbedder)
+    # Initial failure + one successful retry.
+    assert embedder.embed_calls == 2
+    # We slept exactly once between attempts.
+    assert sleeps == [mcp_server._WARMUP_RETRY_DELAY_SECONDS]
+    # Retry succeeded — no "failed (continuing without)" warning.
+    assert not any(
+        "warmup embed failed" in rec.message for rec in caplog.records
+    )
+    # Retry-success path emits the distinct INFO line so cold-boot races stay
+    # observable in operator logs.
+    assert any(
+        "warmup embed completed (after retry)" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_main_warmup_does_not_swallow_non_ollama_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-``OllamaEmbedError`` exceptions during warmup must propagate so
+    import / programming errors surface to the operator instead of being
+    silently retried-and-warned-about. Locks in the narrow exception scope."""
+    _install_main_doubles(
+        monkeypatch, embedder_cls=_NonOllamaErrorEmbedder
+    )
+    monkeypatch.setattr(mcp_server.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError, match="simulated non-Ollama failure"):
+        mcp_server.main()

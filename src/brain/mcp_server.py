@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import sys
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import date as date_cls
@@ -74,6 +75,13 @@ _MAX_NOTE_BODY_BYTES = 256 * 1024
 # CLI, sync, and MCP is consistent.
 _ID_PREFIX_MIN_LEN = 6
 _HEX_ONLY_RE = re.compile(r"^[0-9a-f-]+$")
+
+# Pause between the initial warmup embed and its single bounded retry. Covers
+# the cold-boot race where launchd has started the Ollama daemon but the
+# embedding model hasn't finished loading yet (observed 2026-05-13 41 s after
+# system boot). Kept small so a sustained Ollama outage still falls through to
+# the warning path quickly.
+_WARMUP_RETRY_DELAY_SECONDS = 1.0
 
 
 @dataclass
@@ -1277,17 +1285,24 @@ def main() -> None:
     # ``Config.enrich_timeout_seconds`` from env.
     enricher = make_enricher(cfg)
     _state = _State(cfg=cfg, embedder=embedder, enricher=enricher)
-    # One-shot warmup embed to cut cold-start latency on the first real
-    # ``brain_search``. Failure must NOT abort startup — search will retry on
-    # demand. Catch ``OllamaEmbedError`` so import / programming errors still
-    # surface.
+    # Warmup embed to cut cold-start latency on the first real ``brain_search``.
+    # A single bounded retry covers cold-boot races where Ollama is up but the
+    # embedding model is still loading. Persistent failure must NOT abort
+    # startup — real tool calls surface the error to the MCP caller via
+    # ``_wrap_embed_error``. Only ``OllamaEmbedError`` is caught so import /
+    # programming errors still surface here.
     try:
         _state.embedder.embed(["hello"], input_type="document")
         logger.info("warmup embed completed")
-    except OllamaEmbedError as e:
-        logger.warning(
-            "warmup embed failed (continuing without): %s", type(e).__name__
-        )
+    except OllamaEmbedError:
+        time.sleep(_WARMUP_RETRY_DELAY_SECONDS)
+        try:
+            _state.embedder.embed(["hello"], input_type="document")
+            logger.info("warmup embed completed (after retry)")
+        except OllamaEmbedError as e:
+            logger.warning(
+                "warmup embed failed (continuing without): %s", type(e).__name__
+            )
     logger.info("brain-mcp starting (stdio transport)")
     mcp_app.run(transport="stdio")
 
