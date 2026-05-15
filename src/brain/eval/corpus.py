@@ -7,9 +7,13 @@ import yaml
 
 from .errors import EvalCorpusError
 
-# Path to the bundled 20-query bootstrap corpus, resolved relative to the
-# package install root.  From corpus.py: eval/ → brain/ → src/ → repo root,
-# then descend into tests/eval/.
+# Path to the local golden-corpus YAML, resolved relative to the package
+# install root.  From corpus.py: eval/ → brain/ → src/ → repo root, then
+# descend into tests/eval/.  The file is gitignored — each developer
+# authors their own set tailored to their brain's seeded documents (real
+# corpus = real doc IDs).  ``load_corpus`` raises ``EvalCorpusError`` when
+# the default path doesn't exist; callers that want to operate without a
+# local corpus should pass ``--corpus`` explicitly.
 _DEFAULT_CORPUS_PATH: Path = (
     Path(__file__).resolve().parent.parent.parent.parent
     / "tests"

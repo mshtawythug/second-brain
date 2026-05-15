@@ -1646,6 +1646,9 @@ def eval_cmd(
 
     By default runs all queries in ``tests/eval/golden_corpus.yaml`` and prints
     a Rich table of nDCG@5 / MRR / Recall@20 per query plus aggregate means.
+    That file is gitignored and must be authored locally (see
+    ``tests/eval/.gitignore``); pass ``--corpus PATH`` to point at a different
+    YAML, or expect ``EvalCorpusError`` when the default path is absent.
 
     Use ``--record-baseline NAME`` to persist the result for future comparison,
     and ``--baseline NAME --diff`` to compare the current run against a saved
