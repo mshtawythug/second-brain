@@ -4,12 +4,24 @@
 #
 # Caddy is intentionally left running: it keeps serving the last-good build
 # from <vault>/.quartz/current so brain.test stays healthy across restarts.
+#
+# Env overrides (default to the production values when unset — production
+# behavior is unchanged unless you explicitly set these; mirrors the
+# BRAIN_LAUNCHCTL / BRAIN_LAUNCHD_DIR pattern below). They exist so the test
+# suite can run this shim HERMETICALLY — pointing the pid files at a tmp dir
+# and the orphan-killer at a stub — so the real `brain-up` watchers on a dev
+# machine are never touched:
+#   BRAIN_WATCH_PID  (default: /tmp/brain-watch.pid)
+#   BRAIN_BUILD_PID  (default: /tmp/brain-build.pid)
+#   BRAIN_WIKI_PID   (default: /tmp/brain-wiki.pid)
+#   BRAIN_PKILL      (default: pkill) — binary used for the orphan sweep
 
 set -euo pipefail
 
-WATCH_PID='/tmp/brain-watch.pid'   # `brain vault sync --watch`
-BUILD_PID='/tmp/brain-build.pid'   # `python -m brain.wiki.build_watcher`
-WIKI_PID='/tmp/brain-wiki.pid'     # legacy: pre-blue/green `npx quartz --serve`
+WATCH_PID="${BRAIN_WATCH_PID:-/tmp/brain-watch.pid}"   # `brain vault sync --watch`
+BUILD_PID="${BRAIN_BUILD_PID:-/tmp/brain-build.pid}"   # `python -m brain.wiki.build_watcher`
+WIKI_PID="${BRAIN_WIKI_PID:-/tmp/brain-wiki.pid}"      # legacy: pre-blue/green `npx quartz --serve`
+PKILL="${BRAIN_PKILL:-pkill}"                          # orphan-sweep binary (tests stub it)
 
 LAUNCHD_DIR="${BRAIN_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}"
 LAUNCHCTL="${BRAIN_LAUNCHCTL:-launchctl}"
@@ -60,8 +72,8 @@ stop_one "$BUILD_PID" 'build watcher'
 stop_one "$WIKI_PID"  'wiki (legacy quartz --serve)'
 
 # Belt + suspenders: any orphaned processes from prior crashed runs.
-pkill -f 'brain.wiki.build_watcher' 2>/dev/null || true
-pkill -f 'brain vault sync --watch' 2>/dev/null || true
+"$PKILL" -f 'brain.wiki.build_watcher' 2>/dev/null || true
+"$PKILL" -f 'brain vault sync --watch' 2>/dev/null || true
 
 echo '🧠 brain is down'
 echo '   (caddy left running — brain.test continues to serve last good build)'

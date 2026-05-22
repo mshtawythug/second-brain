@@ -28,8 +28,8 @@ import contextlib
 import os
 import shutil
 import subprocess
-from collections.abc import Iterator
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -37,9 +37,56 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 BIN = REPO_ROOT / "bin"
 
 
+class HermeticPids(NamedTuple):
+    """Tmp pid paths + shim env overrides for a hermetic real-process bin test."""
+
+    paths: dict[str, Path]  # logical key ("watch_pid"/…) -> tmp pid file path
+    env: dict[str, str]  # BRAIN_*_PID overrides wiring the shim to ``paths``
+
+
 # ---------------------------------------------------------------------------
 # Fixtures.
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def hermetic_pids(tmp_path: Path) -> HermeticPids:
+    """Tmp pid paths + shim env overrides for hermetic real-process bin tests.
+
+    The ``brain-down`` / ``brain-status`` shims default their pid files to the
+    GLOBAL ``/tmp/brain-*.pid`` locations, and (for ``brain-down``) sweep
+    orphans with ``pkill -f 'brain vault sync --watch'`` /
+    ``pkill -f 'brain.wiki.build_watcher'``. On a developer machine running a
+    live ``brain-up`` install, the previous tests collided with those real
+    files and the ``pkill`` killed the real watchers — an intermittent,
+    destructive flake.
+
+    The shims now honor ``BRAIN_WATCH_PID`` / ``BRAIN_BUILD_PID`` /
+    ``BRAIN_WIKI_PID`` (and ``BRAIN_PKILL`` for the orphan sweep), defaulting to
+    the production values when unset. This fixture returns the per-key tmp pid
+    paths plus the ``env`` dict wiring those overrides, so the real-process
+    tests run fully sandboxed — their pid files live under ``tmp_path`` and (the
+    caller adds ``BRAIN_PKILL``) the orphan sweep is redirected — so a live
+    install is never touched and the tests run (not skip) on both CI and a dev
+    box.
+    """
+    pid_dir = tmp_path / "pids"
+    pid_dir.mkdir()
+    paths = {
+        "watch_pid": pid_dir / "brain-watch.pid",
+        "build_pid": pid_dir / "brain-build.pid",
+        "wiki_pid": pid_dir / "brain-wiki.pid",
+        "watch_log": pid_dir / "brain-watch.log",
+        "build_log": pid_dir / "brain-build.log",
+    }
+    env = {
+        "BRAIN_WATCH_PID": str(paths["watch_pid"]),
+        "BRAIN_BUILD_PID": str(paths["build_pid"]),
+        "BRAIN_WIKI_PID": str(paths["wiki_pid"]),
+        "BRAIN_WATCH_LOG": str(paths["watch_log"]),
+        "BRAIN_BUILD_LOG": str(paths["build_log"]),
+    }
+    return HermeticPids(paths=paths, env=env)
 
 
 @pytest.fixture
@@ -66,44 +113,6 @@ def vault_dir(tmp_path: Path) -> Path:
     v.mkdir()
     (v / ".quartz").mkdir()
     return v
-
-
-@pytest.fixture
-def isolated_pid_files(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Path]]:
-    """Redirect ``/tmp/brain-*.pid`` and ``/tmp/brain-*.log`` into a tmp dir.
-
-    The bin scripts hard-code ``/tmp/brain-*.{pid,log}`` paths, which
-    would clash with a real local install if a developer happens to
-    have ``brain-up`` running while the suite executes. We can't change
-    the scripts to read these from env (they'd be unsafe in production
-    — multiple installs would race on the same default), so instead we
-    use ``mocker``-style cleanup: snapshot any pre-existing files,
-    remove them for the test, restore them after. Returns a dict so
-    tests can read paths cleanly.
-    """
-    paths = {
-        "watch_pid": Path("/tmp/brain-watch.pid"),
-        "watch_log": Path("/tmp/brain-watch.log"),
-        "build_pid": Path("/tmp/brain-build.pid"),
-        "build_log": Path("/tmp/brain-build.log"),
-        "wiki_pid": Path("/tmp/brain-wiki.pid"),
-        "wiki_log": Path("/tmp/brain-wiki.log"),
-    }
-    saved: dict[Path, bytes] = {}
-    for p in paths.values():
-        if p.exists():
-            saved[p] = p.read_bytes()
-            p.unlink()
-    try:
-        yield paths
-    finally:
-        # Best-effort restore: anything we created during the test goes
-        # away; anything we displaced from before is put back.
-        for p in paths.values():
-            if p.exists():
-                p.unlink()
-        for p, data in saved.items():
-            p.write_bytes(data)
 
 
 def _write_stub(
@@ -201,7 +210,7 @@ def _read_log(path: Path) -> list[str]:
 def test_brain_up_skips_cold_start_when_current_healthy(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — used for cleanup side effect
+    hermetic_pids: HermeticPids,
 ) -> None:
     """Healthy ``current/`` symlink → no cold-start ``build_swap`` call.
 
@@ -218,7 +227,7 @@ def test_brain_up_skips_cold_start_when_current_healthy(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={"BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
         [str(BIN / "brain-up")],
@@ -242,7 +251,7 @@ def test_brain_up_skips_cold_start_when_current_healthy(
 def test_brain_up_runs_cold_start_when_current_missing(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — used for cleanup side effect
+    hermetic_pids: HermeticPids,
 ) -> None:
     """Empty ``.quartz/`` → cold-start ``build_swap`` runs synchronously.
 
@@ -258,7 +267,7 @@ def test_brain_up_runs_cold_start_when_current_missing(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={"BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
         [str(BIN / "brain-up")],
@@ -282,7 +291,7 @@ def test_brain_up_runs_cold_start_when_current_missing(
 def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — used for cleanup side effect
+    hermetic_pids: HermeticPids,
     tmp_path: Path,
 ) -> None:
     """brain-up calls install-launchd → launchctl bootstrap fires for both labels.
@@ -316,6 +325,7 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
         # BRAIN_INSTALL_LAUNCHD points at the venv-installed Python entry
         # point so brain-up.sh resolves it without needing the venv on PATH.
         extras={
+            **hermetic_pids.env,
             "BRAIN_NO_OVERLAY": "1",
             "BRAIN_LAUNCHD_DIR": str(launchd_dir),
             "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
@@ -357,7 +367,7 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
 def test_brain_up_aborts_when_cold_start_fails(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — used for cleanup side effect
+    hermetic_pids: HermeticPids,
 ) -> None:
     """A failing cold-start build aborts brain-up with a non-zero exit code.
 
@@ -379,7 +389,7 @@ def test_brain_up_aborts_when_cold_start_fails(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={"BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
         [str(BIN / "brain-up")],
@@ -401,34 +411,46 @@ def test_brain_up_aborts_when_cold_start_fails(
 
 def test_brain_down_kills_all_three_pids(
     stub_dir: Path,
-    isolated_pid_files: dict[str, Path],
+    hermetic_pids: HermeticPids,
     tmp_path: Path,
 ) -> None:
     """Three live ``sleep 60`` processes are killed and pid files removed.
 
-    Spawns three real ``sleep`` processes, writes their pids into the
-    watch / build / wiki pid files (``wiki`` is the legacy file the
-    plan asks us to clean up if it still exists), runs ``brain-down``,
-    and asserts:
+    Runs HERMETICALLY: the shim's pid files are redirected to a tmp dir and its
+    orphan-sweep ``pkill`` is redirected to a logging stub (via the
+    ``BRAIN_WATCH_PID`` / ``BRAIN_BUILD_PID`` / ``BRAIN_WIKI_PID`` /
+    ``BRAIN_PKILL`` overrides), so the test can NEVER touch a real ``brain-up``
+    install's watchers or the global ``/tmp/brain-*.pid`` files. It therefore
+    RUNS (never skips) on CI and on a dev box with live watchers alike.
+
+    Spawns three real ``sleep`` processes, writes their pids into the tmp
+    watch / build / wiki pid files, runs ``brain-down``, and asserts:
 
     1. All three processes are no longer running (``kill -0`` fails).
-    2. All three pid files are gone.
+    2. All three (tmp) pid files are gone.
     3. The ``caddy left running`` reassurance line is in stdout.
+    4. (Isolation regression) the orphan sweep went through the STUB ``pkill``
+       with the watcher patterns — proving the real ``pkill`` binary was never
+       invoked, so a live install's `brain vault sync --watch` /
+       `brain.wiki.build_watcher` are untouched — and every pid path the shim
+       used was under ``tmp_path``, never ``/tmp``.
 
-    Stubs `launchctl` (and points BRAIN_LAUNCHD_DIR at a tmp dir) so the
-    test doesn't accidentally bootout real LaunchAgents from the
-    developer's launchd state — the bootout-when-loaded path has its own
-    dedicated test, this one is just the kill-loop.
+    Stubs ``launchctl`` (and points BRAIN_LAUNCHD_DIR at a tmp dir) so the test
+    doesn't bootout real LaunchAgents either.
     """
     _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
+    pkill_stub = _write_stub(stub_dir, "pkill")
+    pkill_log = stub_dir / "pkill.calls"
     procs: list[subprocess.Popen[bytes]] = []
     try:
         for key in ("watch_pid", "build_pid", "wiki_pid"):
             p = subprocess.Popen(["/bin/sleep", "60"])  # noqa: S603,S607 — fixed args
             procs.append(p)
-            isolated_pid_files[key].write_text(f"{p.pid}\n")
+            hermetic_pids.paths[key].write_text(f"{p.pid}\n")
 
         env = os.environ.copy()
+        env.update(hermetic_pids.env)
+        env["BRAIN_PKILL"] = str(pkill_stub)
         env["BRAIN_LAUNCHD_DIR"] = str(tmp_path / "LaunchAgents")
         env["BRAIN_LAUNCHCTL"] = str(stub_dir / "launchctl")
         result = subprocess.run(  # noqa: S603 — list-form, no shell
@@ -457,9 +479,22 @@ def test_brain_down_kills_all_three_pids(
             )
 
         for key in ("watch_pid", "build_pid", "wiki_pid"):
-            assert not isolated_pid_files[key].exists(), key
+            assert not hermetic_pids.paths[key].exists(), key
 
         assert "caddy left running" in result.stdout, result.stdout
+
+        # --- Isolation regression -------------------------------------------
+        # The orphan sweep went through the STUB pkill (logged), so the REAL
+        # pkill — the only thing that could match a live install's watchers —
+        # was never invoked. Both shim sweep patterns must appear in the stub's
+        # call log, proving they were swallowed harmlessly, not run for real.
+        sweep_calls = "\n".join(_read_log(pkill_log))
+        assert "brain.wiki.build_watcher" in sweep_calls, sweep_calls
+        assert "brain vault sync --watch" in sweep_calls, sweep_calls
+        # Every pid path the shim touched was under tmp_path — never /tmp — so a
+        # live install's global /tmp/brain-*.pid files can't be contended.
+        for key in ("watch_pid", "build_pid", "wiki_pid"):
+            assert tmp_path in hermetic_pids.paths[key].parents, key
     finally:
         # Belt and suspenders: kill anything that escaped.
         for p in procs:
@@ -476,23 +511,30 @@ def test_brain_down_kills_all_three_pids(
 def test_brain_status_three_rows(
     stub_dir: Path,  # noqa: ARG001 — fixture forces test isolation
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],
+    hermetic_pids: HermeticPids,
+    tmp_path: Path,
 ) -> None:
     """Live ``watch`` + ``build`` pids + a stale ``wiki`` pid render three rows.
 
-    Seeds a healthy ``current/`` symlink so the build-id readback line
-    fires too, and asserts that all three labels (``watcher``, ``build``,
-    ``wiki``) appear in stdout.
+    Runs HERMETICALLY (BRAIN_WATCH_PID/BRAIN_BUILD_PID/BRAIN_WIKI_PID point at a
+    tmp pid dir), so the test reads its own tmp pid files instead of the global
+    ``/tmp/brain-*.pid`` a live ``brain-up`` install owns — it RUNS (never
+    skips) on CI and on a dev box alike. Seeds a healthy ``current/`` symlink so
+    the build-id readback line fires too, and asserts that all three labels
+    (``watcher``, ``build``, ``wiki``) appear in stdout.
     """
     _seed_healthy_current(vault_dir)
     procs: list[subprocess.Popen[bytes]] = []
+    pid_by_key: dict[str, int] = {}
     try:
         for key in ("watch_pid", "build_pid", "wiki_pid"):
             p = subprocess.Popen(["/bin/sleep", "60"])  # noqa: S603,S607 — fixed args
             procs.append(p)
-            isolated_pid_files[key].write_text(f"{p.pid}\n")
+            pid_by_key[key] = p.pid
+            hermetic_pids.paths[key].write_text(f"{p.pid}\n")
 
         env = os.environ.copy()
+        env.update(hermetic_pids.env)
         env["BRAIN_VAULT_PATH"] = str(vault_dir)
         result = subprocess.run(  # noqa: S603 — list-form, no shell
             [str(BIN / "brain-status")],
@@ -508,6 +550,13 @@ def test_brain_status_three_rows(
         assert "wiki:" in result.stdout, result.stdout
         # Build-id line surfaces from the seeded symlink.
         assert "build-id" in result.stdout, result.stdout
+        # Finding #2: status must report the ACTUAL spawned PIDs — proving it
+        # read OUR tmp override paths (BRAIN_*_PID), not the global /tmp files.
+        for key, pid in pid_by_key.items():
+            assert str(pid) in result.stdout, (key, pid, result.stdout)
+        # Isolation regression: status read the tmp pid files, never /tmp.
+        for key in ("watch_pid", "build_pid", "wiki_pid"):
+            assert tmp_path in hermetic_pids.paths[key].parents, key
     finally:
         for p in procs:
             if p.poll() is None:
@@ -523,7 +572,6 @@ def test_brain_status_three_rows(
 def test_brain_rebuild_one_shot(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — used for cleanup side effect
 ) -> None:
     """One ``build_swap`` call, no ``brain-down``/``brain-up`` bounce.
 
@@ -563,7 +611,6 @@ def test_brain_rebuild_one_shot(
 def test_brain_rebuild_clean_cache_flag_wipes_cache_dir(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — used for cleanup side effect
 ) -> None:
     """``--clean-cache`` removes the parser cache dir but leaves ``.quartz/`` intact.
 
@@ -613,7 +660,6 @@ def test_brain_rebuild_clean_cache_flag_wipes_cache_dir(
 def test_brain_rebuild_default_preserves_cache_dir(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — used for cleanup side effect
 ) -> None:
     """Without ``--clean-cache`` the parser cache dir is left untouched.
 
@@ -657,7 +703,6 @@ def test_brain_rebuild_default_preserves_cache_dir(
 def test_brain_rebuild_no_build_skips_build_swap(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — used for cleanup side effect
 ) -> None:
     """``--no-build`` skips the one-shot build but still runs the export."""
     _write_stub(stub_dir, "brain")
@@ -744,7 +789,8 @@ def test_bin_script_is_executable_and_parses(name: str) -> None:
 def test_brain_watcher_fg_writes_pid_and_execs_brain_sync(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],
+    hermetic_pids: HermeticPids,
+    tmp_path: Path,
 ) -> None:
     """Wrapper writes /tmp/brain-watch.pid then execs `brain vault sync --watch`.
 
@@ -762,7 +808,7 @@ def test_brain_watcher_fg_writes_pid_and_execs_brain_sync(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={"BRAIN_SKIP_VENV_AUTOLOAD": "1"},
+        extras={**hermetic_pids.env, "BRAIN_SKIP_VENV_AUTOLOAD": "1"},
     )
 
     result = subprocess.run(  # noqa: S603 — list-form, no shell
@@ -775,9 +821,11 @@ def test_brain_watcher_fg_writes_pid_and_execs_brain_sync(
     )
     assert result.returncode == 0, result.stderr
 
-    assert isolated_pid_files["watch_pid"].exists(), "wrapper must write the pid file"
-    pid_content = isolated_pid_files["watch_pid"].read_text().strip()
+    assert hermetic_pids.paths["watch_pid"].exists(), "wrapper must write the pid file"
+    pid_content = hermetic_pids.paths["watch_pid"].read_text().strip()
     assert pid_content.isdigit(), f"pid file should contain an integer, got {pid_content!r}"
+    # Isolation regression: the wrapper wrote to the tmp pid path, never /tmp.
+    assert tmp_path in hermetic_pids.paths["watch_pid"].parents
 
     brain_calls = _read_log(stub_dir / "brain.calls")
     assert any("vault sync --watch" in c for c in brain_calls), brain_calls
@@ -787,7 +835,7 @@ def test_brain_watcher_fg_writes_pid_and_execs_brain_sync(
 def test_brain_watcher_fg_aborts_when_brain_cli_missing(
     stub_dir: Path,  # noqa: ARG001 — fixture forces test isolation
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],
+    hermetic_pids: HermeticPids,
 ) -> None:
     """No `brain` on PATH → wrapper exits non-zero and never writes pid file.
 
@@ -807,6 +855,9 @@ def test_brain_watcher_fg_aborts_when_brain_cli_missing(
         "HOME": str(vault_dir.parent),
         "BRAIN_VAULT_PATH": str(vault_dir),
         "BRAIN_SKIP_VENV_AUTOLOAD": "1",
+        # Hermetic: point the pid path at a tmp file so the assertion below
+        # checks the override (never the global /tmp/brain-watch.pid).
+        **hermetic_pids.env,
     }
 
     result = subprocess.run(  # noqa: S603 — list-form, no shell
@@ -819,7 +870,7 @@ def test_brain_watcher_fg_aborts_when_brain_cli_missing(
     )
     assert result.returncode != 0
     assert "brain CLI not on PATH" in result.stderr, result.stderr
-    assert not isolated_pid_files["watch_pid"].exists(), (
+    assert not hermetic_pids.paths["watch_pid"].exists(), (
         "wrapper must NOT write a pid file when it can't actually run the watcher"
     )
 
@@ -827,7 +878,8 @@ def test_brain_watcher_fg_aborts_when_brain_cli_missing(
 def test_brain_build_fg_writes_pid_and_execs_build_watcher(
     stub_dir: Path,
     vault_dir: Path,
-    isolated_pid_files: dict[str, Path],
+    hermetic_pids: HermeticPids,
+    tmp_path: Path,
 ) -> None:
     """Wrapper writes /tmp/brain-build.pid then execs `python -m brain.wiki.build_watcher`.
 
@@ -839,7 +891,7 @@ def test_brain_build_fg_writes_pid_and_execs_build_watcher(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={"BRAIN_WIKI_KEEP_BUILDS": "5"},
+        extras={**hermetic_pids.env, "BRAIN_WIKI_KEEP_BUILDS": "5"},
     )
 
     result = subprocess.run(  # noqa: S603 — list-form, no shell
@@ -852,9 +904,11 @@ def test_brain_build_fg_writes_pid_and_execs_build_watcher(
     )
     assert result.returncode == 0, result.stderr
 
-    assert isolated_pid_files["build_pid"].exists(), "wrapper must write the pid file"
-    pid_content = isolated_pid_files["build_pid"].read_text().strip()
+    assert hermetic_pids.paths["build_pid"].exists(), "wrapper must write the pid file"
+    pid_content = hermetic_pids.paths["build_pid"].read_text().strip()
     assert pid_content.isdigit(), pid_content
+    # Isolation regression: the wrapper wrote to the tmp pid path, never /tmp.
+    assert tmp_path in hermetic_pids.paths["build_pid"].parents
 
     python_calls = _read_log(stub_dir / "python.calls")
     build_lines = [c for c in python_calls if "brain.wiki.build_watcher" in c]
@@ -1013,7 +1067,7 @@ def test_uninstall_launchd_boots_out_and_removes_plists(
 
 def test_brain_down_boots_out_launchd_when_loaded(
     stub_dir: Path,
-    isolated_pid_files: dict[str, Path],
+    hermetic_pids: HermeticPids,
     tmp_path: Path,
 ) -> None:
     """brain-down bootouts both labels when launchctl reports them loaded.
@@ -1025,9 +1079,13 @@ def test_brain_down_boots_out_launchd_when_loaded(
     launchd_dir = tmp_path / "LaunchAgents"
     launchd_dir.mkdir()
     _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=True))
+    pkill_stub = _write_stub(stub_dir, "pkill")
+    pkill_log = stub_dir / "pkill.calls"
 
     env = os.environ.copy()
     env["PATH"] = f"{stub_dir}:/usr/bin:/bin"
+    env.update(hermetic_pids.env)  # hermetic: pid paths under tmp, never /tmp
+    env["BRAIN_PKILL"] = str(pkill_stub)  # orphan sweep hits the stub, not real pkill
     env["BRAIN_LAUNCHD_DIR"] = str(launchd_dir)
     env["BRAIN_LAUNCHCTL"] = str(stub_dir / "launchctl")
 
@@ -1047,10 +1105,16 @@ def test_brain_down_boots_out_launchd_when_loaded(
     assert any("com.brain.build" in c for c in bootout_calls), launchctl_calls
     assert "unloaded launchd" in result.stdout, result.stdout
 
+    # Isolation regression: the orphan sweep ran through the STUB pkill, so the
+    # real pkill never executed and a live install's watchers are untouched.
+    sweep_calls = "\n".join(_read_log(pkill_log))
+    assert "brain.wiki.build_watcher" in sweep_calls, sweep_calls
+    assert "brain vault sync --watch" in sweep_calls, sweep_calls
+
 
 def test_brain_down_skips_bootout_when_not_loaded(
     stub_dir: Path,
-    isolated_pid_files: dict[str, Path],  # noqa: ARG001 — fixture isolation
+    hermetic_pids: HermeticPids,
     tmp_path: Path,
 ) -> None:
     """brain-down does NOT bootout when launchctl `print` reports not loaded.
@@ -1063,8 +1127,13 @@ def test_brain_down_skips_bootout_when_not_loaded(
     launchd_dir.mkdir()
     _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
 
+    pkill_stub = _write_stub(stub_dir, "pkill")
+    pkill_log = stub_dir / "pkill.calls"
+
     env = os.environ.copy()
     env["PATH"] = f"{stub_dir}:/usr/bin:/bin"
+    env.update(hermetic_pids.env)  # hermetic: pid paths under tmp, never /tmp
+    env["BRAIN_PKILL"] = str(pkill_stub)  # orphan sweep hits the stub, not real pkill
     env["BRAIN_LAUNCHD_DIR"] = str(launchd_dir)
     env["BRAIN_LAUNCHCTL"] = str(stub_dir / "launchctl")
 
@@ -1085,3 +1154,9 @@ def test_brain_down_skips_bootout_when_not_loaded(
         f"saw {bootout_calls}"
     )
     assert "unloaded launchd" not in result.stdout, result.stdout
+
+    # Isolation regression: the orphan sweep ran through the STUB pkill, so the
+    # real pkill never executed and a live install's watchers are untouched.
+    sweep_calls = "\n".join(_read_log(pkill_log))
+    assert "brain.wiki.build_watcher" in sweep_calls, sweep_calls
+    assert "brain vault sync --watch" in sweep_calls, sweep_calls

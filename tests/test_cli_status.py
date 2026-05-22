@@ -10,7 +10,7 @@ from brain.ingest import ExtractedDoc, ingest_document
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql://brain:brain@localhost:5433/second_brain_test",
+    "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
 
 

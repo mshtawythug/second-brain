@@ -5,9 +5,23 @@ from pathlib import Path
 
 import psycopg
 from pgvector.psycopg import register_vector
+from psycopg import sql
 
-from .errors import BrainError
+from .embedding_targets import (
+    embedding_index_name,
+    validate_embedding_target,
+)
+from .errors import AgeBootstrapError, BrainError
 from .ingest import Embedder
+
+# Canonical Apache AGE graph name created by the ``brain init`` bootstrap and
+# traversed by the graph backend (wave G0). Defined here — not in
+# :mod:`brain.config` — so this low-level layer stays dependency-free; the
+# configurable ``BRAIN_GRAPH_NAME`` override (spec §10) is resolved by higher
+# layers and passed in explicitly as ``graph_name`` when it lands (G0-4+).
+# ``tests/conftest.py``'s ``_reset_age_graph`` drops exactly this graph between
+# tests, so the bootstrap and the reset must agree on the name.
+DEFAULT_GRAPH_NAME = "brain_graph"
 
 
 def connect_raw(database_url: str) -> psycopg.Connection:
@@ -49,6 +63,83 @@ def connect(database_url: str) -> Iterator[psycopg.Connection]:
         yield conn
     finally:
         conn.close()
+
+
+def _age_extension_installed(conn: psycopg.Connection) -> bool:
+    """True iff the ``age`` extension object exists in this database.
+
+    ``LOAD 'age'`` only loads the shared library; the openCypher catalog
+    functions (``cypher``, ``create_graph``, ...) come from the extension
+    object created by ``CREATE EXTENSION age``. On a fresh database — before
+    :func:`bootstrap_age` runs during ``brain init`` — that object is absent, so
+    the session helpers must no-op rather than fail. Mirrors the
+    ``vector``-extension tolerance in :func:`connect_raw`.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM pg_extension WHERE extname = 'age'"
+    ).fetchone()
+    return row is not None
+
+
+def load_age(conn: psycopg.Connection) -> bool:
+    """Make Apache AGE callable on ``conn`` for the rest of the session.
+
+    Issues ``LOAD 'age'`` so the openCypher catalog functions become available.
+    AGE requires this once per backend session even when the extension object
+    already exists — verified against the live AGE image, where a fresh
+    connection that skips ``LOAD`` raises
+    ``unhandled cypher(cstring) function call``.
+
+    Deliberately does **not** mutate ``search_path``. The graph backend
+    fully-qualifies every call (``ag_catalog.cypher(...) AS (col
+    ag_catalog.agtype)``), which the live AGE image accepts without an
+    ``ag_catalog``-first search_path. Avoiding the global path keeps the
+    contract identical to ``tests/conftest.py``'s ``_reset_age_graph`` (which
+    explicitly refuses to leak ``ag_catalog`` onto the session) and guarantees
+    zero impact on the unqualified ``public`` queries every other command runs.
+
+    Tolerates the bootstrap window where the extension is not yet installed
+    (returns ``False`` without loading) so :func:`connect_age` is safe on a
+    fresh database. ``LOAD`` is a process-level effect that survives a
+    transaction rollback, so the implicit transaction opened under psycopg's
+    default ``autocommit=False`` is rolled back here — mirroring
+    :func:`connect_raw` — leaving the caller free to flip ``autocommit``
+    afterwards.
+
+    Returns ``True`` when AGE was loaded, ``False`` when the extension is
+    absent (nothing loaded). Raises :class:`AgeBootstrapError` (never a raw
+    ``psycopg.Error``) if the catalog probe or ``LOAD`` fails.
+    """
+    try:
+        installed = _age_extension_installed(conn)
+        if installed:
+            conn.execute("LOAD 'age'")
+    except psycopg.Error as exc:
+        # Clear the aborted transaction first so the connection stays usable,
+        # then surface a typed bootstrap failure (no raw psycopg.Error escapes).
+        if not conn.autocommit:
+            conn.rollback()
+        raise AgeBootstrapError(f"failed to LOAD Apache AGE: {exc}") from exc
+    # Clear the implicit transaction opened by the SELECT (and LOAD) so the
+    # caller can still flip autocommit; harmless no-op under autocommit=True.
+    if not conn.autocommit:
+        conn.rollback()
+    return installed
+
+
+@contextmanager
+def connect_age(database_url: str) -> Iterator[psycopg.Connection]:
+    """Open a connection with pgvector registered **and** Apache AGE loaded.
+
+    Thin wrapper over :func:`connect` that additionally runs :func:`load_age`,
+    so graph callers don't repeat the per-session ``LOAD 'age'`` bootstrap. On a
+    fresh database where the ``age`` extension isn't installed yet,
+    :func:`load_age` no-ops; the connection is still usable for the relational
+    source-of-truth tables.
+    """
+    with connect(database_url) as conn:
+        load_age(conn)
+        yield conn
 
 
 def migrations_dir() -> Path:
@@ -159,8 +250,117 @@ def run_migrations(conn: psycopg.Connection) -> list[str]:
     return applied
 
 
-def _current_embedding_dim(conn: psycopg.Connection) -> int:
-    """Return the dim declared in ``chunks.embedding``'s ``vector(N)`` type.
+def age_extension_available(conn: psycopg.Connection) -> bool:
+    """True iff the ``age`` extension is *installable* in this database.
+
+    Probes ``pg_available_extensions`` — the catalog of extensions whose control
+    files are present on the server (i.e. extensions that *can* be
+    ``CREATE EXTENSION``-ed) — as opposed to ``pg_extension``, which lists the
+    extensions already *installed* (the latter is what
+    :func:`_age_extension_installed` checks). On a stock pgvector image (a prod
+    DB before the Apache AGE cut-over) ``age`` is absent here, so ``brain init``
+    can SKIP the AGE bootstrap instead of crashing on ``CREATE EXTENSION age``
+    after the relational migrations have already committed.
+
+    Rolls back the implicit read transaction opened by the SELECT under
+    psycopg's default ``autocommit=False`` so the caller's connection stays
+    clean (a harmless no-op when the caller is already autocommit, as ``init``
+    is) — on BOTH the success and failure paths: if the probe statement itself
+    raises on a non-autocommit connection it would otherwise leave the
+    transaction aborted, poisoning the caller's connection. Mirrors the
+    ``vector``-extension tolerance in :func:`connect_raw`.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM pg_available_extensions WHERE name = 'age'"
+        ).fetchone()
+    except psycopg.Error:
+        # Clear the aborted transaction the failed SELECT may have opened on a
+        # non-autocommit connection, then re-raise (the probe makes no claim it
+        # can swallow DB failures — the caller decides how to surface them).
+        if not conn.autocommit:
+            conn.rollback()
+        raise
+    if not conn.autocommit:
+        conn.rollback()
+    return row is not None
+
+
+def bootstrap_age(
+    conn: psycopg.Connection,
+    graph_name: str = DEFAULT_GRAPH_NAME,
+) -> bool:
+    """Idempotently provision the Apache AGE extension + the canonical graph.
+
+    Invoked by ``brain init`` after :func:`run_migrations`. All steps are
+    idempotent / guarded:
+
+    1. ``CREATE EXTENSION IF NOT EXISTS age CASCADE`` — installs the catalog
+       functions if absent; no-op otherwise.
+    2. ``LOAD 'age'`` — required before ``create_graph`` is callable.
+    3. Check ``ag_catalog.ag_graph`` for ``graph_name`` and call
+       ``ag_catalog.create_graph`` **only when absent**. ``create_graph`` raises
+       ``InvalidSchemaName`` ("graph already exists") on a second call, so the
+       existence guard is mandatory (verified against the live AGE image); it is
+       what makes re-running ``brain init`` a safe no-op.
+
+    AGE catalog DDL (``CREATE EXTENSION`` / ``create_graph``) does not behave
+    well inside an open transaction under psycopg v3, so this **requires
+    ``conn.autocommit`` to be True** and raises :class:`BrainError` otherwise.
+    ``brain init`` already sets autocommit before running migrations.
+
+    Every AGE catalog reference is fully-qualified (``ag_catalog.*``) and no
+    ``search_path`` is mutated, so the surrounding ``init`` work (migrations,
+    :func:`ensure_embedding_column`, search backfill) keeps targeting
+    ``public``.
+
+    Returns ``True`` when the graph was created by this call, ``False`` when it
+    already existed (re-run no-op). Raises :class:`AgeBootstrapError` (never a
+    raw ``psycopg.Error``) on any AGE catalog DDL failure; the autocommit
+    precondition is a separate, plain :class:`BrainError` (caller bug).
+
+    **Vertex/edge labels and property indexes are intentionally NOT created
+    here.** Per the phase split (plan §G0-4 / spec §12), the G0-4
+    ``GraphBackend`` owns entity/edge upserts and will create its labels (via
+    ``MERGE`` / ``create_vlabel``/``create_elabel``) and the matching per-label
+    property indexes (spec §5b: ``tenant_id``, ``entity_uuid``,
+    ``canonical_key``, ``CO_OCCURS.weight``) at that point — when G0-3's
+    tenantized relational schema and the ``tenant_id`` property contract are in
+    place. AGE property indexes target a specific label's backing table, which
+    cannot exist before its label is created, so pre-creating empty labels now
+    would duplicate G0-4's ownership and risk drift. Deferred deliberately.
+    """
+    if not conn.autocommit:
+        raise BrainError(
+            "bootstrap_age requires an autocommit connection — AGE catalog DDL "
+            "does not run reliably inside an open transaction under psycopg v3"
+        )
+    try:
+        conn.execute("CREATE EXTENSION IF NOT EXISTS age CASCADE")
+        conn.execute("LOAD 'age'")
+        existing = conn.execute(
+            "SELECT 1 FROM ag_catalog.ag_graph WHERE name = %s",
+            (graph_name,),
+        ).fetchone()
+        if existing is not None:
+            return False
+        conn.execute("SELECT ag_catalog.create_graph(%s)", (graph_name,))
+    except psycopg.Error as exc:
+        raise AgeBootstrapError(
+            f"failed to bootstrap Apache AGE graph {graph_name!r}: {exc}"
+        ) from exc
+    return True
+
+
+def _current_embedding_dim(
+    conn: psycopg.Connection, table: str, column: str
+) -> int:
+    """Return the dim declared in ``<table>.<column>``'s ``vector(N)`` type.
+
+    The table/column are bound as *values* through the ``::regclass`` cast and
+    an ``attname`` equality (not interpolated into SQL text), so this query is
+    safe for any name. Callers still validate against the allowlist before
+    issuing DDL.
 
     Raises :class:`BrainError` if the column doesn't exist or the type isn't
     a ``vector(N)``. Both are bugs (migrations should always shape the
@@ -168,42 +368,59 @@ def _current_embedding_dim(conn: psycopg.Connection) -> int:
     """
     row = conn.execute(
         "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
-        "WHERE attrelid = 'chunks'::regclass AND attname = 'embedding'"
+        "WHERE attrelid = %s::regclass AND attname = %s",
+        (table, column),
     ).fetchone()
     if row is None:
-        raise BrainError("chunks.embedding column not found — run brain init first")
+        raise BrainError(
+            f"{table}.{column} column not found — run brain init first"
+        )
     formatted = str(row[0])
     # format_type returns e.g. ``vector(1024)``; strip + parse the int.
     if not (formatted.startswith("vector(") and formatted.endswith(")")):
         raise BrainError(
-            f"unexpected chunks.embedding column type: {formatted!r}"
+            f"unexpected {table}.{column} column type: {formatted!r}"
         )
     return int(formatted[len("vector(") : -1])
 
 
-def ensure_embedding_column(conn: psycopg.Connection, embedder: Embedder) -> None:
-    """Reconcile ``chunks.embedding`` column dim with the active embedder.
+def ensure_embedding_column(
+    conn: psycopg.Connection,
+    embedder: Embedder,
+    table: str = "chunks",
+    column: str = "embedding",
+) -> None:
+    """Reconcile a pgvector embedding column's dim with the active embedder.
 
-    Idempotent. The contract:
+    Generalized over ``(table, column)`` (default ``chunks.embedding``) so the
+    GraphRAG tables can reuse it; ``(table, column)`` is checked against the
+    hard-coded allowlist in :mod:`brain.embedding_targets` and every identifier
+    is quoted via :class:`psycopg.sql.Identifier` — never string-formatted into
+    SQL.
+
+    Idempotent. The contract (applies to whichever ``(table, column)`` is
+    passed; the re-added column is **nullable**, matching the migration shape —
+    NOT NULL is a separate finalize concern handled by
+    :func:`brain.queries.finalize_embedding_index`):
 
     - Column dim already matches ``embedder.dim`` → no-op.
-    - Mismatch with zero non-NULL embeddings in ``chunks`` → drop + re-add
-      the column at ``embedder.dim`` (and drop any leftover HNSW index,
-      which would point at a column that's about to disappear). Safe —
-      there are no embeddings to lose. Document/chunk rows are preserved;
-      only the (NULL) embedding column is rebuilt at the new dim.
+    - Mismatch with zero non-NULL embeddings → drop + re-add the column at
+      ``embedder.dim`` (and drop any leftover HNSW index, which would point at
+      a column that's about to disappear). Safe — there are no embeddings to
+      lose. Existing rows are preserved; only the (NULL) embedding column is
+      rebuilt at the new dim.
     - Mismatch with one or more non-NULL embeddings → raise
       :class:`BrainError` instructing the user to do a destructive reset.
       Switching backends with populated embeddings is intentionally not
-      silent; those embeddings would all be invalidated and re-embedding
-      from ``chunks.content`` (via ``brain reembed --all``) is the only
-      correct recovery.
+      silent; those embeddings would all be invalidated and re-embedding is
+      the only correct recovery.
 
-    Called by ``brain init`` after :func:`run_migrations` so the column
-    always matches the configured backend before any embeddings are
-    written.
+    Called by ``brain init`` after :func:`run_migrations` so ``chunks.embedding``
+    always matches the configured backend before any embeddings are written;
+    the GraphRAG reconcile path uses it for ``graph_entities.embedding``.
     """
-    current_dim = _current_embedding_dim(conn)
+    validate_embedding_target(table, column)
+    current_dim = _current_embedding_dim(conn, table, column)
     if current_dim == embedder.dim:
         return
 
@@ -211,23 +428,39 @@ def ensure_embedding_column(conn: psycopg.Connection, embedder: Embedder) -> Non
     # (e.g. immediately after migration 002 drops + re-adds the column, or
     # after `brain reembed` ingest of new docs that haven't been embedded)
     # contribute no data we'd lose by resizing.
-    row = conn.execute(
-        "SELECT count(*) FROM chunks WHERE embedding IS NOT NULL"
-    ).fetchone()
+    populated_sql = sql.SQL(
+        "SELECT count(*) FROM {table} WHERE {column} IS NOT NULL"
+    ).format(table=sql.Identifier(table), column=sql.Identifier(column))
+    row = conn.execute(populated_sql).fetchone()
     assert row is not None  # count(*) always yields one row
     populated = int(row[0])
     if populated > 0:
         raise BrainError(
-            f"Embedding column is vector({current_dim}) but BRAIN_EMBEDDER "
-            f"expects vector({embedder.dim}). Switching backends with "
-            f"existing embeddings requires a destructive reset. Run: "
+            f"Embedding column {table}.{column} is vector({current_dim}) but "
+            f"BRAIN_EMBEDDER expects vector({embedder.dim}). Switching backends "
+            f"with existing embeddings requires a destructive reset. Run: "
             f"docker compose down && rm -rf data/postgres && "
             f"docker compose up -d && brain init && brain reembed"
         )
 
+    index_name = embedding_index_name(table, column)
     with conn.transaction():
-        conn.execute("DROP INDEX IF EXISTS chunks_embedding_idx")
-        conn.execute("ALTER TABLE chunks DROP COLUMN embedding")
         conn.execute(
-            f"ALTER TABLE chunks ADD COLUMN embedding vector({embedder.dim})"
+            sql.SQL("DROP INDEX IF EXISTS {index}").format(
+                index=sql.Identifier(index_name)
+            )
+        )
+        conn.execute(
+            sql.SQL("ALTER TABLE {table} DROP COLUMN {column}").format(
+                table=sql.Identifier(table), column=sql.Identifier(column)
+            )
+        )
+        conn.execute(
+            sql.SQL(
+                "ALTER TABLE {table} ADD COLUMN {column} vector({dim})"
+            ).format(
+                table=sql.Identifier(table),
+                column=sql.Identifier(column),
+                dim=sql.Literal(embedder.dim),
+            )
         )

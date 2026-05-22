@@ -1102,3 +1102,18 @@ def test_min_rrf_score_does_not_prune_strong_neighbors(
         f"Strong candidate score {candidate.score:.6f} must exceed "
         f"_MIN_RRF_SCORE={_MIN_RRF_SCORE}"
     )
+
+    # Exact-score equivalence lock (G4-e DRY refactor): in this deterministic
+    # two-doc corpus the candidate is the sole neighbor, hitting 0-indexed
+    # rank 0 in BOTH the FTS and vector legs. Its score is therefore exactly
+    # ``2 * rrf_contribution(0, k=RRF_K) == 2 / (RRF_K + 1)``. Pinning the
+    # literal float proves ``_neighbors_for_source`` still produces byte-for-byte
+    # identical numbers after swapping the inline ``1/(RRF_K+rank+1)`` for the
+    # shared ``rank_fusion.rrf_contribution`` helper (same k, same accumulation).
+    from brain.search import RRF_K
+
+    expected_dual_leg_score = 2.0 / (RRF_K + 1)
+    assert math.isclose(candidate.score, expected_dual_leg_score, rel_tol=0, abs_tol=1e-12), (
+        f"Dual-leg rank-0 score must equal 2/(RRF_K+1)={expected_dual_leg_score!r}; "
+        f"got {candidate.score!r}"
+    )

@@ -17,6 +17,11 @@ backups/
 tests/eval/baselines/*.json
 logs/
 
+# Stray SQLite-style artifact created at the repo root by accidental tooling
+# (the project's database is Postgres — there is no app-owned brain.db). Ignored
+# so it can never be committed by mistake. Anchored to the root only.
+/brain.db
+
 # Runtime shim cache for the brain CLI launcher (T1.5).
 # `_launcher.ensure_shim()` copies package-data bash templates here on
 # first invocation. Dev-checkouts get `<repo>/.shims/`; pipx users get

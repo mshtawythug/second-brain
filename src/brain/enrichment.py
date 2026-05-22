@@ -96,6 +96,98 @@ _TAG_SYSTEM_PROMPT = (
 )
 
 
+# Wave G2-b — concept entity extraction (spec §3 D3 / §8). The extractor
+# *backend* lives here (transport, JSON-mode, retry) so it shares one place with
+# ``summarize`` / ``propose_tags``; the concept-extraction *logic* (chunking,
+# canonicalization, position-finding, per-doc cap, never-raise) lives in
+# :mod:`brain.graph_rag.extract`. ``type`` is constrained to the four concept
+# entity types — people are derived for free from the participants pipeline and
+# are deliberately NOT extracted here (spec §17b decision 2: "people excluded").
+_EXTRACT_SYSTEM_PROMPT = (
+    "You extract the salient non-person CONCEPT entities from a "
+    "personal-knowledge-base document.\n"
+    "\n"
+    "Return ONLY valid JSON:\n"
+    '{"entities": [{"name": "...", "type": "topic"}]}\n'
+    "\n"
+    "type MUST be exactly one of: org, project, tool, topic.\n"
+    "Use the entity's surface form exactly as it appears in the text for name.\n"
+    "\n"
+    "Type rules:\n"
+    "- org: a company or provider whose hosted service or platform you consume "
+    "or integrate with — e.g. a payments, identity, data-warehouse, or cloud "
+    "provider. Use the company name.\n"
+    "- tool: software you run, deploy, operate, import, or build with — a "
+    "framework, library, language, database, monitoring agent, or server.\n"
+    "- project: a named initiative or effort. Keep the FULL name including a "
+    'leading word like "Project" (return "Project Falcon", never "Falcon").\n'
+    "- topic: a central, durable theme or subject area the document is about, "
+    "usually one or two words.\n"
+    "\n"
+    "Topic guidance:\n"
+    "- Capture the few themes the text frames as central. Look for "
+    "importance-signaling language — examples (not an exhaustive list) include "
+    '"the main topic", "the recurring theme", "the headline", "dominated the '
+    'discussion", "a major focus was", "central to the conversation", "we kept '
+    'coming back to", or "came up repeatedly" — and any similar phrasing that '
+    "marks something as important, as well as the core subject the document "
+    "centers on.\n"
+    "- Also capture the core subject word that a named effort or platform is "
+    'about — the domain word inside phrases like a "<X> effort", "<X> '
+    'initiative", "<X> platform", or "<X> stack" (extract <X> as the topic).\n'
+    "- Return roughly 1-3 topics, and prefer the short theme word over a long "
+    "phrase (the one- or two-word theme, not a verbose feature description).\n"
+    "\n"
+    "Never extract:\n"
+    "- people or person names (they are tracked separately)\n"
+    "- dates, times, or file formats\n"
+    "- generic activities or events (meetings, reviews, sprints, workshops)\n"
+    "- incidental UI or implementation nouns, or one-off mentions that are not a "
+    "central theme\n"
+    "- vague container words (platform, service, system, dashboard) on their own\n"
+    "\n"
+    "Examples (illustrative only — invented names; do not copy them):\n"
+    "TEXT: We moved payments onto Glasswing this quarter. Project Falcon owns "
+    "the new ledger, tracked in Quillbase. Onboarding was the recurring theme of "
+    "the review.\n"
+    'JSON: {"entities": [{"name": "Glasswing", "type": "org"}, '
+    '{"name": "Project Falcon", "type": "project"}, '
+    '{"name": "Quillbase", "type": "tool"}, '
+    '{"name": "onboarding", "type": "topic"}]}\n'
+    "TEXT: The team adopted Helmwright for scheduling and wired up Tessa for "
+    "alerts. Project Marlin is the rollout. Uptime dominated the discussion.\n"
+    'JSON: {"entities": [{"name": "Helmwright", "type": "tool"}, '
+    '{"name": "Tessa", "type": "tool"}, '
+    '{"name": "Project Marlin", "type": "project"}, '
+    '{"name": "uptime", "type": "topic"}]}\n'
+    "\n"
+    "Return an empty list when the text has no clear concept entities."
+)
+
+
+# Wave G2-f — on-demand theme synthesis (spec §6b step 4 / §17b decision 7).
+# Opt-in (``--synthesize``); best-effort and never required for retrieval.
+_GROUP_SUMMARY_SYSTEM_PROMPT = (
+    "You write a one-to-two sentence synthesis of a cluster of related topics "
+    "from a personal knowledge base.\n"
+    "\n"
+    "Inputs: PERSON/SCOPE (the person the themes are about, if any), TOPICS "
+    "(the cluster's key entities), and REPRESENTATIVE DOCUMENTS (their titles).\n"
+    "\n"
+    "Return ONLY valid JSON:\n"
+    '{"summary": "..."}\n'
+    "\n"
+    "Rules:\n"
+    "- 1-2 sentences, factual, plain past tense\n"
+    "- name the specific topics that tie the cluster together\n"
+    "- never invent facts, never exceed 50 words"
+)
+
+# Token budget for the concept-extraction completion. Larger than the
+# summary/tag budget (256) because a document can yield a long entity list.
+_EXTRACT_NUM_PREDICT = 1024
+
+
 @dataclass(frozen=True)
 class SummaryResult:
     """One enrichment summary. Stored byte-for-byte on ``documents.summary``.
@@ -136,6 +228,11 @@ class OllamaEnricher:
         - ``summarize(title, content)`` → :class:`SummaryResult`
         - ``propose_tags(title, summary, existing_vocab, current_tags, max_new=1)``
             → :class:`TagProposal`
+        - ``extract_entities(text)`` → ``list[Any]`` (raw concept-entity
+            candidates; the concept-extraction *logic* lives in
+            :mod:`brain.graph_rag.extract`)
+        - ``summarize_group(person, entity_names, doc_titles)`` → ``str | None``
+            (best-effort theme synthesis; never raises)
         - ``count_tokens(text)`` → int (tiktoken ``cl100k_base``)
         - ``model`` (read-only attribute) → the model fingerprint
     """
@@ -262,8 +359,88 @@ class OllamaEnricher:
                 new.append(tag)
         return TagProposal(existing=existing, new=new[:max_new])
 
+    def extract_entities(self, text: str) -> list[Any]:
+        """Return the model's raw concept-entity candidates for one text block.
+
+        One ``/api/chat`` JSON-mode round-trip with the concept-extraction
+        system prompt. Returns the model's ``entities`` array verbatim — a list
+        whose individual elements the caller (:class:`brain.graph_rag.extract.
+        OllamaExtractor`) validates, canonicalizes, positions, dedups, and caps.
+        This method does NOT chunk: the extractor sizes each ``text`` block to
+        the model context and calls once per chunk.
+
+        Raises :class:`OllamaUnavailable` / :class:`EnrichmentError` on transport
+        / malformed-response failures exactly like :meth:`summarize`. The
+        never-raise boundary is the :class:`~brain.graph_rag.extract.
+        OllamaExtractor`, which catches these so a gated ingest never breaks
+        (spec §17b decision 7 / §7 never-raise discipline).
+        """
+        body = self._chat_with_retry(
+            system=_EXTRACT_SYSTEM_PROMPT,
+            user=f"TEXT:\n{text}",
+            schema_keys=("entities",),
+            num_predict=_EXTRACT_NUM_PREDICT,
+        )
+        entities = body["entities"]
+        if not isinstance(entities, list):
+            raise EnrichmentError(
+                f"extract_entities: model returned non-list entities: {body!r}"
+            )
+        return entities
+
+    def summarize_group(
+        self,
+        *,
+        person: str | None,
+        entity_names: list[str],
+        doc_titles: list[str],
+    ) -> str | None:
+        """Best-effort one-to-two sentence synthesis of a theme group.
+
+        Used by the G2-f ``--synthesize`` path (spec §6b step 4 / §17b decision
+        7): opt-in, default-off, and **never required for retrieval**. Returns
+        the synthesized text, or ``None`` (logging a WARN) when Ollama is
+        unavailable / times out / returns invalid JSON / yields an empty
+        summary. NEVER raises — mirroring the GraphSyncer + enrich never-raise
+        discipline so a retrieval path never becomes a hard live-Ollama
+        dependency.
+        """
+        scope = f" {person}" if person else " (none)"
+        user_message = (
+            f"PERSON/SCOPE:{scope}\n"
+            f"TOPICS: {json.dumps(entity_names)}\n"
+            f"REPRESENTATIVE DOCUMENTS: {json.dumps(doc_titles)}"
+        )
+        try:
+            body = self._chat_with_retry(
+                system=_GROUP_SUMMARY_SYSTEM_PROMPT,
+                user=user_message,
+                schema_keys=("summary",),
+            )
+        except EnrichmentError as exc:
+            # OllamaUnavailable is an EnrichmentError subclass, so this single
+            # clause covers transport failure AND malformed-JSON-twice.
+            _logger.warning(
+                "summarize_group: synthesis failed (%s); returning summary=None",
+                exc,
+            )
+            return None
+        summary = body["summary"]
+        if not isinstance(summary, str) or not summary.strip():
+            _logger.warning(
+                "summarize_group: model returned empty / non-string summary; "
+                "returning summary=None"
+            )
+            return None
+        return summary.strip()
+
     def _chat_with_retry(
-        self, *, system: str, user: str, schema_keys: tuple[str, ...]
+        self,
+        *,
+        system: str,
+        user: str,
+        schema_keys: tuple[str, ...],
+        num_predict: int = 256,
     ) -> dict[str, Any]:
         """Issue an ``/api/chat`` JSON-mode call with one retry on parse failure.
 
@@ -275,7 +452,9 @@ class OllamaEnricher:
         last_error: Exception | None = None
         for attempt in (1, 2):
             try:
-                response_text = self._chat_once(system=system, user=user)
+                response_text = self._chat_once(
+                    system=system, user=user, num_predict=num_predict
+                )
             except OllamaUnavailable:
                 # Transient — propagate immediately, no retry.
                 raise
@@ -308,14 +487,16 @@ class OllamaEnricher:
             f"enrichment failed after 2 attempts: {last_error}"
         ) from last_error
 
-    def _chat_once(self, *, system: str, user: str) -> str:
+    def _chat_once(self, *, system: str, user: str, num_predict: int = 256) -> str:
         """Single ``/api/chat`` round-trip returning the inner content string.
 
         Returns the ``message.content`` field verbatim so the caller can
         ``json.loads`` it. Maps transport-layer failures to
         :class:`OllamaUnavailable` (CLAUDE.md "no bare except" — only
         ``httpx.HTTPError`` and ``ValueError`` are caught here, matching the
-        embedder's pattern).
+        embedder's pattern). ``num_predict`` caps the completion length
+        (default 256 for summary/tag; the concept extractor passes a larger
+        budget for long entity lists).
         """
         request_body = {
             "model": self._model,
@@ -325,7 +506,7 @@ class OllamaEnricher:
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "options": {"temperature": 0.0, "num_predict": 256},
+            "options": {"temperature": 0.0, "num_predict": num_predict},
         }
         try:
             response = self._client.post("/api/chat", json=request_body)

@@ -605,7 +605,7 @@ def test_cli_vault_export_writes_files(
         # it at the same test DB.
         os.environ.get(
             "TEST_DATABASE_URL",
-            "postgresql://brain:brain@localhost:5433/second_brain_test",
+            "postgresql://brain:brain@localhost:5434/second_brain_test",
         ),
     )
     _ingest(
@@ -633,7 +633,7 @@ def test_cli_vault_export_idempotent(
         "DATABASE_URL",
         os.environ.get(
             "TEST_DATABASE_URL",
-            "postgresql://brain:brain@localhost:5433/second_brain_test",
+            "postgresql://brain:brain@localhost:5434/second_brain_test",
         ),
     )
     _ingest(
@@ -661,7 +661,7 @@ def test_cli_vault_export_refuses_unmanaged_dir_without_force(
         "DATABASE_URL",
         os.environ.get(
             "TEST_DATABASE_URL",
-            "postgresql://brain:brain@localhost:5433/second_brain_test",
+            "postgresql://brain:brain@localhost:5434/second_brain_test",
         ),
     )
     target = tmp_path / "stranger"

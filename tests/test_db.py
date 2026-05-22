@@ -12,7 +12,7 @@ from brain.errors import BrainError
 def test_connect_returns_open_connection() -> None:
     url = os.environ.get(
         "TEST_DATABASE_URL",
-        "postgresql://brain:brain@localhost:5433/second_brain_test",
+        "postgresql://brain:brain@localhost:5434/second_brain_test",
     )
     with connect(url) as conn:
         cur = conn.execute("SELECT 1")
@@ -48,7 +48,7 @@ def test_run_migrations_applies_all_sql_files_in_order() -> None:
     """Directly exercise run_migrations() against a freshly reset schema."""
     url = os.environ.get(
         "TEST_DATABASE_URL",
-        "postgresql://brain:brain@localhost:5433/second_brain_test",
+        "postgresql://brain:brain@localhost:5434/second_brain_test",
     )
     # migrations_dir() resolves to the repo-root migrations/ directory
     expected_files = sorted(p.name for p in migrations_dir().glob("*.sql"))
@@ -65,7 +65,7 @@ def test_run_migrations_is_idempotent_when_already_applied() -> None:
     """Second call returns [] — schema_migrations dedups."""
     url = os.environ.get(
         "TEST_DATABASE_URL",
-        "postgresql://brain:brain@localhost:5433/second_brain_test",
+        "postgresql://brain:brain@localhost:5434/second_brain_test",
     )
     with psycopg.connect(url, autocommit=True) as conn:
         conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
@@ -80,7 +80,7 @@ def test_run_migrations_records_each_applied_in_schema_migrations() -> None:
     """After a fresh run, schema_migrations has one row per .sql file."""
     url = os.environ.get(
         "TEST_DATABASE_URL",
-        "postgresql://brain:brain@localhost:5433/second_brain_test",
+        "postgresql://brain:brain@localhost:5434/second_brain_test",
     )
     expected_files = sorted(p.name for p in migrations_dir().glob("*.sql"))
 
@@ -102,7 +102,7 @@ def test_run_migrations_seeds_existing_schema_without_tracking_table() -> None:
     """
     url = os.environ.get(
         "TEST_DATABASE_URL",
-        "postgresql://brain:brain@localhost:5433/second_brain_test",
+        "postgresql://brain:brain@localhost:5434/second_brain_test",
     )
     with psycopg.connect(url, autocommit=True) as conn:
         # Simulate a prod-style DB that has 001 + 002 applied (pre-vault-model)
@@ -209,6 +209,28 @@ def _column_dim(conn: psycopg.Connection) -> int:
     assert row is not None
     formatted = str(row[0])
     return int(formatted[len("vector(") : -1])
+
+
+def _column_dim_of(conn: psycopg.Connection, table: str, column: str) -> int:
+    """Generalized variant of :func:`_column_dim` for any ``<table>.<column>``."""
+    row = conn.execute(
+        "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+        "WHERE attrelid = %s::regclass AND attname = %s",
+        (table, column),
+    ).fetchone()
+    assert row is not None
+    formatted = str(row[0])
+    return int(formatted[len("vector(") : -1])
+
+
+def _column_is_nullable(conn: psycopg.Connection, table: str, column: str) -> bool:
+    row = conn.execute(
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_name = %s AND column_name = %s",
+        (table, column),
+    ).fetchone()
+    assert row is not None
+    return str(row[0]) == "YES"
 
 
 def test_ensure_embedding_column_noop_on_match(
@@ -349,3 +371,87 @@ def test_ensure_embedding_column_drops_stale_index_on_resize(
         is None
     )
     assert _column_dim(test_db) == 4096
+
+
+# --- G0b: generalized (table, column) dim reconciliation --------------------
+# The reconciliation helpers are parameterized over (table, column) so the
+# GraphRAG tables can reuse them. These tests prove (a) the chunks path is
+# unchanged when the explicit-arg signature is used, (b) graph_entities.embedding
+# resizes correctly and stays NULLABLE, and (c) a non-allowlisted pair is
+# rejected before any DDL runs.
+
+
+def test_ensure_embedding_column_chunks_explicit_args_match_default(
+    test_db: psycopg.Connection,
+) -> None:
+    """Regression: explicit ``("chunks", "embedding")`` args == default behavior.
+
+    Proves the generalization didn't change the chunks reconciliation: a
+    4096→1024 resize on an empty table drops + re-adds the column at the new
+    dim, exactly as the default-arg path does (covered by
+    :func:`test_ensure_embedding_column_resizes_on_zero_rows`).
+    """
+    assert _column_dim(test_db) == 4096
+
+    ensure_embedding_column(test_db, _DimEmbedder(dim=1024), "chunks", "embedding")
+
+    assert _column_dim(test_db) == 1024
+    # Re-added column is NULLABLE (NOT NULL is a separate finalize step).
+    assert _column_is_nullable(test_db, "chunks", "embedding")
+
+
+def test_ensure_embedding_column_resizes_graph_entities(
+    test_db: psycopg.Connection,
+) -> None:
+    """graph_entities.embedding (ships vector(1024)) resizes to the active dim.
+
+    Migration 012 ships the column as ``vector(1024)`` NULLABLE. With a row
+    present but its embedding NULL, reconciling against a 4096-dim embedder must
+    drop + re-add the column at 4096, preserve the row, and leave the column
+    NULLABLE (graph columns are never forced NOT NULL by reconciliation).
+    """
+    assert _column_dim_of(test_db, "graph_entities", "embedding") == 1024
+
+    # Synthetic entity row with a NULL embedding (post-migration state).
+    test_db.execute(
+        "INSERT INTO graph_entities (entity_type, name, canonical_key) "
+        "VALUES (%s, %s, %s)",
+        ("topic", "Alpha", "alpha"),
+    )
+
+    ensure_embedding_column(
+        test_db, _DimEmbedder(dim=4096), "graph_entities", "embedding"
+    )
+
+    assert _column_dim_of(test_db, "graph_entities", "embedding") == 4096
+    # Column stays NULLABLE — reconciliation never sets NOT NULL on graph tables.
+    assert _column_is_nullable(test_db, "graph_entities", "embedding")
+    # The entity row survived the column rebuild.
+    surviving = test_db.execute(
+        "SELECT count(*) FROM graph_entities"
+    ).fetchone()
+    assert surviving is not None and surviving[0] == 1
+
+
+def test_ensure_embedding_column_graph_entities_noop_on_match(
+    test_db: psycopg.Connection,
+) -> None:
+    """graph_entities at 1024 + a 1024-dim embedder → no schema change."""
+    assert _column_dim_of(test_db, "graph_entities", "embedding") == 1024
+
+    ensure_embedding_column(
+        test_db, _DimEmbedder(dim=1024), "graph_entities", "embedding"
+    )
+
+    assert _column_dim_of(test_db, "graph_entities", "embedding") == 1024
+    assert _column_is_nullable(test_db, "graph_entities", "embedding")
+
+
+def test_ensure_embedding_column_rejects_non_allowlisted(
+    test_db: psycopg.Connection,
+) -> None:
+    """A ``(table, column)`` pair off the allowlist raises before any DDL."""
+    with pytest.raises(BrainError, match="allowlist"):
+        ensure_embedding_column(
+            test_db, _DimEmbedder(dim=1024), "documents", "tsv"
+        )

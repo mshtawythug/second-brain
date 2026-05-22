@@ -5,11 +5,12 @@ import re
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from datetime import date as date_cls
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 import yaml
@@ -18,18 +19,24 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from .config import Config
-from .db import connect
+from .db import age_extension_available, connect, connect_age
 from .embeddings import OllamaEmbedError, make_embedder
 from .enrichment import OllamaEnricher, make_enricher
 from .errors import (
     BrainError,
+    GraphBackendError,
+    GraphReconcileError,
+    GraphTenantError,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
     IdPrefixTooShort,
+    InteractionError,
     PersonAmbiguous,
     PersonNotFound,
 )
+from .format import community_record_json, graph_context_json
+from .graph_rag.sync import GraphSyncer, make_graph_syncer
 from .ingest import (
     Embedder,
     apply_tags,
@@ -40,12 +47,17 @@ from .ingest.stdin import make_doc as _stdin_make_doc
 from .interactions import record_interaction
 from .queries import (
     fetch_document,
+    iter_all_document_ids,
     list_documents,
     resolve_document_prefix,
     resolve_person_to_keys,
     summary_counts,
 )
 from .search import hybrid_search
+
+if TYPE_CHECKING:
+    from .graph_rag.reconcile import ReconcileConfig
+    from .graph_rag.schema import GraphContext
 from .vault.frontmatter import (
     dump_frontmatter,
     parse_frontmatter,
@@ -103,6 +115,11 @@ class _State:
     cfg: Config
     embedder: Embedder
     enricher: OllamaEnricher | None = None
+    # Wave G1-c: people-aspect graph syncer wired through ``brain_ingest`` /
+    # ``brain_edit`` so MCP-driven writes keep the graph in lock-step. ``None``
+    # (tests that build ``_State`` directly) skips graph sync; production
+    # :func:`main` always populates it via :func:`make_graph_syncer`.
+    graph_syncer: GraphSyncer | None = None
 
 
 _state: _State | None = None
@@ -349,6 +366,7 @@ def brain_show(
     id_prefix: str,
     originating_query: str | None = None,
     session_id: str | None = None,
+    graph_retrieved: bool = False,
 ) -> dict[str, Any]:
     """Return the full body and metadata of a single document by id prefix.
 
@@ -361,8 +379,19 @@ def brain_show(
     query=originating_query, session_id=parsed UUID or NULL). Supplying
     ``session_id`` without ``originating_query`` is rejected — a session
     id alone carries no useful signal. ``session_id`` must be a valid UUID
-    string (the one returned from a prior ``brain_search`` call); a
-    malformed value raises ``INVALID_PARAMS``.
+    string (the one returned from a prior ``brain_search`` *or*
+    ``brain_graphrag_*`` call); a malformed value raises ``INVALID_PARAMS``.
+
+    G4-b graph provenance (spec §17d Q2): pass ``graph_retrieved=true`` when
+    this open came from a graph surface (``brain_graphrag_search`` /
+    ``…_themes`` / ``…_entity``). It stamps ``graph_retrieved=TRUE`` on the
+    logged ``opened`` row — a provenance flag only; the row is still a
+    document row (``document_id`` set). Default ``false`` preserves the
+    pre-G4 behavior. The graph retrieval tools never log at retrieval time;
+    only this user-action open does. Interaction logging is best-effort — a
+    logging failure is warned and swallowed so the document still returns
+    (this supersedes the Q1-C D13 "propagate logging errors" note for the
+    locked never-raise discipline). The return shape is unchanged.
     """
     state = _get_state()
     logger.debug(
@@ -400,18 +429,27 @@ def brain_show(
             conn.autocommit = True
             doc_id = _resolve_id(conn, id_prefix)
             doc = fetch_document(conn, doc_id)
-            # Log the open AFTER the fetch succeeded. A logging failure
-            # propagates as INTERNAL_ERROR via _wrap_db_error so we don't
-            # silently lose signal (per plan D13).
+            # Log the open AFTER the fetch succeeded, gated on
+            # originating_query. ``graph_retrieved`` is provenance on the
+            # document row (G4-b). Best-effort (never-raise): a logging
+            # failure is warned + swallowed so the document still returns —
+            # this supersedes the Q1-C D13 propagate-the-error note.
             if originating_query is not None:
-                record_interaction(
-                    conn,
-                    document_id=doc_id,
-                    action="opened",
-                    source="mcp",
-                    query=originating_query,
-                    session_id=session_uuid,
-                )
+                try:
+                    record_interaction(
+                        conn,
+                        document_id=doc_id,
+                        action="opened",
+                        source="mcp",
+                        query=originating_query,
+                        session_id=session_uuid,
+                        graph_retrieved=graph_retrieved,
+                    )
+                except (psycopg.Error, InteractionError) as log_exc:
+                    logger.warning(
+                        "brain_show: interaction logging failed: %s",
+                        type(log_exc).__name__,
+                    )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     assert doc is not None  # _resolve_id confirmed the doc exists
@@ -546,6 +584,7 @@ def brain_ingest_stdin(
                 source_metadata=meta,
                 tags=merged_tags,
                 vault_root=state.cfg.vault_path,
+                graph_syncer=state.graph_syncer,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -682,6 +721,7 @@ def brain_edit(
                     replace_metadata=replace_metadata,
                     vault_root=state.cfg.vault_path,
                     enricher=enricher,
+                    graph_syncer=state.graph_syncer,
                 )
             except ValueError as e:
                 raise _mcp_error(INVALID_PARAMS, str(e)) from e
@@ -1127,6 +1167,560 @@ def brain_link_proposal(
     }
 
 
+# ---------------------------------------------------------------------------
+# Wave G2-i — GraphRAG retrieval surfaces (MCP parity with the G2-h CLI).
+# Full CLI↔MCP parity (spec §9): every `brain graphrag …` capability/param/
+# semantic is reachable here and behaves identically — same `graph_rag_search`
+# core, same router, same degradation signalling on the returned JSON, same
+# tenant scoping. Structured params only; the backend injects tenant_id + caps;
+# NEVER raw Cypher (spec §4 D9). The wire shape REUSES
+# :func:`brain.format.graph_context_json` (the exact `--json` CLI shape, which
+# already carries ``session_id`` like ``brain_search``).
+# ---------------------------------------------------------------------------
+
+
+def _wrap_graph_backend_error(e: GraphBackendError) -> McpError:
+    """Wrap an Apache AGE backend failure as an MCP error.
+
+    Mirrors :func:`_wrap_db_error`: the user-facing message exposes only the
+    exception class name (a :class:`GraphBackendError` can wrap a generated
+    Cypher / catalog statement, which must NEVER reach the wire — spec §4 D9
+    no-raw-Cypher), and the full exception is logged to stderr for debugging.
+    """
+    logger.error("graph backend error", exc_info=e)
+    return _mcp_error(INTERNAL_ERROR, f"graph backend error: {type(e).__name__}")
+
+
+def _require_age_or_mcp_error(conn: psycopg.Connection[Any]) -> None:
+    """Raise ``McpError`` when this DB image lacks Apache AGE.
+
+    The MCP analogue of the CLI's :func:`brain.cli._require_age_or_exit`: the
+    graphrag tools exist solely to query / maintain the AGE graph, so an
+    AGE-absent image is an unrecoverable server-side condition (the caller
+    cannot fix the DB image), surfaced as ``INTERNAL_ERROR`` — matching how the
+    other tools surface unavailable subsystems (DB / embedder failures).
+    """
+    if not age_extension_available(conn):
+        raise _mcp_error(
+            INTERNAL_ERROR,
+            "graphrag: Apache AGE is not available in this database image — "
+            "cut over to the AGE image and run `brain init` first",
+        )
+
+
+def _graphrag_reconcile_config(
+    cfg: Config, tenant: str | None
+) -> "ReconcileConfig":
+    """Resolve the shared :class:`ReconcileConfig`, applying a ``tenant`` override.
+
+    The MCP twin of the CLI's :func:`brain.cli._graphrag_config`: starts from the
+    single :func:`brain.graph_rag.sync.build_reconcile_config` (so a build uses
+    the SAME co-occurrence window / per-doc cap / generic ratio / owner keys as
+    the incremental sync hook) and overrides only the tenant id when a non-blank
+    ``tenant`` is supplied — leaving every weighting knob identical so an MCP
+    build cannot diverge from the CLI / incremental path.
+    """
+    from .graph_rag.sync import build_reconcile_config
+
+    base = build_reconcile_config(cfg)
+    if tenant is not None and tenant.strip():
+        return replace(base, tenant_id=tenant.strip())
+    return base
+
+
+def _graphrag_search_or_mcp_error(
+    cfg: Config,
+    query: str,
+    *,
+    mode: str,
+    tenant: str | None,
+    person: str | None,
+    depth: int | None,
+    limit: int | None,
+    synthesize: bool,
+    enricher: OllamaEnricher | None,
+    embedder_factory: Callable[[], Embedder] | None = None,
+) -> "GraphContext":
+    """Open an AGE connection, run :func:`graph_rag_search`, map core errors.
+
+    The single construction + error-mapping seam shared by the graphrag
+    retrieval tools (the MCP twin of the CLI's
+    :func:`brain.cli._graphrag_search_or_exit`): opens an AGE-capable autocommit
+    connection, bootstraps the backend, and runs the SAME ``graph_rag_search``
+    core the CLI calls — so identical inputs yield an identical
+    :class:`GraphContext` (the parity guarantee). Local seed resolution + the
+    snippet path are FTS-only, so an embedder is needed ONLY for the ``global``
+    (community) path's vector leg (spec §17c Q9): ``embedder_factory``
+    (``lambda: state.embedder``) is passed through but invoked **lazily** by
+    ``_retrieve_global`` only after routing resolves to global. The enricher is
+    the opt-in ``synthesize`` group-summary seam.
+
+    Error → ``McpError`` mapping (spec §17b decision 4 + repo error contract;
+    mirrors the CLI's exit-code mapping; the G3-e flip means explicit
+    ``mode='global'`` now EXECUTES so the former ``GraphModeUnavailable`` reject
+    is gone — §17c Q6):
+
+    * :class:`PersonNotFound` / :class:`PersonAmbiguous` (themes resolver) →
+      ``INVALID_PARAMS`` (caller-fixable — pick / disambiguate a real person).
+    * ``ValueError`` (themes mode with no resolvable person, or an unknown mode
+      surfaced by the router) → ``INVALID_PARAMS`` (usage error).
+    * :class:`GraphTenantError` / :class:`GraphBackendError` → ``INTERNAL_ERROR``
+      (the code the other tools use for unavailable subsystems; the backend
+      error's message is class-name-only so no Cypher reaches the wire).
+    * :class:`psycopg.Error` → ``INTERNAL_ERROR`` (class-name only, via
+      :func:`_wrap_db_error`).
+
+    AGE-absent is handled before retrieval by :func:`_require_age_or_mcp_error`.
+    """
+    from .graph_rag import graph_rag_search
+    from .graph_rag.backends import AgeBackend
+
+    try:
+        with connect_age(cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            backend = AgeBackend()
+            backend.bootstrap(conn)
+            return graph_rag_search(
+                conn,
+                cfg,
+                query,
+                backend=backend,
+                tenant=tenant,
+                depth=depth,
+                limit=limit,
+                mode=mode,
+                person=person,
+                synthesize=synthesize,
+                enricher=enricher,
+                embedder_factory=embedder_factory,
+            )
+    except (PersonNotFound, PersonAmbiguous) as exc:
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+    except GraphTenantError as exc:
+        # Empty effective tenant — a degenerate config bug, not caller-fixable
+        # via params; surface as INTERNAL_ERROR (no Cypher in the message).
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    except GraphBackendError as exc:
+        raise _wrap_graph_backend_error(exc) from exc
+    except ValueError as exc:
+        # Router caller-bug surface: themes mode with no resolvable person, or an
+        # unrecognized mode value. Both are usage errors → INVALID_PARAMS.
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+
+
+@mcp_app.tool()
+def brain_graphrag_search(
+    query: str,
+    mode: str = "auto",
+    person: str | None = None,
+    depth: int | None = None,
+    limit: int | None = None,
+    tenant: str | None = None,
+    synthesize: bool = False,
+) -> dict[str, Any]:
+    """Graph retrieval over the Apache AGE people/concept graph (spec §6/§9).
+
+    Full parity with ``brain graphrag search``. Returns the
+    :func:`brain.format.graph_context_json` wire shape (identical to the CLI's
+    ``--json`` output), which carries a fresh ``session_id`` (like
+    ``brain_search``) plus ``mode`` / ``query`` / ``tenant_id`` / ``person``,
+    the degradation signals (``requested_mode`` / ``degraded_from`` /
+    ``degradation_reason``), the ranked ``themes`` (themes mode) and
+    ``entities`` (local mode), the document hits (``docs``), and the ranking
+    ``explanation``. Raw Cypher is never accepted or returned.
+
+    Params (all but ``query`` optional; mirror the CLI flags 1:1):
+
+    - ``mode``: ``auto`` (heuristic router, default) | ``local`` (entity-centric)
+      | ``themes`` (scope-first "themes with X", requires ``person``) |
+      ``global`` (community-level RRF over detected communities; spec §6c) |
+      ``fuse`` (RRF of the local-graph doc leg with the vector/FTS hybrid leg;
+      wave G4-c, spec §17d Q1). Under ``auto`` a thematic query with no resolvable
+      person now routes to ``global`` (the G3-e flip, spec §17c Q6 — no longer a
+      global→local degradation), and an explicit ``global`` EXECUTES (build the
+      communities first via ``brain_graphrag_communities_build``). The returned
+      JSON carries a top-level ``communities`` key in global mode; ``fuse`` is
+      explicit-only (``auto`` never targets it) and its per-doc leg provenance
+      rides in ``explanation.matched_filters.fuse_doc_provenance``.
+    - ``person``: scope themes to this person (resolved via the directory). An
+      unknown / ambiguous person raises ``INVALID_PARAMS``.
+    - ``depth``: traversal depth (default ``BRAIN_GRAPH_DEPTH``).
+    - ``limit``: max documents returned (default 10).
+    - ``tenant``: tenant to query (default ``BRAIN_GRAPH_TENANT``); the backend
+      scopes every query to it — no cross-tenant leak.
+    - ``synthesize``: attach a best-effort local-Ollama summary to each theme
+      group (opt-in; never required for retrieval — a missing/failed Ollama
+      yields ``summary=None``).
+    """
+    state = _get_state()
+    logger.debug(
+        "brain_graphrag_search: query=%r mode=%s person?=%s",
+        query,
+        mode,
+        person is not None,
+    )
+    ctx = _graphrag_search_or_mcp_error(
+        state.cfg,
+        query,
+        mode=mode,
+        tenant=tenant,
+        person=person,
+        depth=depth,
+        limit=limit,
+        synthesize=synthesize,
+        enricher=state.enricher if synthesize else None,
+        # The global (community) path's vector leg embeds the query via this
+        # factory (spec §17c Q9 — local/themes never invoke it). Reuses the
+        # long-lived server embedder built in :func:`main`.
+        embedder_factory=lambda: state.embedder,
+    )
+    return graph_context_json(ctx)
+
+
+@mcp_app.tool()
+def brain_graphrag_themes(
+    person: str,
+    depth: int | None = None,
+    limit: int | None = None,
+    tenant: str | None = None,
+    synthesize: bool = False,
+) -> dict[str, Any]:
+    """The "themes in my conversations with X" headline (spec §6b).
+
+    Full parity with ``brain graphrag themes`` — a convenience wrapper for
+    ``brain_graphrag_search(mode='themes', person=X)``: scopes to ``person``,
+    groups their co-occurrence subgraph, and returns ranked theme groups (key
+    entities + representative documents) in the
+    :func:`brain.format.graph_context_json` wire shape. ``person`` is REQUIRED;
+    an empty / whitespace-only value raises ``INVALID_PARAMS``. ``synthesize``
+    attaches a best-effort per-group Ollama summary (opt-in).
+    """
+    if not person.strip():
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "person is required for themes mode (the X to scope to)",
+        )
+    state = _get_state()
+    logger.debug("brain_graphrag_themes: person=%r", person)
+    ctx = _graphrag_search_or_mcp_error(
+        state.cfg,
+        "",
+        mode="themes",
+        tenant=tenant,
+        person=person,
+        depth=depth,
+        limit=limit,
+        synthesize=synthesize,
+        enricher=state.enricher if synthesize else None,
+    )
+    return graph_context_json(ctx)
+
+
+@mcp_app.tool()
+def brain_graphrag_entity(
+    name: str,
+    depth: int | None = None,
+    limit: int | None = None,
+    tenant: str | None = None,
+) -> dict[str, Any]:
+    """Show a single entity's neighbourhood (spec §9).
+
+    Full parity with ``brain graphrag entity``: a thin wrapper over local
+    (entity-centric) retrieval seeded on ``name`` — it reuses the SAME path as
+    ``brain_graphrag_search(mode='local')``, resolving the entity, traversing
+    its bounded ``CO_OCCURS`` neighbourhood, and returning the seed + reached
+    entities and their documents in the
+    :func:`brain.format.graph_context_json` wire shape. ``name`` is REQUIRED; an
+    empty / whitespace-only value raises ``INVALID_PARAMS``.
+    """
+    if not name.strip():
+        raise _mcp_error(INVALID_PARAMS, "name is required")
+    state = _get_state()
+    logger.debug("brain_graphrag_entity: name=%r", name)
+    ctx = _graphrag_search_or_mcp_error(
+        state.cfg,
+        name,
+        mode="local",
+        tenant=tenant,
+        person=None,
+        depth=depth,
+        limit=limit,
+        synthesize=False,
+        enricher=None,
+    )
+    return graph_context_json(ctx)
+
+
+@mcp_app.tool()
+def brain_graphrag_build(
+    tenant: str | None = None,
+    concepts: bool = False,
+    backfill: bool = False,
+    force: bool = False,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Bulk-reconcile the graph for all existing documents (spec §9).
+
+    Full parity with ``brain graphrag build``. Walks every document in id order
+    and reconciles its people aspect (and, when ``concepts`` or
+    ``BRAIN_GRAPH_CONCEPTS`` is on, its concept aspect) into the Apache AGE
+    graph, sharing the SAME :class:`ReconcileConfig` as the incremental sync
+    path. Idempotent + resumable via the per-aspect watermark.
+
+    Params (mirror the CLI flags):
+
+    - ``backfill``: reconcile the people aspect of EVERY existing document.
+      Required (pass ``backfill`` or ``force``) — calling with neither raises
+      ``INVALID_PARAMS`` (the MCP equivalent of the CLI's "pass --backfill"
+      hint).
+    - ``force``: authoritative full rebuild — bypass the watermark and
+      re-reconcile every document from the relational source-of-truth (recovery
+      for a dropped / corrupted AGE mirror). Implies ``backfill`` and is
+      incompatible with ``limit`` (rejected with ``INVALID_PARAMS``).
+    - ``concepts``: also (re)build the concept aspect via the local Ollama
+      extractor (explicit per-run opt-in, independent of ``BRAIN_GRAPH_CONCEPTS``).
+    - ``tenant``: tenant to build (default ``BRAIN_GRAPH_TENANT``).
+    - ``limit``: max documents to reconcile (default all).
+
+    Returns the :class:`~brain.graph_rag.build.BuildResult` tally as a dict:
+    ``{processed, reconciled, skipped, orphans_removed, tenant_id, concepts}``.
+    """
+    if force and limit is not None:
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "force rebuilds the full corpus and cannot be combined with limit",
+        )
+    if not (backfill or force):
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "pass backfill=true to reconcile all existing documents into the "
+            "graph (or force=true for an authoritative full rebuild that ignores "
+            "the watermark). Add concepts=true to also build the concept aspect.",
+        )
+    state = _get_state()
+    cfg = state.cfg
+    logger.debug(
+        "brain_graphrag_build: backfill=%s force=%s concepts=%s limit=%s",
+        backfill,
+        force,
+        concepts,
+        limit,
+    )
+    # Concepts run when the param is passed OR the env gate is on (mirrors the
+    # CLI): the param is an explicit per-run opt-in independent of
+    # BRAIN_GRAPH_CONCEPTS, so a caller can build the concept graph on demand
+    # without flipping the ingest-time gate.
+    include_concepts = concepts or cfg.graph_concepts
+    config = _graphrag_reconcile_config(cfg, tenant)
+
+    from .graph_rag.backends import AgeBackend
+    from .graph_rag.build import build_graph
+    from .graph_rag.extract import EntityExtractor, make_extractor
+
+    extractor: EntityExtractor | None = None
+    if include_concepts:
+        config = replace(config, concepts_enabled=True)
+        extractor = make_extractor(cfg)
+
+    try:
+        with connect_age(cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            backend = AgeBackend()
+            backend.bootstrap(conn)
+            document_ids = (
+                doc_id for batch in iter_all_document_ids(conn) for doc_id in batch
+            )
+            result = build_graph(
+                conn,
+                document_ids,
+                backend=backend,
+                config=config,
+                limit=limit,
+                extractor=extractor,
+                force=force,
+            )
+    except GraphBackendError as exc:
+        raise _wrap_graph_backend_error(exc) from exc
+    except GraphReconcileError as exc:
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return {
+        "processed": result.processed,
+        "reconciled": result.reconciled,
+        "skipped": result.skipped,
+        "orphans_removed": result.orphans_removed,
+        "tenant_id": config.tenant_id,
+        "concepts": include_concepts,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Wave G3-f — GraphRAG communities admin (MCP parity with the CLI
+# `brain graphrag communities` group). Communities are RELATIONAL-only (spec
+# §17c Q2/Q3); build/refresh run Louvain + persist + eagerly summarize, list
+# reads the stored rows. Structured params only; tenant-scoped; NEVER raw Cypher.
+# ---------------------------------------------------------------------------
+
+
+def _graphrag_communities_build_or_mcp_error(
+    cfg: Config,
+    *,
+    tenant: str | None,
+    limit: int | None,
+    force: bool,
+    enricher: OllamaEnricher | None,
+    embedder: Embedder | None,
+) -> dict[str, Any]:
+    """Build (``force=False``) / refresh (``force=True``) + summarize communities.
+
+    The MCP twin of the CLI's :func:`brain.cli._run_communities_build`: resolves
+    the tenant, runs :func:`build_communities` (dirty-gated unless ``force``),
+    then the best-effort :func:`summarize_communities` (a ``None`` enricher or an
+    unreachable Ollama leaves summaries NULL; a ``None`` embedder still writes
+    summaries and only skips the embeddings — the build always succeeds; spec
+    §17c Q10). Returns ``{tenant_id, build:{…}, summary:{…}}``.
+
+    Error mapping mirrors :func:`_graphrag_search_or_mcp_error`:
+    :class:`GraphTenantError` → ``INTERNAL_ERROR``,
+    :class:`GraphBackendError` → wrapped (class-name only — no Cypher on the
+    wire), :class:`psycopg.Error` → ``INTERNAL_ERROR``.
+    """
+    from .graph_rag.communities import build_communities
+    from .graph_rag.communities_summary import summarize_communities
+    from .graph_rag.tenancy import resolve_tenant
+
+    try:
+        tenant_id = resolve_tenant(cfg, tenant)
+        with connect_age(cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            build_result = build_communities(conn, cfg, tenant=tenant_id, force=force)
+            summary_result = summarize_communities(
+                conn,
+                cfg,
+                tenant=tenant_id,
+                enricher=enricher,
+                embedder=embedder,
+                limit=limit,
+            )
+    except GraphTenantError as exc:
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    except GraphBackendError as exc:
+        raise _wrap_graph_backend_error(exc) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return {
+        "tenant_id": tenant_id,
+        "build": {
+            "communities_total": build_result.communities_total,
+            "created": build_result.created,
+            "reused": build_result.reused,
+            "deleted": build_result.deleted,
+            "dirty": build_result.dirty,
+            "skipped": build_result.skipped,
+        },
+        "summary": {
+            "candidates": summary_result.candidates,
+            "summarized": summary_result.summarized,
+            "summary_failures": summary_result.summary_failures,
+            "embedded": summary_result.embedded,
+            "embed_failures": summary_result.embed_failures,
+            "skipped": summary_result.skipped,
+        },
+    }
+
+
+@mcp_app.tool()
+def brain_graphrag_communities_build(
+    tenant: str | None = None,
+    limit: int | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Detect + persist + summarize the tenant's communities (spec §17c Q3).
+
+    Full parity with ``brain graphrag communities build`` / ``… refresh``: runs
+    Louvain over the tenant's relational ``graph_relationships`` edges, persists
+    the partition to ``graph_communities`` / ``graph_community_members``, then
+    EAGERLY (best-effort) summarizes + embeds each community via the server's
+    enricher + embedder. A missing/unreachable Ollama leaves summaries NULL and
+    the build still succeeds (the global path then ranks FTS-only).
+
+    Params (mirror the CLI flags):
+
+    - ``force``: bypass the ``(build_version, source_graph_hash)`` dirty gate and
+      rebuild even when the graph is unchanged (the ``communities refresh``
+      equivalent). Default ``False`` skips an unchanged graph.
+    - ``tenant``: tenant to build (default ``BRAIN_GRAPH_TENANT``).
+    - ``limit``: max stale/new communities to (re)summarize this run (does NOT
+      cap detection — Louvain always partitions the full edge set).
+
+    Returns ``{tenant_id, build:{communities_total, created, reused, deleted,
+    dirty, skipped}, summary:{candidates, summarized, summary_failures, embedded,
+    embed_failures, skipped}}``. No raw Cypher is ever returned.
+    """
+    state = _get_state()
+    logger.debug(
+        "brain_graphrag_communities_build: force=%s tenant=%s limit=%s",
+        force,
+        tenant,
+        limit,
+    )
+    return _graphrag_communities_build_or_mcp_error(
+        state.cfg,
+        tenant=tenant,
+        limit=limit,
+        force=force,
+        enricher=state.enricher,
+        embedder=state.embedder,
+    )
+
+
+@mcp_app.tool()
+def brain_graphrag_communities(
+    tenant: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """List the tenant's materialized communities (spec §17c Q3).
+
+    Full parity with ``brain graphrag communities list``: reads the stored
+    ``graph_communities`` rows (largest-first, ``limit`` capped) and returns
+    ``{tenant_id, count, communities:[{community_key, level, build_version,
+    member_count, edge_count, total_weight, summary, summary_model,
+    summary_at}]}``. Read-only; the raw ``summary_embedding`` vector is omitted
+    and no raw Cypher is ever returned.
+
+    Params:
+
+    - ``tenant``: tenant to list (default ``BRAIN_GRAPH_TENANT``).
+    - ``limit``: max communities to return (default all).
+    """
+    from .graph_rag.communities import list_communities
+    from .graph_rag.tenancy import resolve_tenant
+
+    state = _get_state()
+    logger.debug("brain_graphrag_communities: tenant=%s limit=%s", tenant, limit)
+    try:
+        tenant_id = resolve_tenant(state.cfg, tenant)
+        with connect_age(state.cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            records = list_communities(conn, tenant_id, limit=limit)
+    except GraphTenantError as exc:
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return {
+        "tenant_id": tenant_id,
+        "count": len(records),
+        "communities": [community_record_json(r) for r in records],
+    }
+
+
 def _build_note_file_text(
     *,
     body: str,
@@ -1284,7 +1878,13 @@ def main() -> None:
     # service has explicit timeouts; the enricher reads
     # ``Config.enrich_timeout_seconds`` from env.
     enricher = make_enricher(cfg)
-    _state = _State(cfg=cfg, embedder=embedder, enricher=enricher)
+    # Wave G1-c: build the per-process people-aspect graph syncer (shares one
+    # ReconcileConfig). Cheap + self-gating on BRAIN_GRAPH_ENABLED + AGE
+    # availability, so it's a no-op on a stock pgvector DB.
+    graph_syncer = make_graph_syncer(cfg)
+    _state = _State(
+        cfg=cfg, embedder=embedder, enricher=enricher, graph_syncer=graph_syncer
+    )
     # Warmup embed to cut cold-start latency on the first real ``brain_search``.
     # A single bounded retry covers cold-boot races where Ollama is up but the
     # embedding model is still loading. Persistent failure must NOT abort

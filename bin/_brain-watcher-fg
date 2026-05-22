@@ -31,7 +31,9 @@
 set -euo pipefail
 
 VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
-WATCH_PID='/tmp/brain-watch.pid'
+# Pid path defaults to the production /tmp location; overridable (unset =
+# unchanged) so tests run this wrapper hermetically against a tmp pid dir.
+WATCH_PID="${BRAIN_WATCH_PID:-/tmp/brain-watch.pid}"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"

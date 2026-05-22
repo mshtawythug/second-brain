@@ -2,14 +2,23 @@
 import json
 from typing import TYPE_CHECKING, Any
 
-from rich.console import Console
+from rich.console import Console, Group, RenderableType
 from rich.table import Table
+from rich.text import Text
 
 from .search import SearchExplanation, SearchResult
 
 if TYPE_CHECKING:
     from .eval.baseline import BaselineDiff
     from .eval.runner import EvalReport
+    from .graph_rag.schema import (
+        CommunityGroup,
+        CommunityRecord,
+        GraphContext,
+        GraphEntity,
+        GraphExplanation,
+        ThemeGroup,
+    )
 
 # nDCG@5 delta threshold below which a query row is highlighted red in the
 # diff table.  Display-only — the CLI never exits non-zero based on this.
@@ -23,9 +32,14 @@ def emit_json(payload: Any) -> None:
     console.print_json(json.dumps(payload, default=str))
 
 
-def search_table(results: list[SearchResult]) -> Table:
-    """Render hybrid-search results as a Rich table."""
-    table = Table(title="Search results")
+def search_table(results: list[SearchResult], *, title: str = "Search results") -> Table:
+    """Render hybrid-search results as a Rich table.
+
+    ``title`` defaults to ``"Search results"`` for ``brain search``; graph
+    retrieval reuses the same row shape for its document hits with a
+    ``"Documents"`` title (spec §4 D8 — graph ``docs`` reuse ``SearchResult``).
+    """
+    table = Table(title=title)
     table.add_column("ID", style="dim")
     table.add_column("Title")
     table.add_column("Source", style="cyan")
@@ -203,4 +217,281 @@ def eval_diff_table(diff: "BaselineDiff") -> Table:
     if diff.config_signature_changed:
         table.caption = "⚠ config_signature changed between baseline and current run"
 
+    return table
+
+
+# ---------------------------------------------------------------------------
+# GraphRAG retrieval output (wave G2-h) — human renderable + JSON serializer
+# for the ``GraphContext`` wire shape (spec §4 D8, §6, §9). NEVER exposes raw
+# Cypher: the renderer reads only the structured value object.
+# ---------------------------------------------------------------------------
+
+
+def _entity_json(entity: "GraphEntity") -> dict[str, Any]:
+    """Serialize one :class:`~brain.graph_rag.schema.GraphEntity` (read-side)."""
+    return {
+        "id": entity.id,
+        "entity_type": entity.entity_type,
+        "name": entity.name,
+        "canonical_key": entity.canonical_key,
+        "tenant_id": entity.tenant_id,
+        "description": entity.description,
+        "doc_count": entity.doc_count,
+    }
+
+
+def _graph_doc_json(doc: SearchResult) -> dict[str, Any]:
+    """Serialize one graph document hit (a reused :class:`SearchResult`)."""
+    return {
+        "id": doc.document_id,
+        "title": doc.title,
+        "source_kind": doc.source_kind,
+        "snippet": doc.snippet,
+        "score": doc.score,
+        "content_type": doc.content_type,
+        "tags": doc.tags,
+    }
+
+
+def _theme_json(theme: "ThemeGroup") -> dict[str, Any]:
+    """Serialize one :class:`~brain.graph_rag.schema.ThemeGroup`."""
+    return {
+        "group_id": theme.group_id,
+        "score": theme.score,
+        "summary": theme.summary,
+        "entities": [_entity_json(e) for e in theme.entities],
+        "doc_ids": list(theme.doc_ids),
+    }
+
+
+def _community_json(community: "CommunityGroup") -> dict[str, Any]:
+    """Serialize one :class:`~brain.graph_rag.schema.CommunityGroup` (global mode).
+
+    The wire shape for the top-level ``communities`` key (spec §17c Q5):
+    ``community_key`` / ``level`` / ``member_count`` / ``score`` / ``summary`` +
+    the representative ``entities`` (reusing :func:`_entity_json`) and
+    ``doc_ids``. Mirrors :func:`_theme_json` for the themes path.
+    """
+    return {
+        "community_key": community.community_key,
+        "level": community.level,
+        "member_count": community.member_count,
+        "score": community.score,
+        "summary": community.summary,
+        "entities": [_entity_json(e) for e in community.entities],
+        "doc_ids": list(community.doc_ids),
+    }
+
+
+def _explanation_json(explanation: "GraphExplanation | None") -> dict[str, Any] | None:
+    """Serialize the :class:`~brain.graph_rag.schema.GraphExplanation` diagnostic."""
+    if explanation is None:
+        return None
+    return {
+        "mode": explanation.mode,
+        "tenant_id": explanation.tenant_id,
+        "seed_entity_ids": list(explanation.seed_entity_ids),
+        "person_keys": list(explanation.person_keys),
+        "depth": explanation.depth,
+        "frontier_cap": explanation.frontier_cap,
+        "min_edge_weight": explanation.min_edge_weight,
+        "nodes_visited": explanation.nodes_visited,
+        "edges_considered": explanation.edges_considered,
+        "generic_df_cap": explanation.generic_df_cap,
+        "matched_filters": explanation.matched_filters,
+    }
+
+
+def graph_context_json(ctx: "GraphContext") -> dict[str, Any]:
+    """Serialize a :class:`~brain.graph_rag.schema.GraphContext` for ``--json``.
+
+    The full structured wire shape (spec §9): the resolved/requested mode +
+    degradation signals, the scoped person, the ranked ``themes`` (themes mode),
+    ``communities`` (global mode; spec §17c Q5), and ``entities`` (local mode),
+    the document hits, and the ranking ``explanation``. For ``fuse`` mode (wave
+    G4-c; spec §17d Q1) the fused doc list is the standard ``docs`` array (no new
+    field — wire-stable) and the per-doc leg provenance rides inside
+    ``explanation.matched_filters['fuse_doc_provenance']`` (serialized verbatim
+    here). Raw Cypher is never present — only the value object's fields.
+    """
+    return {
+        "session_id": ctx.session_id,
+        "mode": ctx.mode,
+        "query": ctx.query,
+        "tenant_id": ctx.tenant_id,
+        "person": ctx.person,
+        "requested_mode": ctx.requested_mode,
+        "degraded_from": ctx.degraded_from,
+        "degradation_reason": ctx.degradation_reason,
+        "themes": [_theme_json(t) for t in ctx.themes],
+        "communities": [_community_json(c) for c in ctx.communities],
+        "entities": [_entity_json(e) for e in ctx.entities],
+        "docs": [_graph_doc_json(d) for d in ctx.docs],
+        "explanation": _explanation_json(ctx.explanation),
+    }
+
+
+def _graph_header(ctx: "GraphContext") -> Text:
+    """Build the one-line ``GraphContext`` header (mode / person / tenant)."""
+    parts = [f"mode={ctx.mode}"]
+    if ctx.person:
+        parts.append(f"person={ctx.person}")
+    parts.append(f"tenant={ctx.tenant_id}")
+    return Text("Graph RAG · " + " · ".join(parts), style="bold")
+
+
+def _graph_themes_table(themes: "list[ThemeGroup]") -> Table:
+    """Render the ranked theme groups (themes mode)."""
+    table = Table(title="Themes")
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("Entities")
+    table.add_column("Score", justify="right")
+    table.add_column("Docs", justify="right")
+    table.add_column("Summary")
+    for theme in themes:
+        table.add_row(
+            str(theme.group_id),
+            ", ".join(e.name for e in theme.entities),
+            f"{theme.score:.3f}",
+            str(len(theme.doc_ids)),
+            (theme.summary or "").replace("\n", " "),
+        )
+    return table
+
+
+def _graph_communities_table(communities: "list[CommunityGroup]") -> Table:
+    """Render the ranked community groups (global mode; spec §17c Q5).
+
+    Columns: # (1-based rank) / Key (short ``community_key``) / Entities (the
+    representative member names) / Members (full ``member_count``) / Score (fused
+    RRF) / Summary. Mirrors :func:`_graph_themes_table`.
+    """
+    table = Table(title="Communities")
+    table.add_column("#", style="dim", justify="right")
+    table.add_column("Key", style="dim")
+    table.add_column("Entities")
+    table.add_column("Members", justify="right")
+    table.add_column("Score", justify="right")
+    table.add_column("Summary")
+    for rank, community in enumerate(communities, start=1):
+        table.add_row(
+            str(rank),
+            community.community_key[:8],
+            ", ".join(e.name for e in community.entities),
+            str(community.member_count),
+            f"{community.score:.4f}",
+            (community.summary or "").replace("\n", " "),
+        )
+    return table
+
+
+def _graph_entities_table(entities: "list[GraphEntity]") -> Table:
+    """Render the seed + reached entity neighbourhood (local mode)."""
+    table = Table(title="Entities")
+    table.add_column("Type", style="cyan")
+    table.add_column("Name")
+    table.add_column("Key", style="dim")
+    table.add_column("Docs", justify="right")
+    for entity in entities:
+        table.add_row(
+            entity.entity_type,
+            entity.name,
+            entity.canonical_key,
+            str(entity.doc_count),
+        )
+    return table
+
+
+def graph_context_renderable(ctx: "GraphContext") -> RenderableType:
+    """Render a :class:`~brain.graph_rag.schema.GraphContext` for the terminal.
+
+    A header line (mode / person / tenant), a degradation note when the auto
+    router degraded ``global → local`` (spec §17b decision 4 — kept dormant in
+    G3), the ranked ``communities`` (global mode; spec §17c Q5), ``themes``
+    (themes mode), or the ``entities`` neighbourhood (local mode), and the
+    document hits (reusing the search-result table shape). For ``fuse`` mode
+    (wave G4-c; spec §17d Q1) the graph leg's ``entities`` render above the fused
+    ``docs`` table (the per-doc leg provenance is in the ``--json`` explanation).
+    An all-empty context renders the header + a ``(no graph results)`` line. Raw
+    Cypher is never shown — only the structured value object.
+    """
+    blocks: list[RenderableType] = [_graph_header(ctx)]
+    if ctx.degraded_from is not None:
+        blocks.append(
+            Text(
+                f"note: requested {ctx.requested_mode!r} degraded "
+                f"{ctx.degraded_from}→{ctx.mode} ({ctx.degradation_reason})",
+                style="yellow",
+            )
+        )
+    if ctx.communities:
+        blocks.append(_graph_communities_table(ctx.communities))
+    elif ctx.themes:
+        blocks.append(_graph_themes_table(ctx.themes))
+    elif ctx.entities:
+        blocks.append(_graph_entities_table(ctx.entities))
+    if ctx.docs:
+        blocks.append(search_table(ctx.docs, title="Documents"))
+    if not ctx.communities and not ctx.themes and not ctx.entities and not ctx.docs:
+        blocks.append(Text("(no graph results)", style="dim"))
+    return Group(*blocks)
+
+
+# ---------------------------------------------------------------------------
+# Community admin listing (`brain graphrag communities list`, wave G3-f).
+# A persisted-row view (NOT a ranked retrieval group) — mirrors the stored
+# ``graph_communities`` rows for an operator. Distinct from the global-mode
+# ``CommunityGroup`` rendering above (which is per-query, RRF-ranked).
+# ---------------------------------------------------------------------------
+
+
+def _summary_preview(summary: str | None, limit: int = 80) -> str:
+    """One-line summary preview for the admin table (NULL → ``"(none)"``)."""
+    if not summary:
+        return "(none)"
+    flattened = summary.replace("\n", " ").strip()
+    return flattened if len(flattened) <= limit else flattened[: limit - 1] + "…"
+
+
+def community_record_json(record: "CommunityRecord") -> dict[str, Any]:
+    """Serialize one :class:`~brain.graph_rag.schema.CommunityRecord` (admin view).
+
+    The wire shape for ``brain graphrag communities list --json``: the stored
+    community's identity + aggregate stats + summary metadata. Like the other
+    read-side serializers it omits the raw ``summary_embedding`` vector (a
+    storage handle, not a wire value).
+    """
+    return {
+        "community_key": record.community_key,
+        "level": record.level,
+        "build_version": record.build_version,
+        "member_count": record.member_count,
+        "edge_count": record.edge_count,
+        "total_weight": record.total_weight,
+        "summary": record.summary,
+        "summary_model": record.summary_model,
+        "summary_at": record.summary_at.isoformat() if record.summary_at else None,
+    }
+
+
+def community_records_table(records: "list[CommunityRecord]") -> Table:
+    """Render stored communities as a Rich table (admin listing; wave G3-f).
+
+    Columns: Key (short ``community_key``) / Members / Edges / Weight / Summary
+    (preview). An empty list still renders the (header-only) table.
+    """
+    table = Table(title="Communities")
+    table.add_column("Key", style="dim")
+    table.add_column("Members", justify="right")
+    table.add_column("Edges", justify="right")
+    table.add_column("Weight", justify="right")
+    table.add_column("Summary")
+    for record in records:
+        table.add_row(
+            record.community_key[:8],
+            str(record.member_count),
+            str(record.edge_count),
+            f"{record.total_weight:.3f}",
+            _summary_preview(record.summary),
+        )
     return table

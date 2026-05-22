@@ -239,3 +239,152 @@ def test_migration_010_session_index_is_partial(test_db: psycopg.Connection) -> 
     ).fetchone()
     assert row is not None
     assert "session_id IS NOT NULL" in str(row[0])
+
+
+# --------------------------------------------------------------------------- #
+# G4-a (migration 015): generalized graph-target interactions.
+# --------------------------------------------------------------------------- #
+def test_record_interaction_graph_target(test_db: psycopg.Connection) -> None:
+    """A graph-target row writes target_type/target_id with NULL document_id."""
+    new_id = record_interaction(
+        test_db,
+        action="rated_useful",
+        source="cli",
+        target_type="entity",
+        target_id="ent-7",
+    )
+    assert uuid.UUID(new_id)
+    row = test_db.execute(
+        "SELECT document_id, target_type, target_id, graph_retrieved "
+        "FROM interactions WHERE id = %s",
+        (new_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] is None  # document_id NULL for a graph-target row
+    assert row[1] == "entity"
+    assert row[2] == "ent-7"
+    assert row[3] is False  # provenance defaults off
+
+
+@pytest.mark.parametrize("target_type", ["entity", "community", "theme"])
+def test_record_interaction_graph_target_all_kinds(
+    test_db: psycopg.Connection, target_type: str
+) -> None:
+    """All three target kinds are accepted by the Python writer."""
+    new_id = record_interaction(
+        test_db,
+        action="pinned",
+        source="mcp",
+        target_type=target_type,  # type: ignore[arg-type]
+        target_id="t-1",
+    )
+    row = test_db.execute(
+        "SELECT target_type FROM interactions WHERE id = %s", (new_id,)
+    ).fetchone()
+    assert row is not None
+    assert row[0] == target_type
+
+
+def test_record_interaction_graph_retrieved_on_document_row(
+    test_db: psycopg.Connection,
+) -> None:
+    """``graph_retrieved`` is provenance — settable on a DOCUMENT row."""
+    doc_id = _seed_doc(test_db)
+    new_id = record_interaction(
+        test_db,
+        document_id=doc_id,
+        action="opened",
+        source="mcp",
+        query="x",
+        graph_retrieved=True,
+    )
+    row = test_db.execute(
+        "SELECT document_id::text, target_type, graph_retrieved "
+        "FROM interactions WHERE id = %s",
+        (new_id,),
+    ).fetchone()
+    assert row is not None
+    assert row[0] == doc_id
+    assert row[1] is None  # still a document row, no target
+    assert row[2] is True
+
+
+def test_record_interaction_both_targets_raises(
+    test_db: psycopg.Connection,
+) -> None:
+    """document_id + a graph target → XOR error before any SQL runs."""
+    doc_id = _seed_doc(test_db)
+    with pytest.raises(InteractionError, match="not both"):
+        record_interaction(
+            test_db,
+            document_id=doc_id,
+            action="rated_useful",
+            source="cli",
+            target_type="entity",
+            target_id="ent-7",
+        )
+    count = test_db.execute("SELECT count(*) FROM interactions").fetchone()
+    assert count is not None
+    assert count[0] == 0
+
+
+def test_record_interaction_neither_target_raises(
+    test_db: psycopg.Connection,
+) -> None:
+    """Neither document_id nor a graph target → XOR error, nothing inserted."""
+    with pytest.raises(InteractionError, match="either a document"):
+        record_interaction(
+            test_db,
+            action="rated_useful",
+            source="cli",
+        )
+    count = test_db.execute("SELECT count(*) FROM interactions").fetchone()
+    assert count is not None
+    assert count[0] == 0
+
+
+def test_record_interaction_half_target_raises(
+    test_db: psycopg.Connection,
+) -> None:
+    """target_type without target_id → error (a full target needs both)."""
+    with pytest.raises(InteractionError, match="BOTH target_type and target_id"):
+        record_interaction(
+            test_db,
+            action="rated_useful",
+            source="cli",
+            target_type="entity",
+        )
+    count = test_db.execute("SELECT count(*) FROM interactions").fetchone()
+    assert count is not None
+    assert count[0] == 0
+
+
+def test_record_interaction_unknown_target_type_raises(
+    test_db: psycopg.Connection,
+) -> None:
+    """An unrecognised target_type raises before any SQL runs."""
+    with pytest.raises(InteractionError, match="unknown target_type"):
+        record_interaction(
+            test_db,
+            action="rated_useful",
+            source="cli",
+            target_type="document",  # type: ignore[arg-type]
+            target_id="x",
+        )
+    count = test_db.execute("SELECT count(*) FROM interactions").fetchone()
+    assert count is not None
+    assert count[0] == 0
+
+
+def test_db_xor_check_catches_raw_both_targets(
+    test_db: psycopg.Connection,
+) -> None:
+    """Raw INSERT setting both shapes trips the DB-level XOR CHECK."""
+    doc_id = _seed_doc(test_db)
+    with pytest.raises(psycopg.errors.CheckViolation):
+        test_db.execute(
+            "INSERT INTO interactions "
+            "(document_id, action, source, target_type, target_id) "
+            "VALUES (%s, %s, %s, %s, %s)",
+            (doc_id, "rated_useful", "cli", "entity", "ent-7"),
+        )

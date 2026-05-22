@@ -51,10 +51,13 @@ PORT="${BRAIN_WIKI_PORT:-8080}"
 URL="http://localhost:$PORT"
 KEEP="${BRAIN_WIKI_KEEP_BUILDS:-3}"
 
-WATCH_PID='/tmp/brain-watch.pid'
-WATCH_LOG='/tmp/brain-watch.log'
-BUILD_PID='/tmp/brain-build.pid'
-BUILD_LOG='/tmp/brain-build.log'
+# Pid/log paths default to the production /tmp locations; overridable (unset =
+# unchanged) so the test suite can run this shim hermetically against a tmp
+# dir, never colliding with a live brain-up install's global /tmp files.
+WATCH_PID="${BRAIN_WATCH_PID:-/tmp/brain-watch.pid}"
+WATCH_LOG="${BRAIN_WATCH_LOG:-/tmp/brain-watch.log}"
+BUILD_PID="${BRAIN_BUILD_PID:-/tmp/brain-build.pid}"
+BUILD_LOG="${BRAIN_BUILD_LOG:-/tmp/brain-build.log}"
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 

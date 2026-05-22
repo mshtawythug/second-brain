@@ -64,7 +64,7 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import psycopg
 from watchdog.events import (
@@ -86,6 +86,9 @@ from watchdog.observers.polling import PollingObserver as Observer
 from ..ingest import Embedder
 from .derived_links.fence import strip_fence
 from .sync import SyncReport, sync_one_file, sync_vault
+
+if TYPE_CHECKING:
+    from ..graph_rag.sync import GraphSyncer
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +183,7 @@ def run_watcher(
     config: WatchConfig,
     observer_factory: Callable[[], BaseObserver] | None = None,
     install_signal_handlers: bool = True,
+    graph_syncer: GraphSyncer | None = None,
 ) -> SyncReport:
     """Block until SIGINT/SIGTERM, watching ``config.vault_path``.
 
@@ -219,6 +223,7 @@ def run_watcher(
             dry_run=False,
             link_rewrite=config.link_rewrite,
             owner_participants=config.owner_participants,
+            graph_syncer=graph_syncer,
         )
     finally:
         startup_conn.close()
@@ -231,7 +236,7 @@ def run_watcher(
     worker_conn.autocommit = True
     worker_thread = threading.Thread(
         target=_worker_loop,
-        args=(worker_conn, embedder, config, state),
+        args=(worker_conn, embedder, config, state, graph_syncer),
         name="brain-vault-watcher-worker",
         daemon=True,
     )
@@ -535,6 +540,7 @@ def _worker_loop(
     embedder: Embedder,
     config: WatchConfig,
     state: _WatcherState,
+    graph_syncer: GraphSyncer | None = None,
 ) -> None:
     """Consume jobs serially. Owns the DB connection.
 
@@ -567,6 +573,7 @@ def _worker_loop(
                     dry_run=False,
                     link_rewrite=config.link_rewrite,
                     owner_participants=config.owner_participants,
+                    graph_syncer=graph_syncer,
                 )
                 # The full sync may have rewritten any number of fences;
                 # the cache entries from before the overflow window are
@@ -604,10 +611,16 @@ def _worker_loop(
                             file_path=job.abs_path,
                             link_rewrite=config.link_rewrite,
                             owner_participants=config.owner_participants,
+                            graph_syncer=graph_syncer,
                         )
                         _refresh_body_cache(state, job.abs_path)
                 else:
-                    _handle_delete(conn, job.abs_path, config.vault_path)
+                    _handle_delete(
+                        conn,
+                        job.abs_path,
+                        config.vault_path,
+                        graph_syncer=graph_syncer,
+                    )
                     # Drop the cache entry so a future creation event for
                     # the same path is treated as cold-start, not a
                     # spurious fence-only no-op.
@@ -648,6 +661,7 @@ def _worker_loop(
                         file_path=job.abs_path,
                         link_rewrite=config.link_rewrite,
                         owner_participants=config.owner_participants,
+                        graph_syncer=graph_syncer,
                     )
                     # Re-read after sync so the cache reflects whatever
                     # fence the linker just rewrote — that way the
@@ -713,7 +727,11 @@ def _refresh_body_cache(state: _WatcherState, abs_path: Path) -> None:
 
 
 def _handle_delete(
-    conn: psycopg.Connection[Any], abs_path: Path, vault_path: Path
+    conn: psycopg.Connection[Any],
+    abs_path: Path,
+    vault_path: Path,
+    *,
+    graph_syncer: GraphSyncer | None = None,
 ) -> None:
     """Remove the vault-tier ``documents`` row for ``abs_path``.
 
@@ -765,3 +783,9 @@ def _handle_delete(
             len(deleted),
             relative,
         )
+    # Wave G1-c: drop each deleted doc from the people graph (best-effort /
+    # never-raises; no-op when graph sync is disabled or AGE is absent). The
+    # worker connection is autocommit, so the DELETE above already committed.
+    if graph_syncer is not None:
+        for row in deleted:
+            graph_syncer.remove(conn, str(row[0]))

@@ -1,5 +1,8 @@
 services:
   postgres:
+    # Prod stays on stock pgvector until the explicit, gated cutover — see
+    # docs/specs/2026-05-20-graphrag-age-image.md. AGE runs for tests via
+    # docker-compose.age-test.yml (separate project, port 5434, named volume).
     image: pgvector/pgvector:pg16
     container_name: second-brain-postgres
     environment:

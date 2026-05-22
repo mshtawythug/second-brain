@@ -49,7 +49,12 @@ _CANARIES: list[tuple[str, str]] = [
     ("agentic AI in production", "b6d41f26"),  # AI Work Strategy (post-fix)
     ("interview prep", "19619f7c"),  # Interview Prep Hub (post-fix)
     ("test driven development", "d5433401"),
-    ("COMPANY_REDACTED pricing", "b0bcb431"),
+    # Refreshed 2026-05-22 (wave G4-d): the original pre-fix top-1 b0bcb431 was
+    # legitimately displaced by newer pricing/SEO planning docs (verified corpus
+    # drift, stable across repeated live runs), so the expectation is corrected
+    # to today's true top-1 — NOT weakened. 6a4635cc = "Website Pricing &
+    # Competitive Positioning Update Plan".
+    ("COMPANY_REDACTED pricing", "6a4635cc"),
     ("payments product", "410e1a90"),
     ("engineering leadership", "de3a7df5"),
 ]

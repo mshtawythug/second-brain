@@ -49,6 +49,7 @@ Second Brain is a local personal knowledge base with hybrid search, designed to 
 - PostgreSQL 16 + pgvector in Docker on port `5433`
 - Pluggable embedders via `BRAIN_EMBEDDER`: `arctic` default, `voyage`, or `qwen3`
 - Extraction: `pypdf`, `pdfplumber`, `python-docx`, `markdown-it-py`
+- Graph retrieval (experimental): Apache AGE (openCypher graph in-Postgres) + `networkx` (Louvain community detection) for entity-centric GraphRAG alongside the vector/FTS search; default-OFF via `BRAIN_GRAPH_ENABLED`; needs the custom AGE Postgres image
 - Tests: `pytest` with real Postgres fixtures and fake embedders
 - Lint/type: `ruff`, `mypy`
 
@@ -71,6 +72,22 @@ brain ingest-dir <dir>
 brain search "query"
 brain show <id-prefix>
 brain status
+
+# GraphRAG (experimental — entity graph alongside vector/FTS search).
+# Requires the custom Apache AGE image (second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2),
+# NOT the stock pgvector prod image. `pip install -e ".[dev]"` pulls networkx.
+# Set BRAIN_GRAPH_ENABLED=true in .env to enable the ingest-time graph sync.
+brain init                               # also bootstraps AGE + graph migrations on an AGE image
+brain graphrag build --backfill          # backfill the people graph from existing docs
+brain graphrag communities build         # detect + summarize communities (needed for --mode global)
+brain graphrag search "query"            # graph retrieval (modes: auto|local|themes|global|fuse)
+brain graphrag themes --person "Jane Doe"  # "themes in my conversations with X"
+brain graphrag communities list          # admin view of materialized communities
+brain doctor                             # also reports AGE + graph health (soft check)
+# Usage skill (Claude Code): skills/brain-graph/SKILL.md (brain-graph) — graph
+#   retrieval for themes / patterns / connections across interactions (themes
+#   with a person, what connects A and B, recurring themes), alongside plain
+#   hybrid search.
 
 # Verification
 ruff check
@@ -184,6 +201,8 @@ Topic → file map (Codex memory):
 - Switching embedders is destructive because embeddings cannot be re-projected across models.
 - `brain init` applies migrations and reconciles `chunks.embedding` dimensions with the active embedder.
 - For `qwen3`, pgvector HNSW is skipped because 4096 dimensions exceed pgvector's vector index cap.
+- GraphRAG (experimental) needs the custom Apache AGE image `second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2` (built from `src/brain/templates/docker/age/Dockerfile`); the stock pgvector prod image does not ship AGE. The concept aspect (LLM extraction) is default-OFF behind `BRAIN_GRAPH_CONCEPTS`; the people aspect needs no model. The graph is a recomputable mirror — rebuild it with `brain graphrag build --force`. Switching an existing brain to AGE is a separate, deliberate cutover — back up the database first; until then GraphRAG runs against the AGE-backed test instance only (`docker-compose.age-test.yml`, port 5434) while prod stays on stock pgvector.
+- GraphRAG retrieval/admin surfaces have full CLI↔MCP parity: `brain graphrag {search,themes,entity,build,refresh,communities {build,refresh,list}}` and the matching `brain_graphrag_*` MCP tools. Never accept or emit raw Cypher — every command takes structured params and the backend injects the tenant + traversal caps.
 
 ## Lessons
 

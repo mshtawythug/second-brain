@@ -1,0 +1,40 @@
+# AGE-enabled TEST instance ONLY — backs the pytest suite (TEST_DATABASE_URL,
+# port 5434). Separate compose project (`second-brain-age-test`) with its own
+# NAMED docker volume (`second-brain-age-test-postgres`), never the prod
+# bind-mount at ./data/postgres.
+#
+# Prod stays on stock pgvector on port 5433 (./data/postgres) via
+# docker-compose.yml and is NEVER touched by this file. The Apache AGE cutover
+# of the prod container is gated — see docs/specs/2026-05-20-graphrag-age-image.md.
+#
+#   Start:  docker compose -f docker-compose.age-test.yml up -d --build
+#   Stop:   docker compose -f docker-compose.age-test.yml down   (data persists in the named volume)
+#   Wipe:   docker compose -f docker-compose.age-test.yml down -v (drops the test data; safe — not prod)
+name: second-brain-age-test
+services:
+  postgres-age-test:
+    # Custom PG16 image: pgvector 0.8.2 + pgcrypto + Apache AGE 1.5.0-rc0 (GraphRAG).
+    # Canonical Dockerfile is packaged at src/brain/templates/docker/age/Dockerfile
+    # (single source). All versions pinned. `docker compose -f docker-compose.age-test.yml
+    # up --build` produces the `image:` tag below; subsequent `up` reuses it.
+    build:
+      context: ./src/brain/templates/docker/age
+      dockerfile: Dockerfile
+    image: second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
+    container_name: second-brain-age-test
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain
+      POSTGRES_DB: second_brain_test
+    ports:
+      - "5434:5432"
+    volumes:
+      - second-brain-age-test-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d second_brain_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  second-brain-age-test-postgres:
