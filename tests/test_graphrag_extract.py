@@ -266,16 +266,16 @@ def test_extract_empty_text_makes_no_model_call() -> None:
 
 
 def test_extractor_version_constant_present_and_folds_model() -> None:
-    assert EXTRACTOR_VERSION == "concepts-v1"
+    assert EXTRACTOR_VERSION == "concepts-v2"
     extractor = _extractor(_const_handler(_ok_entities([])))
-    assert extractor.version == "llama3.1:8b@concepts-v1"
+    assert extractor.version == "llama3.1:8b@concepts-v2"
 
 
 def test_extractor_version_changes_with_model() -> None:
     extractor = OllamaExtractor(
         enricher=_enricher(_const_handler(_ok_entities([])), model="custom:7b")
     )
-    assert extractor.version == "custom:7b@concepts-v1"
+    assert extractor.version == "custom:7b@concepts-v2"
 
 
 def test_concept_entity_types_excludes_person() -> None:
@@ -476,7 +476,7 @@ def test_make_extractor_uses_graph_extract_model() -> None:
     cfg = Config(database_url="postgresql://x/y", graph_extract_model="custom:7b")
     extractor = make_extractor(cfg)
     assert isinstance(extractor, OllamaExtractor)
-    assert extractor.version == "custom:7b@concepts-v1"
+    assert extractor.version == "custom:7b@concepts-v2"
 
 
 def test_make_extractor_threads_max_entities() -> None:
@@ -501,3 +501,160 @@ def test_invalid_max_entities_raises_value_error() -> None:
         OllamaExtractor(
             enricher=_enricher(_const_handler(_ok_entities([]))), max_entities=0
         )
+
+
+# --------------------------------------------------------------------------- #
+# G2 quality fixes (task #53): type-label normalization, noise filter, project
+# prefix repair, conservative project substring dedup, timeout threading.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("raw_type", "expected_type"),
+    [
+        ("organization", "org"),
+        ("Organisation", "org"),
+        ("company", "org"),
+        ("vendor", "org"),
+        ("software", "tool"),
+        ("framework", "tool"),
+        ("library", "tool"),
+        ("application", "tool"),
+        ("initiative", "project"),
+        ("effort", "project"),
+        ("theme", "topic"),
+        ("subject", "topic"),
+    ],
+)
+def test_extract_normalizes_synonym_type_labels(
+    raw_type: str, expected_type: str
+) -> None:
+    """Near-synonym type labels map to the canonical type (recall: not dropped)."""
+    handler = _const_handler(_ok_entities([{"name": "Glasswing", "type": raw_type}]))
+    out = _extractor(handler).extract("We adopted Glasswing this quarter.")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [
+        (expected_type, "glasswing")
+    ]
+
+
+def test_extract_unknown_type_still_dropped_after_normalization() -> None:
+    """A label that is neither canonical nor a known synonym is still dropped."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "2026-05-22", "type": "date"},  # unknown -> dropped
+                {"name": "Glasswing", "type": "vendor"},  # synonym -> org
+            ]
+        )
+    )
+    out = _extractor(handler).extract("Glasswing on 2026-05-22")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("org", "glasswing")]
+
+
+def test_extract_drops_single_char_key_keeps_two_char_acronym() -> None:
+    """Min-key-len floor is 2: 1-char noise dropped, 2-char acronym kept."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "x", "type": "topic"},  # 1 char -> dropped
+                {"name": "ML", "type": "topic"},  # 2 char -> kept
+            ]
+        )
+    )
+    out = _extractor(handler).extract("x and ML were discussed")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("topic", "ml")]
+
+
+def test_extract_drops_generic_stop_words() -> None:
+    """Exact-match generic stop words are filtered; real concepts survive."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "platform", "type": "topic"},  # generic -> dropped
+                {"name": "Dashboard", "type": "topic"},  # generic -> dropped
+                {"name": "billing", "type": "topic"},  # real -> kept
+            ]
+        )
+    )
+    out = _extractor(handler).extract("the billing platform dashboard")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("topic", "billing")]
+
+
+def test_extract_repairs_stripped_project_prefix() -> None:
+    """A bare project name is restored to 'Project X' when the doc names it so."""
+    handler = _const_handler(_ok_entities([{"name": "Helios", "type": "project"}]))
+    out = _extractor(handler).extract("Project Helios shipped the migration.")
+    assert len(out) == 1
+    assert out[0].entity_type == "project"
+    assert out[0].canonical_key == "project helios"
+    assert out[0].display_name == "Project Helios"
+
+
+def test_extract_project_prefix_repair_only_when_present_in_text() -> None:
+    """No spurious 'Project ' prefix when the doc does not use that form."""
+    handler = _const_handler(_ok_entities([{"name": "Helios", "type": "project"}]))
+    out = _extractor(handler).extract("Helios shipped the migration.")
+    assert out[0].canonical_key == "helios"
+
+
+def test_extract_dedupes_project_substring_keeping_longer() -> None:
+    """A bare project subsumed by its 'Project X' sibling is dropped (project-only)."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "Helios", "type": "project"},
+                {"name": "Project Helios", "type": "project"},
+            ]
+        )
+    )
+    # Text lacks the phrase 'Project Helios', so prefix-repair does NOT merge
+    # them — the conservative project substring dedup must.
+    out = _extractor(handler).extract("We discussed Helios at length.")
+    keys = sorted(e.canonical_key for e in out if e.entity_type == "project")
+    assert keys == ["project helios"]
+
+
+def test_extract_substring_dedup_not_applied_to_topics() -> None:
+    """Topics are NOT substring-deduped — a shorter topic is often the right one."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "billing", "type": "topic"},
+                {"name": "billing platform", "type": "topic"},
+            ]
+        )
+    )
+    out = _extractor(handler).extract("billing and billing platform discussed")
+    keys = sorted(e.canonical_key for e in out if e.entity_type == "topic")
+    assert keys == ["billing", "billing platform"]
+
+
+def test_make_extractor_threads_enrich_timeout() -> None:
+    """make_extractor threads cfg.enrich_timeout_seconds (not the 60s default)."""
+    cfg = Config(database_url="postgresql://x/y", enrich_timeout_seconds=137.0)
+    extractor = make_extractor(cfg)
+    assert extractor._enricher._client.timeout.read == 137.0
+
+
+def test_extract_project_prefix_repair_rejects_substring_false_positive() -> None:
+    """A bare project is NOT promoted on a substring-only match: 'Project
+    Helioscope' in the text must not turn 'Helios' into 'Project Helios'."""
+    handler = _const_handler(_ok_entities([{"name": "Helios", "type": "project"}]))
+    out = _extractor(handler).extract("Project Helioscope shipped the rollout.")
+    assert len(out) == 1
+    assert out[0].entity_type == "project"
+    assert out[0].canonical_key == "helios"  # NOT 'project helios'
+
+
+@pytest.mark.parametrize(
+    "ambiguous_type",
+    ["platform", "technology", "domain", "area", "app", "language", "infrastructure"],
+)
+def test_extract_drops_ambiguous_non_synonym_type_labels(ambiguous_type: str) -> None:
+    """Ambiguous words excluded from the synonym map are NOT normalized — the
+    entity is dropped rather than mis-typed (Codex review: narrow synonym set)."""
+    handler = _const_handler(
+        _ok_entities([{"name": "Glasswing", "type": ambiguous_type}])
+    )
+    out = _extractor(handler).extract("We use Glasswing daily.")
+    assert out == []

@@ -79,13 +79,91 @@ __all__ = [
 # which feeds ``graph_index_state.extractor_ver`` (spec §7). Bump when the
 # prompt / validation / canonicalization semantics change so reconcile
 # re-extracts affected documents.
-EXTRACTOR_VERSION = "concepts-v1"
+EXTRACTOR_VERSION = "concepts-v2"
 
 # The concept entity types the extractor emits (spec §5 ``entity_type CHECK``
 # minus ``person``). People are derived from the participants pipeline and are
 # explicitly NOT extracted here (spec §17b decision 2: "people excluded"); any
 # model entry typed ``person`` (or anything off this list) is dropped.
 CONCEPT_ENTITY_TYPES = frozenset({"topic", "project", "org", "tool"})
+
+# Near-synonym TYPE labels a small model commonly emits for the four canonical
+# concept types. Normalized to the canonical type BEFORE the allowlist check in
+# :func:`_validate_entry`, so a valid extraction tagged ``"organization"`` /
+# ``"software"`` / ``"initiative"`` / ``"theme"`` is recovered rather than
+# silently dropped (a real recall loss the gate exposed). This is keyed strictly
+# on the TYPE label — never on the entity NAME (no vendor/name allowlist, which
+# would overfit the synthetic gate fixture).
+#
+# Deliberately conservative: ONLY unambiguous type-label synonyms are mapped.
+# Ambiguous words (``platform`` / ``technology`` / ``domain`` / ``area`` /
+# ``language`` / ``infrastructure`` / ``app``) are intentionally EXCLUDED — a
+# real-corpus entity mislabeled with one of those is better dropped than
+# silently mis-typed (Codex review).
+_TYPE_LABEL_SYNONYMS: dict[str, str] = {
+    "organization": "org",
+    "organisation": "org",
+    "company": "org",
+    "companies": "org",
+    "vendor": "org",
+    "institution": "org",
+    "corporation": "org",
+    "software": "tool",
+    "framework": "tool",
+    "library": "tool",
+    "application": "tool",
+    "initiative": "project",
+    "effort": "project",
+    "program": "project",
+    "programme": "project",
+    "projects": "project",
+    "theme": "topic",
+    "subject": "topic",
+    "topics": "topic",
+}
+
+# Minimum canonical-key length (characters). A floor of 2 drops single-character
+# noise while KEEPING short acronyms / tool names (a 2-char language, ``ml``,
+# ``ci``…). Deliberately not 3 — a 3-char floor silently kills valid 2-char
+# acronyms in the real corpus (Codex review, recall-protective).
+_MIN_CANONICAL_KEY_LEN = 2
+
+# Generic structural / meeting nouns that are never a useful standalone concept.
+# EXACT canonical-key match only, and intentionally GENERIC (NOT this fixture's
+# specific distractor terms) so it never blocks a legitimate domain concept in
+# the real 1195-doc corpus (Codex review: a fixture-derived blocklist overfits
+# the precision side). Keep this list small and obviously-generic.
+_GENERIC_STOP_KEYS: frozenset[str] = frozenset({
+    "platform",
+    "service",
+    "services",
+    "system",
+    "systems",
+    "stack",
+    "team",
+    "teams",
+    "group",
+    "groups",
+    "meeting",
+    "meetings",
+    "call",
+    "calls",
+    "sync",
+    "standup",
+    "review",
+    "reviews",
+    "update",
+    "updates",
+    "discussion",
+    "workshop",
+    "sprint",
+    "document",
+    "note",
+    "notes",
+    "report",
+    "dashboard",
+    "dashboards",
+})
 
 # Per-chunk token budget for the LLM extraction calls. A document longer than
 # this is split into multiple chunks (one model call each). Independent of the
@@ -252,18 +330,23 @@ class OllamaExtractor:
     def _finalize(
         self, candidates: list[tuple[str, str]], text: str
     ) -> list[ExtractedEntity]:
-        """Dedup, position, cap, and order the validated candidates."""
+        """Repair, filter, dedup, position, cap, and order the candidates."""
         if not candidates:
             return []
         doc_words = _tokenize_words(text)
         # Dedup on (entity_type, canonical_key); keep the first-seen surface form
         # as the display name. Iteration order over the candidate list is
         # deterministic (chunk order, then in-chunk order), so the kept surface
-        # form is stable.
+        # form is stable. Before canonicalizing: restore a stripped "Project"
+        # prefix when the document names the project that way (fixes an exact-key
+        # miss). After canonicalizing: drop too-short or generic-noun keys
+        # (precision). Both stay recall-safe — the repair recovers a match, and
+        # the noise filter is narrow + generic.
         seen: dict[tuple[str, str], str] = {}
-        for entity_type, display_name in candidates:
+        for entity_type, raw_display_name in candidates:
+            display_name = _repair_project_prefix(entity_type, raw_display_name, text)
             canonical_key = _canonical_key(display_name)
-            if not canonical_key:
+            if _is_noise_key(canonical_key):
                 continue
             seen.setdefault((entity_type, canonical_key), display_name)
 
@@ -279,6 +362,7 @@ class OllamaExtractor:
                     mention_count=max(1, len(positions)),
                 )
             )
+        entities = _dedupe_project_substrings(entities)
         entities = self._apply_cap(entities)
         entities.sort(key=lambda entity: (entity.entity_type, entity.canonical_key))
         return entities
@@ -311,8 +395,18 @@ def make_extractor(cfg: Config) -> OllamaExtractor:
     (``BRAIN_GRAPH_MAX_ENTITIES_PER_DOC``). The model is the dedicated
     ``BRAIN_GRAPH_EXTRACT_MODEL`` so the concept extractor and the summary
     enricher stay independently overridable (no enrich<->graph coupling).
+
+    The HTTP timeout is threaded from ``cfg.enrich_timeout_seconds``
+    (``BRAIN_ENRICH_TIMEOUT_SECONDS``) — NOT the 60s ``OllamaEnricher`` default.
+    A large document can take more than 60s to extract on a slow model; the old
+    hardcoded default timed those out and silently returned zero entities.
+    Operators raise ``BRAIN_ENRICH_TIMEOUT_SECONDS`` for slow models.
     """
-    enricher = OllamaEnricher(host=cfg.ollama_host, model=cfg.graph_extract_model)
+    enricher = OllamaEnricher(
+        host=cfg.ollama_host,
+        model=cfg.graph_extract_model,
+        timeout=cfg.enrich_timeout_seconds,
+    )
     return OllamaExtractor(enricher=enricher, max_entities=cfg.graph_max_entities)
 
 
@@ -337,6 +431,11 @@ def _validate_entry(entry: Any) -> tuple[str, str] | None:
         return None
     display_name = raw_name.strip()
     entity_type = raw_type.strip().lower()
+    # Normalize near-synonym type labels (organization/software/initiative/theme/
+    # …) to the canonical type BEFORE the allowlist check, so a valid extraction
+    # is not dropped purely over label wording (a real recall loss). Keyed on the
+    # TYPE label only — never on the entity NAME.
+    entity_type = _TYPE_LABEL_SYNONYMS.get(entity_type, entity_type)
     if not display_name:
         return None
     if entity_type not in CONCEPT_ENTITY_TYPES:
@@ -375,3 +474,93 @@ def _locate_positions(name: str, doc_words: list[str]) -> tuple[int, ...]:
     return tuple(
         i for i in range(last_start + 1) if doc_words[i : i + span] == name_words
     )
+
+
+def _is_noise_key(canonical_key: str) -> bool:
+    """True when a canonical key is too short or a generic stop word.
+
+    Drops single-character noise (``len < _MIN_CANONICAL_KEY_LEN``) and an exact
+    match against the small, generic :data:`_GENERIC_STOP_KEYS` list. Both checks
+    are deliberately narrow to protect recall — short acronyms (>= 2 chars) and
+    every real domain concept pass through.
+    """
+    return (
+        len(canonical_key) < _MIN_CANONICAL_KEY_LEN
+        or canonical_key in _GENERIC_STOP_KEYS
+    )
+
+
+def _repair_project_prefix(entity_type: str, display_name: str, text: str) -> str:
+    """Restore a stripped ``Project`` prefix when the document names it that way.
+
+    Small models often return the bare project name (``"Helios"``) for a concept
+    the document writes as ``"Project Helios"``. When the entity is a ``project``
+    and the ``"Project <name>"`` form appears verbatim in the text, prefer that
+    fuller surface form so the canonical key matches how the project is actually
+    named. Generic (any project name) — never keyed on a specific entity.
+
+    The match is a contiguous WORD/token sequence, not a substring: a bare
+    ``"Helios"`` is NOT promoted when the document only says ``"Project
+    Helioscope"`` (which contains ``"project helios"`` as a substring).
+    """
+    if entity_type != "project":
+        return display_name
+    stripped = display_name.strip()
+    if not stripped or stripped.lower().startswith("project "):
+        return display_name
+    name_words = _tokenize_words(stripped)
+    if not name_words:
+        return display_name
+    target = ["project", *name_words]
+    doc_words = _tokenize_words(text)
+    span = len(target)
+    if any(
+        doc_words[i : i + span] == target
+        for i in range(len(doc_words) - span + 1)
+    ):
+        return f"Project {stripped}"
+    return display_name
+
+
+def _is_word_subsequence(short_words: list[str], long_words: list[str]) -> bool:
+    """True when ``short_words`` appears as a contiguous run inside ``long_words``."""
+    span = len(short_words)
+    if not span or span >= len(long_words):
+        return False
+    return any(
+        long_words[i : i + span] == short_words
+        for i in range(len(long_words) - span + 1)
+    )
+
+
+def _dedupe_project_substrings(
+    entities: list[ExtractedEntity],
+) -> list[ExtractedEntity]:
+    """Drop a bare ``project`` entity subsumed by a fuller ``"Project X"`` sibling.
+
+    Conservative and PROJECT-SCOPED: when two ``project`` entities exist and one
+    canonical key is a contiguous word-subsequence of the other (e.g. ``helios``
+    vs ``project helios``), keep only the longer named form. Deliberately NOT
+    applied to org/tool/topic — for those a shorter key is often the correct
+    concept (``billing`` vs ``billing platform``), so a blanket keep-longest
+    would hurt recall.
+    """
+    projects = [e for e in entities if e.entity_type == "project"]
+    if len(projects) < 2:
+        return entities
+    drop_keys: set[str] = set()
+    for candidate in projects:
+        candidate_words = candidate.canonical_key.split()
+        for other in projects:
+            if other.canonical_key == candidate.canonical_key:
+                continue
+            if _is_word_subsequence(candidate_words, other.canonical_key.split()):
+                drop_keys.add(candidate.canonical_key)
+                break
+    if not drop_keys:
+        return entities
+    return [
+        e
+        for e in entities
+        if not (e.entity_type == "project" and e.canonical_key in drop_keys)
+    ]

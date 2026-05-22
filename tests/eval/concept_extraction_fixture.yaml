@@ -36,6 +36,9 @@ docs:
       - {type: project, key: project helios}
       - {type: topic, key: observability}
       - {type: topic, key: reliability}
+      # Gold-label correction (Codex QA): the doc states "Latency and reliability
+      # were the main topics in the review." — both conjuncts are main topics.
+      - {type: topic, key: latency}
 
   - id: synth-data-003
     text: >
@@ -71,6 +74,9 @@ docs:
       - {type: project, key: project atlas}
       - {type: topic, key: personalization}
       - {type: topic, key: model evaluation}
+      # Gold-label correction (Codex QA): the doc states "Model evaluation and
+      # feature drift were the recurring topics." — both conjuncts are topics.
+      - {type: topic, key: feature drift}
 
   - id: synth-frontend-006
     text: >
@@ -93,6 +99,9 @@ docs:
       - {type: org, key: stripe}
       - {type: project, key: project aurora}
       - {type: topic, key: fraud prevention}
+      # Gold-label correction (Codex QA): the doc states "Fraud prevention and
+      # chargebacks dominated the discussion." — both conjuncts are topics.
+      - {type: topic, key: chargebacks}
 
   - id: synth-messaging-008
     text: >
@@ -104,3 +113,6 @@ docs:
       - {type: tool, key: redis}
       - {type: project, key: project beacon}
       - {type: topic, key: throughput}
+      # Gold-label correction (Codex QA): the doc states "Throughput and
+      # back-pressure were the main topics raised." — both conjuncts are topics.
+      - {type: topic, key: back-pressure}

@@ -104,19 +104,64 @@ _TAG_SYSTEM_PROMPT = (
 # entity types — people are derived for free from the participants pipeline and
 # are deliberately NOT extracted here (spec §17b decision 2: "people excluded").
 _EXTRACT_SYSTEM_PROMPT = (
-    "You extract the salient CONCEPT entities from a personal-knowledge-base "
-    "document: its topics, projects, organizations, and tools.\n"
+    "You extract the salient non-person CONCEPT entities from a "
+    "personal-knowledge-base document.\n"
     "\n"
     "Return ONLY valid JSON:\n"
     '{"entities": [{"name": "...", "type": "topic"}]}\n'
     "\n"
-    "Rules:\n"
-    "- type MUST be exactly one of: topic, project, org, tool\n"
-    "- NEVER extract people / person names (those are tracked separately)\n"
-    "- NEVER extract dates, generic filler words, or file formats\n"
-    "- use the entity's surface form exactly as it appears in the text for name\n"
-    "- prefer specific, salient entities; skip incidental one-off mentions\n"
-    "- return an empty list when the text has no clear concept entities"
+    "type MUST be exactly one of: org, project, tool, topic.\n"
+    "Use the entity's surface form exactly as it appears in the text for name.\n"
+    "\n"
+    "Type rules:\n"
+    "- org: a company or provider whose hosted service or platform you consume "
+    "or integrate with — e.g. a payments, identity, data-warehouse, or cloud "
+    "provider. Use the company name.\n"
+    "- tool: software you run, deploy, operate, import, or build with — a "
+    "framework, library, language, database, monitoring agent, or server.\n"
+    "- project: a named initiative or effort. Keep the FULL name including a "
+    'leading word like "Project" (return "Project Falcon", never "Falcon").\n'
+    "- topic: a central, durable theme or subject area the document is about, "
+    "usually one or two words.\n"
+    "\n"
+    "Topic guidance:\n"
+    "- Capture the few themes the text frames as central. Look for "
+    "importance-signaling language — examples (not an exhaustive list) include "
+    '"the main topic", "the recurring theme", "the headline", "dominated the '
+    'discussion", "a major focus was", "central to the conversation", "we kept '
+    'coming back to", or "came up repeatedly" — and any similar phrasing that '
+    "marks something as important, as well as the core subject the document "
+    "centers on.\n"
+    "- Also capture the core subject word that a named effort or platform is "
+    'about — the domain word inside phrases like a "<X> effort", "<X> '
+    'initiative", "<X> platform", or "<X> stack" (extract <X> as the topic).\n'
+    "- Return roughly 1-3 topics, and prefer the short theme word over a long "
+    "phrase (the one- or two-word theme, not a verbose feature description).\n"
+    "\n"
+    "Never extract:\n"
+    "- people or person names (they are tracked separately)\n"
+    "- dates, times, or file formats\n"
+    "- generic activities or events (meetings, reviews, sprints, workshops)\n"
+    "- incidental UI or implementation nouns, or one-off mentions that are not a "
+    "central theme\n"
+    "- vague container words (platform, service, system, dashboard) on their own\n"
+    "\n"
+    "Examples (illustrative only — invented names; do not copy them):\n"
+    "TEXT: We moved payments onto Glasswing this quarter. Project Falcon owns "
+    "the new ledger, tracked in Quillbase. Onboarding was the recurring theme of "
+    "the review.\n"
+    'JSON: {"entities": [{"name": "Glasswing", "type": "org"}, '
+    '{"name": "Project Falcon", "type": "project"}, '
+    '{"name": "Quillbase", "type": "tool"}, '
+    '{"name": "onboarding", "type": "topic"}]}\n'
+    "TEXT: The team adopted Helmwright for scheduling and wired up Tessa for "
+    "alerts. Project Marlin is the rollout. Uptime dominated the discussion.\n"
+    'JSON: {"entities": [{"name": "Helmwright", "type": "tool"}, '
+    '{"name": "Tessa", "type": "tool"}, '
+    '{"name": "Project Marlin", "type": "project"}, '
+    '{"name": "uptime", "type": "topic"}]}\n'
+    "\n"
+    "Return an empty list when the text has no clear concept entities."
 )
 
 

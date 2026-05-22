@@ -50,7 +50,11 @@ def test_concept_extractor_gate(caplog: pytest.LogCaptureFixture) -> None:
     cfg = Config.load()
 
     # Reachability probe — skip (don't fail) when Ollama / the model is down.
-    probe = OllamaEnricher(host=cfg.ollama_host, model=cfg.graph_extract_model)
+    probe = OllamaEnricher(
+        host=cfg.ollama_host,
+        model=cfg.graph_extract_model,
+        timeout=cfg.enrich_timeout_seconds,
+    )
     try:
         probe.extract_entities("Stripe billing and pricing for Project Aurora.")
     except OllamaUnavailable as exc:

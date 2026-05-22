@@ -353,7 +353,7 @@ def reconcile_document(
       co-occurrence config (the extracted entities are captured by
       ``content_hash`` + ``extractor_ver``, so this skip-check runs BEFORE the
       LLM call: an unchanged concept watermark short-circuits extraction),
-      ``extractor_ver`` = ``extractor.version`` (``"<model>@concepts-v1"``).
+      ``extractor_ver`` = ``extractor.version`` (``"<model>@concepts-v2"``).
 
     Both share ``suppress_ver`` (the derive-time weighting/suppression version).
     For each STALE aspect the pipeline upserts its ``graph_entities`` rows and
