@@ -161,8 +161,10 @@ class _RecordingSyncer:
 # 1. Config parsing + validation
 # --------------------------------------------------------------------------- #
 def test_graph_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    # BRAIN_GRAPH_ENABLED is isolated from the local .env by the session-autouse
+    # _force_graph_flags_default fixture (empty -> code default = disabled);
+    # delenv'ing it here would instead let the .env file re-inject the flag.
     for key in (
-        "BRAIN_GRAPH_ENABLED",
         "BRAIN_GRAPH_TENANT",
         "BRAIN_GRAPH_COOCCUR_WINDOW",
         "BRAIN_GRAPH_MAX_ENTITIES_PER_DOC",

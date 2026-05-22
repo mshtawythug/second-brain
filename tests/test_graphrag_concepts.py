@@ -846,8 +846,10 @@ def test_cli_build_default_off_skips_concepts(
     _seed_manual_doc(test_db, external_id="n1", content="stripe phoenix")
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setenv("BRAIN_GRAPH_GENERIC_DF", "1.0")
-    # Ensure the env gate is off.
-    monkeypatch.delenv("BRAIN_GRAPH_CONCEPTS", raising=False)
+    # The concept env gate stays off via the session-autouse
+    # _force_graph_flags_default fixture; a delenv here would instead let the
+    # local .env (which the concept backfill sets BRAIN_GRAPH_CONCEPTS=true in)
+    # re-inject the flag and silently flip this test.
 
     res = CliRunner().invoke(app, ["graphrag", "build", "--backfill"])
     assert res.exit_code == 0, res.output

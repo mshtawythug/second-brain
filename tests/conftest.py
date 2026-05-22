@@ -145,6 +145,39 @@ def _force_test_database_url() -> Iterator[None]:
             os.environ["DATABASE_URL"] = original
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _force_graph_flags_default() -> Iterator[None]:
+    """Isolate the whole suite from the local ``.env``'s GraphRAG feature flags.
+
+    ``Config.load()`` reads the ``.env`` FILE via ``dotenv_values`` (not just
+    ``os.environ``) and applies it with ``os.environ.setdefault`` — so a flag
+    present in the repo ``.env`` flows into every ``Config.load()`` unless that
+    key is ALREADY in ``os.environ``. Once the operational ``.env`` enables the
+    graph flags (``BRAIN_GRAPH_ENABLED`` for the prod cutover,
+    ``BRAIN_GRAPH_CONCEPTS`` for the concept backfill), any test asserting the
+    *disabled* default silently flips — and a bare ``monkeypatch.delenv`` does
+    NOT help, because the file value is re-injected after the delete.
+
+    Mirroring :func:`_force_test_database_url`, force both flags to an EMPTY
+    string for the session (empty -> the parser uses the code default, i.e.
+    disabled), so ``os.environ.setdefault`` skips the ``.env`` value. Per-test
+    ``monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "true")`` in the enabled-path
+    tests still overrides this and undoes itself per-test.
+    """
+    keys = ("BRAIN_GRAPH_ENABLED", "BRAIN_GRAPH_CONCEPTS")
+    originals = {key: os.environ.get(key) for key in keys}
+    for key in keys:
+        os.environ[key] = ""
+    try:
+        yield
+    finally:
+        for key, original in originals.items():
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
+
+
 def _reset_age_graph(conn: psycopg.Connection) -> None:
     """Reset Apache AGE graph state between DB tests.
 
