@@ -197,6 +197,10 @@ brain graphrag themes --person "Jane Doe"  # "themes in my conversations with X"
 brain graphrag search "..." --mode fuse  # RRF of the graph leg + vector/FTS hybrid leg
 brain graphrag communities list          # admin view of materialized communities
 brain doctor                             # also reports AGE + graph health (soft check)
+# Usage skill (Claude Code): skills/brain-graph/SKILL.md (brain-graph) — graph
+#   retrieval for themes / patterns / connections across interactions (themes
+#   with a person, what connects A and B, recurring themes), alongside plain
+#   hybrid search.
 
 # Testing
 pytest                                   # full suite
