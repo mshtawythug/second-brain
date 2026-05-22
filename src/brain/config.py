@@ -81,6 +81,62 @@ DEFAULT_ENRICH_MAX_INPUT_TOKENS = 4000
 # ``BRAIN_ENRICH_TIMEOUT_SECONDS``.
 DEFAULT_ENRICH_TIMEOUT_SECONDS = 60.0
 
+# Wave G1-c -- GraphRAG incremental sync (people aspect) settings.
+#
+# Graph sync is OPT-IN this wave: ``BRAIN_GRAPH_ENABLED`` defaults to False so
+# existing deployments (and the prod DB, which predates the Apache AGE image)
+# see no behavior change. When enabled AND the database actually ships AGE, a
+# post-write / post-delete hook keeps the people graph in lock-step with the
+# ``documents`` table (see :mod:`brain.graph_rag.sync`). The remaining knobs map
+# 1:1 onto :class:`brain.graph_rag.reconcile.ReconcileConfig`; their defaults
+# mirror the canonical constants in :mod:`brain.graph_rag.cooccur` /
+# :mod:`brain.graph_rag.weighting` -- kept as literals here (not imported) so
+# ``config`` stays import-cheap and free of any cycle with the graph package.
+DEFAULT_GRAPH_ENABLED = False
+DEFAULT_GRAPH_TENANT_ID = "default"
+DEFAULT_GRAPH_COOCCUR_WINDOW = 3  # == brain.graph_rag.cooccur.DEFAULT_COOCCUR_WINDOW
+DEFAULT_GRAPH_MAX_ENTITIES = 40  # == cooccur.DEFAULT_MAX_ENTITIES_PER_DOC
+DEFAULT_GRAPH_GENERIC_DF_RATIO = 0.30  # == weighting.DEFAULT_GENERIC_DF
+
+# Accepted spellings for the boolean ``BRAIN_GRAPH_ENABLED`` /
+# ``BRAIN_GRAPH_CONCEPTS`` flags (compared case-insensitively after ``.strip()``).
+_GRAPH_ENABLED_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_GRAPH_ENABLED_FALSY = frozenset({"0", "false", "no", "off"})
+
+# Wave G2 -- GraphRAG concept extraction + bounded retrieval (spec §10). Parsed
+# here in G2-a; the concept aspect (G2-b/c) and the local/themes retrieval
+# surfaces (G2-d..i) consume them. Defaults follow spec §10 + Codex ruling Q4
+# (``BRAIN_GRAPH_MAX_DEGREE`` = 50, ``BRAIN_GRAPH_MIN_EDGE_WEIGHT`` = 0.20).
+DEFAULT_GRAPH_CONCEPTS = False
+# Ollama model for the gated concept entity extractor (spec §3 D3: the default
+# ``OllamaExtractor`` wraps ``enrichment.extract_entities()``). Mirrors the
+# enrich-model default convention but kept a separate literal so the concept
+# extractor and the summary enricher stay independently overridable -- ``config``
+# carries no enrich<->graph coupling.
+DEFAULT_GRAPH_EXTRACT_MODEL = "llama3.1:8b"
+DEFAULT_GRAPH_DEPTH = 2  # spec §6 bounded variable-length traversal radius
+DEFAULT_GRAPH_FRONTIER_CAP = 200  # spec §6 LIMIT on entities reached per seed
+DEFAULT_GRAPH_MAX_DEGREE = 50  # Codex ruling Q4 -- per-node expansion fan-out cap
+DEFAULT_GRAPH_MIN_EDGE_WEIGHT = 0.20  # Codex ruling Q4 -- normalized-lift floor
+DEFAULT_GRAPH_THEME_LIMIT = 5  # spec §6b ranked ThemeGroup count
+
+# Wave G3 -- global community detection (networkx Louvain) knobs (spec §17c).
+# Parsed here in G3-a; the detection core (G3-b), the lazy/eager summaries
+# (G3-c), and the global retrieval path (G3-d) consume them. §17c pins the
+# migration-013 schema (Q1) and the perf budgets (Q8) but does NOT pin these
+# tuning defaults, so the values below are CHOSEN to be consistent with the
+# existing graph knobs and are documented as such in ``.env.example``.
+DEFAULT_GRAPH_COMMUNITY_RESOLUTION = 1.0  # networkx louvain_communities() default
+DEFAULT_GRAPH_COMMUNITY_SEED = 1234  # deterministic Louvain RNG seed (chosen)
+DEFAULT_GRAPH_COMMUNITY_MIN_SIZE = 3  # min members to materialize a community (chosen)
+DEFAULT_GRAPH_COMMUNITY_JACCARD = 0.5  # stable-identity match threshold (§17c Q3/Q7; chosen)
+DEFAULT_GRAPH_COMMUNITY_LIMIT = 5  # global retrieval community count (== theme limit)
+# Perf/ops safety valve: max communities materialized per tenant per build
+# (bounds the summary + embedding cost behind the §17c Q8 budgets). ``None`` ==
+# unlimited so the default is behavior-neutral; mirrors the int|none idiom of
+# ``BRAIN_GRAPH_MAX_ENTITIES_PER_DOC``.
+DEFAULT_GRAPH_COMMUNITY_MAX: int | None = None
+
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
 # :func:`brain.ingest.gmail.strip_boilerplate`. Default-deny for ``re.DOTALL``;
@@ -207,6 +263,39 @@ class Config:
     enrich_min_tokens: int = DEFAULT_ENRICH_MIN_TOKENS
     enrich_max_input_tokens: int = DEFAULT_ENRICH_MAX_INPUT_TOKENS
     enrich_timeout_seconds: float = DEFAULT_ENRICH_TIMEOUT_SECONDS
+    # Wave G1-c -- GraphRAG people-aspect incremental sync. ``graph_enabled``
+    # gates the post-write/delete reconcile hook; the other four resolve into
+    # the single shared :class:`ReconcileConfig`
+    # (:func:`brain.graph_rag.sync.build_reconcile_config`). ``owner_participants``
+    # (above) is reused as the reconcile ``owner_keys`` -- the corpus owner is
+    # stripped from the graph's person roster exactly as from the People Hub, so
+    # there is no separate ``BRAIN_GRAPH_OWNER_*`` knob.
+    graph_enabled: bool = DEFAULT_GRAPH_ENABLED
+    graph_tenant_id: str = DEFAULT_GRAPH_TENANT_ID
+    graph_cooccur_window: int = DEFAULT_GRAPH_COOCCUR_WINDOW
+    graph_max_entities: int | None = DEFAULT_GRAPH_MAX_ENTITIES
+    graph_generic_df_ratio: float = DEFAULT_GRAPH_GENERIC_DF_RATIO
+    # Wave G2 -- concept extraction + bounded-retrieval knobs (spec §10). Parsed
+    # in G2-a; consumed by the concept aspect (G2-b/c) and the local/themes
+    # traversal (G2-d..i). ``graph_concepts`` gates the concept aspect;
+    # ``graph_extract_model`` selects the Ollama extractor model; the remaining
+    # five are the hard traversal caps + theme-ranking knob.
+    graph_concepts: bool = DEFAULT_GRAPH_CONCEPTS
+    graph_extract_model: str = DEFAULT_GRAPH_EXTRACT_MODEL
+    graph_depth: int = DEFAULT_GRAPH_DEPTH
+    graph_frontier_cap: int = DEFAULT_GRAPH_FRONTIER_CAP
+    graph_max_degree: int = DEFAULT_GRAPH_MAX_DEGREE
+    graph_min_edge_weight: float = DEFAULT_GRAPH_MIN_EDGE_WEIGHT
+    graph_theme_limit: int = DEFAULT_GRAPH_THEME_LIMIT
+    # Wave G3 -- global community detection (spec §17c). Parsed in G3-a;
+    # consumed by detection (G3-b), summaries (G3-c), and global retrieval
+    # (G3-d). ``graph_community_max`` is an ops safety cap (None == unlimited).
+    graph_community_resolution: float = DEFAULT_GRAPH_COMMUNITY_RESOLUTION
+    graph_community_seed: int = DEFAULT_GRAPH_COMMUNITY_SEED
+    graph_community_min_size: int = DEFAULT_GRAPH_COMMUNITY_MIN_SIZE
+    graph_community_jaccard: float = DEFAULT_GRAPH_COMMUNITY_JACCARD
+    graph_community_limit: int = DEFAULT_GRAPH_COMMUNITY_LIMIT
+    graph_community_max: int | None = DEFAULT_GRAPH_COMMUNITY_MAX
 
     @classmethod
     def load(cls) -> "Config":
@@ -448,6 +537,314 @@ class Config:
                     f"(got {enrich_timeout_raw!r})"
                 )
 
+        # Wave G1-c -- GraphRAG sync env vars. Same eager-validation pattern as
+        # the enrich knobs above: unset/blank -> default; non-parseable /
+        # out-of-range -> ConfigError so a typo surfaces at startup, never
+        # mid-ingest.
+        graph_enabled_raw = os.environ.get("BRAIN_GRAPH_ENABLED")
+        if graph_enabled_raw is None or graph_enabled_raw.strip() == "":
+            graph_enabled = DEFAULT_GRAPH_ENABLED
+        else:
+            token = graph_enabled_raw.strip().lower()
+            if token in _GRAPH_ENABLED_TRUTHY:
+                graph_enabled = True
+            elif token in _GRAPH_ENABLED_FALSY:
+                graph_enabled = False
+            else:
+                raise ConfigError(
+                    "BRAIN_GRAPH_ENABLED must be one of "
+                    "1/true/yes/on or 0/false/no/off "
+                    f"(got {graph_enabled_raw!r})"
+                )
+
+        graph_tenant_raw = os.environ.get("BRAIN_GRAPH_TENANT")
+        if graph_tenant_raw is None or graph_tenant_raw.strip() == "":
+            graph_tenant_id = DEFAULT_GRAPH_TENANT_ID
+        else:
+            graph_tenant_id = graph_tenant_raw.strip()
+
+        graph_window_raw = os.environ.get("BRAIN_GRAPH_COOCCUR_WINDOW")
+        if graph_window_raw is None or graph_window_raw.strip() == "":
+            graph_cooccur_window = DEFAULT_GRAPH_COOCCUR_WINDOW
+        else:
+            try:
+                graph_cooccur_window = int(graph_window_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_COOCCUR_WINDOW must be a positive integer "
+                    f"(got {graph_window_raw!r})"
+                ) from exc
+            if graph_cooccur_window < 1:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_COOCCUR_WINDOW must be a positive integer "
+                    f"(got {graph_window_raw!r})"
+                )
+
+        # ``none`` / ``unlimited`` disables the per-doc cap (maps to ``None``,
+        # which :class:`ReconcileConfig` accepts); otherwise a positive int.
+        graph_max_raw = os.environ.get("BRAIN_GRAPH_MAX_ENTITIES_PER_DOC")
+        graph_max_entities: int | None
+        if graph_max_raw is None or graph_max_raw.strip() == "":
+            graph_max_entities = DEFAULT_GRAPH_MAX_ENTITIES
+        elif graph_max_raw.strip().lower() in {"none", "unlimited"}:
+            graph_max_entities = None
+        else:
+            try:
+                graph_max_entities = int(graph_max_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_MAX_ENTITIES_PER_DOC must be a positive integer "
+                    f"or 'none' (got {graph_max_raw!r})"
+                ) from exc
+            if graph_max_entities < 1:
+                raise ConfigError(
+                    "BRAIN_GRAPH_MAX_ENTITIES_PER_DOC must be a positive integer "
+                    f"or 'none' (got {graph_max_raw!r})"
+                )
+
+        graph_ratio_raw = os.environ.get("BRAIN_GRAPH_GENERIC_DF")
+        if graph_ratio_raw is None or graph_ratio_raw.strip() == "":
+            graph_generic_df_ratio = DEFAULT_GRAPH_GENERIC_DF_RATIO
+        else:
+            try:
+                graph_generic_df_ratio = float(graph_ratio_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_GENERIC_DF must be a float in (0.0, 1.0] "
+                    f"(got {graph_ratio_raw!r})"
+                ) from exc
+            if not (0.0 < graph_generic_df_ratio <= 1.0):
+                raise ConfigError(
+                    "BRAIN_GRAPH_GENERIC_DF must be a float in (0.0, 1.0] "
+                    f"(got {graph_ratio_raw!r})"
+                )
+
+        # Wave G2 -- concept-extraction + bounded-retrieval env vars. Same
+        # eager-validation idiom as the G1-c graph knobs above: unset/blank ->
+        # default; non-parseable / out-of-range -> ConfigError at startup so a
+        # typo never surfaces mid-retrieval.
+        graph_concepts_raw = os.environ.get("BRAIN_GRAPH_CONCEPTS")
+        if graph_concepts_raw is None or graph_concepts_raw.strip() == "":
+            graph_concepts = DEFAULT_GRAPH_CONCEPTS
+        else:
+            token = graph_concepts_raw.strip().lower()
+            if token in _GRAPH_ENABLED_TRUTHY:
+                graph_concepts = True
+            elif token in _GRAPH_ENABLED_FALSY:
+                graph_concepts = False
+            else:
+                raise ConfigError(
+                    "BRAIN_GRAPH_CONCEPTS must be one of "
+                    "1/true/yes/on or 0/false/no/off "
+                    f"(got {graph_concepts_raw!r})"
+                )
+
+        graph_extract_model_raw = os.environ.get("BRAIN_GRAPH_EXTRACT_MODEL")
+        if (
+            graph_extract_model_raw is None
+            or graph_extract_model_raw.strip() == ""
+        ):
+            graph_extract_model = DEFAULT_GRAPH_EXTRACT_MODEL
+        else:
+            graph_extract_model = graph_extract_model_raw.strip()
+
+        graph_depth_raw = os.environ.get("BRAIN_GRAPH_DEPTH")
+        if graph_depth_raw is None or graph_depth_raw.strip() == "":
+            graph_depth = DEFAULT_GRAPH_DEPTH
+        else:
+            try:
+                graph_depth = int(graph_depth_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_DEPTH must be a positive integer "
+                    f"(got {graph_depth_raw!r})"
+                ) from exc
+            if graph_depth < 1:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_DEPTH must be a positive integer "
+                    f"(got {graph_depth_raw!r})"
+                )
+
+        graph_frontier_raw = os.environ.get("BRAIN_GRAPH_FRONTIER_CAP")
+        if graph_frontier_raw is None or graph_frontier_raw.strip() == "":
+            graph_frontier_cap = DEFAULT_GRAPH_FRONTIER_CAP
+        else:
+            try:
+                graph_frontier_cap = int(graph_frontier_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_FRONTIER_CAP must be a positive integer "
+                    f"(got {graph_frontier_raw!r})"
+                ) from exc
+            if graph_frontier_cap < 1:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_FRONTIER_CAP must be a positive integer "
+                    f"(got {graph_frontier_raw!r})"
+                )
+
+        graph_max_degree_raw = os.environ.get("BRAIN_GRAPH_MAX_DEGREE")
+        if graph_max_degree_raw is None or graph_max_degree_raw.strip() == "":
+            graph_max_degree = DEFAULT_GRAPH_MAX_DEGREE
+        else:
+            try:
+                graph_max_degree = int(graph_max_degree_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_MAX_DEGREE must be a positive integer "
+                    f"(got {graph_max_degree_raw!r})"
+                ) from exc
+            if graph_max_degree < 1:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_MAX_DEGREE must be a positive integer "
+                    f"(got {graph_max_degree_raw!r})"
+                )
+
+        graph_min_edge_raw = os.environ.get("BRAIN_GRAPH_MIN_EDGE_WEIGHT")
+        if graph_min_edge_raw is None or graph_min_edge_raw.strip() == "":
+            graph_min_edge_weight = DEFAULT_GRAPH_MIN_EDGE_WEIGHT
+        else:
+            try:
+                graph_min_edge_weight = float(graph_min_edge_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_MIN_EDGE_WEIGHT must be a float in [0.0, 1.0] "
+                    f"(got {graph_min_edge_raw!r})"
+                ) from exc
+            if not (0.0 <= graph_min_edge_weight <= 1.0):
+                raise ConfigError(
+                    "BRAIN_GRAPH_MIN_EDGE_WEIGHT must be a float in [0.0, 1.0] "
+                    f"(got {graph_min_edge_raw!r})"
+                )
+
+        graph_theme_limit_raw = os.environ.get("BRAIN_GRAPH_THEME_LIMIT")
+        if graph_theme_limit_raw is None or graph_theme_limit_raw.strip() == "":
+            graph_theme_limit = DEFAULT_GRAPH_THEME_LIMIT
+        else:
+            try:
+                graph_theme_limit = int(graph_theme_limit_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_THEME_LIMIT must be a positive integer "
+                    f"(got {graph_theme_limit_raw!r})"
+                ) from exc
+            if graph_theme_limit < 1:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_THEME_LIMIT must be a positive integer "
+                    f"(got {graph_theme_limit_raw!r})"
+                )
+
+        # Wave G3 -- global community-detection env vars (spec §17c). Same
+        # eager-validation idiom as the G2 graph knobs above: unset/blank ->
+        # default; non-parseable / out-of-range -> ConfigError at startup so a
+        # typo never surfaces mid community-build.
+        gc_resolution_raw = os.environ.get("BRAIN_GRAPH_COMMUNITY_RESOLUTION")
+        if gc_resolution_raw is None or gc_resolution_raw.strip() == "":
+            graph_community_resolution = DEFAULT_GRAPH_COMMUNITY_RESOLUTION
+        else:
+            try:
+                graph_community_resolution = float(gc_resolution_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_RESOLUTION must be a positive float "
+                    f"(got {gc_resolution_raw!r})"
+                ) from exc
+            if graph_community_resolution <= 0:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_RESOLUTION must be a positive float "
+                    f"(got {gc_resolution_raw!r})"
+                )
+
+        gc_seed_raw = os.environ.get("BRAIN_GRAPH_COMMUNITY_SEED")
+        if gc_seed_raw is None or gc_seed_raw.strip() == "":
+            graph_community_seed = DEFAULT_GRAPH_COMMUNITY_SEED
+        else:
+            try:
+                graph_community_seed = int(gc_seed_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_SEED must be a non-negative integer "
+                    f"(got {gc_seed_raw!r})"
+                ) from exc
+            if graph_community_seed < 0:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_SEED must be a non-negative integer "
+                    f"(got {gc_seed_raw!r})"
+                )
+
+        gc_min_size_raw = os.environ.get("BRAIN_GRAPH_COMMUNITY_MIN_SIZE")
+        if gc_min_size_raw is None or gc_min_size_raw.strip() == "":
+            graph_community_min_size = DEFAULT_GRAPH_COMMUNITY_MIN_SIZE
+        else:
+            try:
+                graph_community_min_size = int(gc_min_size_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_MIN_SIZE must be a positive integer "
+                    f"(got {gc_min_size_raw!r})"
+                ) from exc
+            if graph_community_min_size < 1:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_MIN_SIZE must be a positive integer "
+                    f"(got {gc_min_size_raw!r})"
+                )
+
+        gc_jaccard_raw = os.environ.get("BRAIN_GRAPH_COMMUNITY_JACCARD")
+        if gc_jaccard_raw is None or gc_jaccard_raw.strip() == "":
+            graph_community_jaccard = DEFAULT_GRAPH_COMMUNITY_JACCARD
+        else:
+            try:
+                graph_community_jaccard = float(gc_jaccard_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_JACCARD must be a float in [0.0, 1.0] "
+                    f"(got {gc_jaccard_raw!r})"
+                ) from exc
+            if not (0.0 <= graph_community_jaccard <= 1.0):
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_JACCARD must be a float in [0.0, 1.0] "
+                    f"(got {gc_jaccard_raw!r})"
+                )
+
+        gc_limit_raw = os.environ.get("BRAIN_GRAPH_COMMUNITY_LIMIT")
+        if gc_limit_raw is None or gc_limit_raw.strip() == "":
+            graph_community_limit = DEFAULT_GRAPH_COMMUNITY_LIMIT
+        else:
+            try:
+                graph_community_limit = int(gc_limit_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_LIMIT must be a positive integer "
+                    f"(got {gc_limit_raw!r})"
+                ) from exc
+            if graph_community_limit < 1:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_LIMIT must be a positive integer "
+                    f"(got {gc_limit_raw!r})"
+                )
+
+        # ``none`` / ``unlimited`` disables the per-tenant community cap (maps to
+        # ``None``); otherwise a positive int. Mirrors
+        # ``BRAIN_GRAPH_MAX_ENTITIES_PER_DOC``.
+        gc_max_raw = os.environ.get("BRAIN_GRAPH_COMMUNITY_MAX")
+        graph_community_max: int | None
+        if gc_max_raw is None or gc_max_raw.strip() == "":
+            graph_community_max = DEFAULT_GRAPH_COMMUNITY_MAX
+        elif gc_max_raw.strip().lower() in {"none", "unlimited"}:
+            graph_community_max = None
+        else:
+            try:
+                graph_community_max = int(gc_max_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_MAX must be a positive integer "
+                    f"or 'none' (got {gc_max_raw!r})"
+                ) from exc
+            if graph_community_max < 1:
+                raise ConfigError(
+                    "BRAIN_GRAPH_COMMUNITY_MAX must be a positive integer "
+                    f"or 'none' (got {gc_max_raw!r})"
+                )
+
         return {
             # brain_home resolves via default_factory=_brain_home_root.
             "database_url": database_url,
@@ -466,4 +863,22 @@ class Config:
             "enrich_min_tokens": enrich_min_tokens,
             "enrich_max_input_tokens": enrich_max_input_tokens,
             "enrich_timeout_seconds": enrich_timeout_seconds,
+            "graph_enabled": graph_enabled,
+            "graph_tenant_id": graph_tenant_id,
+            "graph_cooccur_window": graph_cooccur_window,
+            "graph_max_entities": graph_max_entities,
+            "graph_generic_df_ratio": graph_generic_df_ratio,
+            "graph_concepts": graph_concepts,
+            "graph_extract_model": graph_extract_model,
+            "graph_depth": graph_depth,
+            "graph_frontier_cap": graph_frontier_cap,
+            "graph_max_degree": graph_max_degree,
+            "graph_min_edge_weight": graph_min_edge_weight,
+            "graph_theme_limit": graph_theme_limit,
+            "graph_community_resolution": graph_community_resolution,
+            "graph_community_seed": graph_community_seed,
+            "graph_community_min_size": graph_community_min_size,
+            "graph_community_jaccard": graph_community_jaccard,
+            "graph_community_limit": graph_community_limit,
+            "graph_community_max": graph_community_max,
         }

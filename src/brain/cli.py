@@ -1,6 +1,7 @@
 """brain — second brain CLI."""
 from __future__ import annotations
 
+import dataclasses
 import json as _json  # aliased — `json` conflicts with the --json output flag name
 import logging
 import os
@@ -23,7 +24,17 @@ from rich.table import Table
 from . import config as _config_module
 from .backfill import backfill_search, backfill_source_rows
 from .config import Config, ConfigError
-from .db import connect, connect_raw, ensure_embedding_column, run_migrations
+from .db import (
+    DEFAULT_GRAPH_NAME,
+    age_extension_available,
+    bootstrap_age,
+    connect,
+    connect_age,
+    connect_raw,
+    ensure_embedding_column,
+    load_age,
+    run_migrations,
+)
 from .edit_session import (
     EditorAbortedError,
     EditorError,
@@ -36,11 +47,15 @@ from .editor import EditorError as RawEditorError
 from .editor import run_editor_on
 from .embeddings import make_embedder
 from .errors import (
+    AgeBootstrapError,
     EnrichmentError,
+    GraphBackendError,
+    GraphTenantError,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
     IdPrefixTooShort,
+    InteractionError,
     OllamaUnavailable,
     PersonAmbiguous,
     PersonNotFound,
@@ -48,6 +63,9 @@ from .errors import (
 
 if TYPE_CHECKING:
     from .enrichment import OllamaEnricher
+    from .graph_rag.reconcile import ReconcileConfig
+    from .graph_rag.schema import GraphContext
+    from .graph_rag.sync import GraphSyncer
 from .cli_claude import SkillInstallError
 from .cli_claude import install_skill as _install_skill
 from .eval import (
@@ -62,11 +80,15 @@ from .eval import (
 from .eval.baseline import _assert_baseline_name
 from .eval.corpus import _DEFAULT_CORPUS_PATH, _VALID_CATEGORIES
 from .format import (
+    community_record_json,
+    community_records_table,
     console,
     emit_json,
     eval_diff_table,
     eval_report_table,
     explain_table,
+    graph_context_json,
+    graph_context_renderable,
     search_table,
 )
 from .ingest import (
@@ -86,10 +108,12 @@ from .queries import (
     MirrorDriftSummary,
     PersonMatch,
     count_chunks_missing_embedding,
+    count_documents,
     count_unenriched_documents,
     embedding_column_state,
     fetch_document,
     finalize_embedding_index,
+    iter_all_document_ids,
     iter_chunks_missing_embedding,
     iter_orphan_mirror_files,
     iter_stale_mirror_files,
@@ -219,6 +243,16 @@ claude_app = typer.Typer(
 )
 app.add_typer(claude_app, name="claude")
 
+graphrag_app = typer.Typer(
+    name="graphrag",
+    help=(
+        "GraphRAG admin/index operations (Apache AGE people graph). "
+        "Retrieval surfaces arrive in G2."
+    ),
+    no_args_is_help=True,
+)
+app.add_typer(graphrag_app, name="graphrag")
+
 
 @app.callback()
 def _main() -> None:
@@ -301,6 +335,29 @@ def init() -> None:
         conn.autocommit = True
         applied = run_migrations(conn)
         ensure_embedding_column(conn, embedder)
+        # GraphRAG (wave G0): provision the Apache AGE extension + the canonical
+        # ``brain_graph`` graph idempotently, after relational migrations — but
+        # ONLY when the DB image actually ships AGE. A stock pgvector image (a
+        # prod DB before the gated AGE cut-over) cannot ``CREATE EXTENSION age``;
+        # bootstrapping unconditionally would crash init AFTER the relational
+        # migrations already committed. So probe ``pg_available_extensions``
+        # first and SKIP the whole graph stack with a friendly note when AGE is
+        # absent, letting init finish cleanly. When AGE *is* available the
+        # bootstrap is a safe no-op on re-run (existence-guarded create_graph).
+        # Requires the autocommit connection set above — AGE catalog DDL
+        # dislikes open txns.
+        age_available = age_extension_available(conn)
+        graph_created = False
+        if age_available:
+            graph_created = bootstrap_age(conn)
+            # Reconcile graph_entities.embedding's declared dim with the active
+            # embedder, exactly as for chunks.embedding above — a non-1024
+            # backend (e.g. qwen3=4096) otherwise leaves the migration-012
+            # vector(1024) column mismatched. Resizes in place; the column stays
+            # NULLABLE (no NOT NULL / HNSW finalize) because no entities are
+            # embedded yet in G0 — the graph write path is a no-op this wave.
+            # Gated with the bootstrap so a stock-pgvector DB skips it too.
+            ensure_embedding_column(conn, embedder, "graph_entities", "embedding")
         # Migration 009 added title_text/tags_text/search_extras columns to
         # chunks but seeded them as NULL. When 009 is applied for the first
         # time on a populated DB, run the backfill in the same init pass so
@@ -316,6 +373,17 @@ def init() -> None:
     else:
         typer.echo("no migrations to apply")
     typer.echo(f"embedder        {cfg.embedder} (dim={embedder.dim})")
+    if age_available:
+        typer.echo(
+            f"graph           brain_graph "
+            f"{'created' if graph_created else 'present'} (age)"
+        )
+    else:
+        typer.echo(
+            "graph           skipped — AGE not available in this database "
+            "image; cut over to the AGE image then re-run `brain init` "
+            f"(see {_AGE_IMAGE_SPEC})"
+        )
     if search_backfill_report is not None:
         typer.echo(
             f"backfill search Stage A: {search_backfill_report.stage_a_rows} "
@@ -424,6 +492,399 @@ def _check_ollama(cfg: Config, failures: list[str]) -> None:
         typer.secho(f"ollama          FAIL — {e}", fg="red", err=True)
 
 
+# GraphRAG (wave G0). Path the WARN remediations point operators at when the DB
+# image predates the Apache AGE cut-over.
+_AGE_IMAGE_SPEC = "docs/specs/2026-05-20-graphrag-age-image.md"
+
+
+def _rollback_quietly(conn: psycopg.Connection[Any]) -> None:
+    """Roll back the implicit read transaction on a non-autocommit connection.
+
+    The doctor probes are read-only ``SELECT``s; under psycopg's default
+    ``autocommit=False`` each opens a transaction that must be cleared so the
+    connection stays clean for the next probe (and so a later ``LOAD``/flip is
+    unobstructed). A no-op under autocommit.
+    """
+    if not conn.autocommit:
+        conn.rollback()
+
+
+def _installed_extension_versions(
+    conn: psycopg.Connection[Any],
+) -> dict[str, str]:
+    """Return ``{extname: extversion}`` for the GraphRAG-relevant extensions.
+
+    One ``pg_extension`` round-trip covering ``vector``, ``pgcrypto`` and
+    ``age``; absent extensions are simply missing keys. Rolls the implicit read
+    transaction back so the caller's connection stays clean.
+    """
+    rows = conn.execute(
+        "SELECT extname, extversion FROM pg_extension "
+        "WHERE extname IN ('vector', 'pgcrypto', 'age')"
+    ).fetchall()
+    _rollback_quietly(conn)
+    return {str(name): str(version) for name, version in rows}
+
+
+def _age_graph_present(conn: psycopg.Connection[Any], graph_name: str) -> bool:
+    """True iff ``graph_name`` exists in the AGE graph catalog.
+
+    Rolls the implicit read transaction back afterward so the caller's
+    connection stays clean. Lets any ``psycopg.Error`` propagate — the caller
+    decides how to surface a catalog-probe failure.
+    """
+    present = (
+        conn.execute(
+            "SELECT 1 FROM ag_catalog.ag_graph WHERE name = %s",
+            (graph_name,),
+        ).fetchone()
+        is not None
+    )
+    _rollback_quietly(conn)
+    return present
+
+
+def _check_age(conn: psycopg.Connection[Any]) -> None:
+    """Doctor sub-check: verify the Apache AGE GraphRAG backend is provisioned.
+
+    Soft check — never flips doctor's exit code. The AGE rollout (wave G0) can
+    land before the prod DB image is cut over, so a database without AGE is a
+    yellow ``WARN`` with an actionable remediation rather than a hard failure.
+
+    Asserts, in order, stopping at the first unmet condition:
+
+    1. ``vector``, ``pgcrypto`` and ``age`` extensions are present in
+       ``pg_extension``.
+    2. Reports the ``age`` extversion — built from the ``PG16/v1.5.0-rc0``
+       release candidate (extversion ``1.5.0``), **not** a GA release; the
+       wording stays honest and never claims "GA".
+    3. ``LOAD 'age'`` succeeds in-session. Reuses :func:`brain.db.load_age` for
+       the LOAD + rollback + typed-error contract. ``load_age`` re-checks
+       ``pg_extension`` for ``age`` — a negligible extra ``SELECT`` in this
+       rarely-run command; we accept that small overlap rather than duplicate
+       ``load_age``'s LOAD/rollback/error-wrapping logic inline.
+    4. The canonical ``brain_graph`` graph exists in ``ag_catalog.ag_graph``.
+
+    Prints ``age             OK (age <ver>, graph brain_graph present)`` when all
+    four hold; otherwise a single WARN line naming the failed condition and the
+    next step to fix it.
+    """
+    try:
+        installed = _installed_extension_versions(conn)
+    except psycopg.Error as exc:
+        _rollback_quietly(conn)
+        typer.secho(
+            f"age             WARN — extension probe failed: {exc}", fg="yellow"
+        )
+        return
+
+    if "age" not in installed:
+        # Distinguish "the image can't do AGE at all" from "AGE is installable
+        # but `brain init` hasn't created the extension yet" — the remediation
+        # differs. ``age_extension_available`` probes ``pg_available_extensions``
+        # (control file present) vs the ``pg_extension`` (installed) probe above.
+        # Guarded: this AGE check is WARN-only, so a probe failure must NOT escape
+        # to doctor()'s outer DB handler (which would flip the run to exit 1).
+        try:
+            available = age_extension_available(conn)
+        except psycopg.Error as exc:
+            _rollback_quietly(conn)
+            typer.secho(
+                f"age             WARN — couldn't determine AGE availability: {exc}",
+                fg="yellow",
+            )
+            return
+        if available:
+            typer.secho(
+                "age             WARN — Apache AGE is available but not installed "
+                "— run `brain init` to install + bootstrap AGE",
+                fg="yellow",
+            )
+        else:
+            typer.secho(
+                "age             WARN — the DB image lacks Apache AGE — rebuild/cut "
+                f"over to the AGE image; see {_AGE_IMAGE_SPEC}",
+                fg="yellow",
+            )
+        return
+
+    missing_support = [
+        name for name in ("vector", "pgcrypto") if name not in installed
+    ]
+    if missing_support:
+        typer.secho(
+            "age             WARN — missing extension(s): "
+            f"{', '.join(missing_support)} — run `brain init`",
+            fg="yellow",
+        )
+        return
+
+    try:
+        loaded = load_age(conn)
+    except AgeBootstrapError as exc:
+        # Roll back too — defensive parity with the psycopg.Error handlers. The
+        # exception may have left an aborted transaction; clearing it keeps the
+        # connection usable so this check can never poison a later one.
+        _rollback_quietly(conn)
+        typer.secho(
+            f"age             WARN — `LOAD 'age'` failed ({exc}) — the AGE "
+            "extension isn't loadable in this database/image; rebuild or cut "
+            f"over to the AGE image (see {_AGE_IMAGE_SPEC})",
+            fg="yellow",
+        )
+        return
+    if not loaded:
+        # Extension row present but load_age found it absent — defensive guard;
+        # treat as the image-missing case.
+        typer.secho(
+            "age             WARN — the DB image lacks Apache AGE — rebuild/cut "
+            f"over to the AGE image; see {_AGE_IMAGE_SPEC}",
+            fg="yellow",
+        )
+        return
+
+    try:
+        graph_present = _age_graph_present(conn, DEFAULT_GRAPH_NAME)
+    except psycopg.Error as exc:
+        _rollback_quietly(conn)
+        typer.secho(
+            f"age             WARN — graph catalog probe failed: {exc}",
+            fg="yellow",
+        )
+        return
+
+    if not graph_present:
+        typer.secho(
+            f"age             WARN — graph {DEFAULT_GRAPH_NAME} absent — run "
+            "`brain init` to bootstrap the AGE graph",
+            fg="yellow",
+        )
+        return
+
+    typer.echo(
+        f"age             OK (age {installed['age']}, "
+        f"graph {DEFAULT_GRAPH_NAME} present)"
+    )
+
+
+def _relational_graph_counts(
+    conn: psycopg.Connection[Any], tenant_id: str
+) -> tuple[int, int]:
+    """Return ``(entity_count, cooccur_edge_count)`` from the relational mirror.
+
+    The source-of-truth counts the doctor drift check compares against the AGE
+    graph: ``graph_entities`` and the ``graph_relationships`` aggregate (the SQL
+    counterpart of the AGE ``CO_OCCURS`` edges; spec §5). Tenant-scoped. Rolls
+    the implicit read transaction back so the shared connection stays clean.
+    """
+    ent_row = conn.execute(
+        "SELECT count(*) FROM graph_entities WHERE tenant_id = %s", (tenant_id,)
+    ).fetchone()
+    rel_row = conn.execute(
+        "SELECT count(*) FROM graph_relationships WHERE tenant_id = %s", (tenant_id,)
+    ).fetchone()
+    _rollback_quietly(conn)
+    return (
+        int(ent_row[0]) if ent_row is not None else 0,
+        int(rel_row[0]) if rel_row is not None else 0,
+    )
+
+
+def _check_graph_drift(conn: psycopg.Connection[Any], cfg: Config) -> None:
+    """Doctor sub-check: relational ↔ AGE graph entity/edge parity (spec §7).
+
+    Gated by the caller on ``BRAIN_GRAPH_ENABLED``; here it additionally requires
+    Apache AGE to be present + loadable (returns silently otherwise — the
+    ``age`` line already warned). Compares the configured tenant's relational
+    source-of-truth counts (``graph_entities`` / ``graph_relationships``) against
+    the AGE mirror (``Entity`` vertices / ``CO_OCCURS`` edges) and prints a
+    counts line; a mismatch is a yellow ``drift detected`` WARN pointing at
+    ``brain graphrag build --force`` (the authoritative rebuild). Soft check:
+    every failure mode is a WARN that never flips doctor's exit code (it catches
+    its own probe errors so a graph hiccup never masquerades as a postgres
+    failure).
+    """
+    try:
+        if not age_extension_available(conn):
+            _rollback_quietly(conn)
+            return
+        if not load_age(conn):
+            return
+    except (psycopg.Error, AgeBootstrapError) as exc:
+        _rollback_quietly(conn)
+        typer.secho(
+            f"graph drift     WARN — AGE availability probe failed: {exc}",
+            fg="yellow",
+        )
+        return
+
+    from .graph_rag.backends import AgeBackend
+    from .graph_rag.tenancy import resolve_tenant
+
+    try:
+        tenant_id = resolve_tenant(cfg)
+    except GraphTenantError as exc:
+        typer.secho(f"graph drift     WARN — {exc}", fg="yellow")
+        return
+
+    try:
+        rel_entities, rel_edges = _relational_graph_counts(conn, tenant_id)
+        backend = AgeBackend()
+        age_entities = backend.count_entities(conn, tenant_id)
+        age_edges = backend.count_cooccur_edges(conn, tenant_id)
+    except (psycopg.Error, GraphBackendError) as exc:
+        _rollback_quietly(conn)
+        typer.secho(
+            f"graph drift     WARN — graph count probe failed: {exc}", fg="yellow"
+        )
+        return
+    finally:
+        _rollback_quietly(conn)
+
+    counters = (
+        f"entities rel={rel_entities} age={age_entities}, "
+        f"co_occurs rel={rel_edges} age={age_edges}, tenant {tenant_id!r}"
+    )
+    if rel_entities == age_entities and rel_edges == age_edges:
+        typer.echo(f"graph drift     OK ({counters})")
+        return
+    typer.secho(f"graph drift     drift detected ({counters})", fg="yellow")
+    typer.secho(
+        "                — run `brain graphrag build --force` to rebuild the "
+        "AGE mirror from the relational source-of-truth",
+        fg="yellow",
+    )
+
+
+def _community_counts(
+    conn: psycopg.Connection[Any], tenant_id: str
+) -> tuple[int, int]:
+    """Return ``(community_count, member_count)`` for the tenant (spec §17c).
+
+    The counts the doctor community check reports: ``graph_communities`` and
+    ``graph_community_members`` rows for the configured tenant. Tenant-scoped.
+    Rolls the implicit read transaction back so the shared connection stays clean
+    (mirrors :func:`_relational_graph_counts`).
+    """
+    comm_row = conn.execute(
+        "SELECT count(*) FROM graph_communities WHERE tenant_id = %s", (tenant_id,)
+    ).fetchone()
+    mem_row = conn.execute(
+        "SELECT count(*) FROM graph_community_members WHERE tenant_id = %s",
+        (tenant_id,),
+    ).fetchone()
+    _rollback_quietly(conn)
+    return (
+        int(comm_row[0]) if comm_row is not None else 0,
+        int(mem_row[0]) if mem_row is not None else 0,
+    )
+
+
+def _stored_community_fingerprints(
+    conn: psycopg.Connection[Any], tenant_id: str
+) -> set[str]:
+    """Return the DISTINCT ``source_graph_hash`` set across the tenant's communities.
+
+    A clean build stamps every community row with the build's fingerprint, so a
+    healthy set is exactly ``{current_hash}``; any divergence (membership change,
+    extra hash) means the communities no longer reflect the live graph.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT source_graph_hash FROM graph_communities "
+        "WHERE tenant_id = %s",
+        (tenant_id,),
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def _relationship_edges(
+    conn: psycopg.Connection[Any], tenant_id: str
+) -> list[tuple[str, str, float]]:
+    """Read the tenant's ``graph_relationships`` edges as ``(src, dst, weight)``.
+
+    The input to :func:`brain.graph_rag.communities.compute_source_graph_hash`
+    (which sorts internally, so read order is irrelevant). Tenant-scoped — the
+    same edge set the community build hashes into ``source_graph_hash``.
+    """
+    rows = conn.execute(
+        "SELECT src_id::text, dst_id::text, weight FROM graph_relationships "
+        "WHERE tenant_id = %s",
+        (tenant_id,),
+    ).fetchall()
+    return [(str(src), str(dst), float(weight)) for src, dst, weight in rows]
+
+
+def _check_graph_communities(conn: psycopg.Connection[Any], cfg: Config) -> None:
+    """Doctor sub-check: community counts + stale-fingerprint detection (§17c).
+
+    Gated by the caller on ``BRAIN_GRAPH_ENABLED``; here it additionally requires
+    Apache AGE to be present + loadable (returns silently otherwise — the ``age``
+    line already warned), mirroring :func:`_check_graph_drift`. Reports the
+    configured tenant's ``graph_communities`` / ``graph_community_members`` counts
+    and compares the communities' stored ``source_graph_hash`` fingerprint against
+    the CURRENT tenant graph hash, recomputed from ``graph_relationships`` via the
+    same :func:`brain.graph_rag.communities.compute_source_graph_hash` the build
+    uses. A mismatch is a yellow ``stale`` WARN pointing at ``brain graphrag
+    communities refresh`` (the authoritative rebuild). Soft check: every failure
+    mode is a WARN that never flips doctor's exit code (it catches its own probe
+    errors so a community hiccup never masquerades as a postgres failure).
+    """
+    try:
+        if not age_extension_available(conn):
+            _rollback_quietly(conn)
+            return
+        if not load_age(conn):
+            return
+    except (psycopg.Error, AgeBootstrapError) as exc:
+        _rollback_quietly(conn)
+        typer.secho(
+            f"communities     WARN — AGE availability probe failed: {exc}",
+            fg="yellow",
+        )
+        return
+
+    from .graph_rag.communities import compute_source_graph_hash
+    from .graph_rag.tenancy import resolve_tenant
+
+    try:
+        tenant_id = resolve_tenant(cfg)
+    except GraphTenantError as exc:
+        typer.secho(f"communities     WARN — {exc}", fg="yellow")
+        return
+
+    try:
+        community_count, member_count = _community_counts(conn, tenant_id)
+        stored_hashes = _stored_community_fingerprints(conn, tenant_id)
+        current_hash = compute_source_graph_hash(_relationship_edges(conn, tenant_id))
+    except psycopg.Error as exc:
+        _rollback_quietly(conn)
+        typer.secho(
+            f"communities     WARN — community probe failed: {exc}", fg="yellow"
+        )
+        return
+    finally:
+        _rollback_quietly(conn)
+
+    counts = (
+        f"{community_count} communities, {member_count} members, tenant {tenant_id!r}"
+    )
+    if community_count == 0:
+        typer.echo(
+            f"communities     OK ({counts}) — none built; run "
+            "`brain graphrag communities build`"
+        )
+        return
+    if stored_hashes == {current_hash}:
+        typer.echo(f"communities     OK ({counts}, fingerprint current)")
+        return
+    typer.secho(f"communities     stale ({counts}, fingerprint stale)", fg="yellow")
+    typer.secho(
+        "                — communities are stale; run `brain graphrag communities "
+        "refresh` to rebuild from the current graph",
+        fg="yellow",
+    )
+
+
 @app.command()
 def doctor() -> None:
     """Check environment, database connection, and external dependencies.
@@ -453,6 +914,19 @@ def doctor() -> None:
             else:
                 failures.append("pgvector extension not installed (run brain init)")
                 typer.echo("postgres        FAIL — pgvector not installed")
+            # GraphRAG (wave G0): soft AGE health line — reuses the open
+            # connection. Self-contained (catches its own probe errors) so an
+            # AGE hiccup never masquerades as a postgres failure below.
+            _check_age(conn)
+            # GraphRAG (wave G2-h): relational↔AGE graph drift check, only when
+            # the people-aspect graph sync is opted into. Self-contained WARN —
+            # never flips doctor's exit code (mirrors _check_age).
+            if cfg.graph_enabled:
+                _check_graph_drift(conn, cfg)
+                # GraphRAG (wave G3-g): community counts + stale-fingerprint
+                # check (spec §17c). Same gating + self-contained WARN contract
+                # as _check_graph_drift; never flips doctor's exit code.
+                _check_graph_communities(conn, cfg)
     except psycopg.Error as e:
         failures.append(f"database: {e}")
         typer.secho(f"postgres        FAIL — {e}", fg="red", err=True)
@@ -652,6 +1126,22 @@ def _build_enricher(cfg: Config) -> OllamaEnricher:
     return make_enricher(cfg)
 
 
+def _build_graph_syncer(cfg: Config) -> GraphSyncer:
+    """Build the per-invocation people-aspect graph syncer (wave G1-c).
+
+    Indirected through this single factory (mirrors :func:`_build_embedder` /
+    :func:`_build_enricher`) so tests can monkeypatch one point to swap in a
+    syncer wired to a live AGE backend, and so every write/delete command in
+    this module shares ONE :class:`~brain.graph_rag.reconcile.ReconcileConfig`
+    (the factory caches it per :class:`Config`). The syncer self-gates on
+    ``BRAIN_GRAPH_ENABLED`` + AGE availability, so building it unconditionally
+    is cheap and a no-op on a stock pgvector DB.
+    """
+    from .graph_rag.sync import make_graph_syncer
+
+    return make_graph_syncer(cfg)
+
+
 @app.command()
 def ingest(
     path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
@@ -672,6 +1162,7 @@ def ingest(
     cfg = Config.load()
     embedder = _build_embedder(cfg)
     enricher = None if no_enrich else _build_enricher(cfg)
+    graph_syncer = _build_graph_syncer(cfg)
     doc = extract_path(path)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
@@ -686,6 +1177,7 @@ def ingest(
             enricher=enricher,
             enrich=not no_enrich,
             enrich_min_tokens=cfg.enrich_min_tokens,
+            graph_syncer=graph_syncer,
         )
     if result.created:
         verb = "ingested"
@@ -733,6 +1225,7 @@ def ingest_dir(
 
     embedder = _build_embedder(cfg)
     enricher = None if no_enrich else _build_enricher(cfg)
+    graph_syncer = _build_graph_syncer(cfg)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         for f in files:
@@ -748,6 +1241,7 @@ def ingest_dir(
                     enricher=enricher,
                     enrich=not no_enrich,
                     enrich_min_tokens=cfg.enrich_min_tokens,
+                    graph_syncer=graph_syncer,
                 )
                 if result.created:
                     verb = "ingested"
@@ -814,6 +1308,7 @@ def ingest_stdin(
     cfg = Config.load()
     embedder = _build_embedder(cfg)
     enricher = None if no_enrich else _build_enricher(cfg)
+    graph_syncer = _build_graph_syncer(cfg)
     # Krisp ingest triggers Calendar/Contacts directory refresh via the gws
     # CLI; other sources don't need a runner. Refresh failures are warnings,
     # not errors — the ingest itself still succeeds.
@@ -834,6 +1329,7 @@ def ingest_stdin(
             enricher=enricher,
             enrich=not no_enrich,
             enrich_min_tokens=cfg.enrich_min_tokens,
+            graph_syncer=graph_syncer,
         )
     if result.created:
         verb = "ingested"
@@ -923,6 +1419,7 @@ def ingest_gmail(
 
     embedder = _build_embedder(cfg)
     enricher = None if no_enrich else _build_enricher(cfg)
+    graph_syncer = _build_graph_syncer(cfg)
     ingested = 0
     ingested_draft = 0
     skipped = 0
@@ -950,6 +1447,7 @@ def ingest_gmail(
                     enricher=enricher,
                     enrich=not no_enrich,
                     enrich_min_tokens=cfg.enrich_min_tokens,
+                    graph_syncer=graph_syncer,
                 )
                 # P2.2 thread upsert: ``created`` is True only on first
                 # insert; ``body_changed`` is True when an existing thread
@@ -1098,6 +1596,690 @@ def reembed(
                 typer.echo(
                     f"finalize skipped: {remaining} chunk(s) still have NULL embedding"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Wave G1-d — brain graphrag (admin / index ops; Apache AGE people graph)
+# ---------------------------------------------------------------------------
+
+
+def _graphrag_config(cfg: Config, tenant: str | None) -> ReconcileConfig:
+    """Resolve the shared :class:`ReconcileConfig`, applying a ``--tenant`` override.
+
+    Starts from the single cached config (:func:`build_reconcile_config`) so a
+    build / refresh uses the SAME co-occurrence window + per-doc cap + generic
+    ratio + owner keys as the incremental sync hook. ``--tenant`` overrides only
+    the tenant id (via :func:`dataclasses.replace` on the frozen config), leaving
+    every other knob identical so a backfill cannot diverge from the incremental
+    path on weighting.
+    """
+    from .graph_rag.sync import build_reconcile_config
+
+    base = build_reconcile_config(cfg)
+    if tenant is not None and tenant.strip():
+        return dataclasses.replace(base, tenant_id=tenant.strip())
+    return base
+
+
+def _require_age_or_exit(conn: psycopg.Connection[Any]) -> None:
+    """Exit non-zero with a clear message when this DB image lacks Apache AGE.
+
+    The ``graphrag`` admin commands exist solely to maintain the AGE graph, so —
+    unlike ``brain init`` (which has other work and degrades gracefully) — they
+    fail loudly when AGE is unavailable, pointing the operator at the AGE image
+    cut-over (consistent with ``brain init``'s probe + ``brain doctor``'s WARN).
+    """
+    if not age_extension_available(conn):
+        typer.secho(
+            "graphrag: Apache AGE is not available in this database image — "
+            "cut over to the AGE image and run `brain init` first "
+            f"(see {_AGE_IMAGE_SPEC})",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+
+@graphrag_app.command("build")
+def graphrag_build(
+    backfill: bool = typer.Option(
+        False,
+        "--backfill",
+        help=(
+            "Reconcile the people aspect of EVERY existing document into the "
+            "graph. Required in G1 (the only build mode this wave); concept "
+            "indexing arrives in G2."
+        ),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Authoritative full rebuild: bypass the per-aspect watermark and "
+            "re-reconcile EVERY document from the relational source-of-truth "
+            "(entities + MENTIONED_IN + Document vertices + CO_OCCURS). The "
+            "recovery path for a dropped or corrupted AGE mirror when documents "
+            "and config are unchanged (a plain build would skip them). Implies "
+            "--backfill."
+        ),
+    ),
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to build (default: BRAIN_GRAPH_TENANT)."
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Max documents to reconcile (default: all)."
+    ),
+    concepts: bool = typer.Option(
+        False,
+        "--concepts",
+        help=(
+            "Also (re)build the CONCEPT aspect (extract topics/projects/orgs/"
+            "tools via the local Ollama extractor) alongside the always-on people "
+            "aspect. Explicit opt-in for this run, independent of "
+            "BRAIN_GRAPH_CONCEPTS (which gates the ingest-time auto-sync); when "
+            "that env is on, concepts are included even without this flag. "
+            "Without it (and env off) the build is person-only — unchanged."
+        ),
+    ),
+) -> None:
+    """Bulk-reconcile the graph for all existing documents (backfill).
+
+    The batch equivalent of the per-document graph-sync hook: walks every
+    document in id order and reconciles its people aspect (and, when ``--concepts``
+    or ``BRAIN_GRAPH_CONCEPTS`` is on, its concept aspect) into the Apache AGE
+    graph, sharing the same :class:`ReconcileConfig` as the incremental path so
+    the result is identical to having reconciled each doc at ingest time.
+
+    Idempotent + resumable: re-running (or resuming after an interruption) skips
+    already-indexed documents via the per-aspect watermark. ``--limit`` caps the
+    document count; ``--tenant`` scopes the build to one tenant.
+
+    ``--force`` is the authoritative full rebuild — it bypasses the watermark and
+    re-reconciles every document from the relational source-of-truth, the
+    recovery path for a dropped or corrupted AGE mirror (where docs + config are
+    unchanged, so a plain ``--backfill`` would skip every doc). ``--force``
+    implies ``--backfill`` and cannot be combined with ``--limit`` (a
+    clear-then-partial-rebuild would permanently lose the un-rebuilt rest).
+    """
+    if force and limit is not None:
+        raise typer.BadParameter(
+            "--force rebuilds the full corpus and cannot be combined with --limit"
+        )
+    cfg = Config.load()
+    if not (backfill or force):
+        typer.echo(
+            "graphrag build: pass --backfill to reconcile all existing "
+            "documents into the graph (or --force for an authoritative full "
+            "rebuild that ignores the watermark). Add --concepts to also build "
+            "the concept aspect."
+        )
+        return
+
+    # Concepts run when the flag is passed OR the env gate is on. The flag is an
+    # explicit per-run opt-in independent of BRAIN_GRAPH_CONCEPTS, so an operator
+    # can build the concept graph on demand without flipping the ingest-time gate.
+    include_concepts = concepts or cfg.graph_concepts
+    config = _graphrag_config(cfg, tenant)
+    from .graph_rag.backends import AgeBackend
+    from .graph_rag.build import build_graph
+    from .graph_rag.extract import EntityExtractor, make_extractor
+
+    extractor: EntityExtractor | None = None
+    if include_concepts:
+        config = dataclasses.replace(config, concepts_enabled=True)
+        extractor = make_extractor(cfg)
+
+    with connect_age(cfg.database_url) as conn:
+        conn.autocommit = True
+        _require_age_or_exit(conn)
+        backend = AgeBackend()
+        backend.bootstrap(conn)
+        total = count_documents(conn)
+        mode = " (force: ignoring watermark)" if force else ""
+        aspects = "people + concepts" if include_concepts else "people"
+        typer.echo(
+            f"reconciling {aspects} aspect for {total} document(s) "
+            f"(tenant {config.tenant_id!r}){mode}"
+        )
+        document_ids = (
+            doc_id for batch in iter_all_document_ids(conn) for doc_id in batch
+        )
+        result = build_graph(
+            conn,
+            document_ids,
+            backend=backend,
+            config=config,
+            limit=limit,
+            extractor=extractor,
+            force=force,
+        )
+    typer.echo(
+        f"graphrag build: {result.processed} processed "
+        f"(reconciled {result.reconciled}, skipped {result.skipped}), "
+        f"{result.orphans_removed} orphan(s) removed (tenant {config.tenant_id!r})"
+    )
+
+
+@graphrag_app.command("refresh")
+def graphrag_refresh(
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to refresh (default: BRAIN_GRAPH_TENANT)."
+    ),
+) -> None:
+    """Recompute a tenant's aggregate edges from the source-of-truth.
+
+    The corpus-wide weight/edge recompute, WITHOUT re-resolving any document's
+    persons: rebuilds every ``graph_relationships`` edge from
+    ``graph_edge_contributions`` (normalized lift + generic suppression) and
+    rematerializes the AGE ``CO_OCCURS`` edges. Use after a corpus-wide
+    weighting / suppression change (e.g. a new ``BRAIN_GRAPH_GENERIC_DF``).
+    Idempotent. Run ``brain graphrag build --backfill`` first — refresh assumes
+    the tenant's entity vertices already exist in the graph. For a dropped or
+    corrupted AGE mirror (vertices missing), use ``brain graphrag build --force``
+    — the authoritative full rebuild — instead.
+    """
+    cfg = Config.load()
+    config = _graphrag_config(cfg, tenant)
+    from .graph_rag.backends import AgeBackend
+    from .graph_rag.reconcile import refresh_aggregates
+
+    with connect_age(cfg.database_url) as conn:
+        conn.autocommit = True
+        _require_age_or_exit(conn)
+        backend = AgeBackend()
+        backend.bootstrap(conn)
+        result = refresh_aggregates(conn, backend=backend, config=config)
+    typer.echo(
+        f"graphrag refresh: {result.relationship_count} relationship(s), "
+        f"{result.orphans_removed} orphan(s) removed (tenant {config.tenant_id!r})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wave G2-h — brain graphrag retrieval surfaces (search / themes / entity).
+# Full CLI↔MCP parity arrives in G2-i; this wave is CLI-only. NEVER expose raw
+# Cypher — every command takes structured params and the backend injects
+# tenant_id + caps (spec §9).
+# ---------------------------------------------------------------------------
+
+
+def _graphrag_search_or_exit(
+    cfg: Config,
+    query: str,
+    *,
+    mode: str,
+    tenant: str | None,
+    person: str | None,
+    depth: int | None,
+    limit: int | None,
+    synthesize: bool,
+) -> GraphContext:
+    """Open an AGE connection, run :func:`graph_rag_search`, map core errors.
+
+    The single construction + error-mapping seam shared by ``brain graphrag
+    search`` / ``themes`` / ``entity`` (mirrors how ``build`` / ``refresh`` open
+    an AGE-capable autocommit connection + bootstrap the backend). Local seed
+    resolution + the snippet path are FTS-only, so an embedder is needed ONLY for
+    the ``global`` (community) path's vector leg (spec §17c Q9): the
+    ``embedder_factory`` (``lambda: _build_embedder(cfg)``) is passed through but
+    invoked **lazily** by ``_retrieve_global`` only after routing resolves to
+    global — local/themes/entity never construct one. The enricher is built only
+    for the opt-in ``--synthesize`` group-summary path.
+
+    Error → exit-code mapping (spec §17b decision 4 + repo error contract; the
+    G3-e flip means explicit ``--mode global`` now EXECUTES, so the former
+    ``GraphModeUnavailable`` reject is gone — §17c Q6):
+
+    * :class:`PersonNotFound` / :class:`PersonAmbiguous` (themes resolver) →
+      clean red CLI error, exit 1 (no traceback).
+    * :class:`GraphTenantError` / :class:`GraphBackendError` → clean red CLI
+      error, exit 1 (no traceback).
+    * ``ValueError`` (themes mode with no resolvable person, or an unknown mode
+      surfaced by the router) → :class:`typer.BadParameter` (exit 2).
+
+    AGE-absent is handled before retrieval by :func:`_require_age_or_exit`
+    (exit 1), identical to the ``build`` / ``refresh`` admin commands.
+    """
+    from .graph_rag import graph_rag_search
+    from .graph_rag.backends import AgeBackend
+
+    enricher = _build_enricher(cfg) if synthesize else None
+    try:
+        with connect_age(cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_exit(conn)
+            backend = AgeBackend()
+            backend.bootstrap(conn)
+            return graph_rag_search(
+                conn,
+                cfg,
+                query,
+                backend=backend,
+                tenant=tenant,
+                depth=depth,
+                limit=limit,
+                mode=mode,
+                person=person,
+                synthesize=synthesize,
+                enricher=enricher,
+                embedder_factory=lambda: _build_embedder(cfg),
+            )
+    except (PersonNotFound, PersonAmbiguous) as exc:
+        typer.secho(f"graphrag: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+    except (GraphTenantError, GraphBackendError) as exc:
+        typer.secho(f"graphrag: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+    except ValueError as exc:
+        # Router caller-bug surface: themes mode with no resolvable person, or an
+        # unrecognized --mode value. Both are usage errors → BadParameter.
+        raise typer.BadParameter(str(exc)) from exc
+
+
+def _emit_graph_context(ctx: GraphContext, *, json_output: bool) -> None:
+    """Render a :class:`GraphContext` (full JSON, or the human renderable)."""
+    if json_output:
+        emit_json(graph_context_json(ctx))
+        return
+    console.print(graph_context_renderable(ctx))
+
+
+@graphrag_app.command("search")
+def graphrag_search(
+    query: str = typer.Argument(..., help="Free-text graph retrieval query."),
+    mode: str = typer.Option(
+        "auto",
+        "--mode",
+        help=(
+            "Retrieval mode: auto (heuristic router, default) | local "
+            "(entity-centric) | themes (scope-first 'themes with X', requires "
+            "--person) | global (community-level RRF over detected communities; "
+            "run `brain graphrag communities build` first) | fuse (RRF of the "
+            "local-graph doc leg with the vector/FTS hybrid leg)."
+        ),
+    ),
+    person: str | None = typer.Option(
+        None,
+        "--person",
+        help="Scope themes to this person (resolved via the directory).",
+    ),
+    depth: int | None = typer.Option(
+        None, "--depth", help="Traversal depth (default: BRAIN_GRAPH_DEPTH)."
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Max documents returned (default: 10)."
+    ),
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+    synthesize: bool = typer.Option(
+        False,
+        "--synthesize",
+        help=(
+            "Attach a best-effort local-Ollama summary to each theme group "
+            "(opt-in; never required for retrieval — a missing/failed Ollama "
+            "yields summary=None + a WARN)."
+        ),
+    ),
+) -> None:
+    """Graph retrieval over the Apache AGE people/concept graph (spec §6/§9).
+
+    ``--mode auto`` (default) runs the heuristic router: a thematic query with a
+    resolvable person → themes; a thematic query with no person → global (the
+    community path — the G3-e flip, spec §17c Q6, no longer a global→local
+    degradation); otherwise local. An explicit ``--mode global`` executes the
+    community-level RRF (spec §6c) — build the communities first via
+    ``brain graphrag communities build``. An explicit ``--mode fuse`` (wave G4-c,
+    spec §17d Q1) RRF-merges the local-graph doc leg with the vector/FTS hybrid
+    leg into one ranked doc list (per-doc leg provenance lands in the ``--json``
+    ``explanation.matched_filters.fuse_doc_provenance``); ``fuse`` is
+    explicit-only — ``auto`` never routes to it. No raw Cypher is ever accepted
+    or shown — the backend injects the tenant + caps.
+    """
+    cfg = Config.load()
+    ctx = _graphrag_search_or_exit(
+        cfg,
+        query,
+        mode=mode,
+        tenant=tenant,
+        person=person,
+        depth=depth,
+        limit=limit,
+        synthesize=synthesize,
+    )
+    _emit_graph_context(ctx, json_output=json_output)
+
+
+@graphrag_app.command("themes")
+def graphrag_themes(
+    person: str = typer.Option(
+        ...,
+        "--person",
+        help="Required: the person X to scope 'themes in my conversations with X'.",
+    ),
+    depth: int | None = typer.Option(
+        None, "--depth", help="Traversal depth (default: BRAIN_GRAPH_DEPTH)."
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Max documents returned (default: 10)."
+    ),
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+    synthesize: bool = typer.Option(
+        False,
+        "--synthesize",
+        help="Attach a best-effort Ollama summary per theme group (opt-in).",
+    ),
+) -> None:
+    """The 'themes in my conversations with X' headline (spec §6b).
+
+    A convenience wrapper for ``graphrag search --mode themes --person X``:
+    scopes to X, groups X's co-occurrence subgraph, and returns ranked theme
+    groups (key entities + representative X-docs). ``--person`` is required;
+    omitting it is a usage error.
+    """
+    cfg = Config.load()
+    ctx = _graphrag_search_or_exit(
+        cfg,
+        "",
+        mode="themes",
+        tenant=tenant,
+        person=person,
+        depth=depth,
+        limit=limit,
+        synthesize=synthesize,
+    )
+    _emit_graph_context(ctx, json_output=json_output)
+
+
+@graphrag_app.command("entity")
+def graphrag_entity(
+    name: str = typer.Argument(..., help="Entity name or canonical key to inspect."),
+    depth: int | None = typer.Option(
+        None, "--depth", help="Neighbourhood depth (default: BRAIN_GRAPH_DEPTH)."
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Max documents returned (default: 10)."
+    ),
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show a single entity's neighbourhood (spec §9).
+
+    A thin wrapper over local (entity-centric) retrieval seeded on ``name``: it
+    resolves the entity, traverses its bounded ``CO_OCCURS`` neighbourhood, and
+    returns the seed + reached entities and their documents. No new traversal
+    logic — it reuses the same path as ``graphrag search --mode local``.
+    """
+    cfg = Config.load()
+    ctx = _graphrag_search_or_exit(
+        cfg,
+        name,
+        mode="local",
+        tenant=tenant,
+        person=None,
+        depth=depth,
+        limit=limit,
+        synthesize=False,
+    )
+    _emit_graph_context(ctx, json_output=json_output)
+
+
+# ---------------------------------------------------------------------------
+# Wave G3-f — brain graphrag communities (global-mode admin: build / refresh /
+# list). Communities are RELATIONAL-only (spec §17c Q2/Q3): build runs Louvain
+# over graph_relationships, persists graph_communities/_members, then EAGERLY
+# (best-effort) summarizes + embeds each community. Construction mirrors
+# build/refresh (connect_age + AGE guard + resolve_tenant). NEVER raw Cypher.
+# ---------------------------------------------------------------------------
+
+communities_app = typer.Typer(
+    name="communities",
+    help=(
+        "Global-mode community admin: build / refresh / list the detected "
+        "communities that `brain graphrag search --mode global` ranks."
+    ),
+    no_args_is_help=False,
+)
+graphrag_app.add_typer(communities_app, name="communities")
+
+
+def _run_communities_build(
+    cfg: Config,
+    *,
+    tenant: str | None,
+    limit: int | None,
+    json_output: bool,
+    force: bool,
+) -> None:
+    """Build (``force=False``) / refresh (``force=True``) + summarize communities.
+
+    The shared core of ``communities build`` / ``communities refresh`` (spec
+    §17c Q3): resolves the tenant, runs :func:`build_communities` (the dirty gate
+    SKIPS an unchanged graph unless ``force``), then :func:`summarize_communities`
+    (best-effort Ollama + embedder — an unreachable enricher leaves summaries
+    NULL, while a missing/broken embedder still writes summaries and only skips
+    the embeddings; either way the build still succeeds; spec §17c Q10). The
+    embedder is constructed defensively (mirroring
+    :func:`brain.graph_rag.global_._vector_ranked_keys`' lazy-catch) so a
+    ``make_embedder`` failure (misconfig, Ollama unreachable) degrades to
+    summaries-without-embeddings rather than crashing the build. Reports both
+    tallies (human or ``--json``). ``limit`` caps how many stale/new communities
+    are (re)summarized this run (it does NOT cap detection — Louvain always
+    partitions the full edge set).
+    """
+    from .graph_rag.communities import build_communities
+    from .graph_rag.communities_summary import summarize_communities
+    from .graph_rag.tenancy import resolve_tenant
+
+    tenant_id = resolve_tenant(cfg, tenant)
+    enricher = _build_enricher(cfg)
+    # Construct the embedder defensively (mirrors global_._vector_ranked_keys'
+    # lazy-catch): a missing/broken embedder (e.g. ConfigError from
+    # make_embedder, Ollama unreachable) must NOT crash `communities build` nor
+    # block summaries. On failure, fall back to embedder=None so
+    # summarize_communities still writes summaries and leaves summary_embedding
+    # NULL (global retrieval degrades that community to FTS-only; §17c Q10).
+    embedder: Embedder | None
+    try:
+        embedder = _build_embedder(cfg)
+    except Exception as exc:  # noqa: BLE001 — best-effort: never crash the build
+        logger.warning(
+            "graphrag communities build: embedder construction failed (%s); "
+            "writing summaries without embeddings (FTS-only)",
+            exc,
+        )
+        embedder = None
+    with connect_age(cfg.database_url) as conn:
+        conn.autocommit = True
+        _require_age_or_exit(conn)
+        build_result = build_communities(conn, cfg, tenant=tenant_id, force=force)
+        summary_result = summarize_communities(
+            conn,
+            cfg,
+            tenant=tenant_id,
+            enricher=enricher,
+            embedder=embedder,
+            limit=limit,
+        )
+
+    if json_output:
+        emit_json(
+            {
+                "tenant_id": tenant_id,
+                "build": {
+                    "communities_total": build_result.communities_total,
+                    "created": build_result.created,
+                    "reused": build_result.reused,
+                    "deleted": build_result.deleted,
+                    "dirty": build_result.dirty,
+                    "skipped": build_result.skipped,
+                },
+                "summary": {
+                    "candidates": summary_result.candidates,
+                    "summarized": summary_result.summarized,
+                    "summary_failures": summary_result.summary_failures,
+                    "embedded": summary_result.embedded,
+                    "embed_failures": summary_result.embed_failures,
+                    "skipped": summary_result.skipped,
+                },
+            }
+        )
+        return
+
+    verb = "refresh" if force else "build"
+    if build_result.skipped:
+        typer.echo(
+            f"graphrag communities {verb}: graph unchanged — skipped "
+            f"({build_result.communities_total} community/-ies, "
+            f"tenant {tenant_id!r})"
+        )
+    else:
+        typer.echo(
+            f"graphrag communities {verb}: {build_result.communities_total} "
+            f"community/-ies (created {build_result.created}, reused "
+            f"{build_result.reused}, deleted {build_result.deleted}, "
+            f"tenant {tenant_id!r})"
+        )
+    summary_tail = (
+        " (enricher unavailable — summaries skipped)"
+        if summary_result.skipped
+        else ""
+    )
+    typer.echo(
+        f"summaries: {summary_result.summarized} written, "
+        f"{summary_result.summary_failures} failed, "
+        f"{summary_result.embedded} embedded, "
+        f"{summary_result.embed_failures} embed failure(s)" + summary_tail
+    )
+
+
+def _run_communities_list(
+    cfg: Config,
+    *,
+    tenant: str | None,
+    limit: int | None,
+    json_output: bool,
+) -> None:
+    """List a tenant's materialized communities (the ``communities list`` core).
+
+    Resolves the tenant and reads the stored ``graph_communities`` rows via
+    :func:`brain.graph_rag.communities.list_communities` (largest-first,
+    ``--limit`` capped), then renders the admin table or the ``--json`` payload
+    (``{tenant_id, count, communities:[…]}``). Read-only; no raw Cypher.
+    """
+    from .graph_rag.communities import list_communities
+    from .graph_rag.tenancy import resolve_tenant
+
+    tenant_id = resolve_tenant(cfg, tenant)
+    with connect_age(cfg.database_url) as conn:
+        conn.autocommit = True
+        _require_age_or_exit(conn)
+        records = list_communities(conn, tenant_id, limit=limit)
+
+    if json_output:
+        emit_json(
+            {
+                "tenant_id": tenant_id,
+                "count": len(records),
+                "communities": [community_record_json(r) for r in records],
+            }
+        )
+        return
+    console.print(community_records_table(records))
+
+
+@communities_app.callback(invoke_without_command=True)
+def communities_default(ctx: typer.Context) -> None:
+    """List communities when ``brain graphrag communities`` is run bare.
+
+    Defaults the bare group invocation to ``list`` (with default tenant + no
+    limit). An explicit subcommand (``build`` / ``refresh`` / ``list``) suppresses
+    this so only the subcommand runs.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    _run_communities_list(Config.load(), tenant=None, limit=None, json_output=False)
+
+
+@communities_app.command("build")
+def graphrag_communities_build(
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to build (default: BRAIN_GRAPH_TENANT)."
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        "-n",
+        help="Max stale/new communities to (re)summarize this run (default: all).",
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Detect + persist + summarize the tenant's communities (spec §17c Q3).
+
+    Runs Louvain over the tenant's relational ``graph_relationships`` edges and
+    persists the partition to ``graph_communities`` / ``graph_community_members``,
+    then EAGERLY (best-effort) summarizes + embeds each community. The dirty gate
+    SKIPS when the graph is unchanged since the last build — use ``communities
+    refresh`` to force a rebuild. A missing/unreachable Ollama leaves summaries
+    NULL and the build still succeeds (the global path then ranks FTS-only).
+    """
+    cfg = Config.load()
+    _run_communities_build(
+        cfg, tenant=tenant, limit=limit, json_output=json_output, force=False
+    )
+
+
+@communities_app.command("refresh")
+def graphrag_communities_refresh(
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to refresh (default: BRAIN_GRAPH_TENANT)."
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        "-n",
+        help="Max stale/new communities to (re)summarize this run (default: all).",
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Force a community rebuild regardless of the dirty gate (spec §17c Q3).
+
+    Identical to ``communities build`` except it bypasses the
+    ``(build_version, source_graph_hash)`` dirty gate — Louvain + the relational
+    replace always run, then the eager (best-effort) summary/embedding pass. Use
+    after a corpus-wide weighting / suppression change, or to recover after a
+    knob change that should re-partition an unchanged graph.
+    """
+    cfg = Config.load()
+    _run_communities_build(
+        cfg, tenant=tenant, limit=limit, json_output=json_output, force=True
+    )
+
+
+@communities_app.command("list")
+def graphrag_communities_list(
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to list (default: BRAIN_GRAPH_TENANT)."
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Max communities to show (default: all)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List the tenant's materialized communities (admin view; spec §17c Q3).
+
+    Shows each stored community's short key, member/edge counts, total weight,
+    and a summary preview (largest-first). ``--json`` emits the structured
+    ``{tenant_id, count, communities:[…]}`` payload. Read-only — never raw Cypher.
+    """
+    cfg = Config.load()
+    _run_communities_list(cfg, tenant=tenant, limit=limit, json_output=json_output)
 
 
 # ---------------------------------------------------------------------------
@@ -1785,35 +2967,137 @@ def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
         raise typer.Exit(code=1) from e
 
 
+# Graph-target kinds rateable via ``brain rate --target-type`` (G4-b, spec
+# §17d Q2). Mirrors ``brain.interactions._VALID_TARGET_TYPES`` / the SQL
+# ``interactions_target_type_chk`` CHECK; kept as a CLI-local tuple so the
+# Typer help + boundary validation don't reach into the writer's private set.
+_RATE_TARGET_TYPES = ("entity", "community", "theme")
+
+
+def _record_interaction_best_effort(
+    conn: psycopg.Connection[Any], **kwargs: Any
+) -> str | None:
+    """Write one interaction row, swallowing logging failures (G4-b never-raise).
+
+    Interaction logging is best-effort: a logging failure must NOT break the
+    underlying command (mirrors the MCP discipline). Boundary validation
+    (verdict / target-type / doc-id resolution) happens at the call site and
+    surfaces normally; only the persistence step is guarded here. Returns the
+    new row's id, or ``None`` if the write failed (logged at WARNING).
+    """
+    try:
+        return record_interaction(conn, **kwargs)
+    except (psycopg.Error, InteractionError) as exc:
+        logger.warning("interaction logging failed: %s", type(exc).__name__)
+        return None
+
+
 @app.command()
 def rate(
-    id: str = typer.Argument(..., help="Document id prefix (6+ hex chars)."),
+    id: str = typer.Argument(
+        ...,
+        help=(
+            "What you're rating: a document id prefix (6+ hex chars), or — when "
+            "--target-type is given — the graph target's id (entity UUID, "
+            "community key, or theme key)."
+        ),
+    ),
     verdict: str = typer.Argument(
         ..., help="One of: useful, irrelevant.",
     ),
+    target_type: str | None = typer.Option(
+        None,
+        "--target-type",
+        help=(
+            "Rate a graph target instead of a document: one of "
+            "entity | community | theme. When set, the positional id is the "
+            "graph target's id (not resolved as a document prefix)."
+        ),
+    ),
+    graph_retrieved: bool = typer.Option(
+        False,
+        "--graph-retrieved",
+        help=(
+            "Provenance: mark this rating as produced by a graph surface "
+            "(graphrag search/themes/entity). Independent of the target shape — "
+            "a document rated via a graph path is still a document row."
+        ),
+    ),
 ) -> None:
-    """Record a thumbs-up / thumbs-down on a document.
+    """Record a thumbs-up / thumbs-down on a document or graph target.
 
     Persists to the ``interactions`` table (action=``rated_useful`` or
     ``rated_irrelevant``, source='cli', session_id=NULL). Ratings APPEND
-    every call — re-rating the same doc creates a new row with a fresh
+    every call — re-rating the same target creates a new row with a fresh
     timestamp; the full history is preserved. A future aggregation query
     will collapse to "most recent rating wins" but that is a read-side
     concern; not in Q1-C.
+
+    Two target shapes (G4-b, spec §17d Q2; mutually exclusive — the XOR is
+    enforced by ``record_interaction`` + the SQL CHECK):
+
+    - Document (default): ``brain rate <doc-id> useful`` — the positional id
+      resolves to a document.
+    - Graph target: ``brain rate <target-id> useful --target-type entity`` —
+      entity / community / theme become first-class rateable targets; the
+      positional id is the durable graph-target id (no document resolution),
+      and ``document_id`` is NULL.
+
+    ``--graph-retrieved`` is an orthogonal provenance flag usable with either
+    shape. Graph retrieval surfaces (``brain graphrag …``) never log at
+    retrieval time — only this user action does.
     """
     if verdict not in {"useful", "irrelevant"}:
         raise typer.BadParameter("verdict must be 'useful' or 'irrelevant'")
     action: str = "rated_useful" if verdict == "useful" else "rated_irrelevant"
+    if target_type is not None and target_type not in _RATE_TARGET_TYPES:
+        raise typer.BadParameter(
+            "--target-type must be one of: "
+            + ", ".join(_RATE_TARGET_TYPES)
+        )
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
+        if target_type is not None:
+            # Graph-target rating: the positional id is the target id; it is
+            # NOT a document prefix, so skip _resolve_id. document_id stays
+            # NULL (the XOR demands exactly the target shape).
+            new_id = _record_interaction_best_effort(
+                conn,
+                action=action,
+                source="cli",
+                target_type=target_type,
+                target_id=id,
+                graph_retrieved=graph_retrieved,
+            )
+            if new_id is None:
+                typer.secho(
+                    f"warning: failed to record {action} for "
+                    f"{target_type} {id}",
+                    fg="yellow",
+                    err=True,
+                )
+                return
+            typer.echo(
+                f"recorded {action} ({new_id[:8]}) for {target_type} {id}"
+            )
+            return
+        # Document rating (the unchanged Q1-C path + optional provenance).
         doc_id = _resolve_id(conn, id)
-        new_id = record_interaction(
+        new_id = _record_interaction_best_effort(
             conn,
             document_id=doc_id,
-            action=action,  # type: ignore[arg-type]
+            action=action,
             source="cli",
+            graph_retrieved=graph_retrieved,
         )
+    if new_id is None:
+        typer.secho(
+            f"warning: failed to record {action} for doc {doc_id[:8]}",
+            fg="yellow",
+            err=True,
+        )
+        return
     typer.echo(f"recorded {action} ({new_id[:8]}) for doc {doc_id[:8]}")
 
 
@@ -1887,12 +3171,71 @@ def todo(
 def show(
     id: str = typer.Argument(...),
     json_output: bool = typer.Option(False, "--json"),
+    query: str | None = typer.Option(
+        None,
+        "--query",
+        "--originating-query",
+        help=(
+            "The query that led you to this document. When set, records an "
+            "'opened' interaction (source='cli'). Mirrors MCP brain_show."
+        ),
+    ),
+    session_id: str | None = typer.Option(
+        None,
+        "--session-id",
+        help=(
+            "UUID grouping a search-then-open pair (from a prior search/graphrag "
+            "call). Requires --query."
+        ),
+    ),
+    graph_retrieved: bool = typer.Option(
+        False,
+        "--graph-retrieved",
+        help=(
+            "Provenance: this open came from a graph surface (graphrag "
+            "search/themes/entity). Recorded on the 'opened' row when --query "
+            "is given. Default off preserves today's no-log behavior."
+        ),
+    ),
 ) -> None:
-    """Print a document by id (or 6+ char prefix)."""
+    """Print a document by id (or 6+ char prefix).
+
+    G4-b (spec §17d Q2): pass ``--query`` to record an ``opened`` interaction
+    (source='cli') the same way MCP ``brain_show`` does, and ``--graph-retrieved``
+    to mark that open as produced by a graph surface (provenance). With no
+    ``--query`` nothing is logged — today's behavior is unchanged. Logging is
+    best-effort: a logging failure never blocks the document from printing.
+    """
+    # Mirror MCP brain_show's D15 guard: a session id without an originating
+    # query carries no useful signal.
+    if session_id is not None and query is None:
+        raise typer.BadParameter("--session-id requires --query")
+    session_uuid: uuid.UUID | None = None
+    if session_id is not None:
+        try:
+            session_uuid = uuid.UUID(session_id)
+        except ValueError as e:
+            raise typer.BadParameter(
+                f"--session-id is not a valid UUID: {session_id!r}"
+            ) from e
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
+        conn.autocommit = True
         doc_id = _resolve_id(conn, id)
         doc = fetch_document(conn, doc_id)
+        # Log the open AFTER the fetch succeeded, gated on --query (parity with
+        # MCP brain_show). graph_retrieved is provenance on the document row.
+        # Best-effort: a logging failure must not break `brain show` (G4-b).
+        if query is not None:
+            _record_interaction_best_effort(
+                conn,
+                document_id=doc_id,
+                action="opened",
+                source="cli",
+                query=query,
+                session_id=session_uuid,
+                graph_retrieved=graph_retrieved,
+            )
     assert doc is not None  # _resolve_id confirmed the doc exists
     if json_output:
         # Wave Q1-D — emit ``summary`` only when populated (additive,
@@ -2317,6 +3660,7 @@ def _edit_via_editor(cfg: Config, doc_id: str) -> int:
     # edit). Ollama failures inside the hook degrade soft (logged WARN;
     # ``brain enrich --backfill`` recovers the row later).
     enricher: Any = _build_enricher(cfg) if body_changed else None
+    graph_syncer = _build_graph_syncer(cfg)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         try:
@@ -2332,6 +3676,7 @@ def _edit_via_editor(cfg: Config, doc_id: str) -> int:
                 new_tags=new_tags,
                 vault_root=cfg.vault_path,
                 enricher=enricher,
+                graph_syncer=graph_syncer,
             )
         except ValueError as e:
             typer.secho(str(e), fg="red", err=True)
@@ -2536,6 +3881,7 @@ def edit(
     # ``--content-stdin``) is the only path that re-triggers
     # ``_enrich_post_ingest_hook``'s body-changed branch.
     enricher: Any = _build_enricher(cfg) if new_content is not None else None
+    graph_syncer = _build_graph_syncer(cfg)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         try:
@@ -2550,6 +3896,7 @@ def edit(
                 replace_metadata=replace_metadata,
                 vault_root=cfg.vault_path,
                 enricher=enricher,
+                graph_syncer=graph_syncer,
             )
         except ValueError as e:
             typer.secho(str(e), fg="red", err=True)
@@ -2572,6 +3919,7 @@ def rm(
     proceeds.
     """
     cfg = Config.load()
+    graph_syncer = _build_graph_syncer(cfg)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         doc_id = _resolve_id(conn, id)
@@ -2586,6 +3934,12 @@ def rm(
         if not yes:
             typer.confirm(f"Delete '{title}' ({doc_id[:8]})?", abort=True)
         conn.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
+        # Wave G1-c — drop the doc from the people graph. Runs post-DELETE on
+        # the same (autocommit) connection; best-effort / never-raises. The
+        # documents-row delete cascades to the relational graph source rows
+        # (migration 012 FKs), and remove_document is robust whether those are
+        # already gone or not — it then GCs orphaned person vertices + edges.
+        graph_syncer.remove(conn, doc_id)
     suffix = _rm_unlink_vault_mirror(cfg=cfg, vault_path_rel=vault_path_rel)
     typer.echo(f"removed {doc_id[:8]}{suffix}")
 
@@ -2631,6 +3985,7 @@ def _set_draft(id_prefix: str, *, draft: bool) -> None:
     :func:`_resolve_id` → ``typer.Exit(code=1)``.
     """
     cfg = Config.load()
+    graph_syncer = _build_graph_syncer(cfg)
     target_state_label = "draft" if draft else "published"
     other_state_label = "published" if draft else "draft"
     with connect(cfg.database_url) as conn:
@@ -2651,6 +4006,7 @@ def _set_draft(id_prefix: str, *, draft: bool) -> None:
                 document_id=doc_id,
                 new_draft=draft,
                 vault_root=cfg.vault_path,
+                graph_syncer=graph_syncer,
             )
         except ValueError as e:
             typer.secho(str(e), fg="red", err=True)
@@ -2903,6 +4259,7 @@ def vault_sync(
         raise typer.Exit(code=2)
 
     embedder = _build_embedder(cfg)
+    graph_syncer = _build_graph_syncer(cfg)
 
     if watch:
         # Long-running mode. The watcher owns its own connection lifecycle
@@ -2927,6 +4284,7 @@ def vault_sync(
                 link_rewrite=not no_link_rewrite,
                 owner_participants=cfg.owner_participants,
             ),
+            graph_syncer=graph_syncer,
         )
         typer.echo(f"vault path:     {target}")
         deletion_phrase = (
@@ -2960,6 +4318,7 @@ def vault_sync(
             dry_run=dry_run,
             link_rewrite=not no_link_rewrite,
             owner_participants=cfg.owner_participants,
+            graph_syncer=graph_syncer,
         )
 
     suffix = " (dry-run)" if dry_run else ""
@@ -3514,6 +4873,7 @@ def vault_relink_derived() -> None:
     overwrites ``_participant_keys`` deterministically from the body.
     """
     cfg = Config.load()
+    graph_syncer = _build_graph_syncer(cfg)
     started_at = _time.perf_counter()
 
     with connect(cfg.database_url) as conn:
@@ -3617,6 +4977,22 @@ def vault_relink_derived() -> None:
         )
         typer.echo(f"  - Pages written: {people_report.pages_written}")
         typer.echo(f"  - Pages deleted: {people_report.pages_deleted}")
+
+        # Step 5.5 (wave G1-c): reconcile the people graph for every linkable
+        # doc. Step 1 (Gmail directory rescan), step 1.5 (Krisp
+        # ``_participant_keys`` backfill), and step 2 (Calendar/Contacts
+        # refresh) all feed the person resolver, so a doc's graph people roster
+        # can go stale after a relink even when its own row was untouched.
+        # Reconciling the full linkable set (the same ids the linker iterates)
+        # is correct + cheap: the per-aspect ``graph_index_state`` watermark
+        # skips any doc whose resolved persons + config didn't actually change.
+        # Best-effort / never-raises; a no-op when graph sync is disabled or
+        # AGE is absent. Runs post-commit on the autocommit ``conn``.
+        if corpus_ids:
+            typer.echo("Reconciling graph...")
+            for doc_id in sorted(corpus_ids):
+                graph_syncer.reconcile(conn, doc_id)
+            typer.echo(f"  - Graph docs reconciled: {len(corpus_ids)}")
 
         # Step 6: Rich summary — directory by source + derived_links by rule.
         directory_counts = _directory_counts_by_source(conn)

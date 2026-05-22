@@ -24,6 +24,8 @@ deferred until after the DB transaction commits, so a DB crash mid-sync
 leaves the file untouched (the prior write-first-then-DB ordering could
 leave a file id-stamped on disk with no DB row to back it).
 """
+from __future__ import annotations
+
 import hashlib
 import json
 import logging
@@ -31,7 +33,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import psycopg
 import yaml
@@ -47,6 +49,9 @@ from .frontmatter import body_hash, dump_frontmatter, parse_frontmatter
 from .link_rewrite import rewrite_vault_links
 from .links import ParsedLink, parse_wiki_links
 from .resolver import resolve_link, title_collisions
+
+if TYPE_CHECKING:
+    from ..graph_rag.sync import GraphSyncer
 
 # Top-level vault directories (or anything starting with ``_``) that the sync
 # engine never treats as authored notes. ``_templates`` is editor scaffolding,
@@ -121,6 +126,7 @@ def sync_vault(
     dry_run: bool = False,
     link_rewrite: bool = True,
     owner_participants: frozenset[str] = frozenset(),
+    graph_syncer: GraphSyncer | None = None,
 ) -> SyncReport:
     """Reconcile every ``.md`` file under ``vault_path`` into the DB.
 
@@ -181,7 +187,7 @@ def sync_vault(
             seen_doc_ids.add(doc_id)
 
     # Step 3: detect missing-on-disk vault-tier rows.
-    _process_missing(
+    pruned_ids = _process_missing(
         conn,
         seen_relative=seen_relative,
         report=report,
@@ -223,6 +229,20 @@ def sync_vault(
                 doc_ids=seen_doc_ids,
             )
 
+    # Step 7 (wave G1-c): people-aspect graph sync. Runs only on a real
+    # (non-dry-run) sync, AFTER the per-file transactions + linker pass have
+    # committed, reusing ``conn``. Reconcile every doc we touched (most are
+    # watermark-skips — vault-tier rows carry no participants, and ingested
+    # mirrors keep DB-authoritative metadata that sync doesn't change — so the
+    # graph only moves for the rare synced doc whose person set actually
+    # differs) and remove every pruned doc. Both calls are best-effort /
+    # never-raise and no-op when graph sync is disabled or AGE is absent.
+    if not dry_run and graph_syncer is not None:
+        for doc_id in sorted(seen_doc_ids):
+            graph_syncer.reconcile(conn, doc_id)
+        for doc_id in pruned_ids:
+            graph_syncer.remove(conn, doc_id)
+
     return report
 
 
@@ -234,6 +254,7 @@ def sync_one_file(
     file_path: Path,
     link_rewrite: bool = True,
     owner_participants: frozenset[str] = frozenset(),
+    graph_syncer: GraphSyncer | None = None,
 ) -> SyncReport:
     """Sync exactly one ``.md`` file under ``vault_path``.
 
@@ -366,6 +387,13 @@ def sync_one_file(
             )
         ):
             report.links_rewritten += 1
+
+        # Wave G1-c: reconcile the single touched doc into the people graph
+        # (best-effort / never-raises; a no-op when graph sync is disabled or
+        # AGE is absent). Runs after the per-file + linker transactions
+        # committed, reusing ``conn``.
+        if graph_syncer is not None:
+            graph_syncer.reconcile(conn, doc_id)
 
     return report
 
@@ -1260,7 +1288,7 @@ def _process_missing(
     report: SyncReport,
     prune: bool,
     dry_run: bool,
-) -> None:
+) -> list[str]:
     """Find vault-tier rows whose ``vault_path`` was NOT seen and prune/warn.
 
     Dry-run reports the planned action via the report counters but never
@@ -1268,17 +1296,23 @@ def _process_missing(
     "read-only" (no DB writes, no FS writes, no log noise the user wasn't
     asking for). The counters in the returned report still reflect what
     *would* happen.
+
+    Returns the list of document ids that were ACTUALLY deleted this pass
+    (``prune`` and not ``dry_run``) so the caller can drop them from the
+    people graph (wave G1-c). Empty on warn-only / dry-run.
     """
     rows = conn.execute(
         "SELECT id::text, vault_path, title FROM documents "
         "WHERE kind = 'vault' AND vault_path IS NOT NULL"
     ).fetchall()
+    pruned_ids: list[str] = []
     for doc_id, vault_path_value, title in rows:
         if vault_path_value in seen_relative:
             continue
         if prune:
             if not dry_run:
                 conn.execute("DELETE FROM documents WHERE id = %s", (doc_id,))
+                pruned_ids.append(str(doc_id))
             report.deleted += 1
         else:
             if not dry_run:
@@ -1290,6 +1324,7 @@ def _process_missing(
                     vault_path_value,
                 )
             report.warned += 1
+    return pruned_ids
 
 
 def _retry_unresolved(

@@ -25,6 +25,7 @@ import psycopg
 
 from ..config import Config
 from ..db import connect
+from ..rank_fusion import rrf_contribution
 from ..search import CANDIDATE_LIMIT, PER_DOC_CHUNK_CAP, RRF_K
 from ..vault._atomic import atomic_write_text
 
@@ -453,10 +454,10 @@ def _neighbors_for_source(
     rrf: dict[str, float] = {}
     chunk_meta: dict[str, tuple[str, str]] = {}  # chunk_id → (document_id, content)
     for rank, (cid, doc_id, content) in enumerate(fts_rows):
-        rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        rrf[cid] = rrf.get(cid, 0.0) + rrf_contribution(rank, k=RRF_K)
         chunk_meta[cid] = (doc_id, content)
     for rank, (cid, doc_id, content) in enumerate(vec_rows):
-        rrf[cid] = rrf.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+        rrf[cid] = rrf.get(cid, 0.0) + rrf_contribution(rank, k=RRF_K)
         chunk_meta[cid] = (doc_id, content)
 
     if not rrf:

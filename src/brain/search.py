@@ -32,6 +32,7 @@ from typing import Any
 import psycopg
 
 from .ingest import Embedder
+from .rank_fusion import rrf_contribution
 
 
 @dataclass(frozen=True)
@@ -310,14 +311,14 @@ def hybrid_search(
     chunk_meta: dict[str, tuple[str, int, str]] = {}
     for rank, row in enumerate(fts_rows):
         cid = str(row[0])
-        contrib = 1.0 / (RRF_K + rank + 1)
+        contrib = rrf_contribution(rank, k=RRF_K)
         rrf[cid] = rrf.get(cid, 0.0) + contrib
         if explain:
             rrf_fts[cid] = contrib
         chunk_meta[cid] = (str(row[1]), int(row[2]), row[3])
     for rank, row in enumerate(vec_rows):
         cid = str(row[0])
-        contrib = 1.0 / (RRF_K + rank + 1)
+        contrib = rrf_contribution(rank, k=RRF_K)
         rrf[cid] = rrf.get(cid, 0.0) + contrib
         if explain:
             rrf_vec[cid] = contrib

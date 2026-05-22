@@ -11,6 +11,7 @@ import psycopg
 import pytest
 
 from brain.errors import (
+    BrainError,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
@@ -417,6 +418,103 @@ def test_finalize_embedding_index_idempotent(
 
     state = embedding_column_state(test_db)
     assert state.not_null
+
+
+# --- G0b: generalized (table, column) finalize ------------------------------
+# finalize_embedding_index is parameterized over (table, column) + create_hnsw.
+# These tests prove (a) the chunks path is unchanged via the explicit-arg
+# signature (NOT NULL + HNSW), (b) graph_entities with create_hnsw=False stays
+# NULLABLE with no index even when a NULL embedding is present, and (c) a
+# non-allowlisted pair is rejected.
+
+
+def _graph_entities_index_exists(conn: psycopg.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM pg_indexes WHERE indexname = 'graph_entities_embedding_idx'"
+    ).fetchone()
+    return row is not None
+
+
+def _graph_entities_embedding_nullable(conn: psycopg.Connection) -> bool:
+    row = conn.execute(
+        "SELECT is_nullable FROM information_schema.columns "
+        "WHERE table_name = 'graph_entities' AND column_name = 'embedding'"
+    ).fetchone()
+    assert row is not None
+    return str(row[0]) == "YES"
+
+
+def test_finalize_embedding_index_chunks_explicit_args_match_default(
+    test_db: psycopg.Connection,
+) -> None:
+    """Regression: explicit ``("chunks", "embedding")`` + ``create_hnsw=True``
+    is byte-equivalent to the default chunks path — NOT NULL is applied and the
+    HNSW cosine index is created for a 1024-dim backend.
+    """
+    test_db.execute("ALTER TABLE chunks DROP COLUMN embedding")
+    test_db.execute("ALTER TABLE chunks ADD COLUMN embedding vector(1024)")
+
+    doc_id = _seed_doc_for_chunks(test_db)
+    _insert_chunk(
+        test_db,
+        document_id=doc_id,
+        chunk_index=0,
+        content="filled",
+        embedding=[0.0] * 1024,
+    )
+
+    finalize_embedding_index(
+        test_db, _FixedDimEmbedder(dim=1024), "chunks", "embedding", create_hnsw=True
+    )
+
+    state = embedding_column_state(test_db)
+    assert state.not_null
+    assert "vector(1024)" in state.column_type
+    assert state.has_index is True
+    idx = test_db.execute(
+        "SELECT 1 FROM pg_indexes WHERE indexname = 'chunks_embedding_idx'"
+    ).fetchone()
+    assert idx is not None
+
+
+def test_finalize_embedding_index_graph_entities_skips_hnsw_and_not_null(
+    test_db: psycopg.Connection,
+) -> None:
+    """graph_entities + ``create_hnsw=False`` → no HNSW, no NOT NULL.
+
+    A NULL embedding is present (the normal post-migration state); the
+    create_hnsw=False path must NOT raise (no NULL-completeness requirement),
+    must NOT create the HNSW index, and must leave the column NULLABLE.
+    """
+    test_db.execute(
+        "INSERT INTO graph_entities (entity_type, name, canonical_key) "
+        "VALUES (%s, %s, %s)",
+        ("topic", "Beta", "beta"),
+    )
+    assert _graph_entities_embedding_nullable(test_db)
+    assert not _graph_entities_index_exists(test_db)
+
+    finalize_embedding_index(
+        test_db,
+        _FixedDimEmbedder(dim=1024),
+        "graph_entities",
+        "embedding",
+        create_hnsw=False,
+    )
+
+    # Column still NULLABLE (no NOT NULL forced) and no HNSW index created.
+    assert _graph_entities_embedding_nullable(test_db)
+    assert not _graph_entities_index_exists(test_db)
+
+
+def test_finalize_embedding_index_rejects_non_allowlisted(
+    test_db: psycopg.Connection,
+) -> None:
+    """A ``(table, column)`` pair off the allowlist raises before any DDL."""
+    with pytest.raises(BrainError, match="allowlist"):
+        finalize_embedding_index(
+            test_db, _FixedDimEmbedder(dim=1024), "documents", "tsv"
+        )
 
 
 def test_embedding_column_state_pre_finalize(

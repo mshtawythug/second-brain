@@ -303,6 +303,24 @@ def _perform_action(label: str, fn: object, dry_run: bool) -> None:
         fn()
 
 
+def materialize_age_dockerfile(brain_home: Path) -> Path:
+    """Copy the packaged AGE Dockerfile into ``$BRAIN_HOME/docker/age/Dockerfile``.
+
+    The rendered ``docker-compose.yml`` builds the custom PG16 + pgvector + AGE
+    image from ``$BRAIN_HOME/docker/age``; this materializes the canonical packaged
+    Dockerfile (``brain.templates/docker/age/Dockerfile``) there so the build
+    context resolves on a fresh install — mirroring how the compose/env templates
+    and bin shims are shipped from package data. Idempotent (overwrites in place).
+
+    Returns the destination path.
+    """
+    src = resource_files("brain.templates") / "docker" / "age" / "Dockerfile"
+    dest = brain_home / "docker" / "age" / "Dockerfile"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(dest, src.read_text(encoding="utf-8"))
+    return dest
+
+
 # ---------------------------------------------------------------------------
 # T3.5 — brain init + doctor
 # ---------------------------------------------------------------------------
@@ -639,6 +657,15 @@ def run_setup(
         typer.echo(f"  [ok] wrote {compose_dest}")
 
     _perform_action(f"render {compose_dest}", _write_compose_yml, dry_run)
+
+    # 3b. Materialize the packaged AGE Dockerfile so the compose build context
+    # ($BRAIN_HOME/docker/age) resolves before `docker compose up` runs.
+    dockerfile_dest = brain_home / "docker" / "age" / "Dockerfile"
+    _perform_action(
+        f"materialize AGE Dockerfile → {dockerfile_dest}",
+        lambda: materialize_age_dockerfile(brain_home),
+        dry_run,
+    )
 
     # 4. Render .env — only if missing; never overwrite.
     env_dest = brain_home / ".env"

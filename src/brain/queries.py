@@ -13,7 +13,12 @@ from typing import Any
 
 import psycopg
 import yaml
+from psycopg import sql
 
+from .embedding_targets import (
+    embedding_index_name,
+    validate_embedding_target,
+)
 from .errors import (
     BrainError,
     IdPrefixAmbiguous,
@@ -599,37 +604,130 @@ def count_chunks_missing_embedding(
     return int(row[0])
 
 
-def finalize_embedding_index(
-    conn: psycopg.Connection[Any], embedder: Embedder
-) -> None:
-    """Apply NOT NULL on ``chunks.embedding`` once backfill is complete.
+def iter_all_document_ids(
+    conn: psycopg.Connection[Any], *, batch_size: int = 256
+) -> Iterator[list[str]]:
+    """Yield batches of every document id in ascending ``id`` order.
 
-    For embedders with ``dim <= 2000`` (arctic, voyage), additionally creates
-    an HNSW cosine index. pgvector 0.8.x caps HNSW/IVFFlat at 2000 dims for
-    ``vector`` (4000 for ``halfvec``), so higher-dim embedders (Qwen3 at
-    4096) skip the index — sequential scan over the cosine operator is
-    acceptable at personal-corpus scale (~150 ms at 10K chunks, ~1 s at
-    100K).
+    Drives ``brain graphrag build --backfill`` — the batch equivalent of the
+    per-document graph reconcile hook. Uses keyset pagination over
+    ``documents.id`` (UUID, ordered) so the in-memory footprint stays bounded on
+    a large corpus, mirroring :func:`iter_chunks_missing_embedding` /
+    :func:`iter_unenriched_documents`.
+
+    The deterministic ascending-id order is what makes a build resumable: a
+    re-run after an interruption revisits the ids in the same order, and the
+    reconcile watermark skips the already-indexed prefix cheaply.
+    """
+    last_id: str | None = None
+    while True:
+        if last_id is None:
+            rows = conn.execute(
+                "SELECT id::text FROM documents ORDER BY id LIMIT %s",
+                (batch_size,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id::text FROM documents WHERE id > %s::uuid "
+                "ORDER BY id LIMIT %s",
+                (last_id, batch_size),
+            ).fetchall()
+        if not rows:
+            return
+        last_id = str(rows[-1][0])
+        yield [str(r[0]) for r in rows]
+
+
+def count_documents(conn: psycopg.Connection[Any]) -> int:
+    """Return the total number of documents (drives build progress reporting)."""
+    row = conn.execute("SELECT count(*) FROM documents").fetchone()
+    assert row is not None  # count(*) always yields one row
+    return int(row[0])
+
+
+def _count_null_embedding(
+    conn: psycopg.Connection[Any], table: str, column: str
+) -> int:
+    """Count rows in ``<table>`` whose vector ``<column>`` is NULL.
+
+    Identifiers are quoted via :class:`psycopg.sql.Identifier`; callers
+    validate ``(table, column)`` against the allowlist before reaching here.
+    """
+    count_sql = sql.SQL(
+        "SELECT count(*) FROM {table} WHERE {column} IS NULL"
+    ).format(table=sql.Identifier(table), column=sql.Identifier(column))
+    row = conn.execute(count_sql).fetchone()
+    assert row is not None  # count(*) always yields one row
+    return int(row[0])
+
+
+def finalize_embedding_index(
+    conn: psycopg.Connection[Any],
+    embedder: Embedder,
+    table: str = "chunks",
+    column: str = "embedding",
+    *,
+    create_hnsw: bool = True,
+) -> None:
+    """Finalize a pgvector embedding column once its backfill is complete.
+
+    Generalized over ``(table, column)`` (default ``chunks.embedding``) so the
+    GraphRAG tables can reuse it; ``(table, column)`` is checked against the
+    hard-coded allowlist in :mod:`brain.embedding_targets` and every identifier
+    is quoted via :class:`psycopg.sql.Identifier` — never string-formatted.
+
+    Two regimes, selected by ``create_hnsw``:
+
+    - ``create_hnsw=True`` (default — the ``chunks`` semantics, **unchanged**):
+      apply ``NOT NULL`` on the column, and for embedders with
+      ``dim <= 2000`` (arctic, voyage) additionally create an HNSW cosine
+      index. pgvector 0.8.x caps HNSW/IVFFlat at 2000 dims for ``vector``, so
+      higher-dim embedders (Qwen3 at 4096) get ``NOT NULL`` but skip the index
+      — sequential cosine scan is acceptable at personal-corpus scale.
+    - ``create_hnsw=False`` (the GraphRAG semantics, e.g.
+      ``graph_entities.embedding``): the column stays **NULLABLE** with **no**
+      HNSW index. Small row counts make sequential scan fine (spec §5) and
+      global ranking guards on ``IS NOT NULL`` rather than a column
+      constraint, so there is nothing to finalize yet — the call is a
+      validated no-op.
 
     Idempotent — ``ALTER COLUMN ... SET NOT NULL`` is a no-op if the column
     is already non-nullable, and ``CREATE INDEX IF NOT EXISTS`` is a no-op
     if the index already exists.
 
-    Raises :class:`ValueError` if any chunk still has NULL embedding —
-    that's a caller bug (the CLI should only call this after asserting
-    ``count_chunks_missing_embedding == 0``).
+    Raises :class:`ValueError` (only on the ``create_hnsw=True`` path) if any
+    row still has a NULL embedding — that's a caller bug (the CLI should only
+    call this after asserting the NULL count is zero).
     """
-    remaining = count_chunks_missing_embedding(conn)
+    validate_embedding_target(table, column)
+    if not create_hnsw:
+        # GraphRAG deferred mode: column stays NULLABLE, no HNSW index, no
+        # NULL-completeness requirement. Nothing to finalize.
+        return
+
+    remaining = _count_null_embedding(conn, table, column)
     if remaining > 0:
         raise ValueError(
-            f"cannot finalize: {remaining} chunk(s) still have NULL embedding"
+            f"cannot finalize: {remaining} {table}.{column} value(s) "
+            f"still NULL"
         )
+    index_name = embedding_index_name(table, column)
     with conn.transaction():
-        conn.execute("ALTER TABLE chunks ALTER COLUMN embedding SET NOT NULL")
+        conn.execute(
+            sql.SQL("ALTER TABLE {table} ALTER COLUMN {column} SET NOT NULL").format(
+                table=sql.Identifier(table), column=sql.Identifier(column)
+            )
+        )
         if embedder.dim <= _PGVECTOR_HNSW_DIM_CAP:
             conn.execute(
-                "CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks "
-                "USING hnsw (embedding vector_cosine_ops)"
+                sql.SQL(
+                    "CREATE INDEX IF NOT EXISTS {index} ON {table} "
+                    "USING hnsw ({column} vector_cosine_ops)"
+                ).format(
+                    index=sql.Identifier(index_name),
+                    table=sql.Identifier(table),
+                    column=sql.Identifier(column),
+                )
             )
 
 

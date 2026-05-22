@@ -19,7 +19,9 @@ set -euo pipefail
 
 VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
 KEEP="${BRAIN_WIKI_KEEP_BUILDS:-3}"
-BUILD_PID='/tmp/brain-build.pid'
+# Pid path defaults to the production /tmp location; overridable (unset =
+# unchanged) so tests run this wrapper hermetically against a tmp pid dir.
+BUILD_PID="${BRAIN_BUILD_PID:-/tmp/brain-build.pid}"
 
 # Pick the Python interpreter once. BRAIN_PY (env var) wins; otherwise
 # prefer python3 on PATH. The installed-shim flow (in $BRAIN_HOME/bin/)

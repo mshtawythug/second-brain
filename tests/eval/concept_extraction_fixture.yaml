@@ -1,0 +1,106 @@
+# Synthetic labeled fixture for the GraphRAG concept-extractor eval gate
+# (wave G2-j; spec §17b decision 2). SHIPPED in-repo on purpose — unlike the
+# gitignored golden_corpus.yaml, every document and concept here is SYNTHETIC
+# (invented orgs/topics/projects/tools, no real people, no PII). It exists so
+# the live-Ollama gate has a stable, hand-labeled target set.
+#
+# Gold = the unique (entity_type, canonical_key) concept pairs the extractor
+# SHOULD find. PEOPLE ARE EXCLUDED (they come from the participants pipeline,
+# not the LLM extractor) — every gold `type` must be one of org/topic/project/
+# tool. Concept names appear verbatim in the text so a competent small model
+# can recover them.
+version: 1
+docs:
+  - id: synth-billing-001
+    text: >
+      We finished the migration of our billing platform onto Stripe this
+      sprint. Project Aurora handled the subscription invoicing logic, and the
+      whole effort was tracked in Jira. Pricing tiers were re-modeled to support
+      usage-based billing.
+    gold:
+      - {type: org, key: stripe}
+      - {type: project, key: project aurora}
+      - {type: tool, key: jira}
+      - {type: topic, key: billing}
+      - {type: topic, key: pricing}
+
+  - id: synth-infra-002
+    text: >
+      The platform team moved our container workloads to Kubernetes and added
+      Datadog dashboards for observability. Project Helios is the umbrella
+      initiative covering the migration. Latency and reliability were the main
+      topics in the review.
+    gold:
+      - {type: tool, key: kubernetes}
+      - {type: tool, key: datadog}
+      - {type: project, key: project helios}
+      - {type: topic, key: observability}
+      - {type: topic, key: reliability}
+
+  - id: synth-data-003
+    text: >
+      Our analytics stack now lands raw events in Snowflake, and the data
+      modeling happens in dbt. Project Lumen owns the warehouse. The recurring
+      theme this quarter was data governance.
+    gold:
+      - {type: org, key: snowflake}
+      - {type: tool, key: dbt}
+      - {type: project, key: project lumen}
+      - {type: topic, key: analytics}
+      - {type: topic, key: data governance}
+
+  - id: synth-security-004
+    text: >
+      The security workstream rolled out single sign-on through Okta and added
+      audit logging across services. Project Sentinel is the compliance effort.
+      Threat modeling was the central topic of the workshop.
+    gold:
+      - {type: org, key: okta}
+      - {type: project, key: project sentinel}
+      - {type: topic, key: compliance}
+      - {type: topic, key: threat modeling}
+
+  - id: synth-ml-005
+    text: >
+      The machine learning group prototyped a recommendation model using
+      PyTorch, and served it behind Triton. Project Atlas is the personalization
+      initiative. Model evaluation and feature drift were the recurring topics.
+    gold:
+      - {type: tool, key: pytorch}
+      - {type: tool, key: triton}
+      - {type: project, key: project atlas}
+      - {type: topic, key: personalization}
+      - {type: topic, key: model evaluation}
+
+  - id: synth-frontend-006
+    text: >
+      The web team rebuilt the dashboard in React and adopted Storybook for the
+      component library. Project Mosaic is the design-system rollout.
+      Accessibility was the headline topic of the audit.
+    gold:
+      - {type: tool, key: react}
+      - {type: tool, key: storybook}
+      - {type: project, key: project mosaic}
+      - {type: topic, key: accessibility}
+
+  - id: synth-payments-007
+    text: >
+      We integrated PayPal as a secondary payment provider alongside the
+      existing Stripe setup. Project Aurora extended its checkout flow.
+      Fraud prevention and chargebacks dominated the discussion.
+    gold:
+      - {type: org, key: paypal}
+      - {type: org, key: stripe}
+      - {type: project, key: project aurora}
+      - {type: topic, key: fraud prevention}
+
+  - id: synth-messaging-008
+    text: >
+      The notifications service was migrated to Kafka for event streaming, with
+      Redis used for rate limiting. Project Beacon owns the messaging platform.
+      Throughput and back-pressure were the main topics raised.
+    gold:
+      - {type: tool, key: kafka}
+      - {type: tool, key: redis}
+      - {type: project, key: project beacon}
+      - {type: topic, key: throughput}

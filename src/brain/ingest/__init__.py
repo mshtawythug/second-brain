@@ -18,6 +18,7 @@ from brain.tags import normalize_tags
 
 if TYPE_CHECKING:
     from brain.enrichment import OllamaEnricher
+    from brain.graph_rag.sync import GraphSyncer
 from brain.vault.derived_links.directory import (
     DirectoryStore,
     GwsRunner,
@@ -96,6 +97,15 @@ class IngestResult:
     document_id: str | None
     created: bool
     body_changed: bool = False
+    # Wave G1-c: set ONLY on the force content-hash-fallback path
+    # (:func:`_ingest_within_transaction`), where an old ``documents`` row at
+    # the same content hash is DELETEd and a fresh row INSERTed under a NEW
+    # uuid. The old uuid's relational graph rows cascade away with the row, but
+    # its AGE ``Document`` vertex (and any persons it orphaned) do NOT — so
+    # :func:`ingest_document` calls ``graph_syncer.remove(replaced_document_id)``
+    # post-commit to drop the stale graph presence. ``None`` on every other
+    # path (new insert, in-place update, no-op skip).
+    replaced_document_id: str | None = None
 
 
 @dataclass
@@ -326,6 +336,7 @@ def ingest_document(
     enricher: OllamaEnricher | None = None,
     enrich: bool = True,
     enrich_min_tokens: int = 50,
+    graph_syncer: GraphSyncer | None = None,
 ) -> IngestResult:
     """Ingest a single extracted document.
 
@@ -405,6 +416,15 @@ def ingest_document(
     ``enricher=None`` with ``enrich=True`` is a no-op with a debug log
     (library callers / tests that don't care about enrichment leave it
     None).
+
+    Wave G1-c graph sync: when ``graph_syncer`` is supplied AND the call
+    actually wrote a row (``created`` / ``body_changed`` / ``force``), the
+    document's people-aspect graph is reconciled post-commit via
+    :meth:`brain.graph_rag.sync.GraphSyncer.reconcile` (reusing ``conn``,
+    OUTSIDE the transaction — like the vault mirror). It is best-effort and
+    never raises: a disabled flag, an AGE-absent DB, or any sync error is a
+    logged no-op that leaves the committed ingest intact. ``None`` (library
+    callers / tests) skips graph sync entirely.
     """
     if doc.source_path is not None:
         if source_kind is None:
@@ -485,6 +505,26 @@ def ingest_document(
                 exc,
             )
 
+    # Wave G1-c — people-aspect graph sync. Runs OUTSIDE the DB transaction
+    # (post-commit, reusing ``conn``) on the same gate as the vault mirror:
+    # only when an actual write happened (created / body changed / forced).
+    # ``GraphSyncer.reconcile`` is best-effort and never raises — a graph-sync
+    # failure is logged and swallowed so a committed ingest is never undone
+    # (the graph is a recomputable mirror). A ``None`` syncer (library callers,
+    # tests) or a disabled / AGE-absent DB is a no-op.
+    if (
+        graph_syncer is not None
+        and result.document_id is not None
+        and (result.created or result.body_changed or force)
+    ):
+        graph_syncer.reconcile(conn, result.document_id)
+    # Force content-hash-fallback replaced an old row under a new uuid — drop
+    # the old uuid's stale AGE Document vertex + any persons it orphaned. Runs
+    # AFTER reconcile(new) so shared persons keep their vertex; best-effort /
+    # never-raises like every other graph-sync call.
+    if graph_syncer is not None and result.replaced_document_id is not None:
+        graph_syncer.remove(conn, result.replaced_document_id)
+
     return result
 
 
@@ -515,6 +555,11 @@ def _ingest_within_transaction(
     """
     h = content_hash
     is_thread = _is_gmail_thread_doc(doc, source_kind)
+    # Set on the force content-hash-fallback path when an old row at the same
+    # hash is replaced (DELETE + INSERT under a new uuid); surfaced on the
+    # IngestResult so ``ingest_document`` can drop the old uuid's stale AGE
+    # graph presence post-commit (wave G1-c).
+    replaced_id: str | None = None
     with conn.transaction():
         if is_thread:
             # P2.2: gmail-thread upsert. Lookup keys on the
@@ -730,6 +775,11 @@ def _ingest_within_transaction(
             if existing:
                 if not force:
                     return IngestResult(document_id=str(existing[0]), created=False)
+                # Force re-ingest: the old row is replaced by a fresh INSERT
+                # under a new uuid below. Capture the old id so the post-commit
+                # graph hook can DETACH DELETE its now-orphaned AGE vertex
+                # (the relational graph rows cascade with the row; AGE doesn't).
+                replaced_id = str(existing[0])
                 conn.execute("DELETE FROM documents WHERE id=%s", (existing[0],))
 
         source_id = _upsert_source(
@@ -834,7 +884,10 @@ def _ingest_within_transaction(
         )
 
         return IngestResult(
-            document_id=document_id, created=True, body_changed=True
+            document_id=document_id,
+            created=True,
+            body_changed=True,
+            replaced_document_id=replaced_id,
         )
 
 
@@ -1365,6 +1418,7 @@ def update_document(
     enricher: OllamaEnricher | None = None,
     enrich: bool = True,
     enrich_min_tokens: int = 50,
+    graph_syncer: GraphSyncer | None = None,
 ) -> UpdateResult:
     """Update one document in place.
 
@@ -1398,6 +1452,12 @@ def update_document(
     and does NOT roll back the DB update — drift is recoverable via
     ``brain vault export --force``. Named ``vault_root`` to distinguish
     from the per-document ``documents.vault_path`` relative path.
+
+    Wave G1-c graph sync: when ``graph_syncer`` is supplied AND any field
+    changed, the document's people-aspect graph is reconciled post-commit via
+    :meth:`brain.graph_rag.sync.GraphSyncer.reconcile` (reusing ``conn``,
+    OUTSIDE the transaction). Best-effort / never-raises; a ``None`` syncer or a
+    no-op edit skips it.
     """
     with conn.transaction():
         row = conn.execute(
@@ -1636,6 +1696,16 @@ def update_document(
                 document_id,
                 exc,
             )
+
+    # Wave G1-c — people-aspect graph sync after an in-place edit. Runs
+    # post-commit (reusing ``conn``) whenever any field actually changed; a
+    # change to the participants metadata flips the reconcile watermark and
+    # re-indexes, while a person-irrelevant edit (e.g. a ``draft`` toggle) is a
+    # cheap watermark-skip. Best-effort / never-raises — see
+    # :meth:`brain.graph_rag.sync.GraphSyncer.reconcile`. A ``None`` syncer or a
+    # no-op edit (empty ``fields_changed``) skips graph sync entirely.
+    if graph_syncer is not None and fields_changed:
+        graph_syncer.reconcile(conn, document_id)
 
     return UpdateResult(
         document_id=document_id,

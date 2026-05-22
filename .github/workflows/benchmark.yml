@@ -1,0 +1,91 @@
+# =============================================================================
+# GraphRAG P95 benchmark gate — BLOCKING perf gate CI (wave G2-k)
+# -----------------------------------------------------------------------------
+# Design decisions (spec docs/specs/2026-05-20-graphrag-design.md §16 / §17b Q5):
+#
+#   * DEDICATED workflow, mirroring the eval-gate precedent. The `benchmark`
+#     pytest marker stays OFF by default (pyproject.toml
+#     addopts = "... -m 'not eval and not benchmark'") so local devs never pay
+#     the full-scale load on a normal `pytest`; this workflow opts in with
+#     `-m benchmark`. Local use of the gate is manual only.
+#
+#   * PINNED Apache AGE image. The gate REQUIRES AGE (not stock pgvector), so we
+#     build + start the custom PG16 + pgvector 0.8.2 + AGE 1.5.0-rc0 image from
+#     the canonical Dockerfile via docker-compose.age-test.yml (the same image +
+#     port 5434 + db `second_brain_test` the local test suite uses). The image
+#     tag is pinned in that compose file (second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2).
+#     A GitHub Actions `services:` block can't `build:` an image inline, so we
+#     bring it up with compose instead of as a service container.
+#
+#   * Budgets (spec §16/§17.3/§17b Q5): P95 local traversal ≤ 750 ms AND P95
+#     themes-with-X ≤ 2 s, over 50k entities / 500k CO_OCCURS / 1M mentions /
+#     10 tenants (seed 1234). Corpus generation ≤ 20 min (asserted in-test);
+#     the whole job is capped at 30 min (`timeout-minutes`). The gate test
+#     prints P50/P95/P99/max + PASS/FAIL for both paths. A FAIL here is the
+#     signal for the GraphBackend kill-switch decision (Neo4j/Memgraph) — a
+#     human/coordinator call, not an automatic remediation.
+#
+#   * Concurrency: cancel in-progress runs only on PRs (most recent push wins);
+#     master/main keeps a complete audit trail.
+# =============================================================================
+name: benchmark
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: benchmark-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  benchmark:
+    name: GraphRAG P95 perf gate (AGE)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      DATABASE_URL: postgresql://brain:brain@localhost:5434/second_brain_test
+      TEST_DATABASE_URL: postgresql://brain:brain@localhost:5434/second_brain_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build + start the pinned AGE test instance
+        run: docker compose -f docker-compose.age-test.yml up -d --build
+
+      - name: Install package (with dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: Wait for the AGE instance to be ready
+        run: |
+          # The compose healthcheck should already report healthy; a short
+          # retry loop is cheap insurance against cold-start jitter.
+          for i in $(seq 1 60); do
+            if pg_isready -h localhost -p 5434 -U brain -d second_brain_test; then
+              echo "AGE instance is ready"
+              exit 0
+            fi
+            echo "waiting for AGE instance ($i/60)..."
+            sleep 2
+          done
+          echo "AGE instance did not become ready in time" >&2
+          docker compose -f docker-compose.age-test.yml logs --tail=50
+          exit 1
+
+      - name: Run the P95 benchmark gate
+        run: pytest -m benchmark --no-cov -v
+
+      - name: Tear down the AGE test instance
+        if: always()
+        run: docker compose -f docker-compose.age-test.yml down -v

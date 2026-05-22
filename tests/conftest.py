@@ -8,6 +8,7 @@ import os
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import psycopg
 import pytest
@@ -20,7 +21,50 @@ load_dotenv()
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql://brain:brain@localhost:5433/second_brain_test",
+    # Default to the Apache-AGE test instance (docker-compose.age-test.yml,
+    # port 5434, named volume) — a separate container from prod on 5433.
+    # Start it: docker compose -f docker-compose.age-test.yml up -d --build
+    "postgresql://brain:brain@localhost:5434/second_brain_test",
+)
+
+# --- DB-SAFETY HARD GUARD ---------------------------------------------------
+# The schema reset below runs ``DROP SCHEMA public CASCADE`` — irreversibly
+# destructive. It must NEVER target the prod container. Prod is the
+# ``second_brain`` database on localhost:5433 (docker-compose.yml); the test
+# instance is ``*_test`` on port 5434 (docker-compose.age-test.yml). If
+# ``TEST_DATABASE_URL`` / ``DATABASE_URL`` is ever pointed at prod (e.g. an
+# accidental export), we ABORT loudly rather than wipe production data.
+_PROD_PORT = 5433
+_PROD_DB_NAME = "second_brain"
+_LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+
+
+def _looks_like_prod_db(host: str | None, port: int | None, dbname: str | None) -> bool:
+    """True if (host, port, dbname) resolves to the prod container.
+
+    Refuses the prod port on a local host, OR the exact prod database name on
+    any host (belt-and-suspenders: catches a non-default prod port mapping).
+    """
+    is_local = (host or "").lower() in _LOCAL_HOSTS
+    return (is_local and port == _PROD_PORT) or (dbname == _PROD_DB_NAME)
+
+
+def _assert_not_prod_db(host: str | None, port: int | None, dbname: str | None) -> None:
+    """Abort the session if a destructive reset would hit the prod database."""
+    if _looks_like_prod_db(host, port, dbname):
+        raise RuntimeError(
+            "REFUSING to run the destructive test schema reset against what "
+            f"looks like the PROD database (host={host!r} port={port!r} "
+            f"db={dbname!r}). The DROP SCHEMA reset must only ever target the "
+            "AGE test instance (port 5434, db '*_test'). Fix TEST_DATABASE_URL "
+            "/ DATABASE_URL so it points at the test container."
+        )
+
+
+# Fail fast at import/collection time on the resolved TEST_DATABASE_URL.
+_test_url = urlparse(TEST_DATABASE_URL)
+_assert_not_prod_db(
+    _test_url.hostname, _test_url.port, (_test_url.path or "").lstrip("/")
 )
 
 
@@ -101,6 +145,44 @@ def _force_test_database_url() -> Iterator[None]:
             os.environ["DATABASE_URL"] = original
 
 
+def _reset_age_graph(conn: psycopg.Connection) -> None:
+    """Reset Apache AGE graph state between DB tests.
+
+    The AGE test instance (``docker-compose.age-test.yml``, port 5434) ships
+    the ``age`` shared library; the extension *object* must still be created
+    once per database (``CREATE EXTENSION age CASCADE``), after which
+    ``LOAD 'age'`` makes its catalog functions callable in the session.
+
+    AGE keeps graphs in the ``ag_catalog`` schema plus a per-graph schema —
+    neither lives in ``public``, so the ``DROP SCHEMA public CASCADE`` performed
+    by :func:`_reset_schema_and_migrate` does NOT clear them. We explicitly drop
+    ``brain_graph`` (the canonical graph the G0-2 bootstrap creates) so each
+    test starts from a clean graph, mirroring that bootstrap.
+
+    Runs under autocommit (the caller sets ``conn.autocommit = True``) because
+    AGE catalog DDL wants explicit commits under psycopg v3. ``search_path`` is
+    set to ``ag_catalog`` ONLY for the AGE statements and reset immediately
+    afterward, so the later ``run_migrations`` DDL still lands in ``public`` and
+    never leaks the ``ag_catalog`` namespace onto the session.
+    """
+    # Idempotent: the .so is in the AGE image; the extension object may not
+    # exist yet on a freshly-created database.
+    conn.execute("CREATE EXTENSION IF NOT EXISTS age CASCADE")
+    conn.execute("LOAD 'age'")
+    conn.execute('SET search_path = ag_catalog, "$user", public')
+    try:
+        existing = conn.execute(
+            "SELECT 1 FROM ag_catalog.ag_graph WHERE name = %s",
+            ("brain_graph",),
+        ).fetchone()
+        if existing is not None:
+            conn.execute("SELECT drop_graph('brain_graph', true)")
+    finally:
+        # Restore the default search_path so migration DDL targets public —
+        # never leak ag_catalog onto the session.
+        conn.execute("RESET search_path")
+
+
 def _reset_schema_and_migrate(conn: psycopg.Connection) -> None:
     """Drop and recreate the public schema then run all migrations.
 
@@ -114,7 +196,20 @@ def _reset_schema_and_migrate(conn: psycopg.Connection) -> None:
     before dropping the schema, then move it back to public afterwards.
     pgcrypto's gen_random_uuid() conflicts with pg_catalog, so we handle it
     by dropping and reinstalling it explicitly.
+
+    AGE graph state lives in ``ag_catalog`` (outside ``public``) and so
+    survives the schema drop; :func:`_reset_age_graph` clears the canonical
+    ``brain_graph`` first so each test gets a clean graph.
     """
+    # DB-SAFETY: guard the ACTUAL connection target (not just the env var) — if
+    # this connection somehow points at the prod container, abort before the
+    # destructive DROP SCHEMA below ever runs.
+    _assert_not_prod_db(conn.info.host, conn.info.port, conn.info.dbname)
+
+    # Reset AGE graph state first — it lives outside public and would otherwise
+    # leak across tests. Scopes ag_catalog to its own statements (no leakage).
+    _reset_age_graph(conn)
+
     # Move vector to pg_catalog before the schema drop so it survives.
     # pgcrypto cannot go to pg_catalog (DuplicateFunction on gen_random_uuid).
     if conn.execute("SELECT 1 FROM pg_extension WHERE extname='vector'").fetchone():

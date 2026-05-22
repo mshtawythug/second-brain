@@ -208,3 +208,54 @@ def test_fg_helpers_match_packaged_templates() -> None:
             f"dev-checkout launchd flows execute the same code. Re-sync them "
             f"(usually `cp src/brain/templates/bin/{tpl_name} bin/{dev_name}`)."
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — packaged AGE Dockerfile is shipped + loadable via importlib.resources
+# ---------------------------------------------------------------------------
+
+
+def test_age_dockerfile_packaged_and_loadable() -> None:
+    """The custom-image Dockerfile must ship as package data and be readable.
+
+    The rendered ``$BRAIN_HOME/docker-compose.yml`` builds the PG16 + pgvector +
+    AGE image from a build context the installer materializes; if the Dockerfile
+    is not packaged it cannot be materialized on pipx/wheel installs.
+    """
+    # On disk in the source tree.
+    on_disk = BRAIN_TEMPLATES / "docker" / "age" / "Dockerfile"
+    assert on_disk.is_file(), (
+        "missing src/brain/templates/docker/age/Dockerfile — canonical packaged "
+        "source of the custom AGE image"
+    )
+
+    # Reachable via importlib.resources (editable + wheel installs).
+    root_pkg = importlib.resources.files("brain.templates")
+    text = (root_pkg / "docker" / "age" / "Dockerfile").read_text(encoding="utf-8")
+    assert text, "brain.templates/docker/age/Dockerfile is empty or unreadable"
+    # Pins must be present + honestly labelled (rc0, not GA).
+    assert "pgvector/pgvector:0.8.2-pg16" in text
+    assert "PG16/v1.5.0-rc0" in text
+
+
+def test_age_dockerfile_materialized_into_brain_home(tmp_path: Path) -> None:
+    """`materialize_age_dockerfile` copies the packaged Dockerfile into $BRAIN_HOME.
+
+    Asserts the destination is created at ``$BRAIN_HOME/docker/age/Dockerfile`` and
+    is byte-identical to the packaged source, so the rendered compose build context
+    resolves on a fresh install.
+    """
+    from brain.setup import materialize_age_dockerfile
+
+    brain_home = tmp_path / "brain_home"
+    dest = materialize_age_dockerfile(brain_home)
+
+    assert dest == brain_home / "docker" / "age" / "Dockerfile"
+    assert dest.is_file(), "Dockerfile was not materialized into $BRAIN_HOME/docker/age/"
+
+    packaged = (
+        importlib.resources.files("brain.templates") / "docker" / "age" / "Dockerfile"
+    ).read_text(encoding="utf-8")
+    assert dest.read_text(encoding="utf-8") == packaged, (
+        "materialized Dockerfile drifted from the packaged source"
+    )

@@ -305,7 +305,7 @@ def test_cli_vault_sync_summaries_dry_run(
         "DATABASE_URL",
         os.environ.get(
             "TEST_DATABASE_URL",
-            "postgresql://brain:brain@localhost:5433/second_brain_test",
+            "postgresql://brain:brain@localhost:5434/second_brain_test",
         ),
     )
     vault = tmp_path / "vault"
@@ -336,7 +336,7 @@ def test_cli_vault_sync_summaries_applies(
         "DATABASE_URL",
         os.environ.get(
             "TEST_DATABASE_URL",
-            "postgresql://brain:brain@localhost:5433/second_brain_test",
+            "postgresql://brain:brain@localhost:5434/second_brain_test",
         ),
     )
     vault = tmp_path / "vault"

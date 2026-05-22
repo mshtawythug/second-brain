@@ -8,6 +8,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from typing import Any
+from unittest import mock
 
 import psycopg
 import pytest
@@ -20,7 +21,7 @@ from brain.ingest import ExtractedDoc, ingest_document
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql://brain:brain@localhost:5433/second_brain_test",
+    "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
 
 
@@ -61,12 +62,18 @@ def _ingest(
 def _interactions(doc_id: str) -> list[dict[str, Any]]:
     with psycopg.connect(TEST_DATABASE_URL) as conn:
         rows = conn.execute(
-            "SELECT action, source, query, session_id::text "
+            "SELECT action, source, query, session_id::text, graph_retrieved "
             "FROM interactions WHERE document_id = %s ORDER BY at",
             (doc_id,),
         ).fetchall()
     return [
-        {"action": r[0], "source": r[1], "query": r[2], "session_id": r[3]}
+        {
+            "action": r[0],
+            "source": r[1],
+            "query": r[2],
+            "session_id": r[3],
+            "graph_retrieved": r[4],
+        }
         for r in rows
     ]
 
@@ -221,3 +228,82 @@ def test_brain_show_failed_id_resolution_writes_nothing(
         row = conn.execute("SELECT count(*) FROM interactions").fetchone()
         assert row is not None
         assert row[0] == 0
+
+
+# ---------------------------------------------------------------------------
+# G4-b — brain_show graph_retrieved provenance + never-raise
+# ---------------------------------------------------------------------------
+
+
+def test_brain_show_graph_retrieved_defaults_false(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """An ordinary open records graph_retrieved=FALSE (unchanged pre-G4)."""
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="A body")
+    mcp_server.brain_show(id_prefix=doc_id[:8], originating_query="company-id")
+    rows = _interactions(doc_id)
+    assert len(rows) == 1
+    assert rows[0]["graph_retrieved"] is False
+
+
+def test_brain_show_graph_retrieved_true_stamps_provenance(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """Opening a graph-surfaced doc records graph_retrieved=TRUE on the row."""
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="A body")
+    mcp_server.brain_show(
+        id_prefix=doc_id[:8],
+        originating_query="themes with X",
+        graph_retrieved=True,
+    )
+    rows = _interactions(doc_id)
+    assert len(rows) == 1
+    assert rows[0]["action"] == "opened"
+    assert rows[0]["graph_retrieved"] is True
+
+
+def test_brain_show_graph_retrieved_without_query_writes_nothing(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """Provenance alone (no originating_query) logs nothing — gated on query."""
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="A body")
+    mcp_server.brain_show(id_prefix=doc_id[:8], graph_retrieved=True)
+    assert _interactions(doc_id) == []
+
+
+def test_brain_show_return_shape_unchanged_with_graph_retrieved(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """The locked brain_show return shape is unaffected by graph_retrieved."""
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="A body")
+    payload = mcp_server.brain_show(
+        id_prefix=doc_id[:8],
+        originating_query="q",
+        graph_retrieved=True,
+    )
+    assert "graph_retrieved" not in payload  # provenance is log-only, not wire
+    assert payload["id"] == doc_id
+
+
+def test_brain_show_logging_failure_does_not_raise(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    mcp_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """G4-b never-raise: a logging failure is swallowed; the doc still returns."""
+    doc_id = _ingest(test_db, fake_embedder, title="A", content="A body")
+    boom = psycopg.OperationalError("simulated logging outage")
+    with mock.patch.object(mcp_server, "record_interaction", side_effect=boom):
+        payload = mcp_server.brain_show(
+            id_prefix=doc_id[:8], originating_query="company-id"
+        )
+    assert payload["id"] == doc_id  # returned despite the logging failure
+    assert _interactions(doc_id) == []  # nothing persisted

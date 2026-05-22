@@ -21,6 +21,7 @@ dependencies = [
   "voyageai>=0.3",
   "pyyaml>=6.0",
   "watchdog>=4.0",
+  "networkx>=3.2",
 ]
 
 [project.optional-dependencies]
@@ -64,10 +65,12 @@ where = ["src"]
 # Templates shipped with the brain package for use by the installer.
 # Explicit extension patterns (not "**/*") to avoid shipping bytecode.
 # brain.templates root: docker-compose.yml.j2, Caddyfile.j2, env.example
+# brain.templates.docker.age: pinned Dockerfile (PG16 + pgvector + AGE), a plain
+#   data subdir (no __init__.py) materialized into $BRAIN_HOME by `brain setup`
 # brain.templates.bin: shell launcher/helper scripts
 # brain.templates.launchd: launchd plist Jinja2 templates
 # brain.templates.skill: SKILL.md prose for Claude Code skill setup
-"brain.templates" = ["*.j2", "env.example"]
+"brain.templates" = ["*.j2", "env.example", "docker/age/Dockerfile"]
 "brain.templates.bin" = ["*.sh"]
 "brain.templates.launchd" = ["*.j2"]
 "brain.templates.skill" = ["*.md"]
@@ -83,13 +86,17 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval'"
+addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval and not benchmark and not e2e'"
 markers = [
   # P3.5 — frontend integration harness. Tests under this marker shell
-  # out to `npx quartz build` and serve the artifact over HTTP, so they
-  # require a Node toolchain + the live brain Quartz workspace at
-  # `~/brain-vault/.quartz/`. Marked separately from the default suite
-  # so CI runners without Node can opt out via `-m "not e2e"`.
+  # out to `npx quartz build` and serve the artifact over HTTP (or rsync the
+  # live vault for the FastPath T0 perf benchmarks), so they require a Node
+  # toolchain + the live brain Quartz workspace at `~/brain-vault/.quartz/`.
+  # EXCLUDED from the default suite (see the ``addopts`` -m filter, alongside
+  # ``eval`` / ``benchmark``): they are non-hermetic (need a live vault, and
+  # the FastPath benchmarks rsync it — racing the live build daemon) and far
+  # too slow for every local run. Opt IN with `-m e2e`; CI runs them in a
+  # dedicated workflow.
   "e2e: end-to-end Quartz build + serve test (requires npx + live workspace)",
   # Phase D — search-ranking-fix. Tests under this marker connect to the
   # live local Postgres (`second_brain` database) and to a real Ollama
@@ -103,6 +110,14 @@ markers = [
   # nDCG@5 / MRR / Recall@20.  Excluded from the default suite; opt-IN
   # via `-m eval`.  Skips cleanly when Postgres or Ollama is unreachable.
   "eval: live golden-corpus run; gated, requires explicit -m eval invocation",
+  # Wave G1-d / G2 — GraphRAG benchmark perf gate. Tests under this marker
+  # load the full-scale synthetic graph (50k entities / 500k CO_OCCURS / 1M
+  # mentions / 10 tenants — tests/graphrag/benchmark_fixture.py) and measure
+  # P95 traversal/themes latency. EXCLUDED from the default suite (see
+  # ``addopts`` -m filter) because the load is far too slow for every run;
+  # G2's perf gate opts IN via ``pytest -m benchmark``. The default suite
+  # exercises the SAME generator via the tiny ≈50-entity smoke instead.
+  "benchmark: GraphRAG full-scale perf gate; requires explicit -m benchmark invocation",
 ]
 
 [tool.ruff]
@@ -123,5 +138,5 @@ explicit_package_bases = true
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*", "watchdog.*"]
+module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*", "watchdog.*", "networkx.*"]
 ignore_missing_imports = true

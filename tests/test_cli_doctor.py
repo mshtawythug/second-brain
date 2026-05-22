@@ -10,11 +10,13 @@ import psycopg
 import pytest
 from typer.testing import CliRunner
 
-from brain.cli import _model_loaded, _ollama_loaded_models, app
+from brain.cli import _check_age, _model_loaded, _ollama_loaded_models, app
+from brain.db import DEFAULT_GRAPH_NAME, bootstrap_age, connect
+from brain.errors import AgeBootstrapError
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
-    "postgresql://brain:brain@localhost:5433/second_brain_test",
+    "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
 
 
@@ -331,3 +333,451 @@ def test_doctor_reports_drift_when_orphans_exist(
     assert "1 orphan files" in result.output
     assert "drift detected" in result.output
     assert "prune-orphans" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Apache AGE line (wave G0-5) — surfaces the GraphRAG backend's health in
+# ``brain doctor``. Soft check: every failure mode is a yellow WARN that never
+# flips the exit code. Runs against the live AGE test instance (port 5434) per
+# the drift-test precedent above.
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_age_ok_when_extension_and_graph_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """AGE extension installed + ``brain_graph`` bootstrapped → ``age OK`` line.
+
+    Setup: the per-test reset leaves ``age`` installed but drops the graph;
+    bootstrap it so the canonical graph is present.
+    Exercise: ``brain doctor`` (Ollama mocked OK).
+    Verify: the OK line reports the extversion and graph presence, exit 0.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    bootstrap_age(test_db)
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "age             OK (age " in result.output
+    assert f"graph {DEFAULT_GRAPH_NAME} present)" in result.output
+
+
+def test_doctor_age_warns_when_graph_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """AGE present but ``brain_graph`` not bootstrapped → WARN with init hint.
+
+    The per-test reset drops the graph and does NOT recreate it, so doctor must
+    flag the absent graph and point at ``brain init`` — without failing.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "age             WARN" in result.output
+    assert f"graph {DEFAULT_GRAPH_NAME} absent" in result.output
+    assert "brain init" in result.output
+
+
+def test_doctor_age_warns_when_available_but_not_installed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """AGE installable (control file present) but not yet installed → init hint.
+
+    Drops the extension on the AGE test image so ``age`` is absent from
+    ``pg_extension`` but still present in ``pg_available_extensions`` — i.e. an
+    AGE-capable DB that simply hasn't run ``brain init`` yet. doctor must point
+    at ``brain init``, NOT at an image cut-over. Restores the extension after.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    test_db.execute("DROP EXTENSION IF EXISTS age CASCADE")
+    try:
+        with _patch_httpx_client(_ok_ollama_transport()):
+            result = CliRunner().invoke(app, ["doctor"])
+        assert result.exit_code == 0, result.output
+        assert "age             WARN" in result.output
+        assert "available but not installed" in result.output
+        assert "brain init" in result.output
+        # Must NOT mislead toward an image rebuild — AGE is installable here.
+        assert "lacks Apache AGE" not in result.output
+    finally:
+        test_db.execute("CREATE EXTENSION IF NOT EXISTS age CASCADE")
+
+
+def test_doctor_age_warns_when_age_unavailable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any"
+) -> None:
+    """AGE neither installed NOR installable → WARN pointing at the image cut-over.
+
+    Simulates a stock-pgvector image: ``_installed_extension_versions`` reports
+    no ``age`` row AND ``age_extension_available`` is False (no control file).
+    doctor must recommend rebuilding/cutting over to the AGE image, not
+    ``brain init`` (which would fail to install a non-existent extension).
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with (
+        patch(
+            "brain.cli._installed_extension_versions",
+            return_value={"vector": "0.8.0", "pgcrypto": "1.3"},
+        ),
+        patch("brain.cli.age_extension_available", return_value=False),
+        _patch_httpx_client(_ok_ollama_transport()),
+    ):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "age             WARN" in result.output
+    assert "lacks Apache AGE" in result.output
+    assert "docs/specs/2026-05-20-graphrag-age-image.md" in result.output
+
+
+def test_doctor_age_warns_when_availability_probe_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any"
+) -> None:
+    """The availability probe raising must WARN, not flip doctor to FAIL/exit 1.
+
+    The AGE check is WARN-only. With ``age`` absent from ``pg_extension``, a
+    ``psycopg.Error`` from ``age_extension_available`` must be caught and
+    degraded to a WARN — never escape to doctor()'s outer DB handler (which would
+    exit 1). Patches the probe seam to raise; asserts WARN + exit 0.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    boom = psycopg.OperationalError("simulated pg_available_extensions failure")
+    with (
+        patch(
+            "brain.cli._installed_extension_versions",
+            return_value={"vector": "0.8.0", "pgcrypto": "1.3"},
+        ),
+        patch("brain.cli.age_extension_available", side_effect=boom),
+        _patch_httpx_client(_ok_ollama_transport()),
+    ):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "age             WARN" in result.output
+    assert "couldn't determine AGE availability" in result.output
+
+
+def test_doctor_age_warns_when_load_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """``LOAD 'age'`` raising AgeBootstrapError → WARN about the missing library.
+
+    The extension row is present (so the probe passes) but the shared library
+    fails to load; doctor must surface a preload remediation, never fail. Uses
+    ``unittest.mock.patch`` on the cli's ``load_age`` seam (an allowed test
+    double with automatic cleanup, not banned monkey-patching).
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    bootstrap_age(test_db)
+    boom = AgeBootstrapError("failed to LOAD Apache AGE: simulated")
+    with patch("brain.cli.load_age", side_effect=boom), _patch_httpx_client(
+        _ok_ollama_transport()
+    ):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "age             WARN" in result.output
+    assert "`LOAD 'age'` failed" in result.output
+    assert "isn't loadable in this database/image" in result.output
+    assert "docs/specs/2026-05-20-graphrag-age-image.md" in result.output
+
+
+def test_doctor_age_warns_when_extension_probe_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any"
+) -> None:
+    """A ``psycopg.Error`` from the ``pg_extension`` probe → WARN, exit 0.
+
+    Patches the cli's ``_installed_extension_versions`` seam to raise; doctor
+    must surface a probe-failed WARN without failing the run.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    boom = psycopg.OperationalError("simulated pg_extension probe failure")
+    with patch(
+        "brain.cli._installed_extension_versions", side_effect=boom
+    ), _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "age             WARN" in result.output
+    assert "extension probe failed" in result.output
+
+
+def test_doctor_age_warns_when_support_extensions_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any"
+) -> None:
+    """``age`` present but ``vector``/``pgcrypto`` absent → WARN naming them.
+
+    Patches the extension probe to report only ``age`` so the support-extension
+    branch fires (it cannot be reproduced on the live DB without a destructive
+    drop of vector/pgcrypto, which other code depends on).
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with patch(
+        "brain.cli._installed_extension_versions",
+        return_value={"age": "1.5.0"},
+    ), _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "age             WARN" in result.output
+    assert "missing extension(s): vector, pgcrypto" in result.output
+    assert "brain init" in result.output
+
+
+def test_doctor_age_warns_when_load_age_returns_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any"
+) -> None:
+    """Defensive branch: extension row present but ``load_age`` returns False.
+
+    Simulates the extension being reported by ``pg_extension`` while the shared
+    library is unavailable at LOAD time; doctor treats it as the image-missing
+    case (WARN), never a failure.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    present = {"age": "1.5.0", "vector": "0.8.0", "pgcrypto": "1.3"}
+    with patch(
+        "brain.cli._installed_extension_versions", return_value=present
+    ), patch("brain.cli.load_age", return_value=False), _patch_httpx_client(
+        _ok_ollama_transport()
+    ):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "age             WARN" in result.output
+    assert "lacks Apache AGE" in result.output
+
+
+def test_doctor_age_warns_when_graph_probe_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """A ``psycopg.Error`` from the ``ag_catalog.ag_graph`` probe → WARN, exit 0.
+
+    Extensions are present and ``LOAD 'age'`` runs for real (``test_db``
+    guarantees ``age`` is installed); only the graph-catalog probe is patched to
+    raise, exercising the graph-probe-failure branch.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    boom = psycopg.OperationalError("simulated ag_graph probe failure")
+    with patch(
+        "brain.cli._age_graph_present", side_effect=boom
+    ), _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "age             WARN" in result.output
+    assert "graph catalog probe failed" in result.output
+
+
+def test_check_age_rolls_back_after_load_failure(
+    test_db: psycopg.Connection,
+) -> None:
+    """``_check_age`` clears an aborted txn left by a LOAD failure (isolation).
+
+    Guards the ``AgeBootstrapError`` handler's rollback: ``load_age`` is mocked
+    to poison the transaction (run a bad statement, swallow the error WITHOUT
+    rolling back) then raise — the exact "aborted txn left behind" case. After
+    ``_check_age`` returns (WARN, never raising), a follow-up query on the SAME
+    connection must succeed, proving the AGE failure cannot poison a later
+    doctor check.
+
+    Runs on a non-autocommit connection (where an aborted txn is observable);
+    ``test_db`` guarantees the ``age`` extension is present so the probe reaches
+    ``load_age``.
+    """
+
+    def _poison_then_raise(conn_arg: psycopg.Connection) -> bool:
+        # Abort the transaction and deliberately do NOT roll back, mimicking a
+        # failure path that leaves the connection unusable.
+        with contextlib.suppress(psycopg.Error):
+            conn_arg.execute("SELECT * FROM _g05_nonexistent_table")
+        raise AgeBootstrapError("simulated LOAD failure leaving an aborted txn")
+
+    with connect(TEST_DATABASE_URL) as conn:
+        assert conn.autocommit is False
+        with patch("brain.cli.load_age", side_effect=_poison_then_raise):
+            _check_age(conn)  # must WARN + roll back, never raise
+        # The aborted txn was cleared — a follow-up query succeeds.
+        row = conn.execute("SELECT 1").fetchone()
+        assert row == (1,)
+
+
+# ---------------------------------------------------------------------------
+# Graph drift line (wave G2-h) — relational↔AGE entity/edge parity. Gated on
+# BRAIN_GRAPH_ENABLED; soft WARN that never flips doctor's exit code. Built from
+# the synthetic person triangle reused from test_cli_graphrag_search.
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_graph_drift_ok_when_built(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """A consistent relational + AGE mirror prints ``graph drift     OK`` counts."""
+    from tests.test_cli_graphrag_search import _build, _seed_triangle
+
+    _seed_triangle(test_db)
+    _build(test_db)  # 3 person entities + 3 CO_OCCURS edges in 'default'
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "graph drift     OK (entities rel=3 age=3, co_occurs rel=3 age=3, "
+        "tenant 'default')" in result.output
+    )
+
+
+def test_doctor_graph_drift_detected_when_mirror_dropped(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """Relational rows present but AGE mirror dropped → drift WARN + rebuild hint."""
+    from brain.graph_rag.backends import AgeBackend
+    from tests.test_cli_graphrag_search import _build, _seed_triangle
+
+    _seed_triangle(test_db)
+    _build(test_db)
+    # Drop the AGE mirror (relational source-of-truth + watermark intact).
+    AgeBackend().drop_graph(test_db, "default")
+
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    # Soft check: drift never flips the exit code.
+    assert result.exit_code == 0, result.output
+    assert "graph drift     drift detected" in result.output
+    assert "entities rel=3 age=0" in result.output
+    assert "co_occurs rel=3 age=0" in result.output
+    assert "graphrag build --force" in result.output
+
+
+def test_doctor_no_graph_drift_line_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """With BRAIN_GRAPH_ENABLED off, doctor emits no ``graph drift`` line."""
+    from tests.test_cli_graphrag_search import _build, _seed_triangle
+
+    _seed_triangle(test_db)
+    _build(test_db)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.delenv("BRAIN_GRAPH_ENABLED", raising=False)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "graph drift" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# Community line (wave G3-g) — graph_communities/members counts + a stale
+# source_graph_hash check (stored fingerprint vs the recomputed current graph
+# hash). Gated on BRAIN_GRAPH_ENABLED + AGE; soft WARN that never flips the exit
+# code. Reuses the two-triangle community corpus from test_cli_graphrag_search.
+# ---------------------------------------------------------------------------
+
+
+def _build_default_communities(test_db: psycopg.Connection) -> None:
+    """Seed the two-triangle corpus + AGE graph and build its communities.
+
+    The corpus yields exactly two size-3 communities (six members) in tenant
+    ``default``; the AGE graph is bootstrapped so the sibling ``graph drift``
+    check probes cleanly. Summaries are NOT needed — the community line reads
+    only counts + the stored ``source_graph_hash`` fingerprint.
+    """
+    from brain.config import Config
+    from brain.graph_rag.communities import build_communities
+    from tests.test_cli_graphrag_search import _seed_communities_corpus
+
+    _seed_communities_corpus(test_db)
+    bootstrap_age(test_db)
+    cfg = Config(database_url=TEST_DATABASE_URL, graph_tenant_id="default")
+    result = build_communities(test_db, cfg, tenant="default", force=True)
+    assert result.communities_total == 2  # two triangles → two communities
+
+
+def test_doctor_community_counts_ok_when_built(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """Built + fingerprint-current communities print the ``communities OK`` line."""
+    _build_default_communities(test_db)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "communities     OK (2 communities, 6 members, tenant 'default', "
+        "fingerprint current)" in result.output
+    )
+
+
+def test_doctor_community_stale_when_graph_changes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """Mutating the live graph after a build → ``stale`` WARN + refresh hint.
+
+    Deleting the weak bridge edge changes the recomputed ``source_graph_hash``
+    while the stored community fingerprint stays put — exactly the staleness the
+    check exists to surface. Soft check: it never flips doctor's exit code.
+    """
+    _build_default_communities(test_db)
+    # Drop the weak bridge so the recomputed graph hash diverges from the stored
+    # community fingerprint (counts are unchanged — communities aren't rebuilt).
+    test_db.execute(
+        "DELETE FROM graph_relationships "
+        "WHERE tenant_id = 'default' AND weight < 0.1"
+    )
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert (
+        "communities     stale (2 communities, 6 members, tenant 'default', "
+        "fingerprint stale)" in result.output
+    )
+    assert "graphrag communities refresh" in result.output
+
+
+def test_doctor_community_none_built_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """Graph enabled + AGE present but no communities → ``none built`` hint, exit 0."""
+    from tests.test_cli_graphrag_search import _seed_communities_corpus
+
+    # Seed the relational graph but never build communities.
+    _seed_communities_corpus(test_db)
+    bootstrap_age(test_db)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "communities     OK (0 communities, 0 members, tenant 'default')" in (
+        result.output
+    )
+    assert "none built" in result.output
+    assert "graphrag communities build" in result.output
+
+
+def test_doctor_no_community_line_when_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: "Any", test_db: psycopg.Connection
+) -> None:
+    """With BRAIN_GRAPH_ENABLED off, doctor emits no ``communities`` line."""
+    _build_default_communities(test_db)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.delenv("BRAIN_GRAPH_ENABLED", raising=False)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "communities" not in result.output
