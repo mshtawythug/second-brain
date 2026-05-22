@@ -426,6 +426,116 @@ brain doctor   # env, Postgres/pgvector, embedder, gws, npx, mirror drift
 `brain doctor` exits non-zero only for required failures: config, database, or
 active embedder. Optional integrations (`gws`, `npx`) are warnings.
 
+## GraphRAG (experimental)
+
+GraphRAG adds **entity-centric graph retrieval alongside** the existing
+hybrid vector + FTS search — it does not replace `brain search`. Where hybrid
+search ranks documents by lexical + semantic similarity, GraphRAG builds a
+graph of the people (and, optionally, concepts) that co-occur across your
+corpus and retrieves over that structure. It answers questions hybrid search
+struggles with — "what themes come up in my conversations with X", "which
+clusters of people and topics dominate my notes" — by traversing
+relationships instead of matching text.
+
+It exposes a `brain graphrag …` CLI command group (with full MCP parity via
+the `brain_graphrag_*` tools), with five retrieval modes:
+
+| Mode | What it does |
+|---|---|
+| `local` | Entity-centric — seeds on an entity and traverses its co-occurrence neighbourhood. |
+| `themes` | "Themes with X" — scopes to a person and returns ranked theme groups (the headline use case; requires `--person`). |
+| `global` | Community-level — RRF over detected communities (run `brain graphrag communities build` first). |
+| `fuse` | RRF-merges the local-graph document leg with the vector/FTS hybrid leg into one ranked list. |
+| `auto` *(default)* | Heuristic router — picks `themes` / `global` / `local` based on the query and whether a person resolves. |
+
+> **Status:** experimental. The graph runs on [Apache AGE](https://age.apache.org/)
+> (an openCypher graph extension) inside the same Postgres. The **concept
+> aspect** (LLM entity extraction over topics/projects/orgs/tools) is
+> **default-OFF** behind `BRAIN_GRAPH_CONCEPTS` — the always-on people aspect
+> needs no model. No raw Cypher is ever accepted or shown; every command takes
+> structured params and the backend injects the tenant + traversal caps.
+
+### Setup
+
+GraphRAG needs a Postgres image that ships Apache AGE — the **stock
+`pgvector/pgvector:pg16` prod image does not**. This repo packages a custom
+image, `second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2` (PostgreSQL 16 + pgvector
+0.8.2 + pgcrypto + Apache AGE 1.5.0-rc0), built from
+`src/brain/templates/docker/age/Dockerfile`.
+
+```bash
+# 1. Install deps — pip install -e ".[dev]" pulls the new `networkx` dependency
+#    (used for Louvain community detection). If your venv predates GraphRAG,
+#    re-run it.
+pip install -e ".[dev]"
+
+# 2. Enable the ingest-time graph sync. Add to .env:
+#    BRAIN_GRAPH_ENABLED=true
+#    (Default is false — on a stock pgvector DB this knob is a no-op.)
+
+# 3. Apply the graph migrations + bootstrap the AGE graph. On an AGE-capable
+#    image, `brain init` creates the `age` extension and the recomputable graph
+#    mirror; on a stock pgvector image it prints a friendly "graph skipped" note
+#    and finishes cleanly.
+brain init
+
+# 4. Backfill the graph from your existing documents (idempotent + resumable).
+brain graphrag build --backfill
+
+# 5. (Optional, required for `--mode global`) detect + summarize communities.
+brain graphrag communities build
+
+# 6. Verify. `brain doctor` adds a soft AGE/graph health line (it never flips
+#    the exit code — a DB without AGE is reported, not a failure).
+brain doctor
+```
+
+The relevant `.env` knobs are documented in `.env.example` (search for
+`BRAIN_GRAPH_`): `BRAIN_GRAPH_ENABLED`, `BRAIN_GRAPH_TENANT`,
+`BRAIN_GRAPH_DEPTH`, `BRAIN_GRAPH_CONCEPTS`, the community-detection tuning
+(`BRAIN_GRAPH_COMMUNITY_*`), and more — all with sensible defaults.
+
+### Usage
+
+```bash
+# Graph retrieval. --mode defaults to auto (the heuristic router).
+brain graphrag search "platform migration tradeoffs"
+brain graphrag search "platform migration tradeoffs" --mode local
+brain graphrag search "hiring plans" --mode fuse        # graph leg ⊕ vector/FTS leg
+brain graphrag search "..." --json                      # machine-readable
+
+# "Themes in my conversations with X" — the headline. --person is required.
+brain graphrag themes --person "Jane Doe"
+brain graphrag themes --person "Jane Doe" --limit 5 --synthesize
+
+# Inspect one entity's co-occurrence neighbourhood.
+brain graphrag entity "Project Phoenix"
+
+# Community admin (global mode).
+brain graphrag communities build        # detect + summarize (skips if graph unchanged)
+brain graphrag communities refresh      # force a rebuild regardless of the dirty gate
+brain graphrag communities list         # admin view of materialized communities
+
+# Index maintenance.
+brain graphrag build --backfill         # reconcile every existing doc into the graph
+brain graphrag build --force            # authoritative full rebuild (recover a dropped mirror)
+brain graphrag refresh                  # recompute aggregate edge weights only
+```
+
+The same surface is available to Claude Desktop / Claude Code through the
+`brain_graphrag_search`, `brain_graphrag_themes`, `brain_graphrag_entity`,
+`brain_graphrag_build`, and `brain_graphrag_communities_build` MCP tools.
+
+### Switching an existing brain to AGE
+
+Moving a brain that's already running on the stock pgvector image over to the
+AGE image is a **separate, deliberate cutover** — back up your database first.
+The graph itself is a recomputable mirror (rebuild it with
+`brain graphrag build --force` after the swap), so the cutover is about the
+container image, not the data. Until then, GraphRAG runs against the AGE-backed
+**test** instance only (`docker-compose.age-test.yml`, port 5434); the prod
+container stays on stock pgvector.
+
 ## Vault model
 
 Brain has two storage tiers, both searchable through the same hybrid index:

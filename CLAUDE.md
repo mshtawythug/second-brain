@@ -148,6 +148,10 @@ Full design in `docs/specs/2026-04-24-second-brain-design.md`. Implementation pl
 - **Markdown:** markdown-it-py
 - **Tokenization:** tiktoken (offline `cl100k_base`, used by every backend for chunker budgeting)
 - **Output:** Rich (colored tables, JSON)
+- **Graph retrieval (experimental):** Apache AGE (openCypher graph in-Postgres) +
+  networkx (Louvain community detection). Entity-centric GraphRAG alongside the
+  vector/FTS search. Needs the custom AGE Postgres image; default-OFF via
+  `BRAIN_GRAPH_ENABLED`.
 - **Tests:** pytest, real Postgres test DB, fake embedder fixture
 - **Lint/Type:** ruff, mypy
 
@@ -179,6 +183,20 @@ brain reembed                            # backfill missing embeddings; idempote
 docker compose down && rm -rf data/postgres
 # edit .env (BRAIN_EMBEDDER=qwen3 / voyage / arctic)
 docker compose up -d && brain init && brain ingest-dir <…> && brain reembed
+
+# GraphRAG (experimental — entity graph alongside vector/FTS search)
+# Requires the custom Apache AGE Postgres image
+#   (second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2), NOT the stock pgvector prod
+#   image. `pip install -e ".[dev]"` pulls the networkx dep. Set
+#   BRAIN_GRAPH_ENABLED=true in .env to enable the ingest-time graph sync.
+brain init                               # also bootstraps AGE + applies graph migrations when the image ships AGE
+brain graphrag build --backfill          # backfill the people graph from existing docs
+brain graphrag communities build         # detect + summarize communities (needed for --mode global)
+brain graphrag search "..."              # graph retrieval (modes: auto|local|themes|global|fuse)
+brain graphrag themes --person "Jane Doe"  # "themes in my conversations with X"
+brain graphrag search "..." --mode fuse  # RRF of the graph leg + vector/FTS hybrid leg
+brain graphrag communities list          # admin view of materialized communities
+brain doctor                             # also reports AGE + graph health (soft check)
 
 # Testing
 pytest                                   # full suite
