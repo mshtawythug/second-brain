@@ -14,9 +14,11 @@ if TYPE_CHECKING:
     from .graph_rag.schema import (
         CommunityGroup,
         CommunityRecord,
+        EntitySummary,
         GraphContext,
         GraphEntity,
         GraphExplanation,
+        GraphStats,
         ThemeGroup,
     )
 
@@ -494,4 +496,83 @@ def community_records_table(records: "list[CommunityRecord]") -> Table:
             f"{record.total_weight:.3f}",
             _summary_preview(record.summary),
         )
+    return table
+
+
+# ---------------------------------------------------------------------------
+# Entity listing renderers (admin view; plan 2026-05-23)
+# Mirrors the community_records_table / community_record_json pair above.
+# ---------------------------------------------------------------------------
+
+# Max characters shown for the description preview in the entity table.
+_ENTITY_DESC_PREVIEW = 60
+
+
+def entity_summaries_json(row: "EntitySummary") -> dict[str, Any]:
+    """Serialize one :class:`~brain.graph_rag.schema.EntitySummary` (admin view).
+
+    The per-entity wire shape for ``brain graphrag entities --json`` and the
+    ``brain_graphrag_entities`` MCP tool. Mirrors :func:`community_record_json`.
+    """
+    return {
+        "entity_type": row.entity_type,
+        "name": row.name,
+        "canonical_key": row.canonical_key,
+        "doc_count": row.doc_count,
+        "description": row.description,
+    }
+
+
+def entity_summaries_table(rows: "list[EntitySummary]") -> Table:
+    """Render entity summaries as a Rich table (admin listing).
+
+    Columns: Type / Name / Docs / Description (preview). An empty list still
+    renders the (header-only) table.
+    """
+    table = Table(title="Entities")
+    table.add_column("Type", style="cyan")
+    table.add_column("Name")
+    table.add_column("Docs", justify="right")
+    table.add_column("Description")
+    for row in rows:
+        table.add_row(
+            row.entity_type,
+            row.name,
+            str(row.doc_count),
+            _summary_preview(row.description, limit=_ENTITY_DESC_PREVIEW),
+        )
+    return table
+
+
+def graph_stats_json(stats: "GraphStats") -> dict[str, Any]:
+    """Serialize a :class:`~brain.graph_rag.schema.GraphStats` (admin view).
+
+    The wire shape for ``brain graphrag stats --json`` and the
+    ``brain_graphrag_stats`` MCP tool.
+    """
+    return {
+        "counts_by_type": dict(stats.counts_by_type),
+        "total_entities": stats.total_entities,
+        "total_relationships": stats.total_relationships,
+        "total_communities": stats.total_communities,
+        "top_entities": [entity_summaries_json(e) for e in stats.top_entities],
+    }
+
+
+def graph_stats_table(stats: "GraphStats") -> Table:
+    """Render a graph overview as a Rich table (admin view; ``brain graphrag stats``).
+
+    Columns: Metric / Value. Rows: total entities, total relationships,
+    total communities, then one row per entity type (sorted alphabetically).
+    The top-entities slice is rendered separately by the CLI via
+    :func:`entity_summaries_table`.
+    """
+    table = Table(title="Graph Statistics")
+    table.add_column("Metric")
+    table.add_column("Value", justify="right")
+    table.add_row("Total entities", str(stats.total_entities))
+    table.add_row("Total relationships", str(stats.total_relationships))
+    table.add_row("Total communities", str(stats.total_communities))
+    for entity_type in sorted(stats.counts_by_type):
+        table.add_row(f"  {entity_type}", str(stats.counts_by_type[entity_type]))
     return table

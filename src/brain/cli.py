@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import dataclasses
+import enum
 import json as _json  # aliased — `json` conflicts with the --json output flag name
 import logging
 import os
@@ -84,11 +85,15 @@ from .format import (
     community_records_table,
     console,
     emit_json,
+    entity_summaries_json,
+    entity_summaries_table,
     eval_diff_table,
     eval_report_table,
     explain_table,
     graph_context_json,
     graph_context_renderable,
+    graph_stats_json,
+    graph_stats_table,
     search_table,
 )
 from .ingest import (
@@ -2280,6 +2285,153 @@ def graphrag_communities_list(
     """
     cfg = Config.load()
     _run_communities_list(cfg, tenant=tenant, limit=limit, json_output=json_output)
+
+
+# ---------------------------------------------------------------------------
+# brain graphrag entities / stats — entity enumeration (plan 2026-05-23)
+# ---------------------------------------------------------------------------
+
+
+class _EntityType(enum.StrEnum):
+    """Allowed entity types for ``brain graphrag entities --type``."""
+
+    org = "org"
+    project = "project"
+    tool = "tool"
+    topic = "topic"
+    person = "person"
+
+
+class _EntitySort(enum.StrEnum):
+    """Sort order for ``brain graphrag entities --sort``."""
+
+    docs = "docs"
+    name = "name"
+
+
+def _run_entities_list(
+    cfg: Config,
+    *,
+    tenant: str | None,
+    entity_type: str | None,
+    sort: str,
+    limit: int,
+    json_output: bool,
+) -> None:
+    """List a tenant's entities (the ``graphrag entities`` core).
+
+    Resolves the tenant and reads ``graph_entities`` rows via
+    :func:`brain.graph_rag.relational.list_entities` (filtered, sorted,
+    limit-capped), then renders the admin table or the ``--json`` payload
+    (``{tenant_id, count, entities:[…]}``). Read-only; no raw Cypher.
+    """
+    from .graph_rag.relational import list_entities
+    from .graph_rag.tenancy import resolve_tenant
+
+    tenant_id = resolve_tenant(cfg, tenant)
+    with connect_age(cfg.database_url) as conn:
+        conn.autocommit = True
+        _require_age_or_exit(conn)
+        rows = list_entities(conn, tenant_id, entity_type=entity_type, sort=sort, limit=limit)
+
+    if json_output:
+        emit_json(
+            {
+                "tenant_id": tenant_id,
+                "count": len(rows),
+                "entities": [entity_summaries_json(r) for r in rows],
+            }
+        )
+        return
+    console.print(entity_summaries_table(rows))
+
+
+def _run_graph_stats(
+    cfg: Config,
+    *,
+    tenant: str | None,
+    json_output: bool,
+) -> None:
+    """Show a tenant's graph overview (the ``graphrag stats`` core).
+
+    Resolves the tenant, reads counts from the relational tables via
+    :func:`brain.graph_rag.relational.graph_stats`, then renders the stats
+    table + top-entities table, or the ``--json`` payload. Read-only.
+    """
+    from .graph_rag.relational import graph_stats
+    from .graph_rag.tenancy import resolve_tenant
+
+    tenant_id = resolve_tenant(cfg, tenant)
+    with connect_age(cfg.database_url) as conn:
+        conn.autocommit = True
+        _require_age_or_exit(conn)
+        stats = graph_stats(conn, tenant_id)
+
+    if json_output:
+        emit_json({"tenant_id": tenant_id, **graph_stats_json(stats)})
+        return
+    console.print(graph_stats_table(stats))
+    if stats.top_entities:
+        console.print(entity_summaries_table(list(stats.top_entities)))
+
+
+@graphrag_app.command("entities")
+def graphrag_entities(
+    entity_type: _EntityType | None = typer.Option(
+        None,
+        "--type",
+        help="Filter to one entity type (org / project / tool / topic / person).",
+    ),
+    sort: _EntitySort = typer.Option(
+        _EntitySort.docs,
+        "--sort",
+        help="Sort order: docs (doc_count DESC) or name (name ASC).",
+    ),
+    limit: int = typer.Option(
+        50,
+        "--limit",
+        "-n",
+        help="Max entities to show (default 50; 0 = all).",
+    ),
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to list (default: BRAIN_GRAPH_TENANT)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List the tenant's entities (admin view; all types or filtered by --type).
+
+    Shows entity type, name, doc_count, and a description preview, sorted by
+    doc_count descending (default) or alphabetically (``--sort name``).
+    ``--json`` emits ``{tenant_id, count, entities:[…]}``.
+    Read-only — never raw Cypher.
+    """
+    cfg = Config.load()
+    _run_entities_list(
+        cfg,
+        tenant=tenant,
+        entity_type=entity_type.value if entity_type is not None else None,
+        sort=sort.value,
+        limit=limit,
+        json_output=json_output,
+    )
+
+
+@graphrag_app.command("stats")
+def graphrag_stats(
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to summarize (default: BRAIN_GRAPH_TENANT)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show an at-a-glance graph overview for the tenant.
+
+    Reports entity counts by type, total relationships, total communities, and
+    the top-10 entities by doc_count. ``--json`` emits ``{tenant_id,
+    counts_by_type, total_entities, total_relationships, total_communities,
+    top_entities:[…]}``. Read-only — never raw Cypher.
+    """
+    cfg = Config.load()
+    _run_graph_stats(cfg, tenant=tenant, json_output=json_output)
 
 
 # ---------------------------------------------------------------------------

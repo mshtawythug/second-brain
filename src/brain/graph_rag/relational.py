@@ -14,17 +14,24 @@ from typing import Any
 
 import psycopg
 
-from .schema import EdgeContribution, EntityMention
+from ..errors import GraphBackendError
+from .schema import EdgeContribution, EntityMention, EntitySummary, GraphStats
 
 __all__ = [
     "delete_doc_relational",
     "fetch_doc_content",
     "fetch_doc_meta",
+    "graph_stats",
     "index_state",
+    "list_entities",
     "read_doc_mentions",
     "rewrite_doc_relational",
     "upsert_index_state",
 ]
+
+# Allowlists for validated query parameters — never interpolated into SQL.
+_VALID_ENTITY_TYPES: frozenset[str] = frozenset({"org", "project", "tool", "topic", "person"})
+_VALID_SORT_OPTIONS: frozenset[str] = frozenset({"docs", "name"})
 
 
 def fetch_doc_meta(
@@ -219,4 +226,128 @@ def delete_doc_relational(
     conn.execute(
         "DELETE FROM graph_index_state WHERE tenant_id = %s AND document_id = %s",
         (tenant_id, document_id),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Listing helpers for the admin enumeration surfaces (wave plan 2026-05-23).
+# ---------------------------------------------------------------------------
+
+
+def list_entities(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+    *,
+    entity_type: str | None = None,
+    sort: str = "docs",
+    limit: int = 50,
+) -> list[EntitySummary]:
+    """List entities for the tenant, filtered and sorted (admin listing).
+
+    Returns :class:`~brain.graph_rag.schema.EntitySummary` rows from
+    ``graph_entities``, filtered to ``entity_type`` when given, ordered by
+    ``sort`` (``"docs"`` → ``doc_count DESC, name ASC``; ``"name"`` →
+    ``name ASC``), and capped at ``limit`` rows (``limit <= 0`` returns all).
+    Read-only; no raw Cypher or AGE traversal. The raw ``embedding`` column is
+    not selected (a storage handle, not a wire value).
+
+    Raises:
+        GraphBackendError: ``entity_type`` is not one of the five known types, or
+            ``sort`` is not one of the two valid options.
+    """
+    if entity_type is not None and entity_type not in _VALID_ENTITY_TYPES:
+        raise GraphBackendError(
+            f"invalid entity_type {entity_type!r}; "
+            f"must be one of {sorted(_VALID_ENTITY_TYPES)}"
+        )
+    if sort not in _VALID_SORT_OPTIONS:
+        raise GraphBackendError(
+            f"invalid sort {sort!r}; must be one of {sorted(_VALID_SORT_OPTIONS)}"
+        )
+
+    params: list[Any] = [tenant_id]
+    where_clause = "WHERE tenant_id = %s"
+    if entity_type is not None:
+        where_clause += " AND entity_type = %s"
+        params.append(entity_type)
+
+    order_clause = (
+        "ORDER BY doc_count DESC, name ASC" if sort == "docs" else "ORDER BY name ASC"
+    )
+
+    sql = (
+        "SELECT entity_type, name, canonical_key, doc_count, description "
+        f"FROM graph_entities {where_clause} {order_clause}"
+    )
+    if limit > 0:
+        sql += " LIMIT %s"
+        params.append(limit)
+
+    rows = conn.execute(sql, tuple(params)).fetchall()
+    return [
+        EntitySummary(
+            entity_type=str(row[0]),
+            name=str(row[1]),
+            canonical_key=str(row[2]),
+            doc_count=int(row[3]),
+            description=str(row[4]) if row[4] is not None else None,
+        )
+        for row in rows
+    ]
+
+
+def graph_stats(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+) -> GraphStats:
+    """Return an at-a-glance graph overview for the tenant.
+
+    Reads entity counts grouped by type from ``graph_entities``, the
+    relationship count from ``graph_relationships``, the community count from
+    ``graph_communities``, and the top-10 entities by ``doc_count``
+    (the same slice :func:`list_entities` with ``limit=10, sort="docs"``
+    returns). All queries are tenant-scoped and parameterized. Read-only.
+    """
+    type_rows = conn.execute(
+        "SELECT entity_type, COUNT(*) FROM graph_entities "
+        "WHERE tenant_id = %s GROUP BY entity_type ORDER BY entity_type",
+        (tenant_id,),
+    ).fetchall()
+    counts_by_type: dict[str, int] = {str(row[0]): int(row[1]) for row in type_rows}
+    total_entities = sum(counts_by_type.values())
+
+    rel_row = conn.execute(
+        "SELECT COUNT(*) FROM graph_relationships WHERE tenant_id = %s",
+        (tenant_id,),
+    ).fetchone()
+    total_relationships = int(rel_row[0]) if rel_row is not None else 0
+
+    comm_row = conn.execute(
+        "SELECT COUNT(*) FROM graph_communities WHERE tenant_id = %s",
+        (tenant_id,),
+    ).fetchone()
+    total_communities = int(comm_row[0]) if comm_row is not None else 0
+
+    top_rows = conn.execute(
+        "SELECT entity_type, name, canonical_key, doc_count, description "
+        "FROM graph_entities WHERE tenant_id = %s "
+        "ORDER BY doc_count DESC, name ASC LIMIT 10",
+        (tenant_id,),
+    ).fetchall()
+    top_entities = tuple(
+        EntitySummary(
+            entity_type=str(row[0]),
+            name=str(row[1]),
+            canonical_key=str(row[2]),
+            doc_count=int(row[3]),
+            description=str(row[4]) if row[4] is not None else None,
+        )
+        for row in top_rows
+    )
+    return GraphStats(
+        counts_by_type=counts_by_type,
+        total_entities=total_entities,
+        total_relationships=total_relationships,
+        total_communities=total_communities,
+        top_entities=top_entities,
     )

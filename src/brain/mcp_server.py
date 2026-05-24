@@ -35,7 +35,12 @@ from .errors import (
     PersonAmbiguous,
     PersonNotFound,
 )
-from .format import community_record_json, graph_context_json
+from .format import (
+    community_record_json,
+    entity_summaries_json,
+    graph_context_json,
+    graph_stats_json,
+)
 from .graph_rag.sync import GraphSyncer, make_graph_syncer
 from .ingest import (
     Embedder,
@@ -1719,6 +1724,98 @@ def brain_graphrag_communities(
         "count": len(records),
         "communities": [community_record_json(r) for r in records],
     }
+
+
+@mcp_app.tool()
+def brain_graphrag_entities(
+    entity_type: str | None = None,
+    sort: str = "docs",
+    limit: int = 50,
+    tenant: str | None = None,
+) -> dict[str, Any]:
+    """List the tenant's entities (admin view; filterable by entity type).
+
+    Full parity with ``brain graphrag entities``: reads ``graph_entities``
+    rows (filtered, sorted, ``limit``-capped) and returns
+    ``{tenant_id, count, entities:[{entity_type, name, canonical_key,
+    doc_count, description}]}``. Read-only; no raw Cypher.
+
+    Params:
+
+    - ``entity_type``: filter to one type — ``org`` / ``project`` / ``tool`` /
+      ``topic`` / ``person`` (default all).
+    - ``sort``: ``"docs"`` (doc_count DESC, default) or ``"name"`` (name ASC).
+    - ``limit``: max entities to return (default 50; 0 = all).
+    - ``tenant``: tenant to list (default ``BRAIN_GRAPH_TENANT``).
+    """
+    from .graph_rag.relational import list_entities
+    from .graph_rag.tenancy import resolve_tenant
+
+    state = _get_state()
+    logger.debug(
+        "brain_graphrag_entities: entity_type=%s sort=%s limit=%s tenant=%s",
+        entity_type,
+        sort,
+        limit,
+        tenant,
+    )
+    try:
+        tenant_id = resolve_tenant(state.cfg, tenant)
+        with connect_age(state.cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            rows = list_entities(
+                conn, tenant_id, entity_type=entity_type, sort=sort, limit=limit
+            )
+    except GraphTenantError as exc:
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    # Safe to surface str(exc): list_entities raises GraphBackendError only from
+    # its own input-validation guards on a pure-relational path (no AGE/Cypher to
+    # leak per spec §4 D9). If this path ever raises GraphBackendError from an
+    # AGE/DB failure, switch to _wrap_db_error() instead.
+    except GraphBackendError as exc:
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return {
+        "tenant_id": tenant_id,
+        "count": len(rows),
+        "entities": [entity_summaries_json(r) for r in rows],
+    }
+
+
+@mcp_app.tool()
+def brain_graphrag_stats(
+    tenant: str | None = None,
+) -> dict[str, Any]:
+    """Return an at-a-glance graph overview for the tenant.
+
+    Full parity with ``brain graphrag stats``: reads entity counts by type,
+    total relationships, total communities, and the top-10 entities by
+    doc_count from the relational tables. Returns ``{tenant_id,
+    counts_by_type, total_entities, total_relationships, total_communities,
+    top_entities:[…]}``. Read-only; no raw Cypher.
+
+    Params:
+
+    - ``tenant``: tenant to summarize (default ``BRAIN_GRAPH_TENANT``).
+    """
+    from .graph_rag.relational import graph_stats
+    from .graph_rag.tenancy import resolve_tenant
+
+    state = _get_state()
+    logger.debug("brain_graphrag_stats: tenant=%s", tenant)
+    try:
+        tenant_id = resolve_tenant(state.cfg, tenant)
+        with connect_age(state.cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            stats = graph_stats(conn, tenant_id)
+    except GraphTenantError as exc:
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return {"tenant_id": tenant_id, **graph_stats_json(stats)}
 
 
 def _build_note_file_text(

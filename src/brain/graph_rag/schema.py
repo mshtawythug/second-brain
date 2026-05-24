@@ -27,6 +27,7 @@ import cycle with the ingest pipeline that later wires graph reconciliation in.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
@@ -278,3 +279,38 @@ class GraphContext:
     requested_mode: str | None = None
     degraded_from: str | None = None
     degradation_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class EntitySummary:
+    """Lightweight entity row for listing — projected from ``graph_entities``.
+
+    Returned by :func:`brain.graph_rag.relational.list_entities` for the
+    ``brain graphrag entities`` admin surface. Does not carry the raw
+    ``embedding`` vector (a storage handle, not a wire value — same convention
+    as :class:`GraphEntity` and :class:`CommunityRecord`).
+    """
+
+    entity_type: str
+    name: str
+    canonical_key: str
+    doc_count: int
+    description: str | None = None
+
+
+@dataclass(frozen=True)
+class GraphStats:
+    """At-a-glance graph overview for ``brain graphrag stats``.
+
+    Produced by :func:`brain.graph_rag.relational.graph_stats` from the
+    tenant's relational tables. ``counts_by_type`` maps each ``entity_type``
+    present in ``graph_entities`` to its row count; ``total_entities`` is their
+    sum. ``top_entities`` are the top-10 entities by ``doc_count`` (the same
+    slice ``brain graphrag entities --limit 10`` would return with sort=docs).
+    """
+
+    counts_by_type: Mapping[str, int]
+    total_entities: int
+    total_relationships: int
+    total_communities: int
+    top_entities: tuple[EntitySummary, ...]
