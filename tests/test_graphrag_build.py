@@ -190,6 +190,23 @@ def _relational_entity_count(conn: psycopg.Connection[Any], tenant: str) -> int:
     return int(row[0])
 
 
+def _doc_count_by_key(
+    conn: psycopg.Connection[Any], tenant: str
+) -> dict[str, int]:
+    """Map each entity's ``canonical_key`` → its derived ``graph_entities.doc_count``.
+
+    ``doc_count`` is refreshed by ``_recompute_aggregates`` — which the deferred
+    bulk build hoists to a SINGLE post-loop ``refresh_aggregates`` instead of
+    per-document — so comparing this map across the batched and per-doc tenants
+    proves the deferral does not drift the derived per-entity doc frequency.
+    """
+    rows = conn.execute(
+        "SELECT canonical_key, doc_count FROM graph_entities WHERE tenant_id = %s",
+        (tenant,),
+    ).fetchall()
+    return {str(k): int(c) for k, c in rows}
+
+
 def _relational_relationship_count(conn: psycopg.Connection[Any], tenant: str) -> int:
     row = conn.execute(
         "SELECT count(*) FROM graph_relationships WHERE tenant_id = %s", (tenant,)
@@ -323,7 +340,9 @@ def test_batched_build_equals_incremental(test_db: psycopg.Connection[Any]) -> N
 
     # Batched backfill into tenant "batch".
     bres = build_graph(test_db, all_ids, backend=backend, config=_cfg("batch"))
-    assert bres == BuildResult(processed=3, reconciled=3, skipped=0, orphans_removed=0)
+    assert bres == BuildResult(
+        processed=3, reconciled=3, skipped=0, orphans_removed=0, relationship_count=3
+    )
 
     # Incremental per-doc reconcile of the SAME docs into tenant "incr".
     for doc_id in all_ids:
@@ -339,6 +358,11 @@ def test_batched_build_equals_incremental(test_db: psycopg.Connection[Any]) -> N
     )
     # Weights (by canonical-key pair) match exactly.
     assert _rels_by_key(test_db, "batch") == _rels_by_key(test_db, "incr")
+    # Derived per-entity doc_count matches too — the deferred build recomputes it
+    # ONCE post-loop (not per doc), so this guards against doc_count drift under
+    # deferral. Triangle: each of alice/bob/carol appears in 2 docs → all 2.
+    assert _doc_count_by_key(test_db, "batch") == _doc_count_by_key(test_db, "incr")
+    assert set(_doc_count_by_key(test_db, "batch").values()) == {2}
     # Spot-check the weights are the real normalized lift (triangle: each pair
     # co-occurs in 1 doc; each person appears in 2 docs → lift 0.5).
     assert set(_rels_by_key(test_db, "batch").values()) == {
@@ -430,6 +454,129 @@ def test_build_progress_callback_invoked(test_db: psycopg.Connection[Any]) -> No
 
 
 # --------------------------------------------------------------------------- #
+# 4b. Deferred whole-tenant refresh (perf): the O(R) AGE CO_OCCURS rebuild is
+#     hoisted out of the per-document loop and run ONCE after it, not per doc —
+#     while keeping the end state identical to the per-document path.
+# --------------------------------------------------------------------------- #
+class _CountingRefreshBackend(AgeBackend):
+    """AgeBackend that counts ``refresh_cooccur_edges`` calls (defer-perf probe).
+
+    The whole-tenant CO_OCCURS rebuild is the O(R) cost the deferral hoists out of
+    the per-document loop; counting its invocations proves a corpus build pays it
+    exactly once (via the post-loop refresh), not once per document.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refresh_cooccur_calls = 0
+
+    def refresh_cooccur_edges(self, conn: Any, tenant_id: str) -> int:
+        self.refresh_cooccur_calls += 1
+        return super().refresh_cooccur_edges(conn, tenant_id)
+
+
+def test_build_refreshes_cooccur_once_not_per_doc(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A 3-doc build rebuilds AGE CO_OCCURS ONCE (post-loop), not per document."""
+    backend = _CountingRefreshBackend()
+    backend.bootstrap(test_db)
+    _seed_three_docs(test_db)
+    all_ids = [doc_id for batch in iter_all_document_ids(test_db) for doc_id in batch]
+
+    result = build_graph(test_db, all_ids, backend=backend, config=_cfg())
+
+    # The expensive whole-tenant CO_OCCURS rematerialization ran exactly once
+    # (the post-loop refresh), NOT once per processed document (which would be 3).
+    assert backend.refresh_cooccur_calls == 1
+    assert result.reconciled == 3
+    assert result.relationship_count == 3
+    # End state is still the full triangle in AGE (identical to the per-doc path).
+    assert _age_cooccur_count(test_db, "default") == 3
+    assert _age_entity_count(test_db, "default") == 3
+
+
+def test_build_all_skip_runs_no_refresh(test_db: psycopg.Connection[Any]) -> None:
+    """An idempotent (all-skip) re-build does NO whole-tenant refresh at all."""
+    backend = _CountingRefreshBackend()
+    backend.bootstrap(test_db)
+    _seed_three_docs(test_db)
+    all_ids = [doc_id for batch in iter_all_document_ids(test_db) for doc_id in batch]
+
+    first = build_graph(test_db, all_ids, backend=backend, config=_cfg())
+    assert first.reconciled == 3 and backend.refresh_cooccur_calls == 1
+
+    # Re-run: every doc short-circuits on its watermark, so no work is done and
+    # the post-loop refresh is gated OFF (the derived layers are already current).
+    second = build_graph(test_db, all_ids, backend=backend, config=_cfg())
+    assert second.reconciled == 0 and second.skipped == 3
+    assert backend.refresh_cooccur_calls == 1  # unchanged — no second refresh
+    assert second.relationship_count == 0
+    # Graph is unchanged + intact.
+    assert _age_cooccur_count(test_db, "default") == 3
+    assert _person_keys(test_db, "default") == {"alice", "bob", "carol"}
+
+
+def test_build_final_refresh_prunes_orphan_absent_from_all_docs(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """An entity mentioned by no document is GC'd by the single post-loop refresh."""
+    backend = _backend(test_db)
+    _seed_three_docs(test_db)
+    all_ids = [doc_id for batch in iter_all_document_ids(test_db) for doc_id in batch]
+
+    # Seed a stale orphan person (no mentions) in BOTH stores before the build.
+    row = test_db.execute(
+        "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key) "
+        "VALUES ('default', 'person', 'Ghost', 'ghost') RETURNING id::text"
+    ).fetchone()
+    assert row is not None
+    orphan_id = str(row[0])
+    _cypher_scalar(
+        test_db,
+        "MERGE (e:Entity {entity_uuid: $u, tenant_id: $t}) RETURN 1",
+        {"u": orphan_id, "t": "default"},
+    )
+    # Only the orphan exists pre-build — the 3 real persons are created DURING
+    # the build (reconcile derives them from the seeded documents' participants).
+    assert _relational_entity_count(test_db, "default") == 1  # just the orphan
+    assert _age_entity_count(test_db, "default") == 1  # just the orphan vertex
+
+    result = build_graph(test_db, all_ids, backend=backend, config=_cfg())
+
+    # The post-loop refresh GC'd the orphan from BOTH stores; only the triangle
+    # survives. (Per-document reconcile deferred the GC, so this is the single
+    # final pass doing it.)
+    assert result.orphans_removed == 1
+    assert _person_keys(test_db, "default") == {"alice", "bob", "carol"}
+    assert _relational_entity_count(test_db, "default") == 3
+    assert _age_entity_count(test_db, "default") == 3
+    assert _age_cooccur_count(test_db, "default") == 3
+
+
+def test_incremental_reconcile_materializes_cooccur_per_call(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A single ``reconcile_document`` (defer_tenant_refresh defaults False) stays
+    fully consistent immediately — CO_OCCURS + relationships materialize in that
+    one call, as the incremental ingest hook (``sync.py``) requires (it never
+    defers)."""
+    backend = _backend(test_db)
+    doc_ids = _seed_three_docs(test_db)
+
+    # alice-bob, then alice-carol — each reconcile leaves a consistent derived
+    # layer with NO post-loop refresh (this is not a build).
+    res1 = reconcile_document(test_db, doc_ids[0], backend=backend, config=_cfg())
+    assert not res1.skipped and res1.relationship_count == 1
+    assert _age_cooccur_count(test_db, "default") == 1  # consistent after ONE call
+
+    res2 = reconcile_document(test_db, doc_ids[1], backend=backend, config=_cfg())
+    assert not res2.skipped and res2.relationship_count == 2
+    assert _relational_relationship_count(test_db, "default") == 2
+    assert _age_cooccur_count(test_db, "default") == 2
+
+
+# --------------------------------------------------------------------------- #
 # 5. Resume after interruption (d)
 # --------------------------------------------------------------------------- #
 def test_build_resumes_after_interruption(test_db: psycopg.Connection[Any]) -> None:
@@ -445,7 +592,7 @@ def test_build_resumes_after_interruption(test_db: psycopg.Connection[Any]) -> N
     # Resume (no limit): the first 2 skip on their watermark, the 3rd is new.
     resumed = build_graph(test_db, all_ids, backend=backend, config=_cfg())
     assert resumed == BuildResult(
-        processed=3, reconciled=1, skipped=2, orphans_removed=0
+        processed=3, reconciled=1, skipped=2, orphans_removed=0, relationship_count=3
     )
     assert _watermark_count(test_db, "default") == 3
 
@@ -495,7 +642,7 @@ def test_build_force_rebuilds_dropped_age_mirror(
     # relational source-of-truth: entities + MENTIONED_IN + Document + CO_OCCURS.
     forced = build_graph(test_db, all_ids, backend=backend, config=_cfg(), force=True)
     assert forced == BuildResult(
-        processed=3, reconciled=3, skipped=0, orphans_removed=0
+        processed=3, reconciled=3, skipped=0, orphans_removed=0, relationship_count=3
     )
     assert _age_entity_count(test_db, "default") == 3
     assert _age_cooccur_count(test_db, "default") == 3
@@ -571,7 +718,7 @@ def test_build_force_clears_stale_age_only_state(
     # rebuilds ONLY from the relational source-of-truth.
     result = build_graph(test_db, all_ids, backend=backend, config=_cfg(), force=True)
     assert result == BuildResult(
-        processed=3, reconciled=3, skipped=0, orphans_removed=0
+        processed=3, reconciled=3, skipped=0, orphans_removed=0, relationship_count=3
     )
     # Stale Document + stale AGE-only Entity (+ their edge) are GONE; the mirror
     # equals the relational source exactly.
@@ -646,7 +793,7 @@ def test_build_force_cleans_stale_relational_state_with_docs(
 
     result = build_graph(test_db, all_ids, backend=backend, config=_cfg(), force=True)
     assert result == BuildResult(
-        processed=3, reconciled=3, skipped=0, orphans_removed=0
+        processed=3, reconciled=3, skipped=0, orphans_removed=0, relationship_count=3
     )
     # The triangle survives; the stale orphans + relationship are purged from
     # BOTH stores.

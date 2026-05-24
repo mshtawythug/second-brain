@@ -284,6 +284,7 @@ def reconcile_document(
     person_resolver: PersonResolver = default_person_resolver,
     extractor: EntityExtractor | None = None,
     force: bool = False,
+    defer_tenant_refresh: bool = False,
 ) -> ReconcileResult:
     """(Re)index one document's people (+ optionally concept) aspect (spec §7).
 
@@ -326,6 +327,29 @@ def reconcile_document(
     active aspect unconditionally — the authoritative recovery path for a dropped
     or corrupted AGE mirror (spec §7). ``brain graphrag build --force`` threads
     this through every document.
+
+    ``defer_tenant_refresh=True`` (bulk build only) HOISTS the three tenant-wide
+    derived-layer steps — the ``graph_relationships`` recompute, the orphan GC,
+    and the AGE ``CO_OCCURS`` rematerialization (+ orphan-vertex DETACH DELETE) —
+    out of the per-document path so a corpus build pays them ONCE (after the loop,
+    via :func:`brain.graph_rag.build.build_graph` →
+    :func:`~brain.graph_rag.aggregates.refresh_aggregates`) instead of once per
+    document. The per-document relational rewrite and the doc's own AGE
+    entity/``MENTIONED_IN`` sync + watermark still run, so the relational
+    source-of-truth stays current and the build stays resumable; the deferred
+    end state is identical (the derived layers are a deterministic full recompute
+    from that source-of-truth). On a deferred call ``relationship_count`` and
+    ``orphans_removed`` are 0 — the post-loop refresh reports the tenant totals.
+    Leave it ``False`` (the default) for the incremental ingest hook, which must
+    keep every single-document write fully consistent immediately.
+
+    Crash-window recovery: if a deferred bulk build is interrupted AFTER a
+    document's watermark is written but BEFORE ``build_graph``'s final
+    ``refresh_aggregates`` runs, a same-command rerun all-skips
+    (``reconciled == 0``) and will NOT repair the derived layer
+    (``graph_relationships`` / AGE ``CO_OCCURS``) — run ``brain graphrag refresh``
+    (or ``brain graphrag build --force``) to repair. The relational
+    source-of-truth stays correct throughout.
 
     Raises:
         GraphReconcileError: the document does not exist;
@@ -479,14 +503,31 @@ def reconcile_document(
             )
 
         # --- Shared aggregate recompute + per-aspect orphan GC. ---
-        relationship_count = _recompute_aggregates(
-            conn, tenant_id, cfg.generic_df_ratio
-        )
+        # When ``defer_tenant_refresh`` is set (bulk build), the tenant-wide
+        # aggregate recompute, the orphan GC, and (below) the AGE CO_OCCURS
+        # rematerialization are HOISTED out of the per-document loop and run ONCE
+        # after it — :func:`brain.graph_rag.build.build_graph` calls
+        # :func:`~brain.graph_rag.aggregates.refresh_aggregates` when any document
+        # did work. This turns a corpus build from O(docs × tenant_R) per-document
+        # CO_OCCURS rebuilds into O(docs × doc_entities + tenant_R) — a single
+        # final rebuild. The per-document relational rewrite and the doc's own AGE
+        # entity/MENTIONED_IN sync STILL run (so the relational source-of-truth and
+        # the doc's mention edges stay current); only the tenant-wide DERIVED layers
+        # are deferred, and because those derive purely from the per-document
+        # source-of-truth, the deferred end state is identical to the per-document
+        # path (a deterministic full recompute). ``relationship_count`` /
+        # ``orphans_removed`` are then 0 on this result — the final refresh reports
+        # the tenant-wide totals.
+        relationship_count = 0
         orphan_ids: list[str] = []
-        if person_stale:
-            orphan_ids += _gc_orphan_persons(conn, tenant_id)
-        if concept_stale:
-            orphan_ids += _gc_orphan_concepts(conn, tenant_id)
+        if not defer_tenant_refresh:
+            relationship_count = _recompute_aggregates(
+                conn, tenant_id, cfg.generic_df_ratio
+            )
+            if person_stale:
+                orphan_ids += _gc_orphan_persons(conn, tenant_id)
+            if concept_stale:
+                orphan_ids += _gc_orphan_concepts(conn, tenant_id)
 
         # --- AGE sync. Re-read the doc's COMBINED current mentions from the
         # relational source-of-truth so a fresh aspect's MENTIONED_IN edges are
@@ -505,6 +546,7 @@ def reconcile_document(
             mentions=combined_mentions,
             content_type=content_type,
             orphan_ids=orphan_ids,
+            skip_cooccur=defer_tenant_refresh,
         )
 
         # --- Per-aspect watermarks (only for the aspects that ran). ---
@@ -611,6 +653,7 @@ def _sync_age_reconcile(
     mentions: list[EntityMention],
     content_type: str,
     orphan_ids: list[str],
+    skip_cooccur: bool = False,
 ) -> None:
     """Mirror the just-rewritten relational state for one doc into AGE.
 
@@ -627,6 +670,14 @@ def _sync_age_reconcile(
     mentions: DETACH DELETE its ``Document`` vertex so entity-less docs hold no
     graph presence. Then rematerialize the tenant's ``CO_OCCURS`` edges from the
     recomputed mirror and DETACH DELETE any orphaned vertices.
+
+    ``skip_cooccur`` (bulk build) defers the two TENANT-WIDE steps — the
+    ``CO_OCCURS`` rematerialization and the orphan-vertex DETACH DELETE — to a
+    single post-loop :func:`~brain.graph_rag.aggregates.refresh_aggregates`. The
+    per-document Document / Entity / ``MENTIONED_IN`` sync above ALWAYS runs, so
+    the doc's own mention edges are written incrementally; only the whole-tenant
+    derived edges are hoisted out of the loop (``orphan_ids`` is empty in this
+    mode, the GC having been deferred too).
     """
     if mentions:
         backend.upsert_entities(conn, tenant_id, entities)
@@ -639,9 +690,10 @@ def _sync_age_reconcile(
         )
     else:
         backend.detach_delete_documents(conn, tenant_id, [document_id])
-    backend.refresh_cooccur_edges(conn, tenant_id)
-    if orphan_ids:
-        backend.detach_delete_entities(conn, tenant_id, orphan_ids)
+    if not skip_cooccur:
+        backend.refresh_cooccur_edges(conn, tenant_id)
+        if orphan_ids:
+            backend.detach_delete_entities(conn, tenant_id, orphan_ids)
 
 
 # --------------------------------------------------------------------------- #

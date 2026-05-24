@@ -33,7 +33,12 @@ from typing import Any
 import psycopg
 
 from ..errors import GraphReconcileError
-from .aggregates import _gc_orphan_concepts, _gc_orphan_persons, _recompute_aggregates
+from .aggregates import (
+    _gc_orphan_concepts,
+    _gc_orphan_persons,
+    _recompute_aggregates,
+    refresh_aggregates,
+)
 from .backends.base import GraphBackend
 from .extract import EntityExtractor
 from .reconcile import ReconcileConfig, ReconcileResult, reconcile_document
@@ -49,14 +54,21 @@ class BuildResult:
     ``processed`` is the number of documents reconcile was attempted on (bounded
     by ``limit``); ``reconciled`` is how many did graph work; ``skipped`` is how
     many short-circuited on an unchanged watermark (``reconciled + skipped ==
-    processed``); ``orphans_removed`` is the total zero-mention person vertices
-    GC'd across the run.
+    processed``); ``orphans_removed`` is the total zero-mention entity vertices
+    GC'd across the run; ``relationship_count`` is the number of tenant
+    ``graph_relationships`` edges materialized by the post-loop refresh (0 when no
+    document did work, so no refresh ran). Because the per-document reconcile
+    defers the tenant-wide aggregate recompute + orphan GC + AGE ``CO_OCCURS``
+    rebuild, ``orphans_removed`` and ``relationship_count`` are sourced from the
+    single post-loop :func:`~brain.graph_rag.aggregates.refresh_aggregates`, not
+    summed per document.
     """
 
     processed: int = 0
     reconciled: int = 0
     skipped: int = 0
     orphans_removed: int = 0
+    relationship_count: int = 0
 
 
 # Invoked after each document with ``(processed_count, document_id, result)`` so
@@ -82,6 +94,19 @@ def build_graph(
     shared ``config`` + ``backend``. Stops after ``limit`` documents when set
     (caps the corpus for testing / partial runs). Returns a :class:`BuildResult`
     tally; ``progress`` (when given) is called once per processed document.
+
+    **Deferred whole-tenant refresh (perf).** Every per-document reconcile runs
+    with ``defer_tenant_refresh=True``, so the tenant-wide derived layers — the
+    ``graph_relationships`` recompute, the orphan GC, and the AGE ``CO_OCCURS``
+    rematerialization — are skipped per document and recomputed ONCE after the
+    loop via :func:`~brain.graph_rag.aggregates.refresh_aggregates` (only when at
+    least one document did work). The AGE ``CO_OCCURS`` rebuild is a whole-tenant
+    operation whose cost scales with the tenant's relationship count R, so running
+    it per document made a corpus build O(docs × R); hoisting it to a single final
+    pass makes the build O(docs × doc_entities + R) while producing the identical
+    end state (the derived layers are a deterministic full recompute from the
+    per-document relational source-of-truth, which IS still written per document).
+    Applies to both the plain backfill and the ``force`` rebuild below.
 
     The connection SHOULD be autocommit so each document commits on its own,
     making the build resumable after an interruption (see the module docstring).
@@ -202,6 +227,7 @@ def build_graph(
             config=config,
             extractor=extractor,
             force=force,
+            defer_tenant_refresh=True,
         )
         processed += 1
         if result.skipped:
@@ -211,11 +237,45 @@ def build_graph(
         orphans_removed += result.orphans_removed
         if progress is not None:
             progress(processed, document_id, result)
+
+    # Each per-document reconcile above ran with ``defer_tenant_refresh=True``, so
+    # the tenant-wide derived layers — ``graph_relationships`` (normalized lift +
+    # generic suppression), the orphan GC of both aspects, the AGE ``CO_OCCURS``
+    # rematerialization, and the orphan-vertex DETACH DELETE — were skipped per
+    # document and are recomputed ONCE here from the now-complete relational
+    # source-of-truth. This is the SAME whole-tenant operation reconcile ran per
+    # document before (``refresh_aggregates`` reuses the identical aggregate + GC
+    # helpers), hoisted out of the loop: a corpus build drops from O(docs ×
+    # tenant_R) per-doc CO_OCCURS rebuilds to O(docs × doc_entities + tenant_R)
+    # (one final rebuild), and the end state is identical (a deterministic full
+    # recompute from the source-of-truth).
+    #
+    # Gate on ``reconciled > 0``: the refresh runs only when at least one document
+    # changed the relational source (so the derived layers are stale). When every
+    # document short-circuited on its watermark (an idempotent re-run, or a plain
+    # ``--backfill`` over an unchanged corpus) the derived layers are already
+    # consistent from the build that did the work, so skipping the refresh keeps
+    # the re-run a true no-op AND avoids a spurious ``refresh_cooccur_edges`` that
+    # would raise against a deliberately-dropped AGE mirror (the recovery path for
+    # that is ``--force``, which always reconciles).
+    #
+    # CRASH-WINDOW RECOVERY: if a deferred build is interrupted AFTER the last
+    # document's watermark is written but BEFORE this final refresh runs, a
+    # same-command rerun all-skips (``reconciled == 0``) and will NOT repair the
+    # derived layer (``graph_relationships`` / AGE ``CO_OCCURS``) — run
+    # ``brain graphrag refresh`` (or ``brain graphrag build --force``) to repair.
+    # The relational source-of-truth stays correct throughout.
+    relationship_count = 0
+    if reconciled > 0:
+        refresh = refresh_aggregates(conn, backend=backend, config=config)
+        relationship_count = refresh.relationship_count
+        orphans_removed += refresh.orphans_removed
     return BuildResult(
         processed=processed,
         reconciled=reconciled,
         skipped=skipped,
         orphans_removed=orphans_removed,
+        relationship_count=relationship_count,
     )
 
 

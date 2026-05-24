@@ -1761,6 +1761,7 @@ def graphrag_build(
     typer.echo(
         f"graphrag build: {result.processed} processed "
         f"(reconciled {result.reconciled}, skipped {result.skipped}), "
+        f"{result.relationship_count} relationship(s) rebuilt, "
         f"{result.orphans_removed} orphan(s) removed (tenant {config.tenant_id!r})"
     )
 
