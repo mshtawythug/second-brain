@@ -346,22 +346,22 @@ class TestThresholdAndPeopleYmlOverride:
 
 
 class TestSlugCollision:
-    """Two distinct display_names that slugify to the same slug → second
-    gets the ``-2`` suffix; alpha order on display_name decides who wins
-    the bare slug."""
+    """Two *canonically distinct* display_names that slugify to the same slug
+    → second gets the ``-2`` suffix; alpha order on the canonical key decides
+    who wins the bare slug."""
 
     def test_collision_resolves_with_numeric_suffix(
         self, test_db: psycopg.Connection[Any]
     ) -> None:
         store = DirectoryStore(test_db)
-        # Two display_names that survive ``normalize_participant`` distinct
-        # but collapse to the same slug after ``slugify`` — internal
-        # punctuation (underscore / hyphen) collapses to ``-`` in slugify.
+        # ``john doe`` (canonical "john doe") and ``john-doe`` (canonical
+        # "john-doe" — the hyphen is preserved, NOT collapsed) are two distinct
+        # people whose slugs both reduce to "john-doe", so the second collides.
         store.upsert_pair(
             display_name="john doe", email="j@example.com", source="people_yml"
         )
         store.upsert_pair(
-            display_name="john_doe", email="jd@example.com", source="people_yml"
+            display_name="john-doe", email="jd@example.com", source="people_yml"
         )
 
         records = aggregate_people(
@@ -369,13 +369,52 @@ class TestSlugCollision:
         )
         names = [r.display_name for r in records]
         assert "john doe" in names
-        assert "john_doe" in names
+        assert "john-doe" in names
 
         first = _record_by_name(records, "john doe")
-        second = _record_by_name(records, "john_doe")
-        # ASCII space (32) < underscore (95), so "john doe" wins the alpha tiebreak.
+        second = _record_by_name(records, "john-doe")
+        # ASCII space (32) < hyphen (45), so "john doe" wins the alpha tiebreak.
         assert first.slug == "john-doe"
         assert second.slug == "john-doe-2"
+
+
+class TestSeparatorMerge:
+    """Phase 1 regression: handle-style separators (``.`` / ``_``) collapse so
+    ``Jane.Doe`` / ``jane_doe`` / ``Jane Doe`` all merge into ONE person with a
+    single canonical key and a merged email list."""
+
+    def test_dot_underscore_and_spaced_variants_merge(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        store = DirectoryStore(test_db)
+        # Three directory rows for the same human under three separator styles.
+        store.upsert_pair(
+            display_name="jane doe", email="jane@example.com", source="people_yml"
+        )
+        store.upsert_pair(
+            display_name="jane_doe", email="jane.alt@example.com", source="gmail"
+        )
+        # ``normalize_participant`` keeps the dot internal; the Phase 1
+        # normalizer then collapses it to a space at canonical-key time.
+        store.upsert_pair(
+            display_name="jane.doe", email="jane.work@example.com", source="gmail"
+        )
+
+        records = aggregate_people(
+            test_db, owner_keys=frozenset(), min_docs=0
+        )
+
+        # All three collapsed to the single canonical key "jane doe".
+        jane_records = [r for r in records if r.display_name == "jane doe"]
+        assert len(jane_records) == 1
+        jane = jane_records[0]
+        assert jane.all_emails == [
+            "jane.alt@example.com",
+            "jane.work@example.com",
+            "jane@example.com",
+        ]
+        # people_yml among the merged rows → curated badge sticks.
+        assert jane.in_people_yml is True
 
 
 # --------------------------------------------------------------------------
@@ -392,8 +431,8 @@ class TestOwnerExclusion:
     ) -> None:
         store = DirectoryStore(test_db)
         store.upsert_pair(
-            display_name="Ali Sarkis",
-            email="ali@example.com",
+            display_name="Pat Owner",
+            email="pat.owner@example.com",
             source="people_yml",
         )
         store.upsert_pair(
@@ -402,31 +441,31 @@ class TestOwnerExclusion:
             source="people_yml",
         )
 
-        # Gmail thread Ali↔person-person-luke. Owner_keys strips Ali → only
-        # person-person-luke gets a record, with this doc on his roster.
+        # Gmail thread owner↔person-person-luke. Owner_keys strips the owner →
+        # only person-person-luke gets a record, with this doc on his roster.
         _seed_doc(
             test_db,
             source_kind="gmail",
-            external_id="gmail-ali-person-luke",
+            external_id="gmail-owner-luke",
             title="Coffee?",
             metadata={
-                "from": "Ali Sarkis <ali@example.com>",
+                "from": "Pat Owner <pat.owner@example.com>",
                 "to": "person-person-luke <person-luke@example.com>",
                 "thread_id": "t-coffee",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
         )
 
-        # Krisp call where Ali appears in _participant_keys — same exclusion.
+        # Krisp call where the owner appears in _participant_keys — same exclusion.
         _seed_doc(
             test_db,
             source_kind="krisp",
-            external_id="krisp-ali-person-luke",
+            external_id="krisp-owner-luke",
             title="1:1",
             metadata={
                 "_participant_keys": [
-                    "ali@example.com",
-                    "ali sarkis",
+                    "pat.owner@example.com",
+                    "pat owner",
                     "person-luke@example.com",
                     "person-person-luke",
                 ],
@@ -434,7 +473,7 @@ class TestOwnerExclusion:
             },
         )
 
-        owner_keys = frozenset({"ali@example.com", "ali sarkis"})
+        owner_keys = frozenset({"pat.owner@example.com", "pat owner"})
         records = aggregate_people(
             test_db, owner_keys=owner_keys, min_docs=1
         )
@@ -455,8 +494,8 @@ class TestOwnerExclusion:
         # zero rosters — nobody (not even owner-self) gets it.
         store = DirectoryStore(test_db)
         store.upsert_pair(
-            display_name="Ali Sarkis",
-            email="ali@example.com",
+            display_name="Pat Owner",
+            email="pat.owner@example.com",
             source="people_yml",
         )
         store.upsert_pair(
@@ -470,15 +509,15 @@ class TestOwnerExclusion:
             external_id="gmail-self",
             title="Note to self",
             metadata={
-                "from": "Ali <ali@example.com>",
-                "to": "ali@example.com",
+                "from": "Pat Owner <pat.owner@example.com>",
+                "to": "pat.owner@example.com",
                 "thread_id": "t-self",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
         )
         records = aggregate_people(
             test_db,
-            owner_keys=frozenset({"ali@example.com", "ali sarkis"}),
+            owner_keys=frozenset({"pat.owner@example.com", "pat owner"}),
             min_docs=1,
         )
         # person-person-luke is curated so he still emits, but with zero docs — the
@@ -487,6 +526,138 @@ class TestOwnerExclusion:
         assert names == ["person-person-luke"]
         luke = _record_by_name(records, "person-person-luke")
         assert luke.docs == []
+
+
+# --------------------------------------------------------------------------
+# Phase 1 — automated-sender + owner-variant filtering, via-decoration
+# --------------------------------------------------------------------------
+
+
+class TestAutomatedSenderFiltering:
+    """no-reply / notification / org senders never become a person, even with
+    many docs."""
+
+    def test_no_reply_sender_dropped(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        store = DirectoryStore(test_db)
+        store.upsert_pair(
+            display_name="Acme Notifications",
+            email="no-reply@acme.example.com",
+            source="gmail",
+        )
+        store.upsert_pair(
+            display_name="Jane Doe", email="jane@example.com", source="gmail"
+        )
+        # The automated sender appears on many docs; the real person on a few.
+        for i in range(5):
+            _seed_doc(
+                test_db,
+                source_kind="gmail",
+                external_id=f"noreply-{i}",
+                title=f"Statement {i}",
+                metadata={
+                    "from": "Acme Notifications <no-reply@acme.example.com>",
+                    "to": "Jane Doe <jane@example.com>",
+                    "thread_id": f"t-noreply-{i}",
+                    "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+                },
+            )
+        records = aggregate_people(
+            test_db, owner_keys=frozenset(), min_docs=1
+        )
+        names = [r.display_name for r in records]
+        assert "acme notifications" not in names
+        assert "jane doe" in names
+
+    def test_extra_denylist_entry_dropped(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        store = DirectoryStore(test_db)
+        store.upsert_pair(
+            display_name="Billing Team",
+            email="billing@acme.example.com",
+            source="gmail",
+        )
+        _seed_doc(
+            test_db,
+            source_kind="gmail",
+            external_id="billing-1",
+            title="Invoice",
+            metadata={
+                "from": "Billing Team <billing@acme.example.com>",
+                "to": "ali@example.com",
+                "thread_id": "t-billing",
+                "date": "Wed, 15 Apr 2026 12:00:00 -0700",
+            },
+        )
+        records = aggregate_people(
+            test_db,
+            owner_keys=frozenset(),
+            min_docs=1,
+            sender_denylist=frozenset({"billing@"}),
+        )
+        assert "billing team" not in [r.display_name for r in records]
+
+
+class TestOwnerVariantFiltering:
+    """The owner can't leak in under a first-name-only / local-part variant —
+    but a DISTINCT person who merely shares the owner's first name must survive
+    (no over-filtering). Owner names here are SYNTHETIC ("Pat Owner")."""
+
+    def test_owner_variant_dropped_distinct_person_kept(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        store = DirectoryStore(test_db)
+        # Both entries are curated (people_yml) so the doc-count threshold is
+        # never the reason either is dropped — only the owner filter can be.
+        # "Pat" is the owner's leaked first-name-only variant; "Pat Rivera" is
+        # a distinct person who happens to share the first name.
+        store.upsert_pair(
+            display_name="Pat", email="pat.leak@example.com", source="people_yml"
+        )
+        store.upsert_pair(
+            display_name="Pat Rivera",
+            email="pat.rivera@example.com",
+            source="people_yml",
+        )
+        records = aggregate_people(
+            test_db,
+            owner_keys=frozenset({"pat owner", "pat.owner@example.com"}),
+            min_docs=1,
+        )
+        names = [r.display_name for r in records]
+        # The bare owner first-name variant is filtered out…
+        assert "pat" not in names
+        # …but the distinct person who shares the first name is KEPT.
+        assert "pat rivera" in names
+
+
+class TestViaDecorationMerge:
+    """Mailing-list ``via X`` decoration is stripped at canonical-key time so
+    the person merges with their clean name."""
+
+    def test_via_name_merges_with_clean_name(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        store = DirectoryStore(test_db)
+        # Clean entry + a Google-Groups-rewritten "via" entry, same human.
+        store.upsert_pair(
+            display_name="Jane Doe", email="jane@example.com", source="people_yml"
+        )
+        # ``normalize_participant`` lowercases + collapses but keeps the "via"
+        # text; the Phase 1 normalizer strips it at canonical-key time.
+        store.upsert_pair(
+            display_name="Jane Doe via Acme Members",
+            email="jane.list@example.com",
+            source="gmail",
+        )
+        records = aggregate_people(
+            test_db, owner_keys=frozenset(), min_docs=0
+        )
+        jane_records = [r for r in records if r.display_name == "jane doe"]
+        assert len(jane_records) == 1
+        assert "jane.list@example.com" in jane_records[0].all_emails
 
 
 # --------------------------------------------------------------------------

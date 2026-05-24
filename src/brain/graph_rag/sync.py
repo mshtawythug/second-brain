@@ -73,6 +73,7 @@ def build_reconcile_config(cfg: Config) -> ReconcileConfig:
         max_entities_per_doc=cfg.graph_max_entities,
         generic_df_ratio=cfg.graph_generic_df_ratio,
         owner_keys=cfg.owner_participants,
+        sender_denylist=cfg.graph_sender_denylist,
         concepts_enabled=cfg.graph_concepts,
     )
 

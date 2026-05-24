@@ -43,6 +43,12 @@ from brain.vault.derived_links.participants import extract_gmail_addresses
 from brain.vault.frontmatter import dump_frontmatter
 from brain.vault.paths import safe_wikilink_alias, strip_md_extension
 from brain.vault.slug import slugify
+from brain.wiki._person_name import (
+    expand_owner_keys,
+    humanize_person_name,
+    is_automated_sender,
+    normalize_person_name,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,35 +115,56 @@ class _DirectoryIndex:
 
     Built once per :func:`aggregate_people` call (one SELECT) so per-doc
     resolution is dictionary lookups rather than repeated SQL.
+
+    Every view is keyed on the **canonical key** produced by
+    :func:`brain.wiki._person_name.normalize_person_name` — the lowercase,
+    separator-collapsed merge identity. Two directory rows whose raw
+    ``display_name`` differs only by separators / mailing-list decoration /
+    ``Last, First`` ordering (``Jane.Doe`` vs ``Jane Doe``) therefore collapse
+    to one canonical person here, merging their emails and curated flags.
+    Automated / org senders (no-reply, notifications, …) are dropped at build
+    time so they never become a person.
     """
 
-    # Set of every ``display_name`` ever recorded with at least one (name,
-    # email) pair. Empty-name rows (``display_name=''``) are excluded — those
-    # are bare-email Gmail headers with no resolvable identity.
-    known_names: set[str]
+    # Set of every canonical key with at least one surviving (name, email)
+    # pair. Empty-name rows (``display_name=''``) and automated senders are
+    # excluded.
+    known_keys: set[str]
 
-    # Per-name, the email with the highest sum-of-occurrences across all
-    # sources. ``people_yml`` rows win unconditionally (mirrors the precedence
-    # in :meth:`DirectoryStore.resolve_name_to_email`).
-    primary_email_by_name: dict[str, str]
+    # Per canonical key, the email with the highest sum-of-occurrences across
+    # all sources / merged raw names. ``people_yml`` rows win unconditionally
+    # (mirrors the precedence in :meth:`DirectoryStore.resolve_name_to_email`).
+    primary_email_by_key: dict[str, str]
 
-    # Per-name, the sorted distinct list of every email seen across sources.
-    emails_by_name: dict[str, list[str]]
+    # Per canonical key, the sorted distinct list of every email seen across
+    # sources / merged raw names.
+    emails_by_key: dict[str, list[str]]
 
-    # Reverse index: email → canonical display_name. Used to resolve email
-    # participant keys to a person. ``people_yml`` wins; otherwise the name
-    # with the highest summed occurrence_count for that email.
-    canonical_name_by_email: dict[str, str]
+    # Reverse index: email → canonical key. Used to resolve email participant
+    # keys to a person. ``people_yml`` wins; otherwise the canonical key with
+    # the highest summed occurrence_count for that email.
+    canonical_key_by_email: dict[str, str]
 
-    # Per-name: True iff at least one ``directory_entries`` row for this name
-    # has ``source='people_yml'``. Drives the curated badge on the page and
+    # Per canonical key: True iff at least one underlying ``directory_entries``
+    # row has ``source='people_yml'``. Drives the curated badge on the page and
     # the always-emit override below the doc-count threshold.
-    in_people_yml_by_name: dict[str, bool]
+    in_people_yml_by_key: dict[str, bool]
 
 
-def _build_directory_index(conn: psycopg.Connection[Any]) -> _DirectoryIndex:
-    """Pull ``directory_entries`` once and project the indexes the resolver
-    needs. See :class:`_DirectoryIndex` for what each index represents.
+def _build_directory_index(
+    conn: psycopg.Connection[Any],
+    *,
+    sender_denylist: frozenset[str] = frozenset(),
+) -> _DirectoryIndex:
+    """Pull ``directory_entries`` once and project the canonical-key indexes the
+    resolver needs. See :class:`_DirectoryIndex` for what each index represents.
+
+    Each raw ``display_name`` is run through
+    :func:`brain.wiki._person_name.normalize_person_name` to derive its
+    canonical key, and each ``(display_name, email)`` row is dropped when
+    :func:`brain.wiki._person_name.is_automated_sender` flags it as a non-human
+    / org sender. ``sender_denylist`` (``BRAIN_GRAPH_SENDER_DENYLIST``) adds
+    corpus-specific entries to the always-on generic heuristic.
     """
     rows = conn.execute(
         "SELECT display_name, email, source, occurrence_count "
@@ -145,59 +172,67 @@ def _build_directory_index(conn: psycopg.Connection[Any]) -> _DirectoryIndex:
         "WHERE display_name <> ''"
     ).fetchall()
 
-    # (name, email) → summed count across sources, plus a flag tracking whether
-    # any source is people_yml.
+    # (canonical_key, email) → summed count across sources / merged raw names,
+    # plus a flag tracking whether any underlying row is people_yml.
     counts: dict[tuple[str, str], int] = {}
     is_people_yml: dict[tuple[str, str], bool] = {}
 
     for name, email, source, count in rows:
-        key = (name, email)
+        # Drop automated / non-human senders (no-reply, notifications, mailer,
+        # …) before they can ever become a person. Matches the email's local
+        # part only — the directory ``display_name`` is normalized separately.
+        if is_automated_sender(str(email), denylist=sender_denylist):
+            continue
+        normalized = normalize_person_name(str(name))
+        if normalized is None:
+            continue
+        key = (normalized.canonical_key, str(email))
         counts[key] = counts.get(key, 0) + int(count)
         if source == "people_yml":
             is_people_yml[key] = True
 
-    known_names: set[str] = set()
-    name_emails: dict[str, list[tuple[str, int, bool]]] = {}
-    email_names: dict[str, list[tuple[str, int, bool]]] = {}
+    known_keys: set[str] = set()
+    key_emails: dict[str, list[tuple[str, int, bool]]] = {}
+    email_keys: dict[str, list[tuple[str, int, bool]]] = {}
 
-    for (name, email), total in counts.items():
-        people_yml = is_people_yml.get((name, email), False)
-        known_names.add(name)
-        name_emails.setdefault(name, []).append((email, total, people_yml))
-        email_names.setdefault(email, []).append((name, total, people_yml))
+    for (canonical_key, email), total in counts.items():
+        people_yml = is_people_yml.get((canonical_key, email), False)
+        known_keys.add(canonical_key)
+        key_emails.setdefault(canonical_key, []).append((email, total, people_yml))
+        email_keys.setdefault(email, []).append((canonical_key, total, people_yml))
 
-    primary_email_by_name: dict[str, str] = {}
-    emails_by_name: dict[str, list[str]] = {}
-    in_people_yml_by_name: dict[str, bool] = {}
+    primary_email_by_key: dict[str, str] = {}
+    emails_by_key: dict[str, list[str]] = {}
+    in_people_yml_by_key: dict[str, bool] = {}
 
-    # Both per-name primary-email picks and per-email canonical-name picks
-    # share the same precedence rules as ``DirectoryStore.resolve_name_to_email``
+    # Both per-key primary-email picks and per-email canonical-key picks share
+    # the same precedence rules as ``DirectoryStore.resolve_name_to_email``
     # (people_yml wins → highest summed count → alpha tiebreak); reuse that
     # module's helper so the rules cannot drift. ``skip_ambiguous=False``
     # because every person needs *some* primary email and every email needs
-    # *some* canonical name — alpha tiebreak is the deterministic fallback.
-    for name, items in name_emails.items():
-        emails_by_name[name] = sorted({email for email, _, _ in items})
-        in_people_yml_by_name[name] = any(p for _, _, p in items)
+    # *some* canonical key — alpha tiebreak is the deterministic fallback.
+    for canonical_key, items in key_emails.items():
+        emails_by_key[canonical_key] = sorted({email for email, _, _ in items})
+        in_people_yml_by_key[canonical_key] = any(p for _, _, p in items)
         winner = _score_directory_rows(items, skip_ambiguous=False)
         # ``items`` is non-empty by construction (the outer loop only adds a
-        # name when at least one (name, email) row exists); ``_score_directory_rows``
+        # key when at least one (key, email) row exists); ``_score_directory_rows``
         # therefore returns a non-None winner. ``assert`` keeps mypy honest.
         assert winner is not None
-        primary_email_by_name[name] = winner
+        primary_email_by_key[canonical_key] = winner
 
-    canonical_name_by_email: dict[str, str] = {}
-    for email, candidates in email_names.items():
+    canonical_key_by_email: dict[str, str] = {}
+    for email, candidates in email_keys.items():
         winner = _score_directory_rows(candidates, skip_ambiguous=False)
         assert winner is not None
-        canonical_name_by_email[email] = winner
+        canonical_key_by_email[email] = winner
 
     return _DirectoryIndex(
-        known_names=known_names,
-        primary_email_by_name=primary_email_by_name,
-        emails_by_name=emails_by_name,
-        canonical_name_by_email=canonical_name_by_email,
-        in_people_yml_by_name=in_people_yml_by_name,
+        known_keys=known_keys,
+        primary_email_by_key=primary_email_by_key,
+        emails_by_key=emails_by_key,
+        canonical_key_by_email=canonical_key_by_email,
+        in_people_yml_by_key=in_people_yml_by_key,
     )
 
 
@@ -236,19 +271,25 @@ def _resolve_key_to_person(
     *,
     directory: _DirectoryIndex,
 ) -> str | None:
-    """Map a participant key to a canonical display_name, or None.
+    """Map a participant key to a canonical key, or None.
 
-    ``key`` is either an email (``fixture@example.com``) or a normalized display
-    name. Emails resolve via ``canonical_name_by_email``; names resolve to
-    themselves only if they appear in ``known_names`` (so a Krisp speaker
-    label like ``"random one-off name"`` that has no directory entry is
-    silently dropped — exactly the long-tail noise we want to filter).
+    ``key`` is either an email (``fixture@example.com``) or a raw display name.
+    Emails resolve via ``canonical_key_by_email``; an email with no directory
+    match returns ``None`` (long-tail one-off senders are dropped, not
+    surfaced). Names are normalized via
+    :func:`brain.wiki._person_name.normalize_person_name` and resolve only when
+    their canonical key appears in ``known_keys`` — so a handle-style key like
+    ``Jane.Doe`` matches the directory's ``jane doe`` entry, while a one-off
+    Krisp speaker label with no directory entry is silently dropped.
     """
-    lower = key.lower()
-    if "@" in lower:
-        return directory.canonical_name_by_email.get(lower)
-    if lower in directory.known_names:
-        return lower
+    stripped = key.strip()
+    if "@" in stripped:
+        return directory.canonical_key_by_email.get(stripped.lower())
+    normalized = normalize_person_name(stripped)
+    if normalized is None:
+        return None
+    if normalized.canonical_key in directory.known_keys:
+        return normalized.canonical_key
     return None
 
 
@@ -350,27 +391,33 @@ def aggregate_people(
     *,
     owner_keys: frozenset[str],
     min_docs: int,
+    sender_denylist: frozenset[str] = frozenset(),
 ) -> list[PersonRecord]:
     """Aggregate per-person doc rosters from ``directory_entries`` + ``documents``.
 
-    The returned list is sorted alphabetically by ``display_name`` and ready
-    for page emission (slugs assigned, collisions resolved).
+    The returned list is sorted alphabetically by ``display_name`` (the
+    lowercase canonical key) and ready for page emission (slugs assigned,
+    collisions resolved).
 
     Arguments:
         conn: Live Postgres connection. Read-only — no writes performed.
-        owner_keys: Lowercased identifiers (emails AND/OR display names) that
-            count as the corpus owner. Stripped from every doc's participant
-            key set so the owner doesn't appear in *every* doc list. Persons
-            whose canonical identity (display_name OR primary_email OR every
-            email in ``all_emails``) sits entirely inside ``owner_keys`` are
-            dropped from the result — same semantics as the derived-link
-            owner filter in
+        owner_keys: Identifiers (emails AND/OR display names) that count as the
+            corpus owner. Expanded via
+            :func:`brain.wiki._person_name.expand_owner_keys` to also cover
+            first-name-only and email-local-part variants, then stripped from
+            every doc's participant key set so the owner doesn't appear in
+            *every* doc list. Persons whose canonical identity (canonical key
+            OR primary_email) sits inside the expanded set are dropped from the
+            result — same semantics as the derived-link owner filter in
             :func:`brain.vault.derived_links.pass_runner._build_snapshot`.
         min_docs: Threshold for non-curated emission. Persons with strictly
             fewer than ``min_docs`` docs and no ``_people.yml`` entry are
             dropped. Curated persons (``in_people_yml=True``) always emit
             regardless. Required positional — the default lives one layer up
             in :class:`brain.config.Config` (Phase C).
+        sender_denylist: Extra ``BRAIN_GRAPH_SENDER_DENYLIST`` substrings /
+            addresses forwarded to the automated-sender filter on top of the
+            always-on generic heuristic. Default empty.
 
     Raises:
         ValueError: ``min_docs`` is negative.
@@ -378,13 +425,12 @@ def aggregate_people(
     if min_docs < 0:
         raise ValueError(f"min_docs must be >= 0 (got {min_docs!r})")
 
-    # Self-protect against future mixed-case callers — every comparison
-    # against ``owner_keys`` already does ``.lower()`` on the haystack, so
-    # normalizing the needle once keeps that contract explicit even when a
-    # caller passes ``BRAIN_OWNER_PARTICIPANTS=Ali@Example.COM``.
-    owner_keys = frozenset(k.lower() for k in owner_keys)
+    # Expand the owner set with first-name-only / email-local-part variants so
+    # the owner can never leak in as a person under a partial form. The result
+    # is already lowercased, so downstream comparisons normalize the needle.
+    owner_keys = expand_owner_keys(owner_keys)
 
-    directory = _build_directory_index(conn)
+    directory = _build_directory_index(conn, sender_denylist=sender_denylist)
 
     # Pull every gmail/krisp document. Drafts (``draft=TRUE``) are excluded
     # — they're already filtered from the rendered wiki, so a People Hub page
@@ -399,7 +445,7 @@ def aggregate_people(
         """
     ).fetchall()
 
-    # person_name → list of DocRefs (deduped within a doc — multiple keys for
+    # canonical_key → list of DocRefs (deduped within a doc — multiple keys for
     # the same doc resolving to one person count once).
     person_docs: dict[str, list[DocRef]] = {}
 
@@ -407,13 +453,16 @@ def aggregate_people(
         meta: dict[str, Any] = dict(metadata) if metadata else {}
         keys = _doc_participant_keys(source_kind=source_kind, metadata=meta)
         # Strip owner keys before resolution so the owner contributes nothing
-        # to anyone's roster — including their own (no /people/ali-sarkis).
-        keys = {k for k in keys if k.lower() not in owner_keys}
+        # to anyone's roster — including their own (no /people/pat-owner).
+        keys = {k for k in keys if k.strip().lower() not in owner_keys}
 
         persons_for_doc: set[str] = set()
         for key in keys:
             person = _resolve_key_to_person(key, directory=directory)
-            if person is not None:
+            # Belt-and-suspenders: a key that survived the raw strip but
+            # resolves to an owner canonical (e.g. a first-name-only leak) is
+            # dropped here too.
+            if person is not None and person not in owner_keys:
                 persons_for_doc.add(person)
 
         if not persons_for_doc:
@@ -430,15 +479,15 @@ def aggregate_people(
         for person in persons_for_doc:
             person_docs.setdefault(person, []).append(ref)
 
-    # Build records for every name in directory_entries (so curated 0-doc
-    # entries still emit). Skip owner-identified names entirely — strict
+    # Build records for every canonical key in directory_entries (so curated
+    # 0-doc entries still emit). Skip owner-identified keys entirely — strict
     # interpretation per Phase A.2: a person whose primary identifier is an
     # owner key never gets a page.
     records: list[PersonRecord] = []
-    for name in directory.known_names:
-        if name.lower() in owner_keys:
+    for canonical_key in directory.known_keys:
+        if canonical_key in owner_keys:
             continue
-        primary = directory.primary_email_by_name[name]
+        primary = directory.primary_email_by_key[canonical_key]
         if primary.lower() in owner_keys:
             # ``primary_email`` is always a member of ``all_emails`` (it's
             # picked from that set), so this single check is equivalent to
@@ -446,15 +495,15 @@ def aggregate_people(
             # listed an alias as an owner. No need for a second pass over
             # ``all_emails``.
             continue
-        all_emails = directory.emails_by_name[name]
-        in_yml = directory.in_people_yml_by_name.get(name, False)
-        docs = _sort_docs(person_docs.get(name, []))
+        all_emails = directory.emails_by_key[canonical_key]
+        in_yml = directory.in_people_yml_by_key.get(canonical_key, False)
+        docs = _sort_docs(person_docs.get(canonical_key, []))
         if not in_yml and len(docs) < min_docs:
             continue
         records.append(
             PersonRecord(
                 slug="",  # filled in by _assign_slugs
-                display_name=name,
+                display_name=canonical_key,
                 primary_email=primary,
                 all_emails=all_emails,
                 docs=docs,
@@ -509,8 +558,12 @@ def humanize_display_name(display_name: str) -> str:
     title-cased form in its terminal output without re-implementing
     the rule. Keep the internal alias below for backwards compat
     inside this module — every call site already routes through it.
+
+    Delegates to :func:`brain.wiki._person_name.humanize_person_name` so the
+    People Hub, the graph reconcile resolver, and the CLI share one
+    presentation transform.
     """
-    return display_name.title()
+    return humanize_person_name(display_name)
 
 
 # Internal alias — every existing call site reads from this name. Public
@@ -781,6 +834,7 @@ def emit_people_pages(
     vault_path: Path,
     owner_keys: frozenset[str],
     min_docs: int,
+    sender_denylist: frozenset[str] = frozenset(),
 ) -> EmitReport:
     """Aggregate, render, and write every ``<vault>/people/<slug>.md`` + index.
 
@@ -808,6 +862,9 @@ def emit_people_pages(
             managed; nothing outside it is touched.
         owner_keys: forwarded to :func:`aggregate_people` as-is.
         min_docs: forwarded to :func:`aggregate_people` as-is.
+        sender_denylist: forwarded to :func:`aggregate_people` as-is
+            (``BRAIN_GRAPH_SENDER_DENYLIST`` extras for the automated-sender
+            filter). Default empty.
 
     Returns:
         :class:`EmitReport` with counters for the CLI summary line.
@@ -821,7 +878,10 @@ def emit_people_pages(
     deleting pages against a partial target would lose data).
     """
     records = aggregate_people(
-        conn, owner_keys=owner_keys, min_docs=min_docs
+        conn,
+        owner_keys=owner_keys,
+        min_docs=min_docs,
+        sender_denylist=sender_denylist,
     )
 
     people_dir = _people_dir(vault_path)

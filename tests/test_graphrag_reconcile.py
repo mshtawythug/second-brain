@@ -414,7 +414,11 @@ def test_display_name_change_reindexes(test_db: psycopg.Connection[Any]) -> None
     state = {"name": "Alice"}
 
     def resolver(
-        conn: Any, document_id: str, *, owner_keys: frozenset[str]
+        conn: Any,
+        document_id: str,
+        *,
+        owner_keys: frozenset[str],
+        sender_denylist: frozenset[str] = frozenset(),
     ) -> list[ResolvedPerson]:
         return [ResolvedPerson("alice", state["name"])]
 
@@ -887,6 +891,88 @@ def test_default_person_resolver_filters_owner_and_unknown(
     assert persons[0].display_name == "Bob"
 
 
+def test_default_person_resolver_drops_automated_sender(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A no-reply sender never becomes a graph person (Phase 1 A.1)."""
+    _seed_directory(
+        test_db,
+        [("acme notifications", "no-reply@acme.example.com"), ("bob", "bob@x.com")],
+    )
+    doc = _seed_gmail_doc(
+        test_db,
+        external_id="m1",
+        participants=[
+            ("acme notifications", "no-reply@acme.example.com"),
+            ("bob", "bob@x.com"),
+        ],
+    )
+    persons = default_person_resolver(test_db, doc)
+    assert [p.canonical_key for p in persons] == ["bob"]
+
+
+def test_default_person_resolver_drops_owner_variant_keeps_distinct_person(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Owner first-name leak filtered, but a distinct same-first-name person is
+    KEPT (Phase 1 A.2; no over-filtering). Owner name is SYNTHETIC."""
+    # "pat" is the owner's leaked first-name variant; "pat rivera" is a distinct
+    # person sharing the first name.
+    _seed_directory(
+        test_db,
+        [("pat", "pat.leak@x.com"), ("pat rivera", "pat.rivera@x.com")],
+    )
+    doc = _seed_gmail_doc(
+        test_db,
+        external_id="m1",
+        participants=[("pat", "pat.leak@x.com"), ("pat rivera", "pat.rivera@x.com")],
+    )
+    persons = default_person_resolver(
+        test_db, doc, owner_keys=frozenset({"pat owner", "pat.owner@x.com"})
+    )
+    # The leaked first-name variant is dropped; the distinct person survives.
+    assert [p.canonical_key for p in persons] == ["pat rivera"]
+
+
+def test_default_person_resolver_merges_separator_variants(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Handle-style and spaced directory names collapse to one canonical key."""
+    _seed_directory(
+        test_db, [("jane.doe", "jane@x.com"), ("jane doe", "jane.alt@x.com")]
+    )
+    doc = _seed_gmail_doc(
+        test_db,
+        external_id="m1",
+        participants=[("jane.doe", "jane@x.com"), ("jane doe", "jane.alt@x.com")],
+    )
+    persons = default_person_resolver(test_db, doc)
+    assert [p.canonical_key for p in persons] == ["jane doe"]
+    assert persons[0].display_name == "Jane Doe"
+
+
+def test_default_person_resolver_honors_sender_denylist(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """``sender_denylist`` extends the automated-sender filter (Phase 1 knob)."""
+    _seed_directory(
+        test_db,
+        [("billing team", "billing@acme.example.com"), ("bob", "bob@x.com")],
+    )
+    doc = _seed_gmail_doc(
+        test_db,
+        external_id="m1",
+        participants=[
+            ("billing team", "billing@acme.example.com"),
+            ("bob", "bob@x.com"),
+        ],
+    )
+    persons = default_person_resolver(
+        test_db, doc, sender_denylist=frozenset({"billing@"})
+    )
+    assert [p.canonical_key for p in persons] == ["bob"]
+
+
 def test_default_person_resolver_missing_doc_returns_empty(
     test_db: psycopg.Connection[Any],
 ) -> None:
@@ -970,7 +1056,11 @@ class FakeBackend:
 
 def _static_resolver(persons: list[ResolvedPerson]) -> Any:
     def _resolve(
-        conn: Any, document_id: str, *, owner_keys: frozenset[str]
+        conn: Any,
+        document_id: str,
+        *,
+        owner_keys: frozenset[str],
+        sender_denylist: frozenset[str] = frozenset(),
     ) -> list[ResolvedPerson]:
         return persons
 

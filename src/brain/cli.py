@@ -5126,6 +5126,7 @@ def vault_relink_derived() -> None:
             vault_path=cfg.vault_path,
             owner_keys=cfg.owner_participants,
             min_docs=cfg.people_hub_min_docs,
+            sender_denylist=cfg.graph_sender_denylist,
         )
         typer.echo(f"  - Pages written: {people_report.pages_written}")
         typer.echo(f"  - Pages deleted: {people_report.pages_deleted}")
@@ -6554,6 +6555,7 @@ def people_cmd(
             conn,
             owner_keys=cfg.owner_participants,
             min_docs=cfg.people_hub_min_docs,
+            sender_denylist=cfg.graph_sender_denylist,
         )
 
     if name is None:
@@ -6768,7 +6770,7 @@ def owner_show() -> None:
 def owner_set(
     csv: str = typer.Argument(
         ...,
-        help='Comma-separated identifiers, e.g. "Ali Sarkis,fixture@example.com"',
+        help='Comma-separated identifiers, e.g. "Pat Owner,fixture@example.com"',
     ),
 ) -> None:
     """Replace the entire ``BRAIN_OWNER_PARTICIPANTS`` list in ``.env``.

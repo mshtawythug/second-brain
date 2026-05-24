@@ -125,6 +125,7 @@ from .cooccur import (
     to_contributions,
 )
 from .extract import EntityExtractor
+from .person_resolver import ResolvedPerson, default_person_resolver
 from .relational import (
     delete_doc_relational,
     fetch_doc_content,
@@ -166,26 +167,20 @@ PEOPLE_ASPECT = "people"
 # document's people aspect to re-reconcile (e.g. if the participant-derivation
 # logic changes). There is no LLM extractor for the people aspect (people are
 # derived from participants), so this is the derivation-logic version.
-PEOPLE_ASPECT_VERSION = "people-v1"
+#
+# people-v2 (2026-05-23, Phase 1 data-quality remediation): the shared
+# person-name normalizer (:mod:`brain.wiki._person_name`) now drives canonical
+# keys — mailing-list "via X" decoration stripped, ``Last, First`` flipped,
+# separators collapsed (so ``Jane.Doe`` / ``Jane Doe`` merge), email-as-name
+# humanized from the local part, automated / org senders dropped, and owner
+# first-name / local-part variants excluded. A re-`build --backfill` re-extracts
+# every document's people aspect cleanly under the new keys.
+PEOPLE_ASPECT_VERSION = "people-v2"
 
 # ``graph_entity_mentions.source`` provenance for person mentions (spec §5a:
 # ``'people'`` for the people pipeline vs ``'extractor:<model>@<ver>'`` for the
 # concept extractor).
 PEOPLE_MENTION_SOURCE = "people"
-
-
-@dataclass(frozen=True)
-class ResolvedPerson:
-    """One person resolved for a document — the input to entity upsert.
-
-    ``canonical_key`` is the normalized lowercase display name (the People-Hub
-    canonical identity, unique per ``(tenant_id, entity_type, canonical_key)``);
-    ``display_name`` is its humanized presentation form (stored as
-    ``graph_entities.name``).
-    """
-
-    canonical_key: str
-    display_name: str
 
 
 @dataclass(frozen=True)
@@ -207,6 +202,12 @@ class ReconcileConfig:
     max_entities_per_doc: int | None = DEFAULT_MAX_ENTITIES_PER_DOC
     generic_df_ratio: float = DEFAULT_GENERIC_DF
     owner_keys: frozenset[str] = frozenset()
+    # Extra automated-sender denylist entries (``BRAIN_GRAPH_SENDER_DENYLIST``)
+    # threaded to the person resolver's :func:`brain.wiki._person_name
+    # .is_automated_sender` filter, on top of the always-on generic heuristic
+    # (no-reply / notifications / mailer / …). Consumed only by the resolver
+    # (``reconcile_document``); ``remove_document`` ignores it.
+    sender_denylist: frozenset[str] = frozenset()
     # Wave G2-c: gate the concept aspect (``BRAIN_GRAPH_CONCEPTS``). When True AND
     # an :class:`~brain.graph_rag.extract.EntityExtractor` is injected,
     # :func:`reconcile_document` also extracts + indexes the document's concept
@@ -257,71 +258,18 @@ class PersonResolver(Protocol):
         document_id: str,
         *,
         owner_keys: frozenset[str],
+        sender_denylist: frozenset[str] = frozenset(),
     ) -> list[ResolvedPerson]:
         ...
 
 
-def default_person_resolver(
-    conn: psycopg.Connection[Any],
-    document_id: str,
-    *,
-    owner_keys: frozenset[str] = frozenset(),
-) -> list[ResolvedPerson]:
-    """Derive a document's person set from the existing People-Hub pipeline.
-
-    Reuses :mod:`brain.wiki.build_people`'s directory index + per-doc participant
-    extraction + key resolution so the graph's person roster for a document is
-    identical to its People-Hub roster (spec §3 reuse map). Owner keys are
-    stripped both before resolution (raw participant key) and after (resolved
-    canonical name), matching ``aggregate_people``'s owner filter. Returns the
-    deduplicated persons sorted by ``canonical_key`` for determinism.
-
-    Returns an empty list when the document does not exist or has no resolvable
-    participants (e.g. a manual note, or a Gmail header with no directory match).
-    """
-    # Late import keeps :mod:`brain.graph_rag` import-cheap and avoids a cycle
-    # with the wiki package, mirroring ``queries.resolve_person_to_keys``.
-    from ..wiki.build_people import (
-        _build_directory_index,
-        _doc_participant_keys,
-        _resolve_key_to_person,
-        humanize_display_name,
-    )
-
-    row = conn.execute(
-        "SELECT s.kind, d.metadata FROM documents d "
-        "JOIN sources s ON s.id = d.source_id WHERE d.id = %s",
-        (document_id,),
-    ).fetchone()
-    if row is None:
-        return []
-    source_kind, raw_metadata = row
-    metadata: dict[str, Any] = dict(raw_metadata) if raw_metadata else {}
-
-    normalized_owner = frozenset(key.lower() for key in owner_keys)
-    directory = _build_directory_index(conn)
-    raw_keys = _doc_participant_keys(source_kind=source_kind, metadata=metadata)
-
-    resolved: dict[str, str] = {}
-    for key in raw_keys:
-        if key.lower() in normalized_owner:
-            continue
-        canonical = _resolve_key_to_person(key, directory=directory)
-        if canonical is None or canonical.lower() in normalized_owner:
-            continue
-        # Record-level owner filter (mirrors ``aggregate_people``): drop a person
-        # whose primary email is an owner key even when only the email — not the
-        # display name — was listed, since the display-name participant key would
-        # otherwise resolve the owner back in.
-        primary_email = directory.primary_email_by_name.get(canonical)
-        if primary_email is not None and primary_email.lower() in normalized_owner:
-            continue
-        resolved[canonical] = humanize_display_name(canonical)
-
-    return [
-        ResolvedPerson(canonical_key=key, display_name=name)
-        for key, name in sorted(resolved.items())
-    ]
+# The default :class:`PersonResolver` implementation
+# (:func:`default_person_resolver`) and its :class:`ResolvedPerson` value object
+# live in :mod:`brain.graph_rag.person_resolver` (extracted to keep this module
+# under the 800-line cap). They are imported above and re-exported via
+# ``__all__`` so existing
+# ``from brain.graph_rag.reconcile import ResolvedPerson, default_person_resolver``
+# imports keep working.
 
 
 # --------------------------------------------------------------------------- #
@@ -412,7 +360,12 @@ def reconcile_document(
         sver = suppress_ver(cfg.generic_df_ratio)
 
         # --- People aspect: resolve + watermark (always active). ---
-        persons = person_resolver(conn, document_id, owner_keys=cfg.owner_keys)
+        persons = person_resolver(
+            conn,
+            document_id,
+            owner_keys=cfg.owner_keys,
+            sender_denylist=cfg.sender_denylist,
+        )
         person_inputs_hash = _inputs_hash(
             persons, cfg.cooccur_window, cfg.max_entities_per_doc
         )

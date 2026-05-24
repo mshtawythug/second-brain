@@ -296,6 +296,16 @@ class Config:
     graph_community_jaccard: float = DEFAULT_GRAPH_COMMUNITY_JACCARD
     graph_community_limit: int = DEFAULT_GRAPH_COMMUNITY_LIMIT
     graph_community_max: int | None = DEFAULT_GRAPH_COMMUNITY_MAX
+    # Phase 1 data-quality remediation (2026-05-23). Extra automated-sender
+    # denylist entries (substrings or full addresses) layered on top of the
+    # always-on generic heuristic (no-reply / notifications / mailer / …) used by
+    # :func:`brain.wiki._person_name.is_automated_sender`. Loaded from
+    # ``BRAIN_GRAPH_SENDER_DENYLIST`` (comma-separated); entries are trimmed,
+    # lowercased, and de-duplicated at load time. Empty frozenset (default) means
+    # only the generic heuristic runs. Threaded into both the People Hub
+    # (``emit_people_pages``) and the graph reconcile (``ReconcileConfig``) so a
+    # no-reply / org sender becomes a person in neither.
+    graph_sender_denylist: frozenset[str] = frozenset()
 
     @classmethod
     def load(cls) -> "Config":
@@ -845,6 +855,18 @@ class Config:
                     f"or 'none' (got {gc_max_raw!r})"
                 )
 
+        # Phase 1 -- extra automated-sender denylist entries. Same comma-split /
+        # trim / lowercase / dedupe shape as ``BRAIN_OWNER_PARTICIPANTS``;
+        # unset/blank yields an empty frozenset (generic heuristic only).
+        sender_denylist_raw = os.environ.get("BRAIN_GRAPH_SENDER_DENYLIST", "")
+        graph_sender_denylist = frozenset(
+            piece
+            for piece in (
+                entry.strip().lower() for entry in sender_denylist_raw.split(",")
+            )
+            if piece
+        )
+
         return {
             # brain_home resolves via default_factory=_brain_home_root.
             "database_url": database_url,
@@ -881,4 +903,5 @@ class Config:
             "graph_community_jaccard": graph_community_jaccard,
             "graph_community_limit": graph_community_limit,
             "graph_community_max": graph_community_max,
+            "graph_sender_denylist": graph_sender_denylist,
         }
