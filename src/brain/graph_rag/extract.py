@@ -22,6 +22,20 @@ extraction *logic*:
   concept types (:data:`CONCEPT_ENTITY_TYPES`). People and unknown types are
   dropped (spec §17b decision 2: "people excluded"). Malformed entries are
   skipped, never fatal.
+* **Presence-validated (v3)** — a small model on an entity-*sparse* document
+  tends to copy the prompt's illustrative names or emit its own reasoning text
+  as "entities". So every candidate whose name does not actually appear in the
+  source document (separator-normalized substring match) is dropped, regardless
+  of prompt. This is the robust kill for few-shot prompt-example leakage; a
+  reasoning-text reject (sentence-length / meta-commentary patterns) and a
+  generic structural-noise filter (``PDF`` / ``Chapter 24`` / ``Section 3`` /
+  page + format words) back it up.
+* **One type per name (v3)** — when the model emits the *same* canonical name
+  under multiple types (a standards body as both ``org`` and ``topic``; a
+  numbered standard duplicated across ``topic`` / ``org`` / ``tool``), the
+  duplicates are collapsed to a single node keeping the highest-precedence type
+  (:data:`_TYPE_PRECEDENCE`: person > org > project > tool > topic), so the
+  graph (and the communities derived from it) is not fragmented.
 * **Canonicalized** — ``canonical_key`` is ``name`` lower-cased with collapsed
   internal whitespace, matching the people aspect's "normalized lowercase"
   identity (:mod:`brain.graph_rag.reconcile`). Entities dedup on
@@ -79,7 +93,7 @@ __all__ = [
 # which feeds ``graph_index_state.extractor_ver`` (spec §7). Bump when the
 # prompt / validation / canonicalization semantics change so reconcile
 # re-extracts affected documents.
-EXTRACTOR_VERSION = "concepts-v2"
+EXTRACTOR_VERSION = "concepts-v3"
 
 # The concept entity types the extractor emits (spec §5 ``entity_type CHECK``
 # minus ``person``). People are derived from the participants pipeline and are
@@ -164,6 +178,108 @@ _GENERIC_STOP_KEYS: frozenset[str] = frozenset({
     "dashboard",
     "dashboards",
 })
+
+# Document-structure / file-format noise that is never a standalone concept
+# (audit B.5: ``PDF`` / ``Chapter 24`` / ``<Body> Standard`` extracted as
+# topics). EXACT canonical-key match, extends :data:`_GENERIC_STOP_KEYS`, and
+# kept deliberately GENERIC — only format + document-structure words, never a
+# real product / standards-body / domain name (a corpus-derived blocklist would
+# overfit precision and risk dropping legitimate concepts). "standard" /
+# "standards" sit here because the audit observed a numbered-standards family
+# fragmenting the graph; a real domain concept is virtually never the bare word.
+_STRUCTURAL_STOP_KEYS: frozenset[str] = frozenset({
+    "pdf",
+    "docx",
+    "doc",
+    "html",
+    "csv",
+    "json",
+    "xml",
+    "page",
+    "pages",
+    "chapter",
+    "chapters",
+    "section",
+    "sections",
+    "appendix",
+    "appendices",
+    "figure",
+    "figures",
+    "table",
+    "tables",
+    "exhibit",
+    "exhibits",
+    "paragraph",
+    "paragraphs",
+    "footnote",
+    "footnotes",
+    "heading",
+    "headings",
+    "introduction",
+    "conclusion",
+    "abstract",
+    "preface",
+    "glossary",
+    "index",
+    "contents",
+    "attachment",
+    "attachments",
+    "screenshot",
+    "screenshots",
+    "standard",
+    "standards",
+})
+
+# A structural reference of the form "<structural noun> <enumerator>" — e.g.
+# "chapter 24", "section 3", "page 12", "figure 2", "appendix a", "standard 72".
+# Matches a document-structure noun followed by a number / roman numeral / single
+# letter; generic by construction, never a real entity name. Applied to the
+# already-lower-cased canonical key.
+_STRUCTURAL_ENUM_RE = re.compile(
+    r"^(?:chapter|section|page|figure|fig|table|appendix|exhibit|paragraph|"
+    r"para|footnote|clause|article|item|part|volume|vol|step|standard|"
+    r"version|ver|revision|rev)\s+(?:\d+|[ivxlcdm]+|[a-z])$"
+)
+
+# Maximum word count for an entity NAME. Concept names are short (the gate's
+# longest gold entity is two words); a longer "name" is almost always the
+# model's reasoning text / a sentence rather than an entity (audit B.2). A
+# generous cap of 6 protects recall on legitimate multi-word concepts.
+_MAX_ENTITY_WORDS = 6
+
+# Meta-commentary / reasoning-text markers a small model emits AS an entity name
+# on entity-sparse documents (audit B.2: e.g. "<X> is not present in the text.
+# However, …"). Matched against the candidate name; a hit means it is the
+# model's prose, not a concept, so it is dropped. Generic phrasing only.
+_REASONING_PATTERNS = re.compile(
+    r"(?i)("
+    r"\bis not present\b|\bare not present\b|\bnot present in\b|"
+    r"\bdoes not appear\b|\bdo not appear\b|\bnot mentioned\b|"
+    r"\bno (?:clear |concept )*entit(?:y|ies)\b|"
+    r"\bthere (?:is|are) no\b|"
+    r"\bcannot (?:find|identify|extract)\b|\bunable to\b|"
+    r"\bthe (?:text|document|passage) (?:does|contains|has|mentions|states|"
+    r"describes|discusses)\b|"
+    r"\bn/a\b|\bnone\b|\bhowever\b"
+    r")"
+)
+
+# Type precedence for cross-type collapse (audit B.3/B.4): when the SAME
+# canonical name is emitted under multiple types, keep ONE node with the
+# highest-precedence type and drop the rest. ``person`` ranks first for
+# completeness (a name confusable with a person should win person), though
+# people never reach :func:`_finalize` — they are dropped in
+# :func:`_validate_entry`. Among concept types: a hosted provider is an ``org``
+# before a ``topic``; a named effort is a ``project`` before a ``tool``.
+_TYPE_PRECEDENCE: tuple[str, ...] = ("person", "org", "project", "tool", "topic")
+_TYPE_RANK: dict[str, int] = {t: rank for rank, t in enumerate(_TYPE_PRECEDENCE)}
+
+# Separator-normalization for the presence check: lower-case and collapse every
+# run of non-alphanumeric characters (whitespace, hyphens, dots, underscores) to
+# a single space. So "back-pressure" / "back_pressure" / "Back Pressure" all
+# normalize to "back pressure" and a hyphenated concept present in the text is
+# not spuriously dropped.
+_SEPARATOR_RE = re.compile(r"[\W_]+", re.UNICODE)
 
 # Per-chunk token budget for the LLM extraction calls. A document longer than
 # this is split into multiple chunks (one model call each). Independent of the
@@ -334,19 +450,25 @@ class OllamaExtractor:
         if not candidates:
             return []
         doc_words = _tokenize_words(text)
+        normalized_text = _normalize_for_presence(text)
         # Dedup on (entity_type, canonical_key); keep the first-seen surface form
         # as the display name. Iteration order over the candidate list is
         # deterministic (chunk order, then in-chunk order), so the kept surface
-        # form is stable. Before canonicalizing: restore a stripped "Project"
+        # form is stable. Per candidate, in order: restore a stripped "Project"
         # prefix when the document names the project that way (fixes an exact-key
-        # miss). After canonicalizing: drop too-short or generic-noun keys
-        # (precision). Both stay recall-safe — the repair recovers a match, and
-        # the noise filter is narrow + generic.
+        # miss); drop the model's reasoning text / meta-commentary (B.2); drop
+        # too-short, generic, or structural-noise keys (B.5 precision); and drop
+        # any name that does not actually appear in the source text (B.1 presence
+        # validation — the robust kill for few-shot prompt-example leakage).
         seen: dict[tuple[str, str], str] = {}
         for entity_type, raw_display_name in candidates:
             display_name = _repair_project_prefix(entity_type, raw_display_name, text)
+            if _is_reasoning_text(display_name):
+                continue
             canonical_key = _canonical_key(display_name)
             if _is_noise_key(canonical_key):
+                continue
+            if not _name_present_in_text(canonical_key, normalized_text):
                 continue
             seen.setdefault((entity_type, canonical_key), display_name)
 
@@ -363,6 +485,7 @@ class OllamaExtractor:
                 )
             )
         entities = _dedupe_project_substrings(entities)
+        entities = _dedupe_cross_type(entities)
         entities = self._apply_cap(entities)
         entities.sort(key=lambda entity: (entity.entity_type, entity.canonical_key))
         return entities
@@ -477,17 +600,94 @@ def _locate_positions(name: str, doc_words: list[str]) -> tuple[int, ...]:
 
 
 def _is_noise_key(canonical_key: str) -> bool:
-    """True when a canonical key is too short or a generic stop word.
+    """True when a canonical key is too short, a generic stop word, or structural.
 
-    Drops single-character noise (``len < _MIN_CANONICAL_KEY_LEN``) and an exact
-    match against the small, generic :data:`_GENERIC_STOP_KEYS` list. Both checks
-    are deliberately narrow to protect recall — short acronyms (>= 2 chars) and
-    every real domain concept pass through.
+    Drops single-character noise (``len < _MIN_CANONICAL_KEY_LEN``), an exact
+    match against the generic :data:`_GENERIC_STOP_KEYS` / file-format +
+    document-structure :data:`_STRUCTURAL_STOP_KEYS` lists, and the
+    "<structural noun> <enumerator>" pattern (``chapter 24``, ``section 3``,
+    ``standard 72`` — :data:`_STRUCTURAL_ENUM_RE`). All checks are deliberately
+    narrow + generic to protect recall — short acronyms (>= 2 chars) and every
+    real domain concept pass through.
     """
     return (
         len(canonical_key) < _MIN_CANONICAL_KEY_LEN
         or canonical_key in _GENERIC_STOP_KEYS
+        or canonical_key in _STRUCTURAL_STOP_KEYS
+        or _STRUCTURAL_ENUM_RE.match(canonical_key) is not None
     )
+
+
+def _normalize_for_presence(text: str) -> str:
+    """Lower-case ``text`` and collapse every non-alphanumeric run to one space.
+
+    The shared normalization for the presence check: separators (whitespace,
+    hyphens, dots, underscores) all become a single space, so a hyphenated or
+    handle-style concept that appears in the source is matched against its
+    whitespace-collapsed canonical key (:func:`_canonical_key`).
+    """
+    return _SEPARATOR_RE.sub(" ", text.lower()).strip()
+
+
+def _name_present_in_text(canonical_key: str, normalized_text: str) -> bool:
+    """True when the entity name actually appears in the source text (B.1).
+
+    Separator-normalized substring match: the canonical key is re-normalized the
+    same way as ``normalized_text`` (:func:`_normalize_for_presence`) and checked
+    for containment. Deliberately a substring (not a whole-word) match so a bare
+    ``"helios"`` still counts as present when the document writes
+    ``"Helioscope"`` (lenient = recall-safe); the goal is only to drop names that
+    do **not** occur at all — hallucinated few-shot example names and paraphrases
+    the model invented but never wrote.
+    """
+    needle = _normalize_for_presence(canonical_key)
+    if not needle:
+        return False
+    return needle in normalized_text
+
+
+def _is_reasoning_text(display_name: str) -> bool:
+    """True when a candidate "name" is the model's reasoning text, not an entity.
+
+    Drops sentence-length names (more than :data:`_MAX_ENTITY_WORDS` words) and
+    names containing meta-commentary markers (:data:`_REASONING_PATTERNS`, e.g.
+    "is not present", "however", "the document discusses") that a small model
+    emits as an "entity" on entity-sparse documents (audit B.2). Generic phrasing
+    only — never keyed on a specific entity name.
+    """
+    stripped = display_name.strip()
+    if not stripped:
+        return True
+    if len(stripped.split()) > _MAX_ENTITY_WORDS:
+        return True
+    return _REASONING_PATTERNS.search(stripped) is not None
+
+
+def _dedupe_cross_type(entities: list[ExtractedEntity]) -> list[ExtractedEntity]:
+    """Collapse one canonical name emitted under multiple types to a single node.
+
+    Audit B.3/B.4: the model frequently emits the same real entity under more
+    than one type (a standards body as both ``org`` and ``topic``; each numbered
+    standard duplicated across ``topic`` / ``org`` / ``tool``), inflating and
+    fragmenting the graph and the Louvain communities built from it. For each
+    canonical key, keep the single highest-precedence type
+    (:data:`_TYPE_PRECEDENCE`) and drop the lower-precedence duplicates. Order is
+    preserved. Positions are a pure function of the name + document text, so the
+    surviving node already carries the correct ``mention_count`` — no re-summing.
+    """
+    unknown_rank = len(_TYPE_PRECEDENCE)
+    best_rank: dict[str, int] = {}
+    for entity in entities:
+        rank = _TYPE_RANK.get(entity.entity_type, unknown_rank)
+        current = best_rank.get(entity.canonical_key)
+        if current is None or rank < current:
+            best_rank[entity.canonical_key] = rank
+    return [
+        entity
+        for entity in entities
+        if _TYPE_RANK.get(entity.entity_type, unknown_rank)
+        == best_rank[entity.canonical_key]
+    ]
 
 
 def _repair_project_prefix(entity_type: str, display_name: str, text: str) -> str:

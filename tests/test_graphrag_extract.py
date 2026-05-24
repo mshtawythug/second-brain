@@ -119,13 +119,24 @@ def test_extract_canonical_key_lowercases_and_collapses_whitespace() -> None:
     assert out[0].display_name == "Data   Lake"
 
 
-def test_extract_positions_empty_when_name_not_in_text() -> None:
-    """A concept the model named but that is not present verbatim still surfaces
-    (positions empty, mention_count floored at 1)."""
+def test_extract_drops_name_absent_from_text() -> None:
+    """v3 presence validation: a concept the model named but that does NOT appear
+    in the source text at all is dropped (kills few-shot prompt-example leakage /
+    paraphrased hallucinations)."""
     handler = _const_handler(_ok_entities([{"name": "Kubernetes", "type": "tool"}]))
     out = _extractor(handler).extract("We discussed container orchestration broadly.")
+    assert out == []
+
+
+def test_extract_keeps_substring_present_name_with_empty_positions() -> None:
+    """v3 presence validation is a separator-normalized SUBSTRING match (lenient,
+    recall-safe): a name that appears only inside a larger word still surfaces,
+    even though contiguous-token positions are empty (mention_count floored)."""
+    handler = _const_handler(_ok_entities([{"name": "observ", "type": "topic"}]))
+    out = _extractor(handler).extract("Observability dashboards were rolled out.")
     assert len(out) == 1
-    assert out[0].positions == ()
+    assert out[0].canonical_key == "observ"
+    assert out[0].positions == ()  # 'observ' is not a standalone word token
     assert out[0].mention_count == 1
 
 
@@ -150,20 +161,21 @@ def test_extract_dedups_by_entity_type_and_canonical_key() -> None:
     assert out[0].display_name == "Stripe"  # first-seen surface form
 
 
-def test_extract_same_key_different_type_are_distinct_entities() -> None:
+def test_extract_collapses_same_key_across_types_to_highest_precedence() -> None:
+    """v3 cross-type dedup: the same canonical name emitted under multiple types
+    collapses to ONE node, keeping the highest-precedence type (org > project >
+    tool > topic). Prevents graph/community fragmentation (audit B.3/B.4)."""
     handler = _const_handler(
         _ok_entities(
             [
-                {"name": "Acme", "type": "org"},
+                {"name": "Acme", "type": "topic"},
                 {"name": "Acme", "type": "project"},
+                {"name": "Acme", "type": "org"},
             ]
         )
     )
     out = _extractor(handler).extract("Acme Acme")
-    assert [(e.entity_type, e.canonical_key) for e in out] == [
-        ("org", "acme"),
-        ("project", "acme"),
-    ]
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("org", "acme")]
 
 
 def test_extract_excludes_people_and_unknown_types() -> None:
@@ -206,7 +218,10 @@ def test_extract_cap_none_keeps_all() -> None:
     handler = _const_handler(
         _ok_entities([{"name": f"topic{i}", "type": "topic"} for i in range(5)])
     )
-    out = _extractor(handler, max_entities=None).extract("topic0 topic1 topic2")
+    # All five names appear in the text so presence validation keeps them.
+    out = _extractor(handler, max_entities=None).extract(
+        "topic0 topic1 topic2 topic3 topic4"
+    )
     assert len(out) == 5
 
 
@@ -266,16 +281,16 @@ def test_extract_empty_text_makes_no_model_call() -> None:
 
 
 def test_extractor_version_constant_present_and_folds_model() -> None:
-    assert EXTRACTOR_VERSION == "concepts-v2"
+    assert EXTRACTOR_VERSION == "concepts-v3"
     extractor = _extractor(_const_handler(_ok_entities([])))
-    assert extractor.version == "llama3.1:8b@concepts-v2"
+    assert extractor.version == "llama3.1:8b@concepts-v3"
 
 
 def test_extractor_version_changes_with_model() -> None:
     extractor = OllamaExtractor(
         enricher=_enricher(_const_handler(_ok_entities([])), model="custom:7b")
     )
-    assert extractor.version == "custom:7b@concepts-v2"
+    assert extractor.version == "custom:7b@concepts-v3"
 
 
 def test_concept_entity_types_excludes_person() -> None:
@@ -476,7 +491,7 @@ def test_make_extractor_uses_graph_extract_model() -> None:
     cfg = Config(database_url="postgresql://x/y", graph_extract_model="custom:7b")
     extractor = make_extractor(cfg)
     assert isinstance(extractor, OllamaExtractor)
-    assert extractor.version == "custom:7b@concepts-v2"
+    assert extractor.version == "custom:7b@concepts-v3"
 
 
 def test_make_extractor_threads_max_entities() -> None:
@@ -598,7 +613,28 @@ def test_extract_project_prefix_repair_only_when_present_in_text() -> None:
 
 
 def test_extract_dedupes_project_substring_keeping_longer() -> None:
-    """A bare project subsumed by its 'Project X' sibling is dropped (project-only)."""
+    """A project subsumed by a longer 'Project X …' sibling is dropped — both
+    forms appear in the text, so presence validation keeps them and the
+    conservative project substring dedup collapses to the longer named form."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "Project Helios", "type": "project"},
+                {"name": "Project Helios Phase Two", "type": "project"},
+            ]
+        )
+    )
+    out = _extractor(handler).extract(
+        "Project Helios and Project Helios Phase Two both shipped."
+    )
+    keys = sorted(e.canonical_key for e in out if e.entity_type == "project")
+    assert keys == ["project helios phase two"]
+
+
+def test_extract_presence_drops_absent_longer_project_form() -> None:
+    """v3 presence validation: when the text says only 'Helios' (never 'Project
+    Helios'), the model's invented 'Project Helios' form is dropped as not
+    present, leaving the bare name that actually appears."""
     handler = _const_handler(
         _ok_entities(
             [
@@ -607,11 +643,9 @@ def test_extract_dedupes_project_substring_keeping_longer() -> None:
             ]
         )
     )
-    # Text lacks the phrase 'Project Helios', so prefix-repair does NOT merge
-    # them — the conservative project substring dedup must.
     out = _extractor(handler).extract("We discussed Helios at length.")
     keys = sorted(e.canonical_key for e in out if e.entity_type == "project")
-    assert keys == ["project helios"]
+    assert keys == ["helios"]
 
 
 def test_extract_substring_dedup_not_applied_to_topics() -> None:
@@ -658,3 +692,178 @@ def test_extract_drops_ambiguous_non_synonym_type_labels(ambiguous_type: str) ->
     )
     out = _extractor(handler).extract("We use Glasswing daily.")
     assert out == []
+
+
+# --------------------------------------------------------------------------- #
+# v3 data-quality fixes (Phase 2): few-shot leakage kill (presence validation),
+# reasoning-text rejection, cross-type dedup, structural-junk filtering.
+# All entity names below are SYNTHETIC (no PII).
+# --------------------------------------------------------------------------- #
+
+
+# Entity-sparse prose: generic chatter with NO org/project/tool/topic entities —
+# the exact gap the v2 concept gate (entity-RICH only) missed.
+_SPARSE_TEXTS = [
+    "Thanks for the note. Let's sync tomorrow and figure out next steps.",
+    "Sounds good to me. I'll circle back after lunch with a few thoughts.",
+    "Appreciate the quick turnaround. Talk soon and have a great weekend.",
+]
+
+# Synthetic example-style names a buggy small model copies from its prompt /
+# prior context on a sparse document (the leakage failure mode). NONE of these
+# appear in the _SPARSE_TEXTS above, so presence validation must drop them all.
+_LEAKED_NAMES = [
+    {"name": "Glasswing", "type": "org"},
+    {"name": "Quillbase", "type": "tool"},
+    {"name": "Project Marlin", "type": "project"},
+    {"name": "Helmwright", "type": "tool"},
+    {"name": "onboarding", "type": "topic"},
+]
+
+
+@pytest.mark.parametrize("sparse_text", _SPARSE_TEXTS)
+def test_extract_leakage_gate_drops_all_absent_names(sparse_text: str) -> None:
+    """LEAKAGE GATE (deterministic): on entity-sparse prose, a model that emits
+    invented/example names not present in the text yields ZERO entities. This is
+    the v3 presence-validation kill for few-shot prompt-example leakage."""
+    handler = _const_handler(_ok_entities(_LEAKED_NAMES))
+    out = _extractor(handler).extract(sparse_text)
+    assert out == []
+
+
+def test_extract_presence_keeps_present_drops_absent() -> None:
+    """Mixed batch: only names that literally appear in the text survive."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "Acme Metrics", "type": "tool"},  # present -> kept
+                {"name": "Glasswing", "type": "org"},  # absent -> dropped
+                {"name": "observability", "type": "topic"},  # present -> kept
+                {"name": "Quillbase", "type": "tool"},  # absent -> dropped
+            ]
+        )
+    )
+    out = _extractor(handler).extract(
+        "We rolled out Acme Metrics dashboards to improve observability."
+    )
+    assert [(e.entity_type, e.canonical_key) for e in out] == [
+        ("tool", "acme metrics"),
+        ("topic", "observability"),
+    ]
+
+
+def test_extract_presence_match_is_separator_normalized() -> None:
+    """A hyphenated concept present in the text matches its whitespace-collapsed
+    canonical key (separator-normalized substring), not dropped spuriously."""
+    handler = _const_handler(_ok_entities([{"name": "back-pressure", "type": "topic"}]))
+    out = _extractor(handler).extract("Throughput and back-pressure were discussed.")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("topic", "back-pressure")]
+
+
+def test_extract_rejects_reasoning_text_as_entity() -> None:
+    """A model that emits its own meta-commentary as an 'entity' has it dropped
+    (sentence length + reasoning-phrase patterns), keeping the real concept."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {
+                    "name": "Glasswing is not present in the text. However, the "
+                    "document discusses billing.",
+                    "type": "topic",
+                },
+                {"name": "billing", "type": "topic"},  # the real concept
+            ]
+        )
+    )
+    out = _extractor(handler).extract("The billing migration finished this sprint.")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("topic", "billing")]
+
+
+@pytest.mark.parametrize(
+    "reasoning_name",
+    [
+        "There are no concept entities in this text",
+        "The document does not appear to mention any tools",
+        "N/A",
+        "None",
+        "I cannot identify any organizations here",
+    ],
+)
+def test_extract_drops_reasoning_phrases(reasoning_name: str) -> None:
+    """Generic reasoning / meta-commentary phrases never become entities."""
+    handler = _const_handler(_ok_entities([{"name": reasoning_name, "type": "topic"}]))
+    # Echo the reasoning text into the doc so this isolates the reasoning filter
+    # (not presence validation): even when 'present', reasoning text is dropped.
+    out = _extractor(handler).extract(f"Context: {reasoning_name} -- end.")
+    assert out == []
+
+
+@pytest.mark.parametrize(
+    ("types", "winner"),
+    [
+        (["topic", "org"], "org"),
+        (["topic", "project"], "project"),
+        (["tool", "project"], "project"),
+        (["topic", "tool"], "tool"),
+        (["topic", "project", "org", "tool"], "org"),
+    ],
+)
+def test_extract_cross_type_precedence(types: list[str], winner: str) -> None:
+    """The same canonical name across types collapses to the single
+    highest-precedence type (org > project > tool > topic)."""
+    handler = _const_handler(
+        _ok_entities([{"name": "Helix", "type": t} for t in types])
+    )
+    out = _extractor(handler).extract("Helix Helix Helix")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [(winner, "helix")]
+
+
+def test_extract_cross_type_dedup_preserves_distinct_names() -> None:
+    """Cross-type dedup only collapses SAME-named entities — distinct concepts
+    under different types are untouched."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "Acme", "type": "org"},
+                {"name": "Acme", "type": "topic"},  # collapses into the org
+                {"name": "billing", "type": "topic"},  # distinct -> kept
+            ]
+        )
+    )
+    out = _extractor(handler).extract("Acme rebuilt its billing system.")
+    assert sorted((e.entity_type, e.canonical_key) for e in out) == [
+        ("org", "acme"),
+        ("topic", "billing"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "junk_name",
+    ["PDF", "pdf", "DOCX", "Chapter 24", "Section 3", "Page 12", "Figure 2",
+     "Appendix A", "Standard 72", "standard", "standards", "Table 5"],
+)
+def test_extract_drops_structural_junk_entities(junk_name: str) -> None:
+    """Document-structure / file-format noise is never a concept (audit B.5)."""
+    handler = _const_handler(_ok_entities([{"name": junk_name, "type": "topic"}]))
+    # Put the junk in the text so presence passes — this isolates the structural
+    # filter (the junk is 'present' yet still dropped as structural noise).
+    out = _extractor(handler).extract(f"See {junk_name} for the relevant details.")
+    assert out == []
+
+
+def test_extract_structural_filter_keeps_real_concepts() -> None:
+    """The structural filter is generic — it drops noise but keeps real concepts
+    that happen to sit beside structural words."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "PDF", "type": "topic"},  # structural -> dropped
+                {"name": "Chapter 24", "type": "topic"},  # structural -> dropped
+                {"name": "compliance", "type": "topic"},  # real -> kept
+            ]
+        )
+    )
+    out = _extractor(handler).extract(
+        "Chapter 24 of the PDF covers our compliance program."
+    )
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("topic", "compliance")]

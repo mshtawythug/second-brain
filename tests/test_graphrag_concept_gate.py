@@ -39,9 +39,28 @@ from brain.config import Config
 from brain.enrichment import OllamaEnricher
 from brain.errors import EnrichmentError, OllamaUnavailable
 from brain.eval.concept_extraction import concept_set_micro_f1, load_concept_fixture
-from brain.graph_rag.extract import make_extractor
+from brain.graph_rag.extract import _normalize_for_presence, make_extractor
 
 _EXTRACT_LOGGER = "brain.graph_rag.extract"
+
+# Entity-SPARSE synthetic documents — generic prose / chatter with NO org,
+# project, tool, or topic entities. This is the v2 concept gate's blind spot
+# (its fixture was entity-RICH only): on sparse text an 8B model used to copy
+# the prompt's few-shot example names. The v3 leakage gate asserts the live
+# extractor returns no entity that is not literally present in the document.
+# All text is synthetic (no PII).
+_SPARSE_LEAKAGE_DOCS: tuple[str, ...] = (
+    "Thanks so much for the quick reply. Let's catch up tomorrow afternoon and "
+    "figure out the next steps together. Hope you have a relaxing evening.",
+    "Sounds good to me. I'll circle back after lunch with a couple of thoughts. "
+    "No rush at all on your end — whenever you get a chance is totally fine.",
+    "Appreciate you taking the time today. It was great to reconnect after so "
+    "long. Let me know if there is anything else you need from my side.",
+    "Quick note to say the package arrived safely this morning. Everything "
+    "looks great and exactly as expected. Thanks again for sorting it out.",
+    "Happy Friday everyone. Reminder that the office will be a little quieter "
+    "next week. Wishing you all a restful and enjoyable long weekend ahead.",
+)
 
 
 @pytest.mark.eval
@@ -107,4 +126,75 @@ def test_concept_extractor_gate(caplog: pytest.LogCaptureFixture) -> None:
         "Note: this gate is a DECISION tool — G2 ships BRAIN_GRAPH_CONCEPTS "
         "default-OFF regardless; a failing gate simply means concepts are not "
         "yet ready to be flipped default-ON."
+    )
+
+
+# Synthetic names that the v2 few-shot prompt baked in and that leaked as real
+# entities (audit B.1). They appear in NONE of the sparse docs, so v3 must never
+# emit them. Lower-cased for a case-insensitive canonical-key compare.
+_FORMER_LEAK_NAMES: frozenset[str] = frozenset({
+    "glasswing",
+    "helmwright",
+    "quillbase",
+    "tessa",
+    "project marlin",
+    "project falcon",
+    "onboarding",
+    "uptime",
+})
+
+
+@pytest.mark.eval
+def test_concept_extractor_no_leakage_on_sparse_docs(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """LEAKAGE GATE (live): on entity-sparse prose the v3 extractor emits no
+    entity that is not literally present in the document — and specifically none
+    of the v2 prompt's example names. This closes the v2 gate's blind spot
+    (entity-rich fixture only). Skips cleanly when Ollama is unreachable."""
+    cfg = Config.load()
+
+    probe = OllamaEnricher(
+        host=cfg.ollama_host,
+        model=cfg.graph_extract_model,
+        timeout=cfg.enrich_timeout_seconds,
+    )
+    try:
+        probe.extract_entities("Acme Pay billing and pricing for Project Aurora.")
+    except OllamaUnavailable as exc:
+        pytest.skip(
+            f"Ollama / extract model {cfg.graph_extract_model!r} unreachable: {exc}"
+        )
+    except EnrichmentError:
+        pass
+
+    extractor = make_extractor(cfg)
+    leaked: list[tuple[str, str, str]] = []  # (doc_snippet, type, key)
+    absent: list[tuple[str, str, str]] = []
+
+    for text in _SPARSE_LEAKAGE_DOCS:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=_EXTRACT_LOGGER):
+            entities = extractor.extract(text)
+        if any(
+            "Ollama unavailable" in record.getMessage() for record in caplog.records
+        ):
+            pytest.skip("Ollama became unavailable during the leakage gate run")
+        normalized_text = _normalize_for_presence(text)
+        snippet = text[:40]
+        for entity in entities:
+            if entity.canonical_key in _FORMER_LEAK_NAMES:
+                leaked.append((snippet, entity.entity_type, entity.canonical_key))
+            needle = _normalize_for_presence(entity.canonical_key)
+            if needle and needle not in normalized_text:
+                absent.append((snippet, entity.entity_type, entity.canonical_key))
+
+    print(
+        f"\n[leakage gate] model={cfg.graph_extract_model} "
+        f"docs={len(_SPARSE_LEAKAGE_DOCS)} leaked={len(leaked)} absent={len(absent)}"
+    )
+    assert not leaked, f"v2 prompt-example names leaked into v3 output: {leaked}"
+    assert not absent, (
+        f"v3 extractor emitted entities NOT present in the source text "
+        f"(presence-validation regression): {absent}"
     )

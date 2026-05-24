@@ -120,7 +120,8 @@ _EXTRACT_SYSTEM_PROMPT = (
     "- tool: software you run, deploy, operate, import, or build with — a "
     "framework, library, language, database, monitoring agent, or server.\n"
     "- project: a named initiative or effort. Keep the FULL name including a "
-    'leading word like "Project" (return "Project Falcon", never "Falcon").\n'
+    'leading word like "Project" (return the whole "Project <name>" form, never '
+    "just the bare name).\n"
     "- topic: a central, durable theme or subject area the document is about, "
     "usually one or two words.\n"
     "\n"
@@ -141,27 +142,31 @@ _EXTRACT_SYSTEM_PROMPT = (
     "Never extract:\n"
     "- people or person names (they are tracked separately)\n"
     "- dates, times, or file formats\n"
+    "- document-structure references (PDF, chapter, section, page, table, "
+    "figure, appendix, heading)\n"
     "- generic activities or events (meetings, reviews, sprints, workshops)\n"
     "- incidental UI or implementation nouns, or one-off mentions that are not a "
     "central theme\n"
     "- vague container words (platform, service, system, dashboard) on their own\n"
     "\n"
-    "Examples (illustrative only — invented names; do not copy them):\n"
-    "TEXT: We moved payments onto Glasswing this quarter. Project Falcon owns "
-    "the new ledger, tracked in Quillbase. Onboarding was the recurring theme of "
-    "the review.\n"
-    'JSON: {"entities": [{"name": "Glasswing", "type": "org"}, '
-    '{"name": "Project Falcon", "type": "project"}, '
-    '{"name": "Quillbase", "type": "tool"}, '
-    '{"name": "onboarding", "type": "topic"}]}\n'
-    "TEXT: The team adopted Helmwright for scheduling and wired up Tessa for "
-    "alerts. Project Marlin is the rollout. Uptime dominated the discussion.\n"
-    'JSON: {"entities": [{"name": "Helmwright", "type": "tool"}, '
-    '{"name": "Tessa", "type": "tool"}, '
-    '{"name": "Project Marlin", "type": "project"}, '
-    '{"name": "uptime", "type": "topic"}]}\n'
+    "CRITICAL: Extract ONLY entities that appear LITERALLY in THIS text. Copy the "
+    "name exactly as written. Never invent a name, never add a name that is not "
+    "in the text, and never copy a name from these instructions or from a "
+    "previous document.\n"
     "\n"
-    "Return an empty list when the text has no clear concept entities."
+    "The bracketed words in the FORMAT example below are PLACEHOLDERS showing the "
+    "JSON shape only. They are NOT real entities — never output them.\n"
+    "FORMAT (schematic — replace each placeholder with a real name from the "
+    "text, or omit it):\n"
+    'JSON: {"entities": [{"name": "<the hosted provider named in the text>", '
+    '"type": "org"}, {"name": "Project <the effort named in the text>", '
+    '"type": "project"}, {"name": "<the software tool named in the text>", '
+    '"type": "tool"}, {"name": "<the central theme of the text>", '
+    '"type": "topic"}]}\n'
+    "\n"
+    "When THIS text contains no org, project, tool, or topic entities, return an "
+    "empty list. Do NOT fill it with examples or guesses:\n"
+    'JSON: {"entities": []}'
 )
 
 
