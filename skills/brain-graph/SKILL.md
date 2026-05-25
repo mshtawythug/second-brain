@@ -176,7 +176,9 @@ these over shelling out when you're already driving via tools:
 Admin (setup, not everyday querying):
 
 - `brain_graphrag_build(tenant=None, concepts=False, backfill=False, force=False, limit=None)` — pass `backfill=true` (or `force=true`)
+- `brain_graphrag_refresh(tenant=None)` — recompute a tenant's aggregate edges (no re-resolve)
 - `brain_graphrag_communities_build(...)` — detect + summarize clusters
+- `brain_graphrag_communities_refresh(tenant=None, limit=None)` — force re-detect + re-summarize past the dirty gate
 
 Results come back in the `graph_context_json` shape: a `session_id`, `mode`,
 `tenant_id`, the ranked `themes` (themes mode) / `entities` (local mode) /

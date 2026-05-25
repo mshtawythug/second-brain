@@ -1665,8 +1665,6 @@ def brain_graphrag_refresh(
             result = refresh_aggregates(conn, backend=backend, config=config)
     except GraphBackendError as exc:
         raise _wrap_graph_backend_error(exc) from exc
-    except GraphReconcileError as exc:
-        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
     except psycopg.Error as exc:
         raise _wrap_db_error(exc) from exc
     return {
