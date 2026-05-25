@@ -41,6 +41,7 @@ from .aggregates import (
 )
 from .backends.base import GraphBackend
 from .extract import EntityExtractor
+from .person_resolver import prebuilt_directory_resolver
 from .reconcile import ReconcileConfig, ReconcileResult, reconcile_document
 from .schema import GraphEntity
 
@@ -107,6 +108,15 @@ def build_graph(
     end state (the derived layers are a deterministic full recompute from the
     per-document relational source-of-truth, which IS still written per document).
     Applies to both the plain backfill and the ``force`` rebuild below.
+
+    **Directory index hoist (perf, Fix B).** The People-Hub directory index
+    (``directory_entries``) drives person resolution but is corpus-wide and does
+    NOT change during a build, so this driver builds it ONCE before the loop and
+    injects it through reconcile's ``person_resolver`` DI seam (via
+    :func:`brain.graph_rag.person_resolver.prebuilt_directory_resolver`) — instead
+    of every per-document reconcile rebuilding the ~1.2k-row ``SELECT`` + dict.
+    The incremental ingest hook (``sync.py``) is unaffected: it uses the default
+    resolver, which builds its own single-document index.
 
     The connection SHOULD be autocommit so each document commits on its own,
     making the build resumable after an interruption (see the module docstring).
@@ -213,6 +223,21 @@ def build_graph(
             #    exist).
             _restore_tenant_entity_vertices(conn, config.tenant_id, backend=backend)
 
+    # Perf Fix B (2026-05-24): build the People-Hub directory index ONCE for the
+    # whole batch and inject it through reconcile's person_resolver DI seam,
+    # instead of every per-document reconcile rebuilding it. The directory
+    # (``directory_entries``, ~1.2k rows) is corpus-wide and does NOT change
+    # during a build, so rebuilding the SELECT + dict per document is pure waste
+    # (~30-80 ms/doc). The incremental ingest hook (``sync.py``) keeps using the
+    # default resolver, which builds its own single-document index, so the
+    # one-doc path is unchanged. Late import keeps this module import-cheap
+    # (``build_people`` pulls in the wiki package), mirroring person_resolver's
+    # own late import of the same helper.
+    from ..wiki.build_people import _build_directory_index
+
+    directory = _build_directory_index(conn, sender_denylist=config.sender_denylist)
+    resolver = prebuilt_directory_resolver(directory)
+
     processed = 0
     reconciled = 0
     skipped = 0
@@ -225,6 +250,7 @@ def build_graph(
             document_id,
             backend=backend,
             config=config,
+            person_resolver=resolver,
             extractor=extractor,
             force=force,
             defer_tenant_refresh=True,

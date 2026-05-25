@@ -28,6 +28,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from pytest_mock import MockerFixture
 from typer.testing import CliRunner
 
 from brain.cli import app
@@ -574,6 +575,53 @@ def test_incremental_reconcile_materializes_cooccur_per_call(
     assert not res2.skipped and res2.relationship_count == 2
     assert _relational_relationship_count(test_db, "default") == 2
     assert _age_cooccur_count(test_db, "default") == 2
+
+
+# --------------------------------------------------------------------------- #
+# 4c. Directory index hoist (perf Fix B): the corpus-wide People-Hub directory
+#     index is built ONCE for the whole batch, not once per document — while
+#     person resolution stays identical to the per-document path.
+# --------------------------------------------------------------------------- #
+def test_build_builds_directory_index_once_not_per_doc(
+    test_db: psycopg.Connection[Any], mocker: MockerFixture
+) -> None:
+    """A multi-doc batch build builds the People-Hub directory index ONCE (in
+    build_graph), not once per document, while person resolution is unchanged."""
+    import brain.wiki.build_people as build_people_mod
+
+    spy = mocker.spy(build_people_mod, "_build_directory_index")
+
+    backend = _backend(test_db)
+    _seed_three_docs(test_db)
+    all_ids = [doc_id for batch in iter_all_document_ids(test_db) for doc_id in batch]
+
+    result = build_graph(test_db, all_ids, backend=backend, config=_cfg())
+
+    # Built exactly once for the whole 3-doc batch (pre-Fix-B this was 3 — one
+    # rebuild per per-document reconcile via default_person_resolver).
+    assert spy.call_count == 1
+    # Resolution is unchanged: the full triangle still materializes.
+    assert result.reconciled == 3
+    assert _person_keys(test_db, "default") == {"alice", "bob", "carol"}
+
+
+def test_incremental_reconcile_builds_its_own_directory_index(
+    test_db: psycopg.Connection[Any], mocker: MockerFixture
+) -> None:
+    """Fix B regression: the incremental path (default resolver, no prebuilt
+    directory) STILL builds the directory itself — the hoist is batch-only and
+    must not break single-document reconcile (sync.py's ingest hook)."""
+    import brain.wiki.build_people as build_people_mod
+
+    spy = mocker.spy(build_people_mod, "_build_directory_index")
+
+    backend = _backend(test_db)
+    doc_ids = _seed_three_docs(test_db)
+    reconcile_document(test_db, doc_ids[0], backend=backend, config=_cfg())
+
+    # The single incremental reconcile built its own one-document index.
+    assert spy.call_count == 1
+    assert _person_keys(test_db, "default") == {"alice", "bob"}
 
 
 # --------------------------------------------------------------------------- #
