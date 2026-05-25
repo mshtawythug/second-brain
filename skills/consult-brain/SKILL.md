@@ -26,6 +26,14 @@ base, then synthesize a grounded answer or draft from the retrieved content.
 Stay strictly grounded in retrieved material — never invent biographical
 claims or specific quotes.
 
+For THEMES, PATTERNS, or CONNECTIONS **across** interactions — recurring
+themes, "what connects A and B", "themes with X", "how my thinking on Z has
+evolved", "map out …" — use `brain-graph` instead. That skill walks the entity
+graph (people/concepts + their relationships + clusters); this one stays for
+lookups, facts, quotes, and writing in the user's voice. Rule of thumb: a flat
+answer about content → stay here; relationships, themes, or clustering →
+`brain-graph`.
+
 For ingesting new content into the brain, see `ingest-brain`. For authoring
 new notes, see `brain-authoring`. For action-item / TODO queries, see
 `brain-todo`. For health / re-embedding / maintenance, see `brain-maintenance`.
@@ -155,6 +163,10 @@ boost, best-chunk index, and matched filters. Two things to look for:
   scrape something — say "no relevant content found in your brain for X,
   want to share more context?" and stop.
 - The user explicitly says "don't search my brain" / "skip the brain".
+- The ask is about **themes, patterns, or connections across** interactions
+  (recurring themes, "what connects A and B", "themes with X", "how my thinking
+  evolved", "map out …") — hand off to `brain-graph`, which walks the entity
+  graph instead of returning a flat ranked doc list.
 
 ## Examples — full flow
 
