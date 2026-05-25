@@ -49,7 +49,11 @@ from .ingest import (
     update_document,
 )
 from .ingest.stdin import make_doc as _stdin_make_doc
-from .interactions import record_interaction
+from .interactions import (
+    InteractionAction,
+    InteractionTargetType,
+    record_interaction,
+)
 from .queries import (
     fetch_document,
     iter_all_document_ids,
@@ -1326,7 +1330,36 @@ def brain_graphrag_search(
     tenant: str | None = None,
     synthesize: bool = False,
 ) -> dict[str, Any]:
-    """Graph retrieval over the Apache AGE people/concept graph (spec §6/§9).
+    """Graph retrieval — THEMES, PATTERNS, and CONNECTIONS across interactions.
+
+    WHEN TO USE (graph vs. plain ``brain_search``): reach for this when the
+    question is about how things RELATE — themes that keep coming up, patterns
+    across conversations, what connects two people/topics, how thinking on a
+    subject evolved, the bigger picture, "map out / cluster …". Use plain
+    ``brain_search`` instead for a flat "find docs about X", a quote, or a
+    single fact from one document. Rule of thumb: *flat answer about content →*
+    ``brain_search``; *relationships / themes / clustering →* this tool. When a
+    person is named and the ask is thematic, ``mode='themes'`` (or
+    ``brain_graphrag_themes``) is the headline move.
+
+    Pick a ``mode`` (the five retrieval strategies):
+
+    - ``auto`` *(default router)* — heuristic: a thematic query WITH a
+      resolvable person → themes; thematic WITHOUT a person → global; otherwise
+      → local. Let it choose when intent is fuzzy.
+    - ``local`` — entity-centric: resolve the seed entity, traverse its bounded
+      ``CO_OCCURS`` neighbourhood, return the seed + reached entities and their
+      docs. "What connects to X." Same core as ``brain_graphrag_entity``.
+    - ``themes`` — *the headline* — "themes in my conversations with X".
+      Requires ``person``. Groups the person's co-occurrence subgraph into
+      ranked theme groups. Same core as ``brain_graphrag_themes``.
+    - ``global`` — community-level RRF over the detected clusters (FTS over
+      community summaries ⊕ vector over summary embeddings). Best for "overall
+      themes in my brain"; build the communities first via
+      ``brain_graphrag_communities_build``.
+    - ``fuse`` — RRF-merge the local-graph doc leg with the vector/FTS hybrid
+      leg into one ranked doc list. Explicit-only (``auto`` never routes here);
+      default tenant only.
 
     Full parity with ``brain graphrag search``. Returns the
     :func:`brain.format.graph_context_json` wire shape (identical to the CLI's
@@ -1335,21 +1368,18 @@ def brain_graphrag_search(
     the degradation signals (``requested_mode`` / ``degraded_from`` /
     ``degradation_reason``), the ranked ``themes`` (themes mode) and
     ``entities`` (local mode), the document hits (``docs``), and the ranking
-    ``explanation``. Raw Cypher is never accepted or returned.
+    ``explanation``. In ``global`` mode the JSON carries a top-level
+    ``communities`` key; in ``fuse`` mode per-doc leg provenance rides in
+    ``explanation.matched_filters.fuse_doc_provenance``. Raw Cypher is never
+    accepted or returned — the backend injects the tenant + caps automatically.
 
     Params (all but ``query`` optional; mirror the CLI flags 1:1):
 
-    - ``mode``: ``auto`` (heuristic router, default) | ``local`` (entity-centric)
-      | ``themes`` (scope-first "themes with X", requires ``person``) |
-      ``global`` (community-level RRF over detected communities; spec §6c) |
-      ``fuse`` (RRF of the local-graph doc leg with the vector/FTS hybrid leg;
-      wave G4-c, spec §17d Q1). Under ``auto`` a thematic query with no resolvable
-      person now routes to ``global`` (the G3-e flip, spec §17c Q6 — no longer a
-      global→local degradation), and an explicit ``global`` EXECUTES (build the
-      communities first via ``brain_graphrag_communities_build``). The returned
-      JSON carries a top-level ``communities`` key in global mode; ``fuse`` is
-      explicit-only (``auto`` never targets it) and its per-doc leg provenance
-      rides in ``explanation.matched_filters.fuse_doc_provenance``.
+    - ``mode``: one of the five above (default ``auto``). Under ``auto`` a
+      thematic query with no resolvable person routes to ``global`` (the G3-e
+      flip, spec §17c Q6 — no longer a global→local degradation); an explicit
+      ``global`` EXECUTES (spec §6c). ``fuse`` is explicit-only (wave G4-c,
+      spec §17d Q1).
     - ``person``: scope themes to this person (resolved via the directory). An
       unknown / ambiguous person raises ``INVALID_PARAMS``.
     - ``depth``: traversal depth (default ``BRAIN_GRAPH_DEPTH``).
@@ -1393,15 +1423,25 @@ def brain_graphrag_themes(
     tenant: str | None = None,
     synthesize: bool = False,
 ) -> dict[str, Any]:
-    """The "themes in my conversations with X" headline (spec §6b).
+    """THE HEADLINE — "themes in my conversations with X" (spec §6b).
+
+    WHEN TO USE: the go-to graph tool whenever the ask is thematic AND names a
+    person — "what themes keep coming up with X", "what do X and I talk about",
+    "patterns in my conversations with X". This is the most common graph route;
+    prefer it over ``brain_graphrag_search`` when a person is explicit. For a
+    thematic ask with NO person, use ``brain_graphrag_search(mode='global')``;
+    for one entity's neighbourhood, ``brain_graphrag_entity``; for a flat doc
+    lookup, plain ``brain_search``.
 
     Full parity with ``brain graphrag themes`` — a convenience wrapper for
     ``brain_graphrag_search(mode='themes', person=X)``: scopes to ``person``,
     groups their co-occurrence subgraph, and returns ranked theme groups (key
     entities + representative documents) in the
     :func:`brain.format.graph_context_json` wire shape. ``person`` is REQUIRED;
-    an empty / whitespace-only value raises ``INVALID_PARAMS``. ``synthesize``
-    attaches a best-effort per-group Ollama summary (opt-in).
+    an empty / whitespace-only value raises ``INVALID_PARAMS`` (an unknown or
+    ambiguous person likewise). ``synthesize`` attaches a best-effort per-group
+    local-Ollama summary (opt-in; a missing/failed Ollama yields
+    ``summary=None``).
     """
     if not person.strip():
         raise _mcp_error(
@@ -1431,7 +1471,14 @@ def brain_graphrag_entity(
     limit: int | None = None,
     tenant: str | None = None,
 ) -> dict[str, Any]:
-    """Show a single entity's neighbourhood (spec §9).
+    """One entity's neighbourhood — "what connects to X" (spec §9).
+
+    WHEN TO USE: the ask centres on a SINGLE named entity (a person, project,
+    org, tool, or topic) and you want what it links to — "who/what is related
+    to X", "show me everything around X", "X's neighbourhood". For thematic
+    asks scoped to a person use ``brain_graphrag_themes``; for brain-wide
+    clusters use ``brain_graphrag_search(mode='global')``; to merely ENUMERATE
+    entities (not traverse one) use ``brain_graphrag_entities``.
 
     Full parity with ``brain graphrag entity``: a thin wrapper over local
     (entity-centric) retrieval seeded on ``name`` — it reuses the SAME path as
@@ -1467,7 +1514,15 @@ def brain_graphrag_build(
     force: bool = False,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    """Bulk-reconcile the graph for all existing documents (spec §9).
+    """ADMIN/SETUP — bulk-build the entity graph from all documents (spec §9).
+
+    WHEN TO USE: a slow, write-side maintenance op — NOT everyday querying.
+    Reach for it only to bootstrap the graph the first time, or to rebuild
+    after ``brain doctor`` reports drift / a missing graph. Once built, query
+    with ``brain_graphrag_search`` / ``_themes`` / ``_entity``. After a
+    corpus-wide weighting change that needs no re-resolve, prefer the lighter
+    ``brain_graphrag_refresh``; to (re)detect clusters for ``mode='global'``
+    use ``brain_graphrag_communities_build``.
 
     Full parity with ``brain graphrag build``. Walks every document in id order
     and reconciles its people aspect (and, when ``concepts`` or
@@ -1564,6 +1619,63 @@ def brain_graphrag_build(
     }
 
 
+@mcp_app.tool()
+def brain_graphrag_refresh(
+    tenant: str | None = None,
+) -> dict[str, Any]:
+    """ADMIN — recompute a tenant's aggregate edges (no re-resolve; spec §7/§9).
+
+    WHEN TO USE: a corpus-wide weight/edge recompute that does NOT re-resolve
+    any document's persons — the response to a weighting / suppression knob
+    change (e.g. a new ``BRAIN_GRAPH_GENERIC_DF``) that must propagate to every
+    edge at once. Lighter than a full ``brain_graphrag_build``; NOT everyday
+    querying. It assumes the tenant's entity vertices already exist — run
+    ``brain_graphrag_build(backfill=true)`` first. For a dropped / corrupted AGE
+    mirror (vertices missing) use ``brain_graphrag_build(force=true)`` instead.
+
+    Full parity with ``brain graphrag refresh``: rebuilds every
+    ``graph_relationships`` edge from ``graph_edge_contributions`` (normalized
+    lift + generic suppression), GCs now-orphaned catalog rows, and
+    rematerializes the AGE ``CO_OCCURS`` edges. Idempotent — a second run with
+    the same config converges to the identical graph. Shares the SAME
+    :class:`ReconcileConfig` as the incremental sync + the build path.
+
+    Params:
+
+    - ``tenant``: tenant to refresh (default ``BRAIN_GRAPH_TENANT``).
+
+    Returns ``{tenant_id, relationship_count, orphans_removed}`` — the number of
+    aggregate edges written and now-zero-mention catalog rows GC'd. No raw
+    Cypher is ever returned.
+    """
+    state = _get_state()
+    cfg = state.cfg
+    logger.debug("brain_graphrag_refresh: tenant=%s", tenant)
+    config = _graphrag_reconcile_config(cfg, tenant)
+
+    from .graph_rag.aggregates import refresh_aggregates
+    from .graph_rag.backends import AgeBackend
+
+    try:
+        with connect_age(cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            backend = AgeBackend()
+            backend.bootstrap(conn)
+            result = refresh_aggregates(conn, backend=backend, config=config)
+    except GraphBackendError as exc:
+        raise _wrap_graph_backend_error(exc) from exc
+    except GraphReconcileError as exc:
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return {
+        "tenant_id": config.tenant_id,
+        "relationship_count": result.relationship_count,
+        "orphans_removed": result.orphans_removed,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Wave G3-f — GraphRAG communities admin (MCP parity with the CLI
 # `brain graphrag communities` group). Communities are RELATIONAL-only (spec
@@ -1646,7 +1758,14 @@ def brain_graphrag_communities_build(
     limit: int | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Detect + persist + summarize the tenant's communities (spec §17c Q3).
+    """ADMIN/SETUP — detect + summarize the tenant's clusters (spec §17c Q3).
+
+    WHEN TO USE: a slow, write-side prerequisite for ``mode='global'`` (and for
+    ``brain_graphrag_communities`` to have rows to list) — NOT everyday
+    querying. Run it once after a ``brain_graphrag_build``, then re-run only
+    when ``brain doctor`` flags stale communities. To force a rebuild past the
+    dirty gate after a corpus-wide weighting change, use ``force=True`` here or
+    the sibling ``brain_graphrag_communities_refresh``.
 
     Full parity with ``brain graphrag communities build`` / ``… refresh``: runs
     Louvain over the tenant's relational ``graph_relationships`` edges, persists
@@ -1686,11 +1805,63 @@ def brain_graphrag_communities_build(
 
 
 @mcp_app.tool()
+def brain_graphrag_communities_refresh(
+    tenant: str | None = None,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """ADMIN — force a community rebuild past the dirty gate (spec §17c Q3).
+
+    WHEN TO USE: identical to ``brain_graphrag_communities_build`` except it
+    BYPASSES the ``(build_version, source_graph_hash)`` dirty gate — Louvain +
+    the relational replace always run, then the eager (best-effort)
+    summary/embedding pass. Reach for it after a corpus-wide weighting /
+    suppression change (or a knob change that should re-partition an otherwise
+    unchanged graph); for a routine "build if stale" pass, use the plain
+    ``brain_graphrag_communities_build`` (which skips an unchanged graph). NOT
+    everyday querying.
+
+    Full parity with ``brain graphrag communities refresh``: the MCP twin of
+    ``brain_graphrag_communities_build(force=true)`` — same Louvain detection,
+    relational persistence, and eager summary/embedding pass; a
+    missing/unreachable Ollama leaves summaries NULL and the rebuild still
+    succeeds (the global path then ranks FTS-only).
+
+    Params (mirror the CLI flags):
+
+    - ``tenant``: tenant to refresh (default ``BRAIN_GRAPH_TENANT``).
+    - ``limit``: max stale/new communities to (re)summarize this run (does NOT
+      cap detection — Louvain always partitions the full edge set).
+
+    Returns the same ``{tenant_id, build:{…}, summary:{…}}`` shape as
+    ``brain_graphrag_communities_build``. No raw Cypher is ever returned.
+    """
+    state = _get_state()
+    logger.debug(
+        "brain_graphrag_communities_refresh: tenant=%s limit=%s", tenant, limit
+    )
+    return _graphrag_communities_build_or_mcp_error(
+        state.cfg,
+        tenant=tenant,
+        limit=limit,
+        force=True,
+        enricher=state.enricher,
+        embedder=state.embedder,
+    )
+
+
+@mcp_app.tool()
 def brain_graphrag_communities(
     tenant: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    """List the tenant's materialized communities (spec §17c Q3).
+    """List the tenant's materialized community clusters (spec §17c Q3).
+
+    WHEN TO USE: an admin/overview read of the brain's top-level clusters —
+    "what are the big clusters / themes in my brain" at a glance, or to confirm
+    communities exist before a ``mode='global'`` search. Read-only and fast (no
+    detection). For the actual ranked global retrieval use
+    ``brain_graphrag_search(mode='global')``; to (re)build the clusters first
+    use ``brain_graphrag_communities_build``.
 
     Full parity with ``brain graphrag communities list``: reads the stored
     ``graph_communities`` rows (largest-first, ``limit`` capped) and returns
@@ -1733,7 +1904,13 @@ def brain_graphrag_entities(
     limit: int = 50,
     tenant: str | None = None,
 ) -> dict[str, Any]:
-    """List the tenant's entities (admin view; filterable by entity type).
+    """ENUMERATE the entities in the graph — "what's in my brain" (admin view).
+
+    WHEN TO USE: the ask is to LIST / inventory entities — "what orgs (or
+    people / projects / topics / tools) are in my brain", "list all projects",
+    "what topics do I have". Distinct from ``brain_graphrag_entity`` (singular),
+    which traverses ONE entity's neighbourhood: this one just enumerates and
+    filters by type. For a one-line size overview use ``brain_graphrag_stats``.
 
     Full parity with ``brain graphrag entities``: reads ``graph_entities``
     rows (filtered, sorted, ``limit``-capped) and returns
@@ -1788,7 +1965,13 @@ def brain_graphrag_entities(
 def brain_graphrag_stats(
     tenant: str | None = None,
 ) -> dict[str, Any]:
-    """Return an at-a-glance graph overview for the tenant.
+    """OVERVIEW — how big is the graph, at a glance (the graph's "status").
+
+    WHEN TO USE: the ask is about the graph's SIZE / shape — "how big is my
+    graph", "how many entities/relationships/communities do I have", "is the
+    graph built / worth querying". One fast read-only roll-up. To then list the
+    entities themselves use ``brain_graphrag_entities``; to list clusters use
+    ``brain_graphrag_communities``.
 
     Full parity with ``brain graphrag stats``: reads entity counts by type,
     total relationships, total communities, and the top-10 entities by
@@ -1816,6 +1999,129 @@ def brain_graphrag_stats(
     except psycopg.Error as exc:
         raise _wrap_db_error(exc) from exc
     return {"tenant_id": tenant_id, **graph_stats_json(stats)}
+
+
+# ---------------------------------------------------------------------------
+# Feedback (G4-b parity, spec §17d Q2) — the MCP counterpart of the CLI's
+# `brain rate`. Closes the parity gap noted in the T3 rate audit: before this
+# tool the graph feedback path (entity/community/theme ratings) was reachable
+# ONLY from the CLI. Mirrors the CLI's local tuple rather than importing the
+# writer's private `brain.interactions._VALID_TARGET_TYPES` set.
+# ---------------------------------------------------------------------------
+_RATE_TARGET_TYPES = ("entity", "community", "theme")
+
+
+@mcp_app.tool()
+def brain_rate(
+    id: str,
+    verdict: str,
+    target_type: str | None = None,
+    graph_retrieved: bool = False,
+) -> dict[str, Any]:
+    """Record a thumbs-up / thumbs-down on a document OR a graph target.
+
+    WHEN TO USE: the user reacts to a specific result — "that one was useful" /
+    "that's irrelevant". Works for BOTH a document (the default) and a graph
+    target (an entity / community / theme), so graph retrieval feedback is
+    reachable here, not just from the CLI. Graph retrieval tools
+    (``brain_graphrag_*``) deliberately do NOT auto-log feedback at retrieval
+    time — only this explicit user action does. (Document *opens* are logged
+    separately by ``brain_show(originating_query=…)``.)
+
+    Full parity with ``brain rate``. Persists one append-only row to the
+    ``interactions`` table (``action='rated_useful'`` or ``'rated_irrelevant'``,
+    ``source='mcp'``, ``session_id=NULL``). Ratings APPEND every call — re-rating
+    the same target adds a new row with a fresh timestamp; the full history is
+    preserved.
+
+    Two mutually-exclusive target shapes (the XOR is enforced by
+    ``record_interaction`` + the SQL CHECK):
+
+    - Document (default — leave ``target_type`` unset): ``id`` is a document id
+      prefix (6+ hex chars), resolved to a document. A too-short / non-hex /
+      unknown / ambiguous prefix raises ``INVALID_PARAMS``.
+    - Graph target (``target_type`` set): ``id`` is the durable graph-target id
+      (entity UUID / community key / theme key) and is NOT resolved as a
+      document; ``document_id`` stays NULL.
+
+    Params:
+
+    - ``id``: the document id prefix, or — when ``target_type`` is set — the
+      graph target's id.
+    - ``verdict``: ``'useful'`` or ``'irrelevant'`` (anything else →
+      ``INVALID_PARAMS``).
+    - ``target_type``: ``None`` (document, default) or one of
+      ``'entity'`` / ``'community'`` / ``'theme'`` (anything else →
+      ``INVALID_PARAMS``).
+    - ``graph_retrieved``: provenance flag — set ``true`` when this rating came
+      from a graph surface. Orthogonal to the target shape: a document rated via
+      a graph path is still a document row with ``graph_retrieved=true``.
+
+    Returns ``{interaction_id, action, graph_retrieved}`` plus ``document_id``
+    (document shape) or ``target_type`` + ``target_id`` (graph shape). Unlike
+    ``brain_show``'s best-effort open logging, a persistence failure here is
+    surfaced as an MCP error — recording the rating IS this tool's job.
+    """
+    if verdict not in {"useful", "irrelevant"}:
+        raise _mcp_error(
+            INVALID_PARAMS, "verdict must be 'useful' or 'irrelevant'"
+        )
+    action: InteractionAction = (
+        "rated_useful" if verdict == "useful" else "rated_irrelevant"
+    )
+    if target_type is not None and target_type not in _RATE_TARGET_TYPES:
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "target_type must be one of: " + ", ".join(_RATE_TARGET_TYPES),
+        )
+    state = _get_state()
+    logger.debug(
+        "brain_rate: target_type=%s graph_retrieved=%s", target_type, graph_retrieved
+    )
+    try:
+        with connect(state.cfg.database_url) as conn:
+            conn.autocommit = True
+            if target_type is not None:
+                # Graph-target rating: ``id`` is the durable target id, NOT a
+                # document prefix — skip _resolve_id; document_id stays NULL.
+                # Validated against _RATE_TARGET_TYPES above → safe to narrow to
+                # the writer's Literal for the static checker.
+                narrowed: InteractionTargetType = target_type  # type: ignore[assignment]
+                new_id = record_interaction(
+                    conn,
+                    action=action,
+                    source="mcp",
+                    target_type=narrowed,
+                    target_id=id,
+                    graph_retrieved=graph_retrieved,
+                )
+                return {
+                    "interaction_id": new_id,
+                    "action": action,
+                    "target_type": target_type,
+                    "target_id": id,
+                    "graph_retrieved": graph_retrieved,
+                }
+            # Document rating (the default shape).
+            doc_id = _resolve_id(conn, id)
+            new_id = record_interaction(
+                conn,
+                document_id=doc_id,
+                action=action,
+                source="mcp",
+                graph_retrieved=graph_retrieved,
+            )
+    except InteractionError as exc:
+        # Shape / enum guard tripped (caller-fixable) → INVALID_PARAMS.
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return {
+        "interaction_id": new_id,
+        "action": action,
+        "document_id": doc_id,
+        "graph_retrieved": graph_retrieved,
+    }
 
 
 def _build_note_file_text(
