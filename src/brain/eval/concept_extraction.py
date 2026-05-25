@@ -276,7 +276,7 @@ def load_concept_fixture(path: Path | None = None) -> list[ConceptFixtureDoc]:
           - id: synth-billing-001
             text: "..."
             gold:
-              - {type: org, key: stripe}
+              - {type: org, key: acmepay}
               - {type: topic, key: billing}
 
     Every ``gold.type`` must be one of the four concept types

@@ -18,7 +18,7 @@ Two layers, both against the AGE test instance (port 5434):
 * **Unit** — the pure ``concepts.py`` helpers (``concept_inputs_hash`` /
   ``concept_mention_source``).
 
-All entity names are synthetic (Stripe / Phoenix / Acme / Datadog / Kafka); no
+All entity names are synthetic (Acmepay / Phoenix / Acme / Acmemetrics / Kafka); no
 PII. The schema + AGE graph are reset per test by the ``test_db`` fixture.
 """
 from __future__ import annotations
@@ -375,10 +375,10 @@ def test_concept_single_doc_builds_entities_mentions_edges(
     test_db: psycopg.Connection[Any],
 ) -> None:
     backend = _backend(test_db)
-    doc = _seed_manual_doc(test_db, external_id="n1", content="stripe and phoenix")
+    doc = _seed_manual_doc(test_db, external_id="n1", content="acmepay and phoenix")
     extractor = FakeExtractor(
         default=[
-            _concept("stripe", "tool", positions=(0,)),
+            _concept("acmepay", "tool", positions=(0,)),
             _concept("phoenix", "project", positions=(1,)),
         ]
     )
@@ -397,11 +397,11 @@ def test_concept_single_doc_builds_entities_mentions_edges(
     assert extractor.calls == 1
 
     # Relational source-of-truth.
-    assert _concept_keys(test_db, "default") == {"stripe", "phoenix"}
+    assert _concept_keys(test_db, "default") == {"acmepay", "phoenix"}
     assert _concept_mention_count(test_db, "default") == 2
     assert _contribution_count(test_db, "default") == 1
     # Provenance: source = extractor:<model>@<ver>.
-    assert _concept_mention_source_for(test_db, "default", "stripe") == (
+    assert _concept_mention_source_for(test_db, "default", "acmepay") == (
         f"extractor:{extractor.version}"
     )
 
@@ -453,10 +453,10 @@ def test_concept_idempotent_skip_does_not_re_extract(
     test_db: psycopg.Connection[Any],
 ) -> None:
     backend = _backend(test_db)
-    doc = _seed_manual_doc(test_db, external_id="n1", content="stripe phoenix")
+    doc = _seed_manual_doc(test_db, external_id="n1", content="acmepay phoenix")
     extractor = FakeExtractor(
         default=[
-            _concept("stripe", "tool", positions=(0,)),
+            _concept("acmepay", "tool", positions=(0,)),
             _concept("phoenix", "project", positions=(1,)),
         ]
     )
@@ -474,7 +474,7 @@ def test_concept_idempotent_skip_does_not_re_extract(
     # The unchanged content_hash + extractor version short-circuited BEFORE the
     # LLM call — no second extraction.
     assert extractor.calls == 1
-    assert _concept_keys(test_db, "default") == {"stripe", "phoenix"}
+    assert _concept_keys(test_db, "default") == {"acmepay", "phoenix"}
     assert _age_cooccur_count(test_db, "default") == 1
 
 
@@ -483,9 +483,9 @@ def test_concept_model_swap_re_extracts(
 ) -> None:
     """Bumping the extractor version busts the concept watermark → re-extract."""
     backend = _backend(test_db)
-    doc = _seed_manual_doc(test_db, external_id="n1", content="stripe phoenix")
+    doc = _seed_manual_doc(test_db, external_id="n1", content="acmepay phoenix")
     extractor = FakeExtractor(
-        default=[_concept("stripe", "tool"), _concept("phoenix", "project")]
+        default=[_concept("acmepay", "tool"), _concept("phoenix", "project")]
     )
     reconcile_document(
         test_db, doc, backend=backend, config=_ccfg(), extractor=extractor
@@ -500,7 +500,7 @@ def test_concept_model_swap_re_extracts(
     assert again.skipped is False
     assert extractor.calls == 2
     # Mention provenance refreshed to the new model fingerprint.
-    assert _concept_mention_source_for(test_db, "default", "stripe") == (
+    assert _concept_mention_source_for(test_db, "default", "acmepay") == (
         "extractor:other-model@concepts-v1"
     )
 
@@ -515,14 +515,14 @@ def test_concept_edit_re_extracts_and_rewrites(
     doc = _seed_manual_doc(test_db, external_id="n1", content="MARKER_A body")
     extractor = FakeExtractor(
         by_marker={
-            "MARKER_A": [_concept("stripe", "tool"), _concept("phoenix", "project")],
-            "MARKER_B": [_concept("datadog", "tool")],
+            "MARKER_A": [_concept("acmepay", "tool"), _concept("phoenix", "project")],
+            "MARKER_B": [_concept("acmemetrics", "tool")],
         }
     )
     reconcile_document(
         test_db, doc, backend=backend, config=_ccfg(), extractor=extractor
     )
-    assert _concept_keys(test_db, "default") == {"stripe", "phoenix"}
+    assert _concept_keys(test_db, "default") == {"acmepay", "phoenix"}
 
     # Edit the content → new content_hash → re-extract with the new marker.
     _set_doc_content(test_db, doc, "MARKER_B body")
@@ -533,9 +533,9 @@ def test_concept_edit_re_extracts_and_rewrites(
     assert result.skipped is False
     assert result.concept_count == 1
     # Old concepts dropped + GC'd; only the new one survives.
-    assert _concept_keys(test_db, "default") == {"datadog"}
+    assert _concept_keys(test_db, "default") == {"acmemetrics"}
     assert _concept_mention_count(test_db, "default") == 1
-    # datadog alone → no co-occurrence edge.
+    # acmemetrics alone → no co-occurrence edge.
     assert _contribution_count(test_db, "default") == 0
     assert _age_concept_count(test_db, "default") == 1
     assert _age_cooccur_count(test_db, "default") == 0
@@ -548,14 +548,14 @@ def test_remove_document_cleans_concepts(
     test_db: psycopg.Connection[Any],
 ) -> None:
     backend = _backend(test_db)
-    doc = _seed_manual_doc(test_db, external_id="n1", content="stripe phoenix")
+    doc = _seed_manual_doc(test_db, external_id="n1", content="acmepay phoenix")
     extractor = FakeExtractor(
-        default=[_concept("stripe", "tool"), _concept("phoenix", "project")]
+        default=[_concept("acmepay", "tool"), _concept("phoenix", "project")]
     )
     reconcile_document(
         test_db, doc, backend=backend, config=_ccfg(), extractor=extractor
     )
-    assert _concept_keys(test_db, "default") == {"stripe", "phoenix"}
+    assert _concept_keys(test_db, "default") == {"acmepay", "phoenix"}
 
     result = remove_document(test_db, doc, backend=backend, config=_ccfg())
 
@@ -580,10 +580,10 @@ def test_concept_batched_build_equals_incremental(
     backend = _backend(test_db)
     doc1 = _seed_manual_doc(test_db, external_id="n1", content="MARK1 body")
     doc2 = _seed_manual_doc(test_db, external_id="n2", content="MARK2 body")
-    # Two docs sharing one concept (stripe) so an aggregate edge forms across docs.
+    # Two docs sharing one concept (acmepay) so an aggregate edge forms across docs.
     canned = {
-        "MARK1": [_concept("stripe", "tool"), _concept("phoenix", "project")],
-        "MARK2": [_concept("stripe", "tool"), _concept("datadog", "tool")],
+        "MARK1": [_concept("acmepay", "tool"), _concept("phoenix", "project")],
+        "MARK2": [_concept("acmepay", "tool"), _concept("acmemetrics", "tool")],
     }
 
     # Batched backfill into tenant "batch".
@@ -605,7 +605,7 @@ def test_concept_batched_build_equals_incremental(
         )
 
     assert _concept_keys(test_db, "batch") == _concept_keys(test_db, "incr")
-    assert _concept_keys(test_db, "batch") == {"stripe", "phoenix", "datadog"}
+    assert _concept_keys(test_db, "batch") == {"acmepay", "phoenix", "acmemetrics"}
     assert _concept_mention_count(test_db, "batch") == _concept_mention_count(
         test_db, "incr"
     )
@@ -625,16 +625,16 @@ def test_concept_batched_build_equals_incremental(
 # --------------------------------------------------------------------------- #
 def test_concept_tenant_isolation(test_db: psycopg.Connection[Any]) -> None:
     backend = _backend(test_db)
-    doc = _seed_manual_doc(test_db, external_id="n1", content="stripe phoenix")
+    doc = _seed_manual_doc(test_db, external_id="n1", content="acmepay phoenix")
     extractor = FakeExtractor(
-        default=[_concept("stripe", "tool"), _concept("phoenix", "project")]
+        default=[_concept("acmepay", "tool"), _concept("phoenix", "project")]
     )
 
     reconcile_document(
         test_db, doc, backend=backend, config=_ccfg("tenant-a"), extractor=extractor
     )
 
-    assert _concept_keys(test_db, "tenant-a") == {"stripe", "phoenix"}
+    assert _concept_keys(test_db, "tenant-a") == {"acmepay", "phoenix"}
     assert _concept_keys(test_db, "tenant-b") == set()
     assert _age_concept_count(test_db, "tenant-a") == 2
     assert _age_concept_count(test_db, "tenant-b") == 0
@@ -642,7 +642,7 @@ def test_concept_tenant_isolation(test_db: psycopg.Connection[Any]) -> None:
     # Removing the doc from tenant-b (where it was never indexed) is a no-op for
     # tenant-a.
     remove_document(test_db, doc, backend=backend, config=_ccfg("tenant-b"))
-    assert _concept_keys(test_db, "tenant-a") == {"stripe", "phoenix"}
+    assert _concept_keys(test_db, "tenant-a") == {"acmepay", "phoenix"}
     assert _age_concept_count(test_db, "tenant-a") == 2
 
 
@@ -659,10 +659,10 @@ def test_person_and_concept_aspects_coexist(
         test_db,
         external_id="m1",
         participants=[("alice", "alice@x.com"), ("bob", "bob@x.com")],
-        content="stripe phoenix",
+        content="acmepay phoenix",
     )
     extractor = FakeExtractor(
-        default=[_concept("stripe", "tool"), _concept("phoenix", "project")]
+        default=[_concept("acmepay", "tool"), _concept("phoenix", "project")]
     )
 
     result = reconcile_document(
@@ -672,9 +672,9 @@ def test_person_and_concept_aspects_coexist(
     assert result.person_count == 2
     assert result.concept_count == 2
     # 4 entities total (2 persons + 2 concepts); 4 mentions; 2 contributions
-    # (alice-bob person pair + stripe-phoenix concept pair — never crossed).
+    # (alice-bob person pair + acmepay-phoenix concept pair — never crossed).
     assert _person_keys(test_db, "default") == {"alice", "bob"}
-    assert _concept_keys(test_db, "default") == {"stripe", "phoenix"}
+    assert _concept_keys(test_db, "default") == {"acmepay", "phoenix"}
     assert _mention_count(test_db, "default") == 4
     assert _contribution_count(test_db, "default") == 2
     # AGE: combined MENTIONED_IN = 4 (one Document vertex, 4 entity→doc edges);
@@ -696,10 +696,10 @@ def test_person_only_reconcile_does_not_clobber_existing_concepts(
         test_db,
         external_id="m1",
         participants=[("alice", "alice@x.com")],
-        content="stripe phoenix",
+        content="acmepay phoenix",
     )
     extractor = FakeExtractor(
-        default=[_concept("stripe", "tool"), _concept("phoenix", "project")]
+        default=[_concept("acmepay", "tool"), _concept("phoenix", "project")]
     )
     # First pass: both aspects (1 person, 2 concepts).
     reconcile_document(
@@ -727,7 +727,7 @@ def test_person_only_reconcile_does_not_clobber_existing_concepts(
     assert extractor.calls == 1
     assert result.person_count == 2
     assert _person_keys(test_db, "default") == {"alice", "bob"}
-    assert _concept_keys(test_db, "default") == {"stripe", "phoenix"}
+    assert _concept_keys(test_db, "default") == {"acmepay", "phoenix"}
     # Combined MENTIONED_IN rebuilt intact: 2 persons + 2 concepts = 4 (the
     # concept edges were NOT clobbered by the person-only rewrite).
     assert _age_mentioned_in_count(test_db, "default") == 4
@@ -742,8 +742,8 @@ def test_concepts_disabled_ignores_extractor(
 ) -> None:
     """With concepts_enabled=False, an injected extractor is never used."""
     backend = _backend(test_db)
-    doc = _seed_manual_doc(test_db, external_id="n1", content="stripe phoenix")
-    extractor = FakeExtractor(default=[_concept("stripe", "tool")])
+    doc = _seed_manual_doc(test_db, external_id="n1", content="acmepay phoenix")
+    extractor = FakeExtractor(default=[_concept("acmepay", "tool")])
 
     result = reconcile_document(
         test_db,
@@ -809,18 +809,18 @@ def test_cli_build_concepts_flag(
     boundary), so we swap the FACTORY with a fake via ``monkeypatch.setattr`` — a
     standard test double (CLAUDE.md rule 13), not production monkey-patching.
     """
-    _seed_manual_doc(test_db, external_id="n1", content="stripe phoenix")
-    _seed_manual_doc(test_db, external_id="n2", content="stripe datadog")
+    _seed_manual_doc(test_db, external_id="n1", content="acmepay phoenix")
+    _seed_manual_doc(test_db, external_id="n2", content="acmepay acmemetrics")
 
     fake = FakeExtractor(
         by_marker={
-            "stripe phoenix": [
-                _concept("stripe", "tool"),
+            "acmepay phoenix": [
+                _concept("acmepay", "tool"),
                 _concept("phoenix", "project"),
             ],
-            "stripe datadog": [
-                _concept("stripe", "tool"),
-                _concept("datadog", "tool"),
+            "acmepay acmemetrics": [
+                _concept("acmepay", "tool"),
+                _concept("acmemetrics", "tool"),
             ],
         }
     )
@@ -834,7 +834,7 @@ def test_cli_build_concepts_flag(
     assert res.exit_code == 0, res.output
     assert "people + concepts aspect" in res.output
     assert "graphrag build: 2 processed" in res.output
-    assert _concept_keys(test_db, "default") == {"stripe", "phoenix", "datadog"}
+    assert _concept_keys(test_db, "default") == {"acmepay", "phoenix", "acmemetrics"}
     assert _age_concept_count(test_db, "default") == 3
     assert _watermark_count(test_db, "default", CONCEPTS_ASPECT) == 2
 
@@ -843,7 +843,7 @@ def test_cli_build_default_off_skips_concepts(
     test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without --concepts (and env off), the build is person-only."""
-    _seed_manual_doc(test_db, external_id="n1", content="stripe phoenix")
+    _seed_manual_doc(test_db, external_id="n1", content="acmepay phoenix")
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setenv("BRAIN_GRAPH_GENERIC_DF", "1.0")
     # The concept env gate stays off via the session-autouse
@@ -863,9 +863,9 @@ def test_cli_build_env_gate_includes_concepts(
     test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """BRAIN_GRAPH_CONCEPTS=true includes concepts even without the flag."""
-    _seed_manual_doc(test_db, external_id="n1", content="stripe phoenix")
+    _seed_manual_doc(test_db, external_id="n1", content="acmepay phoenix")
     fake = FakeExtractor(
-        default=[_concept("stripe", "tool"), _concept("phoenix", "project")]
+        default=[_concept("acmepay", "tool"), _concept("phoenix", "project")]
     )
     monkeypatch.setattr(
         "brain.graph_rag.extract.make_extractor", lambda cfg: fake
@@ -877,7 +877,7 @@ def test_cli_build_env_gate_includes_concepts(
     res = CliRunner().invoke(app, ["graphrag", "build", "--backfill"])
     assert res.exit_code == 0, res.output
     assert "people + concepts aspect" in res.output
-    assert _concept_keys(test_db, "default") == {"stripe", "phoenix"}
+    assert _concept_keys(test_db, "default") == {"acmepay", "phoenix"}
 
 
 # --------------------------------------------------------------------------- #

@@ -8,7 +8,7 @@ the pure scorers in :mod:`brain.eval.graph_retrieval`.
 
 Corpus shape: a synthetic person **Dana Lee** (with an owner co-participant)
 appears across six documents spanning two disjoint topic clusters —
-``{pricing, billing, stripe}`` and ``{roadmap, analytics}``. Concepts come from
+``{pricing, billing, acmepay}`` and ``{roadmap, analytics}``. Concepts come from
 a deterministic fake extractor keyed on a per-document marker substring (no
 Ollama). This is the same construction the headline themes integration test
 uses, generalized into a reusable fixture.
@@ -32,7 +32,7 @@ CONCEPT_MARKERS: dict[str, list[tuple[str, str, str]]] = {
     "PRICING": [
         ("topic", "pricing", "Pricing"),
         ("topic", "billing", "Billing"),
-        ("org", "stripe", "Stripe"),
+        ("org", "acmepay", "Acmepay"),
     ],
     "ROADMAP": [
         ("topic", "roadmap", "Roadmap"),
@@ -95,7 +95,7 @@ class GraphThemesCase:
 
 
 # Local queries: "pricing" seeds the pricing topic and (via CO_OCCURS) reaches
-# billing + stripe, so the three PRICING-cluster docs should rank.
+# billing + acmepay, so the three PRICING-cluster docs should rank.
 LOCAL_CASES: tuple[GraphLocalCase, ...] = (
     GraphLocalCase(
         query="pricing",
@@ -112,7 +112,7 @@ THEMES_CASES: tuple[GraphThemesCase, ...] = (
     GraphThemesCase(
         person="dana lee",
         expected_theme_keysets=(
-            frozenset({"pricing", "billing", "stripe"}),
+            frozenset({"pricing", "billing", "acmepay"}),
             frozenset({"roadmap", "analytics"}),
         ),
     ),

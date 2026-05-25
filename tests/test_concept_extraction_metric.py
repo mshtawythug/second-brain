@@ -30,8 +30,8 @@ from brain.eval.errors import EvalCorpusError, EvalMetricError
 # normalize_concept_pairs — canonicalization, type-awareness, people-exclusion
 # --------------------------------------------------------------------------- #
 def test_normalize_lowercases_and_collapses_whitespace() -> None:
-    out = normalize_concept_pairs([("ORG", "  Stripe   Inc "), ("Topic", "Billing")])
-    assert out == {("org", "stripe inc"), ("topic", "billing")}
+    out = normalize_concept_pairs([("ORG", "  Acmepay   Inc "), ("Topic", "Billing")])
+    assert out == {("org", "acmepay inc"), ("topic", "billing")}
 
 
 def test_normalize_excludes_people() -> None:
@@ -50,15 +50,15 @@ def test_normalize_drops_empty_type_or_key() -> None:
 
 
 def test_normalize_dedups() -> None:
-    out = normalize_concept_pairs([("org", "Stripe"), ("ORG", "stripe")])
-    assert out == {("org", "stripe")}
+    out = normalize_concept_pairs([("org", "Acmepay"), ("ORG", "acmepay")])
+    assert out == {("org", "acmepay")}
 
 
 # --------------------------------------------------------------------------- #
 # concept_set_micro_f1 — exact numbers
 # --------------------------------------------------------------------------- #
 def test_perfect_prediction_scores_one() -> None:
-    gold = [[("org", "stripe"), ("topic", "billing")], [("topic", "roadmap")]]
+    gold = [[("org", "acmepay"), ("topic", "billing")], [("topic", "roadmap")]]
     report = concept_set_micro_f1(predicted_per_doc=gold, gold_per_doc=gold)
     assert report.precision == 1.0
     assert report.recall == 1.0
@@ -71,14 +71,14 @@ def test_perfect_prediction_scores_one() -> None:
 
 
 def test_mixed_prediction_exact_micro_numbers() -> None:
-    # Doc1: TP=stripe, FP=pricing, FN=billing.
+    # Doc1: TP=acmepay, FP=pricing, FN=billing.
     # Doc2: TP=roadmap, FP=analytics, FN=0.
     predicted = [
-        [("org", "stripe"), ("topic", "pricing")],
+        [("org", "acmepay"), ("topic", "pricing")],
         [("topic", "roadmap"), ("topic", "analytics")],
     ]
     gold = [
-        [("org", "stripe"), ("topic", "billing")],
+        [("org", "acmepay"), ("topic", "billing")],
         [("topic", "roadmap")],
     ]
     report = concept_set_micro_f1(predicted_per_doc=predicted, gold_per_doc=gold)
@@ -118,8 +118,8 @@ def test_people_excluded_from_scoring() -> None:
 def test_invalid_doc_counts_toward_rate_and_ignores_predictions() -> None:
     # Doc2 is flagged invalid: even though its predicted pair MATCHES gold, it is
     # ignored (treated as empty) → that gold pair becomes a false negative.
-    predicted = [[("org", "stripe")], [("topic", "billing")]]
-    gold = [[("org", "stripe")], [("topic", "billing")]]
+    predicted = [[("org", "acmepay")], [("topic", "billing")]]
+    gold = [[("org", "acmepay")], [("topic", "billing")]]
     report = concept_set_micro_f1(
         predicted_per_doc=predicted,
         gold_per_doc=gold,
@@ -127,7 +127,7 @@ def test_invalid_doc_counts_toward_rate_and_ignores_predictions() -> None:
     )
     assert report.n_invalid_docs == 1
     assert report.invalid_json_or_schema_rate == 0.5
-    assert report.true_positives == 1  # only doc1's stripe
+    assert report.true_positives == 1  # only doc1's acmepay
     assert report.false_negatives == 1  # doc2's billing
     assert report.false_positives == 0
     assert report.passes is False  # invalid_rate > 0 fails the gate
@@ -151,16 +151,16 @@ def test_empty_corpus_raises() -> None:
 def test_length_mismatch_raises() -> None:
     with pytest.raises(EvalMetricError, match="length mismatch"):
         concept_set_micro_f1(
-            predicted_per_doc=[[("org", "stripe")]],
-            gold_per_doc=[[("org", "stripe")], [("topic", "billing")]],
+            predicted_per_doc=[[("org", "acmepay")]],
+            gold_per_doc=[[("org", "acmepay")], [("topic", "billing")]],
         )
 
 
 def test_invalid_flags_length_mismatch_raises() -> None:
     with pytest.raises(EvalMetricError, match="invalid_doc_flags length mismatch"):
         concept_set_micro_f1(
-            predicted_per_doc=[[("org", "stripe")]],
-            gold_per_doc=[[("org", "stripe")]],
+            predicted_per_doc=[[("org", "acmepay")]],
+            gold_per_doc=[[("org", "acmepay")]],
             invalid_doc_flags=[False, False],
         )
 
@@ -231,7 +231,7 @@ def test_load_shipped_fixture_parses_synthetic_docs() -> None:
     assert all(isinstance(d, ConceptFixtureDoc) for d in docs)
     first = next(d for d in docs if d.doc_id == "synth-billing-001")
     # Gold is canonicalized + sorted; all four concept types only (no person).
-    assert ("org", "stripe") in first.gold_concepts
+    assert ("org", "acmepay") in first.gold_concepts
     assert ("topic", "billing") in first.gold_concepts
     assert list(first.gold_concepts) == sorted(first.gold_concepts)
     for doc in docs:

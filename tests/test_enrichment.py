@@ -253,18 +253,18 @@ def test_summarize_empty_summary_string_raises_enrichment_error() -> None:
 
 def test_propose_tags_returns_partitioned_existing_and_new() -> None:
     transport = httpx.MockTransport(
-        lambda req: _ok_tags(["interview-prep", "person-b", "stripe"])
+        lambda req: _ok_tags(["interview-prep", "person-b", "acmepay"])
     )
     enricher = _make_enricher(transport)
     out = enricher.propose_tags(
         title="t",
         summary="s",
-        existing_vocab=["interview-prep", "stripe"],
+        existing_vocab=["interview-prep", "acmepay"],
         current_tags=[],
         max_new=5,
     )
     assert isinstance(out, TagProposal)
-    assert out.existing == ["interview-prep", "stripe"]
+    assert out.existing == ["interview-prep", "acmepay"]
     assert out.new == ["person-b"]
 
 

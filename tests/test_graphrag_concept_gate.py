@@ -75,7 +75,7 @@ def test_concept_extractor_gate(caplog: pytest.LogCaptureFixture) -> None:
         timeout=cfg.enrich_timeout_seconds,
     )
     try:
-        probe.extract_entities("Stripe billing and pricing for Project Aurora.")
+        probe.extract_entities("Acmepay billing and pricing for Project Aurora.")
     except OllamaUnavailable as exc:
         pytest.skip(f"Ollama / extract model {cfg.graph_extract_model!r} unreachable: {exc}")
     except EnrichmentError:
@@ -160,7 +160,7 @@ def test_concept_extractor_no_leakage_on_sparse_docs(
         timeout=cfg.enrich_timeout_seconds,
     )
     try:
-        probe.extract_entities("Acme Pay billing and pricing for Project Aurora.")
+        probe.extract_entities("Acmepay billing and pricing for Project Aurora.")
     except OllamaUnavailable as exc:
         pytest.skip(
             f"Ollama / extract model {cfg.graph_extract_model!r} unreachable: {exc}"

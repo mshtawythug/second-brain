@@ -85,11 +85,11 @@ def _extractor(handler: _Handler, **kwargs: object) -> OllamaExtractor:
 
 
 def test_extract_returns_canonicalized_entities_with_positions() -> None:
-    text = "We migrated Stripe billing for Project Phoenix. Stripe was central."
+    text = "We migrated Acmepay billing for Project Phoenix. Acmepay was central."
     handler = _const_handler(
         _ok_entities(
             [
-                {"name": "Stripe", "type": "org"},
+                {"name": "Acmepay", "type": "org"},
                 {"name": "Project Phoenix", "type": "project"},
             ]
         )
@@ -97,16 +97,16 @@ def test_extract_returns_canonicalized_entities_with_positions() -> None:
     out = _extractor(handler).extract(text)
 
     assert [(e.entity_type, e.canonical_key) for e in out] == [
-        ("org", "stripe"),
+        ("org", "acmepay"),
         ("project", "project phoenix"),
     ]
-    stripe = next(e for e in out if e.canonical_key == "stripe")
+    acmepay = next(e for e in out if e.canonical_key == "acmepay")
     phoenix = next(e for e in out if e.canonical_key == "project phoenix")
-    # doc words: we migrated stripe billing for project phoenix stripe was central
+    # doc words: we migrated acmepay billing for project phoenix acmepay was central
     #            0  1        2      3       4   5       6       7      8   9
-    assert stripe.positions == (2, 7)
-    assert stripe.mention_count == 2
-    assert stripe.display_name == "Stripe"  # surface form preserved
+    assert acmepay.positions == (2, 7)
+    assert acmepay.mention_count == 2
+    assert acmepay.display_name == "Acmepay"  # surface form preserved
     assert phoenix.positions == (5,)
     assert phoenix.mention_count == 1
 
@@ -123,7 +123,7 @@ def test_extract_drops_name_absent_from_text() -> None:
     """v3 presence validation: a concept the model named but that does NOT appear
     in the source text at all is dropped (kills few-shot prompt-example leakage /
     paraphrased hallucinations)."""
-    handler = _const_handler(_ok_entities([{"name": "Kubernetes", "type": "tool"}]))
+    handler = _const_handler(_ok_entities([{"name": "Helmsman", "type": "tool"}]))
     out = _extractor(handler).extract("We discussed container orchestration broadly.")
     assert out == []
 
@@ -149,16 +149,16 @@ def test_extract_dedups_by_entity_type_and_canonical_key() -> None:
     handler = _const_handler(
         _ok_entities(
             [
-                {"name": "Stripe", "type": "org"},
-                {"name": "stripe", "type": "org"},
-                {"name": "STRIPE", "type": "org"},
+                {"name": "Acmepay", "type": "org"},
+                {"name": "acmepay", "type": "org"},
+                {"name": "ACMEPAY", "type": "org"},
             ]
         )
     )
-    out = _extractor(handler).extract("Stripe Stripe Stripe")
+    out = _extractor(handler).extract("Acmepay Acmepay Acmepay")
     assert len(out) == 1
-    assert out[0].canonical_key == "stripe"
-    assert out[0].display_name == "Stripe"  # first-seen surface form
+    assert out[0].canonical_key == "acmepay"
+    assert out[0].display_name == "Acmepay"  # first-seen surface form
 
 
 def test_extract_collapses_same_key_across_types_to_highest_precedence() -> None:
@@ -184,12 +184,12 @@ def test_extract_excludes_people_and_unknown_types() -> None:
             [
                 {"name": "Person X", "type": "person"},  # excluded — people pipeline
                 {"name": "2026-05-21", "type": "date"},  # unknown type
-                {"name": "Datadog", "type": "tool"},  # kept
+                {"name": "Acmemetrics", "type": "tool"},  # kept
             ]
         )
     )
-    out = _extractor(handler).extract("Person X used Datadog on 2026-05-21")
-    assert [(e.entity_type, e.canonical_key) for e in out] == [("tool", "datadog")]
+    out = _extractor(handler).extract("Person X used Acmemetrics on 2026-05-21")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("tool", "acmemetrics")]
 
 
 # --------------------------------------------------------------------------- #
@@ -235,13 +235,13 @@ def test_extract_chunks_long_input_and_merges_results() -> None:
     results merge + dedup across chunks."""
     from brain.ingest.chunker import chunk_text
 
-    text = " ".join(["stripe billing notes"] * 80)
+    text = " ".join(["acmepay billing notes"] * 80)
     call_count = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal call_count
         call_count += 1
-        return _ok_entities([{"name": "Stripe", "type": "org"}])
+        return _ok_entities([{"name": "Acmepay", "type": "org"}])
 
     enricher = _enricher(handler)
     extractor = OllamaExtractor(
@@ -259,7 +259,7 @@ def test_extract_chunks_long_input_and_merges_results() -> None:
     assert expected_chunks > 1  # the input really was split
     assert call_count == expected_chunks  # one model call per chunk
     assert len(out) == 1  # deduped across chunks
-    assert out[0].canonical_key == "stripe"
+    assert out[0].canonical_key == "acmepay"
 
 
 def test_extract_empty_text_makes_no_model_call() -> None:
@@ -286,13 +286,13 @@ def test_extract_caps_input_before_chunking_reduces_calls() -> None:
     the uncapped whole document."""
     from brain.ingest.chunker import chunk_text
 
-    text = " ".join(["acme pay billing notes"] * 200)  # long: many chunks at tt=10
+    text = " ".join(["acmepay billing notes"] * 200)  # long: many chunks at tt=10
     call_count = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal call_count
         call_count += 1
-        return _ok_entities([{"name": "Acme Pay", "type": "org"}])
+        return _ok_entities([{"name": "Acmepay", "type": "org"}])
 
     enricher = _enricher(handler)
     extractor = OllamaExtractor(
@@ -324,31 +324,31 @@ def test_extract_caps_input_before_chunking_reduces_calls() -> None:
     out = extractor.extract(text)
     assert capped_chunks < uncapped_chunks  # the cap really trimmed the tail
     assert call_count == capped_chunks  # one model call per capped chunk
-    assert [e.canonical_key for e in out] == ["acme pay"]
+    assert [e.canonical_key for e in out] == ["acmepay"]
 
 
 def test_extract_under_cap_processes_whole_document() -> None:
     """A document shorter than the cap is extracted in full — the cap is a no-op
     (identical result to the uncapped extractor, single model call)."""
-    text = "We migrated Acme Pay billing for Project Phoenix."
+    text = "We migrated Acmepay billing for Project Phoenix."
     calls_capped = 0
     calls_uncapped = 0
 
     def capped_handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls_capped
         calls_capped += 1
-        return _ok_entities([{"name": "Acme Pay", "type": "org"}])
+        return _ok_entities([{"name": "Acmepay", "type": "org"}])
 
     def uncapped_handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls_uncapped
         calls_uncapped += 1
-        return _ok_entities([{"name": "Acme Pay", "type": "org"}])
+        return _ok_entities([{"name": "Acmepay", "type": "org"}])
 
     capped = _extractor(capped_handler, max_input_tokens=10_000).extract(text)
     uncapped = _extractor(uncapped_handler).extract(text)
     assert capped == uncapped  # a generous cap does not change the output
     assert calls_capped == 1 == calls_uncapped  # single chunk either way
-    assert [e.canonical_key for e in capped] == ["acme pay"]
+    assert [e.canonical_key for e in capped] == ["acmepay"]
 
 
 def test_extract_cap_disabled_processes_whole_document() -> None:
@@ -356,13 +356,13 @@ def test_extract_cap_disabled_processes_whole_document() -> None:
     the whole long document is processed."""
     from brain.ingest.chunker import chunk_text
 
-    text = " ".join(["acme pay billing notes"] * 200)
+    text = " ".join(["acmepay billing notes"] * 200)
     call_count = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal call_count
         call_count += 1
-        return _ok_entities([{"name": "Acme Pay", "type": "org"}])
+        return _ok_entities([{"name": "Acmepay", "type": "org"}])
 
     enricher = _enricher(handler)
     extractor = OllamaExtractor(
@@ -512,11 +512,11 @@ def test_enricher_extract_entities_passes_raw_list_and_sets_num_predict() -> Non
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request.read())
-        return _ok_entities([{"name": "Stripe", "type": "org"}])
+        return _ok_entities([{"name": "Acmepay", "type": "org"}])
 
     enricher = _enricher(handler)
     raw = enricher.extract_entities("some text")
-    assert raw == [{"name": "Stripe", "type": "org"}]
+    assert raw == [{"name": "Acmepay", "type": "org"}]
     body = json.loads(captured[0])
     assert body["format"] == "json"
     assert body["options"]["num_predict"] == 1024  # extraction budget, not 256
@@ -539,7 +539,7 @@ def test_summarize_group_returns_summary() -> None:
     enricher = _enricher(handler)
     out = enricher.summarize_group(
         person="Pat Synth",
-        entity_names=["stripe", "billing"],
+        entity_names=["acmepay", "billing"],
         doc_titles=["Q2 billing review"],
     )
     assert out == "Recurring billing-platform work."
@@ -554,7 +554,7 @@ def test_summarize_group_returns_none_and_warns_on_connect_error(
     enricher = _enricher(handler)
     with caplog.at_level(logging.WARNING, logger="brain.enrichment"):
         out = enricher.summarize_group(
-            person=None, entity_names=["stripe"], doc_titles=[]
+            person=None, entity_names=["acmepay"], doc_titles=[]
         )
     assert out is None
     assert "summary=None" in caplog.text
@@ -871,7 +871,7 @@ def test_extract_presence_keeps_present_drops_absent() -> None:
     handler = _const_handler(
         _ok_entities(
             [
-                {"name": "Acme Metrics", "type": "tool"},  # present -> kept
+                {"name": "Acmemetrics", "type": "tool"},  # present -> kept
                 {"name": "Glasswing", "type": "org"},  # absent -> dropped
                 {"name": "observability", "type": "topic"},  # present -> kept
                 {"name": "Quillbase", "type": "tool"},  # absent -> dropped
@@ -879,10 +879,10 @@ def test_extract_presence_keeps_present_drops_absent() -> None:
         )
     )
     out = _extractor(handler).extract(
-        "We rolled out Acme Metrics dashboards to improve observability."
+        "We rolled out Acmemetrics dashboards to improve observability."
     )
     assert [(e.entity_type, e.canonical_key) for e in out] == [
-        ("tool", "acme metrics"),
+        ("tool", "acmemetrics"),
         ("topic", "observability"),
     ]
 

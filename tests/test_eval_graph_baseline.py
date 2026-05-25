@@ -57,8 +57,8 @@ def _themes_result(
 ) -> GraphThemesEvalResult:
     return GraphThemesEvalResult(
         person=person,
-        expected_theme_keysets=[["billing", "pricing", "stripe"], ["analytics", "roadmap"]],
-        actual_theme_keysets=[["billing", "pricing", "stripe"], ["analytics", "roadmap"]],
+        expected_theme_keysets=[["billing", "pricing", "acmepay"], ["analytics", "roadmap"]],
+        actual_theme_keysets=[["billing", "pricing", "acmepay"], ["analytics", "roadmap"]],
         precision=precision,
         recall=recall,
         f1=f1,
@@ -137,7 +137,7 @@ def test_save_load_roundtrip(tmp_path: Path) -> None:
     assert {r.mode for r in loaded.doc_results} == {"local", "fuse"}
     # Keysets round-trip as lists, preserving order.
     assert loaded.themes_results[0].expected_theme_keysets == [
-        ["billing", "pricing", "stripe"],
+        ["billing", "pricing", "acmepay"],
         ["analytics", "roadmap"],
     ]
 

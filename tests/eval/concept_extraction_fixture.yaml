@@ -13,12 +13,12 @@ version: 1
 docs:
   - id: synth-billing-001
     text: >
-      We finished the migration of our billing platform onto Stripe this
+      We finished the migration of our billing platform onto Acmepay this
       sprint. Project Aurora handled the subscription invoicing logic, and the
       whole effort was tracked in Jira. Pricing tiers were re-modeled to support
       usage-based billing.
     gold:
-      - {type: org, key: stripe}
+      - {type: org, key: acmepay}
       - {type: project, key: project aurora}
       - {type: tool, key: jira}
       - {type: topic, key: billing}
@@ -26,13 +26,13 @@ docs:
 
   - id: synth-infra-002
     text: >
-      The platform team moved our container workloads to Kubernetes and added
-      Datadog dashboards for observability. Project Helios is the umbrella
+      The platform team moved our container workloads to Helmsman and added
+      Acmemetrics dashboards for observability. Project Helios is the umbrella
       initiative covering the migration. Latency and reliability were the main
       topics in the review.
     gold:
-      - {type: tool, key: kubernetes}
-      - {type: tool, key: datadog}
+      - {type: tool, key: helmsman}
+      - {type: tool, key: acmemetrics}
       - {type: project, key: project helios}
       - {type: topic, key: observability}
       - {type: topic, key: reliability}
@@ -92,11 +92,11 @@ docs:
   - id: synth-payments-007
     text: >
       We integrated PayPal as a secondary payment provider alongside the
-      existing Stripe setup. Project Aurora extended its checkout flow.
+      existing Acmepay setup. Project Aurora extended its checkout flow.
       Fraud prevention and chargebacks dominated the discussion.
     gold:
       - {type: org, key: paypal}
-      - {type: org, key: stripe}
+      - {type: org, key: acmepay}
       - {type: project, key: project aurora}
       - {type: topic, key: fraud prevention}
       # Gold-label correction (Codex QA): the doc states "Fraud prevention and
