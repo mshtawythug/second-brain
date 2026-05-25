@@ -270,16 +270,34 @@ class OllamaEnricher:
         """Return the number of tokens in ``text`` per ``cl100k_base``."""
         return len(self._tokenizer.encode(text))
 
-    def _truncate_to_budget(self, text: str) -> str:
-        """Return the head of ``text`` truncated to ``self._max_input_tokens``.
+    def truncate_to_tokens(self, text: str, max_tokens: int) -> str:
+        """Return the head of ``text`` truncated to its first ``max_tokens`` tokens.
 
-        Head-only: the opening of a doc is the highest-signal portion for
-        transcripts, emails, and notes alike. Cheap (one encode + decode).
+        Head-only truncation using the SAME ``cl100k_base`` tokenizer as
+        :meth:`count_tokens`, so a caller's truncation boundary is consistent with
+        the chunk budgeting that also goes through ``count_tokens`` — the concept
+        extractor's input head cap (perf Fix C, 2026-05-24) reuses this so its cap
+        and its per-chunk token sizing agree. The full text is returned unchanged
+        when it already fits. ``max_tokens`` must be positive. Cheap: one encode +
+        one decode.
         """
+        if max_tokens < 1:
+            raise ValueError(
+                f"max_tokens must be a positive integer (got {max_tokens})"
+            )
         ids = self._tokenizer.encode(text)
-        if len(ids) <= self._max_input_tokens:
+        if len(ids) <= max_tokens:
             return text
-        return self._tokenizer.decode(ids[: self._max_input_tokens])
+        return self._tokenizer.decode(ids[:max_tokens])
+
+    def _truncate_to_budget(self, text: str) -> str:
+        """Truncate ``text`` to this enricher's summary input budget (head-only).
+
+        Delegates to :meth:`truncate_to_tokens` with ``self._max_input_tokens``
+        (the per-instance summary cap, default 4000): the opening of a doc is the
+        highest-signal portion for transcripts, emails, and notes alike.
+        """
+        return self.truncate_to_tokens(text, self._max_input_tokens)
 
     def summarize(self, title: str, content: str) -> SummaryResult:
         """Return a 2-3 sentence summary of ``content``.

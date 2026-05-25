@@ -78,7 +78,7 @@ def concept_mention_source(extractor_version: str) -> str:
     """``graph_entity_mentions.source`` provenance for concepts (spec §5a).
 
     ``"extractor:<model>@<ver>"`` — i.e. ``f"extractor:{extractor.version}"``,
-    where ``extractor.version`` is the ``"<model>@concepts-v3"`` fingerprint
+    where ``extractor.version`` is the ``"<model>@concepts-v4"`` fingerprint
     (:attr:`brain.graph_rag.extract.OllamaExtractor.version`). Distinguishes
     concept mentions from the person pipeline's ``"people"`` source.
     """

@@ -206,6 +206,35 @@ def test_summarize_truncates_input_to_max_tokens() -> None:
     assert enricher.count_tokens(user_content) <= 100 + 20
 
 
+# ---------------------------------------------------------------------------
+# truncate_to_tokens() — the shared head-cap seam (perf Fix C reuses it)
+# ---------------------------------------------------------------------------
+
+
+def test_truncate_to_tokens_head_caps_long_text() -> None:
+    """Head-caps to the first N cl100k_base tokens — the concept extractor's
+    input cap (Fix C) reuses this so its boundary agrees with count_tokens."""
+    enricher = _make_enricher(httpx.MockTransport(lambda _r: _ok_summary("ok")))
+    long = "word " * 500
+    assert enricher.count_tokens(long) > 50
+    capped = enricher.truncate_to_tokens(long, 50)
+    assert capped != long  # it really truncated
+    assert enricher.count_tokens(capped) <= 50
+
+
+def test_truncate_to_tokens_passes_through_short_text() -> None:
+    """Text already within the budget is returned unchanged (no re-encode loss)."""
+    enricher = _make_enricher(httpx.MockTransport(lambda _r: _ok_summary("ok")))
+    short = "just a few words"
+    assert enricher.truncate_to_tokens(short, 1000) == short
+
+
+def test_truncate_to_tokens_rejects_non_positive() -> None:
+    enricher = _make_enricher(httpx.MockTransport(lambda _r: _ok_summary("ok")))
+    with pytest.raises(ValueError, match="max_tokens"):
+        enricher.truncate_to_tokens("some text", 0)
+
+
 def test_summarize_empty_summary_string_raises_enrichment_error() -> None:
     """Whitespace-only summary is treated as a malformed response."""
 

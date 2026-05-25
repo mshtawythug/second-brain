@@ -93,7 +93,13 @@ __all__ = [
 # which feeds ``graph_index_state.extractor_ver`` (spec §7). Bump when the
 # prompt / validation / canonicalization semantics change so reconcile
 # re-extracts affected documents.
-EXTRACTOR_VERSION = "concepts-v3"
+#
+# concepts-v4 (2026-05-24, perf Fix C): the extractor now applies a configurable
+# input head cap (``BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS``, default 8000) BEFORE
+# chunking, so a long document is no longer extracted in full. This changes the
+# extraction output for docs past the cap, so the watermark MUST change to force a
+# ``--backfill`` re-extraction.
+EXTRACTOR_VERSION = "concepts-v4"
 
 # The concept entity types the extractor emits (spec §5 ``entity_type CHECK``
 # minus ``person``). People are derived from the participants pipeline and are
@@ -360,6 +366,7 @@ class OllamaExtractor:
         max_entities: int | None = DEFAULT_MAX_ENTITIES_PER_DOC,
         chunk_target_tokens: int = _DEFAULT_CHUNK_TARGET_TOKENS,
         chunk_overlap_tokens: int = _DEFAULT_CHUNK_OVERLAP_TOKENS,
+        max_input_tokens: int | None = None,
     ) -> None:
         if max_entities is not None and max_entities < 1:
             raise ValueError(
@@ -374,10 +381,20 @@ class OllamaExtractor:
                 "chunk_overlap_tokens must be a non-negative integer "
                 f"(got {chunk_overlap_tokens})"
             )
+        if max_input_tokens is not None and max_input_tokens < 1:
+            raise ValueError(
+                "max_input_tokens must be a positive integer or None "
+                f"(got {max_input_tokens})"
+            )
         self._enricher = enricher
         self._max_entities = max_entities
         self._chunk_target_tokens = chunk_target_tokens
         self._chunk_overlap_tokens = chunk_overlap_tokens
+        # Perf Fix C: head cap (in cl100k_base tokens) applied to the document
+        # body before chunking. ``None`` == no cap (the whole document is
+        # extracted — the historical behavior and the test default). Production
+        # threads ``BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS`` via ``make_extractor``.
+        self._max_input_tokens = max_input_tokens
 
     @property
     def version(self) -> str:
@@ -393,17 +410,30 @@ class OllamaExtractor:
     def extract(self, text: str) -> list[ExtractedEntity]:
         """Extract one document's concept entities. Never raises.
 
-        Chunks ``text``, calls the model once per chunk, validates + collects
-        every well-formed candidate, then dedups on ``(entity_type,
-        canonical_key)``, locates raw-text positions over the whole document,
-        and applies the per-doc cap. On Ollama unavailability the whole
-        extraction returns ``[]`` (+ WARN); a single chunk that returns
+        Optionally head-caps ``text`` to the first ``max_input_tokens`` tokens
+        (perf Fix C; ``None`` = no cap), then chunks it, calls the model once per
+        chunk, validates + collects every well-formed candidate, then dedups on
+        ``(entity_type, canonical_key)``, locates raw-text positions over the
+        (capped) document, and applies the per-doc cap. On Ollama unavailability
+        the whole extraction returns ``[]`` (+ WARN); a single chunk that returns
         malformed JSON is skipped (+ WARN) and the remaining chunks still
         contribute.
         """
         text = text.strip()
         if not text:
             return []
+
+        # Perf Fix C: head-cap the input BEFORE chunking. The model is called once
+        # per chunk, so a long document drives a heavy tail of LLM calls; capping
+        # to the first ``self._max_input_tokens`` tokens bounds that tail. The cap
+        # uses the enricher's tokenizer (the same ``count_tokens`` path the chunker
+        # below budgets with), so the truncation boundary and the chunk sizing
+        # agree. ``None`` disables the cap (whole document extracted). KISS: a
+        # plain HEAD cap — head+tail sampling (to also catch concepts that appear
+        # only deep in a long transcript) is a deliberate FUTURE tuning option, not
+        # built here.
+        if self._max_input_tokens is not None:
+            text = self._enricher.truncate_to_tokens(text, self._max_input_tokens)
 
         # Late import keeps :mod:`brain.graph_rag` import-cheap and avoids pulling
         # the heavy :mod:`brain.ingest` package in at module load (mirrors
@@ -524,13 +554,22 @@ def make_extractor(cfg: Config) -> OllamaExtractor:
     A large document can take more than 60s to extract on a slow model; the old
     hardcoded default timed those out and silently returned zero entities.
     Operators raise ``BRAIN_ENRICH_TIMEOUT_SECONDS`` for slow models.
+
+    The input head cap is threaded from ``cfg.graph_extract_max_input_tokens``
+    (``BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS``, default 8000; ``None`` disables)
+    so a long document's body is truncated to its first N tokens before chunking
+    — bounding the per-document LLM call count (perf Fix C).
     """
     enricher = OllamaEnricher(
         host=cfg.ollama_host,
         model=cfg.graph_extract_model,
         timeout=cfg.enrich_timeout_seconds,
     )
-    return OllamaExtractor(enricher=enricher, max_entities=cfg.graph_max_entities)
+    return OllamaExtractor(
+        enricher=enricher,
+        max_entities=cfg.graph_max_entities,
+        max_input_tokens=cfg.graph_extract_max_input_tokens,
+    )
 
 
 # --------------------------------------------------------------------------- #

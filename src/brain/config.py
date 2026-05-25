@@ -114,6 +114,15 @@ DEFAULT_GRAPH_CONCEPTS = False
 # extractor and the summary enricher stay independently overridable -- ``config``
 # carries no enrich<->graph coupling.
 DEFAULT_GRAPH_EXTRACT_MODEL = "llama3.1:8b"
+# Head-cap (tiktoken ``cl100k_base`` tokens) applied to a document body BEFORE the
+# concept extractor chunks it (perf Fix C, 2026-05-24). The extractor calls the
+# LLM once per ~1500-token chunk, so a long document generates a heavy tail of
+# calls (the perf investigation measured 7.7% of docs driving ~33% of all calls).
+# Capping the input to its first ~5-6 chunks bounds that tail while preserving
+# recall on the bulk; mirrors the summary enricher's input head cap. ``0`` /
+# ``none`` disables the cap (whole document extracted) -- the escape hatch. A
+# generous default of 8000 only trims the extreme tail.
+DEFAULT_GRAPH_EXTRACT_MAX_INPUT_TOKENS = 8000
 DEFAULT_GRAPH_DEPTH = 2  # spec §6 bounded variable-length traversal radius
 DEFAULT_GRAPH_FRONTIER_CAP = 200  # spec §6 LIMIT on entities reached per seed
 DEFAULT_GRAPH_MAX_DEGREE = 50  # Codex ruling Q4 -- per-node expansion fan-out cap
@@ -282,6 +291,11 @@ class Config:
     # five are the hard traversal caps + theme-ranking knob.
     graph_concepts: bool = DEFAULT_GRAPH_CONCEPTS
     graph_extract_model: str = DEFAULT_GRAPH_EXTRACT_MODEL
+    # Concept-extractor input head cap (perf Fix C). ``None`` == no cap (whole
+    # document extracted); a positive int caps the body to its first N
+    # ``cl100k_base`` tokens before chunking. Threaded into
+    # :func:`brain.graph_rag.extract.make_extractor`.
+    graph_extract_max_input_tokens: int | None = DEFAULT_GRAPH_EXTRACT_MAX_INPUT_TOKENS
     graph_depth: int = DEFAULT_GRAPH_DEPTH
     graph_frontier_cap: int = DEFAULT_GRAPH_FRONTIER_CAP
     graph_max_degree: int = DEFAULT_GRAPH_MAX_DEGREE
@@ -658,6 +672,30 @@ class Config:
         else:
             graph_extract_model = graph_extract_model_raw.strip()
 
+        # Concept-extractor input head cap (perf Fix C). ``0`` / ``none`` /
+        # ``unlimited`` disables the cap (maps to ``None``); otherwise a positive
+        # int. Mirrors the ``BRAIN_GRAPH_MAX_ENTITIES_PER_DOC`` sentinel idiom,
+        # additionally accepting ``0`` as the disable token per the perf plan.
+        gem_raw = os.environ.get("BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS")
+        graph_extract_max_input_tokens: int | None
+        if gem_raw is None or gem_raw.strip() == "":
+            graph_extract_max_input_tokens = DEFAULT_GRAPH_EXTRACT_MAX_INPUT_TOKENS
+        elif gem_raw.strip().lower() in {"0", "none", "unlimited"}:
+            graph_extract_max_input_tokens = None
+        else:
+            try:
+                graph_extract_max_input_tokens = int(gem_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS must be a positive integer "
+                    f"or 0/'none' to disable (got {gem_raw!r})"
+                ) from exc
+            if graph_extract_max_input_tokens < 1:
+                raise ConfigError(
+                    "BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS must be a positive integer "
+                    f"or 0/'none' to disable (got {gem_raw!r})"
+                )
+
         graph_depth_raw = os.environ.get("BRAIN_GRAPH_DEPTH")
         if graph_depth_raw is None or graph_depth_raw.strip() == "":
             graph_depth = DEFAULT_GRAPH_DEPTH
@@ -892,6 +930,7 @@ class Config:
             "graph_generic_df_ratio": graph_generic_df_ratio,
             "graph_concepts": graph_concepts,
             "graph_extract_model": graph_extract_model,
+            "graph_extract_max_input_tokens": graph_extract_max_input_tokens,
             "graph_depth": graph_depth,
             "graph_frontier_cap": graph_frontier_cap,
             "graph_max_degree": graph_max_degree,

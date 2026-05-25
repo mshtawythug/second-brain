@@ -276,21 +276,130 @@ def test_extract_empty_text_makes_no_model_call() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Input head cap (perf Fix C): truncate BEFORE chunking to bound LLM calls
+# --------------------------------------------------------------------------- #
+
+
+def test_extract_caps_input_before_chunking_reduces_calls() -> None:
+    """Fix C: with a ``max_input_tokens`` cap, the body is truncated to its first
+    N tokens BEFORE chunking, so fewer chunks (hence fewer LLM calls) run than on
+    the uncapped whole document."""
+    from brain.ingest.chunker import chunk_text
+
+    text = " ".join(["stripe billing notes"] * 200)  # long: many chunks at tt=10
+    call_count = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return _ok_entities([{"name": "Stripe", "type": "org"}])
+
+    enricher = _enricher(handler)
+    extractor = OllamaExtractor(
+        enricher=enricher,
+        chunk_target_tokens=10,
+        chunk_overlap_tokens=0,
+        max_input_tokens=40,
+    )
+    # The extractor strips then head-caps to 40 tokens before chunking, so the
+    # number of chunks (== model calls) is that of the TRUNCATED body, not the
+    # whole document.
+    truncated = enricher.truncate_to_tokens(text.strip(), 40)
+    capped_chunks = len(
+        chunk_text(
+            truncated,
+            target_tokens=10,
+            overlap_tokens=0,
+            count_tokens=enricher.count_tokens,
+        )
+    )
+    uncapped_chunks = len(
+        chunk_text(
+            text.strip(),
+            target_tokens=10,
+            overlap_tokens=0,
+            count_tokens=enricher.count_tokens,
+        )
+    )
+    out = extractor.extract(text)
+    assert capped_chunks < uncapped_chunks  # the cap really trimmed the tail
+    assert call_count == capped_chunks  # one model call per capped chunk
+    assert [e.canonical_key for e in out] == ["stripe"]
+
+
+def test_extract_under_cap_processes_whole_document() -> None:
+    """A document shorter than the cap is extracted in full — the cap is a no-op
+    (identical result to the uncapped extractor, single model call)."""
+    text = "We migrated Stripe billing for Project Phoenix."
+    calls_capped = 0
+    calls_uncapped = 0
+
+    def capped_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls_capped
+        calls_capped += 1
+        return _ok_entities([{"name": "Stripe", "type": "org"}])
+
+    def uncapped_handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls_uncapped
+        calls_uncapped += 1
+        return _ok_entities([{"name": "Stripe", "type": "org"}])
+
+    capped = _extractor(capped_handler, max_input_tokens=10_000).extract(text)
+    uncapped = _extractor(uncapped_handler).extract(text)
+    assert capped == uncapped  # a generous cap does not change the output
+    assert calls_capped == 1 == calls_uncapped  # single chunk either way
+    assert [e.canonical_key for e in capped] == ["stripe"]
+
+
+def test_extract_cap_disabled_processes_whole_document() -> None:
+    """``max_input_tokens=None`` (the default) disables the cap: every chunk of
+    the whole long document is processed."""
+    from brain.ingest.chunker import chunk_text
+
+    text = " ".join(["stripe billing notes"] * 200)
+    call_count = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        return _ok_entities([{"name": "Stripe", "type": "org"}])
+
+    enricher = _enricher(handler)
+    extractor = OllamaExtractor(
+        enricher=enricher,
+        chunk_target_tokens=10,
+        chunk_overlap_tokens=0,
+        max_input_tokens=None,
+    )
+    expected_chunks = len(
+        chunk_text(
+            text.strip(),
+            target_tokens=10,
+            overlap_tokens=0,
+            count_tokens=enricher.count_tokens,
+        )
+    )
+    extractor.extract(text)
+    assert expected_chunks > 1
+    assert call_count == expected_chunks  # no cap -> every chunk processed
+
+
+# --------------------------------------------------------------------------- #
 # Versioning
 # --------------------------------------------------------------------------- #
 
 
 def test_extractor_version_constant_present_and_folds_model() -> None:
-    assert EXTRACTOR_VERSION == "concepts-v3"
+    assert EXTRACTOR_VERSION == "concepts-v4"
     extractor = _extractor(_const_handler(_ok_entities([])))
-    assert extractor.version == "llama3.1:8b@concepts-v3"
+    assert extractor.version == "llama3.1:8b@concepts-v4"
 
 
 def test_extractor_version_changes_with_model() -> None:
     extractor = OllamaExtractor(
         enricher=_enricher(_const_handler(_ok_entities([])), model="custom:7b")
     )
-    assert extractor.version == "custom:7b@concepts-v3"
+    assert extractor.version == "custom:7b@concepts-v4"
 
 
 def test_concept_entity_types_excludes_person() -> None:
@@ -491,13 +600,32 @@ def test_make_extractor_uses_graph_extract_model() -> None:
     cfg = Config(database_url="postgresql://x/y", graph_extract_model="custom:7b")
     extractor = make_extractor(cfg)
     assert isinstance(extractor, OllamaExtractor)
-    assert extractor.version == "custom:7b@concepts-v3"
+    assert extractor.version == "custom:7b@concepts-v4"
 
 
 def test_make_extractor_threads_max_entities() -> None:
     cfg = Config(database_url="postgresql://x/y", graph_max_entities=2)
     extractor = make_extractor(cfg)
     assert extractor._max_entities == 2
+
+
+def test_make_extractor_defaults_input_cap_to_8000() -> None:
+    """Fix C: the generous default input head cap (8000 tokens) is wired by default."""
+    cfg = Config(database_url="postgresql://x/y")
+    assert make_extractor(cfg)._max_input_tokens == 8000
+
+
+def test_make_extractor_threads_max_input_tokens() -> None:
+    cfg = Config(database_url="postgresql://x/y", graph_extract_max_input_tokens=1234)
+    extractor = make_extractor(cfg)
+    assert extractor._max_input_tokens == 1234
+
+
+def test_make_extractor_threads_max_input_tokens_none() -> None:
+    """The disable sentinel (None) flows through to a no-cap extractor."""
+    cfg = Config(database_url="postgresql://x/y", graph_extract_max_input_tokens=None)
+    extractor = make_extractor(cfg)
+    assert extractor._max_input_tokens is None
 
 
 def test_ollama_extractor_satisfies_entity_extractor_protocol() -> None:
@@ -515,6 +643,13 @@ def test_invalid_max_entities_raises_value_error() -> None:
     with pytest.raises(ValueError, match="max_entities"):
         OllamaExtractor(
             enricher=_enricher(_const_handler(_ok_entities([]))), max_entities=0
+        )
+
+
+def test_invalid_max_input_tokens_raises_value_error() -> None:
+    with pytest.raises(ValueError, match="max_input_tokens"):
+        OllamaExtractor(
+            enricher=_enricher(_const_handler(_ok_entities([]))), max_input_tokens=0
         )
 
 

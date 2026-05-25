@@ -280,6 +280,46 @@ def test_graph_extract_model_blank_falls_back(
     assert Config.load().graph_extract_model == "llama3.1:8b"
 
 
+# Perf Fix C — concept-extractor input head cap config knob.
+def test_graph_extract_max_input_tokens_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS", raising=False)
+    assert Config.load().graph_extract_max_input_tokens == 8000
+
+
+def test_graph_extract_max_input_tokens_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS", "12000")
+    assert Config.load().graph_extract_max_input_tokens == 12000
+
+
+@pytest.mark.parametrize("token", ["0", "none", "NONE", "unlimited", " None "])
+def test_graph_extract_max_input_tokens_disabled(
+    monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """``0`` / ``none`` / ``unlimited`` disable the cap (map to None)."""
+    monkeypatch.setenv("BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS", token)
+    assert Config.load().graph_extract_max_input_tokens is None
+
+
+def test_graph_extract_max_input_tokens_blank_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS", "   ")
+    assert Config.load().graph_extract_max_input_tokens == 8000
+
+
+@pytest.mark.parametrize("value", ["-3", "abc", "1.5"])
+def test_graph_extract_max_input_tokens_invalid_raises(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    monkeypatch.setenv("BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS", value)
+    with pytest.raises(ConfigError, match="BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS"):
+        Config.load()
+
+
 @pytest.mark.parametrize(
     ("var", "value", "attr", "expected"),
     [
