@@ -910,3 +910,144 @@ def test_communities_build_age_absent_internal_error(
         mcp_server.brain_graphrag_communities_build()
     assert exc_info.value.error.code == INTERNAL_ERROR
     assert "Apache AGE is not available" in exc_info.value.error.message
+
+
+# --------------------------------------------------------------------------- #
+# 12. brain_graphrag_refresh (B3 parity — `brain graphrag refresh`)
+# --------------------------------------------------------------------------- #
+def test_refresh_recomputes_aggregates(
+    test_db: psycopg.Connection, graph_state: mcp_server._State  # noqa: ARG001
+) -> None:
+    """refresh recomputes the tenant's aggregate edges from the SoT.
+
+    The triangle's three co-occurrence pairs (m1 alice-bob, m2 alice-carol,
+    m3 bob-carol) yield exactly three relationship edges; nothing is orphaned.
+    """
+    _seed_triangle(test_db)
+    _build(test_db)
+    result = mcp_server.brain_graphrag_refresh()
+    assert result["tenant_id"] == "default"
+    assert result["relationship_count"] == 3
+    assert result["orphans_removed"] == 0
+    # The graph is still queryable after the recompute.
+    payload = mcp_server.brain_graphrag_search(query="bob", mode="local")
+    assert {"bob", "alice", "carol"} <= {
+        e["canonical_key"] for e in payload["entities"]
+    }
+
+
+def test_refresh_idempotent_second_run(
+    test_db: psycopg.Connection, graph_state: mcp_server._State  # noqa: ARG001
+) -> None:
+    """A second refresh converges to the identical edge count (idempotent)."""
+    _seed_triangle(test_db)
+    _build(test_db)
+    first = mcp_server.brain_graphrag_refresh()
+    second = mcp_server.brain_graphrag_refresh()
+    assert second["relationship_count"] == first["relationship_count"] == 3
+    assert second["orphans_removed"] == 0
+
+
+def test_refresh_tenant_scoping(
+    test_db: psycopg.Connection, graph_state: mcp_server._State  # noqa: ARG001
+) -> None:
+    """refresh is tenant-scoped — a built tenant recomputes; default stays empty."""
+    _seed_triangle(test_db)
+    _build(test_db, tenant="custom")
+
+    custom = mcp_server.brain_graphrag_refresh(tenant="custom")
+    assert custom["tenant_id"] == "custom"
+    assert custom["relationship_count"] == 3
+
+    # The default tenant has no contributions → a clean zero recompute.
+    default = mcp_server.brain_graphrag_refresh()
+    assert default["tenant_id"] == "default"
+    assert default["relationship_count"] == 0
+    assert default["orphans_removed"] == 0
+
+
+def test_refresh_no_cypher_in_payload(
+    test_db: psycopg.Connection, graph_state: mcp_server._State  # noqa: ARG001
+) -> None:
+    _seed_triangle(test_db)
+    _build(test_db)
+    result = mcp_server.brain_graphrag_refresh()
+    assert "cypher" not in _json.dumps(result).lower()
+
+
+def test_refresh_age_absent_internal_error(
+    test_db: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    graph_state: mcp_server._State,  # noqa: ARG001
+) -> None:
+    """AGE-absent image → INTERNAL_ERROR (matches the other graphrag tools)."""
+    _seed_triangle(test_db)
+    _build(test_db)
+    monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_graphrag_refresh()
+    assert exc_info.value.error.code == INTERNAL_ERROR
+    assert "Apache AGE is not available" in exc_info.value.error.message
+
+
+# --------------------------------------------------------------------------- #
+# 13. brain_graphrag_communities_refresh (B3 parity — `communities refresh`)
+# --------------------------------------------------------------------------- #
+def test_communities_refresh_forces_rebuild(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """refresh bypasses the dirty gate that a plain build would hit.
+
+    Build once, then a plain build SKIPS (graph unchanged), but refresh forces a
+    full re-detect (``skipped`` False, the two communities reused).
+    """
+    _community_state(monkeypatch, _FakeCommunityEnricher())
+    _seed_communities_corpus(test_db)
+    mcp_server.brain_graphrag_communities_build()
+
+    skipped = mcp_server.brain_graphrag_communities_build()
+    assert skipped["build"]["skipped"] is True
+
+    forced = mcp_server.brain_graphrag_communities_refresh()
+    assert forced["tenant_id"] == "default"
+    assert forced["build"]["skipped"] is False
+    assert forced["build"]["communities_total"] == 2
+    assert forced["build"]["reused"] == 2
+
+
+def test_communities_refresh_tenant_scoped(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """refresh is tenant-scoped (matches the build tool)."""
+    _community_state(monkeypatch, _FakeCommunityEnricher())
+    _seed_communities_corpus(test_db, tenant="custom")
+    mcp_server.brain_graphrag_communities_refresh(tenant="custom")
+
+    custom = mcp_server.brain_graphrag_communities(tenant="custom")
+    assert custom["tenant_id"] == "custom"
+    assert custom["count"] == 2
+
+    default = mcp_server.brain_graphrag_communities()
+    assert default["count"] == 0
+
+
+def test_communities_refresh_no_cypher_in_payload(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _community_state(monkeypatch, _FakeCommunityEnricher())
+    _seed_communities_corpus(test_db)
+    result = mcp_server.brain_graphrag_communities_refresh()
+    assert "cypher" not in _json.dumps(result).lower()
+
+
+def test_communities_refresh_age_absent_internal_error(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AGE-absent image → INTERNAL_ERROR (matches the other graphrag tools)."""
+    _community_state(monkeypatch, _FakeCommunityEnricher())
+    _seed_communities_corpus(test_db)
+    monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_graphrag_communities_refresh()
+    assert exc_info.value.error.code == INTERNAL_ERROR
+    assert "Apache AGE is not available" in exc_info.value.error.message

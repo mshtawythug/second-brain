@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# brain-skills-sync — copy-install the brain-family skills into ~/.claude/skills.
+# Copy-based (real files, predictable), idempotent, with a --check drift guard.
+# Touches ONLY the brain-family skills enumerated from the repo skills/ dir —
+# never the other global skills (e.g. the open-design collection).
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+SRC_SKILLS="$REPO_ROOT/skills"
+
+CHECK=0
+# Dest precedence: --dest flag > BRAIN_SKILLS_DEST env > default ~/.claude/skills.
+DEST="${BRAIN_SKILLS_DEST:-$HOME/.claude/skills}"
+
+usage() {
+  echo "Usage: brain-skills-sync [--check|--dry-run] [--dest <dir>] [-h|--help]  — copy the brain-family skills into ~/.claude/skills (idempotent: installed/updated/unchanged per skill; --check reports drift and exits non-zero if any are stale, copying nothing)."
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check|--dry-run) CHECK=1; shift ;;
+    --dest) [[ $# -ge 2 ]] || { echo "error: --dest requires a path argument" >&2; exit 2; }; DEST="$2"; shift 2 ;;
+    --dest=*) DEST="${1#--dest=}"; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+DEST="${DEST%/}"
+
+[[ -d "$SRC_SKILLS" ]] || { echo "error: repo skills dir not found: $SRC_SKILLS" >&2; exit 1; }
+
+# Enumerate the brain-family skills straight from the repo — never a hardcoded
+# (and therefore drift-prone) list. Each immediate sub-directory is one skill.
+skills=()
+for d in "$SRC_SKILLS"/*/; do
+  [[ -d "$d" ]] || continue
+  skills+=( "$(basename "$d")" )
+done
+[[ ${#skills[@]} -gt 0 ]] || { echo "error: no skills found under $SRC_SKILLS" >&2; exit 1; }
+
+stale=0
+n_installed=0
+n_updated=0
+n_unchanged=0
+
+for name in "${skills[@]}"; do
+  src="$SRC_SKILLS/$name"
+  dst="$DEST/$name"
+
+  if [[ ! -d "$dst" ]]; then
+    if [[ "$CHECK" == "1" ]]; then
+      echo "  $name: MISSING (not installed)"
+      stale=1
+    else
+      mkdir -p "$DEST"
+      cp -R "$src" "$dst"
+      echo "  $name: installed"
+      n_installed=$((n_installed + 1))
+    fi
+    continue
+  fi
+
+  # diff -rq: exit 0 == identical, non-zero == differs (or unreadable → resync).
+  if diff -rq "$src" "$dst" >/dev/null 2>&1; then
+    if [[ "$CHECK" == "1" ]]; then
+      echo "  $name: in sync"
+    else
+      echo "  $name: unchanged"
+      n_unchanged=$((n_unchanged + 1))
+    fi
+  else
+    if [[ "$CHECK" == "1" ]]; then
+      echo "  $name: STALE (differs from repo)"
+      stale=1
+    else
+      # Wholesale replace so repo deletions propagate to the dest.
+      rm -rf "$dst"
+      cp -R "$src" "$dst"
+      echo "  $name: updated"
+      n_updated=$((n_updated + 1))
+    fi
+  fi
+done
+
+if [[ "$CHECK" == "1" ]]; then
+  if [[ "$stale" == "1" ]]; then
+    echo "drift detected: one or more brain skills are out of sync with the repo. Run 'brain-skills-sync' to fix." >&2
+    exit 1
+  fi
+  echo "all ${#skills[@]} brain skills in sync with $DEST"
+  exit 0
+fi
+
+echo "done: ${n_installed} installed, ${n_updated} updated, ${n_unchanged} unchanged → $DEST"
