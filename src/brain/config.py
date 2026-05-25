@@ -120,8 +120,8 @@ DEFAULT_GRAPH_EXTRACT_MODEL = "llama3.1:8b"
 # calls (the perf investigation measured 7.7% of docs driving ~33% of all calls).
 # Capping the input to its first ~5-6 chunks bounds that tail while preserving
 # recall on the bulk; mirrors the summary enricher's input head cap. ``0`` /
-# ``none`` disables the cap (whole document extracted) -- the escape hatch. A
-# generous default of 8000 only trims the extreme tail.
+# ``none`` / ``unlimited`` disables the cap (whole document extracted) -- the
+# escape hatch. A generous default of 8000 only trims the extreme tail.
 DEFAULT_GRAPH_EXTRACT_MAX_INPUT_TOKENS = 8000
 DEFAULT_GRAPH_DEPTH = 2  # spec §6 bounded variable-length traversal radius
 DEFAULT_GRAPH_FRONTIER_CAP = 200  # spec §6 LIMIT on entities reached per seed
@@ -684,16 +684,16 @@ class Config:
             graph_extract_max_input_tokens = None
         else:
             try:
-                graph_extract_max_input_tokens = int(gem_raw)
+                graph_extract_max_input_tokens = int(gem_raw.strip())
             except ValueError as exc:
                 raise ConfigError(
                     "BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS must be a positive integer "
-                    f"or 0/'none' to disable (got {gem_raw!r})"
+                    f"or 0/'none'/'unlimited' to disable (got {gem_raw!r})"
                 ) from exc
             if graph_extract_max_input_tokens < 1:
                 raise ConfigError(
                     "BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS must be a positive integer "
-                    f"or 0/'none' to disable (got {gem_raw!r})"
+                    f"or 0/'none'/'unlimited' to disable (got {gem_raw!r})"
                 )
 
         graph_depth_raw = os.environ.get("BRAIN_GRAPH_DEPTH")

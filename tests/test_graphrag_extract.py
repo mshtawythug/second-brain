@@ -286,13 +286,13 @@ def test_extract_caps_input_before_chunking_reduces_calls() -> None:
     the uncapped whole document."""
     from brain.ingest.chunker import chunk_text
 
-    text = " ".join(["stripe billing notes"] * 200)  # long: many chunks at tt=10
+    text = " ".join(["acme pay billing notes"] * 200)  # long: many chunks at tt=10
     call_count = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal call_count
         call_count += 1
-        return _ok_entities([{"name": "Stripe", "type": "org"}])
+        return _ok_entities([{"name": "Acme Pay", "type": "org"}])
 
     enricher = _enricher(handler)
     extractor = OllamaExtractor(
@@ -324,31 +324,31 @@ def test_extract_caps_input_before_chunking_reduces_calls() -> None:
     out = extractor.extract(text)
     assert capped_chunks < uncapped_chunks  # the cap really trimmed the tail
     assert call_count == capped_chunks  # one model call per capped chunk
-    assert [e.canonical_key for e in out] == ["stripe"]
+    assert [e.canonical_key for e in out] == ["acme pay"]
 
 
 def test_extract_under_cap_processes_whole_document() -> None:
     """A document shorter than the cap is extracted in full — the cap is a no-op
     (identical result to the uncapped extractor, single model call)."""
-    text = "We migrated Stripe billing for Project Phoenix."
+    text = "We migrated Acme Pay billing for Project Phoenix."
     calls_capped = 0
     calls_uncapped = 0
 
     def capped_handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls_capped
         calls_capped += 1
-        return _ok_entities([{"name": "Stripe", "type": "org"}])
+        return _ok_entities([{"name": "Acme Pay", "type": "org"}])
 
     def uncapped_handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls_uncapped
         calls_uncapped += 1
-        return _ok_entities([{"name": "Stripe", "type": "org"}])
+        return _ok_entities([{"name": "Acme Pay", "type": "org"}])
 
     capped = _extractor(capped_handler, max_input_tokens=10_000).extract(text)
     uncapped = _extractor(uncapped_handler).extract(text)
     assert capped == uncapped  # a generous cap does not change the output
     assert calls_capped == 1 == calls_uncapped  # single chunk either way
-    assert [e.canonical_key for e in capped] == ["stripe"]
+    assert [e.canonical_key for e in capped] == ["acme pay"]
 
 
 def test_extract_cap_disabled_processes_whole_document() -> None:
@@ -356,13 +356,13 @@ def test_extract_cap_disabled_processes_whole_document() -> None:
     the whole long document is processed."""
     from brain.ingest.chunker import chunk_text
 
-    text = " ".join(["stripe billing notes"] * 200)
+    text = " ".join(["acme pay billing notes"] * 200)
     call_count = 0
 
     def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal call_count
         call_count += 1
-        return _ok_entities([{"name": "Stripe", "type": "org"}])
+        return _ok_entities([{"name": "Acme Pay", "type": "org"}])
 
     enricher = _enricher(handler)
     extractor = OllamaExtractor(

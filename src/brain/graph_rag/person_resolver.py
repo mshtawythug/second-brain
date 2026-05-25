@@ -14,7 +14,6 @@ keep working.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +21,7 @@ import psycopg
 
 if TYPE_CHECKING:
     from ..wiki.build_people import _DirectoryIndex
+    from .reconcile import PersonResolver
 
 __all__ = [
     "ResolvedPerson",
@@ -131,7 +131,7 @@ def default_person_resolver(
 
 def prebuilt_directory_resolver(
     directory: _DirectoryIndex,
-) -> Callable[..., list[ResolvedPerson]]:
+) -> PersonResolver:
     """Wrap :func:`default_person_resolver` to reuse a prebuilt directory index.
 
     Perf seam for the batch corpus build (Fix B, 2026-05-24). The People-Hub
