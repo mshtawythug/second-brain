@@ -549,6 +549,68 @@ def _age_graph_present(conn: psycopg.Connection[Any], graph_name: str) -> bool:
     return present
 
 
+def _check_chunks_stats(conn: psycopg.Connection[Any]) -> None:
+    """Doctor sub-check: warn when ``chunks`` table stats are stale or absent.
+
+    Soft check — never flips doctor's exit code. Catches the post-restore
+    stale-stats root cause: a ``pg_restore`` does NOT run ``ANALYZE``, and
+    rows bulk-loaded via ``COPY`` do not trigger autoanalyze until the
+    autovacuum daemon makes its first pass (which can be minutes to hours
+    after restore). Meanwhile ``EXPLAIN`` falls back to default estimates,
+    producing bad query plans.
+
+    Reports:
+    - ``chunks stats   OK (analyzed <ago>)`` — last_analyze or last_autoanalyze
+      is set (whichever is more recent).
+    - ``chunks stats   WARN — never analyzed`` when BOTH are NULL and the
+      table is non-empty. Suggests ``ANALYZE chunks``.
+    - Silently skips the check (no output) when the table is empty (fresh
+      install before any ingest).
+    """
+    try:
+        row = conn.execute(
+            """
+            SELECT last_analyze, last_autoanalyze, n_live_tup
+            FROM pg_stat_user_tables
+            WHERE relname = 'chunks'
+            """
+        ).fetchone()
+    except psycopg.Error as exc:
+        _rollback_quietly(conn)
+        typer.secho(
+            f"chunks stats    WARN — could not probe pg_stat_user_tables: {exc}",
+            fg="yellow",
+        )
+        return
+
+    if row is None:
+        # Table not yet visible in pg_stat_user_tables (no vacuums/analyzes yet).
+        return
+
+    last_analyze, last_autoanalyze, n_live_tup = row
+    if n_live_tup == 0:
+        # Empty table — no stats needed yet; skip so fresh installs stay clean.
+        return
+
+    most_recent = None
+    if last_analyze is not None:
+        most_recent = last_analyze
+    if last_autoanalyze is not None and (most_recent is None or last_autoanalyze > most_recent):
+        most_recent = last_autoanalyze
+
+    if most_recent is None:
+        typer.secho(
+            f"chunks stats    WARN — never analyzed ({n_live_tup:,} live rows, "
+            "stats NULL). Run: ANALYZE chunks;  "
+            "This can happen after pg_restore — planners use default estimates "
+            "until ANALYZE runs.",
+            fg="yellow",
+        )
+    else:
+        analyzed_at = most_recent.strftime("%Y-%m-%d %H:%M UTC")
+        typer.echo(f"chunks stats    OK (last analyzed {analyzed_at})")
+
+
 def _check_age(conn: psycopg.Connection[Any]) -> None:
     """Doctor sub-check: verify the Apache AGE GraphRAG backend is provisioned.
 
@@ -916,6 +978,8 @@ def doctor() -> None:
                 typer.echo(f"postgres        OK (pgvector {ext[0]})")
                 _report_embedding_column(conn)
                 _report_mirror_drift(conn, vault_path=cfg.vault_path)
+                # Perf wave T1: warn when chunks stats are stale (e.g. post-restore).
+                _check_chunks_stats(conn)
             else:
                 failures.append("pgvector extension not installed (run brain init)")
                 typer.echo("postgres        FAIL — pgvector not installed")

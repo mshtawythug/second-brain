@@ -505,26 +505,55 @@ class StatusCounts:
 
 
 def summary_counts(conn: psycopg.Connection[Any]) -> StatusCounts:
-    """Aggregate counts for ``status`` / ``brain_status``. One round-trip per table."""
-    doc_row = conn.execute("SELECT count(*) FROM documents").fetchone()
-    chunk_row = conn.execute("SELECT count(*) FROM chunks").fetchone()
-    source_row = conn.execute("SELECT count(*) FROM sources").fetchone()
-    last_row = conn.execute("SELECT max(ingested_at) FROM documents").fetchone()
-    by_kind_rows = conn.execute(
-        "SELECT coalesce(s.kind, 'manual') AS kind, count(*) "
-        "FROM documents d LEFT JOIN sources s ON s.id = d.source_id "
-        "GROUP BY 1 ORDER BY 2 DESC"
-    ).fetchall()
-    assert doc_row is not None  # count(*) always yields one row
-    assert chunk_row is not None
-    assert source_row is not None
-    assert last_row is not None
+    """Aggregate counts for ``status`` / ``brain_status``. Single round-trip via CTE.
+
+    Replaces five sequential SELECTs with one CTE query so ``brain status``
+    and the MCP ``brain_status`` tool each pay one network round-trip instead
+    of five. The return type (:class:`StatusCounts`) is unchanged.
+    """
+    row = conn.execute(
+        """
+        WITH
+          doc_stats AS (
+            SELECT count(*)            AS doc_count,
+                   max(ingested_at)    AS last_ingest
+            FROM documents
+          ),
+          chunk_count AS (
+            SELECT count(*) AS n FROM chunks
+          ),
+          source_count AS (
+            SELECT count(*) AS n FROM sources
+          ),
+          by_kind AS (
+            SELECT coalesce(s.kind, 'manual') AS kind,
+                   count(*)                    AS n
+            FROM documents d
+            LEFT JOIN sources s ON s.id = d.source_id
+            GROUP BY 1
+          )
+        SELECT
+          (SELECT doc_count   FROM doc_stats),
+          (SELECT last_ingest FROM doc_stats),
+          (SELECT n           FROM chunk_count),
+          (SELECT n           FROM source_count),
+          (SELECT json_agg(json_build_array(kind, n) ORDER BY n DESC)
+           FROM by_kind)
+        """
+    ).fetchone()
+    assert row is not None  # constant-expression SELECT always yields one row
+    doc_count, last_ingest, chunk_count, source_count, by_kind_json = row
+    by_kind: list[tuple[str, int]] = (
+        [(str(item[0]), int(item[1])) for item in by_kind_json]
+        if by_kind_json is not None
+        else []
+    )
     return StatusCounts(
-        documents=int(doc_row[0]),
-        chunks=int(chunk_row[0]),
-        sources=int(source_row[0]),
-        last_ingest=last_row[0],
-        by_kind=[(str(k), int(c)) for k, c in by_kind_rows],
+        documents=int(doc_count),
+        chunks=int(chunk_count),
+        sources=int(source_count),
+        last_ingest=last_ingest,
+        by_kind=by_kind,
     )
 
 
