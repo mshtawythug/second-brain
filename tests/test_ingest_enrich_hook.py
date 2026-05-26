@@ -462,56 +462,62 @@ def test_update_document_title_only_preserves_summary(
 def test_update_thread_doc_body_change_refreshes_summary(
     test_db: psycopg.Connection, fake_embedder: object
 ) -> None:
-    """Codex finding 1 regression — second leg. Same bug, different call
-    path: ``_update_doc_in_place`` is the gmail-thread upsert path.
-    A new message in the thread changes the body bytes and must trigger
-    re-summary. Before the fix the hook read the just-updated content_hash
-    and short-circuited, leaving stale summaries on every thread refresh.
-    """
-    from brain.ingest import (
-        _content_hash,
-        _update_doc_in_place,
-    )
+    """Codex finding 1 regression — second leg, now via the real ingest path.
 
-    # Seed: ingest a thread doc directly via ingest_document so the
-    # initial INSERT path populates summary normally.
+    ``_update_doc_in_place`` is the gmail-thread upsert path. A new message in
+    the thread changes the body bytes and must trigger re-summary. Wave perf-T3
+    moved enrichment to post-commit (its own autocommit UPDATE), so this drives
+    a real ``ingest_document`` thread re-ingest instead of calling the now
+    chunk-precomputing internal directly. Before the original fix the hook read
+    the just-updated content_hash and short-circuited, leaving stale summaries
+    on every thread refresh.
+    """
     enricher = _FakeEnricher(summary_text="Thread v1 summary.")
-    initial_body = "Thread message v1. " * 30
-    doc_id = _ingest(test_db, fake_embedder, content=initial_body, enricher=enricher)
-    summary_before, _ = _read_summary(test_db, doc_id)
+    thread_id = "thread-enrich-refresh"
+    v1 = ExtractedDoc(
+        title="Subject",
+        content="Thread message v1. " * 30,
+        content_type="email_thread",
+        source_path=None,
+        metadata={"thread_id": thread_id},
+    )
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        doc=v1,
+        source_kind="gmail",
+        source_external_id="msg-1",
+        enricher=enricher,  # type: ignore[arg-type]
+    )
+    assert r1.document_id is not None
+    summary_before, _ = _read_summary(test_db, r1.document_id)
     assert summary_before == "Thread v1 summary."
     assert enricher.calls == 1
 
-    # Re-arm + call the in-place upsert with a NEW body.
+    # Re-arm + re-ingest the SAME thread with a new body (a new reply).
     enricher.summary_text = "Thread v2 summary."
-    new_body = "Thread message v2 (added a reply). " * 30
-    new_hash = _content_hash(new_body)
-    new_doc = ExtractedDoc(
-        title="Doc title",
-        content=new_body,
-        content_type="note",
+    v2 = ExtractedDoc(
+        title="Subject",
+        content="Thread message v2 (added a reply). " * 30,
+        content_type="email_thread",
         source_path=None,
-        metadata={},
+        metadata={"thread_id": thread_id},
     )
-    with test_db.transaction():
-        _update_doc_in_place(
-            test_db,
-            embedder=fake_embedder,  # type: ignore[arg-type]
-            document_id=doc_id,
-            doc=new_doc,
-            source_kind="manual",
-            source_external_id=None,
-            source_metadata={},
-            tags=[],
-            content_hash=new_hash,
-            body_changed=True,
-            gws_runner=None,
-            enricher=enricher,  # type: ignore[arg-type]
-        )
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        doc=v2,
+        source_kind="gmail",
+        source_external_id="msg-2",
+        enricher=enricher,  # type: ignore[arg-type]
+    )
+    assert r2.document_id == r1.document_id
+    assert r2.created is False
+    assert r2.body_changed is True
 
-    summary_after, _ = _read_summary(test_db, doc_id)
+    summary_after, _ = _read_summary(test_db, r1.document_id)
     assert summary_after == "Thread v2 summary.", (
-        "thread-upsert body refresh must re-enrich"
+        "thread-upsert body refresh must re-enrich (post-commit)"
     )
     assert enricher.calls == 2
 
@@ -519,45 +525,56 @@ def test_update_thread_doc_body_change_refreshes_summary(
 def test_update_thread_doc_body_unchanged_preserves_summary(
     test_db: psycopg.Connection, fake_embedder: object
 ) -> None:
-    """Idempotency complement: a byte-identical thread re-ingest (caller
-    passes ``body_changed=False``) must NOT re-call the enricher, even
-    though the row's content_hash matches what's already stored.
-    """
-    from brain.ingest import (
-        _content_hash,
-        _update_doc_in_place,
-    )
+    """Idempotency complement: a force same-body thread re-ingest goes through
+    the in-place UPDATE path (``body_changed=False``) and the post-commit
+    enrich hook's D11 skip must prevent a second Ollama call.
 
+    (A plain non-force same-body re-ingest is a decision-phase ``skip`` and
+    never reaches the hook; ``force=True`` exercises the in-place UPDATE so the
+    D11 branch is genuinely covered.)
+    """
     enricher = _FakeEnricher(summary_text="Stable summary.")
+    thread_id = "thread-enrich-stable"
     body = "Identical thread body across both passes. " * 30
-    doc_id = _ingest(test_db, fake_embedder, content=body, enricher=enricher)
+    v1 = ExtractedDoc(
+        title="Subject",
+        content=body,
+        content_type="email_thread",
+        source_path=None,
+        metadata={"thread_id": thread_id},
+    )
+    r1 = ingest_document(
+        test_db,
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        doc=v1,
+        source_kind="gmail",
+        source_external_id="msg-1",
+        enricher=enricher,  # type: ignore[arg-type]
+    )
+    assert r1.document_id is not None
     assert enricher.calls == 1
 
-    same_doc = ExtractedDoc(
-        title="Doc title",
+    v2 = ExtractedDoc(
+        title="Subject",
         content=body,
-        content_type="note",
+        content_type="email_thread",
         source_path=None,
-        metadata={},
+        metadata={"thread_id": thread_id},
     )
-    with test_db.transaction():
-        _update_doc_in_place(
-            test_db,
-            embedder=fake_embedder,  # type: ignore[arg-type]
-            document_id=doc_id,
-            doc=same_doc,
-            source_kind="manual",
-            source_external_id=None,
-            source_metadata={},
-            tags=[],
-            content_hash=_content_hash(body),
-            body_changed=False,
-            gws_runner=None,
-            enricher=enricher,  # type: ignore[arg-type]
-        )
+    r2 = ingest_document(
+        test_db,
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        doc=v2,
+        source_kind="gmail",
+        source_external_id="msg-1",
+        force=True,
+        enricher=enricher,  # type: ignore[arg-type]
+    )
+    assert r2.document_id == r1.document_id
+    assert r2.body_changed is False
 
-    summary, _ = _read_summary(test_db, doc_id)
+    summary, _ = _read_summary(test_db, r1.document_id)
     assert summary == "Stable summary."
     assert enricher.calls == 1, (
-        "thread-upsert with body_changed=False must hit the D11 skip"
+        "force same-body thread re-ingest must hit the post-commit D11 skip"
     )

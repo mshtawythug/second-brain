@@ -31,7 +31,7 @@ from brain.vault.derived_links.participants import (
 )
 from brain.vault.export import regenerate_vault_file
 
-from .chunker import chunk_text
+from .chunker import Chunk, chunk_text
 from .sub_tokens import extract_sub_tokens
 
 _logger = logging.getLogger(__name__)
@@ -303,21 +303,92 @@ def _upsert_source(
     metadata: dict[str, Any],
 ) -> str | None:
     """Return an existing source row id, or insert a new one. Returns None for
-    purely manual ingests with no external id and no metadata."""
+    purely manual ingests with no external id and no metadata.
+
+    Wave perf-T3 (F6): the common (non-NULL ``external_id``) path is a single
+    ``INSERT … ON CONFLICT (kind, external_id)`` round-trip instead of a
+    SELECT-then-INSERT pair. The ``DO UPDATE SET metadata = sources.metadata``
+    clause is a deliberate no-op self-assignment — it forces ``RETURNING id`` to
+    yield the row even on conflict (``DO NOTHING`` returns no row) while
+    preserving the existing row's metadata, exactly matching the legacy
+    behavior, which returned the existing id WITHOUT refreshing metadata.
+
+    The ``UNIQUE (kind, external_id)`` constraint (migration 001) treats NULLs
+    as distinct, so an ``ON CONFLICT`` target cannot match a NULL
+    ``external_id``. The rare manual-stdin-with-metadata case
+    (``external_id is None`` but ``metadata`` non-empty) keeps the explicit
+    lookup-then-insert so it still reuses an existing NULL-external_id row.
+    """
     if external_id is None and not metadata:
         return None
+    if external_id is None:
+        row = conn.execute(
+            "SELECT id FROM sources WHERE kind=%s AND external_id IS NULL",
+            (kind,),
+        ).fetchone()
+        if row:
+            return str(row[0])
+        new = conn.execute(
+            "INSERT INTO sources (kind, external_id, metadata) "
+            "VALUES (%s, NULL, %s) RETURNING id",
+            (kind, json.dumps(metadata)),
+        ).fetchone()
+        assert new is not None  # RETURNING id always yields a row
+        return str(new[0])
     row = conn.execute(
-        "SELECT id FROM sources WHERE kind=%s AND external_id IS NOT DISTINCT FROM %s",
-        (kind, external_id),
-    ).fetchone()
-    if row:
-        return str(row[0])
-    new = conn.execute(
-        "INSERT INTO sources (kind, external_id, metadata) VALUES (%s, %s, %s) RETURNING id",
+        "INSERT INTO sources (kind, external_id, metadata) VALUES (%s, %s, %s) "
+        "ON CONFLICT (kind, external_id) DO UPDATE SET metadata = sources.metadata "
+        "RETURNING id",
         (kind, external_id, json.dumps(metadata)),
     ).fetchone()
-    assert new is not None  # RETURNING id always yields a row
-    return str(new[0])
+    assert row is not None  # ON CONFLICT DO UPDATE always yields a row
+    return str(row[0])
+
+
+def _insert_chunks(
+    conn: psycopg.Connection,
+    *,
+    document_id: str,
+    chunks: list[Chunk],
+    embeddings: list[list[float]],
+    title_text: str,
+    tags_text: str,
+) -> None:
+    """Bulk-insert chunk rows for ``document_id`` in a single round-trip.
+
+    Wave perf-T3 (F2/F7): replaces the per-chunk ``conn.execute`` loop with one
+    ``executemany`` over a pre-built row list. ``extract_sub_tokens`` is computed
+    while building the list (before any DB round-trip) instead of interleaved
+    with N inserts. The ``title_text`` / ``tags_text`` / ``search_extras``
+    columns feed the migration-009 weighted multi-field tsv exactly as the prior
+    loop did, so the stored rows are byte-for-byte identical. ``embeddings`` must
+    be precomputed by the caller (outside the transaction). No-op on empty
+    ``chunks``.
+    """
+    if not chunks:
+        return
+    rows = [
+        (
+            document_id,
+            c.index,
+            c.content,
+            emb,
+            title_text,
+            tags_text,
+            extract_sub_tokens(c.content),
+        )
+        for c, emb in zip(chunks, embeddings, strict=True)
+    ]
+    # psycopg3 exposes ``executemany`` on the cursor, not the connection. The
+    # cursor runs inside the caller's open transaction (same connection), so
+    # the bulk insert stays atomic with the surrounding document write.
+    with conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO chunks (document_id, chunk_index, content, embedding, "
+            "title_text, tags_text, search_extras) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            rows,
+        )
 
 
 def ingest_document(
@@ -528,6 +599,222 @@ def ingest_document(
     return result
 
 
+@dataclass(frozen=True)
+class _IngestAction:
+    """The write the ingest pipeline will perform, decided by a read-only pass.
+
+    Computed by :func:`_resolve_ingest_action` BEFORE embeddings are generated
+    so the slow Ollama embed call (and the write transaction) is skipped
+    entirely on the no-op ``skip`` path. ``existing_id`` is the target row for
+    ``skip`` / ``update`` / ``replace`` and ``None`` for ``insert``.
+    """
+
+    kind: str  # "skip" | "update" | "insert" | "replace"
+    existing_id: str | None
+    body_changed: bool
+
+
+def _resolve_ingest_action(
+    conn: psycopg.Connection,
+    *,
+    doc: ExtractedDoc,
+    source_kind: str,
+    source_external_id: str | None,
+    content_hash: str,
+    force: bool,
+    draft: bool,
+    is_thread: bool,
+) -> _IngestAction:
+    """Read-only dedup decision — runs OUTSIDE the write transaction.
+
+    Replicates the dedup ladder previously embedded inside
+    :func:`_ingest_within_transaction` (Gmail thread → file ``source_path`` →
+    sourced-stdin → content-hash fallback) but performs only SELECTs, so the
+    caller can short-circuit ``skip`` (no embed, no transaction, no enrich) and
+    defer the embed for ``update`` / ``insert`` / ``replace`` until after the
+    slow Ollama call has run unlocked (Wave perf-T3 / F1).
+
+    Decisions, mirroring the legacy branches exactly:
+
+    - Gmail thread: draft-only-on-published → ``skip`` (Q1-A partial-window
+      no-op); same-hash-no-force → ``skip``; else ``update``
+      (``body_changed = existing_hash != content_hash``); no row → ``insert``.
+    - File ``source_path``: same-hash-no-force → ``skip``; else ``update``; no
+      row → ``insert`` (never reaches the content-hash fallback — migration 006
+      scopes the content_hash UNIQUE index to ``source_path IS NULL``).
+    - Sourced-stdin: >1 rows → :class:`IngestAmbiguousSource`; same-hash-no-force
+      → ``skip``; else ``update``; no row → content-hash fallback.
+    - Content-hash fallback (stdin only): row + no force → ``skip``; row + force
+      → ``replace`` (DELETE old + INSERT new uuid); no row → ``insert``.
+
+    The sourced branch drops the legacy ``FOR UPDATE OF d`` lock — the
+    authoritative row lock is re-acquired inside :func:`_update_doc_in_place` in
+    the write transaction. As before, this pipeline is safe for sequential CLI
+    use only; a concurrent dual-INSERT of the same key still raises
+    IntegrityError on the partial unique indexes.
+    """
+    h = content_hash
+    if is_thread:
+        thread_id = doc.metadata.get("thread_id")
+        assert isinstance(thread_id, str) and thread_id  # _is_gmail_thread_doc
+        existing = conn.execute(
+            "SELECT id, content_hash, draft FROM documents "
+            "WHERE thread_id=%s AND kind='ingested' AND content_type='email_thread'",
+            (thread_id,),
+        ).fetchone()
+        if existing is not None:
+            existing_id, existing_hash, existing_draft = existing
+            if draft and not existing_draft:
+                return _IngestAction("skip", str(existing_id), False)
+            if not force and existing_hash == h:
+                return _IngestAction("skip", str(existing_id), False)
+            return _IngestAction("update", str(existing_id), existing_hash != h)
+        return _IngestAction("insert", None, True)
+
+    if doc.source_path is not None:
+        existing = conn.execute(
+            "SELECT id, content_hash FROM documents "
+            "WHERE source_path=%s AND kind='ingested'",
+            (doc.source_path,),
+        ).fetchone()
+        if existing:
+            existing_id, existing_hash = existing
+            if not force and existing_hash == h:
+                return _IngestAction("skip", str(existing_id), False)
+            return _IngestAction("update", str(existing_id), existing_hash != h)
+        return _IngestAction("insert", None, True)
+
+    # source_path is None — sourced lookup first, then content-hash fallback.
+    if source_external_id is not None:
+        sourced_rows = conn.execute(
+            """
+            SELECT d.id, d.content_hash
+            FROM documents d
+            JOIN sources s ON d.source_id = s.id
+            WHERE s.kind = %s AND s.external_id = %s
+            """,
+            (source_kind, source_external_id),
+        ).fetchall()
+        if len(sourced_rows) > 1:
+            raise IngestAmbiguousSource(
+                f"Multiple documents share source ({source_kind!r}, "
+                f"{source_external_id!r}): "
+                f"{[str(r[0]) for r in sourced_rows]}. "
+                "Resolve manually before re-ingesting."
+            )
+        if sourced_rows:
+            existing_id, existing_hash = sourced_rows[0]
+            if not force and existing_hash == h:
+                return _IngestAction("skip", str(existing_id), False)
+            return _IngestAction("update", str(existing_id), existing_hash != h)
+
+    existing = conn.execute(
+        "SELECT id FROM documents "
+        "WHERE content_hash=%s AND kind='ingested' AND source_path IS NULL",
+        (h,),
+    ).fetchone()
+    if existing:
+        if not force:
+            return _IngestAction("skip", str(existing[0]), False)
+        return _IngestAction("replace", str(existing[0]), True)
+    return _IngestAction("insert", None, True)
+
+
+def _insert_new_document(
+    conn: psycopg.Connection,
+    *,
+    doc: ExtractedDoc,
+    source_kind: str,
+    source_external_id: str | None,
+    source_metadata: dict[str, Any],
+    tags: list[str],
+    content_hash: str,
+    draft: bool,
+    chunks: list[Chunk],
+    embeddings: list[list[float]],
+    gws_runner: GwsRunner | None,
+) -> str:
+    """INSERT a brand-new document row + its chunks; return the new id.
+
+    Runs inside the caller's open transaction. Embeddings are PRECOMPUTED by the
+    caller (outside the transaction, Wave perf-T3 / F1), so this helper performs
+    no Ollama calls and the transaction holds no locks across network I/O.
+    Auto-summary enrichment is NOT run here — the caller invokes
+    :func:`_enrich_post_ingest_hook` AFTER the commit.
+    """
+    source_id = _upsert_source(
+        conn,
+        kind=source_kind,
+        external_id=source_external_id,
+        metadata=source_metadata,
+    )
+
+    # Pre-insert: derive source-specific metadata fields (e.g. Krisp
+    # ``_participant_keys``) so they're stored alongside the doc row in one
+    # INSERT. The leading underscore flags the key as derived/internal.
+    _apply_pre_insert_metadata(doc, source_kind=source_kind)
+
+    # Project email/krisp metadata onto typed columns. The base INSERT always
+    # writes the same fixed columns; the promoted columns ride along as a
+    # dynamic suffix so a doc with no recognized metadata keys produces the
+    # exact same SQL as before migration 007.
+    promoted = _promote_metadata_to_columns(doc.metadata)
+    promoted_columns = list(promoted.keys())
+    promoted_values = [promoted[c] for c in promoted_columns]
+    extra_cols = "".join(f", {c}" for c in promoted_columns)
+    extra_placeholders = ", %s" * len(promoted_columns)
+
+    doc_row = conn.execute(
+        f"""
+        INSERT INTO documents (source_id, title, content, content_hash, content_type,
+                               source_path, tags, metadata, draft{extra_cols})
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s{extra_placeholders})
+        RETURNING id
+        """,
+        (
+            source_id,
+            doc.title,
+            doc.content,
+            content_hash,
+            doc.content_type,
+            doc.source_path,
+            tags,
+            json.dumps(doc.metadata),
+            draft,
+            *promoted_values,
+        ),
+    ).fetchone()
+    assert doc_row is not None  # RETURNING id always yields a row
+    document_id = str(doc_row[0])
+
+    title_text, tags_text = _chunk_search_metadata(doc.title, tags)
+    _insert_chunks(
+        conn,
+        document_id=document_id,
+        chunks=chunks,
+        embeddings=embeddings,
+        title_text=title_text,
+        tags_text=tags_text,
+    )
+
+    # Wave Q1-D — Krisp action-items docs always carry the ``action-items`` tag
+    # so ``brain list --tag action-items`` and ``brain todo`` work out of the
+    # box. Mechanical, not LLM-derived; never re-proposed by ``brain tag
+    # --auto`` (D19 + D20).
+    _maybe_autotag_action_items(conn, document_id=document_id, doc=doc, tags=tags)
+
+    # Source-specific hooks (gmail directory upsert / krisp refresh) run INSIDE
+    # the transaction so a hook failure rolls the document back too.
+    _run_source_hooks(
+        conn,
+        source_kind=source_kind,
+        doc=doc,
+        document_id=document_id,
+        gws_runner=gws_runner,
+    )
+    return document_id
+
+
 def _ingest_within_transaction(
     conn: psycopg.Connection,
     *,
@@ -545,326 +832,126 @@ def _ingest_within_transaction(
     enrich: bool = True,
     enrich_min_tokens: int = 50,
 ) -> IngestResult:
-    """Body of :func:`ingest_document` that runs inside the DB transaction.
+    """Decide the dedup action, embed OUTSIDE the transaction, then write.
 
-    Extracted so the public function can wrap the post-commit vault mirror
-    write outside the ``with conn.transaction()`` block — a filesystem
-    failure must not roll back a successful DB ingest. Early returns from
-    this helper exit the surrounding ``with conn.transaction()`` cleanly
-    (commit on normal return, rollback on exception).
+    Wave perf-T3 (F1) restructures the ingest hot path so neither slow Ollama
+    call holds a DB lock:
+
+    1. :func:`_resolve_ingest_action` runs the read-only dedup ladder. A
+       ``skip`` decision (same content_hash / draft partial-window no-op)
+       returns immediately — no embed, no transaction, no enrich (matches the
+       prior early-return short-circuits exactly).
+    2. ``embedder.embed`` runs BEFORE ``with conn.transaction()`` opens, so the
+       2–5 s Ollama embed never holds a row lock. Skipped when there are no
+       chunks. (Previously the in-place UPDATE path embedded while holding a
+       ``FOR UPDATE`` lock on the document row.)
+    3. The transaction performs ONLY the INSERT/UPDATE of the document + its
+       chunks using the precomputed vectors — it commits in ~milliseconds.
+    4. Auto-summary enrichment runs AFTER the commit, in autocommit mode, as
+       its own short ``UPDATE``. A post-commit enrichment failure leaves the
+       committed document with ``summary IS NULL`` (best-effort; recoverable via
+       ``brain enrich --backfill``) — it can never roll back the ingest.
+
+    Atomicity preserved: the document row + ALL its chunk rows still INSERT (or
+    UPDATE + re-chunk) inside ONE transaction, so a write failure rolls back the
+    whole document. An embed failure raises BEFORE the transaction opens (no
+    partial row, no orphaned chunks). Sequential-CLI dedup guarantees are
+    unchanged; the partial-window draft no-op is enforced in BOTH the decision
+    pass and inside :func:`_update_doc_in_place` (defense in depth).
     """
     h = content_hash
     is_thread = _is_gmail_thread_doc(doc, source_kind)
-    # Set on the force content-hash-fallback path when an old row at the same
-    # hash is replaced (DELETE + INSERT under a new uuid); surfaced on the
-    # IngestResult so ``ingest_document`` can drop the old uuid's stale AGE
-    # graph presence post-commit (wave G1-c).
+
+    action = _resolve_ingest_action(
+        conn,
+        doc=doc,
+        source_kind=source_kind,
+        source_external_id=source_external_id,
+        content_hash=h,
+        force=force,
+        draft=draft,
+        is_thread=is_thread,
+    )
+    if action.kind == "skip":
+        return IngestResult(
+            document_id=action.existing_id, created=False, body_changed=False
+        )
+
+    # Chunk (cheap, pure Python) then embed — BOTH outside the transaction so
+    # the Ollama HTTP round-trip holds no DB lock.
+    chunks = chunk_text(doc.content, count_tokens=embedder.count_tokens)
+    if action.kind in ("insert", "replace") and not chunks:
+        # Matches the legacy INSERT-path "no chunks → no document" behavior.
+        # (The update path still proceeds on empty chunks — it rebuilds zero
+        # chunk rows, preserving the prior in-place behavior.)
+        return IngestResult(document_id=None, created=False)
+    embeddings = (
+        embedder.embed([c.content for c in chunks], input_type="document")
+        if chunks
+        else []
+    )
+
     replaced_id: str | None = None
+    did_write = True
     with conn.transaction():
-        if is_thread:
-            # P2.2: gmail-thread upsert. Lookup keys on the
-            # ``(kind, thread_id, content_type='email_thread')`` triple
-            # constrained by ``uq_documents_gmail_thread``. Same-body
-            # re-ingests short-circuit; body-changed re-ingests UPDATE
-            # in place so the document UUID stays stable across thread
-            # growth (links / derived_links / unresolved_links keep
-            # pointing at the same row instead of cascade-dropping).
-            thread_id = doc.metadata.get("thread_id")
-            assert isinstance(thread_id, str) and thread_id  # _is_gmail_thread_doc
-            existing_thread = conn.execute(
-                "SELECT id, content_hash, draft FROM documents "
-                "WHERE thread_id=%s AND kind='ingested' "
-                "AND content_type='email_thread'",
-                (thread_id,),
-            ).fetchone()
-            if existing_thread is not None:
-                existing_id, existing_hash, existing_draft = existing_thread
-                # Q1-A safety rule: if the incoming ingest is draft-only
-                # (``draft=True``) but the stored thread is already published
-                # (``existing_draft=False``), skip the update entirely.
-                #
-                # Why: ``brain ingest-gmail --since N`` returns only messages
-                # that arrived within the time window. When the window captures
-                # a draft reply on a thread whose sent messages are older than
-                # N days, ``to_extracted_thread`` sees only the draft message
-                # and returns a draft-only body. Updating the stored doc with
-                # that partial body would overwrite the full sent-message
-                # content with a draft-only view — "publishing draft-only
-                # content" even though ``draft`` is blocked from flipping.
-                # The stored doc already reflects the true (published) state of
-                # the thread; the draft reply is ephemeral and may never be
-                # sent, so the safest action is a no-op.
-                if draft and not existing_draft:
-                    return IngestResult(
-                        document_id=str(existing_id),
-                        created=False,
-                        body_changed=False,
-                    )
-                if not force and existing_hash == h:
-                    return IngestResult(
-                        document_id=str(existing_id),
-                        created=False,
-                        body_changed=False,
-                    )
-                # Body changed iff the existing row's hash differs from
-                # the incoming. ``force=True`` may have brought us here
-                # with identical hashes (an explicit re-process request) —
-                # in that case the body has NOT changed; the D11 skip
-                # inside ``_enrich_post_ingest_hook`` will short-circuit
-                # the re-summary correctly. When hashes differ, the
-                # update is a real body refresh and the hook must
-                # re-enrich (Codex finding 1 fix).
-                body_changed = existing_hash != h
-                _update_doc_in_place(
-                    conn,
-                    embedder=embedder,
-                    document_id=str(existing_id),
-                    doc=doc,
-                    source_kind=source_kind,
-                    source_external_id=source_external_id,
-                    source_metadata=source_metadata,
-                    tags=tags,
-                    content_hash=h,
-                    body_changed=body_changed,
-                    gws_runner=gws_runner,
-                    draft=draft,
-                    enricher=enricher,
-                    enrich=enrich,
-                    enrich_min_tokens=enrich_min_tokens,
-                )
-                return IngestResult(
-                    document_id=str(existing_id),
-                    created=False,
-                    body_changed=body_changed,
-                )
-            # No existing thread doc — fall through to the standard INSERT
-            # path. The partial unique index ``uq_documents_gmail_thread``
-            # protects against concurrent dual-insert: a second concurrent
-            # transaction reaching this branch raises IntegrityError on
-            # the INSERT below, which bubbles up to the caller.
-        elif doc.source_path is not None:
-            # File-based ingest: dedup by source_path. UPDATE in place when a
-            # matching row is found so the UUID (and any FK references via
-            # links/derived_links/unresolved_links) is preserved across
-            # content changes.
-            #
-            # No DB-level UNIQUE on source_path — two concurrent CLI
-            # invocations for the same path can race past this SELECT and both
-            # INSERT, producing two rows for one path. Acceptable for sequential
-            # CLI use; would need a UNIQUE INDEX or pg_advisory_xact_lock on a
-            # hash of source_path if invoked concurrently.
-            existing_row = conn.execute(
-                "SELECT id, content_hash FROM documents "
-                "WHERE source_path=%s AND kind='ingested'",
-                (doc.source_path,),
-            ).fetchone()
-            if existing_row:
-                existing_id, existing_hash = existing_row
-                if not force and existing_hash == h:
-                    return IngestResult(
-                        document_id=str(existing_id), created=False, body_changed=False
-                    )
-                body_changed = existing_hash != h
-                _update_doc_in_place(
-                    conn,
-                    embedder=embedder,
-                    document_id=str(existing_id),
-                    doc=doc,
-                    source_kind=source_kind,
-                    source_external_id=source_external_id,
-                    source_metadata=source_metadata,
-                    tags=tags,
-                    content_hash=h,
-                    body_changed=body_changed,
-                    gws_runner=gws_runner,
-                    draft=draft,
-                    enricher=enricher,
-                    enrich=enrich,
-                    enrich_min_tokens=enrich_min_tokens,
-                )
-                return IngestResult(
-                    document_id=str(existing_id),
-                    created=False,
-                    body_changed=body_changed,
-                )
-            # No source_path row — exit the if/elif/else chain and proceed
-            # directly to the INSERT block below. Skipping the content_hash
-            # fallback is correct: migration 006 narrows the content_hash
-            # UNIQUE constraint to (kind='ingested' AND source_path IS NULL),
-            # so the INSERT cannot IntegrityError on hash collision with another
-            # file ingest. The existing regression test
-            # test_two_files_with_same_content_at_different_paths_are_separate_docs
-            # locks this in.
-        else:
-            # source_path is None — try sourced lookup first, then fall through
-            # to content_hash fallback. All inside this `else` so file ingests
-            # above NEVER reach content_hash dedup.
-            if source_external_id is not None:
-                # Sourced-stdin branch (Krisp, Slack, ...). Dedup by
-                # (source_kind, source_external_id) via JOIN on sources.
-                # UPDATE in place so the UUID and all FK references survive.
-                #
-                # sources(kind, external_id) is UNIQUE per migration 001, but
-                # one source row CAN link to multiple documents if a prior
-                # `brain rm` left an orphaned source row. Raise loudly on >1
-                # rows rather than silently picking one — the user must resolve.
-                sourced_rows = conn.execute(
-                    """
-                    SELECT d.id, d.content_hash
-                    FROM documents d
-                    JOIN sources s ON d.source_id = s.id
-                    WHERE s.kind = %s AND s.external_id = %s
-                    FOR UPDATE OF d
-                    """,
-                    (source_kind, source_external_id),
-                ).fetchall()
-                if len(sourced_rows) > 1:
-                    raise IngestAmbiguousSource(
-                        f"Multiple documents share source ({source_kind!r}, "
-                        f"{source_external_id!r}): "
-                        f"{[str(r[0]) for r in sourced_rows]}. "
-                        "Resolve manually before re-ingesting."
-                    )
-                if sourced_rows:
-                    existing_id, existing_hash = sourced_rows[0]
-                    if not force and existing_hash == h:
-                        return IngestResult(
-                            document_id=str(existing_id), created=False, body_changed=False
-                        )
-                    body_changed = existing_hash != h
-                    _update_doc_in_place(
-                        conn,
-                        embedder=embedder,
-                        document_id=str(existing_id),
-                        doc=doc,
-                        source_kind=source_kind,
-                        source_external_id=source_external_id,
-                        source_metadata=source_metadata,
-                        tags=tags,
-                        content_hash=h,
-                        body_changed=body_changed,
-                        gws_runner=gws_runner,
-                        draft=draft,
-                        enricher=enricher,
-                        enrich=enrich,
-                        enrich_min_tokens=enrich_min_tokens,
-                    )
-                    return IngestResult(
-                        document_id=str(existing_id),
-                        created=False,
-                        body_changed=body_changed,
-                    )
-                # No sourced row — fall through to content_hash fallback below
-                # (still inside the `else: source_path is None` block).
-
-            # Content-hash fallback. Reached from:
-            #   * sourced branch when no (kind, external_id) row found
-            #   * direct path (source_external_id is None — stdin manual)
-            # NOT reached from the file branch above (which exits the chain).
-            #
-            # Scope to stdin-only rows: migration 006 narrows the
-            # documents.content_hash UNIQUE index to (kind='ingested' AND
-            # source_path IS NULL). An unscoped SELECT could match a vault-tier
-            # doc or a file ingest with the same body, and --force would DELETE
-            # the wrong row.
-            existing = conn.execute(
-                "SELECT id FROM documents "
-                "WHERE content_hash=%s AND kind='ingested' AND source_path IS NULL",
-                (h,),
-            ).fetchone()
-            if existing:
-                if not force:
-                    return IngestResult(document_id=str(existing[0]), created=False)
-                # Force re-ingest: the old row is replaced by a fresh INSERT
-                # under a new uuid below. Capture the old id so the post-commit
-                # graph hook can DETACH DELETE its now-orphaned AGE vertex
-                # (the relational graph rows cascade with the row; AGE doesn't).
-                replaced_id = str(existing[0])
-                conn.execute("DELETE FROM documents WHERE id=%s", (existing[0],))
-
-        source_id = _upsert_source(
-            conn,
-            kind=source_kind,
-            external_id=source_external_id,
-            metadata=source_metadata,
-        )
-
-        chunks = chunk_text(doc.content, count_tokens=embedder.count_tokens)
-        if not chunks:
-            return IngestResult(document_id=None, created=False)
-
-        embeddings = embedder.embed(
-            [c.content for c in chunks], input_type="document"
-        )
-
-        # Pre-insert: derive source-specific metadata fields (e.g. Krisp
-        # ``_participant_keys``) so they're stored alongside the doc row in
-        # one INSERT instead of an extra UPDATE after the fact. The leading
-        # underscore on the key flags it as derived/internal — the linker
-        # pass (B.4) reads it via a single SELECT.
-        _apply_pre_insert_metadata(doc, source_kind=source_kind)
-
-        # Project email/krisp metadata onto typed columns. The base INSERT
-        # always writes the same fixed columns; the promoted columns ride
-        # along as a dynamic suffix so a doc with no recognized metadata
-        # keys produces the exact same SQL as before migration 007.
-        promoted = _promote_metadata_to_columns(doc.metadata)
-        promoted_columns = list(promoted.keys())
-        promoted_values = [promoted[c] for c in promoted_columns]
-        extra_cols = "".join(f", {c}" for c in promoted_columns)
-        extra_placeholders = ", %s" * len(promoted_columns)
-
-        doc_row = conn.execute(
-            f"""
-            INSERT INTO documents (source_id, title, content, content_hash, content_type,
-                                   source_path, tags, metadata, draft{extra_cols})
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s{extra_placeholders})
-            RETURNING id
-            """,
-            (
-                source_id,
-                doc.title,
-                doc.content,
-                h,
-                doc.content_type,
-                doc.source_path,
-                tags,
-                json.dumps(doc.metadata),
-                draft,
-                *promoted_values,
-            ),
-        ).fetchone()
-        assert doc_row is not None  # RETURNING id always yields a row
-        document_id = str(doc_row[0])
-
-        title_text, tags_text = _chunk_search_metadata(doc.title, tags)
-        for c, emb in zip(chunks, embeddings, strict=True):
-            conn.execute(
-                "INSERT INTO chunks (document_id, chunk_index, content, embedding, "
-                "title_text, tags_text, search_extras) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (
-                    document_id,
-                    c.index,
-                    c.content,
-                    emb,
-                    title_text,
-                    tags_text,
-                    extract_sub_tokens(c.content),
-                ),
+        if action.kind == "update":
+            assert action.existing_id is not None
+            did_write = _update_doc_in_place(
+                conn,
+                document_id=action.existing_id,
+                doc=doc,
+                source_kind=source_kind,
+                source_external_id=source_external_id,
+                source_metadata=source_metadata,
+                tags=tags,
+                content_hash=h,
+                body_changed=action.body_changed,
+                gws_runner=gws_runner,
+                draft=draft,
+                chunks=chunks,
+                embeddings=embeddings,
             )
+            document_id = action.existing_id
+            created = False
+            # When the partial-window draft guard no-op'd, nothing was written.
+            body_changed = action.body_changed if did_write else False
+        else:  # "insert" or "replace"
+            if action.kind == "replace":
+                assert action.existing_id is not None
+                # Force re-ingest: replace the old row under a new uuid. Capture
+                # the old id so the post-commit graph hook can DETACH DELETE its
+                # now-orphaned AGE vertex (relational graph rows cascade with the
+                # row; AGE doesn't).
+                replaced_id = action.existing_id
+                conn.execute(
+                    "DELETE FROM documents WHERE id=%s", (action.existing_id,)
+                )
+            document_id = _insert_new_document(
+                conn,
+                doc=doc,
+                source_kind=source_kind,
+                source_external_id=source_external_id,
+                source_metadata=source_metadata,
+                tags=tags,
+                content_hash=h,
+                draft=draft,
+                chunks=chunks,
+                embeddings=embeddings,
+                gws_runner=gws_runner,
+            )
+            created = True
+            body_changed = True
 
-        # Wave Q1-D — Krisp action-items docs always carry the
-        # ``action-items`` tag so ``brain list --tag action-items`` and
-        # ``brain todo`` work out of the box. Mechanical, not LLM-derived;
-        # never re-proposed by ``brain tag --auto`` (D19 + D20).
-        _maybe_autotag_action_items(conn, document_id=document_id, doc=doc, tags=tags)
-
-        # Wave Q1-D — auto-summary hook. Runs BEFORE the source-specific
-        # hook (D14) so a future gmail/krisp hook that wants to consume the
-        # freshly-written summary can do so. Skip rules live inside the
-        # helper; failure modes (Ollama down, malformed JSON) are caught and
-        # logged — the ingest itself always commits.
+    # --- Post-commit auto-summary (Wave perf-T3 / F1). ---
+    # Runs in autocommit (the transaction has committed) as its own short
+    # UPDATE. ``is_new_doc=created`` skips the redundant idempotency SELECT on
+    # the create path (F4) — a freshly-INSERTed row is known to have
+    # ``summary IS NULL``. The update path keeps the SELECT for D11 idempotency.
+    # ``did_write`` is False only when :func:`_update_doc_in_place` hit its
+    # partial-window draft guard, in which case no body was written and we must
+    # not enrich. Skip rules + failure handling (Ollama down → WARN, ingest
+    # already committed) live inside the hook.
+    if did_write:
         _enrich_post_ingest_hook(
             conn,
             document_id=document_id,
@@ -873,28 +960,21 @@ def _ingest_within_transaction(
             enrich=enrich,
             min_tokens=enrich_min_tokens,
             content_hash=h,
+            body_changed=body_changed,
+            is_new_doc=created,
         )
 
-        _run_source_hooks(
-            conn,
-            source_kind=source_kind,
-            doc=doc,
-            document_id=document_id,
-            gws_runner=gws_runner,
-        )
-
-        return IngestResult(
-            document_id=document_id,
-            created=True,
-            body_changed=True,
-            replaced_document_id=replaced_id,
-        )
+    return IngestResult(
+        document_id=document_id,
+        created=created,
+        body_changed=body_changed,
+        replaced_document_id=replaced_id,
+    )
 
 
 def _update_doc_in_place(
     conn: psycopg.Connection,
     *,
-    embedder: Embedder,
     document_id: str,
     doc: ExtractedDoc,
     source_kind: str,
@@ -904,23 +984,29 @@ def _update_doc_in_place(
     content_hash: str,
     body_changed: bool,
     gws_runner: GwsRunner | None,
+    chunks: list[Chunk],
+    embeddings: list[list[float]],
     draft: bool = False,
-    enricher: OllamaEnricher | None = None,
-    enrich: bool = True,
-    enrich_min_tokens: int = 50,
-) -> None:
+) -> bool:
     """Replace title / body / metadata / tags / typed columns on an existing
-    document row and rebuild its chunks. Used by the gmail-thread upsert path
-    (P2.2), the file-path UPDATE-in-place branch, and the sourced-stdin
-    (Krisp/Slack) UPDATE-in-place branch.
+    document row and rebuild its chunks. Returns ``True`` when the row was
+    written, ``False`` when the partial-window draft guard no-op'd.
 
-    Runs inside the caller's open transaction. The document UUID is preserved
-    so any ``links`` / ``derived_links`` / ``unresolved_links`` referencing
-    this doc keep pointing at the same row across re-ingest. Old chunks are
-    deleted via direct DELETE (no need for ON DELETE CASCADE — we know the
-    parent doc id) and re-inserted from the freshly chunked + embedded body.
-    Source-specific post-ingest hooks (gmail directory upsert) re-run so
-    headers from the latest message in the rebuilt thread propagate.
+    Used by the gmail-thread upsert path (P2.2), the file-path UPDATE-in-place
+    branch, and the sourced-stdin (Krisp/Slack) UPDATE-in-place branch. Runs
+    inside the caller's open transaction. The document UUID is preserved so any
+    ``links`` / ``derived_links`` / ``unresolved_links`` referencing this doc
+    keep pointing at the same row across re-ingest. Old chunks are deleted via
+    direct DELETE (no need for ON DELETE CASCADE — we know the parent doc id)
+    and re-inserted from the precomputed vectors. Source-specific post-ingest
+    hooks (gmail directory upsert) re-run so headers from the latest message in
+    the rebuilt thread propagate.
+
+    Wave perf-T3 (F1): chunks + embeddings are PRECOMPUTED by the caller
+    (outside the transaction) and passed in — this helper performs no Ollama
+    calls, so the ``FOR UPDATE`` row lock it holds is never held across network
+    I/O. Auto-summary enrichment is NOT run here; the caller invokes
+    :func:`_enrich_post_ingest_hook` AFTER the commit.
 
     Tag union semantics: existing curated tags on the row are preserved and
     merged with the incoming ``tags`` argument via
@@ -928,19 +1014,26 @@ def _update_doc_in_place(
     existing tags are never removed — ``brain tag`` is the only explicit
     tag-modification surface.
 
-    Summary-regen ordering signal: when ``body_changed`` is True this helper
-    does TWO things — (1) NULL out ``summary`` / ``summary_model`` / ``summary_at``
-    in the same UPDATE that overwrites ``content_hash``, so a stale summary
-    describing the old body can never linger on disk, and (2) pass
-    ``body_changed`` through to ``_enrich_post_ingest_hook`` so it bypasses the
-    D11 idempotency check (the hook reads the freshly-updated content_hash and
-    would otherwise see a match). Together, (1) handles the case where the
-    hook can't regenerate (``enrich=False`` / ``enricher=None`` / content
-    < min_tokens) and (2) handles the case where it can. Without (1), a body
-    change with no enricher would leave the old summary on disk, misdescribing
-    the new content. (Codex finding 1, 2026-05-11; Codex stop-gate finding,
-    2026-05-13.)
+    Summary-staleness rule: when ``body_changed`` is True this NULLs out
+    ``summary`` / ``summary_model`` / ``summary_at`` in the same UPDATE that
+    overwrites ``content_hash``, so a stale summary describing the old body can
+    never linger if the post-commit enrich hook can't regenerate (``enrich=False``
+    / ``enricher=None`` / content < min_tokens). When it can, the hook overwrites
+    it. The caller passes ``body_changed`` on to the post-commit hook so its D11
+    idempotency check knows the prior summary is stale. (Codex finding 1,
+    2026-05-11; Codex stop-gate finding, 2026-05-13.)
     """
+    # F5 (Wave perf-T3): one locked SELECT reads BOTH the draft flag (for the
+    # partial-window guard) AND the existing tags (for the union merge), where
+    # the prior code issued two separate SELECTs against the same row. The
+    # ``FOR UPDATE`` lock guards against concurrent tag-writes. ``body_changed``
+    # is signalled via the kwarg, so we don't read content_hash here — the
+    # caller computed it from the pre-UPDATE hash diff.
+    existing_row = conn.execute(
+        "SELECT draft, tags FROM documents WHERE id=%s FOR UPDATE",
+        (document_id,),
+    ).fetchone()
+
     # Partial-window guard: if the incoming extraction is all-draft but the
     # existing row is published, the ingest window is a subset of the full
     # thread (e.g. ``brain ingest-gmail --since 7d`` where only a fresh
@@ -949,24 +1042,12 @@ def _update_doc_in_place(
     # UPDATE preserves the published body, metadata, chunks, and links.
     # The legitimate auto-flip direction (TRUE→FALSE when a sent reply
     # arrives) is unaffected because this guard only triggers on draft=True.
-    if draft:
-        draft_existing = conn.execute(
-            "SELECT draft FROM documents WHERE id=%s",
-            (document_id,),
-        ).fetchone()
-        if draft_existing is not None and not draft_existing[0]:
-            return
+    if draft and existing_row is not None and not existing_row[0]:
+        return False
 
-    # FOR UPDATE SELECT locks the row against concurrent tag-writes
-    # (read-modify-write safety) and reads existing tags for the union merge.
-    # body_changed is signalled separately via the kwarg, so we don't need to
-    # read content_hash here — the caller already computed it from the
-    # pre-UPDATE hash diff.
-    existing_row = conn.execute(
-        "SELECT tags FROM documents WHERE id=%s FOR UPDATE",
-        (document_id,),
-    ).fetchone()
-    existing_tags: list[str] = list(existing_row[0]) if existing_row and existing_row[0] else []
+    existing_tags: list[str] = (
+        list(existing_row[1]) if existing_row and existing_row[1] else []
+    )
 
     # Union semantics: preserve existing curated tags; add incoming tags.
     # normalize_tags is idempotent (casefold + hyphenate) and preserves
@@ -974,21 +1055,14 @@ def _update_doc_in_place(
     merged_tags = normalize_tags([*existing_tags, *tags])
 
     # Re-evaluate the source row — same ``(kind, external_id)`` as the
-    # initial insert, so this is a SELECT-with-fallback-INSERT no-op in
-    # practice. Kept here so a future caller passing different
-    # ``source_metadata`` still gets the source row's metadata refreshed.
+    # initial insert, so this is an ON CONFLICT no-op in practice. Kept here
+    # so a future caller passing different ``source_metadata`` still resolves
+    # the source row.
     source_id = _upsert_source(
         conn,
         kind=source_kind,
         external_id=source_external_id,
         metadata=source_metadata,
-    )
-
-    chunks = chunk_text(doc.content, count_tokens=embedder.count_tokens)
-    embeddings = (
-        embedder.embed([c.content for c in chunks], input_type="document")
-        if chunks
-        else []
     )
 
     # Pre-insert metadata derivation (krisp adds ``_participant_keys``).
@@ -1066,39 +1140,13 @@ def _update_doc_in_place(
     # the full union — existing curated tags stay searchable via the weighted-B
     # tsv field even after a re-ingest that passes an empty tags list.
     title_text, tags_text = _chunk_search_metadata(doc.title, merged_tags)
-    for c, emb in zip(chunks, embeddings, strict=True):
-        conn.execute(
-            "INSERT INTO chunks (document_id, chunk_index, content, embedding, "
-            "title_text, tags_text, search_extras) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-            (
-                document_id,
-                c.index,
-                c.content,
-                emb,
-                title_text,
-                tags_text,
-                extract_sub_tokens(c.content),
-            ),
-        )
-
-    # Wave Q1-D — re-enrich the doc when its body actually changed.
-    # The hook's D11 idempotency rule needs ``body_changed`` because the
-    # ``UPDATE documents SET content_hash=%s`` above has already overwritten
-    # the row's stored hash — without an explicit body-changed signal the
-    # hook would always see ``existing_hash == content_hash`` and skip,
-    # leaving a stale summary on disk after a body refresh (Codex
-    # finding 1, 2026-05-11). The caller computed ``body_changed`` from
-    # the pre-UPDATE hash diff in :func:`_ingest_within_transaction`.
-    _enrich_post_ingest_hook(
+    _insert_chunks(
         conn,
         document_id=document_id,
-        doc=doc,
-        enricher=enricher,
-        enrich=enrich,
-        min_tokens=enrich_min_tokens,
-        content_hash=content_hash,
-        body_changed=body_changed,
+        chunks=chunks,
+        embeddings=embeddings,
+        title_text=title_text,
+        tags_text=tags_text,
     )
 
     _run_source_hooks(
@@ -1108,6 +1156,7 @@ def _update_doc_in_place(
         document_id=document_id,
         gws_runner=gws_runner,
     )
+    return True
 
 
 def _maybe_autotag_action_items(
@@ -1142,12 +1191,17 @@ def _enrich_post_ingest_hook(
     min_tokens: int,
     content_hash: str,
     body_changed: bool = False,
+    is_new_doc: bool = False,
 ) -> None:
     """Generate + persist a 2-3 sentence summary on ``documents.summary``.
 
-    Runs inside the caller's open transaction so the documents row + its
-    summary commit atomically. Skips silently (with a debug log) when any
-    of the wave-plan §3.a rules apply:
+    On the ingest hot path (Wave perf-T3 / F1) this runs AFTER the document
+    transaction has committed, in autocommit mode, as its own short ``UPDATE``
+    — a failure here leaves the committed row with ``summary IS NULL`` and never
+    rolls back the ingest. On the ``update_document`` (``brain edit``) path and
+    in direct unit tests it still runs inside the caller's open transaction.
+    Skips silently (with a debug log) when any of the wave-plan §3.a rules
+    apply:
 
     1. ``enrich=False`` — caller passed ``--no-enrich`` or a library caller
        deliberately disabled it.
@@ -1189,25 +1243,32 @@ def _enrich_post_ingest_hook(
         return
     if enricher.count_tokens(doc.content) < min_tokens:
         return
-    row = conn.execute(
-        "SELECT summary, content_hash, summary_model FROM documents WHERE id=%s",
-        (document_id,),
-    ).fetchone()
-    if row is None:
-        return  # defensive — the row was just INSERTed
-    existing_summary, existing_hash, existing_model = row
-    # Idempotency D11: reuse prior summary ONLY when the body AND model both
-    # match the current enricher AND the caller hasn't told us the body
-    # just changed. After a ``BRAIN_ENRICH_MODEL`` upgrade (e.g.,
-    # llama3.1:8b → llama3.2:8b), the existing summary is stale relative
-    # to the new model — re-enrich so improvements propagate.
-    if (
-        existing_summary is not None
-        and not body_changed
-        and existing_hash == content_hash
-        and existing_model == enricher.model
-    ):
-        return
+    # F4 (Wave perf-T3): on the new-doc path the row was just INSERTed with
+    # ``summary IS NULL`` / ``content_hash == content_hash`` / ``summary_model
+    # IS NULL``, so the D11 idempotency SELECT can only ever read those known
+    # values and never skips — drop the round-trip and proceed straight to
+    # summarization. The update path (``is_new_doc=False``) keeps the SELECT so
+    # D11 can reuse a still-valid summary.
+    if not is_new_doc:
+        row = conn.execute(
+            "SELECT summary, content_hash, summary_model FROM documents WHERE id=%s",
+            (document_id,),
+        ).fetchone()
+        if row is None:
+            return  # defensive — the row was just INSERTed
+        existing_summary, existing_hash, existing_model = row
+        # Idempotency D11: reuse prior summary ONLY when the body AND model both
+        # match the current enricher AND the caller hasn't told us the body
+        # just changed. After a ``BRAIN_ENRICH_MODEL`` upgrade (e.g.,
+        # llama3.1:8b → llama3.2:8b), the existing summary is stale relative
+        # to the new model — re-enrich so improvements propagate.
+        if (
+            existing_summary is not None
+            and not body_changed
+            and existing_hash == content_hash
+            and existing_model == enricher.model
+        ):
+            return
     try:
         result = enricher.summarize(doc.title, doc.content)
     except OllamaUnavailable as exc:
@@ -1588,21 +1649,18 @@ def update_document(
                 final_title = new_title if new_title is not None else cur_title
                 final_tags = list(new_tags) if new_tags is not None else cur_tags
                 title_text, tags_text = _chunk_search_metadata(final_title, final_tags)
-                for c, emb in zip(chunks, embeddings, strict=True):
-                    conn.execute(
-                        "INSERT INTO chunks (document_id, chunk_index, content, "
-                        "embedding, title_text, tags_text, search_extras) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                        (
-                            document_id,
-                            c.index,
-                            c.content,
-                            emb,
-                            title_text,
-                            tags_text,
-                            extract_sub_tokens(c.content),
-                        ),
-                    )
+                # F2 (Wave perf-T3): single executemany over the rebuilt chunks
+                # instead of a per-chunk round-trip. Still inside this txn — the
+                # ``brain edit`` path is interactive/single-doc, not the batch
+                # ingest hot path, so its embed/enrich stay transactional.
+                _insert_chunks(
+                    conn,
+                    document_id=document_id,
+                    chunks=chunks,
+                    embeddings=embeddings,
+                    title_text=title_text,
+                    tags_text=tags_text,
+                )
 
         if sets:
             # Same rationale as update_document: bump ingested_at so
