@@ -1,56 +1,50 @@
--- Migration 016: index hygiene — drop dead indexes, add two missing ones.
+-- Migration 016: index hygiene — drop one provably dead index, add two missing.
 --
--- Background: ``brain doctor`` (wave perf/waves-0-2) added a stale-stats
--- probe that exposed several indexes that have never been used (``idx_scan = 0``
--- across the entire lifetime of the prod DB). All eight were verified read-only
--- on 2026-05-25 before inclusion here.
+-- All operations are idempotent:
+-- ``DROP INDEX IF EXISTS`` is a no-op when already gone;
+-- ``CREATE INDEX IF NOT EXISTS`` is a no-op when already present.
 --
--- This migration is additive in the sense that it only REMOVES indexes
--- (never user data) and ADDS two new ones. All operations are idempotent:
--- ``DROP INDEX IF EXISTS`` is a no-op when the index is already gone;
--- ``CREATE INDEX IF NOT EXISTS`` is a no-op when it already exists.
+-- 1. DROP documents_tsv_idx — the only PROVABLY dead index.
+--    Code-level evidence: migration 009 moved FTS to the weighted
+--    chunks.tsv (multi-field tsvector). The documents.tsv column is still
+--    present (generated, no migration cost to keep), but no search query
+--    plan uses this index. It is a ~12 MB GIN that carries unnecessary
+--    write-amplification on every document INSERT / UPDATE.
 --
--- 1. documents_tsv_idx — GIN on documents.tsv (dead since migration 009 moved
---    FTS to the weighted chunks.tsv; the documents.tsv column is still present
---    for schema compatibility but no query plan uses this index).
+-- 2. DEFERRED — the following six filter indexes also showed idx_scan=0 at
+--    the 2026-05-25 audit, but the prod stats were reset by the 2026-05-22
+--    AGE cutover (pg_restore). Three days of observations is too short a
+--    window to call filter indexes "dead":
 --
--- 2. Seven additional dead indexes (idx_scan = 0 on prod as of 2026-05-25):
---      derived_links_rule_idx          (on derived_links.rule)
---      documents_tags_idx              (GIN on documents.tags)
---      directory_entries_email_idx     (on directory_entries.email)
---      idx_documents_draft             (on documents.draft)
---      idx_documents_sent_at           (on documents.sent_at)
---      idx_documents_thread_id         (on documents.thread_id)
---      uq_documents_gmail_thread       (unique partial on documents.thread_id)
+--      derived_links_rule_idx        (on derived_links.rule)
+--      documents_tags_idx            (GIN on documents.tags)
+--      directory_entries_email_idx   (on directory_entries.email)
+--      idx_documents_draft           (on documents.draft)
+--      idx_documents_sent_at         (on documents.sent_at)
+--      idx_documents_thread_id       (on documents.thread_id)
 --
---    Note: uq_documents_gmail_thread is a UNIQUE constraint implemented as an
---    index (migration 008). Dropping it removes the uniqueness constraint too.
---    The Python ingest layer enforces this via ``ON CONFLICT`` logic, not
---    by relying on the constraint at write time, so dropping it is safe.
+--    Revisit after ~30 days of post-cutover prod traffic. Drop in a
+--    migration 017 if idx_scan remains 0 at that point.
 --
--- 3. NEW: GIN index on documents.participants — the ``&&`` array-overlap
---    operator used by the --person filter (Q1-C) currently forces a seq-scan.
+-- 3. NEVER DROP uq_documents_gmail_thread — it is a UNIQUE constraint
+--    (indisunique=True, migration 008) that enforces the invariant
+--    "one email_thread row per thread_id". UNIQUE indexes legitimately
+--    show idx_scan=0 because uniqueness enforcement does not increment
+--    idx_scan. Dropping it would silently remove a data-integrity guard.
 --
--- 4. NEW: partial btree index on documents.source_path — the file-ingest
---    dedup path runs ``WHERE source_path = %s`` and currently seq-scans the
---    whole documents table. Scoped to IS NOT NULL rows to stay compact (stdin
---    ingests have source_path NULL and are deduped by content_hash).
+-- 4. NEW: GIN index on documents.participants — the ``&&`` array-overlap
+--    operator used by the --person filter (Q1-C) forces a seq-scan without
+--    this index.
+--
+-- 5. NEW: partial btree index on documents.source_path — the file-ingest
+--    dedup path (``WHERE source_path = %s``) forces a seq-scan without it.
+--    Scoped to IS NOT NULL rows (stdin ingests use content_hash dedup and
+--    have source_path NULL), keeping the index small.
 
 BEGIN;
 
--- Drop dead indexes
-
+-- Drop the single provably-dead index (FTS moved to chunks.tsv in 009).
 DROP INDEX IF EXISTS documents_tsv_idx;
-
-DROP INDEX IF EXISTS derived_links_rule_idx;
-DROP INDEX IF EXISTS documents_tags_idx;
-DROP INDEX IF EXISTS directory_entries_email_idx;
-DROP INDEX IF EXISTS idx_documents_draft;
-DROP INDEX IF EXISTS idx_documents_sent_at;
-DROP INDEX IF EXISTS idx_documents_thread_id;
-DROP INDEX IF EXISTS uq_documents_gmail_thread;
-
--- Add missing indexes
 
 -- GIN for ``documents.participants && ARRAY[...]`` array-overlap queries
 -- (the --person filter in Q1-C; currently a full seq-scan).
