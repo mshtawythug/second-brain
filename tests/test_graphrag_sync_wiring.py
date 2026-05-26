@@ -172,7 +172,7 @@ def test_graph_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     ):
         monkeypatch.delenv(key, raising=False)
     cfg = Config.load()
-    assert cfg.graph_enabled is False
+    assert cfg.graph_enabled is True
     assert cfg.graph_tenant_id == "default"
     assert cfg.graph_cooccur_window == 3
     assert cfg.graph_max_entities == 40
@@ -185,8 +185,10 @@ def test_graph_enabled_truthy(monkeypatch: pytest.MonkeyPatch, token: str) -> No
     assert Config.load().graph_enabled is True
 
 
-@pytest.mark.parametrize("token", ["0", "false", "no", "off", ""])
+@pytest.mark.parametrize("token", ["0", "false", "no", "off"])
 def test_graph_enabled_falsy(monkeypatch: pytest.MonkeyPatch, token: str) -> None:
+    # "" is intentionally excluded: empty string means "use the code default"
+    # (now True after the 2026-05-26 flip), tested by test_graph_config_defaults.
     monkeypatch.setenv("BRAIN_GRAPH_ENABLED", token)
     assert Config.load().graph_enabled is False
 
@@ -240,7 +242,7 @@ def test_graph_g2_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in _G2_GRAPH_ENV_VARS:
         monkeypatch.delenv(key, raising=False)
     cfg = Config.load()
-    assert cfg.graph_concepts is False
+    assert cfg.graph_concepts is True
     assert cfg.graph_extract_model == "llama3.1:8b"
     assert cfg.graph_depth == 2
     assert cfg.graph_frontier_cap == 200
@@ -255,8 +257,10 @@ def test_graph_concepts_truthy(monkeypatch: pytest.MonkeyPatch, token: str) -> N
     assert Config.load().graph_concepts is True
 
 
-@pytest.mark.parametrize("token", ["0", "false", "no", "off", ""])
+@pytest.mark.parametrize("token", ["0", "false", "no", "off"])
 def test_graph_concepts_falsy(monkeypatch: pytest.MonkeyPatch, token: str) -> None:
+    # "" is intentionally excluded: empty string means "use the code default"
+    # (now True after the 2026-05-26 flip), tested by test_graph_g2_config_defaults.
     monkeypatch.setenv("BRAIN_GRAPH_CONCEPTS", token)
     assert Config.load().graph_concepts is False
 
@@ -1099,3 +1103,37 @@ def test_relink_derived_reconciles_corpus(
     assert _person_keys(test_db) == {"alice", "bob"}
     assert _age_entity_count(test_db) == 2
     assert _age_document_count(test_db) == 1
+
+
+# --------------------------------------------------------------------------- #
+# 11. Regression — DEFAULT_GRAPH_ENABLED=True must not break stock-pgvector DBs
+# --------------------------------------------------------------------------- #
+def test_graph_enabled_default_does_not_break_ingest_when_age_missing(
+    test_db: psycopg.Connection[Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Regression: flipping DEFAULT_GRAPH_ENABLED to True must not break ingest
+    on a database that lacks Apache AGE. The GraphSyncer.reconcile contract is
+    best-effort + never-raises; this test pins that contract so future refactors
+    can't silently re-introduce a hard failure when the new default activates on
+    a stock pgvector DB.
+    """
+    # Explicitly construct with enabled=True to mirror the new code default;
+    # this is what every CLI / MCP invocation now produces on a stock pgvector DB.
+    syncer = GraphSyncer(
+        ReconcileConfig(),
+        enabled=True,
+        backend=AgeBackend(),
+    )
+    # Simulate a stock pgvector DB where Apache AGE is not installed.
+    # age_extension_available returns False → _age_ready returns False early →
+    # reconcile skips gracefully without touching reconcile_document.
+    with patch(
+        "brain.graph_rag.sync.age_extension_available", return_value=False
+    ), patch("brain.graph_rag.sync.reconcile_document") as mock_reconcile, caplog.at_level(
+        "WARNING", logger="brain.graph_rag.sync"
+    ):
+        # Must NOT raise — the graph is a recomputable mirror; ingest already
+        # committed and must not be rolled back by a graph-sync hiccup.
+        syncer.reconcile(test_db, "22222222-2222-2222-2222-222222222222")
+    # AGE absent → graceful early return; reconcile_document was never invoked.
+    mock_reconcile.assert_not_called()

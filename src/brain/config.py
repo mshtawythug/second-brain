@@ -101,16 +101,16 @@ DEFAULT_ENRICH_TIMEOUT_SECONDS = 60.0
 
 # Wave G1-c -- GraphRAG incremental sync (people aspect) settings.
 #
-# Graph sync is OPT-IN this wave: ``BRAIN_GRAPH_ENABLED`` defaults to False so
-# existing deployments (and the prod DB, which predates the Apache AGE image)
-# see no behavior change. When enabled AND the database actually ships AGE, a
-# post-write / post-delete hook keeps the people graph in lock-step with the
-# ``documents`` table (see :mod:`brain.graph_rag.sync`). The remaining knobs map
-# 1:1 onto :class:`brain.graph_rag.reconcile.ReconcileConfig`; their defaults
+# Graph sync is OPT-IN by origin; ``BRAIN_GRAPH_ENABLED`` now defaults to True so
+# new deployments get graph retrieval out of the box. Deployments on stock pgvector
+# (no AGE) are safe: GraphSyncer.reconcile is best-effort + never-raises. When
+# the AGE image is present, a post-write/post-delete hook keeps the graph in sync with
+# ``documents`` (see :mod:`brain.graph_rag.sync`). The remaining knobs map
+# 1:1 onto :class:`brain.graph_rag.reconcile.ReconcileConfig`; defaults
 # mirror the canonical constants in :mod:`brain.graph_rag.cooccur` /
 # :mod:`brain.graph_rag.weighting` -- kept as literals here (not imported) so
 # ``config`` stays import-cheap and free of any cycle with the graph package.
-DEFAULT_GRAPH_ENABLED = False
+DEFAULT_GRAPH_ENABLED = True
 DEFAULT_GRAPH_TENANT_ID = "default"
 DEFAULT_GRAPH_COOCCUR_WINDOW = 3  # == brain.graph_rag.cooccur.DEFAULT_COOCCUR_WINDOW
 DEFAULT_GRAPH_MAX_ENTITIES = 40  # == cooccur.DEFAULT_MAX_ENTITIES_PER_DOC
@@ -125,7 +125,7 @@ _GRAPH_ENABLED_FALSY = frozenset({"0", "false", "no", "off"})
 # here in G2-a; the concept aspect (G2-b/c) and the local/themes retrieval
 # surfaces (G2-d..i) consume them. Defaults follow spec §10 + Codex ruling Q4
 # (``BRAIN_GRAPH_MAX_DEGREE`` = 50, ``BRAIN_GRAPH_MIN_EDGE_WEIGHT`` = 0.20).
-DEFAULT_GRAPH_CONCEPTS = False
+DEFAULT_GRAPH_CONCEPTS = True
 # Ollama model for the gated concept entity extractor (spec §3 D3: the default
 # ``OllamaExtractor`` wraps ``enrichment.extract_entities()``). Mirrors the
 # enrich-model default convention but kept a separate literal so the concept

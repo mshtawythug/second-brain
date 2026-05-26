@@ -666,9 +666,9 @@ def test_doctor_no_graph_drift_line_when_disabled(
     _seed_triangle(test_db)
     _build(test_db)
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    # Graph stays disabled via the session-autouse _force_graph_flags_default
-    # fixture; a delenv here would let the local .env re-inject the flag.
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    # Graph forced disabled (default is now ON after 2026-05-26 flip).
+    monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "false")
     with _patch_httpx_client(_ok_ollama_transport()):
         result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
@@ -776,9 +776,9 @@ def test_doctor_no_community_line_when_disabled(
     """With BRAIN_GRAPH_ENABLED off, doctor emits no ``communities`` line."""
     _build_default_communities(test_db)
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
-    # Graph stays disabled via the session-autouse _force_graph_flags_default
-    # fixture; a delenv here would let the local .env re-inject the flag.
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    # Graph forced disabled (default is now ON after 2026-05-26 flip).
+    monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "false")
     with _patch_httpx_client(_ok_ollama_transport()):
         result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output

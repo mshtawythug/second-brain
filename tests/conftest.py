@@ -159,8 +159,9 @@ def _force_graph_flags_default() -> Iterator[None]:
     NOT help, because the file value is re-injected after the delete.
 
     Mirroring :func:`_force_test_database_url`, force both flags to an EMPTY
-    string for the session (empty -> the parser uses the code default, i.e.
-    disabled), so ``os.environ.setdefault`` skips the ``.env`` value. Per-test
+    string for the session (empty -> the parser uses the code default, currently
+    enabled for both flags after the 2026-05-26 default-on flip), so
+    ``os.environ.setdefault`` skips the ``.env`` value. Per-test
     ``monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "true")`` in the enabled-path
     tests still overrides this and undoes itself per-test.
     """

@@ -78,6 +78,8 @@ Caveats:
   ```
   See [Wiki rendering → Serve locally](#serve-locally) for the Caddyfile recipe and the `brain.test` /etc/hosts entry. Skip Caddy if you only ever query the brain through `brain search` from Claude — the wiki view is optional.
 - **`gws` CLI** (only for Gmail ingest and Google-backed directory linking). Brain shells out to `gws gmail users messages list/get` for `brain ingest-gmail`, and uses `gws` best-effort for Calendar/Contacts directory refreshes. Install and authenticate it separately, make sure `which gws` resolves, then `brain doctor` will report `gws CLI OK`.
+- **Apache AGE Postgres image** — shipped automatically. `brain setup` builds and runs the custom `second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2` image (PostgreSQL 16 + pgvector 0.8.2 + pgcrypto + AGE 1.5.0-rc0) from the packaged Dockerfile. The step-by-step path stays on stock pgvector for backwards-compat; see [Upgrading an existing brain to the AGE image](#upgrading-an-existing-brain-to-the-age-image).
+- **An Ollama model for GraphRAG concept extraction** (only if `BRAIN_GRAPH_CONCEPTS=true`, which is the default). `ollama pull llama3.1:8b` (~4.7 GB) covers the default model; set `BRAIN_GRAPH_EXTRACT_MODEL` to override. Setting `BRAIN_GRAPH_CONCEPTS=false` disables concept extraction (people aspect still works without an LLM).
 - **Graphviz** (optional) — only needed if you want to render `brain graph --format dot` output locally with `dot -Tsvg`. On macOS: `brew install graphviz`.
 - **A Voyage AI API key** (only if `BRAIN_EMBEDDER=voyage`) — free tier covers personal use. Sign up at [voyageai.com](https://www.voyageai.com/) and grab a key.
 - **Claude Code or Claude Desktop** (optional but the whole point) — Claude Code can call the `brain` CLI from any project; Claude Desktop can call the `brain-mcp` server once configured.
@@ -153,7 +155,10 @@ isn't running (`brew services start ollama`), the configured embedding model
 isn't pulled (`ollama pull snowflake-arctic-embed2`), or — only when
 `BRAIN_EMBEDDER=voyage` — `VOYAGE_API_KEY` is missing from `.env`. Missing
 `gws` only disables Gmail ingest and Google directory refreshes; missing `npx`
-only disables `brain vault render`.
+only disables `brain vault render`. GraphRAG health (AGE extension presence,
+graph-drift counters, community-materialization staleness) is a soft check — a
+stock pgvector DB is reported as a warning, not a failure, and doesn't flip the
+exit code.
 
 ### Uninstall
 
@@ -420,22 +425,23 @@ passed through and can use any Gmail search syntax.
 
 ```bash
 brain status   # counts and last-ingest time
-brain doctor   # env, Postgres/pgvector, embedder, gws, npx, mirror drift
+brain doctor   # env, Postgres/pgvector, embedder, gws, npx, mirror drift, AGE + graph health
 ```
 
 `brain doctor` exits non-zero only for required failures: config, database, or
-active embedder. Optional integrations (`gws`, `npx`) are warnings.
+active embedder. Optional integrations (`gws`, `npx`, the AGE extension, the
+concept-extractor model, community materialization staleness) are warnings.
 
-## GraphRAG (experimental)
+## GraphRAG
 
 GraphRAG adds **entity-centric graph retrieval alongside** the existing
 hybrid vector + FTS search — it does not replace `brain search`. Where hybrid
 search ranks documents by lexical + semantic similarity, GraphRAG builds a
-graph of the people (and, optionally, concepts) that co-occur across your
-corpus and retrieves over that structure. It answers questions hybrid search
-struggles with — "what themes come up in my conversations with X", "which
-clusters of people and topics dominate my notes" — by traversing
-relationships instead of matching text.
+graph of the people and concepts that co-occur across your corpus and
+retrieves over that structure. It answers questions hybrid search struggles
+with — "what themes come up in my conversations with X", "which clusters of
+people and topics dominate my notes" — by traversing relationships instead of
+matching text.
 
 It exposes a `brain graphrag …` CLI command group (with full MCP parity via
 the `brain_graphrag_*` tools), with five retrieval modes:
@@ -448,51 +454,43 @@ the `brain_graphrag_*` tools), with five retrieval modes:
 | `fuse` | RRF-merges the local-graph document leg with the vector/FTS hybrid leg into one ranked list. |
 | `auto` *(default)* | Heuristic router — picks `themes` / `global` / `local` based on the query and whether a person resolves. |
 
-> **Status:** experimental. The graph runs on [Apache AGE](https://age.apache.org/)
-> (an openCypher graph extension) inside the same Postgres. The **concept
-> aspect** (LLM entity extraction over topics/projects/orgs/tools) is
-> **default-OFF** behind `BRAIN_GRAPH_CONCEPTS` — the always-on people aspect
-> needs no model. No raw Cypher is ever accepted or shown; every command takes
-> structured params and the backend injects the tenant + traversal caps.
+The graph runs on [Apache AGE](https://age.apache.org/) (an openCypher graph
+extension) inside the same Postgres. Both aspects — **people** (always on) and
+**concepts** (LLM entity extraction over topics/projects/orgs/tools) — are
+default-on; flip `BRAIN_GRAPH_CONCEPTS=false` to disable the concept aspect if
+you don't have an LLM available locally. No raw Cypher is ever accepted or
+shown; every command takes structured params and the backend injects the
+tenant + traversal caps.
 
 ### Setup
 
-GraphRAG needs a Postgres image that ships Apache AGE — the **stock
-`pgvector/pgvector:pg16` prod image does not**. This repo packages a custom
-image, `second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2` (PostgreSQL 16 + pgvector
-0.8.2 + pgcrypto + Apache AGE 1.5.0-rc0), built from
-`src/brain/templates/docker/age/Dockerfile`.
+GraphRAG is on by default after `brain setup` (the one-liner installer). The
+packaged `docker-compose.yml` template provisions a custom Postgres image —
+`second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2` (PostgreSQL 16 + pgvector 0.8.2 +
+pgcrypto + Apache AGE 1.5.0-rc0), built from
+`src/brain/templates/docker/age/Dockerfile` — and `brain init` bootstraps the
+AGE extension and the recomputable graph mirror automatically.
+
+If you installed by hand (the "Step by step" path above) on a stock pgvector
+image, GraphRAG will run in soft-degraded mode: ingest succeeds, but graph
+sync is a silent no-op and `brain graphrag …` commands return a friendly "AGE
+not available" guard. To enable the full graph stack, follow the
+[Upgrading an existing brain to the AGE image](#upgrading-an-existing-brain-to-the-age-image)
+recipe below.
+
+After install, backfill the graph from your existing documents and (optionally)
+detect communities for `--mode global`:
 
 ```bash
-# 1. Install deps — pip install -e ".[dev]" pulls the new `networkx` dependency
-#    (used for Louvain community detection). If your venv predates GraphRAG,
-#    re-run it.
-pip install -e ".[dev]"
-
-# 2. Enable the ingest-time graph sync. Add to .env:
-#    BRAIN_GRAPH_ENABLED=true
-#    (Default is false — on a stock pgvector DB this knob is a no-op.)
-
-# 3. Apply the graph migrations + bootstrap the AGE graph. On an AGE-capable
-#    image, `brain init` creates the `age` extension and the recomputable graph
-#    mirror; on a stock pgvector image it prints a friendly "graph skipped" note
-#    and finishes cleanly.
-brain init
-
-# 4. Backfill the graph from your existing documents (idempotent + resumable).
-brain graphrag build --backfill
-
-# 5. (Optional, required for `--mode global`) detect + summarize communities.
-brain graphrag communities build
-
-# 6. Verify. `brain doctor` adds a soft AGE/graph health line (it never flips
-#    the exit code — a DB without AGE is reported, not a failure).
-brain doctor
+brain graphrag build --backfill          # idempotent + resumable
+brain graphrag communities build         # required only for --mode global
+brain doctor                             # AGE + graph-drift + communities health
 ```
 
 The relevant `.env` knobs are documented in `.env.example` (search for
-`BRAIN_GRAPH_`): `BRAIN_GRAPH_ENABLED`, `BRAIN_GRAPH_TENANT`,
-`BRAIN_GRAPH_DEPTH`, `BRAIN_GRAPH_CONCEPTS`, the community-detection tuning
+`BRAIN_GRAPH_`): `BRAIN_GRAPH_ENABLED` (default `true`), `BRAIN_GRAPH_CONCEPTS`
+(default `true`), `BRAIN_GRAPH_TENANT`, `BRAIN_GRAPH_DEPTH`,
+`BRAIN_GRAPH_EXTRACT_MODEL`, the community-detection tuning
 (`BRAIN_GRAPH_COMMUNITY_*`), and more — all with sensible defaults.
 
 ### Usage
@@ -526,15 +524,49 @@ The same surface is available to Claude Desktop / Claude Code through the
 `brain_graphrag_search`, `brain_graphrag_themes`, `brain_graphrag_entity`,
 `brain_graphrag_build`, and `brain_graphrag_communities_build` MCP tools.
 
-### Switching an existing brain to AGE
+### Upgrading an existing brain to the AGE image
 
-Moving a brain that's already running on the stock pgvector image over to the
-AGE image is a **separate, deliberate cutover** — back up your database first.
-The graph itself is a recomputable mirror (rebuild it with
-`brain graphrag build --force` after the swap), so the cutover is about the
-container image, not the data. Until then, GraphRAG runs against the AGE-backed
-**test** instance only (`docker-compose.age-test.yml`, port 5434); the prod
-container stays on stock pgvector.
+If your brain was installed before 2026-05-22 (or you used the step-by-step
+path on the committed `docker-compose.yml`, which intentionally stays on stock
+pgvector), the graph stack runs in soft-degraded mode until you flip the
+container image. The cutover is about the container, not the data — the AGE
+graph itself is a recomputable mirror you'll rebuild with
+`brain graphrag build --force` after the swap.
+
+```bash
+# 1. Back up your database before any image change (host bind-mount; mandatory).
+mkdir -p ~/brain-backups
+docker exec second-brain-postgres pg_dump -U brain -Fc -d second_brain \
+  > ~/brain-backups/second_brain-precutover-$(date +%Y%m%d-%H%M%S).dump
+
+# 2. Build the AGE image locally. The Dockerfile is packaged in this repo.
+docker build -t second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2 \
+  -f src/brain/templates/docker/age/Dockerfile src/brain/templates/docker/age/
+
+# 3. Create a gitignored docker-compose.override.yml that pins the AGE image
+#    only on your machine — the committed docker-compose.yml stays on stock
+#    pgvector as the repo default.
+cat > docker-compose.override.yml <<'YAML'
+services:
+  postgres:
+    image: second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
+YAML
+
+# 4. Restart the container so Compose picks up the new image.
+docker compose down
+docker compose up -d
+
+# 5. Bootstrap AGE + recompute the graph mirror.
+brain init                               # creates the age extension + graph mirror
+brain graphrag build --force             # authoritative full rebuild
+brain graphrag communities build         # optional, needed for --mode global
+brain doctor                             # AGE + graph-drift should now report OK
+```
+
+If something goes wrong, `docker compose down && docker compose up -d` with
+the override removed returns you to stock pgvector (the data on disk is
+unchanged — graph rows live in their own tables and AGE catalogue, both of
+which are safely re-derivable from the backup).
 
 ## Vault model
 
@@ -727,6 +759,11 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `brain_note_new` | Create a vault note from chat content without opening `$EDITOR`; auto-tags `source-mcp`. |
 | `brain_daily` | Resolve or create a daily note for a date. |
 | `brain_link_proposal` | Propose a `[[link]]` from one vault note to another without writing files. |
+| `brain_graphrag_search` | Graph retrieval over the entity graph. Modes: `auto` (default) / `local` / `themes` / `global` / `fuse`. Returns a `GraphContext` with entities + scored docs. |
+| `brain_graphrag_themes` | "Themes in my conversations with X" — required `person` arg. Returns ranked theme groups. |
+| `brain_graphrag_entity` | One entity's co-occurrence neighbourhood. |
+| `brain_graphrag_build` | Backfill or force-rebuild the graph from existing documents. Idempotent + resumable. |
+| `brain_graphrag_communities_build` | Detect + summarize communities (Louvain over the entity graph). Required for `--mode global`. |
 
 ### Environment variables
 
@@ -740,6 +777,12 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault folder for authored notes, ingested mirrors, wiki rendering, and MCP note tools. |
 | `BRAIN_USER_EMAIL` | unset | Owner email used by the rendered Gmail thread view's "Show only my replies" filter. Set it before wiki builds if you use that filter. |
 | `BRAIN_MCP_LOG_LEVEL` | `INFO` | Stderr log level. Accepts `DEBUG`, `INFO`, `WARNING`, `ERROR`. Unknown values fall back to `INFO`. |
+| `BRAIN_GRAPH_ENABLED` | `true` | Enable people-aspect graph sync at ingest. On a stock pgvector DB the sync is a best-effort no-op (never raises). |
+| `BRAIN_GRAPH_CONCEPTS` | `true` | Enable concept-aspect extraction (LLM entity extraction over topics/projects/orgs/tools). Requires `BRAIN_GRAPH_EXTRACT_MODEL` to be pullable via Ollama. |
+| `BRAIN_GRAPH_TENANT` | `default` | Tenant id stamped on every graph row, vertex, edge, and query. Single-user local deployments leave it at the default. |
+| `BRAIN_GRAPH_EXTRACT_MODEL` | `llama3.1:8b` | Ollama model used by the concept extractor. Any JSON-mode-capable model pullable via `ollama pull <name>`. |
+
+(See `.env.example` for the full ~18-knob `BRAIN_GRAPH_*` set covering traversal caps, community detection, and concept-extraction tuning — all with sensible defaults.)
 
 ### What to expect
 
@@ -964,6 +1007,7 @@ The design is captured across three specs and one set of phase-by-phase implemen
 | [`2026-04-24-second-brain-design.md`](docs/specs/2026-04-24-second-brain-design.md) | Original v1 — Postgres + pgvector schema, hybrid FTS+vector search via Reciprocal Rank Fusion, ingestion pipeline (PDF/DOCX/MD/TXT, Gmail, Krisp/Slack via stdin), CLI surface. The foundation everything else builds on. |
 | [`2026-04-27-mcp-server-design.md`](docs/specs/2026-04-27-mcp-server-design.md) | FastMCP server exposing brain tools (`brain_search`, `brain_show`, `brain_list`, `brain_status`, `brain_ingest_stdin`, `brain_tag`, `brain_edit`) so Claude Desktop can call them in any conversation. Stdio transport, error wrapping, warmup embed. |
 | [`2026-04-28-vault-model-design.md`](docs/specs/2026-04-28-vault-model-design.md) | The current model — vault folder of `.md` files as source of truth for authored notes, sync engine + watcher, `[[wiki-links]]` graph, Quartz-rendered wiki. Two-tier corpus (vault + ingested). |
+| [`2026-05-20-graphrag-age-image.md`](docs/specs/2026-05-20-graphrag-age-image.md) | GraphRAG architecture — Apache AGE inside the existing Postgres (not Neo4j); hybrid relational + AGE-mirror storage; people + concept aspects; auto / local / themes / global / fuse retrieval modes; community detection (Louvain); the gated cutover from stock pgvector to the AGE image. |
 
 ### Plans (`docs/plans/`)
 
@@ -978,6 +1022,8 @@ The design is captured across three specs and one set of phase-by-phase implemen
 | [`2026-05-08-quartz-incremental-builds.md`](docs/plans/2026-05-08-quartz-incremental-builds.md) | Plan A — TypeScript parser cache at `<vault>/.quartz/.cache/parser/` so unchanged Markdown files skip the parse phase between builds. Surfaced via `bin/brain-rebuild --clean-cache`. |
 | [`2026-05-09-edit-to-ui-latency.md`](docs/plans/2026-05-09-edit-to-ui-latency.md) / [`-closeout.md`](docs/plans/2026-05-09-edit-to-ui-latency-closeout.md) | Edit-to-UI latency reduction — PollingObserver swap, scoped polling, deferred refresh_related, node-direct Quartz invocation, reload poll 3s→1s. Median 29.7s edit-to-UI on a 1100-doc vault. |
 | [`2026-05-09-plan-b-per-file-emit.md`](docs/plans/2026-05-09-plan-b-per-file-emit.md) | Plan B — per-file partial emit fastpath. Trivial edits route to a single-file Quartz emit instead of a full rebuild, taking edit-to-UI from ~30s down to ~2s. See [Serve locally](#serve-locally) for the user-facing description. |
+| GraphRAG G0–G4 plans (`docs/plans/2026-05-??-graphrag*.md`) | GraphRAG end-to-end — relational + AGE storage; people-aspect ingest sync; bounded traversal; community detection; auto router; the AGE-image cutover. Merged to master via PR #1 on 2026-05-22. |
+| Q1 search-quality plans (`docs/plans/2026-05-11-*.md`) | Q1-A (recency boost + snippet context), Q1-B (explain trace + nDCG eval harness), Q1-C (metadata filters: person / time / kind / thread / draft / has-tag / without-tag), Q1-D (auto-summary via Ollama + `brain todo` for Krisp action items). |
 
 ### Codebase layout
 
@@ -987,44 +1033,36 @@ src/brain/
   config.py           — env loading; selects BRAIN_EMBEDDER ∈ {arctic, voyage, qwen3}
   db.py               — psycopg connection + migration runner (schema_migrations tracked)
   embeddings.py       — three concrete embedders behind a shared Protocol
+  embedding_targets.py — allowlist + identifier-safety helpers for pgvector embedding columns
   errors.py           — BrainError hierarchy
   queries.py          — read-side SQL helpers shared by CLI + MCP
   search.py           — hybrid FTS + vector via RRF
+  rank_fusion.py      — shared RRF helper (search + graph retrieval both use it)
+  set_similarity.py   — Jaccard helper (community membership matching)
+  tags.py             — canonical casefold-lowercase + hyphenated tag normaliser
+  interactions.py     — append-only feedback log (search clicks, ratings, pins) — supports both document + graph targets
+  enrichment.py       — Ollama-backed summariser + tag-proposal helpers
+  todo.py             — parses krisp_action_items checkboxes for `brain todo`
   format.py           — human + JSON output
   edit_session.py     — JSON-header + body editor flow
   editor.py           — $EDITOR / $VISUAL subprocess wrapper
-  mcp_server.py       — FastMCP stdio server
-  ingest/             — extractors per file type + chunker + Embedder Protocol
-  vault/              — vault-model modules
-    slug.py           — deterministic ASCII slugifier
-    templates.py      — _templates/ rendering ({{title}}, {{date}}, ...)
-    frontmatter.py    — YAML frontmatter parse / dump / body_hash
-    export.py         — DB → vault one-shot dump
-    links.py          — wiki-link parser ([[X]], [[X|Y]], ![[X]], [[brain:id]])
-    resolver.py       — title / alias / id / source-external resolution
-    sync.py           — vault → DB reconciliation; sync_one_file helper
-    rename.py         — note rename with [[]] reference rewrite + atomic restore
-    graph.py          — backlinks / outgoing / orphans / graph queries
-    graph_format.py   — JSON / DOT / Mermaid emitters
-    watch.py          — fsnotify watcher with debounce + drain on shutdown
-    paths.py          — shared path/wiki-link helpers
-  wiki/               — wiki rendering + serve
-    build_swap.py     — full Quartz build + atomic current/ symlink swap
-    build_watcher.py  — vault-change watcher; routes to fastpath or full
-    build_partial.py  — Python wrapper for the Quartz build-partial subcommand
-    edit_classifier.py — fingerprint-based trivial/non-trivial routing
-    fastpath_manifest.py — manifest.json + contentmap.json reader/writer
-    fastpath_state.py — state.json (last_partial_at_ms, failure counter)
-    build_homepage.py — recent rail + homepage emit
-    build_people.py   — People Hub (per-person vault pages + roster)
-    build_related.py  — refresh_related daemon (per-doc related JSON)
-    slug.py           — Quartz-compatible slug → vault-path conversion
-migrations/           — numbered SQL files (001..009) + schema_migrations tracking
-bin/                  — brain-up / brain-down / brain-status convenience scripts
+  mcp_server.py       — FastMCP stdio server (brain_* + brain_graphrag_* tools)
+  setup.py            — `brain setup` orchestration (preflight, compose render, init, doctor)
+  uninstall.py        — `brain uninstall` (removes launchd plists + runtime state)
+  cli_claude.py       — `brain claude install-skill` (installs the Claude Code skill)
+  templates/          — packaged docker-compose.yml.j2, env.example, AGE Dockerfile, skill, Caddyfile
+  ingest/             — extractors per file type + chunker + Embedder Protocol + graph sync hook
+  vault/              — vault-model modules (slug, templates, frontmatter, export, links, resolver, sync, rename, graph, watch, paths)
+  wiki/               — wiki rendering + serve (build_swap, build_watcher, build_partial, edit_classifier, fastpath_manifest, fastpath_state, build_homepage, build_people, build_related, slug)
+  quartz_overrides/   — Quartz overlay applied to <vault>/.quartz at render time
+  graph_rag/          — GraphRAG package: backend (AGE), schema (frozen value objects), extractor (Ollama), cooccur, weighting, traversal, router, communities, sync, reconcile
+migrations/           — numbered SQL files (001..016) + schema_migrations tracking
+bin/                  — brain-up / brain-down / brain-rebuild / brain-status convenience scripts
 quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
+skills/               — claude code skills (consult-brain, brain-graph)
 docs/specs/           — design specs (above)
 docs/plans/           — implementation plans (above)
-tests/                — real-DB pattern, fake embedder, ~825 tests
+tests/                — real-DB pattern, fake embedder, ~3560 tests
 ```
 
 ## How Claude uses this
