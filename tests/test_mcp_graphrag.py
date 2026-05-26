@@ -1051,3 +1051,244 @@ def test_communities_refresh_age_absent_internal_error(
         mcp_server.brain_graphrag_communities_refresh()
     assert exc_info.value.error.code == INTERNAL_ERROR
     assert "Apache AGE is not available" in exc_info.value.error.message
+
+
+# --------------------------------------------------------------------------- #
+# A4: brain_graphrag_themes MCP wire shape — scoped_doc_count locked
+# --------------------------------------------------------------------------- #
+def test_mcp_themes_result_includes_scoped_doc_count(
+    test_db: psycopg.Connection, graph_state: mcp_server._State  # noqa: ARG001
+) -> None:
+    """themes payload entities carry both ``doc_count`` and ``scoped_doc_count``.
+
+    ``brain_graphrag_themes`` delegates to ``graph_context_json`` which calls
+    ``_entity_json``; A3 adds ``scoped_doc_count`` to ``_entity_json``, so both
+    keys must be present on every entity returned by the MCP tool. This locks the
+    wire shape so a future format refactor cannot silently drop the field.
+    """
+    _seed_dana_cluster(test_db)
+    _build(test_db)
+    payload = mcp_server.brain_graphrag_themes(person="dana lee")
+    assert payload["themes"], "expected at least one theme group from dana cluster"
+    # Every entity in every theme must carry both fields.
+    for theme in payload["themes"]:
+        for ent in theme["entities"]:
+            assert "doc_count" in ent, f"doc_count missing from entity {ent}"
+            assert "scoped_doc_count" in ent, f"scoped_doc_count missing from entity {ent}"
+    # Concretely: the scoped count must be a non-negative integer (not None),
+    # because themes mode always sets scoped_doc_count via in_scope_df (A2).
+    first_entities = payload["themes"][0]["entities"]
+    assert first_entities, "first theme has no entities"
+    sc = first_entities[0]["scoped_doc_count"]
+    assert isinstance(sc, int) and sc >= 0, f"expected non-negative int, got {sc!r}"
+
+
+# --------------------------------------------------------------------------- #
+# C4: brain_graphrag_aliases_apply MCP twin
+# Mirrors `brain graphrag aliases apply`. Synthetic alias rules only.
+# --------------------------------------------------------------------------- #
+def _make_aliases_state(
+    monkeypatch: pytest.MonkeyPatch, fake_embedder: object
+) -> mcp_server._State:
+    """Install state whose Config picks up ``BRAIN_GRAPH_ALIASES_PATH``.
+
+    Mirrors :func:`_make_state` but loads the Config from environment so the
+    alias-path env var set by the test is honored (rather than hard-coding the
+    test DB URL into a Config kwarg, which would discard
+    ``BRAIN_GRAPH_ALIASES_PATH``). ``DATABASE_URL`` is monkey-patched to the
+    test DB for the env-driven load.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_GRAPH_GENERIC_DF", "1.0")
+    state = mcp_server._State(
+        cfg=Config.load(),
+        embedder=fake_embedder,  # type: ignore[arg-type]
+        enricher=None,
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+    return state
+
+
+def test_aliases_apply_empty_rules_is_noop(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,  # noqa: ARG001 — fixture readies the DB
+    fake_embedder: object,
+) -> None:
+    """No rules file configured → zero-counter payload, no DB writes, exit OK."""
+    monkeypatch.delenv("BRAIN_GRAPH_ALIASES_PATH", raising=False)
+    _make_aliases_state(monkeypatch, fake_embedder)
+    payload = mcp_server.brain_graphrag_aliases_apply()
+    assert payload["rules_total"] == 0
+    assert payload["rules_applied"] == 0
+    assert payload["dry_run"] is False
+    assert payload["communities_refresh_recommended"] is False
+    # Wire shape: 7 AliasResult fields + the staleness hint = 8 keys.
+    assert set(payload.keys()) == {
+        "tenant_id",
+        "rules_total",
+        "rules_applied",
+        "mentions_repointed",
+        "contributions_repointed",
+        "sources_orphaned",
+        "dry_run",
+        "communities_refresh_recommended",
+    }
+
+
+def test_aliases_apply_dry_run_persists_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    tmp_path: Any,
+    fake_embedder: object,
+) -> None:
+    """``dry_run=True`` reports counters but writes nothing AND clears the hint."""
+    # Seed BEFORE installing state so ``Config.load()`` honors the env knobs.
+    test_db.execute(
+        "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key) "
+        "VALUES ('default', 'topic', 'Acme', 'acme'), "
+        "       ('default', 'topic', 'Acme Corp', 'acme corp')"
+    )
+    doc_row = test_db.execute(
+        "INSERT INTO documents (title, content, content_hash, content_type) "
+        "VALUES ('alias-mcp-dry', 'body', 'hash-alias-mcp-dry', 'note') RETURNING id"
+    ).fetchone()
+    assert doc_row is not None
+    src = test_db.execute(
+        "SELECT id FROM graph_entities WHERE tenant_id='default' AND "
+        "entity_type='topic' AND canonical_key='acme'"
+    ).fetchone()
+    assert src is not None
+    test_db.execute(
+        "INSERT INTO graph_entity_mentions "
+        "(tenant_id, entity_id, document_id, mention_count, source) "
+        "VALUES ('default', %s, %s, 1, 'concepts')",
+        (src[0], doc_row[0]),
+    )
+
+    rules_yml = tmp_path / "aliases.yml"
+    rules_yml.write_text(
+        "rules:\n"
+        "  - from: {type: topic, key: acme}\n"
+        "    to:   {type: topic, key: acme corp}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(rules_yml))
+    _make_aliases_state(monkeypatch, fake_embedder)
+
+    payload = mcp_server.brain_graphrag_aliases_apply(dry_run=True)
+
+    assert payload["dry_run"] is True
+    assert payload["rules_total"] == 1
+    assert payload["rules_applied"] == 1
+    assert payload["mentions_repointed"] == 1
+    # Dry-run never triggers the staleness hint — communities cannot drift.
+    assert payload["communities_refresh_recommended"] is False
+    # DB untouched: source mention row preserved.
+    moved = test_db.execute(
+        "SELECT count(*) FROM graph_entity_mentions WHERE entity_id = %s",
+        (src[0],),
+    ).fetchone()
+    assert moved is not None and int(moved[0]) == 1
+
+
+def test_aliases_apply_writes_and_recommends_communities_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    tmp_path: Any,
+    fake_embedder: object,
+) -> None:
+    """A real apply re-points mentions AND flips ``communities_refresh_recommended``."""
+    test_db.execute(
+        "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key) "
+        "VALUES ('default', 'topic', 'Acme', 'acme'), "
+        "       ('default', 'topic', 'Acme Corp', 'acme corp')"
+    )
+    doc_row = test_db.execute(
+        "INSERT INTO documents (title, content, content_hash, content_type) "
+        "VALUES ('alias-mcp-real', 'body', 'hash-alias-mcp-real', 'note') RETURNING id"
+    ).fetchone()
+    assert doc_row is not None
+    src = test_db.execute(
+        "SELECT id FROM graph_entities WHERE tenant_id='default' AND "
+        "entity_type='topic' AND canonical_key='acme'"
+    ).fetchone()
+    assert src is not None
+    test_db.execute(
+        "INSERT INTO graph_entity_mentions "
+        "(tenant_id, entity_id, document_id, mention_count, source) "
+        "VALUES ('default', %s, %s, 1, 'concepts')",
+        (src[0], doc_row[0]),
+    )
+
+    rules_yml = tmp_path / "aliases.yml"
+    rules_yml.write_text(
+        "rules:\n"
+        "  - from: {type: topic, key: acme}\n"
+        "    to:   {type: topic, key: acme corp}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(rules_yml))
+    _make_aliases_state(monkeypatch, fake_embedder)
+
+    payload = mcp_server.brain_graphrag_aliases_apply()
+
+    assert payload["dry_run"] is False
+    assert payload["rules_total"] == 1
+    assert payload["rules_applied"] == 1
+    assert payload["mentions_repointed"] == 1
+    # Real apply → operator should refresh communities (CO_OCCURS / membership
+    # can drift after merges; spec §17c Q3).
+    assert payload["communities_refresh_recommended"] is True
+    # Source entity GC'd by the embedded refresh_aggregates.
+    gone = test_db.execute(
+        "SELECT id FROM graph_entities WHERE tenant_id='default' AND "
+        "entity_type='topic' AND canonical_key='acme'"
+    ).fetchone()
+    assert gone is None
+
+
+def test_aliases_apply_age_absent_internal_error(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,  # noqa: ARG001
+    tmp_path: Any,
+    fake_embedder: object,
+) -> None:
+    """AGE-absent image → INTERNAL_ERROR (mirrors the other graphrag tools)."""
+    rules_yml = tmp_path / "aliases.yml"
+    rules_yml.write_text(
+        "rules:\n"
+        "  - from: {type: org, key: x}\n"
+        "    to:   {type: org, key: y}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(rules_yml))
+    _make_aliases_state(monkeypatch, fake_embedder)
+    monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_graphrag_aliases_apply()
+    assert exc_info.value.error.code == INTERNAL_ERROR
+    assert "Apache AGE is not available" in exc_info.value.error.message
+
+
+def test_aliases_apply_invalid_rules_yields_invalid_params(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,  # noqa: ARG001
+    tmp_path: Any,
+    fake_embedder: object,
+) -> None:
+    """A malformed alias rule (chain) raises ``INVALID_PARAMS`` — caller-fixable."""
+    rules_yml = tmp_path / "aliases.yml"
+    rules_yml.write_text(
+        "rules:\n"
+        "  - from: {type: org, key: a}\n"
+        "    to:   {type: org, key: b}\n"
+        "  - from: {type: org, key: b}\n"
+        "    to:   {type: org, key: c}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(rules_yml))
+    _make_aliases_state(monkeypatch, fake_embedder)
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_graphrag_aliases_apply()
+    assert exc_info.value.error.code == INVALID_PARAMS
+    assert "chain" in exc_info.value.error.message.lower()

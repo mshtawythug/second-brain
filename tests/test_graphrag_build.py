@@ -1225,3 +1225,84 @@ def test_cli_refresh_exits_when_age_absent(
     res = CliRunner().invoke(app, ["graphrag", "refresh"])
     assert res.exit_code == 1
     assert "Apache AGE is not available" in res.output
+
+
+# --------------------------------------------------------------------------- #
+# 8. C3 — build auto-applies curated alias rules at corpus level
+# --------------------------------------------------------------------------- #
+def test_build_applies_aliases_then_refreshes(
+    test_db: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+) -> None:
+    """``brain graphrag build --backfill`` auto-applies curated alias rules.
+
+    Arrange: seed three docs, then drop in a synthetic alias YAML that merges
+    the ``person:alice`` entity into ``person:carol`` via
+    ``BRAIN_GRAPH_ALIASES_PATH``. Act: run the CLI build. Assert: the build
+    succeeds AND the alias source entity is gone (refresh GC), its mentions
+    live under the target, and the AGE mirror was refreshed (no missing
+    vertices, no stranded edges).
+
+    This guards the C3 wiring: an alias config that was set BEFORE the build
+    must take effect on the build pass (not require a separate
+    ``aliases apply`` round-trip).
+    """
+    aliases_yml = tmp_path / "aliases.yml"
+    aliases_yml.write_text(
+        "rules:\n"
+        "  - from: {type: person, key: alice}\n"
+        "    to:   {type: person, key: carol}\n",
+        encoding="utf-8",
+    )
+    _seed_three_docs(test_db)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_GRAPH_GENERIC_DF", "1.0")
+    monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(aliases_yml))
+
+    res = CliRunner().invoke(app, ["graphrag", "build", "--backfill"])
+
+    assert res.exit_code == 0, res.output
+    assert "graphrag build: 3 processed" in res.output
+    # Footer for the alias pass — proves merge_aliases ran post-loop.
+    assert "graphrag aliases apply:" in res.output
+    assert "1/1 rule(s) applied" in res.output
+
+    # Source entity 'alice' is gone (refresh_aggregates GC'd it after the
+    # mentions moved); target 'carol' absorbed the source's mention pool.
+    src_row = test_db.execute(
+        "SELECT id FROM graph_entities "
+        "WHERE tenant_id = %s AND entity_type = 'person' AND canonical_key = %s",
+        ("default", "alice"),
+    ).fetchone()
+    assert src_row is None
+    dst_id = _entity_id(test_db, "default", "carol")
+    dst_mention_count = test_db.execute(
+        "SELECT count(*) FROM graph_entity_mentions "
+        "WHERE tenant_id = %s AND entity_id = %s",
+        ("default", dst_id),
+    ).fetchone()
+    assert dst_mention_count is not None
+    # alice was in m1 + m2; carol was in m2 + m3 (m2 collapses by PK summing).
+    # → carol now has mentions for m1, m2, m3 = 3 distinct documents.
+    assert int(dst_mention_count[0]) == 3
+
+
+def test_build_no_alias_rules_is_no_op(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without an alias file set, build behavior is byte-identical to pre-C3.
+
+    Empty-rules path: no transaction opens inside ``merge_aliases``, the
+    alias footer is suppressed, the build footer is unchanged.
+    """
+    _seed_three_docs(test_db)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_GRAPH_GENERIC_DF", "1.0")
+    monkeypatch.delenv("BRAIN_GRAPH_ALIASES_PATH", raising=False)
+    res = CliRunner().invoke(app, ["graphrag", "build", "--backfill"])
+    assert res.exit_code == 0, res.output
+    assert "graphrag build: 3 processed" in res.output
+    assert "graphrag aliases apply:" not in res.output  # footer suppressed
+    # All three persons survived (no merge ran).
+    assert _person_keys(test_db, "default") == {"alice", "bob", "carol"}

@@ -11,6 +11,7 @@ from .search import SearchExplanation, SearchResult
 if TYPE_CHECKING:
     from .eval.baseline import BaselineDiff
     from .eval.runner import EvalReport
+    from .graph_rag.aliases import AliasResult
     from .graph_rag.schema import (
         CommunityGroup,
         CommunityRecord,
@@ -239,6 +240,9 @@ def _entity_json(entity: "GraphEntity") -> dict[str, Any]:
         "tenant_id": entity.tenant_id,
         "description": entity.description,
         "doc_count": entity.doc_count,
+        # Person-scoped count (themes mode only); None in local/global/entity modes.
+        # Always emitted for a stable wire shape (A3).
+        "scoped_doc_count": entity.scoped_doc_count,
     }
 
 
@@ -346,14 +350,20 @@ def _graph_themes_table(themes: "list[ThemeGroup]") -> Table:
     """Render the ranked theme groups (themes mode)."""
     table = Table(title="Themes")
     table.add_column("#", style="dim", justify="right")
-    table.add_column("Entities")
+    table.add_column("Entities (scoped docs)")
     table.add_column("Score", justify="right")
     table.add_column("Docs", justify="right")
     table.add_column("Summary")
     for theme in themes:
+        entities_cell = ", ".join(
+            f"{e.name} ({e.scoped_doc_count})"
+            if e.scoped_doc_count is not None
+            else e.name
+            for e in theme.entities
+        )
         table.add_row(
             str(theme.group_id),
-            ", ".join(e.name for e in theme.entities),
+            entities_cell,
             f"{theme.score:.3f}",
             str(len(theme.doc_ids)),
             (theme.summary or "").replace("\n", " "),
@@ -576,3 +586,47 @@ def graph_stats_table(stats: "GraphStats") -> Table:
     for entity_type in sorted(stats.counts_by_type):
         table.add_row(f"  {entity_type}", str(stats.counts_by_type[entity_type]))
     return table
+
+
+# ---------------------------------------------------------------------------
+# Phase C — alias/merge admin renderers (``brain graphrag aliases apply``
+# + ``brain_graphrag_aliases_apply``). All 7 :class:`AliasResult` fields are
+# emitted verbatim so the JSON wire shape stays stable across CLI / MCP.
+# ---------------------------------------------------------------------------
+
+
+def alias_result_json(res: "AliasResult") -> dict[str, Any]:
+    """Serialize one :class:`~brain.graph_rag.aliases.AliasResult` (admin view).
+
+    The wire shape for ``brain graphrag aliases apply --json`` and the
+    ``brain_graphrag_aliases_apply`` MCP tool. Emits ALL 7 fields verbatim so a
+    dry-run and a real apply are introspectable side-by-side.
+    """
+    return {
+        "tenant_id": res.tenant_id,
+        "rules_total": res.rules_total,
+        "rules_applied": res.rules_applied,
+        "mentions_repointed": res.mentions_repointed,
+        "contributions_repointed": res.contributions_repointed,
+        "sources_orphaned": res.sources_orphaned,
+        "dry_run": res.dry_run,
+    }
+
+
+def alias_result_summary(res: "AliasResult") -> str:
+    """One-line human summary of an :class:`AliasResult` (the CLI footer).
+
+    Mirrors the verb-leading style of the ``graphrag build`` / ``refresh``
+    footers ("graphrag build: N processed …") so the three admin commands read
+    consistently. Prepends ``"(dry-run) "`` on a dry-run so the no-write nature
+    of the call is obvious at a glance.
+    """
+    prefix = "(dry-run) " if res.dry_run else ""
+    return (
+        f"{prefix}graphrag aliases apply: "
+        f"{res.rules_applied}/{res.rules_total} rule(s) applied, "
+        f"{res.mentions_repointed} mention(s) repointed, "
+        f"{res.contributions_repointed} contribution(s) repointed, "
+        f"{res.sources_orphaned} source(s) orphaned "
+        f"(tenant {res.tenant_id!r})"
+    )

@@ -330,3 +330,213 @@ def test_graph_empty_db_produces_valid_output(
     mermaid_result = CliRunner().invoke(app, ["graph", "--format", "mermaid"])
     assert mermaid_result.exit_code == 0
     assert "graph TD" in mermaid_result.output
+
+
+# ===========================================================================
+# Wave C3 — `brain graphrag aliases apply` (nested Typer group)
+# Synthetic alias rules only (PII rule 15) — never real entity names.
+# ===========================================================================
+
+
+def test_graphrag_aliases_apply_empty_rules_is_noop_text(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection[Any],  # noqa: ARG001 — fixture readies the DB
+) -> None:
+    """No rules file → human output prints the 'no rules configured' hint."""
+    _set_env(monkeypatch)
+    monkeypatch.delenv("BRAIN_GRAPH_ALIASES_PATH", raising=False)
+    res = CliRunner().invoke(app, ["graphrag", "aliases", "apply"])
+    assert res.exit_code == 0, res.output
+    assert "no rules configured" in res.output
+    # Bare apply with no rules MUST NOT print the apply counters footer (no
+    # rules ran). Match on the counter substring rather than the verb prefix —
+    # the "no rules configured" hint itself leads with the same prefix.
+    assert "rule(s) applied" not in res.output
+    assert "source(s) orphaned" not in res.output
+
+
+def test_graphrag_aliases_apply_empty_rules_is_noop_json(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection[Any],  # noqa: ARG001
+) -> None:
+    """No rules file + ``--json`` → emits the zero-valued AliasResult payload.
+
+    C4 parity (review fix #2): the empty-rules CLI JSON shape MUST match the
+    MCP empty-rules wire shape — 7 ``AliasResult`` fields + the
+    ``communities_refresh_recommended`` staleness hint = 8 keys. Empty rules
+    can't dirty the community partition, so the hint is always ``False`` here.
+    """
+    _set_env(monkeypatch)
+    monkeypatch.delenv("BRAIN_GRAPH_ALIASES_PATH", raising=False)
+    res = CliRunner().invoke(app, ["graphrag", "aliases", "apply", "--json"])
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["rules_total"] == 0
+    assert payload["rules_applied"] == 0
+    assert payload["dry_run"] is False
+    # Empty rules → never dirty → staleness hint is always False.
+    assert payload["communities_refresh_recommended"] is False
+    # The empty-rules wire shape is locked at 8 keys (alias_result_json's 7 +
+    # communities_refresh_recommended) — matches the MCP empty-rules payload.
+    assert set(payload.keys()) == {
+        "tenant_id",
+        "rules_total",
+        "rules_applied",
+        "mentions_repointed",
+        "contributions_repointed",
+        "sources_orphaned",
+        "dry_run",
+        "communities_refresh_recommended",
+    }
+
+
+def test_graphrag_aliases_apply_dry_run_json(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection[Any],
+    tmp_path: Path,
+) -> None:
+    """``aliases apply --dry-run --json`` reports the would-be merge + writes nothing.
+
+    Seeds a synthetic source + target entity, points
+    ``BRAIN_GRAPH_ALIASES_PATH`` at a one-rule YAML, then runs the dry-run.
+    Asserts: the JSON tally shows the rule was applied (counters) but the DB
+    state is unchanged (source mention count preserved).
+    """
+    _set_env(monkeypatch)
+    monkeypatch.setenv("BRAIN_GRAPH_GENERIC_DF", "1.0")
+    # Seed: synthetic person + topic entities with one source mention.
+    test_db.execute(
+        "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key) "
+        "VALUES ('default', 'person', 'Sam Rivera', 'sam rivera'), "
+        "       ('default', 'topic', 'Sam', 'sam')"
+    )
+    doc_row = test_db.execute(
+        "INSERT INTO documents (title, content, content_hash, content_type) "
+        "VALUES ('alias-dry', 'body', 'hash-alias-dry', 'note') RETURNING id"
+    ).fetchone()
+    assert doc_row is not None
+    src_eid = test_db.execute(
+        "SELECT id FROM graph_entities WHERE tenant_id='default' AND "
+        "entity_type='topic' AND canonical_key='sam'"
+    ).fetchone()
+    assert src_eid is not None
+    test_db.execute(
+        "INSERT INTO graph_entity_mentions "
+        "(tenant_id, entity_id, document_id, mention_count, source) "
+        "VALUES ('default', %s, %s, 1, 'concepts')",
+        (src_eid[0], doc_row[0]),
+    )
+
+    rules_yml = tmp_path / "aliases.yml"
+    rules_yml.write_text(
+        "rules:\n"
+        "  - from: {type: topic, key: sam}\n"
+        "    to:   {type: person, key: sam rivera}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(rules_yml))
+
+    res = CliRunner().invoke(
+        app, ["graphrag", "aliases", "apply", "--dry-run", "--json"]
+    )
+
+    assert res.exit_code == 0, res.output
+    payload = json.loads(res.stdout)
+    assert payload["dry_run"] is True
+    assert payload["rules_total"] == 1
+    assert payload["rules_applied"] == 1
+    assert payload["mentions_repointed"] == 1
+    assert payload["sources_orphaned"] == 1
+    assert payload["tenant_id"] == "default"
+
+    # Dry-run wrote NOTHING: the source mention row is still there.
+    moved_check = test_db.execute(
+        "SELECT count(*) FROM graph_entity_mentions "
+        "WHERE tenant_id = 'default' AND entity_id = %s",
+        (src_eid[0],),
+    ).fetchone()
+    assert moved_check is not None and int(moved_check[0]) == 1
+
+
+def test_graphrag_aliases_apply_writes_and_hints_communities_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection[Any],
+    tmp_path: Path,
+) -> None:
+    """A real apply re-points mentions AND prints the communities-refresh hint."""
+    _set_env(monkeypatch)
+    monkeypatch.setenv("BRAIN_GRAPH_GENERIC_DF", "1.0")
+    # Seed: source (topic:sam) + target (person:sam rivera) with one source mention.
+    test_db.execute(
+        "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key) "
+        "VALUES ('default', 'person', 'Sam Rivera', 'sam rivera'), "
+        "       ('default', 'topic', 'Sam', 'sam')"
+    )
+    doc_row = test_db.execute(
+        "INSERT INTO documents (title, content, content_hash, content_type) "
+        "VALUES ('alias-apply', 'body', 'hash-alias-apply', 'note') RETURNING id"
+    ).fetchone()
+    assert doc_row is not None
+    src_eid = test_db.execute(
+        "SELECT id FROM graph_entities WHERE tenant_id='default' AND "
+        "entity_type='topic' AND canonical_key='sam'"
+    ).fetchone()
+    assert src_eid is not None
+    test_db.execute(
+        "INSERT INTO graph_entity_mentions "
+        "(tenant_id, entity_id, document_id, mention_count, source) "
+        "VALUES ('default', %s, %s, 1, 'concepts')",
+        (src_eid[0], doc_row[0]),
+    )
+
+    rules_yml = tmp_path / "aliases.yml"
+    rules_yml.write_text(
+        "rules:\n"
+        "  - from: {type: topic, key: sam}\n"
+        "    to:   {type: person, key: sam rivera}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(rules_yml))
+
+    res = CliRunner().invoke(app, ["graphrag", "aliases", "apply"])
+
+    assert res.exit_code == 0, res.output
+    assert "graphrag aliases apply: 1/1 rule(s) applied" in res.output
+    # Staleness hint MUST fire on a non-dry, non-empty apply.
+    assert "communities may be stale" in res.output
+
+    # Source row was GC'd by the embedded refresh_aggregates; target absorbed
+    # the mention.
+    src_check = test_db.execute(
+        "SELECT id FROM graph_entities WHERE tenant_id='default' AND "
+        "entity_type='topic' AND canonical_key='sam'"
+    ).fetchone()
+    assert src_check is None
+    dst_check = test_db.execute(
+        "SELECT count(*) FROM graph_entity_mentions m "
+        "JOIN graph_entities e ON m.entity_id = e.id "
+        "WHERE e.tenant_id = 'default' AND e.entity_type='person' "
+        "AND e.canonical_key = 'sam rivera'"
+    ).fetchone()
+    assert dst_check is not None and int(dst_check[0]) == 1
+
+
+def test_graphrag_aliases_apply_exits_when_age_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection[Any],  # noqa: ARG001
+    tmp_path: Path,
+) -> None:
+    """AGE absent → red error + exit 1 (mirrors build/refresh AGE guard)."""
+    _set_env(monkeypatch)
+    rules_yml = tmp_path / "aliases.yml"
+    rules_yml.write_text(
+        "rules:\n"
+        "  - from: {type: org, key: acme}\n"
+        "    to:   {type: org, key: acme corp}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(rules_yml))
+    monkeypatch.setattr("brain.cli.age_extension_available", lambda conn: False)
+    res = CliRunner().invoke(app, ["graphrag", "aliases", "apply"])
+    assert res.exit_code == 1
+    assert "Apache AGE is not available" in res.output

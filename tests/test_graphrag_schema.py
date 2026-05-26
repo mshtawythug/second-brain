@@ -302,3 +302,28 @@ def test_graph_context_carries_full_payload() -> None:
     assert ctx.explanation is not None
     assert ctx.explanation.tenant_id == "acme"
     assert ctx.explanation.person_keys == ["person-a"]
+
+
+# --------------------------------------------------------------------------- #
+# GraphEntity.scoped_doc_count (A1)
+# --------------------------------------------------------------------------- #
+def test_graph_entity_scoped_doc_count_defaults_none() -> None:
+    """``scoped_doc_count`` defaults to ``None`` (unset outside themes mode)."""
+    e = GraphEntity(id="x", entity_type="topic", name="N", canonical_key="n")
+    assert e.scoped_doc_count is None
+
+
+def test_graph_entity_scoped_doc_count_via_replace() -> None:
+    """``dataclasses.replace`` can thread a person-scoped count into the entity."""
+    e = GraphEntity(id="x", entity_type="topic", name="N", canonical_key="n", doc_count=16)
+    assert dataclasses.replace(e, scoped_doc_count=3).scoped_doc_count == 3
+
+
+def test_graph_entity_scoped_doc_count_is_independent_of_doc_count() -> None:
+    """``scoped_doc_count`` is a separate field from the corpus-wide ``doc_count``."""
+    e = GraphEntity(
+        id="x", entity_type="topic", name="N", canonical_key="n",
+        doc_count=16, scoped_doc_count=3,
+    )
+    assert e.doc_count == 16
+    assert e.scoped_doc_count == 3

@@ -7,10 +7,22 @@ sorting, escaping, or whitespace shows up as a diff.
 No DB needed — the formatters are pure functions over
 :class:`brain.vault.graph.GraphData`.
 """
+import io
 import json
+from typing import Any
 
 import pytest
+from rich.console import Console
+from rich.table import Table
 
+from brain.format import (
+    _entity_json,
+    _graph_themes_table,
+    alias_result_json,
+    alias_result_summary,
+)
+from brain.graph_rag.aliases import AliasResult
+from brain.graph_rag.schema import GraphEntity, ThemeGroup
 from brain.vault.graph import GraphData, GraphEdge, GraphNode
 from brain.vault.graph_format import to_dot, to_json, to_mermaid
 
@@ -716,3 +728,124 @@ def test_node_label_60_char_threshold(kind: str) -> None:
     assert sixty in to_dot(g60)
     assert ("y" * 59 + "…") in to_dot(g61)
     assert sixty_one not in to_dot(g61)
+
+
+# ===========================================================================
+# GraphRAG format tests (brain.format._entity_json / _graph_themes_table)
+# A3: scoped_doc_count in JSON + themes human renderer
+# ===========================================================================
+
+
+def _render_table_to_text(table: Table) -> str:
+    """Render a Rich :class:`~rich.table.Table` to plain text (no ANSI)."""
+    buf = io.StringIO()
+    console = Console(file=buf, highlight=False, no_color=True, width=200)
+    console.print(table)
+    return buf.getvalue()
+
+
+def _make_entity(**kw: Any) -> GraphEntity:
+    base: dict[str, Any] = {"id": "x", "entity_type": "topic", "name": "N", "canonical_key": "n"}
+    base.update(kw)
+    return GraphEntity(**base)
+
+
+def test_entity_json_includes_scoped_doc_count() -> None:
+    """``_entity_json`` includes ``scoped_doc_count`` when set."""
+    out = _entity_json(_make_entity(doc_count=16, scoped_doc_count=3))
+    assert out["doc_count"] == 16 and out["scoped_doc_count"] == 3
+
+
+def test_entity_json_scoped_null_when_unset() -> None:
+    """``_entity_json`` emits ``scoped_doc_count: null`` when not set."""
+    out = _entity_json(_make_entity(entity_type="org"))
+    assert out["scoped_doc_count"] is None
+
+
+def test_graph_themes_table_shows_scoped_count() -> None:
+    """The themes table inlines ``(scoped)`` per entity when ``scoped_doc_count`` is set."""
+    grp = ThemeGroup(
+        group_id=0,
+        entities=[_make_entity(doc_count=16, scoped_doc_count=3)],
+        doc_ids=["d1"],
+        score=1.0,
+    )
+    rendered = _render_table_to_text(_graph_themes_table([grp]))
+    assert "N (3)" in rendered
+
+
+def test_graph_themes_table_omits_parens_when_scoped_none() -> None:
+    """When ``scoped_doc_count`` is None, entity name renders without parenthetical."""
+    grp = ThemeGroup(
+        group_id=0,
+        entities=[_make_entity()],
+        doc_ids=["d1"],
+        score=1.0,
+    )
+    rendered = _render_table_to_text(_graph_themes_table([grp]))
+    # Name alone, no trailing " (N)".
+    assert "N" in rendered
+    assert "N (" not in rendered
+
+
+# ===========================================================================
+# Wave C3 — alias_result_json + alias_result_summary renderers
+# ===========================================================================
+
+
+def test_alias_result_json_emits_all_seven_fields() -> None:
+    """``alias_result_json`` returns ALL 7 :class:`AliasResult` fields verbatim."""
+    res = AliasResult(
+        tenant_id="t-test",
+        rules_total=3,
+        rules_applied=2,
+        mentions_repointed=5,
+        contributions_repointed=4,
+        sources_orphaned=2,
+        dry_run=False,
+    )
+    out = alias_result_json(res)
+    assert out == {
+        "tenant_id": "t-test",
+        "rules_total": 3,
+        "rules_applied": 2,
+        "mentions_repointed": 5,
+        "contributions_repointed": 4,
+        "sources_orphaned": 2,
+        "dry_run": False,
+    }
+
+
+def test_alias_result_json_dry_run_preserves_flag() -> None:
+    """The dry-run flag rides through the JSON serializer unchanged."""
+    res = AliasResult(tenant_id="t-test", rules_total=1, dry_run=True)
+    out = alias_result_json(res)
+    assert out["dry_run"] is True
+    assert out["rules_total"] == 1
+
+
+def test_alias_result_summary_real_apply() -> None:
+    """The one-line human summary mentions all counters and the tenant id."""
+    res = AliasResult(
+        tenant_id="t-test",
+        rules_total=2,
+        rules_applied=2,
+        mentions_repointed=3,
+        contributions_repointed=4,
+        sources_orphaned=2,
+        dry_run=False,
+    )
+    line = alias_result_summary(res)
+    assert line.startswith("graphrag aliases apply:")
+    assert "2/2 rule(s) applied" in line
+    assert "3 mention(s) repointed" in line
+    assert "4 contribution(s) repointed" in line
+    assert "2 source(s) orphaned" in line
+    assert "tenant 't-test'" in line
+
+
+def test_alias_result_summary_dry_run_prefix() -> None:
+    """``dry_run=True`` prepends a ``(dry-run)`` prefix to the summary line."""
+    res = AliasResult(tenant_id="t-test", rules_total=1, rules_applied=1, dry_run=True)
+    line = alias_result_summary(res)
+    assert line.startswith("(dry-run) graphrag aliases apply:")

@@ -896,3 +896,24 @@ def test_concept_inputs_hash_is_config_only_and_stable() -> None:
     assert base != concept_inputs_hash(4, 40)
     assert base != concept_inputs_hash(3, 41)
     assert base != concept_inputs_hash(3, None)
+
+
+def test_concept_inputs_hash_varies_with_stopwords() -> None:
+    """Adding a stopword changes the hash so a stopword-set change forces
+    re-extraction (Phase B F6 requirement). Synthetic stopwords (rule 15)."""
+    h1 = concept_inputs_hash(5, 40, stopwords=frozenset({"foo"}))
+    h2 = concept_inputs_hash(5, 40, stopwords=frozenset({"foo", "bar"}))
+    assert h1 != h2
+
+
+def test_concept_inputs_hash_stopwords_order_stable() -> None:
+    """The hash is insensitive to frozenset iteration order — sorted() normalizes."""
+    assert concept_inputs_hash(5, 40, stopwords=frozenset({"a", "b"})) == (
+        concept_inputs_hash(5, 40, stopwords=frozenset({"b", "a"}))
+    )
+
+
+def test_concept_inputs_hash_empty_stopwords_matches_default() -> None:
+    """Passing stopwords=frozenset() produces the same hash as the default
+    (no-stopwords call is backward-compatible with existing watermarks)."""
+    assert concept_inputs_hash(3, 40) == concept_inputs_hash(3, 40, stopwords=frozenset())

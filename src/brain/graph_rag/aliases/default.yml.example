@@ -1,0 +1,19 @@
+# EXAMPLE GraphRAG alias rules (synthetic data — documentation only).
+#
+# Copy this file to your gitignored local location and point
+# BRAIN_GRAPH_ALIASES_PATH at it. Keys are stored in lowercase canonical form.
+# Real rules must never be committed (CLAUDE.md rule 15 — no PII in checked-in code).
+#
+# Supported entity types: person, org, project, topic, tool
+#
+# Constraints (validated by load_alias_rules):
+#   - from != to (no self-merge)
+#   - each source (type, key) appears at most once (no ambiguous duplicate targets)
+#   - a source must not also be another rule's target (no transitive chains/cycles)
+rules:
+  - from: {type: org,   key: acme}           # acronym/variant → canonical org name
+    to:   {type: org,   key: acme corp}
+  - from: {type: topic, key: qbr}            # abbreviation → spelled-out topic
+    to:   {type: topic, key: quarterly business review}
+  - from: {type: topic, key: sam}            # bare first name → known person entity
+    to:   {type: person, key: sam rivera}

@@ -75,6 +75,7 @@ def build_reconcile_config(cfg: Config) -> ReconcileConfig:
         owner_keys=cfg.owner_participants,
         sender_denylist=cfg.graph_sender_denylist,
         concepts_enabled=cfg.graph_concepts,
+        graph_extract_stopwords=cfg.graph_extract_stopwords,
     )
 
 

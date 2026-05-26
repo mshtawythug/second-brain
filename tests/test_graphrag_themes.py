@@ -1032,3 +1032,69 @@ def test_live_themes_is_tenant_scoped(
         frozenset({"roadmap", "analytics"}),
     }
     assert _theme_keysets(other_ctx) == _theme_keysets(default_ctx)
+
+
+# --------------------------------------------------------------------------- #
+# A2: person-scoped doc count threaded onto theme entities
+# --------------------------------------------------------------------------- #
+def test_themes_entities_carry_person_scoped_doc_count(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Theme entities carry ``scoped_doc_count`` = docs co-occurring with the person.
+
+    Entity "e" (synthetic topic) co-occurs with person "dana lee" in 2 of the
+    person's scoped docs (d1, d2); its corpus-wide ``doc_count`` is 3 (d1, d2, d3).
+    Entity "f" appears only in d1 and d2 (doc_count=2). After themes retrieval,
+    ``e.scoped_doc_count`` must equal 2 (not 3) and ``e.doc_count`` must remain 3.
+
+    Corpus has 3 total docs with mentions → cap = round(3 × 1.0) = 3.
+    entity e: corpus doc_count=3, is_generic(3, cap=3)=False (3 not > 3) → eligible.
+    entity f: corpus doc_count=2, is_generic(2, cap=3)=False → eligible.
+    """
+    _seed_directory(test_db, [("dana lee", "dana@x.com")])
+    dana = _insert_entity(
+        test_db, entity_type="person", name="Dana Lee", canonical_key="dana lee"
+    )
+    # Entity "e" appears in 3 corpus docs (doc_count=3 stored):
+    #   d1, d2 are in Dana's scope; d3 is outside (no Dana mention).
+    e = _insert_entity(
+        test_db, name="Synthetic Topic E", canonical_key="e", doc_count=3
+    )
+    # Entity "f" appears only in d1 and d2 (doc_count=2 stored).
+    f = _insert_entity(
+        test_db, name="Synthetic Topic F", canonical_key="f", doc_count=2
+    )
+    d1 = _insert_doc(test_db, title="Scoped1", content="scoped doc one")
+    d2 = _insert_doc(test_db, title="Scoped2", content="scoped doc two")
+    d3 = _insert_doc(test_db, title="Extra", content="extra doc out of scope")
+    # Dana's scope covers d1 + d2; both e and f appear in d1 and d2.
+    for doc in (d1, d2):
+        _insert_mention(test_db, entity_id=dana, document_id=doc)
+        _insert_mention(test_db, entity_id=e, document_id=doc)
+        _insert_mention(test_db, entity_id=f, document_id=doc)
+        _insert_contribution(test_db, document_id=doc, a=e, b=f)
+    # e also appears in d3 (out of scope — no dana mention there).
+    _insert_mention(test_db, entity_id=e, document_id=d3)
+    scope = PersonScope(
+        seed_entity_uuid=dana,
+        entity_uuids=tuple(sorted((e, f))),
+        document_uuids=tuple(sorted((d1, d2))),
+    )
+
+    ctx = graph_rag_search(
+        test_db,
+        _make_cfg(),
+        "",
+        backend=FakeScopeBackend({dana: scope}),
+        mode=THEMES_MODE,
+        person="dana lee",
+    )
+
+    assert ctx.themes, "expected at least one theme group"
+    all_entities = {en.canonical_key: en for t in ctx.themes for en in t.entities}
+    assert "e" in all_entities, f"entity 'e' not in theme entities: {list(all_entities)}"
+    entity_e = all_entities["e"]
+    # scoped_doc_count = distinct docs in Dana's scope that mention e = 2.
+    assert entity_e.scoped_doc_count == 2
+    # doc_count = corpus-wide maintained count as stored in graph_entities = 3.
+    assert entity_e.doc_count == 3

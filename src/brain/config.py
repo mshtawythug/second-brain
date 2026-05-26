@@ -347,6 +347,23 @@ class Config:
     # (``emit_people_pages``) and the graph reconcile (``ReconcileConfig``) so a
     # no-reply / org sender becomes a person in neither.
     graph_sender_denylist: frozenset[str] = frozenset()
+    # Phase B (2026-05-25) — operator-curated concept extraction stopwords.
+    # Entities whose ``canonical_key`` appears in this set are dropped by the
+    # extractor's ``_finalize`` chokepoint (after the generic noise filter) even
+    # when they pass presence validation. Real terms are employer-specific (rule
+    # 15) so the default is **empty** — operators set
+    # ``BRAIN_GRAPH_EXTRACT_STOPWORDS`` locally. Parsed as a comma-separated list;
+    # entries are trimmed, lowercased, and de-duplicated at load time. Also folded
+    # into :func:`brain.graph_rag.concepts.concept_inputs_hash` so a stopword
+    # change re-extracts (beyond the one-time ``EXTRACTOR_VERSION`` bump).
+    graph_extract_stopwords: frozenset[str] = frozenset()
+    # Phase C (2026-05-25) — curated entity alias/merge rules. Real rules contain
+    # real entity names (rule 15) so they live in a gitignored local file. This
+    # path is resolved from ``BRAIN_GRAPH_ALIASES_PATH``; if unset it defaults to
+    # ``$BRAIN_HOME/graph_aliases.yml`` when that file exists, else ``None``
+    # (feature is opt-in — absent file → no aliases applied). Eager-validated:
+    # when a path IS resolved it must be readable (raises ``ConfigError`` if not).
+    graph_aliases_path: Path | None = None
 
     @classmethod
     def load(cls) -> "Config":
@@ -950,6 +967,39 @@ class Config:
             if piece
         )
 
+        # Phase B (2026-05-25) -- operator-curated concept extraction stopwords.
+        # Same comma-split / trim / lowercase / dedupe shape as
+        # ``BRAIN_GRAPH_SENDER_DENYLIST``; default empty (real terms are
+        # employer-specific, rule 15 — operators set this locally).
+        stopwords_raw = os.environ.get("BRAIN_GRAPH_EXTRACT_STOPWORDS", "")
+        graph_extract_stopwords = frozenset(
+            piece
+            for piece in (
+                entry.strip().lower() for entry in stopwords_raw.split(",")
+            )
+            if piece
+        )
+
+        # Phase C (2026-05-25) -- curated entity alias rules path. Opt-in:
+        # 1. ``BRAIN_GRAPH_ALIASES_PATH`` when set → use that path (expand user).
+        # 2. Else ``$BRAIN_HOME/graph_aliases.yml`` when that file exists.
+        # 3. Else ``None`` (feature off; ``load_alias_rules(None)`` returns ``[]``).
+        # When a path is resolved, eager-validate it is readable (ConfigError if not).
+        graph_aliases_path: Path | None
+        aliases_env_raw = os.environ.get("BRAIN_GRAPH_ALIASES_PATH")
+        if aliases_env_raw and aliases_env_raw.strip():
+            graph_aliases_path = Path(aliases_env_raw.strip()).expanduser()
+            try:
+                graph_aliases_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ConfigError(
+                    f"BRAIN_GRAPH_ALIASES_PATH is not readable: {graph_aliases_path} "
+                    f"({exc})"
+                ) from exc
+        else:
+            _default_aliases = _brain_home_root() / "graph_aliases.yml"
+            graph_aliases_path = _default_aliases if _default_aliases.exists() else None
+
         return {
             # brain_home resolves via default_factory=_brain_home_root.
             "database_url": database_url,
@@ -989,4 +1039,6 @@ class Config:
             "graph_community_limit": graph_community_limit,
             "graph_community_max": graph_community_max,
             "graph_sender_denylist": graph_sender_denylist,
+            "graph_extract_stopwords": graph_extract_stopwords,
+            "graph_aliases_path": graph_aliases_path,
         }

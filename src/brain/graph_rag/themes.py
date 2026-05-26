@@ -145,8 +145,16 @@ def _retrieve_themes(
     ]
 
     # 6. In-scope normalized-lift edges among eligible entities → grouping.
+    #    Thread ``in_scope_df`` (person-scoped distinct-doc count) onto each entity
+    #    before grouping so callers can show "N docs with X" per entity (A2).
+    #    Every eligible_id is guaranteed present in in_scope_df (the eligibility
+    #    guard at step 5 requires ``eid in in_scope_df``), so ``.get(e.id, 0)`` is
+    #    purely defensive and is never reached in production.
     edges = _in_scope_edges(conn, tenant_id, scope_doc_ids, eligible_ids, in_scope_df)
-    entities = _fetch_entities(conn, tenant_id, eligible_ids)
+    entities = [
+        replace(e, scoped_doc_count=in_scope_df.get(e.id, 0))
+        for e in _fetch_entities(conn, tenant_id, eligible_ids)
+    ]
     groups = group_themes(
         entities, edges, min_edge_weight=min_edge_weight, theme_limit=theme_limit
     )

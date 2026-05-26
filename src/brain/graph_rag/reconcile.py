@@ -214,6 +214,12 @@ class ReconcileConfig:
     # entities (its own ``aspect='concepts'`` watermark) alongside the always-on
     # person aspect. Default False keeps the person-only behavior unchanged.
     concepts_enabled: bool = False
+    # Phase B (2026-05-25): operator-curated extraction stopwords folded into the
+    # concept watermark (``concept_inputs_hash``) so a stopword-set change forces
+    # re-extraction beyond the one-time ``EXTRACTOR_VERSION`` bump. Default empty
+    # (real terms are employer-specific, rule 15). Threaded from
+    # ``Config.graph_extract_stopwords`` by the CLI/sync build path.
+    graph_extract_stopwords: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -302,7 +308,7 @@ def reconcile_document(
       co-occurrence config (the extracted entities are captured by
       ``content_hash`` + ``extractor_ver``, so this skip-check runs BEFORE the
       LLM call: an unchanged concept watermark short-circuits extraction),
-      ``extractor_ver`` = ``extractor.version`` (``"<model>@concepts-v4"``).
+      ``extractor_ver`` = ``extractor.version`` (``"<model>@concepts-v5"``).
 
     Both share ``suppress_ver`` (the derive-time weighting/suppression version).
     For each STALE aspect the pipeline upserts its ``graph_entities`` rows and
@@ -412,7 +418,9 @@ def reconcile_document(
             assert extractor is not None  # narrowed by concepts_active
             concept_extractor_ver = extractor.version
             c_inputs_hash = concept_inputs_hash(
-                cfg.cooccur_window, cfg.max_entities_per_doc
+                cfg.cooccur_window,
+                cfg.max_entities_per_doc,
+                stopwords=cfg.graph_extract_stopwords,
             )
             concept_watermark = (
                 content_hash,

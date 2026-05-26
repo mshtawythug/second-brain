@@ -45,6 +45,11 @@ EXPECTED_MAPPING: dict[str, str] = {
     "communities build": "brain_graphrag_communities_build",
     "communities refresh": "brain_graphrag_communities_refresh",
     "communities list": "brain_graphrag_communities",
+    # Wave C4 — curated entity alias/merge admin (Phase C of the
+    # 2026-05-25 graphrag-entity-quality plan). The nested `aliases apply`
+    # subcommand mirrors the `communities {build,refresh,list}` group shape;
+    # its MCP twin is `brain_graphrag_aliases_apply`.
+    "aliases apply": "brain_graphrag_aliases_apply",
 }
 
 _MCP_TOOL_PREFIX = "brain_graphrag_"

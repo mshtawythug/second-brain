@@ -734,3 +734,105 @@ def test_config_load_still_requires_database_url(
     assert not isolated_dotenv.exists()
     with pytest.raises(ConfigError, match="DATABASE_URL"):
         Config.load()
+
+
+# ---------------------------------------------------------------------------
+# BRAIN_GRAPH_ALIASES_PATH — Phase C (2026-05-25) curated alias rules path.
+# ---------------------------------------------------------------------------
+
+
+class TestGraphAliasesPath:
+    """Env parsing + validation for ``BRAIN_GRAPH_ALIASES_PATH``."""
+
+    def test_unset_no_default_file_yields_none(
+        self, monkeypatch, isolated_dotenv: Path
+    ) -> None:
+        """Arrange: env unset; $BRAIN_HOME/graph_aliases.yml absent. Assert: None."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_GRAPH_ALIASES_PATH", raising=False)
+        # isolated_dotenv patches _brain_home_root → tmp_path/brain_home_root;
+        # that directory has no graph_aliases.yml, so default path doesn't exist.
+        cfg = Config.load()
+        assert cfg.graph_aliases_path is None
+
+    def test_env_set_to_readable_file_resolves_path(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """Arrange: BRAIN_GRAPH_ALIASES_PATH points to a real file. Assert: Path resolved."""
+        # Arrange
+        aliases_file = tmp_path / "my_aliases.yml"
+        aliases_file.write_text("rules: []\n")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(aliases_file))
+        # Act
+        cfg = Config.load()
+        # Assert
+        assert cfg.graph_aliases_path == aliases_file
+
+    def test_env_set_to_nonexistent_file_raises_config_error(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """Arrange: BRAIN_GRAPH_ALIASES_PATH points to a missing file. Assert: ConfigError."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv(
+            "BRAIN_GRAPH_ALIASES_PATH", str(tmp_path / "no_such_file.yml")
+        )
+        with pytest.raises(ConfigError, match="BRAIN_GRAPH_ALIASES_PATH"):
+            Config.load()
+
+    def test_default_file_exists_resolves_automatically(
+        self, monkeypatch, isolated_dotenv: Path, tmp_path: Path
+    ) -> None:
+        """Arrange: $BRAIN_HOME/graph_aliases.yml exists; env unset. Assert: path resolved."""
+        # The isolated_dotenv fixture patches _brain_home_root → tmp_path/brain_home_root.
+        brain_home_dir = tmp_path / "brain_home_root"
+        brain_home_dir.mkdir(parents=True, exist_ok=True)
+        default_aliases = brain_home_dir / "graph_aliases.yml"
+        default_aliases.write_text("rules: []\n")
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_GRAPH_ALIASES_PATH", raising=False)
+        cfg = Config.load()
+        assert cfg.graph_aliases_path == default_aliases
+
+
+# ---------------------------------------------------------------------------
+# BRAIN_GRAPH_EXTRACT_STOPWORDS — Phase B (2026-05-25) operator stopword knob.
+# ---------------------------------------------------------------------------
+
+
+class TestGraphExtractStopwords:
+    """Env parsing for ``BRAIN_GRAPH_EXTRACT_STOPWORDS``."""
+
+    def test_default_empty(self, monkeypatch: pytest.MonkeyPatch, isolated_dotenv: Path) -> None:
+        """Unset env → empty frozenset (real terms are employer-specific, rule 15)."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_GRAPH_EXTRACT_STOPWORDS", raising=False)
+        cfg = Config.load()
+        assert cfg.graph_extract_stopwords == frozenset()
+
+    def test_parses_csv_trims_and_lowercases(
+        self, monkeypatch: pytest.MonkeyPatch, isolated_dotenv: Path
+    ) -> None:
+        """Comma-separated entries are trimmed, lowercased, and de-duplicated."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_GRAPH_EXTRACT_STOPWORDS", "foo, bar baz ")
+        cfg = Config.load()
+        assert cfg.graph_extract_stopwords == frozenset({"foo", "bar baz"})
+
+    def test_blank_value_yields_empty(
+        self, monkeypatch: pytest.MonkeyPatch, isolated_dotenv: Path
+    ) -> None:
+        """Whitespace-only value is treated as unset → empty frozenset."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_GRAPH_EXTRACT_STOPWORDS", "   ")
+        cfg = Config.load()
+        assert cfg.graph_extract_stopwords == frozenset()
+
+    def test_duplicates_collapsed(
+        self, monkeypatch: pytest.MonkeyPatch, isolated_dotenv: Path
+    ) -> None:
+        """frozenset collapses duplicate entries after normalization."""
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_GRAPH_EXTRACT_STOPWORDS", "foo,FOO, Foo")
+        cfg = Config.load()
+        assert cfg.graph_extract_stopwords == frozenset({"foo"})

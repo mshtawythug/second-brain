@@ -390,16 +390,16 @@ def test_extract_cap_disabled_processes_whole_document() -> None:
 
 
 def test_extractor_version_constant_present_and_folds_model() -> None:
-    assert EXTRACTOR_VERSION == "concepts-v4"
+    assert EXTRACTOR_VERSION == "concepts-v5"
     extractor = _extractor(_const_handler(_ok_entities([])))
-    assert extractor.version == "llama3.1:8b@concepts-v4"
+    assert extractor.version == "llama3.1:8b@concepts-v5"
 
 
 def test_extractor_version_changes_with_model() -> None:
     extractor = OllamaExtractor(
         enricher=_enricher(_const_handler(_ok_entities([])), model="custom:7b")
     )
-    assert extractor.version == "custom:7b@concepts-v4"
+    assert extractor.version == "custom:7b@concepts-v5"
 
 
 def test_concept_entity_types_excludes_person() -> None:
@@ -600,7 +600,7 @@ def test_make_extractor_uses_graph_extract_model() -> None:
     cfg = Config(database_url="postgresql://x/y", graph_extract_model="custom:7b")
     extractor = make_extractor(cfg)
     assert isinstance(extractor, OllamaExtractor)
-    assert extractor.version == "custom:7b@concepts-v4"
+    assert extractor.version == "custom:7b@concepts-v5"
 
 
 def test_make_extractor_threads_max_entities() -> None:
@@ -1002,3 +1002,54 @@ def test_extract_structural_filter_keeps_real_concepts() -> None:
         "Chapter 24 of the PDF covers our compliance program."
     )
     assert [(e.entity_type, e.canonical_key) for e in out] == [("topic", "compliance")]
+
+
+# --------------------------------------------------------------------------- #
+# Phase B — extra_stopwords + _STRUCTURAL_ENUM_RE number-word extension
+# --------------------------------------------------------------------------- #
+
+
+def _make_extractor(extra_stopwords: frozenset[str] = frozenset()) -> OllamaExtractor:
+    """Build an OllamaExtractor with a no-op MockTransport (``_finalize`` never
+    calls the model; we drive it directly). Synthetic names only (rule 15)."""
+    handler = _const_handler(_ok_entities([]))
+    return OllamaExtractor(enricher=_enricher(handler), extra_stopwords=extra_stopwords)
+
+
+def test_finalize_drops_curated_stopwords() -> None:
+    """Entities whose canonical_key is in extra_stopwords are dropped by _finalize.
+
+    F4: the stopword check fires AFTER _is_noise_key so a generic-noise key never
+    competes with a stopword; the real-concept Northwind is preserved.
+    All names are synthetic (rule 15).
+    """
+    ex = _make_extractor(extra_stopwords=frozenset({"foo", "bar baz"}))
+    text = "We discussed Foo and Bar Baz and Northwind in the call."
+    keys = {
+        e.canonical_key
+        for e in ex._finalize(
+            [("topic", "Foo"), ("topic", "Bar Baz"), ("org", "Northwind")], text
+        )
+    }
+    assert "foo" not in keys
+    assert "bar baz" not in keys
+    assert "northwind" in keys
+
+
+def test_finalize_drops_structural_number_word() -> None:
+    """Number-words extend _STRUCTURAL_ENUM_RE so «section one» is dropped
+    (structural noun + number-word), but «phase two» survives («phase» is not
+    in the structural-noun list).
+
+    F4 (Codex): extend the existing enum, NOT a new broad regex.
+    """
+    ex = _make_extractor()
+    text = "section one and phase two were reviewed in the call"
+    keys = {
+        e.canonical_key
+        for e in ex._finalize(
+            [("topic", "section one"), ("topic", "phase two")], text
+        )
+    }
+    assert "section one" not in keys, "structural noun + number-word should be dropped"
+    assert "phase two" in keys, "non-structural noun + number-word should survive"

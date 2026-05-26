@@ -33,3 +33,8 @@ logs/
 
 # Plans / specs / audits / QA — local-only working docs (may contain personal references)
 docs/
+
+# Real GraphRAG alias rules contain real entity names (CLAUDE.md rule 15) — keep local.
+# The checked-in file is aliases/default.yml.example (synthetic, documentation only).
+/graph_aliases.yml
+/src/brain/graph_rag/aliases/default.yml

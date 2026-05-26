@@ -99,7 +99,14 @@ __all__ = [
 # chunking, so a long document is no longer extracted in full. This changes the
 # extraction output for docs past the cap, so the watermark MUST change to force a
 # ``--backfill`` re-extraction.
-EXTRACTOR_VERSION = "concepts-v4"
+#
+# concepts-v5 (2026-05-25, Phase B): (1) ``_STRUCTURAL_ENUM_RE`` extended with
+# number-words (zero…ten) so "section one" / "version two" are dropped by the
+# existing ``_is_noise_key`` filter without a new broad regex; (2)
+# ``OllamaExtractor`` gains an ``extra_stopwords`` parameter (operator-curated
+# canonical keys dropped in ``_finalize`` after the generic noise filter). Real
+# stopwords are employer-specific (rule 15) and default to the empty set.
+EXTRACTOR_VERSION = "concepts-v5"
 
 # The concept entity types the extractor emits (spec §5 ``entity_type CHECK``
 # minus ``person``). People are derived from the participants pipeline and are
@@ -244,7 +251,9 @@ _STRUCTURAL_STOP_KEYS: frozenset[str] = frozenset({
 _STRUCTURAL_ENUM_RE = re.compile(
     r"^(?:chapter|section|page|figure|fig|table|appendix|exhibit|paragraph|"
     r"para|footnote|clause|article|item|part|volume|vol|step|standard|"
-    r"version|ver|revision|rev)\s+(?:\d+|[ivxlcdm]+|[a-z])$"
+    r"version|ver|revision|rev)\s+"
+    r"(?:\d+|[ivxlcdm]+|[a-z]|"
+    r"zero|one|two|three|four|five|six|seven|eight|nine|ten)$"
 )
 
 # Maximum word count for an entity NAME. Concept names are short (the gate's
@@ -367,6 +376,7 @@ class OllamaExtractor:
         chunk_target_tokens: int = _DEFAULT_CHUNK_TARGET_TOKENS,
         chunk_overlap_tokens: int = _DEFAULT_CHUNK_OVERLAP_TOKENS,
         max_input_tokens: int | None = None,
+        extra_stopwords: frozenset[str] = frozenset(),
     ) -> None:
         if max_entities is not None and max_entities < 1:
             raise ValueError(
@@ -395,6 +405,11 @@ class OllamaExtractor:
         # extracted — the historical behavior and the test default). Production
         # threads ``BRAIN_GRAPH_EXTRACT_MAX_INPUT_TOKENS`` via ``make_extractor``.
         self._max_input_tokens = max_input_tokens
+        # Phase B: operator-curated canonical keys dropped in ``_finalize`` after
+        # the generic noise filter. Default empty (real terms are employer-specific,
+        # rule 15). Threaded from ``cfg.graph_extract_stopwords`` by
+        # :func:`make_extractor`.
+        self._extra_stopwords = extra_stopwords
 
     @property
     def version(self) -> str:
@@ -498,6 +513,8 @@ class OllamaExtractor:
             canonical_key = _canonical_key(display_name)
             if _is_noise_key(canonical_key):
                 continue
+            if canonical_key in self._extra_stopwords:
+                continue
             if not _name_present_in_text(canonical_key, normalized_text):
                 continue
             seen.setdefault((entity_type, canonical_key), display_name)
@@ -570,6 +587,7 @@ def make_extractor(cfg: Config) -> OllamaExtractor:
         enricher=enricher,
         max_entities=cfg.graph_max_entities,
         max_input_tokens=cfg.graph_extract_max_input_tokens,
+        extra_stopwords=cfg.graph_extract_stopwords,
     )
 
 

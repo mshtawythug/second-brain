@@ -78,26 +78,37 @@ def concept_mention_source(extractor_version: str) -> str:
     """``graph_entity_mentions.source`` provenance for concepts (spec §5a).
 
     ``"extractor:<model>@<ver>"`` — i.e. ``f"extractor:{extractor.version}"``,
-    where ``extractor.version`` is the ``"<model>@concepts-v4"`` fingerprint
+    where ``extractor.version`` is the ``"<model>@concepts-v5"`` fingerprint
     (:attr:`brain.graph_rag.extract.OllamaExtractor.version`). Distinguishes
     concept mentions from the person pipeline's ``"people"`` source.
     """
     return f"extractor:{extractor_version}"
 
 
-def concept_inputs_hash(window: int, max_entities: int | None) -> str:
+def concept_inputs_hash(
+    window: int,
+    max_entities: int | None,
+    stopwords: frozenset[str] = frozenset(),
+) -> str:
     """Stable fingerprint of the concept-aspect's config inputs (watermark).
 
-    Captures only the co-occurrence config (window + per-doc cap). The document
-    content is tracked by ``graph_index_state.content_hash`` and the
-    model/algorithm by ``extractor_ver``, so this deliberately excludes the
-    extracted entities — letting the G2-c concept skip-check run before any LLM
-    call (an unchanged watermark short-circuits extraction; spec §7 step 1).
+    Captures the co-occurrence config (window + per-doc cap) and the
+    operator-curated stopword set (Phase B). The document content is tracked by
+    ``graph_index_state.content_hash`` and the model/algorithm by
+    ``extractor_ver``, so this deliberately excludes the extracted entities —
+    letting the G2-c concept skip-check run before any LLM call (an unchanged
+    watermark short-circuits extraction; spec §7 step 1).
+
+    ``stopwords`` is folded as a *sorted* list so order does not affect the
+    fingerprint (frozenset iteration order is undefined). Adding or removing a
+    stopword changes the hash and forces re-extraction even when the
+    ``EXTRACTOR_VERSION`` itself has not changed (Phase B F6 requirement).
     """
     payload = {
         "aspect": CONCEPTS_ASPECT,
         "window": window,
         "max_entities": max_entities,
+        "stopwords": sorted(stopwords),
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()

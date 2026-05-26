@@ -37,6 +37,7 @@ from .errors import (
     PersonNotFound,
 )
 from .format import (
+    alias_result_json,
     community_record_json,
     entity_summaries_json,
     graph_context_json,
@@ -1944,6 +1945,113 @@ def brain_graphrag_communities(
         "count": len(records),
         "communities": [community_record_json(r) for r in records],
     }
+
+
+# ---------------------------------------------------------------------------
+# Wave C4 — brain_graphrag_aliases_apply (MCP twin of `brain graphrag aliases
+# apply`). Single admin tool that mirrors the CLI: load rules from the
+# server-configured BRAIN_GRAPH_ALIASES_PATH, run merge_aliases atomically,
+# return the structured tally. Structured params only; tenant-scoped; NEVER
+# raw Cypher; PII-safe — only counts + tenant id reach the wire.
+# ---------------------------------------------------------------------------
+
+
+@mcp_app.tool()
+def brain_graphrag_aliases_apply(
+    dry_run: bool = False,
+    tenant: str | None = None,
+) -> dict[str, Any]:
+    """ADMIN — apply curated entity alias/merge rules to the graph (spec §9).
+
+    WHEN TO USE: a one-shot administrative cleanup that folds known variant
+    entities (acronym variants, abbreviation duplicates, a topic that is
+    really a known person) into their canonical entity. NOT everyday querying.
+    Reach for it after curating ``BRAIN_GRAPH_ALIASES_PATH`` and before / after
+    a ``brain_graphrag_build`` when the build's auto-apply path was skipped.
+
+    Full parity with ``brain graphrag aliases apply``: re-points every source
+    entity's mentions + contributions onto its target, provisions any
+    newly-created target AGE vertices, then refreshes aggregates so the
+    GC + AGE-detach + ``CO_OCCURS`` rebuild reflects the merges. Atomic per
+    :func:`brain.graph_rag.aliases.merge_aliases` — a failure rolls the whole
+    alias work back without disturbing other tenant data. ``dry_run=True``
+    rolls the transaction back and reports what WOULD have moved (no writes).
+
+    A missing / empty rules file is a clean no-op: the returned payload has
+    ``rules_total=0`` and ``rules_applied=0`` and
+    ``communities_refresh_recommended`` is ``False``. After a non-dry, non-
+    empty apply ``communities_refresh_recommended`` is ``True`` — the caller
+    SHOULD run ``brain_graphrag_communities_refresh`` (community membership
+    can drift across merges; spec §17c Q3).
+
+    Params (mirror the CLI flags):
+
+    - ``dry_run``: report would-be moves without writing (default ``False``).
+    - ``tenant``: tenant to apply rules to (default ``BRAIN_GRAPH_TENANT``).
+
+    Returns ``{tenant_id, rules_total, rules_applied, mentions_repointed,
+    contributions_repointed, sources_orphaned, dry_run,
+    communities_refresh_recommended}`` — all 7 :class:`AliasResult` fields
+    plus the staleness hint. No raw Cypher / SQL / real entity name is ever
+    returned (error/log messages only redact-prefix rule keys; F5).
+    """
+    state = _get_state()
+    cfg = state.cfg
+    logger.debug("brain_graphrag_aliases_apply: dry_run=%s tenant=%s", dry_run, tenant)
+    config = _graphrag_reconcile_config(cfg, tenant)
+
+    from .graph_rag.aliases import load_alias_rules, merge_aliases
+    from .graph_rag.backends import AgeBackend
+
+    try:
+        alias_rules = load_alias_rules(cfg.graph_aliases_path)
+    except GraphReconcileError as exc:
+        # Caller-fixable: malformed alias YAML — chained, but message only
+        # carries the validator's redacted key + rule type (F5), never the
+        # full real mapping.
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+
+    if not alias_rules:
+        # Empty/missing file is the opt-out: same shape as a real apply with
+        # zero rules, plus the staleness hint cleared.
+        payload = {
+            "tenant_id": config.tenant_id,
+            "rules_total": 0,
+            "rules_applied": 0,
+            "mentions_repointed": 0,
+            "contributions_repointed": 0,
+            "sources_orphaned": 0,
+            "dry_run": dry_run,
+            "communities_refresh_recommended": False,
+        }
+        return payload
+
+    try:
+        with connect_age(cfg.database_url) as conn:
+            conn.autocommit = True
+            _require_age_or_mcp_error(conn)
+            backend = AgeBackend()
+            backend.bootstrap(conn)
+            res = merge_aliases(
+                conn,
+                config.tenant_id,
+                alias_rules,
+                backend,
+                dry_run=dry_run,
+                config=config,
+            )
+    except GraphBackendError as exc:
+        raise _wrap_graph_backend_error(exc) from exc
+    except GraphReconcileError as exc:
+        raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+
+    payload = alias_result_json(res)
+    payload["communities_refresh_recommended"] = (
+        not res.dry_run and res.rules_applied > 0
+    )
+    return payload
 
 
 @mcp_app.tool()

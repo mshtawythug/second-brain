@@ -81,6 +81,8 @@ from .eval import (
 from .eval.baseline import _assert_baseline_name
 from .eval.corpus import _DEFAULT_CORPUS_PATH, _VALID_CATEGORIES
 from .format import (
+    alias_result_json,
+    alias_result_summary,
     community_record_json,
     community_records_table,
     console,
@@ -1798,6 +1800,15 @@ def graphrag_build(
         config = dataclasses.replace(config, concepts_enabled=True)
         extractor = make_extractor(cfg)
 
+    # Curated alias rules — wave C3. Loaded once, before opening the AGE
+    # connection, so a malformed YAML fails fast without any DB writes. An
+    # empty / missing file (the default) is the opt-out: the build behaves
+    # exactly as before. Logged-only details: the path is sensitive (real
+    # entity names) so we keep it out of the operator footer.
+    from .graph_rag.aliases import load_alias_rules, merge_aliases
+
+    alias_rules = load_alias_rules(cfg.graph_aliases_path)
+
     with connect_age(cfg.database_url) as conn:
         conn.autocommit = True
         _require_age_or_exit(conn)
@@ -1822,12 +1833,24 @@ def graphrag_build(
             extractor=extractor,
             force=force,
         )
+        # Apply curated alias rules at corpus level AFTER the per-doc loop +
+        # build_graph's deferred refresh: merge_aliases re-points sources,
+        # provisions any newly-created target AGE vertices, then runs another
+        # refresh_aggregates so the GC+detach+CO_OCCURS rebuild reflects the
+        # merges. Empty rules = no-op (no transaction opened). Atomic per
+        # merge_aliases's contract: a failure rolls the alias work back without
+        # disturbing the per-doc reconcile that already committed above.
+        alias_result = merge_aliases(
+            conn, config.tenant_id, alias_rules, backend, config=config
+        )
     typer.echo(
         f"graphrag build: {result.processed} processed "
         f"(reconciled {result.reconciled}, skipped {result.skipped}), "
         f"{result.relationship_count} relationship(s) rebuilt, "
         f"{result.orphans_removed} orphan(s) removed (tenant {config.tenant_id!r})"
     )
+    if alias_result.rules_total > 0:
+        typer.echo(alias_result_summary(alias_result))
 
 
 @graphrag_app.command("refresh")
@@ -1850,19 +1873,57 @@ def graphrag_refresh(
     """
     cfg = Config.load()
     config = _graphrag_config(cfg, tenant)
+    from .graph_rag.aliases import load_alias_rules, merge_aliases
     from .graph_rag.backends import AgeBackend
     from .graph_rag.reconcile import refresh_aggregates
+
+    # Wave C3: alias rules are corpus-level data — a refresh should also fold
+    # them in so a knob change that drives a refresh doesn't leave variant
+    # entities stranded. Loaded BEFORE the AGE connection so a malformed file
+    # fails fast without any DB writes; empty rules = no-op.
+    alias_rules = load_alias_rules(cfg.graph_aliases_path)
 
     with connect_age(cfg.database_url) as conn:
         conn.autocommit = True
         _require_age_or_exit(conn)
         backend = AgeBackend()
         backend.bootstrap(conn)
-        result = refresh_aggregates(conn, backend=backend, config=config)
+        # Apply alias merges BEFORE the corpus refresh so the refresh observes
+        # the post-merge graph: merge_aliases internally calls refresh_aggregates
+        # too, so we skip the second refresh when alias rules ran AND moved at
+        # least one rule (the merge's refresh is authoritative). When no rules
+        # apply (or the file is empty / missing), behavior is unchanged — the
+        # original refresh_aggregates runs and the footer matches the legacy
+        # output.
+        alias_result = merge_aliases(
+            conn, config.tenant_id, alias_rules, backend, config=config
+        )
+        if alias_result.rules_applied > 0:
+            # merge_aliases already ran refresh_aggregates inside its atomic
+            # transaction — duplicating it here is wasted work AND would log a
+            # second "rebuilt" line that doesn't match reality. Re-read the
+            # tenant's current relationship count + orphans-since-last-call for
+            # the footer.
+            from .graph_rag.aggregates import RefreshResult
+
+            rel_row = conn.execute(
+                "SELECT count(*) FROM graph_relationships WHERE tenant_id = %s",
+                (config.tenant_id,),
+            ).fetchone()
+            assert rel_row is not None
+            result = RefreshResult(
+                tenant_id=config.tenant_id,
+                relationship_count=int(rel_row[0]),
+                orphans_removed=alias_result.sources_orphaned,
+            )
+        else:
+            result = refresh_aggregates(conn, backend=backend, config=config)
     typer.echo(
         f"graphrag refresh: {result.relationship_count} relationship(s), "
         f"{result.orphans_removed} orphan(s) removed (tenant {config.tenant_id!r})"
     )
+    if alias_result.rules_total > 0:
+        typer.echo(alias_result_summary(alias_result))
 
 
 # ---------------------------------------------------------------------------
@@ -2358,6 +2419,106 @@ def graphrag_communities_list(
     """
     cfg = Config.load()
     _run_communities_list(cfg, tenant=tenant, limit=limit, json_output=json_output)
+
+
+# ---------------------------------------------------------------------------
+# Wave C3 — brain graphrag aliases (curated entity-merge admin: apply). Mirrors
+# the `communities` nested Typer group so the parity guard maps `aliases apply`
+# to the MCP twin `brain_graphrag_aliases_apply` 1:1. Real rules live in a
+# gitignored local YAML; an empty / missing file is the opt-out (no-op).
+# ---------------------------------------------------------------------------
+
+aliases_app = typer.Typer(
+    name="aliases",
+    help="Curated entity alias/merge admin (apply rules + refresh aggregates).",
+    no_args_is_help=True,
+)
+graphrag_app.add_typer(aliases_app, name="aliases")
+
+
+@aliases_app.command("apply")
+def graphrag_aliases_apply(
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Report would-be re-pointed mentions / contributions without "
+            "writing. The full apply+upsert+refresh transaction rolls back."
+        ),
+    ),
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to apply rules to (default: BRAIN_GRAPH_TENANT)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Apply curated entity alias/merge rules + refresh aggregates (C3).
+
+    Loads rules from ``BRAIN_GRAPH_ALIASES_PATH`` (default
+    ``$BRAIN_HOME/graph_aliases.yml`` when present, else nothing) and runs
+    :func:`brain.graph_rag.aliases.merge_aliases` atomically — re-points every
+    source entity's mentions + contributions onto its rule target, provisions
+    any newly-created target AGE vertices, then runs ``refresh_aggregates`` so
+    the GC + AGE-detach + ``CO_OCCURS`` rebuild reflects the merges.
+
+    ``--dry-run`` rolls the whole transaction back and reports what WOULD have
+    moved. After a non-dry, non-empty apply the community partition may be
+    stale — re-run ``brain graphrag communities refresh`` (a hint is printed
+    to remind the operator). A missing / empty rules file is a no-op that
+    prints a short note and exits 0.
+    """
+    cfg = Config.load()
+    from .graph_rag.aliases import load_alias_rules, merge_aliases
+    from .graph_rag.backends import AgeBackend
+
+    config = _graphrag_config(cfg, tenant)
+    alias_rules = load_alias_rules(cfg.graph_aliases_path)
+    if not alias_rules:
+        msg = (
+            "graphrag aliases apply: no rules configured — set "
+            "BRAIN_GRAPH_ALIASES_PATH to a YAML file with a non-empty `rules:` "
+            "list, or copy `aliases/default.yml.example` and adapt."
+        )
+        if json_output:
+            # 7 AliasResult fields + ``communities_refresh_recommended`` to
+            # match the MCP empty-rules wire shape (C4 parity — both surfaces
+            # MUST emit the same 8-key payload so a consumer can assume one
+            # schema regardless of transport). Empty rules can't dirty the
+            # community partition, so the hint is always ``False`` here.
+            emit_json(
+                {
+                    "tenant_id": config.tenant_id,
+                    "rules_total": 0,
+                    "rules_applied": 0,
+                    "mentions_repointed": 0,
+                    "contributions_repointed": 0,
+                    "sources_orphaned": 0,
+                    "dry_run": dry_run,
+                    "communities_refresh_recommended": False,
+                }
+            )
+        else:
+            typer.echo(msg)
+        return
+
+    with connect_age(cfg.database_url) as conn:
+        conn.autocommit = True
+        _require_age_or_exit(conn)
+        backend = AgeBackend()
+        backend.bootstrap(conn)
+        res = merge_aliases(
+            conn, config.tenant_id, alias_rules, backend,
+            dry_run=dry_run, config=config,
+        )
+
+    if json_output:
+        emit_json(alias_result_json(res))
+        return
+    typer.echo(alias_result_summary(res))
+    if not res.dry_run and res.rules_applied > 0:
+        typer.echo(
+            "                — communities may be stale; run "
+            "`brain graphrag communities refresh`"
+        )
 
 
 # ---------------------------------------------------------------------------

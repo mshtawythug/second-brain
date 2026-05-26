@@ -598,6 +598,22 @@ def test_build_reconcile_config_maps_fields(monkeypatch: pytest.MonkeyPatch) -> 
     assert rc.owner_keys == frozenset({"owner@x.com", "owner name"})
 
 
+def test_build_reconcile_config_threads_graph_extract_stopwords(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_reconcile_config must thread BRAIN_GRAPH_EXTRACT_STOPWORDS into ReconcileConfig.
+
+    Verifies the B3/F6 production wiring: an operator-curated stopword set set
+    via env reaches the ReconcileConfig used by every reconcile_document call so
+    the concept_inputs_hash watermark is live and will trigger re-extraction when
+    the stopword set changes.
+    """
+    monkeypatch.setenv("BRAIN_GRAPH_EXTRACT_STOPWORDS", "alpha,beta")
+    cfg = Config.load()
+    rc = build_reconcile_config(cfg)
+    assert rc.graph_extract_stopwords == frozenset({"alpha", "beta"})
+
+
 def test_build_reconcile_config_is_shared_object(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -56,6 +56,10 @@ class GraphEntity:
     tenant_id: str = "default"
     description: str | None = None
     doc_count: int = 0
+    # Person-scoped count for the active retrieval (themes mode): distinct docs
+    # where this entity co-occurs with the queried person. None when not
+    # scope-computed (local/global/entity modes). Derived per-query, never stored.
+    scoped_doc_count: int | None = None
     properties: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
