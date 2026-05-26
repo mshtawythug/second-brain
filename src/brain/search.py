@@ -27,6 +27,7 @@ The fts_only path bypasses (3) entirely.
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from typing import Any
 
 import psycopg
@@ -119,6 +120,74 @@ def _build_tsquery(conn: psycopg.Connection, raw_query: str) -> str:
     if not compact_tsq or compact_tsq == standard:
         return standard
     return f"({standard}) | ({compact_tsq})"
+
+
+# ---------------------------------------------------------------------------
+# Query-embedding LRU cache (perf F1)
+# ---------------------------------------------------------------------------
+
+# In-process cache for query embeddings. The query embed call (e.g. Ollama
+# Arctic) dominates search latency — ~115 ms warm / ~280 ms cold per the
+# retrieval perf audit (2026-05-25). Identical query embeds recur within a
+# single process: ``brain explain`` right after ``brain search``, an MCP
+# multi-turn session. Those should not hit the embedder twice. A fresh CLI
+# invocation starts cold, so the win is purely in-process / MCP. This is a
+# module-level constant, NOT a Config knob (per the task scope).
+_QUERY_EMBED_CACHE_SIZE = 256
+
+# identity → embedder, populated on every :func:`_query_embed` call so the
+# ``lru_cache``'d worker can recompute on a miss without taking the embedder
+# (unhashable, per-instance) as a cache-key argument. Bounded by the number of
+# distinct (class, model, dim) embedder identities seen in-process — at most a
+# handful — so it never grows unbounded.
+_embedder_registry: dict[str, Embedder] = {}
+
+
+def _embedder_identity(embedder: Embedder) -> str:
+    """Return a stable cache-key identity for ``embedder``.
+
+    Combines the concrete class (module + qualname), the backend model name
+    when the embedder exposes one (``_model`` on the Ollama/Voyage backends),
+    and the output ``dim``. Two embedders that would yield *different* vectors
+    for the same text — different model, backend, or dimensionality — MUST map
+    to different identities so the query-embed cache never serves a vector
+    computed by a different embedder/model.
+    """
+    cls = type(embedder)
+    model = getattr(embedder, "_model", "")
+    return f"{cls.__module__}.{cls.__qualname__}|{model}|{embedder.dim}"
+
+
+@lru_cache(maxsize=_QUERY_EMBED_CACHE_SIZE)
+def _cached_query_embed(
+    identity: str, input_type: str, text: str
+) -> tuple[float, ...]:
+    """LRU-cached single-text embed keyed by ``(identity, input_type, text)``.
+
+    The embedder is resolved from :data:`_embedder_registry` rather than passed
+    as an argument, so every component of the cache key is hashable and the key
+    is identity-scoped. Returns an immutable tuple — embeddings are lists
+    (unhashable), and caching a mutable list would also let one caller corrupt
+    another's vector.
+    """
+    embedder = _embedder_registry[identity]
+    return tuple(embedder.embed([text], input_type=input_type)[0])
+
+
+def _query_embed(
+    embedder: Embedder, text: str, *, input_type: str = "query"
+) -> list[float]:
+    """Return the embedding for ``text`` via the in-process LRU cache.
+
+    Registers ``embedder`` under its identity (so a cache miss can recompute),
+    then returns a fresh ``list`` copy of the cached tuple — callers hand it to
+    psycopg as a ``::vector`` parameter and must not mutate the shared cache
+    entry. Behaviourally identical to ``embedder.embed([text],
+    input_type=input_type)[0]`` apart from the caching.
+    """
+    identity = _embedder_identity(embedder)
+    _embedder_registry[identity] = embedder
+    return list(_cached_query_embed(identity, input_type, text))
 
 
 def hybrid_search(
@@ -247,22 +316,49 @@ def hybrid_search(
         where_params.append(without_tag)
     where_sql = " AND ".join(where_clauses)
 
+    # No-filter fast path (perf F5 + F2). ``where_clauses`` always starts with
+    # the literal ``"TRUE"``; every metadata filter appends a clause *and* a
+    # param. So ``where_sql == "TRUE"`` (the common unfiltered CLI search)
+    # means the ``documents`` JOIN supplies no column the FTS/vector legs
+    # actually read — title/tags/source_kind/recency all come from the separate
+    # ``doc_rows`` fetch below, and the inner JOIN on the ``document_id`` FK
+    # can neither drop nor duplicate chunk rows. We therefore (F5) omit the
+    # JOIN and (F2) force psycopg to prepare the now-static SQL so an
+    # in-process / MCP repeated search reuses the plan (~15 ms planning saved).
+    # The filtered path keeps the JOIN and leaves ``prepare=None`` (psycopg's
+    # auto-prepare heuristic) since each distinct filter combo is a different
+    # statement; a one-shot CLI invocation prepares-then-executes once, a
+    # negligible no-op risk.
+    has_filters = where_sql != "TRUE"
+    prepare_flag: bool | None = None if has_filters else True
+    join_clause = "JOIN documents d ON d.id = c.document_id" if has_filters else ""
+    fts_filter = f" AND {where_sql}" if has_filters else ""
+
     tsquery = _build_tsquery(conn, query)
 
-    # Per-doc cap CTE — keep the top PER_DOC_CHUNK_CAP chunks per
-    # ``document_id`` (ranked by ts_rank) before the global LIMIT, so one
-    # long doc can't fill the entire candidate slot.
+    # Two-level CTE (perf F3): the inner ``base`` computes ``ts_rank`` exactly
+    # once per row as ``score``; ``ranked`` reuses that alias for both the
+    # per-document window cap and the final ordering. The previous single-CTE
+    # form computed ``ts_rank`` twice (score column + window ORDER BY) and bound
+    # ``to_tsquery`` three times. The ``@@`` predicate is deliberately kept as a
+    # direct inline ``to_tsquery(...)`` expression (not hoisted into a CTE) so
+    # the GIN ``chunks_tsv_idx`` Bitmap Index Scan plan is provably unchanged.
+    # The per-doc cap keeps the top PER_DOC_CHUNK_CAP chunks per ``document_id``
+    # before the global LIMIT so one long doc can't fill the candidate slot.
     fts_sql = f"""
-        WITH ranked AS (
+        WITH base AS (
             SELECT c.id, c.document_id, c.chunk_index, c.content,
-                   ts_rank(c.tsv, to_tsquery('english', %s)) AS score,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY c.document_id
-                       ORDER BY ts_rank(c.tsv, to_tsquery('english', %s)) DESC
-                   ) AS rn
+                   ts_rank(c.tsv, to_tsquery('english', %s)) AS score
             FROM chunks c
-            JOIN documents d ON d.id = c.document_id
-            WHERE c.tsv @@ to_tsquery('english', %s) AND {where_sql}
+            {join_clause}
+            WHERE c.tsv @@ to_tsquery('english', %s){fts_filter}
+        ),
+        ranked AS (
+            SELECT id, document_id, chunk_index, content, score,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY document_id ORDER BY score DESC
+                   ) AS rn
+            FROM base
         )
         SELECT id, document_id, chunk_index, content, score
         FROM ranked
@@ -271,25 +367,31 @@ def hybrid_search(
         LIMIT {CANDIDATE_LIMIT}
     """
     fts_rows = conn.execute(
-        fts_sql, [tsquery, tsquery, tsquery, *where_params]
+        fts_sql, [tsquery, tsquery, *where_params], prepare=prepare_flag
     ).fetchall()
 
     vec_rows: list[Any] = []
     if not fts_only:
-        q_emb = embedder.embed([query], input_type="query")[0]
+        q_emb = _query_embed(embedder, query)
+        floor_pred = "1 - (c.embedding <=> %s::vector) >= %s"
+        vec_params: list[Any]
+        if has_filters:
+            vec_where = f"WHERE {where_sql} AND {floor_pred}"
+            vec_params = [q_emb, *where_params, q_emb, vector_sim_floor, q_emb]
+        else:
+            vec_where = f"WHERE {floor_pred}"
+            vec_params = [q_emb, q_emb, vector_sim_floor, q_emb]
         vec_sql = f"""
             SELECT c.id, c.document_id, c.chunk_index, c.content,
                    1 - (c.embedding <=> %s::vector) AS score
             FROM chunks c
-            JOIN documents d ON d.id = c.document_id
-            WHERE {where_sql}
-              AND 1 - (c.embedding <=> %s::vector) >= %s
+            {join_clause}
+            {vec_where}
             ORDER BY c.embedding <=> %s::vector
             LIMIT {CANDIDATE_LIMIT}
         """
         vec_rows = conn.execute(
-            vec_sql,
-            [q_emb, *where_params, q_emb, vector_sim_floor, q_emb],
+            vec_sql, vec_params, prepare=prepare_flag
         ).fetchall()
 
     # Per-chunk rank tables (built only when explain=True; zero overhead otherwise).
