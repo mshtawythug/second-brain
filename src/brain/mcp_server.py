@@ -5,6 +5,8 @@ import re
 import sys
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date as date_cls
 from datetime import datetime
@@ -18,7 +20,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from .config import Config
-from .db import age_extension_available, connect, connect_age
+from .db import PersistentConnection, age_extension_available, connect, connect_age
 from .embeddings import OllamaEmbedError, make_embedder
 from .enrichment import OllamaEnricher, make_enricher
 from .errors import (
@@ -118,6 +120,12 @@ class _State:
     pre-edit summary above the new body. ``None`` is an allowed
     value so tests can opt out of the LLM round-trip; production
     :func:`main` always populates it via :func:`make_enricher`.
+
+    DB-08 (perf/waves-0-2 T6): ``db_conn`` holds the persistent connection
+    opened once in :func:`main` and reused across all tool calls. Tests
+    that build ``_State`` directly may leave it ``None``; :func:`_mcp_conn`
+    then falls back to the per-call :func:`connect` path so all existing
+    test-doubles remain functional.
     """
 
     cfg: Config
@@ -128,6 +136,9 @@ class _State:
     # (tests that build ``_State`` directly) skips graph sync; production
     # :func:`main` always populates it via :func:`make_graph_syncer`.
     graph_syncer: GraphSyncer | None = None
+    # DB-08: persistent connection opened at server startup, reused per call.
+    # ``None`` preserves per-call ``connect()`` semantics for existing tests.
+    db_conn: PersistentConnection | None = None
 
 
 _state: _State | None = None
@@ -153,8 +164,28 @@ def _wrap_db_error(e: psycopg.Error) -> McpError:
     The user-facing message intentionally omits ``str(e)`` (which can include
     SQL fragments + connection details) and exposes only the exception class
     name. The full exception is logged to stderr so we can still debug.
+
+    DB-08: on :class:`psycopg.OperationalError` (broken pipe, server restart),
+    also triggers a best-effort :meth:`PersistentConnection.reconnect` so the
+    *next* tool call can succeed with a fresh connection. The current call
+    still surfaces ``INTERNAL_ERROR`` — reconnect is for the benefit of
+    subsequent calls, not this one. A reconnect failure is logged at ERROR and
+    swallowed; it will surface again as ``OperationalError`` on the next call.
     """
     logger.error("database error", exc_info=e)
+    if isinstance(e, psycopg.OperationalError) and _state is not None:
+        db_conn = _state.db_conn
+        if db_conn is not None:
+            try:
+                db_conn.reconnect()
+                logger.info(
+                    "persistent connection reconnected after OperationalError"
+                )
+            except psycopg.OperationalError as reconnect_err:
+                logger.error(
+                    "persistent connection reconnect failed: %s",
+                    type(reconnect_err).__name__,
+                )
     return _mcp_error(INTERNAL_ERROR, f"database error: {type(e).__name__}")
 
 
@@ -166,6 +197,26 @@ def _wrap_embed_error(e: OllamaEmbedError) -> McpError:
     """
     logger.error("embedding failed", exc_info=e)
     return _mcp_error(INTERNAL_ERROR, f"embedding failed: {type(e).__name__}")
+
+
+@contextmanager
+def _mcp_conn(state: _State) -> Iterator[psycopg.Connection[Any]]:
+    """Yield a DB connection for an MCP tool call.
+
+    DB-08: in production (``state.db_conn`` set by :func:`main`) yields the
+    persistent connection (always ``autocommit=True``) without closing it on
+    exit — it stays alive for the next call.
+
+    Tests that build ``_State`` without ``db_conn`` fall through to a per-call
+    :func:`connect` so existing test-doubles
+    (``monkeypatch.setattr(mcp_server, "connect", ...)``) stay functional and
+    the entire pre-T6 test suite continues to pass unchanged.
+    """
+    if state.db_conn is not None:
+        yield state.db_conn.get()
+    else:
+        with connect(state.cfg.database_url) as conn:
+            yield conn
 
 
 def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
@@ -318,7 +369,7 @@ def brain_search(
     session_id = str(uuid.uuid4())
 
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             person_match = None
             if person is not None:
                 try:
@@ -433,7 +484,7 @@ def brain_show(
             ) from e
 
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             conn.autocommit = True
             doc_id = _resolve_id(conn, id_prefix)
             doc = fetch_document(conn, doc_id)
@@ -494,7 +545,7 @@ def brain_list(
     state = _get_state()
     logger.debug("brain_list: source=%s tag=%s limit=%d", source, tag, limit)
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             rows = list_documents(conn, source=source, tag=tag, limit=limit)
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -523,7 +574,7 @@ def brain_status() -> dict[str, Any]:
     state = _get_state()
     logger.debug("brain_status: called")
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             counts = summary_counts(conn)
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -581,7 +632,7 @@ def brain_ingest_stdin(
         title,
     )
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             conn.autocommit = True
             result = ingest_document(
                 conn,
@@ -636,7 +687,7 @@ def brain_tag(
         "brain_tag: id_prefix=%s add=%s remove=%s", id_prefix, add, remove
     )
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             conn.autocommit = True
             doc_id = _resolve_id(conn, id_prefix)
             row = conn.execute(
@@ -714,7 +765,7 @@ def brain_edit(
     # ``brain enrich --backfill`` recovers it later.
     enricher = state.enricher if content is not None else None
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             conn.autocommit = True
             doc_id = _resolve_id(conn, id_prefix)
             try:
@@ -755,7 +806,7 @@ def brain_backlinks(id_prefix: str) -> list[dict[str, Any]]:
     state = _get_state()
     logger.debug("brain_backlinks: id_prefix=%s", id_prefix)
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             doc_id = _resolve_id(conn, id_prefix)
             rows = backlinks_for(conn, doc_id)
     except psycopg.Error as e:
@@ -791,7 +842,7 @@ def brain_links(
         include_unresolved,
     )
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             doc_id = _resolve_id(conn, id_prefix)
             rows = outgoing_links_for(
                 conn, doc_id, include_unresolved=include_unresolved
@@ -823,7 +874,7 @@ def brain_orphans(vault_only: bool = True) -> list[dict[str, Any]]:
     state = _get_state()
     logger.debug("brain_orphans: vault_only=%s", vault_only)
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             rows = orphans(conn, vault_only=vault_only)
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -927,7 +978,7 @@ def brain_note_new(
         document_id[:8],
     )
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             conn.autocommit = True
             report = sync_one_file(
                 conn,
@@ -1047,7 +1098,7 @@ def brain_daily(date: str | None = None) -> dict[str, Any]:
         document_id[:8],
     )
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             conn.autocommit = True
             report = sync_one_file(
                 conn,
@@ -1101,7 +1152,7 @@ def brain_link_proposal(
         dst_id_or_title,
     )
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             src_id = _resolve_id(conn, src_id_prefix)
             src_row = conn.execute(
                 "SELECT kind, title, vault_path FROM documents WHERE id = %s",
@@ -2077,7 +2128,7 @@ def brain_rate(
         "brain_rate: target_type=%s graph_retrieved=%s", target_type, graph_retrieved
     )
     try:
-        with connect(state.cfg.database_url) as conn:
+        with _mcp_conn(state) as conn:
             conn.autocommit = True
             if target_type is not None:
                 # Graph-target rating: ``id`` is the durable target id, NOT a
@@ -2245,6 +2296,30 @@ def _resolve_proposal_dst(
     return dst_id, dst_title, dst_title
 
 
+def _warmup_embed(embedder: Embedder) -> None:
+    """Fire a single embed call so the model is in VRAM before the first query.
+
+    Retries once after :data:`_WARMUP_RETRY_DELAY_SECONDS` to cover the
+    cold-boot race where the Ollama daemon is up but the model is still
+    loading.  Persistent failure is logged at WARNING and swallowed — the
+    server stays up and real tool calls surface errors through the normal
+    ``_wrap_embed_error`` path.  Only :class:`~brain.embeddings.OllamaEmbedError`
+    is caught so import / programming errors still surface here.
+    """
+    try:
+        embedder.embed(["hello"], input_type="document")
+        logger.info("warmup embed completed")
+    except OllamaEmbedError:
+        time.sleep(_WARMUP_RETRY_DELAY_SECONDS)
+        try:
+            embedder.embed(["hello"], input_type="document")
+            logger.info("warmup embed completed (after retry)")
+        except OllamaEmbedError as e:
+            logger.warning(
+                "warmup embed failed (continuing without): %s", type(e).__name__
+            )
+
+
 def _configure_logging() -> None:
     """Configure stderr logging from the ``BRAIN_MCP_LOG_LEVEL`` env var.
 
@@ -2283,27 +2358,19 @@ def main() -> None:
     # ReconcileConfig). Cheap + self-gating on BRAIN_GRAPH_ENABLED + AGE
     # availability, so it's a no-op on a stock pgvector DB.
     graph_syncer = make_graph_syncer(cfg)
+    # DB-08: open the persistent connection once at server startup; every tool
+    # call reuses it via _mcp_conn(state), saving the ~10–30 ms TCP handshake
+    # overhead per request. autocommit=True is set inside PersistentConnection.get.
+    db_conn = PersistentConnection(cfg.database_url)
     _state = _State(
-        cfg=cfg, embedder=embedder, enricher=enricher, graph_syncer=graph_syncer
+        cfg=cfg,
+        embedder=embedder,
+        enricher=enricher,
+        graph_syncer=graph_syncer,
+        db_conn=db_conn,
     )
-    # Warmup embed to cut cold-start latency on the first real ``brain_search``.
-    # A single bounded retry covers cold-boot races where Ollama is up but the
-    # embedding model is still loading. Persistent failure must NOT abort
-    # startup — real tool calls surface the error to the MCP caller via
-    # ``_wrap_embed_error``. Only ``OllamaEmbedError`` is caught so import /
-    # programming errors still surface here.
-    try:
-        _state.embedder.embed(["hello"], input_type="document")
-        logger.info("warmup embed completed")
-    except OllamaEmbedError:
-        time.sleep(_WARMUP_RETRY_DELAY_SECONDS)
-        try:
-            _state.embedder.embed(["hello"], input_type="document")
-            logger.info("warmup embed completed (after retry)")
-        except OllamaEmbedError as e:
-            logger.warning(
-                "warmup embed failed (continuing without): %s", type(e).__name__
-            )
+    # F7: warm the embedding model into VRAM before the first real query.
+    _warmup_embed(_state.embedder)
     logger.info("brain-mcp starting (stdio transport)")
     mcp_app.run(transport="stdio")
 

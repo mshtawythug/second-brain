@@ -1,6 +1,6 @@
 """Postgres connection + migration helpers."""
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import psycopg
@@ -464,3 +464,52 @@ def ensure_embedding_column(
                 dim=sql.Literal(embedder.dim),
             )
         )
+
+
+class PersistentConnection:
+    """A single long-lived psycopg connection for the MCP server.
+
+    Opened lazily on first :meth:`get` call and reused across all subsequent
+    MCP tool calls, eliminating the ~10–30 ms per-call TCP handshake overhead.
+    Kept in ``autocommit=True`` mode so write helpers can manage transactions
+    explicitly via ``conn.transaction()`` without a wrapping session-level
+    transaction blocking them.
+
+    On :class:`psycopg.OperationalError` during a tool call, callers invoke
+    :meth:`reconnect` once before retrying; if the reconnect itself fails the
+    ``OperationalError`` propagates as ``INTERNAL_ERROR``.
+
+    Intended exclusively for the MCP server — CLI invocations use the
+    per-call :func:`connect` context-manager so their connection lifetime
+    remains bounded.
+    """
+
+    def __init__(self, database_url: str) -> None:
+        self._url = database_url
+        self._conn: psycopg.Connection | None = None
+
+    def get(self) -> psycopg.Connection:
+        """Return the live connection, opening it lazily if absent or closed."""
+        if self._conn is None or self._conn.closed:
+            self._conn = connect_raw(self._url)
+            self._conn.autocommit = True
+        return self._conn
+
+    def reconnect(self) -> None:
+        """Close the current connection (if any) and open a fresh one.
+
+        Raises :class:`psycopg.OperationalError` when the new connection
+        cannot be established — callers surface this as ``INTERNAL_ERROR``.
+        """
+        if self._conn is not None and not self._conn.closed:
+            with suppress(psycopg.Error):  # best-effort close; open fresh one below
+                self._conn.close()
+        self._conn = connect_raw(self._url)
+        self._conn.autocommit = True
+
+    def close(self) -> None:
+        """Shut down the connection gracefully (called at server teardown)."""
+        if self._conn is not None and not self._conn.closed:
+            with suppress(psycopg.Error):
+                self._conn.close()
+        self._conn = None
