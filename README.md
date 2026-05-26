@@ -945,7 +945,7 @@ echo '127.0.0.1 brain.test' | sudo tee -a /etc/hosts
 
 **First-build cost.** Cold start (`brain-up` against an empty `.quartz/current`) takes ~40s for a ~450-doc vault — the user sees a "first build, ~40s" message in the foreground before the script returns. Full rebuilds (rename, frontmatter change, structural edit) are also ~40s, but they happen entirely in the background under `builds/<ts>-<hash>/`; open tabs keep seeing the previous build right up to the atomic swap. The build watcher coalesces rapid edits with a 1.5s debounce, so a flurry of saves produces one rebuild rather than one per save. Old build dirs are GC'd after each swap (default keep=3, tunable via `BRAIN_WIKI_KEEP_BUILDS`); the build that `current` points at is never deleted, even if it's beyond the keep window.
 
-**Per-file fastpath (trivial edits).** When you edit one Markdown file's body without changing structural fields (title, tags, slug, etc.), the watcher routes the edit through a per-file partial emit instead of a full rebuild. Warm fastpath builds land in ~700ms-1.8s on a ~1100-doc vault; combined with the 1s reload poll, the total edit-to-UI latency is ~2 seconds. The mechanism is documented in [`docs/plans/2026-05-09-plan-b-per-file-emit.md`](docs/plans/2026-05-09-plan-b-per-file-emit.md): a full build writes a `manifest.json` + `contentmap.json` envelope under `<vault>/.quartz/.cache/fastpath/` keyed by canonical structural fingerprints; `brain.wiki.edit_classifier` recomputes the fingerprint after each edit and routes TRIVIAL edits to a Quartz `build-partial` subcommand that re-emits only the changed file's HTML (cross-file emitters like backlinks/graph see a synthesized full corpus so they don't break). Anything non-trivial (rename, tag change, slug collision, manifest miss) falls back to the full build path. Set `BRAIN_FASTPATH_ENABLED=false` to disable the fastpath if you ever need to.
+**Per-file fastpath (trivial edits).** When you edit one Markdown file's body without changing structural fields (title, tags, slug, etc.), the watcher routes the edit through a per-file partial emit instead of a full rebuild. Warm fastpath builds land in ~700ms-1.8s on a ~1100-doc vault; combined with the 1s reload poll, the total edit-to-UI latency is ~2 seconds. The mechanism: a full build writes a `manifest.json` + `contentmap.json` envelope under `<vault>/.quartz/.cache/fastpath/` keyed by canonical structural fingerprints; `brain.wiki.edit_classifier` recomputes the fingerprint after each edit and routes TRIVIAL edits to a Quartz `build-partial` subcommand that re-emits only the changed file's HTML (cross-file emitters like backlinks/graph see a synthesized full corpus so they don't break). Anything non-trivial (rename, tag change, slug collision, manifest miss) falls back to the full build path. Set `BRAIN_FASTPATH_ENABLED=false` to disable the fastpath if you ever need to.
 
 Backlinks, graph view, and full-text search all work out of the box — that's Quartz's job, not brain's.
 
@@ -998,33 +998,6 @@ If Quartz drifts incompatibly, gets archived, or you just want a different look:
 
 ## Architecture
 
-The design is captured across three specs and one set of phase-by-phase implementation plans. Read the specs for *why* and *what*; read the plans for the task-by-task breakdown that actually shipped.
-
-### Specs (`docs/specs/`)
-
-| Spec | What it covers |
-|---|---|
-| [`2026-04-24-second-brain-design.md`](docs/specs/2026-04-24-second-brain-design.md) | Original v1 — Postgres + pgvector schema, hybrid FTS+vector search via Reciprocal Rank Fusion, ingestion pipeline (PDF/DOCX/MD/TXT, Gmail, Krisp/Slack via stdin), CLI surface. The foundation everything else builds on. |
-| [`2026-04-27-mcp-server-design.md`](docs/specs/2026-04-27-mcp-server-design.md) | FastMCP server exposing brain tools (`brain_search`, `brain_show`, `brain_list`, `brain_status`, `brain_ingest_stdin`, `brain_tag`, `brain_edit`) so Claude Desktop can call them in any conversation. Stdio transport, error wrapping, warmup embed. |
-| [`2026-04-28-vault-model-design.md`](docs/specs/2026-04-28-vault-model-design.md) | The current model — vault folder of `.md` files as source of truth for authored notes, sync engine + watcher, `[[wiki-links]]` graph, Quartz-rendered wiki. Two-tier corpus (vault + ingested). |
-| [`2026-05-20-graphrag-age-image.md`](docs/specs/2026-05-20-graphrag-age-image.md) | GraphRAG architecture — Apache AGE inside the existing Postgres (not Neo4j); hybrid relational + AGE-mirror storage; people + concept aspects; auto / local / themes / global / fuse retrieval modes; community detection (Louvain); the gated cutover from stock pgvector to the AGE image. |
-
-### Plans (`docs/plans/`)
-
-| Plan | What it shipped |
-|---|---|
-| [`2026-04-24-second-brain.md`](docs/plans/2026-04-24-second-brain.md) | v1 build-out — schema, ingest extractors, hybrid search, CLI. |
-| [`2026-04-26-brain-edit.md`](docs/plans/2026-04-26-brain-edit.md) | `brain edit` JSON-header + body editor flow for in-place updates. |
-| [`2026-04-27-mcp-server.md`](docs/plans/2026-04-27-mcp-server.md) | MCP server implementation per the design above. |
-| [`2026-04-28-local-embeddings-qwen3-8b.md`](docs/plans/2026-04-28-local-embeddings-qwen3-8b.md) | Pluggable embedder backends (arctic / voyage / qwen3) behind a single `Embedder` Protocol. |
-| `2026-04-{28,29}-vault-model-phase-{1..7}.md` | Vault model rollout: schema + export, sync engine + wiki-link parser, authoring CLI, link graph queries, watcher, Quartz render integration, MCP additions. Each phase shipped independently with its own review + audit loop. |
-| [`2026-05-07-people-hub.md`](docs/plans/2026-05-07-people-hub.md) | People Hub — per-person vault pages under `<vault>/people/<slug>.md` aggregated from frontmatter, plus a `brain people [NAME]` CLI. Curated `_people.yml` always emits; anyone with ≥`BRAIN_PEOPLE_HUB_MIN_DOCS` documents joins automatically. |
-| [`2026-05-08-quartz-incremental-builds.md`](docs/plans/2026-05-08-quartz-incremental-builds.md) | Plan A — TypeScript parser cache at `<vault>/.quartz/.cache/parser/` so unchanged Markdown files skip the parse phase between builds. Surfaced via `bin/brain-rebuild --clean-cache`. |
-| [`2026-05-09-edit-to-ui-latency.md`](docs/plans/2026-05-09-edit-to-ui-latency.md) / [`-closeout.md`](docs/plans/2026-05-09-edit-to-ui-latency-closeout.md) | Edit-to-UI latency reduction — PollingObserver swap, scoped polling, deferred refresh_related, node-direct Quartz invocation, reload poll 3s→1s. Median 29.7s edit-to-UI on a 1100-doc vault. |
-| [`2026-05-09-plan-b-per-file-emit.md`](docs/plans/2026-05-09-plan-b-per-file-emit.md) | Plan B — per-file partial emit fastpath. Trivial edits route to a single-file Quartz emit instead of a full rebuild, taking edit-to-UI from ~30s down to ~2s. See [Serve locally](#serve-locally) for the user-facing description. |
-| GraphRAG G0–G4 plans (`docs/plans/2026-05-??-graphrag*.md`) | GraphRAG end-to-end — relational + AGE storage; people-aspect ingest sync; bounded traversal; community detection; auto router; the AGE-image cutover. Merged to master via PR #1 on 2026-05-22. |
-| Q1 search-quality plans (`docs/plans/2026-05-11-*.md`) | Q1-A (recency boost + snippet context), Q1-B (explain trace + nDCG eval harness), Q1-C (metadata filters: person / time / kind / thread / draft / has-tag / without-tag), Q1-D (auto-summary via Ollama + `brain todo` for Krisp action items). |
-
 ### Codebase layout
 
 ```
@@ -1060,8 +1033,6 @@ migrations/           — numbered SQL files (001..016) + schema_migrations trac
 bin/                  — brain-up / brain-down / brain-rebuild / brain-status convenience scripts
 quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
 skills/               — claude code skills (consult-brain, brain-graph)
-docs/specs/           — design specs (above)
-docs/plans/           — implementation plans (above)
 tests/                — real-DB pattern, fake embedder, ~3560 tests
 ```
 
@@ -1069,6 +1040,7 @@ tests/                — real-DB pattern, fake embedder, ~3560 tests
 
 A snippet in `~/.claude/CLAUDE.md` tells every Claude Code conversation:
 - When to invoke `brain search` and `brain show` (career topics, interviews, past meetings, prior roles, deals)
+- When to reach for GraphRAG instead (`brain graphrag themes --person X`, `brain graphrag search ... --mode global|fuse`) — questions about themes, patterns, or connections across the corpus, where the answer lives in the *relationships* between docs rather than any single doc
 - How to orchestrate Krisp/Slack ingestion via MCP → `brain ingest-stdin`
 - That `--json` output is available for programmatic parsing
 
@@ -1100,12 +1072,19 @@ Once your corpus is ingested, you can ask Claude things like:
 - "Pull every mention of the data warehouse migration across Slack, Krisp, and email, then summarize where it stands."
 - "What's the through-line in my notes about engineering culture over the past year?"
 
+**Themes and connections (GraphRAG)**
+- "What themes keep coming up in my conversations with [person]?" → `brain graphrag themes --person ...`
+- "What connects the platform-migration thread to the hiring-plan thread?" → `brain graphrag search "..." --mode fuse`
+- "Map out everyone connected to [project] and the topics that pull them together." → `brain graphrag search "[project]" --mode local` then `brain graphrag communities list`
+- "Which clusters of people and topics dominate my notes overall?" → `brain graphrag communities build` then `brain graphrag search "..." --mode global`
+- "Show me the entity graph around [topic] at depth 2." → `brain graphrag entity "[topic]"`
+
 **Ingest on demand** (Claude orchestrates the MCP calls)
 - "Ingest last week's Krisp calls."
 - "Pull the Slack thread about the auth incident into my brain."
 - "Ingest emails from the recruiting@ alias from the past 30 days."
 
-The pattern: ask the question naturally — Claude decides whether to call `brain search`, which filters to apply (`--source`, `--tag`, `--since`), and when to follow up with `brain show` for full context.
+The pattern: ask the question naturally — Claude decides whether to call `brain search` (single-doc lookup, ranked by lexical + semantic similarity) or `brain graphrag …` (themes / patterns / connections traversed via the entity graph), which filters to apply (`--source`, `--tag`, `--since`, `--person`, `--mode`), and when to follow up with `brain show` for full context.
 
 ## Tests
 
