@@ -4,25 +4,65 @@ Local personal knowledge base with hybrid search, designed to be queried by Clau
 
 Stores career documents, interview prep, Krisp call transcripts, Slack threads, and Gmail messages in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank and vector cosine similarity. The embedding backend is pluggable — defaults to local Snowflake Arctic Embed v2 over Ollama (free, no cloud dependency); Voyage AI and Qwen3-Embedding-8B are also supported.
 
+## Table of contents
+
+- [What this is](#what-this-is)
+- [Why this exists](#why-this-exists)
+  - [Why I built it](#why-i-built-it)
+  - [Token cost vs. direct fetch](#token-cost-vs-direct-fetch)
+- [Quick start](#quick-start)
+  - [Prerequisites](#prerequisites)
+    - [Required](#required)
+    - [Optional](#optional)
+  - [Install](#install)
+  - [Make `brain`, `brain-mcp`, and the `bin/` scripts available from any directory](#make-brain-brain-mcp-and-the-bin-scripts-available-from-any-directory)
+- [Tech stack](#tech-stack)
+- [Core usage](#core-usage)
+  - [Ingest files and pasted text](#ingest-files-and-pasted-text)
+  - [Search, browse, and inspect](#search-browse-and-inspect)
+  - [Tags, edits, draft hiding, and deletes](#tags-edits-draft-hiding-and-deletes)
+  - [Gmail ingest](#gmail-ingest)
+  - [Status and health](#status-and-health)
+- [GraphRAG (graph retrieval)](#graphrag-graph-retrieval)
+  - [How it works](#how-it-works)
+  - [Enabling GraphRAG](#enabling-graphrag)
+  - [Query modes](#query-modes)
+  - [Upgrading an existing brain to the AGE image](#upgrading-an-existing-brain-to-the-age-image)
+- [Vault model](#vault-model)
+  - [One-time vault setup](#one-time-vault-setup)
+  - [Authoring commands](#authoring-commands)
+  - [Link graph](#link-graph)
+  - [Watcher mode](#watcher-mode)
+  - [Vault maintenance](#vault-maintenance)
+- [Wiki (rendered view, optional)](#wiki-rendered-view-optional)
+  - [Quick start (Wiki)](#quick-start-wiki)
+  - [One-time setup](#one-time-setup)
+  - [Render](#render)
+  - [Customizing the graph](#customizing-the-graph)
+  - [Serve locally](#serve-locally)
+  - [Daily use — `bin/` scripts](#daily-use--bin-scripts)
+  - [Deploy (optional)](#deploy-optional)
+  - [When Quartz isn't a fit](#when-quartz-isnt-a-fit)
+- [Claude integrations](#claude-integrations)
+  - [Claude Desktop (MCP server)](#claude-desktop-mcp-server)
+  - [Claude Code (consult-brain skill)](#claude-code-consult-brain-skill)
+  - [Example prompts](#example-prompts)
+- [Configuration and administration](#configuration-and-administration)
+  - [Choosing an embedder backend](#choosing-an-embedder-backend)
+  - [Switching embedder backends](#switching-embedder-backends)
+  - [Data hygiene backfills](#data-hygiene-backfills)
+  - [Uninstall](#uninstall)
+- [Codebase layout](#codebase-layout)
+- [Tests](#tests)
+- [License](#license)
+
 ## What this is
 
 A `brain` CLI backed by a local Postgres database that I can query from any Claude Code session. I ingest my own career artifacts — resumes, interview prep, Krisp call transcripts, Slack threads, selected Gmail — and Claude searches them via `brain search` whenever a conversation touches my work history. Instead of copy-pasting context into every chat, Claude pulls the real source material on demand.
 
-## Tech stack
+## Why this exists
 
-| Layer | Choice | Why |
-|---|---|---|
-| CLI | Python 3.11 + [Typer](https://typer.tiangolo.com/) | Fast to write, good ergonomics, easy to test. |
-| Storage | PostgreSQL 16 + [`pgvector`](https://github.com/pgvector/pgvector) | One database for both lexical (`tsvector`) and semantic (vector) search — no separate vector store to operate. Runs in Docker on port 5433. |
-| Embeddings | Pluggable via `BRAIN_EMBEDDER` — default [Snowflake Arctic Embed v2](https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0) over local [Ollama](https://ollama.com/) (1024-dim, Apache 2.0, free). [Voyage AI](https://docs.voyageai.com/) (`voyage-3.5`, paid SaaS) and [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) (4096-dim, local Ollama) are alternates behind the same `Embedder` Protocol. | Local-by-default keeps the corpus off vendor servers; the abstraction lets the user upgrade or downgrade backends without touching ingest/search code. |
-| Search | Hybrid: Postgres FTS + vector cosine, fused via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (k=60) | Lexical alone misses paraphrases ("what did I say about X"); vector alone misses exact names ("a coworker", "a former employer"). RRF combines both ranks without tuning weights. |
-| Extraction | `pypdf`, `pdfplumber`, `python-docx`, `markdown-it-py` | Covers the file types I actually have. |
-| Chunking | Paragraph-aware, budgeted with `tiktoken` | Keeps semantic boundaries intact while staying under the embedder's token limit. |
-| Output | [Rich](https://rich.readthedocs.io/) tables + `--json` mode | Human-readable in a terminal, machine-parsable when Claude shells out. |
-| Tests | `pytest` against a real Postgres test DB, fake embedder fixture | Real-DB integration catches schema/migration drift that mocks would hide. |
-| Lint / type | `ruff`, `mypy` | Cheap to run, catches real bugs. |
-
-## Why I built this
+### Why I built it
 
 - **Claude has no memory across conversations.** A queryable second brain gives it durable, personal context (past meetings, prior writings, decisions) without me re-pasting it every time.
 - **Local-only by design.** My Krisp transcripts and Slack history don't leave my machine — no SaaS account, no vendor indexing my comms.
@@ -30,7 +70,7 @@ A `brain` CLI backed by a local Postgres database that I can query from any Clau
 - **Works from any cwd.** A symlinked launcher means Claude Code in any project can call `brain search` — the knowledge base isn't tied to one repo.
 - **Idempotent ingest.** `documents.content_hash` is `UNIQUE`, so re-running `brain ingest-dir` is a no-op. I can rerun without thinking about duplicates.
 
-## Token cost vs. direct fetch
+### Token cost vs. direct fetch
 
 The other big reason this is worth building: querying `brain` burns far less context than having Claude read the source directly via MCP or the `Read` tool. Rough per-query estimates (yours will vary with thread/file size):
 
@@ -55,9 +95,11 @@ Caveats:
 - Numbers are rough — long, chatty threads or very large docs widen the gap; short ones narrow it.
 - Brain only knows what's been ingested. For "search anything in my inbox right now," Gmail MCP is still the only option; brain is for the slice you've curated in.
 
-## Setup
+## Quick start
 
 ### Prerequisites
+
+#### Required
 
 - **Git** — used to clone this repo and the optional Quartz wiki renderer.
 - **Python 3.11+** — `python3.11 --version` should work. On macOS: `brew install python@3.11`.
@@ -70,6 +112,10 @@ Caveats:
   # ollama pull qwen3-embedding:8b        # only if you want BRAIN_EMBEDDER=qwen3 — 4.7 GB
   ```
   Skip Ollama entirely if you plan to use `BRAIN_EMBEDDER=voyage` exclusively.
+- **A Voyage AI API key** (only if `BRAIN_EMBEDDER=voyage`) — free tier covers personal use. Sign up at [voyageai.com](https://www.voyageai.com/) and grab a key.
+
+#### Optional
+
 - **Node.js 18+ and npm** (only if you want the rendered wiki). On macOS: `brew install node`.
 - **[Caddy](https://caddyserver.com/)** (only if you want the live wiki at `brain.test` or `localhost:8080`). On macOS:
   ```bash
@@ -81,7 +127,6 @@ Caveats:
 - **Apache AGE Postgres image** — shipped automatically. `brain setup` builds and runs the custom `second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2` image (PostgreSQL 16 + pgvector 0.8.2 + pgcrypto + AGE 1.5.0-rc0) from the packaged Dockerfile. The step-by-step path stays on stock pgvector for backwards-compat; see [Upgrading an existing brain to the AGE image](#upgrading-an-existing-brain-to-the-age-image).
 - **An Ollama model for GraphRAG concept extraction** (only if `BRAIN_GRAPH_CONCEPTS=true`, which is the default). `ollama pull llama3.1:8b` (~4.7 GB) covers the default model; set `BRAIN_GRAPH_EXTRACT_MODEL` to override. Setting `BRAIN_GRAPH_CONCEPTS=false` disables concept extraction (people aspect still works without an LLM).
 - **Graphviz** (optional) — only needed if you want to render `brain graph --format dot` output locally with `dot -Tsvg`. On macOS: `brew install graphviz`.
-- **A Voyage AI API key** (only if `BRAIN_EMBEDDER=voyage`) — free tier covers personal use. Sign up at [voyageai.com](https://www.voyageai.com/) and grab a key.
 - **Claude Code or Claude Desktop** (optional but the whole point) — Claude Code can call the `brain` CLI from any project; Claude Desktop can call the `brain-mcp` server once configured.
 
 ### Install
@@ -160,102 +205,6 @@ graph-drift counters, community-materialization staleness) is a soft check — a
 stock pgvector DB is reported as a warning, not a failure, and doesn't flip the
 exit code.
 
-### Uninstall
-
-```bash
-# 1. Tear down the runtime (launchd plists, $BRAIN_HOME files, Docker compose).
-#    By default this KEEPS the database at $BRAIN_HOME/data/postgres/ and the
-#    vault at $BRAIN_VAULT_PATH — both are user data.
-brain uninstall
-
-# 2. (Destructive — opt in explicitly.) Also remove the DB and/or vault:
-brain uninstall --remove-db --remove-vault   # --remove-db requires a typed
-                                             # confirmation: "yes, delete my data"
-
-# 3. Remove the pipx-installed CLI itself (must be a separate command —
-#    a Python CLI can't safely uninstall its own running process).
-pipx uninstall second-brain
-```
-
-### Wiki (optional)
-
-If you want a live wiki view of your vault at `brain.test` (Obsidian-style
-graph, backlinks, full-text search, dark mode), wire up Caddy + the Quartz
-workspace. This is the procedural "I want it working" path — the
-how-it-works details (architecture, atomic build swap, auto-reload
-mechanism) live under [Wiki rendering → Serve locally](#serve-locally)
-below.
-
-```bash
-# 1. Install Caddy (skip if it's already running on your machine).
-brew install caddy
-brew services start caddy
-
-# 2. Map brain.test to localhost (one-time, system-wide).
-echo '127.0.0.1 brain.test' | sudo tee -a /etc/hosts
-
-# 3. Clone Quartz into your vault as .quartz/.
-git clone https://github.com/jackyzha0/quartz.git ~/brain-vault/.quartz
-cd ~/brain-vault/.quartz
-npm install
-
-# 4. Drop in the brain-tuned Quartz config (graph extensions, ignore patterns,
-#    reload-signal transformer registration).
-cp ~/workspace/second-brain/quartz.config.ts ./quartz.config.ts
-
-# 5. Configure Caddy to serve the live build symlink. Paste the Caddyfile
-#    recipe from "Serve locally" below into /opt/homebrew/etc/Caddyfile,
-#    replacing /Users/<you>/brain-vault with your actual vault path
-#    (Caddy does NOT expand ~). Then reload:
-brew services reload caddy
-
-# 6. Light the wiki up. Cold start is ~40s for a ~450-doc vault.
-#    (Run `~/workspace/second-brain/bin/brain-up` if `bin/` isn't on your
-#    PATH yet — see the section below for the one-time PATH setup.)
-brain-up
-```
-
-`brain-up` starts the vault sync watcher, applies the brain Quartz overlay,
-runs the cold-start build (if `current/` is empty or unhealthy), starts the
-build watcher, and opens the browser. After it returns, every save in
-`~/brain-vault/` triggers a fresh background rebuild, and open tabs
-auto-reload the moment the new build is swapped in. See [Daily use —
-`bin/` scripts](#daily-use--bin-scripts) for the full daily workflow.
-
-### Choosing an embedder backend
-
-Set `BRAIN_EMBEDDER` in `.env` (or the shell). Three values are supported:
-
-| Value | Model | Dim | Cost | Setup | Notes |
-|---|---|---|---|---|---|
-| `arctic` *(default)* | Snowflake Arctic Embed v2 (Apache 2.0) | 1024 | Free | Ollama + `ollama pull snowflake-arctic-embed2` (Ollama packages `Snowflake/snowflake-arctic-embed-l-v2.0` from Hugging Face under this shorter tag — same model) | Recommended. Strong retrieval quality on personal text; HNSW-indexable; fully local. |
-| `voyage` | Voyage AI `voyage-3.5` | 1024 | ~$0.06/M tokens | `VOYAGE_API_KEY` in `.env` | Highest quality on long-form text; corpus leaves your machine. |
-| `qwen3` | Qwen3-Embedding-8B (Alibaba) | 4096 | Free | Ollama + `ollama pull qwen3-embedding:8b` | Local. Native 4096 dims exceeds pgvector's HNSW cap (2000 for `vector`) so search uses sequential scan — fine at <100K chunks but slower than `arctic`. China-origin model — judge accordingly. |
-
-The active backend is reflected in `brain init` ("embedder arctic (dim=1024)") and `brain doctor` (the embedding-column line shows the column type and whether `[hnsw]` is present).
-
-### Switching embedder backends
-
-**Switching is destructive.** The chosen backend's native dim is baked into the `chunks.embedding` column on the first `brain init`, and existing embeddings cannot be re-projected to a different model — the chunks must be re-embedded from their original text. The CLI refuses to swap dims silently when chunks already exist; instead, do a full reset:
-
-```bash
-# 1. Stop the database and delete the data directory (chunks are wiped).
-docker compose down
-rm -rf data/postgres
-
-# 2. Pick the new backend in .env (or via shell env var).
-#    BRAIN_EMBEDDER=qwen3   # for example
-
-# 3. Start fresh and re-ingest.
-docker compose up -d
-brain init                       # column shaped to the new backend's dim
-brain ingest-dir ~/Documents/career   # or whatever your ingest sources are
-brain reembed                    # finalizes NOT NULL + (for dim ≤ 2000) HNSW index
-brain doctor
-```
-
-`docker compose down -v` is **not** sufficient — Postgres data lives in `./data/postgres` (a host bind-mount), not a Docker-managed volume. The `rm -rf data/postgres` step is what actually wipes the corpus.
-
 ### Make `brain`, `brain-mcp`, and the `bin/` scripts available from any directory
 
 By default, `brain` and `brain-mcp` only work inside this folder with the venv
@@ -325,7 +274,21 @@ brain-status         # → wiki/watcher status (both stopped initially)
 Once both are on PATH, the daily flow is just `brain-up` / `brain-down` —
 no need to remember Quartz or watcher invocations.
 
-## Usage
+## Tech stack
+
+| Layer | Choice | Why |
+|---|---|---|
+| CLI | Python 3.11 + [Typer](https://typer.tiangolo.com/) | Fast to write, good ergonomics, easy to test. |
+| Storage | PostgreSQL 16 + [`pgvector`](https://github.com/pgvector/pgvector) | One database for both lexical (`tsvector`) and semantic (vector) search — no separate vector store to operate. Runs in Docker on port 5433. |
+| Embeddings | Pluggable via `BRAIN_EMBEDDER` — default [Snowflake Arctic Embed v2](https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0) over local [Ollama](https://ollama.com/) (1024-dim, Apache 2.0, free). [Voyage AI](https://docs.voyageai.com/) (`voyage-3.5`, paid SaaS) and [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) (4096-dim, local Ollama) are alternates behind the same `Embedder` Protocol. | Local-by-default keeps the corpus off vendor servers; the abstraction lets the user upgrade or downgrade backends without touching ingest/search code. |
+| Search | Hybrid: Postgres FTS + vector cosine, fused via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (k=60) | Lexical alone misses paraphrases ("what did I say about X"); vector alone misses exact names ("a coworker", "a former employer"). RRF combines both ranks without tuning weights. |
+| Extraction | `pypdf`, `pdfplumber`, `python-docx`, `markdown-it-py` | Covers the file types I actually have. |
+| Chunking | Paragraph-aware, budgeted with `tiktoken` | Keeps semantic boundaries intact while staying under the embedder's token limit. |
+| Output | [Rich](https://rich.readthedocs.io/) tables + `--json` mode | Human-readable in a terminal, machine-parsable when Claude shells out. |
+| Tests | `pytest` against a real Postgres test DB, fake embedder fixture | Real-DB integration catches schema/migration drift that mocks would hide. |
+| Lint / type | `ruff`, `mypy` | Cheap to run, catches real bugs. |
+
+## Core usage
 
 ### Ingest files and pasted text
 
@@ -432,7 +395,9 @@ brain doctor   # env, Postgres/pgvector, embedder, gws, npx, mirror drift, AGE +
 active embedder. Optional integrations (`gws`, `npx`, the AGE extension, the
 concept-extractor model, community materialization staleness) are warnings.
 
-## GraphRAG
+## GraphRAG (graph retrieval)
+
+### How it works
 
 GraphRAG adds **entity-centric graph retrieval alongside** the existing
 hybrid vector + FTS search — it does not replace `brain search`. Where hybrid
@@ -462,7 +427,7 @@ you don't have an LLM available locally. No raw Cypher is ever accepted or
 shown; every command takes structured params and the backend injects the
 tenant + traversal caps.
 
-### Setup
+### Enabling GraphRAG
 
 GraphRAG is on by default after `brain setup` (the one-liner installer). The
 packaged `docker-compose.yml` template provisions a custom Postgres image —
@@ -493,7 +458,7 @@ The relevant `.env` knobs are documented in `.env.example` (search for
 `BRAIN_GRAPH_EXTRACT_MODEL`, the community-detection tuning
 (`BRAIN_GRAPH_COMMUNITY_*`), and more — all with sensible defaults.
 
-### Usage
+### Query modes
 
 ```bash
 # Graph retrieval. --mode defaults to auto (the heuristic router).
@@ -695,129 +660,54 @@ The `brain owner` subcommand group manages this list without hand-editing
 mutation rewrites `.env` atomically and reminds you to run
 `brain vault relink-derived` + `brain vault sync` afterward.
 
-### Data hygiene backfills
-
-These commands are for cleanup after older imports or tag taxonomy changes:
-
-```bash
-brain backfill normalize-tags --dry-run
-brain backfill normalize-tags
-brain backfill normalize-tags --mapping ./tag-map.json
-
-brain backfill source-rows --dry-run
-brain backfill source-rows
-brain vault export --to ~/brain-vault --force   # after source-rows
-```
-
-`normalize-tags` lowercases, hyphenates, dedupes, and rewrites both DB tags and
-frontmatter tags when a mirror file exists. The optional mapping file is a JSON
-object like `{"recruiters": "recruiter", "artificial-intelligence": "ai"}`.
-`source-rows` is only for legacy Markdown rows with `source_id IS NULL`; fresh
-installs should not need it.
-
-## Use from Claude Desktop
-
-The `brain-mcp` binary exposes Brain as an [MCP](https://modelcontextprotocol.io/)
-server so Claude Desktop can search, save, author notes, inspect links, and
-edit entries during a chat — no terminal required.
-
-Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json`. The `env` block must match whichever backend you set in `.env` — pass `BRAIN_EMBEDDER` and the backend-specific knobs (Ollama host for `arctic`/`qwen3`, `VOYAGE_API_KEY` for `voyage`). `BRAIN_VAULT_PATH` is optional when you use the default `~/brain-vault`, but setting it explicitly makes Desktop behavior match the CLI even if the repo moves later:
-
-```json
-{
-  "mcpServers": {
-    "brain": {
-      "command": "/Users/mshtawythug/workspace/second-brain/.venv/bin/brain-mcp",
-      "env": {
-        "DATABASE_URL": "postgresql://brain:brain@localhost:5433/second_brain",
-        "BRAIN_EMBEDDER": "arctic",
-        "OLLAMA_HOST": "http://localhost:11434",
-        "BRAIN_VAULT_PATH": "/Users/<you>/brain-vault",
-        "BRAIN_MCP_LOG_LEVEL": "INFO"
-      }
-    }
-  }
-}
-```
-
-For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voyage"` and `"VOYAGE_API_KEY": "<paste here>"`.
-
-### MCP tools
-
-| Tool | What it does |
-|---|---|
-| `brain_search` | Hybrid search with `source`, `tag`, `since_days`, and `fts_only` filters. |
-| `brain_show` | Return one full document by 6+ character id prefix. |
-| `brain_list` | Browse recent documents, optionally filtered by `source` or `tag`. |
-| `brain_status` | Counts, last-ingest timestamp, and by-source breakdown. |
-| `brain_ingest_stdin` | Save text from a chat or another MCP result; auto-tags `source-mcp`. |
-| `brain_tag` | Add/remove tags on an existing document and rewrite mirror frontmatter when present. |
-| `brain_edit` | Update title, content type, body, or metadata; body edits re-embed. |
-| `brain_backlinks` | List documents that link to a document. |
-| `brain_links` | List outgoing links, optionally including unresolved refs. |
-| `brain_orphans` | List docs with no incoming or outgoing links. |
-| `brain_note_new` | Create a vault note from chat content without opening `$EDITOR`; auto-tags `source-mcp`. |
-| `brain_daily` | Resolve or create a daily note for a date. |
-| `brain_link_proposal` | Propose a `[[link]]` from one vault note to another without writing files. |
-| `brain_graphrag_search` | Graph retrieval over the entity graph. Modes: `auto` (default) / `local` / `themes` / `global` / `fuse`. Returns a `GraphContext` with entities + scored docs. |
-| `brain_graphrag_themes` | "Themes in my conversations with X" — required `person` arg. Returns ranked theme groups. |
-| `brain_graphrag_entity` | One entity's co-occurrence neighbourhood. |
-| `brain_graphrag_build` | Backfill or force-rebuild the graph from existing documents. Idempotent + resumable. |
-| `brain_graphrag_communities_build` | Detect + summarize communities (Louvain over the entity graph). Required for `--mode global`. |
-
-### Environment variables
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `DATABASE_URL` | (required) | Postgres connection string. Same value used by the CLI. |
-| `BRAIN_EMBEDDER` | `arctic` | Embedder backend: `arctic`, `voyage`, or `qwen3`. Must match the dim baked into the database by `brain init`. |
-| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL. Used by `arctic` and `qwen3`; ignored by `voyage`. |
-| `QWEN3_MODEL` | `qwen3-embedding:8b` | Ollama model tag for the qwen3 backend. |
-| `VOYAGE_API_KEY` | (required for `voyage`) | Voyage AI key. Ignored by the local backends. |
-| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault folder for authored notes, ingested mirrors, wiki rendering, and MCP note tools. |
-| `BRAIN_USER_EMAIL` | unset | Owner email used by the rendered Gmail thread view's "Show only my replies" filter. Set it before wiki builds if you use that filter. |
-| `BRAIN_MCP_LOG_LEVEL` | `INFO` | Stderr log level. Accepts `DEBUG`, `INFO`, `WARNING`, `ERROR`. Unknown values fall back to `INFO`. |
-| `BRAIN_GRAPH_ENABLED` | `true` | Enable people-aspect graph sync at ingest. On a stock pgvector DB the sync is a best-effort no-op (never raises). |
-| `BRAIN_GRAPH_CONCEPTS` | `true` | Enable concept-aspect extraction (LLM entity extraction over topics/projects/orgs/tools). Requires `BRAIN_GRAPH_EXTRACT_MODEL` to be pullable via Ollama. |
-| `BRAIN_GRAPH_TENANT` | `default` | Tenant id stamped on every graph row, vertex, edge, and query. Single-user local deployments leave it at the default. |
-| `BRAIN_GRAPH_EXTRACT_MODEL` | `llama3.1:8b` | Ollama model used by the concept extractor. Any JSON-mode-capable model pullable via `ollama pull <name>`. |
-
-(See `.env.example` for the full ~18-knob `BRAIN_GRAPH_*` set covering traversal caps, community detection, and concept-extraction tuning — all with sensible defaults.)
-
-### What to expect
-
-After saving the config and fully quitting/reopening Claude Desktop, the
-`brain_*` tools become callable in any chat. Ask "search my brain for the Q1
-review with [person]" and Desktop can call `brain_search`; ask "make a daily
-note for today with these bullets" and it can call `brain_daily` /
-`brain_edit`. Server startup is ~0.5–1.5s; the first search may also pay the
-embedder cold start cost (Ollama loading the model, or the Voyage
-SDK/network path warming up). Logs go to stderr and are surfaced by Claude
-Desktop if a tool call fails.
-
-## Use from Claude Code (consult-brain skill)
-
-For Claude Code (the CLI), this repo ships a skill at
-`skills/consult-brain/SKILL.md` that teaches Claude when and how to query the
-brain. It triggers on phrases like "what did I say to X", "summarize my
-conversations about Y", "write this in my voice", and similar — searching the
-brain instead of guessing.
-
-Install once with a symlink so live edits to the repo update the skill:
-
-```bash
-mkdir -p ~/.claude/skills
-ln -s "$(pwd)/skills/consult-brain" ~/.claude/skills/consult-brain
-```
-
-Verify with `claude` running in any project: ask "what's in my brain about
-[topic]?" — Claude should reach for the skill, run `brain search`, read the
-top hits with `brain show`, and answer with citations. The MCP server above
-covers Claude Desktop; this skill covers Claude Code.
-
-## Wiki rendering (Quartz)
+## Wiki (rendered view, optional)
 
 The vault is plain Markdown plus `[[wiki-links]]` plus YAML frontmatter — readable in any editor. When you want a polished wiki view of the vault (graph view, backlinks panel, full-text search, dark mode), `brain vault render` shells out to [Quartz](https://quartz.jzhao.xyz/), a static-site generator built specifically for Obsidian-style vaults. Brain orchestrates Quartz; it doesn't bundle it.
+
+### Quick start (Wiki)
+
+If you want a live wiki view of your vault at `brain.test` (Obsidian-style
+graph, backlinks, full-text search, dark mode), wire up Caddy + the Quartz
+workspace. This is the procedural "I want it working" path — the
+how-it-works details (architecture, atomic build swap, auto-reload
+mechanism) live under [Wiki rendering → Serve locally](#serve-locally)
+below.
+
+```bash
+# 1. Install Caddy (skip if it's already running on your machine).
+brew install caddy
+brew services start caddy
+
+# 2. Map brain.test to localhost (one-time, system-wide).
+echo '127.0.0.1 brain.test' | sudo tee -a /etc/hosts
+
+# 3. Clone Quartz into your vault as .quartz/.
+git clone https://github.com/jackyzha0/quartz.git ~/brain-vault/.quartz
+cd ~/brain-vault/.quartz
+npm install
+
+# 4. Drop in the brain-tuned Quartz config (graph extensions, ignore patterns,
+#    reload-signal transformer registration).
+cp ~/workspace/second-brain/quartz.config.ts ./quartz.config.ts
+
+# 5. Configure Caddy to serve the live build symlink. Paste the Caddyfile
+#    recipe from "Serve locally" below into /opt/homebrew/etc/Caddyfile,
+#    replacing /Users/<you>/brain-vault with your actual vault path
+#    (Caddy does NOT expand ~). Then reload:
+brew services reload caddy
+
+# 6. Light the wiki up. Cold start is ~40s for a ~450-doc vault.
+#    (Run `~/workspace/second-brain/bin/brain-up` if `bin/` isn't on your
+#    PATH yet — see the section below for the one-time PATH setup.)
+brain-up
+```
+
+`brain-up` starts the vault sync watcher, applies the brain Quartz overlay,
+runs the cold-start build (if `current/` is empty or unhealthy), starts the
+build watcher, and opens the browser. After it returns, every save in
+`~/brain-vault/` triggers a fresh background rebuild, and open tabs
+auto-reload the moment the new build is swapped in. See [Daily use —
+`bin/` scripts](#daily-use--bin-scripts) for the full daily workflow.
 
 ### One-time setup
 
@@ -951,7 +841,7 @@ Backlinks, graph view, and full-text search all work out of the box — that's Q
 
 ### Daily use — `bin/` scripts
 
-Four convenience scripts under `bin/` cover the daily flow. They assume `bin/` is on your PATH — see [Make `brain` and the `bin/` scripts available from any directory](#make-brain-and-the-bin-scripts-available-from-any-directory) above for the one-time setup.
+Four convenience scripts under `bin/` cover the daily flow. They assume `bin/` is on your PATH — see [Make `brain`, `brain-mcp`, and the `bin/` scripts available from any directory](#make-brain-brain-mcp-and-the-bin-scripts-available-from-any-directory) above for the one-time setup.
 
 ```bash
 brain-up       # start vault sync watcher → apply Quartz overlay → cold-start
@@ -996,55 +886,119 @@ PIDs are tracked at `/tmp/brain-{watch,build}.pid`; logs at `/tmp/brain-{watch,b
 
 If Quartz drifts incompatibly, gets archived, or you just want a different look: the vault format (Markdown + frontmatter + `[[wiki-links]]`) is generic enough that any Obsidian-aware renderer (MkDocs Material with the right plugins, Hugo with an Obsidian theme, your own exporter) can replace it without touching the vault folder. Brain doesn't lock you in.
 
-## Architecture
+## Claude integrations
 
-### Codebase layout
+Brain ships two ways for Claude to use the corpus: an MCP server (Claude Desktop) and a skill (Claude Code). Both call the same underlying `brain` CLI.
 
-```
-src/brain/
-  cli.py              — Typer app, every `brain ...` subcommand
-  config.py           — env loading; selects BRAIN_EMBEDDER ∈ {arctic, voyage, qwen3}
-  db.py               — psycopg connection + migration runner (schema_migrations tracked)
-  embeddings.py       — three concrete embedders behind a shared Protocol
-  embedding_targets.py — allowlist + identifier-safety helpers for pgvector embedding columns
-  errors.py           — BrainError hierarchy
-  queries.py          — read-side SQL helpers shared by CLI + MCP
-  search.py           — hybrid FTS + vector via RRF
-  rank_fusion.py      — shared RRF helper (search + graph retrieval both use it)
-  set_similarity.py   — Jaccard helper (community membership matching)
-  tags.py             — canonical casefold-lowercase + hyphenated tag normaliser
-  interactions.py     — append-only feedback log (search clicks, ratings, pins) — supports both document + graph targets
-  enrichment.py       — Ollama-backed summariser + tag-proposal helpers
-  todo.py             — parses krisp_action_items checkboxes for `brain todo`
-  format.py           — human + JSON output
-  edit_session.py     — JSON-header + body editor flow
-  editor.py           — $EDITOR / $VISUAL subprocess wrapper
-  mcp_server.py       — FastMCP stdio server (brain_* + brain_graphrag_* tools)
-  setup.py            — `brain setup` orchestration (preflight, compose render, init, doctor)
-  uninstall.py        — `brain uninstall` (removes launchd plists + runtime state)
-  cli_claude.py       — `brain claude install-skill` (installs the Claude Code skill)
-  templates/          — packaged docker-compose.yml.j2, env.example, AGE Dockerfile, skill, Caddyfile
-  ingest/             — extractors per file type + chunker + Embedder Protocol + graph sync hook
-  vault/              — vault-model modules (slug, templates, frontmatter, export, links, resolver, sync, rename, graph, watch, paths)
-  wiki/               — wiki rendering + serve (build_swap, build_watcher, build_partial, edit_classifier, fastpath_manifest, fastpath_state, build_homepage, build_people, build_related, slug)
-  quartz_overrides/   — Quartz overlay applied to <vault>/.quartz at render time
-  graph_rag/          — GraphRAG package: backend (AGE), schema (frozen value objects), extractor (Ollama), cooccur, weighting, traversal, router, communities, sync, reconcile
-migrations/           — numbered SQL files (001..016) + schema_migrations tracking
-bin/                  — brain-up / brain-down / brain-rebuild / brain-status convenience scripts
-quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
-skills/               — claude code skills (consult-brain, brain-graph)
-tests/                — real-DB pattern, fake embedder, ~3560 tests
+### Claude Desktop (MCP server)
+
+#### Configuration
+
+The `brain-mcp` binary exposes Brain as an [MCP](https://modelcontextprotocol.io/)
+server so Claude Desktop can search, save, author notes, inspect links, and
+edit entries during a chat — no terminal required.
+
+Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json`. The `env` block must match whichever backend you set in `.env` — pass `BRAIN_EMBEDDER` and the backend-specific knobs (Ollama host for `arctic`/`qwen3`, `VOYAGE_API_KEY` for `voyage`). `BRAIN_VAULT_PATH` is optional when you use the default `~/brain-vault`, but setting it explicitly makes Desktop behavior match the CLI even if the repo moves later:
+
+```json
+{
+  "mcpServers": {
+    "brain": {
+      "command": "/Users/mshtawythug/workspace/second-brain/.venv/bin/brain-mcp",
+      "env": {
+        "DATABASE_URL": "postgresql://brain:brain@localhost:5433/second_brain",
+        "BRAIN_EMBEDDER": "arctic",
+        "OLLAMA_HOST": "http://localhost:11434",
+        "BRAIN_VAULT_PATH": "/Users/<you>/brain-vault",
+        "BRAIN_MCP_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
 ```
 
-## How Claude uses this
+For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voyage"` and `"VOYAGE_API_KEY": "<paste here>"`.
+
+#### MCP tools
+
+| Tool | What it does |
+|---|---|
+| `brain_search` | Hybrid search with `source`, `tag`, `since_days`, and `fts_only` filters. |
+| `brain_show` | Return one full document by 6+ character id prefix. |
+| `brain_list` | Browse recent documents, optionally filtered by `source` or `tag`. |
+| `brain_status` | Counts, last-ingest timestamp, and by-source breakdown. |
+| `brain_ingest_stdin` | Save text from a chat or another MCP result; auto-tags `source-mcp`. |
+| `brain_tag` | Add/remove tags on an existing document and rewrite mirror frontmatter when present. |
+| `brain_edit` | Update title, content type, body, or metadata; body edits re-embed. |
+| `brain_backlinks` | List documents that link to a document. |
+| `brain_links` | List outgoing links, optionally including unresolved refs. |
+| `brain_orphans` | List docs with no incoming or outgoing links. |
+| `brain_note_new` | Create a vault note from chat content without opening `$EDITOR`; auto-tags `source-mcp`. |
+| `brain_daily` | Resolve or create a daily note for a date. |
+| `brain_link_proposal` | Propose a `[[link]]` from one vault note to another without writing files. |
+| `brain_graphrag_search` | Graph retrieval over the entity graph. Modes: `auto` (default) / `local` / `themes` / `global` / `fuse`. Returns a `GraphContext` with entities + scored docs. |
+| `brain_graphrag_themes` | "Themes in my conversations with X" — required `person` arg. Returns ranked theme groups. |
+| `brain_graphrag_entity` | One entity's co-occurrence neighbourhood. |
+| `brain_graphrag_build` | Backfill or force-rebuild the graph from existing documents. Idempotent + resumable. |
+| `brain_graphrag_communities_build` | Detect + summarize communities (Louvain over the entity graph). Required for `--mode global`. |
+
+#### Environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | (required) | Postgres connection string. Same value used by the CLI. |
+| `BRAIN_EMBEDDER` | `arctic` | Embedder backend: `arctic`, `voyage`, or `qwen3`. Must match the dim baked into the database by `brain init`. |
+| `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL. Used by `arctic` and `qwen3`; ignored by `voyage`. |
+| `QWEN3_MODEL` | `qwen3-embedding:8b` | Ollama model tag for the qwen3 backend. |
+| `VOYAGE_API_KEY` | (required for `voyage`) | Voyage AI key. Ignored by the local backends. |
+| `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault folder for authored notes, ingested mirrors, wiki rendering, and MCP note tools. |
+| `BRAIN_USER_EMAIL` | unset | Owner email used by the rendered Gmail thread view's "Show only my replies" filter. Set it before wiki builds if you use that filter. |
+| `BRAIN_MCP_LOG_LEVEL` | `INFO` | Stderr log level. Accepts `DEBUG`, `INFO`, `WARNING`, `ERROR`. Unknown values fall back to `INFO`. |
+| `BRAIN_GRAPH_ENABLED` | `true` | Enable people-aspect graph sync at ingest. On a stock pgvector DB the sync is a best-effort no-op (never raises). |
+| `BRAIN_GRAPH_CONCEPTS` | `true` | Enable concept-aspect extraction (LLM entity extraction over topics/projects/orgs/tools). Requires `BRAIN_GRAPH_EXTRACT_MODEL` to be pullable via Ollama. |
+| `BRAIN_GRAPH_TENANT` | `default` | Tenant id stamped on every graph row, vertex, edge, and query. Single-user local deployments leave it at the default. |
+| `BRAIN_GRAPH_EXTRACT_MODEL` | `llama3.1:8b` | Ollama model used by the concept extractor. Any JSON-mode-capable model pullable via `ollama pull <name>`. |
+
+(See `.env.example` for the full ~18-knob `BRAIN_GRAPH_*` set covering traversal caps, community detection, and concept-extraction tuning — all with sensible defaults.)
+
+#### What to expect
+
+After saving the config and fully quitting/reopening Claude Desktop, the
+`brain_*` tools become callable in any chat. Ask "search my brain for the Q1
+review with [person]" and Desktop can call `brain_search`; ask "make a daily
+note for today with these bullets" and it can call `brain_daily` /
+`brain_edit`. Server startup is ~0.5–1.5s; the first search may also pay the
+embedder cold start cost (Ollama loading the model, or the Voyage
+SDK/network path warming up). Logs go to stderr and are surfaced by Claude
+Desktop if a tool call fails.
+
+### Claude Code (consult-brain skill)
+
+For Claude Code (the CLI), this repo ships a skill at
+`skills/consult-brain/SKILL.md` that teaches Claude when and how to query the
+brain. It triggers on phrases like "what did I say to X", "summarize my
+conversations about Y", "write this in my voice", and similar — searching the
+brain instead of guessing.
+
+Install once with a symlink so live edits to the repo update the skill:
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s "$(pwd)/skills/consult-brain" ~/.claude/skills/consult-brain
+```
+
+Verify with `claude` running in any project: ask "what's in my brain about
+[topic]?" — Claude should reach for the skill, run `brain search`, read the
+top hits with `brain show`, and answer with citations. The MCP server above
+covers Claude Desktop; this skill covers Claude Code.
+
+### Example prompts
 
 A snippet in `~/.claude/CLAUDE.md` tells every Claude Code conversation:
 - When to invoke `brain search` and `brain show` (career topics, interviews, past meetings, prior roles, deals)
 - When to reach for GraphRAG instead (`brain graphrag themes --person X`, `brain graphrag search ... --mode global|fuse`) — questions about themes, patterns, or connections across the corpus, where the answer lives in the *relationships* between docs rather than any single doc
 - How to orchestrate Krisp/Slack ingestion via MCP → `brain ingest-stdin`
 - That `--json` output is available for programmatic parsing
-
-### Example prompts
 
 Once your corpus is ingested, you can ask Claude things like:
 
@@ -1085,6 +1039,119 @@ Once your corpus is ingested, you can ask Claude things like:
 - "Ingest emails from the recruiting@ alias from the past 30 days."
 
 The pattern: ask the question naturally — Claude decides whether to call `brain search` (single-doc lookup, ranked by lexical + semantic similarity) or `brain graphrag …` (themes / patterns / connections traversed via the entity graph), which filters to apply (`--source`, `--tag`, `--since`, `--person`, `--mode`), and when to follow up with `brain show` for full context.
+
+## Configuration and administration
+
+Post-install operations: choosing or switching the embedder backend, cleaning up legacy data, and removing brain from the machine.
+
+### Choosing an embedder backend
+
+Set `BRAIN_EMBEDDER` in `.env` (or the shell). Three values are supported:
+
+| Value | Model | Dim | Cost | Setup | Notes |
+|---|---|---|---|---|---|
+| `arctic` *(default)* | Snowflake Arctic Embed v2 (Apache 2.0) | 1024 | Free | Ollama + `ollama pull snowflake-arctic-embed2` (Ollama packages `Snowflake/snowflake-arctic-embed-l-v2.0` from Hugging Face under this shorter tag — same model) | Recommended. Strong retrieval quality on personal text; HNSW-indexable; fully local. |
+| `voyage` | Voyage AI `voyage-3.5` | 1024 | ~$0.06/M tokens | `VOYAGE_API_KEY` in `.env` | Highest quality on long-form text; corpus leaves your machine. |
+| `qwen3` | Qwen3-Embedding-8B (Alibaba) | 4096 | Free | Ollama + `ollama pull qwen3-embedding:8b` | Local. Native 4096 dims exceeds pgvector's HNSW cap (2000 for `vector`) so search uses sequential scan — fine at <100K chunks but slower than `arctic`. China-origin model — judge accordingly. |
+
+The active backend is reflected in `brain init` ("embedder arctic (dim=1024)") and `brain doctor` (the embedding-column line shows the column type and whether `[hnsw]` is present).
+
+### Switching embedder backends
+
+**Switching is destructive.** The chosen backend's native dim is baked into the `chunks.embedding` column on the first `brain init`, and existing embeddings cannot be re-projected to a different model — the chunks must be re-embedded from their original text. The CLI refuses to swap dims silently when chunks already exist; instead, do a full reset:
+
+```bash
+# 1. Stop the database and delete the data directory (chunks are wiped).
+docker compose down
+rm -rf data/postgres
+
+# 2. Pick the new backend in .env (or via shell env var).
+#    BRAIN_EMBEDDER=qwen3   # for example
+
+# 3. Start fresh and re-ingest.
+docker compose up -d
+brain init                       # column shaped to the new backend's dim
+brain ingest-dir ~/Documents/career   # or whatever your ingest sources are
+brain reembed                    # finalizes NOT NULL + (for dim ≤ 2000) HNSW index
+brain doctor
+```
+
+`docker compose down -v` is **not** sufficient — Postgres data lives in `./data/postgres` (a host bind-mount), not a Docker-managed volume. The `rm -rf data/postgres` step is what actually wipes the corpus.
+
+### Data hygiene backfills
+
+These commands are for cleanup after older imports or tag taxonomy changes:
+
+```bash
+brain backfill normalize-tags --dry-run
+brain backfill normalize-tags
+brain backfill normalize-tags --mapping ./tag-map.json
+
+brain backfill source-rows --dry-run
+brain backfill source-rows
+brain vault export --to ~/brain-vault --force   # after source-rows
+```
+
+`normalize-tags` lowercases, hyphenates, dedupes, and rewrites both DB tags and
+frontmatter tags when a mirror file exists. The optional mapping file is a JSON
+object like `{"recruiters": "recruiter", "artificial-intelligence": "ai"}`.
+`source-rows` is only for legacy Markdown rows with `source_id IS NULL`; fresh
+installs should not need it.
+
+### Uninstall
+
+```bash
+# 1. Tear down the runtime (launchd plists, $BRAIN_HOME files, Docker compose).
+#    By default this KEEPS the database at $BRAIN_HOME/data/postgres/ and the
+#    vault at $BRAIN_VAULT_PATH — both are user data.
+brain uninstall
+
+# 2. (Destructive — opt in explicitly.) Also remove the DB and/or vault:
+brain uninstall --remove-db --remove-vault   # --remove-db requires a typed
+                                             # confirmation: "yes, delete my data"
+
+# 3. Remove the pipx-installed CLI itself (must be a separate command —
+#    a Python CLI can't safely uninstall its own running process).
+pipx uninstall second-brain
+```
+
+## Codebase layout
+
+```
+src/brain/
+  cli.py              — Typer app, every `brain ...` subcommand
+  config.py           — env loading; selects BRAIN_EMBEDDER ∈ {arctic, voyage, qwen3}
+  db.py               — psycopg connection + migration runner (schema_migrations tracked)
+  embeddings.py       — three concrete embedders behind a shared Protocol
+  embedding_targets.py — allowlist + identifier-safety helpers for pgvector embedding columns
+  errors.py           — BrainError hierarchy
+  queries.py          — read-side SQL helpers shared by CLI + MCP
+  search.py           — hybrid FTS + vector via RRF
+  rank_fusion.py      — shared RRF helper (search + graph retrieval both use it)
+  set_similarity.py   — Jaccard helper (community membership matching)
+  tags.py             — canonical casefold-lowercase + hyphenated tag normaliser
+  interactions.py     — append-only feedback log (search clicks, ratings, pins) — supports both document + graph targets
+  enrichment.py       — Ollama-backed summariser + tag-proposal helpers
+  todo.py             — parses krisp_action_items checkboxes for `brain todo`
+  format.py           — human + JSON output
+  edit_session.py     — JSON-header + body editor flow
+  editor.py           — $EDITOR / $VISUAL subprocess wrapper
+  mcp_server.py       — FastMCP stdio server (brain_* + brain_graphrag_* tools)
+  setup.py            — `brain setup` orchestration (preflight, compose render, init, doctor)
+  uninstall.py        — `brain uninstall` (removes launchd plists + runtime state)
+  cli_claude.py       — `brain claude install-skill` (installs the Claude Code skill)
+  templates/          — packaged docker-compose.yml.j2, env.example, AGE Dockerfile, skill, Caddyfile
+  ingest/             — extractors per file type + chunker + Embedder Protocol + graph sync hook
+  vault/              — vault-model modules (slug, templates, frontmatter, export, links, resolver, sync, rename, graph, watch, paths)
+  wiki/               — wiki rendering + serve (build_swap, build_watcher, build_partial, edit_classifier, fastpath_manifest, fastpath_state, build_homepage, build_people, build_related, slug)
+  quartz_overrides/   — Quartz overlay applied to <vault>/.quartz at render time
+  graph_rag/          — GraphRAG package: backend (AGE), schema (frozen value objects), extractor (Ollama), cooccur, weighting, traversal, router, communities, sync, reconcile
+migrations/           — numbered SQL files (001..016) + schema_migrations tracking
+bin/                  — brain-up / brain-down / brain-rebuild / brain-status convenience scripts
+quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
+skills/               — claude code skills (consult-brain, brain-graph)
+tests/                — real-DB pattern, fake embedder, ~3560 tests
+```
 
 ## Tests
 
