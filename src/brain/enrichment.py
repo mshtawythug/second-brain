@@ -41,6 +41,11 @@ from .tags import normalize_tags
 
 _logger = logging.getLogger(__name__)
 
+# Module-level keep_alive fallback — matches embeddings.py convention. Tests
+# that construct OllamaEnricher without an explicit ``keep_alive`` kwarg get
+# this default; production always threads ``Config.ollama_keep_alive``.
+_DEFAULT_KEEP_ALIVE = "30m"
+
 # D20 — banned auto-tag formats. These are ``documents.content_type`` values
 # (or close synonyms) that the LLM should never propose as semantic tags.
 # Belt-and-braces with the prompt: a prompt-injection / model drift case that
@@ -250,10 +255,12 @@ class OllamaEnricher:
         client: httpx.Client | None = None,
         timeout: float = 60.0,
         max_input_tokens: int = 4000,
+        keep_alive: str = _DEFAULT_KEEP_ALIVE,
     ) -> None:
         self._host = host
         self._model = model
         self._max_input_tokens = max_input_tokens
+        self._keep_alive = keep_alive
         self._tokenizer = tiktoken.get_encoding("cl100k_base")
         if client is not None:
             self._client = client
@@ -525,6 +532,7 @@ class OllamaEnricher:
             "model": self._model,
             "stream": False,
             "format": "json",
+            "keep_alive": self._keep_alive,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -585,4 +593,5 @@ def make_enricher(cfg: Config) -> OllamaEnricher:
         model=cfg.enrich_model,
         timeout=cfg.enrich_timeout_seconds,
         max_input_tokens=cfg.enrich_max_input_tokens,
+        keep_alive=cfg.ollama_keep_alive,
     )

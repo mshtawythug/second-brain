@@ -26,6 +26,12 @@ from .ingest import Embedder
 _DEFAULT_OLLAMA_BATCH = 32
 _DEFAULT_OLLAMA_TIMEOUT_S = 60.0
 
+# Module-level keep_alive fallback — used when an embedder is constructed
+# without an explicit ``keep_alive`` kwarg (e.g. in tests or legacy call
+# sites). Production always threads the value from ``Config.ollama_keep_alive``
+# (set at construction time, not re-read per request).
+_DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
+
 # Arctic Embed v2 query prefix per Snowflake's HF model card guidance:
 #   https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0
 # "Use the query prefix below (just on the query)" → 'query: '. Documents
@@ -70,10 +76,12 @@ class _OllamaEmbedderBase:
         client: httpx.Client | None = None,
         batch_size: int = _DEFAULT_OLLAMA_BATCH,
         timeout: float = _DEFAULT_OLLAMA_TIMEOUT_S,
+        keep_alive: str = _DEFAULT_OLLAMA_KEEP_ALIVE,
     ) -> None:
         self._host = host
         self._model = model
         self._batch_size = batch_size
+        self._keep_alive = keep_alive
         self._tokenizer = tiktoken.get_encoding("cl100k_base")
         if client is not None:
             self._client = client
@@ -114,7 +122,11 @@ class _OllamaEmbedderBase:
         try:
             response = self._client.post(
                 "/api/embed",
-                json={"model": self._model, "input": batch},
+                json={
+                    "model": self._model,
+                    "input": batch,
+                    "keep_alive": self._keep_alive,
+                },
             )
             response.raise_for_status()
             payload = response.json()
@@ -165,6 +177,7 @@ class Qwen3Embedder(_OllamaEmbedderBase):
         client: httpx.Client | None = None,
         batch_size: int = _DEFAULT_OLLAMA_BATCH,
         timeout: float = _DEFAULT_OLLAMA_TIMEOUT_S,
+        keep_alive: str = _DEFAULT_OLLAMA_KEEP_ALIVE,
     ) -> None:
         super().__init__(
             host=host,
@@ -172,6 +185,7 @@ class Qwen3Embedder(_OllamaEmbedderBase):
             client=client,
             batch_size=batch_size,
             timeout=timeout,
+            keep_alive=keep_alive,
         )
 
     def _format_query(self, text: str) -> str:
@@ -198,6 +212,7 @@ class ArcticEmbedder(_OllamaEmbedderBase):
         client: httpx.Client | None = None,
         batch_size: int = _DEFAULT_OLLAMA_BATCH,
         timeout: float = _DEFAULT_OLLAMA_TIMEOUT_S,
+        keep_alive: str = _DEFAULT_OLLAMA_KEEP_ALIVE,
     ) -> None:
         super().__init__(
             host=host,
@@ -205,6 +220,7 @@ class ArcticEmbedder(_OllamaEmbedderBase):
             client=client,
             batch_size=batch_size,
             timeout=timeout,
+            keep_alive=keep_alive,
         )
 
     def _format_query(self, text: str) -> str:
@@ -273,9 +289,13 @@ def make_embedder(cfg: Config) -> Embedder:
     depend on the concrete subclass.
     """
     if cfg.embedder == "arctic":
-        return ArcticEmbedder(host=cfg.ollama_host)
+        return ArcticEmbedder(host=cfg.ollama_host, keep_alive=cfg.ollama_keep_alive)
     if cfg.embedder == "qwen3":
-        return Qwen3Embedder(host=cfg.ollama_host, model=cfg.qwen3_model)
+        return Qwen3Embedder(
+            host=cfg.ollama_host,
+            model=cfg.qwen3_model,
+            keep_alive=cfg.ollama_keep_alive,
+        )
     if cfg.embedder == "voyage":
         if cfg.voyage_api_key is None:
             raise ConfigError(

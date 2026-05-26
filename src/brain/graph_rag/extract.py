@@ -564,6 +564,7 @@ def make_extractor(cfg: Config) -> OllamaExtractor:
         host=cfg.ollama_host,
         model=cfg.graph_extract_model,
         timeout=cfg.enrich_timeout_seconds,
+        keep_alive=cfg.ollama_keep_alive,
     )
     return OllamaExtractor(
         enricher=enricher,

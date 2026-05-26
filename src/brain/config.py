@@ -1,5 +1,6 @@
 """Configuration loading from environment / .env."""
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,20 @@ DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_QWEN3_MODEL = "qwen3-embedding:8b"
 DEFAULT_EMBEDDER = "arctic"
 _VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
+
+# How long Ollama keeps a model loaded in VRAM between requests. Passed as
+# ``keep_alive`` in every outgoing Ollama HTTP payload (``/api/embed``,
+# ``/api/chat``, ``/api/generate``). "30m" keeps the model hot across bursts of
+# ingest/search; raise to "1h" if your workflow has longer idle gaps. Set via
+# ``BRAIN_OLLAMA_KEEP_ALIVE``; accepts any format Ollama understands: a positive
+# integer duration string ("30m", "1h", "60s") or a bare positive integer seconds
+# string ("60"). Zero and negative values are rejected — they would unload the
+# model between calls (defeating the purpose) and cause latency spikes.
+DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
+
+# Accepts "30m", "1h", "60s", "60" etc. — any POSITIVE integer optionally
+# followed by m/h/s. "0", "-1", empty, and non-numeric strings are rejected.
+_KEEP_ALIVE_RE = re.compile(r"^([1-9]\d*)(m|h|s)?$")
 
 # Cosine-similarity floor for the vector leg of hybrid search. Tuned
 # empirically against the live corpus on 2026-05-06 (see Phase D of
@@ -72,9 +87,12 @@ DEFAULT_ENRICH_MIN_TOKENS = 50
 
 # Max content tokens fed to the model. llama3.1:8b has a 128K context window
 # but we never need more than the opening of a doc to summarize it. Capping
-# at 4K keeps the LLM round-trip predictable (~3-8 s on M-series silicon)
-# and bounds the prompt cost.
-DEFAULT_ENRICH_MAX_INPUT_TOKENS = 4000
+# at 1200 tokens (~900 words, the doc head) keeps the LLM round-trip under
+# ~2.5s on M-series silicon (was ~7s at 4000 tokens) and bounds the prompt
+# cost while still covering the content that matters most for a 2-3 sentence
+# summary. Override via ``BRAIN_ENRICH_MAX_INPUT_TOKENS`` when higher fidelity
+# on very long docs is more important than throughput.
+DEFAULT_ENRICH_MAX_INPUT_TOKENS = 1200
 
 # Ollama HTTP timeout for ``/api/chat`` calls. 60 s gives headroom for a
 # cold-model swap-in on first call without spiraling. Override via
@@ -272,6 +290,15 @@ class Config:
     enrich_min_tokens: int = DEFAULT_ENRICH_MIN_TOKENS
     enrich_max_input_tokens: int = DEFAULT_ENRICH_MAX_INPUT_TOKENS
     enrich_timeout_seconds: float = DEFAULT_ENRICH_TIMEOUT_SECONDS
+    # Per-request ``keep_alive`` sent in every outgoing Ollama payload (embedder
+    # ``/api/embed``, enricher ``/api/chat``, extractor ``/api/generate``). Keeps
+    # the model loaded in VRAM for this long after the last request, preventing
+    # the cold-load latency spike on the next call. Accepts any format Ollama
+    # understands: a positive integer duration string ("30m", "1h", "60s") or a
+    # bare positive integer seconds string ("60"). Zero and negative values are
+    # rejected at load time via ConfigError (they unload the model between calls).
+    # Override via ``BRAIN_OLLAMA_KEEP_ALIVE``.
+    ollama_keep_alive: str = DEFAULT_OLLAMA_KEEP_ALIVE
     # Wave G1-c -- GraphRAG people-aspect incremental sync. ``graph_enabled``
     # gates the post-write/delete reconcile hook; the other four resolve into
     # the single shared :class:`ReconcileConfig`
@@ -560,6 +587,24 @@ class Config:
                     f"BRAIN_ENRICH_TIMEOUT_SECONDS must be a positive float "
                     f"(got {enrich_timeout_raw!r})"
                 )
+
+        # Ollama keep_alive -- see DEFAULT_OLLAMA_KEEP_ALIVE. Accepts a
+        # positive integer optionally followed by m/h/s (e.g. "30m", "1h",
+        # "60s", "60"). Zero, negative, empty, and non-numeric strings are
+        # rejected via ConfigError so a config typo surfaces at startup, not
+        # during an embed/chat call.
+        keep_alive_raw = os.environ.get("BRAIN_OLLAMA_KEEP_ALIVE")
+        if keep_alive_raw is None or keep_alive_raw.strip() == "":
+            ollama_keep_alive = DEFAULT_OLLAMA_KEEP_ALIVE
+        else:
+            stripped_ka = keep_alive_raw.strip()
+            if not _KEEP_ALIVE_RE.match(stripped_ka):
+                raise ConfigError(
+                    "BRAIN_OLLAMA_KEEP_ALIVE must be a positive integer or duration "
+                    "string like '30m', '1h', '60s', '60' "
+                    f"(got {keep_alive_raw!r})"
+                )
+            ollama_keep_alive = stripped_ka
 
         # Wave G1-c -- GraphRAG sync env vars. Same eager-validation pattern as
         # the enrich knobs above: unset/blank -> default; non-parseable /
@@ -923,6 +968,7 @@ class Config:
             "enrich_min_tokens": enrich_min_tokens,
             "enrich_max_input_tokens": enrich_max_input_tokens,
             "enrich_timeout_seconds": enrich_timeout_seconds,
+            "ollama_keep_alive": ollama_keep_alive,
             "graph_enabled": graph_enabled,
             "graph_tenant_id": graph_tenant_id,
             "graph_cooccur_window": graph_cooccur_window,
