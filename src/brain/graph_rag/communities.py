@@ -560,19 +560,27 @@ def _persist(
             reused += 1
         members_to_insert.extend((community_key, member) for member in community.members)
 
-    for community_key, member in members_to_insert:
-        conn.execute(
-            "INSERT INTO graph_community_members "
-            "(tenant_id, community_key, entity_id, member_rank, member_weight) "
-            "VALUES (%s, %s, %s, %s, %s)",
-            (
-                tenant,
-                community_key,
-                member.entity_id,
-                member.member_rank,
-                member.member_weight,
-            ),
-        )
+    # Batched (perf-T4 G4): one ``executemany`` per call instead of N per-row
+    # round-trips (2,583 inserts for the live corpus collapse to one cursor
+    # batch). Runs inside the caller's open transaction so the bulk write is
+    # atomic with the surrounding membership replacement.
+    if members_to_insert:
+        with conn.cursor() as cur:
+            cur.executemany(
+                "INSERT INTO graph_community_members "
+                "(tenant_id, community_key, entity_id, member_rank, member_weight) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                [
+                    (
+                        tenant,
+                        community_key,
+                        member.entity_id,
+                        member.member_rank,
+                        member.member_weight,
+                    )
+                    for community_key, member in members_to_insert
+                ],
+            )
 
     return created, reused
 

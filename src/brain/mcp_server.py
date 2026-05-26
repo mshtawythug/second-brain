@@ -5,7 +5,6 @@ import re
 import sys
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import date as date_cls
 from datetime import datetime
@@ -1248,7 +1247,7 @@ def _graphrag_search_or_mcp_error(
     limit: int | None,
     synthesize: bool,
     enricher: OllamaEnricher | None,
-    embedder_factory: Callable[[], Embedder] | None = None,
+    embedder: Embedder | None = None,
 ) -> "GraphContext":
     """Open an AGE connection, run :func:`graph_rag_search`, map core errors.
 
@@ -1259,10 +1258,10 @@ def _graphrag_search_or_mcp_error(
     core the CLI calls — so identical inputs yield an identical
     :class:`GraphContext` (the parity guarantee). Local seed resolution + the
     snippet path are FTS-only, so an embedder is needed ONLY for the ``global``
-    (community) path's vector leg (spec §17c Q9): ``embedder_factory``
-    (``lambda: state.embedder``) is passed through but invoked **lazily** by
-    ``_retrieve_global`` only after routing resolves to global. The enricher is
-    the opt-in ``synthesize`` group-summary seam.
+    (community) path's vector leg AND the ``fuse`` hybrid leg (spec §17c Q9;
+    perf-T4 G5): the caller passes the long-lived ``state.embedder`` instance
+    directly (no per-call construction); local / themes / entity ignore it.
+    The enricher is the opt-in ``synthesize`` group-summary seam.
 
     Error → ``McpError`` mapping (spec §17b decision 4 + repo error contract;
     mirrors the CLI's exit-code mapping; the G3-e flip means explicit
@@ -1302,7 +1301,7 @@ def _graphrag_search_or_mcp_error(
                 person=person,
                 synthesize=synthesize,
                 enricher=enricher,
-                embedder_factory=embedder_factory,
+                embedder=embedder,
             )
     except (PersonNotFound, PersonAmbiguous) as exc:
         raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
@@ -1408,9 +1407,10 @@ def brain_graphrag_search(
         synthesize=synthesize,
         enricher=state.enricher if synthesize else None,
         # The global (community) path's vector leg embeds the query via this
-        # factory (spec §17c Q9 — local/themes never invoke it). Reuses the
-        # long-lived server embedder built in :func:`main`.
-        embedder_factory=lambda: state.embedder,
+        # embedder (spec §17c Q9 — local/themes never use it). Passes the
+        # long-lived server embedder built in :func:`main` directly — no
+        # per-call construction (perf-T4 G5).
+        embedder=state.embedder,
     )
     return graph_context_json(ctx)
 

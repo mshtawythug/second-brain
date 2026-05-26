@@ -802,7 +802,7 @@ def test_auto_thematic_no_person_dispatches_global(
 ) -> None:
     """G3-e flip: thematic + no resolvable person dispatches to the real global
     community path (was the G2 degraded-local), invoking ``_retrieve_global`` with
-    the injected ``embedder_factory`` and stamping NO degradation signals (Q6)."""
+    the injected pre-warmed ``embedder`` and stamping NO degradation signals (Q6)."""
     # 'recurring'/'themes' make the query thematic; no person entity is seeded, so
     # the auto router resolves no person → global (not themes, not degraded local).
     emb = FakeEmbedder(dim=_SUMMARY_DIM)
@@ -821,7 +821,7 @@ def test_auto_thematic_no_person_dispatches_global(
         query,
         backend=backend,
         mode="auto",
-        embedder_factory=lambda: emb,
+        embedder=emb,
     )
 
     assert ctx.mode == "global"

@@ -33,10 +33,10 @@ best-effort-optional-leg discipline):
   traversal is **not** swallowed (the backend's complete-or-loud-failure
   contract, identical to ``mode=local``); an empty graph result simply yields no
   graph docs → **hybrid-only**.
-* The **hybrid leg** is additive/best-effort: a missing ``embedder_factory`` /
-  a failing embedder construction / a failing query embedding → a WARN + the
-  hybrid leg runs **FTS-only**; the hybrid leg failing even FTS-only (a DB /
-  tsquery error) → a WARN + fuse degrades to **graph-only**.
+* The **hybrid leg** is additive/best-effort: a missing ``embedder`` (the
+  caller's pre-warmed instance — perf-T4 G5) / a failing query embedding → a
+  WARN + the hybrid leg runs **FTS-only**; the hybrid leg failing even
+  FTS-only (a DB / tsquery error) → a WARN + fuse degrades to **graph-only**.
 """
 from __future__ import annotations
 
@@ -52,8 +52,6 @@ from .router import FUSE_MODE
 from .schema import GraphContext, GraphExplanation
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from ..config import Config
     from ..ingest import Embedder
     from ..search import SearchResult
@@ -114,7 +112,7 @@ def _retrieve_fuse(
     frontier_cap: int,
     min_edge_weight: float,
     limit: int,
-    embedder_factory: Callable[[], Embedder] | None = None,
+    embedder: Embedder | None = None,
     session_id: str | None = None,
 ) -> GraphContext:
     """Run fuse (graph ⊕ hybrid) retrieval + assemble its ``GraphContext``.
@@ -129,6 +127,11 @@ def _retrieve_fuse(
     hybrid leg reads its tuning (``vector_sim_floor`` / ``recency_halflife_days``
     / ``snippet_context_tokens``) from ``cfg``. ``session_id`` is generated when
     omitted (a fresh ``uuid4`` hex).
+
+    ``embedder`` is the caller's PRE-WARMED :class:`brain.ingest.Embedder`
+    instance (perf-T4 G5) — the SAME instance that would feed any other leg
+    (e.g. global) within this call, so multi-leg retrievers never re-construct
+    or double-embed. ``None`` triggers FTS-only hybrid (never-raise).
 
     Never-raise: an empty graph leg → hybrid-only; a missing/failed embedder →
     FTS-only hybrid; a fully-dead hybrid leg → graph-only (spec §17d Q1). A
@@ -176,7 +179,7 @@ def _retrieve_fuse(
 
     # HYBRID leg (additive, best-effort): FTS + vector via hybrid_search.
     hybrid_docs, hybrid_vector_arm = _run_hybrid_leg(
-        conn, cfg, query, limit=limit, embedder_factory=embedder_factory
+        conn, cfg, query, limit=limit, embedder=embedder
     )
 
     # RRF-merge the two document-id rankings.
@@ -303,27 +306,33 @@ def _run_hybrid_leg(
     query: str,
     *,
     limit: int,
-    embedder_factory: Callable[[], Embedder] | None,
+    embedder: Embedder | None,
 ) -> tuple[list[SearchResult], bool]:
     """Run the FTS + vector hybrid leg for fuse (spec §17d Q1; never-raise).
 
     Returns ``(docs, vector_arm_used)``:
 
-    * embedder constructs + the query embeds + the cosine SQL runs → full hybrid
-      (``vector_arm_used=True``).
-    * embedder absent / construction fails / the vector arm fails → **FTS-only**
-      hybrid (``vector_arm_used=False``); the hybrid leg's ranking is consumed
+    * caller's pre-warmed embedder present + query embeds + cosine SQL runs →
+      full hybrid (``vector_arm_used=True``).
+    * embedder absent / the vector arm fails → **FTS-only** hybrid
+      (``vector_arm_used=False``); the hybrid leg's ranking is consumed
       unchanged (spec §4 D7 — hybrid search is never modified).
     * the FTS-only ``hybrid_search`` itself failing (a DB / tsquery error) →
       ``([], False)`` + a WARN (fuse degrades to graph-only).
+
+    The caller is responsible for constructing the embedder ONCE per call
+    (perf-T4 G5) so multi-leg retrievers never re-build or double-embed.
     """
     # Late import keeps :mod:`brain.graph_rag` import-cheap + free of the ingest
     # import cycle :mod:`brain.search` pulls in (mirrors ``_build_doc_results``).
     from ..search import hybrid_search
 
-    embedder = _build_leg_embedder(embedder_factory)
+    if embedder is None:
+        _logger.warning(
+            "fuse: no embedder injected; hybrid leg runs FTS-only"
+        )
 
-    # Vector arm — only when a real embedder constructed.
+    # Vector arm — only when a real embedder was passed in.
     if embedder is not None:
         try:
             docs = hybrid_search(
@@ -360,26 +369,3 @@ def _run_hybrid_leg(
         )
         return [], False
     return docs, False
-
-
-def _build_leg_embedder(
-    embedder_factory: Callable[[], Embedder] | None,
-) -> Embedder | None:
-    """Construct the hybrid-leg embedder; ``None`` on absent/failed factory (WARN).
-
-    A ``None`` factory or a factory that raises both degrade the hybrid leg to
-    FTS-only (spec §17d Q1 — embedder construction failing still runs FTS-only),
-    so this returns ``None`` rather than raising.
-    """
-    if embedder_factory is None:
-        _logger.warning(
-            "fuse: no embedder_factory injected; hybrid leg runs FTS-only"
-        )
-        return None
-    try:
-        return embedder_factory()
-    except Exception as exc:  # noqa: BLE001 — never-raise: degrade to FTS-only
-        _logger.warning(
-            "fuse: embedder construction failed (%s); hybrid leg runs FTS-only", exc
-        )
-        return None

@@ -7,9 +7,9 @@ Covers :func:`brain.graph_rag.global_._retrieve_global`, the pure
 * pure RRF fusion: both legs combine; ties broken by ``community_key``.
 * community ranking: a community in BOTH legs outranks a single-leg one; the
   closest vector-leg community ranks first.
-* FTS-only degradation (never-raise): a ``None`` ``embedder_factory``, a failing
-  embed call, a failing factory, or a failing vector cosine SQL leg (e.g. a dim
-  mismatch after a backend swap) → a WARN + the vector leg skipped.
+* FTS-only degradation (never-raise): a ``None`` ``embedder`` instance, a
+  failing embed call, or a failing vector cosine SQL leg (e.g. a dim mismatch
+  after a backend swap) → a WARN + the vector leg skipped.
 * ``CommunityGroup`` population: representative entities (by ``member_rank``),
   representative ``doc_ids``, ``member_count`` / ``summary`` / ``score``, and
   context-level docs/snippets via the shared ``_build_doc_results``.
@@ -110,14 +110,6 @@ class _EntityNameSummarizer:
         doc_titles: list[str],
     ) -> str | None:
         return "Community covering " + ", ".join(entity_names)
-
-
-def _make_raising_embedder() -> Any:
-    return _RaisingEmbedder()
-
-
-def _raising_factory() -> Any:
-    raise RuntimeError("synthetic factory failure")
 
 
 # --------------------------------------------------------------------------- #
@@ -317,7 +309,7 @@ def test_global_rrf_fuses_both_legs(test_db: psycopg.Connection[Any]) -> None:
     )
 
     ctx = _retrieve_global(
-        test_db, _cfg(), query, tenant="default", embedder_factory=lambda: emb
+        test_db, _cfg(), query, tenant="default", embedder=emb
     )
     assert [c.community_key for c in ctx.communities] == [a, b]
     assert ctx.explanation is not None
@@ -340,7 +332,7 @@ def test_global_vector_leg_ranks_closest_first(
     )
 
     ctx = _retrieve_global(
-        test_db, _cfg(), query, tenant="default", embedder_factory=lambda: emb
+        test_db, _cfg(), query, tenant="default", embedder=emb
     )
     keys = [c.community_key for c in ctx.communities]
     assert keys[0] == near  # exact-match embedding is the closest
@@ -350,11 +342,11 @@ def test_global_vector_leg_ranks_closest_first(
 # --------------------------------------------------------------------------- #
 # FTS-only degradation (never-raise)
 # --------------------------------------------------------------------------- #
-@pytest.mark.parametrize("factory_kind", ["none", "embed_raises", "factory_raises"])
+@pytest.mark.parametrize("embedder_kind", ["none", "embed_raises"])
 def test_global_degrades_to_fts_only_on_embedder_problem(
     test_db: psycopg.Connection[Any],
     caplog: pytest.LogCaptureFixture,
-    factory_kind: str,
+    embedder_kind: str,
 ) -> None:
     emb = FakeEmbedder(dim=_SUMMARY_DIM)
     # Both communities carry an embedding; only A matches the FTS query.
@@ -371,16 +363,16 @@ def test_global_degrades_to_fts_only_on_embedder_problem(
         embedding=emb.embed(["budget review"], input_type="document")[0],
     )
 
-    if factory_kind == "none":
-        factory = None
-    elif factory_kind == "embed_raises":
-        factory = _make_raising_embedder
-    else:
-        factory = _raising_factory
+    # perf-T4 G5: the caller now passes a pre-warmed Embedder instance (not a
+    # factory). A factory that raises during construction is the caller's
+    # problem — the parametrize accordingly drops the former "factory_raises"
+    # case; "none" + "embed_raises" remain the only kinds of failure
+    # _retrieve_global itself must degrade through.
+    embedder = None if embedder_kind == "none" else _RaisingEmbedder()
 
     with caplog.at_level(logging.WARNING, logger="brain.graph_rag.global_"):
         ctx = _retrieve_global(
-            test_db, _cfg(), "roadmap", tenant="default", embedder_factory=factory
+            test_db, _cfg(), "roadmap", tenant="default", embedder=embedder
         )
 
     # Vector leg skipped → only the FTS-matching community surfaces; never raises.
@@ -425,7 +417,7 @@ def test_global_vector_sql_dim_mismatch_degrades_to_fts_only(
             _cfg(),
             "roadmap",
             tenant="default",
-            embedder_factory=lambda: _WrongDimEmbedder(),
+            embedder=_WrongDimEmbedder(),
         )
 
     # The cosine SQL raised a dim mismatch → vector leg skipped; only the
@@ -463,7 +455,7 @@ def test_global_populates_community_group(
     _add_mention(test_db, "default", e0, d2)  # d2 mentions one (count 1)
 
     ctx = _retrieve_global(
-        test_db, _cfg(), query, tenant="default", embedder_factory=lambda: emb
+        test_db, _cfg(), query, tenant="default", embedder=emb
     )
     assert len(ctx.communities) == 1
     group = ctx.communities[0]
@@ -498,7 +490,7 @@ def test_global_docs_have_snippets(test_db: psycopg.Connection[Any]) -> None:
     _add_chunk(test_db, chunk_emb, d1, "Detailed roadmap planning discussion.")
 
     ctx = _retrieve_global(
-        test_db, _cfg(), query, tenant="default", embedder_factory=lambda: emb
+        test_db, _cfg(), query, tenant="default", embedder=emb
     )
     doc = next(r for r in ctx.docs if r.document_id == d1)
     assert doc.title == "Doc One"
@@ -516,7 +508,7 @@ def test_global_empty_when_no_summaries(
     _insert_community(test_db, "default", summary=None, embedding=None)
     ctx = _retrieve_global(
         test_db, _cfg(), "roadmap", tenant="default",
-        embedder_factory=lambda: FakeEmbedder(dim=_SUMMARY_DIM),
+        embedder=FakeEmbedder(dim=_SUMMARY_DIM),
     )
     assert isinstance(ctx, GraphContext)
     assert ctx.mode == "global"
@@ -531,7 +523,7 @@ def test_global_empty_when_no_communities(
 ) -> None:
     ctx = _retrieve_global(
         test_db, _cfg(), "roadmap", tenant="default",
-        embedder_factory=lambda: FakeEmbedder(dim=_SUMMARY_DIM),
+        embedder=FakeEmbedder(dim=_SUMMARY_DIM),
     )
     assert ctx.mode == "global"
     assert ctx.communities == []
@@ -552,7 +544,7 @@ def test_global_is_tenant_isolated(test_db: psycopg.Connection[Any]) -> None:
     )
 
     ctx = _retrieve_global(
-        test_db, _cfg(), "roadmap", tenant="default", embedder_factory=lambda: emb
+        test_db, _cfg(), "roadmap", tenant="default", embedder=emb
     )
     keys = {c.community_key for c in ctx.communities}
     assert mine in keys
@@ -571,14 +563,14 @@ def test_global_deterministic_tiebreak_by_key(
     b = _insert_community(test_db, "default", summary=summary, embedding=None)
 
     first = _retrieve_global(
-        test_db, _cfg(), "roadmap", tenant="default", embedder_factory=None
+        test_db, _cfg(), "roadmap", tenant="default", embedder=None
     )
     keys = [c.community_key for c in first.communities]
     assert keys == sorted([a, b])
 
     # Re-running yields byte-identical ordering (determinism).
     second = _retrieve_global(
-        test_db, _cfg(), "roadmap", tenant="default", embedder_factory=None
+        test_db, _cfg(), "roadmap", tenant="default", embedder=None
     )
     assert [c.community_key for c in second.communities] == keys
 
@@ -595,14 +587,14 @@ def test_global_respects_community_limit(
 
     capped = _retrieve_global(
         test_db, _cfg(graph_community_limit=1), "roadmap", tenant="default",
-        embedder_factory=lambda: emb,
+        embedder=emb,
     )
     assert len(capped.communities) == 1
 
     # An explicit ``limit`` overrides the config default.
     override = _retrieve_global(
         test_db, _cfg(graph_community_limit=1), "roadmap", tenant="default",
-        limit=2, embedder_factory=lambda: emb,
+        limit=2, embedder=emb,
     )
     assert len(override.communities) == 2
 
@@ -621,7 +613,7 @@ def test_graph_rag_search_dispatches_to_global(
 
     ctx = graph_rag_search(
         test_db, _cfg(), "roadmap", backend=_UnusedBackend(), mode="global",
-        tenant="default", embedder_factory=lambda: emb,
+        tenant="default", embedder=emb,
     )
     assert ctx.mode == "global"
     assert [c.community_key for c in ctx.communities] == [a]
@@ -631,7 +623,7 @@ def test_graph_rag_search_dispatches_to_global(
 def test_graph_rag_search_global_no_longer_raises_without_embedder(
     test_db: psycopg.Connection[Any],
 ) -> None:
-    # Explicit global with NO embedder_factory now WORKS (FTS-only) instead of
+    # Explicit global with NO embedder now WORKS (FTS-only) instead of
     # raising GraphModeUnavailable (the G3-d behavior change).
     a = _insert_community(
         test_db, "default", summary="roadmap topic", embedding=None
@@ -680,7 +672,7 @@ def test_global_integration_build_summarize_retrieve(
     # so the query embedder must match — use the default FakeEmbedder.
     ctx = graph_rag_search(
         test_db, _cfg(), "Cluster", backend=_UnusedBackend(), mode="global",
-        tenant="default", embedder_factory=lambda: FakeEmbedder(),
+        tenant="default", embedder=FakeEmbedder(),
     )
     assert ctx.mode == "global"
     # Both communities carry an embedding → both surface via the vector leg.

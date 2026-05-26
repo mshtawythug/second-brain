@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 
 from .backends.base import GraphBackend
-from .weighting import edge_weight, generic_df_cap
+from .weighting import generic_df_cap
 
 if TYPE_CHECKING:
     from .reconcile import ReconcileConfig
@@ -146,6 +146,31 @@ def _recompute_aggregates(
     omitted) when either endpoint exceeds the generic-frequency cap
     (``round(generic_df_ratio × corpus_N)``). Returns the number of aggregate
     edges written. Cascade-safe full recompute (spec §7 step 4).
+
+    **Set-based (perf-T4 G3).** The pair-by-pair Python loop + per-row
+    ``INSERT`` is replaced with a single CTE-driven ``INSERT … SELECT``: two
+    aggregate CTEs compute the pair co-document counts and per-entity document
+    frequencies, then the outer SELECT joins them, applies the suppression
+    filter, computes the normalized-lift weight, and inserts every surviving
+    edge in one round-trip. The semantics are identical to the prior loop:
+
+    * The weight formula matches :func:`brain.graph_rag.weighting.normalized_lift`
+      — ``co_doc_count / min(src_df, dst_df)`` (∈ ``(0, 1]``).
+    * The generic-entity suppression matches
+      :func:`brain.graph_rag.weighting.edge_weight` — an edge is omitted iff
+      EITHER endpoint's ``df`` is *strictly greater than* ``cap`` (an entity
+      sitting exactly at the cap is kept, matching
+      :func:`is_generic_entity`).
+    * ``cap`` is computed in Python via :func:`generic_df_cap` so the banker's
+      rounding of ``corpus_N × generic_df_ratio`` is preserved exactly (SQL's
+      ``round`` does not match Python's banker's rounding).
+    * Endpoint-pair ordering and per-row column values pass through unchanged:
+      the ``graph_edge_contributions`` ``(src_id, dst_id)`` pairs feed
+      ``graph_relationships`` 1-to-1 with the prior loop, and the migration-012
+      ``CHECK (weight > 0 AND weight <= 1)`` remains satisfied by construction.
+
+    Returns the number of materialized edges (the same number the prior loop
+    returned), read off ``cur.rowcount`` after the bulk insert.
     """
     # Refresh the derived per-entity doc_count from the mentions source-of-truth.
     conn.execute(
@@ -161,14 +186,9 @@ def _recompute_aggregates(
         (tenant_id,),
     )
 
-    df = {
-        str(entity_id): int(count)
-        for entity_id, count in conn.execute(
-            "SELECT entity_id::text, COUNT(DISTINCT document_id) "
-            "FROM graph_entity_mentions WHERE tenant_id = %s GROUP BY entity_id",
-            (tenant_id,),
-        ).fetchall()
-    }
+    # Compute the generic-entity cap in Python so ``round`` uses banker's
+    # rounding identically to :func:`generic_df_cap` — keeping the SQL form's
+    # suppression boundary byte-identical to the prior loop's.
     corpus_row = conn.execute(
         "SELECT COUNT(DISTINCT document_id) "
         "FROM graph_entity_mentions WHERE tenant_id = %s",
@@ -177,42 +197,50 @@ def _recompute_aggregates(
     corpus_n = int(corpus_row[0]) if corpus_row is not None else 0
     cap = generic_df_cap(corpus_n, generic_df_ratio)
 
-    pair_rows = conn.execute(
-        "SELECT src_id::text, dst_id::text, SUM(cooccur_count), "
-        "COUNT(DISTINCT document_id) "
-        "FROM graph_edge_contributions WHERE tenant_id = %s "
-        "GROUP BY src_id, dst_id",
-        (tenant_id,),
-    ).fetchall()
-
+    # Clear the tenant's existing aggregate edges, then materialize every
+    # non-suppressed edge in ONE statement. The ``pair_aggregates`` CTE
+    # mirrors the prior ``SELECT src_id, dst_id, SUM(cooccur_count),
+    # COUNT(DISTINCT document_id) GROUP BY src_id, dst_id`` exactly; the
+    # ``entity_df`` CTE mirrors the prior ``df`` map (per-entity distinct
+    # document count). The outer SELECT joins them, filters by the generic
+    # cap (``df <= cap`` on BOTH endpoints — strictly-greater suppression),
+    # and computes ``LEAST(src.df, dst.df)`` as the normalized-lift divisor
+    # (the ``::float`` cast prevents integer truncation).
     conn.execute(
         "DELETE FROM graph_relationships WHERE tenant_id = %s", (tenant_id,)
     )
-
-    written = 0
-    for src_id, dst_id, co_count, pair_doc_count in pair_rows:
-        weight = edge_weight(
-            co_doc_count=int(pair_doc_count),
-            src_doc_count=df[str(src_id)],
-            dst_doc_count=df[str(dst_id)],
-            cap=cap,
-        )
-        if weight is None:
-            continue  # generic-suppressed: do not materialize this edge
-        conn.execute(
-            "INSERT INTO graph_relationships "
-            "(tenant_id, src_id, dst_id, rel_type, weight, co_count, doc_count) "
-            "VALUES (%s, %s, %s, 'co_occurs', %s, %s, %s)",
-            (
-                tenant_id,
-                str(src_id),
-                str(dst_id),
-                weight,
-                int(co_count),
-                int(pair_doc_count),
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            WITH pair_aggregates AS (
+                SELECT src_id, dst_id,
+                       SUM(cooccur_count)::bigint AS co_count,
+                       COUNT(DISTINCT document_id)::bigint AS pair_doc_count
+                FROM graph_edge_contributions
+                WHERE tenant_id = %(tenant)s
+                GROUP BY src_id, dst_id
             ),
+            entity_df AS (
+                SELECT entity_id,
+                       COUNT(DISTINCT document_id)::bigint AS df
+                FROM graph_entity_mentions
+                WHERE tenant_id = %(tenant)s
+                GROUP BY entity_id
+            )
+            INSERT INTO graph_relationships
+                (tenant_id, src_id, dst_id, rel_type, weight, co_count, doc_count)
+            SELECT %(tenant)s, pa.src_id, pa.dst_id, 'co_occurs',
+                   pa.pair_doc_count::float / LEAST(src.df, dst.df)::float,
+                   pa.co_count,
+                   pa.pair_doc_count
+            FROM pair_aggregates pa
+            JOIN entity_df src ON src.entity_id = pa.src_id
+            JOIN entity_df dst ON dst.entity_id = pa.dst_id
+            WHERE src.df <= %(cap)s AND dst.df <= %(cap)s
+            """,
+            {"tenant": tenant_id, "cap": cap},
         )
-        written += 1
+        written = cur.rowcount
     return written
 
 

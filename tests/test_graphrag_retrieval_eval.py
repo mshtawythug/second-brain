@@ -263,8 +263,8 @@ def _run_graph_eval(
     """Drive the parallel graph-eval runner over the synthetic corpus.
 
     One cfg serves all modes: ``owner_participants`` is set for the themes owner
-    exclusion; local/fuse ignore it. ``embedder_factory`` feeds the fuse hybrid
-    leg's vector arm.
+    exclusion; local/fuse ignore it. ``embedder`` (the pre-warmed instance —
+    perf-T4 G5) feeds the fuse hybrid leg's vector arm.
     """
     cfg = _make_cfg(owner_participants=frozenset({OWNER[0]}))
     return run_graph_eval(
@@ -274,7 +274,7 @@ def _run_graph_eval(
         local_cases=LOCAL_CASES,
         themes_cases=THEMES_CASES,
         external_id_to_doc_id=docs,
-        embedder_factory=lambda: embedder,
+        embedder=embedder,
         include_fuse=True,
         backend_name="age-test",
     )

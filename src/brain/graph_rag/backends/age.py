@@ -217,46 +217,70 @@ class AgeBackend:
         """MERGE Entity vertices, then MATCH+SET their mutable properties.
 
         **Atomic, all-or-nothing** (matches :meth:`refresh_cooccur_edges` /
-        :meth:`_detach_delete_vertices`): the whole MERGE+SET loop runs inside one
+        :meth:`_detach_delete_vertices`): the whole MERGE+SET batch runs inside one
         ``conn.transaction()`` — a real transaction on an autocommit connection, a
         SAVEPOINT when already nested (e.g. under the reconcile transaction or the
         ``build --force`` pre-pass) — so a failure partway through rolls the batch
         back rather than leaving some vertices created and others not.
+
+        **Batched (perf-T4 G2).** A single ``UNWIND $rows`` Cypher MERGEs every
+        vertex in one round-trip, then a second ``UNWIND $rows`` Cypher MATCHes
+        and SETs each vertex's mutable properties. The two statements are split
+        because a ``SET`` in the same statement as a freshly-creating MERGE does
+        not persist (AGE quirk — see this module's preamble). Two round-trips
+        per call instead of ``2 × N`` (13,190 statements for a 6,595-entity
+        build becomes 2).
         """
+        if not entities:
+            return 0
+        # Validate cross-tenant + build the per-row params upfront, BEFORE
+        # opening the AGE session, so a bad input never touches the graph.
+        for entity in entities:
+            if entity.tenant_id != tenant_id:
+                raise GraphBackendError(
+                    f"cross-tenant entity upsert: entity {entity.id} carries "
+                    f"tenant_id {entity.tenant_id!r} but the call scopes "
+                    f"tenant_id {tenant_id!r}"
+                )
+        # Fixed backend-controlled keys (not a caller bag) — run the reserved-key
+        # guard once on a sample so a future edit that added an identity key here
+        # would still be caught, matching the per-row form's defence in depth.
+        _inline_set_map(
+            {"name": "", "entity_type": "", "canonical_key": ""},
+            reserved=_ENTITY_RESERVED_KEYS,
+            context="entity properties",
+        )
+        rows = [
+            {
+                "u": entity.id,
+                "name": entity.name,
+                "entity_type": entity.entity_type,
+                "canonical_key": entity.canonical_key,
+            }
+            for entity in entities
+        ]
         with self._age_session(conn), conn.transaction():
-            for entity in entities:
-                if entity.tenant_id != tenant_id:
-                    raise GraphBackendError(
-                        f"cross-tenant entity upsert: entity {entity.id} carries "
-                        f"tenant_id {entity.tenant_id!r} but the call scopes "
-                        f"tenant_id {tenant_id!r}"
-                    )
-                # MERGE get-or-creates; a SET in this same statement would not
-                # persist for a freshly-created vertex (AGE quirk), so update
-                # properties in a second MATCH+SET statement.
-                self._cypher(
-                    conn,
-                    "MERGE (e:Entity {entity_uuid: $u, tenant_id: $t})",
-                    {"u": entity.id, "t": tenant_id},
-                )
-                # Fixed backend-controlled keys (not a caller bag), but built via
-                # the guarded helper so the reserved-identity guard is uniform and
-                # a future edit that added an identity key here would be caught.
-                set_clause, set_params = _inline_set_map(
-                    {
-                        "name": entity.name,
-                        "entity_type": entity.entity_type,
-                        "canonical_key": entity.canonical_key,
-                    },
-                    reserved=_ENTITY_RESERVED_KEYS,
-                    context="entity properties",
-                )
-                self._cypher(
-                    conn,
-                    "MATCH (e:Entity {entity_uuid: $u, tenant_id: $t}) "
-                    f"SET e += {set_clause}",
-                    {"u": entity.id, "t": tenant_id, **set_params},
-                )
+            # Pass 1: MERGE every vertex in one Cypher round-trip. AGE's UNWIND
+            # iterates the agtype list parameter; the MERGE pattern reads the
+            # per-row identity keys via ``row.<key>`` map access.
+            self._cypher(
+                conn,
+                "UNWIND $rows AS row "
+                "MERGE (e:Entity {entity_uuid: row.u, tenant_id: $t})",
+                {"t": tenant_id, "rows": rows},
+            )
+            # Pass 2: MATCH each vertex (always on the match path → SET persists)
+            # and update its mutable properties. The keys are fixed identifiers
+            # interpolated into Cypher; the values flow as agtype params via row.
+            self._cypher(
+                conn,
+                "UNWIND $rows AS row "
+                "MATCH (e:Entity {entity_uuid: row.u, tenant_id: $t}) "
+                "SET e.name = row.name, "
+                "e.entity_type = row.entity_type, "
+                "e.canonical_key = row.canonical_key",
+                {"t": tenant_id, "rows": rows},
+            )
         return len(entities)
 
     def upsert_mention_edges(
@@ -372,7 +396,6 @@ class AgeBackend:
             "FROM graph_relationships WHERE tenant_id = %s",
             (tenant_id,),
         ).fetchall()
-        created = 0
         with self._age_session(conn), conn.transaction():
             # Full recompute, ATOMIC: drop the tenant's aggregate edges, then
             # recreate — all inside one transaction so a miss below rolls the
@@ -382,40 +405,60 @@ class AgeBackend:
                 "MATCH ()-[r:CO_OCCURS {tenant_id: $t}]->() DELETE r",
                 {"t": tenant_id},
             )
-            for src_id, dst_id, weight, co_count, doc_count, rel_type in rows:
-                # ``RETURN 1`` yields exactly one row when BOTH endpoints bind
-                # and the edge is created; zero rows when a MATCH misses (the
-                # CREATE then no-ops). Counting returned rows makes the result
-                # reflect reality instead of the optimistic input length.
-                result = self._cypher(
-                    conn,
-                    "MATCH (a:Entity {entity_uuid: $s, tenant_id: $t}) "
-                    "MATCH (b:Entity {entity_uuid: $d, tenant_id: $t}) "
-                    "CREATE (a)-[:CO_OCCURS {tenant_id: $t, weight: $w, "
-                    "co_count: $co, doc_count: $dc, rel_type: $rt}]->(b) "
-                    "RETURN 1",
-                    {
-                        "s": str(src_id),
-                        "d": str(dst_id),
-                        "t": tenant_id,
-                        "w": float(weight),
-                        "co": int(co_count),
-                        "dc": int(doc_count),
-                        "rt": rel_type,
-                    },
+            if not rows:
+                return 0
+            # Batched (perf-T4 G1): one UNWIND Cypher per call instead of N
+            # round-trips. AGE iterates the agtype list parameter; each row's
+            # endpoint UUIDs / edge properties flow through ``row.<key>`` map
+            # access. ``RETURN row.s, row.d`` emits one result row per (a,b)
+            # pair where BOTH MATCHes bound and the CREATE ran — when either
+            # MATCH misses, the UNWIND row simply produces nothing. Comparing
+            # the returned (src,dst) set against the input set lets us preserve
+            # the original complete-or-loud-failure miss-detection contract.
+            edge_rows = [
+                {
+                    "s": str(src_id),
+                    "d": str(dst_id),
+                    "w": float(weight),
+                    "co": int(co_count),
+                    "dc": int(doc_count),
+                    "rt": rel_type,
+                }
+                for src_id, dst_id, weight, co_count, doc_count, rel_type in rows
+            ]
+            result = self._cypher(
+                conn,
+                "UNWIND $rows AS row "
+                "MATCH (a:Entity {entity_uuid: row.s, tenant_id: $t}) "
+                "MATCH (b:Entity {entity_uuid: row.d, tenant_id: $t}) "
+                "CREATE (a)-[:CO_OCCURS {tenant_id: $t, weight: row.w, "
+                "co_count: row.co, doc_count: row.dc, rel_type: row.rt}]->(b) "
+                "RETURN row.s, row.d",
+                {"t": tenant_id, "rows": edge_rows},
+                columns="s ag_catalog.agtype, d ag_catalog.agtype",
+            )
+            created = len(result)
+            if created < len(edge_rows):
+                # At least one MATCH missed → the relational mirror references
+                # an entity with no AGE vertex. Identify the FIRST missing pair
+                # for a precise message (matches the prior per-row form's error
+                # shape), then raise. Raising aborts conn.transaction() → the
+                # DELETE and any CREATEs in this rebuild roll back, so the prior
+                # CO_OCCURS set is preserved intact (all-or-nothing).
+                returned = {(_agtype_loads(s), _agtype_loads(d)) for s, d in result}
+                first_missing = next(
+                    ((r["s"], r["d"]) for r in edge_rows
+                     if (r["s"], r["d"]) not in returned),
+                    (None, None),
                 )
-                if not result:
-                    # Raising here aborts conn.transaction() → the DELETE and any
-                    # earlier CREATEs in this rebuild roll back, so the prior
-                    # CO_OCCURS set is preserved intact (all-or-nothing).
-                    raise GraphBackendError(
-                        "refresh_cooccur_edges could not create a CO_OCCURS edge "
-                        f"for tenant {tenant_id!r}: an endpoint Entity vertex is "
-                        f"missing (src={src_id} dst={dst_id}). The relational "
-                        "graph_relationships mirror references an entity with no "
-                        "AGE vertex — run upsert_entities before refreshing edges."
-                    )
-                created += 1
+                raise GraphBackendError(
+                    "refresh_cooccur_edges could not create a CO_OCCURS edge "
+                    f"for tenant {tenant_id!r}: an endpoint Entity vertex is "
+                    f"missing (src={first_missing[0]} dst={first_missing[1]}). "
+                    "The relational graph_relationships mirror references an "
+                    "entity with no AGE vertex — run upsert_entities before "
+                    "refreshing edges."
+                )
         return created
 
     # ------------------------------------------------------------------ #

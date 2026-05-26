@@ -1889,12 +1889,13 @@ def _graphrag_search_or_exit(
     The single construction + error-mapping seam shared by ``brain graphrag
     search`` / ``themes`` / ``entity`` (mirrors how ``build`` / ``refresh`` open
     an AGE-capable autocommit connection + bootstrap the backend). Local seed
-    resolution + the snippet path are FTS-only, so an embedder is needed ONLY for
-    the ``global`` (community) path's vector leg (spec §17c Q9): the
-    ``embedder_factory`` (``lambda: _build_embedder(cfg)``) is passed through but
-    invoked **lazily** by ``_retrieve_global`` only after routing resolves to
-    global — local/themes/entity never construct one. The enricher is built only
-    for the opt-in ``--synthesize`` group-summary path.
+    resolution + the snippet path are FTS-only, so an embedder is needed ONLY
+    for the ``global`` (community) path's vector leg AND the ``fuse`` hybrid
+    leg (spec §17c Q9; perf-T4 G5). The embedder is constructed ONCE here
+    (eagerly, not via a factory) only when the mode actually needs it — global
+    / fuse / auto — and passed through ``graph_rag_search``'s ``embedder``
+    param; local / themes / entity skip construction entirely. The enricher is
+    built only for the opt-in ``--synthesize`` group-summary path.
 
     Error → exit-code mapping (spec §17b decision 4 + repo error contract; the
     G3-e flip means explicit ``--mode global`` now EXECUTES, so the former
@@ -1914,6 +1915,13 @@ def _graphrag_search_or_exit(
     from .graph_rag.backends import AgeBackend
 
     enricher = _build_enricher(cfg) if synthesize else None
+    # Build the embedder ONCE up-front (perf-T4 G5) only when the mode might
+    # need it — global, fuse, or auto (which may route to global). Local /
+    # themes / entity stay embedder-free, matching the prior lazy-factory
+    # contract: never construct an embedder we wouldn't use.
+    embedder = (
+        _build_embedder(cfg) if mode in {"global", "fuse", "auto"} else None
+    )
     try:
         with connect_age(cfg.database_url) as conn:
             conn.autocommit = True
@@ -1932,7 +1940,7 @@ def _graphrag_search_or_exit(
                 person=person,
                 synthesize=synthesize,
                 enricher=enricher,
-                embedder_factory=lambda: _build_embedder(cfg),
+                embedder=embedder,
             )
     except (PersonNotFound, PersonAmbiguous) as exc:
         typer.secho(f"graphrag: {exc}", fg="red", err=True)

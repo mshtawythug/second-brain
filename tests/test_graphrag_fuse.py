@@ -14,7 +14,7 @@ leg with the vector/FTS (``hybrid_search``) doc leg — and the
   ``FakeTraversalBackend`` for the graph leg + the deterministic
   :class:`tests.conftest.FakeEmbedder` for the hybrid leg): fuse returns a merged
   ranked doc list with per-doc provenance.
-* **fallbacks (never-raise)**: no ``embedder_factory`` → graph + FTS-only hybrid;
+* **fallbacks (never-raise)**: no ``embedder`` → graph + FTS-only hybrid;
   an empty graph leg → hybrid-only; a fully-dead hybrid leg → graph-only; an
   all-empty query → an empty-but-valid context.
 
@@ -304,7 +304,7 @@ def test_fuse_merges_graph_and_hybrid(test_db: psycopg.Connection[Any]) -> None:
         frontier_cap=200,
         min_edge_weight=0.2,
         limit=10,
-        embedder_factory=lambda: emb,
+        embedder=emb,
     )
 
     assert ctx.mode == FUSE_MODE
@@ -348,7 +348,7 @@ def test_fuse_dispatch_via_graph_rag_search(
         backend=backend,
         mode="fuse",
         tenant="default",
-        embedder_factory=lambda: emb,
+        embedder=emb,
     )
     assert ctx.mode == FUSE_MODE
     assert doc_a in [d.document_id for d in ctx.docs]
@@ -360,7 +360,7 @@ def test_fuse_dispatch_via_graph_rag_search(
 def test_fuse_no_embedder_degrades_to_fts_only(
     test_db: psycopg.Connection[Any],
 ) -> None:
-    """No embedder_factory → graph + FTS-only hybrid (vector arm skipped)."""
+    """No embedder → graph + FTS-only hybrid (vector arm skipped)."""
     from tests.conftest import FakeEmbedder
 
     emb = FakeEmbedder()
@@ -381,7 +381,7 @@ def test_fuse_no_embedder_degrades_to_fts_only(
         frontier_cap=200,
         min_edge_weight=0.2,
         limit=10,
-        embedder_factory=None,
+        embedder=None,
     )
 
     assert ctx.mode == FUSE_MODE
@@ -416,7 +416,7 @@ def test_fuse_empty_graph_leg_is_hybrid_only(
         frontier_cap=200,
         min_edge_weight=0.2,
         limit=10,
-        embedder_factory=lambda: emb,
+        embedder=emb,
     )
 
     assert ctx.mode == FUSE_MODE
@@ -460,7 +460,7 @@ def test_fuse_hybrid_dead_is_graph_only(
             frontier_cap=200,
             min_edge_weight=0.2,
             limit=10,
-            embedder_factory=lambda: emb,
+            embedder=emb,
         )
 
     assert ctx.mode == FUSE_MODE
@@ -490,7 +490,7 @@ def test_fuse_all_empty_returns_empty_context(
         frontier_cap=200,
         min_edge_weight=0.2,
         limit=10,
-        embedder_factory=lambda: FakeEmbedder(),
+        embedder=FakeEmbedder(),
     )
 
     assert ctx.mode == FUSE_MODE
@@ -527,7 +527,7 @@ def test_fuse_limit_caps_returned_docs(
         frontier_cap=200,
         min_edge_weight=0.2,
         limit=2,
-        embedder_factory=lambda: emb,
+        embedder=emb,
     )
     assert len(ctx.docs) == 2
 
@@ -545,7 +545,7 @@ def test_fuse_session_id_honored(test_db: psycopg.Connection[Any]) -> None:
         frontier_cap=200,
         min_edge_weight=0.2,
         limit=10,
-        embedder_factory=lambda: FakeEmbedder(),
+        embedder=FakeEmbedder(),
         session_id="fixed-session-123",
     )
     assert ctx.session_id == "fixed-session-123"
@@ -582,7 +582,7 @@ def test_fuse_non_default_tenant_rejects_before_either_leg(
             frontier_cap=200,
             min_edge_weight=0.2,
             limit=10,
-            embedder_factory=lambda: FakeEmbedder(),
+            embedder=FakeEmbedder(),
         )
     # Neither leg ran: the graph backend was never traversed and the hybrid leg
     # never queried the corpus-wide documents/chunks.
@@ -610,7 +610,7 @@ def test_fuse_default_tenant_still_runs(test_db: psycopg.Connection[Any]) -> Non
         frontier_cap=200,
         min_edge_weight=0.2,
         limit=10,
-        embedder_factory=lambda: emb,
+        embedder=emb,
     )
     assert ctx.mode == FUSE_MODE
     assert doc_a in [d.document_id for d in ctx.docs]

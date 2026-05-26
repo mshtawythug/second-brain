@@ -20,8 +20,8 @@ chunks. Two signals are fused with Reciprocal Rank Fusion
   search rather than reinventing it).
 * **Vector leg** — cosine distance over ``summary_embedding`` for communities
   with a non-NULL embedding. The query is embedded ``input_type="query"`` via
-  the injected ``embedder_factory`` (spec §17c Q9). The vector leg is the **only
-  reason global needs an embedder**; local/themes stay embedder-free.
+  the injected ``embedder`` instance (spec §17c Q9). The vector leg is the
+  **only reason global needs an embedder**; local/themes stay embedder-free.
 
 ``score = Σ 1/(60 + rank + 1)`` per ``community_key``; ties broken by
 ``community_key`` (deterministic). The top ``limit`` communities
@@ -31,9 +31,9 @@ Design invariants (mirroring the sibling paths):
 
 * **Never-raise (spec §17c Q9/Q10).** No communities / no summaries → an
   empty-but-valid :class:`GraphContext` (never raises). A **missing**
-  ``embedder_factory`` OR a **failing** query-embedding call → a WARN + the
-  vector leg is skipped (FTS-only), never a hard failure — exactly the §6c
-  "guarded on non-null embedding" degradation.
+  ``embedder`` OR a **failing** query-embedding call → a WARN + the vector
+  leg is skipped (FTS-only), never a hard failure — exactly the §6c "guarded
+  on non-null embedding" degradation.
 * **Tenant-scoped (spec §4 D9).** Every read filters by ``tenant_id``.
 * **Deterministic ordering.** Both legs order before truncation, the fusion
   tie-breaks on ``community_key``, and the per-community entity/doc reads break
@@ -53,8 +53,6 @@ from .router import GLOBAL_MODE
 from .schema import CommunityGroup, GraphContext, GraphEntity, GraphExplanation
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from ..config import Config
     from ..ingest import Embedder
     from ..search import SearchResult
@@ -86,7 +84,7 @@ def _retrieve_global(
     *,
     tenant: str,
     limit: int | None = None,
-    embedder_factory: Callable[[], Embedder] | None = None,
+    embedder: Embedder | None = None,
     session_id: str | None = None,
 ) -> GraphContext:
     """Run global (community-based) retrieval + assemble its ``GraphContext``.
@@ -98,19 +96,22 @@ def _retrieve_global(
     representative member entities + documents (+ snippets via the shared
     :func:`brain.graph_rag._retrieval_common._build_doc_results`).
 
-    ``embedder_factory`` is invoked **here** (lazily) to embed the *query* for
-    the vector leg (spec §17c Q9 — local/themes never construct an embedder). A
-    ``None`` factory or a failing embed call logs a WARN and runs **FTS-only**
-    (never-raise). No communities / no summaries → an empty-but-valid context.
-    ``session_id`` is generated when omitted (a fresh ``uuid4`` hex), mirroring
-    the MCP ``{session_id, results}`` envelope.
+    ``embedder`` is the **pre-warmed** :class:`brain.ingest.Embedder` instance
+    used to embed the *query* for the vector leg (spec §17c Q9 — local/themes
+    never need one). Pre-warmed because the caller (CLI/MCP/fuse) constructs
+    or reuses ONE long-lived instance and passes it in, so global mode never
+    re-builds the embedder per call (perf-T4 G5). A ``None`` embedder or a
+    failing ``embed()`` call logs a WARN and runs **FTS-only** (never-raise).
+    No communities / no summaries → an empty-but-valid context. ``session_id``
+    is generated when omitted (a fresh ``uuid4`` hex), mirroring the MCP
+    ``{session_id, results}`` envelope.
     """
     resolved_limit = cfg.graph_community_limit if limit is None else limit
     resolved_session = uuid.uuid4().hex if session_id is None else session_id
 
     fts_keys = _fts_ranked_keys(conn, tenant=tenant, query=query)
     vector_keys, vector_arm_used = _vector_ranked_keys(
-        conn, tenant=tenant, query=query, embedder_factory=embedder_factory
+        conn, tenant=tenant, query=query, embedder=embedder
     )
 
     fused = _fuse_rrf(fts_keys, vector_keys)
@@ -191,23 +192,25 @@ def _vector_ranked_keys(
     *,
     tenant: str,
     query: str,
-    embedder_factory: Callable[[], Embedder] | None,
+    embedder: Embedder | None,
 ) -> tuple[list[str], bool]:
     """Communities ranked by ``summary_embedding`` cosine (vector leg, §17c Q4/Q9).
 
     Returns ``(keys, attempted)``. The vector leg requires an embedder (spec
-    §17c Q9 — global REQUIRES one; local/themes stay embedder-free): the injected
-    ``embedder_factory`` is constructed lazily here and used to embed the *query*
-    (``input_type="query"``). A ``None`` factory OR **any** failure in the vector
-    arm — constructing the embedder, embedding the query, OR executing the cosine
+    §17c Q9 — global REQUIRES one; local/themes stay embedder-free): the
+    injected ``embedder`` is the caller's PRE-WARMED instance (perf-T4 G5 —
+    the caller constructs ONCE and reuses across calls / legs), used to embed
+    the *query* (``input_type="query"``). A ``None`` embedder OR **any**
+    failure in the vector arm — embedding the query OR executing the cosine
     ``<=>`` SQL (e.g. a dim mismatch when the backend was swapped without a
     community rebuild, or a transient DB error) → a WARN and ``([], False)``
     (FTS-only degradation; never-raise, matching §6c "guarded on non-null
-    embedding"). The cosine SQL is inside the guard precisely so a dim-mismatch /
-    DB error in the ``<=>`` execution degrades to FTS-only rather than breaking
-    global retrieval. ``attempted=True`` means the full vector arm ran (embed +
-    cosine SQL succeeded) and the ranking is usable (even if zero communities
-    carry a ``summary_embedding`` — the leg simply contributes nothing).
+    embedding"). The cosine SQL is inside the guard precisely so a dim-mismatch
+    / DB error in the ``<=>`` execution degrades to FTS-only rather than
+    breaking global retrieval. ``attempted=True`` means the full vector arm ran
+    (embed + cosine SQL succeeded) and the ranking is usable (even if zero
+    communities carry a ``summary_embedding`` — the leg simply contributes
+    nothing).
 
     Tenant-scoped, restricted to ``summary_embedding IS NOT NULL``; ordered by
     cosine distance ascending then ``community_key`` (deterministic), capped at
@@ -215,14 +218,13 @@ def _vector_ranked_keys(
     CLI/MCP search paths set ``autocommit=True``), so a failed ``<=>`` statement
     leaves the connection usable for the subsequent FTS-only assembly.
     """
-    if embedder_factory is None:
+    if embedder is None:
         _logger.warning(
-            "global retrieval: no embedder_factory injected; vector leg skipped "
+            "global retrieval: no embedder injected; vector leg skipped "
             "(FTS-only)"
         )
         return [], False
     try:
-        embedder = embedder_factory()
         query_vec = embedder.embed([query], input_type="query")[0]
         rows = conn.execute(
             "SELECT community_key::text FROM graph_communities "

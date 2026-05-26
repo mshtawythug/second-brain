@@ -84,8 +84,6 @@ from .tenancy import resolve_tenant
 from .themes import _GroupSummarizer, _retrieve_themes
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from ..config import Config
     from ..ingest import Embedder
     from .backends.base import GraphBackend
@@ -136,7 +134,7 @@ def graph_rag_search(
     theme_limit: int | None = None,
     synthesize: bool = False,
     enricher: _GroupSummarizer | None = None,
-    embedder_factory: Callable[[], Embedder] | None = None,
+    embedder: Embedder | None = None,
 ) -> GraphContext:
     """Graph retrieval (spec §6; ``local`` G2-d, ``themes`` G2-f, router G2-g).
 
@@ -157,9 +155,10 @@ def graph_rag_search(
     a :class:`GraphContext` with ranked ``communities`` (each a
     :class:`CommunityGroup`) + representative ``docs``. The community count
     defaults from ``cfg.graph_community_limit``. The vector leg needs an embedder:
-    ``embedder_factory`` (the only path that uses it — local/themes stay
-    embedder-free) is invoked to embed the query; a missing factory / failed
-    embed logs a WARN and runs FTS-only (never-raise; spec §17c Q9).
+    the caller passes a PRE-WARMED ``embedder`` instance (perf-T4 G5 — the only
+    path that uses it; local/themes stay embedder-free) used to embed the query;
+    a missing/failed embed logs a WARN and runs FTS-only (never-raise; spec §17c
+    Q9).
 
     ``mode='fuse'`` (explicit only — never an auto target; wave G4-c, spec §17d
     Q1) dispatches to :func:`brain.graph_rag.fuse._retrieve_fuse`: it runs the
@@ -168,10 +167,10 @@ def graph_rag_search(
     other rankers), returning a :class:`GraphContext` (``mode='fuse'``) whose
     ``docs`` are the fused :class:`~brain.search.SearchResult`s (wire-stable) with
     per-doc leg provenance in ``explanation.matched_filters['fuse_doc_provenance']``.
-    ``embedder_factory`` feeds the hybrid leg's vector arm; a missing/failed
-    embedder degrades it to FTS-only and a fully-dead hybrid leg degrades fuse to
-    graph-only (never-raise). Hybrid search's ranking is consumed unchanged (spec
-    §4 D7).
+    The pre-warmed ``embedder`` instance feeds the hybrid leg's vector arm; a
+    missing/failed embedder degrades it to FTS-only and a fully-dead hybrid leg
+    degrades fuse to graph-only (never-raise). Hybrid search's ranking is
+    consumed unchanged (spec §4 D7).
 
     ``mode='local'`` resolves ``query`` to seed entities, traverses
     ``CO_OCCURS`` from each seed via ``backend``, maps the reached entities to
@@ -232,8 +231,8 @@ def graph_rag_search(
     # Global (community-based) path (spec §6c; waves G3-d/G3-e). An EXPLICIT
     # ``mode='global'`` AND the auto thematic-no-person branch both resolve to
     # GLOBAL_MODE and share this single dispatch to :func:`_retrieve_global` —
-    # the only path that uses ``embedder_factory`` (spec §17c Q9; local/themes
-    # stay embedder-free). The community limit defaults from
+    # the only path that uses ``embedder`` (spec §17c Q9; local/themes stay
+    # embedder-free). The community limit defaults from
     # ``cfg.graph_community_limit`` (resolved inside ``_retrieve_global``), not
     # the doc ``limit``. The G3-e flip routes BOTH global cases here; the G2
     # ``global→local`` degradation is gone (spec §17c Q6).
@@ -244,16 +243,16 @@ def graph_rag_search(
             query,
             tenant=tenant_id,
             limit=limit,
-            embedder_factory=embedder_factory,
+            embedder=embedder,
             session_id=resolved_session,
         )
 
     # Fuse (graph ⊕ hybrid doc-leg RRF) path (spec §17d Q1; wave G4-c). Honored
     # ONLY for an EXPLICIT ``mode='fuse'`` — the auto router never targets it
     # (auto stays local/themes/global). Runs the local doc leg + the hybrid leg
-    # and RRF-merges their doc-id rankings; ``embedder_factory`` feeds the hybrid
-    # leg's vector arm (a missing/failed embedder degrades it to FTS-only —
-    # never-raise). Local/themes/global/auto are unchanged.
+    # and RRF-merges their doc-id rankings; the pre-warmed ``embedder`` feeds the
+    # hybrid leg's vector arm (a missing/failed embedder degrades it to FTS-only
+    # — never-raise). Local/themes/global/auto are unchanged.
     if decision.executed_mode == FUSE_MODE:
         return _retrieve_fuse(
             conn,
@@ -265,7 +264,7 @@ def graph_rag_search(
             frontier_cap=resolved_frontier,
             min_edge_weight=resolved_min_weight,
             limit=resolved_limit,
-            embedder_factory=embedder_factory,
+            embedder=embedder,
             session_id=resolved_session,
         )
 

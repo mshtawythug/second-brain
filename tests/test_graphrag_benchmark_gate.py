@@ -730,7 +730,7 @@ def test_p95_global_query_budget(
     def _call(tenant: str, query: str) -> Callable[[], object]:
         return lambda: graph_rag_search(
             bench_conn, corpus.cfg, query, backend=backend, tenant=tenant,
-            mode=GLOBAL_MODE, embedder_factory=_embedder_factory,
+            mode=GLOBAL_MODE, embedder=_embedder_factory(),
         )
 
     calls = [_call(tenant, query) for tenant, query in corpus.global_plan]
@@ -769,7 +769,7 @@ def test_p95_fuse_query_budget(
     def _call(query: str) -> Callable[[], object]:
         return lambda: graph_rag_search(
             bench_conn, corpus.cfg, query, backend=backend, tenant="default",
-            mode=FUSE_MODE, embedder_factory=_embedder_factory,
+            mode=FUSE_MODE, embedder=_embedder_factory(),
         )
 
     calls = [_call(query) for query in corpus.fuse_plan]

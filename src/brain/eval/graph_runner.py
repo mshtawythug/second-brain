@@ -41,8 +41,6 @@ from ..graph_rag import FUSE_MODE, LOCAL_MODE, THEMES_MODE, graph_rag_search
 from .graph_retrieval import score_local_docs, score_themes
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from ..config import Config
     from ..graph_rag.backends.base import GraphBackend
     from ..ingest import Embedder
@@ -155,7 +153,7 @@ def run_graph_eval(
     local_cases: Sequence[LocalCaseLike],
     themes_cases: Sequence[ThemesCaseLike],
     external_id_to_doc_id: Mapping[str, str],
-    embedder_factory: Callable[[], Embedder] | None = None,
+    embedder: Embedder | None = None,
     include_fuse: bool = False,
     ndcg_k: int = 5,
     recall_k: int = 20,
@@ -172,8 +170,8 @@ def run_graph_eval(
       with :func:`~brain.eval.graph_retrieval.score_local_docs`.
     * **fuse** (when ``include_fuse``) — ``mode='fuse'`` per local case (same
       query + expected docs as local; spec §17d Q1 fuse is a ranked-doc mode);
-      the hybrid leg's vector arm is fed by ``embedder_factory`` (FTS-only when
-      absent — never-raise).
+      the hybrid leg's vector arm is fed by the pre-warmed ``embedder``
+      instance (FTS-only when absent — never-raise; perf-T4 G5).
     * **themes** — ``mode='themes'`` per themes case; ``GraphContext.themes``
       keysets scored with :func:`~brain.eval.graph_retrieval.score_themes`.
 
@@ -187,8 +185,8 @@ def run_graph_eval(
         themes_cases: Themes cases (injected G2-j ``THEMES_CASES``).
         external_id_to_doc_id: Maps each case's ``expected_doc_external_ids`` to
             the seeded document UUIDs (the corpus builder returns this).
-        embedder_factory: Hybrid-leg embedder factory for fuse; ``None`` runs the
-            fuse hybrid leg FTS-only.
+        embedder: Pre-warmed Embedder instance feeding the fuse hybrid leg's
+            vector arm (perf-T4 G5); ``None`` runs the fuse hybrid leg FTS-only.
         include_fuse: When ``True``, also run + score ``mode='fuse'`` per local
             case.
         ndcg_k: nDCG cutoff (default 5).
@@ -226,7 +224,7 @@ def run_graph_eval(
                     expected=expected,
                     ndcg_k=ndcg_k,
                     recall_k=recall_k,
-                    embedder_factory=embedder_factory,
+                    embedder=embedder,
                 )
             )
 
@@ -295,7 +293,7 @@ def _score_doc_mode(
     expected: list[str],
     ndcg_k: int,
     recall_k: int,
-    embedder_factory: Callable[[], Embedder] | None = None,
+    embedder: Embedder | None = None,
 ) -> GraphDocEvalResult:
     """Run one ranked-doc mode (local/fuse) for ``query`` and score its docs."""
     ctx = graph_rag_search(
@@ -304,7 +302,7 @@ def _score_doc_mode(
         query,
         backend=backend,
         mode=mode,
-        embedder_factory=embedder_factory,
+        embedder=embedder,
     )
     actual = [doc.document_id for doc in ctx.docs]
     score = score_local_docs(actual, expected, ndcg_k=ndcg_k, recall_k=recall_k)
