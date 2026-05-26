@@ -585,7 +585,7 @@ class TestRenderFencedSection:
         )
         partner_id = _seed_partner(
             test_db,
-            title="Re: [External] Re: Ali Sarkis × vendor-ev",
+            title="Re: [External] Re: Pat Morgan × vendor-ev",
             vault_path="_ingested/gmail/2026-04-12-partner.md",
             metadata={"date": "Sat, 12 Apr 2026 09:00:00 -0700"},
             source_kind="gmail",
@@ -598,7 +598,7 @@ class TestRenderFencedSection:
         rendered = render_fenced_section(test_db, center_id)
         assert rendered is not None
         # Alias bracketed prefix has been sanitized to round parens.
-        assert "[[2026-04-12-partner|Re: (External) Re: Ali Sarkis × vendor-ev]]" in rendered
+        assert "[[2026-04-12-partner|Re: (External) Re: Pat Morgan × vendor-ev]]" in rendered
         # And no raw `[…]` survives in the alias slot — the bullet line
         # itself must round-trip Quartz's wikilinkRegex cleanly.
         bullet = next(

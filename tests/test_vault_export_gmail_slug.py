@@ -67,7 +67,7 @@ def test_gmail_export_uses_gmail_slug_path(
     """A gmail doc with thread_id + sent_at lands at the gmail_slug path."""
     thread_id = "thread-19de56cd"
     sent_at = "2026-05-01T12:00:00+00:00"
-    title = "Re: external — Re: Ali Sarkis vendor-ev"
+    title = "Re: external — Re: Pat Morgan vendor-ev"
     _ingest_gmail(
         test_db,
         embedder=fake_embedder,

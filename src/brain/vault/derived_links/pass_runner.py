@@ -300,8 +300,8 @@ def _krisp_participant_keys(
 
     Reads ``metadata['_participant_keys']`` (sorted list, ingest-time output)
     and bridges name-only keys to emails via the directory so a Krisp call
-    labeled ``**Ali Sarkis | 0:01**`` can match a Gmail with
-    ``from: "Ali Sarkis <redacted@example.com>"``.
+    labeled ``**Pat Morgan | 0:01**`` can match a Gmail with
+    ``from: "Pat Morgan <redacted@example.com>"``.
     """
     raw = metadata.get("_participant_keys")
     if not isinstance(raw, list):

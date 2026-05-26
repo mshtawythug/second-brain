@@ -70,16 +70,16 @@ class TestNormalizeParticipant:
         assert normalize_participant(token) is None
 
     def test_simple_name_passthrough(self) -> None:
-        assert normalize_participant("Ali Sarkis") == "ali sarkis"
+        assert normalize_participant("Pat Morgan") == "pat morgan"
 
     def test_collapses_internal_whitespace(self) -> None:
-        assert normalize_participant("Ali   Sarkis") == "ali sarkis"
-        assert normalize_participant("Ali\t\tSarkis") == "ali sarkis"
+        assert normalize_participant("Pat   Morgan") == "pat morgan"
+        assert normalize_participant("Pat\t\tMorgan") == "pat morgan"
 
     def test_strips_leading_and_trailing_punctuation(self) -> None:
-        assert normalize_participant(", Ali Sarkis.") == "ali sarkis"
-        assert normalize_participant("(Ali Sarkis)") == "ali sarkis"
-        assert normalize_participant("--Ali Sarkis--") == "ali sarkis"
+        assert normalize_participant(", Pat Morgan.") == "pat morgan"
+        assert normalize_participant("(Pat Morgan)") == "pat morgan"
+        assert normalize_participant("--Pat Morgan--") == "pat morgan"
 
     @pytest.mark.parametrize("token", ["A", "J ", "  X  ", "."])
     def test_too_short_after_normalization_returns_none(self, token: str) -> None:
@@ -104,34 +104,34 @@ class TestExtractKrispSpeakers:
         assert extract_krisp_speakers(body) == set()
 
     def test_single_speaker(self) -> None:
-        body = "**Ali Sarkis | 00:29**\nHey there\n"
-        assert extract_krisp_speakers(body) == {"ali sarkis"}
+        body = "**Pat Morgan | 00:29**\nHey there\n"
+        assert extract_krisp_speakers(body) == {"pat morgan"}
 
     def test_multiple_distinct_speakers(self) -> None:
         body = (
-            "**Ali Sarkis | 00:29**\nHello.\n"
+            "**Pat Morgan | 00:29**\nHello.\n"
             "**person-x last-a | 00:35**\nHi back.\n"
             "**person-erik | 01:02**\nHey.\n"
         )
-        assert extract_krisp_speakers(body) == {"ali sarkis", "person-x last-a", "person-erik"}
+        assert extract_krisp_speakers(body) == {"pat morgan", "person-x last-a", "person-erik"}
 
     def test_repeated_speaker_returns_single_entry(self) -> None:
         body = (
-            "**Ali Sarkis | 00:01**\nFirst turn.\n"
+            "**Pat Morgan | 00:01**\nFirst turn.\n"
             "**person-x last-a | 00:10**\nReply.\n"
-            "**Ali Sarkis | 00:20**\nSecond turn.\n"
-            "**Ali Sarkis | 00:35**\nThird turn.\n"
+            "**Pat Morgan | 00:20**\nSecond turn.\n"
+            "**Pat Morgan | 00:35**\nThird turn.\n"
         )
-        assert extract_krisp_speakers(body) == {"ali sarkis", "person-x last-a"}
+        assert extract_krisp_speakers(body) == {"pat morgan", "person-x last-a"}
 
     def test_speaker_n_placeholders_dropped(self) -> None:
         body = (
-            "**Ali Sarkis | 00:01**\nHi.\n"
+            "**Pat Morgan | 00:01**\nHi.\n"
             "**Speaker_1 | 00:10**\nUnknown person.\n"
             "**Speaker_2 | 00:25**\nAnother unknown.\n"
             "**person-x last-a | 00:40**\nReply.\n"
         )
-        assert extract_krisp_speakers(body) == {"ali sarkis", "person-x last-a"}
+        assert extract_krisp_speakers(body) == {"pat morgan", "person-x last-a"}
 
     def test_extract_krisp_speakers_drops_space_placeholders(self) -> None:
         # Real Krisp transcripts label unidentified speakers with a SPACE
@@ -141,9 +141,9 @@ class TestExtractKrispSpeakers:
         body = (
             "**Speaker 2 | 0:01**\nUnknown.\n"
             "**Speaker 5 | 0:02**\nAlso unknown.\n"
-            "**Ali | 0:03**\nReal speaker.\n"
+            "**Pat | 0:03**\nReal speaker.\n"
         )
-        assert extract_krisp_speakers(body) == {"ali"}
+        assert extract_krisp_speakers(body) == {"pat"}
 
     def test_email_speaker_returned_as_email(self) -> None:
         body = "**bob@example.com | 1:23**\nHello from bob.\n"
@@ -159,8 +159,8 @@ class TestExtractKrispSpeakers:
         assert extract_krisp_speakers(body) == {"bob jones"}
 
     def test_whitespace_variations_inside_label(self) -> None:
-        body = "**  Ali Sarkis  |  00:29  **\nHey.\n"
-        assert extract_krisp_speakers(body) == {"ali sarkis"}
+        body = "**  Pat Morgan  |  00:29  **\nHey.\n"
+        assert extract_krisp_speakers(body) == {"pat morgan"}
 
     def test_realistic_transcript_snippet(self) -> None:
         # 4-Phase: setup the snippet, exercise the parser, verify the set,
@@ -168,7 +168,7 @@ class TestExtractKrispSpeakers:
         snippet = (
             "Meeting transcript — 2026-04-15\n"
             "\n"
-            "**Ali Sarkis | 00:00**\n"
+            "**Pat Morgan | 00:00**\n"
             "Thanks for jumping on. Quick agenda check.\n"
             "\n"
             "**person-erik@example.com | 00:08**\n"
@@ -177,23 +177,23 @@ class TestExtractKrispSpeakers:
             "**Speaker_1 | 00:14**\n"
             "(unidentified noise)\n"
             "\n"
-            "**Ali Sarkis | 00:22**\n"
+            "**Pat Morgan | 00:22**\n"
             "Let's start with the renewal.\n"
         )
         assert extract_krisp_speakers(snippet) == {
-            "ali sarkis",
+            "pat morgan",
             "person-erik@example.com",
         }
 
     def test_label_inside_code_block_is_still_parsed(self) -> None:
         # Spec: parser is not Markdown-aware. Anything that matches the regex
         # is captured, even when the surrounding context is fenced code.
-        body = "```\n**Ali Sarkis | 00:29**\nfenced content\n```\n"
-        assert extract_krisp_speakers(body) == {"ali sarkis"}
+        body = "```\n**Pat Morgan | 00:29**\nfenced content\n```\n"
+        assert extract_krisp_speakers(body) == {"pat morgan"}
 
     def test_label_must_have_double_asterisks_on_both_sides(self) -> None:
         # Single asterisks aren't bold, so they aren't speaker labels.
-        body = "*Ali Sarkis | 00:29*\nNot a label.\n"
+        body = "*Pat Morgan | 00:29*\nNot a label.\n"
         assert extract_krisp_speakers(body) == set()
 
     def test_two_consecutive_labels_both_parsed(self) -> None:
@@ -204,8 +204,8 @@ class TestExtractKrispSpeakers:
     def test_hour_minute_second_timestamp_matches(self) -> None:
         # Calls over 60 minutes use H:MM:SS for the timestamp; the regex
         # must accept that form too.
-        body = "**Ali Sarkis | 1:23:45**\nLong call.\n"
-        assert extract_krisp_speakers(body) == {"ali sarkis"}
+        body = "**Pat Morgan | 1:23:45**\nLong call.\n"
+        assert extract_krisp_speakers(body) == {"pat morgan"}
 
 
 class TestExtractGmailAddresses:
@@ -221,8 +221,8 @@ class TestExtractGmailAddresses:
         assert extract_gmail_addresses({"from": "", "to": "   "}) == []
 
     def test_single_from_with_display_name(self) -> None:
-        result = extract_gmail_addresses({"from": "Ali Sarkis <redacted@example.com>"})
-        assert result == [("ali sarkis", "redacted@example.com")]
+        result = extract_gmail_addresses({"from": "Pat Morgan <redacted@example.com>"})
+        assert result == [("pat morgan", "redacted@example.com")]
 
     def test_bare_email_no_display_name(self) -> None:
         result = extract_gmail_addresses({"from": "bob@example.com"})
@@ -252,23 +252,23 @@ class TestExtractGmailAddresses:
         # Same email appears in from and to; should be returned exactly once.
         result = extract_gmail_addresses(
             {
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "redacted@example.com, Bob <bob@x.com>",
             }
         )
         # First occurrence (from) wins, then bob from to.
         assert result == [
-            ("ali sarkis", "redacted@example.com"),
+            ("pat morgan", "redacted@example.com"),
             ("bob", "bob@x.com"),
         ]
 
     def test_email_lowercased(self) -> None:
-        result = extract_gmail_addresses({"from": "Ali <REDACTED@Example.COM>"})
-        assert result == [("ali", "redacted@example.com")]
+        result = extract_gmail_addresses({"from": "Pat <REDACTED@Example.COM>"})
+        assert result == [("pat", "redacted@example.com")]
 
     def test_display_name_lowercased_and_whitespace_collapsed(self) -> None:
-        result = extract_gmail_addresses({"from": "ALI   SARKIS <a@x.com>"})
-        assert result == [("ali sarkis", "a@x.com")]
+        result = extract_gmail_addresses({"from": "PAT   MORGAN <a@x.com>"})
+        assert result == [("pat morgan", "a@x.com")]
 
     def test_mixed_valid_and_invalid_in_same_string(self) -> None:
         # email.utils.getaddresses tolerates malformed entries; we drop them.

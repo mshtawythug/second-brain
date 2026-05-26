@@ -25,7 +25,7 @@ def _gmail_doc(
     *,
     body: str = "hello",
     title: str = "Hi",
-    from_addr: str | None = "Ali Sarkis <redacted@example.com>",
+    from_addr: str | None = "Pat Morgan <redacted@example.com>",
     to: str | None = "person-x last-a <person-a@example.com>",
     message_id: str = "m1",
 ) -> ExtractedDoc:
@@ -80,8 +80,8 @@ def _wide_console(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Rich consults ``COLUMNS`` first and falls back to TTY size. Without
     this, ``CliRunner``'s captured stdout is treated as an 80-column
-    terminal and email/timestamp columns get clipped (e.g. ``ali@exampl…``)
-    — which makes ``"ali@example.com" in result.stdout`` flap.
+    terminal and email/timestamp columns get clipped (e.g. ``pat@exampl…``)
+    — which makes ``"pat@example.com" in result.stdout`` flap.
     """
     monkeypatch.setenv("COLUMNS", "240")
 
@@ -92,7 +92,7 @@ def _seed_gmail(
     *,
     external_id: str,
     body: str = "hello",
-    from_addr: str = "Ali Sarkis <redacted@example.com>",
+    from_addr: str = "Pat Morgan <redacted@example.com>",
     to: str = "person-x last-a <person-a@example.com>",
 ) -> str:
     """Ingest a Gmail document; the post-ingest hook seeds directory_entries."""
@@ -167,7 +167,7 @@ def test_directory_refresh_populates_from_gmail_docs(
         external_id="m2",
         body="second",
         from_addr="person-x last-a <person-a@example.com>",
-        to="Ali Sarkis <redacted@example.com>",
+        to="Pat Morgan <redacted@example.com>",
     )
 
     result = CliRunner().invoke(app, ["vault", "directory", "refresh"])
@@ -250,8 +250,8 @@ def test_directory_show_lists_all_entries(
     patch_embedder(fake_embedder)
     _insert_entry(
         test_db,
-        display_name="ali sarkis",
-        email="ali@example.com",
+        display_name="pat morgan",
+        email="pat@example.com",
         source="gmail",
     )
     _insert_entry(
@@ -271,7 +271,7 @@ def test_directory_show_lists_all_entries(
     assert result.exit_code == 0, result.stdout
     out = result.stdout
     # All three emails appear.
-    assert "ali@example.com" in out
+    assert "pat@example.com" in out
     assert "person-a@example.com" in out
     assert "alice@example.com" in out
     # Source labels appear.
@@ -289,8 +289,8 @@ def test_directory_show_filters_by_source(
     patch_embedder(fake_embedder)
     _insert_entry(
         test_db,
-        display_name="ali sarkis",
-        email="ali@example.com",
+        display_name="pat morgan",
+        email="pat@example.com",
         source="gmail",
     )
     _insert_entry(
@@ -305,7 +305,7 @@ def test_directory_show_filters_by_source(
     )
     assert result.exit_code == 0, result.stdout
     out = result.stdout
-    assert "ali@example.com" in out
+    assert "pat@example.com" in out
     # contacts row not shown — both the email and the source label tied
     # to the contacts row are absent from the rendered table.
     assert "person-a@example.com" not in out

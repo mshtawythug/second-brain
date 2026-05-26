@@ -46,7 +46,7 @@ def _wide_console(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Same pattern as ``test_cli_directory.py``: without ``COLUMNS``,
     Rich treats CliRunner output as 80 cols and emails get clipped to
-    e.g. ``ali@exampl…``, making substring assertions on email
+    e.g. ``pat@exampl…``, making substring assertions on email
     addresses flap.
     """
     monkeypatch.setenv("COLUMNS", "240")
@@ -58,7 +58,7 @@ def _scrub_owner_participants(monkeypatch: pytest.MonkeyPatch) -> None:
 
     The test author's local ``.env`` likely has owner identifiers set;
     without this override, ``Config.load()`` would pick them up via
-    python-dotenv's cwd walk and silently filter out the seeded "Ali"
+    python-dotenv's cwd walk and silently filter out the seeded "Pat"
     rows. ``setenv`` (rather than ``delenv``) wins because dotenv loads
     with ``override=False`` — a set-but-empty shell var beats the file.
     Owner-filter tests opt in by overriding this with their own setenv.
@@ -82,7 +82,7 @@ def _gmail_doc(
     *,
     body: str = "hello",
     title: str = "Hello",
-    from_addr: str = "Ali Sarkis <redacted@example.com>",
+    from_addr: str = "Pat Morgan <redacted@example.com>",
     to: str = "person-x last-a <person-a@example.com>",
     message_id: str = "m1",
     thread_id: str | None = None,
@@ -111,7 +111,7 @@ def _seed_gmail(
     external_id: str,
     title: str = "Hello",
     body: str = "hello",
-    from_addr: str = "Ali Sarkis <redacted@example.com>",
+    from_addr: str = "Pat Morgan <redacted@example.com>",
     to: str = "person-x last-a <person-a@example.com>",
 ) -> str:
     """Ingest a Gmail document; the post-ingest hook seeds directory_entries."""
@@ -153,7 +153,7 @@ def test_people_roster_lists_seeded_correspondents(
     # table headers + rows.
     assert "Display name" in out
     assert "Person-X Last-A" in out
-    assert "Ali Sarkis" in out
+    assert "Pat Morgan" in out
     # Primary email surfaces too.
     assert "person-a@example.com" in out
 
@@ -200,7 +200,7 @@ def test_people_roster_curated_badge_for_people_yml(
 
     result = CliRunner().invoke(app, ["people"])
     assert result.exit_code == 0, result.stdout
-    # The person-x row should carry the curated checkmark; the Ali row should not.
+    # The person-x row should carry the curated checkmark; the Pat row should not.
     assert "Person-X Last-A" in result.stdout
     assert "✅" in result.stdout
 
@@ -265,10 +265,10 @@ def test_people_roster_owner_filter_strips_owner(
     """``BRAIN_OWNER_PARTICIPANTS`` strips the owner from the roster."""
     patch_embedder(fake_embedder)
     _seed_gmail(test_db, fake_embedder, external_id="m1")
-    # Owner = the "Ali Sarkis" identity; should drop from the roster.
+    # Owner = the "Pat Morgan" identity; should drop from the roster.
     monkeypatch.setenv(
         "BRAIN_OWNER_PARTICIPANTS",
-        "ali sarkis,redacted@example.com",
+        "pat morgan,redacted@example.com",
     )
 
     result = CliRunner().invoke(app, ["people"])
@@ -276,7 +276,7 @@ def test_people_roster_owner_filter_strips_owner(
     # Counterparty stays.
     assert "Person-X Last-A" in result.stdout
     # Owner gone.
-    assert "Ali Sarkis" not in result.stdout
+    assert "Pat Morgan" not in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -368,25 +368,25 @@ def test_people_detail_ambiguous_match_warns_and_picks_first(
         test_db,
         fake_embedder,
         external_id="m1",
-        from_addr="Ali Sarkis <redacted@example.com>",
+        from_addr="Pat Morgan <redacted@example.com>",
         to="person-x last-a <person-a@example.com>",
     )
     _seed_gmail(
         test_db,
         fake_embedder,
         external_id="m2",
-        from_addr="Ali Sarkis <redacted@example.com>",
+        from_addr="Pat Morgan <redacted@example.com>",
         to="Anna Lee <anna@example.com>",
     )
 
-    # Substring "a" is in "ali sarkis", "anna lee", AND "person-a last-a" (the 'a'
+    # Substring "a" is in "pat morgan", "anna lee", AND "person-a last-a" (the 'a'
     # in "last-a"). All three persons match.
     result = CliRunner().invoke(app, ["people", "a"])
     assert result.exit_code == 0, result.output
     out_lower = result.output.lower()
     assert "matches" in out_lower
-    # The picked match (alpha-first) is Ali Sarkis.
-    assert "Ali Sarkis" in result.output
+    # The picked match (alpha-first) is Pat Morgan.
+    assert "Pat Morgan" in result.output
 
 
 def test_people_detail_json_emits_single_object(

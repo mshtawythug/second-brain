@@ -72,7 +72,7 @@ _MIN_TITLE_TOKENS_FOR_TITLE_ONLY = 3
 # (plainto_tsquery) is kept as-is.
 #
 # Empirically tuned on the live ~1,076-doc corpus (Phase F.D). At 0.025
-# (ndoc > ~27) the cut catches commodity tokens such as ``ali`` (ndoc 94),
+# (ndoc > ~27) the cut catches commodity tokens such as ``pat`` (ndoc 94),
 # ``sarki`` (53) and ``meet`` (31) — which lacked any IDF correction
 # under ``ts_rank`` and were outranking distinctive lexemes like
 # ``topic-ih`` (4) and ``person-b`` (1). The plan's original 0.30 was too

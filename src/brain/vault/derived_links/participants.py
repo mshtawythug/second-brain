@@ -77,7 +77,7 @@ def normalize_participant(token: str) -> str | None:
     collapsed = _WHITESPACE_RE.sub(" ", lowered)
     # Strip leading/trailing punctuation (anything that's not alphanumeric or
     # an internal space). We re-strip whitespace afterwards because removing
-    # punctuation can leave dangling spaces (``", Ali."`` → ``" ali "``).
+    # punctuation can leave dangling spaces (``", Pat."`` → ``" pat "``).
     name = collapsed.strip(" \t\n\r\f\v.,;:!?\"'()[]{}<>-_/\\|")
     name = name.strip()
     if len(name) < _MIN_NAME_LENGTH:

@@ -38,7 +38,7 @@ def _patch_embedder(monkeypatch: pytest.MonkeyPatch, fake_embedder: object) -> N
 
 
 KRISP_BODY_TWO_SPEAKERS = (
-    "**Ali | 0:01**\nHey, thanks for joining.\n\n"
+    "**Pat | 0:01**\nHey, thanks for joining.\n\n"
     "**bob@example.com | 0:02**\nHi there.\n"
 )
 """A canonical Krisp transcript body with one name + one email speaker."""
@@ -87,7 +87,7 @@ def test_ingest_stdin_creates_document(
             "--title", "person-x sync",
             "--content-type", "transcript",
             "--metadata",
-            json.dumps({"participants": ["person-x", "Ali"], "duration_min": 28}),
+            json.dumps({"participants": ["person-x", "Pat"], "duration_min": 28}),
         ],
         input="Hello person-x. Let me catch you up on COMPANY_REDACTED.\n\nIt was great.\n",
     )
@@ -290,7 +290,7 @@ def test_krisp_ingest_materializes_participant_keys(
     assert row is not None
     metadata = row[0]
     # Sorted alphabetically for deterministic JSONB ordering.
-    assert metadata["_participant_keys"] == ["ali", "bob@example.com"]
+    assert metadata["_participant_keys"] == ["bob@example.com", "pat"]
 
 
 def test_krisp_ingest_with_no_participants_stores_empty_list(
@@ -477,7 +477,7 @@ def test_krisp_ingest_succeeds_when_runner_is_none(
         (result.document_id,),
     ).fetchone()
     assert row is not None
-    assert row[0]["_participant_keys"] == ["ali", "bob@example.com"]
+    assert row[0]["_participant_keys"] == ["bob@example.com", "pat"]
     # No directory state row was created (refreshes were short-circuited).
     assert _refresh_state(test_db, "calendar") is None
     assert _refresh_state(test_db, "contacts") is None
@@ -507,7 +507,7 @@ def test_krisp_ingest_succeeds_when_calendar_refresh_fails(
         (result.document_id,),
     ).fetchone()
     assert doc_row is not None
-    assert doc_row[0]["_participant_keys"] == ["ali", "bob@example.com"]
+    assert doc_row[0]["_participant_keys"] == ["bob@example.com", "pat"]
 
     chunk_count = test_db.execute(
         "SELECT count(*) FROM chunks WHERE document_id = %s",
@@ -534,7 +534,7 @@ def test_gmail_hook_unchanged_after_b3_refactor(
             content_type="email",
             source_path=None,
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "person-x last-a <person-a@example.com>",
                 "date": "2026-04-01",
                 "message_id": "m1",
@@ -552,7 +552,7 @@ def test_gmail_hook_unchanged_after_b3_refactor(
     ).fetchall()
     assert rows == [
         ("person-x last-a", "person-a@example.com", "gmail"),
-        ("ali sarkis", "redacted@example.com", "gmail"),
+        ("pat morgan", "redacted@example.com", "gmail"),
     ]
 
 
@@ -598,4 +598,4 @@ def test_cli_krisp_ingest_threads_real_runner(
             "WHERE s.external_id='cli-meeting-1'"
         ).fetchone()
     assert row is not None
-    assert row[0]["_participant_keys"] == ["ali", "bob@example.com"]
+    assert row[0]["_participant_keys"] == ["bob@example.com", "pat"]

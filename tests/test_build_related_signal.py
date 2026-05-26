@@ -242,7 +242,7 @@ def test_self_tsquery_long_title_matches_partial_overlap(
     partial-overlap neighbors.
 
     Pre-fix: ``_build_self_tsquery`` returned a 7-way AND
-    (``'30' & 'min' & 'meet' & 'person-b' & 'topic-b' & 'ali' & 'sarki'``)
+    (``'30' & 'min' & 'meet' & 'person-b' & 'topic-b' & 'pat' & 'sarki'``)
     so a candidate body that contained only ``person-x`` was rejected and
     the FTS leg returned zero candidates. The doc 3508c63e in the live
     corpus exhibited this exact failure: its only person-x-mentioning
@@ -251,7 +251,7 @@ def test_self_tsquery_long_title_matches_partial_overlap(
     Post-fix: the title-only path returns ``(AND-form) | <per-token OR>``,
     so a body containing even one distinctive title token matches.
     """
-    title = "30 min meeting between person-x and Ali Sarkis"
+    title = "30 min meeting between person-x and Pat Morgan"
     doc_id = _doc(
         test_db,
         title=title,
@@ -276,7 +276,7 @@ def test_self_tsquery_long_title_matches_partial_overlap(
     assert _matches(
         test_db,
         tsquery,
-        "30 min meeting between person-x and Ali Sarkis recap",
+        "30 min meeting between person-x and Pat Morgan recap",
     )
 
 

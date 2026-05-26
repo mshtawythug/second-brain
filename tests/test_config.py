@@ -245,25 +245,25 @@ class TestOwnerParticipants:
         monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
         monkeypatch.setenv(
             "BRAIN_OWNER_PARTICIPANTS",
-            "Ali Sarkis,redacted@example.com",
+            "Pat Morgan,redacted@example.com",
         )
         cfg = Config.load()
         assert cfg.owner_participants == frozenset(
-            {"ali sarkis", "redacted@example.com"}
+            {"pat morgan", "redacted@example.com"}
         )
 
     def test_csv_drops_empty_entries_and_normalises(
         self, monkeypatch, isolated_dotenv
     ) -> None:
         # Whitespace-padded entries get trimmed; trailing empties from
-        # ``Ali ,, ALI@x.com ,`` are dropped; mixed case is folded.
+        # ``Pat ,, PAT@x.com ,`` are dropped; mixed case is folded.
         monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
         monkeypatch.setenv(
             "BRAIN_OWNER_PARTICIPANTS",
-            "  Ali  ,  ALI@x.com  ,  ",
+            "  Pat  ,  PAT@x.com  ,  ",
         )
         cfg = Config.load()
-        assert cfg.owner_participants == frozenset({"ali", "ali@x.com"})
+        assert cfg.owner_participants == frozenset({"pat", "pat@x.com"})
 
     def test_duplicates_collapsed(
         self, monkeypatch, isolated_dotenv
@@ -273,11 +273,11 @@ class TestOwnerParticipants:
         monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
         monkeypatch.setenv(
             "BRAIN_OWNER_PARTICIPANTS",
-            "ali@example.com, ALI@EXAMPLE.COM ,Ali Sarkis,ali sarkis",
+            "pat@example.com, PAT@EXAMPLE.COM ,Pat Morgan,pat morgan",
         )
         cfg = Config.load()
         assert cfg.owner_participants == frozenset(
-            {"ali@example.com", "ali sarkis"}
+            {"pat@example.com", "pat morgan"}
         )
 
 

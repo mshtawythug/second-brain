@@ -66,26 +66,26 @@ def test_owner_show_lists_current_entries(
     """``show`` prints lowercased entries, one per line, sorted for stability."""
     monkeypatch.setenv(
         "BRAIN_OWNER_PARTICIPANTS",
-        "Ali Sarkis,redacted@example.com",
+        "Pat Morgan,redacted@example.com",
     )
     runner = CliRunner()
     result = runner.invoke(app, ["owner", "show"])
     assert result.exit_code == 0, result.output
     lines = [ln for ln in result.output.splitlines() if ln.strip()]
-    assert lines == ["ali sarkis", "redacted@example.com"]
+    assert lines == ["pat morgan", "redacted@example.com"]
 
 
 def test_owner_set_writes_env_file(isolated_env: Path) -> None:
-    """``set "Ali,fixture@example.com"`` writes a normalised + quoted line to ``.env``.
+    """``set "Pat,fixture@example.com"`` writes a normalised + quoted line to ``.env``.
 
     Lowercase-in-list is the chosen contract (matches ``Config.load()``);
     a comma in the value triggers double-quoting per the writer rule.
     """
     runner = CliRunner()
-    result = runner.invoke(app, ["owner", "set", "Ali,fixture@example.com"])
+    result = runner.invoke(app, ["owner", "set", "Pat,fixture@example.com"])
     assert result.exit_code == 0, result.output
     text = isolated_env.read_text()
-    assert 'BRAIN_OWNER_PARTICIPANTS="ali,fixture@example.com"' in text
+    assert 'BRAIN_OWNER_PARTICIPANTS="pat,fixture@example.com"' in text
 
 
 def test_owner_set_replaces_existing_line(isolated_env: Path) -> None:
@@ -118,7 +118,7 @@ def test_owner_set_replaces_existing_line(isolated_env: Path) -> None:
 def test_owner_add_is_idempotent(isolated_env: Path) -> None:
     """Adding an already-present identifier is a no-op (case-insensitive)."""
     isolated_env.write_text(
-        'BRAIN_OWNER_PARTICIPANTS="ali,fixture@example.com"\n'
+        'BRAIN_OWNER_PARTICIPANTS="pat,fixture@example.com"\n'
     )
     before = isolated_env.read_text()
     runner = CliRunner()
@@ -135,7 +135,7 @@ def test_owner_add_is_idempotent(isolated_env: Path) -> None:
 def test_owner_remove_is_idempotent(isolated_env: Path) -> None:
     """Removing an identifier that isn't present is a no-op."""
     isolated_env.write_text(
-        'BRAIN_OWNER_PARTICIPANTS="ali,fixture@example.com"\n'
+        'BRAIN_OWNER_PARTICIPANTS="pat,fixture@example.com"\n'
     )
     before = isolated_env.read_text()
     runner = CliRunner()
@@ -156,11 +156,11 @@ def test_owner_set_quotes_when_value_contains_spaces(isolated_env: Path) -> None
     """
     runner = CliRunner()
     result = runner.invoke(
-        app, ["owner", "set", "Ali Sarkis,fixture@example.com"]
+        app, ["owner", "set", "Pat Morgan,fixture@example.com"]
     )
     assert result.exit_code == 0, result.output
     text = isolated_env.read_text()
-    assert 'BRAIN_OWNER_PARTICIPANTS="ali sarkis,fixture@example.com"' in text
+    assert 'BRAIN_OWNER_PARTICIPANTS="pat morgan,fixture@example.com"' in text
 
 
 def test_owner_set_short_circuits_when_unchanged(isolated_env: Path) -> None:
@@ -171,11 +171,11 @@ def test_owner_set_short_circuits_when_unchanged(isolated_env: Path) -> None:
     be byte-for-byte identical (including any trailing-newline quirks)
     so the no-op claim holds even at the OS level.
     """
-    isolated_env.write_text('BRAIN_OWNER_PARTICIPANTS="ali,fixture@example.com"\n')
+    isolated_env.write_text('BRAIN_OWNER_PARTICIPANTS="pat,fixture@example.com"\n')
     before = isolated_env.read_text()
     runner = CliRunner()
     # Mixed-case + reordered input that normalises to the existing list.
-    result = runner.invoke(app, ["owner", "set", "ALI,fixture@example.com"])
+    result = runner.invoke(app, ["owner", "set", "PAT,fixture@example.com"])
     assert result.exit_code == 0, result.output
     assert "no change" in result.output.lower()
     assert _RELINK_HINT_FRAGMENT not in result.output

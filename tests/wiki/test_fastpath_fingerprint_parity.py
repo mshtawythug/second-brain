@@ -341,7 +341,7 @@ def test_parity_all_structural_fields_populated() -> None:
 def test_parity_ignored_field_does_not_change_hash() -> None:
     """An ignored frontmatter field (Appendix A) produces the SAME hash as without it."""
     base = _src("title: Same\n", "Body.")
-    with_ignored = _src("title: Same\nowner: ali\nhits: 99\nsource: gmail\n", "Body.")
+    with_ignored = _src("title: Same\nowner: pat\nhits: 99\nsource: gmail\n", "Body.")
     fp_base_ts = _ts_fingerprint("same", "same.md", "same.html", base)
     fp_with_ts = _ts_fingerprint("same", "same.md", "same.html", with_ignored)
     fp_base_py = _py_fingerprint("same", "same.md", "same.html", base)

@@ -61,12 +61,12 @@ def test_summarize_returns_summary_and_model() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.append(request.read())
-        return _ok_summary("person-x met Ali on 2026-04-30 to discuss compliance work.")
+        return _ok_summary("person-x met Pat on 2026-04-30 to discuss compliance work.")
 
     enricher = _make_enricher(httpx.MockTransport(handler))
     result = enricher.summarize("person-x sync", "long body about the meeting")
     assert isinstance(result, SummaryResult)
-    assert result.summary.startswith("person-x met Ali")
+    assert result.summary.startswith("person-x met Pat")
     assert result.model == "llama3.1:8b"
     body = json.loads(captured[0])
     assert body["model"] == "llama3.1:8b"

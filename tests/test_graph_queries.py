@@ -568,7 +568,7 @@ def test_derived_edge_carries_rule_weight_evidence(
         b=ids["y"],
         rule="shared_participant",
         weight=0.4,
-        evidence={"participant": "ali@example.com", "shared_count": 3},
+        evidence={"participant": "pat@example.com", "shared_count": 3},
     )
     snapshot = graph_data(test_db, include_ingested=True)
     derived_edges = [e for e in snapshot.edges if e.link_kind == "derived"]
@@ -576,7 +576,7 @@ def test_derived_edge_carries_rule_weight_evidence(
     edge = derived_edges[0]
     assert edge.rule == "shared_participant"
     assert edge.weight == 0.4
-    assert edge.evidence == {"participant": "ali@example.com", "shared_count": 3}
+    assert edge.evidence == {"participant": "pat@example.com", "shared_count": 3}
 
 
 def test_backlinks_for_no_double_count_with_wiki_and_derived(

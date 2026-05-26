@@ -66,7 +66,7 @@ def _make_message(
     """Build a single Gmail ``users.messages.get`` response."""
     headers = [
         {"name": "From", "value": sender},
-        {"name": "To", "value": "ali@example.com"},
+        {"name": "To", "value": "pat@example.com"},
         {"name": "Subject", "value": subject},
         {"name": "Date", "value": date_header},
         {"name": "Message-ID", "value": f"<{msg_id}@example.com>"},
@@ -472,7 +472,7 @@ def test_link_refactor_vault_files(
 
     vault_path = tmp_path / "vault"
     vault_path.mkdir()
-    note_path = vault_path / "ali-vs-recruiter.md"
+    note_path = vault_path / "pat-vs-recruiter.md"
     note_path.write_text(
         "---\n"
         "id: 11111111-1111-1111-1111-111111111111\n"

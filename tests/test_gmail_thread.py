@@ -699,7 +699,7 @@ def test_summary_html_escapes_angle_bracketed_email() -> None:
             internal_date="1000",
             headers={
                 "Subject": "x",
-                "From": "Ali Sarkis <redacted@example.com>",
+                "From": "Pat Morgan <redacted@example.com>",
                 "Date": "Tue, 24 Feb 2026 17:11:00 -0500",
             },
             body_text="OLDER body",
@@ -720,7 +720,7 @@ def test_summary_html_escapes_angle_bracketed_email() -> None:
     # summary — the angle brackets become entities so the browser
     # renders the email as literal text instead of stripping it.
     assert (
-        "<summary>2026-02-24 22:11 — Ali Sarkis &lt;redacted@example.com&gt;"
+        "<summary>2026-02-24 22:11 — Pat Morgan &lt;redacted@example.com&gt;"
         "</summary>"
         in doc.content
     ), (
@@ -731,7 +731,7 @@ def test_summary_html_escapes_angle_bracketed_email() -> None:
     # Defense in depth: the unescaped form must NOT appear inside any
     # <summary> — that would re-introduce the stripped-by-browser bug.
     assert (
-        "<summary>2026-02-24 22:11 — Ali Sarkis <redacted@example.com>"
+        "<summary>2026-02-24 22:11 — Pat Morgan <redacted@example.com>"
         "</summary>"
         not in doc.content
     ), (

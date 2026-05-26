@@ -200,7 +200,7 @@ def test_metadata_promoted_on_insert_krisp(test_db, fake_embedder) -> None:
         content_type="transcript",
         source_path=None,
         metadata={
-            "participants": ["Ali Sarkis", "person-x last-b"],
+            "participants": ["Pat Morgan", "person-x last-b"],
             "duration_min": 42,
         },
     )
@@ -219,7 +219,7 @@ def test_metadata_promoted_on_insert_krisp(test_db, fake_embedder) -> None:
     ).fetchone()
     assert row is not None
     participants, duration_min = row
-    assert participants == ["Ali Sarkis", "person-x last-b"]
+    assert participants == ["Pat Morgan", "person-x last-b"]
     assert duration_min == 42
 
 
@@ -328,7 +328,7 @@ def test_malformed_participants_skipped(test_db, fake_embedder) -> None:
         source_path=None,
         metadata={
             "duration_min": 10,
-            "participants": "Ali, person-x",  # WRONG: should be a list
+            "participants": "Pat, person-x",  # WRONG: should be a list
         },
     )
     result = ingest_document(
@@ -443,7 +443,7 @@ def test_metadata_promoted_on_update(test_db, fake_embedder) -> None:
             "rfc_message_id": "<patched@example.com>",
             "in_reply_to": "<orig@example.com>",
             "date": "Wed, 05 May 2026 09:00:00 +0000",
-            "participants": ["Ali", "person-x"],
+            "participants": ["Pat", "person-x"],
             "duration_min": 30,
         },
     )
@@ -463,7 +463,7 @@ def test_metadata_promoted_on_update(test_db, fake_embedder) -> None:
     assert rfc_id == "<patched@example.com>"
     assert in_reply == "<orig@example.com>"
     assert sent_at == datetime(2026, 5, 5, 9, 0, 0, tzinfo=UTC)
-    assert participants == ["Ali", "person-x"]
+    assert participants == ["Pat", "person-x"]
     assert duration == 30
 
 

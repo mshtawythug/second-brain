@@ -105,7 +105,7 @@ class TestRuleSharedParticipant:
 
     def test_single_shared_participant_fires(self) -> None:
         a = make_doc(document_id="a", participants={"person-a@example.com"})
-        b = make_doc(document_id="b", participants={"person-a@example.com", "ali@example.com"})
+        b = make_doc(document_id="b", participants={"person-a@example.com", "pat@example.com"})
 
         evidence = rule_shared_participant(a, b)
 
@@ -120,18 +120,18 @@ class TestRuleSharedParticipant:
     def test_multiple_shared_picks_lowest_sorted_key(self) -> None:
         a = make_doc(
             document_id="a",
-            participants={"person-a@example.com", "ali@example.com", "zoe@example.com"},
+            participants={"person-a@example.com", "pat@example.com", "zoe@example.com"},
         )
         b = make_doc(
             document_id="b",
-            participants={"person-a@example.com", "ali@example.com", "zoe@example.com"},
+            participants={"person-a@example.com", "pat@example.com", "zoe@example.com"},
         )
 
         evidence = rule_shared_participant(a, b)
 
         assert evidence is not None
-        # sorted({...})[0] over these is "ali@example.com".
-        assert evidence.payload == {"participant": "ali@example.com", "shared_count": 3}
+        # sorted({...})[0] over these is "pat@example.com".
+        assert evidence.payload == {"participant": "pat@example.com", "shared_count": 3}
 
     def test_disjoint_participants_returns_none(self) -> None:
         a = make_doc(document_id="a", participants={"alice@example.com"})
@@ -454,17 +454,17 @@ class TestRuleSameDayParticipant:
         krisp = make_doc(
             document_id="k",
             source_kind="krisp",
-            participants={"person-a@example.com", "ali@example.com", "zoe@example.com"},
+            participants={"person-a@example.com", "pat@example.com", "zoe@example.com"},
             date=datetime.date(2026, 4, 15),
         )
         gmail = make_doc(
             document_id="g",
             source_kind="gmail",
-            participants={"person-a@example.com", "ali@example.com"},
+            participants={"person-a@example.com", "pat@example.com"},
             date=datetime.date(2026, 4, 15),
         )
 
         evidence = rule_same_day_participant(krisp, gmail)
 
         assert evidence is not None
-        assert evidence.payload["participant"] == "ali@example.com"
+        assert evidence.payload["participant"] == "pat@example.com"

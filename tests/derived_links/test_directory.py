@@ -139,17 +139,17 @@ class TestUpsertPair:
     def test_display_name_normalized(
         self, store: DirectoryStore, test_db: psycopg.Connection
     ) -> None:
-        # "Ali Sarkis." (trailing punctuation, mixed case) → "ali sarkis"
+        # "Pat Morgan." (trailing punctuation, mixed case) → "pat morgan"
         store.upsert_pair(
-            display_name="Ali Sarkis.",
-            email="ali@example.com",
+            display_name="Pat Morgan.",
+            email="pat@example.com",
             source="gmail",
         )
         row = test_db.execute(
             "SELECT display_name FROM directory_entries"
         ).fetchone()
         assert row is not None
-        assert row[0] == "ali sarkis"
+        assert row[0] == "pat morgan"
 
     def test_email_lowercased_and_stripped(
         self, store: DirectoryStore, test_db: psycopg.Connection

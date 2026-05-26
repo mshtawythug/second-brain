@@ -649,7 +649,7 @@ the display-name key behind and the rules still match. The recommended
 shape is `<Display Name>,<email>[,<other-email>...]`:
 
 ```
-BRAIN_OWNER_PARTICIPANTS="Ali Sarkis,redacted@example.com,redacted@example.com"
+BRAIN_OWNER_PARTICIPANTS="Pat Morgan,redacted@example.com,redacted@example.com"
 ```
 
 After changing the value, run `brain vault relink-derived` to rebuild the

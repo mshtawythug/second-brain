@@ -36,7 +36,7 @@ def _gmail_doc(
     *,
     body: str = "Hello world",
     title: str = "Hi",
-    from_addr: str | None = "Ali Sarkis <redacted@example.com>",
+    from_addr: str | None = "Pat Morgan <redacted@example.com>",
     to: str | None = "person-x last-a <person-a@example.com>",
     message_id: str = "m1",
     thread_id: str | None = None,
@@ -116,7 +116,7 @@ def _seed_gmail(
     *,
     external_id: str,
     body: str,
-    from_addr: str = "Ali Sarkis <redacted@example.com>",
+    from_addr: str = "Pat Morgan <redacted@example.com>",
     to: str = "person-x last-a <person-a@example.com>",
     thread_id: str | None = None,
 ) -> str:
@@ -215,7 +215,7 @@ def test_relink_derived_populates_directory_from_gmail(
         external_id="m2",
         body="second body",
         from_addr="person-x last-a <person-a@example.com>",
-        to="Ali Sarkis <redacted@example.com>",
+        to="Pat Morgan <redacted@example.com>",
     )
 
     result = CliRunner().invoke(app, ["vault", "relink-derived"])
@@ -394,7 +394,7 @@ def test_relink_derived_backfills_krisp_participant_keys(
     normalized speaker keys parsed from the body.
     """
     patch_embedder(fake_embedder)
-    body = "**Ali Sarkis | 0:01**\nHey.\n\n**person-x | 0:02**\nHi back.\n"
+    body = "**Pat Morgan | 0:01**\nHey.\n\n**person-x | 0:02**\nHi back.\n"
     doc_id = _seed_krisp_without_participant_keys(
         test_db, fake_embedder, external_id="meeting-backfill", body=body
     )
@@ -416,7 +416,7 @@ def test_relink_derived_backfills_krisp_participant_keys(
     # ``extract_krisp_speakers`` returns normalized lowercase names; the
     # backfill stores the sorted list. Both labels in the body resolve, so
     # we expect both keys, sorted alphabetically.
-    assert keys == ["ali sarkis", "person-x"]
+    assert keys == ["pat morgan", "person-x"]
     # The user-facing summary surfaces the backfill count.
     assert "backfilled" in result.stdout.lower()
 
@@ -434,7 +434,7 @@ def test_relink_derived_overwrites_stale_krisp_keys(
     edited via ``brain edit``) snaps back into alignment.
     """
     patch_embedder(fake_embedder)
-    body = "**Ali Sarkis | 0:01**\nHey.\n\n**person-x | 0:02**\nHi back.\n"
+    body = "**Pat Morgan | 0:01**\nHey.\n\n**person-x | 0:02**\nHi back.\n"
     # Ingest normally (the pre-insert hook will write keys based on body),
     # then OVERWRITE the keys with garbage so the test verifies the
     # backfill replaces, not just fills-when-missing.
@@ -457,7 +457,7 @@ def test_relink_derived_overwrites_stale_krisp_keys(
     assert post is not None
     keys = (post[0] or {}).get("_participant_keys")
     # Stale value gone; current-body-derived value present.
-    assert keys == ["ali sarkis", "person-x"]
+    assert keys == ["pat morgan", "person-x"]
     assert "someone-who-doesnt-exist" not in (keys or [])
 
 

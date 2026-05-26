@@ -190,7 +190,7 @@ def test_different_source_path_gives_different_hash() -> None:
 def test_ignored_field_does_not_change_hash() -> None:
     """Adding an ignored frontmatter field (Appendix A) does NOT change fingerprint."""
     src1 = _make_source("title: Hello\n", "Body.")
-    src2 = _make_source("title: Hello\nowner: ali\nhits: 42\n", "Body.")
+    src2 = _make_source("title: Hello\nowner: pat\nhits: 42\n", "Body.")
     fp1 = compute_fingerprint(
         source_bytes=src1, slug="hello", source_path="hello.md", output_path="hello.html"
     )

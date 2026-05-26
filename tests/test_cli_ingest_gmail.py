@@ -47,7 +47,7 @@ def _msg(
     from_addr: str,
     body: str,
     date: str = "Mon, 01 Apr 2026 12:00:00 +0000",
-    to: str = "ali@example.com",
+    to: str = "pat@example.com",
     thread_id: str | None = None,
     internal_date: str | None = None,
 ) -> dict[str, Any]:
@@ -701,7 +701,7 @@ def _gmail_doc(
     *,
     body: str = "Hello world",
     title: str = "Hi",
-    from_addr: str | None = "Ali Sarkis <redacted@example.com>",
+    from_addr: str | None = "Pat Morgan <redacted@example.com>",
     to: str | None = "person-x last-a <person-a@example.com>",
     message_id: str = "m1",
 ) -> ExtractedDoc:
@@ -746,7 +746,7 @@ def test_gmail_ingest_upserts_directory_entries(
     ).fetchall()
     assert rows == [
         ("person-x last-a", "person-a@example.com", "gmail", 1),
-        ("ali sarkis", "redacted@example.com", "gmail", 1),
+        ("pat morgan", "redacted@example.com", "gmail", 1),
     ]
 
 
@@ -847,7 +847,7 @@ def test_directory_upsert_skipped_for_non_gmail_source(
             content="manual body",
             content_type="note",
             source_path=None,
-            metadata={"from": "Ali <redacted@example.com>", "to": "x@y.com"},
+            metadata={"from": "Pat <redacted@example.com>", "to": "x@y.com"},
         ),
         source_kind="manual",
     )
@@ -963,7 +963,7 @@ def test_cli_ingest_gmail_populates_directory(
         "m1": _msg(
             id="m1",
             subject="Hi",
-            from_addr="Ali Sarkis <redacted@example.com>",
+            from_addr="Pat Morgan <redacted@example.com>",
             to="person-x last-a <person-a@example.com>",
             body="Hello there",
         ),
@@ -979,7 +979,7 @@ def test_cli_ingest_gmail_populates_directory(
         ).fetchall()
     assert rows == [
         ("person-x last-a", "person-a@example.com", "gmail"),
-        ("ali sarkis", "redacted@example.com", "gmail"),
+        ("pat morgan", "redacted@example.com", "gmail"),
     ]
 
 
@@ -1189,7 +1189,7 @@ def test_ingest_gmail_ingests_draft_only_thread_with_draft_flag(
         "payload": {
             "mimeType": "text/plain",
             "headers": [
-                {"name": "From", "value": "ali@example.com"},
+                {"name": "From", "value": "pat@example.com"},
                 {"name": "To", "value": "person-a@example.com"},
                 {"name": "Subject", "value": "draft thread subject"},
                 {"name": "Date", "value": "Mon, 04 May 2026 12:00:00 +0000"},

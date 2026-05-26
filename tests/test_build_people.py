@@ -257,7 +257,7 @@ class TestThresholdAndPeopleYmlOverride:
             title="Re: thing",
             metadata={
                 "from": "person-person-luke <person-luke@example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-person-luke",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -272,7 +272,7 @@ class TestThresholdAndPeopleYmlOverride:
                 title=f"Dan note {i}",
                 metadata={
                     "from": "Dan Jones <dan@example.com>",
-                    "to": "ali@example.com",
+                    "to": "pat@example.com",
                     "thread_id": f"t-dan-{i}",
                     "date": "Wed, 16 Apr 2026 12:00:00 -0700",
                 },
@@ -307,7 +307,7 @@ class TestThresholdAndPeopleYmlOverride:
                 title=f"Dan note {i}",
                 metadata={
                     "from": "Dan Jones <dan@example.com>",
-                    "to": "ali@example.com",
+                    "to": "pat@example.com",
                     "thread_id": f"t-dan-{i}",
                     "date": "Wed, 16 Apr 2026 12:00:00 -0700",
                 },
@@ -586,7 +586,7 @@ class TestAutomatedSenderFiltering:
             title="Invoice",
             metadata={
                 "from": "Billing Team <billing@acme.example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-billing",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -696,7 +696,7 @@ class TestDefensive:
             title="Real",
             metadata={
                 "from": "Bob <bob@example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-real",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -708,7 +708,7 @@ class TestDefensive:
             title="Draft",
             metadata={
                 "from": "Bob <bob@example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-draft",
                 "date": "Thu, 16 Apr 2026 12:00:00 -0700",
             },
@@ -736,7 +736,7 @@ class TestDefensive:
             title="Older",
             metadata={
                 "from": "Bob <bob@example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-old",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -748,7 +748,7 @@ class TestDefensive:
             title="Newer",
             metadata={
                 "from": "Bob <bob@example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-new",
                 "date": "Thu, 16 Apr 2026 12:00:00 -0700",
             },
@@ -783,7 +783,7 @@ class TestDefensive:
             title="Anon",
             metadata={
                 "from": "stranger@example.com",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-anon",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -816,7 +816,7 @@ class TestDefensive:
                 title=f"Doc {i}",
                 metadata={
                     "from": "Bob <bob@b.com>",
-                    "to": "ali@example.com",
+                    "to": "pat@example.com",
                     "thread_id": f"t-{i}",
                     "date": "Wed, 15 Apr 2026 12:00:00 -0700",
                 },
@@ -844,7 +844,7 @@ class TestDefensive:
             title="No mirror yet",
             metadata={
                 "from": "Bob <bob@example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-1",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -874,7 +874,7 @@ class TestDefensive:
             title="Headers",
             metadata={
                 "from": "Bob <bob@example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-sent",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -936,7 +936,7 @@ class TestDefensive:
             title="Z empty",
             metadata={
                 "from": "Bob <bob@example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-empty",
                 "date": "   ",
             },
@@ -948,7 +948,7 @@ class TestDefensive:
             title="A bad",
             metadata={
                 "from": "Bob <bob@example.com>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": "t-bad",
                 "date": "Bogus 99 Notamonth -1 12:00:00 -0700",
             },
@@ -981,7 +981,7 @@ class TestDefensive:
                 title=f"x {i}",
                 metadata={
                     "from": "Alias <alias@example.com>",
-                    "to": "ali@example.com",
+                    "to": "pat@example.com",
                     "thread_id": f"t-alias-{i}",
                     "date": "Wed, 15 Apr 2026 12:00:00 -0700",
                 },
@@ -1272,7 +1272,7 @@ def _seed_curated_with_docs(
             title=f"{name.title()} doc {i}",
             metadata={
                 "from": f"{name} <{email}>",
-                "to": "ali@example.com",
+                "to": "pat@example.com",
                 "thread_id": f"t-{name}-{i}",
                 "date": f"Wed, {15 + i:02d} Apr 2026 12:00:00 -0700",
             },

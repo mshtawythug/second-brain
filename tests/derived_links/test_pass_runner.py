@@ -113,7 +113,7 @@ class TestSharedThread:
             external_id="msg-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-shared",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -124,7 +124,7 @@ class TestSharedThread:
             source_kind="gmail",
             external_id="msg-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-shared",
                 "date": "Wed, 15 Apr 2026 12:30:00 -0700",
@@ -164,7 +164,7 @@ class TestSameDayParticipant:
             source_kind="krisp",
             external_id="krisp-1",
             metadata={
-                "_participant_keys": sorted(["person-a@example.com", "ali sarkis"]),
+                "_participant_keys": sorted(["person-a@example.com", "pat morgan"]),
                 "date": "2026-04-15",
             },
             content="**person-x | 0:01**\nhello",
@@ -175,7 +175,7 @@ class TestSameDayParticipant:
             external_id="gmail-1",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-1",
                 "date": "Wed, 15 Apr 2026 09:00:00 -0700",
             },
@@ -212,7 +212,7 @@ class TestSameDayParticipant:
             external_id="gmail-2",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-2",
                 "date": "Mon, 20 Apr 2026 09:00:00 -0700",  # 5 days later
             },
@@ -272,10 +272,10 @@ class TestDirectoryBridge:
     def test_directory_bridges_name_to_email(
         self, test_db: psycopg.Connection, directory: DirectoryStore
     ) -> None:
-        # Bridge "Ali Sarkis" → "redacted@example.com" via people_yml so it
+        # Bridge "Pat Morgan" → "redacted@example.com" via people_yml so it
         # wins absolutely; relies on B.1's resolution semantics.
         directory.upsert_pair(
-            display_name="Ali Sarkis",
+            display_name="Pat Morgan",
             email="redacted@example.com",
             source="people_yml",
         )
@@ -285,18 +285,18 @@ class TestDirectoryBridge:
             source_kind="krisp",
             external_id="krisp-bridge",
             metadata={
-                # B.3 stores a sorted list; "ali sarkis" is the only key.
-                "_participant_keys": ["ali sarkis"],
+                # B.3 stores a sorted list; "pat morgan" is the only key.
+                "_participant_keys": ["pat morgan"],
                 "date": "2026-04-15",
             },
-            content="**Ali Sarkis | 0:01**\nthought leadership",
+            content="**Pat Morgan | 0:01**\nthought leadership",
         )
         gmail_id = _seed_doc(
             test_db,
             source_kind="gmail",
             external_id="gmail-bridge",
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-bridge",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
@@ -328,7 +328,7 @@ class TestTouchedScope:
             external_id="g-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-tri",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -339,7 +339,7 @@ class TestTouchedScope:
             source_kind="gmail",
             external_id="g-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-tri",
                 "date": "Wed, 15 Apr 2026 13:00:00 -0700",
@@ -352,7 +352,7 @@ class TestTouchedScope:
             external_id="g-c",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-tri",
                 "date": "Wed, 15 Apr 2026 14:00:00 -0700",
             },
@@ -384,7 +384,7 @@ class TestIdempotence:
             external_id="ig-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-idem",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -395,7 +395,7 @@ class TestIdempotence:
             source_kind="gmail",
             external_id="ig-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-idem",
                 "date": "Wed, 15 Apr 2026 13:00:00 -0700",
@@ -448,7 +448,7 @@ class TestConcurrentRebuildRace:
             external_id="race-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-race",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -459,7 +459,7 @@ class TestConcurrentRebuildRace:
             source_kind="gmail",
             external_id="race-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-race",
                 "date": "Wed, 15 Apr 2026 13:00:00 -0700",
@@ -518,7 +518,7 @@ class TestCanonicalOrdering:
             external_id="co-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-co",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -529,7 +529,7 @@ class TestCanonicalOrdering:
             source_kind="gmail",
             external_id="co-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-co",
                 "date": "Wed, 15 Apr 2026 13:00:00 -0700",
@@ -592,7 +592,7 @@ class TestEmptyInput:
             external_id="emp-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-emp",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -603,7 +603,7 @@ class TestEmptyInput:
             source_kind="gmail",
             external_id="emp-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-emp",
                 "date": "Wed, 15 Apr 2026 13:00:00 -0700",
@@ -637,7 +637,7 @@ class TestRulePriority:
             external_id="co1-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-co1",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -648,7 +648,7 @@ class TestRulePriority:
             source_kind="gmail",
             external_id="co1-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-co1",
                 "date": "Wed, 15 Apr 2026 13:00:00 -0700",
@@ -691,7 +691,7 @@ class TestR3SupersedesR2:
             external_id="sup-g",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-sup",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -721,7 +721,7 @@ class TestPreservesUnrelated:
             external_id="pre-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-ab",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -732,7 +732,7 @@ class TestPreservesUnrelated:
             source_kind="gmail",
             external_id="pre-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-ab",
                 "date": "Wed, 15 Apr 2026 13:00:00 -0700",
@@ -833,7 +833,7 @@ class TestMalformedMetadata:
             external_id="bad-g1",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-bad1",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -874,7 +874,7 @@ class TestMalformedMetadata:
             external_id="bad-g2",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-bad2",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -909,7 +909,7 @@ class TestMalformedMetadata:
             external_id="bad-g3",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-bad3",
                 "date": "   ",  # blank string
             },
@@ -944,7 +944,7 @@ class TestMalformedMetadata:
             external_id="bad-g4",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-bad4",
                 "date": "totally bogus",
             },
@@ -996,7 +996,7 @@ class TestAffectedIds:
             external_id="incl-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-isolated",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -1021,7 +1021,7 @@ class TestAffectedIds:
             external_id="trio-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-trio",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -1032,7 +1032,7 @@ class TestAffectedIds:
             source_kind="gmail",
             external_id="trio-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-trio",
                 "date": "Wed, 15 Apr 2026 13:00:00 -0700",
@@ -1045,7 +1045,7 @@ class TestAffectedIds:
             external_id="trio-c",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-trio",
                 "date": "Wed, 15 Apr 2026 14:00:00 -0700",
             },
@@ -1076,7 +1076,7 @@ class TestAffectedIds:
             external_id="lost-a",
             metadata={
                 "from": "person-x <person-a@example.com>",
-                "to": "Ali <ali@example.com>",
+                "to": "Pat <pat@example.com>",
                 "thread_id": "t-lost",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
@@ -1087,7 +1087,7 @@ class TestAffectedIds:
             source_kind="gmail",
             external_id="lost-b",
             metadata={
-                "from": "Ali <ali@example.com>",
+                "from": "Pat <pat@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-lost",
                 "date": "Wed, 15 Apr 2026 13:00:00 -0700",
@@ -1143,20 +1143,20 @@ class TestOwnerParticipantStrip:
             document_id="d1",
             source_kind="gmail",
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-strip",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
             },
             directory=directory,
-            owner_participants=frozenset({"redacted@example.com", "ali sarkis"}),
+            owner_participants=frozenset({"redacted@example.com", "pat morgan"}),
         )
         # Both the owner email and the directory-resolved display key for
-        # "Ali Sarkis" should be gone; only "person-a@example.com" remains
+        # "Pat Morgan" should be gone; only "person-a@example.com" remains
         # (display "person-x" is not in the directory, so it stays — but lower-
         # cased to "person-a" by ``extract_gmail_addresses`` normalisation).
         assert "redacted@example.com" not in snap.participant_keys
-        assert "ali sarkis" not in snap.participant_keys
+        assert "pat morgan" not in snap.participant_keys
         assert "person-a@example.com" in snap.participant_keys
 
     def test_snapshot_strips_owner_display_name(
@@ -1164,24 +1164,24 @@ class TestOwnerParticipantStrip:
     ) -> None:
         # Krisp snapshot with two name-only participant keys, no directory
         # resolution, so both stay as raw names. Configuring
-        # ``owner_participants={"ali sarkis"}`` strips that one key while
+        # ``owner_participants={"pat morgan"}`` strips that one key while
         # leaving "person-a" untouched.
         snap = _build_snapshot(
             document_id="d2",
             source_kind="krisp",
             metadata={
-                "_participant_keys": ["Ali Sarkis", "person-a"],
+                "_participant_keys": ["Pat Morgan", "person-a"],
                 "date": "2026-04-15",
             },
             directory=directory,
-            owner_participants=frozenset({"ali sarkis"}),
+            owner_participants=frozenset({"pat morgan"}),
         )
         # Krisp keys are stored as the raw display name (case-preserved)
         # when the directory has no resolution. The strip uses
         # ``key.lower() in owner_participants`` so the case-mixed
-        # "Ali Sarkis" key matches the lowercased owner entry.
-        assert "Ali Sarkis" not in snap.participant_keys
-        assert "ali sarkis" not in snap.participant_keys
+        # "Pat Morgan" key matches the lowercased owner entry.
+        assert "Pat Morgan" not in snap.participant_keys
+        assert "pat morgan" not in snap.participant_keys
         assert "person-a" in snap.participant_keys
 
     def test_empty_owner_set_does_not_strip_keys(
@@ -1196,7 +1196,7 @@ class TestOwnerParticipantStrip:
             document_id="d3",
             source_kind="gmail",
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-noop",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
@@ -1215,13 +1215,13 @@ class TestOwnerParticipantStrip:
         # ``_gmail_participant_keys`` adds BOTH the email and the lowered
         # display name to the key set — so the owner config must list
         # both forms (mirrors the plan's recommended ``BRAIN_OWNER_PARTICIPANTS``
-        # value: ``"Ali Sarkis,redacted@example.com"``).
-        owner = frozenset({"redacted@example.com", "ali sarkis"})
+        # value: ``"Pat Morgan,redacted@example.com"``).
+        owner = frozenset({"redacted@example.com", "pat morgan"})
         a = _build_snapshot(
             document_id="a",
             source_kind="gmail",
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-a",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
@@ -1233,7 +1233,7 @@ class TestOwnerParticipantStrip:
             document_id="b",
             source_kind="gmail",
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "Carol <carol@example.com>",
                 "thread_id": "t-b",
                 "date": "Thu, 16 Apr 2026 12:00:00 -0700",
@@ -1250,12 +1250,12 @@ class TestOwnerParticipantStrip:
         # Same owner-strip configuration, but both docs also share a real
         # non-owner participant. R2 must still fire on the surviving
         # overlap.
-        owner = frozenset({"redacted@example.com", "ali sarkis"})
+        owner = frozenset({"redacted@example.com", "pat morgan"})
         a = _build_snapshot(
             document_id="a",
             source_kind="gmail",
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-a",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
@@ -1267,7 +1267,7 @@ class TestOwnerParticipantStrip:
             document_id="b",
             source_kind="gmail",
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "person-x <person-a@example.com>",
                 "thread_id": "t-b",
                 "date": "Fri, 17 Apr 2026 12:00:00 -0700",
@@ -1288,7 +1288,7 @@ class TestOwnerParticipantStrip:
         assert evidence.payload["participant"] in {"person-a", "person-a@example.com"}
         assert evidence.payload["participant"] not in {
             "redacted@example.com",
-            "ali sarkis",
+            "pat morgan",
         }
 
     def test_same_day_participant_drops_to_none_when_only_owner_is_shared(
@@ -1297,12 +1297,12 @@ class TestOwnerParticipantStrip:
         # Krisp + Gmail on the same date whose only shared participant is
         # the owner — after the strip R3 has no intersection and returns
         # None.
-        owner = frozenset({"redacted@example.com", "ali sarkis"})
+        owner = frozenset({"redacted@example.com", "pat morgan"})
         krisp = _build_snapshot(
             document_id="k",
             source_kind="krisp",
             metadata={
-                "_participant_keys": ["ali sarkis"],
+                "_participant_keys": ["pat morgan"],
                 "date": "2026-04-15",
             },
             directory=directory,
@@ -1312,7 +1312,7 @@ class TestOwnerParticipantStrip:
             document_id="g",
             source_kind="gmail",
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "Carol <carol@example.com>",
                 "thread_id": "t-g",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
@@ -1335,17 +1335,17 @@ class TestOwnerParticipantStrip:
             source_kind="krisp",
             external_id="own-k",
             metadata={
-                "_participant_keys": ["ali sarkis"],
+                "_participant_keys": ["pat morgan"],
                 "date": "2026-04-15",
             },
-            content="**Ali Sarkis | 0:01**\nbanking call",
+            content="**Pat Morgan | 0:01**\nbanking call",
         )
         gmail_id = _seed_doc(
             test_db,
             source_kind="gmail",
             external_id="own-g",
             metadata={
-                "from": "Ali Sarkis <redacted@example.com>",
+                "from": "Pat Morgan <redacted@example.com>",
                 "to": "company-mc <support@example.com>",
                 "thread_id": "t-company-mc",
                 "date": "Wed, 15 Apr 2026 12:00:00 -0700",
@@ -1358,7 +1358,7 @@ class TestOwnerParticipantStrip:
             {krisp_id, gmail_id},
             directory=directory,
             owner_participants=frozenset(
-                {"redacted@example.com", "ali sarkis"}
+                {"redacted@example.com", "pat morgan"}
             ),
         )
 

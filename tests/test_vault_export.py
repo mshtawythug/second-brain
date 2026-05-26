@@ -414,7 +414,7 @@ def test_export_honors_existing_ingested_vault_path(
     doc_id = _ingest(
         test_db,
         embedder=fake_embedder,
-        title="Ali Sarkis -- vendor-ev",
+        title="Pat Morgan -- vendor-ev",
         content="thread body",
         source_kind="gmail",
         external_id="msg-1",
@@ -423,7 +423,7 @@ def test_export_honors_existing_ingested_vault_path(
             "sent_at": "2026-04-28T12:00:00+00:00",
         },
     )
-    recorded_rel = "_ingested/gmail/Tue, 28 Ap-19dd5817-ali-sarkis-vendor-ev.md"
+    recorded_rel = "_ingested/gmail/Tue, 28 Ap-19dd5817-pat-morgan-vendor-ev.md"
     test_db.execute(
         "UPDATE documents SET vault_path = %s WHERE id = %s::uuid",
         (recorded_rel, doc_id),
