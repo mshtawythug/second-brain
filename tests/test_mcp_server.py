@@ -261,7 +261,14 @@ class _BoomEmbedder:
 
     Used to assert each tool wraps embedder failures as ``McpError`` rather
     than letting a raw ``OllamaEmbedError`` propagate to the MCP runtime.
+
+    ``dim`` is required by the Embedder Protocol; T2's query-embed LRU
+    cache reads it to build its key before any ``embed`` call fires, so
+    a stub without ``dim`` would AttributeError before the intended
+    ``embed`` failure can be wrapped. Value matches the arctic default.
     """
+
+    dim: int = 1024
 
     def embed(
         self, texts: list[str], *, input_type: str = "document"
