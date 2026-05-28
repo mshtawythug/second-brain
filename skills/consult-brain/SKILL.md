@@ -1,22 +1,16 @@
 ---
 name: consult-brain
 description: >
-  Answer questions and write content using the user's local "second brain" — a
-  hybrid-search knowledge base of their career artifacts, meeting transcripts,
-  Slack threads, Gmail conversations, and authored vault notes. Use this skill
-  whenever the user asks about their own history, past meetings, past Slack
-  threads or emails, interview prep, specific people they have worked with, or
-  asks Claude to write/draft anything in their voice. Trigger on phrases like
-  "what did I say to X", "summarize my conversations about Y", "what's in my
-  brain about Z", "pull my thoughts on W", "write a [thing] in my voice",
-  "draft this like I would", or any question whose answer plausibly lives in
-  the user's personal corpus. Also trigger on indirect signals like "do I have
-  anything written about ..." or "search my notes for ...". Prefer this skill
-  over guessing or inventing biographical content.
+  Answer questions or write content using the user's local "second brain" — a
+  hybrid-search knowledge base of career artifacts, meeting transcripts, Slack
+  threads, Gmail, and authored vault notes. Use for lookups about the user's
+  own history, quotes, facts, and drafting in their voice. For themes /
+  patterns / connections across interactions, use `brain-graph` instead.
   MANDATORY TRIGGERS: ask my brain, second brain, what did I say, my
   conversations, my notes about, write in my voice, draft like me, my career,
   my interview prep, summarize my emails about, what did I tell, did I ever
-  say, remind me about my, pull from my brain.
+  say, remind me about my, pull from my brain, search my notes for, do I have
+  anything written about.
 ---
 
 # Consult Brain

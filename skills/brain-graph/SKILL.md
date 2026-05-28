@@ -2,28 +2,17 @@
 name: brain-graph
 description: >
   Graph retrieval over the user's local "second brain" — an entity-centric
-  GraphRAG layer (Apache AGE) that sits alongside the plain hybrid search. Use
-  this skill when the question is about THEMES, PATTERNS, or CONNECTIONS across
-  the user's interactions rather than a single-document lookup: "what themes
-  keep coming up in my conversations with X", "what topics connect A and B",
-  "how has my thinking on Z evolved", "what are the recurring themes in my
-  brain", "show me everything around person/topic Q and what it links to". Also
-  use it to ENUMERATE or SIZE UP the graph: "what orgs/people/projects/topics
-  are in my brain", "list all projects", "how big is my graph / what's in it".
-  Trigger on phrases like "themes with", "patterns across", "what connects",
-  "what keeps coming up", "recurring topics", "the bigger picture across my
-  notes", "map out", "who/what is related to", "what orgs are in my brain",
-  "list all my projects", "how big is the graph", or any request that wants the
-  GRAPH shape (entities + relationships + clusters) instead of a flat ranked
-  list of documents. For plain "find docs about X" lookups, voice writing, or
-  per-document Q&A, use `consult-brain` instead.
-  MANDATORY TRIGGERS: themes with, themes in my conversations, patterns across,
-  what connects, what keeps coming up, recurring themes, recurring topics, how
-  has my thinking evolved, map out my, who is related to, what is related to,
-  the bigger picture across, graph of my, cluster my notes, overall themes in
-  my brain, what orgs are in my brain, what people are in my brain, list all
-  projects, what topics are in my brain, what entities, how big is my graph,
-  what's in my graph, graph overview, graph stats.
+  GraphRAG layer (Apache AGE) alongside hybrid search. Use for THEMES,
+  PATTERNS, or CONNECTIONS across interactions, or to ENUMERATE the graph
+  (people / orgs / projects / topics). For single-doc lookups, quotes, or
+  voice writing, use `consult-brain` instead.
+  MANDATORY TRIGGERS: themes with, themes in my conversations, patterns
+  across, what connects, what keeps coming up, recurring themes, recurring
+  topics, how has my thinking evolved, map out my, who is related to, what is
+  related to, the bigger picture across, graph of my, cluster my notes,
+  overall themes in my brain, what orgs are in my brain, what people are in
+  my brain, list all projects, what topics are in my brain, what entities,
+  how big is my graph, what's in my graph, graph overview, graph stats.
 ---
 
 # Brain Graph (GraphRAG)
