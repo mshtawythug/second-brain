@@ -4,10 +4,12 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
+from .db import connect
 from .errors import BrainError
 
 
@@ -161,3 +163,29 @@ def ingest_in_flight(processes: Sequence[str] | None = None) -> bool:
     """True iff a ``brain ingest*`` process is running. Watchers are not matched."""
     procs = processes if processes is not None else _snapshot_processes()
     return any(_INGEST_RE.search(p) for p in procs)
+
+
+# Fixed namespaced advisory-lock key for brain-rebuild (arbitrary 32-bit constant, "brnr").
+_REBUILD_LOCK_KEY = 0x6272_6E72
+
+
+class RebuildLockHeld(BrainError):
+    """Another brain-rebuild run already holds the advisory lock."""
+
+
+@contextmanager
+def rebuild_lock(database_url: str) -> Iterator[None]:
+    """Hold a session-level advisory lock for the rebuild.
+
+    Raises :class:`RebuildLockHeld` if another run holds it. Released on exit.
+    """
+    with connect(database_url) as conn:
+        row = conn.execute(
+            "SELECT pg_try_advisory_lock(%s)", (_REBUILD_LOCK_KEY,)
+        ).fetchone()
+        if not (row and row[0]):
+            raise RebuildLockHeld("another brain-rebuild run is in progress")
+        try:
+            yield
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (_REBUILD_LOCK_KEY,))

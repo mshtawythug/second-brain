@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from brain import maintenance as m
+from brain.config import Config
 
 
 def test_build_stages_canonical_order_and_ids() -> None:
@@ -99,3 +100,22 @@ def test_ingest_in_flight_matches_all_ingest_variants() -> None:
         assert m.ingest_in_flight(
             [f"/usr/bin/python /x/bin/brain {cmd} /some/path"]
         ) is True, cmd
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Advisory lock (integration — requires test Postgres on port 5434)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_rebuild_lock_is_exclusive() -> None:
+    # _force_test_database_url (autouse session fixture) ensures DATABASE_URL
+    # is the test DB (port 5434), so Config.load() is safe here.
+    url = Config.load().database_url
+    with m.rebuild_lock(url):
+        with pytest.raises(m.RebuildLockHeld):
+            with m.rebuild_lock(url):
+                pass
+    # After the outer block exits the lock is released; re-acquisition must succeed.
+    with m.rebuild_lock(url):
+        pass
