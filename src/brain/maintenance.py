@@ -1,6 +1,7 @@
 """brain-rebuild orchestrator: a full-corpus rebuild chaining every derived-layer stage."""
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import shutil
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import typer
 
+from .config import Config
 from .db import connect
 from .errors import BrainError
 
@@ -233,3 +235,95 @@ def run_stages(
                     f"  warn: {' '.join(step.argv)} exited {code} (non-fatal, continuing)",
                     fg="yellow",
                 )
+
+
+_KEEP_DEFAULT = 3  # mirrors BRAIN_WIKI_KEEP_BUILDS default in the retired bash template
+
+
+def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
+    """Parse brain-rebuild command-line arguments."""
+    p = argparse.ArgumentParser(
+        prog="brain-rebuild",
+        description=(
+            "Full-corpus rebuild: embeddings → summaries → search "
+            "→ graph → weights → communities → wiki."
+        ),
+    )
+    p.add_argument(
+        "--wiki-only",
+        action="store_true",
+        help="Run only the wiki stage (today's fast path).",
+    )
+    p.add_argument("--only", help="Comma-separated stage ids to run.")
+    p.add_argument("--skip", help="Comma-separated stage ids to skip.")
+    p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the stage plan and exit; run nothing, take no lock.",
+    )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="Override the in-flight-ingest guard.",
+    )
+    p.add_argument(
+        "--clean-cache",
+        action="store_true",
+        help="Wipe the Quartz parser cache before the wiki build.",
+    )
+    return p.parse_args(list(argv))
+
+
+def _csv(value: str | None) -> list[str] | None:
+    """Split a comma-separated string into a stripped list, or return None."""
+    if not value:
+        return None
+    return [s.strip() for s in value.split(",") if s.strip()]
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Entry point for brain-rebuild. Returns an exit code (0 success, 1–4 error)."""
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+
+    cfg = Config.load()
+    keep = int(os.environ.get("BRAIN_WIKI_KEEP_BUILDS", str(_KEEP_DEFAULT)))
+    stages = build_stages(vault_path=cfg.vault_path, keep=keep, clean_cache=args.clean_cache)
+
+    try:
+        selected = select_stages(
+            stages,
+            only=_csv(args.only),
+            skip=_csv(args.skip),
+            wiki_only=args.wiki_only,
+        )
+    except SelectionError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        return 2
+
+    if args.dry_run:
+        typer.echo("brain-rebuild plan (dry-run):")
+        for i, stage in enumerate(selected, 1):
+            typer.echo(f"  {i}. {stage.stage_id} — {stage.description}")
+        return 0
+
+    if not args.force and ingest_in_flight():
+        typer.secho(
+            "error: a `brain ingest` process is in flight; "
+            "wait for it to finish or pass --force.",
+            fg="red",
+            err=True,
+        )
+        return 3
+
+    try:
+        with rebuild_lock(cfg.database_url):
+            run_stages(selected, clean_cache=args.clean_cache, vault_path=cfg.vault_path)
+    except RebuildLockHeld as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        return 4
+    except StageFailed as exc:
+        typer.secho(f"error: {exc}. Remaining stages not run.", fg="red", err=True)
+        return 1
+
+    typer.secho("✓ brain-rebuild complete", fg="green")
+    return 0

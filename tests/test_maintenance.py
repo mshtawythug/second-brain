@@ -1,6 +1,8 @@
 """Unit + integration tests for the brain-rebuild full-corpus orchestrator."""
 from __future__ import annotations
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -112,7 +114,7 @@ def test_rebuild_lock_is_exclusive() -> None:
     # _force_test_database_url (autouse session fixture) ensures DATABASE_URL
     # is the test DB (port 5434), so Config.load() is safe here.
     url = Config.load().database_url
-    with m.rebuild_lock(url):
+    with m.rebuild_lock(url):  # noqa: SIM117 — nesting is intentional: outer holds the lock
         with pytest.raises(m.RebuildLockHeld):
             with m.rebuild_lock(url):
                 pass
@@ -155,3 +157,85 @@ def test_run_stages_nonfatal_step_continues_to_build_swap() -> None:
 
     m.run_stages(selected, runner=fake_run, clean_cache=False, vault_path=Path("/tmp/v"))
     assert any("build_swap" in a for c in calls for a in c)
+
+
+# ---------------------------------------------------------------------------
+# Task 6: main(argv) — argparse entry, dry-run, guard + lock wiring
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _noop_lock(_url: str) -> Generator[None, None, None]:
+    yield
+
+
+def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("BRAIN_VAULT_PATH", "/tmp/v")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused/db")
+
+
+def test_main_dry_run_prints_plan_runs_nothing(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _base_env(monkeypatch)
+    # If ingest_in_flight or run_stages are called during --dry-run the test fails.
+    monkeypatch.setattr(
+        m,
+        "ingest_in_flight",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("guard called")),
+    )
+    monkeypatch.setattr(
+        m,
+        "run_stages",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ran")),
+    )
+    code = m.main(["--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "embeddings" in out and "wiki" in out
+
+
+def test_main_refuses_when_ingest_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    monkeypatch.setattr(m, "ingest_in_flight", lambda *a, **k: True)
+    assert m.main([]) == 3
+
+
+def test_main_force_bypasses_ingest_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    monkeypatch.setattr(m, "ingest_in_flight", lambda *a, **k: True)
+    monkeypatch.setattr(m, "rebuild_lock", _noop_lock)
+    ran: list[int] = []
+    monkeypatch.setattr(m, "run_stages", lambda *a, **k: ran.append(1))
+    assert m.main(["--force", "--wiki-only"]) == 0
+    assert ran == [1]
+
+
+def test_main_lock_held_returns_4(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    monkeypatch.setattr(m, "ingest_in_flight", lambda *a, **k: False)
+
+    @contextmanager
+    def boom(_url: str) -> Generator[None, None, None]:
+        raise m.RebuildLockHeld("busy")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(m, "rebuild_lock", boom)
+    assert m.main(["--wiki-only"]) == 4
+
+
+def test_main_stage_failure_returns_1(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    monkeypatch.setattr(m, "ingest_in_flight", lambda *a, **k: False)
+    monkeypatch.setattr(m, "rebuild_lock", _noop_lock)
+
+    def boom(*a: object, **k: object) -> None:
+        raise m.StageFailed("graph", 5)
+
+    monkeypatch.setattr(m, "run_stages", boom)
+    assert m.main([]) == 1
+
+
+def test_main_bad_only_returns_2(monkeypatch: pytest.MonkeyPatch) -> None:
+    _base_env(monkeypatch)
+    assert m.main(["--only", "bogus"]) == 2
