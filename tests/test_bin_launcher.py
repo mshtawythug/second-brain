@@ -246,19 +246,25 @@ def test_brain_status_main_dispatches_to_shim(monkeypatch: Any) -> None:
     assert captured["args"] == ["--json"]
 
 
-def test_brain_rebuild_main_dispatches_to_shim(monkeypatch: Any) -> None:
-    """brain-rebuild's main() calls exec_shim with the correct shim name."""
+def test_brain_rebuild_main_delegates_to_orchestrator(monkeypatch: Any) -> None:
+    """brain-rebuild's main() delegates to the Python orchestrator (brain.maintenance.main).
+
+    After the bash-template retirement, brain.bin.rebuild no longer calls
+    exec_shim.  Instead it calls ``_main(sys.argv[1:])`` (brain.maintenance.main)
+    and wraps the return value in SystemExit.
+    """
     from brain.bin import rebuild
 
-    captured: dict[str, Any] = {}
+    called_with: list[list[str]] = []
 
-    def fake_exec_shim(name: str, args: Sequence[str]) -> None:
-        captured["name"] = name
-        captured["args"] = list(args)
+    def fake_main(argv: Sequence[str]) -> int:
+        called_with.append(list(argv))
+        return 0
 
-    monkeypatch.setattr("brain.bin.rebuild.exec_shim", fake_exec_shim)
-    monkeypatch.setattr(sys, "argv", ["brain-rebuild", "--clean-cache"])
-    rebuild.main()
+    monkeypatch.setattr("brain.bin.rebuild._main", fake_main)
+    monkeypatch.setattr(sys, "argv", ["brain-rebuild", "--dry-run"])
+    with pytest.raises(SystemExit) as exc_info:
+        rebuild.main()
 
-    assert captured["name"] == "brain-rebuild"
-    assert captured["args"] == ["--clean-cache"]
+    assert exc_info.value.code == 0
+    assert called_with == [["--dry-run"]]

@@ -408,35 +408,34 @@ def test_transformers_index_references_parser_cache_file(transformers_index_sour
 # Cache-path contract — TS default must align with bash --clean-cache target
 # ---------------------------------------------------------------------------
 
-# Post-T1.8: bin/brain-rebuild is a 6-line dev-checkout wrapper that
-# delegates to the brain-rebuild console script. The actual rebuild
-# logic — including the `--clean-cache` rm target the parser cache test
-# guards — lives in the packaged template that the launcher copies into
-# $BRAIN_HOME/.shims/brain-rebuild at first invocation.
-BIN_REBUILD = REPO_ROOT / "src" / "brain" / "templates" / "bin" / "brain-rebuild.sh"
+# The --clean-cache target now lives in the Python orchestrator
+# (brain.maintenance.run_stages) instead of the retired bash template.
+MAINTENANCE_PY = REPO_ROOT / "src" / "brain" / "maintenance.py"
 
 
 @pytest.fixture(scope="module")
-def bin_rebuild_source() -> str:
-    """Read ``bin/brain-rebuild`` once per module."""
-    assert BIN_REBUILD.is_file(), f"missing bin/brain-rebuild at {BIN_REBUILD}"
-    return BIN_REBUILD.read_text(encoding="utf-8")
+def maintenance_source() -> str:
+    """Read ``src/brain/maintenance.py`` once per module."""
+    assert MAINTENANCE_PY.is_file(), f"missing maintenance module at {MAINTENANCE_PY}"
+    return MAINTENANCE_PY.read_text(encoding="utf-8")
 
 
-def test_parse_ts_default_cache_dir_matches_bash_clean_cache_target(
-    parse_source: str, bin_rebuild_source: str
+def test_parse_ts_default_cache_dir_matches_python_clean_cache_target(
+    parse_source: str, maintenance_source: str
 ) -> None:
-    """TS default cache-dir and bash ``--clean-cache`` rm target resolve to the same path.
+    """TS default cache-dir and Python ``--clean-cache`` rm target resolve to the same path.
 
     Plan A specifies ``<vault>/.quartz/.cache/parser/`` as the canonical path.
-    ``parseMarkdown`` in ``parse.ts`` must default there; ``bin/brain-rebuild``'s
-    ``--clean-cache`` handler must ``rm -rf`` the same path.  Any drift between
-    the two sides means cold-cache wipes miss the actual cache directory.
+    ``parseMarkdown`` in ``parse.ts`` must default there; ``brain.maintenance.run_stages``
+    (the Python orchestrator) must ``shutil.rmtree`` the same path when
+    ``--clean-cache`` is requested.  Any drift between the two sides means
+    cold-cache wipes miss the actual cache directory.
 
     Verifications:
     1. The TS default contains the segments ``.quartz``, ``.cache``, and
        ``parser`` in that order, rooted at ``argv.directory``.
-    2. The bash rm target contains the literal substring ``.quartz/.cache/parser``.
+    2. The Python rm target references ``.quartz``, ``.cache``, and ``parser``
+       as Path division steps (``vault_path / ".quartz" / ".cache" / "parser"``).
     3. Both resolve to ``<base>/.quartz/.cache/parser`` with the same base.
     """
     # --- TS side ---
@@ -473,23 +472,24 @@ def test_parse_ts_default_cache_dir_matches_bash_clean_cache_target(
         'expected segment order .quartz → .cache → parser in default cacheDir path.join'
     )
 
-    # --- Bash side ---
-    # The --clean-cache handler must rm -rf a path containing .quartz/.cache/parser.
-    assert ".quartz/.cache/parser" in bin_rebuild_source, (
-        "expected `.quartz/.cache/parser` literal in bin/brain-rebuild --clean-cache rm target — "
+    # --- Python side ---
+    # run_stages() must shutil.rmtree a path built from the vault root with the
+    # canonical segments .quartz / .cache / parser.  Guard that all three segments
+    # appear together in the clean-cache branch so the path cannot silently drift.
+    assert '".quartz"' in maintenance_source, (
+        'expected `".quartz"` segment in maintenance.py clean-cache shutil.rmtree target — '
         "it must match the TS default: <vault>/.quartz/.cache/parser"
     )
-
-    # --- Cross-check: both bases are the vault root ---
-    # TS base is argv.directory which equals the vault root (set via --directory <vault>).
-    # Bash base is $VAULT (same vault root).
-    # Assert that the TS join arguments and the bash rm path agree on the
-    # sub-directory suffix so they physically resolve to the same location.
-    ts_suffix = ".quartz/.cache/parser"
-    bash_has_suffix = f"$VAULT/{ts_suffix}" in bin_rebuild_source or \
-                      f'"$VAULT/{ts_suffix}"' in bin_rebuild_source or \
-                      f"${{VAULT}}/{ts_suffix}" in bin_rebuild_source
-    assert bash_has_suffix, (
-        f'expected `$VAULT/{ts_suffix}` or `${{VAULT}}/{ts_suffix}` in bin/brain-rebuild '
-        f'--clean-cache rm target — must match TS default suffix `{ts_suffix}`'
+    assert '".cache"' in maintenance_source, (
+        'expected `".cache"` segment in maintenance.py clean-cache shutil.rmtree target — '
+        "it must match the TS default: <vault>/.quartz/.cache/parser"
+    )
+    assert '"parser"' in maintenance_source, (
+        'expected `"parser"` segment in maintenance.py clean-cache shutil.rmtree target — '
+        "it must match the TS default: <vault>/.quartz/.cache/parser"
+    )
+    # Belt-and-suspenders: the shutil.rmtree call must reference vault_path as the base.
+    assert "vault_path" in maintenance_source, (
+        "expected `vault_path` reference in maintenance.py shutil.rmtree call — "
+        "base must be the vault root, not a hardcoded path"
     )

@@ -1,8 +1,8 @@
-"""brain-rebuild — rebuild the wiki workspace + cold-restart watchers."""
+"""brain-rebuild — full-corpus rebuild orchestrator (see brain.maintenance)."""
 import sys
 
-from ._launcher import exec_shim
+from ..maintenance import main as _main
 
 
 def main() -> None:
-    exec_shim("brain-rebuild", sys.argv[1:])
+    raise SystemExit(_main(sys.argv[1:]))

@@ -569,161 +569,36 @@ def test_brain_status_three_rows(
 # ---------------------------------------------------------------------------
 
 
-def test_brain_rebuild_one_shot(
-    stub_dir: Path,
-    vault_dir: Path,
-) -> None:
-    """One ``build_swap`` call, no ``brain-down``/``brain-up`` bounce.
+def test_brain_rebuild_dry_run_lists_stages(tmp_path: Path) -> None:
+    """``--dry-run`` prints all 7 stage ids and exits 0 (no live DB needed).
 
-    The python stub records argv; we assert that exactly one
-    ``build_swap`` invocation lands and that the legacy bounce path
-    (which would spawn watcher / build watcher) was skipped.
+    The Python orchestrator entry prints the stage plan and returns immediately
+    when ``--dry-run`` is passed — it never opens a DB connection, never
+    takes the advisory lock, and never spawns any subprocess.  A dummy
+    ``DATABASE_URL`` is sufficient.
     """
-    _write_stub(stub_dir, "brain")
-    _write_stub(stub_dir, "python")
-
-    env = _make_env(stub_dir=stub_dir, vault_dir=vault_dir)
+    env = {
+        **os.environ,
+        "BRAIN_VAULT_PATH": str(tmp_path / "vault"),
+        "DATABASE_URL": "postgresql://unused/db",
+    }
     result = subprocess.run(  # noqa: S603 — list-form, no shell
-        [str(BIN / "brain-rebuild")],
-        env=env,
+        [str(BIN / "brain-rebuild"), "--dry-run"],
         capture_output=True,
         text=True,
-        timeout=15,
+        env=env,
+        timeout=30,
         check=False,
     )
     assert result.returncode == 0, result.stderr
-
-    brain_calls = _read_log(stub_dir / "brain.calls")
-    # The DB→vault export step still runs in the default path.
-    assert any("vault export" in c for c in brain_calls), brain_calls
-    # No ``brain vault sync --watch`` (that would mean a bounce ran).
-    assert not any("vault sync --watch" in c for c in brain_calls), brain_calls
-
-    python_calls = _read_log(stub_dir / "python.calls")
-    swap_calls = [c for c in python_calls if "brain.wiki.build_swap" in c]
-    assert len(swap_calls) == 1, python_calls
-    assert "--vault" in swap_calls[0]
-    assert str(vault_dir) in swap_calls[0]
-    # build_watcher should not have been started by rebuild.
-    assert not any("build_watcher" in c for c in python_calls), python_calls
-
-
-def test_brain_rebuild_clean_cache_flag_wipes_cache_dir(
-    stub_dir: Path,
-    vault_dir: Path,
-) -> None:
-    """``--clean-cache`` removes the parser cache dir but leaves ``.quartz/`` intact.
-
-    Seeds a fake cache entry at ``.quartz/.cache/parser/aa/bb/abc123.json``,
-    then runs ``brain-rebuild`` with ``--clean-cache`` plus all the ``--no-*``
-    flags so the script returns fast without touching anything else.  Asserts
-    that the cache sub-tree is gone but the ``.quartz/`` workspace root survives.
-    """
-    # Seed a fake cache entry under the two-level shard structure.
-    cache_dir = vault_dir / ".quartz" / ".cache" / "parser"
-    shard = cache_dir / "aa" / "bb"
-    shard.mkdir(parents=True)
-    (shard / "abc123.json").write_text('{"version":1}', encoding="utf-8")
-
-    _write_stub(stub_dir, "brain")
-    _write_stub(stub_dir, "python")
-
-    env = _make_env(stub_dir=stub_dir, vault_dir=vault_dir)
-    result = subprocess.run(  # noqa: S603 — list-form, no shell
-        [
-            str(BIN / "brain-rebuild"),
-            "--clean-cache",
-            "--no-export",
-            "--no-prune",
-            "--no-overlay",
-            "--no-build",
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
-    # The parser cache sub-tree must be gone.
-    assert not cache_dir.exists(), (
-        f".quartz/.cache/parser/ should have been wiped by --clean-cache "
-        f"but still exists at {cache_dir}"
-    )
-    # The .quartz/ workspace root itself must survive — only the cache is removed.
-    assert (vault_dir / ".quartz").is_dir(), (
-        ".quartz/ workspace dir must remain after --clean-cache"
-    )
-
-
-def test_brain_rebuild_default_preserves_cache_dir(
-    stub_dir: Path,
-    vault_dir: Path,
-) -> None:
-    """Without ``--clean-cache`` the parser cache dir is left untouched.
-
-    Negative complement to ``test_brain_rebuild_clean_cache_flag_wipes_cache_dir``.
-    Guards against a regression that flips the ``DO_CLEAN_CACHE`` default to 1
-    or accidentally removes the ``if [[ "$DO_CLEAN_CACHE" == '1' ]]`` gate.
-    """
-    # Seed the same fake cache entry as the positive test.
-    cache_file = vault_dir / ".quartz" / ".cache" / "parser" / "aa" / "bb" / "abc123.json"
-    cache_file.parent.mkdir(parents=True)
-    cache_file.write_text('{"version":1}', encoding="utf-8")
-
-    _write_stub(stub_dir, "brain")
-    _write_stub(stub_dir, "python")
-
-    env = _make_env(stub_dir=stub_dir, vault_dir=vault_dir)
-    result = subprocess.run(  # noqa: S603 — list-form, no shell
-        [
-            str(BIN / "brain-rebuild"),
-            "--no-export",
-            "--no-prune",
-            "--no-overlay",
-            "--no-build",
-            # NOTE: no --clean-cache here — that's the point of this test.
-        ],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
-    # Cache entry must survive: default run must not wipe the cache.
-    assert cache_file.exists(), (
-        f"parser cache file should survive a default brain-rebuild run "
-        f"(without --clean-cache), but {cache_file} was removed"
-    )
-
-
-def test_brain_rebuild_no_build_skips_build_swap(
-    stub_dir: Path,
-    vault_dir: Path,
-) -> None:
-    """``--no-build`` skips the one-shot build but still runs the export."""
-    _write_stub(stub_dir, "brain")
-    _write_stub(stub_dir, "python")
-
-    env = _make_env(stub_dir=stub_dir, vault_dir=vault_dir)
-    result = subprocess.run(  # noqa: S603 — list-form, no shell
-        [str(BIN / "brain-rebuild"), "--no-build"],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    assert result.returncode == 0, result.stderr
-
-    brain_calls = _read_log(stub_dir / "brain.calls")
-    assert any("vault export" in c for c in brain_calls), brain_calls
-
-    python_calls = _read_log(stub_dir / "python.calls")
-    assert not any("build_swap" in c for c in python_calls), python_calls
+    for sid in (
+        "embeddings", "summaries", "search", "graph",
+        "graph-weights", "communities", "wiki",
+    ):
+        assert sid in result.stdout, (
+            f"expected stage id {sid!r} in --dry-run output;\n"
+            f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

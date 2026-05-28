@@ -39,7 +39,6 @@ _SHIM_NAMES: tuple[str, ...] = (
     "brain-up",
     "brain-down",
     "brain-status",
-    "brain-rebuild",
     "_brain-watcher-fg",
     "_brain-build-fg",
 )
