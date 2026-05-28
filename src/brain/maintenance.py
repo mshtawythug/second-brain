@@ -235,7 +235,7 @@ def run_stages(
     for stage in stages:
         typer.echo(f"▶ {stage.stage_id}: {stage.description}")
         if stage.stage_id == "wiki" and clean_cache:
-            shutil.rmtree(vault_path / ".quartz" / ".cache" / "parser", ignore_errors=True)
+            shutil.rmtree(vault_path / _PARSER_CACHE_RELPATH, ignore_errors=True)
         for step in stage.steps:
             env = dict(step.env) if step.env else None
             code = runner(step.argv, env=env)
@@ -247,6 +247,13 @@ def run_stages(
                     fg="yellow",
                 )
 
+
+# Canonical relative path for the Quartz parser cache.  This constant is the
+# single source of truth shared by run_stages (--clean-cache wipe) and the
+# static cross-file contract test (tests/test_quartz_parser_cache_static.py).
+# It must stay in sync with the default cacheDir in the Quartz overlay's
+# parse.ts and ctx.ts: <vault>/.quartz/.cache/parser.
+_PARSER_CACHE_RELPATH: Path = Path(".quartz") / ".cache" / "parser"
 
 _KEEP_DEFAULT = 3  # mirrors BRAIN_WIKI_KEEP_BUILDS default in the retired bash template
 

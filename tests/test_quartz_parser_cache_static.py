@@ -472,24 +472,23 @@ def test_parse_ts_default_cache_dir_matches_python_clean_cache_target(
         'expected segment order .quartz → .cache → parser in default cacheDir path.join'
     )
 
-    # --- Python side ---
-    # run_stages() must shutil.rmtree a path built from the vault root with the
-    # canonical segments .quartz / .cache / parser.  Guard that all three segments
-    # appear together in the clean-cache branch so the path cannot silently drift.
-    assert '".quartz"' in maintenance_source, (
-        'expected `".quartz"` segment in maintenance.py clean-cache shutil.rmtree target — '
-        "it must match the TS default: <vault>/.quartz/.cache/parser"
+    # --- Python side (import-based — not a substring scan) ---
+    # _PARSER_CACHE_RELPATH is the single source of truth for the wipe target.
+    # Importing it and comparing its string form proves the Python side agrees
+    # with the TS default on the exact relative path.
+    from brain.maintenance import _PARSER_CACHE_RELPATH  # noqa: PLC0415
+
+    assert str(_PARSER_CACHE_RELPATH) == ".quartz/.cache/parser", (
+        f"brain.maintenance._PARSER_CACHE_RELPATH must equal '.quartz/.cache/parser'; "
+        f"got {str(_PARSER_CACHE_RELPATH)!r} — update the constant or the TS overlay."
     )
-    assert '".cache"' in maintenance_source, (
-        'expected `".cache"` segment in maintenance.py clean-cache shutil.rmtree target — '
-        "it must match the TS default: <vault>/.quartz/.cache/parser"
-    )
-    assert '"parser"' in maintenance_source, (
-        'expected `"parser"` segment in maintenance.py clean-cache shutil.rmtree target — '
-        "it must match the TS default: <vault>/.quartz/.cache/parser"
-    )
-    # Belt-and-suspenders: the shutil.rmtree call must reference vault_path as the base.
-    assert "vault_path" in maintenance_source, (
-        "expected `vault_path` reference in maintenance.py shutil.rmtree call — "
-        "base must be the vault root, not a hardcoded path"
-    )
+
+    # --- Cross-file contract: both TS overlay files must reference the same path ---
+    # ctx.ts declares the cacheDir interface field; parse.ts sets its default.
+    # Both must contain the canonical suffix so a rename of either side fails fast.
+    for ts_rel in ("quartz/util/ctx.ts", "quartz/processors/parse.ts"):
+        ts_text = (OVERRIDES_DIR / ts_rel).read_text(encoding="utf-8")
+        assert ".quartz/.cache/parser" in ts_text, (
+            f"expected '.quartz/.cache/parser' in {ts_rel} — "
+            "it must match brain.maintenance._PARSER_CACHE_RELPATH"
+        )

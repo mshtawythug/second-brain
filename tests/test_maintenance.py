@@ -173,6 +173,34 @@ def test_run_stages_nonfatal_step_continues_to_build_swap() -> None:
     assert any("build_swap" in a for c in calls for a in c)
 
 
+def test_run_stages_clean_cache_removes_only_parser_cache(tmp_path: Path) -> None:
+    """``--clean-cache`` wipes ``<vault>/.quartz/.cache/parser`` and nothing else.
+
+    Creates the parser cache dir plus a sibling dir under ``.quartz/.cache/``,
+    then runs the wiki stage with ``clean_cache=True`` and a no-op fake runner.
+    Asserts that the parser cache is gone and the sibling is untouched —
+    proving the ``shutil.rmtree`` target is exactly ``_PARSER_CACHE_RELPATH``.
+    """
+    vault = tmp_path / "vault"
+    parser = vault / ".quartz" / ".cache" / "parser"
+    sibling = vault / ".quartz" / ".cache" / "other"
+    parser.mkdir(parents=True)
+    (parser / "x.json").write_text("{}", encoding="utf-8")
+    sibling.mkdir(parents=True)
+    (sibling / "keep.txt").write_text("keep", encoding="utf-8")
+
+    wiki = [s for s in m.build_stages(vault_path=vault, keep=3) if s.stage_id == "wiki"]
+    m.run_stages(
+        wiki,
+        runner=lambda argv, env=None: 0,
+        clean_cache=True,
+        vault_path=vault,
+    )
+    assert not parser.exists(), "parser cache dir must be wiped by --clean-cache"
+    assert sibling.exists(), "sibling cache dir must be untouched by --clean-cache"
+    assert (sibling / "keep.txt").exists(), "sibling file must survive --clean-cache"
+
+
 # ---------------------------------------------------------------------------
 # Task 6: main(argv) — argparse entry, dry-run, guard + lock wiring
 # ---------------------------------------------------------------------------
