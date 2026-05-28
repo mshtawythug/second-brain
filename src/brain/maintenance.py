@@ -42,13 +42,8 @@ ALL_STAGE_IDS: tuple[str, ...] = (
 )
 
 
-def build_stages(*, vault_path: Path, keep: int, clean_cache: bool) -> list[Stage]:
-    """Construct the canonical stage list.
-
-    ``clean_cache`` is consumed by the runner (it wipes the parser cache before
-    the wiki build); it is threaded through here so callers have one place to
-    pass all rebuild knobs.
-    """
+def build_stages(*, vault_path: Path, keep: int) -> list[Stage]:
+    """Construct the canonical stage list in dependency order."""
     py = sys.executable
     wiki_steps = (
         Step(("brain", "vault", "export", "--to", str(vault_path))),
@@ -69,7 +64,6 @@ def build_stages(*, vault_path: Path, keep: int, clean_cache: bool) -> list[Stag
             env=(("BRAIN_WIKI_RELOAD", "1"),),
         ),
     )
-    _ = clean_cache  # consumed by run_stages; threaded through here for caller symmetry
     return [
         Stage(
             "embeddings",
@@ -305,7 +299,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     cfg = Config.load()
     keep = int(os.environ.get("BRAIN_WIKI_KEEP_BUILDS", str(_KEEP_DEFAULT)))
-    stages = build_stages(vault_path=cfg.vault_path, keep=keep, clean_cache=args.clean_cache)
+    stages = build_stages(vault_path=cfg.vault_path, keep=keep)
 
     try:
         selected = select_stages(

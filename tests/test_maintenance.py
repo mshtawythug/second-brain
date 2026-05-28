@@ -12,7 +12,7 @@ from brain.config import Config
 
 
 def test_build_stages_canonical_order_and_ids() -> None:
-    stages = m.build_stages(vault_path=Path("/tmp/vault"), keep=3, clean_cache=False)
+    stages = m.build_stages(vault_path=Path("/tmp/vault"), keep=3)
     assert [s.stage_id for s in stages] == [
         "embeddings", "summaries", "search",
         "graph", "graph-weights", "communities", "wiki",
@@ -35,7 +35,7 @@ def _ids(stages: list[m.Stage]) -> list[str]:
 
 
 def _stages() -> list[m.Stage]:
-    return m.build_stages(vault_path=Path("/tmp/v"), keep=3, clean_cache=False)
+    return m.build_stages(vault_path=Path("/tmp/v"), keep=3)
 
 
 def test_select_default_runs_all() -> None:
