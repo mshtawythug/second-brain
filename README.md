@@ -880,7 +880,7 @@ Env overrides:
 | `BRAIN_NO_OVERLAY` | `0` | Set `1` to skip the Quartz overlay step at startup. Useful when iterating on stock Quartz behavior. |
 | `BRAIN_NO_BUILD_WATCHER` | `0` | Set `1` to skip starting the build watcher (used by the bin-script tests; also handy when debugging the sync watcher in isolation). |
 | `BRAIN_FASTPATH_ENABLED` | `true` | Set `false`/`0`/`no` to disable the per-file partial-emit fastpath and force every vault edit through a full rebuild. See [Serve locally → Per-file fastpath](#serve-locally) for the trade-off. |
-| `BRAIN_PY` | (unset) | Test/CI knob — overrides the Python interpreter `bin/brain-{up,rebuild}` invoke for the watcher + build subprocesses. Defaults to `<repo>/.venv/bin/python`. |
+| `BRAIN_PY` | (unset) | Test/CI knob — overrides the Python interpreter `bin/brain-up` invokes for the watcher + build subprocesses. (`brain-rebuild` is now a Python console-script entry point that uses its venv's `sys.executable` directly; `BRAIN_PY` does not affect it.) Defaults to `<repo>/.venv/bin/python`. |
 
 PIDs are tracked at `/tmp/brain-{watch,build}.pid`; logs at `/tmp/brain-{watch,build}.log`. (The legacy `/tmp/brain-wiki.pid` from the old `quartz --serve` setup is still cleaned up by `brain-down` for backward compat — fresh installs won't see it.)
 
