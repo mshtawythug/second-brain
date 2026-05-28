@@ -852,14 +852,17 @@ brain-up       # start vault sync watcher → apply Quartz overlay → cold-star
                # Idempotent.
 brain-down     # stop both watchers. Caddy is left running so brain.test keeps
                # serving the last good build.
-brain-rebuild  # one-shot rebuild + atomic swap. Use after overlay or config
-               # edits the watcher won't catch (since nothing in the vault tree
-               # changed). --no-export skips the DB→vault export step;
-               # --no-prune skips the orphan-mirror prune; --no-overlay skips
-               # the Quartz overlay re-apply; --no-build skips the build
-               # itself; --clean-cache wipes the parser cache at
-               # <vault>/.quartz/.cache/parser/ before building (use to
-               # debug cache issues or measure a cold-build baseline).
+brain-rebuild  # full-corpus rebuild: embeddings → summaries → search →
+               # graph → graph-weights → communities → wiki (atomic swap).
+               # Runs all 7 derived-layer stages in dependency order, then
+               # swaps the wiki build atomically.  Common flags:
+               #   --wiki-only     run only the wiki stage (old fast path)
+               #   --only STAGES   comma-separated stage ids to run
+               #   --skip STAGES   comma-separated stage ids to skip
+               #   --dry-run       print the plan; run nothing, take no lock
+               #   --force         bypass the in-flight-ingest guard
+               #   --clean-cache   wipe <vault>/.quartz/.cache/parser/ before
+               #                   the wiki build (cold-build baseline)
 brain-status   # show watcher state, the active build dir, the build-id pinned
                # by current/, and whether the wiki URL is reachable.
 ```
