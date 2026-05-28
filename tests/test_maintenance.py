@@ -4,7 +4,9 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
+import psycopg
 import pytest
 
 from brain import maintenance as m
@@ -281,3 +283,82 @@ def test_main_stage_failure_returns_1(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_main_bad_only_returns_2(monkeypatch: pytest.MonkeyPatch) -> None:
     _base_env(monkeypatch)
     assert m.main(["--only", "bogus"]) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 8: Regression — full run leaves communities fingerprint current
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+def test_full_run_communities_leaves_fingerprint_current(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """After the communities stage runs, the stored fingerprint equals the live hash.
+
+    Seeds a minimal triangle graph (3 synthetic entities, 3 edges — exactly the
+    default ``min_size=3``) on the test DB, then invokes
+    ``m.main(["--only", "communities", "--force"])`` which spawns
+    ``brain graphrag communities refresh`` as a subprocess against the same test
+    DB (via the session-scoped ``DATABASE_URL=TEST_DATABASE_URL`` fixture).
+
+    After the subprocess returns, verifies that the set of distinct
+    ``source_graph_hash`` values stored in ``graph_communities`` is exactly
+    ``{current_hash}`` — the invariant that ``brain doctor`` checks under its
+    ``communities current`` line.
+
+    Requires the Apache AGE test container (port 5434,
+    ``docker-compose.age-test.yml``).  If AGE is unavailable,
+    ``brain graphrag communities refresh`` exits 1, ``m.main`` returns 1, and
+    the ``assert m.main(...) == 0`` line fails with an explicit ENV-ERROR.
+    No PII: all entity names and keys are synthetic.
+    """
+    from brain.cli import _relationship_edges, _stored_community_fingerprints
+    from brain.db import connect
+    from brain.graph_rag.communities import compute_source_graph_hash
+    from brain.graph_rag.tenancy import resolve_tenant
+
+    # Seed a one-triangle graph: 3 entities (canonical keys maint-key-{0,1,2}),
+    # 3 CO_OCCURS edges at weight 0.8.  Exactly min_size=3 → one community.
+    # test_db uses autocommit=True, so data is visible to the subprocess immediately.
+    tenant = "default"
+    entity_ids: list[str] = []
+    for i in range(3):
+        row = test_db.execute(
+            "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key) "
+            "VALUES (%s, 'person', %s, %s) RETURNING id::text",
+            (tenant, f"maint-person-{i}", f"maint-key-{i}"),
+        ).fetchone()
+        assert row is not None
+        entity_ids.append(str(row[0]))
+    for a, b in [(0, 1), (0, 2), (1, 2)]:
+        src, dst = sorted((entity_ids[a], entity_ids[b]))
+        test_db.execute(
+            "INSERT INTO graph_relationships "
+            "(tenant_id, src_id, dst_id, rel_type, weight, co_count, doc_count) "
+            "VALUES (%s, %s, %s, 'co_occurs', %s, 1, 1)",
+            (tenant, src, dst, 0.8),
+        )
+
+    cfg = Config.load()
+    resolved_tenant = resolve_tenant(cfg)
+
+    # m.main spawns `brain graphrag communities refresh` as a subprocess.
+    # --force bypasses the ingest guard (ingest_in_flight check) so the test
+    # does not depend on the process table.  The communities refresh command
+    # itself always forces (bypass dirty gate) since it uses the "refresh"
+    # subcommand — the dirty gate is a no-op when force=True.
+    result = m.main(["--only", "communities", "--force"])
+    assert result == 0, (
+        f"m.main returned {result} — likely AGE container unavailable (ENV-ERROR) "
+        "or a logic bug in communities refresh.  Run `docker compose "
+        "-f docker-compose.age-test.yml up -d --build` and retry."
+    )
+
+    with connect(cfg.database_url) as conn:
+        current = compute_source_graph_hash(_relationship_edges(conn, resolved_tenant))
+        stored = _stored_community_fingerprints(conn, resolved_tenant)
+    assert stored == {current}, (
+        f"Fingerprint mismatch: stored={stored!r} current={current!r}.  "
+        "communities refresh did not stamp communities with the current graph hash."
+    )
