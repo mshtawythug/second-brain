@@ -162,18 +162,17 @@ def _snapshot_processes() -> list[str]:
 def _is_brain_ingest(cmd: str) -> bool:
     """True iff ``cmd`` invokes ``brain ingest*`` (not a watcher or other sub-command).
 
-    Splits the command string on whitespace and checks for a consecutive token
-    pair where the first token's basename (part after the last ``/``) is exactly
-    ``brain`` and the second token is ``ingest`` or ``ingest-<variant>``.  This
-    prevents false-positives from quoted arguments such as
-    ``brain search 'brain ingest foo'``.
+    Finds the first token whose basename (part after the last ``/``) is exactly
+    ``brain`` — the executable — and checks whether the immediately following
+    token is ``ingest`` or ``ingest-<variant>``.  Returning at the first match
+    prevents later bare ``brain ingest`` tokens (positional args to a different
+    sub-command) from triggering a false-positive.
     """
     tokens = cmd.split()
-    for i, token in enumerate(tokens):
-        if i + 1 >= len(tokens):
-            break
-        if token.rsplit("/", 1)[-1] == "brain" and _INGEST_SUBCOMMAND_RE.match(tokens[i + 1]):
-            return True
+    for i, tok in enumerate(tokens):
+        if tok.rsplit("/", 1)[-1] == "brain":
+            nxt = tokens[i + 1] if i + 1 < len(tokens) else ""
+            return bool(_INGEST_SUBCOMMAND_RE.match(nxt))
     return False
 
 

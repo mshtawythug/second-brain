@@ -112,6 +112,12 @@ def test_ingest_in_flight_ignores_ingest_inside_quoted_args() -> None:
     ) is False
 
 
+def test_ingest_in_flight_ignores_ingest_as_bare_args_to_other_subcommand() -> None:
+    # False-positive guard: bare `brain ingest` tokens that are positional args
+    # to a different sub-command must not trigger the guard.
+    assert m.ingest_in_flight(["/x/bin/brain search brain ingest foo"]) is False
+
+
 # ---------------------------------------------------------------------------
 # Task 4: Advisory lock (integration — requires test Postgres on port 5434)
 # ---------------------------------------------------------------------------
