@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+
+from .errors import BrainError
 
 
 @dataclass(frozen=True)
@@ -90,3 +93,42 @@ def build_stages(*, vault_path: Path, keep: int, clean_cache: bool) -> list[Stag
         ),
         Stage("wiki", "vault export/sync/prune/overlay + build_swap", wiki_steps),
     ]
+
+
+class SelectionError(BrainError):
+    """Invalid --only/--skip/--wiki-only combination or unknown stage id."""
+
+
+def select_stages(
+    stages: Sequence[Stage],
+    *,
+    only: Sequence[str] | None,
+    skip: Sequence[str] | None,
+    wiki_only: bool,
+) -> list[Stage]:
+    """Select stages by --only/--skip/--wiki-only, preserving registry order."""
+    if wiki_only and (only or skip):
+        raise SelectionError("--wiki-only cannot be combined with --only/--skip")
+    if only and skip:
+        raise SelectionError("--only and --skip are mutually exclusive")
+    if wiki_only:
+        only = ["wiki"]
+    valid = {s.stage_id for s in stages}
+
+    def _validate(ids: Sequence[str]) -> None:
+        unknown = [i for i in ids if i not in valid]
+        if unknown:
+            raise SelectionError(
+                f"unknown stage id(s): {', '.join(unknown)}; "
+                f"valid: {', '.join(s.stage_id for s in stages)}"
+            )
+
+    if only:
+        _validate(only)
+        keep = set(only)
+        return [s for s in stages if s.stage_id in keep]
+    if skip:
+        _validate(skip)
+        drop = set(skip)
+        return [s for s in stages if s.stage_id not in drop]
+    return list(stages)
