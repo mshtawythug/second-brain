@@ -104,6 +104,14 @@ def test_ingest_in_flight_matches_all_ingest_variants() -> None:
         ) is True, cmd
 
 
+def test_ingest_in_flight_ignores_ingest_inside_quoted_args() -> None:
+    # False-positive guard: the word "ingest" appearing inside a quoted argument
+    # (e.g. a search query) must not trigger the guard.
+    assert m.ingest_in_flight(
+        ["/usr/bin/python /x/bin/brain search 'brain ingest foo'"]
+    ) is False
+
+
 # ---------------------------------------------------------------------------
 # Task 4: Advisory lock (integration — requires test Postgres on port 5434)
 # ---------------------------------------------------------------------------

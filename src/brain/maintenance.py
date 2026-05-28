@@ -144,10 +144,10 @@ def select_stages(
     return list(stages)
 
 
-# Matches `brain ingest` / `brain ingest-dir/-stdin/-gmail` as a token after the
-# `brain` executable. Excludes `brain.wiki.build_watcher` and
-# `brain vault sync --watch` (neither contains the `brain ingest` token).
-_INGEST_RE = re.compile(r"(^|/|\s)brain\s+ingest(-\w+)?(\s|$)")
+# Matches the `ingest` / `ingest-<variant>` subcommand token that follows the
+# `brain` executable.  Using argv tokenization (not a substring scan) so that
+# `brain search 'brain ingest foo'` is not a false-positive.
+_INGEST_SUBCOMMAND_RE = re.compile(r"^ingest(-[a-z]+)?$")
 
 
 def _snapshot_processes() -> list[str]:
@@ -165,10 +165,28 @@ def _snapshot_processes() -> list[str]:
     return [line for line in out.stdout.splitlines() if line.strip()]
 
 
+def _is_brain_ingest(cmd: str) -> bool:
+    """True iff ``cmd`` invokes ``brain ingest*`` (not a watcher or other sub-command).
+
+    Splits the command string on whitespace and checks for a consecutive token
+    pair where the first token's basename (part after the last ``/``) is exactly
+    ``brain`` and the second token is ``ingest`` or ``ingest-<variant>``.  This
+    prevents false-positives from quoted arguments such as
+    ``brain search 'brain ingest foo'``.
+    """
+    tokens = cmd.split()
+    for i, token in enumerate(tokens):
+        if i + 1 >= len(tokens):
+            break
+        if token.rsplit("/", 1)[-1] == "brain" and _INGEST_SUBCOMMAND_RE.match(tokens[i + 1]):
+            return True
+    return False
+
+
 def ingest_in_flight(processes: Sequence[str] | None = None) -> bool:
     """True iff a ``brain ingest*`` process is running. Watchers are not matched."""
     procs = processes if processes is not None else _snapshot_processes()
-    return any(_INGEST_RE.search(p) for p in procs)
+    return any(_is_brain_ingest(p) for p in procs)
 
 
 # Fixed namespaced advisory-lock key for brain-rebuild (arbitrary 32-bit constant, "brnr").
