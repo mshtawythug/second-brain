@@ -1,13 +1,17 @@
 """brain-rebuild orchestrator: a full-corpus rebuild chaining every derived-layer stage."""
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+import typer
 
 from .db import connect
 from .errors import BrainError
@@ -189,3 +193,43 @@ def rebuild_lock(database_url: str) -> Iterator[None]:
             yield
         finally:
             conn.execute("SELECT pg_advisory_unlock(%s)", (_REBUILD_LOCK_KEY,))
+
+
+class StageFailed(BrainError):
+    """A fatal step in a stage exited non-zero (fail-fast trigger)."""
+
+    def __init__(self, stage_id: str, exit_code: int) -> None:
+        super().__init__(f"stage {stage_id!r} failed (exit {exit_code})")
+        self.stage_id = stage_id
+        self.exit_code = exit_code
+
+
+def _default_runner(argv: Sequence[str], env: dict[str, str] | None = None) -> int:
+    """Run a subprocess and return its exit code."""
+    full_env = {**os.environ, **(env or {})}
+    proc = subprocess.run(list(argv), env=full_env, check=False)  # noqa: S603
+    return proc.returncode
+
+
+def run_stages(
+    stages: Sequence[Stage],
+    *,
+    runner: Callable[..., int] = _default_runner,
+    clean_cache: bool,
+    vault_path: Path,
+) -> None:
+    """Run selected stages in order; fail-fast on the first fatal non-zero step."""
+    for stage in stages:
+        typer.echo(f"▶ {stage.stage_id}: {stage.description}")
+        if stage.stage_id == "wiki" and clean_cache:
+            shutil.rmtree(vault_path / ".quartz" / ".cache" / "parser", ignore_errors=True)
+        for step in stage.steps:
+            env = dict(step.env) if step.env else None
+            code = runner(step.argv, env=env)
+            if code != 0:
+                if step.fatal:
+                    raise StageFailed(stage.stage_id, code)
+                typer.secho(
+                    f"  warn: {' '.join(step.argv)} exited {code} (non-fatal, continuing)",
+                    fg="yellow",
+                )

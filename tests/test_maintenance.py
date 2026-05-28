@@ -119,3 +119,39 @@ def test_rebuild_lock_is_exclusive() -> None:
     # After the outer block exits the lock is released; re-acquisition must succeed.
     with m.rebuild_lock(url):
         pass
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Stage runner (fail-fast)
+# ---------------------------------------------------------------------------
+
+
+def test_run_stages_fail_fast_stops_after_first_fatal() -> None:
+    selected = m.select_stages(
+        _stages(), only=["embeddings", "summaries", "search"], skip=None, wiki_only=False
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: tuple[str, ...], env: dict[str, str] | None = None) -> int:
+        calls.append(tuple(argv))
+        return 7 if tuple(argv[:2]) == ("brain", "enrich") else 0
+
+    with pytest.raises(m.StageFailed) as exc:
+        m.run_stages(selected, runner=fake_run, clean_cache=False, vault_path=Path("/tmp/v"))
+    assert exc.value.stage_id == "summaries"
+    assert exc.value.exit_code == 7
+    assert ("brain", "reembed") in calls
+    assert ("brain", "enrich", "--backfill") in calls
+    assert ("brain", "backfill", "search") not in calls
+
+
+def test_run_stages_nonfatal_step_continues_to_build_swap() -> None:
+    selected = m.select_stages(_stages(), only=["wiki"], skip=None, wiki_only=False)
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run(argv: tuple[str, ...], env: dict[str, str] | None = None) -> int:
+        calls.append(tuple(argv))
+        return 1 if "sync-summaries" in argv else 0
+
+    m.run_stages(selected, runner=fake_run, clean_cache=False, vault_path=Path("/tmp/v"))
+    assert any("build_swap" in a for c in calls for a in c)
