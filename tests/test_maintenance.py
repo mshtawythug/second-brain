@@ -70,3 +70,32 @@ def test_unknown_stage_id_errors_with_valid_list() -> None:
         m.select_stages(_stages(), only=["bogus"], skip=None, wiki_only=False)
     assert "bogus" in str(exc.value)
     assert "embeddings" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Task 3: In-flight ingest guard
+# ---------------------------------------------------------------------------
+
+
+def test_ingest_in_flight_detects_ingest() -> None:
+    procs = [
+        "/usr/bin/python /x/bin/brain ingest-stdin --source krisp --title foo",
+        "/usr/bin/python -m brain.wiki.build_watcher --vault /v --keep 3",
+    ]
+    assert m.ingest_in_flight(procs) is True
+
+
+def test_ingest_in_flight_ignores_watchers_and_search() -> None:
+    procs = [
+        "/usr/bin/python /x/bin/brain vault sync --watch --vault /v",
+        "/usr/bin/python -m brain.wiki.build_watcher --vault /v --keep 3",
+        "/usr/bin/python /x/bin/brain search 'ingest pipeline'",
+    ]
+    assert m.ingest_in_flight(procs) is False
+
+
+def test_ingest_in_flight_matches_all_ingest_variants() -> None:
+    for cmd in ("ingest", "ingest-dir", "ingest-stdin", "ingest-gmail"):
+        assert m.ingest_in_flight(
+            [f"/usr/bin/python /x/bin/brain {cmd} /some/path"]
+        ) is True, cmd

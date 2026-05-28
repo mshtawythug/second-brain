@@ -1,6 +1,8 @@
 """brain-rebuild orchestrator: a full-corpus rebuild chaining every derived-layer stage."""
 from __future__ import annotations
 
+import re
+import subprocess
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -132,3 +134,30 @@ def select_stages(
         drop = set(skip)
         return [s for s in stages if s.stage_id not in drop]
     return list(stages)
+
+
+# Matches `brain ingest` / `brain ingest-dir/-stdin/-gmail` as a token after the
+# `brain` executable. Excludes `brain.wiki.build_watcher` and
+# `brain vault sync --watch` (neither contains the `brain ingest` token).
+_INGEST_RE = re.compile(r"(^|/|\s)brain\s+ingest(-\w+)?(\s|$)")
+
+
+def _snapshot_processes() -> list[str]:
+    """Return one command-line string per running process (best-effort)."""
+    try:
+        out = subprocess.run(  # noqa: S603,S607
+            ["ps", "-axo", "command="],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [line for line in out.stdout.splitlines() if line.strip()]
+
+
+def ingest_in_flight(processes: Sequence[str] | None = None) -> bool:
+    """True iff a ``brain ingest*`` process is running. Watchers are not matched."""
+    procs = processes if processes is not None else _snapshot_processes()
+    return any(_INGEST_RE.search(p) for p in procs)
