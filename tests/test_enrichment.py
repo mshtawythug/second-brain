@@ -143,6 +143,43 @@ def test_summarize_raises_enrichment_error_after_second_failure() -> None:
     assert call_count == 2
 
 
+def test_chat_json_doubles_num_predict_on_truncation_retry() -> None:
+    """Truncated JSON → retry doubles ``num_predict`` (targeted fix for the
+    concept-extraction 'Unterminated string' failure observed 2026-05-29).
+    Same ``num_predict`` would re-truncate deterministically; doubling on the
+    retry recovers."""
+    # JSONDecodeError(msg="Unterminated string starting at: ...") is raised on
+    # this body because the string value is never closed.
+    truncated_body = '{"summary": "she said: \\"hello'
+    responses = iter(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "message": {"role": "assistant", "content": truncated_body},
+                    "done": True,
+                },
+            ),
+            _ok_summary("retried after num_predict doubled"),
+        ]
+    )
+    captured_num_predict: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.read())
+        captured_num_predict.append(body["options"]["num_predict"])
+        return next(responses)
+
+    enricher = _make_enricher(httpx.MockTransport(handler))
+    result = enricher.summarize("t", "body")
+    assert result.summary == "retried after num_predict doubled"
+    assert len(captured_num_predict) == 2
+    assert captured_num_predict[1] == captured_num_predict[0] * 2, (
+        f"expected num_predict doubled on truncation retry, "
+        f"got first={captured_num_predict[0]} second={captured_num_predict[1]}"
+    )
+
+
 def test_summarize_raises_ollama_unavailable_on_connect_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused")

@@ -480,10 +480,11 @@ class OllamaEnricher:
         when two consecutive attempts fail JSON parsing / schema validation.
         """
         last_error: Exception | None = None
+        current_num_predict = num_predict
         for attempt in (1, 2):
             try:
                 response_text = self._chat_once(
-                    system=system, user=user, num_predict=num_predict
+                    system=system, user=user, num_predict=current_num_predict
                 )
             except OllamaUnavailable:
                 # Transient — propagate immediately, no retry.
@@ -492,6 +493,12 @@ class OllamaEnricher:
                 parsed = json.loads(response_text)
             except json.JSONDecodeError as exc:
                 last_error = exc
+                # Truncation: the model exhausted ``num_predict`` mid-string.
+                # Same budget would re-truncate deterministically; double it
+                # for the retry so the next call can complete. Schema/non-dict
+                # failures don't trigger the bump.
+                if "Unterminated" in exc.msg:
+                    current_num_predict *= 2
                 _logger.debug(
                     "enricher chat attempt %d: JSON decode failed (%s); response=%r",
                     attempt,
