@@ -33,16 +33,24 @@ def _port() -> int:
 # ---------------------------------------------------------------------------
 # Runtime state paths.
 #
-# PID files stay at /tmp/brain-{watch,build}.pid because the foreground
-# wrapper scripts (`_brain-{watcher,build}-fg.sh`) hard-code those paths.
-# Log files used to live at /tmp/brain-{watch,build}.log under the legacy
-# nohup era, but T1.7's launchd plist templates redirect both StandardOut
-# and StandardError to `$BRAIN_HOME/logs/com.brain.{watcher,build}.{out,err}.log`,
-# so that's where we read them from now.
+# PID files live under $BRAIN_HOME/run/, matching the foreground wrapper
+# scripts (`_brain-{watcher,build}-fg.sh`). They used to default to
+# /tmp/brain-{watch,build}.pid, but macOS's tmp_cleaner reaps files left
+# untouched for 3 days — and these daemons write their pid file once at launch
+# then run for weeks, so the /tmp pid file silently vanished and we misreported
+# a live daemon as "stopped". $BRAIN_HOME/run/ is not reaped. The BRAIN_*_PID
+# env overrides mirror the shell shims (and let the test suite point them at a
+# tmp dir). Log files live at
+# `$BRAIN_HOME/logs/com.brain.{watcher,build}.{out,err}.log` (the launchd
+# plists redirect StandardOut/StandardError there).
 # ---------------------------------------------------------------------------
 
-WATCH_PID = Path("/tmp/brain-watch.pid")
-BUILD_PID = Path("/tmp/brain-build.pid")
+WATCH_PID = Path(
+    os.environ.get("BRAIN_WATCH_PID", str(_brain_home_root() / "run" / "brain-watch.pid"))
+)
+BUILD_PID = Path(
+    os.environ.get("BRAIN_BUILD_PID", str(_brain_home_root() / "run" / "brain-build.pid"))
+)
 
 
 def _watch_log() -> Path:

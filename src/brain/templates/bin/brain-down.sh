@@ -11,16 +11,26 @@
 # suite can run this shim HERMETICALLY — pointing the pid files at a tmp dir
 # and the orphan-killer at a stub — so the real `brain-up` watchers on a dev
 # machine are never touched:
-#   BRAIN_WATCH_PID  (default: /tmp/brain-watch.pid)
-#   BRAIN_BUILD_PID  (default: /tmp/brain-build.pid)
-#   BRAIN_WIKI_PID   (default: /tmp/brain-wiki.pid)
+#   BRAIN_WATCH_PID  (default: $BRAIN_HOME/run/brain-watch.pid)
+#   BRAIN_BUILD_PID  (default: $BRAIN_HOME/run/brain-build.pid)
+#   BRAIN_WIKI_PID   (default: $BRAIN_HOME/run/brain-wiki.pid)
 #   BRAIN_PKILL      (default: pkill) — binary used for the orphan sweep
 
 set -euo pipefail
 
-WATCH_PID="${BRAIN_WATCH_PID:-/tmp/brain-watch.pid}"   # `brain vault sync --watch`
-BUILD_PID="${BRAIN_BUILD_PID:-/tmp/brain-build.pid}"   # `python -m brain.wiki.build_watcher`
-WIKI_PID="${BRAIN_WIKI_PID:-/tmp/brain-wiki.pid}"      # legacy: pre-blue/green `npx quartz --serve`
+# Resolve $BRAIN_HOME from this script's location ($BRAIN_HOME/.shims/ under a
+# pipx install, $repo_root/bin/ in a dev checkout) so the pid paths match where
+# the fg wrappers write them. Honor an explicit BRAIN_HOME override if set.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
+
+# Pid paths default to $BRAIN_HOME/run/ — NOT /tmp. macOS's tmp_cleaner reaps
+# files left untouched for 3 days, which silently vanishes a long-lived
+# daemon's pid file; $BRAIN_HOME/run/ is not reaped. Must match the fg
+# wrappers' defaults. Overridable (unset = unchanged) for hermetic tests.
+WATCH_PID="${BRAIN_WATCH_PID:-$BRAIN_HOME_RESOLVED/run/brain-watch.pid}"   # `brain vault sync --watch`
+BUILD_PID="${BRAIN_BUILD_PID:-$BRAIN_HOME_RESOLVED/run/brain-build.pid}"   # `python -m brain.wiki.build_watcher`
+WIKI_PID="${BRAIN_WIKI_PID:-$BRAIN_HOME_RESOLVED/run/brain-wiki.pid}"      # legacy: pre-blue/green `npx quartz --serve`
 PKILL="${BRAIN_PKILL:-pkill}"                          # orphan-sweep binary (tests stub it)
 
 LAUNCHD_DIR="${BRAIN_LAUNCHD_DIR:-$HOME/Library/LaunchAgents}"

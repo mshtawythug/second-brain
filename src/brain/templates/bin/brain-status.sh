@@ -14,12 +14,16 @@ URL="http://localhost:$PORT"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
 
-# Pid paths default to the production /tmp locations; overridable (unset =
-# unchanged) so the test suite can run this shim hermetically against a tmp
-# pid dir, never colliding with a live brain-up install on a dev machine.
-WATCH_PID="${BRAIN_WATCH_PID:-/tmp/brain-watch.pid}"
-BUILD_PID="${BRAIN_BUILD_PID:-/tmp/brain-build.pid}"
-WIKI_PID="${BRAIN_WIKI_PID:-/tmp/brain-wiki.pid}"   # legacy quartz --serve install
+# Pid paths default to $BRAIN_HOME/run/ — NOT /tmp. macOS's tmp_cleaner reaps
+# files left untouched for 3 days; the build/watch daemons write their pid file
+# once at launch and then run for weeks, so a /tmp pid file silently vanishes
+# and this very script misreports a live daemon as "stopped". $BRAIN_HOME/run/
+# is not reaped. Overridable (unset = unchanged) so the test suite can run this
+# shim hermetically against a tmp pid dir, never colliding with a live
+# brain-up install on a dev machine.
+WATCH_PID="${BRAIN_WATCH_PID:-$BRAIN_HOME_RESOLVED/run/brain-watch.pid}"
+BUILD_PID="${BRAIN_BUILD_PID:-$BRAIN_HOME_RESOLVED/run/brain-build.pid}"
+WIKI_PID="${BRAIN_WIKI_PID:-$BRAIN_HOME_RESOLVED/run/brain-wiki.pid}"   # legacy quartz --serve install
 # T1.7 plist templates redirect StandardOut to $BRAIN_HOME/logs/com.brain.*.out.log,
 # not the legacy /tmp paths the pre-launchd nohup era used.
 WATCH_LOG="$BRAIN_HOME_RESOLVED/logs/com.brain.watcher.out.log"

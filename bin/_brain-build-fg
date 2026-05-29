@@ -19,9 +19,17 @@ set -euo pipefail
 
 VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
 KEEP="${BRAIN_WIKI_KEEP_BUILDS:-3}"
-# Pid path defaults to the production /tmp location; overridable (unset =
-# unchanged) so tests run this wrapper hermetically against a tmp pid dir.
-BUILD_PID="${BRAIN_BUILD_PID:-/tmp/brain-build.pid}"
+# Resolve $BRAIN_HOME from this script's location ($BRAIN_HOME/.shims/ under a
+# pipx install, $repo_root/bin/ in a dev checkout) so the pid file lands in a
+# stable, non-reaped dir. Honor an explicit BRAIN_HOME override if set.
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
+# Pid path defaults to $BRAIN_HOME/run/ — NOT /tmp. macOS's tmp_cleaner reaps
+# files left untouched for 3 days; this daemon writes the pid once at launch
+# then runs for weeks, so a /tmp pid file silently vanishes and brain-status
+# misreports the live daemon as stopped. Overridable (unset = unchanged) so
+# tests run this wrapper hermetically against a tmp pid dir.
+BUILD_PID="${BRAIN_BUILD_PID:-$BRAIN_HOME_RESOLVED/run/brain-build.pid}"
 
 # Pick the Python interpreter once. BRAIN_PY (env var) wins; otherwise
 # prefer python3 on PATH. The installed-shim flow (in $BRAIN_HOME/bin/)
@@ -40,5 +48,6 @@ fi
 
 export BRAIN_WIKI_RELOAD=1
 
+mkdir -p "$(dirname "$BUILD_PID")"
 echo "$$" >"$BUILD_PID"
 exec "$PY" -m brain.wiki.build_watcher --vault "$VAULT" --keep "$KEEP"

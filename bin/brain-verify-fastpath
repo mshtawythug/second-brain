@@ -31,7 +31,6 @@ VAULT="${BRAIN_VAULT_PATH:-$HOME/brain-vault}"
 QUARTZ_DIR="$VAULT/.quartz"
 FASTPATH_DIR="$QUARTZ_DIR/.cache/fastpath"
 BUILD_LOG='/tmp/brain-build.log'
-BUILD_PID='/tmp/brain-build.pid'
 TS=$(date +%Y%m%d-%H%M%S)
 VERIFY_LOG="${BRAIN_FASTPATH_LOG:-/tmp/brain-fastpath-verify-${TS}.log}"
 WAIT_PARTIAL="${BRAIN_FASTPATH_WAIT_PARTIAL:-8}"
@@ -40,6 +39,10 @@ WAIT_FULL="${BRAIN_FASTPATH_WAIT_FULL:-45}"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 PROJECT_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
 VENV_PY="$PROJECT_ROOT/.venv/bin/python"
+# Pid path defaults to $BRAIN_HOME/run/ (PROJECT_ROOT == $BRAIN_HOME) to match
+# the build watcher's fg wrapper — NOT /tmp, which macOS's tmp_cleaner reaps
+# out from under the long-lived daemon. Honor BRAIN_BUILD_PID if set.
+BUILD_PID="${BRAIN_BUILD_PID:-$PROJECT_ROOT/run/brain-build.pid}"
 
 # Test state (declared before trap registration)
 THROWAWAY_NOTE=""

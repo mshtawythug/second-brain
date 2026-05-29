@@ -28,6 +28,13 @@ logs/
 # `~/.brain/.shims/`. Never tracked.
 .shims/
 
+# Runtime pid dir for the brain daemons (watch + build watchers). The fg
+# wrappers write `$BRAIN_HOME/run/brain-{watch,build}.pid` here; in a
+# dev-checkout $BRAIN_HOME is the repo root, so `run/` lands in the tree.
+# Moved off /tmp because macOS's tmp_cleaner reaped the long-lived pid files.
+# Never tracked.
+run/
+
 # Brainstorm artifacts (kept local-only — can contain PII / personal references)
 .superpowers/
 

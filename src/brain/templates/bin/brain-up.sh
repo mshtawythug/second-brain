@@ -51,15 +51,23 @@ PORT="${BRAIN_WIKI_PORT:-8080}"
 URL="http://localhost:$PORT"
 KEEP="${BRAIN_WIKI_KEEP_BUILDS:-3}"
 
-# Pid/log paths default to the production /tmp locations; overridable (unset =
-# unchanged) so the test suite can run this shim hermetically against a tmp
-# dir, never colliding with a live brain-up install's global /tmp files.
-WATCH_PID="${BRAIN_WATCH_PID:-/tmp/brain-watch.pid}"
-WATCH_LOG="${BRAIN_WATCH_LOG:-/tmp/brain-watch.log}"
-BUILD_PID="${BRAIN_BUILD_PID:-/tmp/brain-build.pid}"
-BUILD_LOG="${BRAIN_BUILD_LOG:-/tmp/brain-build.log}"
-
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Resolve $BRAIN_HOME from this script's location ($BRAIN_HOME/.shims/ under a
+# pipx install, $repo_root/bin/ in a dev checkout). Honor an explicit
+# BRAIN_HOME override if the launcher set one.
+BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
+
+# Pid paths default to $BRAIN_HOME/run/ — NOT /tmp. macOS's tmp_cleaner reaps
+# files left untouched for 3 days, silently vanishing a long-lived daemon's
+# pid file so brain-status misreports it as stopped; $BRAIN_HOME/run/ is not
+# reaped, and must match the fg wrappers' defaults. Log paths keep their legacy
+# /tmp fallback (the launchd plists redirect real output to $BRAIN_HOME/logs/).
+# Overridable (unset = unchanged) so the test suite can run this shim
+# hermetically against a tmp dir, never colliding with a live brain-up install.
+WATCH_PID="${BRAIN_WATCH_PID:-$BRAIN_HOME_RESOLVED/run/brain-watch.pid}"
+WATCH_LOG="${BRAIN_WATCH_LOG:-/tmp/brain-watch.log}"
+BUILD_PID="${BRAIN_BUILD_PID:-$BRAIN_HOME_RESOLVED/run/brain-build.pid}"
+BUILD_LOG="${BRAIN_BUILD_LOG:-/tmp/brain-build.log}"
 
 # Pick the Python interpreter once. BRAIN_PY (env var) wins; otherwise
 # prefer python3 on PATH. The installed-shim flow (in $BRAIN_HOME/bin/)
