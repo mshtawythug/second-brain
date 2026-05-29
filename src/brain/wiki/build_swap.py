@@ -363,6 +363,9 @@ def _run_build(
     if env is not None:
         merged_env.update(env)
     merged_env["QUARTZ_PARENT_BUILD_ID"] = build_id
+    # Suppress Node deprecation noise (e.g. DEP0040 punycode from a transitive
+    # Quartz dep). Cosmetic only; setdefault preserves a caller override.
+    merged_env.setdefault("NODE_OPTIONS", "--no-deprecation")
 
     args = [
         node_path,
