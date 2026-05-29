@@ -226,7 +226,10 @@ const config: QuartzConfig = {
       // once per build to compute which folders are empty.
       Plugin.EmptyDoorFilter(),
       Plugin.Description(),
-      Plugin.Latex({ renderEngine: "katex" }),
+      // strict: "ignore" suppresses KaTeX strict-mode build warnings for
+      // typographic chars (en/em-dashes, », ¢) in math contexts — cosmetic
+      // only, rendering unchanged.
+      Plugin.Latex({ renderEngine: "katex", katexOptions: { strict: "ignore" } }),
     ],
     filters: [Plugin.RemoveDrafts()],
     emitters: [
