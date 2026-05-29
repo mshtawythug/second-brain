@@ -118,6 +118,12 @@ markers = [
   # G2's perf gate opts IN via ``pytest -m benchmark``. The default suite
   # exercises the SAME generator via the tiny ≈50-entity smoke instead.
   "benchmark: GraphRAG full-scale perf gate; requires explicit -m benchmark invocation",
+  # brain-rebuild advisory-lock + real-DB tests. These need the test Postgres
+  # container (port 5434) to be up but do NOT require Ollama. Included in the
+  # default suite (not excluded by the addopts -m filter) because the test DB
+  # is required for most other tests anyway; marked for easy targeted runs via
+  # ``pytest -m integration``.
+  "integration: requires the test Postgres container (port 5434, db second_brain_test)",
 ]
 
 [tool.ruff]

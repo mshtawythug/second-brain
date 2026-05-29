@@ -283,8 +283,8 @@ export async function parseMarkdown(ctx: BuildCtx, fps: FilePath[]): Promise<Pro
   //   3. default               → <argv.directory>/.quartz/.cache/parser
   // `cacheDir: undefined` from an upstream BuildCtx constructor means
   // "not set yet" and falls through to the default.
-  // NOTE: this path must match the rm target in bin/brain-rebuild's
-  // --clean-cache handler: `"$VAULT/.quartz/.cache/parser"`.
+  // NOTE: this path must match brain.maintenance._PARSER_CACHE_RELPATH
+  // (.quartz/.cache/parser), wiped by `brain-rebuild --clean-cache`.
   const cacheDir: string | null =
     ctx.cacheDir !== undefined
       ? ctx.cacheDir

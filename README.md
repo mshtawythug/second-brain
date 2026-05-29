@@ -852,14 +852,17 @@ brain-up       # start vault sync watcher → apply Quartz overlay → cold-star
                # Idempotent.
 brain-down     # stop both watchers. Caddy is left running so brain.test keeps
                # serving the last good build.
-brain-rebuild  # one-shot rebuild + atomic swap. Use after overlay or config
-               # edits the watcher won't catch (since nothing in the vault tree
-               # changed). --no-export skips the DB→vault export step;
-               # --no-prune skips the orphan-mirror prune; --no-overlay skips
-               # the Quartz overlay re-apply; --no-build skips the build
-               # itself; --clean-cache wipes the parser cache at
-               # <vault>/.quartz/.cache/parser/ before building (use to
-               # debug cache issues or measure a cold-build baseline).
+brain-rebuild  # full-corpus rebuild: embeddings → summaries → search →
+               # graph → graph-weights → communities → wiki (atomic swap).
+               # Runs all 7 derived-layer stages in dependency order, then
+               # swaps the wiki build atomically.  Common flags:
+               #   --wiki-only     run only the wiki stage (old fast path)
+               #   --only STAGES   comma-separated stage ids to run
+               #   --skip STAGES   comma-separated stage ids to skip
+               #   --dry-run       print the plan; run nothing, take no lock
+               #   --force         bypass the in-flight-ingest guard
+               #   --clean-cache   wipe <vault>/.quartz/.cache/parser/ before
+               #                   the wiki build (cold-build baseline)
 brain-status   # show watcher state, the active build dir, the build-id pinned
                # by current/, and whether the wiki URL is reachable.
 ```
@@ -877,7 +880,7 @@ Env overrides:
 | `BRAIN_NO_OVERLAY` | `0` | Set `1` to skip the Quartz overlay step at startup. Useful when iterating on stock Quartz behavior. |
 | `BRAIN_NO_BUILD_WATCHER` | `0` | Set `1` to skip starting the build watcher (used by the bin-script tests; also handy when debugging the sync watcher in isolation). |
 | `BRAIN_FASTPATH_ENABLED` | `true` | Set `false`/`0`/`no` to disable the per-file partial-emit fastpath and force every vault edit through a full rebuild. See [Serve locally → Per-file fastpath](#serve-locally) for the trade-off. |
-| `BRAIN_PY` | (unset) | Test/CI knob — overrides the Python interpreter `bin/brain-{up,rebuild}` invoke for the watcher + build subprocesses. Defaults to `<repo>/.venv/bin/python`. |
+| `BRAIN_PY` | (unset) | Test/CI knob — overrides the Python interpreter `bin/brain-up` invokes for the watcher + build subprocesses. (`brain-rebuild` is now a Python console-script entry point that uses its venv's `sys.executable` directly; `BRAIN_PY` does not affect it.) Defaults to `<repo>/.venv/bin/python`. |
 
 PIDs are tracked at `/tmp/brain-{watch,build}.pid`; logs at `/tmp/brain-{watch,build}.log`. (The legacy `/tmp/brain-wiki.pid` from the old `quartz --serve` setup is still cleaned up by `brain-down` for backward compat — fresh installs won't see it.)
 

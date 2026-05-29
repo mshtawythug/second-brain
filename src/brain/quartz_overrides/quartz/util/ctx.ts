@@ -66,8 +66,9 @@ export interface BuildCtx {
   //   string  — active cache at this path
   //   null    — cache explicitly disabled for this run (e.g. --no-cache)
   //   undefined — not yet set; parseMarkdown.ts defaults to
-  //               <argv.directory>/.quartz/.cache/parser (matches the
-  //               rm target in bin/brain-rebuild --clean-cache).
+  //               <argv.directory>/.quartz/.cache/parser (matches
+  //               brain.maintenance._PARSER_CACHE_RELPATH; wiped by
+  //               `brain-rebuild --clean-cache`).
   // Optional so existing BuildCtx constructors compile without change.
   cacheDir?: string | null
 }
