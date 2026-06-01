@@ -162,7 +162,7 @@ class UserFlaggedDetector:
         ]
 
 
-DETECTOR_REGISTRY: dict[str, type] = {
+DETECTOR_REGISTRY: dict[str, type[GapDetector]] = {
     "delta": DeltaDetector,
     "orphan": OrphanEntityDetector,
     "contradiction": ContradictionDetector,

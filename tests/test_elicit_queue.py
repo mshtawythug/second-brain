@@ -91,17 +91,30 @@ def test_rank_scores_normalized_to_one() -> None:
 
 
 def test_build_queue_excludes_resolved(test_db: psycopg.Connection) -> None:
-    """Resolved gaps are not returned by build_queue."""
+    """Resolved gaps are excluded; surfaced siblings are still returned.
+
+    Previously the test was vacuous: an empty return list trivially satisfies
+    ``all(g.target_id != 'x' for g in [])``.  Adding a surfaced row 'y' forces
+    build_queue to return a non-empty list, making the exclusion assertion
+    meaningful.
+    """
     test_db.execute(
         "INSERT INTO elicitation_gaps "
         "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, status) "
         "VALUES ('default','delta','topic','x', 0.9, ARRAY['d1','d2','d3'], 'resolved')"
     )
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, rationale, status) "
+        "VALUES ('default','orphan','topic','y', 0.9, ARRAY['d1','d2','d3'], 'r', 'surfaced')"
+    )
     from brain.config import Config
 
     cfg = Config.load()
     gaps = build_queue(test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10)
-    assert all(g.target_id != "x" for g in gaps)
+    assert len(gaps) > 0, "surfaced row 'y' must be returned"
+    assert any(g.target_id == "y" for g in gaps), "surfaced gap must be present"
+    assert all(g.target_id != "x" for g in gaps), "resolved gap must be absent"
 
 
 def test_build_queue_empty_detectors_returns_empty(test_db: psycopg.Connection) -> None:
