@@ -186,6 +186,10 @@ class PersonNotFound(BrainError):
         self.query = query
 
 
+class ElicitError(BrainError):
+    """Base class for tacit-knowledge elicitation failures."""
+
+
 class EnrichmentError(BrainError):
     """Raised when a per-document enrichment call fails unrecoverably.
 
