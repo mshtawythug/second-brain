@@ -7242,14 +7242,18 @@ def uninstall_cmd(
 
 @elicit_app.command("list")
 def elicit_list(
-    as_json: bool = typer.Option(False, "--json", help="Emit raw JSON instead of a table."),
+    as_json: bool = typer.Option(False, "--json", help="Emit JSON instead of a table."),
     limit: int = typer.Option(
         0, "--limit", "-n", help="Max gaps to show (0 = use BRAIN_ELICIT_QUEUE_LIMIT)."
     ),
+    low_confidence: bool = typer.Option(
+        False, "--low-confidence", help="Include gaps below the score floor."
+    ),
 ) -> None:
-    """List open knowledge gaps sorted by score (highest first).
+    """Refresh the gap queue and list open knowledge gaps sorted by score.
 
-    Shows surfaced gaps and snoozed gaps whose snooze window has expired.
+    Runs the active detectors (delta, orphan, contradiction-when-enabled),
+    upserts results into elicitation_gaps, then renders the current open queue.
     """
     import json as _json
 
@@ -7257,46 +7261,53 @@ def elicit_list(
     from rich.table import Table
 
     from .db import connect
+    from .elicit.detectors import (
+        ContradictionDetector,
+        DeltaDetector,
+        GapDetector,
+        OrphanEntityDetector,
+    )
+    from .elicit.queue import build_queue
 
     cfg = Config.load()
     effective_limit = limit if limit > 0 else cfg.elicit_queue_limit
+    detectors: list[GapDetector] = [
+        DeltaDetector(),
+        OrphanEntityDetector(),
+        ContradictionDetector(enabled=cfg.elicit_contradiction_enabled),
+    ]
 
     with connect(cfg.database_url) as conn:
-        rows = conn.execute(
-            """
-            SELECT id::text, signal_kind, target_type, target_id,
-                   score, evidence_ids, rationale, status,
-                   first_surfaced_at
-            FROM elicitation_gaps
-            WHERE tenant_id = %s
-              AND status IN ('surfaced', 'snoozed')
-              AND (snoozed_until IS NULL OR snoozed_until <= now())
-            ORDER BY score DESC
-            LIMIT %s
-            """,
-            ("default", effective_limit),
-        ).fetchall()
-
-    if not rows:
-        typer.echo("No open gaps in the elicitation queue.")
-        return
+        gaps = build_queue(
+            conn,
+            cfg=cfg,
+            tenant_id=cfg.graph_tenant_id,
+            detectors=detectors,
+            limit=effective_limit,
+            include_low_confidence=low_confidence,
+        )
 
     if as_json:
-        data = [
-            {
-                "id": r[0],
-                "signal_kind": r[1],
-                "target_type": r[2],
-                "target_id": r[3],
-                "score": r[4],
-                "evidence_ids": list(r[5]),
-                "rationale": r[6],
-                "status": r[7],
-                "first_surfaced_at": r[8].isoformat() if r[8] else None,
-            }
-            for r in rows
-        ]
-        typer.echo(_json.dumps(data))
+        typer.echo(
+            _json.dumps(
+                [
+                    {
+                        "gap_id": g.gap_id,
+                        "signal_kind": g.signal_kind,
+                        "target_type": g.target_type,
+                        "target_id": g.target_id,
+                        "score": g.score,
+                        "evidence_ids": g.evidence_ids,
+                        "rationale": g.rationale,
+                    }
+                    for g in gaps
+                ]
+            )
+        )
+        return
+
+    if not gaps:
+        typer.echo("No open gaps in the elicitation queue.")
         return
 
     console = Console()
@@ -7306,16 +7317,16 @@ def elicit_list(
     table.add_column("Type", style="green", min_width=8)
     table.add_column("Target", min_width=16)
     table.add_column("Score", justify="right", width=7)
-    table.add_column("Status", width=9)
+    table.add_column("Evidence", justify="right", width=8)
 
-    for i, r in enumerate(rows, 1):
+    for i, g in enumerate(gaps, 1):
         table.add_row(
             str(i),
-            r[1],
-            r[2],
-            r[3],
-            f"{r[4]:.4f}",
-            r[7],
+            g.signal_kind,
+            g.target_type,
+            g.target_id,
+            f"{g.score:.4f}",
+            str(len(g.evidence_ids)),
         )
 
     console.print(table)
