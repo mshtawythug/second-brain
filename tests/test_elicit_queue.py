@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import psycopg
 import pytest
@@ -11,7 +12,7 @@ from brain.elicit.schema import Gap
 
 
 # ---------------------------------------------------------------------------
-# Helper
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -26,6 +27,28 @@ def _g(kind: str, tid: str, score: float, n_ev: int = 3) -> Gap:
         evidence_texts=[],
         rationale="r",
     )
+
+
+class FakeDetector:
+    """Hand-written test double that satisfies the GapDetector Protocol.
+
+    Returns a caller-supplied fixed list of Gaps without touching the DB.
+    Avoids monkey-patching — the real detector registry is not modified.
+    """
+
+    signal_kind = "delta"
+
+    def __init__(self, gaps: list[Gap]) -> None:
+        self._gaps = gaps
+
+    def detect(
+        self,
+        conn: psycopg.Connection[Any],
+        *,
+        tenant_id: str,
+        limit: int,
+    ) -> list[Gap]:
+        return self._gaps[:limit]
 
 
 # ---------------------------------------------------------------------------
@@ -194,3 +217,85 @@ def test_build_queue_upserts_and_returns_gaps(test_db: psycopg.Connection) -> No
     # Confirm row landed in the DB
     count = test_db.execute("SELECT count(*) FROM elicitation_gaps").fetchone()
     assert count is not None and count[0] >= 1
+
+
+# ---------------------------------------------------------------------------
+# FakeDetector-based guard tests (spec-mandated: 3 tests below)
+# ---------------------------------------------------------------------------
+
+
+def test_build_queue_min_evidence_guard_via_fake_detector(
+    test_db: psycopg.Connection,
+) -> None:
+    """FakeDetector: gap with < min_evidence_docs evidence_ids is excluded; sibling with >= is kept."""
+    from brain.config import Config
+
+    sparse = _g("delta", "target-sparse", 8.0, n_ev=2)  # 2 < default min_evidence_docs=3
+    ample = _g("delta", "target-ample", 5.0, n_ev=3)  # 3 == min_evidence_docs → included
+
+    cfg = Config.load()  # elicit_min_evidence_docs defaults to 3
+    gaps = build_queue(
+        test_db,
+        cfg=cfg,
+        tenant_id="default",
+        detectors=[FakeDetector([sparse, ample])],
+        limit=10,
+    )
+
+    returned_ids = {g.target_id for g in gaps}
+    assert "target-sparse" not in returned_ids, "sparse gap must be excluded"
+    assert "target-ample" in returned_ids, "ample gap must be returned"
+
+    # Sparse gap must NOT have been upserted into the DB.
+    row = test_db.execute(
+        "SELECT count(*) FROM elicitation_gaps WHERE target_id = 'target-sparse'"
+    ).fetchone()
+    assert row is not None and row[0] == 0
+
+
+def test_build_queue_score_floor_excludes_below_threshold(
+    test_db: psycopg.Connection,
+) -> None:
+    """Gaps with score < elicit_min_gap_score (0.3) are absent from normal read-back."""
+    from brain.config import Config
+
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, rationale, status) "
+        "VALUES ('default','delta','topic','hi-score',0.9,ARRAY['d1','d2','d3'],'r','surfaced')"
+    )
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, rationale, status) "
+        "VALUES ('default','orphan','topic','lo-score',0.1,ARRAY['d1','d2','d3'],'r','surfaced')"
+    )
+
+    cfg = Config.load()  # elicit_min_gap_score defaults to 0.3
+    gaps = build_queue(test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10)
+    ids = {g.target_id for g in gaps}
+    assert "hi-score" in ids, "gap above floor must be returned"
+    assert "lo-score" not in ids, "gap below floor must be absent"
+
+
+def test_build_queue_include_low_confidence_bypasses_floor(
+    test_db: psycopg.Connection,
+) -> None:
+    """include_low_confidence=True returns gaps regardless of score floor."""
+    from brain.config import Config
+
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, rationale, status) "
+        "VALUES ('default','delta','topic','lo-conf',0.1,ARRAY['d1','d2','d3'],'r','surfaced')"
+    )
+
+    cfg = Config.load()  # elicit_min_gap_score defaults to 0.3
+    gaps = build_queue(
+        test_db,
+        cfg=cfg,
+        tenant_id="default",
+        detectors=[],
+        limit=10,
+        include_low_confidence=True,
+    )
+    assert any(g.target_id == "lo-conf" for g in gaps), "low-conf gap must appear"
