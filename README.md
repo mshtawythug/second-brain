@@ -1,8 +1,10 @@
 # Second Brain
 
-Local personal knowledge base with hybrid search, designed to be queried by Claude from any conversation.
+Local, queryable knowledge base and note vault with hybrid search and an entity-graph layer — designed to be searched by Claude from any conversation.
 
-Stores career documents, interview prep, Krisp call transcripts, Slack threads, and Gmail messages in Postgres + pgvector. Searches use Reciprocal Rank Fusion of FTS rank and vector cosine similarity. The embedding backend is pluggable — defaults to local Snowflake Arctic Embed v2 over Ollama (free, no cloud dependency); Voyage AI and Qwen3-Embedding-8B are also supported.
+Stores career documents, interview prep, Krisp call transcripts, Slack threads, Gmail messages, and authored Markdown notes in Postgres + pgvector. Hybrid search ranks results with Reciprocal Rank Fusion over full-text rank and vector cosine similarity, plus recency weighting and metadata filters. The embedding backend is pluggable — defaults to local Snowflake Arctic Embed v2 over Ollama (free, no cloud dependency); Voyage AI and Qwen3-Embedding-8B are also supported.
+
+On top of plain search it adds: a **GraphRAG** layer (an entity graph of people, orgs, and concepts in Apache AGE) for themes, patterns, and connections across interactions; optional **LLM enrichment** that auto-summarizes and tags ingested documents; and an Obsidian-style **vault** of wiki-linked notes that can be published as a browsable **Quartz wiki**. Claude reaches all of this through a bundled MCP server and skills.
 
 ## Table of contents
 
