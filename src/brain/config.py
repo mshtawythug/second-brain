@@ -164,6 +164,34 @@ DEFAULT_GRAPH_COMMUNITY_LIMIT = 5  # global retrieval community count (== theme 
 # ``BRAIN_GRAPH_MAX_ENTITIES_PER_DOC``.
 DEFAULT_GRAPH_COMMUNITY_MAX: int | None = None
 
+# Tacit-knowledge elicitation knobs (feat/tacit-knowledge-elicitation).
+#
+# ``DEFAULT_ELICIT_MIN_EVIDENCE_DOCS`` — minimum number of evidence documents
+# required before a gap is eligible for surfacing. A gap with fewer supporting
+# docs is too thin to act on; conservative default of 3 mirrors the People Hub
+# threshold.
+DEFAULT_ELICIT_MIN_EVIDENCE_DOCS = 3
+
+# Minimum gap score (in [0.0, 1.0]) for a gap to enter the queue. Below this
+# threshold the gap is computed but silently discarded. Default 0.3 keeps
+# low-confidence noise out while still surfacing moderate signals.
+DEFAULT_ELICIT_MIN_GAP_SCORE = 0.3
+
+# Maximum number of open gaps returned by ``brain elicit list`` in a single
+# query. Keeps the CLI output manageable; override via
+# ``BRAIN_ELICIT_QUEUE_LIMIT``.
+DEFAULT_ELICIT_QUEUE_LIMIT = 20
+
+# Gates the contradiction detector. Off by default because contradiction
+# detection requires at least ``elicit_contradiction_min_docs`` documents for
+# a target and can produce false positives on sparse corpora.
+DEFAULT_ELICIT_CONTRADICTION_ENABLED = False
+
+# Minimum documents for a target before contradiction detection runs on it.
+# Ignored when ``elicit_contradiction_enabled`` is False.
+DEFAULT_ELICIT_CONTRADICTION_MIN_DOCS = 5
+
+
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
 # :func:`brain.ingest.gmail.strip_boilerplate`. Default-deny for ``re.DOTALL``;
@@ -364,6 +392,20 @@ class Config:
     # (feature is opt-in — absent file → no aliases applied). Eager-validated:
     # when a path IS resolved it must be readable (raises ``ConfigError`` if not).
     graph_aliases_path: Path | None = None
+    # Tacit-knowledge elicitation knobs (feat/tacit-knowledge-elicitation).
+    # Minimum evidence docs required for a gap to surface.  See
+    # :data:`DEFAULT_ELICIT_MIN_EVIDENCE_DOCS`. Non-negative integer.
+    elicit_min_evidence_docs: int = DEFAULT_ELICIT_MIN_EVIDENCE_DOCS
+    # Minimum gap score in [0.0, 1.0] for a gap to enter the queue. See
+    # :data:`DEFAULT_ELICIT_MIN_GAP_SCORE`. Out-of-range values are rejected
+    # at load time via :class:`ConfigError`.
+    elicit_min_gap_score: float = DEFAULT_ELICIT_MIN_GAP_SCORE
+    # Maximum rows returned by ``brain elicit list``. Non-negative integer.
+    elicit_queue_limit: int = DEFAULT_ELICIT_QUEUE_LIMIT
+    # Gates the contradiction detector. Bool, default off.
+    elicit_contradiction_enabled: bool = DEFAULT_ELICIT_CONTRADICTION_ENABLED
+    # Minimum docs per target before contradiction detection runs. Non-negative int.
+    elicit_contradiction_min_docs: int = DEFAULT_ELICIT_CONTRADICTION_MIN_DOCS
 
     @classmethod
     def load(cls) -> "Config":
@@ -1000,6 +1042,104 @@ class Config:
             _default_aliases = _brain_home_root() / "graph_aliases.yml"
             graph_aliases_path = _default_aliases if _default_aliases.exists() else None
 
+        # Tacit-knowledge elicitation knobs. Same eager-validation idiom as the
+        # enrich / graph knobs above: unset/blank -> default; non-parseable /
+        # out-of-range -> ConfigError at startup so a typo never surfaces
+        # mid-elicitation.
+        elicit_min_evidence_raw = os.environ.get("BRAIN_ELICIT_MIN_EVIDENCE_DOCS")
+        if elicit_min_evidence_raw is None or elicit_min_evidence_raw.strip() == "":
+            elicit_min_evidence_docs = DEFAULT_ELICIT_MIN_EVIDENCE_DOCS
+        else:
+            try:
+                elicit_min_evidence_docs = int(elicit_min_evidence_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ELICIT_MIN_EVIDENCE_DOCS must be a non-negative integer "
+                    f"(got {elicit_min_evidence_raw!r})"
+                ) from exc
+            if elicit_min_evidence_docs < 0:
+                raise ConfigError(
+                    f"BRAIN_ELICIT_MIN_EVIDENCE_DOCS must be a non-negative integer "
+                    f"(got {elicit_min_evidence_docs!r})"
+                )
+
+        elicit_gap_score_raw = os.environ.get("BRAIN_ELICIT_MIN_GAP_SCORE")
+        if elicit_gap_score_raw is None or elicit_gap_score_raw.strip() == "":
+            elicit_min_gap_score = DEFAULT_ELICIT_MIN_GAP_SCORE
+        else:
+            try:
+                elicit_min_gap_score = float(elicit_gap_score_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0] "
+                    f"(got {elicit_gap_score_raw!r})"
+                ) from exc
+            if not (0.0 <= elicit_min_gap_score <= 1.0):
+                raise ConfigError(
+                    f"BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0] "
+                    f"(got {elicit_min_gap_score!r})"
+                )
+
+        elicit_queue_limit_raw = os.environ.get("BRAIN_ELICIT_QUEUE_LIMIT")
+        if elicit_queue_limit_raw is None or elicit_queue_limit_raw.strip() == "":
+            elicit_queue_limit = DEFAULT_ELICIT_QUEUE_LIMIT
+        else:
+            try:
+                elicit_queue_limit = int(elicit_queue_limit_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ELICIT_QUEUE_LIMIT must be a non-negative integer "
+                    f"(got {elicit_queue_limit_raw!r})"
+                ) from exc
+            if elicit_queue_limit < 0:
+                raise ConfigError(
+                    f"BRAIN_ELICIT_QUEUE_LIMIT must be a non-negative integer "
+                    f"(got {elicit_queue_limit_raw!r})"
+                )
+
+        elicit_contradiction_enabled_raw = os.environ.get(
+            "BRAIN_ELICIT_CONTRADICTION_ENABLED"
+        )
+        if (
+            elicit_contradiction_enabled_raw is None
+            or elicit_contradiction_enabled_raw.strip() == ""
+        ):
+            elicit_contradiction_enabled = DEFAULT_ELICIT_CONTRADICTION_ENABLED
+        else:
+            token = elicit_contradiction_enabled_raw.strip().lower()
+            if token in _GRAPH_ENABLED_TRUTHY:
+                elicit_contradiction_enabled = True
+            elif token in _GRAPH_ENABLED_FALSY:
+                elicit_contradiction_enabled = False
+            else:
+                raise ConfigError(
+                    "BRAIN_ELICIT_CONTRADICTION_ENABLED must be one of "
+                    "1/true/yes/on or 0/false/no/off "
+                    f"(got {elicit_contradiction_enabled_raw!r})"
+                )
+
+        elicit_contradiction_min_docs_raw = os.environ.get(
+            "BRAIN_ELICIT_CONTRADICTION_MIN_DOCS"
+        )
+        if (
+            elicit_contradiction_min_docs_raw is None
+            or elicit_contradiction_min_docs_raw.strip() == ""
+        ):
+            elicit_contradiction_min_docs = DEFAULT_ELICIT_CONTRADICTION_MIN_DOCS
+        else:
+            try:
+                elicit_contradiction_min_docs = int(elicit_contradiction_min_docs_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ELICIT_CONTRADICTION_MIN_DOCS must be a non-negative integer "
+                    f"(got {elicit_contradiction_min_docs_raw!r})"
+                ) from exc
+            if elicit_contradiction_min_docs < 0:
+                raise ConfigError(
+                    f"BRAIN_ELICIT_CONTRADICTION_MIN_DOCS must be a non-negative integer "
+                    f"(got {elicit_contradiction_min_docs!r})"
+                )
+
         return {
             # brain_home resolves via default_factory=_brain_home_root.
             "database_url": database_url,
@@ -1041,4 +1181,9 @@ class Config:
             "graph_sender_denylist": graph_sender_denylist,
             "graph_extract_stopwords": graph_extract_stopwords,
             "graph_aliases_path": graph_aliases_path,
+            "elicit_min_evidence_docs": elicit_min_evidence_docs,
+            "elicit_min_gap_score": elicit_min_gap_score,
+            "elicit_queue_limit": elicit_queue_limit,
+            "elicit_contradiction_enabled": elicit_contradiction_enabled,
+            "elicit_contradiction_min_docs": elicit_contradiction_min_docs,
         }

@@ -836,3 +836,35 @@ class TestGraphExtractStopwords:
         monkeypatch.setenv("BRAIN_GRAPH_EXTRACT_STOPWORDS", "foo,FOO, Foo")
         cfg = Config.load()
         assert cfg.graph_extract_stopwords == frozenset({"foo"})
+
+
+# ---------------------------------------------------------------------------
+# Elicitation config knobs (feat/tacit-knowledge-elicitation, 2026-06-01).
+# ---------------------------------------------------------------------------
+
+
+def test_elicit_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All five elicit knobs should resolve to their hardcoded defaults when unset."""
+    for k in [
+        "BRAIN_ELICIT_MIN_EVIDENCE_DOCS",
+        "BRAIN_ELICIT_MIN_GAP_SCORE",
+        "BRAIN_ELICIT_QUEUE_LIMIT",
+        "BRAIN_ELICIT_CONTRADICTION_ENABLED",
+        "BRAIN_ELICIT_CONTRADICTION_MIN_DOCS",
+    ]:
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
+    cfg = Config.load()
+    assert cfg.elicit_min_evidence_docs == 3
+    assert cfg.elicit_min_gap_score == 0.3
+    assert cfg.elicit_queue_limit == 20
+    assert cfg.elicit_contradiction_enabled is False
+    assert cfg.elicit_contradiction_min_docs == 5
+
+
+def test_elicit_min_gap_score_rejects_out_of_range(monkeypatch: pytest.MonkeyPatch) -> None:
+    """BRAIN_ELICIT_MIN_GAP_SCORE outside [0.0, 1.0] must raise ConfigError."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x/y")
+    monkeypatch.setenv("BRAIN_ELICIT_MIN_GAP_SCORE", "1.5")
+    with pytest.raises(ConfigError):
+        Config.load()

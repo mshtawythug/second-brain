@@ -455,3 +455,17 @@ def test_ensure_embedding_column_rejects_non_allowlisted(
         ensure_embedding_column(
             test_db, _DimEmbedder(dim=1024), "documents", "tsv"
         )
+
+
+# --- Migration 017: elicitation_gaps table ------------------------------------
+
+
+def test_migration_017_creates_elicitation_gaps_table(
+    test_db: psycopg.Connection,
+) -> None:
+    """Migration 017 must create the ``elicitation_gaps`` table."""
+    row = test_db.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'public' AND table_name = 'elicitation_gaps'"
+    ).fetchone()
+    assert row is not None, "elicitation_gaps table not found after migrations"
