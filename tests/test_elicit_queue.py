@@ -1,204 +1,129 @@
-"""Tests for brain.elicit.queue — build_queue upsert, RRF, and guards."""
+"""Tests for brain.elicit.queue — _rank_gaps RRF + build_queue upsert/read-back."""
 from __future__ import annotations
 
-import os
+import uuid
 
 import psycopg
 import pytest
 
-from brain.config import Config
-from brain.elicit.queue import BuildQueueResult, build_queue
-
-TEST_DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql://brain:brain@localhost:5434/second_brain_test",
-)
+from brain.elicit.queue import _rank_gaps, build_queue
+from brain.elicit.schema import Gap
 
 
-def _make_cfg(**overrides: object) -> Config:
-    """Minimal Config for queue tests — uses test DB URL and default elicit knobs."""
-    return Config(database_url=TEST_DATABASE_URL, **overrides)  # type: ignore[arg-type]
+# ---------------------------------------------------------------------------
+# Helper
+# ---------------------------------------------------------------------------
 
 
-def _seed_entity(
-    conn: psycopg.Connection,
-    *,
-    name: str,
-    entity_type: str,
-    description: str | None,
-    doc_kinds: list[str],
-) -> str:
-    """Insert a graph entity with N document mentions; return entity id string."""
-    eid = conn.execute(
+def _g(kind: str, tid: str, score: float, n_ev: int = 3) -> Gap:
+    return Gap(
+        gap_id=str(uuid.uuid4()),
+        signal_kind=kind,  # type: ignore[arg-type]
+        target_type="topic",
+        target_id=tid,
+        score=score,
+        evidence_ids=[f"d{i}" for i in range(n_ev)],
+        evidence_texts=[],
+        rationale="r",
+    )
+
+
+# ---------------------------------------------------------------------------
+# _rank_gaps: cross-signal RRF
+# ---------------------------------------------------------------------------
+
+
+def test_rank_merges_signals_by_rrf() -> None:
+    """A target_id appearing in multiple signal lists is boosted to the top."""
+    delta = [_g("delta", "a", 10.0), _g("delta", "b", 5.0)]
+    orphan = [_g("orphan", "a", 2.0)]  # 'a' under two signals -> boosted
+    ranked = _rank_gaps({"delta": delta, "orphan": orphan})
+    assert ranked[0].target_id == "a"
+    assert all(0.0 < g.score <= 1.0 for g in ranked)
+
+
+def test_rank_single_signal_descending() -> None:
+    """With one signal, gaps are returned in descending score order."""
+    gaps = [_g("delta", "c", 1.0), _g("delta", "d", 3.0), _g("delta", "e", 2.0)]
+    ranked = _rank_gaps({"delta": gaps})
+    assert ranked[0].target_id == "d"  # highest raw score → rank 0 → best RRF
+    assert ranked[-1].target_id == "c"
+
+
+def test_rank_empty_returns_empty() -> None:
+    assert _rank_gaps({}) == []
+    assert _rank_gaps({"delta": []}) == []
+
+
+def test_rank_scores_normalized_to_one() -> None:
+    """Top gap always has score exactly 1.0 after normalization."""
+    gaps = [_g("delta", "x", 5.0), _g("delta", "y", 2.0)]
+    ranked = _rank_gaps({"delta": gaps})
+    assert abs(ranked[0].score - 1.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# build_queue: upsert + guarded read-back
+# ---------------------------------------------------------------------------
+
+
+def test_build_queue_excludes_resolved(test_db: psycopg.Connection) -> None:
+    """Resolved gaps are not returned by build_queue."""
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, status) "
+        "VALUES ('default','delta','topic','x', 0.9, ARRAY['d1','d2','d3'], 'resolved')"
+    )
+    from brain.config import Config
+
+    cfg = Config.load()
+    gaps = build_queue(test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10)
+    assert all(g.target_id != "x" for g in gaps)
+
+
+def test_build_queue_empty_detectors_returns_empty(test_db: psycopg.Connection) -> None:
+    """With no detectors and an empty queue, build_queue returns []."""
+    from brain.config import Config
+
+    cfg = Config.load()
+    gaps = build_queue(test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10)
+    assert gaps == []
+
+
+def test_build_queue_upserts_and_returns_gaps(test_db: psycopg.Connection) -> None:
+    """build_queue upserts detected gaps and returns the top-scored open ones."""
+    from brain.config import Config
+    from brain.elicit.detectors import DeltaDetector
+
+    # Seed 3 ingested-only docs for entity "Widget" so DeltaDetector finds it
+    eid = test_db.execute(
         "INSERT INTO graph_entities "
         "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
-        "VALUES ('default', %s, %s, %s, %s, %s) RETURNING id",
-        (entity_type, name, name.lower(), description, len(doc_kinds)),
+        "VALUES ('default', 'org', 'Widget', 'widget', 'desc', 3) RETURNING id"
     ).fetchone()[0]  # type: ignore[index]
-    for i, kind in enumerate(doc_kinds):
-        did = conn.execute(
+    for i in range(3):
+        did = test_db.execute(
             "INSERT INTO documents (title, content, content_hash, content_type, kind) "
-            "VALUES (%s, %s, %s, 'note', %s) RETURNING id",
-            (f"{name} doc {i}", "body", f"{name}-{i}-q-hash", kind),
+            "VALUES (%s, 'body', %s, 'note', 'ingested') RETURNING id",
+            (f"Widget doc {i}", f"widget-{i}-bq-hash"),
         ).fetchone()[0]  # type: ignore[index]
-        conn.execute(
+        test_db.execute(
             "INSERT INTO graph_entity_mentions "
             "(tenant_id, entity_id, document_id, source) "
             "VALUES ('default', %s, %s, 'people')",
             (eid, did),
         )
-    return str(eid)
 
-
-# ---------------------------------------------------------------------------
-# Happy-path: gaps are inserted
-# ---------------------------------------------------------------------------
-
-
-def test_build_queue_inserts_delta_gaps(test_db: psycopg.Connection) -> None:
-    """Entities referenced only in ingested docs produce delta gaps in the queue."""
-    _seed_entity(
+    cfg = Config.load()
+    gaps = build_queue(
         test_db,
-        name="Acme",
-        entity_type="org",
-        description="x",
-        doc_kinds=["ingested", "ingested", "ingested"],
+        cfg=cfg,
+        tenant_id="default",
+        detectors=[DeltaDetector()],
+        limit=10,
     )
-    cfg = _make_cfg(elicit_min_evidence_docs=3, elicit_min_gap_score=0.0)
-    result = build_queue(test_db, cfg=cfg, tenant_id="default")
-
-    assert result.inserted == 1
-    assert result.updated == 0
-
-    row = test_db.execute(
-        "SELECT signal_kind, target_type, score FROM elicitation_gaps "
-        "WHERE status = 'surfaced' ORDER BY score DESC LIMIT 1"
-    ).fetchone()
-    assert row is not None
-    assert row[0] == "delta"
-    assert row[1] == "org"
-    assert row[2] > 0  # RRF score stored
-
-
-def test_build_queue_returns_result_type(test_db: psycopg.Connection) -> None:
-    """build_queue always returns a BuildQueueResult dataclass."""
-    cfg = _make_cfg()
-    result = build_queue(test_db, cfg=cfg)
-    assert isinstance(result, BuildQueueResult)
-
-
-# ---------------------------------------------------------------------------
-# Evidence guard: gaps with too few docs are skipped
-# ---------------------------------------------------------------------------
-
-
-def test_build_queue_skips_low_evidence(test_db: psycopg.Connection) -> None:
-    """Entities with fewer evidence docs than min_evidence_docs are skipped."""
-    # 2 docs < min_evidence_docs=3 → skipped
-    _seed_entity(
-        test_db,
-        name="Tiny",
-        entity_type="org",
-        description="x",
-        doc_kinds=["ingested", "ingested"],
-    )
-    cfg = _make_cfg(elicit_min_evidence_docs=3, elicit_min_gap_score=0.0)
-    result = build_queue(test_db, cfg=cfg)
-
-    assert result.inserted == 0
-    assert result.skipped >= 1
+    assert len(gaps) >= 1
+    assert gaps[0].signal_kind == "delta"
+    # Confirm row landed in the DB
     count = test_db.execute("SELECT count(*) FROM elicitation_gaps").fetchone()
-    assert count is not None and count[0] == 0
-
-
-# ---------------------------------------------------------------------------
-# Score guard: gaps below min_gap_score are skipped
-# ---------------------------------------------------------------------------
-
-
-def test_build_queue_skips_low_score(test_db: psycopg.Connection) -> None:
-    """Entities whose raw score is below min_gap_score are filtered out."""
-    # doc_count=3 → raw score 3.0; require raw score >= 10.0 → skipped
-    _seed_entity(
-        test_db,
-        name="Moderate",
-        entity_type="org",
-        description="x",
-        doc_kinds=["ingested", "ingested", "ingested"],
-    )
-    cfg = _make_cfg(elicit_min_evidence_docs=1, elicit_min_gap_score=10.0)
-    result = build_queue(test_db, cfg=cfg)
-
-    assert result.inserted == 0
-    count = test_db.execute("SELECT count(*) FROM elicitation_gaps").fetchone()
-    assert count is not None and count[0] == 0
-
-
-# ---------------------------------------------------------------------------
-# Upsert: second run updates, not inserts
-# ---------------------------------------------------------------------------
-
-
-def test_build_queue_updates_existing_gap(test_db: psycopg.Connection) -> None:
-    """A second build_queue run updates an existing surfaced gap instead of inserting."""
-    _seed_entity(
-        test_db,
-        name="Persistent",
-        entity_type="org",
-        description="x",
-        doc_kinds=["ingested", "ingested", "ingested"],
-    )
-    cfg = _make_cfg(elicit_min_evidence_docs=3, elicit_min_gap_score=0.0)
-
-    r1 = build_queue(test_db, cfg=cfg)
-    assert r1.inserted == 1
-    assert r1.updated == 0
-
-    r2 = build_queue(test_db, cfg=cfg)
-    assert r2.inserted == 0
-    assert r2.updated == 1
-
-    # Only one row should exist in the queue
-    count = test_db.execute(
-        "SELECT count(*) FROM elicitation_gaps WHERE status = 'surfaced'"
-    ).fetchone()
-    assert count is not None and count[0] == 1
-
-
-# ---------------------------------------------------------------------------
-# signal_kinds filter: limit to specific detectors
-# ---------------------------------------------------------------------------
-
-
-def test_build_queue_signal_kinds_filter(test_db: psycopg.Connection) -> None:
-    """Passing signal_kinds limits which detectors run."""
-    _seed_entity(
-        test_db,
-        name="FilterMe",
-        entity_type="org",
-        description=None,
-        doc_kinds=["ingested", "ingested", "ingested"],
-    )
-    cfg = _make_cfg(elicit_min_evidence_docs=3, elicit_min_gap_score=0.0)
-
-    # Only run orphan — should produce an orphan gap (no description)
-    result = build_queue(test_db, cfg=cfg, signal_kinds=["orphan"])
-    assert result.inserted == 1
-
-    row = test_db.execute(
-        "SELECT signal_kind FROM elicitation_gaps WHERE status = 'surfaced'"
-    ).fetchone()
-    assert row is not None and row[0] == "orphan"
-
-
-# ---------------------------------------------------------------------------
-# Contradiction stub: disabled by default, no errors raised
-# ---------------------------------------------------------------------------
-
-
-def test_build_queue_contradiction_disabled_by_default(test_db: psycopg.Connection) -> None:
-    """ContradictionDetector returns empty list when disabled; no exception raised."""
-    cfg = _make_cfg(elicit_contradiction_enabled=False)
-    result = build_queue(test_db, cfg=cfg, signal_kinds=["contradiction"])
-    assert result.inserted == 0
-    assert result.skipped == 0
+    assert count is not None and count[0] >= 1
