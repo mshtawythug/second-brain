@@ -1,10 +1,10 @@
 # Second Brain
 
-Local, queryable knowledge base and note vault with hybrid search and an entity-graph layer — designed to be searched by Claude from any conversation.
+Local, queryable knowledge base and note vault with hybrid search and an entity-graph layer — designed to be searched by any AI coding agent or assistant from any conversation.
 
 Stores career documents, interview prep, Krisp call transcripts, Slack threads, Gmail messages, and authored Markdown notes in Postgres + pgvector. Hybrid search ranks results with Reciprocal Rank Fusion over full-text rank and vector cosine similarity, plus recency weighting and metadata filters. The embedding backend is pluggable — defaults to local Snowflake Arctic Embed v2 over Ollama (free, no cloud dependency); Voyage AI and Qwen3-Embedding-8B are also supported.
 
-On top of plain search it adds: a **GraphRAG** layer (an entity graph of people, orgs, and concepts in Apache AGE) for themes, patterns, and connections across interactions; optional **LLM enrichment** that auto-summarizes and tags ingested documents; and an Obsidian-style **vault** of wiki-linked notes that can be published as a browsable **Quartz wiki**. Claude reaches all of this through a bundled MCP server and skills.
+On top of plain search it adds: a **GraphRAG** layer (an entity graph of people, orgs, and concepts in Apache AGE) for themes, patterns, and connections across interactions; optional **LLM enrichment** that auto-summarizes and tags ingested documents; and an Obsidian-style **vault** of wiki-linked notes that can be published as a browsable **Quartz wiki**. Any agent reaches all of this through the `brain` CLI or the bundled `brain-mcp` MCP server — with ready-made skills for Claude Code, and the MCP server dropping into Claude Desktop or any MCP-compatible client.
 
 ## Table of contents
 
@@ -60,21 +60,21 @@ On top of plain search it adds: a **GraphRAG** layer (an entity graph of people,
 
 ## What this is
 
-A `brain` CLI backed by a local Postgres database that I can query from any Claude Code session. I ingest my own career artifacts — resumes, interview prep, Krisp call transcripts, Slack threads, selected Gmail — and Claude searches them via `brain search` whenever a conversation touches my work history. Instead of copy-pasting context into every chat, Claude pulls the real source material on demand.
+A `brain` CLI backed by a local Postgres database that any AI agent can query from any session — Claude Code, Claude Desktop, or any other CLI-capable or MCP-compatible harness. I ingest my own career artifacts — resumes, interview prep, Krisp call transcripts, Slack threads, selected Gmail — and the agent searches them via `brain search` whenever a conversation touches my work history. Instead of copy-pasting context into every chat, the agent pulls the real source material on demand.
 
 ## Why this exists
 
 ### Why I built it
 
-- **Claude has no memory across conversations.** A queryable second brain gives it durable, personal context (past meetings, prior writings, decisions) without me re-pasting it every time.
+- **AI assistants have no memory across conversations.** A queryable second brain gives them durable, personal context (past meetings, prior writings, decisions) without me re-pasting it every time.
 - **Local-only by design.** My Krisp transcripts and Slack history don't leave my machine — no SaaS account, no vendor indexing my comms.
 - **Hybrid search beats either half.** My queries split roughly 50/50 between paraphrase-heavy ("compliance horror stories") and exact-name (a coworker, a former employer). RRF gives me both in one ranked list.
-- **Works from any cwd.** A symlinked launcher means Claude Code in any project can call `brain search` — the knowledge base isn't tied to one repo.
+- **Works from any cwd.** A symlinked launcher means any agent in any project can call `brain search` — the knowledge base isn't tied to one repo.
 - **Idempotent ingest.** `documents.content_hash` is `UNIQUE`, so re-running `brain ingest-dir` is a no-op. I can rerun without thinking about duplicates.
 
 ### Token cost vs. direct fetch
 
-The other big reason this is worth building: querying `brain` burns far less context than having Claude read the source directly via MCP or the `Read` tool. Rough per-query estimates (yours will vary with thread/file size):
+The other big reason this is worth building: querying `brain` burns far less context than having an agent read the source directly via MCP or a file-read tool. Rough per-query estimates (yours will vary with thread/file size):
 
 | Source | Direct (MCP / `Read` tool) | `brain search` (+ optional `brain show`) | Savings |
 |---|---|---|---|
@@ -124,12 +124,12 @@ Caveats:
   brew install caddy
   brew services start caddy
   ```
-  See [Wiki rendering → Serve locally](#serve-locally) for the Caddyfile recipe and the `brain.test` /etc/hosts entry. Skip Caddy if you only ever query the brain through `brain search` from Claude — the wiki view is optional.
+  See [Wiki rendering → Serve locally](#serve-locally) for the Caddyfile recipe and the `brain.test` /etc/hosts entry. Skip Caddy if you only ever query the brain through `brain search` from your agent — the wiki view is optional.
 - **`gws` CLI** (only for Gmail ingest and Google-backed directory linking). Brain shells out to `gws gmail users messages list/get` for `brain ingest-gmail`, and uses `gws` best-effort for Calendar/Contacts directory refreshes. Install and authenticate it separately, make sure `which gws` resolves, then `brain doctor` will report `gws CLI OK`.
 - **Apache AGE Postgres image** — shipped automatically. `brain setup` builds and runs the custom `second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2` image (PostgreSQL 16 + pgvector 0.8.2 + pgcrypto + AGE 1.5.0-rc0) from the packaged Dockerfile. The step-by-step path stays on stock pgvector for backwards-compat; see [Upgrading an existing brain to the AGE image](#upgrading-an-existing-brain-to-the-age-image).
 - **An Ollama model for GraphRAG concept extraction** (only if `BRAIN_GRAPH_CONCEPTS=true`, which is the default). `ollama pull llama3.1:8b` (~4.7 GB) covers the default model; set `BRAIN_GRAPH_EXTRACT_MODEL` to override. Setting `BRAIN_GRAPH_CONCEPTS=false` disables concept extraction (people aspect still works without an LLM).
 - **Graphviz** (optional) — only needed if you want to render `brain graph --format dot` output locally with `dot -Tsvg`. On macOS: `brew install graphviz`.
-- **Claude Code or Claude Desktop** (optional but the whole point) — Claude Code can call the `brain` CLI from any project; Claude Desktop can call the `brain-mcp` server once configured.
+- **An AI agent or assistant** (optional but the whole point) — any CLI-capable agent (e.g. Claude Code) can call the `brain` CLI from any project; any MCP-compatible client (e.g. Claude Desktop) can call the `brain-mcp` server once configured.
 
 ### Install
 
@@ -216,7 +216,7 @@ edits fix the CLI and wiki scripts; the MCP symlink is optional but useful for
 debugging.
 
 **1. Symlink the `brain` launcher onto your PATH** so `brain` works from any
-shell — including Claude Code in any project:
+shell — including any agent running in any project:
 
 ```bash
 # macOS (Homebrew):
@@ -230,7 +230,7 @@ The symlink works without `source .venv/bin/activate` because `pip install -e`
 gives the launcher an absolute-path shebang pointing at the venv's Python.
 
 **2. Optional: symlink `brain-mcp` too** so you can start the MCP server from
-any terminal while debugging Claude Desktop:
+any terminal while debugging an MCP client (e.g. Claude Desktop):
 
 ```bash
 # macOS (Homebrew):
@@ -240,7 +240,7 @@ ln -s ~/workspace/second-brain/.venv/bin/brain-mcp /opt/homebrew/bin/brain-mcp
 ln -s ~/workspace/second-brain/.venv/bin/brain-mcp ~/.local/bin/brain-mcp
 ```
 
-Claude Desktop can still use the absolute venv path shown below; this symlink
+Your MCP client can still use the absolute venv path shown below; this symlink
 is only for convenience.
 
 **3. Add `bin/` to your shell's PATH** so `brain-up` / `brain-down` /
@@ -288,7 +288,7 @@ no need to remember Quartz or watcher invocations.
 | Extraction | `pypdf`, `pdfplumber`, `python-docx`, `markdown-it-py` | Covers the file types I actually have. |
 | Chunking | Paragraph-aware, budgeted with `tiktoken` | Keeps semantic boundaries intact while staying under the embedder's token limit. |
 | LLM enrichment | Local-by-default [Ollama](https://ollama.com/) (`llama3.1:8b` defaults for `BRAIN_ENRICH_MODEL` and `BRAIN_GRAPH_EXTRACT_MODEL`) | Auto-summary writes `documents.summary` after ingest; GraphRAG concept extraction uses a separate Ollama extractor. `--no-enrich` disables auto-summary for an ingest run; `BRAIN_GRAPH_CONCEPTS=false` disables the concept aspect. |
-| Output | [Rich](https://rich.readthedocs.io/) tables + `--json` mode | Human-readable in a terminal, machine-parsable when Claude shells out. |
+| Output | [Rich](https://rich.readthedocs.io/) tables + `--json` mode | Human-readable in a terminal, machine-parsable when an agent shells out. |
 | Wiki rendering | [Quartz](https://quartz.jzhao.xyz/) (static site from Markdown + `[[wiki-links]]`) + [Caddy](https://caddyserver.com/) (blue/green serve from the `current` symlink) | Optional rendered vault view: graph view, backlinks, full-text search, dark mode. Body-only edits take the per-file fastpath, reaching the UI in ~2s including reload. Start it with `brain-up` in dev; installer users opt out with `--skip-wiki`. |
 | Tests | `pytest` against a real Postgres test DB, fake embedder fixture | Real-DB integration catches schema/migration drift that mocks would hide. |
 | Lint / type | `ruff`, `mypy` | Cheap to run, catches real bugs. |
@@ -340,7 +340,7 @@ brain list --json
 ```
 
 ID prefixes must be at least 6 hex characters and must uniquely identify one
-document. `--json` is the machine-readable path for Claude or scripts.
+document. `--json` is the machine-readable path for agents or scripts.
 
 ### Tags, edits, draft hiding, and deletes
 
@@ -490,7 +490,7 @@ brain graphrag build --force            # authoritative full rebuild (recover a 
 brain graphrag refresh                  # recompute aggregate edge weights only
 ```
 
-The same surface is available to Claude Desktop / Claude Code through the
+The same surface is available to any MCP client (Claude Desktop, Claude Code, and others) through the
 `brain_graphrag_search`, `brain_graphrag_themes`, `brain_graphrag_entity`,
 `brain_graphrag_build`, and `brain_graphrag_communities_build` MCP tools.
 
@@ -896,15 +896,16 @@ If Quartz drifts incompatibly, gets archived, or you just want a different look:
 
 ## Claude integrations
 
-Brain ships two ways for Claude to use the corpus: an MCP server (Claude Desktop) and a skill (Claude Code). Both call the same underlying `brain` CLI.
+The `brain` CLI and the `brain-mcp` MCP server are harness-agnostic — any agent that can run a shell command or speak MCP can use the corpus. The two worked integrations below are the ones I run: an MCP server (Claude Desktop, or any MCP-compatible client) and a skill (Claude Code). Both call the same underlying `brain` CLI.
 
 ### Claude Desktop (MCP server)
 
 #### Configuration
 
 The `brain-mcp` binary exposes Brain as an [MCP](https://modelcontextprotocol.io/)
-server so Claude Desktop can search, save, author notes, inspect links, and
-edit entries during a chat — no terminal required.
+server so Claude Desktop — or any other MCP-compatible client — can search,
+save, author notes, inspect links, and edit entries during a chat — no
+terminal required.
 
 Add the following to `~/Library/Application Support/Claude/claude_desktop_config.json`. The `env` block must match whichever backend you set in `.env` — pass `BRAIN_EMBEDDER` and the backend-specific knobs (Ollama host for `arctic`/`qwen3`, `VOYAGE_API_KEY` for `voyage`). `BRAIN_VAULT_PATH` is optional when you use the default `~/brain-vault`, but setting it explicitly makes Desktop behavior match the CLI even if the repo moves later:
 
@@ -1008,7 +1009,7 @@ A snippet in `~/.claude/CLAUDE.md` tells every Claude Code conversation:
 - How to orchestrate Krisp/Slack ingestion via MCP → `brain ingest-stdin`
 - That `--json` output is available for programmatic parsing
 
-Once your corpus is ingested, you can ask Claude things like:
+Once your corpus is ingested, you can ask your agent things like:
 
 **Recall past conversations**
 - "What did I tell the design team about the new onboarding flow?"
@@ -1041,12 +1042,12 @@ Once your corpus is ingested, you can ask Claude things like:
 - "Which clusters of people and topics dominate my notes overall?" → `brain graphrag communities build` then `brain graphrag search "..." --mode global`
 - "Show me the entity graph around [topic] at depth 2." → `brain graphrag entity "[topic]"`
 
-**Ingest on demand** (Claude orchestrates the MCP calls)
+**Ingest on demand** (the agent orchestrates the MCP calls)
 - "Ingest last week's Krisp calls."
 - "Pull the Slack thread about the auth incident into my brain."
 - "Ingest emails from the recruiting@ alias from the past 30 days."
 
-The pattern: ask the question naturally — Claude decides whether to call `brain search` (single-doc lookup, ranked by lexical + semantic similarity) or `brain graphrag …` (themes / patterns / connections traversed via the entity graph), which filters to apply (`--source`, `--tag`, `--since`, `--person`, `--mode`), and when to follow up with `brain show` for full context.
+The pattern: ask the question naturally — the agent decides whether to call `brain search` (single-doc lookup, ranked by lexical + semantic similarity) or `brain graphrag …` (themes / patterns / connections traversed via the entity graph), which filters to apply (`--source`, `--tag`, `--since`, `--person`, `--mode`), and when to follow up with `brain show` for full context.
 
 ## Configuration and administration
 
