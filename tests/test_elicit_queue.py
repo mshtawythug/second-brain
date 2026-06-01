@@ -90,6 +90,73 @@ def test_build_queue_empty_detectors_returns_empty(test_db: psycopg.Connection) 
     assert gaps == []
 
 
+def test_build_queue_evidence_guard_drops_sparse_gaps(test_db: psycopg.Connection) -> None:
+    """Gaps with fewer evidence docs than elicit_min_evidence_docs are not upserted or returned."""
+    from brain.config import Config
+    from brain.elicit.detectors import DeltaDetector
+
+    # Seed entity with only 2 ingested docs — below default min_evidence_docs=3.
+    eid = test_db.execute(
+        "INSERT INTO graph_entities "
+        "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
+        "VALUES ('default', 'org', 'Sparse', 'sparse', 'desc', 2) RETURNING id"
+    ).fetchone()[0]  # type: ignore[index]
+    for i in range(2):
+        did = test_db.execute(
+            "INSERT INTO documents (title, content, content_hash, content_type, kind) "
+            "VALUES (%s, 'body', %s, 'note', 'ingested') RETURNING id",
+            (f"Sparse doc {i}", f"sparse-{i}-guard-hash"),
+        ).fetchone()[0]  # type: ignore[index]
+        test_db.execute(
+            "INSERT INTO graph_entity_mentions "
+            "(tenant_id, entity_id, document_id, source) "
+            "VALUES ('default', %s, %s, 'people')",
+            (eid, did),
+        )
+
+    cfg = Config.load()  # elicit_min_evidence_docs defaults to 3
+    gaps = build_queue(
+        test_db, cfg=cfg, tenant_id="default", detectors=[DeltaDetector()], limit=10
+    )
+    assert gaps == []
+    count = test_db.execute("SELECT count(*) FROM elicitation_gaps").fetchone()
+    assert count is not None and count[0] == 0
+
+
+def test_build_queue_score_floor_and_include_low_confidence(
+    test_db: psycopg.Connection,
+) -> None:
+    """Gaps below elicit_min_gap_score are excluded; include_low_confidence=True bypasses floor."""
+    from brain.config import Config
+
+    # Insert a gap directly with score=0.1, below the default floor of 0.3.
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, rationale, status) "
+        "VALUES ('default', 'delta', 'topic', 'low-score-target', 0.1, "
+        "ARRAY['d1','d2','d3'], 'rationale', 'surfaced')"
+    )
+
+    cfg = Config.load()  # elicit_min_gap_score defaults to 0.3
+
+    # Without include_low_confidence: floor=0.3, gap excluded.
+    gaps_normal = build_queue(
+        test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10
+    )
+    assert all(g.target_id != "low-score-target" for g in gaps_normal)
+
+    # With include_low_confidence=True: floor=0.0, gap included.
+    gaps_lc = build_queue(
+        test_db,
+        cfg=cfg,
+        tenant_id="default",
+        detectors=[],
+        limit=10,
+        include_low_confidence=True,
+    )
+    assert any(g.target_id == "low-score-target" for g in gaps_lc)
+
+
 def test_build_queue_upserts_and_returns_gaps(test_db: psycopg.Connection) -> None:
     """build_queue upserts detected gaps and returns the top-scored open ones."""
     from brain.config import Config
