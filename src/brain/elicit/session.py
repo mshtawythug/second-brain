@@ -11,6 +11,7 @@ CLI imports the session, never the reverse.
 """
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,7 @@ from ..edit_session import (
 from ..edit_session import run_editor_session as _run_editor_session
 from ..errors import ElicitError
 from ..vault import create_vault_note
+from ..vault.paths import safe_wikilink_alias, strip_md_extension
 from .drafter import Drafter
 from .schema import ElicitDraft, ElicitOutcome, Gap
 
@@ -36,6 +38,12 @@ EditFn = Callable[..., "tuple[dict[str, Any], str]"]
 
 _MENU = "[e] edit & save   [s] skip   [n] snooze N days   [q] quit"
 _EVIDENCE_PREVIEW = 3
+
+# Target types whose ``target_id`` is a real ``graph_entities`` UUID (so the
+# source entity's display name can be resolved). ``user_flagged`` gaps may
+# carry a raw-string ``target_id`` that is not a UUID, so resolution is always
+# guarded by a UUID parse regardless of target_type.
+_ENTITY_TARGET_TYPES = frozenset({"person", "org", "project", "topic", "tool"})
 
 
 def _default_input() -> str:
@@ -264,12 +272,14 @@ def _codify(
     """
     if vault_path is None:
         raise ValueError("vault_path is required to codify an elicited rule")
+    footer = _build_source_footer(conn, gap, tenant_id=tenant_id)
+    note_body = f"{body}{footer}" if footer else body
     note_id = create_vault_note(
         conn,
         cfg=cfg,
         vault_path=vault_path,
         title=draft.title,
-        body=body,
+        body=note_body,
         tags=_note_tags(gap),
     )
     cur = conn.execute(
@@ -284,3 +294,102 @@ def _codify(
 def _note_tags(gap: Gap) -> list[str]:
     """Canonical tag set for an elicited rule note."""
     return ["tacit", gap.signal_kind]
+
+
+def _build_source_footer(
+    conn: psycopg.Connection[Any], gap: Gap, *, tenant_id: str
+) -> str:
+    """Build a grounded ``## Source`` footer wiki-linking the gap's provenance.
+
+    Spec §1/§4.5: codified rules are "wikilinked to their source entity." We
+    resolve only REAL data so no link is ever guessed (repo rule: never invent
+    wiki-link targets):
+
+    - **Evidence:** the gap's evidence documents are resolved to their actual
+      ``documents.vault_path`` (rows that exist AND have been exported to the
+      vault). Each is rendered as a path-form wiki-link
+      ``[[<vault-path-no-md>|<title>]]`` — the same shape the derived-links
+      fence / People Hub emit and that
+      :func:`brain.vault.resolver._resolve_by_vault_path` matches, so the link
+      is guaranteed to resolve.
+    - **Source entity:** for an entity-typed gap whose ``target_id`` is a real
+      entity UUID, the entity's display name is included as PLAIN TEXT (no
+      wiki-link — we can't confirm a vault page exists for the entity, and a
+      broken link is worse than plain text).
+
+    Returns ``""`` when neither an entity name nor any evidence vault_path
+    resolves, so the caller appends nothing rather than an empty section.
+    """
+    lines: list[str] = []
+
+    entity_name = _resolve_entity_name(conn, gap, tenant_id=tenant_id)
+    if entity_name:
+        lines.append(f"Elicited from: {entity_name}")
+
+    evidence_links = _resolve_evidence_links(conn, gap)
+    if evidence_links:
+        if lines:
+            lines.append("")
+        lines.append("Evidence:")
+        lines.extend(f"- {link}" for link in evidence_links)
+
+    if not lines:
+        return ""
+    return "\n\n## Source\n\n" + "\n".join(lines) + "\n"
+
+
+def _resolve_entity_name(
+    conn: psycopg.Connection[Any], gap: Gap, *, tenant_id: str
+) -> str | None:
+    """Return the source entity's display name, or ``None`` if not resolvable.
+
+    Guarded so a ``user_flagged`` gap with a raw-string ``target_id`` (not a
+    UUID) is skipped gracefully rather than raising on the UUID cast.
+    """
+    if gap.target_type not in _ENTITY_TARGET_TYPES:
+        return None
+    try:
+        uuid.UUID(gap.target_id)
+    except (ValueError, AttributeError, TypeError):
+        return None
+    row = conn.execute(
+        "SELECT name FROM graph_entities WHERE id = %s::uuid AND tenant_id = %s",
+        (gap.target_id, tenant_id),
+    ).fetchone()
+    if row is None or not row[0]:
+        return None
+    return str(row[0])
+
+
+def _resolve_evidence_links(
+    conn: psycopg.Connection[Any], gap: Gap
+) -> list[str]:
+    """Render the gap's evidence docs as resolvable path-form wiki-links.
+
+    Only evidence ids that parse as UUIDs are queried (non-UUID placeholders
+    are skipped, never cast), and only rows with a non-null ``vault_path`` are
+    rendered — so every emitted link points at a real, exported file.
+    """
+    valid_ids: list[str] = []
+    for ev in gap.evidence_ids:
+        try:
+            uuid.UUID(str(ev))
+        except (ValueError, AttributeError, TypeError):
+            continue
+        valid_ids.append(str(ev))
+    if not valid_ids:
+        return []
+    rows = conn.execute(
+        "SELECT vault_path, title FROM documents "
+        "WHERE id = ANY(%s::uuid[]) AND vault_path IS NOT NULL "
+        "ORDER BY vault_path",
+        (valid_ids,),
+    ).fetchall()
+    links: list[str] = []
+    for vault_path, title in rows:
+        target = strip_md_extension(str(vault_path))
+        if title:
+            links.append(f"[[{target}|{safe_wikilink_alias(str(title))}]]")
+        else:
+            links.append(f"[[{target}]]")
+    return links

@@ -196,6 +196,163 @@ def test_accept_codifies(
     assert "MY CORRECTED RULE" in content
 
 
+def _seed_evidence_doc(
+    conn: psycopg.Connection,
+    *,
+    vault_path: str,
+    title: str = "Evidence Doc",
+    content_hash: str = "ev-src-footer-hash",
+) -> str:
+    """Insert a synthetic ingested doc WITH a vault_path; return its uuid."""
+    return conn.execute(
+        "INSERT INTO documents (title, content, content_hash, content_type, kind, "
+        "vault_path) VALUES (%s, 'evidence body', %s, 'transcript', 'ingested', %s) "
+        "RETURNING id::text",
+        (title, content_hash, vault_path),
+    ).fetchone()[0]
+
+
+def test_accept_codify_links_evidence_vault_paths(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The codified note gains a ## Source section wiki-linking evidence docs."""
+    # Arrange — vault + a real evidence doc with a vault_path.
+    vault = tmp_path / "vault"
+    init_vault(vault)
+    monkeypatch.setattr(
+        "brain.vault.note_builder._build_embedder", lambda _cfg: fake_embedder
+    )
+    ev_path = "_ingested/krisp/2026-01-01-abcd1234-evidence-doc.md"
+    ev_id = _seed_evidence_doc(test_db, vault_path=ev_path)
+    gid = _seed_gap(test_db)
+    gap = Gap(
+        gap_id=gid,
+        signal_kind="delta",
+        target_type="org",
+        target_id="Acme",
+        score=0.9,
+        evidence_ids=[ev_id],
+        rationale="r",
+    )
+
+    # Act
+    outcomes = run_session(
+        Config.load(),
+        test_db,
+        drafter=_FakeDrafter(),
+        gaps=[gap],
+        tenant_id="default",
+        vault_path=vault,
+        input_fn=iter(["e"]).__next__,
+        edit_fn=lambda initial, *, doc_id_label: ({}, "MY CORRECTED RULE"),
+    )
+
+    # Assert — corrected body + grounded Source section both present.
+    assert outcomes[0].action == "accepted"
+    content = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (outcomes[0].note_id,)
+    ).fetchone()[0]
+    assert "MY CORRECTED RULE" in content
+    assert "## Source" in content
+    # Path-form wiki-link to the real evidence vault_path (sans .md).
+    assert "_ingested/krisp/2026-01-01-abcd1234-evidence-doc" in content
+
+
+def test_accept_codify_includes_entity_name(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entity-typed gap whose target_id is a real entity UUID names it."""
+    # Arrange — a graph entity + an evidence doc, gap targets the entity UUID.
+    vault = tmp_path / "vault"
+    init_vault(vault)
+    monkeypatch.setattr(
+        "brain.vault.note_builder._build_embedder", lambda _cfg: fake_embedder
+    )
+    entity_id = test_db.execute(
+        "INSERT INTO graph_entities "
+        "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
+        "VALUES ('default','org','Globex Corp','globex','desc',3) RETURNING id::text"
+    ).fetchone()[0]
+    ev_id = _seed_evidence_doc(
+        test_db,
+        vault_path="_ingested/krisp/2026-02-02-beef0001-globex-sync.md",
+        content_hash="ev-entity-hash",
+    )
+    gid = _seed_gap(test_db)
+    gap = Gap(
+        gap_id=gid,
+        signal_kind="delta",
+        target_type="org",
+        target_id=entity_id,
+        score=0.9,
+        evidence_ids=[ev_id],
+        rationale="r",
+    )
+
+    # Act
+    outcomes = run_session(
+        Config.load(),
+        test_db,
+        drafter=_FakeDrafter(),
+        gaps=[gap],
+        tenant_id="default",
+        vault_path=vault,
+        input_fn=iter(["e"]).__next__,
+        edit_fn=lambda initial, *, doc_id_label: ({}, "ENTITY RULE BODY"),
+    )
+
+    # Assert — entity name surfaces as plain text under the Source section.
+    assert outcomes[0].action == "accepted"
+    content = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (outcomes[0].note_id,)
+    ).fetchone()[0]
+    assert "## Source" in content
+    assert "Elicited from: Globex Corp" in content
+
+
+def test_accept_codify_without_resolvable_evidence_adds_no_source_section(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gap with no UUID/vault_path evidence still codifies — no empty section."""
+    # Arrange — default gap (evidence_ids are non-UUID placeholders d1/d2/d3,
+    # target_id 'Acme' is not an entity UUID), so nothing resolves.
+    vault = tmp_path / "vault"
+    init_vault(vault)
+    monkeypatch.setattr(
+        "brain.vault.note_builder._build_embedder", lambda _cfg: fake_embedder
+    )
+    gid = _seed_gap(test_db)
+
+    # Act
+    outcomes = run_session(
+        Config.load(),
+        test_db,
+        drafter=_FakeDrafter(),
+        gaps=[_gap(gid)],
+        tenant_id="default",
+        vault_path=vault,
+        input_fn=iter(["e"]).__next__,
+        edit_fn=lambda initial, *, doc_id_label: ({}, "RULE WITHOUT SOURCES"),
+    )
+
+    # Assert — note authored, but no Source section appended.
+    assert outcomes[0].action == "accepted"
+    content = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (outcomes[0].note_id,)
+    ).fetchone()[0]
+    assert "RULE WITHOUT SOURCES" in content
+    assert "## Source" not in content
+
+
 def test_skip_does_not_touch_other_tenant_gap(
     test_db: psycopg.Connection,
 ) -> None:
