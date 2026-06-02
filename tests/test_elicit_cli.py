@@ -221,6 +221,40 @@ def test_elicit_list_degrades_when_contradiction_needs_ollama(
     assert "contradiction detection needs Ollama" in res.stderr
 
 
+def test_elicit_list_builds_queue_once_when_ollama_down(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag ON + Ollama down must run build_queue ONCE (no catch-and-rerun).
+
+    Regression: the first degrade implementation caught OllamaUnavailable and
+    re-ran build_queue with [delta, orphan], so the offline detectors executed
+    twice. The upfront /api/tags probe must instead skip the contradiction
+    detector before the single build_queue call.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_ELICIT_CONTRADICTION_ENABLED", "true")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")  # unreachable
+    _seed_delta_and_contradiction_entity(test_db)
+
+    # The CLI does `from .elicit.queue import build_queue` at call time, so
+    # patching the source symbol with a counting wrapper observes call count.
+    import brain.elicit.queue as queue_mod
+
+    calls = {"n": 0}
+    real_build_queue = queue_mod.build_queue
+
+    def _counting(*args: object, **kwargs: object) -> object:
+        calls["n"] += 1
+        return real_build_queue(*args, **kwargs)
+
+    monkeypatch.setattr("brain.elicit.queue.build_queue", _counting)
+
+    res = CliRunner().invoke(app, ["elicit", "list", "--json"])
+    assert res.exit_code == 0, res.output
+    assert calls["n"] == 1, "build_queue must run exactly once (no rerun)"
+    assert "contradiction detection needs Ollama" in res.stderr
+
+
 def test_elicit_interactive_enrichment_error_exits_clean(
     test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

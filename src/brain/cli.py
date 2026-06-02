@@ -511,6 +511,24 @@ def _check_ollama(cfg: Config, failures: list[str]) -> None:
         typer.secho(f"ollama          FAIL — {e}", fg="red", err=True)
 
 
+def _ollama_reachable(cfg: Config) -> bool:
+    """Cheap Ollama liveness probe: GET ``/api/tags`` (5s), same call as doctor.
+
+    Returns ``True`` iff Ollama answers without a transport/HTTP error. Used to
+    decide UPFRONT whether to wire the contradiction detector in ``elicit list``
+    so the offline delta/orphan detectors run exactly once — never twice via a
+    catch-and-rerun on :class:`OllamaUnavailable`.
+    """
+    try:
+        with httpx.Client(
+            base_url=cfg.ollama_host, timeout=httpx.Timeout(5.0)
+        ) as client:
+            client.get("/api/tags").raise_for_status()
+    except httpx.HTTPError:
+        return False
+    return True
+
+
 # GraphRAG (wave G0). Path the WARN remediations point operators at when the DB
 # image predates the Apache AGE cut-over.
 _AGE_IMAGE_SPEC = "docs/specs/2026-05-20-graphrag-age-image.md"
@@ -7249,48 +7267,40 @@ def elicit_list(
 
     cfg = _load_config_or_exit()
     effective_limit = limit if limit > 0 else cfg.elicit_queue_limit
-    # delta + orphan are Ollama-free. Contradiction detection needs an enricher,
-    # so build one ONLY when the flag is ON — this keeps `elicit list` fully
-    # offline by default (the documented Ollama-free path).
-    base_detectors: list[GapDetector] = [DeltaDetector(), OrphanEntityDetector()]
-    detectors: list[GapDetector] = list(base_detectors)
+    # delta + orphan are Ollama-free and always run. Contradiction detection
+    # needs an enricher, so probe Ollama UPFRONT (the cheap /api/tags check
+    # brain doctor uses) and wire the detector only when reachable. This keeps
+    # `elicit list` offline by default (flag OFF → no check, no enricher) and,
+    # when the flag is ON but Ollama is down, runs delta/orphan exactly ONCE —
+    # no catch-and-rerun that would re-execute the offline detectors.
+    detectors: list[GapDetector] = [DeltaDetector(), OrphanEntityDetector()]
     if cfg.elicit_contradiction_enabled:
-        detectors.append(
-            ContradictionDetector(
-                enabled=True,
-                enricher=make_enricher(cfg),
-                min_docs=cfg.elicit_contradiction_min_docs,
+        if _ollama_reachable(cfg):
+            detectors.append(
+                ContradictionDetector(
+                    enabled=True,
+                    enricher=make_enricher(cfg),
+                    min_docs=cfg.elicit_contradiction_min_docs,
+                )
             )
-        )
-
-    with connect(cfg.database_url) as conn:
-        try:
-            gaps = build_queue(
-                conn,
-                cfg=cfg,
-                tenant_id=cfg.graph_tenant_id,
-                detectors=detectors,
-                limit=effective_limit,
-                include_low_confidence=low_confidence,
-                target_types=target_types,
-            )
-        except OllamaUnavailable as exc:
-            # The flag was ON but Ollama is down. Don't crash and don't block the
-            # offline signals — note it on stderr and fall back to delta/orphan.
+        else:
             typer.secho(
-                f"contradiction detection needs Ollama; skipping ({exc}).",
+                "contradiction detection needs Ollama; skipping "
+                f"(Ollama unreachable at {cfg.ollama_host}).",
                 fg="yellow",
                 err=True,
             )
-            gaps = build_queue(
-                conn,
-                cfg=cfg,
-                tenant_id=cfg.graph_tenant_id,
-                detectors=base_detectors,
-                limit=effective_limit,
-                include_low_confidence=low_confidence,
-                target_types=target_types,
-            )
+
+    with connect(cfg.database_url) as conn:
+        gaps = build_queue(
+            conn,
+            cfg=cfg,
+            tenant_id=cfg.graph_tenant_id,
+            detectors=detectors,
+            limit=effective_limit,
+            include_low_confidence=low_confidence,
+            target_types=target_types,
+        )
 
     if as_json:
         typer.echo(
