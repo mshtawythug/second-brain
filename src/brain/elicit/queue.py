@@ -74,10 +74,15 @@ def build_queue(
     default) adds no predicate — ``brain elicit list`` and the unfiltered
     ``brain elicit`` still see the whole open queue.
     """
+    # Discovery cap: honour an explicit caller ``limit`` larger than the config
+    # default so ``brain elicit list --limit 100`` can surface up to 100 gaps,
+    # while the unfiltered default still discovers ``cfg.elicit_queue_limit``.
+    # The read-back ``LIMIT`` below stays the caller's ``limit`` exactly.
+    discovery_limit = max(limit, cfg.elicit_queue_limit)
     by_signal: dict[str, list[Gap]] = {}
     for det in detectors:
         by_signal[det.signal_kind] = det.detect(
-            conn, tenant_id=tenant_id, limit=cfg.elicit_queue_limit
+            conn, tenant_id=tenant_id, limit=discovery_limit
         )
     ranked = _rank_gaps(by_signal)
     # Evidence guard: skip gaps with too few supporting docs (except user_flagged).

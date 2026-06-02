@@ -313,6 +313,36 @@ def test_build_queue_include_low_confidence_bypasses_floor(
     assert any(g.target_id == "lo-conf" for g in gaps), "low-conf gap must appear"
 
 
+def test_build_queue_limit_overrides_config_discovery_cap(
+    test_db: psycopg.Connection,
+) -> None:
+    """A caller ``limit`` larger than ``cfg.elicit_queue_limit`` widens discovery.
+
+    Regression: detectors were always run with ``limit=cfg.elicit_queue_limit``
+    (default 20), so ``build_queue(..., limit=30)`` could never surface more than
+    20 gaps even though the caller asked for 30. The effective discovery limit
+    must be ``max(limit, cfg.elicit_queue_limit)``.
+    """
+    from brain.config import Config
+
+    cfg = Config.load()  # elicit_queue_limit defaults to 20
+    big = cfg.elicit_queue_limit + 10  # 30
+    many = [_g("delta", f"target-{i}", float(big - i)) for i in range(big)]
+
+    gaps = build_queue(
+        test_db,
+        cfg=cfg,
+        tenant_id="default",
+        detectors=[FakeDetector(many)],
+        limit=big,
+    )
+
+    assert len(gaps) > cfg.elicit_queue_limit, (
+        "caller limit must override the smaller config discovery cap"
+    )
+    assert len(gaps) == big
+
+
 # ---------------------------------------------------------------------------
 # build_queue: read-back scoping for --signal / --target (no-leak guard)
 # ---------------------------------------------------------------------------
