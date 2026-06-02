@@ -26,6 +26,7 @@ from ..edit_session import (
     build_payload,
 )
 from ..edit_session import run_editor_session as _run_editor_session
+from ..errors import ElicitError
 from ..vault import create_vault_note
 from .drafter import Drafter
 from .schema import ElicitDraft, ElicitOutcome, Gap
@@ -117,9 +118,9 @@ def _handle_gap(
         if choice == "q":
             return None
         if choice == "s":
-            return _skip(conn, gap)
+            return _skip(conn, gap, tenant_id=tenant_id)
         if choice == "n":
-            return _snooze(conn, gap, input_fn)
+            return _snooze(conn, gap, input_fn, tenant_id=tenant_id)
         if choice == "e":
             outcome = _edit_and_save(
                 cfg,
@@ -136,18 +137,35 @@ def _handle_gap(
         typer.echo("Unrecognized choice; pick [e]dit, [s]kip, [n]snooze, or [q]uit.")
 
 
-def _skip(conn: psycopg.Connection[Any], gap: Gap) -> ElicitOutcome:
+def _assert_one_row(cur: psycopg.Cursor[Any], gap: Gap, action: str) -> None:
+    """Fail loud when a status UPDATE didn't hit exactly one tenant-owned row.
+
+    A ``rowcount != 1`` means the gap id either doesn't exist or belongs to a
+    different tenant — a silent no-op would hide that, so raise instead.
+    """
+    if cur.rowcount != 1:
+        raise ElicitError(
+            f"{action} affected {cur.rowcount} rows for gap {gap.gap_id} "
+            "(gap missing or owned by another tenant)"
+        )
+
+
+def _skip(
+    conn: psycopg.Connection[Any], gap: Gap, *, tenant_id: str
+) -> ElicitOutcome:
     """Dismiss the gap so it drops out of the open queue."""
-    conn.execute(
-        "UPDATE elicitation_gaps SET status='dismissed', updated_at=now() WHERE id=%s",
-        (gap.gap_id,),
+    cur = conn.execute(
+        "UPDATE elicitation_gaps SET status='dismissed', updated_at=now() "
+        "WHERE id=%s AND tenant_id=%s",
+        (gap.gap_id, tenant_id),
     )
+    _assert_one_row(cur, gap, "dismiss")
     typer.echo("Skipped.")
     return ElicitOutcome(gap_id=gap.gap_id, action="dismissed")
 
 
 def _snooze(
-    conn: psycopg.Connection[Any], gap: Gap, input_fn: InputFn
+    conn: psycopg.Connection[Any], gap: Gap, input_fn: InputFn, *, tenant_id: str
 ) -> ElicitOutcome:
     """Snooze the gap for a user-supplied number of days (>= 1)."""
     typer.echo("Snooze for how many days?")
@@ -162,12 +180,13 @@ def _snooze(
             typer.echo("Days must be >= 1.")
             continue
         break
-    conn.execute(
+    cur = conn.execute(
         "UPDATE elicitation_gaps SET status='snoozed', "
         "snoozed_until=now() + make_interval(days => %s), updated_at=now() "
-        "WHERE id=%s",
-        (days, gap.gap_id),
+        "WHERE id=%s AND tenant_id=%s",
+        (days, gap.gap_id, tenant_id),
     )
+    _assert_one_row(cur, gap, "snooze")
     typer.echo(f"Snoozed for {days} day(s).")
     return ElicitOutcome(gap_id=gap.gap_id, action="snoozed", snoozed_days=days)
 
@@ -253,11 +272,12 @@ def _codify(
         body=body,
         tags=_note_tags(gap),
     )
-    conn.execute(
+    cur = conn.execute(
         "UPDATE elicitation_gaps SET status='resolved', resolved_note_id=%s::uuid, "
-        "updated_at=now() WHERE id=%s",
-        (note_id, gap.gap_id),
+        "updated_at=now() WHERE id=%s AND tenant_id=%s",
+        (note_id, gap.gap_id, tenant_id),
     )
+    _assert_one_row(cur, gap, "resolve")
     return note_id
 
 

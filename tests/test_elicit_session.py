@@ -17,6 +17,7 @@ import pytest
 from brain.config import Config
 from brain.elicit.schema import ElicitDraft, Gap
 from brain.elicit.session import run_session
+from brain.errors import ElicitError
 from brain.vault import init_vault
 
 
@@ -35,11 +36,12 @@ class _FakeDrafter:
         )
 
 
-def _seed_gap(conn: psycopg.Connection) -> str:
+def _seed_gap(conn: psycopg.Connection, tenant_id: str = "default") -> str:
     return conn.execute(
         "INSERT INTO elicitation_gaps (tenant_id, signal_kind, target_type, target_id, "
-        "score, evidence_ids, status) VALUES ('default','delta','org','Acme',0.9,"
-        "ARRAY['d1','d2','d3'],'surfaced') RETURNING id::text"
+        "score, evidence_ids, status) VALUES (%s,'delta','org','Acme',0.9,"
+        "ARRAY['d1','d2','d3'],'surfaced') RETURNING id::text",
+        (tenant_id,),
     ).fetchone()[0]
 
 
@@ -192,6 +194,65 @@ def test_accept_codifies(
         "SELECT content FROM documents WHERE id=%s", (outcomes[0].note_id,)
     ).fetchone()[0]
     assert "MY CORRECTED RULE" in content
+
+
+def test_skip_does_not_touch_other_tenant_gap(
+    test_db: psycopg.Connection,
+) -> None:
+    """A 'default' session must not mutate an 'other'-tenant gap row."""
+    # Arrange — one gap per tenant; the session only sees the default one.
+    other_gid = _seed_gap(test_db, tenant_id="other")
+    default_gid = _seed_gap(test_db, tenant_id="default")
+
+    # Act — dismiss the default gap.
+    run_session(
+        Config.load(),
+        test_db,
+        drafter=_FakeDrafter(),
+        gaps=[_gap(default_gid)],
+        tenant_id="default",
+        vault_path=None,
+        input_fn=iter(["s"]).__next__,
+    )
+
+    # Assert — default transitioned, other untouched (WHERE tenant scoping holds).
+    default_status = test_db.execute(
+        "SELECT status FROM elicitation_gaps WHERE id=%s", (default_gid,)
+    ).fetchone()[0]
+    assert default_status == "dismissed"
+    other_status = test_db.execute(
+        "SELECT status FROM elicitation_gaps WHERE id=%s", (other_gid,)
+    ).fetchone()[0]
+    assert other_status == "surfaced"
+
+
+def test_skip_tenant_mismatch_raises(test_db: psycopg.Connection) -> None:
+    """A status UPDATE that matches no row for the session's tenant fails loud.
+
+    Drives ``run_session`` with a tenant that does not own the gap; the
+    ``rowcount == 1`` guard must raise :class:`ElicitError` rather than
+    silently no-op (the cross-tenant correctness contract).
+    """
+    # Arrange — gap belongs to 'default', session runs as 'other'.
+    gid = _seed_gap(test_db, tenant_id="default")
+
+    # Act / Assert
+    with pytest.raises(ElicitError):
+        run_session(
+            Config.load(),
+            test_db,
+            drafter=_FakeDrafter(),
+            gaps=[_gap(gid)],
+            tenant_id="other",
+            vault_path=None,
+            input_fn=iter(["s"]).__next__,
+        )
+
+    # The gap's status is unchanged — no ghost update slipped through.
+    status = test_db.execute(
+        "SELECT status FROM elicitation_gaps WHERE id=%s", (gid,)
+    ).fetchone()[0]
+    assert status == "surfaced"
 
 
 def test_accept_then_unchanged_reprompts_to_skip(
