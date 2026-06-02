@@ -566,7 +566,11 @@ Four gap signals feed the queue:
 
 The interactive loop (`brain elicit`) requires **Ollama** (used to draft the
 rule text). Viewing the gap queue (`brain elicit list`) is read-only and
-Ollama-free.
+Ollama-free (unless `--signal contradiction` is enabled).
+
+The `list` table shows each gap's **entity name** (e.g. `"Acme Corp"`) and a
+**rationale** column explaining why it was surfaced. JSON output includes the
+same data as `target_name` and `rationale` fields.
 
 ### Commands
 
@@ -576,6 +580,8 @@ brain elicit list
 brain elicit list --json
 brain elicit list --limit 10             # show at most 10 gaps
 brain elicit list --low-confidence       # include gaps below the score floor
+brain elicit list --type person          # only person-type gaps
+brain elicit list --type project --type org   # multiple types (repeatable)
 
 # Run the interactive draft-then-correct loop (needs Ollama).
 brain elicit
@@ -583,7 +589,8 @@ brain elicit --target "engineering culture"   # user-flagged: jump straight to t
 brain elicit --signal delta                   # only surface delta gaps this run
 brain elicit --signal orphan
 brain elicit --signal contradiction           # needs BRAIN_ELICIT_CONTRADICTION_ENABLED=true
-brain elicit --include-low-confidence        # include below-score-floor gaps in the loop
+brain elicit --include-low-confidence         # include below-score-floor gaps in the loop
+brain elicit --type project --type tool       # filter to specific entity types (repeatable)
 ```
 
 Interactive keymap (one gap at a time):
