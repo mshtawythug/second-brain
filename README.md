@@ -30,6 +30,10 @@ On top of plain search it adds: a **GraphRAG** layer (an entity graph of people,
   - [Enabling GraphRAG](#enabling-graphrag)
   - [Query modes](#query-modes)
   - [Upgrading an existing brain to the AGE image](#upgrading-an-existing-brain-to-the-age-image)
+- [Tacit-knowledge elicitation](#tacit-knowledge-elicitation)
+  - [How it works](#how-it-works-1)
+  - [Commands](#commands)
+  - [Config knobs](#config-knobs)
 - [Vault model](#vault-model)
   - [One-time vault setup](#one-time-vault-setup)
   - [Authoring commands](#authoring-commands)
@@ -538,6 +542,73 @@ the override removed returns you to stock pgvector (the data on disk is
 unchanged — graph rows live in their own tables and AGE catalogue, both of
 which are safely re-derivable from the backup).
 
+## Tacit-knowledge elicitation
+
+### How it works
+
+`brain elicit` is the part that **asks**. The brain already indexes what you
+have written and said; this feature mines that corpus for knowledge that is
+*implied everywhere but written nowhere* — entities referenced constantly in
+transcripts, decisions never captured as a note, positions that shifted across
+time. It drafts a confident guess at the unwritten rule, opens your `$EDITOR`
+so you can correct it, and codifies the result as a vault note (tagged `tacit`
++ the signal kind) with a `## Source` section wikilinking the evidence docs.
+Codified gaps are marked resolved and never resurface.
+
+Four gap signals feed the queue:
+
+| Signal | What it detects |
+|---|---|
+| `delta` | Entities heavily referenced in ingested docs (transcripts, Slack, mail) but never authored into a vault note. The cleanest tacit-knowledge proxy. |
+| `orphan` | Graph entities with high mention-count but no written description. The graph knows *who* matters; this surfaces *why* it doesn't. |
+| `contradiction` | Opposing positions across docs — flag-gated; requires Ollama + non-null summaries (`BRAIN_ELICIT_CONTRADICTION_ENABLED=true`). |
+| `user_flagged` | A topic you name with `--target`; always enters the queue regardless of corpus signals. |
+
+The interactive loop (`brain elicit`) requires **Ollama** (used to draft the
+rule text). Viewing the gap queue (`brain elicit list`) is read-only and
+Ollama-free.
+
+### Commands
+
+```bash
+# Show the ranked gap queue — refresh detectors, list open gaps.
+brain elicit list
+brain elicit list --json
+brain elicit list --limit 10             # show at most 10 gaps
+brain elicit list --low-confidence       # include gaps below the score floor
+
+# Run the interactive draft-then-correct loop (needs Ollama).
+brain elicit
+brain elicit --target "engineering culture"   # user-flagged: jump straight to this topic
+brain elicit --signal delta                   # only surface delta gaps this run
+brain elicit --signal orphan
+brain elicit --signal contradiction           # needs BRAIN_ELICIT_CONTRADICTION_ENABLED=true
+brain elicit --include-low-confidence        # include below-score-floor gaps in the loop
+```
+
+Interactive keymap (one gap at a time):
+
+| Key | Action |
+|---|---|
+| `e` | Open draft in `$EDITOR`. Save a non-empty, changed body to codify as a vault note. |
+| `s` | Skip (dismiss) this gap. |
+| `n` | Snooze — prompt for a number of days, suppress until then. |
+| `q` | Quit the loop. |
+
+The editor buffer opens with the drafted rule text and a comment block listing
+the evidence doc IDs. The body must be **non-empty and changed from the draft**;
+re-saving the draft unchanged re-prompts rather than codifying.
+
+### Config knobs
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAIN_ELICIT_MIN_EVIDENCE_DOCS` | `3` | Minimum distinct source docs required before a gap is draftable. |
+| `BRAIN_ELICIT_MIN_GAP_SCORE` | `0.3` | Post-normalization score floor (0–1). Below-floor gaps appear in `list` but are skipped in the loop unless `--include-low-confidence`. |
+| `BRAIN_ELICIT_QUEUE_LIMIT` | `20` | Max gaps surfaced per `list` run (`-n 0` uses this limit). |
+| `BRAIN_ELICIT_CONTRADICTION_ENABLED` | `false` | Enable the contradiction detector (requires Ollama + non-null summaries). |
+| `BRAIN_ELICIT_CONTRADICTION_MIN_DOCS` | `5` | Min entity doc-count before contradiction scan runs on that entity. |
+
 ## Vault model
 
 Brain has two storage tiers, both searchable through the same hybrid index:
@@ -983,23 +1054,25 @@ Desktop if a tool call fails.
 
 ### Claude Code (consult-brain skill)
 
-For Claude Code (the CLI), this repo ships a skill at
-`skills/consult-brain/SKILL.md` that teaches Claude when and how to query the
-brain. It triggers on phrases like "what did I say to X", "summarize my
-conversations about Y", "write this in my voice", and similar — searching the
-brain instead of guessing.
-
-Install once with a symlink so live edits to the repo update the skill:
+For Claude Code (the CLI), this repo ships skills under `skills/` that teach
+Claude when and how to use each brain feature. Install the ones you want with
+symlinks so live edits to the repo update the skills:
 
 ```bash
 mkdir -p ~/.claude/skills
-ln -s "$(pwd)/skills/consult-brain" ~/.claude/skills/consult-brain
+ln -s "$(pwd)/skills/consult-brain"  ~/.claude/skills/consult-brain   # hybrid search + Q&A
+ln -s "$(pwd)/skills/brain-graph"    ~/.claude/skills/brain-graph      # GraphRAG themes/patterns
+ln -s "$(pwd)/skills/elicit-brain"   ~/.claude/skills/elicit-brain     # tacit-knowledge elicitation
+ln -s "$(pwd)/skills/brain-todo"     ~/.claude/skills/brain-todo       # action-item view
+ln -s "$(pwd)/skills/ingest-brain"   ~/.claude/skills/ingest-brain     # Krisp/Slack ingest
 ```
 
-Verify with `claude` running in any project: ask "what's in my brain about
-[topic]?" — Claude should reach for the skill, run `brain search`, read the
-top hits with `brain show`, and answer with citations. The MCP server above
-covers Claude Desktop; this skill covers Claude Code.
+The `consult-brain` skill (plain search + Q&A) is the one you most likely want
+first — it triggers on phrases like "what did I say to X", "summarize my
+conversations about Y", "write this in my voice". The `elicit-brain` skill
+triggers on elicitation phrases like "what do I know that I haven't written
+down", "surface my knowledge gaps", "interview me about X", or "brain elicit".
+The MCP server above covers Claude Desktop; these skills cover Claude Code.
 
 ### Example prompts
 
@@ -1041,6 +1114,13 @@ Once your corpus is ingested, you can ask your agent things like:
 - "Map out everyone connected to [project] and the topics that pull them together." → `brain graphrag search "[project]" --mode local` then `brain graphrag communities list`
 - "Which clusters of people and topics dominate my notes overall?" → `brain graphrag communities build` then `brain graphrag search "..." --mode global`
 - "Show me the entity graph around [topic] at depth 2." → `brain graphrag entity "[topic]"`
+
+**Elicit tacit knowledge** (`brain elicit` — needs Ollama)
+- "What do I know that I haven't written down?" → `brain elicit list` then `brain elicit`
+- "Surface my knowledge gaps." → `brain elicit list --json`
+- "Interview me about my engineering culture principles." → `brain elicit --target "engineering culture"`
+- "Draft the unwritten rules I keep referencing in meetings." → `brain elicit --signal delta`
+- "What implicit knowledge do I have about [person/project]?" → `brain elicit --target "[name]"`
 
 **Ingest on demand** (the agent orchestrates the MCP calls)
 - "Ingest last week's Krisp calls."
@@ -1158,7 +1238,7 @@ src/brain/
 migrations/           — numbered SQL files (001..016) + schema_migrations tracking
 bin/                  — brain-up / brain-down / brain-rebuild / brain-status convenience scripts
 quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
-skills/               — claude code skills (consult-brain, brain-graph)
+skills/               — claude code skills (consult-brain, brain-graph, elicit-brain, brain-todo, ingest-brain)
 tests/                — real-DB pattern, fake embedder, ~3560 tests
 ```
 
