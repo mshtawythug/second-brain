@@ -97,6 +97,9 @@ def _present(gap: Gap, draft: ElicitDraft) -> None:
     """Print the gap's draft rule, rationale, and a few evidence references."""
     typer.echo("")
     typer.echo(f"▸ {draft.title}")
+    target_label = gap.target_name or gap.target_id
+    if target_label:
+        typer.echo(f"  about: {target_label}")
     if gap.rationale:
         typer.echo(f"  why:   {gap.rationale}")
     typer.echo(f"  draft: {draft.draft_text}")

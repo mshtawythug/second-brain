@@ -73,3 +73,56 @@ def test_elicit_list_still_works_under_default_callback(
     res = CliRunner().invoke(app, ["elicit", "list", "--json"])
     assert res.exit_code == 0, res.output
     assert json.loads(res.stdout) == []
+
+
+def _seed_org_and_tool_gaps(conn: psycopg.Connection) -> str:
+    """Seed one org gap (with a resolvable entity name) + one tool gap.
+
+    Returns the org entity's UUID (also the org gap's target_id).
+    """
+    entity_id = conn.execute(
+        "INSERT INTO graph_entities "
+        "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
+        "VALUES ('default', 'org', 'Acme', 'acme', 'desc', 3) RETURNING id"
+    ).fetchone()[0]  # type: ignore[index]
+    conn.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, "
+        "rationale, status) "
+        "VALUES ('default','delta','org',%s,0.9,ARRAY['d1','d2','d3'],'r','surfaced')",
+        (str(entity_id),),
+    )
+    conn.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, "
+        "rationale, status) "
+        "VALUES ('default','delta','tool','tool-target',0.9,"
+        "ARRAY['d1','d2','d3'],'r','surfaced')"
+    )
+    return str(entity_id)
+
+
+def test_elicit_list_type_filter_json(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--type org returns only org rows, each carrying a target_name key."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    entity_id = _seed_org_and_tool_gaps(test_db)
+
+    res = CliRunner().invoke(app, ["elicit", "list", "--type", "org", "--json"])
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.stdout)
+    assert [row["target_type"] for row in data] == ["org"]
+    assert data[0]["target_id"] == entity_id
+    assert data[0]["target_name"] == "Acme"
+    assert all("target_name" in row for row in data)
+
+
+def test_elicit_list_rejects_unknown_type(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unknown --type value fails fast with a BadParameter (exit 2)."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    res = CliRunner().invoke(app, ["elicit", "list", "--type", "bogus", "--json"])
+    assert res.exit_code != 0, res.output
+    assert "bogus" in res.output

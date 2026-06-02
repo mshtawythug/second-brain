@@ -7171,6 +7171,29 @@ def uninstall_cmd(
 # brain elicit list
 # ---------------------------------------------------------------------------
 
+# Entity types a gap may target — mirrors elicit.schema.TargetType. Used to
+# validate the repeatable `--type` filter on `brain elicit list` / `brain elicit`.
+_ELICIT_TARGET_TYPES = ("person", "org", "project", "topic", "tool", "doc")
+
+
+def _validate_elicit_types(type_filter: list[str]) -> list[str] | None:
+    """Validate repeatable ``--type`` values; return them as the build_queue arg.
+
+    Returns ``None`` when no filter was supplied (so the read-back is unscoped),
+    otherwise the validated list. Raises ``BadParameter`` on any unknown value.
+    """
+    if not type_filter:
+        return None
+    cleaned = [t.strip().lower() for t in type_filter]
+    unknown = [t for t in cleaned if t not in _ELICIT_TARGET_TYPES]
+    if unknown:
+        raise typer.BadParameter(
+            f"unknown entity type(s): {', '.join(unknown)}. "
+            f"Choose from: {', '.join(_ELICIT_TARGET_TYPES)}",
+            param_hint="--type",
+        )
+    return cleaned
+
 
 @elicit_app.command("list")
 def elicit_list(
@@ -7180,6 +7203,11 @@ def elicit_list(
     ),
     low_confidence: bool = typer.Option(
         False, "--low-confidence", help="Include gaps below the score floor."
+    ),
+    type_filter: list[str] = typer.Option(
+        [],
+        "--type",
+        help="Filter to entity type(s): person|org|project|topic|tool|doc (repeatable).",
     ),
 ) -> None:
     """Refresh the gap queue and list open knowledge gaps sorted by score.
@@ -7201,6 +7229,8 @@ def elicit_list(
     )
     from .elicit.queue import build_queue
 
+    target_types = _validate_elicit_types(type_filter)
+
     cfg = Config.load()
     effective_limit = limit if limit > 0 else cfg.elicit_queue_limit
     detectors: list[GapDetector] = [
@@ -7220,6 +7250,7 @@ def elicit_list(
             detectors=detectors,
             limit=effective_limit,
             include_low_confidence=low_confidence,
+            target_types=target_types,
         )
 
     if as_json:
@@ -7231,6 +7262,7 @@ def elicit_list(
                         "signal_kind": g.signal_kind,
                         "target_type": g.target_type,
                         "target_id": g.target_id,
+                        "target_name": g.target_name,
                         "score": g.score,
                         "evidence_ids": g.evidence_ids,
                         "rationale": g.rationale,
@@ -7253,15 +7285,21 @@ def elicit_list(
     table.add_column("Target", min_width=16)
     table.add_column("Score", justify="right", width=7)
     table.add_column("Evidence", justify="right", width=8)
+    table.add_column("Rationale", overflow="fold")
 
+    _rationale_preview = 60
     for i, g in enumerate(gaps, 1):
+        rationale = g.rationale or ""
+        if len(rationale) > _rationale_preview:
+            rationale = rationale[:_rationale_preview].rstrip() + "…"
         table.add_row(
             str(i),
             g.signal_kind,
             g.target_type,
-            g.target_id,
+            g.target_name or g.target_id,
             f"{g.score:.4f}",
             str(len(g.evidence_ids)),
+            rationale,
         )
 
     console.print(table)
@@ -7290,6 +7328,11 @@ def elicit(
         "--include-low-confidence",
         "--low-confidence",
         help="Include gaps below the confidence floor.",
+    ),
+    type_filter: list[str] = typer.Option(
+        [],
+        "--type",
+        help="Filter to entity type(s): person|org|project|topic|tool|doc (repeatable).",
     ),
 ) -> None:
     """Interactively review and codify open knowledge gaps.
@@ -7326,7 +7369,7 @@ def elicit(
             min_docs=cfg.elicit_contradiction_min_docs,
         )
 
-    # Validate --signal up front (no DB needed) so a typo fails fast.
+    # Validate --signal / --type up front (no DB needed) so a typo fails fast.
     sig: str | None = None
     if signal is not None:
         sig = signal.strip().lower()
@@ -7335,6 +7378,7 @@ def elicit(
                 "--signal must be one of: delta, orphan, contradiction",
                 param_hint="--signal",
             )
+    target_types = _validate_elicit_types(type_filter)
 
     try:
         with connect(cfg.database_url) as conn:
@@ -7379,6 +7423,7 @@ def elicit(
                 include_low_confidence=include_low_confidence,
                 signal_kinds=signal_kinds,
                 target_ids=target_ids,
+                target_types=target_types,
             )
             if not gaps:
                 typer.echo("No open gaps in the elicitation queue.")
