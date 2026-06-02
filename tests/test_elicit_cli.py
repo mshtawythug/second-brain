@@ -167,3 +167,106 @@ def test_elicit_list_rejects_unknown_type(
     res = CliRunner().invoke(app, ["elicit", "list", "--type", "bogus", "--json"])
     assert res.exit_code != 0, res.output
     assert "bogus" in res.output
+
+
+def _seed_delta_and_contradiction_entity(conn: psycopg.Connection) -> str:
+    """Seed an org with 5 ingested docs (2 summarized) → delta + contradiction.
+
+    The entity qualifies for the offline DeltaDetector (all docs ingested, never
+    authored) AND for the ContradictionDetector (doc_count >= 5 with >= 2 non-null
+    summaries), so enabling contradiction detection forces an assess_contradiction
+    call. Returns the entity UUID.
+    """
+    eid = conn.execute(
+        "INSERT INTO graph_entities "
+        "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
+        "VALUES ('default','org','Acme','acme','an org',5) RETURNING id"
+    ).fetchone()[0]  # type: ignore[index]
+    for i in range(5):
+        summary = "a position summary" if i < 2 else None
+        did = conn.execute(
+            "INSERT INTO documents (title, content, content_hash, content_type, "
+            "kind, summary) VALUES (%s,'body',%s,'note','ingested',%s) RETURNING id",
+            (f"Acme doc {i}", f"acme-listfix-{i}", summary),
+        ).fetchone()[0]  # type: ignore[index]
+        conn.execute(
+            "INSERT INTO graph_entity_mentions "
+            "(tenant_id, entity_id, document_id, source) "
+            "VALUES ('default', %s, %s, 'people')",
+            (eid, did),
+        )
+    return str(eid)
+
+
+def test_elicit_list_degrades_when_contradiction_needs_ollama(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Flag ON but Ollama down: list still returns delta rows and exits 0.
+
+    Regression: `elicit list` built ContradictionDetector with the flag but NO
+    enricher, so when ON it silently returned []. With an enricher wired AND
+    Ollama unreachable it must degrade — note on stderr, offline signals kept.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_ELICIT_CONTRADICTION_ENABLED", "true")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")  # unreachable
+    _seed_delta_and_contradiction_entity(test_db)
+
+    res = CliRunner().invoke(app, ["elicit", "list", "--json"])
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.stdout)
+    kinds = {row["signal_kind"] for row in data}
+    assert "delta" in kinds, "offline delta signal must survive the degrade"
+    assert "contradiction" not in kinds
+    assert "contradiction detection needs Ollama" in res.stderr
+
+
+def test_elicit_interactive_enrichment_error_exits_clean(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An EnrichmentError from drafting surfaces as a clean exit-1 stderr message.
+
+    FIX 4: the interactive `brain elicit` try/except previously caught only
+    OllamaUnavailable, so a generic EnrichmentError from the drafter escaped as a
+    raw traceback. It must now print a clean message and exit non-zero.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    # Seed a delta gap so the session loop reaches the drafter.
+    eid = test_db.execute(
+        "INSERT INTO graph_entities "
+        "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
+        "VALUES ('default','org','Boomco','boomco','desc',3) RETURNING id"
+    ).fetchone()[0]
+    for i in range(3):
+        did = test_db.execute(
+            "INSERT INTO documents (title, content, content_hash, content_type, kind) "
+            "VALUES (%s,'body',%s,'note','ingested') RETURNING id",
+            (f"Boomco doc {i}", f"boomco-fix4-{i}"),
+        ).fetchone()[0]
+        test_db.execute(
+            "INSERT INTO graph_entity_mentions "
+            "(tenant_id, entity_id, document_id, source) "
+            "VALUES ('default', %s, %s, 'people')",
+            (eid, did),
+        )
+
+    from brain.errors import EnrichmentError
+
+    class _RaisingDrafter:
+        """Stand-in GapDrafter whose draft() always raises EnrichmentError."""
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def draft(self, conn: object, gap: object, *, tenant_id: str) -> object:
+            raise EnrichmentError("boom from fake drafter")
+
+    # The CLI does `from .elicit.drafter import GapDrafter` at call time, so
+    # patching the source symbol substitutes our raising double (no production
+    # monkey-patching — this is a standard pytest test double with auto-cleanup).
+    monkeypatch.setattr("brain.elicit.drafter.GapDrafter", _RaisingDrafter)
+
+    res = CliRunner().invoke(app, ["elicit"], input="q\n")
+    assert res.exit_code == 1, res.output
+    assert "Elicitation failed" in res.stderr
+    assert "boom from fake drafter" in res.stderr

@@ -48,6 +48,7 @@ from .editor import run_editor_on
 from .embeddings import make_embedder
 from .errors import (
     AgeBootstrapError,
+    ElicitError,
     EnrichmentError,
     GraphBackendError,
     GraphTenantError,
@@ -7242,30 +7243,54 @@ def elicit_list(
         OrphanEntityDetector,
     )
     from .elicit.queue import build_queue
+    from .enrichment import make_enricher
 
     target_types = _validate_elicit_types(type_filter)
 
     cfg = _load_config_or_exit()
     effective_limit = limit if limit > 0 else cfg.elicit_queue_limit
-    detectors: list[GapDetector] = [
-        DeltaDetector(),
-        OrphanEntityDetector(),
-        ContradictionDetector(
-            enabled=cfg.elicit_contradiction_enabled,
-            min_docs=cfg.elicit_contradiction_min_docs,
-        ),
-    ]
+    # delta + orphan are Ollama-free. Contradiction detection needs an enricher,
+    # so build one ONLY when the flag is ON — this keeps `elicit list` fully
+    # offline by default (the documented Ollama-free path).
+    base_detectors: list[GapDetector] = [DeltaDetector(), OrphanEntityDetector()]
+    detectors: list[GapDetector] = list(base_detectors)
+    if cfg.elicit_contradiction_enabled:
+        detectors.append(
+            ContradictionDetector(
+                enabled=True,
+                enricher=make_enricher(cfg),
+                min_docs=cfg.elicit_contradiction_min_docs,
+            )
+        )
 
     with connect(cfg.database_url) as conn:
-        gaps = build_queue(
-            conn,
-            cfg=cfg,
-            tenant_id=cfg.graph_tenant_id,
-            detectors=detectors,
-            limit=effective_limit,
-            include_low_confidence=low_confidence,
-            target_types=target_types,
-        )
+        try:
+            gaps = build_queue(
+                conn,
+                cfg=cfg,
+                tenant_id=cfg.graph_tenant_id,
+                detectors=detectors,
+                limit=effective_limit,
+                include_low_confidence=low_confidence,
+                target_types=target_types,
+            )
+        except OllamaUnavailable as exc:
+            # The flag was ON but Ollama is down. Don't crash and don't block the
+            # offline signals — note it on stderr and fall back to delta/orphan.
+            typer.secho(
+                f"contradiction detection needs Ollama; skipping ({exc}).",
+                fg="yellow",
+                err=True,
+            )
+            gaps = build_queue(
+                conn,
+                cfg=cfg,
+                tenant_id=cfg.graph_tenant_id,
+                detectors=base_detectors,
+                limit=effective_limit,
+                include_low_confidence=low_confidence,
+                target_types=target_types,
+            )
 
     if as_json:
         typer.echo(
@@ -7458,6 +7483,13 @@ def elicit(
             fg="red",
             err=True,
         )
+        raise typer.Exit(code=1) from exc
+    except (EnrichmentError, VaultNoteSyncError, ElicitError) as exc:
+        # Drafting / enrichment failure, vault-note authoring failure, or a
+        # gap-lifecycle guard tripping. OllamaUnavailable is handled above
+        # (it's an EnrichmentError subclass), so this catches the rest cleanly
+        # rather than letting a raw traceback escape.
+        typer.secho(f"Elicitation failed: {exc}", fg="red", err=True)
         raise typer.Exit(code=1) from exc
 
     accepted = sum(1 for o in outcomes if o.action == "accepted")
