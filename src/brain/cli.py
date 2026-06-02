@@ -268,7 +268,6 @@ app.add_typer(graphrag_app, name="graphrag")
 elicit_app = typer.Typer(
     name="elicit",
     help="Tacit-knowledge elicitation — surface and manage knowledge gaps.",
-    no_args_is_help=True,
 )
 app.add_typer(elicit_app, name="elicit")
 
@@ -7263,3 +7262,121 @@ def elicit_list(
         )
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# brain elicit (default — interactive session)
+# ---------------------------------------------------------------------------
+
+
+@elicit_app.callback(invoke_without_command=True)
+def elicit(
+    ctx: typer.Context,
+    target: str | None = typer.Option(
+        None,
+        "--target",
+        help="Elicit knowledge about one specific entity/topic (skips detection).",
+    ),
+    signal: str | None = typer.Option(
+        None,
+        "--signal",
+        help="Restrict detection to a single signal: delta|orphan|contradiction.",
+    ),
+    include_low_confidence: bool = typer.Option(
+        False,
+        "--include-low-confidence",
+        "--low-confidence",
+        help="Include gaps below the confidence floor.",
+    ),
+) -> None:
+    """Interactively review and codify open knowledge gaps.
+
+    With no subcommand this drives the elicitation session: build the gap
+    queue, draft a confident rule for each gap, then let you edit & save,
+    skip, snooze, or quit. Drafting needs Ollama running; the Ollama-free
+    queue view is ``brain elicit list``.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    from .db import connect
+    from .elicit.detectors import (
+        ContradictionDetector,
+        DeltaDetector,
+        GapDetector,
+        OrphanEntityDetector,
+        UserFlaggedDetector,
+    )
+    from .elicit.drafter import GapDrafter
+    from .elicit.queue import build_queue
+    from .elicit.session import run_session
+    from .enrichment import make_enricher
+
+    cfg = Config.load()
+    tenant_id = cfg.graph_tenant_id
+    vault_path = _resolve_vault(None, cfg)
+
+    def _contradiction() -> ContradictionDetector:
+        return ContradictionDetector(
+            enabled=cfg.elicit_contradiction_enabled,
+            enricher=make_enricher(cfg) if cfg.elicit_contradiction_enabled else None,
+        )
+
+    detectors: list[GapDetector]
+    if target is not None:
+        detectors = [UserFlaggedDetector(target=target)]
+    elif signal is not None:
+        sig = signal.strip().lower()
+        if sig == "delta":
+            detectors = [DeltaDetector()]
+        elif sig == "orphan":
+            detectors = [OrphanEntityDetector()]
+        elif sig == "contradiction":
+            detectors = [_contradiction()]
+        else:
+            raise typer.BadParameter(
+                "--signal must be one of: delta, orphan, contradiction",
+                param_hint="--signal",
+            )
+    else:
+        detectors = [DeltaDetector(), OrphanEntityDetector(), _contradiction()]
+
+    try:
+        with connect(cfg.database_url) as conn:
+            conn.autocommit = True
+            gaps = build_queue(
+                conn,
+                cfg=cfg,
+                tenant_id=tenant_id,
+                detectors=detectors,
+                limit=cfg.elicit_queue_limit,
+                include_low_confidence=include_low_confidence,
+            )
+            if not gaps:
+                typer.echo("No open gaps in the elicitation queue.")
+                return
+            drafter = GapDrafter(make_enricher(cfg))
+            outcomes = run_session(
+                cfg,
+                conn,
+                drafter=drafter,
+                gaps=gaps,
+                tenant_id=tenant_id,
+                vault_path=vault_path,
+            )
+    except OllamaUnavailable as exc:
+        typer.secho(
+            f"Elicitation needs Ollama running to draft rules ({exc}). "
+            "Start Ollama and retry — `brain elicit list` works without it.",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+
+    accepted = sum(1 for o in outcomes if o.action == "accepted")
+    dismissed = sum(1 for o in outcomes if o.action in ("dismissed", "skipped"))
+    snoozed = sum(1 for o in outcomes if o.action == "snoozed")
+    typer.echo(
+        f"\nReviewed {len(outcomes)} gap(s): "
+        f"{accepted} saved, {dismissed} skipped, {snoozed} snoozed."
+    )
