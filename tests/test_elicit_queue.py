@@ -394,3 +394,56 @@ def test_build_queue_no_filter_returns_whole_queue(
 
     returned = {g.target_id for g in gaps}
     assert returned == {"delta-target", "orphan-target", "y", "z"}
+
+
+# ---------------------------------------------------------------------------
+# build_queue: read-back min-evidence guard (previously only pre-upsert)
+# ---------------------------------------------------------------------------
+
+
+def test_build_queue_readback_drops_persisted_sparse_gap(
+    test_db: psycopg.Connection,
+) -> None:
+    """A persisted surfaced gap above the score floor but below min-evidence
+    must NOT resurface on read-back (the guard is no longer pre-upsert only)."""
+    from brain.config import Config
+
+    # Score 0.9 (well above default floor 0.3) but only 1 evidence id, below
+    # the default min_evidence_docs=3.
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, "
+        "rationale, status) "
+        "VALUES ('default','delta','topic','sparse-persisted',0.9,ARRAY['d1'],"
+        "'r','surfaced')"
+    )
+
+    cfg = Config.load()  # elicit_min_evidence_docs defaults to 3
+    gaps = build_queue(test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10)
+
+    assert all(g.target_id != "sparse-persisted" for g in gaps), (
+        "sparse persisted gap must be filtered on read-back"
+    )
+
+
+def test_build_queue_readback_keeps_user_flagged_without_evidence(
+    test_db: psycopg.Connection,
+) -> None:
+    """A user_flagged gap with ZERO evidence above the floor is still returned —
+    user_flagged is exempt from the min-evidence guard."""
+    from brain.config import Config
+
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, "
+        "rationale, status) "
+        "VALUES ('default','user_flagged','topic','flagged-no-evidence',0.9,"
+        "ARRAY[]::text[],'r','surfaced')"
+    )
+
+    cfg = Config.load()
+    gaps = build_queue(test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10)
+
+    assert any(g.target_id == "flagged-no-evidence" for g in gaps), (
+        "user_flagged gap must be exempt from the min-evidence read-back guard"
+    )

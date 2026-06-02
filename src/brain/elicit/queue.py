@@ -119,8 +119,12 @@ def build_queue(
         "status IN ('surfaced', 'snoozed')",
         "(snoozed_until IS NULL OR snoozed_until < now())",
         "score >= %s",
+        # Mirror the pre-upsert evidence guard on read-back so previously
+        # persisted sparse gaps can't resurface (user_flagged is exempt,
+        # exactly as in the upsert filter above).
+        "(cardinality(evidence_ids) >= %s OR signal_kind = 'user_flagged')",
     ]
-    params: list[Any] = [tenant_id, floor]
+    params: list[Any] = [tenant_id, floor, cfg.elicit_min_evidence_docs]
     if signal_kinds is not None:
         clauses.append("signal_kind = ANY(%s)")
         params.append(list(signal_kinds))
