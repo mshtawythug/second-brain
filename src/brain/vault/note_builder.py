@@ -113,6 +113,26 @@ def _build_note_text(
     return dump_frontmatter(fields, note_body), document_id
 
 
+def _unique_target(base_dir: Path, slug: str) -> Path:
+    """Return a non-existing ``<base_dir>/<slug>.md`` path, suffixing on collision.
+
+    ``brain note new`` guards against collisions before delegating here, but the
+    elicitation ``_codify`` path calls :func:`create_vault_note` directly. Without
+    this guard a draft whose title slugifies to an existing note's slug would
+    silently overwrite that note (data loss). On collision we append ``-2``,
+    ``-3``, … until a free path is found so the existing note is never clobbered.
+    """
+    target = base_dir / f"{slug}.md"
+    if not target.exists():
+        return target
+    suffix = 2
+    while True:
+        candidate = base_dir / f"{slug}-{suffix}.md"
+        if not candidate.exists():
+            return candidate
+        suffix += 1
+
+
 def create_vault_note(
     conn: psycopg.Connection[Any],
     *,
@@ -163,10 +183,9 @@ def create_vault_note(
         body=body,
     )
 
-    slug = slugify(title)
-    relative = Path(folder) / f"{slug}.md" if folder else Path(f"{slug}.md")
-    target = vault_path / relative
-    target.parent.mkdir(parents=True, exist_ok=True)
+    base_dir = vault_path / folder if folder else vault_path
+    base_dir.mkdir(parents=True, exist_ok=True)
+    target = _unique_target(base_dir, slugify(title))
     target.write_text(file_text, encoding="utf-8")
 
     active_embedder = embedder if embedder is not None else _build_embedder(cfg)

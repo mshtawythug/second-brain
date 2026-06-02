@@ -200,6 +200,68 @@ def test_create_vault_note_missing_template_raises(
     assert not (vault / "no-such-template.md").exists()
 
 
+def test_create_vault_note_uniquifies_slug_on_collision(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+) -> None:
+    """Calling twice with the same title must not overwrite the first note.
+
+    The ``_codify`` path bypasses ``brain note new``'s pre-write collision
+    guard, so the helper itself must uniquify the slug rather than clobber an
+    existing file (data loss).
+    """
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    cfg = Config.load()
+
+    # Act — same title + DISTINCT bodies, twice.
+    first_id = create_vault_note(
+        test_db,
+        cfg=cfg,
+        vault_path=vault,
+        title="Collision note",
+        body="FIRST distinctive body.",
+        tags=["tacit"],
+        embedder=fake_embedder,
+    )
+    second_id = create_vault_note(
+        test_db,
+        cfg=cfg,
+        vault_path=vault,
+        title="Collision note",
+        body="SECOND distinctive body.",
+        tags=["tacit"],
+        embedder=fake_embedder,
+    )
+
+    # Assert — two DISTINCT documents on two DISTINCT files.
+    assert first_id != second_id
+    first_file = vault / "collision-note.md"
+    second_file = vault / "collision-note-2.md"
+    assert first_file.is_file()
+    assert second_file.is_file()
+
+    # The first note's content is unchanged (not overwritten).
+    first_fields, first_body = parse_frontmatter(first_file.read_text())
+    assert "FIRST distinctive body." in first_body
+    second_fields, second_body = parse_frontmatter(second_file.read_text())
+    assert "SECOND distinctive body." in second_body
+
+    # The frontmatter id of each file matches the returned id, and the indexed
+    # DB rows correspond to the actually-written files.
+    assert first_fields["id"] == first_id
+    assert second_fields["id"] == second_id
+    rows = test_db.execute(
+        "SELECT id::text, content FROM documents WHERE id IN (%s, %s)",
+        (first_id, second_id),
+    ).fetchall()
+    by_id = {r[0]: r[1] for r in rows}
+    assert "FIRST distinctive body." in by_id[first_id]
+    assert "SECOND distinctive body." in by_id[second_id]
+
+
 def test_create_vault_note_builds_embedder_from_cfg_when_absent(
     test_db: psycopg.Connection,
     tmp_path: Path,
