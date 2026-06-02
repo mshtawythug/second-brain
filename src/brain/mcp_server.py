@@ -2294,7 +2294,7 @@ def _build_note_file_text(
 ) -> str:
     """Assemble the on-disk file text for ``brain_note_new`` / ``brain_daily``.
 
-    Mirrors :func:`brain.cli._build_note_text`'s contract: brain-managed
+    Mirrors :func:`brain.vault.note_builder._build_note_text`'s contract: brain-managed
     frontmatter fields (``id`` / ``title`` / ``created`` / ``updated`` /
     ``kind`` / ``tags``) always win over whatever the template author
     wrote; the template's body is preserved (and substituted with

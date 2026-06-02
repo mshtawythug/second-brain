@@ -23,6 +23,7 @@ __all__ = [
     "VAULT_SUBDIRS",
     "VAULT_TEMPLATE_FILES",
     "VaultInitSummary",
+    "create_vault_note",
     "init_vault",
     "rewrite_vault_links",
     "rewrite_wiki_links",
@@ -100,3 +101,11 @@ def init_vault(vault_path: Path) -> VaultInitSummary:
             summary.written_files.append(relative)
 
     return summary
+
+
+# Imported at the BOTTOM on purpose: ``note_builder`` pulls in (lazily) the
+# ingest pipeline, and ``brain.ingest`` imports ``brain.vault.export``, which
+# does ``from . import init_vault``. Re-exporting here only after ``init_vault``
+# is defined keeps that re-entrant import resolvable instead of hitting a
+# partially-initialized package. See note_builder's module docstring.
+from .note_builder import create_vault_note  # noqa: E402

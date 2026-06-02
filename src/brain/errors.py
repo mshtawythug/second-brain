@@ -4,6 +4,13 @@ Internal helpers that can fail in user-visible ways raise these exceptions so
 the CLI and MCP server layers can map them to their respective frameworks
 (``typer.Exit`` / ``McpError``) without sharing framework-specific imports.
 """
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
 
 
 class BrainError(Exception):
@@ -188,6 +195,22 @@ class PersonNotFound(BrainError):
 
 class ElicitError(BrainError):
     """Base class for tacit-knowledge elicitation failures."""
+
+
+class VaultNoteSyncError(BrainError):
+    """Raised when authoring a vault note fails to resolve or index.
+
+    Carries the per-file ``(path, reason)`` pairs (the same shape as
+    :class:`~brain.vault.sync.SyncReport.errors`) so the CLI can print each
+    one and exit non-zero — preserving ``brain note new``'s historical
+    behavior — while a library caller (the elicit session loop) can inspect
+    ``.errors`` programmatically.
+    """
+
+    def __init__(self, errors: Sequence[tuple[Path, str]]) -> None:
+        joined = "; ".join(f"{path}: {reason}" for path, reason in errors)
+        super().__init__(f"vault note sync failed: {joined}")
+        self.errors: list[tuple[Path, str]] = list(errors)
 
 
 class EnrichmentError(BrainError):

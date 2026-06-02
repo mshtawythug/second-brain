@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import psycopg
 import typer
-import yaml
 from rich.table import Table
 
 from . import config as _config_module
@@ -60,6 +59,7 @@ from .errors import (
     OllamaUnavailable,
     PersonAmbiguous,
     PersonNotFound,
+    VaultNoteSyncError,
 )
 
 if TYPE_CHECKING:
@@ -149,7 +149,7 @@ from .vault.derived_links import (
 )
 from .vault.derived_links.fence import rewrite_derived_fences
 from .vault.export import export_vault, regenerate_vault_file
-from .vault.frontmatter import dump_frontmatter, parse_frontmatter, rewrite_tags
+from .vault.frontmatter import rewrite_tags
 from .vault.graph import (
     backlinks_for,
     graph_data,
@@ -157,12 +157,17 @@ from .vault.graph import (
 )
 from .vault.graph import orphans as _orphans_query
 from .vault.graph_format import to_dot, to_json, to_mermaid
+from .vault.note_builder import (
+    _build_embedder,
+    _build_note_text,
+    create_vault_note,
+)
 from .vault.quartz_overlay import OverlayError, apply_overlay, plan_overlay
 from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.sync_summaries import sync_summaries
-from .vault.templates import list_template_names, render_template
+from .vault.templates import list_template_names
 from .vault.watch import WatchConfig, run_watcher
 from .wiki.build_people import (
     PersonRecord,
@@ -1179,15 +1184,6 @@ def _drift_clean(summary: MirrorDriftSummary) -> bool:
         and summary.orphan_files == 0
         and summary.ghost_rows == 0
     )
-
-
-def _build_embedder(cfg: Config) -> Embedder:
-    """Build the configured embedder. Indirected so tests can substitute a fake.
-
-    Returns the :class:`Embedder` Protocol — callers should not depend on the
-    concrete backend (Qwen3 today; potentially others tomorrow).
-    """
-    return make_embedder(cfg)
 
 
 def _build_enricher(cfg: Config) -> OllamaEnricher:
@@ -5654,65 +5650,6 @@ def _ensure_template(vault_path: Path, name: str) -> Path:
     return target
 
 
-def _build_note_text(
-    template_text: str,
-    *,
-    title: str,
-    tags: list[str],
-    today: date_cls,
-    now: datetime,
-) -> tuple[str, str]:
-    """Render a template + force the brain-canonical frontmatter fields.
-
-    Returns ``(file_text, document_id)``. The template's body is preserved
-    verbatim; only frontmatter is rewritten so the brain-managed fields
-    (``id``, ``title``, ``created``, ``updated``, ``kind``, ``tags``) are
-    authoritative regardless of what the template author wrote.
-
-    A user-template ``title:`` line is intentionally ignored — the CLI's
-    ``<title>`` argument wins. That's the contract: if you wanted the
-    template to control title, you'd be using a daily template (which
-    derives title from the date passed in via ``vars``).
-    """
-    rendered = render_template(
-        template_text,
-        {
-            "title": title,
-            "date": today.isoformat(),
-            "datetime": now.isoformat(timespec="seconds"),
-            "slug": slugify(title),
-        },
-    )
-
-    # Try to parse the rendered template's frontmatter; if it's malformed or
-    # missing entirely, build a fresh header. Either way the brain-canonical
-    # fields are forced — the template's body is what we preserve.
-    try:
-        existing_fields, body = parse_frontmatter(rendered)
-    except (ValueError, yaml.YAMLError):
-        # Per the spec's risk: a malformed template shouldn't crash. Fall
-        # back to a fresh frontmatter + the raw rendered text as the body.
-        existing_fields = {}
-        body = rendered
-
-    document_id = str(uuid.uuid4())
-    iso_now = now.isoformat(timespec="seconds")
-    fields: dict[str, Any] = dict(existing_fields)
-    # Brain-managed fields override the template's choices in a fixed order
-    # so frontmatter ordering is stable across runs.
-    fields["id"] = document_id
-    fields["title"] = title
-    fields["created"] = iso_now
-    fields["updated"] = iso_now
-    fields["kind"] = "vault"
-    if tags:
-        fields["tags"] = list(tags)
-    elif "tags" not in fields:
-        fields["tags"] = []
-
-    return dump_frontmatter(fields, body), document_id
-
-
 def _run_post_write_editor_and_sync(
     cfg: Config, *, vault_path: Path, file_path: Path
 ) -> SyncReport | None:
@@ -5799,8 +5736,10 @@ def note_new(
     """
     cfg = Config.load()
     vault_path = _resolve_vault(vault, cfg)
-    template_path = _ensure_template(vault_path, template)
-    template_text = template_path.read_text(encoding="utf-8")
+    # Validate the template up front so a bad ``--template`` / missing
+    # ``_templates/`` surfaces a friendly CLI error (``create_vault_note``
+    # re-resolves it internally for the actual render).
+    _ensure_template(vault_path, template)
 
     slug = slugify(title)
     target_relative = Path(folder) / f"{slug}.md" if folder else Path(f"{slug}.md")
@@ -5817,33 +5756,27 @@ def note_new(
         )
         raise typer.Exit(code=1)
 
-    now = datetime.now()
-    today = now.date()
-    file_text, document_id = _build_note_text(
-        template_text,
-        title=title,
-        tags=list(tag),
-        today=today,
-        now=now,
-    )
-
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(file_text, encoding="utf-8")
-
+    # Build the embedder via the CLI factory (the patch point tests wire onto
+    # ``brain.cli._build_embedder``) and hand it to the shared helper so the
+    # session loop and ``brain note new`` share one create+sync path.
     embedder = _build_embedder(cfg)
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        sync_report = sync_one_file(
-            conn,
-            embedder=embedder,
-            vault_path=vault_path,
-            file_path=target,
-            owner_participants=cfg.owner_participants,
-        )
-    if sync_report.errors:
-        for path, reason in sync_report.errors:
+    try:
+        with connect(cfg.database_url) as conn:
+            conn.autocommit = True
+            document_id = create_vault_note(
+                conn,
+                cfg=cfg,
+                vault_path=vault_path,
+                title=title,
+                tags=list(tag),
+                template=template,
+                folder=folder,
+                embedder=embedder,
+            )
+    except VaultNoteSyncError as exc:
+        for path, reason in exc.errors:
             typer.secho(f"sync error: {path}: {reason}", fg="red", err=True)
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
     typer.echo(
         f"created {target_relative.as_posix()} (id={document_id[:8]})"
