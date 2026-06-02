@@ -75,6 +75,36 @@ def test_elicit_list_still_works_under_default_callback(
     assert json.loads(res.stdout) == []
 
 
+def test_elicit_list_bad_min_gap_score_clean_error(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An out-of-range BRAIN_ELICIT_MIN_GAP_SCORE yields a clean error, not a traceback.
+
+    Regression: `brain elicit list` called `Config.load()` bare, so a bad
+    elicit knob propagated as an uncaught ConfigError and printed a raw Rich
+    traceback. The command must now catch it, print the ConfigError message,
+    and exit non-zero with no leaked exception.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_ELICIT_MIN_GAP_SCORE", "1.5")
+    res = CliRunner().invoke(app, ["elicit", "list"])
+    assert res.exit_code != 0, res.output
+    assert res.exception is None or isinstance(res.exception, SystemExit), res.exception
+    assert "BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0]" in res.output
+
+
+def test_elicit_default_bad_min_gap_score_clean_error(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The default `brain elicit` session also surfaces a clean ConfigError."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_ELICIT_MIN_GAP_SCORE", "1.5")
+    res = CliRunner().invoke(app, ["elicit"], input="q\n")
+    assert res.exit_code != 0, res.output
+    assert res.exception is None or isinstance(res.exception, SystemExit), res.exception
+    assert "BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0]" in res.output
+
+
 def _seed_org_and_tool_gaps(conn: psycopg.Connection) -> str:
     """Seed one org gap (with a resolvable entity name) + one tool gap.
 

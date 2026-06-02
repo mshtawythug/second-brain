@@ -7176,6 +7176,20 @@ def uninstall_cmd(
 _ELICIT_TARGET_TYPES = ("person", "org", "project", "topic", "tool", "doc")
 
 
+def _load_config_or_exit() -> Config:
+    """Load config, turning a ``ConfigError`` into a clean message + exit 1.
+
+    A bad elicit knob (e.g. ``BRAIN_ELICIT_MIN_GAP_SCORE=1.5``) must surface as
+    a friendly one-line error on stderr — never a raw Rich traceback — so the
+    user can fix the typo. Mirrors the inline handling in ``brain doctor``.
+    """
+    try:
+        return Config.load()
+    except ConfigError as e:
+        typer.secho(f"Configuration error: {e}", fg="red", err=True)
+        raise typer.Exit(code=1) from e
+
+
 def _validate_elicit_types(type_filter: list[str]) -> list[str] | None:
     """Validate repeatable ``--type`` values; return them as the build_queue arg.
 
@@ -7231,7 +7245,7 @@ def elicit_list(
 
     target_types = _validate_elicit_types(type_filter)
 
-    cfg = Config.load()
+    cfg = _load_config_or_exit()
     effective_limit = limit if limit > 0 else cfg.elicit_queue_limit
     detectors: list[GapDetector] = [
         DeltaDetector(),
@@ -7358,7 +7372,7 @@ def elicit(
     from .elicit.session import run_session
     from .enrichment import make_enricher
 
-    cfg = Config.load()
+    cfg = _load_config_or_exit()
     tenant_id = cfg.graph_tenant_id
     vault_path = _resolve_vault(None, cfg)
 
