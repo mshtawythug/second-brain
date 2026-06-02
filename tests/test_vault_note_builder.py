@@ -262,6 +262,68 @@ def test_create_vault_note_uniquifies_slug_on_collision(
     assert "SECOND distinctive body." in by_id[second_id]
 
 
+def test_create_vault_note_rejects_folder_escaping_vault(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+) -> None:
+    """A ``folder`` that escapes the vault root is rejected; nothing is written.
+
+    Security guard: ``folder`` is used to place the note under the vault, so a
+    traversal value (``..`` segments) must raise :class:`VaultNoteSyncError`
+    before any directory or file is created outside the vault.
+    """
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    cfg = Config.load()
+
+    # Act / Assert — a sibling-of-vault escape inside tmp_path so the negative
+    # filesystem assertion is deterministic.
+    with pytest.raises(VaultNoteSyncError):
+        create_vault_note(
+            test_db,
+            cfg=cfg,
+            vault_path=vault,
+            title="Escape attempt",
+            body="content",
+            tags=[],
+            folder="../escapee",
+            embedder=fake_embedder,
+        )
+
+    # Nothing authored outside the vault, and nothing inside it either.
+    assert not (tmp_path / "escapee").exists()
+    assert not (vault / "escape-attempt.md").exists()
+
+
+def test_create_vault_note_rejects_absolute_folder_escape(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+) -> None:
+    """An absolute ``folder`` (which pathlib lets replace the vault root) is rejected."""
+    # Arrange
+    vault = tmp_path / "vault"
+    _init_vault(vault)
+    cfg = Config.load()
+    outside = tmp_path / "outside-abs"
+
+    # Act / Assert
+    with pytest.raises(VaultNoteSyncError):
+        create_vault_note(
+            test_db,
+            cfg=cfg,
+            vault_path=vault,
+            title="Absolute escape",
+            body="content",
+            tags=[],
+            folder=str(outside),
+            embedder=fake_embedder,
+        )
+    assert not (outside / "absolute-escape.md").exists()
+
+
 def test_create_vault_note_builds_embedder_from_cfg_when_absent(
     test_db: psycopg.Connection,
     tmp_path: Path,

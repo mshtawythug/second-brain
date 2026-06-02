@@ -184,6 +184,16 @@ def create_vault_note(
     )
 
     base_dir = vault_path / folder if folder else vault_path
+    # Path-traversal guard: a ``folder`` containing ``..`` segments or an
+    # absolute path would resolve outside the vault root and author files in an
+    # arbitrary filesystem location. Reject before any mkdir / write so nothing
+    # is created on violation.
+    vault_root_resolved = vault_path.resolve()
+    base_dir_resolved = base_dir.resolve()
+    if not base_dir_resolved.is_relative_to(vault_root_resolved):
+        raise VaultNoteSyncError(
+            [(base_dir, f"folder {folder!r} escapes the vault root")]
+        )
     base_dir.mkdir(parents=True, exist_ok=True)
     target = _unique_target(base_dir, slugify(title))
     target.write_text(file_text, encoding="utf-8")
