@@ -1864,14 +1864,44 @@ def graphrag_build(
         alias_result = merge_aliases(
             conn, config.tenant_id, alias_rules, backend, config=config
         )
+        # Bug A — automatic cross-document concept type-collapse. Runs AFTER the
+        # per-doc loop + curated alias merge (so every document's mentions are
+        # committed), collapsing any canonical_key fragmented across concept
+        # types (org/project/tool/topic) into the precedence winner via the same
+        # merge_aliases machinery. Concept types only — never person. Idempotent
+        # + a cheap no-op when nothing is fragmented. Gated on ``include_concepts``
+        # so a person-only build stays person-only (matches this command's help
+        # + the sync.py ``concepts_enabled`` gate).
+        collapse_result = None
+        rel_count = result.relationship_count
+        orphans = result.orphans_removed
+        if include_concepts:
+            from .graph_rag.cross_type import collapse_cross_type_concepts
+
+            collapse_result = collapse_cross_type_concepts(
+                conn, config.tenant_id, backend, config=config
+            )
+            if collapse_result.rules_applied > 0:
+                # The collapse ran its own refresh_aggregates, so build_graph's
+                # relationship_count is now stale — re-read the authoritative
+                # count for the footer (same pattern as `graphrag refresh`).
+                rel_row = conn.execute(
+                    "SELECT count(*) FROM graph_relationships WHERE tenant_id = %s",
+                    (config.tenant_id,),
+                ).fetchone()
+                assert rel_row is not None
+                rel_count = int(rel_row[0])
+                orphans += collapse_result.sources_orphaned
     typer.echo(
         f"graphrag build: {result.processed} processed "
         f"(reconciled {result.reconciled}, skipped {result.skipped}), "
-        f"{result.relationship_count} relationship(s) rebuilt, "
-        f"{result.orphans_removed} orphan(s) removed (tenant {config.tenant_id!r})"
+        f"{rel_count} relationship(s) rebuilt, "
+        f"{orphans} orphan(s) removed (tenant {config.tenant_id!r})"
     )
     if alias_result.rules_total > 0:
         typer.echo(alias_result_summary(alias_result))
+    if collapse_result is not None and collapse_result.rules_total > 0:
+        typer.echo(f"cross-type collapse: {alias_result_summary(collapse_result)}")
 
 
 @graphrag_app.command("refresh")
@@ -1894,6 +1924,7 @@ def graphrag_refresh(
     """
     cfg = Config.load()
     config = _graphrag_config(cfg, tenant)
+    from .graph_rag.aggregates import RefreshResult
     from .graph_rag.aliases import load_alias_rules, merge_aliases
     from .graph_rag.backends import AgeBackend
     from .graph_rag.reconcile import refresh_aggregates
@@ -1925,8 +1956,6 @@ def graphrag_refresh(
             # second "rebuilt" line that doesn't match reality. Re-read the
             # tenant's current relationship count + orphans-since-last-call for
             # the footer.
-            from .graph_rag.aggregates import RefreshResult
-
             rel_row = conn.execute(
                 "SELECT count(*) FROM graph_relationships WHERE tenant_id = %s",
                 (config.tenant_id,),
@@ -1939,12 +1968,35 @@ def graphrag_refresh(
             )
         else:
             result = refresh_aggregates(conn, backend=backend, config=config)
+        # Bug A — automatic cross-document concept type-collapse, AFTER the
+        # curated merge + corpus refresh, so a knob-change refresh also repairs
+        # any concept fragmented across types. Concept types only; idempotent.
+        from .graph_rag.cross_type import collapse_cross_type_concepts
+
+        collapse_result = collapse_cross_type_concepts(
+            conn, config.tenant_id, backend, config=config
+        )
+        if collapse_result.rules_applied > 0:
+            # The collapse's own refresh_aggregates is now the authoritative
+            # tenant state — re-read the relationship count for the footer.
+            rel_row = conn.execute(
+                "SELECT count(*) FROM graph_relationships WHERE tenant_id = %s",
+                (config.tenant_id,),
+            ).fetchone()
+            assert rel_row is not None
+            result = RefreshResult(
+                tenant_id=config.tenant_id,
+                relationship_count=int(rel_row[0]),
+                orphans_removed=result.orphans_removed + collapse_result.sources_orphaned,
+            )
     typer.echo(
         f"graphrag refresh: {result.relationship_count} relationship(s), "
         f"{result.orphans_removed} orphan(s) removed (tenant {config.tenant_id!r})"
     )
     if alias_result.rules_total > 0:
         typer.echo(alias_result_summary(alias_result))
+    if collapse_result.rules_total > 0:
+        typer.echo(f"cross-type collapse: {alias_result_summary(collapse_result)}")
 
 
 # ---------------------------------------------------------------------------

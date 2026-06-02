@@ -135,6 +135,24 @@ class GraphSyncer:
                 config=self._config,
                 extractor=self._extractor,
             )
+            # Bug A — cross-document concept type-collapse. Runs AFTER
+            # reconcile_document has written + committed this document's
+            # mentions/contributions (its own top-level transaction), so a
+            # zero-mention source GC inside the collapse can never orphan an id
+            # the pending mention-insert still references. Only meaningful when
+            # concepts are active (the catalog is otherwise person-only, which
+            # this never touches); idempotent + a cheap catalog scan no-op when
+            # nothing is fragmented. Late import keeps the person-only path from
+            # pulling the extractor transport at module load.
+            if self._config.concepts_enabled and self._extractor is not None:
+                from .cross_type import collapse_cross_type_concepts
+
+                collapse_cross_type_concepts(
+                    conn,
+                    self._config.tenant_id,
+                    self._backend,
+                    config=self._config,
+                )
         except Exception as exc:  # noqa: BLE001 -- best-effort: never block a write
             _logger.warning(
                 "graph sync (reconcile) skipped for doc %s: %s; "
