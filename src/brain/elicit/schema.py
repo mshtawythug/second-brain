@@ -19,6 +19,7 @@ class Gap:
     evidence_ids: list[str] = field(default_factory=list)
     evidence_texts: list[str] = field(default_factory=list)
     rationale: str = ""
+    target_name: str = ""
 
 
 @dataclass(frozen=True)

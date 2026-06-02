@@ -447,3 +447,101 @@ def test_build_queue_readback_keeps_user_flagged_without_evidence(
     assert any(g.target_id == "flagged-no-evidence" for g in gaps), (
         "user_flagged gap must be exempt from the min-evidence read-back guard"
     )
+
+
+# ---------------------------------------------------------------------------
+# build_queue: target_name resolution via graph_entities LEFT JOIN
+# ---------------------------------------------------------------------------
+
+
+def test_build_queue_resolves_target_name_from_graph_entity(
+    test_db: psycopg.Connection,
+) -> None:
+    """A gap whose target_id is a real graph_entities UUID resolves target_name."""
+    from brain.config import Config
+
+    entity_id = test_db.execute(
+        "INSERT INTO graph_entities "
+        "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
+        "VALUES ('default', 'org', 'Acme', 'acme', 'desc', 3) RETURNING id"
+    ).fetchone()[0]  # type: ignore[index]
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, "
+        "rationale, status) "
+        "VALUES ('default','delta','org',%s,0.9,ARRAY['d1','d2','d3'],'r','surfaced')",
+        (str(entity_id),),
+    )
+
+    cfg = Config.load()
+    gaps = build_queue(test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10)
+
+    matched = [g for g in gaps if g.target_id == str(entity_id)]
+    assert len(matched) == 1, "the entity-targeted gap must be returned"
+    assert matched[0].target_name == "Acme"
+
+
+def test_build_queue_raw_string_target_has_empty_name(
+    test_db: psycopg.Connection,
+) -> None:
+    """A user_flagged gap with a raw-string (non-UUID) target_id must not crash
+    on the TEXT-equality join and resolves to an empty target_name."""
+    from brain.config import Config
+
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, "
+        "rationale, status) "
+        "VALUES ('default','user_flagged','topic','not-a-uuid',0.9,"
+        "ARRAY[]::text[],'r','surfaced')"
+    )
+
+    cfg = Config.load()
+    gaps = build_queue(test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10)
+
+    matched = [g for g in gaps if g.target_id == "not-a-uuid"]
+    assert len(matched) == 1, "raw-string target gap must be returned, not crash"
+    assert matched[0].target_name == ""
+
+
+# ---------------------------------------------------------------------------
+# build_queue: target_types read-back filter
+# ---------------------------------------------------------------------------
+
+
+def test_build_queue_target_types_filters_readback(
+    test_db: psycopg.Connection,
+) -> None:
+    """target_types restricts the read-back to the requested entity type(s)."""
+    from brain.config import Config
+
+    for target_type, target_id in (("org", "org-target"), ("tool", "tool-target")):
+        test_db.execute(
+            "INSERT INTO elicitation_gaps "
+            "(tenant_id, signal_kind, target_type, target_id, score, "
+            "evidence_ids, rationale, status) "
+            "VALUES ('default','delta',%s,%s,0.9,ARRAY['d1','d2','d3'],'r','surfaced')",
+            (target_type, target_id),
+        )
+
+    cfg = Config.load()
+
+    only_org = build_queue(
+        test_db,
+        cfg=cfg,
+        tenant_id="default",
+        detectors=[],
+        limit=10,
+        target_types=["org"],
+    )
+    assert [g.target_id for g in only_org] == ["org-target"]
+
+    both = build_queue(
+        test_db,
+        cfg=cfg,
+        tenant_id="default",
+        detectors=[],
+        limit=10,
+        target_types=None,
+    )
+    assert {g.target_id for g in both} == {"org-target", "tool-target"}

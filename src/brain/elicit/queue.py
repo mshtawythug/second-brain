@@ -56,6 +56,7 @@ def build_queue(
     include_low_confidence: bool = False,
     signal_kinds: Sequence[str] | None = None,
     target_ids: Sequence[str] | None = None,
+    target_types: Sequence[str] | None = None,
 ) -> list[Gap]:
     """Run ``detectors``, upsert results, then return the filtered open queue.
 
@@ -64,9 +65,10 @@ def build_queue(
     are not overwritten), and then read back in score order with evidence and
     confidence filters applied.
 
-    ``signal_kinds`` / ``target_ids`` optionally scope the read-back so the
-    caller sees only the gaps it asked about. They restrict the SELECT, not the
-    detectors: ``brain elicit --signal delta`` runs only the delta detector AND
+    ``signal_kinds`` / ``target_ids`` / ``target_types`` optionally scope the
+    read-back so the caller sees only the gaps it asked about. They restrict the
+    SELECT, not the detectors: ``brain elicit --signal delta`` runs only the
+    delta detector AND
     filters the read-back to ``signal_kind = 'delta'`` so unrelated pre-existing
     open gaps from prior runs don't leak into the session. ``None`` (the
     default) adds no predicate — ``brain elicit list`` and the unfiltered
@@ -115,29 +117,37 @@ def build_queue(
     # only — no user values are interpolated into the SQL).
     floor = 0.0 if include_low_confidence else cfg.elicit_min_gap_score
     clauses = [
-        "tenant_id = %s",
-        "status IN ('surfaced', 'snoozed')",
-        "(snoozed_until IS NULL OR snoozed_until < now())",
-        "score >= %s",
+        "eg.tenant_id = %s",
+        "eg.status IN ('surfaced', 'snoozed')",
+        "(eg.snoozed_until IS NULL OR eg.snoozed_until < now())",
+        "eg.score >= %s",
         # Mirror the pre-upsert evidence guard on read-back so previously
         # persisted sparse gaps can't resurface (user_flagged is exempt,
         # exactly as in the upsert filter above).
-        "(cardinality(evidence_ids) >= %s OR signal_kind = 'user_flagged')",
+        "(cardinality(eg.evidence_ids) >= %s OR eg.signal_kind = 'user_flagged')",
     ]
     params: list[Any] = [tenant_id, floor, cfg.elicit_min_evidence_docs]
     if signal_kinds is not None:
-        clauses.append("signal_kind = ANY(%s)")
+        clauses.append("eg.signal_kind = ANY(%s)")
         params.append(list(signal_kinds))
     if target_ids is not None:
-        clauses.append("target_id = ANY(%s)")
+        clauses.append("eg.target_id = ANY(%s)")
         params.append(list(target_ids))
+    if target_types is not None:
+        clauses.append("eg.target_type = ANY(%s)")
+        params.append(list(target_types))
     params.append(limit)
+    # LEFT JOIN graph_entities on TEXT equality so a raw-string target_id
+    # (e.g. a user_flagged gap whose target is not a UUID) never triggers a
+    # uuid-cast error — it simply finds no match and target_name stays "".
     sql = (
-        "SELECT id::text, signal_kind, target_type, target_id, "
-        "score, evidence_ids, rationale "
-        "FROM elicitation_gaps "
+        "SELECT eg.id::text, eg.signal_kind, eg.target_type, eg.target_id, "
+        "eg.score, eg.evidence_ids, eg.rationale, ge.name "
+        "FROM elicitation_gaps eg "
+        "LEFT JOIN graph_entities ge "
+        "ON ge.tenant_id = eg.tenant_id AND ge.id::text = eg.target_id "
         f"WHERE {' AND '.join(clauses)} "
-        "ORDER BY score DESC LIMIT %s"
+        "ORDER BY eg.score DESC LIMIT %s"
     )
     rows = conn.execute(sql, tuple(params)).fetchall()
     return [
@@ -150,6 +160,7 @@ def build_queue(
             evidence_ids=list(r[5]),
             evidence_texts=[],
             rationale=r[6],
+            target_name=r[7] or "",
         )
         for r in rows
     ]
