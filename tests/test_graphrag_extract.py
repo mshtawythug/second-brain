@@ -98,10 +98,10 @@ def test_extract_returns_canonicalized_entities_with_positions() -> None:
 
     assert [(e.entity_type, e.canonical_key) for e in out] == [
         ("org", "acmepay"),
-        ("project", "project phoenix"),
+        ("project", "projectphoenix"),
     ]
     acmepay = next(e for e in out if e.canonical_key == "acmepay")
-    phoenix = next(e for e in out if e.canonical_key == "project phoenix")
+    phoenix = next(e for e in out if e.canonical_key == "projectphoenix")
     # doc words: we migrated acmepay billing for project phoenix acmepay was central
     #            0  1        2      3       4   5       6       7      8   9
     assert acmepay.positions == (2, 7)
@@ -111,11 +111,15 @@ def test_extract_returns_canonicalized_entities_with_positions() -> None:
     assert phoenix.mention_count == 1
 
 
-def test_extract_canonical_key_lowercases_and_collapses_whitespace() -> None:
+def test_extract_canonical_key_lowercases_and_strips_all_separators() -> None:
+    """Bug B: the canonical key is lowercase with ALL separators (whitespace,
+    dashes, special characters) stripped — so ``Data Lake`` keys as ``datalake``
+    and merges with ``data-lake`` / ``DataLake`` / ``data lake`` variants. The
+    surface form (``display_name``) is preserved untouched."""
     handler = _const_handler(_ok_entities([{"name": "  Data   Lake  ", "type": "topic"}]))
     out = _extractor(handler).extract("the Data Lake project")
     assert len(out) == 1
-    assert out[0].canonical_key == "data lake"
+    assert out[0].canonical_key == "datalake"
     assert out[0].display_name == "Data   Lake"
 
 
@@ -390,16 +394,16 @@ def test_extract_cap_disabled_processes_whole_document() -> None:
 
 
 def test_extractor_version_constant_present_and_folds_model() -> None:
-    assert EXTRACTOR_VERSION == "concepts-v5"
+    assert EXTRACTOR_VERSION == "concepts-v6"
     extractor = _extractor(_const_handler(_ok_entities([])))
-    assert extractor.version == "llama3.1:8b@concepts-v5"
+    assert extractor.version == "llama3.1:8b@concepts-v6"
 
 
 def test_extractor_version_changes_with_model() -> None:
     extractor = OllamaExtractor(
         enricher=_enricher(_const_handler(_ok_entities([])), model="custom:7b")
     )
-    assert extractor.version == "custom:7b@concepts-v5"
+    assert extractor.version == "custom:7b@concepts-v6"
 
 
 def test_concept_entity_types_excludes_person() -> None:
@@ -600,7 +604,7 @@ def test_make_extractor_uses_graph_extract_model() -> None:
     cfg = Config(database_url="postgresql://x/y", graph_extract_model="custom:7b")
     extractor = make_extractor(cfg)
     assert isinstance(extractor, OllamaExtractor)
-    assert extractor.version == "custom:7b@concepts-v5"
+    assert extractor.version == "custom:7b@concepts-v6"
 
 
 def test_make_extractor_threads_max_entities() -> None:
@@ -736,7 +740,7 @@ def test_extract_repairs_stripped_project_prefix() -> None:
     out = _extractor(handler).extract("Project Helios shipped the migration.")
     assert len(out) == 1
     assert out[0].entity_type == "project"
-    assert out[0].canonical_key == "project helios"
+    assert out[0].canonical_key == "projecthelios"
     assert out[0].display_name == "Project Helios"
 
 
@@ -763,7 +767,7 @@ def test_extract_dedupes_project_substring_keeping_longer() -> None:
         "Project Helios and Project Helios Phase Two both shipped."
     )
     keys = sorted(e.canonical_key for e in out if e.entity_type == "project")
-    assert keys == ["project helios phase two"]
+    assert keys == ["projectheliosphasetwo"]
 
 
 def test_extract_presence_drops_absent_longer_project_form() -> None:
@@ -795,7 +799,7 @@ def test_extract_substring_dedup_not_applied_to_topics() -> None:
     )
     out = _extractor(handler).extract("billing and billing platform discussed")
     keys = sorted(e.canonical_key for e in out if e.entity_type == "topic")
-    assert keys == ["billing", "billing platform"]
+    assert keys == ["billing", "billingplatform"]
 
 
 def test_make_extractor_threads_enrich_timeout() -> None:
@@ -888,11 +892,11 @@ def test_extract_presence_keeps_present_drops_absent() -> None:
 
 
 def test_extract_presence_match_is_separator_normalized() -> None:
-    """A hyphenated concept present in the text matches its whitespace-collapsed
-    canonical key (separator-normalized substring), not dropped spuriously."""
+    """A hyphenated concept present in the text matches its strip-all canonical
+    key (separators removed on both sides), not dropped spuriously."""
     handler = _const_handler(_ok_entities([{"name": "back-pressure", "type": "topic"}]))
     out = _extractor(handler).extract("Throughput and back-pressure were discussed.")
-    assert [(e.entity_type, e.canonical_key) for e in out] == [("topic", "back-pressure")]
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("topic", "backpressure")]
 
 
 def test_extract_rejects_reasoning_text_as_entity() -> None:
@@ -1023,6 +1027,9 @@ def test_finalize_drops_curated_stopwords() -> None:
     competes with a stopword; the real-concept Northwind is preserved.
     All names are synthetic (rule 15).
     """
+    # The operator may curate stopwords in a human-friendly spaced form
+    # ("bar baz"); the extractor normalizes them with the same strip-all
+    # canonical-key rule, so they match the strip-all key ("barbaz").
     ex = _make_extractor(extra_stopwords=frozenset({"foo", "bar baz"}))
     text = "We discussed Foo and Bar Baz and Northwind in the call."
     keys = {
@@ -1032,7 +1039,7 @@ def test_finalize_drops_curated_stopwords() -> None:
         )
     }
     assert "foo" not in keys
-    assert "bar baz" not in keys
+    assert "barbaz" not in keys
     assert "northwind" in keys
 
 
@@ -1051,5 +1058,94 @@ def test_finalize_drops_structural_number_word() -> None:
             [("topic", "section one"), ("topic", "phase two")], text
         )
     }
-    assert "section one" not in keys, "structural noun + number-word should be dropped"
-    assert "phase two" in keys, "non-structural noun + number-word should survive"
+    # Strip-all keys: "section one" -> "sectionone", "phase two" -> "phasetwo".
+    assert "sectionone" not in keys, "structural noun + number-word should be dropped"
+    assert "phasetwo" in keys, "non-structural noun + number-word should survive"
+
+
+# --------------------------------------------------------------------------- #
+# Bug B (2026-06-02) — strip-all canonical key collapses separator variants,
+# and the three dependents (presence matching, structural-enum filter,
+# project-substring dedupe) stay consistent with the new key shape.
+# All entity names are SYNTHETIC (rule 15).
+# --------------------------------------------------------------------------- #
+
+
+def test_canonical_key_collapses_all_separator_variants_to_one() -> None:
+    """REGRESSION (Bug B): camelCase / hyphen / space / glued surface forms of the
+    SAME concept all collapse to a single strip-all canonical key, so they merge
+    into one entity instead of fragmenting into four. Each variant appears
+    verbatim in the text so presence validation keeps them."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "AcmePlatform", "type": "topic"},
+                {"name": "acme-platform", "type": "topic"},
+                {"name": "Acme Platform", "type": "topic"},
+                {"name": "acmeplatform", "type": "topic"},
+            ]
+        )
+    )
+    out = _extractor(handler).extract(
+        "Notes on AcmePlatform, acme-platform, Acme Platform and acmeplatform."
+    )
+    assert {e.canonical_key for e in out} == {"acmeplatform"}
+    assert len(out) == 1  # one entity, not four
+
+
+def test_extract_presence_keeps_separated_text_with_glued_key() -> None:
+    """REGRESSION (Bug B dependent #1): an entity whose strip-all canonical key is
+    glued (``acmeplatform``) but which appears WITH separators in the document
+    text (``Acme Platform``) is NOT falsely dropped. Presence matching strips all
+    separators on both sides, so it stays consistent with the strip-all key."""
+    handler = _const_handler(_ok_entities([{"name": "AcmePlatform", "type": "org"}]))
+    out = _extractor(handler).extract("We migrated everything to Acme Platform last week.")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("org", "acmeplatform")]
+
+
+def test_extract_presence_keeps_glued_text_with_separated_name() -> None:
+    """REGRESSION (Bug B dependent #1, reverse direction): a separated surface
+    form (``Acme Platform``) whose key is ``acmeplatform`` is kept when the
+    document writes the glued form (``AcmePlatform``)."""
+    handler = _const_handler(_ok_entities([{"name": "Acme Platform", "type": "org"}]))
+    out = _extractor(handler).extract("We standardized on AcmePlatform this quarter.")
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("org", "acmeplatform")]
+
+
+def test_extract_structural_enum_dropped_after_strip_all() -> None:
+    """REGRESSION (Bug B dependent #2): a ``<structural noun><enumerator>`` whose
+    strip-all key has no whitespace (``chapter24`` / ``sectionone``) is still
+    filtered as structural noise; a real glued concept is kept."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "Chapter 24", "type": "topic"},  # -> chapter24, structural
+                {"name": "Section One", "type": "topic"},  # -> sectionone, structural
+                {"name": "Northwind", "type": "org"},  # real concept, kept
+            ]
+        )
+    )
+    out = _extractor(handler).extract(
+        "Chapter 24 and Section One of the Northwind brief."
+    )
+    assert [(e.entity_type, e.canonical_key) for e in out] == [("org", "northwind")]
+
+
+def test_extract_project_substring_dedupe_after_strip_all() -> None:
+    """REGRESSION (Bug B dependent #3): project-substring dedupe operates on word
+    tokens (from the display name), so a bare ``Helios`` project is still subsumed
+    by a longer ``Project Helios`` sibling even though both strip-all keys
+    (``helios`` / ``projecthelios``) no longer split into words."""
+    handler = _const_handler(
+        _ok_entities(
+            [
+                {"name": "Project Helios", "type": "project"},
+                {"name": "Project Helios Phase Two", "type": "project"},
+            ]
+        )
+    )
+    out = _extractor(handler).extract(
+        "Project Helios and Project Helios Phase Two both shipped."
+    )
+    keys = sorted(e.canonical_key for e in out if e.entity_type == "project")
+    assert keys == ["projectheliosphasetwo"]

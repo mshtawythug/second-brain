@@ -33,6 +33,7 @@ filesystem. Mirrors :mod:`brain.eval.metrics` (the ranking metrics) in style.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -156,16 +157,20 @@ class ConceptFixtureDoc:
 def normalize_concept_pairs(pairs: Iterable[ConceptPair]) -> set[ConceptPair]:
     """Canonicalize a pair iterable into a deduped, people-excluded pair set.
 
-    Each ``(entity_type, canonical_key)`` is lower-cased with internal whitespace
-    collapsed (matching :func:`brain.graph_rag.extract._canonical_key` and the
-    catalog identity). ``person``-typed pairs and pairs with an empty type or key
-    are dropped — so the metric is type-aware *and* people-excluded regardless of
-    what the caller passes (spec §17b decision 2).
+    The ``canonical_key`` is lower-cased with ALL separators stripped — the
+    strip-all rule that mirrors :func:`brain.graph_rag.extract._canonical_key`
+    (Bug B) and the catalog identity, so gold/predicted pairs score on the same
+    key shape (a human-readable spaced gold key like ``project aurora`` and the
+    extractor's strip-all ``projectaurora`` collapse to one identity). The
+    ``entity_type`` is lower-cased + whitespace-collapsed (types are single
+    words). ``person``-typed pairs and pairs with an empty type or key are dropped
+    — so the metric is type-aware *and* people-excluded regardless of what the
+    caller passes (spec §17b decision 2).
     """
     out: set[ConceptPair] = set()
     for entity_type, canonical_key in pairs:
         norm_type = " ".join(str(entity_type).lower().split())
-        norm_key = " ".join(str(canonical_key).lower().split())
+        norm_key = re.sub(r"[\W_]+", "", str(canonical_key).lower())
         if not norm_type or not norm_key:
             continue
         if norm_type == PERSON_ENTITY_TYPE:

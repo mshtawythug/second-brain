@@ -36,9 +36,10 @@ extraction *logic*:
   duplicates are collapsed to a single node keeping the highest-precedence type
   (:data:`_TYPE_PRECEDENCE`: person > org > project > tool > topic), so the
   graph (and the communities derived from it) is not fragmented.
-* **Canonicalized** — ``canonical_key`` is ``name`` lower-cased with collapsed
-  internal whitespace, matching the people aspect's "normalized lowercase"
-  identity (:mod:`brain.graph_rag.reconcile`). Entities dedup on
+* **Canonicalized** — ``canonical_key`` is ``name`` lower-cased with ALL
+  separators stripped (strip-all, Bug B), so separator variants of one concept
+  (``AcmePlatform`` / ``acme-platform`` / ``Acme Platform``) share one key and
+  stop fragmenting the catalog. Entities dedup on
   ``(entity_type, canonical_key)`` — the same key the eval gate scores
   (spec §17b decision 2) and the catalog uniqueness key
   ``UNIQUE(tenant_id, entity_type, canonical_key)`` (spec §5).
@@ -106,7 +107,20 @@ __all__ = [
 # ``OllamaExtractor`` gains an ``extra_stopwords`` parameter (operator-curated
 # canonical keys dropped in ``_finalize`` after the generic noise filter). Real
 # stopwords are employer-specific (rule 15) and default to the empty set.
-EXTRACTOR_VERSION = "concepts-v5"
+#
+# concepts-v6 (2026-06-02, Bug B): ``_canonical_key`` is now STRIP-ALL —
+# lower-cased with every separator removed (``re.sub(r"[\W_]+", "", …)``) instead
+# of whitespace-collapse only. Separator variants of one concept (``AcmePlatform``
+# / ``acme-platform`` / ``Acme Platform`` / ``acmeplatform``) collapse to a single
+# key and stop fragmenting the catalog. The identity key changes shape, so the
+# watermark MUST change to force a ``--backfill`` re-extraction that re-keys and
+# merges existing separator-variant rows. Dependents kept consistent:
+# ``_normalize_for_presence`` also strips all separators (presence stays
+# consistent with the new key, both directions); ``_STRUCTURAL_ENUM_RE`` matches
+# ``\s*`` so glued forms (``chapter24`` / ``sectionone``) are still filtered; and
+# ``_dedupe_project_substrings`` + curated ``extra_stopwords`` operate on
+# display-name word tokens / normalized keys rather than the now-wordless key.
+EXTRACTOR_VERSION = "concepts-v6"
 
 # The concept entity types the extractor emits (spec §5 ``entity_type CHECK``
 # minus ``person``). People are derived from the participants pipeline and are
@@ -243,15 +257,23 @@ _STRUCTURAL_STOP_KEYS: frozenset[str] = frozenset({
     "standards",
 })
 
-# A structural reference of the form "<structural noun> <enumerator>" — e.g.
+# A structural reference of the form "<structural noun><enumerator>" — e.g.
 # "chapter 24", "section 3", "page 12", "figure 2", "appendix a", "standard 72".
 # Matches a document-structure noun followed by a number / roman numeral / single
 # letter; generic by construction, never a real entity name. Applied to the
-# already-lower-cased canonical key.
+# already-lower-cased canonical key — which is now STRIP-ALL (Bug B), so the
+# separator between noun and enumerator is gone (``chapter24`` / ``sectionone``).
+# The whitespace matcher is therefore ``\s*`` (zero-or-more), keeping BOTH the
+# historical spaced form and the post-strip-all glued form filtered.
+# DO NOT revert ``\s*`` to ``\s+``: strip-all keys never contain whitespace, so
+# ``\s+`` would make this filter dead (nothing would ever match). The trade-off is
+# that a short name colliding with a noun-prefix + single letter (e.g. "vera" =>
+# ver+a) is filtered as collateral — accepted, since the filter is generic by
+# construction and such collisions are rare in the real corpus.
 _STRUCTURAL_ENUM_RE = re.compile(
     r"^(?:chapter|section|page|figure|fig|table|appendix|exhibit|paragraph|"
     r"para|footnote|clause|article|item|part|volume|vol|step|standard|"
-    r"version|ver|revision|rev)\s+"
+    r"version|ver|revision|rev)\s*"
     r"(?:\d+|[ivxlcdm]+|[a-z]|"
     r"zero|one|two|three|four|five|six|seven|eight|nine|ten)$"
 )
@@ -289,11 +311,12 @@ _REASONING_PATTERNS = re.compile(
 _TYPE_PRECEDENCE: tuple[str, ...] = ("person", "org", "project", "tool", "topic")
 _TYPE_RANK: dict[str, int] = {t: rank for rank, t in enumerate(_TYPE_PRECEDENCE)}
 
-# Separator-normalization for the presence check: lower-case and collapse every
-# run of non-alphanumeric characters (whitespace, hyphens, dots, underscores) to
-# a single space. So "back-pressure" / "back_pressure" / "Back Pressure" all
-# normalize to "back pressure" and a hyphenated concept present in the text is
-# not spuriously dropped.
+# Separator pattern shared by the canonical key and the presence check: every run
+# of non-alphanumeric characters (whitespace, hyphens, dots, underscores, special
+# characters). Both callers REMOVE these (strip-all, Bug B), so "back-pressure" /
+# "back_pressure" / "Back Pressure" / "BackPressure" all normalize to
+# "backpressure" — a hyphenated concept present in the text is not spuriously
+# dropped, and separator variants of one concept share a single canonical key.
 _SEPARATOR_RE = re.compile(r"[\W_]+", re.UNICODE)
 
 # Per-chunk token budget for the LLM extraction calls. A document longer than
@@ -320,9 +343,9 @@ class ExtractedEntity:
     ``id`` — those are assigned when the catalog row is upserted, exactly as a
     :class:`brain.graph_rag.reconcile.ResolvedPerson` carries no id).
 
-    ``canonical_key`` is the dedup identity (``name`` lower-cased,
-    whitespace-collapsed) — unique per ``(entity_type, canonical_key)`` and the
-    key the eval gate scores. ``display_name`` is the surface form for the
+    ``canonical_key`` is the dedup identity (``name`` lower-cased with all
+    separators stripped, Bug B) — unique per ``(entity_type, canonical_key)`` and
+    the key the eval gate scores. ``display_name`` is the surface form for the
     catalog ``name`` / AGE vertex label. ``positions`` are the entity's
     raw-text word-index occurrences over the *whole* document (empty when the
     model named a concept that does not appear literally in the text); they feed
@@ -408,8 +431,13 @@ class OllamaExtractor:
         # Phase B: operator-curated canonical keys dropped in ``_finalize`` after
         # the generic noise filter. Default empty (real terms are employer-specific,
         # rule 15). Threaded from ``cfg.graph_extract_stopwords`` by
-        # :func:`make_extractor`.
-        self._extra_stopwords = extra_stopwords
+        # :func:`make_extractor`. Bug B: normalize each curated stopword through the
+        # strip-all :func:`_canonical_key` so an operator-friendly spaced/hyphenated
+        # form ("bar baz") matches the strip-all candidate key ("barbaz"); empties
+        # (no alphanumeric content) are dropped.
+        self._extra_stopwords = frozenset(
+            key for word in extra_stopwords if (key := _canonical_key(word))
+        )
 
     @property
     def version(self) -> str:
@@ -625,13 +653,23 @@ def _validate_entry(entry: Any) -> tuple[str, str] | None:
 
 
 def _canonical_key(display_name: str) -> str:
-    """Canonical dedup key: lower-cased, internal whitespace collapsed.
+    """Canonical dedup key: lower-cased with ALL separators stripped (Bug B).
 
-    Matches the people aspect's "normalized lowercase" identity and the
-    catalog's ``UNIQUE(tenant_id, entity_type, canonical_key)`` (spec §5). Returns
-    an empty string only for a name with no word content (caller skips it).
+    Lower-cases ``display_name`` and removes every non-alphanumeric run
+    (whitespace, hyphens, dots, underscores, special characters) via
+    :data:`_SEPARATOR_RE`, so the glued camelCase, hyphenated, spaced, and
+    concatenated surface forms of one concept (``AcmePlatform`` / ``acme-platform``
+    / ``Acme Platform`` / ``acmeplatform``) all collapse to the SAME key
+    (``acmeplatform``) and merge into one ``graph_entities`` row instead of
+    fragmenting. This is *strip-all*, not collapse-to-space — the weaker
+    whitespace-only normalization left separator variants as distinct keys.
+
+    Backs the catalog's ``UNIQUE(tenant_id, entity_type, canonical_key)`` (spec
+    §5). Returns an empty string only for a name with no alphanumeric content
+    (caller skips it). The presence check (:func:`_normalize_for_presence`) strips
+    separators the same way, so the two stay consistent.
     """
-    return " ".join(display_name.lower().split())
+    return _SEPARATOR_RE.sub("", display_name.lower())
 
 
 def _tokenize_words(text: str) -> list[str]:
@@ -677,23 +715,38 @@ def _is_noise_key(canonical_key: str) -> bool:
 
 
 def _normalize_for_presence(text: str) -> str:
-    """Lower-case ``text`` and collapse every non-alphanumeric run to one space.
+    """Lower-case ``text`` and strip every non-alphanumeric run (Bug B).
 
     The shared normalization for the presence check: separators (whitespace,
-    hyphens, dots, underscores) all become a single space, so a hyphenated or
-    handle-style concept that appears in the source is matched against its
-    whitespace-collapsed canonical key (:func:`_canonical_key`).
+    hyphens, dots, underscores, special characters) are REMOVED entirely — the
+    same strip-all rule as :func:`_canonical_key`. Stripping on both sides keeps
+    presence matching consistent with the strip-all key regardless of which side
+    carries the separators: a glued canonical key (``acmeplatform``) matches a
+    separated source form (``Acme Platform``), and a separated surface form
+    matches a glued source form (``AcmePlatform``). Without this, the strip-all
+    key would never substring-match a strip-to-space document and every
+    separator-bearing entity would be falsely dropped.
+
+    Trade-off: removing separators makes the substring match deliberately MORE
+    permissive across word boundaries (e.g. ``"acme"`` matches ``"...acme..."``
+    even mid-word), so very short entity names (<= 4 chars) carry a higher
+    false-positive risk. Accepted: the presence check is intentionally lenient
+    (recall-safe) — its only job is to drop names that do not occur at all, and
+    the strip-all key consistency matters more than tightening this edge.
     """
-    return _SEPARATOR_RE.sub(" ", text.lower()).strip()
+    return _SEPARATOR_RE.sub("", text.lower())
 
 
 def _name_present_in_text(canonical_key: str, normalized_text: str) -> bool:
     """True when the entity name actually appears in the source text (B.1).
 
-    Separator-normalized substring match: the canonical key is re-normalized the
-    same way as ``normalized_text`` (:func:`_normalize_for_presence`) and checked
-    for containment. Deliberately a substring (not a whole-word) match so a bare
-    ``"helios"`` still counts as present when the document writes
+    Strip-all substring match: the canonical key is re-normalized the same way as
+    ``normalized_text`` (:func:`_normalize_for_presence` — all separators removed)
+    and checked for containment. Because the key is already strip-all, the needle
+    equals the key; matching against strip-all text means a glued key
+    (``acmeplatform``) is found in a separated source (``Acme Platform`` →
+    ``acmeplatform``) and vice versa. Deliberately a substring (not a whole-word)
+    match so a bare ``"helios"`` still counts as present when the document writes
     ``"Helioscope"`` (lenient = recall-safe); the goal is only to drop names that
     do **not** occur at all — hallucinated few-shot example names and paraphrases
     the model invented but never wrote.
@@ -796,23 +849,31 @@ def _dedupe_project_substrings(
 ) -> list[ExtractedEntity]:
     """Drop a bare ``project`` entity subsumed by a fuller ``"Project X"`` sibling.
 
-    Conservative and PROJECT-SCOPED: when two ``project`` entities exist and one
-    canonical key is a contiguous word-subsequence of the other (e.g. ``helios``
-    vs ``project helios``), keep only the longer named form. Deliberately NOT
-    applied to org/tool/topic — for those a shorter key is often the correct
-    concept (``billing`` vs ``billing platform``), so a blanket keep-longest
-    would hurt recall.
+    Conservative and PROJECT-SCOPED: when two ``project`` entities exist and one's
+    name is a contiguous word-subsequence of the other (e.g. ``Helios`` vs
+    ``Project Helios``), keep only the longer named form. Deliberately NOT applied
+    to org/tool/topic — for those a shorter key is often the correct concept
+    (``billing`` vs ``billing platform``), so a blanket keep-longest would hurt
+    recall.
+
+    The word-subsequence test runs on tokens of the ``display_name`` (via
+    :func:`_tokenize_words`), NOT on ``canonical_key`` — the strip-all key (Bug B)
+    has every separator removed, so ``canonical_key.split()`` no longer yields the
+    individual words needed for a subsequence check. The drop set is still keyed
+    by ``canonical_key`` (the entity identity).
     """
     projects = [e for e in entities if e.entity_type == "project"]
     if len(projects) < 2:
         return entities
     drop_keys: set[str] = set()
     for candidate in projects:
-        candidate_words = candidate.canonical_key.split()
+        candidate_words = _tokenize_words(candidate.display_name)
         for other in projects:
             if other.canonical_key == candidate.canonical_key:
                 continue
-            if _is_word_subsequence(candidate_words, other.canonical_key.split()):
+            if _is_word_subsequence(
+                candidate_words, _tokenize_words(other.display_name)
+            ):
                 drop_keys.add(candidate.canonical_key)
                 break
     if not drop_keys:

@@ -132,13 +132,16 @@ def test_concept_extractor_gate(caplog: pytest.LogCaptureFixture) -> None:
 # Synthetic names that the v2 few-shot prompt baked in and that leaked as real
 # entities (audit B.1). They appear in NONE of the sparse docs, so v3 must never
 # emit them. Lower-cased for a case-insensitive canonical-key compare.
+# Strip-all canonical keys (Bug B): these are compared against
+# ``entity.canonical_key``, which now has all separators removed, so the
+# multi-word leak names are stored glued (``projectmarlin`` / ``projectfalcon``).
 _FORMER_LEAK_NAMES: frozenset[str] = frozenset({
     "glasswing",
     "helmwright",
     "quillbase",
     "tessa",
-    "project marlin",
-    "project falcon",
+    "projectmarlin",
+    "projectfalcon",
     "onboarding",
     "uptime",
 })

@@ -29,9 +29,11 @@ from brain.eval.errors import EvalCorpusError, EvalMetricError
 # --------------------------------------------------------------------------- #
 # normalize_concept_pairs — canonicalization, type-awareness, people-exclusion
 # --------------------------------------------------------------------------- #
-def test_normalize_lowercases_and_collapses_whitespace() -> None:
+def test_normalize_lowercases_and_strips_all_separators() -> None:
+    # Bug B: the key is strip-all (mirrors _canonical_key), so "Acmepay   Inc"
+    # keys as "acmepayinc"; the type stays whitespace-collapsed.
     out = normalize_concept_pairs([("ORG", "  Acmepay   Inc "), ("Topic", "Billing")])
-    assert out == {("org", "acmepay inc"), ("topic", "billing")}
+    assert out == {("org", "acmepayinc"), ("topic", "billing")}
 
 
 def test_normalize_excludes_people() -> None:
