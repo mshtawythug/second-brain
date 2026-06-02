@@ -1,6 +1,7 @@
 """Build the ranked, de-duplicated elicitation gap queue."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -53,6 +54,8 @@ def build_queue(
     detectors: list[GapDetector],
     limit: int,
     include_low_confidence: bool = False,
+    signal_kinds: Sequence[str] | None = None,
+    target_ids: Sequence[str] | None = None,
 ) -> list[Gap]:
     """Run ``detectors``, upsert results, then return the filtered open queue.
 
@@ -60,6 +63,14 @@ def build_queue(
     ``elicitation_gaps`` (with the partial-index conflict clause so resolved gaps
     are not overwritten), and then read back in score order with evidence and
     confidence filters applied.
+
+    ``signal_kinds`` / ``target_ids`` optionally scope the read-back so the
+    caller sees only the gaps it asked about. They restrict the SELECT, not the
+    detectors: ``brain elicit --signal delta`` runs only the delta detector AND
+    filters the read-back to ``signal_kind = 'delta'`` so unrelated pre-existing
+    open gaps from prior runs don't leak into the session. ``None`` (the
+    default) adds no predicate — ``brain elicit list`` and the unfiltered
+    ``brain elicit`` still see the whole open queue.
     """
     by_signal: dict[str, list[Gap]] = {}
     for det in detectors:
@@ -99,22 +110,32 @@ def build_queue(
                 g.rationale,
             ),
         )
-    # Read back the open queue with score and confidence floors applied.
+    # Read back the open queue with score and confidence floors applied, plus
+    # the optional signal/target scoping (parameterized; static clause strings
+    # only — no user values are interpolated into the SQL).
     floor = 0.0 if include_low_confidence else cfg.elicit_min_gap_score
-    rows = conn.execute(
-        """
-        SELECT id::text, signal_kind, target_type, target_id,
-               score, evidence_ids, rationale
-        FROM elicitation_gaps
-        WHERE tenant_id = %s
-          AND status IN ('surfaced', 'snoozed')
-          AND (snoozed_until IS NULL OR snoozed_until < now())
-          AND score >= %s
-        ORDER BY score DESC
-        LIMIT %s
-        """,
-        (tenant_id, floor, limit),
-    ).fetchall()
+    clauses = [
+        "tenant_id = %s",
+        "status IN ('surfaced', 'snoozed')",
+        "(snoozed_until IS NULL OR snoozed_until < now())",
+        "score >= %s",
+    ]
+    params: list[Any] = [tenant_id, floor]
+    if signal_kinds is not None:
+        clauses.append("signal_kind = ANY(%s)")
+        params.append(list(signal_kinds))
+    if target_ids is not None:
+        clauses.append("target_id = ANY(%s)")
+        params.append(list(target_ids))
+    params.append(limit)
+    sql = (
+        "SELECT id::text, signal_kind, target_type, target_id, "
+        "score, evidence_ids, rationale "
+        "FROM elicitation_gaps "
+        f"WHERE {' AND '.join(clauses)} "
+        "ORDER BY score DESC LIMIT %s"
+    )
+    rows = conn.execute(sql, tuple(params)).fetchall()
     return [
         Gap(
             gap_id=r[0],

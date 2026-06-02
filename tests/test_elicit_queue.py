@@ -311,3 +311,86 @@ def test_build_queue_include_low_confidence_bypasses_floor(
         include_low_confidence=True,
     )
     assert any(g.target_id == "lo-conf" for g in gaps), "low-conf gap must appear"
+
+
+# ---------------------------------------------------------------------------
+# build_queue: read-back scoping for --signal / --target (no-leak guard)
+# ---------------------------------------------------------------------------
+
+
+def _seed_mixed_open_gaps(conn: psycopg.Connection) -> None:
+    """Seed four distinct surfaced gaps across signals/targets above the floor."""
+    rows = [
+        ("delta", "topic", "delta-target"),
+        ("orphan", "topic", "orphan-target"),
+        ("user_flagged", "topic", "y"),
+        ("user_flagged", "topic", "z"),
+    ]
+    for signal_kind, target_type, target_id in rows:
+        conn.execute(
+            "INSERT INTO elicitation_gaps "
+            "(tenant_id, signal_kind, target_type, target_id, score, "
+            "evidence_ids, rationale, status) "
+            "VALUES ('default', %s, %s, %s, 0.9, ARRAY['d1','d2','d3'], 'r', 'surfaced')",
+            (signal_kind, target_type, target_id),
+        )
+
+
+def test_build_queue_signal_kinds_filters_readback(
+    test_db: psycopg.Connection,
+) -> None:
+    """signal_kinds restricts the read-back to the requested signal only."""
+    from brain.config import Config
+
+    _seed_mixed_open_gaps(test_db)
+    cfg = Config.load()
+
+    gaps = build_queue(
+        test_db,
+        cfg=cfg,
+        tenant_id="default",
+        detectors=[],
+        limit=10,
+        signal_kinds=["delta"],
+    )
+
+    assert [g.target_id for g in gaps] == ["delta-target"]
+
+
+def test_build_queue_target_ids_filters_readback(
+    test_db: psycopg.Connection,
+) -> None:
+    """signal_kinds + target_ids narrows to exactly one user-flagged target."""
+    from brain.config import Config
+
+    _seed_mixed_open_gaps(test_db)
+    cfg = Config.load()
+
+    gaps = build_queue(
+        test_db,
+        cfg=cfg,
+        tenant_id="default",
+        detectors=[],
+        limit=10,
+        signal_kinds=["user_flagged"],
+        target_ids=["y"],
+    )
+
+    assert [g.target_id for g in gaps] == ["y"]
+
+
+def test_build_queue_no_filter_returns_whole_queue(
+    test_db: psycopg.Connection,
+) -> None:
+    """No filter (the `elicit list` / default path) still returns every open gap."""
+    from brain.config import Config
+
+    _seed_mixed_open_gaps(test_db)
+    cfg = Config.load()
+
+    gaps = build_queue(
+        test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10
+    )
+
+    returned = {g.target_id for g in gaps}
+    assert returned == {"delta-target", "orphan-target", "y", "z"}

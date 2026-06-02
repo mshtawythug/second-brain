@@ -7322,28 +7322,50 @@ def elicit(
             enricher=make_enricher(cfg) if cfg.elicit_contradiction_enabled else None,
         )
 
-    detectors: list[GapDetector]
-    if target is not None:
-        detectors = [UserFlaggedDetector(target=target)]
-    elif signal is not None:
+    # Validate --signal up front (no DB needed) so a typo fails fast.
+    sig: str | None = None
+    if signal is not None:
         sig = signal.strip().lower()
-        if sig == "delta":
-            detectors = [DeltaDetector()]
-        elif sig == "orphan":
-            detectors = [OrphanEntityDetector()]
-        elif sig == "contradiction":
-            detectors = [_contradiction()]
-        else:
+        if sig not in ("delta", "orphan", "contradiction"):
             raise typer.BadParameter(
                 "--signal must be one of: delta, orphan, contradiction",
                 param_hint="--signal",
             )
-    else:
-        detectors = [DeltaDetector(), OrphanEntityDetector(), _contradiction()]
 
     try:
         with connect(cfg.database_url) as conn:
             conn.autocommit = True
+
+            # Pick detectors AND the matching read-back scope so --target /
+            # --signal don't surface unrelated pre-existing open gaps.
+            detectors: list[GapDetector]
+            signal_kinds: list[str] | None = None
+            target_ids: list[str] | None = None
+            if target is not None:
+                flagged = UserFlaggedDetector(target=target)
+                detectors = [flagged]
+                signal_kinds = ["user_flagged"]
+                # Capture the target_id(s) this flag resolves to so the read-back
+                # returns only this target's gap (the detector re-runs inside
+                # build_queue; running it once here to capture ids is cheap).
+                target_ids = [
+                    g.target_id
+                    for g in flagged.detect(
+                        conn, tenant_id=tenant_id, limit=cfg.elicit_queue_limit
+                    )
+                ]
+            elif sig == "delta":
+                detectors = [DeltaDetector()]
+                signal_kinds = ["delta"]
+            elif sig == "orphan":
+                detectors = [OrphanEntityDetector()]
+                signal_kinds = ["orphan"]
+            elif sig == "contradiction":
+                detectors = [_contradiction()]
+                signal_kinds = ["contradiction"]
+            else:
+                detectors = [DeltaDetector(), OrphanEntityDetector(), _contradiction()]
+
             gaps = build_queue(
                 conn,
                 cfg=cfg,
@@ -7351,6 +7373,8 @@ def elicit(
                 detectors=detectors,
                 limit=cfg.elicit_queue_limit,
                 include_low_confidence=include_low_confidence,
+                signal_kinds=signal_kinds,
+                target_ids=target_ids,
             )
             if not gaps:
                 typer.echo("No open gaps in the elicitation queue.")
