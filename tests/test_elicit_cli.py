@@ -84,25 +84,36 @@ def test_elicit_list_bad_min_gap_score_clean_error(
     elicit knob propagated as an uncaught ConfigError and printed a raw Rich
     traceback. The command must now catch it, print the ConfigError message,
     and exit non-zero with no leaked exception.
+
+    The message must land on stderr (via `typer.echo(..., err=True)`) and must
+    NOT appear silently on stdout.  Click 8.3+ always captures stdout and stderr
+    separately; `result.stderr` / `result.stdout` are always populated.
     """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setenv("BRAIN_ELICIT_MIN_GAP_SCORE", "1.5")
     res = CliRunner().invoke(app, ["elicit", "list"])
     assert res.exit_code != 0, res.output
     assert res.exception is None or isinstance(res.exception, SystemExit), res.exception
-    assert "BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0]" in res.output
+    assert "BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0]" in res.stderr
+    assert "BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0]" not in res.stdout
 
 
 def test_elicit_default_bad_min_gap_score_clean_error(
     test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The default `brain elicit` session also surfaces a clean ConfigError."""
+    """The default `brain elicit` session also surfaces a clean ConfigError.
+
+    The message must land on stderr (via `typer.echo(..., err=True)`) and must
+    NOT appear silently on stdout.  Click 8.3+ always captures stdout and stderr
+    separately; `result.stderr` / `result.stdout` are always populated.
+    """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setenv("BRAIN_ELICIT_MIN_GAP_SCORE", "1.5")
     res = CliRunner().invoke(app, ["elicit"], input="q\n")
     assert res.exit_code != 0, res.output
     assert res.exception is None or isinstance(res.exception, SystemExit), res.exception
-    assert "BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0]" in res.output
+    assert "BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0]" in res.stderr
+    assert "BRAIN_ELICIT_MIN_GAP_SCORE must be a float in [0.0, 1.0]" not in res.stdout
 
 
 def _seed_org_and_tool_gaps(conn: psycopg.Connection) -> str:
