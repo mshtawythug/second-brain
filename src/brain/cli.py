@@ -7206,7 +7206,10 @@ def elicit_list(
     detectors: list[GapDetector] = [
         DeltaDetector(),
         OrphanEntityDetector(),
-        ContradictionDetector(enabled=cfg.elicit_contradiction_enabled),
+        ContradictionDetector(
+            enabled=cfg.elicit_contradiction_enabled,
+            min_docs=cfg.elicit_contradiction_min_docs,
+        ),
     ]
 
     with connect(cfg.database_url) as conn:
@@ -7320,6 +7323,7 @@ def elicit(
         return ContradictionDetector(
             enabled=cfg.elicit_contradiction_enabled,
             enricher=make_enricher(cfg) if cfg.elicit_contradiction_enabled else None,
+            min_docs=cfg.elicit_contradiction_min_docs,
         )
 
     # Validate --signal up front (no DB needed) so a typo fails fast.

@@ -206,6 +206,27 @@ _GROUP_SUMMARY_SYSTEM_PROMPT = (
     "- never invent facts, never exceed 50 words"
 )
 
+# Wave elicit Wave 4 — contradiction detection between document summaries.
+# The model is given a subject entity and several summary excerpts from
+# different documents and must decide whether they express CONTRADICTORY
+# positions or decisions about that entity (a reversed decision, opposing
+# stance, or conflicting fact).
+_CONTRADICTION_SYSTEM_PROMPT = (
+    "You are given an entity subject and several summary excerpts drawn from "
+    "different documents in a personal knowledge base. Your task is to decide "
+    "whether the excerpts express CONTRADICTORY positions, decisions, or facts "
+    "about that entity — for example a reversed decision, an opposing stance, "
+    "or a directly conflicting statement of fact. Minor differences in emphasis "
+    "or level of detail are NOT contradictions. Return ONLY valid JSON:\n"
+    '{"contradicts": <true|false>, "rationale": "<one sentence>"}\n'
+    "\n"
+    "Rules:\n"
+    '- "contradicts" MUST be a JSON boolean (true or false, no quotes)\n'
+    "- \"rationale\" must be a single sentence explaining the contradiction (or lack thereof)\n"
+    "- never invent facts not present in the excerpts\n"
+    "- when in doubt, return false"
+)
+
 # Token budget for the concept-extraction completion. Larger than the
 # summary/tag budget (256) because a document can yield a long entity list.
 _EXTRACT_NUM_PREDICT = 1024
@@ -238,6 +259,20 @@ class RuleDraft:
     title: str
     rule_text: str
     model: str
+
+
+@dataclass(frozen=True)
+class ContradictionVerdict:
+    """Assessment of whether document summaries express conflicting positions.
+
+    ``contradicts`` is True when the LLM detected a genuine contradiction
+    (reversed decision, opposing stance, conflicting fact) in the evidence
+    summaries for a given subject entity.  ``rationale`` is a one-sentence
+    explanation suitable for display in ``brain elicit``.
+    """
+
+    contradicts: bool
+    rationale: str
 
 
 @dataclass(frozen=True)
@@ -538,6 +573,47 @@ class OllamaEnricher:
         parts = [f"SUBJECT: {subject}", ""]
         for i, text in enumerate(evidence_texts, 1):
             parts.append(f"EXCERPT {i}:\n{text}")
+        return "\n".join(parts)
+
+    def assess_contradiction(
+        self, *, subject: str, summaries: list[str]
+    ) -> ContradictionVerdict:
+        """Decide whether ``summaries`` express contradictory positions about ``subject``.
+
+        Calls ``/api/chat`` with :data:`_CONTRADICTION_SYSTEM_PROMPT` and a
+        numbered-excerpt prompt.  Returns a :class:`ContradictionVerdict` with
+        ``contradicts=True`` when a genuine conflict is detected.
+
+        Raises :class:`OllamaUnavailable` on transport failure and
+        :class:`EnrichmentError` on two consecutive bad responses — the same
+        contract as :meth:`draft_rule`.
+        """
+        user = self._build_contradiction_user_prompt(subject, summaries)
+        data = self._chat_with_retry(
+            system=_CONTRADICTION_SYSTEM_PROMPT,
+            user=user,
+            schema_keys=("contradicts", "rationale"),
+            num_predict=200,
+        )
+        contradicts = data["contradicts"]
+        if not isinstance(contradicts, bool):
+            # Tolerate "true"/"false" strings from the model.
+            contradicts = str(contradicts).strip().lower() in ("true", "yes", "1")
+        rationale = data["rationale"]
+        if not isinstance(rationale, str):
+            rationale = str(rationale)
+        return ContradictionVerdict(contradicts=contradicts, rationale=rationale.strip())
+
+    def _build_contradiction_user_prompt(
+        self, subject: str, summaries: list[str]
+    ) -> str:
+        """Compose the user-turn prompt for :meth:`assess_contradiction`.
+
+        Joins ``subject`` and numbered summary excerpts into a clear prompt.
+        """
+        parts = [f"SUBJECT: {subject}", ""]
+        for i, summary in enumerate(summaries, 1):
+            parts.append(f"SUMMARY {i}:\n{summary}")
         return "\n".join(parts)
 
     def _chat_with_retry(
