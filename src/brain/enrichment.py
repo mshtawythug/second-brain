@@ -177,6 +177,19 @@ _EXTRACT_SYSTEM_PROMPT = (
 
 # Wave G2-f — on-demand theme synthesis (spec §6b step 4 / §17b decision 7).
 # Opt-in (``--synthesize``); best-effort and never required for retrieval.
+
+# Wave elicit — articulate tacit rules the user follows but has never written
+# down.  The enricher holds the LLM transport; the elicit drafter owns the
+# orchestration logic.
+_ELICIT_SYSTEM_PROMPT = (
+    "You are articulating a tacit rule the user follows in their work but has "
+    "never written down. You are given a subject and evidence excerpts drawn from "
+    "their meetings, messages, and notes. State the single most likely underlying "
+    "rule as a confident, first-person assertion the user can quickly confirm or "
+    "correct. Be specific and concrete; do not hedge. Respond with JSON: "
+    '{"title": "<short imperative title>", "rule": "<1-3 sentence rule in first person>"}.'
+)
+
 _GROUP_SUMMARY_SYSTEM_PROMPT = (
     "You write a one-to-two sentence synthesis of a cluster of related topics "
     "from a personal knowledge base.\n"
@@ -210,6 +223,20 @@ class SummaryResult:
     """
 
     summary: str
+    model: str
+
+
+@dataclass(frozen=True)
+class RuleDraft:
+    """A drafted tacit rule for the user to confirm or correct.
+
+    ``title`` is a short imperative phrase; ``rule_text`` is the 1-3 sentence
+    first-person assertion.  ``model`` is the Ollama model fingerprint so
+    callers can persist provenance alongside the draft.
+    """
+
+    title: str
+    rule_text: str
     model: str
 
 
@@ -463,6 +490,45 @@ class OllamaEnricher:
             )
             return None
         return summary.strip()
+
+    def draft_rule(self, *, subject: str, evidence_texts: list[str]) -> RuleDraft:
+        """Articulate the tacit rule implied by ``subject`` and ``evidence_texts``.
+
+        Calls ``/api/chat`` with :data:`_ELICIT_SYSTEM_PROMPT` and a numbered
+        excerpt prompt built by :meth:`_build_elicit_user_prompt`.  The caller
+        (``GapDrafter``) is responsible for pre-truncating ``evidence_texts``
+        to a reasonable token budget; this method joins them as-is.
+
+        Raises :class:`OllamaUnavailable` on transport failure and
+        :class:`EnrichmentError` on two consecutive bad responses — the same
+        contract as :meth:`summarize`.
+        """
+        user = self._build_elicit_user_prompt(subject, evidence_texts)
+        data = self._chat_with_retry(
+            system=_ELICIT_SYSTEM_PROMPT,
+            user=user,
+            schema_keys=("title", "rule"),
+            num_predict=256,
+        )
+        return RuleDraft(
+            title=str(data["title"]).strip(),
+            rule_text=str(data["rule"]).strip(),
+            model=self._model,
+        )
+
+    def _build_elicit_user_prompt(
+        self, subject: str, evidence_texts: list[str]
+    ) -> str:
+        """Compose the user-turn prompt for :meth:`draft_rule`.
+
+        Joins ``subject`` and numbered evidence excerpts into a clear prompt.
+        Evidence texts are assumed pre-truncated by the caller; this method
+        only formats them.
+        """
+        parts = [f"SUBJECT: {subject}", ""]
+        for i, text in enumerate(evidence_texts, 1):
+            parts.append(f"EXCERPT {i}:\n{text}")
+        return "\n".join(parts)
 
     def _chat_with_retry(
         self,
