@@ -6,10 +6,10 @@ import json
 import httpx
 import pytest
 
-from brain.enrichment import OllamaEnricher, RuleDraft
 from brain.elicit.drafter import GapDrafter
 from brain.elicit.schema import Gap
-
+from brain.enrichment import OllamaEnricher, RuleDraft
+from brain.errors import EnrichmentError
 
 # ---------------------------------------------------------------------------
 # Helpers — mirror the pattern in test_enrichment.py exactly so the mock
@@ -195,3 +195,37 @@ def test_gapdrafter_empty_evidence_ids(test_db) -> None:  # type: ignore[no-unty
 
     assert draft.gap_id == "g3"
     assert draft.evidence_texts == []
+
+
+# ---------------------------------------------------------------------------
+# Task 2.1 — draft_rule validation parity with summarize()
+# ---------------------------------------------------------------------------
+
+
+def _enricher_with_response(payload: dict) -> OllamaEnricher:
+    return OllamaEnricher(
+        host="http://x",
+        model="m",
+        client=httpx.Client(base_url="http://x", transport=_mock_transport(payload)),
+    )
+
+
+def test_draft_rule_raises_on_empty_title() -> None:
+    """Whitespace-only title raises EnrichmentError (mirrors summarize behaviour)."""
+    enr = _enricher_with_response({"title": "   ", "rule": "I do something."})
+    with pytest.raises(EnrichmentError, match="empty title"):
+        enr.draft_rule(subject="s", evidence_texts=[])
+
+
+def test_draft_rule_raises_on_non_string_title() -> None:
+    """Non-string title raises EnrichmentError."""
+    enr = _enricher_with_response({"title": 42, "rule": "I do something."})
+    with pytest.raises(EnrichmentError, match="non-string"):
+        enr.draft_rule(subject="s", evidence_texts=[])
+
+
+def test_draft_rule_raises_on_empty_rule() -> None:
+    """Whitespace-only rule raises EnrichmentError."""
+    enr = _enricher_with_response({"title": "Good title", "rule": "  "})
+    with pytest.raises(EnrichmentError, match="empty rule"):
+        enr.draft_rule(subject="s", evidence_texts=[])

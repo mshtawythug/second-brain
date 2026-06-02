@@ -1,6 +1,5 @@
 """Tests for tacit-knowledge gap detectors."""
 
-import pytest
 
 from brain.elicit.detectors import DETECTOR_REGISTRY, DeltaDetector, OrphanEntityDetector
 
@@ -8,7 +7,8 @@ from brain.elicit.detectors import DETECTOR_REGISTRY, DeltaDetector, OrphanEntit
 def _seed_entity_with_mentions(conn, *, name, entity_type, description, doc_kinds):
     """Insert one graph entity + N documents/mentions. doc_kinds: list of 'vault'/'ingested'."""
     eid = conn.execute(
-        "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key, description, doc_count) "
+        "INSERT INTO graph_entities "
+        "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
         "VALUES ('default', %s, %s, %s, %s, %s) RETURNING id",
         (entity_type, name, name.lower(), description, len(doc_kinds)),
     ).fetchone()[0]

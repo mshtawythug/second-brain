@@ -17,7 +17,7 @@ def test_gap_is_frozen_and_holds_evidence():
     )
     assert g.target_type == "person"
     assert len(g.evidence_ids) == 3
-    with pytest.raises(Exception):
+    with pytest.raises(AttributeError):
         g.score = 0.1  # frozen
 
 

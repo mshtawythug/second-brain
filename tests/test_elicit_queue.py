@@ -5,11 +5,9 @@ import uuid
 from typing import Any
 
 import psycopg
-import pytest
 
 from brain.elicit.queue import _rank_gaps, build_queue
 from brain.elicit.schema import Gap
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -240,7 +238,8 @@ def test_build_queue_upserts_and_returns_gaps(test_db: psycopg.Connection) -> No
 def test_build_queue_min_evidence_guard_via_fake_detector(
     test_db: psycopg.Connection,
 ) -> None:
-    """FakeDetector: gap with < min_evidence_docs evidence_ids is excluded; sibling with >= is kept."""
+    """FakeDetector: gap with < min_evidence_docs evidence_ids is excluded;
+    sibling with >= is kept."""
     from brain.config import Config
 
     sparse = _g("delta", "target-sparse", 8.0, n_ev=2)  # 2 < default min_evidence_docs=3

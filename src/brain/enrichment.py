@@ -510,9 +510,19 @@ class OllamaEnricher:
             schema_keys=("title", "rule"),
             num_predict=256,
         )
+        title = data["title"]
+        if not isinstance(title, str) or not title.strip():
+            raise EnrichmentError(
+                f"draft_rule: model returned non-string / empty title: {data!r}"
+            )
+        rule_text = data["rule"]
+        if not isinstance(rule_text, str) or not rule_text.strip():
+            raise EnrichmentError(
+                f"draft_rule: model returned non-string / empty rule: {data!r}"
+            )
         return RuleDraft(
-            title=str(data["title"]).strip(),
-            rule_text=str(data["rule"]).strip(),
+            title=title.strip(),
+            rule_text=rule_text.strip(),
             model=self._model,
         )
 
