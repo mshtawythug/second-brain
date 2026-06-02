@@ -231,6 +231,13 @@ _CONTRADICTION_SYSTEM_PROMPT = (
 # summary/tag budget (256) because a document can yield a long entity list.
 _EXTRACT_NUM_PREDICT = 1024
 
+# Recognized string forms for a boolean ``contradicts`` verdict. The model is
+# instructed to return a JSON boolean, but small local models occasionally
+# stringify it; we tolerate ONLY these exact (stripped, lowercased) forms and
+# raise on anything else rather than silently coercing arbitrary truthiness.
+_CONTRADICTS_TRUE_STRINGS = frozenset({"true", "yes", "1"})
+_CONTRADICTS_FALSE_STRINGS = frozenset({"false", "no", "0"})
+
 
 @dataclass(frozen=True)
 class SummaryResult:
@@ -595,14 +602,40 @@ class OllamaEnricher:
             schema_keys=("contradicts", "rationale"),
             num_predict=200,
         )
-        contradicts = data["contradicts"]
-        if not isinstance(contradicts, bool):
-            # Tolerate "true"/"false" strings from the model.
-            contradicts = str(contradicts).strip().lower() in ("true", "yes", "1")
+        contradicts = self._coerce_contradicts(data)
         rationale = data["rationale"]
-        if not isinstance(rationale, str):
-            rationale = str(rationale)
-        return ContradictionVerdict(contradicts=contradicts, rationale=rationale.strip())
+        if not isinstance(rationale, str) or not rationale.strip():
+            raise EnrichmentError(
+                "assess_contradiction: model returned non-string / empty "
+                f"rationale: {data!r}"
+            )
+        return ContradictionVerdict(
+            contradicts=contradicts, rationale=rationale.strip()
+        )
+
+    @staticmethod
+    def _coerce_contradicts(data: dict[str, Any]) -> bool:
+        """Validate + coerce the ``contradicts`` field into a real bool.
+
+        Accepts a JSON boolean directly. Tolerates the common stringified
+        forms ("true"/"false"/"yes"/"no"/"1"/"0", case-insensitive) some local
+        models emit. Anything else — a number, a dict, an unrecognized string —
+        raises :class:`EnrichmentError` (parity with :meth:`draft_rule`, which
+        refuses to coerce malformed output) rather than silently treating
+        arbitrary truthiness as a verdict.
+        """
+        value = data["contradicts"]
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            token = value.strip().lower()
+            if token in _CONTRADICTS_TRUE_STRINGS:
+                return True
+            if token in _CONTRADICTS_FALSE_STRINGS:
+                return False
+        raise EnrichmentError(
+            f"assess_contradiction: non-boolean contradicts verdict: {data!r}"
+        )
 
     def _build_contradiction_user_prompt(
         self, subject: str, summaries: list[str]

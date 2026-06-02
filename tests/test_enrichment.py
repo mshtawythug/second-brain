@@ -620,3 +620,90 @@ def test_make_enricher_returns_ollama_enricher() -> None:
     enricher = make_enricher(cfg)
     assert isinstance(enricher, OllamaEnricher)
     assert enricher.model == cfg.enrich_model
+
+
+# ---------------------------------------------------------------------------
+# assess_contradiction() — output validation parity with draft_rule
+# ---------------------------------------------------------------------------
+
+
+def _ok_contradiction(payload: dict[str, object]) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "message": {"role": "assistant", "content": json.dumps(payload)},
+            "done": True,
+        },
+    )
+
+
+def test_assess_contradiction_accepts_real_bool() -> None:
+    enricher = _make_enricher(
+        httpx.MockTransport(
+            lambda _r: _ok_contradiction(
+                {"contradicts": True, "rationale": "decision was reversed"}
+            )
+        )
+    )
+    verdict = enricher.assess_contradiction(
+        subject="Acme", summaries=["chose X", "later chose not-X"]
+    )
+    assert verdict.contradicts is True
+    assert verdict.rationale == "decision was reversed"
+
+
+def test_assess_contradiction_coerces_recognized_strings() -> None:
+    """Stringified booleans the model occasionally emits are still tolerated."""
+    cases = {
+        "true": True,
+        "FALSE": False,
+        "yes": True,
+        "No": False,
+        "1": True,
+        "0": False,
+    }
+    for token, expected in cases.items():
+        enricher = _make_enricher(
+            httpx.MockTransport(
+                lambda _r, t=token: _ok_contradiction(
+                    {"contradicts": t, "rationale": "ok"}
+                )
+            )
+        )
+        verdict = enricher.assess_contradiction(subject="S", summaries=["a", "b"])
+        assert verdict.contradicts is expected, token
+
+
+def test_assess_contradiction_empty_rationale_raises() -> None:
+    enricher = _make_enricher(
+        httpx.MockTransport(
+            lambda _r: _ok_contradiction({"contradicts": True, "rationale": "   "})
+        )
+    )
+    with pytest.raises(EnrichmentError, match="empty.*rationale"):
+        enricher.assess_contradiction(subject="S", summaries=["a", "b"])
+
+
+def test_assess_contradiction_non_string_rationale_raises() -> None:
+    enricher = _make_enricher(
+        httpx.MockTransport(
+            lambda _r: _ok_contradiction({"contradicts": False, "rationale": 42})
+        )
+    )
+    with pytest.raises(EnrichmentError, match="rationale"):
+        enricher.assess_contradiction(subject="S", summaries=["a", "b"])
+
+
+def test_assess_contradiction_unrecognized_contradicts_raises() -> None:
+    """A ``contradicts`` value that is neither a bool nor a recognized string
+    (here a dict, and separately a number) must raise rather than coerce."""
+    for bad in ({"nested": "obj"}, 7, "maybe"):
+        enricher = _make_enricher(
+            httpx.MockTransport(
+                lambda _r, b=bad: _ok_contradiction(
+                    {"contradicts": b, "rationale": "ok"}
+                )
+            )
+        )
+        with pytest.raises(EnrichmentError, match="non-boolean contradicts verdict"):
+            enricher.assess_contradiction(subject="S", summaries=["a", "b"])
