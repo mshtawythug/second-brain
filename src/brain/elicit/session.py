@@ -30,6 +30,7 @@ from ..edit_session import run_editor_session as _run_editor_session
 from ..errors import ElicitError
 from ..vault import create_vault_note
 from ..vault.paths import safe_wikilink_alias, strip_md_extension
+from ..vault.slug import slugify
 from .drafter import Drafter
 from .schema import ElicitDraft, ElicitOutcome, Gap
 
@@ -275,6 +276,21 @@ def _codify(
     """
     if vault_path is None:
         raise ValueError("vault_path is required to codify an elicited rule")
+    # Preflight: confirm the gap is still open AND owned by this tenant BEFORE
+    # authoring any note. Without this, a stale / cross-tenant / already-resolved
+    # gap would create a vault note + document row and only THEN fail the
+    # post-update _assert_one_row guard — leaving an orphan note behind. The
+    # post-update guard below stays as belt-and-suspenders for the resolve UPDATE.
+    preflight = conn.execute(
+        "SELECT status FROM elicitation_gaps WHERE id=%s AND tenant_id=%s",
+        (gap.gap_id, tenant_id),
+    ).fetchone()
+    if preflight is None or preflight[0] not in ("surfaced", "snoozed"):
+        observed = preflight[0] if preflight is not None else "absent"
+        raise ElicitError(
+            f"cannot codify gap {gap.gap_id}: gap missing, owned by another "
+            f"tenant, or no longer open (status={observed})"
+        )
     footer = _build_source_footer(conn, gap, tenant_id=tenant_id)
     note_body = f"{body}{footer}" if footer else body
     note_id = create_vault_note(
@@ -316,9 +332,12 @@ def _build_source_footer(
       :func:`brain.vault.resolver._resolve_by_vault_path` matches, so the link
       is guaranteed to resolve.
     - **Source entity:** for an entity-typed gap whose ``target_id`` is a real
-      entity UUID, the entity's display name is included as PLAIN TEXT (no
-      wiki-link — we can't confirm a vault page exists for the entity, and a
-      broken link is worse than plain text).
+      entity UUID, the entity's display name is rendered as a wiki-link *only
+      when* a real vault page for it can be resolved (a People-Hub page or an
+      authored vault note titled after the entity — see
+      :func:`_resolve_entity_link`). When no such page exists the name stays
+      PLAIN TEXT — a broken link is worse than plain text, and we never guess a
+      path that may not exist.
 
     Returns ``""`` when neither an entity name nor any evidence vault_path
     resolves, so the caller appends nothing rather than an empty section.
@@ -327,7 +346,8 @@ def _build_source_footer(
 
     entity_name = _resolve_entity_name(conn, gap, tenant_id=tenant_id)
     if entity_name:
-        lines.append(f"Elicited from: {entity_name}")
+        link = _resolve_entity_link(conn, entity_name)
+        lines.append(f"Elicited from: {link or entity_name}")
 
     evidence_links = _resolve_evidence_links(conn, gap)
     if evidence_links:
@@ -362,6 +382,40 @@ def _resolve_entity_name(
     if row is None or not row[0]:
         return None
     return str(row[0])
+
+
+def _resolve_entity_link(
+    conn: psycopg.Connection[Any], entity_name: str
+) -> str | None:
+    """Return a resolvable path-form wiki-link to the entity's vault page, or None.
+
+    Best-effort and NEVER guesses (repo rule: never invent wiki-link targets):
+    we only emit a link to a ``documents`` row that actually exists AND carries
+    a non-null ``vault_path``. Two real shapes resolve, in priority order:
+
+    1. A People-Hub page at ``people/<slug>.md`` (``slug = slugify(name)``) —
+       the canonical place an entity (person/org/…) gets a vault page.
+    2. An authored vault note titled after the entity (``kind = 'vault'``
+       preferred), then any titled match with a vault_path.
+
+    The link target is :data:`documents.vault_path` (path-form, sans ``.md``),
+    the same shape :func:`brain.vault.resolver._resolve_by_vault_path` matches,
+    so the emitted link is guaranteed to resolve. Returns ``None`` when nothing
+    resolves and the caller keeps the entity as plain text.
+    """
+    people_candidate = f"people/{slugify(entity_name)}.md"
+    row = conn.execute(
+        "SELECT vault_path FROM documents "
+        "WHERE vault_path IS NOT NULL "
+        "AND (vault_path = %s OR lower(title) = lower(%s)) "
+        "ORDER BY (vault_path = %s) DESC, (kind = 'vault') DESC, vault_path "
+        "LIMIT 1",
+        (people_candidate, entity_name, people_candidate),
+    ).fetchone()
+    if row is None or not row[0]:
+        return None
+    target = strip_md_extension(str(row[0]))
+    return f"[[{target}|{safe_wikilink_alias(entity_name)}]]"
 
 
 def _resolve_evidence_links(

@@ -412,6 +412,219 @@ def test_skip_tenant_mismatch_raises(test_db: psycopg.Connection) -> None:
     assert status == "surfaced"
 
 
+def _vault_md_files(vault: Path) -> list[Path]:
+    """All authored .md files under the vault, excluding the _templates dir."""
+    return [
+        p
+        for p in vault.rglob("*.md")
+        if "_templates" not in p.relative_to(vault).parts
+    ]
+
+
+def test_accept_codify_wikilinks_entity_with_vault_page(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entity WITH a resolvable People-Hub page is wiki-linked in the footer."""
+    # Arrange — entity + a People-Hub-style documents row for it.
+    vault = tmp_path / "vault"
+    init_vault(vault)
+    monkeypatch.setattr(
+        "brain.vault.note_builder._build_embedder", lambda _cfg: fake_embedder
+    )
+    entity_id = test_db.execute(
+        "INSERT INTO graph_entities "
+        "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
+        "VALUES ('default','org','Globex Corp','globex','desc',3) RETURNING id::text"
+    ).fetchone()[0]
+    # A real vault page for the entity (kind='vault', non-null vault_path).
+    test_db.execute(
+        "INSERT INTO documents (title, content, content_hash, content_type, kind, "
+        "vault_path) VALUES ('Globex Corp','about globex','globex-page-hash',"
+        "'note','vault','people/globex-corp.md')"
+    )
+    ev_id = _seed_evidence_doc(
+        test_db,
+        vault_path="_ingested/krisp/2026-02-02-beef0002-globex-sync.md",
+        content_hash="ev-entity-link-hash",
+    )
+    gid = _seed_gap(test_db)
+    gap = Gap(
+        gap_id=gid,
+        signal_kind="delta",
+        target_type="org",
+        target_id=entity_id,
+        score=0.9,
+        evidence_ids=[ev_id],
+        rationale="r",
+    )
+
+    # Act
+    outcomes = run_session(
+        Config.load(),
+        test_db,
+        drafter=_FakeDrafter(),
+        gaps=[gap],
+        tenant_id="default",
+        vault_path=vault,
+        input_fn=iter(["e"]).__next__,
+        edit_fn=lambda initial, *, doc_id_label: ({}, "LINKED ENTITY RULE"),
+    )
+
+    # Assert — entity surfaces as a path-form wiki-link (alias = entity name).
+    assert outcomes[0].action == "accepted"
+    content = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (outcomes[0].note_id,)
+    ).fetchone()[0]
+    assert "## Source" in content
+    assert "Elicited from: [[people/globex-corp|Globex Corp]]" in content
+
+
+def test_accept_codify_entity_without_vault_page_stays_plain_text(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An entity with NO resolvable vault page stays plain text — no broken link."""
+    # Arrange — entity + evidence doc, but no documents row for the entity.
+    vault = tmp_path / "vault"
+    init_vault(vault)
+    monkeypatch.setattr(
+        "brain.vault.note_builder._build_embedder", lambda _cfg: fake_embedder
+    )
+    entity_id = test_db.execute(
+        "INSERT INTO graph_entities "
+        "(tenant_id, entity_type, name, canonical_key, description, doc_count) "
+        "VALUES ('default','org','Initech','initech','desc',3) RETURNING id::text"
+    ).fetchone()[0]
+    ev_id = _seed_evidence_doc(
+        test_db,
+        vault_path="_ingested/krisp/2026-03-03-beef0003-initech-sync.md",
+        content_hash="ev-noentity-link-hash",
+    )
+    gid = _seed_gap(test_db)
+    gap = Gap(
+        gap_id=gid,
+        signal_kind="delta",
+        target_type="org",
+        target_id=entity_id,
+        score=0.9,
+        evidence_ids=[ev_id],
+        rationale="r",
+    )
+
+    # Act
+    outcomes = run_session(
+        Config.load(),
+        test_db,
+        drafter=_FakeDrafter(),
+        gaps=[gap],
+        tenant_id="default",
+        vault_path=vault,
+        input_fn=iter(["e"]).__next__,
+        edit_fn=lambda initial, *, doc_id_label: ({}, "UNLINKED ENTITY RULE"),
+    )
+
+    # Assert — plain text, no wiki-link brackets around the entity line.
+    assert outcomes[0].action == "accepted"
+    content = test_db.execute(
+        "SELECT content FROM documents WHERE id=%s", (outcomes[0].note_id,)
+    ).fetchone()[0]
+    assert "Elicited from: Initech" in content
+    assert "Elicited from: [[" not in content
+
+
+def test_codify_tenant_mismatch_creates_no_orphan_note(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepting a gap owned by another tenant raises BEFORE any note is authored.
+
+    Regression: ``_codify`` created the vault note + document row first and only
+    then ran the tenant-scoped resolve UPDATE, so a mismatch left an orphan note.
+    The preflight must reject up front — no vault file, no document row.
+    """
+    # Arrange — gap belongs to 'default'; session runs as 'other'.
+    vault = tmp_path / "vault"
+    init_vault(vault)
+    monkeypatch.setattr(
+        "brain.vault.note_builder._build_embedder", lambda _cfg: fake_embedder
+    )
+    gid = _seed_gap(test_db, tenant_id="default")
+    before_files = set(_vault_md_files(vault))
+
+    # Act / Assert
+    with pytest.raises(ElicitError):
+        run_session(
+            Config.load(),
+            test_db,
+            drafter=_FakeDrafter(),
+            gaps=[_gap(gid)],
+            tenant_id="other",
+            vault_path=vault,
+            input_fn=iter(["e"]).__next__,
+            edit_fn=lambda initial, *, doc_id_label: ({}, "ORPHAN GUARD BODY"),
+        )
+
+    # No vault note authored, no document row created.
+    assert set(_vault_md_files(vault)) == before_files
+    count = test_db.execute(
+        "SELECT count(*) FROM documents WHERE content LIKE %s",
+        ("%ORPHAN GUARD BODY%",),
+    ).fetchone()[0]
+    assert count == 0
+    # The gap is untouched (still surfaced).
+    status = test_db.execute(
+        "SELECT status FROM elicitation_gaps WHERE id=%s", (gid,)
+    ).fetchone()[0]
+    assert status == "surfaced"
+
+
+def test_codify_already_resolved_gap_creates_no_orphan_note(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Accepting an already-resolved gap raises BEFORE authoring — no orphan note."""
+    # Arrange — seed a gap then mark it resolved out-of-band.
+    vault = tmp_path / "vault"
+    init_vault(vault)
+    monkeypatch.setattr(
+        "brain.vault.note_builder._build_embedder", lambda _cfg: fake_embedder
+    )
+    gid = _seed_gap(test_db, tenant_id="default")
+    test_db.execute(
+        "UPDATE elicitation_gaps SET status='resolved' WHERE id=%s", (gid,)
+    )
+    before_files = set(_vault_md_files(vault))
+
+    # Act / Assert
+    with pytest.raises(ElicitError):
+        run_session(
+            Config.load(),
+            test_db,
+            drafter=_FakeDrafter(),
+            gaps=[_gap(gid)],
+            tenant_id="default",
+            vault_path=vault,
+            input_fn=iter(["e"]).__next__,
+            edit_fn=lambda initial, *, doc_id_label: ({}, "RESOLVED GUARD BODY"),
+        )
+
+    assert set(_vault_md_files(vault)) == before_files
+    count = test_db.execute(
+        "SELECT count(*) FROM documents WHERE content LIKE %s",
+        ("%RESOLVED GUARD BODY%",),
+    ).fetchone()[0]
+    assert count == 0
+
+
 def test_accept_then_unchanged_reprompts_to_skip(
     test_db: psycopg.Connection,
     tmp_path: Path,
