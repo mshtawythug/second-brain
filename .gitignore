@@ -45,3 +45,7 @@ docs/
 # The checked-in file is aliases/default.yml.example (synthetic, documentation only).
 /graph_aliases.yml
 /src/brain/graph_rag/aliases/default.yml
+
+# Real PII-gate denylist (real names/customers/codenames) — keep local (rule 15).
+# The checked-in file is .pii-denylist.local.txt.example (synthetic).
+/.pii-denylist.local.txt

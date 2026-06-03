@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+#
+# pre-commit PII / secret gate.
+#
+# Blocks a commit whose STAGED, ADDED lines contain real personal data, real
+# customer/employer/company names, internal project codenames, secrets, or real
+# transcript/email content. Wired via `git config core.hooksPath scripts/hooks`.
+#
+# Two lists (see scripts/hooks/README.md):
+#   .pii-allowlist.txt        (committed)   — public/synthetic tokens to IGNORE in
+#                                             the SEMANTIC pass. FALSE POSITIVES
+#                                             ONLY. NEVER real PII.
+#   .pii-denylist.local.txt   (gitignored)  — your REAL sensitive terms to ALWAYS
+#                                             block. Ships .pii-denylist.local.txt.example.
+#
+# Bypass consciously (only when you are certain the diff is clean):
+#   git commit --no-verify
+#
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+allowlist="${repo_root}/.pii-allowlist.txt"
+denylist="${repo_root}/.pii-denylist.local.txt"
+
+# Added content lines of the staged diff (what actually enters history). awk
+# skips the `+++ ` file-header line and strips the single leading `+` marker, so
+# a real added line whose content itself starts with `+` (e.g. `+sk-...`) is
+# still scanned. The allowlist file is excluded so adding a token never trips it.
+added="$(git diff --cached --no-color -U0 -- . ':(exclude).pii-allowlist.txt' \
+  | awk '/^\+\+\+ /{next} /^\+/{print substr($0,2)}')"
+[ -z "${added}" ] && exit 0
+
+fail() {
+  echo "🚫 pre-commit PII gate: $1" >&2
+  echo "   Fix the diff, add the token to .pii-allowlist.txt if it is a known" >&2
+  echo "   public/synthetic false positive, or bypass consciously: git commit --no-verify" >&2
+  exit 1
+}
+
+# --- 1. Deterministic gate (always runs, even offline) ---------------------
+# Here-strings (not `printf | grep`) so an early `grep -q` match can't SIGPIPE
+# its upstream writer and flip the pipeline status under `pipefail`.
+
+# Secrets / API keys / private keys.
+if grep -nEi \
+  '(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[0-9A-Za-z-]{10,}|sk-[A-Za-z0-9]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{18,}|AIza[0-9A-Za-z_-]{35})' \
+  <<<"${added}" >/dev/null; then
+  fail "possible secret / API key in staged diff"
+fi
+
+# Real-looking email addresses. Allowed synthetic/example domains are anchored to
+# the END of the address, so a lookalike that appends a longer suffix to a
+# synthetic domain (e.g. a "example.com.evil" host) is NOT treated as synthetic.
+emails="$(grep -oEi '[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}' <<<"${added}" \
+  | grep -viE '@((example|test|acme|contoso|northwind|invalid)\.(com|org|net)|localhost)$' \
+  || true)"
+if [ -n "${emails}" ]; then
+  fail "real-looking email address(es): $(printf '%s' "${emails}" | tr '\n' ' ')"
+fi
+
+# Real sensitive terms from the gitignored denylist — always block (case-insensitive
+# substring). `|| [ -n "$term" ]` handles a final line with no trailing newline.
+if [ -f "${denylist}" ]; then
+  while IFS= read -r term || [ -n "${term}" ]; do
+    [ -z "${term}" ] && continue
+    case "${term}" in \#*) continue ;; esac
+    if grep -qiF -- "${term}" <<<"${added}"; then
+      fail "a denylisted sensitive term is present (see .pii-denylist.local.txt)"
+    fi
+  done < "${denylist}"
+fi
+
+# --- 2. Semantic pass via `claude -p` (best-effort; regex gate already ran) -
+
+if ! command -v claude >/dev/null 2>&1; then
+  echo "⚠️  pre-commit PII gate: 'claude' not found — ran the regex/denylist gate only." >&2
+  echo "   Install Claude Code for the semantic pass, or rely on the deterministic gate." >&2
+  exit 0
+fi
+
+allow=""
+if [ -f "${allowlist}" ]; then
+  allow="$(grep -vE '^[[:space:]]*(#|$)' "${allowlist}" | tr '\n' ',' || true)"
+fi
+
+prompt="You are a PII/secret gate for a git commit in a PERSONAL knowledge-base repo whose \
+policy is SYNTHETIC-ONLY test and doc data. Review ONLY the STAGED DIFF added lines below. \
+Print exactly 'OK' if clean, or 'BLOCK: <short reason>' if they contain REAL personal data \
+(real person names, emails, phone numbers, postal addresses), real customer/employer/company \
+names, internal project codenames, secrets/credentials, or real meeting-transcript / \
+email-body content. Tokens in ALLOWLIST and obvious synthetic placeholders (Acme, Contoso, \
+Jane/John Doe, Northwind, Sidekick) are SAFE — never flag them. Output EXACTLY ONE line, \
+nothing else."
+
+# Capture stdout and exit status SEPARATELY (an `|| echo` fallback could let a
+# non-zero exit slip through as a passing 'OK*' verdict — fail closed instead).
+if verdict="$(printf 'ALLOWLIST (safe, never flag): %s\n\nSTAGED DIFF (added lines):\n%s\n' \
+  "${allow}" "${added}" | claude -p "${prompt}" 2>/dev/null)"; then
+  claude_rc=0
+else
+  claude_rc=$?
+fi
+
+[ "${claude_rc}" -ne 0 ] && \
+  fail "semantic scan errored (claude exit ${claude_rc}) — re-run online, or bypass consciously with --no-verify"
+
+# Accept ONLY a single, well-formed line. Anything else fails closed.
+verdict="$(printf '%s' "${verdict}" | tr -d '\r')"
+line_count="$(printf '%s\n' "${verdict}" | grep -c . || true)"
+first_line="$(printf '%s\n' "${verdict}" | sed -n '1p')"
+
+if [ "${line_count}" -gt 1 ]; then
+  fail "ambiguous multi-line verdict from claude — review manually or bypass consciously"
+fi
+case "${first_line}" in
+  OK)      exit 0 ;;
+  BLOCK:*) fail "${first_line#BLOCK: }" ;;
+  *)       fail "unrecognized verdict from claude ('${first_line:0:60}') — failing closed" ;;
+esac

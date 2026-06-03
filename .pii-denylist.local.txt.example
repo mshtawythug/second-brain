@@ -1,0 +1,21 @@
+# PII-gate DENYLIST (LOCAL) — your REAL sensitive terms to ALWAYS block.
+#
+# Copy this file to `.pii-denylist.local.txt` (which is GITIGNORED) and fill in
+# YOUR real sensitive terms — the things that must never reach a commit:
+#   - your real name and family members' names
+#   - real employer / customer / company names
+#   - internal project codenames
+#   - any handle, alias, or term that identifies you or your work
+#
+# The pre-commit hook blocks any staged diff that contains one of these
+# (case-insensitive substring). Because the real file is gitignored, your real
+# terms live only on your machine and never enter git history.
+#
+# One token per line. Blank lines and lines starting with '#' are ignored.
+#
+# The entries below are SYNTHETIC examples — replace them.
+
+Initech
+Hooli
+Wernham Hogg
+Project Stardust

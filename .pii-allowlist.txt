@@ -1,0 +1,29 @@
+# PII-gate ALLOWLIST — tokens the pre-commit scanner must IGNORE.
+#
+# ╔════════════════════════════════════════════════════════════════════════╗
+# ║  FALSE POSITIVES ONLY.  NEVER put real PII here.                        ║
+# ║  Only PUBLIC or SYNTHETIC tokens belong in this file — it is COMMITTED. ║
+# ║  Real names / emails / customers / employer / internal codenames must   ║
+# ║  NEVER be allowlisted; put those in .pii-denylist.local.txt (gitignored)║
+# ║  so the gate ALWAYS blocks them.                                        ║
+# ╚════════════════════════════════════════════════════════════════════════╝
+#
+# One token per line. Blank lines and lines starting with '#' are ignored.
+# Matching is case-insensitive substring (handled by the hook).
+
+# --- Synthetic placeholders (standard fictional names) -------------------
+Acme
+AcmePlatform
+Contoso
+Northwind
+Sidekick
+Jane Doe
+John Doe
+
+# --- Public / generic terms confirmed safe (not the user's PII) ----------
+# Known false positives that surfaced from the corpus as generic public terms.
+NFPA
+Neon
+DACs
+Sdks
+API
