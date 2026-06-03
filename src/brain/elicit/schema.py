@@ -8,6 +8,13 @@ SignalKind = Literal["delta", "orphan", "contradiction", "user_flagged"]
 TargetType = Literal["person", "org", "project", "topic", "tool", "doc"]
 OutcomeAction = Literal["accepted", "skipped", "snoozed", "dismissed"]
 
+# Target types whose ``target_id`` is a real ``graph_entities`` UUID (so the gap
+# can be orphaned when its entity is merged/deleted — used by the F2 self-heal in
+# :mod:`brain.elicit.queue` and the name resolution in :mod:`brain.elicit.session`).
+ENTITY_TARGET_TYPES: frozenset[str] = frozenset(
+    {"person", "org", "project", "topic", "tool"}
+)
+
 
 @dataclass(frozen=True)
 class Gap:

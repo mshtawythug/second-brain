@@ -32,20 +32,13 @@ from ..vault import create_vault_note
 from ..vault.paths import safe_wikilink_alias, strip_md_extension
 from ..vault.slug import slugify
 from .drafter import Drafter
-from .schema import ElicitDraft, ElicitOutcome, Gap
+from .schema import ENTITY_TARGET_TYPES, ElicitDraft, ElicitOutcome, Gap
 
 InputFn = Callable[[], str]
 EditFn = Callable[..., "tuple[dict[str, Any], str]"]
 
 _MENU = "[e] edit & save   [s] skip   [n] snooze N days   [q] quit"
 _EVIDENCE_PREVIEW = 3
-
-# Target types whose ``target_id`` is a real ``graph_entities`` UUID (so the
-# source entity's display name can be resolved). ``user_flagged`` gaps may
-# carry a raw-string ``target_id`` that is not a UUID, so resolution is always
-# guarded by a UUID parse regardless of target_type.
-_ENTITY_TARGET_TYPES = frozenset({"person", "org", "project", "topic", "tool"})
-
 
 def _default_input() -> str:
     """Production input source: prompt the user for a single line via Typer."""
@@ -369,7 +362,7 @@ def _resolve_entity_name(
     Guarded so a ``user_flagged`` gap with a raw-string ``target_id`` (not a
     UUID) is skipped gracefully rather than raising on the UUID cast.
     """
-    if gap.target_type not in _ENTITY_TARGET_TYPES:
+    if gap.target_type not in ENTITY_TARGET_TYPES:
         return None
     try:
         uuid.UUID(gap.target_id)

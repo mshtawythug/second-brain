@@ -115,6 +115,56 @@ def test_build_queue_excludes_resolved(test_db: psycopg.Connection) -> None:
     assert all(g.target_id != "x" for g in gaps), "resolved gap must be absent"
 
 
+def test_build_queue_purges_orphaned_entity_gaps(test_db: psycopg.Connection) -> None:
+    """F2 self-heal: a surfaced gap whose entity was merged/deleted is dropped.
+
+    Surfaced AND snoozed + entity-typed + UUID-target + missing-entity rows are
+    purged. A gap whose entity still exists, a *resolved* gap with a missing
+    entity, and a ``user_flagged`` gap with a raw-string (non-UUID) target all
+    survive.
+    """
+    # A real entity → its surfaced gap must survive.
+    live_id = test_db.execute(
+        "INSERT INTO graph_entities (tenant_id, entity_type, name, canonical_key) "
+        "VALUES ('default','org','Acme Corp','acme corp') RETURNING id::text"
+    ).fetchone()
+    assert live_id is not None
+    live_entity = str(live_id[0])
+    orphan_uuid = str(uuid.uuid4())  # entity-typed UUID with NO graph_entities row
+    orphan_snoozed_uuid = str(uuid.uuid4())
+    resolved_uuid = str(uuid.uuid4())
+
+    test_db.execute(
+        "INSERT INTO elicitation_gaps "
+        "(tenant_id, signal_kind, target_type, target_id, score, evidence_ids, status) "
+        "VALUES "
+        "('default','orphan','org',%s, 0.9, ARRAY['d1','d2','d3'], 'surfaced'),"
+        "('default','orphan','org',%s, 0.9, ARRAY['d1','d2','d3'], 'surfaced'),"
+        "('default','orphan','org',%s, 0.9, ARRAY['d1','d2','d3'], 'snoozed'),"
+        "('default','orphan','org',%s, 0.9, ARRAY['d1','d2','d3'], 'resolved'),"
+        "('default','user_flagged','topic','some raw topic', 0.9, ARRAY['d1'], 'surfaced')",
+        (live_entity, orphan_uuid, orphan_snoozed_uuid, resolved_uuid),
+    )
+    from brain.config import Config
+
+    cfg = Config.load()
+    build_queue(test_db, cfg=cfg, tenant_id="default", detectors=[], limit=10)
+
+    def _exists(target_id: str, status: str) -> bool:
+        row = test_db.execute(
+            "SELECT 1 FROM elicitation_gaps "
+            "WHERE tenant_id='default' AND target_id=%s AND status=%s",
+            (target_id, status),
+        ).fetchone()
+        return row is not None
+
+    assert not _exists(orphan_uuid, "surfaced"), "orphaned surfaced entity gap purged"
+    assert not _exists(orphan_snoozed_uuid, "snoozed"), "orphaned snoozed entity gap purged"
+    assert _exists(live_entity, "surfaced"), "gap for a live entity survives"
+    assert _exists(resolved_uuid, "resolved"), "resolved gap is never purged"
+    assert _exists("some raw topic", "surfaced"), "user_flagged raw-string target survives"
+
+
 def test_build_queue_empty_detectors_returns_empty(test_db: psycopg.Connection) -> None:
     """With no detectors and an empty queue, build_queue returns []."""
     from brain.config import Config

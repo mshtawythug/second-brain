@@ -10,7 +10,12 @@ import psycopg
 from ..config import Config
 from ..rank_fusion import rrf_contribution
 from .detectors import GapDetector
-from .schema import Gap
+from .schema import ENTITY_TARGET_TYPES, Gap
+
+# A UUID-shaped ``target_id`` (entity-typed gaps reference a ``graph_entities``
+# row by id). Guards the F2 purge so a ``user_flagged`` gap carrying a raw-string
+# target (not a UUID) is never treated as an orphaned entity reference.
+_UUID_RE = r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 
 
 def _normalize(gaps: list[Gap]) -> list[Gap]:
@@ -44,6 +49,43 @@ def _rank_gaps(by_signal: dict[str, list[Gap]]) -> list[Gap]:
     top = max((g.score for g in ranked), default=1.0) or 1.0
     ranked = [replace(g, score=g.score / top) for g in ranked]
     return sorted(ranked, key=lambda g: g.score, reverse=True)
+
+
+def _purge_orphaned_entity_gaps(
+    conn: psycopg.Connection[Any], tenant_id: str
+) -> int:
+    """Delete open entity-typed gaps whose ``graph_entities`` target is gone (F2).
+
+    The cross-type collapse (:func:`brain.graph_rag.cross_type.collapse_cross_type_concepts`)
+    merges duplicate entities and GCs the losers, leaving ``elicitation_gaps`` rows
+    whose UUID ``target_id`` no longer resolves. This drops those phantom gaps so a
+    stale entry never lingers in the queue. Scoped to:
+
+    * ``status IN ('surfaced', 'snoozed')`` — the two active states the queue
+      read-back surfaces; never touches user-``resolved`` rows (a snoozed gap whose
+      entity was merged away would otherwise resurface as a phantom on expiry);
+    * entity target types only (:data:`ENTITY_TARGET_TYPES`);
+    * a UUID-shaped ``target_id`` (:data:`_UUID_RE`) — a ``user_flagged`` gap with a
+      raw-string target is never mistaken for an orphaned entity reference;
+    * ``NOT EXISTS`` a matching tenant-scoped ``graph_entities`` row.
+
+    Returns the number of rows purged. Parameterized SQL.
+    """
+    cur = conn.execute(
+        """
+        DELETE FROM elicitation_gaps eg
+        WHERE eg.tenant_id = %s
+          AND eg.status IN ('surfaced', 'snoozed')
+          AND eg.target_type = ANY(%s)
+          AND eg.target_id ~ %s
+          AND NOT EXISTS (
+              SELECT 1 FROM graph_entities ge
+              WHERE ge.tenant_id = eg.tenant_id AND ge.id::text = eg.target_id
+          )
+        """,
+        (tenant_id, list(ENTITY_TARGET_TYPES), _UUID_RE),
+    )
+    return cur.rowcount
 
 
 def build_queue(
@@ -117,6 +159,9 @@ def build_queue(
                 g.rationale,
             ),
         )
+    # F2 self-heal: drop open gaps whose entity target was merged/deleted (e.g. by
+    # the cross-type collapse) so a phantom gap never lingers in the queue.
+    _purge_orphaned_entity_gaps(conn, tenant_id)
     # Read back the open queue with score and confidence floors applied, plus
     # the optional signal/target scoping (parameterized; static clause strings
     # only — no user values are interpolated into the SQL).
