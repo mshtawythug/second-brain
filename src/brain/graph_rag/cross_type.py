@@ -198,8 +198,8 @@ def _uppercase_count(name: str) -> int:
 def _is_all_caps(name: str) -> bool:
     """True when ``name`` has letters but NO lowercase — an all-caps "shout".
 
-    Distinguishes ``"NEON"`` / ``"DACS"`` (shouting) from properly-cased
-    ``"Neon"`` / ``"DACs"``. A genuine all-caps acronym (``"NFPA"``) is still
+    Distinguishes ``"CONTOSO"`` / ``"SDKS"`` (shouting) from properly-cased
+    ``"Contoso"`` / ``"Sdks"``. A genuine all-caps acronym (``"API"``) is still
     kept when it is the only / best variant — the guard only DEMOTES an all-caps
     form when a mixed-case sibling exists.
     """
@@ -215,9 +215,9 @@ def _best_surface_form(variants: list[tuple[str, int]]) -> str:
     concept row sharing one ``canonical_key`` that the collapse merges. The
     heuristic is a total order (never a tie), in priority:
 
-    1. prefer a mixed/cased form over an ALL-CAPS "shout" (``"Neon"`` over
-       ``"NEON"``, ``"DACs"`` over ``"DACS"``) — a lone all-caps acronym is still
-       kept when no mixed-case sibling exists;
+    1. prefer a mixed/cased form over an ALL-CAPS "shout" (``"Contoso"`` over
+       ``"CONTOSO"``, ``"Sdks"`` over ``"SDKS"``) — a lone all-caps acronym is
+       still kept when no mixed-case sibling exists;
     2. more uppercase letters (proper branding) — a mixed/branded form beats an
        all-lowercase one (``AcmePlatform`` over ``acmeplatform``) and a
        better-cased branded form beats a worse one (``AI::Client`` over

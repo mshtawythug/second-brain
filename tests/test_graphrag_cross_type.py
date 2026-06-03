@@ -380,11 +380,11 @@ def test_best_surface_form_heuristic() -> None:
     # Empty input → empty string (caller guards).
     assert _best_surface_form([]) == ""
     # Rule 1: a mixed-case form beats an ALL-CAPS "shout" even with more docs +
-    # uppercase ("Neon" over "NEON", "DACs" over "DACS").
-    assert _best_surface_form([("Neon", 1), ("NEON", 9)]) == "Neon"
-    assert _best_surface_form([("DACs", 1), ("DACS", 5)]) == "DACs"
+    # uppercase ("Contoso" over "CONTOSO", "Sdks" over "SDKS").
+    assert _best_surface_form([("Contoso", 1), ("CONTOSO", 9)]) == "Contoso"
+    assert _best_surface_form([("Sdks", 1), ("SDKS", 5)]) == "Sdks"
     # …but a lone all-caps acronym (no mixed-case sibling) is kept.
-    assert _best_surface_form([("NFPA", 4)]) == "NFPA"
+    assert _best_surface_form([("API", 4)]) == "API"
     # Rule 2a: a branded form beats all-lowercase even with FEWER docs.
     assert _best_surface_form([("acmeplatform", 9), ("AcmePlatform", 1)]) == "AcmePlatform"
     # Rule 2b: MORE uppercase letters wins — a better-cased branded form beats a
