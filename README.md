@@ -488,10 +488,13 @@ brain graphrag communities build        # detect + summarize (skips if graph unc
 brain graphrag communities refresh      # force a rebuild regardless of the dirty gate
 brain graphrag communities list         # admin view of materialized communities
 
-# Index maintenance.
+# Index maintenance. build (with concepts) + refresh also auto-collapse cross-type
+# duplicate concept entities — the same name extracted as `org` in one doc and
+# `project` in another merges into one row (highest-precedence type wins), keeping
+# the best surface form (e.g. `AcmePlatform`, not `acmeplatform`).
 brain graphrag build --backfill         # reconcile every existing doc into the graph
 brain graphrag build --force            # authoritative full rebuild (recover a dropped mirror)
-brain graphrag refresh                  # recompute aggregate edge weights only
+brain graphrag refresh                  # recompute edge weights + collapse cross-type duplicates
 ```
 
 The same surface is available to any MCP client (Claude Desktop, Claude Code, and others) through the
