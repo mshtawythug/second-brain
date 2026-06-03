@@ -168,44 +168,105 @@ def collapse_cross_type_concepts(
     ``"AcmePlatform"``), which the humanized strip-all key would clobber to
     ``"Acmeplatform"`` (camelCase lost). To avoid changing shared
     ``merge_aliases`` behavior (which curated aliases + their tests rely on), this
-    captures each winning target's current ``name`` BEFORE the merge and restores
-    it — relationally AND on the AGE vertex — AFTER, so the merged concept keeps
-    its real display name.
+    captures the BEST surface form across ALL merged variants BEFORE the merge
+    (:func:`_best_display_names` / :func:`_best_surface_form` — F1: a branded
+    mixed-case form like ``"AcmePlatform"`` beats an all-lowercase ``"acmeplatform"``
+    even when the lowercase variant wins TYPE precedence) and restores it —
+    relationally AND on the AGE vertex — AFTER, so the merged concept keeps the
+    best real display name rather than the winning type's possibly-lowercase one.
     """
     rules = generate_cross_type_collapse_rules(conn, tenant_id)
     if not rules:
         return AliasResult(tenant_id=tenant_id, rules_total=0, dry_run=dry_run)
     _validate_alias_graph(rules)  # chain/cycle/dup-source (defensive; F7)
-    # Snapshot the winning targets' real surface names before merge_aliases
-    # overwrites them with the humanized canonical key (see docstring).
-    winner_names = _winner_display_names(conn, tenant_id, rules)
+    # Snapshot the BEST surface form across all merged variants before
+    # merge_aliases overwrites the winner's name with the humanized key (F1).
+    best_names = _best_display_names(conn, tenant_id, rules)
     result = merge_aliases(
         conn, tenant_id, rules, backend, dry_run=dry_run, config=config
     )
     if not dry_run and result.rules_applied > 0:
-        _restore_winner_display_names(conn, tenant_id, backend, winner_names)
+        _restore_winner_display_names(conn, tenant_id, backend, best_names)
     return result
 
 
-def _winner_display_names(
+def _uppercase_count(name: str) -> int:
+    """Count uppercase letters in ``name`` — a proxy for proper branding/casing."""
+    return sum(1 for char in name if char.isupper())
+
+
+def _is_all_caps(name: str) -> bool:
+    """True when ``name`` has letters but NO lowercase — an all-caps "shout".
+
+    Distinguishes ``"NEON"`` / ``"DACS"`` (shouting) from properly-cased
+    ``"Neon"`` / ``"DACs"``. A genuine all-caps acronym (``"NFPA"``) is still
+    kept when it is the only / best variant — the guard only DEMOTES an all-caps
+    form when a mixed-case sibling exists.
+    """
+    return any(char.isalpha() for char in name) and not any(
+        char.islower() for char in name
+    )
+
+
+def _best_surface_form(variants: list[tuple[str, int]]) -> str:
+    """Pick the best display name among merged variants (F1, deterministic).
+
+    ``variants`` is ``[(name, doc_count), …]`` — the surface forms of every
+    concept row sharing one ``canonical_key`` that the collapse merges. The
+    heuristic is a total order (never a tie), in priority:
+
+    1. prefer a mixed/cased form over an ALL-CAPS "shout" (``"Neon"`` over
+       ``"NEON"``, ``"DACs"`` over ``"DACS"``) — a lone all-caps acronym is still
+       kept when no mixed-case sibling exists;
+    2. more uppercase letters (proper branding) — a mixed/branded form beats an
+       all-lowercase one (``AcmePlatform`` over ``acmeplatform``) and a
+       better-cased branded form beats a worse one (``AI::Client`` over
+       ``Ai::Client``);
+    3. higher ``doc_count`` (the most-attested form);
+    4. longer name;
+    5. lexicographically smallest (final deterministic tiebreak).
+
+    Known trade-off: a one-off variant with spurious extra capitals (a typo like
+    ``"ALBa"``) can outrank a more-attested correctly-cased form, because casing
+    signal is ranked above ``doc_count``. Acceptable for a personal corpus, and
+    curated aliases can override any specific case. Returns ``""`` only for empty
+    input (caller guards).
+    """
+    if not variants:
+        return ""
+    return min(
+        variants,
+        key=lambda v: (_is_all_caps(v[0]), -_uppercase_count(v[0]), -v[1], -len(v[0]), v[0]),
+    )[0]
+
+
+def _best_display_names(
     conn: psycopg.Connection[Any], tenant_id: str, rules: list[AliasRule]
 ) -> dict[tuple[str, str], str]:
-    """Capture each rule TARGET's current ``name`` (the merge winner's surface form).
+    """Capture the BEST surface form to assign each merge winner (F1).
 
-    Returns ``{(to_type, to_key): name}`` for every distinct target — the concept
-    row the lower-precedence fragments collapse into. Read BEFORE ``merge_aliases``
-    so the extractor's real display name (``"AcmePlatform"``) is preserved across
-    the merge's humanized-key overwrite. Parameterized SQL.
+    For every distinct rule TARGET ``(to_type, to_key)`` — the concept row the
+    lower-precedence fragments collapse into — collect the ``(name, doc_count)``
+    of EVERY concept row sharing that ``canonical_key`` (the winner plus all the
+    soon-to-be-GC'd source variants) and pick the best via
+    :func:`_best_surface_form`. Returns ``{(to_type, to_key): best_name}``. Read
+    BEFORE ``merge_aliases`` because the source variants are deleted by the
+    merge's orphan GC, so their surface forms must be captured first. Restricted
+    to concept types (``person`` is never part of a cross-type collapse).
+    Parameterized SQL.
     """
     names: dict[tuple[str, str], str] = {}
+    _, concept_types = _concept_precedence()
     for to_type, to_key in sorted({(r.to_type, r.to_key) for r in rules}):
-        row = conn.execute(
-            "SELECT name FROM graph_entities "
-            "WHERE tenant_id = %s AND entity_type = %s AND canonical_key = %s",
-            (tenant_id, to_type, to_key),
-        ).fetchone()
-        if row is not None:
-            names[(to_type, to_key)] = str(row[0])
+        rows = conn.execute(
+            "SELECT name, doc_count FROM graph_entities "
+            "WHERE tenant_id = %s AND canonical_key = %s AND entity_type = ANY(%s)",
+            (tenant_id, to_key, concept_types),
+        ).fetchall()
+        variants = [(str(r[0]), int(r[1])) for r in rows]
+        best = _best_surface_form(variants)
+        if best:
+            names[(to_type, to_key)] = best
     return names
 
 

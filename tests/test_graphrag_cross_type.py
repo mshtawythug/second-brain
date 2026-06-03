@@ -35,6 +35,7 @@ from brain.db import DEFAULT_GRAPH_NAME
 from brain.graph_rag.aliases import _validate_alias_graph
 from brain.graph_rag.backends import AgeBackend
 from brain.graph_rag.cross_type import (
+    _best_surface_form,
     collapse_cross_type_concepts,
     generate_cross_type_collapse_rules,
 )
@@ -366,6 +367,67 @@ def test_collapse_preserves_winner_display_name(
     collapse_cross_type_concepts(test_db, "default", backend, config=_ccfg())
 
     # Assert — single org winner, name preserved (NOT the humanized "Acmeplatform").
+    after = _concept_rows_for_key(test_db, "acmeplatform")
+    assert len(after) == 1
+    win_type, win_id = after[0]
+    assert win_type == "org"
+    assert _relational_name(test_db, win_id) == "AcmePlatform"
+    assert _age_entity_name(test_db, "default", win_id) == "AcmePlatform"
+
+
+def test_best_surface_form_heuristic() -> None:
+    """F1 best-name heuristic is a deterministic total order over the variants."""
+    # Empty input → empty string (caller guards).
+    assert _best_surface_form([]) == ""
+    # Rule 1: a mixed-case form beats an ALL-CAPS "shout" even with more docs +
+    # uppercase ("Neon" over "NEON", "DACs" over "DACS").
+    assert _best_surface_form([("Neon", 1), ("NEON", 9)]) == "Neon"
+    assert _best_surface_form([("DACs", 1), ("DACS", 5)]) == "DACs"
+    # …but a lone all-caps acronym (no mixed-case sibling) is kept.
+    assert _best_surface_form([("NFPA", 4)]) == "NFPA"
+    # Rule 2a: a branded form beats all-lowercase even with FEWER docs.
+    assert _best_surface_form([("acmeplatform", 9), ("AcmePlatform", 1)]) == "AcmePlatform"
+    # Rule 2b: MORE uppercase letters wins — a better-cased branded form beats a
+    # worse one (the AI::Client vs Ai::Client regression the boolean rule caused).
+    assert _best_surface_form([("Ai::Client", 5), ("AI::Client", 1)]) == "AI::Client"
+    # Rule 3: equal casing → higher doc_count wins EVEN OVER a longer name
+    # (isolates doc_count > length: the shorter form has more docs and must win).
+    assert _best_surface_form([("AcmeOne", 9), ("AcmeLonger", 1)]) == "AcmeOne"
+    # Rule 4: equal casing + doc_count → the longer name wins.
+    assert _best_surface_form([("Acme", 2), ("Acmee", 2)]) == "Acmee"
+    # Rule 5: equal casing + doc_count + length → lexicographically smallest.
+    assert _best_surface_form([("AcmeB", 2), ("AcmeA", 2)]) == "AcmeA"
+    # All-lowercase: casing + uppercase tie (0), so doc_count decides.
+    assert _best_surface_form([("acme", 1), ("acmecorp", 3)]) == "acmecorp"
+
+
+def test_collapse_picks_best_surface_form_over_lowercase_winner(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """F1: the survivor takes the BEST variant name, not the winning TYPE's name.
+
+    The ORG variant is all-lowercase ``"acmeplatform"`` and wins type precedence;
+    the PROJECT variant is the branded ``"AcmePlatform"``. The merged ORG survivor
+    must be named ``"AcmePlatform"`` (the branded form) — relationally AND on AGE —
+    even though the lowercase org row won precedence.
+    """
+    # Arrange — same key 'acmeplatform', different surface forms per type.
+    backend = _backend(test_db)
+    doc_a = _seed_manual_doc(test_db, external_id="best-a", content="alpha body")
+    doc_b = _seed_manual_doc(test_db, external_id="best-b", content="beta body")
+    extractor = FakeExtractor(
+        {
+            "alpha": [_concept("acmeplatform", "org", display_name="acmeplatform")],
+            "beta": [_concept("acmeplatform", "project", display_name="AcmePlatform")],
+        }
+    )
+    reconcile_document(test_db, doc_a, backend=backend, config=_ccfg(), extractor=extractor)
+    reconcile_document(test_db, doc_b, backend=backend, config=_ccfg(), extractor=extractor)
+
+    # Act
+    collapse_cross_type_concepts(test_db, "default", backend, config=_ccfg())
+
+    # Assert — single org survivor, BEST (branded) name on both surfaces.
     after = _concept_rows_for_key(test_db, "acmeplatform")
     assert len(after) == 1
     win_type, win_id = after[0]
