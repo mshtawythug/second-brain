@@ -19,6 +19,7 @@ from mcp import McpError
 from mcp.server.fastmcp import FastMCP
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
+from . import capture as capture_mod
 from .config import Config
 from .db import PersistentConnection, age_extension_available, connect, connect_age
 from .embeddings import OllamaEmbedError, make_embedder
@@ -65,6 +66,7 @@ from .queries import (
     summary_counts,
 )
 from .search import hybrid_search
+from .tags import normalize_tags
 
 if TYPE_CHECKING:
     from .graph_rag.reconcile import ReconcileConfig
@@ -653,6 +655,74 @@ def brain_ingest_stdin(
     return {
         "document_id": result.document_id,
         "created": result.created,
+    }
+
+
+@mcp_app.tool()
+def brain_capture(
+    title: str | None = None,
+    content: str = "",
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    """Quick-capture a thought into the brain's inbox (tagged ``inbox``).
+
+    Same code path as ``brain capture`` on the CLI (Plan 09): build the capture
+    doc, chunk → embed → store with ``content_hash`` dedup (no source id —
+    re-capturing identical text is a no-op). Every captured document carries the
+    always-on ``inbox`` tag (plus any caller extras), normalized at the write
+    boundary, until it is reviewed out via ``brain capture review``. When
+    ``title`` is omitted/blank it defaults to a deterministic, date-stamped
+    auto-title derived from the content. The local-Ollama auto-summary hook runs
+    when an enricher is configured and degrades to a warning (summary stays
+    NULL) when Ollama is unavailable.
+
+    Returns ``{"document_id": ..., "status": "ingested" | "skipped"}`` —
+    ``"skipped"`` when an identical capture already existed (dedup no-op).
+    """
+    if not content.strip():
+        raise _mcp_error(INVALID_PARAMS, "content is empty")
+    state = _get_state()
+    cfg = state.cfg
+    # Normalize at the capture boundary so the fresh-INSERT path's verbatim
+    # ``documents.tags`` write stays queryable by exact tag filters. "inbox" is
+    # already canonical, so prepending it never collides. The SAME normalized
+    # list feeds both the doc metadata provenance and the tags column.
+    resolved_tags = normalize_tags(["inbox", *(tags or [])])
+    resolved_title = (
+        title
+        if title and title.strip()
+        else capture_mod.make_capture_title(
+            content, today=date_cls.today(), max_words=cfg.capture_title_words
+        )
+    )
+    doc = capture_mod.make_capture_doc(
+        content, resolved_title, cfg.capture_content_type, resolved_tags
+    )
+    logger.debug(
+        "brain_capture: title=%s tags=%s", resolved_title, resolved_tags
+    )
+    try:
+        with _mcp_conn(state) as conn:
+            conn.autocommit = True
+            result = ingest_document(
+                conn,
+                embedder=state.embedder,
+                doc=doc,
+                source_kind="manual",
+                tags=resolved_tags,
+                vault_root=cfg.vault_path,
+                enricher=state.enricher,
+                enrich=True,
+                enrich_min_tokens=cfg.enrich_min_tokens,
+                graph_syncer=state.graph_syncer,
+            )
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    except OllamaEmbedError as e:
+        raise _wrap_embed_error(e) from e
+    return {
+        "document_id": result.document_id,
+        "status": "ingested" if result.created else "skipped",
     }
 
 

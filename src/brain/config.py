@@ -316,9 +316,9 @@ class Config:
     # Plan 09 -- quick-capture inbox knobs. ``capture_content_type`` is the
     # default content_type for `brain capture` (must be non-blank);
     # ``capture_title_words`` is how many leading body words form the auto-title
-    # slug (>= 1); ``capture_inbox_warn_threshold`` is the inbox size at/above
-    # which `brain doctor` warns (>= 1; consumed in Phase 3). All three are
-    # validated at load time, mirroring the other int/str env knobs.
+    # slug (>= 1); ``capture_inbox_warn_threshold`` is the inbox size above
+    # which `brain doctor` warns (>= 1; Phase 3 compares strictly greater-than).
+    # All three are validated at load time, mirroring the other int/str env knobs.
     capture_content_type: str = DEFAULT_CAPTURE_CONTENT_TYPE
     capture_title_words: int = DEFAULT_CAPTURE_TITLE_WORDS
     capture_inbox_warn_threshold: int = DEFAULT_CAPTURE_INBOX_WARN_THRESHOLD

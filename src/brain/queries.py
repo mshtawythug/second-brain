@@ -674,6 +674,22 @@ def count_documents(conn: psycopg.Connection[Any]) -> int:
     return int(row[0])
 
 
+def count_documents_with_tag(conn: psycopg.Connection[Any], tag: str) -> int:
+    """Return the number of documents carrying ``tag`` in their ``tags`` array.
+
+    Parameterized membership test (``%s = ANY(tags)``) over ``documents.tags``.
+    Backs the ``brain doctor`` inbox-size WARN and the ``brain capture`` inbox
+    count (Plan 09 quick-capture). ``tag`` is matched verbatim — callers
+    normalize it (e.g. via :func:`brain.tags.normalize_tags`) before counting
+    when the input might not already be canonical.
+    """
+    row = conn.execute(
+        "SELECT count(*) FROM documents WHERE %s = ANY(tags)", (tag,)
+    ).fetchone()
+    assert row is not None  # count(*) always yields one row
+    return int(row[0])
+
+
 def _count_null_embedding(
     conn: psycopg.Connection[Any], table: str, column: str
 ) -> int:

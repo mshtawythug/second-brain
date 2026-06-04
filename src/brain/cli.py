@@ -119,6 +119,7 @@ from .queries import (
     analyze_tables,
     count_chunks_missing_embedding,
     count_documents,
+    count_documents_with_tag,
     count_unenriched_documents,
     embedding_column_state,
     fetch_document,
@@ -278,6 +279,11 @@ app.add_typer(elicit_app, name="elicit")
 # Plan 09 — quick-capture inbox. Command logic lives in `_capture_command.py`
 # (cli.py is intentionally kept thin); review/list subcommands land in Phase 2.
 app.add_typer(capture_app, name="capture")
+
+# The always-on tag every quick capture carries until it is reviewed out of the
+# inbox. Mirrors ``_capture_command._INBOX_TAG``; defined here so the doctor
+# inbox-size sub-check has no import-time dependency on the capture sub-app.
+_CAPTURE_INBOX_TAG = "inbox"
 
 
 @app.callback()
@@ -650,6 +656,27 @@ def _check_chunks_stats(conn: psycopg.Connection[Any]) -> None:
         typer.echo(f"chunks stats    OK (last analyzed {analyzed_at})")
 
 
+def _check_inbox_size(conn: psycopg.Connection[Any], cfg: Config) -> None:
+    """Doctor sub-check: warn when the quick-capture inbox has grown large.
+
+    Soft check — never flips doctor's exit code. Counts documents still
+    carrying the ``inbox`` tag (Plan 09 quick-capture). When the count exceeds
+    ``cfg.capture_inbox_warn_threshold`` it nudges the user toward
+    ``brain capture review``; otherwise it prints a plain OK line. The count is
+    sourced from :func:`brain.queries.count_documents_with_tag` so the SQL lives
+    in exactly one place (shared with ``brain capture``).
+    """
+    count = count_documents_with_tag(conn, _CAPTURE_INBOX_TAG)
+    if count > cfg.capture_inbox_warn_threshold:
+        typer.secho(
+            f"inbox           WARN — {count} items "
+            f"(> {cfg.capture_inbox_warn_threshold}); run `brain capture review`",
+            fg="yellow",
+        )
+    else:
+        typer.echo(f"inbox           OK ({count} items)")
+
+
 def _check_age(conn: psycopg.Connection[Any]) -> None:
     """Doctor sub-check: verify the Apache AGE GraphRAG backend is provisioned.
 
@@ -1019,6 +1046,8 @@ def doctor() -> None:
                 _report_mirror_drift(conn, vault_path=cfg.vault_path)
                 # Perf wave T1: warn when chunks stats are stale (e.g. post-restore).
                 _check_chunks_stats(conn)
+                # Plan 09: warn when the quick-capture inbox has grown large.
+                _check_inbox_size(conn, cfg)
             else:
                 failures.append("pgvector extension not installed (run brain init)")
                 typer.echo("postgres        FAIL — pgvector not installed")

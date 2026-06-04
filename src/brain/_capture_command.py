@@ -14,7 +14,12 @@ from brain.db import connect
 from brain.errors import EnrichmentError, OllamaUnavailable
 from brain.format import emit_json
 from brain.ingest import apply_tags, ingest_document
-from brain.queries import DocumentRow, list_documents, list_existing_tags
+from brain.queries import (
+    DocumentRow,
+    count_documents_with_tag,
+    list_documents,
+    list_existing_tags,
+)
 from brain.tags import normalize_tags
 
 # The always-on tag every capture carries until it is reviewed out of the inbox.
@@ -164,12 +169,13 @@ def _fetch_summaries(
 
 
 def _count_inbox(conn: psycopg.Connection[Any]) -> int:
-    """Return the number of documents still carrying the ``inbox`` tag."""
-    row = conn.execute(
-        "SELECT count(*) FROM documents WHERE %s = ANY(tags)", (_INBOX_TAG,)
-    ).fetchone()
-    assert row is not None  # count(*) always yields one row
-    return int(row[0])
+    """Return the number of documents still carrying the ``inbox`` tag.
+
+    Delegates to :func:`brain.queries.count_documents_with_tag` — the same
+    shared helper the ``brain doctor`` inbox WARN uses — so the inbox-size
+    query lives in exactly one place.
+    """
+    return count_documents_with_tag(conn, _INBOX_TAG)
 
 
 def _print_item(
