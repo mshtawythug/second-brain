@@ -203,9 +203,22 @@ def _make_state(
 
     ``graph_generic_df_ratio=1.0`` disables generic suppression so the tiny
     corpora's themes always materialize (the CLI test sets the equivalent
-    ``BRAIN_GRAPH_GENERIC_DF=1.0`` env)."""
+    ``BRAIN_GRAPH_GENERIC_DF=1.0`` env).
+
+    ``graph_concepts=False`` pins the concept aspect OFF in the shared test
+    state so it stays deterministic regardless of the product default (which
+    flipped on 2026-05-26 — ``DEFAULT_GRAPH_CONCEPTS=True``). Every test in
+    this file treats concepts as opt-in; the only concepts-on test
+    (``test_build_concepts_wires_extractor``) opts in via the explicit
+    ``concepts=True`` build arg. Mirrors conftest's ``_force_graph_flags_default``
+    for the directly-constructed ``Config`` here (which bypasses ``Config.load``).
+    """
     return mcp_server._State(
-        cfg=Config(database_url=TEST_DATABASE_URL, graph_generic_df_ratio=1.0),
+        cfg=Config(
+            database_url=TEST_DATABASE_URL,
+            graph_generic_df_ratio=1.0,
+            graph_concepts=False,
+        ),
         embedder=fake_embedder,  # type: ignore[arg-type]
         enricher=enricher,  # type: ignore[arg-type]
     )
