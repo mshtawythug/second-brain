@@ -79,8 +79,9 @@ DEFAULT_CAPTURE_CONTENT_TYPE = "note"
 # Number of leading words from the body used to build the auto-title slug when
 # ``--title`` is omitted. Override via ``BRAIN_CAPTURE_TITLE_WORDS``.
 DEFAULT_CAPTURE_TITLE_WORDS = 6
-# Inbox size at/above which `brain doctor` warns the capture queue is backing up
-# (consumed in Plan 09 Phase 3). Override via ``BRAIN_CAPTURE_INBOX_WARN_THRESHOLD``.
+# Inbox size strictly above which `brain doctor` warns the capture queue is
+# backing up (count > threshold; consumed in Plan 09 Phase 3). Override via
+# ``BRAIN_CAPTURE_INBOX_WARN_THRESHOLD``.
 DEFAULT_CAPTURE_INBOX_WARN_THRESHOLD = 20
 
 # Wave Q1-D -- enrichment (auto-summary + auto-tag) defaults.

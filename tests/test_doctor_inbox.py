@@ -148,6 +148,32 @@ def test_doctor_reports_inbox_warn(
     assert "brain capture review" in result.output
 
 
+def test_doctor_inbox_probe_failure_is_soft(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    test_db: psycopg.Connection,  # noqa: ARG001 — fresh empty schema
+) -> None:
+    """A ``psycopg.Error`` from the inbox count must NOT flip doctor's exit code.
+
+    The sub-check is documented as soft. Force the count helper to raise and
+    assert ``brain doctor`` still exits 0 while surfacing the WARN-probe line —
+    proving the error is caught locally instead of propagating to doctor's outer
+    DB handler (which would add a failure and exit 1).
+    """
+    import brain.cli as cli_mod
+
+    def _boom(*_args: object, **_kwargs: object) -> int:
+        raise psycopg.OperationalError("simulated inbox probe failure")
+
+    monkeypatch.setattr(cli_mod, "count_documents_with_tag", _boom)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path / "vault"))
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "inbox           WARN — could not probe inbox size" in result.output
+
+
 def test_doctor_reports_inbox_ok_when_empty(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

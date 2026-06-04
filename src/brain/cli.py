@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from .graph_rag.reconcile import ReconcileConfig
     from .graph_rag.schema import GraphContext
     from .graph_rag.sync import GraphSyncer
+from ._capture_command import _INBOX_TAG as _CAPTURE_INBOX_TAG
 from ._capture_command import capture_app
 from .cli_claude import SkillInstallError
 from .cli_claude import install_skill as _install_skill
@@ -279,11 +280,6 @@ app.add_typer(elicit_app, name="elicit")
 # Plan 09 — quick-capture inbox. Command logic lives in `_capture_command.py`
 # (cli.py is intentionally kept thin); review/list subcommands land in Phase 2.
 app.add_typer(capture_app, name="capture")
-
-# The always-on tag every quick capture carries until it is reviewed out of the
-# inbox. Mirrors ``_capture_command._INBOX_TAG``; defined here so the doctor
-# inbox-size sub-check has no import-time dependency on the capture sub-app.
-_CAPTURE_INBOX_TAG = "inbox"
 
 
 @app.callback()
@@ -666,7 +662,15 @@ def _check_inbox_size(conn: psycopg.Connection[Any], cfg: Config) -> None:
     sourced from :func:`brain.queries.count_documents_with_tag` so the SQL lives
     in exactly one place (shared with ``brain capture``).
     """
-    count = count_documents_with_tag(conn, _CAPTURE_INBOX_TAG)
+    try:
+        count = count_documents_with_tag(conn, _CAPTURE_INBOX_TAG)
+    except psycopg.Error as exc:
+        _rollback_quietly(conn)
+        typer.secho(
+            f"inbox           WARN — could not probe inbox size: {exc}",
+            fg="yellow",
+        )
+        return
     if count > cfg.capture_inbox_warn_threshold:
         typer.secho(
             f"inbox           WARN — {count} items "

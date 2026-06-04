@@ -698,9 +698,10 @@ def brain_capture(
     doc = capture_mod.make_capture_doc(
         content, resolved_title, cfg.capture_content_type, resolved_tags
     )
-    logger.debug(
-        "brain_capture: title=%s tags=%s", resolved_title, resolved_tags
-    )
+    # NOTE: never log ``resolved_title`` — for auto-titles it is derived from the
+    # first words of the capture content, so logging it would leak document body
+    # text. Log only the non-sensitive tag set.
+    logger.debug("brain_capture: tags=%s", resolved_tags)
     try:
         with _mcp_conn(state) as conn:
             conn.autocommit = True
