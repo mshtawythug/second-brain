@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 from brain.cli import app
 from brain.config import ConfigError
 from brain.enrichment import TagProposal
+from brain.vault.frontmatter import parse_frontmatter
 
 
 def _documents(conn: psycopg.Connection) -> list[tuple[str, list[str], str | None]]:
@@ -43,6 +44,25 @@ def _tags_of(conn: psycopg.Connection, doc_id: str) -> list[str]:
     ).fetchone()
     assert row is not None
     return list(row[0] or [])
+
+
+def _mirror_tags(conn: psycopg.Connection, doc_id: str, vault_root: Path) -> list[str]:
+    """Return the YAML ``tags`` from the doc's on-disk vault mirror.
+
+    Resolves ``documents.vault_path`` to the mirror file under ``vault_root``
+    and parses its frontmatter — the assertion surface for "did the routing
+    write back to the mirror, not just the DB?".
+    """
+    row = conn.execute(
+        "SELECT vault_path FROM documents WHERE id = %s", (doc_id,)
+    ).fetchone()
+    assert row is not None
+    vault_path_rel = row[0]
+    assert vault_path_rel is not None, "capture should have written a vault mirror"
+    mirror = vault_root / vault_path_rel
+    assert mirror.exists(), f"mirror missing at {mirror}"
+    fields, _body = parse_frontmatter(mirror.read_text(encoding="utf-8"))
+    return list(fields.get("tags") or [])
 
 
 def _doc_exists(conn: psycopg.Connection, doc_id: str) -> bool:
@@ -339,6 +359,8 @@ def test_review_promote_removes_inbox(
     assert result.exit_code == 0, result.output
     assert _doc_exists(test_db, doc_id)
     assert _tags_of(test_db, doc_id) == []
+    # The vault mirror's frontmatter must be written back too — no stale inbox.
+    assert "inbox" not in _mirror_tags(test_db, doc_id, tmp_path)
 
 
 def test_review_tag_adds_tag_and_removes_inbox(
@@ -358,6 +380,10 @@ def test_review_tag_adds_tag_and_removes_inbox(
 
     assert result.exit_code == 0, result.output
     assert _tags_of(test_db, doc_id) == ["foo"]
+    # The vault mirror gains the routing tag and loses inbox, matching the DB.
+    mirror_tags = _mirror_tags(test_db, doc_id, tmp_path)
+    assert "foo" in mirror_tags
+    assert "inbox" not in mirror_tags
 
 
 def test_review_skip_keeps_inbox(
@@ -476,6 +502,10 @@ def test_review_auto_routes_with_fake_enricher(
     tags = _tags_of(test_db, doc_id)
     assert "inbox" not in tags
     assert set(tags) == {"idea", "fresh"}
+    # The vault mirror's frontmatter mirrors the routed DB tags exactly.
+    mirror_tags = _mirror_tags(test_db, doc_id, tmp_path)
+    assert "inbox" not in mirror_tags
+    assert set(mirror_tags) == {"idea", "fresh"}
 
 
 def test_review_auto_leaves_unsummarized_item_in_inbox(

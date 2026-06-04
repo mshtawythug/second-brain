@@ -225,6 +225,43 @@ def _discard_item(
     typer.echo(f"  discarded {row.id[:8]}{suffix}")
 
 
+def _writeback_routed_tags(
+    conn: psycopg.Connection[Any],
+    *,
+    cfg: Config,
+    doc_id: str,
+    new_tags: list[str],
+) -> None:
+    """Sync a routed item's vault-mirror frontmatter after ``apply_tags``.
+
+    Captures write an ``_ingested/manual/<slug>.md`` mirror, so a promote /
+    tag / ``--auto`` route that drops ``inbox`` (and adds routing tags) in the
+    DB must also rewrite that mirror's YAML ``tags`` — otherwise the file keeps
+    a stale ``inbox`` tag that a later ``brain vault sync`` could reintroduce.
+    Reuses :func:`brain.cli._tag_file_writeback` (the same post-``apply_tags``
+    writeback ``brain tag`` uses) with ``regenerate_file=False``: a missing
+    mirror degrades to DB-only + a warning rather than being force-regenerated.
+    """
+    row = conn.execute(
+        "SELECT vault_path, kind FROM documents WHERE id = %s", (doc_id,)
+    ).fetchone()
+    if row is None:  # pragma: no cover - apply_tags above proved the row exists
+        return
+    vault_path_rel: str | None = row[0]
+    kind: str = row[1]
+    from brain import cli as _cli
+
+    _cli._tag_file_writeback(
+        conn,
+        cfg=cfg,
+        vault_path_rel=vault_path_rel,
+        kind=kind,
+        new_tags=new_tags,
+        doc_id=doc_id,
+        regenerate_file=False,
+    )
+
+
 def _review_interactive(
     conn: psycopg.Connection[Any],
     rows: list[DocumentRow],
@@ -250,13 +287,15 @@ def _review_interactive(
         if command == "q":
             break
         if command == "p":
-            apply_tags(conn, row.id, remove=[_INBOX_TAG])
+            new_tags = apply_tags(conn, row.id, remove=[_INBOX_TAG])
+            _writeback_routed_tags(conn, cfg=cfg, doc_id=row.id, new_tags=new_tags)
             typer.echo(f"  promoted {row.id[:8]}")
         elif command == "t":
             if not args:
                 typer.echo("  no tags given; left in inbox")
                 continue
-            apply_tags(conn, row.id, add=args, remove=[_INBOX_TAG])
+            new_tags = apply_tags(conn, row.id, add=args, remove=[_INBOX_TAG])
+            _writeback_routed_tags(conn, cfg=cfg, doc_id=row.id, new_tags=new_tags)
             applied = " +".join(normalize_tags(args))
             typer.echo(f"  tagged {row.id[:8]}: +{applied}")
         elif command == "d":
@@ -269,7 +308,11 @@ def _review_interactive(
 
 
 def _review_auto(
-    conn: psycopg.Connection[Any], rows: list[DocumentRow], *, enricher: Any
+    conn: psycopg.Connection[Any],
+    rows: list[DocumentRow],
+    *,
+    cfg: Config,
+    enricher: Any,
 ) -> None:
     """Non-interactive routing: LLM-propose tags per item, remove ``inbox``.
 
@@ -304,7 +347,8 @@ def _review_auto(
         if not accepted:
             typer.echo(f"{row.id[:8]}  no tags proposed; left in inbox")
             continue
-        apply_tags(conn, row.id, add=accepted, remove=[_INBOX_TAG])
+        new_tags = apply_tags(conn, row.id, add=accepted, remove=[_INBOX_TAG])
+        _writeback_routed_tags(conn, cfg=cfg, doc_id=row.id, new_tags=new_tags)
         typer.echo(f"{row.id[:8]}  routed: +{' +'.join(accepted)} (inbox removed)")
 
 
@@ -342,7 +386,7 @@ def capture_review(
             return
         if auto:
             enricher = _cli._build_enricher(cfg)
-            _review_auto(conn, rows, enricher=enricher)
+            _review_auto(conn, rows, cfg=cfg, enricher=enricher)
             return
         _review_interactive(conn, rows, cfg=cfg, graph_syncer=graph_syncer)
 
