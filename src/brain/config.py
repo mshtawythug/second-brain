@@ -71,6 +71,18 @@ DEFAULT_VAULT_PATH = Path.home() / "brain-vault"
 # regardless. Override via ``BRAIN_PEOPLE_HUB_MIN_DOCS``.
 DEFAULT_PEOPLE_HUB_MIN_DOCS = 3
 
+# Plan 09 -- quick-capture inbox (`brain capture`) defaults.
+#
+# ``DEFAULT_CAPTURE_CONTENT_TYPE`` is the ``content_type`` stamped on captures
+# when neither ``--content-type`` nor ``BRAIN_CAPTURE_CONTENT_TYPE`` is set.
+DEFAULT_CAPTURE_CONTENT_TYPE = "note"
+# Number of leading words from the body used to build the auto-title slug when
+# ``--title`` is omitted. Override via ``BRAIN_CAPTURE_TITLE_WORDS``.
+DEFAULT_CAPTURE_TITLE_WORDS = 6
+# Inbox size at/above which `brain doctor` warns the capture queue is backing up
+# (consumed in Plan 09 Phase 3). Override via ``BRAIN_CAPTURE_INBOX_WARN_THRESHOLD``.
+DEFAULT_CAPTURE_INBOX_WARN_THRESHOLD = 20
+
 # Wave Q1-D -- enrichment (auto-summary + auto-tag) defaults.
 #
 # ``DEFAULT_ENRICH_MODEL`` is the Ollama model name passed to ``/api/chat``.
@@ -301,6 +313,15 @@ class Config:
     # threshold would silently flip the filter (no effective filtering)
     # and is almost certainly a config bug.
     people_hub_min_docs: int = DEFAULT_PEOPLE_HUB_MIN_DOCS
+    # Plan 09 -- quick-capture inbox knobs. ``capture_content_type`` is the
+    # default content_type for `brain capture` (must be non-blank);
+    # ``capture_title_words`` is how many leading body words form the auto-title
+    # slug (>= 1); ``capture_inbox_warn_threshold`` is the inbox size at/above
+    # which `brain doctor` warns (>= 1; consumed in Phase 3). All three are
+    # validated at load time, mirroring the other int/str env knobs.
+    capture_content_type: str = DEFAULT_CAPTURE_CONTENT_TYPE
+    capture_title_words: int = DEFAULT_CAPTURE_TITLE_WORDS
+    capture_inbox_warn_threshold: int = DEFAULT_CAPTURE_INBOX_WARN_THRESHOLD
     # Exponential-decay half-life (days) for the recency boost applied after
     # RRF. ``boost = 0.5 ** (age_days / recency_halflife_days)`` where
     # ``age_days`` is clamped to [0, +inf) so future-dated rows get boost=1.0.
@@ -545,6 +566,48 @@ class Config:
                 raise ConfigError(
                     f"BRAIN_PEOPLE_HUB_MIN_DOCS must be a non-negative integer "
                     f"(got {people_hub_min_docs!r})"
+                )
+        # Plan 09 -- quick-capture inbox knobs. Same eager-validation idiom as
+        # the other int/str env vars: unset/blank -> default; non-parseable or
+        # out-of-range -> ConfigError at startup instead of a mid-capture crash.
+        capture_ct_raw = os.environ.get("BRAIN_CAPTURE_CONTENT_TYPE")
+        if capture_ct_raw is None or capture_ct_raw.strip() == "":
+            capture_content_type = DEFAULT_CAPTURE_CONTENT_TYPE
+        else:
+            capture_content_type = capture_ct_raw.strip()
+
+        capture_words_raw = os.environ.get("BRAIN_CAPTURE_TITLE_WORDS")
+        if capture_words_raw is None or capture_words_raw.strip() == "":
+            capture_title_words = DEFAULT_CAPTURE_TITLE_WORDS
+        else:
+            try:
+                capture_title_words = int(capture_words_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_CAPTURE_TITLE_WORDS must be an integer >= 1 "
+                    f"(got {capture_words_raw!r})"
+                ) from exc
+            if capture_title_words < 1:
+                raise ConfigError(
+                    f"BRAIN_CAPTURE_TITLE_WORDS must be an integer >= 1 "
+                    f"(got {capture_title_words!r})"
+                )
+
+        capture_warn_raw = os.environ.get("BRAIN_CAPTURE_INBOX_WARN_THRESHOLD")
+        if capture_warn_raw is None or capture_warn_raw.strip() == "":
+            capture_inbox_warn_threshold = DEFAULT_CAPTURE_INBOX_WARN_THRESHOLD
+        else:
+            try:
+                capture_inbox_warn_threshold = int(capture_warn_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_CAPTURE_INBOX_WARN_THRESHOLD must be an integer >= 1 "
+                    f"(got {capture_warn_raw!r})"
+                ) from exc
+            if capture_inbox_warn_threshold < 1:
+                raise ConfigError(
+                    f"BRAIN_CAPTURE_INBOX_WARN_THRESHOLD must be an integer >= 1 "
+                    f"(got {capture_inbox_warn_threshold!r})"
                 )
         # Recency half-life -- see DEFAULT_RECENCY_HALFLIFE_DAYS.
         # Validation: must parse as a positive float. Zero is invalid
@@ -1152,6 +1215,9 @@ class Config:
             "vector_sim_floor": vector_sim_floor,
             "owner_participants": owner_participants,
             "people_hub_min_docs": people_hub_min_docs,
+            "capture_content_type": capture_content_type,
+            "capture_title_words": capture_title_words,
+            "capture_inbox_warn_threshold": capture_inbox_warn_threshold,
             "recency_halflife_days": recency_halflife_days,
             "snippet_context_tokens": snippet_context_tokens,
             "enrich_model": enrich_model,

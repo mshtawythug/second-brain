@@ -136,6 +136,7 @@ from .queries import (
     summary_counts,
     sync_chunk_search_metadata,
 )
+from ._capture_command import capture_app
 from .search import hybrid_search
 from .tags import normalize_tag, normalize_tags
 from .vault import init_vault
@@ -273,6 +274,10 @@ elicit_app = typer.Typer(
     help="Tacit-knowledge elicitation — surface and manage knowledge gaps.",
 )
 app.add_typer(elicit_app, name="elicit")
+
+# Plan 09 — quick-capture inbox. Command logic lives in `_capture_command.py`
+# (cli.py is intentionally kept thin); review/list subcommands land in Phase 2.
+app.add_typer(capture_app, name="capture")
 
 
 @app.callback()
