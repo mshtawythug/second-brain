@@ -568,11 +568,20 @@ class Config:
                     f"(got {people_hub_min_docs!r})"
                 )
         # Plan 09 -- quick-capture inbox knobs. Same eager-validation idiom as
-        # the other int/str env vars: unset/blank -> default; non-parseable or
+        # the other int/str env vars: unset -> default; non-parseable or
         # out-of-range -> ConfigError at startup instead of a mid-capture crash.
+        # ``BRAIN_CAPTURE_CONTENT_TYPE`` distinguishes unset (None -> default)
+        # from explicitly-blank (set to "" / whitespace -> ConfigError): a user
+        # who sets it to nothing has a config bug, not a "use the default"
+        # request.
         capture_ct_raw = os.environ.get("BRAIN_CAPTURE_CONTENT_TYPE")
-        if capture_ct_raw is None or capture_ct_raw.strip() == "":
+        if capture_ct_raw is None:
             capture_content_type = DEFAULT_CAPTURE_CONTENT_TYPE
+        elif capture_ct_raw.strip() == "":
+            raise ConfigError(
+                "BRAIN_CAPTURE_CONTENT_TYPE must be a non-blank string "
+                f"(got {capture_ct_raw!r})"
+            )
         else:
             capture_content_type = capture_ct_raw.strip()
 

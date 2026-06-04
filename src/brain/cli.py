@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from .graph_rag.reconcile import ReconcileConfig
     from .graph_rag.schema import GraphContext
     from .graph_rag.sync import GraphSyncer
+from ._capture_command import capture_app
 from .cli_claude import SkillInstallError
 from .cli_claude import install_skill as _install_skill
 from .eval import (
@@ -136,7 +137,6 @@ from .queries import (
     summary_counts,
     sync_chunk_search_metadata,
 )
-from ._capture_command import capture_app
 from .search import hybrid_search
 from .tags import normalize_tag, normalize_tags
 from .vault import init_vault

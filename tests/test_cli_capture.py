@@ -183,3 +183,68 @@ def test_inbox_warn_threshold_zero_raises_config_error(
 
     assert result.exit_code != 0
     assert isinstance(result.exception, ConfigError)
+
+
+def test_blank_content_type_raises_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """An explicitly-blank BRAIN_CAPTURE_CONTENT_TYPE fails at config load.
+
+    Unset falls back to the default; set-but-blank is a config bug, not a
+    "use the default" request.
+    """
+    _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    monkeypatch.setenv("BRAIN_CAPTURE_CONTENT_TYPE", "")
+
+    result = CliRunner().invoke(
+        app, ["capture", "--text", "anything", "--no-enrich"]
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ConfigError)
+
+
+def test_extra_tags_are_normalized_at_capture_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """A non-canonical `--tag` is normalized before it hits documents.tags."""
+    _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+
+    result = CliRunner().invoke(
+        app,
+        ["capture", "--text", "normalize my tag", "--no-enrich", "--tag", "Mixed Case"],
+    )
+    assert result.exit_code == 0, result.output
+
+    docs = _documents(test_db)
+    assert len(docs) == 1
+    assert set(docs[0][1]) == {"inbox", "mixed-case"}
+
+
+def test_capture_reads_content_from_stdin(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """With no --text, content is read from stdin and tagged `inbox`."""
+    _patch_embedder(monkeypatch, fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+
+    result = CliRunner().invoke(
+        app, ["capture", "--no-enrich"], input="some stdin capture body\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert "captured" in result.output
+
+    docs = _documents(test_db)
+    assert len(docs) == 1
+    assert docs[0][1] == ["inbox"]

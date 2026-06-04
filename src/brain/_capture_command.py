@@ -10,6 +10,7 @@ from brain import capture as capture_mod
 from brain.config import Config
 from brain.db import connect
 from brain.ingest import ingest_document
+from brain.tags import normalize_tags
 
 capture_app = typer.Typer(
     name="capture",
@@ -76,7 +77,13 @@ def capture(
             content, today=date.today(), max_words=cfg.capture_title_words
         )
     )
-    tags = ["inbox", *tag]
+    # Normalize at the capture boundary: the fresh-INSERT path in
+    # ``ingest_document`` writes ``documents.tags`` verbatim (it only
+    # normalizes on the update/apply_tags paths), so canonicalizing here keeps
+    # the column queryable by exact tag filters. The SAME normalized list feeds
+    # both the doc metadata provenance and the column so they agree. "inbox"
+    # is already canonical, so prepending it never collides.
+    tags = normalize_tags(["inbox", *tag])
     doc = capture_mod.make_capture_doc(
         content, resolved_title, resolved_content_type, tags
     )
