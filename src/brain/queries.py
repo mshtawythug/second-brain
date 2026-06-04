@@ -1016,3 +1016,38 @@ def mirror_drift_summary(
         ghost_rows=ghost_count,
         orphan_files=orphan_count,
     )
+
+
+def list_public_tables(conn: psycopg.Connection[Any]) -> list[str]:
+    """Return the sorted names of base tables in the ``public`` schema.
+
+    Used by ``brain analyze`` to validate a user-supplied table name before it
+    is interpolated into an ``ANALYZE`` statement, giving a friendly error on a
+    typo and a defense-in-depth check on top of identifier quoting.
+    """
+    rows = conn.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+        """
+    ).fetchall()
+    return [str(name) for (name,) in rows]
+
+
+def analyze_tables(conn: psycopg.Connection[Any], tables: list[str]) -> None:
+    """Run ``ANALYZE`` on each given table to refresh planner statistics.
+
+    Each identifier is quoted via :class:`psycopg.sql.Identifier`; callers
+    validate ``tables`` against :func:`list_public_tables` before reaching here
+    (same contract as :func:`_count_null_embedding`). ``ANALYZE`` is run one
+    table at a time so a bad name fails loudly on that name rather than
+    silently analyzing a prefix of the list.
+
+    The connection should be in ``autocommit`` mode (or committed by the
+    caller): ``ANALYZE`` writes to ``pg_statistic``/``pg_class``, which is
+    transactional and would otherwise be rolled back on connection close.
+    """
+    for table in tables:
+        conn.execute(sql.SQL("ANALYZE {table}").format(table=sql.Identifier(table)))

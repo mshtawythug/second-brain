@@ -57,6 +57,9 @@ def test_chunks_stats_warn_when_both_null_and_nonempty(capsys: pytest.CaptureFix
     call_args = mock_secho.call_args
     assert "WARN" in call_args[0][0]
     assert "500" in call_args[0][0]
+    # The remediation now points at the `brain analyze` command (which runs
+    # the ANALYZE SQL), so users get a copy-pasteable shell command.
+    assert "brain analyze" in call_args[0][0]
     assert call_args[1].get("fg") == "yellow"
 
 

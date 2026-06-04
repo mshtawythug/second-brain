@@ -115,6 +115,7 @@ from .interactions import record_interaction
 from .queries import (
     MirrorDriftSummary,
     PersonMatch,
+    analyze_tables,
     count_chunks_missing_embedding,
     count_documents,
     count_unenriched_documents,
@@ -128,6 +129,7 @@ from .queries import (
     iter_unenriched_documents,
     list_documents,
     list_existing_tags,
+    list_public_tables,
     mirror_drift_summary,
     resolve_document_prefix,
     resolve_person_to_keys,
@@ -595,7 +597,7 @@ def _check_chunks_stats(conn: psycopg.Connection[Any]) -> None:
     - ``chunks stats   OK (analyzed <ago>)`` — last_analyze or last_autoanalyze
       is set (whichever is more recent).
     - ``chunks stats   WARN — never analyzed`` when BOTH are NULL and the
-      table is non-empty. Suggests ``ANALYZE chunks``.
+      table is non-empty. Suggests ``brain analyze`` (which runs the SQL).
     - Silently skips the check (no output) when the table is empty (fresh
       install before any ingest).
     """
@@ -633,7 +635,7 @@ def _check_chunks_stats(conn: psycopg.Connection[Any]) -> None:
     if most_recent is None:
         typer.secho(
             f"chunks stats    WARN — never analyzed ({n_live_tup:,} live rows, "
-            "stats NULL). Run: ANALYZE chunks;  "
+            "stats NULL). Run: brain analyze  (or SQL: ANALYZE chunks;)  "
             "This can happen after pg_restore — planners use default estimates "
             "until ANALYZE runs.",
             fg="yellow",
@@ -1115,6 +1117,45 @@ def status() -> None:
     typer.echo("\nby source:")
     for kind, count in counts.by_kind:
         typer.echo(f"  {kind:<12} {count}")
+
+
+@app.command()
+def analyze(
+    table: str = typer.Argument(
+        "chunks",
+        help="Table to ANALYZE. Defaults to 'chunks' (the table brain doctor warns about).",
+    ),
+    all_tables: bool = typer.Option(
+        False,
+        "--all",
+        help="ANALYZE every table in the database instead of a single one.",
+    ),
+) -> None:
+    """Refresh Postgres planner statistics by running ANALYZE.
+
+    Fixes the ``chunks stats WARN — never analyzed`` that ``brain doctor``
+    reports after a ``pg_restore``: a restore bulk-loads rows via ``COPY`` but
+    never runs ``ANALYZE``, so the planner falls back to default row estimates
+    (and bad query plans) until autovacuum's first pass. This command runs the
+    ``ANALYZE`` SQL for you against the configured database.
+    """
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        # ANALYZE writes transactional catalog stats; autocommit (as in `init`)
+        # ensures they persist past connection close.
+        conn.autocommit = True
+        if all_tables:
+            conn.execute("ANALYZE")
+            typer.secho("ANALYZE (all tables) — done", fg="green")
+            return
+        known = list_public_tables(conn)
+        if table not in known:
+            raise typer.BadParameter(
+                f"unknown table {table!r}; known tables: {', '.join(known)}",
+                param_hint="TABLE",
+            )
+        analyze_tables(conn, [table])
+    typer.secho(f"ANALYZE {table} — done", fg="green")
 
 
 def _report_embedding_column(conn: psycopg.Connection[Any]) -> None:
