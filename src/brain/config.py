@@ -109,6 +109,26 @@ DEFAULT_ENRICH_MAX_INPUT_TOKENS = 1200
 # ``BRAIN_ENRICH_TIMEOUT_SECONDS``.
 DEFAULT_ENRICH_TIMEOUT_SECONDS = 60.0
 
+# Plan 02 -- spaced-repetition resurfacing (`brain resurface`) defaults.
+#
+# ``DEFAULT_RESURFACE_LIMIT`` is the number of docs surfaced per run when
+# ``--limit`` is omitted. Override via ``BRAIN_RESURFACE_LIMIT`` (int >= 1).
+DEFAULT_RESURFACE_LIMIT = 7
+# Documents younger than this many days are excluded from the queue before
+# scoring -- brand-new notes don't need resurfacing. Override via
+# ``BRAIN_RESURFACE_MIN_AGE_DAYS`` (int >= 0).
+DEFAULT_RESURFACE_MIN_AGE_DAYS = 14
+# Exponential half-life (days) for the age factor: at this age the age factor
+# is 0.5, saturating toward 1.0 for much older docs. Reuses the ``0.5^(t/hl)``
+# decay shape from search.py, inverted so older = higher priority. Override via
+# ``BRAIN_RESURFACE_AGE_HALFLIFE_DAYS`` (float > 0).
+DEFAULT_RESURFACE_AGE_HALFLIFE_DAYS = 180.0
+# Exponential half-life (days) for the access-staleness factor: a doc last
+# opened this many days ago contributes 0.5. Shorter than the age half-life so
+# a recent open visibly deprioritizes a doc. Override via
+# ``BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS`` (float > 0).
+DEFAULT_RESURFACE_ACCESS_HALFLIFE_DAYS = 90.0
+
 # Wave G1-c -- GraphRAG incremental sync (people aspect) settings.
 #
 # Graph sync is OPT-IN by origin; ``BRAIN_GRAPH_ENABLED`` now defaults to True so
@@ -328,6 +348,14 @@ class Config:
     # context are stitched around it. 0 = disabled. Loaded from
     # ``BRAIN_SNIPPET_CONTEXT_TOKENS``; must be a non-negative integer.
     snippet_context_tokens: int = DEFAULT_SNIPPET_CONTEXT_TOKENS
+    # Plan 02 -- spaced-repetition resurfacing knobs (`brain resurface`). All
+    # four feed :func:`brain.resurface.resurface_docs`; grouped together and
+    # validated the same way as the other int/float env knobs. ``limit`` >= 1,
+    # ``min_age_days`` >= 0, both half-lives > 0.
+    resurface_limit: int = DEFAULT_RESURFACE_LIMIT
+    resurface_min_age_days: int = DEFAULT_RESURFACE_MIN_AGE_DAYS
+    resurface_age_halflife_days: float = DEFAULT_RESURFACE_AGE_HALFLIFE_DAYS
+    resurface_access_halflife_days: float = DEFAULT_RESURFACE_ACCESS_HALFLIFE_DAYS
     # Wave Q1-D -- per-document auto-summary + auto-tag enrichment.
     # The four fields are tightly coupled (they all feed ``OllamaEnricher``)
     # so they live together at the tail of the dataclass.
@@ -639,6 +667,80 @@ class Config:
                     f"BRAIN_SNIPPET_CONTEXT_TOKENS must be a non-negative integer "
                     f"(got {snippet_context_tokens!r})"
                 )
+        # Plan 02 -- resurface env vars. Same eager-validation idiom as the
+        # snippet-context / recency-halflife knobs above: unset/blank ->
+        # default; non-parseable / out-of-range -> ConfigError at startup so a
+        # config typo surfaces immediately rather than mid-resurface.
+        resurface_limit_raw = os.environ.get("BRAIN_RESURFACE_LIMIT")
+        if resurface_limit_raw is None or resurface_limit_raw.strip() == "":
+            resurface_limit = DEFAULT_RESURFACE_LIMIT
+        else:
+            try:
+                resurface_limit = int(resurface_limit_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_RESURFACE_LIMIT must be an integer >= 1 "
+                    f"(got {resurface_limit_raw!r})"
+                ) from exc
+            if resurface_limit < 1:
+                raise ConfigError(
+                    f"BRAIN_RESURFACE_LIMIT must be an integer >= 1 "
+                    f"(got {resurface_limit!r})"
+                )
+
+        resurface_min_age_raw = os.environ.get("BRAIN_RESURFACE_MIN_AGE_DAYS")
+        if resurface_min_age_raw is None or resurface_min_age_raw.strip() == "":
+            resurface_min_age_days = DEFAULT_RESURFACE_MIN_AGE_DAYS
+        else:
+            try:
+                resurface_min_age_days = int(resurface_min_age_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_RESURFACE_MIN_AGE_DAYS must be a non-negative integer "
+                    f"(got {resurface_min_age_raw!r})"
+                ) from exc
+            if resurface_min_age_days < 0:
+                raise ConfigError(
+                    f"BRAIN_RESURFACE_MIN_AGE_DAYS must be a non-negative integer "
+                    f"(got {resurface_min_age_days!r})"
+                )
+
+        resurface_age_hl_raw = os.environ.get("BRAIN_RESURFACE_AGE_HALFLIFE_DAYS")
+        if resurface_age_hl_raw is None or resurface_age_hl_raw.strip() == "":
+            resurface_age_halflife_days = DEFAULT_RESURFACE_AGE_HALFLIFE_DAYS
+        else:
+            try:
+                resurface_age_halflife_days = float(resurface_age_hl_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_RESURFACE_AGE_HALFLIFE_DAYS must be a positive float "
+                    f"(got {resurface_age_hl_raw!r})"
+                ) from exc
+            if resurface_age_halflife_days <= 0:
+                raise ConfigError(
+                    f"BRAIN_RESURFACE_AGE_HALFLIFE_DAYS must be a positive float "
+                    f"(got {resurface_age_halflife_days!r})"
+                )
+
+        resurface_access_hl_raw = os.environ.get(
+            "BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS"
+        )
+        if resurface_access_hl_raw is None or resurface_access_hl_raw.strip() == "":
+            resurface_access_halflife_days = DEFAULT_RESURFACE_ACCESS_HALFLIFE_DAYS
+        else:
+            try:
+                resurface_access_halflife_days = float(resurface_access_hl_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS must be a positive float "
+                    f"(got {resurface_access_hl_raw!r})"
+                ) from exc
+            if resurface_access_halflife_days <= 0:
+                raise ConfigError(
+                    f"BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS must be a positive float "
+                    f"(got {resurface_access_halflife_days!r})"
+                )
+
         # Wave Q1-D -- enrichment env vars. Same validation pattern as the
         # snippet-context / recency-halflife knobs above: unset/blank ->
         # default; non-parseable / out-of-range -> ConfigError eagerly so a
@@ -1209,6 +1311,10 @@ class Config:
             "capture_inbox_warn_threshold": capture_inbox_warn_threshold,
             "recency_halflife_days": recency_halflife_days,
             "snippet_context_tokens": snippet_context_tokens,
+            "resurface_limit": resurface_limit,
+            "resurface_min_age_days": resurface_min_age_days,
+            "resurface_age_halflife_days": resurface_age_halflife_days,
+            "resurface_access_halflife_days": resurface_access_halflife_days,
             "enrich_model": enrich_model,
             "enrich_min_tokens": enrich_min_tokens,
             "enrich_max_input_tokens": enrich_max_input_tokens,
