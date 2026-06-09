@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .link_rewrite import rewrite_vault_links, rewrite_wiki_links
 from .templates import (
+    CAPTURE_README,
     DAILY_TEMPLATE,
     INGESTED_README,
     NOTE_TEMPLATE,
@@ -16,6 +17,7 @@ from .templates import (
 )
 
 __all__ = [
+    "CAPTURE_README",
     "DAILY_TEMPLATE",
     "INGESTED_README",
     "NOTE_TEMPLATE",
@@ -39,6 +41,7 @@ VAULT_SUBDIRS: tuple[str, ...] = (
     "_ingested/slack",
     "_ingested/gmail",
     "_ingested/manual",
+    "capture",
     "daily",
 )
 
@@ -48,6 +51,7 @@ VAULT_TEMPLATE_FILES: tuple[tuple[str, str], ...] = (
     ("_templates/daily.md", DAILY_TEMPLATE),
     ("_templates/note.md", NOTE_TEMPLATE),
     ("_ingested/README.md", INGESTED_README),
+    ("capture/README.md", CAPTURE_README),
     ("README.md", VAULT_README),
 )
 

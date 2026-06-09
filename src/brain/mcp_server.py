@@ -36,6 +36,7 @@ from .errors import (
     InteractionError,
     PersonAmbiguous,
     PersonNotFound,
+    VaultNoteSyncError,
 )
 from .format import (
     alias_result_json,
@@ -77,6 +78,7 @@ from .vault.frontmatter import (
     rewrite_tags,
 )
 from .vault.graph import backlinks_for, orphans, outgoing_links_for
+from .vault.note_builder import create_vault_note
 from .vault.slug import slugify
 from .vault.sync import sync_one_file
 from .vault.templates import render_template
@@ -666,37 +668,40 @@ def brain_capture(
 ) -> dict[str, Any]:
     """Quick-capture a thought into the brain's inbox (tagged ``inbox``).
 
-    Same code path as ``brain capture`` on the CLI (Plan 09): build the capture
-    doc, chunk → embed → store with ``content_hash`` dedup (no source id —
-    re-capturing identical text is a no-op). Every captured document carries the
+    Authors a vault-tier note under ``capture/`` (visible in the Quartz UI
+    without the "Show ingested" toggle). Every captured document carries the
     always-on ``inbox`` tag (plus any caller extras), normalized at the write
     boundary, until it is reviewed out via ``brain capture review``. When
     ``title`` is omitted/blank it defaults to a deterministic, date-stamped
-    auto-title derived from the content. The local-Ollama auto-summary hook runs
-    when an enricher is configured and degrades to a warning (summary stays
-    NULL) when Ollama is unavailable.
+    auto-title derived from the content. No inline graph sync is performed —
+    captures are picked up by the normal ``brain-rebuild`` cycle.
 
-    Returns ``{"document_id": ..., "status": "ingested" | "skipped"}`` —
-    ``"skipped"`` when an identical capture already existed (dedup no-op).
+    No inline enrichment is performed — ``documents.summary`` stays ``NULL``
+    until ``brain enrich --backfill`` (or a full ``brain-rebuild``) runs, so
+    ``brain capture review --auto`` will defer freshly-captured items until
+    a summary is present.
+
+    Returns ``{"document_id": ..., "status": "ingested"}``.
     """
     if not content.strip():
         raise _mcp_error(INVALID_PARAMS, "content is empty")
     state = _get_state()
     cfg = state.cfg
-    # Normalize at the capture boundary so the fresh-INSERT path's verbatim
-    # ``documents.tags`` write stays queryable by exact tag filters. "inbox" is
-    # already canonical, so prepending it never collides. The SAME normalized
-    # list feeds both the doc metadata provenance and the tags column.
+    if cfg.vault_path is None:
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "vault path is not configured — set BRAIN_VAULT_PATH",
+        )
+    # Normalize at the capture boundary so the vault frontmatter tags are
+    # queryable by exact tag filters. "inbox" is already canonical, so
+    # prepending it never collides.
     resolved_tags = normalize_tags(["inbox", *(tags or [])])
     resolved_title = (
-        title
+        title.strip()
         if title and title.strip()
         else capture_mod.make_capture_title(
             content, today=date_cls.today(), max_words=cfg.capture_title_words
         )
-    )
-    doc = capture_mod.make_capture_doc(
-        content, resolved_title, cfg.capture_content_type, resolved_tags
     )
     # NOTE: never log ``resolved_title`` — for auto-titles it is derived from the
     # first words of the capture content, so logging it would leak document body
@@ -705,25 +710,25 @@ def brain_capture(
     try:
         with _mcp_conn(state) as conn:
             conn.autocommit = True
-            result = ingest_document(
+            doc_id = create_vault_note(
                 conn,
-                embedder=state.embedder,
-                doc=doc,
-                source_kind="manual",
+                cfg=cfg,
+                vault_path=cfg.vault_path,
+                title=resolved_title,
+                body=content,
                 tags=resolved_tags,
-                vault_root=cfg.vault_path,
-                enricher=state.enricher,
-                enrich=True,
-                enrich_min_tokens=cfg.enrich_min_tokens,
-                graph_syncer=state.graph_syncer,
+                folder="capture",
+                embedder=state.embedder,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     except OllamaEmbedError as e:
         raise _wrap_embed_error(e) from e
+    except VaultNoteSyncError as e:
+        raise _mcp_error(INVALID_PARAMS, str(e)) from e
     return {
-        "document_id": result.document_id,
-        "status": "ingested" if result.created else "skipped",
+        "document_id": doc_id,
+        "status": "ingested",
     }
 
 

@@ -73,9 +73,6 @@ DEFAULT_PEOPLE_HUB_MIN_DOCS = 3
 
 # Plan 09 -- quick-capture inbox (`brain capture`) defaults.
 #
-# ``DEFAULT_CAPTURE_CONTENT_TYPE`` is the ``content_type`` stamped on captures
-# when neither ``--content-type`` nor ``BRAIN_CAPTURE_CONTENT_TYPE`` is set.
-DEFAULT_CAPTURE_CONTENT_TYPE = "note"
 # Number of leading words from the body used to build the auto-title slug when
 # ``--title`` is omitted. Override via ``BRAIN_CAPTURE_TITLE_WORDS``.
 DEFAULT_CAPTURE_TITLE_WORDS = 6
@@ -314,13 +311,11 @@ class Config:
     # threshold would silently flip the filter (no effective filtering)
     # and is almost certainly a config bug.
     people_hub_min_docs: int = DEFAULT_PEOPLE_HUB_MIN_DOCS
-    # Plan 09 -- quick-capture inbox knobs. ``capture_content_type`` is the
-    # default content_type for `brain capture` (must be non-blank);
+    # Plan 09 -- quick-capture inbox knobs.
     # ``capture_title_words`` is how many leading body words form the auto-title
     # slug (>= 1); ``capture_inbox_warn_threshold`` is the inbox size above
     # which `brain doctor` warns (>= 1; Phase 3 compares strictly greater-than).
-    # All three are validated at load time, mirroring the other int/str env knobs.
-    capture_content_type: str = DEFAULT_CAPTURE_CONTENT_TYPE
+    # Both are validated at load time, mirroring the other int env knobs.
     capture_title_words: int = DEFAULT_CAPTURE_TITLE_WORDS
     capture_inbox_warn_threshold: int = DEFAULT_CAPTURE_INBOX_WARN_THRESHOLD
     # Exponential-decay half-life (days) for the recency boost applied after
@@ -569,23 +564,8 @@ class Config:
                     f"(got {people_hub_min_docs!r})"
                 )
         # Plan 09 -- quick-capture inbox knobs. Same eager-validation idiom as
-        # the other int/str env vars: unset -> default; non-parseable or
+        # the other int env vars: unset -> default; non-parseable or
         # out-of-range -> ConfigError at startup instead of a mid-capture crash.
-        # ``BRAIN_CAPTURE_CONTENT_TYPE`` distinguishes unset (None -> default)
-        # from explicitly-blank (set to "" / whitespace -> ConfigError): a user
-        # who sets it to nothing has a config bug, not a "use the default"
-        # request.
-        capture_ct_raw = os.environ.get("BRAIN_CAPTURE_CONTENT_TYPE")
-        if capture_ct_raw is None:
-            capture_content_type = DEFAULT_CAPTURE_CONTENT_TYPE
-        elif capture_ct_raw.strip() == "":
-            raise ConfigError(
-                "BRAIN_CAPTURE_CONTENT_TYPE must be a non-blank string "
-                f"(got {capture_ct_raw!r})"
-            )
-        else:
-            capture_content_type = capture_ct_raw.strip()
-
         capture_words_raw = os.environ.get("BRAIN_CAPTURE_TITLE_WORDS")
         if capture_words_raw is None or capture_words_raw.strip() == "":
             capture_title_words = DEFAULT_CAPTURE_TITLE_WORDS
@@ -1225,7 +1205,6 @@ class Config:
             "vector_sim_floor": vector_sim_floor,
             "owner_participants": owner_participants,
             "people_hub_min_docs": people_hub_min_docs,
-            "capture_content_type": capture_content_type,
             "capture_title_words": capture_title_words,
             "capture_inbox_warn_threshold": capture_inbox_warn_threshold,
             "recency_halflife_days": recency_halflife_days,

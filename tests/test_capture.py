@@ -7,7 +7,7 @@ from datetime import date
 
 import pytest
 
-from brain.capture import make_capture_doc, make_capture_title, slugify_title
+from brain.capture import make_capture_title, slugify_title
 
 # ---------------------------------------------------------------------------
 # slugify_title
@@ -66,42 +66,3 @@ def test_make_capture_title_format_with_frozen_date() -> None:
         max_words=6,
     )
     assert out == "2026-06-04-capture-follow-up-with-person-a-re-project-ko"
-
-
-# ---------------------------------------------------------------------------
-# make_capture_doc
-# ---------------------------------------------------------------------------
-
-
-def test_make_capture_doc_field_correctness() -> None:
-    """Doc carries stripped title/content, the content_type, no source_path,
-    and normalized tags recorded under ``metadata['tags']``."""
-    doc = make_capture_doc(
-        "  some body text  ",
-        "  My Title  ",
-        "note",
-        ["inbox", "Foo"],
-    )
-    assert doc.title == "My Title"
-    assert doc.content == "some body text"
-    assert doc.content_type == "note"
-    assert doc.source_path is None
-    assert doc.metadata == {"tags": ["inbox", "foo"]}
-
-
-def test_make_capture_doc_no_tags_yields_empty_metadata() -> None:
-    """With no tags the doc metadata is left empty (no stray keys)."""
-    doc = make_capture_doc("body", "Title", "note", [])
-    assert doc.metadata == {}
-
-
-def test_make_capture_doc_rejects_empty_content() -> None:
-    """Whitespace-only content is a ValueError (caller should guard first)."""
-    with pytest.raises(ValueError, match="content is empty"):
-        make_capture_doc("   ", "Title", "note", [])
-
-
-def test_make_capture_doc_rejects_missing_title() -> None:
-    """A None/blank title is a ValueError — the caller resolves the auto-title."""
-    with pytest.raises(ValueError, match="title is required"):
-        make_capture_doc("body", None, "note", [])

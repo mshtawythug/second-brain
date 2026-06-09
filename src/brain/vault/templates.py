@@ -62,6 +62,7 @@ for vault-tier notes; the `brain` CLI keeps a Postgres index in sync.
 - `_templates/` — note templates (`daily.md`, `note.md`)
 - `_attachments/` — binary files referenced by notes
 - `_ingested/` — read-only mirrors of DB-authoritative artifacts
+- `capture/` — quick-capture inbox (`brain capture` lands authored thoughts here)
 - `daily/<YYYY>/<YYYY-MM-DD>.md` — daily notes
 - (anything else) — your authored notes
 
@@ -69,6 +70,14 @@ for vault-tier notes; the `brain` CLI keeps a Postgres index in sync.
 
 Every `.md` file has a YAML frontmatter block with at minimum `id` and `title`.
 `brain vault sync` auto-assigns `id` on first sight if missing.
+"""
+
+CAPTURE_README = """\
+# Capture inbox
+
+Quick-capture inbox — `brain capture` lands authored thoughts here, tagged `inbox`.
+
+Review and route captures with `brain capture review`.
 """
 
 # ``{{ name }}`` — surrounding whitespace inside the braces is tolerated so
