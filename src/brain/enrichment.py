@@ -35,8 +35,9 @@ from typing import Any
 import httpx
 import tiktoken
 
+from .chat import ChatMessage, chat_json_with_client
 from .config import Config
-from .errors import EnrichmentError, OllamaUnavailable
+from .errors import EnrichmentError
 from .tags import normalize_tags
 
 _logger = logging.getLogger(__name__)
@@ -659,116 +660,27 @@ class OllamaEnricher:
     ) -> dict[str, Any]:
         """Issue an ``/api/chat`` JSON-mode call with one retry on parse failure.
 
-        Returns the parsed JSON object on success. Raises
-        :class:`OllamaUnavailable` on transient transport errors (no retry
-        — fail fast so callers can skip). Raises :class:`EnrichmentError`
-        when two consecutive attempts fail JSON parsing / schema validation.
+        Thin adapter over the shared transport + retry core in
+        :func:`brain.chat.chat_json_with_client`. Preserves the enricher's
+        exact two-message (system + user) wire shape and its persistent
+        injected ``httpx.Client`` (the retry / truncation-bump / transport
+        error policy lives once, in ``chat``). Returns the parsed JSON object;
+        raises :class:`~brain.errors.OllamaUnavailable` on transport failure
+        (no retry) and :class:`EnrichmentError` on two consecutive bad
+        responses — the unchanged contract every caller depends on.
         """
-        last_error: Exception | None = None
-        current_num_predict = num_predict
-        for attempt in (1, 2):
-            try:
-                response_text = self._chat_once(
-                    system=system, user=user, num_predict=current_num_predict
-                )
-            except OllamaUnavailable:
-                # Transient — propagate immediately, no retry.
-                raise
-            try:
-                parsed = json.loads(response_text)
-            except json.JSONDecodeError as exc:
-                last_error = exc
-                # Truncation: the model exhausted ``num_predict`` mid-string.
-                # Same budget would re-truncate deterministically; double it
-                # for the retry so the next call can complete. Schema/non-dict
-                # failures don't trigger the bump.
-                if "Unterminated" in exc.msg:
-                    current_num_predict *= 2
-                _logger.debug(
-                    "enricher chat attempt %d: JSON decode failed (%s); response=%r",
-                    attempt,
-                    exc,
-                    response_text[:200],
-                )
-                continue
-            if not isinstance(parsed, dict):
-                last_error = EnrichmentError(
-                    f"chat returned non-object JSON: {parsed!r}"
-                )
-                continue
-            missing = [k for k in schema_keys if k not in parsed]
-            if missing:
-                last_error = EnrichmentError(
-                    f"chat response missing required keys {missing}: {parsed!r}"
-                )
-                continue
-            return parsed
-        # Both attempts failed.
-        assert last_error is not None
-        raise EnrichmentError(
-            f"enrichment failed after 2 attempts: {last_error}"
-        ) from last_error
-
-    def _chat_once(self, *, system: str, user: str, num_predict: int = 256) -> str:
-        """Single ``/api/chat`` round-trip returning the inner content string.
-
-        Returns the ``message.content`` field verbatim so the caller can
-        ``json.loads`` it. Maps transport-layer failures to
-        :class:`OllamaUnavailable` (CLAUDE.md "no bare except" — only
-        ``httpx.HTTPError`` and ``ValueError`` are caught here, matching the
-        embedder's pattern). ``num_predict`` caps the completion length
-        (default 256 for summary/tag; the concept extractor passes a larger
-        budget for long entity lists).
-        """
-        request_body = {
-            "model": self._model,
-            "stream": False,
-            "format": "json",
-            "keep_alive": self._keep_alive,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "options": {"temperature": 0.0, "num_predict": num_predict},
-        }
-        try:
-            response = self._client.post("/api/chat", json=request_body)
-            response.raise_for_status()
-            payload = response.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code if exc.response is not None else 0
-            body_preview = (
-                exc.response.text[:200] if exc.response is not None else "<no body>"
-            )
-            if status >= 500:
-                raise OllamaUnavailable(
-                    f"Ollama returned HTTP {status}: {body_preview}"
-                ) from exc
-            # 4xx — permanent (bad model name, malformed request).
-            raise EnrichmentError(
-                f"Ollama returned HTTP {status}: {body_preview}"
-            ) from exc
-        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
-            raise OllamaUnavailable(f"Ollama unreachable: {exc}") from exc
-        except httpx.HTTPError as exc:
-            raise OllamaUnavailable(f"Ollama transport error: {exc}") from exc
-        except ValueError as exc:
-            # json.JSONDecodeError is a ValueError — a 200 OK with non-JSON
-            # body leaks as a raw decode error otherwise.
-            raise EnrichmentError(
-                f"Ollama returned non-JSON envelope: {exc}"
-            ) from exc
-        message = payload.get("message") if isinstance(payload, dict) else None
-        if not isinstance(message, dict):
-            raise EnrichmentError(
-                f"Ollama response missing 'message': {payload!r}"
-            )
-        content = message.get("content")
-        if not isinstance(content, str):
-            raise EnrichmentError(
-                f"Ollama message.content is not a string: {message!r}"
-            )
-        return content
+        messages: list[ChatMessage] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        return chat_json_with_client(
+            self._client,
+            model=self._model,
+            messages=messages,
+            required_keys=schema_keys,
+            keep_alive=self._keep_alive,
+            num_predict=num_predict,
+        )
 
 
 def make_enricher(cfg: Config) -> OllamaEnricher:
