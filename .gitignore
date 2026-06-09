@@ -35,6 +35,10 @@ logs/
 # Never tracked.
 run/
 
+# Playwright MCP server scratch dir (browser-automation traces/screenshots/session
+# state from MCP browser tool runs). Transient local artifact — never tracked.
+.playwright-mcp/
+
 # Brainstorm artifacts (kept local-only — can contain PII / personal references)
 .superpowers/
 
