@@ -28,6 +28,7 @@ from .enrichment import ContradictionVerdict, OllamaEnricher, make_enricher
 from .errors import (
     BrainError,
     ConnectError,
+    EnrichmentError,
     GraphBackendError,
     GraphReconcileError,
     GraphTenantError,
@@ -36,6 +37,7 @@ from .errors import (
     IdPrefixNotHex,
     IdPrefixTooShort,
     InteractionError,
+    OllamaUnavailable,
     PersonAmbiguous,
     PersonNotFound,
     ReviewError,
@@ -75,6 +77,7 @@ from .search import hybrid_search
 from .tags import normalize_tags
 
 if TYPE_CHECKING:
+    from .ask import AskResult
     from .graph_rag.reconcile import ReconcileConfig
     from .graph_rag.schema import GraphContext
 from .vault.frontmatter import (
@@ -1535,6 +1538,145 @@ def brain_brief(
         if suggestions:
             data = replace(data, suggestions=suggestions)
     return data.to_dict()
+
+
+def _log_ask_interactions_mcp(
+    conn: psycopg.Connection[Any], result: "AskResult"
+) -> None:
+    """Best-effort: one ``opened`` interaction per emitted citation (source=mcp).
+
+    Document rows only (``document_id`` set, ``target_type`` unset). A logging
+    failure is warned + swallowed so the answer still returns (mirrors
+    ``brain_show``'s never-raise interaction discipline)."""
+    try:
+        session_uuid: uuid.UUID | None = uuid.UUID(result.session_id)
+    except ValueError:
+        session_uuid = None
+    for citation in result.citations:
+        try:
+            record_interaction(
+                conn,
+                document_id=citation.document_id,
+                action="opened",
+                source="mcp",
+                session_id=session_uuid,
+            )
+        except (psycopg.Error, InteractionError) as log_exc:
+            logger.warning(
+                "brain_ask: interaction logging failed: %s",
+                type(log_exc).__name__,
+            )
+
+
+@mcp_app.tool()
+def brain_ask(
+    question: str,
+    mode: str = "hybrid",
+    no_loop: bool = False,
+    limit: int | None = None,
+    max_iterations: int | None = None,
+) -> dict[str, Any]:
+    """Agentic multi-hop cited answer synthesis over the second brain.
+
+    Unlike ``brain_search`` (which returns a ranked list you must read and
+    synthesize yourself), this plans sub-queries, retrieves across iterations,
+    optionally reflects to fill coverage gaps, and returns a single direct
+    ANSWER with inline ``[N]`` citations into your documents. Reach for it on
+    multi-hop / synthesis questions like "what did I learn negotiating across my
+    job searches?" or "what did we decide about the data pipeline?".
+
+    ``mode``: ``hybrid`` (vector/FTS only, default) | ``auto`` (graph router) |
+    ``fuse`` (RRF of graph + hybrid) | ``local`` (graph entity-centric). The
+    three graph modes require the Apache AGE image. ``no_loop`` skips
+    plan/reflect for a single fast retrieve+synthesize pass. ``max_iterations``
+    defaults to ``cfg.ask_max_iterations``.
+
+    Returns ``{answer, citations[], iterations_used, sub_queries[],
+    fallback_used, session_id}``. Requires a local Ollama for the LLM steps; an
+    unavailable Ollama surfaces as ``INTERNAL_ERROR`` (start it and retry). A
+    bad ``mode`` is ``INVALID_PARAMS``. Document snippets only reach the LLM —
+    never full bodies.
+    """
+    from .ask import ASK_MODES, HYBRID_MODE
+    from .ask import ask as run_ask
+    from .chat import chat_json
+
+    state = _get_state()
+    if mode not in ASK_MODES:
+        raise _mcp_error(
+            INVALID_PARAMS,
+            f"mode must be one of: {', '.join(sorted(ASK_MODES))}",
+        )
+    if max_iterations is not None and max_iterations < 1:
+        raise _mcp_error(
+            INVALID_PARAMS, "max_iterations must be >= 1"
+        )
+    if limit is not None and limit < 1:
+        raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
+    resolved_max_iter = (
+        max_iterations
+        if max_iterations is not None
+        else state.cfg.ask_max_iterations
+    )
+    resolved_limit = limit if limit is not None else state.cfg.ask_docs_per_iter
+
+    try:
+        if mode == HYBRID_MODE:
+            with _mcp_conn(state) as conn:
+                conn.autocommit = True
+                result = run_ask(
+                    conn,
+                    state.cfg,
+                    embedder=state.embedder,
+                    chat=chat_json,
+                    question=question,
+                    mode=mode,
+                    no_loop=no_loop,
+                    limit=resolved_limit,
+                    max_iterations=resolved_max_iter,
+                )
+                _log_ask_interactions_mcp(conn, result)
+        else:
+            from .graph_rag.backends import AgeBackend
+
+            with connect_age(state.cfg.database_url) as conn:
+                conn.autocommit = True
+                _require_age_or_mcp_error(conn)
+                backend = AgeBackend()
+                backend.bootstrap(conn)
+                result = run_ask(
+                    conn,
+                    state.cfg,
+                    embedder=state.embedder,
+                    chat=chat_json,
+                    question=question,
+                    mode=mode,
+                    no_loop=no_loop,
+                    limit=resolved_limit,
+                    max_iterations=resolved_max_iter,
+                    backend=backend,
+                )
+                _log_ask_interactions_mcp(conn, result)
+    except OllamaUnavailable as exc:
+        raise _mcp_error(
+            INTERNAL_ERROR,
+            "Ollama is not running — start it (e.g. `brew services start "
+            f"ollama`) and retry. ({type(exc).__name__})",
+        ) from exc
+    except EnrichmentError as exc:
+        raise _mcp_error(
+            INTERNAL_ERROR, f"answer synthesis failed: {type(exc).__name__}"
+        ) from exc
+    except (GraphTenantError, GraphBackendError) as exc:
+        raise _mcp_error(
+            INTERNAL_ERROR, f"graph retrieval failed: {type(exc).__name__}"
+        ) from exc
+    except ValueError as exc:
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+
+    return result.to_dict()
 
 
 @mcp_app.tool()

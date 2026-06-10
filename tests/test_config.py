@@ -1065,3 +1065,69 @@ class TestConnectKnobs:
         monkeypatch.setenv("BRAIN_CONNECT_MAX_PER_DOC", "lots")
         with pytest.raises(ConfigError, match="integer >= 1"):
             Config.load()
+class TestAskKnobs:
+    """Env parsing for the Plan 06 ``BRAIN_ASK_*`` knobs."""
+
+    def test_defaults(self, monkeypatch, isolated_dotenv) -> None:
+        from brain.config import (
+            DEFAULT_ASK_DOCS_PER_ITER,
+            DEFAULT_ASK_MAX_ITERATIONS,
+            DEFAULT_ASK_TIMEOUT_SECONDS,
+            DEFAULT_ENRICH_MODEL,
+        )
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        for var in (
+            "BRAIN_ASK_MAX_ITERATIONS",
+            "BRAIN_ASK_DOCS_PER_ITER",
+            "BRAIN_ASK_MODEL",
+            "BRAIN_ASK_TIMEOUT_SECONDS",
+            "BRAIN_ENRICH_MODEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        cfg = Config.load()
+        assert cfg.ask_max_iterations == DEFAULT_ASK_MAX_ITERATIONS == 3
+        assert cfg.ask_docs_per_iter == DEFAULT_ASK_DOCS_PER_ITER == 5
+        assert cfg.ask_timeout_seconds == DEFAULT_ASK_TIMEOUT_SECONDS == 90.0
+        # ask_model inherits the enrich model when unset.
+        assert cfg.ask_model == DEFAULT_ENRICH_MODEL
+
+    def test_ask_model_inherits_enrich_model(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_ENRICH_MODEL", "custom-model:latest")
+        monkeypatch.delenv("BRAIN_ASK_MODEL", raising=False)
+        assert Config.load().ask_model == "custom-model:latest"
+
+    def test_ask_model_override(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_ENRICH_MODEL", "enrich-model:latest")
+        monkeypatch.setenv("BRAIN_ASK_MODEL", "ask-model:latest")
+        assert Config.load().ask_model == "ask-model:latest"
+
+    def test_max_iterations_zero_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_ASK_MAX_ITERATIONS", "0")
+        with pytest.raises(ConfigError, match="positive integer"):
+            Config.load()
+
+    def test_docs_per_iter_non_numeric_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_ASK_DOCS_PER_ITER", "lots")
+        with pytest.raises(ConfigError, match="positive integer"):
+            Config.load()
+
+    def test_timeout_zero_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_ASK_TIMEOUT_SECONDS", "0")
+        with pytest.raises(ConfigError, match="positive float"):
+            Config.load()
+
+    def test_valid_overrides_honored(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_ASK_MAX_ITERATIONS", "5")
+        monkeypatch.setenv("BRAIN_ASK_DOCS_PER_ITER", "8")
+        monkeypatch.setenv("BRAIN_ASK_TIMEOUT_SECONDS", "120")
+        cfg = Config.load()
+        assert cfg.ask_max_iterations == 5
+        assert cfg.ask_docs_per_iter == 8
+        assert cfg.ask_timeout_seconds == 120.0

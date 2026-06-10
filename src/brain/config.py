@@ -298,6 +298,23 @@ DEFAULT_REVIEW_STALE_AGE_DAYS = 365
 DEFAULT_REVIEW_STALE_SUPERSEDE_WINDOW_DAYS = 90
 DEFAULT_REVIEW_STALE_SIM_FLOOR = 0.60
 DEFAULT_REVIEW_STALE_LIMIT = 200
+# Plan 06 -- `brain ask` agentic-synthesis knobs.
+#
+# ``DEFAULT_ASK_MAX_ITERATIONS`` is the hard cap on plan/retrieve/reflect loop
+# iterations when ``--no-loop`` is not given. 3 covers the initial plan plus two
+# reflect-driven follow-up rounds -- enough for multi-hop coverage without
+# unbounded Ollama latency. Override via ``BRAIN_ASK_MAX_ITERATIONS`` (int >= 1).
+DEFAULT_ASK_MAX_ITERATIONS = 3
+
+# Max documents retrieved per sub-query per iteration. Mirrors the search
+# ``--limit`` default. Override via ``BRAIN_ASK_DOCS_PER_ITER`` (int >= 1).
+DEFAULT_ASK_DOCS_PER_ITER = 5
+
+# Ollama HTTP timeout (seconds) for each ask plan/reflect/synthesize chat call.
+# 90 s gives headroom for a cold-model swap-in on the first (plan) call plus the
+# longer synthesize completion without spiraling. Override via
+# ``BRAIN_ASK_TIMEOUT_SECONDS`` (float > 0).
+DEFAULT_ASK_TIMEOUT_SECONDS = 90.0
 
 
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
@@ -613,6 +630,15 @@ class Config:
     review_stale_supersede_window_days: int = DEFAULT_REVIEW_STALE_SUPERSEDE_WINDOW_DAYS
     review_stale_sim_floor: float = DEFAULT_REVIEW_STALE_SIM_FLOOR
     review_stale_limit: int = DEFAULT_REVIEW_STALE_LIMIT
+    # Plan 06 -- `brain ask` agentic-synthesis knobs. ``ask_max_iterations`` and
+    # ``ask_docs_per_iter`` are positive ints (>= 1); ``ask_timeout_seconds`` is
+    # a positive float; ``ask_model`` defaults to ``enrich_model`` (blank env
+    # resets to that default), so the ask loop reuses the configured chat model
+    # unless explicitly overridden via ``BRAIN_ASK_MODEL``.
+    ask_max_iterations: int = DEFAULT_ASK_MAX_ITERATIONS
+    ask_docs_per_iter: int = DEFAULT_ASK_DOCS_PER_ITER
+    ask_model: str = DEFAULT_ENRICH_MODEL
+    ask_timeout_seconds: float = DEFAULT_ASK_TIMEOUT_SECONDS
 
     @classmethod
     def load(cls) -> "Config":
@@ -1617,6 +1643,68 @@ class Config:
         review_stale_limit = _parse_positive_int_env(
             "BRAIN_REVIEW_STALE_LIMIT", DEFAULT_REVIEW_STALE_LIMIT
         )
+        # Plan 06 -- `brain ask` knobs. Same eager-validation pattern as the
+        # enrich / timeline knobs above: unset/blank -> default; non-parseable /
+        # out-of-range -> ConfigError so a typo surfaces at startup, not mid-loop.
+        ask_max_iter_raw = os.environ.get("BRAIN_ASK_MAX_ITERATIONS")
+        if ask_max_iter_raw is None or ask_max_iter_raw.strip() == "":
+            ask_max_iterations = DEFAULT_ASK_MAX_ITERATIONS
+        else:
+            try:
+                ask_max_iterations = int(ask_max_iter_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ASK_MAX_ITERATIONS must be a positive integer "
+                    f"(got {ask_max_iter_raw!r})"
+                ) from exc
+            if ask_max_iterations < 1:
+                raise ConfigError(
+                    f"BRAIN_ASK_MAX_ITERATIONS must be a positive integer "
+                    f"(got {ask_max_iter_raw!r})"
+                )
+
+        ask_docs_raw = os.environ.get("BRAIN_ASK_DOCS_PER_ITER")
+        if ask_docs_raw is None or ask_docs_raw.strip() == "":
+            ask_docs_per_iter = DEFAULT_ASK_DOCS_PER_ITER
+        else:
+            try:
+                ask_docs_per_iter = int(ask_docs_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ASK_DOCS_PER_ITER must be a positive integer "
+                    f"(got {ask_docs_raw!r})"
+                ) from exc
+            if ask_docs_per_iter < 1:
+                raise ConfigError(
+                    f"BRAIN_ASK_DOCS_PER_ITER must be a positive integer "
+                    f"(got {ask_docs_raw!r})"
+                )
+
+        # ``ask_model`` inherits ``enrich_model`` when unset/blank (the locked
+        # default per the plan's config table) so the ask loop reuses the same
+        # chat model as enrichment unless explicitly overridden.
+        ask_model_raw = os.environ.get("BRAIN_ASK_MODEL")
+        if ask_model_raw is None or ask_model_raw.strip() == "":
+            ask_model = enrich_model
+        else:
+            ask_model = ask_model_raw.strip()
+
+        ask_timeout_raw = os.environ.get("BRAIN_ASK_TIMEOUT_SECONDS")
+        if ask_timeout_raw is None or ask_timeout_raw.strip() == "":
+            ask_timeout_seconds = DEFAULT_ASK_TIMEOUT_SECONDS
+        else:
+            try:
+                ask_timeout_seconds = float(ask_timeout_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_ASK_TIMEOUT_SECONDS must be a positive float "
+                    f"(got {ask_timeout_raw!r})"
+                ) from exc
+            if ask_timeout_seconds <= 0:
+                raise ConfigError(
+                    f"BRAIN_ASK_TIMEOUT_SECONDS must be a positive float "
+                    f"(got {ask_timeout_raw!r})"
+                )
 
         return {
             # brain_home resolves via default_factory=_brain_home_root.
@@ -1691,4 +1779,8 @@ class Config:
             "review_stale_supersede_window_days": review_stale_supersede_window_days,
             "review_stale_sim_floor": review_stale_sim_floor,
             "review_stale_limit": review_stale_limit,
+            "ask_max_iterations": ask_max_iterations,
+            "ask_docs_per_iter": ask_docs_per_iter,
+            "ask_model": ask_model,
+            "ask_timeout_seconds": ask_timeout_seconds,
         }
