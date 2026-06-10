@@ -60,6 +60,7 @@ from .errors import (
     OllamaUnavailable,
     PersonAmbiguous,
     PersonNotFound,
+    ReviewError,
     VaultNoteSyncError,
 )
 
@@ -3892,6 +3893,278 @@ def review_weekly(
     if not no_emit:
         path = emit_weekly_page(cfg.vault_path, report)
         typer.echo(f"Wrote {path}")
+
+
+_REVIEW_KIND_MAP: dict[str, tuple[str, ...]] = {
+    "all": ("contradiction", "stale"),
+    "conflicts": ("contradiction",),
+    "stale": ("stale",),
+}
+# Human-facing label per signal_kind, for the [CONFLICT] / [STALE] line prefix.
+_REVIEW_KIND_LABELS: dict[str, str] = {
+    "contradiction": "CONFLICT",
+    "stale": "STALE",
+}
+
+
+def _resolve_review_kinds(kind: str) -> tuple[str, ...]:
+    """Map the ``--kind`` flag to the signal_kinds it filters to."""
+    try:
+        return _REVIEW_KIND_MAP[kind.strip().lower()]
+    except KeyError as exc:
+        raise typer.BadParameter(
+            "must be one of conflicts/stale/all", param_hint="--kind"
+        ) from exc
+
+
+def _print_review_findings(findings: list[Any]) -> None:
+    """Print scan findings in the human-readable ``[CONFLICT] / [STALE]`` form."""
+    if not findings:
+        typer.echo("No findings.")
+        return
+    for finding in findings:
+        label = _REVIEW_KIND_LABELS.get(finding.kind, finding.kind.upper())
+        typer.echo(
+            f"[{label}] {finding.target_type}: {finding.target_id}  "
+            f"score: {finding.score:.2f}"
+        )
+        evidence = ", ".join(e[:8] for e in finding.evidence_ids)
+        typer.echo(f"  evidence: {evidence}")
+        typer.echo(f"  rationale: {finding.rationale}")
+
+
+@review_app.command("scan")
+def review_scan(
+    conflicts: bool = typer.Option(
+        False, "--conflicts", help="Run the contradiction scan."
+    ),
+    stale: bool = typer.Option(False, "--stale", help="Run the staleness scan."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Compute findings without writing to the queue."
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", help="Cap entity candidates for the conflict scan."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Newline-delimited JSON, one finding per line."
+    ),
+) -> None:
+    """Scan for contradictory or stale notes, surfacing findings into the queue.
+
+    Passing neither ``--conflicts`` nor ``--stale`` runs both. The contradiction
+    scan is gated on ``BRAIN_ELICIT_CONTRADICTION_ENABLED`` (default off) and
+    needs Ollama; the staleness scan needs neither. ``--dry-run`` computes and
+    prints findings without writing to ``elicitation_gaps``.
+    """
+    from dataclasses import replace
+
+    from .review import run_staleness_scan
+    from .review.queries import (
+        count_conflict_docs_missing_summary,
+        count_stale_docs_missing_summary,
+    )
+
+    cfg = _load_config_or_exit()
+    run_conflicts = conflicts or not (conflicts or stale)
+    run_stale = stale or not (conflicts or stale)
+    if limit is not None:
+        if limit < 1:
+            raise typer.BadParameter("must be >= 1", param_hint="--limit")
+        cfg = replace(cfg, review_conflict_limit=limit)
+
+    tenant = cfg.graph_tenant_id
+    embedder = _build_embedder(cfg)
+    findings: list[Any] = []
+    try:
+        with connect(cfg.database_url) as conn:
+            conn.autocommit = True
+            if run_conflicts:
+                findings.extend(
+                    _run_conflict_leg(
+                        conn, cfg, embedder, tenant=tenant, dry_run=dry_run
+                    )
+                )
+                if dry_run:
+                    _warn_skipped_no_summary(
+                        count_conflict_docs_missing_summary(conn, tenant_id=tenant)
+                    )
+            if run_stale:
+                findings.extend(
+                    run_staleness_scan(
+                        conn, embedder, cfg, tenant_id=tenant, dry_run=dry_run
+                    )
+                )
+                if dry_run:
+                    _warn_skipped_no_summary(
+                        count_stale_docs_missing_summary(
+                            conn, stale_age_days=cfg.review_stale_age_days
+                        )
+                    )
+    except psycopg.Error as exc:
+        typer.secho(f"Database error: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        # Newline-delimited JSON: one compact object per finding.
+        for finding in findings:
+            typer.echo(
+                _json.dumps(
+                    {
+                        "kind": finding.kind,
+                        "target_type": finding.target_type,
+                        "target_id": finding.target_id,
+                        "score": finding.score,
+                        "rationale": finding.rationale,
+                        "evidence_ids": finding.evidence_ids,
+                    }
+                )
+            )
+        return
+    _print_review_findings(findings)
+
+
+def _run_conflict_leg(
+    conn: psycopg.Connection[Any],
+    cfg: Config,
+    embedder: Any,
+    *,
+    tenant: str,
+    dry_run: bool,
+) -> list[Any]:
+    """Run the contradiction scan with gating + partial-failure handling.
+
+    Gated on ``BRAIN_ELICIT_CONTRADICTION_ENABLED`` (prints a warning + returns
+    empty when off) and on Ollama reachability. A mid-scan
+    :class:`ReviewError` (Ollama dropped) is downgraded to the partial findings
+    already written, with a warning — never a crash.
+    """
+    from .review import run_conflict_scan
+
+    if not cfg.elicit_contradiction_enabled:
+        typer.secho(
+            "contradiction scan is disabled (set "
+            "BRAIN_ELICIT_CONTRADICTION_ENABLED=true to enable).",
+            fg="yellow",
+            err=True,
+        )
+        return []
+    if not _ollama_reachable(cfg):
+        typer.secho(
+            f"contradiction scan needs Ollama; skipping "
+            f"(unreachable at {cfg.ollama_host}).",
+            fg="yellow",
+            err=True,
+        )
+        return []
+    enricher = _build_enricher(cfg)
+    try:
+        return list(
+            run_conflict_scan(
+                conn, enricher, embedder, cfg, tenant_id=tenant, dry_run=dry_run
+            )
+        )
+    except ReviewError as exc:
+        typer.secho(
+            f"Ollama unavailable — partial scan "
+            f"({exc.processed} of {exc.total} entities processed).",
+            fg="yellow",
+            err=True,
+        )
+        return list(exc.findings)
+
+
+def _warn_skipped_no_summary(count: int) -> None:
+    """Emit the ``N doc(s) skipped: no summary`` nudge when ``count`` is nonzero."""
+    if count:
+        typer.secho(
+            f"{count} doc(s) skipped: no summary "
+            "(run `brain enrich --backfill` to include them).",
+            fg="yellow",
+            err=True,
+        )
+
+
+@review_app.command("list")
+def review_list(
+    kind: str = typer.Option(
+        "all", "--kind", help="Filter findings: conflicts|stale|all."
+    ),
+    limit: int = typer.Option(20, "--limit", "-n", help="Max findings to show."),
+    json_output: bool = typer.Option(False, "--json", help="Emit a JSON array."),
+) -> None:
+    """Show the current review queue (contradiction + staleness findings)."""
+    from rich.console import Console
+    from rich.table import Table
+
+    from .review.queries import list_review_queue
+
+    cfg = _load_config_or_exit()
+    kinds = _resolve_review_kinds(kind)
+    with connect(cfg.database_url) as conn:
+        rows = list_review_queue(
+            conn, tenant_id=cfg.graph_tenant_id, signal_kinds=kinds, limit=limit
+        )
+
+    if json_output:
+        emit_json(
+            [
+                {
+                    "id": r.id,
+                    "kind": r.signal_kind,
+                    "target_type": r.target_type,
+                    "target_id": r.target_id,
+                    "score": r.score,
+                    "rationale": r.rationale,
+                    "evidence_ids": r.evidence_ids,
+                    "status": r.status,
+                }
+                for r in rows
+            ]
+        )
+        return
+
+    if not rows:
+        typer.echo("No findings in review queue.")
+        return
+
+    console = Console()
+    table = Table(title="Review Queue", show_lines=False)
+    table.add_column("ID", style="dim", width=10)
+    table.add_column("Kind", style="cyan", min_width=12)
+    table.add_column("Target", min_width=16)
+    table.add_column("Score", justify="right", width=7)
+    table.add_column("Rationale", overflow="fold")
+    for r in rows:
+        rationale = r.rationale or ""
+        if len(rationale) > 70:
+            rationale = rationale[:70].rstrip() + "…"
+        table.add_row(
+            r.id[:8],
+            _REVIEW_KIND_LABELS.get(r.signal_kind, r.signal_kind),
+            r.target_id,
+            f"{r.score:.2f}",
+            rationale,
+        )
+    console.print(table)
+
+
+@review_app.command("dismiss")
+def review_dismiss(
+    id_prefix: str = typer.Argument(..., help="ID prefix of the finding to dismiss."),
+) -> None:
+    """Dismiss a review finding (sets ``status='dismissed'``; idempotent)."""
+    from .review.queries import dismiss_review_finding
+
+    cfg = _load_config_or_exit()
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        try:
+            finding_id = dismiss_review_finding(
+                conn, tenant_id=cfg.graph_tenant_id, id_prefix=id_prefix
+            )
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc), param_hint="id-prefix") from exc
+    typer.echo(f"Dismissed {finding_id}.")
 
 
 def _print_brief(data: Any) -> None:

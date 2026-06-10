@@ -23,7 +23,7 @@ from . import capture as capture_mod
 from .config import Config
 from .db import PersistentConnection, age_extension_available, connect, connect_age
 from .embeddings import OllamaEmbedError, make_embedder
-from .enrichment import OllamaEnricher, make_enricher
+from .enrichment import ContradictionVerdict, OllamaEnricher, make_enricher
 from .errors import (
     BrainError,
     GraphBackendError,
@@ -36,6 +36,7 @@ from .errors import (
     InteractionError,
     PersonAmbiguous,
     PersonNotFound,
+    ReviewError,
     VaultNoteSyncError,
 )
 from .format import (
@@ -1312,6 +1313,178 @@ def brain_review_weekly(
             ) from e
 
     return render_weekly_json(report)
+
+
+class _CountingAssessor:
+    """Wrap an enricher to count ``assess_contradiction`` calls (MCP ``llm_calls``).
+
+    Satisfies :class:`brain.review.scans.ContradictionAssessor` structurally so
+    it drops into ``run_conflict_scan`` without the scan layer importing the
+    concrete enricher.
+    """
+
+    def __init__(self, inner: OllamaEnricher) -> None:
+        self._inner = inner
+        self.calls = 0
+
+    def assess_contradiction(
+        self, *, subject: str, summaries: list[str]
+    ) -> ContradictionVerdict:
+        self.calls += 1
+        return self._inner.assess_contradiction(subject=subject, summaries=summaries)
+
+
+_REVIEW_SCAN_TYPES = ("conflicts", "stale", "all")
+_REVIEW_LIST_KINDS: dict[str, tuple[str, ...]] = {
+    "all": ("contradiction", "stale"),
+    "conflicts": ("contradiction",),
+    "stale": ("stale",),
+}
+
+
+def _review_finding_to_dict(finding: Any) -> dict[str, Any]:
+    """Serialize a scan :class:`ReviewFinding` to the MCP finding shape."""
+    return {
+        "kind": finding.kind,
+        "target_type": finding.target_type,
+        "target_id": finding.target_id,
+        "score": finding.score,
+        "rationale": finding.rationale,
+        "evidence_ids": finding.evidence_ids,
+    }
+
+
+@mcp_app.tool()
+def brain_review_scan(
+    scan_type: str = "all",
+    dry_run: bool = False,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Run a contradiction / staleness scan, surfacing findings into the queue.
+
+    ``scan_type`` is ``"conflicts"`` | ``"stale"`` | ``"all"``. The conflict leg
+    is gated on ``BRAIN_ELICIT_CONTRADICTION_ENABLED`` + a wired Ollama enricher;
+    when unavailable it is skipped silently (no error). ``dry_run`` computes
+    findings without writing. ``limit`` caps conflict entity candidates. Returns
+    ``{findings, scanned, llm_calls}`` — ``scanned`` is the number of candidates
+    examined by the prefilters.
+    """
+    from dataclasses import replace
+
+    from .review import queries as review_queries
+    from .review import run_conflict_scan, run_staleness_scan
+
+    if scan_type not in _REVIEW_SCAN_TYPES:
+        raise _mcp_error(
+            INVALID_PARAMS, "scan_type must be one of conflicts|stale|all"
+        )
+    if limit < 1:
+        raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
+
+    state = _get_state()
+    cfg = replace(state.cfg, review_conflict_limit=limit)
+    tenant = cfg.graph_tenant_id
+    do_conflicts = scan_type in ("conflicts", "all")
+    do_stale = scan_type in ("stale", "all")
+    findings: list[Any] = []
+    scanned = 0
+    counter = (
+        _CountingAssessor(state.enricher) if state.enricher is not None else None
+    )
+    try:
+        with _mcp_conn(state) as conn:
+            if do_conflicts:
+                scanned += len(
+                    review_queries.iter_entities_for_conflict_scan(
+                        conn,
+                        tenant_id=tenant,
+                        min_docs=cfg.elicit_contradiction_min_docs,
+                        limit=cfg.review_conflict_limit,
+                    )
+                )
+                if cfg.elicit_contradiction_enabled and counter is not None:
+                    try:
+                        findings.extend(
+                            run_conflict_scan(
+                                conn,
+                                counter,
+                                state.embedder,
+                                cfg,
+                                tenant_id=tenant,
+                                dry_run=dry_run,
+                            )
+                        )
+                    except ReviewError as exc:
+                        findings.extend(exc.findings)
+            if do_stale:
+                scanned += len(
+                    review_queries.iter_docs_for_staleness_scan(
+                        conn,
+                        stale_age_days=cfg.review_stale_age_days,
+                        limit=cfg.review_stale_limit,
+                    )
+                )
+                findings.extend(
+                    run_staleness_scan(
+                        conn, state.embedder, cfg, tenant_id=tenant, dry_run=dry_run
+                    )
+                )
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+
+    return {
+        "findings": [_review_finding_to_dict(f) for f in findings],
+        "scanned": scanned,
+        "llm_calls": counter.calls if counter is not None else 0,
+    }
+
+
+@mcp_app.tool()
+def brain_review_findings_list(
+    kind: str = "all",
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Read the current review queue without scanning.
+
+    ``kind`` is ``"all"`` | ``"conflicts"`` | ``"stale"``. Returns
+    ``{findings: [...]}`` where each finding is
+    ``{kind, id, target_type, target_id, score, rationale, evidence_ids, status}``.
+    Named to avoid ambiguity with ``brain_review_weekly``.
+    """
+    from .review.queries import list_review_queue
+
+    if kind not in _REVIEW_LIST_KINDS:
+        raise _mcp_error(INVALID_PARAMS, "kind must be one of all|conflicts|stale")
+    if limit < 1:
+        raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
+
+    state = _get_state()
+    try:
+        with _mcp_conn(state) as conn:
+            rows = list_review_queue(
+                conn,
+                tenant_id=state.cfg.graph_tenant_id,
+                signal_kinds=_REVIEW_LIST_KINDS[kind],
+                limit=limit,
+            )
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+
+    return {
+        "findings": [
+            {
+                "kind": r.signal_kind,
+                "id": r.id,
+                "target_type": r.target_type,
+                "target_id": r.target_id,
+                "score": r.score,
+                "rationale": r.rationale,
+                "evidence_ids": r.evidence_ids,
+                "status": r.status,
+            }
+            for r in rows
+        ]
+    }
 
 
 @mcp_app.tool()
