@@ -72,6 +72,7 @@ from ._capture_command import _INBOX_TAG as _CAPTURE_INBOX_TAG
 from ._capture_command import capture_app
 from .cli_claude import SkillInstallError
 from .cli_claude import install_skill as _install_skill
+from .cli_connect import connect_app
 from .eval import (
     EvalBaselineError,
     EvalCorpusError,
@@ -280,6 +281,11 @@ app.add_typer(elicit_app, name="elicit")
 # Plan 09 — quick-capture inbox. Command logic lives in `_capture_command.py`
 # (cli.py is intentionally kept thin); review/list subcommands land in Phase 2.
 app.add_typer(capture_app, name="capture")
+
+# Plan 07 — proactive auto-link suggestions. Command logic lives in
+# `cli_connect.py`; scoring core in `connect.py`. Migration 020 is applied by
+# `brain init` automatically (run_migrations auto-discovers migrations/*.sql).
+app.add_typer(connect_app, name="connect")
 
 
 @app.callback()
