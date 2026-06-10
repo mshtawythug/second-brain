@@ -95,7 +95,9 @@ def record_search_query(
       the operator re-runs ``brain init`` must never break search itself
       (observed live against a pre-019 prod DB). The operator still sees the
       warning on every search until the migration is applied, and the
-      ``brain gaps`` surfaces fail loudly with the same hint.
+      ``brain gaps`` surfaces fail loudly with the same hint. The INSERT runs
+      inside its own ``conn.transaction()`` (savepoint when nested) so the
+      failure never poisons or rolls back the caller's transaction.
     - Any other schema/programming error **propagates** — those are real bugs
       that must surface visibly, never be silently eaten.
 
@@ -104,27 +106,31 @@ def record_search_query(
     path below) where local-only debugging is the explicit opt-in.
     """
     try:
-        conn.execute(
-            """
-            INSERT INTO search_queries
-                (tenant_id, query, result_count, session_id, source)
-            VALUES (%s, %s, %s, %s, %s)
-            """,
-            (
-                tenant_id,
-                query,
-                result_count,
-                str(session_id) if session_id is not None else None,
-                source,
-            ),
-        )
+        # The inner transaction() scopes the best-effort INSERT: a savepoint
+        # when the caller is already in a transaction, a plain transaction
+        # under autocommit. On failure only THIS insert rolls back — the
+        # caller's prior work and open transaction state are untouched (a
+        # bare conn.rollback() here would clobber both, and is forbidden
+        # inside an explicit conn.transaction() block).
+        with conn.transaction():
+            conn.execute(
+                """
+                INSERT INTO search_queries
+                    (tenant_id, query, result_count, session_id, source)
+                VALUES (%s, %s, %s, %s, %s)
+                """,
+                (
+                    tenant_id,
+                    query,
+                    result_count,
+                    str(session_id) if session_id is not None else None,
+                    source,
+                ),
+            )
     except psycopg.errors.UndefinedTable:
         # Migration 019 not applied yet (e.g. binary upgraded before `brain
         # init` re-ran). Search must keep working; nag until the operator
-        # migrates. The failed INSERT poisoned the transaction on
-        # non-autocommit connections — roll it back so the caller's
-        # connection stays usable for the rest of the command.
-        conn.rollback()
+        # migrates.
         logger.warning(
             "search-query logging skipped: search_queries table missing "
             "(migration 019 not applied) — run `brain init` to enable "

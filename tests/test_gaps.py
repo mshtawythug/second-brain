@@ -102,8 +102,9 @@ def test_record_search_query_undefined_table_swallowed_with_hint(
 
     Regression: observed live against a pre-019 prod DB — the propagating
     UndefinedTable aborted `brain search` with a traceback before results were
-    rendered. The contract is now: swallow, roll back the poisoned
-    transaction, and warn with an actionable `brain init` hint.
+    rendered. The contract is now: scope the INSERT in its own
+    conn.transaction() (savepoint when nested, so only the failed insert rolls
+    back), swallow, and warn with an actionable `brain init` hint.
     """
     conn = mock.MagicMock()
     conn.execute.side_effect = psycopg.errors.UndefinedTable(
@@ -115,7 +116,10 @@ def test_record_search_query_undefined_table_swallowed_with_hint(
             conn, query="anything", result_count=0,
             session_id=None, source="cli",
         )
-    conn.rollback.assert_called_once()
+    # The insert is scoped to its own transaction/savepoint; the caller's
+    # connection must never be rolled back directly.
+    conn.transaction.assert_called_once()
+    conn.rollback.assert_not_called()
     assert any("brain init" in r.getMessage() for r in caplog.records)
     # Privacy: the raw query string must not appear at WARNING level.
     assert not any("anything" in r.getMessage() for r in caplog.records)
