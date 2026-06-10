@@ -189,11 +189,15 @@ class GraphBackend(Protocol):
         co-entity``, excluding the seed. Returns the distinct co-mentioned
         entity set and the connecting document set, deterministically ordered.
 
-        **Complete-or-failure contract:** a scope is a *set*, so it is returned
-        COMPLETE or not at all. When more than ``frontier_cap`` co-mention rows
-        exist the implementation MUST raise :class:`GraphBackendError` rather
-        than returning a silently-truncated partial scope — never a silent
-        partial result.
+        **Bounded ranked-truncation contract:** when more than ``frontier_cap``
+        co-mention rows exist the implementation MUST keep the STRONGEST
+        ``frontier_cap`` worth of scope — co-entities ranked by co-mention
+        frequency with the seed (ties → newest shared document → entity id, a
+        total order for reproducibility) — rather than crash, so the headline
+        themes/audio surfaces stay usable for hub people. The truncation MUST
+        stay within the same bound the cap guaranteed (≤ ``frontier_cap`` rows
+        reach downstream) and MUST log a single actionable WARNING naming the
+        ``BRAIN_GRAPH_FRONTIER_CAP`` knob — never a silent partial result.
         """
         ...
 

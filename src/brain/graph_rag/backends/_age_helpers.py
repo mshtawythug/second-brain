@@ -15,6 +15,7 @@ pure move with no behavior change.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -24,6 +25,8 @@ from psycopg import sql
 
 from ...errors import GraphBackendError
 from .base import PersonScope
+
+_logger = logging.getLogger(__name__)
 
 # AGE graph names are SQL identifiers (they back a Postgres schema). The name is
 # a controlled config value, never user input, but it is embedded as a literal
@@ -261,13 +264,32 @@ def _scope_person_relational(
     :class:`~brain.graph_rag.backends.base.GraphBackend` is free to implement
     ``scope_person`` against its own store.
 
-    **Correctness-or-failure contract** (matches :meth:`AgeBackend.traverse`): a
-    scope is a *set*, so it is returned COMPLETE or not at all. The query fetches
-    one extra row (``LIMIT frontier_cap + 1``); if more than ``frontier_cap``
-    distinct ``(co-entity, document)`` rows exist, it raises
-    :class:`GraphBackendError` rather than returning a silently-truncated partial
-    scope. The returned ``entity_uuids`` / ``document_uuids`` are sorted
-    ascending so the result is deterministic regardless of row order.
+    **Bounded ranked-truncation contract** (DIFFERS from
+    :meth:`AgeBackend.traverse`): a scope is a *set*, and the cheap relational
+    two-hop above is the same indexed query downstream df/lift/grouping already
+    runs — so when a hub person's co-mention set exceeds ``frontier_cap`` the
+    right answer is to keep the STRONGEST ``frontier_cap`` worth of scope, not to
+    crash. The common (under-cap) path fetches one extra row
+    (``LIMIT frontier_cap + 1``) and, when within bounds, returns the COMPLETE
+    set unchanged — identical behavior + cost to the prior form, no extra query.
+    Only on overflow does it fall through to :func:`_scope_person_truncated`,
+    which ranks co-entities by co-mention frequency (ties → newest shared doc →
+    entity id) and keeps the strongest prefix whose cumulative ``(co-entity,
+    document)`` row count stays within ``frontier_cap`` — preserving the exact
+    downstream bound the safe-cap was introduced to guarantee (the df/lift/
+    grouping work stays ≤ ``frontier_cap`` rows), and logging ONE actionable
+    WARNING (kept/total counts + the ``BRAIN_GRAPH_FRONTIER_CAP`` knob). The
+    returned ``entity_uuids`` / ``document_uuids`` are sorted ascending so the
+    result is deterministic regardless of row order.
+
+    **Why this truncates while :meth:`AgeBackend.traverse` still raises:**
+    ``traverse`` runs a variable-length Cypher affinity walk whose cap protects
+    against genuine *path explosion* — it cannot ``ORDER BY`` true affinity in
+    AGE, so it must score every within-depth path and a pre-score ``LIMIT`` would
+    silently drop the highest-affinity entities. Here the ranking key
+    (co-mention frequency) is computable directly in indexed SQL, so a correct,
+    deterministic top-``frontier_cap`` selection is cheap — truncation is safe
+    and is exactly what the headline themes/audio surfaces need for hub people.
     """
     # frontier_cap bounds the fetched rows (overflow detection). It is a
     # bound parameter, not interpolated, but the positive-int contract
@@ -298,12 +320,12 @@ def _scope_person_relational(
             f"in tenant {tenant_id!r}: {exc}"
         ) from exc
     if len(rows) > frontier_cap:
-        # More co-mention rows than the safe bound → returning now would be a
-        # silently-truncated partial scope. Fail loudly instead.
-        raise GraphBackendError(
-            f"person scope exceeded safe bound ({frontier_cap}) for seed "
-            f"{seed_entity_uuid!r}; narrow the scope — perf redesign for "
-            "large scopes is deferred to G2"
+        # More co-mention rows than the bound → keep the strongest frontier_cap
+        # worth of scope (deterministic ranked truncation + WARNING), never a
+        # crash. Bounded exactly as before: the truncated scope feeds ≤
+        # frontier_cap rows downstream.
+        return _scope_person_truncated(
+            conn, tenant_id, seed_entity_uuid, frontier_cap=frontier_cap
         )
     entity_uuids: set[str] = set()
     document_uuids: set[str] = set()
@@ -317,3 +339,135 @@ def _scope_person_relational(
         document_uuids=tuple(sorted(document_uuids)),
         tenant_id=tenant_id,
     )
+
+
+def _scope_person_truncated(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+    seed_entity_uuid: str,
+    *,
+    frontier_cap: int,
+) -> PersonScope:
+    """Deterministically truncate an over-cap person scope to its strongest part.
+
+    Reached only from :func:`_scope_person_relational` when the seed's distinct
+    ``(co-entity, document)`` co-mention rows exceed ``frontier_cap``. Ranks the
+    co-mentioned entities by co-mention frequency with the seed (DESC), breaking
+    ties by newest shared document (DESC) then entity id (ASC) — a total order,
+    so the selection is reproducible across runs. It then keeps the strongest
+    prefix of entities whose cumulative co-mention-row count stays within
+    ``frontier_cap`` (always keeping at least the top entity), and resolves their
+    connecting documents (themselves capped to ``frontier_cap``, newest-first, to
+    bound the rare single-dominant-entity case). One actionable WARNING is logged
+    — never silent, never a crash. The result preserves the downstream envelope
+    the safe-cap guaranteed: at most ``frontier_cap`` entity rows and at most
+    ``frontier_cap`` documents reach the df/lift/grouping stage.
+    """
+    # Rank query: one row per co-entity with its shared-doc count + newest shared
+    # doc. Bounded by the SEED's co-entity neighborhood (the legitimate scope,
+    # index-served via the gem PK + idx_gem_document), never a tenant-wide scan —
+    # and we only ever keep a ≤ frontier_cap prefix of it. All inputs bound
+    # (parameterized); the seed uuid casts against the uuid columns as elsewhere.
+    try:
+        ranked = conn.execute(
+            "SELECT co.entity_id::text AS eid, "
+            "COUNT(DISTINCT seed.document_id) AS comention_count, "
+            "MAX(d.ingested_at) AS newest_doc "
+            "FROM graph_entity_mentions AS seed "
+            "JOIN graph_entity_mentions AS co "
+            "  ON co.tenant_id = seed.tenant_id "
+            "  AND co.document_id = seed.document_id "
+            "JOIN documents AS d ON d.id = seed.document_id "
+            "WHERE seed.tenant_id = %s AND seed.entity_id = %s "
+            "  AND co.entity_id <> %s "
+            "GROUP BY co.entity_id "
+            "ORDER BY comention_count DESC, newest_doc DESC, eid ASC",
+            (tenant_id, seed_entity_uuid, seed_entity_uuid),
+        ).fetchall()
+    except psycopg.Error as exc:
+        raise GraphBackendError(
+            f"relational person scope ranking failed for seed "
+            f"{seed_entity_uuid!r} in tenant {tenant_id!r}: {exc}"
+        ) from exc
+    total_rows = sum(int(count) for _eid, count, _newest in ranked)
+    # Greedy prefix by the (co-entity, document) row budget. Each kept entity is
+    # included with ALL its shared docs (a partial entity would distort its
+    # in-scope df), so we stop before the first entity that would overflow the
+    # cap. The top entity is always kept (its docs are bounded below) so a single
+    # dominant co-entity never collapses the scope to empty.
+    kept_entities: list[str] = []
+    kept_rows = 0
+    for eid, count, _newest in ranked:
+        count_int = int(count)
+        if kept_entities and kept_rows + count_int > frontier_cap:
+            break
+        kept_entities.append(str(eid))
+        kept_rows += count_int
+    document_uuids = _scope_connecting_documents(
+        conn, tenant_id, seed_entity_uuid, kept_entities, frontier_cap=frontier_cap
+    )
+    _logger.warning(
+        "graphrag person scope for seed %s exceeded frontier_cap=%d: kept the %d "
+        "strongest co-entities (%d of %d co-mention rows); raise "
+        "BRAIN_GRAPH_FRONTIER_CAP to widen the scope.",
+        seed_entity_uuid,
+        frontier_cap,
+        len(kept_entities),
+        kept_rows,
+        total_rows,
+    )
+    return PersonScope(
+        seed_entity_uuid=seed_entity_uuid,
+        entity_uuids=tuple(sorted(kept_entities)),
+        document_uuids=document_uuids,
+        tenant_id=tenant_id,
+    )
+
+
+def _scope_connecting_documents(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+    seed_entity_uuid: str,
+    kept_entities: list[str],
+    *,
+    frontier_cap: int,
+) -> tuple[str, ...]:
+    """Connecting documents for the kept co-entities, bounded + deterministic.
+
+    The distinct documents in which the seed and at least one ``kept_entities``
+    member are both mentioned. In the common truncated case this is already ≤
+    ``frontier_cap`` (the greedy budget bounds the kept rows); only the rare
+    single-dominant-entity case (one co-entity sharing more than ``frontier_cap``
+    docs with the seed) can exceed it, and there we keep the ``frontier_cap``
+    newest documents (``ingested_at`` DESC, id ASC) so the document array also
+    stays within the cap. Returned sorted ascending for determinism.
+    """
+    if not kept_entities:
+        return ()
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT seed.document_id::text AS did, "
+            "d.ingested_at AS doc_ts "
+            "FROM graph_entity_mentions AS seed "
+            "JOIN graph_entity_mentions AS co "
+            "  ON co.tenant_id = seed.tenant_id "
+            "  AND co.document_id = seed.document_id "
+            "JOIN documents AS d ON d.id = seed.document_id "
+            "WHERE seed.tenant_id = %s AND seed.entity_id = %s "
+            "  AND co.entity_id = ANY(%s)",
+            (tenant_id, seed_entity_uuid, kept_entities),
+        ).fetchall()
+    except psycopg.Error as exc:
+        raise GraphBackendError(
+            f"relational person scope documents failed for seed "
+            f"{seed_entity_uuid!r} in tenant {tenant_id!r}: {exc}"
+        ) from exc
+    if len(rows) <= frontier_cap:
+        return tuple(sorted(str(did) for did, _doc_ts in rows))
+    # Single dominant co-entity overflowed the cap alone: keep the newest
+    # frontier_cap docs. Stable two-pass sort (id ASC, then ingested_at DESC)
+    # gives a total newest-first order with an id tiebreak.
+    by_id = sorted(rows, key=lambda row: str(row[0]))
+    newest_first = sorted(by_id, key=lambda row: row[1], reverse=True)
+    kept_docs = [str(did) for did, _doc_ts in newest_first[:frontier_cap]]
+    return tuple(sorted(kept_docs))
