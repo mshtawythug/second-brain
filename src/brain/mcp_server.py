@@ -49,6 +49,11 @@ from .format import (
     graph_stats_json,
     timeline_context_json,
 )
+from .gaps import (
+    SearchFailureDetector,
+    record_search_query,
+    top_search_failures,
+)
 from .graph_rag.sync import GraphSyncer, make_graph_syncer
 from .ingest import (
     Embedder,
@@ -376,7 +381,8 @@ def brain_search(
     after_dt = _parse_iso_datetime(after, field="after") if after else None
     before_dt = _parse_iso_datetime(before, field="before") if before else None
 
-    session_id = str(uuid.uuid4())
+    session_uuid = uuid.uuid4()
+    session_id = str(session_uuid)
 
     try:
         with _mcp_conn(state) as conn:
@@ -409,6 +415,20 @@ def brain_search(
                 draft=draft,
                 without_tag=without_tag,
             )
+            # Plan 08 — best-effort search-failure logging. The minted
+            # ``session_uuid`` lets no-click detection join this search against a
+            # later ``brain_show`` open in the same session. A transient
+            # ``OperationalError`` is swallowed inside ``record_search_query``; a
+            # missing-table ``UndefinedTable`` propagates to the outer handler
+            # below (surfacing visibly, never silently eaten).
+            record_search_query(
+                conn,
+                query=query,
+                result_count=len(results),
+                session_id=session_uuid,
+                source="mcp",
+                tenant_id=state.cfg.graph_tenant_id,
+            )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     except OllamaEmbedError as e:
@@ -426,6 +446,63 @@ def brain_search(
                 "tags": r.tags,
             }
             for r in results
+        ],
+    }
+
+
+@mcp_app.tool()
+def brain_gaps(
+    since_days: int = 30,
+    limit: int = 20,
+    push: bool = False,
+) -> dict[str, Any]:
+    """Surface knowledge gaps from repeated search failures (Plan 08).
+
+    Mines the ``search_queries`` log for queries the brain failed to answer —
+    ``zero_results`` (nothing matched) and ``no_click`` (results returned but
+    never opened in the search session) — over the last ``since_days`` days.
+
+    Returns ``{"gaps": [{"query": str, "count": int, "kind": str}]}`` where
+    ``kind`` is ``"zero_results"`` or ``"no_click"``. ``query`` is the derived
+    NORMALIZED canonical label (sorted, de-duplicated tokens) — raw stored
+    query strings never leave the server (privacy boundary).
+
+    When ``push=True`` the full :class:`SearchFailureDetector` runs and upserts
+    the resulting ``search_failure`` gaps into the elicitation queue
+    (``elicitation_gaps``) — the same effect as ``brain gaps push`` — before the
+    read view is returned.
+    """
+    state = _get_state()
+    try:
+        with _mcp_conn(state) as conn:
+            if push:
+                from .elicit.queue import build_queue
+
+                detector = SearchFailureDetector(
+                    lookback_days=since_days,
+                    min_cluster_size=state.cfg.gaps_min_cluster_size,
+                )
+                build_queue(
+                    conn,
+                    cfg=state.cfg,
+                    tenant_id=state.cfg.graph_tenant_id,
+                    detectors=[detector],
+                    limit=state.cfg.elicit_queue_limit,
+                    signal_kinds=["search_failure"],
+                )
+            failures = top_search_failures(
+                conn,
+                tenant_id=state.cfg.graph_tenant_id,
+                since_days=since_days,
+                limit=limit,
+                normalize=True,
+            )
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    return {
+        "gaps": [
+            {"query": f.query, "count": f.count, "kind": f.kind}
+            for f in failures
         ],
     }
 

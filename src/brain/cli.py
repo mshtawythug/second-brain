@@ -106,6 +106,11 @@ from .format import (
     timeline_context_json,
     timeline_renderable,
 )
+from .gaps import (
+    SearchFailureDetector,
+    record_search_query,
+    top_search_failures,
+)
 from .ingest import (
     Embedder,
     UpdateResult,
@@ -299,6 +304,15 @@ app.add_typer(review_app, name="review")
 # `cli_connect.py`; scoring core in `connect.py`. Migration 020 is applied by
 # `brain init` automatically (run_migrations auto-discovers migrations/*.sql).
 app.add_typer(connect_app, name="connect")
+
+# Plan 08 — `brain gaps` search-failure-driven knowledge-gap detection. The
+# default (no subcommand) is a read-only view of ranked failed queries; the
+# `push` subcommand runs the detector and upserts `search_failure` gaps into
+# the elicitation queue. Migration 019 is applied by `brain init` automatically.
+gaps_app = typer.Typer(
+    help="Surface knowledge gaps from repeated search failures.",
+)
+app.add_typer(gaps_app, name="gaps")
 
 
 @app.callback()
@@ -3326,6 +3340,10 @@ def search(
     cfg = Config.load()
     embedder = _build_embedder(cfg)
     with connect(cfg.database_url) as conn:
+        # Autocommit so the Plan 08 search-failure log INSERT below is a single
+        # round-trip that persists immediately (hybrid_search reads are fine
+        # under autocommit).
+        conn.autocommit = True
         person_match = _resolve_search_person(conn, person)
         results = hybrid_search(
             conn,
@@ -3349,6 +3367,21 @@ def search(
             thread_id=thread,
             draft=draft,
             without_tag=without_tag,
+        )
+        # Plan 08 — best-effort search-failure logging. ``record_search_query``
+        # is the single narrow-catch chokepoint: it swallows a transient
+        # ``psycopg.OperationalError`` (a DB blip must never break a search the
+        # user already got results for) while a missing-table
+        # ``psycopg.errors.UndefinedTable`` (migration 019 not applied)
+        # propagates so the operator sees it. CLI searches have no session, so
+        # ``session_id=None`` (no-click detection is MCP-only).
+        record_search_query(
+            conn,
+            query=query,
+            result_count=len(results),
+            session_id=None,
+            source="cli",
+            tenant_id=cfg.graph_tenant_id,
         )
 
     if json_output:
@@ -8274,4 +8307,130 @@ def elicit(
     typer.echo(
         f"\nReviewed {len(outcomes)} gap(s): "
         f"{accepted} saved, {dismissed} skipped, {snoozed} snoozed."
+    )
+
+
+# ---------------------------------------------------------------------------
+# brain gaps — search-failure-driven knowledge-gap detection (Plan 08)
+# ---------------------------------------------------------------------------
+
+# Display labels for the two failure kinds (DB stores snake_case).
+_GAP_KIND_DISPLAY = {"zero_results": "zero-results", "no_click": "no-click"}
+
+
+@gaps_app.callback(invoke_without_command=True)
+def gaps(
+    ctx: typer.Context,
+    since: int = typer.Option(
+        0, "--since",
+        help="Lookback window in days (0 = BRAIN_GAPS_LOOKBACK_DAYS).",
+    ),
+    limit: int = typer.Option(
+        20, "--limit", "-n", help="Max failed queries to show."
+    ),
+    as_json: bool = typer.Option(
+        False, "--json", help="Emit JSON instead of a table."
+    ),
+) -> None:
+    """Show the top failed searches (zero-result + no-click) over the window.
+
+    Read-only — never writes to ``elicitation_gaps``. Use ``brain gaps push`` to
+    promote these failures into the elicitation queue.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
+    import json as _json
+
+    from rich.console import Console
+    from rich.table import Table
+
+    cfg = _load_config_or_exit()
+    since_days = since if since > 0 else cfg.gaps_lookback_days
+    with connect(cfg.database_url) as conn:
+        failures = top_search_failures(
+            conn,
+            tenant_id=cfg.graph_tenant_id,
+            since_days=since_days,
+            limit=limit,
+        )
+
+    if as_json:
+        typer.echo(
+            _json.dumps(
+                [
+                    {"query": f.query, "count": f.count, "kind": f.kind}
+                    for f in failures
+                ]
+            )
+        )
+        return
+
+    if not failures:
+        typer.echo("No search failures found.")
+        return
+
+    console = Console()
+    table = Table(title=f"Top search failures (last {since_days} days)")
+    table.add_column("Count", justify="right", style="cyan", width=6)
+    table.add_column("Query", overflow="fold")
+    table.add_column("Kind", style="dim", width=14)
+    for f in failures:
+        table.add_row(
+            f"{f.count}×",
+            f.query,
+            _GAP_KIND_DISPLAY.get(f.kind, f.kind),
+        )
+    console.print(table)
+
+
+@gaps_app.command("push")
+def gaps_push(
+    since: int = typer.Option(
+        0, "--since",
+        help="Lookback window in days (0 = BRAIN_GAPS_LOOKBACK_DAYS).",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Show what would be pushed without writing to the queue.",
+    ),
+) -> None:
+    """Detect search-failure clusters and upsert them as knowledge gaps.
+
+    Runs :class:`brain.gaps.SearchFailureDetector` over the lookback window and
+    pushes the resulting ``search_failure`` gaps into the elicitation queue
+    (``elicitation_gaps``). ``--dry-run`` prints the candidate gaps without
+    writing anything.
+    """
+    from .elicit.queue import build_queue
+
+    cfg = _load_config_or_exit()
+    lookback = since if since > 0 else cfg.gaps_lookback_days
+    detector = SearchFailureDetector(
+        lookback_days=lookback,
+        min_cluster_size=cfg.gaps_min_cluster_size,
+    )
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+        if dry_run:
+            candidates = detector.detect(
+                conn, tenant_id=cfg.graph_tenant_id, limit=cfg.elicit_queue_limit
+            )
+            if not candidates:
+                typer.echo("No search-failure gaps to push.")
+                return
+            typer.echo(f"Would push {len(candidates)} search-failure gap(s):")
+            for g in candidates:
+                typer.echo(f"  {int(g.score)}×  {g.target_id}")
+            return
+        pushed = build_queue(
+            conn,
+            cfg=cfg,
+            tenant_id=cfg.graph_tenant_id,
+            detectors=[detector],
+            limit=cfg.elicit_queue_limit,
+            signal_kinds=["search_failure"],
+        )
+    typer.echo(
+        f"Pushed {len(pushed)} search-failure gap(s) to the elicitation queue."
     )
