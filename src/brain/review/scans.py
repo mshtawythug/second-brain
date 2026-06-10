@@ -270,6 +270,7 @@ def run_staleness_scan(
     del embedder  # documented-but-unused; see docstring.
     candidates = queries.iter_docs_for_staleness_scan(
         conn,
+        tenant_id=tenant_id,
         stale_age_days=cfg.review_stale_age_days,
         limit=cfg.review_stale_limit,
     )

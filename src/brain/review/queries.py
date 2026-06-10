@@ -136,15 +136,18 @@ def count_conflict_docs_missing_summary(
 def iter_docs_for_staleness_scan(
     conn: psycopg.Connection[Any],
     *,
+    tenant_id: str,
     stale_age_days: int,
     limit: int,
 ) -> list[StaleCandidate]:
     """Age candidates: non-draft, summarized, non-transcript docs older than N days.
 
-    ``documents`` has no tenant column (tenancy is a graph-layer concept), so
-    this step is not tenant-scoped — the superseding-doc lookup (Step 2) carries
-    the tenant filter via ``graph_entity_mentions``. Oldest first; capped at
-    ``limit``.
+    ``documents`` has no tenant column, so the scan is tenant-scoped via an
+    ``EXISTS`` on ``graph_entity_mentions``: only docs that participate in this
+    tenant's entity graph are candidates. That is exactly the set that could
+    ever yield a finding — the superseding-doc lookup (Step 2) requires a
+    tenant-shared entity — so the ``EXISTS`` both enforces tenant isolation and
+    skips docs that can never supersede. Oldest first; capped at ``limit``.
     """
     rows = conn.execute(
         """
@@ -156,10 +159,14 @@ def iter_docs_for_staleness_scan(
           AND d.content_type <> ALL(%s)
           AND d.draft IS NOT TRUE
           AND d.summary IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM graph_entity_mentions gem
+              WHERE gem.document_id = d.id AND gem.tenant_id = %s
+          )
         ORDER BY d.ingested_at ASC
         LIMIT %s
         """,
-        (stale_age_days, list(_STALE_EXCLUDED_CONTENT_TYPES), limit),
+        (stale_age_days, list(_STALE_EXCLUDED_CONTENT_TYPES), tenant_id, limit),
     ).fetchall()
     return [
         StaleCandidate(
@@ -173,13 +180,14 @@ def iter_docs_for_staleness_scan(
 
 
 def count_stale_docs_missing_summary(
-    conn: psycopg.Connection[Any], *, stale_age_days: int
+    conn: psycopg.Connection[Any], *, tenant_id: str, stale_age_days: int
 ) -> int:
     """Count aged non-draft, non-transcript docs that still lack a summary.
 
-    Surfaced by ``brain review scan --stale --dry-run`` to nudge the user toward
-    ``brain enrich --backfill`` — these documents never enter the staleness
-    pipeline.
+    Tenant-scoped via the same ``graph_entity_mentions`` ``EXISTS`` as
+    :func:`iter_docs_for_staleness_scan`, so the
+    ``brain review scan --stale --dry-run`` nudge counts only docs in the active
+    tenant's graph that never enter the staleness pipeline for want of a summary.
     """
     row = conn.execute(
         """
@@ -189,8 +197,12 @@ def count_stale_docs_missing_summary(
           AND d.content_type <> ALL(%s)
           AND d.draft IS NOT TRUE
           AND d.summary IS NULL
+          AND EXISTS (
+              SELECT 1 FROM graph_entity_mentions gem
+              WHERE gem.document_id = d.id AND gem.tenant_id = %s
+          )
         """,
-        (stale_age_days, list(_STALE_EXCLUDED_CONTENT_TYPES)),
+        (stale_age_days, list(_STALE_EXCLUDED_CONTENT_TYPES), tenant_id),
     ).fetchone()
     return int(row[0]) if row else 0
 

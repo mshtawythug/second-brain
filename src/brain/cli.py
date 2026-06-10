@@ -3997,7 +3997,9 @@ def review_scan(
                 if dry_run:
                     _warn_skipped_no_summary(
                         count_stale_docs_missing_summary(
-                            conn, stale_age_days=cfg.review_stale_age_days
+                            conn,
+                            tenant_id=tenant,
+                            stale_age_days=cfg.review_stale_age_days,
                         )
                     )
     except psycopg.Error as exc:

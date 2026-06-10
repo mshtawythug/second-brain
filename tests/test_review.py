@@ -384,21 +384,45 @@ def test_iter_docs_for_staleness_skips_young_and_transcript(
     old = _insert_doc(
         test_db, title="Old note", summary="s", ingested_days_ago=400
     )
-    _insert_doc(test_db, title="Young", summary="s", ingested_days_ago=10)
-    _insert_doc(
+    young = _insert_doc(test_db, title="Young", summary="s", ingested_days_ago=10)
+    transcript = _insert_doc(
         test_db,
         title="Old transcript",
         summary="s",
         content_type="transcript",
         ingested_days_ago=400,
     )
-    _insert_doc(test_db, title="Old no-summary", summary=None, ingested_days_ago=400)
+    no_summary = _insert_doc(
+        test_db, title="Old no-summary", summary=None, ingested_days_ago=400
+    )
+    # All four participate in the tenant graph (the staleness scan is tenant-
+    # scoped via graph_entity_mentions); only the WHERE filters should exclude.
+    _insert_entity(
+        test_db,
+        canonical_key="stale-mix",
+        name="Mix",
+        doc_ids=[old, young, transcript, no_summary],
+    )
     cands = queries.iter_docs_for_staleness_scan(
-        test_db, stale_age_days=365, limit=200
+        test_db, tenant_id=_TENANT, stale_age_days=365, limit=200
     )
     ids = {c.doc_id for c in cands}
     assert ids == {old}
     assert cands[0].age_days >= 365
+
+
+def test_iter_docs_for_staleness_excludes_other_tenant(
+    test_db: psycopg.Connection,
+) -> None:
+    old = _insert_doc(test_db, title="Old", summary="s", ingested_days_ago=400)
+    _insert_entity(
+        test_db, canonical_key="t-a", name="A", doc_ids=[old], tenant="tenant-a"
+    )
+    # Scanning a different tenant must not surface tenant-a's doc.
+    cands = queries.iter_docs_for_staleness_scan(
+        test_db, tenant_id="tenant-b", stale_age_days=365, limit=200
+    )
+    assert cands == []
 
 
 def test_upsert_then_list_and_dismiss(test_db: psycopg.Connection) -> None:

@@ -1420,6 +1420,7 @@ def brain_review_scan(
                 scanned += len(
                     review_queries.iter_docs_for_staleness_scan(
                         conn,
+                        tenant_id=tenant,
                         stale_age_days=cfg.review_stale_age_days,
                         limit=cfg.review_stale_limit,
                     )
