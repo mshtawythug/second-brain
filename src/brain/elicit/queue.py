@@ -127,12 +127,15 @@ def build_queue(
             conn, tenant_id=tenant_id, limit=discovery_limit
         )
     ranked = _rank_gaps(by_signal)
-    # Evidence guard: skip gaps with too few supporting docs (except user_flagged).
+    # Evidence guard: skip gaps with too few supporting docs. ``user_flagged``
+    # (an explicit user request) and ``search_failure`` (a repeated failed
+    # search — by definition NO doc answers it, so ``evidence_ids`` is always
+    # empty) are both exempt; the signal itself is the evidence.
     ranked = [
         g
         for g in ranked
         if len(g.evidence_ids) >= cfg.elicit_min_evidence_docs
-        or g.signal_kind == "user_flagged"
+        or g.signal_kind in ("user_flagged", "search_failure")
     ]
     # Upsert passing gaps; the partial index prevents overwriting resolved rows.
     for g in ranked:
@@ -172,9 +175,10 @@ def build_queue(
         "(eg.snoozed_until IS NULL OR eg.snoozed_until < now())",
         "eg.score >= %s",
         # Mirror the pre-upsert evidence guard on read-back so previously
-        # persisted sparse gaps can't resurface (user_flagged is exempt,
-        # exactly as in the upsert filter above).
-        "(cardinality(eg.evidence_ids) >= %s OR eg.signal_kind = 'user_flagged')",
+        # persisted sparse gaps can't resurface (user_flagged and
+        # search_failure are exempt, exactly as in the upsert filter above).
+        "(cardinality(eg.evidence_ids) >= %s "
+        "OR eg.signal_kind IN ('user_flagged', 'search_failure'))",
     ]
     params: list[Any] = [tenant_id, floor, cfg.elicit_min_evidence_docs]
     if signal_kinds is not None:

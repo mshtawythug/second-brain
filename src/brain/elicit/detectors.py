@@ -6,6 +6,7 @@ from typing import Any, Protocol, runtime_checkable
 
 import psycopg
 
+from ..gaps import SearchFailureDetector
 from .schema import Gap
 
 
@@ -224,4 +225,5 @@ DETECTOR_REGISTRY: dict[str, type[GapDetector]] = {
     "orphan": OrphanEntityDetector,
     "contradiction": ContradictionDetector,
     "user_flagged": UserFlaggedDetector,
+    "search_failure": SearchFailureDetector,
 }
