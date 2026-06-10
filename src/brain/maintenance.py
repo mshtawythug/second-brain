@@ -38,7 +38,8 @@ class Stage:
 
 
 ALL_STAGE_IDS: tuple[str, ...] = (
-    "embeddings", "summaries", "search", "graph", "graph-weights", "communities", "wiki",
+    "embeddings", "summaries", "search", "graph", "graph-weights", "communities",
+    "connect", "wiki",
 )
 
 
@@ -94,6 +95,13 @@ def build_stages(*, vault_path: Path, keep: int) -> list[Stage]:
             "communities",
             "Louvain communities + summaries",
             (Step(("brain", "graphrag", "communities", "refresh")),),
+        ),
+        Stage(
+            "connect",
+            "recompute proactive auto-link suggestions",
+            # Non-fatal: a connect-refresh failure (e.g. graph unbuilt) must not
+            # abort the rebuild — suggestions are an enhancement, like the wiki.
+            (Step(("brain", "connect", "refresh"), fatal=False),),
         ),
         Stage("wiki", "vault export/sync/prune/overlay + build_swap", wiki_steps),
     ]
