@@ -187,6 +187,99 @@ def test_graph_summary_from_entities() -> None:
     assert _graph_summary(ctx) == "Alpha, Beta"
 
 
+def test_graph_summary_from_themes_and_communities() -> None:
+    from brain.graph_rag.schema import (
+        CommunityGroup,
+        GraphContext,
+        GraphEntity,
+        ThemeGroup,
+    )
+
+    theme = ThemeGroup(
+        group_id=1,
+        entities=[
+            GraphEntity(id="1", entity_type="concept", name="Latency", canonical_key="latency"),
+        ],
+        summary="latency reduction work",
+    )
+    community = CommunityGroup(community_key="c1", summary="reliability cluster")
+    ctx = GraphContext(
+        session_id="s",
+        mode="themes",
+        query="q",
+        themes=[theme],
+        communities=[community],
+    )
+    summary = _graph_summary(ctx)
+    assert "latency reduction work" in summary
+    assert "reliability cluster" in summary
+
+
+# ---------------------------------------------------------------------------
+# Graph-leg retrieval (mode != hybrid)
+# ---------------------------------------------------------------------------
+
+
+def test_retrieve_graph_requires_backend() -> None:
+    from brain.ask import _retrieve
+
+    with pytest.raises(ValueError, match="requires a graph backend"):
+        _retrieve(
+            None,
+            _cfg(),
+            embedder=FakeEmbedder(),
+            query="q",
+            limit=5,
+            mode="local",
+            backend=None,
+        )
+
+
+def test_retrieve_graph_merges_docs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from brain.ask import _retrieve
+    from brain.graph_rag.schema import GraphContext
+
+    # Hybrid leg returns doc-1; graph leg returns doc-1 (dup) + doc-2 (new).
+    monkeypatch.setattr(
+        "brain.ask._retrieve_hybrid",
+        lambda conn, cfg, *, embedder, query, limit: [_doc("doc-1")],
+    )
+    graph_ctx = GraphContext(
+        session_id="s",
+        mode="local",
+        query="q",
+        docs=[_doc("doc-1"), _doc("doc-2")],
+    )
+    monkeypatch.setattr(
+        "brain.graph_rag.graph_rag_search",
+        lambda *a, **k: graph_ctx,
+    )
+
+    docs, summary = _retrieve(
+        None,
+        _cfg(),
+        embedder=FakeEmbedder(),
+        query="q",
+        limit=5,
+        mode="local",
+        backend=object(),  # sentinel; graph_rag_search is patched
+    )
+    assert [d.document_id for d in docs] == ["doc-1", "doc-2"]
+
+
+def test_ask_no_loop_graph_requires_backend() -> None:
+    with pytest.raises(ValueError, match="requires a graph backend"):
+        ask_no_loop(
+            None,
+            _cfg(),
+            embedder=FakeEmbedder(),
+            chat=_ScriptedChat([]),
+            question="q",
+            mode="local",
+            backend=None,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Loop orchestration (mocked retrieval via a stub conn + scripted chat)
 # ---------------------------------------------------------------------------

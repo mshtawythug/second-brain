@@ -372,17 +372,20 @@ def _retrieve(
     synthesize prompt. A graph leg that yields nothing degrades silently to the
     hybrid docs (never-raise on empty, matching the graph layer's contract).
     """
+    # Validate the graph precondition BEFORE the (DB-touching) hybrid leg so a
+    # missing backend fails fast as a clean caller error.
+    if mode != HYBRID_MODE and backend is None:
+        raise ValueError(
+            f"mode={mode!r} requires a graph backend; pass backend=AgeBackend()"
+        )
+
     results = _retrieve_hybrid(
         conn, cfg, embedder=embedder, query=query, limit=limit
     )
     if mode == HYBRID_MODE:
         return results, ""
 
-    if backend is None:
-        raise ValueError(
-            f"mode={mode!r} requires a graph backend; pass backend=AgeBackend()"
-        )
-
+    assert backend is not None  # guarded above
     from .graph_rag import graph_rag_search
 
     ctx = graph_rag_search(
