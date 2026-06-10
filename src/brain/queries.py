@@ -314,6 +314,29 @@ def fetch_document(conn: psycopg.Connection[Any], document_id: str) -> DocumentR
     )
 
 
+def fetch_document_summary(
+    conn: psycopg.Connection[Any], document_id: str
+) -> tuple[str, str | None] | None:
+    """Return ``(title, summary)`` for ``document_id`` (or ``None`` if missing).
+
+    The summary-only projection used by the Plan 04 audio bundle path. It
+    deliberately selects ``title`` + ``summary`` ONLY — never ``content`` — so a
+    full document body can never be loaded into the LLM script prompt (the audio
+    privacy contract). :func:`fetch_document` always selects ``d.content`` and so
+    is never called from the audio bundle path.
+
+    ``summary`` is ``None`` for a not-yet-enriched document; the caller falls
+    back to the title alone in that case.
+    """
+    row = conn.execute(
+        "SELECT title, summary FROM documents WHERE id = %s",
+        (document_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return (row[0], row[1])
+
+
 @dataclass(frozen=True)
 class UnenrichedDocument:
     """One row from :func:`iter_unenriched_documents` — the backfill driver.
