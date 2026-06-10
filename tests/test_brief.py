@@ -371,3 +371,24 @@ def test_brief_command_pinned_section(
     payload = json.loads(result.stdout)
     pinned_ids = {p["id"] for p in payload["pinned"]}
     assert doc in pinned_ids
+
+
+def test_brief_command_json_and_wiki_writes_page(
+    test_db: psycopg.Connection,  # noqa: ARG001 — schema reset
+    seed_doc: Callable[..., str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # --json and --wiki are independent: JSON is emitted AND the vault page is
+    # written (the --json early-return must not drop the --wiki write).
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    seed_doc(title="JW doc", content="jw body")
+    result = runner.invoke(
+        cli.app, ["brief", "--no-enrich", "--json", "--wiki", "--date", "2026-06-09"]
+    )
+    assert result.exit_code == 0, result.stdout
+    # stdout is still valid JSON (no "Wrote ..." line leaking into it).
+    payload = json.loads(result.stdout)
+    assert payload["date"] == "2026-06-09"
+    written = tmp_path / "daily" / "2026" / "2026-06-09-brief.md"
+    assert written.is_file()

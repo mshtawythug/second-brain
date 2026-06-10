@@ -3875,14 +3875,20 @@ def brief(
         if suggestions:
             data = replace(data, suggestions=suggestions)
 
+    # --wiki is independent of the output format: write the vault page whether
+    # the terminal output is Rich or JSON (the write happens before the --json
+    # early-return so `--json --wiki` doesn't silently drop the page).
+    written_path = (
+        write_brief_to_vault(cfg.vault_path, on_date, data) if wiki else None
+    )
+
     if json_output:
         emit_json(data.to_dict())
         return
 
     _print_brief(data)
-    if wiki:
-        path = write_brief_to_vault(cfg.vault_path, on_date, data)
-        typer.echo(f"\nWrote {path}")
+    if written_path is not None:
+        typer.echo(f"\nWrote {written_path}")
 
 
 @app.command()
