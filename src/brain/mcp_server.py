@@ -1250,6 +1250,43 @@ def brain_review_weekly(
 
 
 @mcp_app.tool()
+def brain_brief(
+    since_hours: int = 24,
+    todo_since_days: int = 7,
+    no_enrich: bool = False,
+) -> dict[str, Any]:
+    """Proactive daily digest: recent captures, open todos, pins, next steps.
+
+    ``since_hours`` bounds the recent-captures window; ``todo_since_days`` bounds
+    the open-action-item window. Best-effort LLM next-step suggestions are
+    included unless ``no_enrich`` is true or Ollama is unavailable (then
+    ``suggestions`` is empty). Surfaces titles + todo texts only — never document
+    bodies. Mirrors ``brain brief --json``.
+    """
+    from dataclasses import replace
+
+    from .brief import assemble_brief, suggest_next_steps
+
+    state = _get_state()
+    try:
+        with _mcp_conn(state) as conn:
+            data = assemble_brief(
+                conn,
+                state.cfg,
+                since_hours=since_hours,
+                todo_since_days=todo_since_days,
+                on_date=date_cls.today(),
+            )
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    if not no_enrich:
+        suggestions = suggest_next_steps(data, state.cfg)
+        if suggestions:
+            data = replace(data, suggestions=suggestions)
+    return data.to_dict()
+
+
+@mcp_app.tool()
 def brain_link_proposal(
     src_id_prefix: str,
     dst_id_or_title: str,

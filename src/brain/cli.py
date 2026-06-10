@@ -3787,6 +3787,103 @@ def review_weekly(
         typer.echo(f"\nWrote {path}")
 
 
+def _print_brief(data: Any) -> None:
+    """Print the daily brief to stdout (titles + todo texts only)."""
+    typer.echo(f"━━━ Brain Brief · {data.date.isoformat()} ━━━")
+    typer.echo("\n📥  Recent captures")
+    if data.captures:
+        for doc in data.captures:
+            kind = doc.source_kind or "manual"
+            typer.echo(f"  • [{kind}] {doc.title}")
+    else:
+        typer.echo("  (no recent captures)")
+    typer.echo("\n✅  Open action items")
+    if data.open_todos:
+        for row in data.open_todos:
+            typer.echo(f"  • [ ] {row.text}")
+    else:
+        typer.echo("  (no open action items)")
+    typer.echo("\n📌  Pinned / follow-up docs")
+    if data.pinned:
+        for pin in data.pinned:
+            typer.echo(f"  • {pin.title}")
+    else:
+        typer.echo("  (no pinned docs)")
+    if data.suggestions:
+        typer.echo("\n💡  Suggested next steps")
+        for i, suggestion in enumerate(data.suggestions, 1):
+            typer.echo(f"  {i}. {suggestion}")
+
+
+@app.command()
+def brief(
+    since: int | None = typer.Option(
+        None, "--since", help="Capture window in hours (default: config)."
+    ),
+    todo_since: int | None = typer.Option(
+        None, "--todo-since", help="Open-todo window in days (default: config)."
+    ),
+    date: str | None = typer.Option(
+        None, "--date", help="ISO date for the header (YYYY-MM-DD, default: today)."
+    ),
+    no_enrich: bool = typer.Option(
+        False, "--no-enrich", help="Skip LLM next-step suggestions."
+    ),
+    wiki: bool = typer.Option(
+        False,
+        "--wiki/--no-wiki",
+        help="Write the digest to <vault>/daily/<YYYY>/<date>-brief.md.",
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Proactive daily digest: recent captures, open todos, pins, and next steps.
+
+    Surfaces titles + todo texts only (never document bodies). LLM next-step
+    suggestions are best-effort — skipped silently if Ollama is down or
+    ``--no-enrich`` is given.
+    """
+    from dataclasses import replace
+
+    from .brief import assemble_brief, suggest_next_steps, write_brief_to_vault
+
+    cfg = Config.load()
+    since_hours = since if since is not None else cfg.brief_since_hours
+    todo_since_days = (
+        todo_since if todo_since is not None else cfg.brief_todo_since_days
+    )
+    if date is not None:
+        try:
+            on_date = date_cls.fromisoformat(date)
+        except ValueError as exc:
+            raise typer.BadParameter(
+                "date must be YYYY-MM-DD", param_hint="--date"
+            ) from exc
+    else:
+        on_date = date_cls.today()
+
+    with connect(cfg.database_url) as conn:
+        data = assemble_brief(
+            conn,
+            cfg,
+            since_hours=since_hours,
+            todo_since_days=todo_since_days,
+            on_date=on_date,
+        )
+    if not no_enrich:
+        suggestions = suggest_next_steps(data, cfg)
+        if suggestions:
+            data = replace(data, suggestions=suggestions)
+
+    if json_output:
+        emit_json(data.to_dict())
+        return
+
+    _print_brief(data)
+    if wiki:
+        path = write_brief_to_vault(cfg.vault_path, on_date, data)
+        typer.echo(f"\nWrote {path}")
+
+
 @app.command()
 def show(
     id: str = typer.Argument(...),

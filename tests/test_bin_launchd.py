@@ -25,6 +25,7 @@ from brain.bin.launchd import (
 
 _WATCHER = "com.brain.watcher"
 _BUILD = "com.brain.build"
+_BRIEF = "com.brain.brief"
 
 _FAKE_BRAIN_HOME = Path("/fake/brain/home")
 _FAKE_VAULT = Path("/fake/vault")
@@ -97,7 +98,7 @@ def test_render_plist_xml_escapes_values(raw: str, escaped: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("label", [_WATCHER, _BUILD])
+@pytest.mark.parametrize("label", [_WATCHER, _BUILD, _BRIEF])
 def test_render_plist_is_valid_xml(label: str) -> None:
     """Each rendered plist is well-formed XML."""
     text = _render(
@@ -268,7 +269,7 @@ def test_install_plists_installs_foreground_wrappers(
         launchctl="/usr/bin/true",
     )
 
-    for wrapper in ("_brain-watcher-fg", "_brain-build-fg"):
+    for wrapper in ("_brain-watcher-fg", "_brain-build-fg", "_brain-brief-fg"):
         shim = brain_home / ".shims" / wrapper
         assert shim.exists(), f"expected shim {shim} to be installed"
         assert shim.stat().st_mode & 0o111, f"expected {shim} to be executable"
