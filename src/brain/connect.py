@@ -270,15 +270,20 @@ def _existing_link_targets(
     dropped from the candidate set so ``connect`` never re-suggests an existing
     edge.
 
-    ``links`` are DIRECTED (a wikilink from A's body to B), so only the
-    ``src = source`` direction counts. ``derived_links`` are stored as a single
-    CANONICAL ``(LEAST, GREATEST)`` pair (undirected — see
-    ``derived_links.pass_runner._canonical_pair``), so a derived edge touching
-    the source in EITHER orientation suppresses the pair (Codex R3 #1).
+    Both ``links`` and ``derived_links`` are treated as UNDIRECTED here, because
+    a suggestion pair is undirected for review purposes (migration 022): if A
+    and B are already connected in EITHER orientation, the pair must not be
+    re-suggested in either orientation. ``links`` rows are individually directed
+    (a wikilink from A's body to B), so we union both the ``src = source`` and
+    ``dst = source`` directions. ``derived_links`` are stored as a single
+    CANONICAL ``(LEAST, GREATEST)`` pair (already undirected — see
+    ``derived_links.pass_runner._canonical_pair``).
     """
     rows = conn.execute(
         """
         SELECT dst_document_id::text FROM links WHERE src_document_id = %(src)s::uuid
+        UNION
+        SELECT src_document_id::text FROM links WHERE dst_document_id = %(src)s::uuid
         UNION
         SELECT dst_document_id::text FROM derived_links WHERE src_document_id = %(src)s::uuid
         UNION
@@ -299,6 +304,11 @@ def _retire_linked_pending(
     queue on the next refresh. Only ``pending`` rows are removed (accepted /
     rejected are frozen), and only for the given source docs. Returns the row
     count deleted.
+
+    Both ``links`` and ``derived_links`` are matched UNDIRECTED: a suggestion
+    pair is undirected for review (migration 022), so a link drawn in EITHER
+    orientation retires the pending row regardless of how the suggestion stored
+    its source/target.
     """
     if not source_ids:
         return 0
@@ -309,9 +319,12 @@ def _retire_linked_pending(
           AND ls.source_doc_id = ANY(%(srcs)s::uuid[])
           AND (
               EXISTS (
+                  -- links are matched undirected — match either orientation.
                   SELECT 1 FROM links l
-                  WHERE l.src_document_id = ls.source_doc_id
-                    AND l.dst_document_id = ls.target_doc_id
+                  WHERE (l.src_document_id = ls.source_doc_id
+                         AND l.dst_document_id = ls.target_doc_id)
+                     OR (l.src_document_id = ls.target_doc_id
+                         AND l.dst_document_id = ls.source_doc_id)
               )
               OR EXISTS (
                   -- derived_links are canonical/undirected — match either way.
@@ -346,9 +359,10 @@ def refresh_suggestions(
     the same predicate as ``build_related``), blend the graph + embedding legs
     via RRF, drop pairs already linked or scoring below ``cfg.connect_min_score``,
     keep the top ``cfg.connect_max_per_doc``, and upsert into
-    ``link_suggestions``. The upsert overwrites the score on ``pending`` rows
-    only (``ON CONFLICT ... DO UPDATE ... WHERE status = 'pending'``), so
-    accepted/rejected rows are frozen.
+    ``link_suggestions``. Suggestions are UNDIRECTED (migration 022): exactly one
+    row persists per unordered pair, storing the best-scoring orientation (see
+    :func:`_upsert_suggestion`). Accepted/rejected rows are frozen and their
+    mirror is never re-suggested.
 
     ``doc_prefix`` limits the refresh to a single source doc (resolved via the
     document-id prefix). ``dry_run`` computes everything but writes nothing.
@@ -468,18 +482,39 @@ def _upsert_suggestion(
     graph_score: float | None,
     embed_score: float | None,
 ) -> None:
-    """Upsert one suggestion; overwrite the score on ``pending`` rows only."""
+    """Upsert one UNDIRECTED suggestion, keeping the best-scoring orientation.
+
+    A suggested pair is undirected for review purposes (migration 022): exactly
+    one row may exist per unordered pair, regardless of which doc is stored as
+    source vs target. The conflict is inferred against the functional unique
+    index ``uq_link_suggestions_unordered_pair`` on
+    ``(LEAST(source, target), GREATEST(source, target))``.
+
+    On conflict the row is rewritten — INCLUDING its orientation
+    (``source_doc_id`` / ``target_doc_id``) — to the incoming candidate, but
+    ONLY when the existing row is ``pending`` AND the new ``score`` is strictly
+    greater. This keeps the better-scoring orientation (so the ``accept --write``
+    writeback targets the more sensible "source" doc) and never thrashes on
+    ties. Because the conflict consumes the insert, an accepted/rejected pair
+    can NOT have its mirror re-inserted: refresh never resuggests the reverse of
+    a decided pair (the WHERE leaves the frozen row untouched and no new row is
+    created).
+    """
     conn.execute(
         """
         INSERT INTO link_suggestions
             (source_doc_id, target_doc_id, score, graph_score, embed_score)
         VALUES (%(src)s::uuid, %(dst)s::uuid, %(score)s, %(graph)s, %(embed)s)
-        ON CONFLICT (source_doc_id, target_doc_id) DO UPDATE
-            SET score = EXCLUDED.score,
+        ON CONFLICT (LEAST(source_doc_id, target_doc_id),
+                     GREATEST(source_doc_id, target_doc_id)) DO UPDATE
+            SET source_doc_id = EXCLUDED.source_doc_id,
+                target_doc_id = EXCLUDED.target_doc_id,
+                score = EXCLUDED.score,
                 graph_score = EXCLUDED.graph_score,
                 embed_score = EXCLUDED.embed_score,
                 suggested_at = now()
             WHERE link_suggestions.status = 'pending'
+              AND EXCLUDED.score > link_suggestions.score
         """,
         {
             "src": source_doc_id,
