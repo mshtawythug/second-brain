@@ -399,6 +399,35 @@ def test_coalesce_fallback_to_ingested_at(
     assert ctx.buckets[0].doc_count == 1
 
 
+def test_build_timeline_inline_coalesce_when_doc_date_absent(
+    test_db: psycopg.Connection[Any], seed_doc: Callable[..., str]
+) -> None:
+    """Exercise the real inline-COALESCE query path (pre-migration-021 DBs).
+
+    The migration runner always applies 021 to the test DB, so the default
+    integration tests run with ``documents.doc_date`` present. Drop it here to
+    prove ``build_timeline`` transparently falls back to the inline
+    ``COALESCE(sent_at, ingested_at)`` expression — the contract for a DB that
+    has not yet applied migration 021 (the column is auto-removed back the next
+    test via the per-test schema reset).
+    """
+    # Dropping the generated column also drops its dependent index.
+    test_db.execute("ALTER TABLE documents DROP COLUMN IF EXISTS doc_date")
+    assert _doc_date_expr(test_db) == "COALESCE(d.sent_at, d.ingested_at)"
+
+    entity = _insert_entity(test_db, name="okrs")
+    by_sent = _doc(seed_doc, test_db, "sent doc", sent_at=_dt(2024, 2, 10))  # Q1
+    by_ingest = _doc(
+        seed_doc, test_db, "ingest doc", sent_at=None, ingested_at=_dt(2024, 5, 1)
+    )  # Q2 via fallback
+    _mention(test_db, entity, by_sent)
+    _mention(test_db, entity, by_ingest)
+
+    ctx = build_timeline(test_db, _cfg(), "okrs", granularity="quarter")
+    assert [b.bucket for b in ctx.buckets] == ["2024-Q1", "2024-Q2"]
+    assert [b.doc_count for b in ctx.buckets] == [1, 1]
+
+
 def test_since_until_filter(
     test_db: psycopg.Connection[Any], seed_doc: Callable[..., str]
 ) -> None:
@@ -490,7 +519,10 @@ def test_timeline_person_scope(
         "1:1 sync",
         content_type="transcript",
         sent_at=_dt(2024, 1, 10),
-        participants=["alpha@example.com"],
+        # Mixed-case participant (Gmail stores source-preserved case) — the
+        # lowercased PersonMatch.keys must still overlap (regression for the
+        # case-sensitive `&&` bug Codex caught).
+        participants=["Alpha@Example.com"],
     )
     without_person = _doc(seed_doc, test_db, "Solo note", sent_at=_dt(2024, 1, 20))
     _mention(test_db, entity, with_person)

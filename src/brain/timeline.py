@@ -302,12 +302,20 @@ def _scope_to_person(
     intersects with the documents that mention any seed entity. Returns the
     qualifying document-id set (as text); an empty set means the person never
     co-appears with the theme.
+
+    The overlap is **case-insensitive**: ``documents.participants`` is written by
+    ingest extractors in source-preserved case (Gmail emits
+    ``"Alice Doe <alice@example.com>"``) while ``PersonMatch.keys`` are lowercased, so
+    a plain ``&&`` would miss every mixed-case stored value. We unnest the array
+    and ``lower()`` each element before comparing — the same pattern the hybrid
+    search ``--person`` filter uses (:func:`brain.search.hybrid_search`).
     """
     if not entity_ids or not person_keys:
         return []
     rows = conn.execute(
         "SELECT id::text FROM documents "
-        "WHERE participants && %s::text[] "
+        "WHERE EXISTS (SELECT 1 FROM unnest(participants) AS _p "
+        "             WHERE lower(_p) = ANY(%s::text[])) "
         "AND id = ANY("
         "    SELECT document_id FROM graph_entity_mentions "
         "    WHERE entity_id = ANY(%s) AND tenant_id = %s"
