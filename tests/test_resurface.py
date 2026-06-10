@@ -399,6 +399,39 @@ def test_resurface_docs_empty_corpus(test_db: psycopg.Connection) -> None:
     assert items == []
 
 
+def test_resurface_docs_rejects_nonpositive_limit(
+    test_db: psycopg.Connection,
+) -> None:
+    """limit < 1 raises ValueError (guards the silent limit=0/-1 slice bug)."""
+    _insert_doc(test_db, title="a", age_days=200.0)
+    with pytest.raises(ValueError, match="limit must be"):
+        resurface_docs(test_db, cfg=_cfg(), limit=0)
+    with pytest.raises(ValueError, match="limit must be"):
+        resurface_docs(test_db, cfg=_cfg(), limit=-1)
+
+
+def test_resurface_docs_rejects_negative_min_age(
+    test_db: psycopg.Connection,
+) -> None:
+    """min_age_days < 0 raises ValueError (would otherwise admit future docs)."""
+    _insert_doc(test_db, title="a", age_days=200.0)
+    with pytest.raises(ValueError, match="min_age_days must be"):
+        resurface_docs(test_db, cfg=_cfg(), min_age_days=-1)
+
+
+def test_resurface_docs_uses_config_defaults(test_db: psycopg.Connection) -> None:
+    """With limit/min_age_days None, the cfg values drive the query."""
+    import dataclasses
+
+    for i in range(5):
+        _insert_doc(test_db, title=f"doc {i}", age_days=200.0 + i)
+    cfg = dataclasses.replace(_cfg(), resurface_limit=2, resurface_min_age_days=14)
+
+    items = resurface_docs(test_db, cfg=cfg)  # no explicit limit/min_age
+
+    assert len(items) == 2
+
+
 def test_resurface_docs_null_doc_ts_excluded(test_db: psycopg.Connection) -> None:
     """A row with both sent_at and ingested_at NULL is excluded by the guard.
 

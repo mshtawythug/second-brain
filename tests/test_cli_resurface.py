@@ -114,6 +114,20 @@ def test_cli_resurface_empty(test_db: psycopg.Connection) -> None:
     assert "No docs due for review." in result.output
 
 
+def test_cli_resurface_rejects_bad_limit(test_db: psycopg.Connection) -> None:
+    """--limit 0 is rejected with a non-zero exit (BadParameter)."""
+    result = runner.invoke(app, ["resurface", "--limit", "0"])
+    assert result.exit_code != 0
+    assert "limit" in result.output.lower()
+
+
+def test_cli_resurface_rejects_negative_min_age(test_db: psycopg.Connection) -> None:
+    """--min-age-days -1 is rejected with a non-zero exit (BadParameter)."""
+    result = runner.invoke(app, ["resurface", "--min-age-days", "-1"])
+    assert result.exit_code != 0
+    assert "min-age" in result.output.lower()
+
+
 def test_cli_resurface_source_filter(test_db: psycopg.Connection) -> None:
     """--source narrows the queue to the chosen source kind."""
     _insert_doc(test_db, title="manual one", source_kind="manual", age_days=200.0)

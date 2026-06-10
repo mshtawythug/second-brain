@@ -570,8 +570,8 @@ def brain_list(
 
 @mcp_app.tool()
 def brain_resurface(
-    limit: int = 7,
-    min_age_days: int = 14,
+    limit: int | None = None,
+    min_age_days: int | None = None,
     source_kind: str | None = None,
 ) -> dict[str, Any]:
     """Return a spaced-repetition review queue of older, unrevisited docs.
@@ -581,12 +581,17 @@ def brain_resurface(
     the top ``limit`` by descending score. ``min_age_days`` excludes
     recently-ingested docs; ``source_kind`` optionally filters by source.
 
+    ``limit`` (default 7 via ``BRAIN_RESURFACE_LIMIT``) and ``min_age_days``
+    (default 14 via ``BRAIN_RESURFACE_MIN_AGE_DAYS``) fall back to the server's
+    configured values when omitted (``None``). ``limit`` must be >= 1 and
+    ``min_age_days`` >= 0 — out-of-range values surface as ``INVALID_PARAMS``.
+
     ``last_access_days`` is ``None`` for never-accessed docs. ``snippet`` is the
     first 200 characters of the body (never the full content).
     """
     state = _get_state()
     logger.debug(
-        "brain_resurface: limit=%d min_age_days=%d source_kind=%s",
+        "brain_resurface: limit=%s min_age_days=%s source_kind=%s",
         limit,
         min_age_days,
         source_kind,
@@ -600,6 +605,8 @@ def brain_resurface(
                 min_age_days=min_age_days,
                 source_kind=source_kind,
             )
+    except ValueError as e:
+        raise _mcp_error(INVALID_PARAMS, str(e)) from e
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     return {

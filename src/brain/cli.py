@@ -3860,6 +3860,10 @@ def resurface(
     staleness, and importance (tags + summary), then lists the highest-scoring
     ones. Re-scored fresh on each run, so a doc you just opened drops out.
     """
+    if limit is not None and limit < 1:
+        raise typer.BadParameter("--limit must be an integer >= 1")
+    if min_age_days is not None and min_age_days < 0:
+        raise typer.BadParameter("--min-age-days must be a non-negative integer")
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
         items = resurface_docs(

@@ -1,8 +1,8 @@
 """End-to-end protocol test for ``brain-mcp``.
 
 Spawns the server via ``python -m brain.mcp_server``, runs a real MCP
-``initialize`` + ``tools/list`` round-trip over stdio, and asserts the seven
-tools (four read, three write) are advertised with non-empty input schemas.
+``initialize`` + ``tools/list`` round-trip over stdio, and asserts the core
+tools (five read, three write) are advertised with non-empty input schemas.
 """
 import os
 import shutil
@@ -22,6 +22,7 @@ EXPECTED_TOOLS = {
     "brain_show",
     "brain_list",
     "brain_status",
+    "brain_resurface",
     "brain_ingest_stdin",
     "brain_tag",
     "brain_edit",
@@ -70,7 +71,7 @@ async def _list_tools_via_stdio() -> dict[str, dict[str, object]]:
     reason="python interpreter not on PATH",
 )
 def test_brain_mcp_tools_list_advertises_all_tools() -> None:
-    """`brain-mcp` responds to tools/list with all seven tools and schemas."""
+    """`brain-mcp` responds to tools/list with all core tools and schemas."""
     tools = anyio.run(_list_tools_via_stdio)
 
     advertised = set(tools.keys())
@@ -98,6 +99,11 @@ def test_brain_mcp_tools_list_advertises_all_tools() -> None:
     # brain_status takes no args.
     status_props = tools["brain_status"]["inputSchema"]["properties"]  # type: ignore[index]
     assert status_props == {}
+
+    # brain_resurface advertises its three optional params (Plan 02).
+    resurface_props = tools["brain_resurface"]["inputSchema"]["properties"]  # type: ignore[index]
+    for arg in ("limit", "min_age_days", "source_kind"):
+        assert arg in resurface_props, f"brain_resurface missing {arg}"
 
     # Write tools advertise the right kwargs.
     ingest_props = tools["brain_ingest_stdin"]["inputSchema"]["properties"]  # type: ignore[index]

@@ -109,6 +109,44 @@ def test_brain_resurface_empty(
     assert out == {"items": []}
 
 
+def test_brain_resurface_uses_config_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """Omitting limit/min_age_days falls back to the server's cfg values.
+
+    Regression for the bug where the tool hard-coded 7/14 and ignored
+    BRAIN_RESURFACE_LIMIT / BRAIN_RESURFACE_MIN_AGE_DAYS.
+    """
+    import dataclasses
+
+    state = mcp_server._State(
+        cfg=dataclasses.replace(
+            Config(database_url=TEST_DATABASE_URL),
+            resurface_limit=2,
+            resurface_min_age_days=14,
+        ),
+        embedder=fake_embedder,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+    for i in range(5):
+        _insert_doc(test_db, title=f"doc {i}", age_days=200.0 + i)
+
+    out = mcp_server.brain_resurface()  # no explicit limit
+
+    assert len(out["items"]) == 2  # cfg.resurface_limit, not the old hard-coded 7
+
+
+def test_brain_resurface_invalid_limit_raises_invalid_params(
+    mcp_state: mcp_server._State, test_db: psycopg.Connection
+) -> None:
+    """limit < 1 surfaces as an McpError (INVALID_PARAMS), not a raw ValueError."""
+    _insert_doc(test_db, title="a", age_days=200.0)
+    with pytest.raises(McpError):
+        mcp_server.brain_resurface(limit=0)
+
+
 def test_brain_resurface_wraps_db_error(
     mcp_state: mcp_server._State, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -120,6 +120,19 @@ def resurface_docs(
     effective_min_age = (
         cfg.resurface_min_age_days if min_age_days is None else min_age_days
     )
+    # Validate the explicit override path. ``cfg`` values are already validated
+    # by Config.load(), but a direct CLI/MCP/API caller can still pass a bad
+    # value — and a bad one is silently wrong, not loud: limit=0 returns
+    # nothing, limit<0 slices "all but the last N" via ``items[:limit]``, and a
+    # negative min_age shifts the cutoff into the future (admitting brand-new /
+    # future-dated docs). Reject both with a clear ValueError; the CLI maps it
+    # to BadParameter and the MCP tool to INVALID_PARAMS.
+    if effective_limit < 1:
+        raise ValueError(f"limit must be an integer >= 1 (got {effective_limit})")
+    if effective_min_age < 0:
+        raise ValueError(
+            f"min_age_days must be a non-negative integer (got {effective_min_age})"
+        )
 
     # WHERE composition mirrors queries.list_documents: static SQL fragments
     # joined with " AND ", every user value bound via a %s placeholder.
