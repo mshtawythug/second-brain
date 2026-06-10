@@ -335,6 +335,15 @@ DEFAULT_AUDIO_MAX_INPUT_TOKENS = 3000
 # bundle. Positive int. Override via ``BRAIN_AUDIO_THEME_LIMIT``.
 DEFAULT_AUDIO_THEME_LIMIT = 4
 
+# Plan 08 -- `brain gaps` search-failure-driven knowledge-gap detection knobs.
+# ``DEFAULT_GAPS_LOOKBACK_DAYS`` is the mining window for the ``search_queries``
+# log; ``DEFAULT_GAPS_MIN_CLUSTER_SIZE`` is the minimum query-occurrence count
+# before a failed-query cluster surfaces as a gap. Both are positive integers
+# validated like the other int knobs. Override via ``BRAIN_GAPS_LOOKBACK_DAYS``
+# / ``BRAIN_GAPS_MIN_CLUSTER_SIZE``.
+DEFAULT_GAPS_LOOKBACK_DAYS = 30
+DEFAULT_GAPS_MIN_CLUSTER_SIZE = 2
+
 
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
@@ -667,6 +676,10 @@ class Config:
     audio_max_turns: int = DEFAULT_AUDIO_MAX_TURNS
     audio_max_input_tokens: int = DEFAULT_AUDIO_MAX_INPUT_TOKENS
     audio_theme_limit: int = DEFAULT_AUDIO_THEME_LIMIT
+    # Plan 08 -- `brain gaps` search-failure knobs. Both positive ints (>= 1),
+    # eager-validated at load time via ``ConfigError`` like the review knobs.
+    gaps_lookback_days: int = DEFAULT_GAPS_LOOKBACK_DAYS
+    gaps_min_cluster_size: int = DEFAULT_GAPS_MIN_CLUSTER_SIZE
 
     @classmethod
     def load(cls) -> "Config":
@@ -1794,6 +1807,13 @@ class Config:
                     "BRAIN_AUDIO_THEME_LIMIT must be a positive integer "
                     f"(got {audio_theme_limit_raw!r})"
                 )
+        # Plan 08 -- `brain gaps` knobs (positive ints).
+        gaps_lookback_days = _parse_positive_int_env(
+            "BRAIN_GAPS_LOOKBACK_DAYS", DEFAULT_GAPS_LOOKBACK_DAYS
+        )
+        gaps_min_cluster_size = _parse_positive_int_env(
+            "BRAIN_GAPS_MIN_CLUSTER_SIZE", DEFAULT_GAPS_MIN_CLUSTER_SIZE
+        )
 
         return {
             # brain_home resolves via default_factory=_brain_home_root.
@@ -1876,4 +1896,6 @@ class Config:
             "audio_max_turns": audio_max_turns,
             "audio_max_input_tokens": audio_max_input_tokens,
             "audio_theme_limit": audio_theme_limit,
+            "gaps_lookback_days": gaps_lookback_days,
+            "gaps_min_cluster_size": gaps_min_cluster_size,
         }

@@ -136,8 +136,14 @@ def test_orphan_detector_finds_null_description_high_mention(test_db):
     assert gaps[0].signal_kind == "orphan"
 
 
-def test_registry_contains_all_four():
-    assert set(DETECTOR_REGISTRY) == {"delta", "orphan", "contradiction", "user_flagged"}
+def test_registry_contains_all_detectors():
+    assert set(DETECTOR_REGISTRY) == {
+        "delta",
+        "orphan",
+        "contradiction",
+        "user_flagged",
+        "search_failure",
+    }
 
 
 # ---------------------------------------------------------------------------
