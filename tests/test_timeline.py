@@ -38,8 +38,14 @@ from brain import timeline as timeline_mod
 from brain.cli import app
 from brain.config import Config
 from brain.enrichment import OllamaEnricher
+from brain.format import (
+    _timeline_header,
+    timeline_context_json,
+    timeline_renderable,
+)
 from brain.timeline import (
     TimelineBucket,
+    TimelineContext,
     _add_one_month,
     _bucket_label,
     _doc_date_expr,
@@ -654,6 +660,74 @@ def test_synthesize_buckets_empty_short_circuits() -> None:
         [], entity_name="x", enricher=_BoomEnricher(), synth_limit=1  # type: ignore[arg-type]
     )
     assert out == []
+
+
+# ===========================================================================
+# Format — timeline header / renderable (pure, no DB)
+# ===========================================================================
+
+
+def _ctx(entity_names: list[str], *, query: str = "hub-theme") -> TimelineContext:
+    """Build a minimal TimelineContext for header rendering (synthetic names)."""
+    return TimelineContext(
+        query=query,
+        tenant_id=TENANT,
+        granularity="quarter",
+        entity_names=entity_names,
+    )
+
+
+def test_timeline_header_three_entities_unchanged() -> None:
+    # <=3 matched entities: every name shown, no overflow note (no behavior change).
+    header = _timeline_header(_ctx(["alpha-topic", "beta-topic", "gamma-topic"])).plain
+    assert "alpha-topic, beta-topic, gamma-topic" in header
+    assert "more matched entities" not in header
+
+
+def test_timeline_header_single_entity_unchanged() -> None:
+    header = _timeline_header(_ctx(["solo-topic"])).plain
+    assert "solo-topic" in header
+    assert "more matched entities" not in header
+
+
+def test_timeline_header_caps_entities_with_overflow_note() -> None:
+    # Regression: a hub theme that expands to many aliases must NOT dump every
+    # name (sensitive alias strings leaked into the header). Show first 3 + count.
+    names = [f"alias-{i:02d}" for i in range(30)]
+    header = _timeline_header(_ctx(names)).plain
+    assert "alias-00, alias-01, alias-02" in header
+    assert "(+27 more matched entities)" in header
+    # The capped-away aliases never appear in the human header.
+    assert "alias-03" not in header
+    assert "alias-29" not in header
+
+
+def test_timeline_header_empty_entities_falls_back_to_query() -> None:
+    header = _timeline_header(_ctx([], query="my-query")).plain
+    assert "my-query" in header
+    assert "more matched entities" not in header
+
+
+def test_timeline_renderable_caps_header_entities() -> None:
+    # End-to-end through the renderable: the capped header is what reaches output.
+    from rich.console import Console
+
+    names = [f"alias-{i:02d}" for i in range(10)]
+    console = Console(width=200, no_color=True)
+    with console.capture() as capture:
+        console.print(timeline_renderable(_ctx(names)))
+    text = capture.get()
+    assert "alias-00, alias-01, alias-02" in text
+    assert "(+7 more matched entities)" in text
+    assert "alias-09" not in text
+
+
+def test_timeline_json_keeps_full_entity_names() -> None:
+    # --json / MCP wire shape is UNCHANGED: full entity_names list survives.
+    names = [f"alias-{i:02d}" for i in range(30)]
+    payload = timeline_context_json(_ctx(names))
+    assert payload["entity_names"] == names
+    assert len(payload["entity_names"]) == 30
 
 
 # ===========================================================================
