@@ -1013,6 +1013,9 @@ def test_connect_accept_reject_cli(
     b = _make_vault_doc(
         test_db, fake_embedder, title="Doc B", content="b", vault_path="n/b.md"
     )
+    c = _make_vault_doc(
+        test_db, fake_embedder, title="Doc C", content="c", vault_path="n/c.md"
+    )
     sid = _insert_suggestion(test_db, source=a, target=b)
     patch_embedder(fake_embedder)
     accept = runner.invoke(app, ["connect", "accept", sid[:8]])
@@ -1023,7 +1026,10 @@ def test_connect_accept_reject_cli(
     ).fetchone()
     assert status is not None and status[0] == "accepted"
 
-    sid2 = _insert_suggestion(test_db, source=b, target=a)
+    # Reject a DISTINCT pair — suggestions are undirected (migration 022), so a
+    # (b, a) mirror of the accepted (a, b) pair can no longer exist as its own
+    # row. Use a fresh {a, c} pair to exercise the reject path.
+    sid2 = _insert_suggestion(test_db, source=a, target=c)
     reject = runner.invoke(app, ["connect", "reject", sid2[:8]])
     assert reject.exit_code == 0
     assert "rejected" in reject.stdout
@@ -1120,3 +1126,256 @@ def test_load_action_context_does_not_mutate(
         "SELECT status FROM link_suggestions WHERE id = %s::uuid", (sid,)
     ).fetchone()
     assert row is not None and row[0] == "pending"
+
+
+# --------------------------------------------------------------------------- #
+# Undirected-pair behavior (migration 022 — mirror-pair redundancy fix).
+# --------------------------------------------------------------------------- #
+
+
+def _pair_rows(
+    conn: psycopg.Connection, a: str, b: str
+) -> list[tuple[str, str, str]]:
+    """Return ``(source, target, status)`` for every row touching the {a,b} pair."""
+    rows = conn.execute(
+        "SELECT source_doc_id::text, target_doc_id::text, status "
+        "FROM link_suggestions "
+        "WHERE (source_doc_id = %s::uuid AND target_doc_id = %s::uuid) "
+        "   OR (source_doc_id = %s::uuid AND target_doc_id = %s::uuid)",
+        (a, b, b, a),
+    ).fetchall()
+    return [(str(r[0]), str(r[1]), str(r[2])) for r in rows]
+
+
+def test_refresh_writes_single_row_per_unordered_pair(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # THE HEADLINE BUG: an overlapping A/B pair is eligible from BOTH source
+    # docs, but only ONE undirected row may persist (not A→B AND B→A).
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    rows = _pair_rows(test_db, a, b)
+    assert len(rows) == 1  # exactly one row for the unordered pair {a, b}
+    assert rows[0][2] == "pending"
+
+
+def test_unordered_unique_index_blocks_direct_mirror_insert(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # DB-level enforcement: with A→B stored, a direct B→A insert must violate the
+    # unordered-pair unique index (migration 022).
+    a = _make_vault_doc(
+        test_db, fake_embedder, title="Doc A", content="a", vault_path="n/a.md"
+    )
+    b = _make_vault_doc(
+        test_db, fake_embedder, title="Doc B", content="b", vault_path="n/b.md"
+    )
+    _insert_suggestion(test_db, source=a, target=b)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        _insert_suggestion(test_db, source=b, target=a)
+    test_db.rollback()  # clear the aborted-transaction state
+
+
+def test_upsert_keeps_better_scoring_orientation(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # Upserting the reverse orientation with a STRICTLY higher score flips the
+    # stored orientation + leg scores; a worse score leaves it untouched.
+    a = _make_vault_doc(
+        test_db, fake_embedder, title="Doc A", content="a", vault_path="n/a.md"
+    )
+    b = _make_vault_doc(
+        test_db, fake_embedder, title="Doc B", content="b", vault_path="n/b.md"
+    )
+    connect_mod._upsert_suggestion(
+        test_db, source_doc_id=a, target_doc_id=b, score=0.40,
+        graph_score=0.40, embed_score=None,
+    )
+    connect_mod._upsert_suggestion(
+        test_db, source_doc_id=b, target_doc_id=a, score=0.60,
+        graph_score=0.55, embed_score=0.65,
+    )
+    rows = _pair_rows(test_db, a, b)
+    assert len(rows) == 1
+    assert rows[0][:2] == (b, a)  # flipped to the better-scoring orientation
+    stored = test_db.execute(
+        "SELECT score, graph_score, embed_score FROM link_suggestions "
+        "WHERE source_doc_id = %s::uuid AND target_doc_id = %s::uuid",
+        (b, a),
+    ).fetchone()
+    assert stored is not None
+    assert stored[0] == pytest.approx(0.60)
+    assert stored[1] == pytest.approx(0.55)
+    assert stored[2] == pytest.approx(0.65)
+
+    # A worse score in the original orientation does NOT flip it back.
+    connect_mod._upsert_suggestion(
+        test_db, source_doc_id=a, target_doc_id=b, score=0.50,
+        graph_score=0.50, embed_score=None,
+    )
+    rows_after = _pair_rows(test_db, a, b)
+    assert len(rows_after) == 1
+    assert rows_after[0][:2] == (b, a)  # unchanged — 0.50 < stored 0.60
+
+
+def test_accept_then_refresh_does_not_resuggest_mirror(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # Accepting one orientation decides the pair; refresh must NOT resurrect the
+    # reverse orientation as a new pending row.
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    row = test_db.execute(
+        "SELECT id::text FROM link_suggestions LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    connect_mod.set_suggestion_status(test_db, str(row[0]), "accepted")
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    rows = _pair_rows(test_db, a, b)
+    assert len(rows) == 1  # still one row...
+    assert rows[0][2] == "accepted"  # ...and it stayed decided (no pending mirror)
+
+
+def test_reject_then_refresh_does_not_resuggest_mirror(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    row = test_db.execute(
+        "SELECT id::text FROM link_suggestions LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    connect_mod.set_suggestion_status(test_db, str(row[0]), "rejected")
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    rows = _pair_rows(test_db, a, b)
+    assert len(rows) == 1
+    assert rows[0][2] == "rejected"  # no pending mirror appeared
+
+
+def test_refresh_dedup_links_undirected(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # A wikilink in `links` (directed A→B) must suppress the suggestion in BOTH
+    # orientations — the pair is undirected for review purposes.
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    test_db.execute(
+        "INSERT INTO links (src_document_id, dst_document_id, link_text, link_kind) "
+        "VALUES (%s::uuid, %s::uuid, %s, %s)",
+        (a, b, "Doc B", "wiki"),
+    )
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    assert _pair_rows(test_db, a, b) == []  # neither A→B nor B→A suggested
+
+
+def test_refresh_retires_pending_when_linked_reverse_orientation(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # A pending suggestion stored as A→B is retired when the user later draws the
+    # wikilink in the REVERSE orientation (B→A) — `links` dedup is undirected.
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    row = test_db.execute(
+        "SELECT source_doc_id::text, target_doc_id::text FROM link_suggestions "
+        "WHERE status = 'pending' LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    src, tgt = str(row[0]), str(row[1])
+    # Draw the wikilink in the opposite orientation to the stored suggestion.
+    test_db.execute(
+        "INSERT INTO links (src_document_id, dst_document_id, link_text, link_kind) "
+        "VALUES (%s::uuid, %s::uuid, %s, %s)",
+        (tgt, src, "manual", "wiki"),  # reverse of the stored (src, tgt)
+    )
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    assert _pair_rows(test_db, src, tgt) == []  # retired despite reverse linkage
+
+
+def test_partial_refresh_retires_pending_scoped_by_target_endpoint(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # Codex review: _retire_linked_pending must scope by EITHER endpoint. A
+    # pending row stored as src->tgt, linked in reverse (tgt->src), must be
+    # retired by a PARTIAL `refresh --doc <tgt>` even though tgt is the row's
+    # TARGET (not its source) — otherwise the stale row lingers because scoring
+    # the linked source suppresses any new upsert.
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    row = test_db.execute(
+        "SELECT source_doc_id::text, target_doc_id::text FROM link_suggestions "
+        "WHERE status = 'pending' LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    src, tgt = str(row[0]), str(row[1])
+    # Link the reverse orientation; the pair is now connected.
+    test_db.execute(
+        "INSERT INTO links (src_document_id, dst_document_id, link_text, link_kind) "
+        "VALUES (%s::uuid, %s::uuid, %s, %s)",
+        (tgt, src, "manual", "wiki"),
+    )
+    # Refresh ONLY the stored target doc — the stored source is out of scope.
+    connect_mod.refresh_suggestions(test_db, _cfg(), doc_prefix=tgt[:8])
+    assert _pair_rows(test_db, src, tgt) == []  # retired by target-endpoint scope
+
+
+def test_migration_022_dedup_keeps_better_and_preserves_decided(
+    test_db: psycopg.Connection,
+) -> None:
+    # Lock the migration-022 cleanup ranking on a constructed legacy snapshot
+    # (mirror rows can't be inserted into the live table once the unique index
+    # exists, so simulate the pre-022 shape in an unconstrained temp table and
+    # run the exact dedup SQL).
+    # No ON COMMIT DROP: the test_db connection runs autocommit, so it would
+    # drop the table immediately after creation. A plain session TEMP table is
+    # auto-cleaned when the per-test connection closes at fixture teardown.
+    test_db.execute(
+        "CREATE TEMP TABLE _legacy_ls ("
+        "  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),"
+        "  source_doc_id uuid, target_doc_id uuid, score float, status text"
+        ")"
+    )
+    a = "aaaaaaaa-0000-0000-0000-000000000000"
+    b = "bbbbbbbb-0000-0000-0000-000000000000"
+    c = "cccccccc-0000-0000-0000-000000000000"
+    d = "dddddddd-0000-0000-0000-000000000000"
+    # Pair {a,b}: two pending mirrors — keep the better-scoring (b→a, 0.80).
+    test_db.execute(
+        "INSERT INTO _legacy_ls (source_doc_id, target_doc_id, score, status) VALUES "
+        "(%s,%s,0.50,'pending'),(%s,%s,0.80,'pending')",
+        (a, b, b, a),
+    )
+    # Pair {c,d}: accepted c→d mirrored by a stale pending d→c — keep accepted.
+    test_db.execute(
+        "INSERT INTO _legacy_ls (source_doc_id, target_doc_id, score, status) VALUES "
+        "(%s,%s,0.40,'accepted'),(%s,%s,0.90,'pending')",
+        (c, d, d, c),
+    )
+    test_db.execute(
+        """
+        WITH ranked AS (
+            SELECT id,
+                   row_number() OVER (
+                       PARTITION BY LEAST(source_doc_id, target_doc_id),
+                                    GREATEST(source_doc_id, target_doc_id)
+                       ORDER BY CASE status
+                                    WHEN 'accepted' THEN 3
+                                    WHEN 'rejected' THEN 2
+                                    ELSE 1
+                                END DESC,
+                                score DESC,
+                                id ASC
+                   ) AS rn
+            FROM _legacy_ls
+        )
+        DELETE FROM _legacy_ls WHERE id IN (SELECT id FROM ranked WHERE rn > 1)
+        """
+    )
+    survivors = {
+        (str(r[0]), str(r[1]), str(r[2]))
+        for r in test_db.execute(
+            "SELECT source_doc_id::text, target_doc_id::text, status FROM _legacy_ls"
+        ).fetchall()
+    }
+    assert survivors == {
+        (b, a, "pending"),   # better-scoring pending orientation kept
+        (c, d, "accepted"),  # decided row preserved over its stale pending mirror
+    }
