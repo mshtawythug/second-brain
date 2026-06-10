@@ -269,12 +269,20 @@ def _existing_link_targets(
     (verified: migrations 003 + 005). A pair already present in either table is
     dropped from the candidate set so ``connect`` never re-suggests an existing
     edge.
+
+    ``links`` are DIRECTED (a wikilink from A's body to B), so only the
+    ``src = source`` direction counts. ``derived_links`` are stored as a single
+    CANONICAL ``(LEAST, GREATEST)`` pair (undirected — see
+    ``derived_links.pass_runner._canonical_pair``), so a derived edge touching
+    the source in EITHER orientation suppresses the pair (Codex R3 #1).
     """
     rows = conn.execute(
         """
         SELECT dst_document_id::text FROM links WHERE src_document_id = %(src)s::uuid
         UNION
         SELECT dst_document_id::text FROM derived_links WHERE src_document_id = %(src)s::uuid
+        UNION
+        SELECT src_document_id::text FROM derived_links WHERE dst_document_id = %(src)s::uuid
         """,
         {"src": source_doc_id},
     ).fetchall()
@@ -306,9 +314,12 @@ def _retire_linked_pending(
                     AND l.dst_document_id = ls.target_doc_id
               )
               OR EXISTS (
+                  -- derived_links are canonical/undirected — match either way.
                   SELECT 1 FROM derived_links d
-                  WHERE d.src_document_id = ls.source_doc_id
-                    AND d.dst_document_id = ls.target_doc_id
+                  WHERE (d.src_document_id = ls.source_doc_id
+                         AND d.dst_document_id = ls.target_doc_id)
+                     OR (d.src_document_id = ls.target_doc_id
+                         AND d.dst_document_id = ls.source_doc_id)
               )
           )
         """,

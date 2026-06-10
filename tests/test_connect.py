@@ -395,6 +395,51 @@ def test_refresh_dedup_derived_links_table(
     assert ab is None
 
 
+def test_refresh_dedup_derived_links_reverse_orientation(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # Codex R3 #1: derived_links are canonical/undirected. A derived edge stored
+    # as (b, a) must still suppress the a→b suggestion (and b→a).
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    test_db.execute(
+        "INSERT INTO derived_links (src_document_id, dst_document_id, rule, weight) "
+        "VALUES (%s::uuid, %s::uuid, %s, %s)",
+        (b, a, "shared_thread", 1.0),  # OPPOSITE orientation to the a→b pair
+    )
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    rows = test_db.execute(
+        "SELECT 1 FROM link_suggestions "
+        "WHERE (source_doc_id = %s::uuid AND target_doc_id = %s::uuid) "
+        "   OR (source_doc_id = %s::uuid AND target_doc_id = %s::uuid)",
+        (a, b, b, a),
+    ).fetchall()
+    assert rows == []  # undirected derived edge covers both directions
+
+
+def test_refresh_retires_now_linked_derived_reverse_orientation(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # Codex R3 #1: a pending a→b row is retired when a derived edge is later
+    # added in the (b, a) orientation.
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    count = test_db.execute("SELECT count(*) FROM link_suggestions").fetchone()
+    assert count is not None and int(count[0]) > 0
+    test_db.execute(
+        "INSERT INTO derived_links (src_document_id, dst_document_id, rule, weight) "
+        "VALUES (%s::uuid, %s::uuid, %s, %s)",
+        (b, a, "shared_thread", 1.0),
+    )
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    remaining = test_db.execute(
+        "SELECT 1 FROM link_suggestions "
+        "WHERE (source_doc_id = %s::uuid AND target_doc_id = %s::uuid) "
+        "   OR (source_doc_id = %s::uuid AND target_doc_id = %s::uuid)",
+        (a, b, b, a),
+    ).fetchall()
+    assert remaining == []
+
+
 def test_refresh_retires_now_linked_pending(
     test_db: psycopg.Connection, fake_embedder: FakeEmbedder
 ) -> None:
