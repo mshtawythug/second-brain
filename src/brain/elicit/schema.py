@@ -4,7 +4,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-SignalKind = Literal["delta", "orphan", "contradiction", "user_flagged"]
+SignalKind = Literal[
+    "delta", "orphan", "contradiction", "user_flagged", "search_failure"
+]
 TargetType = Literal["person", "org", "project", "topic", "tool", "doc"]
 OutcomeAction = Literal["accepted", "skipped", "snoozed", "dismissed"]
 
