@@ -81,6 +81,28 @@ DEFAULT_CAPTURE_TITLE_WORDS = 6
 # ``BRAIN_CAPTURE_INBOX_WARN_THRESHOLD``.
 DEFAULT_CAPTURE_INBOX_WARN_THRESHOLD = 20
 
+# Plan 10 -- `brain review weekly` periodic-synthesis defaults. All three are
+# positive-integer display caps validated the same way as the capture knobs.
+#
+# Max activity / ingested documents listed per weekly report section.
+DEFAULT_REVIEW_ACTIVITY_LIMIT = 20
+# Max theme clusters (graph communities or tag clusters) per weekly report.
+DEFAULT_REVIEW_THEME_LIMIT = 5
+# Max open-loop (action item) rows listed per weekly report.
+DEFAULT_REVIEW_OPEN_LOOP_LIMIT = 20
+
+# Plan 01 -- `brain brief` proactive daily-digest defaults. All four are
+# positive-integer knobs validated the same way as the capture knobs.
+#
+# Default capture window (hours) for the brief's "recent captures" section.
+DEFAULT_BRIEF_SINCE_HOURS = 24
+# Default open-todo window (days) for the brief's "open action items" section.
+DEFAULT_BRIEF_TODO_SINCE_DAYS = 7
+# Max recent-capture rows listed in the brief.
+DEFAULT_BRIEF_CAPTURE_LIMIT = 20
+# Max pinned-doc rows listed in the brief.
+DEFAULT_BRIEF_PIN_LIMIT = 10
+
 # Wave Q1-D -- enrichment (auto-summary + auto-tag) defaults.
 #
 # ``DEFAULT_ENRICH_MODEL`` is the Ollama model name passed to ``/api/chat``.
@@ -309,6 +331,28 @@ class ConfigError(RuntimeError):
     pass
 
 
+def _parse_positive_int_env(env_var: str, default: int) -> int:
+    """Parse ``env_var`` as an integer ``>= 1``, falling back to ``default``.
+
+    Unset / blank → ``default``; non-parseable or ``< 1`` → :class:`ConfigError`
+    at load time so a typo surfaces at startup, not mid-command. Mirrors the
+    eager-validation idiom used by every other int knob in this module, factored
+    out for the Plan 01 / Plan 10 positive-int families.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(
+            f"{env_var} must be an integer >= 1 (got {raw!r})"
+        ) from exc
+    if value < 1:
+        raise ConfigError(f"{env_var} must be an integer >= 1 (got {raw!r})")
+    return value
+
+
 @dataclass(frozen=True)
 class Config:
     """Project configuration loaded from environment / .env.
@@ -362,6 +406,17 @@ class Config:
     # Both are validated at load time, mirroring the other int env knobs.
     capture_title_words: int = DEFAULT_CAPTURE_TITLE_WORDS
     capture_inbox_warn_threshold: int = DEFAULT_CAPTURE_INBOX_WARN_THRESHOLD
+    # Plan 10 -- `brain review weekly` display caps. All three are positive
+    # integers (>= 1), validated at load time like the capture knobs.
+    review_activity_limit: int = DEFAULT_REVIEW_ACTIVITY_LIMIT
+    review_theme_limit: int = DEFAULT_REVIEW_THEME_LIMIT
+    review_open_loop_limit: int = DEFAULT_REVIEW_OPEN_LOOP_LIMIT
+    # Plan 01 -- `brain brief` daily-digest knobs. All four are positive
+    # integers (>= 1), validated at load time like the capture knobs.
+    brief_since_hours: int = DEFAULT_BRIEF_SINCE_HOURS
+    brief_todo_since_days: int = DEFAULT_BRIEF_TODO_SINCE_DAYS
+    brief_capture_limit: int = DEFAULT_BRIEF_CAPTURE_LIMIT
+    brief_pin_limit: int = DEFAULT_BRIEF_PIN_LIMIT
     # Exponential-decay half-life (days) for the recency boost applied after
     # RRF. ``boost = 0.5 ** (age_days / recency_halflife_days)`` where
     # ``age_days`` is clamped to [0, +inf) so future-dated rows get boost=1.0.
@@ -660,6 +715,29 @@ class Config:
                     f"BRAIN_CAPTURE_INBOX_WARN_THRESHOLD must be an integer >= 1 "
                     f"(got {capture_inbox_warn_threshold!r})"
                 )
+        # Plan 10 -- `brain review weekly` display caps. Positive ints.
+        review_activity_limit = _parse_positive_int_env(
+            "BRAIN_REVIEW_ACTIVITY_LIMIT", DEFAULT_REVIEW_ACTIVITY_LIMIT
+        )
+        review_theme_limit = _parse_positive_int_env(
+            "BRAIN_REVIEW_THEME_LIMIT", DEFAULT_REVIEW_THEME_LIMIT
+        )
+        review_open_loop_limit = _parse_positive_int_env(
+            "BRAIN_REVIEW_OPEN_LOOP_LIMIT", DEFAULT_REVIEW_OPEN_LOOP_LIMIT
+        )
+        # Plan 01 -- `brain brief` daily-digest knobs. Positive ints.
+        brief_since_hours = _parse_positive_int_env(
+            "BRAIN_BRIEF_SINCE_HOURS", DEFAULT_BRIEF_SINCE_HOURS
+        )
+        brief_todo_since_days = _parse_positive_int_env(
+            "BRAIN_BRIEF_TODO_SINCE_DAYS", DEFAULT_BRIEF_TODO_SINCE_DAYS
+        )
+        brief_capture_limit = _parse_positive_int_env(
+            "BRAIN_BRIEF_CAPTURE_LIMIT", DEFAULT_BRIEF_CAPTURE_LIMIT
+        )
+        brief_pin_limit = _parse_positive_int_env(
+            "BRAIN_BRIEF_PIN_LIMIT", DEFAULT_BRIEF_PIN_LIMIT
+        )
         # Recency half-life -- see DEFAULT_RECENCY_HALFLIFE_DAYS.
         # Validation: must parse as a positive float. Zero is invalid
         # (produces 0 ** inf = 0 for any finite age, degenerate). Negative
@@ -1401,6 +1479,13 @@ class Config:
             "people_hub_min_docs": people_hub_min_docs,
             "capture_title_words": capture_title_words,
             "capture_inbox_warn_threshold": capture_inbox_warn_threshold,
+            "review_activity_limit": review_activity_limit,
+            "review_theme_limit": review_theme_limit,
+            "review_open_loop_limit": review_open_loop_limit,
+            "brief_since_hours": brief_since_hours,
+            "brief_todo_since_days": brief_todo_since_days,
+            "brief_capture_limit": brief_capture_limit,
+            "brief_pin_limit": brief_pin_limit,
             "recency_halflife_days": recency_halflife_days,
             "snippet_context_tokens": snippet_context_tokens,
             "resurface_limit": resurface_limit,

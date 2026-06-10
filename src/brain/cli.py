@@ -285,6 +285,14 @@ app.add_typer(elicit_app, name="elicit")
 # (cli.py is intentionally kept thin); review/list subcommands land in Phase 2.
 app.add_typer(capture_app, name="capture")
 
+# Plan 10 — `brain review weekly` periodic synthesis. The sub-app is the shared
+# home for the unified `brain review` tree; Plan 03 adds scan/list/dismiss here.
+review_app = typer.Typer(
+    no_args_is_help=True,
+    help="Periodic synthesis over the corpus (weekly review; scan/list/dismiss).",
+)
+app.add_typer(review_app, name="review")
+
 
 @app.callback()
 def _main() -> None:
@@ -3809,6 +3817,184 @@ def todo(
         typer.echo(
             f"{marker:<7} {r.document_id[:8]}  {date_str}  {r.text}"
         )
+
+
+@review_app.command("weekly")
+def review_weekly(
+    week: str | None = typer.Option(
+        None,
+        "--week",
+        help="Target ISO week (YYYY-Www, e.g. 2026-W23). Default: current week.",
+    ),
+    no_graph: bool = typer.Option(
+        False,
+        "--no-graph",
+        help="Skip the graph-community leg; fall back to tag-cluster grouping.",
+    ),
+    no_emit: bool = typer.Option(
+        False,
+        "--no-emit",
+        help="Print to stdout only; do not write the vault review page.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Machine-readable JSON output (implies --no-emit)."
+    ),
+) -> None:
+    """Synthesize the prior week's activity into a dated vault review page.
+
+    Assembles themes (graph communities or tag clusters), activity, open loops,
+    new captures, and key people for the target ISO week. Writes
+    ``<vault>/reviews/<week>.md`` unless ``--no-emit`` / ``--json`` is given.
+    """
+    from .activity import current_iso_week
+    from .review import (
+        build_weekly_report,
+        emit_weekly_page,
+        render_weekly_json,
+        render_weekly_rich,
+    )
+
+    cfg = Config.load()
+    target_week = week or current_iso_week()
+    # Best-effort theme synthesis only matters on the graph path; build the
+    # enricher lazily there (Ollama is contacted only if a community lacks a
+    # stored summary, and summarize_group never raises if it is down).
+    enricher = _build_enricher(cfg) if not no_graph else None
+    try:
+        with connect(cfg.database_url) as conn:
+            report = build_weekly_report(
+                conn,
+                cfg,
+                week=target_week,
+                generated_on=date_cls.today(),
+                no_graph=no_graph,
+                enricher=enricher,
+            )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--week") from exc
+
+    if json_output:
+        emit_json(render_weekly_json(report))
+        return
+
+    is_empty = not (
+        report.themes
+        or report.activity
+        or report.open_loops
+        or report.ingested
+    )
+    if is_empty:
+        typer.echo(f"No activity found for {target_week}.")
+    else:
+        typer.echo(render_weekly_rich(report))
+    # Default behaviour emits the page regardless of how sparse the week was
+    # (the renderer handles empty sections), matching the MCP tool's emit path.
+    if not no_emit:
+        path = emit_weekly_page(cfg.vault_path, report)
+        typer.echo(f"Wrote {path}")
+
+
+def _print_brief(data: Any) -> None:
+    """Print the daily brief to stdout (titles + todo texts only)."""
+    typer.echo(f"━━━ Brain Brief · {data.date.isoformat()} ━━━")
+    typer.echo("\n📥  Recent captures")
+    if data.captures:
+        for doc in data.captures:
+            kind = doc.source_kind or "manual"
+            typer.echo(f"  • [{kind}] {doc.title}")
+    else:
+        typer.echo("  (no recent captures)")
+    typer.echo("\n✅  Open action items")
+    if data.open_todos:
+        for row in data.open_todos:
+            typer.echo(f"  • [ ] {row.text}")
+    else:
+        typer.echo("  (no open action items)")
+    typer.echo("\n📌  Pinned / follow-up docs")
+    if data.pinned:
+        for pin in data.pinned:
+            typer.echo(f"  • {pin.title}")
+    else:
+        typer.echo("  (no pinned docs)")
+    if data.suggestions:
+        typer.echo("\n💡  Suggested next steps")
+        for i, suggestion in enumerate(data.suggestions, 1):
+            typer.echo(f"  {i}. {suggestion}")
+
+
+@app.command()
+def brief(
+    since: int | None = typer.Option(
+        None, "--since", help="Capture window in hours (default: config)."
+    ),
+    todo_since: int | None = typer.Option(
+        None, "--todo-since", help="Open-todo window in days (default: config)."
+    ),
+    date: str | None = typer.Option(
+        None, "--date", help="ISO date for the header (YYYY-MM-DD, default: today)."
+    ),
+    no_enrich: bool = typer.Option(
+        False, "--no-enrich", help="Skip LLM next-step suggestions."
+    ),
+    wiki: bool = typer.Option(
+        False,
+        "--wiki/--no-wiki",
+        help="Write the digest to <vault>/daily/<YYYY>/<date>-brief.md.",
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Proactive daily digest: recent captures, open todos, pins, and next steps.
+
+    Surfaces titles + todo texts only (never document bodies). LLM next-step
+    suggestions are best-effort — skipped silently if Ollama is down or
+    ``--no-enrich`` is given.
+    """
+    from dataclasses import replace
+
+    from .brief import assemble_brief, suggest_next_steps, write_brief_to_vault
+
+    cfg = Config.load()
+    since_hours = since if since is not None else cfg.brief_since_hours
+    todo_since_days = (
+        todo_since if todo_since is not None else cfg.brief_todo_since_days
+    )
+    if date is not None:
+        try:
+            on_date = date_cls.fromisoformat(date)
+        except ValueError as exc:
+            raise typer.BadParameter(
+                "date must be YYYY-MM-DD", param_hint="--date"
+            ) from exc
+    else:
+        on_date = date_cls.today()
+
+    with connect(cfg.database_url) as conn:
+        data = assemble_brief(
+            conn,
+            cfg,
+            since_hours=since_hours,
+            todo_since_days=todo_since_days,
+            on_date=on_date,
+        )
+    if not no_enrich:
+        suggestions = suggest_next_steps(data, cfg)
+        if suggestions:
+            data = replace(data, suggestions=suggestions)
+
+    # --wiki is independent of the output format: write the vault page whether
+    # the terminal output is Rich or JSON (the write happens before the --json
+    # early-return so `--json --wiki` doesn't silently drop the page).
+    written_path = (
+        write_brief_to_vault(cfg.vault_path, on_date, data) if wiki else None
+    )
+
+    if json_output:
+        emit_json(data.to_dict())
+        return
+
+    _print_brief(data)
+    if written_path is not None:
+        typer.echo(f"\nWrote {written_path}")
 
 
 @app.command()

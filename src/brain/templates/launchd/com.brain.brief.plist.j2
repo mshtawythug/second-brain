@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Jinja variables: brain_home, user_home, pipx_bin_dir, vault_path, brain_py
+     The launchd renderer (brain.bin.launchd.render_plist) MUST XML-escape every
+     value before substitution (Path strings with '&' / '<' / '>' would otherwise
+     produce invalid plist XML and launchctl bootstrap would fail).
+
+     Unlike the watcher/build agents this is a ONE-SHOT job: StartCalendarInterval
+     fires the brief once at 07:00 local each day (no KeepAlive, no RunAtLoad).
+     The brief writes the daily digest page; LLM suggestions are best-effort and
+     skipped silently if Ollama is down. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.brain.brief</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{ brain_home }}/.shims/_brain-brief-fg</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{ user_home }}</string>
+        <key>PATH</key>
+        <string>{{ pipx_bin_dir }}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>BRAIN_VAULT_PATH</key>
+        <string>{{ vault_path }}</string>
+        <key>BRAIN_PY</key>
+        <string>{{ brain_py }}</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>7</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>{{ brain_home }}</string>
+    <key>StandardOutPath</key>
+    <string>{{ brain_home }}/logs/com.brain.brief.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{ brain_home }}/logs/com.brain.brief.err.log</string>
+</dict>
+</plist>

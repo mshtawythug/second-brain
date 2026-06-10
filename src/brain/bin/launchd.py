@@ -26,8 +26,10 @@ from ..config import _brain_home_root
 from ..errors import BrainError
 from ._launcher import ensure_shim
 
-# The two launchd labels managed by brain.
-_LABELS = ("com.brain.watcher", "com.brain.build")
+# The launchd labels managed by brain. watcher/build are KeepAlive daemons;
+# brief (Plan 01) is a one-shot StartCalendarInterval job (07:00 daily). All are
+# installed + cleaned together — adding brief here means uninstall sweeps it too.
+_LABELS = ("com.brain.watcher", "com.brain.build", "com.brain.brief")
 
 
 class LaunchdError(BrainError):
@@ -125,7 +127,7 @@ def install_plists(
 
     # Install the foreground wrapper scripts the plists reference.
     # ensure_shim() is idempotent — skips the write if the shim is current.
-    for wrapper in ("_brain-watcher-fg", "_brain-build-fg"):
+    for wrapper in ("_brain-watcher-fg", "_brain-build-fg", "_brain-brief-fg"):
         ensure_shim(wrapper, brain_home)
 
     effective_vault_path = vault_path if vault_path is not None else Path.home() / "brain-vault"

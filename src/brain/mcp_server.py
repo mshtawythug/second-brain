@@ -1265,6 +1265,103 @@ def brain_daily(date: str | None = None) -> dict[str, Any]:
 
 
 @mcp_app.tool()
+def brain_review_weekly(
+    week: str | None = None,
+    no_graph: bool = False,
+    emit: bool = True,
+) -> dict[str, Any]:
+    """Synthesize the prior week's activity into a weekly review.
+
+    ``week`` is an ISO week (``YYYY-Www``, e.g. ``2026-W23``); ``None`` uses the
+    current week. ``no_graph`` forces tag-cluster themes instead of graph
+    communities. When ``emit`` is true (default) the dated page is written to
+    ``<vault>/reviews/<week>.md``. Returns the machine-readable sections plus
+    the relative ``vault_path`` slug (mirrors ``brain review weekly --json``).
+    """
+    from .activity import current_iso_week
+    from .review import build_weekly_report, emit_weekly_page, render_weekly_json
+
+    state = _get_state()
+    target_week = week or current_iso_week()
+    # Theme synthesis matters only on the graph path; reuse the long-lived
+    # enricher built in main(). summarize_group never raises if Ollama is down.
+    enricher = state.enricher if not no_graph else None
+    try:
+        with _mcp_conn(state) as conn:
+            report = build_weekly_report(
+                conn,
+                state.cfg,
+                week=target_week,
+                generated_on=date_cls.today(),
+                no_graph=no_graph,
+                enricher=enricher,
+            )
+    except ValueError as e:
+        raise _mcp_error(
+            INVALID_PARAMS, f"week must be YYYY-Www (e.g. 2026-W23): {e}"
+        ) from e
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+
+    if emit:
+        try:
+            emit_weekly_page(state.cfg.vault_path, report)
+        except OSError as e:
+            raise _mcp_error(
+                INTERNAL_ERROR, f"could not write review page: {e}"
+            ) from e
+
+    return render_weekly_json(report)
+
+
+@mcp_app.tool()
+def brain_brief(
+    since_hours: int | None = None,
+    todo_since_days: int | None = None,
+    no_enrich: bool = False,
+) -> dict[str, Any]:
+    """Proactive daily digest: recent captures, open todos, pins, next steps.
+
+    ``since_hours`` bounds the recent-captures window; ``todo_since_days`` bounds
+    the open-action-item window. Both default to ``None``, resolving to
+    ``cfg.brief_since_hours`` / ``cfg.brief_todo_since_days`` (themselves 24 / 7
+    unless overridden) so the tool honors config exactly like ``brain brief
+    --json``. Best-effort LLM next-step suggestions are included unless
+    ``no_enrich`` is true or Ollama is unavailable (then ``suggestions`` is
+    empty). Surfaces titles + todo texts only — never document bodies.
+    """
+    from dataclasses import replace
+
+    from .brief import assemble_brief, suggest_next_steps
+
+    state = _get_state()
+    resolved_since_hours = (
+        since_hours if since_hours is not None else state.cfg.brief_since_hours
+    )
+    resolved_todo_since_days = (
+        todo_since_days
+        if todo_since_days is not None
+        else state.cfg.brief_todo_since_days
+    )
+    try:
+        with _mcp_conn(state) as conn:
+            data = assemble_brief(
+                conn,
+                state.cfg,
+                since_hours=resolved_since_hours,
+                todo_since_days=resolved_todo_since_days,
+                on_date=date_cls.today(),
+            )
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    if not no_enrich:
+        suggestions = suggest_next_steps(data, state.cfg)
+        if suggestions:
+            data = replace(data, suggestions=suggestions)
+    return data.to_dict()
+
+
+@mcp_app.tool()
 def brain_link_proposal(
     src_id_prefix: str,
     dst_id_or_title: str,
