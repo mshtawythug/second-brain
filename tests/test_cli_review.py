@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -79,3 +80,21 @@ def test_review_weekly_empty_week_reports_no_activity(
     )
     assert result.exit_code == 0, result.stdout
     assert "No activity found for 2026-W01." in result.stdout
+
+
+def test_review_weekly_empty_week_still_emits_by_default(
+    test_db: psycopg.Connection,  # noqa: ARG001 — schema reset
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Default (no --no-emit) writes the page even for an empty week — matching
+    # the default-emit contract + MCP parity. Regression guard for the Codex fix.
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    result = runner.invoke(
+        cli.app, ["review", "weekly", "--week", "2026-W01", "--no-graph"]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "No activity found for 2026-W01." in result.stdout
+    written = tmp_path / "reviews" / "2026-W01.md"
+    assert written.is_file()
+    assert written.read_text(encoding="utf-8").startswith("---\n")
