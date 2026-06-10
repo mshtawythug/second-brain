@@ -76,9 +76,12 @@ from .cli_claude import install_skill as _install_skill
 from .eval import (
     EvalBaselineError,
     EvalCorpusError,
+    answer_eval_report_to_dict,
     diff_reports,
+    load_answer_corpus,
     load_baseline,
     load_corpus,
+    run_answer_eval,
     run_eval,
     save_baseline,
 )
@@ -3491,6 +3494,59 @@ def explain(
     console.print(explain_table(results, verbose=verbose))
 
 
+def _run_answer_eval_cli(
+    *, corpus_path: Path | None, json_output: bool
+) -> None:
+    """Run the `brain ask` answer-quality harness (live Ollama) and report it.
+
+    Loads the answer corpus, runs ``ask_no_loop`` per case against the live
+    brain, and prints ``mean_fact_recall`` / ``mean_citation_count``. Surfaces a
+    clean error (exit 1) when Ollama is unavailable.
+    """
+    from .ask import ask_no_loop
+
+    try:
+        cases = load_answer_corpus(corpus_path)
+    except EvalCorpusError as exc:
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    cfg = Config.load()
+    embedder = _build_embedder(cfg)
+    chat = _build_chat(cfg)
+
+    with connect(cfg.database_url) as conn:
+        conn.autocommit = True
+
+        def _ask_fn(question: str) -> AskResult:
+            return ask_no_loop(
+                conn,
+                cfg,
+                embedder=embedder,
+                chat=chat,
+                question=question,
+                limit=cfg.ask_docs_per_iter,
+            )
+
+        try:
+            report = run_answer_eval(cases, _ask_fn)
+        except OllamaUnavailable as exc:
+            typer.secho(
+                "eval --answer: Ollama is not available — start it and retry. "
+                f"({exc})",
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(code=1) from exc
+
+    if json_output:
+        emit_json(answer_eval_report_to_dict(report))
+        return
+    typer.echo(f"cases:              {len(report.scores)}")
+    typer.echo(f"mean_fact_recall:   {report.mean_fact_recall:.3f}")
+    typer.echo(f"mean_citation_count:{report.mean_citation_count:.3f}")
+
+
 @app.command("eval")
 def eval_cmd(
     category: list[str] = typer.Option(
@@ -3508,6 +3564,15 @@ def eval_cmd(
     corpus_path: Path | None = typer.Option(
         None, "--corpus", help="Override the default corpus YAML path."
     ),
+    answer: bool = typer.Option(
+        False,
+        "--answer",
+        help=(
+            "Run the `brain ask` answer-quality harness instead of the ranking "
+            "harness: synthesize answers over the answer corpus (live Ollama) "
+            "and report mean fact-recall."
+        ),
+    ),
 ) -> None:
     """Run the eval harness over the golden corpus and display ranking metrics.
 
@@ -3520,8 +3585,17 @@ def eval_cmd(
     Use ``--record-baseline NAME`` to persist the result for future comparison,
     and ``--baseline NAME --diff`` to compare the current run against a saved
     baseline.  Baseline files live in ``tests/eval/baselines/<NAME>.json``.
+
+    ``--answer`` switches to the answer-synthesis harness (Plan 06): it loads
+    ``tests/eval/answer_corpus.yaml``, runs ``brain ask --no-loop`` per case
+    against a live Ollama, and reports ``mean_fact_recall`` /
+    ``mean_citation_count`` (no baselines — live-model gated).
     """
     import dataclasses
+
+    if answer:
+        _run_answer_eval_cli(corpus_path=corpus_path, json_output=json_output)
+        return
 
     # Validate mutual-exclusion and dependency constraints.
     if diff and not baseline:

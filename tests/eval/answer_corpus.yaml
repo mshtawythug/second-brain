@@ -1,0 +1,97 @@
+# Golden answer-eval corpus for `brain ask` (Plan 06).
+#
+# Fully SYNTHETIC — no real names, employers, doc IDs, or PII (CLAUDE.md rule
+# 15). Each case is a question plus the short fact phrases an acceptable answer
+# should cover. Used by `brain eval --answer` (live, needs Ollama) and the
+# @pytest.mark.eval harness; scored by deterministic substring/token overlap
+# (brain.eval.answer_eval.score_answer) — NOT an LLM judge.
+#
+# This corpus assumes a brain seeded with the matching synthetic documents
+# (the test harness seeds them, or a local dev populates equivalents). The
+# threshold is intentionally modest (mean_fact_recall >= 0.60) because local
+# 8B-class models paraphrase loosely.
+version: 1
+cases:
+  - question: "What does the synthetic onboarding playbook cover?"
+    expected_facts:
+      - "paired mentorship"
+      - "staged checklist"
+    category: synthesis
+    notes: "Single-doc synthesis over the onboarding playbook note."
+
+  - question: "What did we decide about the data pipeline?"
+    expected_facts:
+      - "streaming ingestion"
+      - "batch fallback"
+    category: synthesis
+    notes: "Decision recall from a synthetic pipeline-decision note."
+
+  - question: "What is the retention policy for synthetic logs?"
+    expected_facts:
+      - "ninety days"
+      - "cold storage"
+    category: synthesis
+    notes: "Policy fact recall."
+
+  - question: "How did the synthetic incident on the payments service resolve?"
+    expected_facts:
+      - "rollback"
+      - "config flag"
+    category: synthesis
+    notes: "Incident postmortem synthesis."
+
+  - question: "What recurring themes came up in reviews of project Atlas?"
+    expected_facts:
+      - "scope creep"
+      - "testing gaps"
+    category: multi-hop
+    notes: "Multi-doc theme aggregation across review notes."
+
+  - question: "What did I learn about negotiation across my synthetic job search?"
+    expected_facts:
+      - "anchor high"
+      - "competing offer"
+    category: multi-hop
+    notes: "Cross-document learning synthesis."
+
+  - question: "What are the synthetic platform team's on-call expectations?"
+    expected_facts:
+      - "primary responder"
+      - "escalation path"
+    category: synthesis
+    notes: "Operational expectations recall."
+
+  - question: "What feedback did the mentor give the synthetic mentee?"
+    expected_facts:
+      - "clearer communication"
+      - "ownership"
+    category: person
+    notes: "Person-scoped feedback synthesis."
+
+  - question: "How has the synthetic team's testing strategy evolved?"
+    expected_facts:
+      - "unit tests"
+      - "end to end"
+    category: timeline
+    notes: "Temporal evolution synthesis."
+
+  - question: "What were the synthetic quarterly goals for the platform group?"
+    expected_facts:
+      - "reduce latency"
+      - "improve reliability"
+    category: synthesis
+    notes: "Goal recall."
+
+  - question: "What blockers did the synthetic migration hit?"
+    expected_facts:
+      - "schema mismatch"
+      - "downtime window"
+    category: multi-hop
+    notes: "Blocker aggregation across migration notes."
+
+  - question: "What did the synthetic design review conclude about caching?"
+    expected_facts:
+      - "read through cache"
+      - "invalidation"
+    category: synthesis
+    notes: "Design conclusion recall."

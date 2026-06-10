@@ -24,6 +24,15 @@ Public surface re-exported from sub-modules:
   / :class:`EvalBaselineError` — exception hierarchy
 """
 
+from .answer_eval import (
+    AnswerEvalCase,
+    AnswerEvalReport,
+    AnswerScore,
+    answer_eval_report_to_dict,
+    load_answer_corpus,
+    run_answer_eval,
+    score_answer,
+)
 from .baseline import BaselineDiff, QueryDiff, diff_reports, load_baseline, save_baseline
 from .concept_extraction import (
     ConceptF1Report,
@@ -61,6 +70,14 @@ __all__ = [
     # Corpus
     "EvalQuery",
     "load_corpus",
+    # Answer-quality eval (Plan 06)
+    "AnswerEvalCase",
+    "AnswerScore",
+    "AnswerEvalReport",
+    "score_answer",
+    "run_answer_eval",
+    "load_answer_corpus",
+    "answer_eval_report_to_dict",
     # Runner output
     "EvalResult",
     "EvalReport",

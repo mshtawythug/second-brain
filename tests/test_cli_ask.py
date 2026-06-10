@@ -161,3 +161,56 @@ def test_cli_ask_bad_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     result = runner.invoke(cli.app, ["ask", "q", "--mode", "bogus"])
     assert result.exit_code != 0
     assert "mode must be one of" in result.output
+
+
+def test_cli_eval_answer_runs(
+    test_db: psycopg.Connection,
+    seed_doc: Callable[..., str],
+    patch_embedder: Callable[[object], None],
+    fake_embedder: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The answer harness loads the committed corpus and runs ask_no_loop per
+    # case. With a fake chat (no Ollama) + fake embedder it executes end-to-end;
+    # we assert the command wiring + JSON shape, not the (model-dependent) score.
+    seed_doc(
+        title="Synthetic onboarding playbook",
+        content="The synthetic onboarding playbook covers paired mentorship.",
+    )
+    patch_embedder(fake_embedder)
+    monkeypatch.setattr(
+        cli, "_build_chat", lambda cfg: _fake_chat_factory("paired mentorship [1].")
+    )
+
+    result = runner.invoke(cli.app, ["eval", "--answer", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert "mean_fact_recall" in payload
+    assert "mean_citation_count" in payload
+    assert len(payload["scores"]) >= 10
+
+
+def test_cli_eval_answer_ollama_unavailable(
+    test_db: psycopg.Connection,  # noqa: ARG001 — schema reset
+    patch_embedder: Callable[[object], None],
+    fake_embedder: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch_embedder(fake_embedder)
+
+    def _dead_chat(
+        prompt: str,
+        *,
+        schema: dict[str, Any],
+        cfg: Config,
+        model: str | None = None,
+        num_predict: int | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        raise OllamaUnavailable("down")
+
+    monkeypatch.setattr(cli, "_build_chat", lambda cfg: _dead_chat)
+
+    result = runner.invoke(cli.app, ["eval", "--answer"])
+    assert result.exit_code == 1
+    assert "Ollama is not available" in result.output
