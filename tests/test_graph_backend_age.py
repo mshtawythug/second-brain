@@ -37,6 +37,8 @@ _C = "33333333-3333-4333-8333-333333333333"
 _D = "44444444-4444-4444-8444-444444444444"
 _DOC1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"
 _DOC2 = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
+_DOC3 = "cccccccc-cccc-4ccc-8ccc-ccccccccccc3"
+_DOC4 = "dddddddd-dddd-4ddd-8ddd-ddddddddddd4"
 
 
 # --------------------------------------------------------------------------- #
@@ -183,14 +185,37 @@ def _insert_relationship(
 
 
 def _insert_document(
-    conn: psycopg.Connection[Any], doc_id: str, *, title: str | None = None
+    conn: psycopg.Connection[Any],
+    doc_id: str,
+    *,
+    title: str | None = None,
+    ingested_at: str | None = None,
 ) -> None:
-    """Insert a minimal ``documents`` row (FK target for relational mentions)."""
-    conn.execute(
-        "INSERT INTO documents (id, title, content, content_hash, content_type) "
-        "VALUES (%s, %s, %s, %s, 'note')",
-        (doc_id, title or doc_id[:8], f"synthetic body {doc_id[:8]}", doc_id),
-    )
+    """Insert a minimal ``documents`` row (FK target for relational mentions).
+
+    ``ingested_at`` (an ISO timestamp string) is set explicitly when a test needs
+    a deterministic "newest shared doc" ordering for scope-truncation tiebreaks;
+    omitting it defaults to ``NOW()`` (the production default).
+    """
+    if ingested_at is None:
+        conn.execute(
+            "INSERT INTO documents (id, title, content, content_hash, content_type) "
+            "VALUES (%s, %s, %s, %s, 'note')",
+            (doc_id, title or doc_id[:8], f"synthetic body {doc_id[:8]}", doc_id),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO documents "
+            "(id, title, content, content_hash, content_type, ingested_at) "
+            "VALUES (%s, %s, %s, %s, 'note', %s)",
+            (
+                doc_id,
+                title or doc_id[:8],
+                f"synthetic body {doc_id[:8]}",
+                doc_id,
+                ingested_at,
+            ),
+        )
 
 
 def _insert_mention(
@@ -682,15 +707,156 @@ def test_scope_person_tenant_isolation(test_db: psycopg.Connection) -> None:
     assert acme_scope.document_uuids == (_DOC2,)
 
 
-def test_scope_person_raises_on_overflow(test_db: psycopg.Connection) -> None:
-    """A person scope larger than frontier_cap fails loudly (complete-or-fail),
-    rather than returning a silently-truncated partial scope."""
-    backend = AgeBackend()
-    _seed_mentions(test_db, "default")  # _DOC1 co-mentions A, B, C
+def test_scope_person_truncates_on_overflow(test_db: psycopg.Connection) -> None:
+    """A person scope larger than frontier_cap is deterministically truncated to
+    the strongest co-entities (bounded ranked truncation), not raised.
 
-    # 2 co-mention rows (B, C) exceed frontier_cap=1 → raise (relational scope).
-    with pytest.raises(GraphBackendError, match="person scope exceeded safe bound"):
+    Regression for the hub-person crash: ``scope_person`` used to raise
+    ``GraphBackendError('person scope exceeded safe bound')`` once a person's
+    co-mention rows exceeded ``frontier_cap``, making themes/audio unusable for
+    exactly the hub people they matter most for. It must now keep the strongest
+    ``frontier_cap`` worth of scope instead.
+    """
+    backend = AgeBackend()
+    _seed_mentions(test_db, "default")  # _DOC1 co-mentions A, B, C (B, C co-rows)
+
+    # 2 co-mention rows (B, C) exceed frontier_cap=1 → truncate to the strongest 1
+    # (B and C tie on count=1 and share _DOC1's date → entity-id tiebreak keeps B).
+    scope = backend.scope_person(test_db, "default", _A, frontier_cap=1)
+
+    assert scope.seed_entity_uuid == _A
+    assert scope.entity_uuids == (_B,)  # _B < _C deterministic tiebreak
+    assert scope.document_uuids == (_DOC1,)
+    assert scope.tenant_id == "default"
+
+
+def test_scope_person_truncation_ranks_by_comention_frequency(
+    test_db: psycopg.Connection,
+) -> None:
+    """Truncation keeps the highest co-mention-frequency entities; the weakest
+    co-entity is dropped once the row budget is met."""
+    backend = AgeBackend()
+    for eid in (_A, _B, _C, _D):
+        _insert_entity(test_db, eid, "default")
+    for doc in (_DOC1, _DOC2, _DOC3, _DOC4):
+        _insert_document(test_db, doc)
+    # Seed _A appears in all four docs.
+    for doc in (_DOC1, _DOC2, _DOC3, _DOC4):
+        _insert_mention(test_db, "default", _A, doc)
+    # _B co-mentioned in 3 docs (strongest), _C in 2, _D in 1 (weakest).
+    for doc in (_DOC1, _DOC2, _DOC3):
+        _insert_mention(test_db, "default", _B, doc)
+    for doc in (_DOC1, _DOC2):
+        _insert_mention(test_db, "default", _C, doc)
+    _insert_mention(test_db, "default", _D, _DOC4)
+
+    # total rows = 3 (B) + 2 (C) + 1 (D) = 6 > 5 → truncate. Greedy by rank:
+    # B (3) fits; C (3+2=5) fits and hits the cap; D would overflow → dropped.
+    scope = backend.scope_person(test_db, "default", _A, frontier_cap=5)
+
+    assert scope.entity_uuids == (_B, _C)  # _D (weakest) dropped, sorted asc
+    assert scope.document_uuids == (_DOC1, _DOC2, _DOC3)  # union of B+C docs
+
+
+def test_scope_person_truncation_tiebreak_newest_doc(
+    test_db: psycopg.Connection,
+) -> None:
+    """Entities tied on co-mention count are ranked by newest shared doc first."""
+    backend = AgeBackend()
+    for eid in (_A, _B, _C):
+        _insert_entity(test_db, eid, "default")
+    # _DOC1 (older) co-mentions A+C; _DOC2 (newer) co-mentions A+B. B and C both
+    # have count=1, so the newest-shared-doc tiebreak ranks B (newer _DOC2) above
+    # C (older _DOC1).
+    _insert_document(test_db, _DOC1, ingested_at="2020-01-01T00:00:00+00:00")
+    _insert_document(test_db, _DOC2, ingested_at="2025-01-01T00:00:00+00:00")
+    _insert_mention(test_db, "default", _A, _DOC1)
+    _insert_mention(test_db, "default", _A, _DOC2)
+    _insert_mention(test_db, "default", _C, _DOC1)
+    _insert_mention(test_db, "default", _B, _DOC2)
+
+    # 2 co-rows (B, C) > frontier_cap=1 → keep the newer-doc entity B.
+    scope = backend.scope_person(test_db, "default", _A, frontier_cap=1)
+
+    assert scope.entity_uuids == (_B,)
+    assert scope.document_uuids == (_DOC2,)
+
+
+def test_scope_person_truncation_caps_documents_for_dominant_entity(
+    test_db: psycopg.Connection,
+) -> None:
+    """A single co-entity whose shared-doc count alone exceeds the cap is still
+    kept (never an empty scope), but its connecting docs are bounded to the cap,
+    keeping the newest."""
+    backend = AgeBackend()
+    _insert_entity(test_db, _A, "default")
+    _insert_entity(test_db, _B, "default")
+    # _B shares 3 docs with _A; cap=2 → keep _B but only the 2 newest docs.
+    _insert_document(test_db, _DOC1, ingested_at="2020-01-01T00:00:00+00:00")
+    _insert_document(test_db, _DOC2, ingested_at="2022-01-01T00:00:00+00:00")
+    _insert_document(test_db, _DOC3, ingested_at="2024-01-01T00:00:00+00:00")
+    for doc in (_DOC1, _DOC2, _DOC3):
+        _insert_mention(test_db, "default", _A, doc)
+        _insert_mention(test_db, "default", _B, doc)
+
+    scope = backend.scope_person(test_db, "default", _A, frontier_cap=2)
+
+    assert scope.entity_uuids == (_B,)
+    # 3 shared docs > cap=2 → keep the 2 newest (_DOC2, _DOC3), sorted asc.
+    assert scope.document_uuids == (_DOC2, _DOC3)
+
+
+def test_scope_person_truncation_is_deterministic(
+    test_db: psycopg.Connection,
+) -> None:
+    """Repeated truncated scopes are byte-identical (no run-to-run drift)."""
+    backend = AgeBackend()
+    for eid in (_A, _B, _C, _D):
+        _insert_entity(test_db, eid, "default")
+    for doc in (_DOC1, _DOC2, _DOC3):
+        _insert_document(test_db, doc)
+    for eid in (_A, _B, _C, _D):
+        _insert_mention(test_db, "default", eid, _DOC1)
+    _insert_mention(test_db, "default", _A, _DOC2)
+    _insert_mention(test_db, "default", _B, _DOC2)
+
+    first = backend.scope_person(test_db, "default", _A, frontier_cap=2)
+    second = backend.scope_person(test_db, "default", _A, frontier_cap=2)
+
+    assert first == second
+
+
+def test_scope_person_truncation_emits_single_warning(
+    test_db: psycopg.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Truncation logs exactly one actionable WARNING (never silent)."""
+    backend = AgeBackend()
+    _seed_mentions(test_db, "default")  # B, C co-rows exceed cap=1
+
+    with caplog.at_level("WARNING", logger="brain.graph_rag.backends._age_helpers"):
         backend.scope_person(test_db, "default", _A, frontier_cap=1)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert "BRAIN_GRAPH_FRONTIER_CAP" in message
+    assert _A in message
+
+
+def test_scope_person_under_cap_emits_no_warning(
+    test_db: psycopg.Connection, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A scope within the cap returns the complete set with NO warning (no
+    behavior change for under-cap scopes)."""
+    backend = AgeBackend()
+    _seed_mentions(test_db, "default")  # 2 co-rows, well under cap=50
+
+    with caplog.at_level("WARNING", logger="brain.graph_rag.backends._age_helpers"):
+        scope = backend.scope_person(test_db, "default", _A, frontier_cap=50)
+
+    assert scope.entity_uuids == (_B, _C)
+    assert scope.document_uuids == (_DOC1,)
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
 
 
 def test_scope_person_is_relational_not_age(test_db: psycopg.Connection) -> None:
