@@ -121,8 +121,8 @@ def score_doc_pair(
     ``Graph`` / ``Embed`` legs).
 
     Design note: the plan's prose mentioned ``rrf_contribution`` of leg *ranks*,
-    but raw RRF tops out at ~``2/(RRF_K+1)`` ≈ 0.033 — below the plan's own
-    default ``connect_min_score = 0.30`` (nothing would ever clear the gate) and
+    but raw RRF tops out at ~``2/(RRF_K+1)`` ≈ 0.033 — far below any usable
+    ``connect_min_score`` floor (nothing would ever clear the gate) and
     inconsistent with the plan's display table, where ``Score`` is exactly the
     mean of the raw ``Graph`` / ``Embed`` signals (0.72 = (0.81 + 0.63) / 2).
     This linear blend of the normalized leg signals is the interpretation those

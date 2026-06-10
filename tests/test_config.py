@@ -1017,7 +1017,7 @@ class TestConnectKnobs:
         ):
             monkeypatch.delenv(key, raising=False)
         cfg = Config.load()
-        assert cfg.connect_min_score == DEFAULT_CONNECT_MIN_SCORE == 0.30
+        assert cfg.connect_min_score == DEFAULT_CONNECT_MIN_SCORE == 0.60
         assert cfg.connect_candidate_limit == DEFAULT_CONNECT_CANDIDATE_LIMIT == 50
         assert cfg.connect_max_per_doc == DEFAULT_CONNECT_MAX_PER_DOC == 5
 

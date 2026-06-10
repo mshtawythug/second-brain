@@ -109,6 +109,18 @@ def _insert_suggestion(
     return str(row[0])
 
 
+@pytest.fixture(autouse=True)
+def _pin_connect_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the confidence floor these mechanics fixtures were authored against.
+
+    The shipped default is 0.60 (tuned on a live corpus, 2026-06-10 — see
+    config.py); the fixtures here score pairs in the 0.30–0.60 band on
+    purpose to exercise upsert/retire/cap mechanics. The default's value
+    itself is asserted in test_config.py.
+    """
+    monkeypatch.setenv("BRAIN_CONNECT_MIN_SCORE", "0.30")
+
+
 def _cfg() -> Config:
     """Load config (DATABASE_URL forced to the test DB by the session fixture)."""
     return Config.load()

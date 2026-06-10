@@ -270,12 +270,12 @@ _VALID_TIMELINE_TRIMS = frozenset({"oldest", "sparsest"})
 # Plan 07 -- `brain connect` proactive auto-link suggestion knobs.
 #
 # ``DEFAULT_CONNECT_MIN_SCORE`` is the RRF-blend confidence floor: candidate
-# pairs scoring below this are silently discarded (no DB write). RRF scores are
-# bounded by ~2/(RRF_K+1) ≈ 0.033 for a rank-1 pair in both legs, so the 0.30
-# default is intentionally conservative on the *normalized* blend; see
-# :mod:`brain.connect`. Override via ``BRAIN_CONNECT_MIN_SCORE``; must be a
-# float in (0.0, 1.0].
-DEFAULT_CONNECT_MIN_SCORE = 0.30
+# pairs scoring below this are silently discarded (no DB write). Tuned against
+# a live ~1.3k-doc corpus (2026-06-10): the original 0.30 floor admitted
+# essentially every candidate (6.2k pending — the per-doc cap, not the floor,
+# was binding); 0.60 keeps ~1.5 high-signal suggestions per doc. Lower via
+# ``BRAIN_CONNECT_MIN_SCORE`` for more recall; must be a float in (0.0, 1.0].
+DEFAULT_CONNECT_MIN_SCORE = 0.60
 # Per-source-doc cap on candidate targets pulled from EACH leg (graph +
 # embedding) before the RRF blend. Bounds the per-doc cost. Override via
 # ``BRAIN_CONNECT_CANDIDATE_LIMIT``; must be an integer >= 1.
