@@ -302,13 +302,17 @@ def _retire_linked_pending(
     Closes the window where a suggestion is queued, then the user draws the link
     manually (or a derived edge appears) — the stale pending row must leave the
     queue on the next refresh. Only ``pending`` rows are removed (accepted /
-    rejected are frozen), and only for the given source docs. Returns the row
-    count deleted.
+    rejected are frozen). Returns the row count deleted.
 
-    Both ``links`` and ``derived_links`` are matched UNDIRECTED: a suggestion
-    pair is undirected for review (migration 022), so a link drawn in EITHER
-    orientation retires the pending row regardless of how the suggestion stored
-    its source/target.
+    Scoping is by EITHER endpoint (``source_doc_id`` OR ``target_doc_id`` in
+    ``source_ids``), not just the stored source: suggestions are undirected
+    (migration 022), so the stored orientation is not stable. A partial
+    ``refresh --doc B`` must still retire a pending row stored as ``A -> B`` once
+    the pair is linked, even though ``B`` is the row's target, not its source.
+
+    Both ``links`` and ``derived_links`` are matched UNDIRECTED: a link drawn in
+    EITHER orientation retires the pending row regardless of how the suggestion
+    stored its source/target.
     """
     if not source_ids:
         return 0
@@ -316,7 +320,8 @@ def _retire_linked_pending(
         """
         DELETE FROM link_suggestions ls
         WHERE ls.status = 'pending'
-          AND ls.source_doc_id = ANY(%(srcs)s::uuid[])
+          AND (ls.source_doc_id = ANY(%(srcs)s::uuid[])
+               OR ls.target_doc_id = ANY(%(srcs)s::uuid[]))
           AND (
               EXISTS (
                   -- links are matched undirected — match either orientation.

@@ -1290,6 +1290,33 @@ def test_refresh_retires_pending_when_linked_reverse_orientation(
     assert _pair_rows(test_db, src, tgt) == []  # retired despite reverse linkage
 
 
+def test_partial_refresh_retires_pending_scoped_by_target_endpoint(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # Codex review: _retire_linked_pending must scope by EITHER endpoint. A
+    # pending row stored as src->tgt, linked in reverse (tgt->src), must be
+    # retired by a PARTIAL `refresh --doc <tgt>` even though tgt is the row's
+    # TARGET (not its source) — otherwise the stale row lingers because scoring
+    # the linked source suppresses any new upsert.
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    row = test_db.execute(
+        "SELECT source_doc_id::text, target_doc_id::text FROM link_suggestions "
+        "WHERE status = 'pending' LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    src, tgt = str(row[0]), str(row[1])
+    # Link the reverse orientation; the pair is now connected.
+    test_db.execute(
+        "INSERT INTO links (src_document_id, dst_document_id, link_text, link_kind) "
+        "VALUES (%s::uuid, %s::uuid, %s, %s)",
+        (tgt, src, "manual", "wiki"),
+    )
+    # Refresh ONLY the stored target doc — the stored source is out of scope.
+    connect_mod.refresh_suggestions(test_db, _cfg(), doc_prefix=tgt[:8])
+    assert _pair_rows(test_db, src, tgt) == []  # retired by target-endpoint scope
+
+
 def test_migration_022_dedup_keeps_better_and_preserves_decided(
     test_db: psycopg.Connection,
 ) -> None:
