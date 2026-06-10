@@ -197,6 +197,20 @@ class ElicitError(BrainError):
     """Base class for tacit-knowledge elicitation failures."""
 
 
+class ConnectError(BrainError):
+    """Raised on invalid inputs in the ``brain connect`` auto-link layer (Plan 07).
+
+    Surfaced by :mod:`brain.connect` before any DB round-trip when a scoring /
+    refresh parameter is degenerate — a non-positive candidate limit or
+    per-doc cap, or a confidence threshold outside ``(0.0, 1.0]``. These are
+    caller bugs (a misconfigured ``BRAIN_CONNECT_*`` knob), so they fail fast
+    rather than silently producing an empty / wrong suggestion set. Also raised
+    when a suggestion-id prefix cannot be resolved to a single
+    ``link_suggestions`` row. Inherits :class:`BrainError` so the CLI / MCP
+    layers map it without a framework-specific import.
+    """
+
+
 class VaultNoteSyncError(BrainError):
     """Raised when authoring a vault note fails to resolve or index.
 
