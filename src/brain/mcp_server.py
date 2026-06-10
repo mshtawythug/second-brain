@@ -1397,7 +1397,7 @@ def brain_ask(
     question: str,
     mode: str = "hybrid",
     no_loop: bool = False,
-    limit: int = 5,
+    limit: int | None = None,
     max_iterations: int | None = None,
 ) -> dict[str, Any]:
     """Agentic multi-hop cited answer synthesis over the second brain.
@@ -1431,11 +1431,18 @@ def brain_ask(
             INVALID_PARAMS,
             f"mode must be one of: {', '.join(sorted(ASK_MODES))}",
         )
+    if max_iterations is not None and max_iterations < 1:
+        raise _mcp_error(
+            INVALID_PARAMS, "max_iterations must be >= 1"
+        )
+    if limit is not None and limit < 1:
+        raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
     resolved_max_iter = (
         max_iterations
         if max_iterations is not None
         else state.cfg.ask_max_iterations
     )
+    resolved_limit = limit if limit is not None else state.cfg.ask_docs_per_iter
 
     try:
         if mode == HYBRID_MODE:
@@ -1449,7 +1456,7 @@ def brain_ask(
                     question=question,
                     mode=mode,
                     no_loop=no_loop,
-                    limit=limit,
+                    limit=resolved_limit,
                     max_iterations=resolved_max_iter,
                 )
                 _log_ask_interactions_mcp(conn, result)
@@ -1469,7 +1476,7 @@ def brain_ask(
                     question=question,
                     mode=mode,
                     no_loop=no_loop,
-                    limit=limit,
+                    limit=resolved_limit,
                     max_iterations=resolved_max_iter,
                     backend=backend,
                 )

@@ -60,6 +60,11 @@ _SYNTH_SNIPPET_CHARS = 400
 # Matches a ``[N]`` citation marker (1+ digits) in a synthesized answer.
 _CITATION_RE = re.compile(r"\[(\d+)\]")
 
+# Matches a ``[N]`` marker plus any leading whitespace, for sanitizing dangling
+# (out-of-range) markers out of the final answer text — the marker AND the space
+# that precedes it are removed so " foo [99] bar" collapses cleanly to "foo bar".
+_MARKER_WITH_LEAD_RE = re.compile(r"\s*\[(\d+)\]")
+
 
 class ChatJson(Protocol):
     """Structural type of :func:`brain.chat.chat_json` (the injected LLM seam).
@@ -270,6 +275,25 @@ def _call_synthesize_step(
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_answer(answer: str, doc_count: int) -> str:
+    """Strip out-of-range ``[N]`` markers from the answer text.
+
+    Citation integrity: a marker whose number has no backing source (``N`` >
+    ``doc_count`` or ``N`` < 1) is a dangling citation. Removing it — along with
+    its leading whitespace — keeps the displayed/returned answer free of
+    references that resolve to nothing, while valid in-range markers are kept
+    verbatim so :func:`_build_citations` still maps them.
+    """
+
+    def _replace(match: re.Match[str]) -> str:
+        ref = int(match.group(1))
+        if 1 <= ref <= doc_count:
+            return match.group(0)  # keep the valid marker (and its lead space)
+        return ""
+
+    return _MARKER_WITH_LEAD_RE.sub(_replace, answer).strip()
+
+
 def _build_citations(answer: str, docs: list[SearchResult]) -> list[Citation]:
     """Map ``[N]`` markers in ``answer`` to the numbered ``docs`` list.
 
@@ -462,7 +486,8 @@ def ask_no_loop(
         mode=mode,
         backend=backend,
     )
-    answer = _call_synthesize_step(chat, cfg, question, docs, graph_summary)
+    raw_answer = _call_synthesize_step(chat, cfg, question, docs, graph_summary)
+    answer = _sanitize_answer(raw_answer, len(docs))
     citations = _build_citations(answer, docs)
     return AskResult(
         answer=answer,
@@ -500,6 +525,10 @@ def ask(
     propagates to the caller (no silent degradation).
     """
     _validate_mode(mode)
+    if max_iterations < 1:
+        raise ValueError(
+            f"max_iterations must be >= 1 (got {max_iterations})"
+        )
     if no_loop:
         return ask_no_loop(
             conn,
@@ -563,9 +592,10 @@ def ask(
     # Step 4 — Synthesize over the accumulated, deduplicated documents.
     docs = list(all_docs.values())
     combined_graph_summary = _join_graph_summaries(graph_summaries)
-    answer = _call_synthesize_step(
+    raw_answer = _call_synthesize_step(
         chat, cfg, question, docs, combined_graph_summary
     )
+    answer = _sanitize_answer(raw_answer, len(docs))
     citations = _build_citations(answer, docs)
     return AskResult(
         answer=answer,

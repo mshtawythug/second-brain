@@ -129,3 +129,66 @@ def test_brain_ask_ollama_unavailable_internal_error(
     with pytest.raises(McpError) as exc_info:
         mcp_server.brain_ask(question="synthetic doc", no_loop=True)
     assert "Ollama is not running" in str(exc_info.value)
+
+
+def test_brain_ask_rejects_non_positive_max_iterations(
+    ask_state: mcp_server._State,  # noqa: ARG001 — installs state
+) -> None:
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_ask(question="q", max_iterations=0)
+    assert "max_iterations must be >= 1" in str(exc_info.value)
+
+
+def test_brain_ask_rejects_non_positive_limit(
+    ask_state: mcp_server._State,  # noqa: ARG001 — installs state
+) -> None:
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_ask(question="q", limit=0)
+    assert "limit must be >= 1" in str(exc_info.value)
+
+
+def test_brain_ask_limit_defaults_to_config(
+    test_db: psycopg.Connection,
+    seed_doc: Callable[..., str],
+    fake_embedder: object,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A custom ask_docs_per_iter must flow through when ``limit`` is omitted.
+    state = mcp_server._State(
+        cfg=Config(
+            database_url=TEST_DATABASE_URL, vault_path=tmp_path, ask_docs_per_iter=3
+        ),
+        embedder=fake_embedder,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+    seed_doc(title="Synthetic doc", content="synthetic content body about widgets.")
+
+    captured: dict[str, int] = {}
+
+    def _spy_chat(
+        prompt: str,
+        *,
+        schema: dict[str, Any],
+        cfg: Config,
+        model: str | None = None,
+        num_predict: int | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        return {"answer": "ok"}
+
+    monkeypatch.setattr(chat, "chat_json", _spy_chat)
+
+    # Spy on ask_no_loop's effective limit by patching hybrid_search.
+    import brain.ask as ask_mod
+
+    real_retrieve = ask_mod._retrieve_hybrid
+
+    def _spy_retrieve(conn, cfg, *, embedder, query, limit):  # type: ignore[no-untyped-def]
+        captured["limit"] = limit
+        return real_retrieve(conn, cfg, embedder=embedder, query=query, limit=limit)
+
+    monkeypatch.setattr(ask_mod, "_retrieve_hybrid", _spy_retrieve)
+
+    mcp_server.brain_ask(question="synthetic widgets", no_loop=True)
+    assert captured["limit"] == 3

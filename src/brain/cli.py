@@ -4124,8 +4124,11 @@ def ask(
         "--no-loop",
         help="Skip plan/reflect; single retrieve+synthesize pass (faster).",
     ),
-    limit: int = typer.Option(
-        5, "--limit", min=1, help="Max documents retrieved per iteration."
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        min=1,
+        help="Max documents retrieved per iteration (default: config ask_docs_per_iter).",
     ),
     max_iter: int | None = typer.Option(
         None,
@@ -4158,6 +4161,7 @@ def ask(
     embedder = _build_embedder(cfg)
     chat = _build_chat(cfg)
     max_iterations = max_iter if max_iter is not None else cfg.ask_max_iterations
+    effective_limit = limit if limit is not None else cfg.ask_docs_per_iter
 
     try:
         if mode == HYBRID_MODE:
@@ -4171,7 +4175,7 @@ def ask(
                     question=question,
                     mode=mode,
                     no_loop=no_loop,
-                    limit=limit,
+                    limit=effective_limit,
                     max_iterations=max_iterations,
                 )
                 _log_ask_interactions(conn, result, source="cli")
@@ -4191,7 +4195,7 @@ def ask(
                     question=question,
                     mode=mode,
                     no_loop=no_loop,
-                    limit=limit,
+                    limit=effective_limit,
                     max_iterations=max_iterations,
                     backend=backend,
                 )

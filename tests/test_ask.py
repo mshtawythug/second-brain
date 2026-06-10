@@ -160,6 +160,25 @@ def test_citations_dedupe_repeated_markers() -> None:
     assert [c.ref for c in citations] == [1, 2]
 
 
+def test_sanitize_answer_strips_out_of_range_markers() -> None:
+    from brain.ask import _sanitize_answer
+
+    # 2 docs available; [99] and [0] are dangling and must be removed from text,
+    # [1] kept.
+    cleaned = _sanitize_answer("Real claim [1] but fake claim [99] and [0].", 2)
+    assert "[99]" not in cleaned
+    assert "[0]" not in cleaned
+    assert "[1]" in cleaned
+    # No double spaces left where markers were removed.
+    assert "  " not in cleaned
+
+
+def test_sanitize_answer_empty_docs_strips_all() -> None:
+    from brain.ask import _sanitize_answer
+
+    assert _sanitize_answer("nothing found [1] here", 0) == "nothing found here"
+
+
 # ---------------------------------------------------------------------------
 # Graph summary (pure logic)
 # ---------------------------------------------------------------------------
@@ -418,6 +437,38 @@ def test_unknown_mode_raises() -> None:
             question="q",
             mode="bogus",
         )
+
+
+def test_ask_rejects_non_positive_max_iterations() -> None:
+    with pytest.raises(ValueError, match="max_iterations must be >= 1"):
+        ask(
+            None,
+            _cfg(),
+            embedder=FakeEmbedder(),
+            chat=_ScriptedChat([]),
+            question="q",
+            max_iterations=0,
+        )
+
+
+def test_ask_loop_sanitizes_out_of_range_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The synthesize step emits a dangling [5] (only 1 doc retrieved). The final
+    # answer must not contain [5], and citations must not include it.
+    chat = _ScriptedChat(
+        [
+            {"sub_queries": ["q1"]},
+            {"answer": "Real [1] but fabricated [5]."},
+        ]
+    )
+    _patch_retrieve(monkeypatch, [[_doc("doc-1")]])
+    result = ask(
+        None, _cfg(), embedder=FakeEmbedder(), chat=chat, question="q", max_iterations=1
+    )
+    assert "[5]" not in result.answer
+    assert "[1]" in result.answer
+    assert [c.ref for c in result.citations] == [1]
 
 
 def test_to_dict_round_trip() -> None:
