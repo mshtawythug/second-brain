@@ -34,19 +34,25 @@ def _insert_search_query(
     query: str,
     result_count: int = 0,
     *,
+    fts_count: int | None = None,
     session_id: uuid.UUID | None = None,
     source: str = "cli",
     tenant_id: str = "default",
 ) -> None:
-    """Insert one ``search_queries`` row (``at`` defaults to NOW())."""
+    """Insert one ``search_queries`` row (``at`` defaults to NOW()).
+
+    ``fts_count`` defaults to ``None`` (NULL) so legacy callers exercise the
+    pre-023 / old-row fallback path; pass an int to simulate a post-fix write.
+    """
     conn.execute(
         "INSERT INTO search_queries "
-        "(tenant_id, query, result_count, session_id, source) "
-        "VALUES (%s, %s, %s, %s, %s)",
+        "(tenant_id, query, result_count, fts_count, session_id, source) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
         (
             tenant_id,
             query,
             result_count,
+            fts_count,
             str(session_id) if session_id is not None else None,
             source,
         ),
@@ -138,6 +144,61 @@ def test_record_search_query_other_schema_errors_propagate() -> None:
         )
 
 
+def test_record_search_query_writes_fts_count(
+    test_db: psycopg.Connection,
+) -> None:
+    """The FTS-leg hit count is persisted alongside result_count."""
+    record_search_query(
+        test_db, query="vector filler topic", result_count=5, fts_count=0,
+        session_id=None, source="cli",
+    )
+    row = test_db.execute(
+        "SELECT query, result_count, fts_count FROM search_queries"
+    ).fetchone()
+    assert row == ("vector filler topic", 5, 0)
+
+
+def test_record_search_query_fts_count_defaults_null(
+    test_db: psycopg.Connection,
+) -> None:
+    """Omitting fts_count stores NULL (back-compat for callers not plumbing it)."""
+    record_search_query(
+        test_db, query="legacy caller", result_count=3,
+        session_id=None, source="cli",
+    )
+    row = test_db.execute("SELECT fts_count FROM search_queries").fetchone()
+    assert row == (None,)
+
+
+def test_record_search_query_undefined_fts_count_column_swallowed_with_hint(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A pre-023 DB (table present, fts_count column missing) must NOT break search.
+
+    Regression: a binary that writes fts_count landing before `brain init`
+    re-runs migration 023 would otherwise abort `brain search` with an
+    UndefinedColumn traceback. Contract: swallow the fts_count-column-missing
+    case (same daily-driver treatment as the missing-table case in migration
+    019) and warn with an actionable `brain init` hint. A genuinely-unknown
+    column still propagates (see the test above).
+    """
+    conn = mock.MagicMock()
+    conn.execute.side_effect = psycopg.errors.UndefinedColumn(
+        'column "fts_count" of relation "search_queries" does not exist'
+    )
+    with caplog.at_level("WARNING", logger="brain.gaps"):
+        # Must NOT raise.
+        record_search_query(
+            conn, query="anything", result_count=5, fts_count=0,
+            session_id=None, source="cli",
+        )
+    conn.transaction.assert_called_once()
+    conn.rollback.assert_not_called()
+    assert any("brain init" in r.getMessage() for r in caplog.records)
+    # Privacy: the raw query string must not appear at WARNING level.
+    assert not any("anything" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # cluster_failed_queries / _canonical_key (pure)
 # ---------------------------------------------------------------------------
@@ -204,6 +265,66 @@ def test_detector_zero_result(test_db: psycopg.Connection) -> None:
     assert gap.score == 5.0
     assert gap.evidence_ids == []
     assert "no useful result" in gap.rationale
+
+
+def test_detector_flags_lexical_miss_despite_vector_filler(
+    test_db: psycopg.Connection,
+) -> None:
+    """THE BUG FIX: fts_count=0 is the gap signal even when result_count>0.
+
+    Live-QA finding: the vector leg always returns nearest neighbours, so an
+    off-corpus query logs ``result_count=5`` (filler) and the old
+    ``result_count = 0`` detector never fired. The lexical (FTS) leg matched
+    zero chunks (``fts_count=0``), which is the real knowledge-gap signal.
+    """
+    for _ in range(5):
+        _insert_search_query(
+            test_db, "offcorpus topic", result_count=5, fts_count=0
+        )
+    detector = SearchFailureDetector(lookback_days=30, min_cluster_size=2)
+    gaps = detector.detect(test_db, tenant_id="default", limit=10)
+    assert len(gaps) == 1
+    assert gaps[0].target_id == "offcorpus topic"
+    assert gaps[0].score == 5.0
+    assert gaps[0].signal_kind == "search_failure"
+
+
+def test_detector_ignores_lexical_match_with_vector_results(
+    test_db: psycopg.Connection,
+) -> None:
+    """A lexical hit (fts_count>0) with results is NOT a zero-result gap."""
+    for _ in range(5):
+        _insert_search_query(
+            test_db, "well covered topic", result_count=5, fts_count=4
+        )
+    detector = SearchFailureDetector(lookback_days=30, min_cluster_size=2)
+    assert detector.detect(test_db, tenant_id="default", limit=10) == []
+
+
+def test_detector_legacy_null_fts_count_falls_back_to_result_count(
+    test_db: psycopg.Connection,
+) -> None:
+    """Old rows (fts_count NULL) keep the historical result_count=0 semantics."""
+    for _ in range(4):
+        _insert_search_query(
+            test_db, "legacy zero topic", result_count=0, fts_count=None
+        )
+    detector = SearchFailureDetector(lookback_days=30, min_cluster_size=2)
+    gaps = detector.detect(test_db, tenant_id="default", limit=10)
+    assert len(gaps) == 1
+    assert gaps[0].target_id == "legacy topic zero"  # canonical = sorted tokens
+
+
+def test_detector_legacy_null_fts_count_with_vector_filler_not_flagged(
+    test_db: psycopg.Connection,
+) -> None:
+    """Old rows with results but NULL fts_count stay invisible (no lexical info)."""
+    for _ in range(5):
+        _insert_search_query(
+            test_db, "legacy filler topic", result_count=5, fts_count=None
+        )
+    detector = SearchFailureDetector(lookback_days=30, min_cluster_size=2)
+    assert detector.detect(test_db, tenant_id="default", limit=10) == []
 
 
 def test_detector_below_min_cluster(test_db: psycopg.Connection) -> None:
@@ -299,6 +420,22 @@ def test_top_search_failures_ranks_by_count(test_db: psycopg.Connection) -> None
     assert failures[1].count == 2
 
 
+def test_top_search_failures_flags_lexical_miss_despite_vector_filler(
+    test_db: psycopg.Connection,
+) -> None:
+    """Read view also keys off fts_count=0, not result_count."""
+    for _ in range(3):
+        _insert_search_query(
+            test_db, "offcorpus read view", result_count=5, fts_count=0
+        )
+    failures = top_search_failures(
+        test_db, tenant_id="default", since_days=30, limit=10
+    )
+    assert failures[0] == SearchFailure(
+        query="offcorpus read view", count=3, kind="zero_results"
+    )
+
+
 def test_top_search_failures_normalize_hides_raw_text(
     test_db: psycopg.Connection,
 ) -> None:
@@ -327,6 +464,36 @@ def test_top_search_failures_includes_no_click(
     assert len(failures) == 1
     assert failures[0].kind == "no_click"
     assert failures[0].query == "vendor comparison"
+
+
+def test_no_double_count_lexical_miss_with_no_click(
+    test_db: psycopg.Connection,
+) -> None:
+    """A lexical miss (fts_count=0) with vector filler, never opened, counts ONCE.
+
+    Regression: such an MCP row matches both the lexical-miss predicate
+    (fts_count=0) and the no-click predicate (result_count>0, session not
+    opened). Without mutual exclusivity it would be counted twice and emit two
+    SearchFailure rows for one event. The lexical miss is the attributed kind.
+    """
+    sess = uuid.uuid4()
+    for _ in range(3):
+        _insert_search_query(
+            test_db, "offcorpus mcp miss", result_count=5, fts_count=0,
+            session_id=sess, source="mcp",
+        )
+    failures = top_search_failures(
+        test_db, tenant_id="default", since_days=30, limit=10
+    )
+    # Exactly one row, attributed to zero_results (not also no_click).
+    assert len(failures) == 1
+    assert failures[0].kind == "zero_results"
+    assert failures[0].count == 3
+    # Detector likewise counts the cluster once (size 3, not 6).
+    detector = SearchFailureDetector(lookback_days=30, min_cluster_size=2)
+    gaps = detector.detect(test_db, tenant_id="default", limit=10)
+    assert len(gaps) == 1
+    assert gaps[0].score == 3.0
 
 
 def test_top_search_failures_empty(test_db: psycopg.Connection) -> None:
@@ -391,6 +558,46 @@ def test_cli_gaps_clean_error_pre_019_schema(
         res = CliRunner().invoke(app, argv)
         assert res.exit_code == 1, res.output
         assert "brain init" in res.output
+        assert "Traceback" not in res.output
+
+
+def test_cli_search_survives_pre_023_schema(
+    test_db: psycopg.Connection,
+    patch_embedder: Any,
+    fake_embedder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`brain search` must keep working when migration 023's column is absent.
+
+    A binary that writes fts_count landing before `brain init` re-runs would
+    otherwise abort search with an UndefinedColumn traceback from the logging
+    hook. record_search_query swallows it with a hint instead.
+    """
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    test_db.execute("ALTER TABLE search_queries DROP COLUMN fts_count")
+    test_db.commit()
+    res = CliRunner().invoke(app, ["search", "synthetic topic xyz"])
+    assert res.exit_code == 0, res.output
+    assert "Traceback" not in res.output
+
+
+def test_cli_gaps_clean_error_pre_023_schema(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`brain gaps` / `gaps push` fail cleanly when the fts_count column is absent.
+
+    The read path queries fts_count; on a pre-023 DB that raises UndefinedColumn.
+    The command must surface a clean `brain init` hint, not a traceback.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    test_db.execute("ALTER TABLE search_queries DROP COLUMN fts_count")
+    test_db.commit()
+    for argv in (["gaps"], ["gaps", "push"]):
+        res = CliRunner().invoke(app, argv)
+        assert res.exit_code == 1, res.output
+        assert "brain init" in res.output
+        assert "migration 023" in res.output
         assert "Traceback" not in res.output
 
 

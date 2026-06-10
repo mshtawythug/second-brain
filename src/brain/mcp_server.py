@@ -54,6 +54,7 @@ from .format import (
 from .gaps import (
     SearchFailureDetector,
     record_search_query,
+    search_queries_schema_hint,
     top_search_failures,
 )
 from .graph_rag.sync import GraphSyncer, make_graph_syncer
@@ -78,7 +79,7 @@ from .queries import (
     summary_counts,
 )
 from .resurface import resurface_docs
-from .search import hybrid_search
+from .search import SearchDiagnostics, hybrid_search
 from .tags import normalize_tags
 
 if TYPE_CHECKING:
@@ -395,6 +396,11 @@ def brain_search(
                     person_match = resolve_person_to_keys(conn, person)
                 except (PersonNotFound, PersonAmbiguous) as e:
                     raise _mcp_error(INVALID_PARAMS, str(e)) from e
+            # The diagnostics holder captures the FTS-leg hit count from work
+            # the search already does (no extra query) — the lexical-miss
+            # signal `brain gaps` keys off (the vector leg always returns
+            # filler).
+            diagnostics = SearchDiagnostics()
             results = hybrid_search(
                 conn,
                 embedder=state.embedder,
@@ -407,6 +413,7 @@ def brain_search(
                 vector_sim_floor=state.cfg.vector_sim_floor,
                 recency_halflife_days=state.cfg.recency_halflife_days,
                 snippet_context_tokens=state.cfg.snippet_context_tokens,
+                diagnostics=diagnostics,
                 person_keys=person_match.keys if person_match else None,
                 person_display_name=(
                     person_match.display_name if person_match else None
@@ -421,14 +428,17 @@ def brain_search(
             # Plan 08 — best-effort search-failure logging. The minted
             # ``session_uuid`` lets no-click detection join this search against a
             # later ``brain_show`` open in the same session. A transient
-            # ``OperationalError`` AND a missing-table ``UndefinedTable``
-            # (migration 019 not applied) are both swallowed inside
-            # ``record_search_query`` — search results must still be returned
-            # on a pre-019 DB; the server log carries the `brain init` hint.
+            # ``OperationalError``, a missing-table ``UndefinedTable``
+            # (migration 019 not applied) AND a missing ``fts_count`` column
+            # ``UndefinedColumn`` (migration 023 not applied) are all swallowed
+            # inside ``record_search_query`` — search results must still be
+            # returned on a pre-019/pre-023 DB; the server log carries the
+            # `brain init` hint.
             record_search_query(
                 conn,
                 query=query,
                 result_count=len(results),
+                fts_count=diagnostics.fts_count,
                 session_id=session_uuid,
                 source="mcp",
                 tenant_id=state.cfg.graph_tenant_id,
@@ -501,6 +511,14 @@ def brain_gaps(
                 limit=limit,
                 normalize=True,
             )
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as e:
+        # Pre-019 (no table) / pre-023 (no fts_count column): surface the
+        # actionable `brain init` hint instead of a generic DB error. Any other
+        # undefined-column (a real bug) falls through to _wrap_db_error.
+        hint = search_queries_schema_hint(e)
+        if hint is None:
+            raise _wrap_db_error(e) from e
+        raise _mcp_error(INVALID_PARAMS, hint) from e
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     return {

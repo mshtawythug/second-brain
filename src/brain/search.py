@@ -63,6 +63,29 @@ class SearchExplanation:
 
 
 @dataclass
+class SearchDiagnostics:
+    """Mutable out-parameter for cheap search-layer metrics.
+
+    Passed to :func:`hybrid_search` via the ``diagnostics`` kwarg and populated
+    in-place, so callers read the FTS-leg hit count WITHOUT changing the
+    ``list[SearchResult]`` return contract every other caller depends on.
+
+    ``fts_count`` is the number of FTS candidate chunks the lexical leg
+    returned for the query. It is taken straight from ``len(fts_rows)`` — work
+    the search already does — so reading it costs no extra query. The value is
+    capped by the candidate limit + per-doc cap, so a positive count is NOT a
+    true total; only the **zero** case is exact (``fts_count == 0`` iff no chunk
+    matched the tsquery). That zero is the knowledge-gap signal for
+    ``brain gaps``: the vector leg always returns nearest neighbours, so a
+    lexical miss is otherwise invisible. ``None`` means the search never ran
+    (the holder was created but not passed, or an exception preceded the FTS
+    leg).
+    """
+
+    fts_count: int | None = None
+
+
+@dataclass
 class SearchResult:
     """A single search hit grouped at document granularity with its best chunk."""
 
@@ -204,6 +227,7 @@ def hybrid_search(
     recency_halflife_days: float | None = None,
     snippet_context_tokens: int = 0,
     explain: bool = False,
+    diagnostics: SearchDiagnostics | None = None,
     # — Q1-C metadata filters —
     person_keys: list[str] | None = None,
     person_display_name: str | None = None,
@@ -238,6 +262,11 @@ def hybrid_search(
     pulling neighboring chunks (``chunk_index ± W``) from the same document
     and stitching them together up to the token budget. ``0`` (default)
     returns the single-chunk snippet unchanged.
+
+    ``diagnostics`` (optional :class:`SearchDiagnostics`) is populated in place
+    with the FTS-leg hit count (``fts_count``). ``None`` (default) skips it.
+    See :class:`SearchDiagnostics` for why this is an out-parameter rather than
+    a return-value change.
 
     Q1-C metadata filters (all optional, default ``None`` = no filter):
 
@@ -369,6 +398,13 @@ def hybrid_search(
     fts_rows = conn.execute(
         fts_sql, [tsquery, tsquery, *where_params], prepare=prepare_flag
     ).fetchall()
+
+    # Surface the lexical-leg hit count to an opt-in caller (no extra query —
+    # ``fts_rows`` is already materialized). ``fts_count == 0`` means the corpus
+    # has no lexical trace of the query, which is the knowledge-gap signal that
+    # the vector leg (always returns nearest neighbours) would otherwise mask.
+    if diagnostics is not None:
+        diagnostics.fts_count = len(fts_rows)
 
     vec_rows: list[Any] = []
     if not fts_only:

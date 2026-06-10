@@ -24,11 +24,27 @@ _PUNCT_RE = re.compile(r"[^\w\s]")
 # Two SQL passes mined by both the read view (``top_search_failures``) and the
 # detector (``SearchFailureDetector.detect``). Both are parameterized; the
 # lookback window is bound as an integer day-count via ``make_interval``.
+# Lexical-miss pass. The headline knowledge-gap signal.
+#
+# Design bug found in live QA: hybrid search's VECTOR leg always returns
+# nearest neighbours, so an off-corpus query logs ``result_count > 0`` (filler)
+# and a ``result_count = 0`` predicate NEVER fires on the CLI path. The real
+# signal is the FTS (lexical) leg matching ZERO chunks (``fts_count = 0``): the
+# corpus has no lexical trace of the query. We keep the ``'zero_results'`` kind
+# label (see ``top_search_failures`` / the detector) for backward compatibility
+# — the *meaning* ("the corpus had no useful answer") is unchanged; only the
+# detection mechanism moved from ``result_count`` to ``fts_count``.
+#
+# Old rows predate migration 023 and carry ``fts_count IS NULL``. For them we
+# fall back to the historical ``result_count = 0`` semantics so no past
+# zero-result evidence is lost; the new signal applies to rows written after
+# the fix. Both branches are index-backed (migration 019's result_count=0
+# partial index + migration 023's fts_count=0 partial index → a BitmapOr plan).
 _ZERO_RESULT_SQL = """
     SELECT query, COUNT(*) AS n
     FROM search_queries
     WHERE tenant_id = %s
-      AND result_count = 0
+      AND (fts_count = 0 OR (fts_count IS NULL AND result_count = 0))
       AND at >= NOW() - make_interval(days => %s)
     GROUP BY query
     ORDER BY n DESC, query
@@ -37,11 +53,22 @@ _ZERO_RESULT_SQL = """
 # No-click: a non-empty result set that the user never opened/clicked within
 # the same search session. MCP-only — CLI searches carry ``session_id IS NULL``
 # (no session to join), so the predicate excludes them automatically.
+#
+# Mutual exclusivity with the lexical-miss pass (matters since migration 023):
+# a lexical miss now keys off ``fts_count = 0``, but such a row can still have
+# ``result_count > 0`` (vector filler). Without the ``fts_count`` guard below,
+# an MCP lexical-miss that was never opened would match BOTH passes and get
+# counted twice (and emit two ``SearchFailure`` rows for one event). We exclude
+# ``fts_count = 0`` rows here so each event is attributed to exactly one pass —
+# the lexical miss is the stronger signal. ``fts_count IS NULL`` (legacy /
+# pre-023 rows) stays eligible for no-click, preserving the prior behavior
+# where ``result_count = 0`` and ``result_count > 0`` were already exclusive.
 _NO_CLICK_SQL = """
     SELECT sq.query, COUNT(*) AS n
     FROM search_queries sq
     WHERE sq.tenant_id = %s
       AND sq.result_count > 0
+      AND (sq.fts_count IS NULL OR sq.fts_count > 0)
       AND sq.session_id IS NOT NULL
       AND sq.at >= NOW() - make_interval(days => %s)
       AND NOT EXISTS (
@@ -77,6 +104,7 @@ def record_search_query(
     result_count: int,
     session_id: uuid.UUID | None,
     source: str,
+    fts_count: int | None = None,
     tenant_id: str = "default",
 ) -> None:
     """INSERT one row into ``search_queries``. Best-effort on a transient blip.
@@ -98,6 +126,13 @@ def record_search_query(
       ``brain gaps`` surfaces fail loudly with the same hint. The INSERT runs
       inside its own ``conn.transaction()`` (savepoint when nested) so the
       failure never poisons or rolls back the caller's transaction.
+    - :class:`psycopg.errors.UndefinedColumn` naming ``fts_count`` (migration
+      023 not applied — a pre-023 DB that has the table but lacks the new
+      column) gets the **same swallow-with-hint** treatment, for the same
+      daily-driver reason: a binary that writes ``fts_count`` must not break
+      search on a DB that hasn't run ``brain init`` since the upgrade. The
+      guard is narrowed to the ``fts_count`` column so a genuinely-unknown
+      column still propagates as a real bug.
     - Any other schema/programming error **propagates** — those are real bugs
       that must surface visibly, never be silently eaten.
 
@@ -116,13 +151,14 @@ def record_search_query(
             conn.execute(
                 """
                 INSERT INTO search_queries
-                    (tenant_id, query, result_count, session_id, source)
-                VALUES (%s, %s, %s, %s, %s)
+                    (tenant_id, query, result_count, fts_count, session_id, source)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 """,
                 (
                     tenant_id,
                     query,
                     result_count,
+                    fts_count,
                     str(session_id) if session_id is not None else None,
                     source,
                 ),
@@ -136,6 +172,20 @@ def record_search_query(
             "(migration 019 not applied) — run `brain init` to enable "
             "`brain gaps`"
         )
+    except psycopg.errors.UndefinedColumn as exc:
+        # Pre-023 DB: the table exists but lacks the additive ``fts_count``
+        # column (migration 023 not applied — e.g. binary upgraded before
+        # `brain init` re-ran). Same daily-driver contract as the missing-table
+        # case above: search must keep working; nag until the operator
+        # migrates. Narrowed to the fts_count column so a genuinely-unknown
+        # column still propagates as a real bug.
+        if "fts_count" not in str(exc):
+            raise
+        logger.warning(
+            "search-query logging skipped: search_queries.fts_count column "
+            "missing (migration 023 not applied) — run `brain init` to enable "
+            "lexical-gap detection in `brain gaps`"
+        )
     except psycopg.OperationalError as exc:
         # Transient blip only — schema/programming errors other than the
         # missing-table case above propagate as real bugs.
@@ -143,6 +193,34 @@ def record_search_query(
             "search-query logging skipped (DB blip): %s", type(exc).__name__
         )
         logger.debug("search-query logging failed for query=%r: %s", query, exc)
+
+
+def search_queries_schema_hint(exc: psycopg.Error) -> str | None:
+    """Map a missing ``search_queries`` schema object to a `brain init` hint.
+
+    The ``brain gaps`` read path (:func:`top_search_failures`,
+    :class:`SearchFailureDetector`) reads the ``search_queries`` table and,
+    since migration 023, its ``fts_count`` column. On a DB that hasn't applied
+    migration 019 (no table) or 023 (no column) the query raises, and the
+    surfaces (CLI / MCP) must fail loudly-but-cleanly with an actionable hint
+    instead of a traceback — mirroring the swallow-with-hint contract the
+    search write path uses in :func:`record_search_query`.
+
+    Returns the hint string for the two known migration gaps, or ``None`` for
+    any other error (a genuinely-unknown column / real bug) so the caller
+    re-raises it.
+    """
+    if isinstance(exc, psycopg.errors.UndefinedTable):
+        return (
+            "search_queries table missing (migration 019 not applied) — "
+            "run `brain init` first"
+        )
+    if isinstance(exc, psycopg.errors.UndefinedColumn) and "fts_count" in str(exc):
+        return (
+            "search_queries.fts_count column missing (migration 023 not "
+            "applied) — run `brain init` first"
+        )
+    return None
 
 
 def _normalize_tokens(query: str) -> frozenset[str]:
