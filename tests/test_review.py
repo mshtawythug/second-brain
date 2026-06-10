@@ -425,6 +425,31 @@ def test_iter_docs_for_staleness_excludes_other_tenant(
     assert cands == []
 
 
+def test_count_stale_docs_missing_summary_tenant_scoped(
+    test_db: psycopg.Connection,
+) -> None:
+    # An aged, no-summary doc mentioned only in tenant-a's graph is counted for
+    # tenant-a but never leaks into tenant-b's skip-count.
+    old = _insert_doc(
+        test_db, title="Old no-summary", summary=None, ingested_days_ago=400
+    )
+    _insert_entity(
+        test_db, canonical_key="t-c", name="C", doc_ids=[old], tenant="tenant-a"
+    )
+    assert (
+        queries.count_stale_docs_missing_summary(
+            test_db, tenant_id="tenant-a", stale_age_days=365
+        )
+        == 1
+    )
+    assert (
+        queries.count_stale_docs_missing_summary(
+            test_db, tenant_id="tenant-b", stale_age_days=365
+        )
+        == 0
+    )
+
+
 def test_upsert_then_list_and_dismiss(test_db: psycopg.Connection) -> None:
     queries.upsert_review_finding(
         test_db,
