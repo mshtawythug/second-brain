@@ -201,6 +201,30 @@ DEFAULT_ELICIT_CONTRADICTION_ENABLED = False
 # Ignored when ``elicit_contradiction_enabled`` is False.
 DEFAULT_ELICIT_CONTRADICTION_MIN_DOCS = 5
 
+# Plan 05 -- `brain timeline` (temporal evolution) knobs.
+#
+# ``DEFAULT_TIMELINE_GRANULARITY`` is the default time-bucket width; one of
+# ``month`` / ``quarter`` / ``year``. Quarter is a good default for a personal
+# corpus that spans a few years. Override via ``BRAIN_TIMELINE_GRANULARITY``.
+DEFAULT_TIMELINE_GRANULARITY = "quarter"
+_VALID_TIMELINE_GRANULARITIES = frozenset({"month", "quarter", "year"})
+
+# Max buckets returned by ``brain timeline`` before the sparse tail is trimmed.
+# Positive int. Override via ``BRAIN_TIMELINE_LIMIT``.
+DEFAULT_TIMELINE_LIMIT = 20
+
+# Max number of densest buckets that get an Ollama ``--synthesize`` summary.
+# Non-negative int; ``0`` disables synthesis even when ``--synthesize`` is
+# passed (keeps the LLM round-trips bounded). Override via
+# ``BRAIN_TIMELINE_SYNTH_LIMIT``.
+DEFAULT_TIMELINE_SYNTH_LIMIT = 5
+
+# Which end of the timeline is trimmed when ``--limit`` is hit: ``oldest``
+# (drop the earliest buckets, keep the most recent) or ``sparsest`` (drop the
+# buckets with the fewest docs). Override via ``BRAIN_TIMELINE_TRIM``.
+DEFAULT_TIMELINE_TRIM = "oldest"
+_VALID_TIMELINE_TRIMS = frozenset({"oldest", "sparsest"})
+
 
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
@@ -423,6 +447,15 @@ class Config:
     elicit_contradiction_enabled: bool = DEFAULT_ELICIT_CONTRADICTION_ENABLED
     # Minimum docs per target before contradiction detection runs. Non-negative int.
     elicit_contradiction_min_docs: int = DEFAULT_ELICIT_CONTRADICTION_MIN_DOCS
+    # Plan 05 -- `brain timeline` knobs. ``timeline_granularity`` is the default
+    # bucket width (validated ∈ {month, quarter, year}); ``timeline_limit`` the
+    # default max buckets (positive int); ``timeline_synth_limit`` the max
+    # densest buckets synthesized (non-negative int, 0 disables);
+    # ``timeline_trim`` which end is trimmed at the limit (∈ {oldest, sparsest}).
+    timeline_granularity: str = DEFAULT_TIMELINE_GRANULARITY
+    timeline_limit: int = DEFAULT_TIMELINE_LIMIT
+    timeline_synth_limit: int = DEFAULT_TIMELINE_SYNTH_LIMIT
+    timeline_trim: str = DEFAULT_TIMELINE_TRIM
 
     @classmethod
     def load(cls) -> "Config":
@@ -1193,6 +1226,65 @@ class Config:
                     f"(got {elicit_contradiction_min_docs!r})"
                 )
 
+        # Plan 05 -- `brain timeline` env vars. Same eager-validation idiom as
+        # the enrich / graph knobs above: unset/blank -> default; invalid value
+        # -> ConfigError at startup so a typo surfaces before any timeline runs.
+        timeline_gran_raw = os.environ.get("BRAIN_TIMELINE_GRANULARITY")
+        if timeline_gran_raw is None or timeline_gran_raw.strip() == "":
+            timeline_granularity = DEFAULT_TIMELINE_GRANULARITY
+        else:
+            timeline_granularity = timeline_gran_raw.strip().lower()
+            if timeline_granularity not in _VALID_TIMELINE_GRANULARITIES:
+                raise ConfigError(
+                    "BRAIN_TIMELINE_GRANULARITY must be one of month/quarter/year "
+                    f"(got {timeline_gran_raw!r})"
+                )
+
+        timeline_limit_raw = os.environ.get("BRAIN_TIMELINE_LIMIT")
+        if timeline_limit_raw is None or timeline_limit_raw.strip() == "":
+            timeline_limit = DEFAULT_TIMELINE_LIMIT
+        else:
+            try:
+                timeline_limit = int(timeline_limit_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_TIMELINE_LIMIT must be a positive integer "
+                    f"(got {timeline_limit_raw!r})"
+                ) from exc
+            if timeline_limit < 1:
+                raise ConfigError(
+                    f"BRAIN_TIMELINE_LIMIT must be a positive integer "
+                    f"(got {timeline_limit_raw!r})"
+                )
+
+        timeline_synth_raw = os.environ.get("BRAIN_TIMELINE_SYNTH_LIMIT")
+        if timeline_synth_raw is None or timeline_synth_raw.strip() == "":
+            timeline_synth_limit = DEFAULT_TIMELINE_SYNTH_LIMIT
+        else:
+            try:
+                timeline_synth_limit = int(timeline_synth_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    f"BRAIN_TIMELINE_SYNTH_LIMIT must be a non-negative integer "
+                    f"(got {timeline_synth_raw!r})"
+                ) from exc
+            if timeline_synth_limit < 0:
+                raise ConfigError(
+                    f"BRAIN_TIMELINE_SYNTH_LIMIT must be a non-negative integer "
+                    f"(got {timeline_synth_raw!r})"
+                )
+
+        timeline_trim_raw = os.environ.get("BRAIN_TIMELINE_TRIM")
+        if timeline_trim_raw is None or timeline_trim_raw.strip() == "":
+            timeline_trim = DEFAULT_TIMELINE_TRIM
+        else:
+            timeline_trim = timeline_trim_raw.strip().lower()
+            if timeline_trim not in _VALID_TIMELINE_TRIMS:
+                raise ConfigError(
+                    "BRAIN_TIMELINE_TRIM must be one of oldest/sparsest "
+                    f"(got {timeline_trim_raw!r})"
+                )
+
         return {
             # brain_home resolves via default_factory=_brain_home_root.
             "database_url": database_url,
@@ -1241,4 +1333,8 @@ class Config:
             "elicit_queue_limit": elicit_queue_limit,
             "elicit_contradiction_enabled": elicit_contradiction_enabled,
             "elicit_contradiction_min_docs": elicit_contradiction_min_docs,
+            "timeline_granularity": timeline_granularity,
+            "timeline_limit": timeline_limit,
+            "timeline_synth_limit": timeline_synth_limit,
+            "timeline_trim": timeline_trim,
         }
