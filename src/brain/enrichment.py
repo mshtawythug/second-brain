@@ -206,6 +206,27 @@ _GROUP_SUMMARY_SYSTEM_PROMPT = (
     "- never invent facts, never exceed 50 words"
 )
 
+# Plan 05 — `brain timeline --synthesize`. Per-time-bucket narrative synthesis:
+# given one period's documents + co-topics for an entity, write a one-to-two
+# sentence "what happened this period" line. Best-effort + never-raises, same
+# discipline as :data:`_GROUP_SUMMARY_SYSTEM_PROMPT`.
+_BUCKET_SUMMARY_SYSTEM_PROMPT = (
+    "You write a one-to-two sentence synthesis of what happened in one time "
+    "period for a recurring theme in a personal knowledge base.\n"
+    "\n"
+    "Inputs: PERIOD (the time bucket label), ENTITY (the theme/entity tracked "
+    "over time), CO-TOPICS (entities that co-occurred this period), and "
+    "DOCUMENTS (the period's document titles).\n"
+    "\n"
+    "Return ONLY valid JSON:\n"
+    '{"summary": "..."}\n'
+    "\n"
+    "Rules:\n"
+    "- 1-2 sentences, factual, plain past tense\n"
+    "- describe how the entity showed up this period and what it connected to\n"
+    "- never invent facts, never exceed 50 words"
+)
+
 # Wave elicit Wave 4 — contradiction detection between document summaries.
 # The model is given a subject entity and several summary excerpts from
 # different documents and must decide whether they express CONTRADICTORY
@@ -312,6 +333,8 @@ class OllamaEnricher:
             :mod:`brain.graph_rag.extract`)
         - ``summarize_group(person, entity_names, doc_titles)`` → ``str | None``
             (best-effort theme synthesis; never raises)
+        - ``summarize_bucket(bucket_label, entity_name, doc_titles, cotopics)``
+            → ``str | None`` (best-effort timeline-bucket synthesis; never raises)
         - ``count_tokens(text)`` → int (tiktoken ``cl100k_base``)
         - ``model`` (read-only attribute) → the model fingerprint
     """
@@ -528,6 +551,52 @@ class OllamaEnricher:
         if not isinstance(summary, str) or not summary.strip():
             _logger.warning(
                 "summarize_group: model returned empty / non-string summary; "
+                "returning summary=None"
+            )
+            return None
+        return summary.strip()
+
+    def summarize_bucket(
+        self,
+        *,
+        bucket_label: str,
+        entity_name: str,
+        doc_titles: list[str],
+        cotopics: list[str],
+    ) -> str | None:
+        """Best-effort one-to-two sentence synthesis of one timeline bucket.
+
+        Used by the Plan 05 ``brain timeline --synthesize`` path: opt-in,
+        default-off, and **never required** for the timeline to render. Returns
+        the synthesized text, or ``None`` (logging a WARN) when Ollama is
+        unavailable / times out / returns invalid JSON / yields an empty summary.
+        NEVER raises — mirroring :meth:`summarize_group`'s never-raise discipline
+        so the display command never becomes a hard live-Ollama dependency.
+        """
+        user_message = (
+            f"PERIOD: {bucket_label}\n"
+            f"ENTITY: {entity_name}\n"
+            f"CO-TOPICS: {json.dumps(cotopics)}\n"
+            f"DOCUMENTS: {json.dumps(doc_titles)}"
+        )
+        try:
+            body = self._chat_with_retry(
+                system=_BUCKET_SUMMARY_SYSTEM_PROMPT,
+                user=user_message,
+                schema_keys=("summary",),
+            )
+        except EnrichmentError as exc:
+            # OllamaUnavailable is an EnrichmentError subclass, so this single
+            # clause covers transport failure AND malformed-JSON-twice.
+            _logger.warning(
+                "summarize_bucket: synthesis failed (%s); returning summary=None",
+                exc,
+            )
+            return None
+        summary = body["summary"]
+        if not isinstance(summary, str) or not summary.strip():
+            _logger.warning(
+                "summarize_bucket: model returned empty / non-string summary; "
                 "returning summary=None"
             )
             return None

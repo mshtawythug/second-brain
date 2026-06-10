@@ -44,6 +44,7 @@ from .format import (
     entity_summaries_json,
     graph_context_json,
     graph_stats_json,
+    timeline_context_json,
 )
 from .graph_rag.sync import GraphSyncer, make_graph_syncer
 from .ingest import (
@@ -1696,6 +1697,91 @@ def brain_graphrag_entity(
         enricher=None,
     )
     return graph_context_json(ctx)
+
+
+@mcp_app.tool()
+def brain_timeline(
+    query: str,
+    person: str | None = None,
+    granularity: str = "quarter",
+    since: str | None = None,
+    until: str | None = None,
+    limit: int = 20,
+    synthesize: bool = False,
+    tenant: str | None = None,
+) -> dict[str, Any]:
+    """How a theme or entity evolved over TIME — temporal bucketing (Plan 05).
+
+    WHEN TO USE: the ask is about evolution / chronology — "how has my thinking
+    on X evolved", "when did X come up most", "X over time", "the history of X".
+    For themes/connections at a single point in time use
+    ``brain_graphrag_themes`` / ``brain_graphrag_search``; for a flat doc lookup
+    use plain ``brain_search``.
+
+    Buckets the documents that mention ``query`` by document date
+    (``COALESCE(sent_at, ingested_at)``) and returns the
+    :func:`brain.format.timeline_context_json` wire shape (identical to
+    ``brain timeline --json``): the resolved ``entity_names`` / ``tenant_id`` /
+    ``granularity``, the optional scope ``person``, ``buckets_omitted`` (trimmed
+    by ``limit``), and the ascending ``buckets`` series — each bucket carrying
+    ``doc_count`` / ``mention_count`` / ``doc_ids`` / ``doc_titles`` /
+    ``cotopics`` / ``synthesis``.
+
+    Params (only ``query`` required; mirror the CLI flags 1:1):
+
+    - ``person``: scope to documents where this person co-appears as a
+      participant (resolved via the directory). Unknown / ambiguous →
+      ``INVALID_PARAMS``.
+    - ``granularity``: ``month`` | ``quarter`` (default) | ``year``.
+    - ``since`` / ``until``: ISO month (``YYYY-MM``) cutoffs; ``since`` inclusive,
+      ``until`` inclusive of the named month.
+    - ``limit``: max buckets returned (default 20); the sparse tail is trimmed
+      per ``BRAIN_TIMELINE_TRIM``.
+    - ``synthesize``: attach a best-effort local-Ollama summary to the densest
+      buckets (opt-in; a missing/failed Ollama yields ``synthesis=None``).
+    - ``tenant``: tenant to query (default ``BRAIN_GRAPH_TENANT``).
+
+    Requires the graph layer (``BRAIN_GRAPH_ENABLED`` + ``brain graphrag
+    build``); when disabled, raises ``INVALID_PARAMS``. An unknown entity returns
+    an empty timeline (not an error). No raw SQL — the query is ILIKE-resolved to
+    graph entities and every clause is parameterized + tenant-scoped.
+    """
+    if not query.strip():
+        raise _mcp_error(INVALID_PARAMS, "query is required")
+    state = _get_state()
+    cfg = state.cfg
+    if not cfg.graph_enabled:
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "timeline requires the graph — set BRAIN_GRAPH_ENABLED=true and run "
+            "`brain graphrag build`",
+        )
+    from .timeline import build_timeline
+
+    logger.debug("brain_timeline: query=%r granularity=%s", query, granularity)
+    enricher = state.enricher if synthesize else None
+    try:
+        with _mcp_conn(state) as conn:
+            ctx = build_timeline(
+                conn,
+                cfg,
+                query,
+                granularity=granularity,
+                since=since,
+                until=until,
+                limit=limit,
+                person=person,
+                synthesize=synthesize,
+                enricher=enricher,
+                tenant=tenant,
+            )
+    except (PersonNotFound, PersonAmbiguous, GraphTenantError) as exc:
+        raise _mcp_error(INVALID_PARAMS, f"timeline: {exc}") from exc
+    except ValueError as exc:
+        raise _mcp_error(INVALID_PARAMS, f"timeline: {exc}") from exc
+    except psycopg.Error as exc:
+        raise _wrap_db_error(exc) from exc
+    return timeline_context_json(ctx)
 
 
 @mcp_app.tool()

@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         ThemeGroup,
     )
     from .resurface import ResurfaceItem
+    from .timeline import TimelineBucket, TimelineContext
 
 # nDCG@5 delta threshold below which a query row is highlighted red in the
 # diff table.  Display-only — the CLI never exits non-zero based on this.
@@ -660,3 +661,92 @@ def alias_result_summary(res: "AliasResult") -> str:
         f"{res.sources_orphaned} source(s) orphaned "
         f"(tenant {res.tenant_id!r})"
     )
+
+
+# ---------------------------------------------------------------------------
+# `brain timeline` (Plan 05) — temporal evolution of a theme/entity.
+# JSON is a serialized TimelineContext (the wire shape shared by CLI --json +
+# the brain_timeline MCP tool); the renderable is an ASCII bar chart.
+# ---------------------------------------------------------------------------
+
+# Max width (in `█` cells) of the densest bucket's bar in the terminal chart.
+_TIMELINE_BAR_WIDTH = 24
+# Max representative doc titles listed under a bucket in the terminal view.
+_TIMELINE_TITLES_SHOWN = 3
+
+
+def _timeline_bucket_json(bucket: "TimelineBucket") -> dict[str, Any]:
+    """Serialize one :class:`~brain.timeline.TimelineBucket` (ISO bucket start)."""
+    return {
+        "bucket": bucket.bucket,
+        "bucket_start": bucket.bucket_start.isoformat(),
+        "doc_count": bucket.doc_count,
+        "mention_count": bucket.mention_count,
+        "doc_ids": list(bucket.doc_ids),
+        "doc_titles": list(bucket.doc_titles),
+        "cotopics": list(bucket.cotopics),
+        "synthesis": bucket.synthesis,
+    }
+
+
+def timeline_context_json(ctx: "TimelineContext") -> dict[str, Any]:
+    """Serialize a :class:`~brain.timeline.TimelineContext` for ``--json`` / MCP.
+
+    The full structured wire shape (spec §3e): the query, resolved tenant +
+    entity names, the scope person (when ``--person``), the bucket count trimmed
+    by ``--limit`` (``buckets_omitted``), and the ascending ``buckets`` series.
+    """
+    return {
+        "query": ctx.query,
+        "tenant_id": ctx.tenant_id,
+        "granularity": ctx.granularity,
+        "entity_names": list(ctx.entity_names),
+        "person": ctx.person,
+        "buckets_omitted": ctx.buckets_omitted,
+        "buckets": [_timeline_bucket_json(b) for b in ctx.buckets],
+    }
+
+
+def _timeline_header(ctx: "TimelineContext") -> Text:
+    """Build the one-line timeline header (query / granularity / bucket count)."""
+    label = ", ".join(ctx.entity_names) if ctx.entity_names else ctx.query
+    parts = [label, f"{ctx.granularity}"]
+    if ctx.person:
+        parts.append(f"with {ctx.person}")
+    suffix = f" — {len(ctx.buckets)} bucket(s)" if ctx.buckets else ""
+    return Text("Timeline · " + " · ".join(parts) + suffix, style="bold")
+
+
+def timeline_renderable(ctx: "TimelineContext") -> RenderableType:
+    """Render a :class:`~brain.timeline.TimelineContext` for the terminal.
+
+    A header line followed by one block per bucket: an ASCII bar proportional to
+    ``doc_count`` (relative to the densest bucket), a co-topic chip line, the top
+    representative doc titles, and the optional ``--synthesize`` summary. An
+    empty context renders the header + a ``(no timeline buckets)`` line.
+    """
+    blocks: list[RenderableType] = [_timeline_header(ctx)]
+    if not ctx.buckets:
+        blocks.append(Text("(no timeline buckets)", style="dim"))
+        return Group(*blocks)
+    max_docs = max(b.doc_count for b in ctx.buckets) or 1
+    for bucket in ctx.buckets:
+        bar_len = max(1, round(_TIMELINE_BAR_WIDTH * bucket.doc_count / max_docs))
+        line = Text()
+        line.append(f"{bucket.bucket:<8} ", style="cyan")
+        line.append("█" * bar_len, style="green")
+        line.append(f" {bucket.doc_count} docs")
+        if bucket.cotopics:
+            line.append(f"   co-topics: {', '.join(bucket.cotopics)}", style="dim")
+        blocks.append(line)
+        for title in bucket.doc_titles[:_TIMELINE_TITLES_SHOWN]:
+            blocks.append(Text(f"  · {title}".replace("\n", " "), style="dim"))
+        if bucket.synthesis:
+            blocks.append(
+                Text(f"  ✦ {bucket.synthesis}".replace("\n", " "), style="italic")
+            )
+    if ctx.buckets_omitted:
+        blocks.append(
+            Text(f"({ctx.buckets_omitted} bucket(s) omitted by --limit)", style="dim")
+        )
+    return Group(*blocks)

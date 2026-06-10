@@ -86,7 +86,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval and not benchmark and not e2e'"
+addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval and not benchmark and not e2e and not phase3'"
 markers = [
   # P3.5 — frontend integration harness. Tests under this marker shell
   # out to `npx quartz build` and serve the artifact over HTTP (or rsync the
@@ -124,6 +124,12 @@ markers = [
   # is required for most other tests anyway; marked for easy targeted runs via
   # ``pytest -m integration``.
   "integration: requires the test Postgres container (port 5434, db second_brain_test)",
+  # Plan 05 — `brain timeline` migration-021 roundtrip. The only test that
+  # requires the optional generated ``documents.doc_date`` column (Phase 3).
+  # EXCLUDED from the default suite (see the ``addopts`` -m filter, alongside
+  # ``eval`` / ``benchmark``) so v1/v2 CI passes without migration 021 applied;
+  # opt IN with `-m phase3`.
+  "phase3: requires the optional migration-021 doc_date column (brain timeline Phase 3)",
 ]
 
 [tool.ruff]
