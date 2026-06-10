@@ -267,6 +267,22 @@ DEFAULT_TIMELINE_SYNTH_LIMIT = 5
 DEFAULT_TIMELINE_TRIM = "oldest"
 _VALID_TIMELINE_TRIMS = frozenset({"oldest", "sparsest"})
 
+# Plan 03 -- `brain review scan` contradiction + staleness knobs.
+# Conflict scan caps: max entity candidates per run, max doc pairs adjudicated
+# per surviving entity, and the embedding cosine floor below which a pair is too
+# topically distant to possibly contradict. The product of the first two bounds
+# the worst-case LLM call budget (default 30 x 3 = 90).
+DEFAULT_REVIEW_CONFLICT_LIMIT = 30
+DEFAULT_REVIEW_CONFLICT_PAIRS_PER_ENTITY = 3
+DEFAULT_REVIEW_EMBED_SIM_FLOOR = 0.40
+# Staleness scan: a doc older than ``stale_age_days`` is a candidate; a newer
+# doc ingested within ``stale_supersede_window_days`` sharing an entity and with
+# cosine >= ``stale_sim_floor`` supersedes it. ``stale_limit`` caps candidates.
+DEFAULT_REVIEW_STALE_AGE_DAYS = 365
+DEFAULT_REVIEW_STALE_SUPERSEDE_WINDOW_DAYS = 90
+DEFAULT_REVIEW_STALE_SIM_FLOOR = 0.60
+DEFAULT_REVIEW_STALE_LIMIT = 200
+
 
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
@@ -350,6 +366,31 @@ def _parse_positive_int_env(env_var: str, default: int) -> int:
         ) from exc
     if value < 1:
         raise ConfigError(f"{env_var} must be an integer >= 1 (got {raw!r})")
+    return value
+
+
+def _parse_unit_interval_env(env_var: str, default: float) -> float:
+    """Parse ``env_var`` as a float in ``[0.0, 1.0]``, falling back to ``default``.
+
+    Unset / blank → ``default``; non-parseable or out of ``[0.0, 1.0]`` →
+    :class:`ConfigError` at load time so a typo surfaces at startup, not
+    mid-command. Mirrors the inline ``BRAIN_VECTOR_SIM_FLOOR`` /
+    ``BRAIN_ELICIT_MIN_GAP_SCORE`` validation, factored out for the Plan 03
+    cosine-floor knobs.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(
+            f"{env_var} must be a float in [0.0, 1.0] (got {raw!r})"
+        ) from exc
+    if not (0.0 <= value <= 1.0):
+        raise ConfigError(
+            f"{env_var} must be a float in [0.0, 1.0] (got {raw!r})"
+        )
     return value
 
 
@@ -539,6 +580,16 @@ class Config:
     timeline_limit: int = DEFAULT_TIMELINE_LIMIT
     timeline_synth_limit: int = DEFAULT_TIMELINE_SYNTH_LIMIT
     timeline_trim: str = DEFAULT_TIMELINE_TRIM
+    # Plan 03 -- `brain review scan` contradiction + staleness knobs. The two
+    # ``*_sim_floor`` values are cosine floors in [0.0, 1.0]; the rest are
+    # positive ints. All eager-validated at load time via ``ConfigError``.
+    review_conflict_limit: int = DEFAULT_REVIEW_CONFLICT_LIMIT
+    review_conflict_pairs_per_entity: int = DEFAULT_REVIEW_CONFLICT_PAIRS_PER_ENTITY
+    review_embed_sim_floor: float = DEFAULT_REVIEW_EMBED_SIM_FLOOR
+    review_stale_age_days: int = DEFAULT_REVIEW_STALE_AGE_DAYS
+    review_stale_supersede_window_days: int = DEFAULT_REVIEW_STALE_SUPERSEDE_WINDOW_DAYS
+    review_stale_sim_floor: float = DEFAULT_REVIEW_STALE_SIM_FLOOR
+    review_stale_limit: int = DEFAULT_REVIEW_STALE_LIMIT
 
     @classmethod
     def load(cls) -> "Config":
@@ -1465,6 +1516,31 @@ class Config:
                     f"(got {timeline_trim_raw!r})"
                 )
 
+        # Plan 03 -- `brain review scan` knobs (positive ints + cosine floors).
+        review_conflict_limit = _parse_positive_int_env(
+            "BRAIN_REVIEW_CONFLICT_LIMIT", DEFAULT_REVIEW_CONFLICT_LIMIT
+        )
+        review_conflict_pairs_per_entity = _parse_positive_int_env(
+            "BRAIN_REVIEW_CONFLICT_PAIRS_PER_ENTITY",
+            DEFAULT_REVIEW_CONFLICT_PAIRS_PER_ENTITY,
+        )
+        review_embed_sim_floor = _parse_unit_interval_env(
+            "BRAIN_REVIEW_EMBED_SIM_FLOOR", DEFAULT_REVIEW_EMBED_SIM_FLOOR
+        )
+        review_stale_age_days = _parse_positive_int_env(
+            "BRAIN_REVIEW_STALE_AGE_DAYS", DEFAULT_REVIEW_STALE_AGE_DAYS
+        )
+        review_stale_supersede_window_days = _parse_positive_int_env(
+            "BRAIN_REVIEW_STALE_SUPERSEDE_WINDOW_DAYS",
+            DEFAULT_REVIEW_STALE_SUPERSEDE_WINDOW_DAYS,
+        )
+        review_stale_sim_floor = _parse_unit_interval_env(
+            "BRAIN_REVIEW_STALE_SIM_FLOOR", DEFAULT_REVIEW_STALE_SIM_FLOOR
+        )
+        review_stale_limit = _parse_positive_int_env(
+            "BRAIN_REVIEW_STALE_LIMIT", DEFAULT_REVIEW_STALE_LIMIT
+        )
+
         return {
             # brain_home resolves via default_factory=_brain_home_root.
             "database_url": database_url,
@@ -1528,4 +1604,11 @@ class Config:
             "timeline_limit": timeline_limit,
             "timeline_synth_limit": timeline_synth_limit,
             "timeline_trim": timeline_trim,
+            "review_conflict_limit": review_conflict_limit,
+            "review_conflict_pairs_per_entity": review_conflict_pairs_per_entity,
+            "review_embed_sim_floor": review_embed_sim_floor,
+            "review_stale_age_days": review_stale_age_days,
+            "review_stale_supersede_window_days": review_stale_supersede_window_days,
+            "review_stale_sim_floor": review_stale_sim_floor,
+            "review_stale_limit": review_stale_limit,
         }
