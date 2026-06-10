@@ -210,6 +210,34 @@ class ConnectError(BrainError):
     layers map it without a framework-specific import.
     """
 
+class ReviewError(BrainError):
+    """Raised when a ``brain review scan`` pass fails partway through (Plan 03).
+
+    The conflict scan calls the local Ollama enricher once per surviving
+    document pair; if Ollama becomes unreachable mid-scan
+    (:class:`OllamaUnavailable`), the findings produced before the failure are
+    already persisted (the connection is committed before this is raised), and
+    the scan stops with this partial-result error rather than silently
+    discarding work. ``findings`` carries the review findings written so far;
+    ``processed`` / ``total`` report how many entity candidates were adjudicated
+    before the failure so the CLI can print
+    "partial scan (N of M entities processed)". Inherits :class:`BrainError` so
+    the CLI / MCP layers map it without a framework-specific import.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        findings: Sequence[object] | None = None,
+        processed: int = 0,
+        total: int = 0,
+    ) -> None:
+        super().__init__(message)
+        self.findings: list[object] = list(findings or [])
+        self.processed = processed
+        self.total = total
+
 
 class VaultNoteSyncError(BrainError):
     """Raised when authoring a vault note fails to resolve or index.
