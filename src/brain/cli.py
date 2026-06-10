@@ -3387,10 +3387,10 @@ def search(
         )
         # Plan 08 — best-effort search-failure logging. ``record_search_query``
         # is the single narrow-catch chokepoint: it swallows a transient
-        # ``psycopg.OperationalError`` (a DB blip must never break a search the
-        # user already got results for) while a missing-table
-        # ``psycopg.errors.UndefinedTable`` (migration 019 not applied)
-        # propagates so the operator sees it. CLI searches have no session, so
+        # ``psycopg.OperationalError`` AND the missing-table
+        # ``psycopg.errors.UndefinedTable`` (migration 019 not applied — warns
+        # with a `brain init` hint); search must keep working on a pre-019 DB.
+        # Other schema errors propagate. CLI searches have no session, so
         # ``session_id=None`` (no-click detection is MCP-only).
         record_search_query(
             conn,
@@ -8767,13 +8767,22 @@ def gaps(
 
     cfg = _load_config_or_exit()
     since_days = since if since > 0 else cfg.gaps_lookback_days
-    with connect(cfg.database_url) as conn:
-        failures = top_search_failures(
-            conn,
-            tenant_id=cfg.graph_tenant_id,
-            since_days=since_days,
-            limit=limit,
+    try:
+        with connect(cfg.database_url) as conn:
+            failures = top_search_failures(
+                conn,
+                tenant_id=cfg.graph_tenant_id,
+                since_days=since_days,
+                limit=limit,
+            )
+    except psycopg.errors.UndefinedTable:
+        typer.secho(
+            "search_queries table missing (migration 019 not applied) — "
+            "run `brain init` first",
+            fg=typer.colors.RED,
+            err=True,
         )
+        raise typer.Exit(1) from None
 
     if as_json:
         typer.echo(
@@ -8830,27 +8839,38 @@ def gaps_push(
         lookback_days=lookback,
         min_cluster_size=cfg.gaps_min_cluster_size,
     )
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        if dry_run:
-            candidates = detector.detect(
-                conn, tenant_id=cfg.graph_tenant_id, limit=cfg.elicit_queue_limit
-            )
-            if not candidates:
-                typer.echo("No search-failure gaps to push.")
+    try:
+        with connect(cfg.database_url) as conn:
+            conn.autocommit = True
+            if dry_run:
+                candidates = detector.detect(
+                    conn,
+                    tenant_id=cfg.graph_tenant_id,
+                    limit=cfg.elicit_queue_limit,
+                )
+                if not candidates:
+                    typer.echo("No search-failure gaps to push.")
+                    return
+                typer.echo(f"Would push {len(candidates)} search-failure gap(s):")
+                for g in candidates:
+                    typer.echo(f"  {int(g.score)}×  {g.target_id}")
                 return
-            typer.echo(f"Would push {len(candidates)} search-failure gap(s):")
-            for g in candidates:
-                typer.echo(f"  {int(g.score)}×  {g.target_id}")
-            return
-        pushed = build_queue(
-            conn,
-            cfg=cfg,
-            tenant_id=cfg.graph_tenant_id,
-            detectors=[detector],
-            limit=cfg.elicit_queue_limit,
-            signal_kinds=["search_failure"],
+            pushed = build_queue(
+                conn,
+                cfg=cfg,
+                tenant_id=cfg.graph_tenant_id,
+                detectors=[detector],
+                limit=cfg.elicit_queue_limit,
+                signal_kinds=["search_failure"],
+            )
+    except psycopg.errors.UndefinedTable:
+        typer.secho(
+            "search_queries table missing (migration 019 not applied) — "
+            "run `brain init` first",
+            fg=typer.colors.RED,
+            err=True,
         )
+        raise typer.Exit(1) from None
     typer.echo(
         f"Pushed {len(pushed)} search-failure gap(s) to the elicitation queue."
     )

@@ -89,8 +89,14 @@ def record_search_query(
     - :class:`psycopg.OperationalError` (a transient connection blip) is
       **swallowed** — a DB hiccup must not break a search the user already got
       results for. Logged at WARNING with the exception *type* only.
-    - Schema errors such as :class:`psycopg.errors.UndefinedTable` (migration
-      019 not applied) **propagate** — a missing table is an operator error
+    - :class:`psycopg.errors.UndefinedTable` (migration 019 not applied) is
+      **swallowed with a loud, actionable WARNING** naming ``brain init``.
+      Search is the daily-driver command; a binary upgrade that lands before
+      the operator re-runs ``brain init`` must never break search itself
+      (observed live against a pre-019 prod DB). The operator still sees the
+      warning on every search until the migration is applied, and the
+      ``brain gaps`` surfaces fail loudly with the same hint.
+    - Any other schema/programming error **propagates** — those are real bugs
       that must surface visibly, never be silently eaten.
 
     Privacy (Plan 08 §6 — firm contract): the raw ``query`` string MUST NOT
@@ -112,9 +118,21 @@ def record_search_query(
                 source,
             ),
         )
+    except psycopg.errors.UndefinedTable:
+        # Migration 019 not applied yet (e.g. binary upgraded before `brain
+        # init` re-ran). Search must keep working; nag until the operator
+        # migrates. The failed INSERT poisoned the transaction on
+        # non-autocommit connections — roll it back so the caller's
+        # connection stays usable for the rest of the command.
+        conn.rollback()
+        logger.warning(
+            "search-query logging skipped: search_queries table missing "
+            "(migration 019 not applied) — run `brain init` to enable "
+            "`brain gaps`"
+        )
     except psycopg.OperationalError as exc:
-        # Transient blip only — never the missing-table case (UndefinedTable is
-        # a ProgrammingError, not an OperationalError, so it propagates above).
+        # Transient blip only — schema/programming errors other than the
+        # missing-table case above propagate as real bugs.
         logger.warning(
             "search-query logging skipped (DB blip): %s", type(exc).__name__
         )

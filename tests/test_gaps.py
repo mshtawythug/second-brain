@@ -95,13 +95,39 @@ def test_record_search_query_db_error_swallowed() -> None:
     )
 
 
-def test_record_search_query_undefined_table_raises() -> None:
-    """A missing table (migration 019 unapplied) must propagate, not be eaten."""
+def test_record_search_query_undefined_table_swallowed_with_hint(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A missing table (migration 019 unapplied) must NOT break search.
+
+    Regression: observed live against a pre-019 prod DB — the propagating
+    UndefinedTable aborted `brain search` with a traceback before results were
+    rendered. The contract is now: swallow, roll back the poisoned
+    transaction, and warn with an actionable `brain init` hint.
+    """
     conn = mock.MagicMock()
     conn.execute.side_effect = psycopg.errors.UndefinedTable(
-        "relation \"search_queries\" does not exist"
+        'relation "search_queries" does not exist'
     )
-    with pytest.raises(psycopg.errors.UndefinedTable):
+    with caplog.at_level("WARNING", logger="brain.gaps"):
+        # Must NOT raise.
+        record_search_query(
+            conn, query="anything", result_count=0,
+            session_id=None, source="cli",
+        )
+    conn.rollback.assert_called_once()
+    assert any("brain init" in r.getMessage() for r in caplog.records)
+    # Privacy: the raw query string must not appear at WARNING level.
+    assert not any("anything" in r.getMessage() for r in caplog.records)
+
+
+def test_record_search_query_other_schema_errors_propagate() -> None:
+    """Schema errors other than the missing table are real bugs — propagate."""
+    conn = mock.MagicMock()
+    conn.execute.side_effect = psycopg.errors.UndefinedColumn(
+        'column "nope" of relation "search_queries" does not exist'
+    )
+    with pytest.raises(psycopg.errors.UndefinedColumn):
         record_search_query(
             conn, query="anything", result_count=0,
             session_id=None, source="cli",
@@ -328,6 +354,40 @@ def test_brain_search_logs_query(
     assert row[1] == 0
     assert row[2] == "cli"
     assert row[3] is None
+
+
+def test_cli_search_survives_pre_019_schema(
+    test_db: psycopg.Connection,
+    patch_embedder: Any,
+    fake_embedder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`brain search` must keep working when migration 019 is unapplied.
+
+    Regression: observed live against a pre-019 prod DB — the search command
+    died with a traceback from the gaps logging hook before rendering results.
+    """
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    test_db.execute("DROP TABLE search_queries")
+    test_db.commit()
+    res = CliRunner().invoke(app, ["search", "synthetic topic xyz"])
+    assert res.exit_code == 0, res.output
+    assert "Traceback" not in res.output
+
+
+def test_cli_gaps_clean_error_pre_019_schema(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`brain gaps` / `gaps push` fail loudly-but-cleanly without the table."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    test_db.execute("DROP TABLE search_queries")
+    test_db.commit()
+    for argv in (["gaps"], ["gaps", "push"]):
+        res = CliRunner().invoke(app, argv)
+        assert res.exit_code == 1, res.output
+        assert "brain init" in res.output
+        assert "Traceback" not in res.output
 
 
 def test_brain_gaps_empty(

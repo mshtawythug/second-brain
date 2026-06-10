@@ -421,9 +421,10 @@ def brain_search(
             # Plan 08 — best-effort search-failure logging. The minted
             # ``session_uuid`` lets no-click detection join this search against a
             # later ``brain_show`` open in the same session. A transient
-            # ``OperationalError`` is swallowed inside ``record_search_query``; a
-            # missing-table ``UndefinedTable`` propagates to the outer handler
-            # below (surfacing visibly, never silently eaten).
+            # ``OperationalError`` AND a missing-table ``UndefinedTable``
+            # (migration 019 not applied) are both swallowed inside
+            # ``record_search_query`` — search results must still be returned
+            # on a pre-019 DB; the server log carries the `brain init` hint.
             record_search_query(
                 conn,
                 query=query,
