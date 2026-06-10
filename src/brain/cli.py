@@ -281,6 +281,14 @@ app.add_typer(elicit_app, name="elicit")
 # (cli.py is intentionally kept thin); review/list subcommands land in Phase 2.
 app.add_typer(capture_app, name="capture")
 
+# Plan 10 — `brain review weekly` periodic synthesis. The sub-app is the shared
+# home for the unified `brain review` tree; Plan 03 adds scan/list/dismiss here.
+review_app = typer.Typer(
+    no_args_is_help=True,
+    help="Periodic synthesis over the corpus (weekly review; scan/list/dismiss).",
+)
+app.add_typer(review_app, name="review")
+
 
 @app.callback()
 def _main() -> None:
@@ -3703,6 +3711,80 @@ def todo(
         typer.echo(
             f"{marker:<7} {r.document_id[:8]}  {date_str}  {r.text}"
         )
+
+
+@review_app.command("weekly")
+def review_weekly(
+    week: str | None = typer.Option(
+        None,
+        "--week",
+        help="Target ISO week (YYYY-Www, e.g. 2026-W23). Default: current week.",
+    ),
+    no_graph: bool = typer.Option(
+        False,
+        "--no-graph",
+        help="Skip the graph-community leg; fall back to tag-cluster grouping.",
+    ),
+    no_emit: bool = typer.Option(
+        False,
+        "--no-emit",
+        help="Print to stdout only; do not write the vault review page.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Machine-readable JSON output (implies --no-emit)."
+    ),
+) -> None:
+    """Synthesize the prior week's activity into a dated vault review page.
+
+    Assembles themes (graph communities or tag clusters), activity, open loops,
+    new captures, and key people for the target ISO week. Writes
+    ``<vault>/reviews/<week>.md`` unless ``--no-emit`` / ``--json`` is given.
+    """
+    from .activity import current_iso_week
+    from .review import (
+        build_weekly_report,
+        emit_weekly_page,
+        render_weekly_json,
+        render_weekly_rich,
+    )
+
+    cfg = Config.load()
+    target_week = week or current_iso_week()
+    # Best-effort theme synthesis only matters on the graph path; build the
+    # enricher lazily there (Ollama is contacted only if a community lacks a
+    # stored summary, and summarize_group never raises if it is down).
+    enricher = _build_enricher(cfg) if not no_graph else None
+    try:
+        with connect(cfg.database_url) as conn:
+            report = build_weekly_report(
+                conn,
+                cfg,
+                week=target_week,
+                generated_on=date_cls.today(),
+                no_graph=no_graph,
+                enricher=enricher,
+            )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="--week") from exc
+
+    if json_output:
+        emit_json(render_weekly_json(report))
+        return
+
+    is_empty = not (
+        report.themes
+        or report.activity
+        or report.open_loops
+        or report.ingested
+    )
+    if is_empty:
+        typer.echo(f"No activity found for {target_week}.")
+        return
+
+    typer.echo(render_weekly_rich(report))
+    if not no_emit:
+        path = emit_weekly_page(cfg.vault_path, report)
+        typer.echo(f"\nWrote {path}")
 
 
 @app.command()

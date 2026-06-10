@@ -83,6 +83,15 @@ def week_bounds(iso_week: str) -> tuple[datetime, datetime]:
     return start, end
 
 
+def current_iso_week() -> str:
+    """Return the current ISO week as ``"YYYY-Www"`` (UTC), e.g. ``"2026-W23"``.
+
+    The default ``--week`` for ``brain review weekly``. Uses ``%G-W%V`` so the
+    ISO year + zero-padded ISO week round-trip through :func:`week_bounds`.
+    """
+    return datetime.now(UTC).strftime("%G-W%V")
+
+
 def iter_activity_docs(
     conn: psycopg.Connection[Any],
     *,

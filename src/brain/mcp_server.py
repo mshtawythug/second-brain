@@ -1200,6 +1200,56 @@ def brain_daily(date: str | None = None) -> dict[str, Any]:
 
 
 @mcp_app.tool()
+def brain_review_weekly(
+    week: str | None = None,
+    no_graph: bool = False,
+    emit: bool = True,
+) -> dict[str, Any]:
+    """Synthesize the prior week's activity into a weekly review.
+
+    ``week`` is an ISO week (``YYYY-Www``, e.g. ``2026-W23``); ``None`` uses the
+    current week. ``no_graph`` forces tag-cluster themes instead of graph
+    communities. When ``emit`` is true (default) the dated page is written to
+    ``<vault>/reviews/<week>.md``. Returns the machine-readable sections plus
+    the relative ``vault_path`` slug (mirrors ``brain review weekly --json``).
+    """
+    from .activity import current_iso_week
+    from .review import build_weekly_report, emit_weekly_page, render_weekly_json
+
+    state = _get_state()
+    target_week = week or current_iso_week()
+    # Theme synthesis matters only on the graph path; reuse the long-lived
+    # enricher built in main(). summarize_group never raises if Ollama is down.
+    enricher = state.enricher if not no_graph else None
+    try:
+        with _mcp_conn(state) as conn:
+            report = build_weekly_report(
+                conn,
+                state.cfg,
+                week=target_week,
+                generated_on=date_cls.today(),
+                no_graph=no_graph,
+                enricher=enricher,
+            )
+    except ValueError as e:
+        raise _mcp_error(
+            INVALID_PARAMS, f"week must be YYYY-Www (e.g. 2026-W23): {e}"
+        ) from e
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+
+    if emit:
+        try:
+            emit_weekly_page(state.cfg.vault_path, report)
+        except OSError as e:
+            raise _mcp_error(
+                INTERNAL_ERROR, f"could not write review page: {e}"
+            ) from e
+
+    return render_weekly_json(report)
+
+
+@mcp_app.tool()
 def brain_link_proposal(
     src_id_prefix: str,
     dst_id_or_title: str,
