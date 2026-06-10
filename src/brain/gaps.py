@@ -53,11 +53,22 @@ _ZERO_RESULT_SQL = """
 # No-click: a non-empty result set that the user never opened/clicked within
 # the same search session. MCP-only — CLI searches carry ``session_id IS NULL``
 # (no session to join), so the predicate excludes them automatically.
+#
+# Mutual exclusivity with the lexical-miss pass (matters since migration 023):
+# a lexical miss now keys off ``fts_count = 0``, but such a row can still have
+# ``result_count > 0`` (vector filler). Without the ``fts_count`` guard below,
+# an MCP lexical-miss that was never opened would match BOTH passes and get
+# counted twice (and emit two ``SearchFailure`` rows for one event). We exclude
+# ``fts_count = 0`` rows here so each event is attributed to exactly one pass —
+# the lexical miss is the stronger signal. ``fts_count IS NULL`` (legacy /
+# pre-023 rows) stays eligible for no-click, preserving the prior behavior
+# where ``result_count = 0`` and ``result_count > 0`` were already exclusive.
 _NO_CLICK_SQL = """
     SELECT sq.query, COUNT(*) AS n
     FROM search_queries sq
     WHERE sq.tenant_id = %s
       AND sq.result_count > 0
+      AND (sq.fts_count IS NULL OR sq.fts_count > 0)
       AND sq.session_id IS NOT NULL
       AND sq.at >= NOW() - make_interval(days => %s)
       AND NOT EXISTS (
@@ -182,6 +193,34 @@ def record_search_query(
             "search-query logging skipped (DB blip): %s", type(exc).__name__
         )
         logger.debug("search-query logging failed for query=%r: %s", query, exc)
+
+
+def search_queries_schema_hint(exc: psycopg.Error) -> str | None:
+    """Map a missing ``search_queries`` schema object to a `brain init` hint.
+
+    The ``brain gaps`` read path (:func:`top_search_failures`,
+    :class:`SearchFailureDetector`) reads the ``search_queries`` table and,
+    since migration 023, its ``fts_count`` column. On a DB that hasn't applied
+    migration 019 (no table) or 023 (no column) the query raises, and the
+    surfaces (CLI / MCP) must fail loudly-but-cleanly with an actionable hint
+    instead of a traceback — mirroring the swallow-with-hint contract the
+    search write path uses in :func:`record_search_query`.
+
+    Returns the hint string for the two known migration gaps, or ``None`` for
+    any other error (a genuinely-unknown column / real bug) so the caller
+    re-raises it.
+    """
+    if isinstance(exc, psycopg.errors.UndefinedTable):
+        return (
+            "search_queries table missing (migration 019 not applied) — "
+            "run `brain init` first"
+        )
+    if isinstance(exc, psycopg.errors.UndefinedColumn) and "fts_count" in str(exc):
+        return (
+            "search_queries.fts_count column missing (migration 023 not "
+            "applied) — run `brain init` first"
+        )
+    return None
 
 
 def _normalize_tokens(query: str) -> frozenset[str]:

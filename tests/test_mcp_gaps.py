@@ -78,6 +78,26 @@ def test_brain_gaps_push_runs_without_error(
     assert payload["gaps"][0]["count"] == 3
 
 
+def test_brain_gaps_pre_023_schema_surfaces_init_hint(
+    gaps_state: mcp_server._State,  # noqa: ARG001 — installs state
+    test_db: psycopg.Connection,
+) -> None:
+    """MCP brain_gaps surfaces a clean `brain init` hint when fts_count is absent.
+
+    The read path queries fts_count; on a pre-023 DB that raises UndefinedColumn.
+    Instead of a generic "database error" the user gets the actionable hint.
+    """
+    from mcp import McpError
+
+    test_db.execute("ALTER TABLE search_queries DROP COLUMN fts_count")
+    test_db.commit()
+    with pytest.raises(McpError) as exc_info:
+        mcp_server.brain_gaps(since_days=30, limit=10)
+    msg = exc_info.value.error.message
+    assert "brain init" in msg
+    assert "migration 023" in msg
+
+
 def test_brain_search_returns_session_id_with_hook(
     gaps_state: mcp_server._State,  # noqa: ARG001 — installs state
 ) -> None:

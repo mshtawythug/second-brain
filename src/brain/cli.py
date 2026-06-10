@@ -116,6 +116,7 @@ from .format import (
 from .gaps import (
     SearchFailureDetector,
     record_search_query,
+    search_queries_schema_hint,
     top_search_failures,
 )
 from .ingest import (
@@ -8783,13 +8784,11 @@ def gaps(
                 since_days=since_days,
                 limit=limit,
             )
-    except psycopg.errors.UndefinedTable:
-        typer.secho(
-            "search_queries table missing (migration 019 not applied) — "
-            "run `brain init` first",
-            fg=typer.colors.RED,
-            err=True,
-        )
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
+        hint = search_queries_schema_hint(exc)
+        if hint is None:
+            raise
+        typer.secho(hint, fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from None
 
     if as_json:
@@ -8871,13 +8870,11 @@ def gaps_push(
                 limit=cfg.elicit_queue_limit,
                 signal_kinds=["search_failure"],
             )
-    except psycopg.errors.UndefinedTable:
-        typer.secho(
-            "search_queries table missing (migration 019 not applied) — "
-            "run `brain init` first",
-            fg=typer.colors.RED,
-            err=True,
-        )
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
+        hint = search_queries_schema_hint(exc)
+        if hint is None:
+            raise
+        typer.secho(hint, fg=typer.colors.RED, err=True)
         raise typer.Exit(1) from None
     typer.echo(
         f"Pushed {len(pushed)} search-failure gap(s) to the elicitation queue."

@@ -54,6 +54,7 @@ from .format import (
 from .gaps import (
     SearchFailureDetector,
     record_search_query,
+    search_queries_schema_hint,
     top_search_failures,
 )
 from .graph_rag.sync import GraphSyncer, make_graph_syncer
@@ -510,6 +511,14 @@ def brain_gaps(
                 limit=limit,
                 normalize=True,
             )
+    except (psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as e:
+        # Pre-019 (no table) / pre-023 (no fts_count column): surface the
+        # actionable `brain init` hint instead of a generic DB error. Any other
+        # undefined-column (a real bug) falls through to _wrap_db_error.
+        hint = search_queries_schema_hint(e)
+        if hint is None:
+            raise _wrap_db_error(e) from e
+        raise _mcp_error(INVALID_PARAMS, hint) from e
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     return {

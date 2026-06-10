@@ -466,6 +466,36 @@ def test_top_search_failures_includes_no_click(
     assert failures[0].query == "vendor comparison"
 
 
+def test_no_double_count_lexical_miss_with_no_click(
+    test_db: psycopg.Connection,
+) -> None:
+    """A lexical miss (fts_count=0) with vector filler, never opened, counts ONCE.
+
+    Regression: such an MCP row matches both the lexical-miss predicate
+    (fts_count=0) and the no-click predicate (result_count>0, session not
+    opened). Without mutual exclusivity it would be counted twice and emit two
+    SearchFailure rows for one event. The lexical miss is the attributed kind.
+    """
+    sess = uuid.uuid4()
+    for _ in range(3):
+        _insert_search_query(
+            test_db, "offcorpus mcp miss", result_count=5, fts_count=0,
+            session_id=sess, source="mcp",
+        )
+    failures = top_search_failures(
+        test_db, tenant_id="default", since_days=30, limit=10
+    )
+    # Exactly one row, attributed to zero_results (not also no_click).
+    assert len(failures) == 1
+    assert failures[0].kind == "zero_results"
+    assert failures[0].count == 3
+    # Detector likewise counts the cluster once (size 3, not 6).
+    detector = SearchFailureDetector(lookback_days=30, min_cluster_size=2)
+    gaps = detector.detect(test_db, tenant_id="default", limit=10)
+    assert len(gaps) == 1
+    assert gaps[0].score == 3.0
+
+
 def test_top_search_failures_empty(test_db: psycopg.Connection) -> None:
     assert top_search_failures(
         test_db, tenant_id="default", since_days=30, limit=10
@@ -528,6 +558,46 @@ def test_cli_gaps_clean_error_pre_019_schema(
         res = CliRunner().invoke(app, argv)
         assert res.exit_code == 1, res.output
         assert "brain init" in res.output
+        assert "Traceback" not in res.output
+
+
+def test_cli_search_survives_pre_023_schema(
+    test_db: psycopg.Connection,
+    patch_embedder: Any,
+    fake_embedder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`brain search` must keep working when migration 023's column is absent.
+
+    A binary that writes fts_count landing before `brain init` re-runs would
+    otherwise abort search with an UndefinedColumn traceback from the logging
+    hook. record_search_query swallows it with a hint instead.
+    """
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    test_db.execute("ALTER TABLE search_queries DROP COLUMN fts_count")
+    test_db.commit()
+    res = CliRunner().invoke(app, ["search", "synthetic topic xyz"])
+    assert res.exit_code == 0, res.output
+    assert "Traceback" not in res.output
+
+
+def test_cli_gaps_clean_error_pre_023_schema(
+    test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`brain gaps` / `gaps push` fail cleanly when the fts_count column is absent.
+
+    The read path queries fts_count; on a pre-023 DB that raises UndefinedColumn.
+    The command must surface a clean `brain init` hint, not a traceback.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    test_db.execute("ALTER TABLE search_queries DROP COLUMN fts_count")
+    test_db.commit()
+    for argv in (["gaps"], ["gaps", "push"]):
+        res = CliRunner().invoke(app, argv)
+        assert res.exit_code == 1, res.output
+        assert "brain init" in res.output
+        assert "migration 023" in res.output
         assert "Traceback" not in res.output
 
 
