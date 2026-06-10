@@ -64,6 +64,7 @@ from .errors import (
 )
 
 if TYPE_CHECKING:
+    from .ask import AskResult, ChatJson
     from .enrichment import OllamaEnricher
     from .graph_rag.reconcile import ReconcileConfig
     from .graph_rag.schema import GraphContext
@@ -3995,6 +3996,175 @@ def brief(
     _print_brief(data)
     if written_path is not None:
         typer.echo(f"\nWrote {written_path}")
+
+
+def _build_chat(cfg: Config) -> ChatJson:
+    """Return the production JSON-mode chat callable (indirection for tests).
+
+    Mirrors :func:`_build_embedder` / :func:`_build_enricher`: production hands
+    back :func:`brain.chat.chat_json`; CLI tests monkeypatch this single point to
+    inject a fake chat so the ask loop never needs a live Ollama.
+    """
+    from .chat import chat_json
+
+    return chat_json
+
+
+def _print_ask_result(result: AskResult, *, explain: bool) -> None:
+    """Render an :class:`AskResult` to the terminal (answer + numbered sources)."""
+    if explain:
+        if result.fallback_used and result.iterations_used == 1:
+            console.print("[dim](fast mode — no planning loop)[/dim]")
+        console.print(
+            f"[dim]Plan:[/dim] {', '.join(result.sub_queries) or '(none)'}"
+        )
+        console.print(f"[dim]Iterations used:[/dim] {result.iterations_used}")
+        console.print()
+
+    console.print("[bold]● Answer[/bold]\n")
+    console.print(result.answer or "[dim](no answer)[/dim]")
+
+    if result.citations:
+        console.print("\n[bold]━ Sources[/bold]\n")
+        for citation in result.citations:
+            kind = citation.source_kind or "doc"
+            console.print(
+                f"[cyan]\\[{citation.ref}][/cyan]  {kind} — "
+                f"{citation.title} ([dim]{citation.document_id[:6]}[/dim])"
+            )
+
+
+@app.command()
+def ask(
+    question: str = typer.Argument(..., help="The natural-language question."),
+    mode: str = typer.Option(
+        "hybrid",
+        "--mode",
+        help=(
+            "Retrieval mode: hybrid (vector/FTS only, default) | auto (graph "
+            "router) | fuse (RRF of graph + hybrid) | local (graph entity-centric)."
+        ),
+    ),
+    no_loop: bool = typer.Option(
+        False,
+        "--no-loop",
+        help="Skip plan/reflect; single retrieve+synthesize pass (faster).",
+    ),
+    limit: int = typer.Option(
+        5, "--limit", min=1, help="Max documents retrieved per iteration."
+    ),
+    max_iter: int | None = typer.Option(
+        None,
+        "--max-iter",
+        min=1,
+        help="Hard cap on loop iterations (default: config ask_max_iterations).",
+    ),
+    explain: bool = typer.Option(
+        False, "--explain", help="Print the sub-query plan and iteration trace."
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit structured JSON."),
+) -> None:
+    """Agentic multi-hop cited answer synthesis over the corpus.
+
+    Plans sub-queries, retrieves (and optionally reflects to fill gaps), then
+    composes a single answer with inline [N] citations into your documents.
+    Requires a local Ollama for the plan/reflect/synthesize steps; if Ollama is
+    unavailable the command exits non-zero with a clear message (no partial
+    answer). Document snippets only are sent to the LLM — never full bodies.
+    """
+    from .ask import ASK_MODES, HYBRID_MODE
+    from .ask import ask as run_ask
+
+    if mode not in ASK_MODES:
+        raise typer.BadParameter(
+            f"mode must be one of: {', '.join(sorted(ASK_MODES))}"
+        )
+
+    cfg = Config.load()
+    embedder = _build_embedder(cfg)
+    chat = _build_chat(cfg)
+    max_iterations = max_iter if max_iter is not None else cfg.ask_max_iterations
+
+    try:
+        if mode == HYBRID_MODE:
+            with connect(cfg.database_url) as conn:
+                conn.autocommit = True
+                result = run_ask(
+                    conn,
+                    cfg,
+                    embedder=embedder,
+                    chat=chat,
+                    question=question,
+                    mode=mode,
+                    no_loop=no_loop,
+                    limit=limit,
+                    max_iterations=max_iterations,
+                )
+                _log_ask_interactions(conn, result, source="cli")
+        else:
+            from .graph_rag.backends import AgeBackend
+
+            with connect_age(cfg.database_url) as conn:
+                conn.autocommit = True
+                _require_age_or_exit(conn)
+                backend = AgeBackend()
+                backend.bootstrap(conn)
+                result = run_ask(
+                    conn,
+                    cfg,
+                    embedder=embedder,
+                    chat=chat,
+                    question=question,
+                    mode=mode,
+                    no_loop=no_loop,
+                    limit=limit,
+                    max_iterations=max_iterations,
+                    backend=backend,
+                )
+                _log_ask_interactions(conn, result, source="cli")
+    except OllamaUnavailable as exc:
+        typer.secho(
+            f"ask: Ollama is not available — start it (e.g. `brew services "
+            f"start ollama`) and retry. ({exc})",
+            fg="red",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+    except EnrichmentError as exc:
+        typer.secho(f"ask: synthesis failed — {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+    except (GraphTenantError, GraphBackendError) as exc:
+        typer.secho(f"ask: graph retrieval failed — {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        emit_json(result.to_dict())
+        return
+    _print_ask_result(result, explain=explain)
+
+
+def _log_ask_interactions(
+    conn: psycopg.Connection[Any], result: AskResult, *, source: str
+) -> None:
+    """Best-effort: record one ``opened`` interaction per emitted citation.
+
+    Document rows (``document_id`` set, ``target_type`` unset). The session id
+    groups the answer's opens; a logging failure never breaks the command
+    (mirrors the MCP / ``brain rate`` discipline).
+    """
+    try:
+        session_uuid: uuid.UUID | None = uuid.UUID(result.session_id)
+    except ValueError:
+        session_uuid = None
+    for citation in result.citations:
+        _record_interaction_best_effort(
+            conn,
+            document_id=citation.document_id,
+            action="opened",
+            source=source,
+            query=None,
+            session_id=session_uuid,
+        )
 
 
 @app.command()

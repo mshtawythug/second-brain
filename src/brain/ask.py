@@ -225,11 +225,12 @@ def _synthesize_prompt(
     """Build the synthesize-step prompt over numbered title+snippet docs."""
     lines = [
         "You are answering the user's question using ONLY the numbered source "
-        "documents below. Write a direct, concise answer. Cite every claim with "
-        "inline [N] markers referencing the source numbers you used. If the "
-        "documents do not contain enough information to answer, say so plainly "
-        "and do not invent facts. Respond ONLY with a JSON object of the form "
-        '{"answer": "..."}.\n',
+        "documents below. Write a direct, concise answer. After each claim, cite "
+        "the source it came from using its bracketed number exactly as shown "
+        "below — for example [1] or [2] (use the real digits, never a literal "
+        "letter). If the documents do not contain enough information to answer, "
+        "say so plainly and do not invent facts. Respond ONLY with a JSON object "
+        'of the form {"answer": "your answer with [1]-style citations"}.\n',
         f"Question: {question}\n",
     ]
     if graph_summary:
