@@ -14,6 +14,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from mcp import McpError
+from mcp.types import INVALID_PARAMS
 
 from brain import mcp_server
 from brain.config import Config
@@ -178,9 +179,12 @@ def test_brain_connect_reject(
 def test_brain_connect_list_invalid_status_raises(
     connect_state: mcp_server._State,
 ) -> None:
-    # Codex R1 #3: a typo'd status must raise, not silently return [].
-    with pytest.raises(McpError):
+    # Codex R1 #3: a typo'd status must raise with INVALID_PARAMS, not silently
+    # return []. Assert the specific error code (Codex R2 #2) — the fix IS the
+    # code mapping, so a wrong code must fail this test.
+    with pytest.raises(McpError) as exc:
         mcp_server.brain_connect_list(status="pendign")
+    assert exc.value.error.code == INVALID_PARAMS
 
 
 def test_brain_connect_accept_write_missing_file_leaves_pending(
@@ -197,20 +201,23 @@ def test_brain_connect_accept_write_missing_file_leaves_pending(
     )
     sid = _insert_suggestion(test_db, source=src, target=tgt)
     # No source file created under the tmp vault → write must fail.
-    with pytest.raises(McpError):
+    with pytest.raises(McpError) as exc:
         mcp_server.brain_connect_accept(id=sid[:8], write=True)
+    assert exc.value.error.code == INVALID_PARAMS
     assert _status(test_db, sid) == "pending"
 
 
 def test_brain_connect_accept_unknown_id_raises(
     connect_state: mcp_server._State,
 ) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(McpError) as exc:
         mcp_server.brain_connect_accept(id="abcdef")
+    assert exc.value.error.code == INVALID_PARAMS
 
 
 def test_brain_connect_reject_unknown_id_raises(
     connect_state: mcp_server._State,
 ) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(McpError) as exc:
         mcp_server.brain_connect_reject(id="abcdef")
+    assert exc.value.error.code == INVALID_PARAMS

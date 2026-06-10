@@ -281,6 +281,42 @@ def _existing_link_targets(
     return {str(r[0]) for r in rows}
 
 
+def _retire_linked_pending(
+    conn: psycopg.Connection[Any], source_ids: list[str]
+) -> int:
+    """Delete ``pending`` suggestions whose pair is now in ``links`` / ``derived_links``.
+
+    Closes the window where a suggestion is queued, then the user draws the link
+    manually (or a derived edge appears) — the stale pending row must leave the
+    queue on the next refresh. Only ``pending`` rows are removed (accepted /
+    rejected are frozen), and only for the given source docs. Returns the row
+    count deleted.
+    """
+    if not source_ids:
+        return 0
+    cur = conn.execute(
+        """
+        DELETE FROM link_suggestions ls
+        WHERE ls.status = 'pending'
+          AND ls.source_doc_id = ANY(%(srcs)s::uuid[])
+          AND (
+              EXISTS (
+                  SELECT 1 FROM links l
+                  WHERE l.src_document_id = ls.source_doc_id
+                    AND l.dst_document_id = ls.target_doc_id
+              )
+              OR EXISTS (
+                  SELECT 1 FROM derived_links d
+                  WHERE d.src_document_id = ls.source_doc_id
+                    AND d.dst_document_id = ls.target_doc_id
+              )
+          )
+        """,
+        {"srcs": source_ids},
+    )
+    return cur.rowcount
+
+
 # --------------------------------------------------------------------------- #
 # Refresh pipeline (DB read + write).
 # --------------------------------------------------------------------------- #
@@ -328,6 +364,14 @@ def refresh_suggestions(
 
         target_id = resolve_document_prefix(conn, doc_prefix)
         sources = [s for s in sources if s.id == target_id]
+
+    if not dry_run:
+        # Retire any PENDING suggestion whose pair has since been linked (a
+        # manual wikilink or derived edge added after it was queued) so the
+        # review queue never re-surfaces an edge that already exists (Codex
+        # R2 #1). Scoped to the sources being refreshed; accepted/rejected
+        # rows are frozen and untouched.
+        _retire_linked_pending(conn, [s.id for s in sources])
 
     candidates_total = 0
     written_total = 0

@@ -395,6 +395,83 @@ def test_refresh_dedup_derived_links_table(
     assert ab is None
 
 
+def test_refresh_retires_now_linked_pending(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # Codex R2 #1: a pending suggestion whose pair gets linked AFTER it was
+    # queued must be retired on the next refresh (not linger in the queue).
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    row = test_db.execute(
+        "SELECT source_doc_id::text, target_doc_id::text FROM link_suggestions "
+        "WHERE status = 'pending' LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    src, tgt = str(row[0]), str(row[1])
+    # The user draws the wikilink manually after the suggestion was queued.
+    test_db.execute(
+        "INSERT INTO links (src_document_id, dst_document_id, link_text, link_kind) "
+        "VALUES (%s::uuid, %s::uuid, %s, %s)",
+        (src, tgt, "manual", "wiki"),
+    )
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    still_there = test_db.execute(
+        "SELECT 1 FROM link_suggestions WHERE source_doc_id = %s::uuid "
+        "AND target_doc_id = %s::uuid",
+        (src, tgt),
+    ).fetchone()
+    assert still_there is None  # retired — the pair is now linked
+
+
+def test_refresh_retires_now_linked_via_derived_links(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    a, b = _seed_overlapping_pair(test_db, fake_embedder)
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    row = test_db.execute(
+        "SELECT source_doc_id::text, target_doc_id::text FROM link_suggestions "
+        "WHERE status = 'pending' LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    src, tgt = str(row[0]), str(row[1])
+    test_db.execute(
+        "INSERT INTO derived_links (src_document_id, dst_document_id, rule, weight) "
+        "VALUES (%s::uuid, %s::uuid, %s, %s)",
+        (src, tgt, "shared_thread", 1.0),
+    )
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    still_there = test_db.execute(
+        "SELECT 1 FROM link_suggestions WHERE source_doc_id = %s::uuid "
+        "AND target_doc_id = %s::uuid",
+        (src, tgt),
+    ).fetchone()
+    assert still_there is None
+
+
+def test_refresh_retire_does_not_touch_accepted(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    # The retire cleanup only removes pending rows — an accepted row for a now
+    # -linked pair stays (it is the historical record of the accept).
+    a = _make_vault_doc(
+        test_db, fake_embedder, title="Doc A", content="a", vault_path="n/a.md"
+    )
+    b = _make_vault_doc(
+        test_db, fake_embedder, title="Doc B", content="b", vault_path="n/b.md"
+    )
+    sid = _insert_suggestion(test_db, source=a, target=b, status="accepted")
+    test_db.execute(
+        "INSERT INTO links (src_document_id, dst_document_id, link_text, link_kind) "
+        "VALUES (%s::uuid, %s::uuid, %s, %s)",
+        (a, b, "Doc B", "wiki"),
+    )
+    connect_mod.refresh_suggestions(test_db, _cfg())
+    row = test_db.execute(
+        "SELECT status FROM link_suggestions WHERE id = %s::uuid", (sid,)
+    ).fetchone()
+    assert row is not None and row[0] == "accepted"
+
+
 def test_refresh_idempotent(
     test_db: psycopg.Connection, fake_embedder: FakeEmbedder
 ) -> None:
