@@ -145,6 +145,32 @@ def test_build_weekly_report_windowed_counts(
     assert len(report.ingested) == 5
 
 
+def _action_items_doc(
+    conn: psycopg.Connection, body: str, ingested_at: datetime
+) -> str:
+    doc = conn.execute(
+        "INSERT INTO documents (title, content, content_hash, content_type, ingested_at) "
+        "VALUES ('Action items', %s, %s, 'krisp_action_items', %s) RETURNING id::text",
+        (body, str(uuid.uuid4()), ingested_at),
+    ).fetchone()[0]
+    return str(doc)
+
+
+def test_build_weekly_report_open_loops_scoped_to_week(
+    test_db: psycopg.Connection,
+) -> None:
+    # An open item ingested in-window appears; an open item ingested out-of-window
+    # (the current-week loop a NOW()-relative query would wrongly include) does not.
+    _action_items_doc(test_db, "- [ ] in-window loop\n", IN_WINDOW)
+    _action_items_doc(test_db, "- [ ] out-of-window loop\n", OUT_WINDOW)
+
+    report = build_weekly_report(
+        test_db, _cfg(), week=WEEK, generated_on=GENERATED_ON, no_graph=True
+    )
+    texts = {row.text for row in report.open_loops}
+    assert texts == {"in-window loop"}
+
+
 def test_build_weekly_report_key_people_dedup_top5(
     test_db: psycopg.Connection,
 ) -> None:

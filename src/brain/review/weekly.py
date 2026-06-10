@@ -39,9 +39,6 @@ from ..enrichment import OllamaEnricher
 from ..todo import TodoRow, iter_action_item_docs
 from ..wiki.build_people import _doc_participant_keys
 
-# Open-loop window: an action item counts as "open this week" if its parent doc
-# was ingested in the last 7 days (one review cadence). Per Plan 10 §3 Step 3.
-_OPEN_LOOP_SINCE_DAYS = 7
 # Top entity names / representative doc titles attached per graph theme block.
 _THEME_ENTITY_CAP = 3
 _THEME_DOC_CAP = 3
@@ -118,11 +115,16 @@ def build_weekly_report(
     ingested = iter_ingested_docs(
         conn, after=after, before=before, limit=cfg.review_activity_limit
     )
-    open_loops = list(
-        iter_action_item_docs(
-            conn, since_days=_OPEN_LOOP_SINCE_DAYS, include_closed=False
-        )
-    )[: cfg.review_open_loop_limit]
+    # Open loops are scoped to the TARGET week, not the last 7 days from NOW():
+    # ``iter_action_item_docs(since_days=...)`` is NOW()-relative (todo.py), which
+    # would surface the current week's loops for a past --week. Pull all open
+    # action items and filter by the requested window so a past-week retrospective
+    # shows that week's loops.
+    open_loops = [
+        row
+        for row in iter_action_item_docs(conn, include_closed=False)
+        if row.ingested_at is not None and after <= row.ingested_at <= before
+    ][: cfg.review_open_loop_limit]
 
     use_graph = cfg.graph_enabled and not no_graph
     themes: list[ThemeBlock] = []

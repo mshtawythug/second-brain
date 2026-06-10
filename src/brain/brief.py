@@ -24,7 +24,7 @@ import psycopg
 from . import chat
 from .activity import recent_captures
 from .config import Config
-from .errors import OllamaUnavailable
+from .errors import EnrichmentError
 from .queries import DocumentRow
 from .todo import TodoRow, iter_action_item_docs
 from .vault.frontmatter import dump_frontmatter
@@ -188,16 +188,20 @@ def suggest_next_steps(brief: BriefData, cfg: Config) -> list[str]:
     """Return up to 5 LLM-proposed next steps, or ``[]`` if Ollama is unavailable.
 
     Assembles the prompt entirely from capture titles + todo texts and calls
-    :func:`brain.chat.chat_json`. Best-effort: on :class:`OllamaUnavailable` it
+    :func:`brain.chat.chat_json`. Best-effort: on any
+    :class:`~brain.errors.EnrichmentError` (Ollama unavailable OR two malformed
+    JSON / schema-violating responses — ``OllamaUnavailable`` is a subclass) it
     logs a warning and returns ``[]`` so the brief always renders. Non-string
     entries from the model are dropped; the list is capped at five.
     """
     prompt = _build_suggest_prompt(brief)
     try:
         body = chat.chat_json(prompt, schema={"suggestions": "list"}, cfg=cfg)
-    except OllamaUnavailable as exc:
+    except EnrichmentError as exc:
+        # OllamaUnavailable is an EnrichmentError subclass, so this single clause
+        # covers transport failure AND malformed-JSON-twice — never fail the brief.
         _logger.warning(
-            "suggest_next_steps: Ollama unavailable (%s); returning no suggestions",
+            "suggest_next_steps: synthesis failed (%s); returning no suggestions",
             exc,
         )
         return []

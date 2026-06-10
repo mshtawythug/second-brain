@@ -25,7 +25,7 @@ from brain.brief import (
     write_brief_to_vault,
 )
 from brain.config import Config, ConfigError
-from brain.errors import OllamaUnavailable
+from brain.errors import EnrichmentError, OllamaUnavailable
 from brain.queries import DocumentRow
 from brain.vault.frontmatter import parse_frontmatter
 
@@ -179,6 +179,18 @@ def test_suggest_next_steps_ollama_unavailable(
     monkeypatch.setattr(chat, "chat_json", _boom)
     result = suggest_next_steps(_brief_with_context(), _cfg())
     assert result == []
+
+
+def test_suggest_next_steps_enrichment_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A malformed-JSON-twice failure surfaces as EnrichmentError (not the
+    # OllamaUnavailable subclass) — it must STILL be swallowed, never crash.
+    def _boom(*_a: object, **_k: object) -> dict[str, object]:
+        raise EnrichmentError("bad json twice")
+
+    monkeypatch.setattr(chat, "chat_json", _boom)
+    assert suggest_next_steps(_brief_with_context(), _cfg()) == []
 
 
 def test_suggest_next_steps_returns_list(monkeypatch: pytest.MonkeyPatch) -> None:

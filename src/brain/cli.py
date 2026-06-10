@@ -3779,12 +3779,13 @@ def review_weekly(
     )
     if is_empty:
         typer.echo(f"No activity found for {target_week}.")
-        return
-
-    typer.echo(render_weekly_rich(report))
+    else:
+        typer.echo(render_weekly_rich(report))
+    # Default behaviour emits the page regardless of how sparse the week was
+    # (the renderer handles empty sections), matching the MCP tool's emit path.
     if not no_emit:
         path = emit_weekly_page(cfg.vault_path, report)
-        typer.echo(f"\nWrote {path}")
+        typer.echo(f"Wrote {path}")
 
 
 def _print_brief(data: Any) -> None:
