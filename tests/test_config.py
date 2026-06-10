@@ -868,3 +868,127 @@ def test_elicit_min_gap_score_rejects_out_of_range(monkeypatch: pytest.MonkeyPat
     monkeypatch.setenv("BRAIN_ELICIT_MIN_GAP_SCORE", "1.5")
     with pytest.raises(ConfigError):
         Config.load()
+
+
+# ---------------------------------------------------------------------------
+# BRAIN_RESURFACE_* — spaced-repetition resurfacing knobs (Plan 02).
+# ---------------------------------------------------------------------------
+
+
+class TestResurfaceLimit:
+    """Env parsing + validation for ``BRAIN_RESURFACE_LIMIT`` (int >= 1)."""
+
+    def test_unset_yields_default(self, monkeypatch, isolated_dotenv) -> None:
+        from brain.config import DEFAULT_RESURFACE_LIMIT
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_RESURFACE_LIMIT", raising=False)
+        cfg = Config.load()
+        assert cfg.resurface_limit == DEFAULT_RESURFACE_LIMIT == 7
+
+    def test_blank_falls_back_to_default(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_LIMIT", "  ")
+        assert Config.load().resurface_limit == 7
+
+    def test_valid_int_honored(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_LIMIT", "12")
+        assert Config.load().resurface_limit == 12
+
+    def test_zero_is_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_LIMIT", "0")
+        with pytest.raises(ConfigError, match="integer >= 1"):
+            Config.load()
+
+    def test_non_numeric_is_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_LIMIT", "lots")
+        with pytest.raises(ConfigError, match="integer >= 1"):
+            Config.load()
+
+
+class TestResurfaceMinAgeDays:
+    """Env parsing + validation for ``BRAIN_RESURFACE_MIN_AGE_DAYS`` (int >= 0)."""
+
+    def test_unset_yields_default(self, monkeypatch, isolated_dotenv) -> None:
+        from brain.config import DEFAULT_RESURFACE_MIN_AGE_DAYS
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_RESURFACE_MIN_AGE_DAYS", raising=False)
+        cfg = Config.load()
+        assert cfg.resurface_min_age_days == DEFAULT_RESURFACE_MIN_AGE_DAYS == 14
+
+    def test_zero_is_valid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_MIN_AGE_DAYS", "0")
+        assert Config.load().resurface_min_age_days == 0
+
+    def test_valid_int_honored(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_MIN_AGE_DAYS", "30")
+        assert Config.load().resurface_min_age_days == 30
+
+    def test_negative_is_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_MIN_AGE_DAYS", "-1")
+        with pytest.raises(ConfigError, match="non-negative integer"):
+            Config.load()
+
+
+class TestResurfaceAgeHalflifeDays:
+    """Env parsing for ``BRAIN_RESURFACE_AGE_HALFLIFE_DAYS`` (float > 0)."""
+
+    def test_unset_yields_default(self, monkeypatch, isolated_dotenv) -> None:
+        from brain.config import DEFAULT_RESURFACE_AGE_HALFLIFE_DAYS
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_RESURFACE_AGE_HALFLIFE_DAYS", raising=False)
+        cfg = Config.load()
+        assert cfg.resurface_age_halflife_days == DEFAULT_RESURFACE_AGE_HALFLIFE_DAYS
+        assert cfg.resurface_age_halflife_days == 180.0
+
+    def test_valid_float_honored(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_AGE_HALFLIFE_DAYS", "365")
+        assert Config.load().resurface_age_halflife_days == 365.0
+
+    def test_zero_is_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_AGE_HALFLIFE_DAYS", "0")
+        with pytest.raises(ConfigError, match="positive float"):
+            Config.load()
+
+    def test_non_numeric_is_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_AGE_HALFLIFE_DAYS", "soon")
+        with pytest.raises(ConfigError, match="positive float"):
+            Config.load()
+
+
+class TestResurfaceAccessHalflifeDays:
+    """Env parsing for ``BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS`` (float > 0)."""
+
+    def test_unset_yields_default(self, monkeypatch, isolated_dotenv) -> None:
+        from brain.config import DEFAULT_RESURFACE_ACCESS_HALFLIFE_DAYS
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.delenv("BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS", raising=False)
+        cfg = Config.load()
+        assert (
+            cfg.resurface_access_halflife_days
+            == DEFAULT_RESURFACE_ACCESS_HALFLIFE_DAYS
+            == 90.0
+        )
+
+    def test_valid_float_honored(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS", "45")
+        assert Config.load().resurface_access_halflife_days == 45.0
+
+    def test_negative_is_invalid(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS", "-5")
+        with pytest.raises(ConfigError, match="positive float"):
+            Config.load()
