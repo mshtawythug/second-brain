@@ -267,6 +267,26 @@ DEFAULT_TIMELINE_SYNTH_LIMIT = 5
 DEFAULT_TIMELINE_TRIM = "oldest"
 _VALID_TIMELINE_TRIMS = frozenset({"oldest", "sparsest"})
 
+# Plan 04 -- `brain audio` (NotebookLM-style two-host overview) knobs.
+#
+# ``DEFAULT_AUDIO_SCRIPT_MODEL`` is the Ollama model name passed to the shared
+# ``chat_json`` helper for dialogue generation. Kept a separate literal from the
+# enrich / extract models so the audio script model stays independently
+# overridable via ``BRAIN_AUDIO_SCRIPT_MODEL``.
+DEFAULT_AUDIO_SCRIPT_MODEL = "llama3.1:8b"
+# Max speaker turns in the generated dialogue. Must be a POSITIVE EVEN integer
+# (pairs of Host/Guest). The generator truncates any surplus turns the model
+# emits beyond this cap. Override via ``BRAIN_AUDIO_MAX_TURNS``.
+DEFAULT_AUDIO_MAX_TURNS = 12
+# Max prompt tokens (tiktoken ``cl100k_base``) fed to the script generator. The
+# bundle (entity names + theme summaries + doc titles/summaries — never raw
+# bodies) is trimmed group-by-group to fit this budget before the LLM call,
+# bounding the round-trip cost. Override via ``BRAIN_AUDIO_MAX_INPUT_TOKENS``.
+DEFAULT_AUDIO_MAX_INPUT_TOKENS = 3000
+# Max theme / community groups pulled from the graph context into the source
+# bundle. Positive int. Override via ``BRAIN_AUDIO_THEME_LIMIT``.
+DEFAULT_AUDIO_THEME_LIMIT = 4
+
 
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
@@ -539,6 +559,15 @@ class Config:
     timeline_limit: int = DEFAULT_TIMELINE_LIMIT
     timeline_synth_limit: int = DEFAULT_TIMELINE_SYNTH_LIMIT
     timeline_trim: str = DEFAULT_TIMELINE_TRIM
+    # Plan 04 -- `brain audio` knobs. ``audio_script_model`` selects the Ollama
+    # dialogue model; ``audio_max_turns`` caps the dialogue (positive even int);
+    # ``audio_max_input_tokens`` bounds the bundle prompt (positive int);
+    # ``audio_theme_limit`` caps the theme/community groups pulled into the
+    # source bundle (positive int).
+    audio_script_model: str = DEFAULT_AUDIO_SCRIPT_MODEL
+    audio_max_turns: int = DEFAULT_AUDIO_MAX_TURNS
+    audio_max_input_tokens: int = DEFAULT_AUDIO_MAX_INPUT_TOKENS
+    audio_theme_limit: int = DEFAULT_AUDIO_THEME_LIMIT
 
     @classmethod
     def load(cls) -> "Config":
@@ -1465,6 +1494,67 @@ class Config:
                     f"(got {timeline_trim_raw!r})"
                 )
 
+        # Plan 04 -- `brain audio` env vars. Same eager-validation idiom as the
+        # enrich / timeline knobs above: unset/blank -> default; non-parseable /
+        # out-of-range -> ConfigError at startup so a typo never surfaces
+        # mid-generation.
+        audio_model_raw = os.environ.get("BRAIN_AUDIO_SCRIPT_MODEL")
+        if audio_model_raw is None or audio_model_raw.strip() == "":
+            audio_script_model = DEFAULT_AUDIO_SCRIPT_MODEL
+        else:
+            audio_script_model = audio_model_raw.strip()
+
+        audio_max_turns_raw = os.environ.get("BRAIN_AUDIO_MAX_TURNS")
+        if audio_max_turns_raw is None or audio_max_turns_raw.strip() == "":
+            audio_max_turns = DEFAULT_AUDIO_MAX_TURNS
+        else:
+            try:
+                audio_max_turns = int(audio_max_turns_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_AUDIO_MAX_TURNS must be a positive even integer "
+                    f"(got {audio_max_turns_raw!r})"
+                ) from exc
+            if audio_max_turns <= 0 or audio_max_turns % 2 != 0:
+                raise ConfigError(
+                    "BRAIN_AUDIO_MAX_TURNS must be a positive even integer "
+                    f"(got {audio_max_turns_raw!r})"
+                )
+
+        audio_max_input_raw = os.environ.get("BRAIN_AUDIO_MAX_INPUT_TOKENS")
+        if audio_max_input_raw is None or audio_max_input_raw.strip() == "":
+            audio_max_input_tokens = DEFAULT_AUDIO_MAX_INPUT_TOKENS
+        else:
+            try:
+                audio_max_input_tokens = int(audio_max_input_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_AUDIO_MAX_INPUT_TOKENS must be a positive integer "
+                    f"(got {audio_max_input_raw!r})"
+                ) from exc
+            if audio_max_input_tokens <= 0:
+                raise ConfigError(
+                    "BRAIN_AUDIO_MAX_INPUT_TOKENS must be a positive integer "
+                    f"(got {audio_max_input_raw!r})"
+                )
+
+        audio_theme_limit_raw = os.environ.get("BRAIN_AUDIO_THEME_LIMIT")
+        if audio_theme_limit_raw is None or audio_theme_limit_raw.strip() == "":
+            audio_theme_limit = DEFAULT_AUDIO_THEME_LIMIT
+        else:
+            try:
+                audio_theme_limit = int(audio_theme_limit_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_AUDIO_THEME_LIMIT must be a positive integer "
+                    f"(got {audio_theme_limit_raw!r})"
+                ) from exc
+            if audio_theme_limit <= 0:
+                raise ConfigError(
+                    "BRAIN_AUDIO_THEME_LIMIT must be a positive integer "
+                    f"(got {audio_theme_limit_raw!r})"
+                )
+
         return {
             # brain_home resolves via default_factory=_brain_home_root.
             "database_url": database_url,
@@ -1528,4 +1618,8 @@ class Config:
             "timeline_limit": timeline_limit,
             "timeline_synth_limit": timeline_synth_limit,
             "timeline_trim": timeline_trim,
+            "audio_script_model": audio_script_model,
+            "audio_max_turns": audio_max_turns,
+            "audio_max_input_tokens": audio_max_input_tokens,
+            "audio_theme_limit": audio_theme_limit,
         }

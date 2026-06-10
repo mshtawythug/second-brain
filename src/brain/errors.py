@@ -235,6 +235,31 @@ class OllamaUnavailable(EnrichmentError):
     """
 
 
+class AudioError(BrainError):
+    """Raised when ``brain audio`` script generation fails unrecoverably (Plan 04).
+
+    Covers the audio-overview script path: the graph layer is disabled, no
+    themes / communities surfaced for the requested person / topic, or the
+    script generator could not coax a structurally valid two-host dialogue out
+    of the model after its retry. Inherits :class:`BrainError` so the CLI maps
+    it to a clean red error + exit 1 without a framework-specific import. An
+    Ollama transport failure surfaces as :class:`OllamaUnavailable` (a separate
+    branch) rather than this error.
+    """
+
+
+class TtsError(BrainError):
+    """Raised when a text-to-speech backend fails (Plan 04, Wave B).
+
+    Surfaced by :func:`brain.audio.make_tts_backend` for an unrecognized
+    ``--tts`` spec (caller bug) and by :class:`brain.audio.ShellTtsBackend`
+    when the user-supplied synthesis command is missing, exits non-zero, or
+    times out. The script ``.json`` / ``.md`` artifacts are always written
+    BEFORE synthesis, so they survive a TTS failure. Inherits
+    :class:`BrainError` so the CLI maps it to a clean red error + exit 1.
+    """
+
+
 class IngestAmbiguousSource(BrainError):
     """Raised when multiple documents share a single ``(source_kind, source_external_id)`` key.
 
