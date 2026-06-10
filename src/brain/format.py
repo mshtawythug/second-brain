@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         GraphStats,
         ThemeGroup,
     )
+    from .resurface import ResurfaceItem
 
 # nDCG@5 delta threshold below which a query row is highlighted red in the
 # diff table.  Display-only — the CLI never exits non-zero based on this.
@@ -55,6 +56,35 @@ def search_table(results: list[SearchResult], *, title: str = "Search results") 
             r.source_kind or "manual",
             f"{r.score:.3f}",
             r.snippet[:120].replace("\n", " "),
+        )
+    return table
+
+
+def resurface_table(
+    items: "list[ResurfaceItem]", *, title: str = "Due for review"
+) -> Table:
+    """Render resurface items as a Rich table (Plan 02).
+
+    Mirrors the ``brain list`` row shape: short id + title, plus the three
+    resurfacing signals (score, age in days, days since last access). A
+    never-accessed doc shows ``never`` in the last column.
+    """
+    table = Table(title=title)
+    table.add_column("ID", style="dim")
+    table.add_column("Title")
+    table.add_column("Score", justify="right")
+    table.add_column("Age (d)", justify="right")
+    table.add_column("Last access (d ago)", justify="right")
+    for it in items:
+        last_access = (
+            "never" if it.last_access_days is None else f"{it.last_access_days:.0f}"
+        )
+        table.add_row(
+            it.id[:8],
+            it.title,
+            f"{it.score:.2f}",
+            f"{it.age_days:.0f}",
+            last_access,
         )
     return table
 
