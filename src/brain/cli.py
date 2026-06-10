@@ -157,7 +157,7 @@ from .queries import (
     sync_chunk_search_metadata,
 )
 from .resurface import resurface_docs
-from .search import hybrid_search
+from .search import SearchDiagnostics, hybrid_search
 from .tags import normalize_tag, normalize_tags
 from .vault import init_vault
 from .vault.daily_index import regenerate_daily_index
@@ -3362,6 +3362,10 @@ def search(
         # under autocommit).
         conn.autocommit = True
         person_match = _resolve_search_person(conn, person)
+        # The diagnostics holder captures the FTS-leg hit count from work the
+        # search already does (no extra query) — the lexical-miss signal that
+        # `brain gaps` keys off (the vector leg always returns filler).
+        diagnostics = SearchDiagnostics()
         results = hybrid_search(
             conn,
             embedder=embedder,
@@ -3374,6 +3378,7 @@ def search(
             vector_sim_floor=cfg.vector_sim_floor,
             recency_halflife_days=cfg.recency_halflife_days,
             snippet_context_tokens=cfg.snippet_context_tokens,
+            diagnostics=diagnostics,
             person_keys=person_match.keys if person_match else None,
             person_display_name=(
                 person_match.display_name if person_match else None
@@ -3388,14 +3393,17 @@ def search(
         # Plan 08 — best-effort search-failure logging. ``record_search_query``
         # is the single narrow-catch chokepoint: it swallows a transient
         # ``psycopg.OperationalError`` AND the missing-table
-        # ``psycopg.errors.UndefinedTable`` (migration 019 not applied — warns
-        # with a `brain init` hint); search must keep working on a pre-019 DB.
-        # Other schema errors propagate. CLI searches have no session, so
-        # ``session_id=None`` (no-click detection is MCP-only).
+        # ``psycopg.errors.UndefinedTable`` (migration 019 not applied) AND the
+        # missing-column ``psycopg.errors.UndefinedColumn`` for ``fts_count``
+        # (migration 023 not applied) — each warns with a `brain init` hint;
+        # search must keep working on a pre-019/pre-023 DB. Other schema errors
+        # propagate. CLI searches have no session, so ``session_id=None``
+        # (no-click detection is MCP-only).
         record_search_query(
             conn,
             query=query,
             result_count=len(results),
+            fts_count=diagnostics.fts_count,
             session_id=None,
             source="cli",
             tenant_id=cfg.graph_tenant_id,
