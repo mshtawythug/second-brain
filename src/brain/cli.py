@@ -48,6 +48,7 @@ from .editor import run_editor_on
 from .embeddings import make_embedder
 from .errors import (
     AgeBootstrapError,
+    AudioError,
     ElicitError,
     EnrichmentError,
     GraphBackendError,
@@ -60,10 +61,12 @@ from .errors import (
     OllamaUnavailable,
     PersonAmbiguous,
     PersonNotFound,
+    TtsError,
     VaultNoteSyncError,
 )
 
 if TYPE_CHECKING:
+    from .audio import ScriptGenerator
     from .enrichment import OllamaEnricher
     from .graph_rag.reconcile import ReconcileConfig
     from .graph_rag.schema import GraphContext
@@ -524,6 +527,16 @@ def _check_ollama(cfg: Config, failures: list[str]) -> None:
             typer.secho(
                 f"enrich model    WARN ({cfg.enrich_model} not in /api/tags — "
                 f"run `ollama pull {cfg.enrich_model}` to enable auto-summary)",
+                fg="yellow",
+            )
+        # Plan 04 — audio script model check. Soft (never failure).
+        if _model_loaded(cfg.audio_script_model, loaded_models):
+            typer.echo(f"audio model     OK ({cfg.audio_script_model} loaded)")
+        else:
+            typer.secho(
+                f"audio model     WARN ({cfg.audio_script_model} not in /api/tags "
+                f"— run `ollama pull {cfg.audio_script_model}` to enable "
+                "`brain audio`)",
                 fg="yellow",
             )
     except (httpx.HTTPError, ValueError) as e:
@@ -3995,6 +4008,167 @@ def brief(
     _print_brief(data)
     if written_path is not None:
         typer.echo(f"\nWrote {written_path}")
+
+
+def _build_script_generator(
+    cfg: Config, *, max_turns: int | None = None
+) -> ScriptGenerator:
+    """Build the audio script generator (indirected so tests inject a fake).
+
+    Mirrors :func:`_build_enricher` / :func:`_build_embedder`: production code
+    goes through this single factory so a test can monkeypatch one point to swap
+    in a generator wired to a fake ``chat_fn`` — no live Ollama in tests.
+    """
+    from .audio import make_script_generator
+
+    return make_script_generator(cfg, max_turns=max_turns)
+
+
+# Default base directory for generated audio artifacts, under $BRAIN_HOME.
+_AUDIO_NO_GRAPH_MSG = (
+    "audio requires the graph — set BRAIN_GRAPH_ENABLED=true and run "
+    "`brain graphrag build` (and `brain graphrag communities build` for "
+    "--topic) to populate the entity layer"
+)
+
+
+@app.command()
+def audio(
+    person: str | None = typer.Option(
+        None,
+        "--person",
+        help="Build a themes overview of your conversations with this person.",
+    ),
+    topic: str | None = typer.Option(
+        None,
+        "--topic",
+        help="Build a community-level overview of this topic (global mode).",
+    ),
+    turns: int | None = typer.Option(
+        None,
+        "--turns",
+        help="Cap the dialogue at N turns (positive even int; default config).",
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Base path for artifacts (.json/.md appended; default $BRAIN_HOME/audio/).",
+    ),
+    tts: str | None = typer.Option(
+        None,
+        "--tts",
+        help="Synthesize audio via a backend spec, e.g. 'shell:/path/to/tts.sh'.",
+    ),
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Print the PodcastScript JSON to stdout; write no files."
+    ),
+) -> None:
+    """Generate a NotebookLM-style two-host audio overview (Plan 04).
+
+    ``--person`` builds a themes overview (graph ``themes`` mode); ``--topic``
+    builds a community-level overview (graph ``global`` mode — run
+    ``brain graphrag communities build`` first). Exactly one of the two is
+    required. The script is grounded ONLY in entity names + document summaries
+    (never raw bodies). Writes ``<out>.json`` + ``<out>.md``; with ``--tts`` it
+    also synthesizes audio via the pluggable backend (artifacts are written
+    BEFORE synthesis, so they survive a TTS failure).
+    """
+    from .audio import bundle_from_graph_context, make_title, make_tts_backend
+
+    cfg = Config.load()
+    if person and topic:
+        raise typer.BadParameter("--person and --topic are mutually exclusive")
+    if not person and not topic:
+        raise typer.BadParameter("one of --person or --topic is required")
+    if turns is not None and (turns <= 0 or turns % 2 != 0):
+        raise typer.BadParameter("--turns must be a positive even integer")
+    if tts is not None and json_output:
+        raise typer.BadParameter(
+            "--tts cannot be combined with --json (TTS needs the written JSON file)"
+        )
+    if not cfg.graph_enabled:
+        typer.secho(f"audio: {_AUDIO_NO_GRAPH_MSG}", fg="red", err=True)
+        raise typer.Exit(code=1)
+
+    mode = "themes" if person else "global"
+    query = "" if person else (topic or "")
+    ctx = _graphrag_search_or_exit(
+        cfg,
+        query,
+        mode=mode,
+        tenant=tenant,
+        person=person,
+        depth=None,
+        limit=None,
+        synthesize=False,
+    )
+    if not ctx.themes and not ctx.communities:
+        target = f"person {person!r}" if person else f"topic {topic!r}"
+        hint = (
+            "`brain graphrag build --backfill`"
+            if person
+            else "`brain graphrag communities build`"
+        )
+        typer.secho(
+            f"audio: no themes found for {target}; try {hint}", fg="red", err=True
+        )
+        raise typer.Exit(code=1)
+
+    with connect(cfg.database_url) as conn:
+        bundle = bundle_from_graph_context(
+            conn, ctx, theme_limit=cfg.audio_theme_limit
+        )
+    title = make_title(bundle)
+    generated_at = datetime.now(UTC).isoformat()
+    generator = _build_script_generator(cfg, max_turns=turns)
+    try:
+        script = generator.generate(
+            bundle, title=title, generated_at=generated_at
+        )
+    except OllamaUnavailable as exc:
+        typer.secho(f"audio: Ollama unavailable — {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+    except AudioError as exc:
+        typer.secho(f"audio: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        emit_json(script.to_dict())
+        return
+
+    base = out if out is not None else _default_audio_base(cfg, person, topic)
+    json_path = base.with_suffix(".json")
+    md_path = base.with_suffix(".md")
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        _json.dumps(script.to_dict(), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    md_path.write_text(script.to_markdown(), encoding="utf-8")
+    typer.echo(f"Wrote {json_path}")
+    typer.echo(f"Wrote {md_path}")
+
+    if tts is not None:
+        try:
+            backend = make_tts_backend(tts)
+            audio_path = base.with_suffix(".mp3")
+            backend.synthesize(script, json_path, audio_path)
+        except TtsError as exc:
+            typer.secho(f"audio: TTS failed — {exc}", fg="red", err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"Wrote {audio_path}")
+
+
+def _default_audio_base(
+    cfg: Config, person: str | None, topic: str | None
+) -> Path:
+    """Compute the default ``<brain_home>/audio/YYYY-MM-DD-<slug>`` base path."""
+    slug = slugify(person or topic or "audio-overview") or "audio-overview"
+    today = date_cls.today().isoformat()
+    return cfg.brain_home / "audio" / f"{today}-{slug}"
 
 
 @app.command()
