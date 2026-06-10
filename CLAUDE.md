@@ -236,6 +236,20 @@ src/brain/
   format.py         — human + JSON output
   edit_session.py   — JSON-header + body editor flow used by `brain edit`
   mcp_server.py     — stdio MCP server (brain-mcp entry point)
+  chat.py           — shared public chat_json() Ollama call (brief / ask / audio)
+  activity.py       — shared time-windowed activity reader (brief + weekly review)
+  resurface.py      — `brain resurface` spaced-repetition scoring core
+  brief.py          — `brain brief` daily-digest assembly + next-step suggestions
+  review/           — `brain review` package: scans (contradiction/staleness),
+                      weekly synthesis, queue queries, emit/render
+  timeline.py       — `brain timeline` temporal bucketing over graph entities
+  connect.py        — `brain connect` auto-link scoring core
+  cli_connect.py    — `brain connect` CLI sub-app (list/refresh/accept/reject/stats)
+  ask.py            — `brain ask` agentic plan/reflect/synthesize loop
+  audio.py          — `brain audio` two-host script generation + TTS Protocol
+  gaps.py           — `brain gaps` search-failure clustering + detector
+  eval/             — retrieval + answer eval harness; answer_eval.py backs
+                      `brain eval --answer`
   ingest/
     __init__.py     — Embedder Protocol (declares `dim`); dispatcher +
                       ingest_document() / update_document() pipelines

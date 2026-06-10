@@ -34,6 +34,16 @@ On top of plain search it adds: a **GraphRAG** layer (an entity graph of people,
   - [How it works](#how-it-works-1)
   - [Commands](#commands)
   - [Config knobs](#config-knobs)
+- [Proactivity and synthesis](#proactivity-and-synthesis)
+  - [brain resurface](#brain-resurface)
+  - [brain brief](#brain-brief)
+  - [brain review](#brain-review)
+  - [brain timeline](#brain-timeline)
+  - [brain connect](#brain-connect)
+  - [brain ask](#brain-ask)
+  - [brain audio](#brain-audio)
+  - [brain gaps](#brain-gaps)
+  - [Feature config knobs](#feature-config-knobs)
 - [Vault model](#vault-model)
   - [One-time vault setup](#one-time-vault-setup)
   - [Authoring commands](#authoring-commands)
@@ -619,6 +629,232 @@ re-saving the draft unchanged re-prompts rather than codifying.
 | `BRAIN_ELICIT_CONTRADICTION_ENABLED` | `false` | Enable the contradiction detector (requires Ollama + non-null summaries). |
 | `BRAIN_ELICIT_CONTRADICTION_MIN_DOCS` | `5` | Min entity doc-count before contradiction scan runs on that entity. |
 
+## Proactivity and synthesis
+
+Hybrid search and GraphRAG are reactive — you ask, the brain answers. This set
+of commands is the proactive half: it surfaces what's due for review, digests
+what just landed, synthesizes across time, flags contradictions, suggests
+links, and answers multi-hop questions with citations. All eight are read-side
+features over the corpus you've already ingested; none change ingest or search
+ranking. The LLM-backed ones (`brief` suggestions, `ask`, `audio`, `timeline
+--synthesize`, conflict `scan`) use the local Ollama and degrade gracefully
+when it's unavailable.
+
+### brain resurface
+
+Spaced-repetition resurfacing — the brain picks older notes you haven't
+revisited recently and ranks them for review. Every non-draft, non-action-item
+document is scored fresh on each run from its **age**, **last-access
+staleness** (via the interactions log), and **importance** (tags + summary
+presence), so a doc you opened yesterday drops out automatically.
+
+```bash
+brain resurface                      # top 7 docs due for review
+brain resurface -n 15                # surface more
+brain resurface --min-age-days 30    # only docs older than 30 days
+brain resurface --source krisp       # filter by source kind
+brain resurface --json
+```
+
+### brain brief
+
+A proactive daily digest of recent captures, open todos, pins, and best-effort
+LLM next-step suggestions. Surfaces **titles and todo texts only — never
+document bodies**. On macOS the installer wires a launchd agent
+(`com.brain.brief`) that runs `brain brief --wiki` once at **07:00 local** each
+day and writes the digest to `<vault>/daily/<YYYY>/<date>-brief.md`.
+
+```bash
+brain brief                          # today's digest to the terminal
+brain brief --since 48 --todo-since 14   # widen the capture / todo windows
+brain brief --wiki                   # also write the dated vault page
+brain brief --no-enrich              # skip the LLM next-step suggestions
+brain brief --date 2026-06-09 --json
+```
+
+### brain review
+
+Periodic synthesis over the corpus — a weekly review page plus a
+contradiction/staleness scan queue. `weekly` assembles themes (graph
+communities, or tag clusters with `--no-graph`), activity, open loops, new
+captures, and key people for an ISO week and writes
+`<vault>/reviews/<week>.md`. `scan` surfaces findings into the same review
+queue that `list` reads and `dismiss` clears.
+
+```bash
+# Weekly synthesis page.
+brain review weekly                          # current ISO week → vault page
+brain review weekly --week 2026-W23          # a specific week
+brain review weekly --no-graph               # tag-cluster themes (no AGE)
+brain review weekly --no-emit --json         # stdout only
+
+# Contradiction + staleness scan.
+brain review scan                            # run both scans
+brain review scan --conflicts --dry-run      # conflicts only, no writes
+brain review scan --stale                    # staleness only
+brain review list --kind conflicts -n 10     # read the queue
+brain review dismiss <id-prefix>             # dismiss one finding
+```
+
+The **contradiction** leg is gated on `BRAIN_ELICIT_CONTRADICTION_ENABLED`
+(default off) and needs Ollama; the **staleness** leg needs neither. Findings
+land in `elicitation_gaps` alongside the `brain elicit` signals (migration 018
+widens the `signal_kind` CHECK to include `stale` + `search_failure`).
+
+### brain timeline
+
+How a theme or entity evolved over **time**. Buckets the documents that mention
+a query by document date (`COALESCE(sent_at, ingested_at)`) into month /
+quarter / year periods, showing per-period doc counts, co-topics, and
+representative titles. Requires the graph layer (`BRAIN_GRAPH_ENABLED` +
+`brain graphrag build`); the query is ILIKE-resolved to graph entities and an
+unknown entity prints a friendly note and exits 0.
+
+```bash
+brain timeline "platform migration"                    # default quarter buckets
+brain timeline "hiring" --granularity year
+brain timeline "Project Phoenix" --person "Jane Doe"   # scope to a participant
+brain timeline "pricing" --since 2026-01 --until 2026-06
+brain timeline "pricing" --synthesize                  # best-effort Ollama narrative
+brain timeline "pricing" --json
+```
+
+### brain connect
+
+Proactive auto-link suggestions — surfaces note pairs that share entities or
+semantics but aren't linked yet, then lets you accept (optionally writing the
+wikilink) or reject each one. `refresh` blends an entity-graph affinity leg
+with an embedding affinity leg via RRF, drops already-linked and below-threshold
+pairs, and upserts the top suggestions per source doc; accepted/rejected rows
+are frozen and never re-proposed. The `connect refresh` stage also runs
+non-fatally inside `brain-rebuild`.
+
+```bash
+brain connect refresh                  # recompute + upsert pending suggestions
+brain connect refresh --doc <id> --dry-run
+brain connect list                     # pending review queue
+brain connect list --all --json        # every status
+brain connect accept <suggestion-id> --write   # flip to accepted + append wikilink
+brain connect reject <suggestion-id>           # freeze; never re-proposed
+brain connect stats                    # pending / accepted / rejected counts
+```
+
+`accept --write` appends a path-form wikilink under a `## See Also` section at
+the end of the source doc's vault file (idempotent — a repeated accept never
+duplicates). The default minimum blended score is **0.60**
+(`BRAIN_CONNECT_MIN_SCORE`, retuned up from 0.30 on live-corpus evidence).
+
+### brain ask
+
+Agentic multi-hop **cited** answer synthesis. Where `brain search` returns a
+ranked list you read yourself, `brain ask` plans sub-queries, retrieves across
+iterations, optionally reflects to fill coverage gaps, and composes a single
+answer with inline `[N]` citations into your documents. Requires a local Ollama
+for the plan/reflect/synthesize steps; if Ollama is down the command exits
+non-zero with a clear message (no partial answer). Only document **snippets**
+are sent to the LLM — never full bodies.
+
+```bash
+brain ask "what did I learn negotiating across my job searches?"
+brain ask "what did we decide about the data pipeline?" --explain
+brain ask "..." --no-loop              # single retrieve+synthesize pass (faster)
+brain ask "..." --mode fuse            # RRF of graph + hybrid retrieval
+brain ask "..." --mode auto            # graph router  | local | hybrid (default)
+brain ask "..." --limit 8 --max-iter 4
+brain ask "..." --json
+```
+
+Retrieval `--mode` is `hybrid` (vector/FTS only, default) `| auto | fuse |
+local`; the three graph modes require the Apache AGE image. An answer-quality
+eval harness ships alongside it: `brain eval --answer` loads
+`tests/eval/answer_corpus.yaml`, runs `brain ask --no-loop` per case, and
+reports citation-grounding metrics (live-model gated, no baselines).
+
+### brain audio
+
+A NotebookLM-style **two-host audio overview** of a theme or a person.
+`--person` builds a themes overview (graph `themes` mode); `--topic` builds a
+community-level overview (graph `global` mode — run
+`brain graphrag communities build` first). Exactly one of the two is required.
+The script is grounded **only** in entity names + document summaries (never raw
+bodies). Writes `<out>.json` + `<out>.md`; with `--tts` it also synthesizes
+audio via a pluggable backend (artifacts are written *before* synthesis, so
+they survive a TTS failure). There is no MCP tool for `brain audio` — it's
+CLI-only.
+
+```bash
+brain audio --person "Jane Doe"                  # themes overview script
+brain audio --topic "platform migration"         # community-level (needs communities)
+brain audio --person "Jane Doe" --turns 16
+brain audio --topic "hiring" --tts 'shell:/path/to/tts.sh'   # synthesize audio
+brain audio --person "Jane Doe" --json           # print script JSON, write no files
+```
+
+### brain gaps
+
+Search-failure-driven knowledge-gap detection. Mines the `search_queries` log
+for queries the brain failed to answer — `zero_results` (nothing matched) and
+`no_click` (results returned but never opened) — over a lookback window, then
+clusters them into knowledge gaps. The read view shows the **normalized**
+canonical query label (raw query strings stay server-side); `push` upserts the
+resulting `search_failure` gaps into the `brain elicit` queue.
+
+```bash
+brain gaps                            # failed-query clusters over the window
+brain gaps --since 60 -n 30
+brain gaps --json
+brain gaps push                       # upsert search_failure gaps into the queue
+brain gaps push --dry-run
+```
+
+Search-failure logging is **best-effort** — it never blocks or breaks a search.
+On a brain whose database predates migration 019 (the `search_queries` table),
+`brain gaps` prints a clean warning to run `brain init`, and searches keep
+working.
+
+### Feature config knobs
+
+All have sensible defaults; set them in `.env` (see `.env.example`). The
+`brain review` knobs cover both the weekly report and the scan engine.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAIN_RESURFACE_LIMIT` | `7` | Default docs surfaced per `brain resurface` run. |
+| `BRAIN_RESURFACE_MIN_AGE_DAYS` | `14` | Exclude docs younger than N days from resurfacing. |
+| `BRAIN_RESURFACE_AGE_HALFLIFE_DAYS` | `180` | Half-life for the age component of the resurface score. |
+| `BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS` | `90` | Half-life for the last-access staleness component. |
+| `BRAIN_BRIEF_SINCE_HOURS` | `24` | Recent-captures window for `brain brief`. |
+| `BRAIN_BRIEF_TODO_SINCE_DAYS` | `7` | Open-todo window for `brain brief`. |
+| `BRAIN_BRIEF_CAPTURE_LIMIT` | `20` | Max captures listed in the brief. |
+| `BRAIN_BRIEF_PIN_LIMIT` | `10` | Max pinned docs listed in the brief. |
+| `BRAIN_REVIEW_ACTIVITY_LIMIT` | `20` | Max activity rows in the weekly review. |
+| `BRAIN_REVIEW_THEME_LIMIT` | `5` | Max themes in the weekly review. |
+| `BRAIN_REVIEW_OPEN_LOOP_LIMIT` | `20` | Max open loops in the weekly review. |
+| `BRAIN_REVIEW_CONFLICT_LIMIT` | `30` | Max entity candidates examined by the conflict scan. |
+| `BRAIN_REVIEW_CONFLICT_PAIRS_PER_ENTITY` | `3` | Max doc pairs compared per entity in the conflict scan. |
+| `BRAIN_REVIEW_EMBED_SIM_FLOOR` | `0.40` | Min embedding similarity to treat two docs as on-topic for conflict. |
+| `BRAIN_REVIEW_STALE_AGE_DAYS` | `365` | A doc must be older than this to be a staleness candidate. |
+| `BRAIN_REVIEW_STALE_SUPERSEDE_WINDOW_DAYS` | `90` | A newer doc within this window can mark an older one stale. |
+| `BRAIN_REVIEW_STALE_SIM_FLOOR` | `0.60` | Min similarity for a newer doc to supersede an older one. |
+| `BRAIN_REVIEW_STALE_LIMIT` | `200` | Max staleness candidates examined per scan. |
+| `BRAIN_TIMELINE_GRANULARITY` | `quarter` | Default bucket width: `month` \| `quarter` \| `year`. |
+| `BRAIN_TIMELINE_LIMIT` | `20` | Max timeline buckets returned. |
+| `BRAIN_TIMELINE_SYNTH_LIMIT` | `5` | Densest buckets given an Ollama narrative under `--synthesize`. |
+| `BRAIN_TIMELINE_TRIM` | `oldest` | Which buckets to drop when over the limit. |
+| `BRAIN_CONNECT_MIN_SCORE` | `0.60` | Min blended (RRF) score to keep a link suggestion. |
+| `BRAIN_CONNECT_CANDIDATE_LIMIT` | `50` | Max candidate pairs considered per source doc. |
+| `BRAIN_CONNECT_MAX_PER_DOC` | `5` | Max suggestions persisted per source doc. |
+| `BRAIN_ASK_MAX_ITERATIONS` | `3` | Hard cap on plan/reflect loop iterations. |
+| `BRAIN_ASK_DOCS_PER_ITER` | `5` | Max documents retrieved per iteration. |
+| `BRAIN_ASK_MODEL` | `llama3.1:8b` | Ollama model for the plan/reflect/synthesize steps. |
+| `BRAIN_ASK_TIMEOUT_SECONDS` | `90` | Per-LLM-call timeout for `brain ask`. |
+| `BRAIN_AUDIO_SCRIPT_MODEL` | `llama3.1:8b` | Ollama model for the two-host script. |
+| `BRAIN_AUDIO_MAX_TURNS` | `12` | Default dialogue turn cap. |
+| `BRAIN_AUDIO_MAX_INPUT_TOKENS` | `3000` | Max grounding tokens fed to the script model. |
+| `BRAIN_AUDIO_THEME_LIMIT` | `4` | Max themes/communities folded into the overview. |
+| `BRAIN_GAPS_LOOKBACK_DAYS` | `30` | Lookback window for `brain gaps` surfaces. |
+| `BRAIN_GAPS_MIN_CLUSTER_SIZE` | `2` | Min failed-query count before a cluster becomes a gap. |
+
 ## Vault model
 
 Brain has two storage tiers, both searchable through the same hybrid index:
@@ -1027,6 +1263,16 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `brain_note_new` | Create a vault note from chat content without opening `$EDITOR`; auto-tags `source-mcp`. |
 | `brain_daily` | Resolve or create a daily note for a date. |
 | `brain_link_proposal` | Propose a `[[link]]` from one vault note to another without writing files. |
+| `brain_brief` | Daily digest: recent captures, open todos, pins, best-effort next steps. Params: `since_hours`, `todo_since_days`, `no_enrich`. Titles + todo texts only. |
+| `brain_review_weekly` | Synthesize a week's activity into a review page. Params: `week` (ISO `YYYY-Www`), `no_graph`, `emit`. |
+| `brain_review_scan` | Run a contradiction / staleness scan into the review queue. Params: `scan_type` (`conflicts`\|`stale`\|`all`), `dry_run`, `limit`. |
+| `brain_review_findings_list` | Read the contradiction + staleness queue without scanning. Params: `kind` (`all`\|`conflicts`\|`stale`), `limit`. |
+| `brain_timeline` | How a theme/entity evolved over time. Params: `query`, `person`, `granularity`, `since`, `until`, `limit`, `synthesize`, `tenant`. Needs the graph layer. |
+| `brain_ask` | Agentic multi-hop cited answer synthesis. Params: `question`, `mode` (`hybrid`\|`auto`\|`fuse`\|`local`), `no_loop`, `limit`, `max_iterations`. Snippets only. |
+| `brain_connect_list` | List auto-link suggestions. Params: `status` (`pending`\|`accepted`\|`rejected`\|`all`), `limit`. |
+| `brain_connect_accept` | Accept a suggestion; with `write=True` append the wikilink. Params: `id` (6+ char prefix), `write`. |
+| `brain_connect_reject` | Reject a suggestion; frozen and never re-proposed. Param: `id` (6+ char prefix). |
+| `brain_gaps` | Surface knowledge gaps from repeated search failures. Params: `since_days`, `limit`, `push` (upsert into the elicitation queue). |
 | `brain_graphrag_search` | Graph retrieval over the entity graph. Modes: `auto` (default) / `local` / `themes` / `global` / `fuse`. Returns a `GraphContext` with entities + scored docs. |
 | `brain_graphrag_themes` | "Themes in my conversations with X" — required `person` arg. Returns ranked theme groups. |
 | `brain_graphrag_entity` | One entity's co-occurrence neighbourhood. |
@@ -1232,6 +1478,17 @@ src/brain/
   tags.py             — canonical casefold-lowercase + hyphenated tag normaliser
   interactions.py     — append-only feedback log (search clicks, ratings, pins) — supports both document + graph targets
   enrichment.py       — Ollama-backed summariser + tag-proposal helpers
+  chat.py             — shared public `chat_json()` Ollama call (brief / ask / audio)
+  activity.py         — shared time-windowed activity reader (brief + weekly review)
+  resurface.py        — `brain resurface` spaced-repetition scoring
+  brief.py            — `brain brief` daily-digest assembly + next-step suggestions
+  review/             — `brain review` package: scans (contradiction/staleness), weekly synthesis, queue queries, emit/render
+  timeline.py         — `brain timeline` temporal bucketing over graph entities
+  connect.py          — `brain connect` auto-link scoring core
+  cli_connect.py      — `brain connect` CLI sub-app (list/refresh/accept/reject/stats)
+  ask.py              — `brain ask` agentic plan/reflect/synthesize loop
+  audio.py            — `brain audio` two-host script generation + TTS Protocol
+  gaps.py             — `brain gaps` search-failure clustering + detector
   todo.py             — parses krisp_action_items checkboxes for `brain todo`
   format.py           — human + JSON output
   edit_session.py     — JSON-header + body editor flow
@@ -1246,7 +1503,8 @@ src/brain/
   wiki/               — wiki rendering + serve (build_swap, build_watcher, build_partial, edit_classifier, fastpath_manifest, fastpath_state, build_homepage, build_people, build_related, slug)
   quartz_overrides/   — Quartz overlay applied to <vault>/.quartz at render time
   graph_rag/          — GraphRAG package: backend (AGE), schema (frozen value objects), extractor (Ollama), cooccur, weighting, traversal, router, communities, sync, reconcile
-migrations/           — numbered SQL files (001..016) + schema_migrations tracking
+  eval/               — retrieval + answer eval harness (metrics, baselines, corpus, runner, answer_eval for `brain eval --answer`)
+migrations/           — numbered SQL files (001..021) + schema_migrations tracking
 bin/                  — brain-up / brain-down / brain-rebuild / brain-status convenience scripts
 quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
 skills/               — claude code skills (consult-brain, brain-graph, elicit-brain, brain-todo, ingest-brain)
