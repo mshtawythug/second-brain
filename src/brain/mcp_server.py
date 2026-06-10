@@ -1251,30 +1251,40 @@ def brain_review_weekly(
 
 @mcp_app.tool()
 def brain_brief(
-    since_hours: int = 24,
-    todo_since_days: int = 7,
+    since_hours: int | None = None,
+    todo_since_days: int | None = None,
     no_enrich: bool = False,
 ) -> dict[str, Any]:
     """Proactive daily digest: recent captures, open todos, pins, next steps.
 
     ``since_hours`` bounds the recent-captures window; ``todo_since_days`` bounds
-    the open-action-item window. Best-effort LLM next-step suggestions are
-    included unless ``no_enrich`` is true or Ollama is unavailable (then
-    ``suggestions`` is empty). Surfaces titles + todo texts only — never document
-    bodies. Mirrors ``brain brief --json``.
+    the open-action-item window. Both default to ``None``, resolving to
+    ``cfg.brief_since_hours`` / ``cfg.brief_todo_since_days`` (themselves 24 / 7
+    unless overridden) so the tool honors config exactly like ``brain brief
+    --json``. Best-effort LLM next-step suggestions are included unless
+    ``no_enrich`` is true or Ollama is unavailable (then ``suggestions`` is
+    empty). Surfaces titles + todo texts only — never document bodies.
     """
     from dataclasses import replace
 
     from .brief import assemble_brief, suggest_next_steps
 
     state = _get_state()
+    resolved_since_hours = (
+        since_hours if since_hours is not None else state.cfg.brief_since_hours
+    )
+    resolved_todo_since_days = (
+        todo_since_days
+        if todo_since_days is not None
+        else state.cfg.brief_todo_since_days
+    )
     try:
         with _mcp_conn(state) as conn:
             data = assemble_brief(
                 conn,
                 state.cfg,
-                since_hours=since_hours,
-                todo_since_days=todo_since_days,
+                since_hours=resolved_since_hours,
+                todo_since_days=resolved_todo_since_days,
                 on_date=date_cls.today(),
             )
     except psycopg.Error as e:
