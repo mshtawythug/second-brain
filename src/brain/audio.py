@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from .chat import chat_json
-from .errors import AudioError, TtsError
+from .errors import AudioError, EnrichmentError, OllamaUnavailable, TtsError
 
 if TYPE_CHECKING:
     import psycopg
@@ -427,10 +427,30 @@ class ScriptGenerator:
         )
 
     def _generate_turns(self, prompt: str) -> list[ScriptTurn]:
-        """Call ``chat_fn`` and validate; retry once on a structural failure."""
+        """Call ``chat_fn`` and validate; retry once on a structural failure.
+
+        ``chat_fn`` (production: :func:`brain.chat.chat_json`) raises
+        :class:`OllamaUnavailable` on a transport failure — propagated so the CLI
+        maps it to its distinct "Ollama unavailable" path — and
+        :class:`EnrichmentError` when it exhausts its OWN retries on
+        malformed-JSON / schema-violating responses; that is unrecoverable for
+        audio, so it is converted to :class:`AudioError` (the Plan 04 clean
+        error contract — the CLI catches only ``OllamaUnavailable`` /
+        ``AudioError``). A structurally-invalid-but-parseable response
+        (:class:`AudioError` from :func:`_parse_turns`) is retried once.
+        """
         last_error: AudioError | None = None
         for _ in (1, 2):
-            response = self._chat_fn(prompt, _TURNS_SCHEMA, self._num_predict)
+            try:
+                response = self._chat_fn(prompt, _TURNS_SCHEMA, self._num_predict)
+            except OllamaUnavailable:
+                # Transport failure — let the CLI map it distinctly. (Subclass of
+                # EnrichmentError, so this except MUST precede the next one.)
+                raise
+            except EnrichmentError as exc:
+                # chat_json already retried JSON parsing internally; a persistent
+                # failure is unrecoverable — surface as the audio error contract.
+                raise AudioError(f"script generation failed: {exc}") from exc
             try:
                 return _parse_turns(response)
             except AudioError as exc:

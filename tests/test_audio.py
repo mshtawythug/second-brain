@@ -493,6 +493,30 @@ def test_script_generator_rejects_non_object_turn() -> None:
         )
 
 
+def test_script_generator_wraps_enrichment_error() -> None:
+    # chat_json raises EnrichmentError after exhausting its own JSON retries;
+    # the generator must convert it to the AudioError contract (not leak it).
+    from brain.errors import EnrichmentError
+
+    chat = FakeChat([EnrichmentError("chat failed after 2 attempts")])
+    with pytest.raises(AudioError):
+        _generator(chat).generate(
+            _simple_bundle(), title="T", generated_at="2026-06-09T00:00:00+00:00"
+        )
+
+
+def test_script_generator_propagates_ollama_unavailable() -> None:
+    # A transport failure propagates as OllamaUnavailable (the CLI maps it
+    # distinctly), NOT as a generic AudioError.
+    from brain.errors import OllamaUnavailable
+
+    chat = FakeChat([OllamaUnavailable("ollama down")])
+    with pytest.raises(OllamaUnavailable):
+        _generator(chat).generate(
+            _simple_bundle(), title="T", generated_at="2026-06-09T00:00:00+00:00"
+        )
+
+
 def test_script_generator_rejects_empty_text() -> None:
     blank = {"turns": [{"speaker": "Host", "text": "   "}]}
     chat = FakeChat([blank, blank])
@@ -921,6 +945,23 @@ def test_audio_default_out_path(
     written = list((tmp_path / "audio").glob("*.json"))
     assert len(written) == 1
     assert (tmp_path / "audio").glob("*.md")
+
+
+def test_audio_chat_json_enrichment_error(
+    _patch_audio: Any, tmp_path: Path
+) -> None:
+    # A persistent malformed-LLM-response (chat_json -> EnrichmentError) reaches
+    # the CLI as the clean `audio:` error path, not an unhandled traceback.
+    from brain.errors import EnrichmentError
+
+    ctx = _themes_ctx([_theme(1, names=["topic"], score=0.5)])
+    _patch_audio(ctx, [EnrichmentError("chat failed after 2 attempts")])
+    result = CliRunner().invoke(
+        app, ["audio", "--person", "Synthetic Person", "--out", str(tmp_path / "o")]
+    )
+    assert result.exit_code == 1
+    assert "audio:" in result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
 
 
 def test_build_script_generator_returns_generator() -> None:
