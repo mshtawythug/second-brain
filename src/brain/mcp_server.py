@@ -66,6 +66,7 @@ from .queries import (
     resolve_person_to_keys,
     summary_counts,
 )
+from .resurface import resurface_docs
 from .search import hybrid_search
 from .tags import normalize_tags
 
@@ -565,6 +566,69 @@ def brain_list(
         }
         for r in rows
     ]
+
+
+@mcp_app.tool()
+def brain_resurface(
+    limit: int | None = None,
+    min_age_days: int | None = None,
+    source_kind: str | None = None,
+) -> dict[str, Any]:
+    """Return a spaced-repetition review queue of older, unrevisited docs.
+
+    Proactive, query-free: scores every non-draft, non-action-item document by
+    age, last-access staleness, and importance (tags + summary), then returns
+    the top ``limit`` by descending score. ``min_age_days`` excludes
+    recently-ingested docs; ``source_kind`` optionally filters by source.
+
+    ``limit`` (default 7 via ``BRAIN_RESURFACE_LIMIT``) and ``min_age_days``
+    (default 14 via ``BRAIN_RESURFACE_MIN_AGE_DAYS``) fall back to the server's
+    configured values when omitted (``None``). ``limit`` must be >= 1 and
+    ``min_age_days`` >= 0 — out-of-range values surface as ``INVALID_PARAMS``.
+
+    ``last_access_days`` is ``None`` for never-accessed docs. ``snippet`` is the
+    first 200 characters of the body (never the full content).
+    """
+    state = _get_state()
+    logger.debug(
+        "brain_resurface: limit=%s min_age_days=%s source_kind=%s",
+        limit,
+        min_age_days,
+        source_kind,
+    )
+    try:
+        with _mcp_conn(state) as conn:
+            items = resurface_docs(
+                conn,
+                cfg=state.cfg,
+                limit=limit,
+                min_age_days=min_age_days,
+                source_kind=source_kind,
+            )
+    except ValueError as e:
+        raise _mcp_error(INVALID_PARAMS, str(e)) from e
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    return {
+        "items": [
+            {
+                "id": it.id,
+                "title": it.title,
+                "source_kind": it.source_kind,
+                "content_type": it.content_type,
+                "tags": it.tags,
+                "age_days": round(it.age_days, 2),
+                "last_access_days": (
+                    round(it.last_access_days, 2)
+                    if it.last_access_days is not None
+                    else None
+                ),
+                "score": round(it.score, 4),
+                "snippet": it.snippet,
+            }
+            for it in items
+        ]
+    }
 
 
 @mcp_app.tool()

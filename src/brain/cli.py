@@ -99,6 +99,7 @@ from .format import (
     graph_context_renderable,
     graph_stats_json,
     graph_stats_table,
+    resurface_table,
     search_table,
 )
 from .ingest import (
@@ -139,6 +140,7 @@ from .queries import (
     summary_counts,
     sync_chunk_search_metadata,
 )
+from .resurface import resurface_docs
 from .search import hybrid_search
 from .tags import normalize_tag, normalize_tags
 from .vault import init_vault
@@ -3835,6 +3837,68 @@ def list_docs(
     for r in rows:
         kind = r.source_kind or "manual"
         typer.echo(f"{r.id[:8]}  {kind:<8}  {r.content_type:<10}  {r.title}")
+
+
+@app.command()
+def resurface(
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Number of docs to surface (default: 7)."
+    ),
+    min_age_days: int | None = typer.Option(
+        None,
+        "--min-age-days",
+        help="Exclude docs younger than N days (default: 14).",
+    ),
+    source: str | None = typer.Option(
+        None, "--source", help="Filter by source kind (krisp, gmail, manual, slack)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Surface older notes due for a spaced-repetition review.
+
+    Scores every non-draft, non-action-item document from its age, last-access
+    staleness, and importance (tags + summary), then lists the highest-scoring
+    ones. Re-scored fresh on each run, so a doc you just opened drops out.
+    """
+    if limit is not None and limit < 1:
+        raise typer.BadParameter("--limit must be an integer >= 1")
+    if min_age_days is not None and min_age_days < 0:
+        raise typer.BadParameter("--min-age-days must be a non-negative integer")
+    cfg = Config.load()
+    with connect(cfg.database_url) as conn:
+        items = resurface_docs(
+            conn,
+            cfg=cfg,
+            limit=limit,
+            min_age_days=min_age_days,
+            source_kind=source,
+        )
+    if json_output:
+        emit_json(
+            [
+                {
+                    "id": it.id,
+                    "title": it.title,
+                    "source_kind": it.source_kind,
+                    "content_type": it.content_type,
+                    "tags": it.tags,
+                    "age_days": round(it.age_days, 2),
+                    "last_access_days": (
+                        round(it.last_access_days, 2)
+                        if it.last_access_days is not None
+                        else None
+                    ),
+                    "score": round(it.score, 4),
+                    "snippet": it.snippet,
+                }
+                for it in items
+            ]
+        )
+        return
+    if not items:
+        typer.echo("No docs due for review.")
+        return
+    console.print(resurface_table(items))
 
 
 @app.command(context_settings={"ignore_unknown_options": True})

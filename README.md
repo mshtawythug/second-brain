@@ -1017,6 +1017,7 @@ For the Voyage backend, swap the embedder-specific keys: `"BRAIN_EMBEDDER": "voy
 | `brain_show` | Return one full document by 6+ character id prefix. |
 | `brain_list` | Browse recent documents, optionally filtered by `source` or `tag`. |
 | `brain_status` | Counts, last-ingest timestamp, and by-source breakdown. |
+| `brain_resurface` | Spaced-repetition review queue: older, unrevisited docs scored by age, access staleness, and importance. Params: `limit`, `min_age_days`, `source_kind`. |
 | `brain_ingest_stdin` | Save text from a chat or another MCP result; auto-tags `source-mcp`. |
 | `brain_tag` | Add/remove tags on an existing document and rewrite mirror frontmatter when present. |
 | `brain_edit` | Update title, content type, body, or metadata; body edits re-embed. |
