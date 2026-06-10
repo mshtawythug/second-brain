@@ -197,13 +197,18 @@ def connect_accept(
         conn.autocommit = True
         resolved = _resolve(conn, suggestion_id)
         try:
-            action = connect_mod.set_suggestion_status(conn, resolved, "accepted")
+            ctx = connect_mod.load_action_context(conn, resolved)
         except ConnectError as exc:
             typer.secho(str(exc), fg="red", err=True)
             raise typer.Exit(code=1) from exc
-    written = False
-    if write:
-        written = _write_wikilink(cfg, action)
+        # Write the wikilink FIRST so a write failure (missing file / IO error)
+        # leaves the suggestion pending rather than frozen accepted-without-link.
+        written = _write_wikilink(cfg, ctx) if write else False
+        try:
+            connect_mod.set_suggestion_status(conn, resolved, "accepted")
+        except ConnectError as exc:
+            typer.secho(str(exc), fg="red", err=True)
+            raise typer.Exit(code=1) from exc
     suffix = "  (wikilink written)" if written else (
         "  (wikilink already present)" if write else ""
     )

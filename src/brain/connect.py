@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -523,14 +523,20 @@ def resolve_suggestion_prefix(conn: psycopg.Connection[Any], prefix: str) -> str
 # --------------------------------------------------------------------------- #
 
 
-def _fetch_action_context(
+def load_action_context(
     conn: psycopg.Connection[Any], suggestion_id: str
-) -> tuple[str, str, str | None, str | None, str]:
-    """Return (source_doc_id, target_doc_id, source_vault_path,
-    target_vault_path, target_title) for a suggestion, or raise ConnectError."""
+) -> ActionResult:
+    """Return a suggestion's current state + writeback metadata WITHOUT mutating.
+
+    Lets an ``accept --write`` caller fetch the source/target vault paths and
+    title, perform the vault write FIRST, and only then flip the status — so a
+    write failure never leaves the row frozen ``accepted`` with no wikilink
+    (Codex R1 #1). ``status`` is the row's current status. Raises
+    :class:`ConnectError` for a missing suggestion id.
+    """
     row = conn.execute(
         """
-        SELECT ls.source_doc_id::text, ls.target_doc_id::text,
+        SELECT ls.status, ls.source_doc_id::text, ls.target_doc_id::text,
                sd.vault_path, td.vault_path, td.title
         FROM link_suggestions ls
         JOIN documents sd ON sd.id = ls.source_doc_id
@@ -541,7 +547,15 @@ def _fetch_action_context(
     ).fetchone()
     if row is None:
         raise ConnectError(f"suggestion not found: {suggestion_id}")
-    return (str(row[0]), str(row[1]), row[2], row[3], str(row[4] or ""))
+    return ActionResult(
+        suggestion_id=suggestion_id,
+        status=str(row[0]),
+        source_doc_id=str(row[1]),
+        target_doc_id=str(row[2]),
+        source_vault_path=row[3],
+        target_vault_path=row[4],
+        target_title=str(row[5] or ""),
+    )
 
 
 def set_suggestion_status(
@@ -558,22 +572,12 @@ def set_suggestion_status(
         raise ConnectError(
             f"status must be 'accepted' or 'rejected' (got {status!r})"
         )
-    src_id, tgt_id, src_path, tgt_path, tgt_title = _fetch_action_context(
-        conn, suggestion_id
-    )
+    ctx = load_action_context(conn, suggestion_id)
     conn.execute(
         "UPDATE link_suggestions SET status = %s, actioned_at = now() WHERE id = %s::uuid",
         (status, suggestion_id),
     )
-    return ActionResult(
-        suggestion_id=suggestion_id,
-        status=status,
-        source_doc_id=src_id,
-        target_doc_id=tgt_id,
-        source_vault_path=src_path,
-        target_vault_path=tgt_path,
-        target_title=tgt_title,
-    )
+    return replace(ctx, status=status)
 
 
 # --------------------------------------------------------------------------- #
@@ -596,23 +600,48 @@ def build_see_also_wikilink(target_vault_path: str, target_title: str) -> str:
 
 
 def append_see_also_link(vault_file: Path, wikilink: str) -> bool:
-    """Append ``- <wikilink>`` under a trailing ``## See Also`` section.
+    """Insert ``- <wikilink>`` into the file's ``## See Also`` section.
 
     Idempotent: returns ``False`` (no write) when ``wikilink`` is already in the
-    file. Otherwise appends the bullet — creating the ``## See Also`` heading if
-    absent — via :func:`atomic_write_text` and returns ``True``. Never logs the
+    file. Otherwise:
+
+    - If a ``## See Also`` heading exists (anywhere — not only as the trailing
+      section, Codex R1 #2), the bullet is inserted at the END of that section
+      (just before the next markdown heading, or EOF), so it never lands under
+      an unrelated later section.
+    - Otherwise a new ``## See Also`` section is appended at the end of the file.
+
+    Writes via :func:`atomic_write_text` and returns ``True``. Never logs the
     file body (privacy rule: ids / paths only).
     """
     text = vault_file.read_text(encoding="utf-8") if vault_file.exists() else ""
     if wikilink in text:
         return False
     bullet = f"- {wikilink}"
-    body = text.rstrip("\n")
-    if _SEE_ALSO_HEADING in text:
-        new_text = f"{body}\n{bullet}\n"
-    elif body:
-        new_text = f"{body}\n\n{_SEE_ALSO_HEADING}\n\n{bullet}\n"
-    else:
-        new_text = f"{_SEE_ALSO_HEADING}\n\n{bullet}\n"
-    atomic_write_text(vault_file, new_text)
+    lines = text.splitlines()
+    heading_idx = next(
+        (i for i, line in enumerate(lines) if line.strip() == _SEE_ALSO_HEADING),
+        None,
+    )
+    if heading_idx is None:
+        body = text.rstrip("\n")
+        new_text = (
+            f"{body}\n\n{_SEE_ALSO_HEADING}\n\n{bullet}\n"
+            if body
+            else f"{_SEE_ALSO_HEADING}\n\n{bullet}\n"
+        )
+        atomic_write_text(vault_file, new_text)
+        return True
+    # Find the end of the See Also section: the next markdown heading after it,
+    # or EOF. Insert the bullet just after the section's last non-blank line.
+    section_end = len(lines)
+    for j in range(heading_idx + 1, len(lines)):
+        if lines[j].startswith("#"):
+            section_end = j
+            break
+    insert_at = section_end
+    while insert_at - 1 > heading_idx and lines[insert_at - 1].strip() == "":
+        insert_at -= 1
+    lines.insert(insert_at, bullet)
+    atomic_write_text(vault_file, "\n".join(lines) + "\n")
     return True

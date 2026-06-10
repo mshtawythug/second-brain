@@ -2533,6 +2533,14 @@ def brain_connect_list(
     """
     state = _get_state()
     logger.debug("brain_connect_list: status=%s limit=%d", status, limit)
+    if status not in ("pending", "accepted", "rejected", "all"):
+        # Reject typos loudly — a silent empty list reads as "queue is empty"
+        # rather than "you passed a bad status" (Codex R1 #3).
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "status must be one of: pending, accepted, rejected, all "
+            f"(got {status!r})",
+        )
     effective_status = None if status == "all" else status
     try:
         with _mcp_conn(state) as conn:
@@ -2576,14 +2584,21 @@ def brain_connect_accept(id: str, write: bool = False) -> dict[str, Any]:
             conn.autocommit = True
             resolved = _resolve_suggestion(conn, id)
             try:
-                action = connect_mod.set_suggestion_status(conn, resolved, "accepted")
+                ctx = connect_mod.load_action_context(conn, resolved)
+            except ConnectError as e:
+                raise _mcp_error(INVALID_PARAMS, str(e)) from e
+            # Write the wikilink FIRST so a write failure (missing path / IO
+            # error) leaves the suggestion pending, not frozen accepted-without
+            # -link (Codex R1 #1).
+            wikilink_written = (
+                _connect_write_wikilink(state.cfg, ctx) if write else False
+            )
+            try:
+                connect_mod.set_suggestion_status(conn, resolved, "accepted")
             except ConnectError as e:
                 raise _mcp_error(INVALID_PARAMS, str(e)) from e
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    wikilink_written = False
-    if write:
-        wikilink_written = _connect_write_wikilink(state.cfg, action)
     return {"status": "accepted", "wikilink_written": wikilink_written}
 
 

@@ -703,6 +703,26 @@ def test_append_see_also_appends_to_existing_section(tmp_path: Path) -> None:
     assert "- [[n/y|Y]]" in text
 
 
+def test_append_see_also_inserts_into_section_not_trailing(tmp_path: Path) -> None:
+    # Codex R1 #2: ## See Also exists but is NOT the trailing section — the new
+    # bullet must land under See Also, not under the later ## Notes section.
+    f = tmp_path / "a.md"
+    f.write_text(
+        "# Doc A\n\n## See Also\n\n- [[n/x|X]]\n\n## Notes\n\nlater content\n",
+        encoding="utf-8",
+    )
+    assert connect_mod.append_see_also_link(f, "[[n/y|Y]]") is True
+    text = f.read_text(encoding="utf-8")
+    see_also_idx = text.index("## See Also")
+    notes_idx = text.index("## Notes")
+    y_idx = text.index("- [[n/y|Y]]")
+    # The new bullet sits between the See Also heading and the Notes heading.
+    assert see_also_idx < y_idx < notes_idx
+    # Later content is untouched and stays last.
+    assert text.index("later content") > notes_idx
+    assert text.count("## See Also") == 1
+
+
 def test_accept_write_inserts_path_alias_wikilink(
     test_db: psycopg.Connection, fake_embedder: FakeEmbedder, tmp_path: Path
 ) -> None:
@@ -915,3 +935,54 @@ def test_connect_accept_write_cli(
     again = runner.invoke(app, ["connect", "accept", sid[:8], "--write"])
     assert again.exit_code == 0
     assert source_file.read_text(encoding="utf-8").count("[[notes/tgt|Target Doc]]") == 1
+
+
+def test_connect_accept_write_missing_file_leaves_pending(
+    test_db: psycopg.Connection,
+    fake_embedder: FakeEmbedder,
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Codex R1 #1: accept --write must NOT freeze the row accepted if the vault
+    # write fails (here: the source file does not exist on disk).
+    src = _make_vault_doc(
+        test_db, fake_embedder, title="Source", content="s", vault_path="notes/src.md"
+    )
+    tgt = _make_vault_doc(
+        test_db, fake_embedder, title="Target", content="t", vault_path="notes/tgt.md"
+    )
+    sid = _insert_suggestion(test_db, source=src, target=tgt)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))  # no src file created
+    patch_embedder(fake_embedder)
+
+    result = runner.invoke(app, ["connect", "accept", sid[:8], "--write"])
+    assert result.exit_code == 1
+    # Status stayed pending — the failed write did not freeze the suggestion.
+    row = test_db.execute(
+        "SELECT status FROM link_suggestions WHERE id = %s::uuid", (sid,)
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "pending"
+
+
+def test_load_action_context_does_not_mutate(
+    test_db: psycopg.Connection, fake_embedder: FakeEmbedder
+) -> None:
+    a = _make_vault_doc(
+        test_db, fake_embedder, title="Doc A", content="a", vault_path="notes/a.md"
+    )
+    b = _make_vault_doc(
+        test_db, fake_embedder, title="Doc B", content="b", vault_path="notes/b.md"
+    )
+    sid = _insert_suggestion(test_db, source=a, target=b)
+    ctx = connect_mod.load_action_context(test_db, sid)
+    assert ctx.status == "pending"  # current status, unchanged
+    assert ctx.source_vault_path == "notes/a.md"
+    assert ctx.target_vault_path == "notes/b.md"
+    assert ctx.target_title == "Doc B"
+    # Reading context did not flip the row.
+    row = test_db.execute(
+        "SELECT status FROM link_suggestions WHERE id = %s::uuid", (sid,)
+    ).fetchone()
+    assert row is not None and row[0] == "pending"

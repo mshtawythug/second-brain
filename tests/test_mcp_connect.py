@@ -175,6 +175,33 @@ def test_brain_connect_reject(
     assert _status(test_db, sid) == "rejected"
 
 
+def test_brain_connect_list_invalid_status_raises(
+    connect_state: mcp_server._State,
+) -> None:
+    # Codex R1 #3: a typo'd status must raise, not silently return [].
+    with pytest.raises(McpError):
+        mcp_server.brain_connect_list(status="pendign")
+
+
+def test_brain_connect_accept_write_missing_file_leaves_pending(
+    connect_state: mcp_server._State,
+    test_db: psycopg.Connection,
+    fake_embedder: FakeEmbedder,
+) -> None:
+    # Codex R1 #1 (MCP parity): a failed write keeps the row pending.
+    src = _make_doc(
+        test_db, fake_embedder, title="Source", content="s", vault_path="notes/src.md"
+    )
+    tgt = _make_doc(
+        test_db, fake_embedder, title="Target", content="t", vault_path="notes/tgt.md"
+    )
+    sid = _insert_suggestion(test_db, source=src, target=tgt)
+    # No source file created under the tmp vault → write must fail.
+    with pytest.raises(McpError):
+        mcp_server.brain_connect_accept(id=sid[:8], write=True)
+    assert _status(test_db, sid) == "pending"
+
+
 def test_brain_connect_accept_unknown_id_raises(
     connect_state: mcp_server._State,
 ) -> None:
