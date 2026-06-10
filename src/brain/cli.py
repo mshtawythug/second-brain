@@ -100,6 +100,8 @@ from .format import (
     graph_stats_json,
     graph_stats_table,
     search_table,
+    timeline_context_json,
+    timeline_renderable,
 )
 from .ingest import (
     Embedder,
@@ -2319,6 +2321,108 @@ def graphrag_entity(
         synthesize=False,
     )
     _emit_graph_context(ctx, json_output=json_output)
+
+
+# ---------------------------------------------------------------------------
+# Plan 05 — brain timeline (temporal evolution of a theme/entity). Relational
+# query over the migration-012 graph tables (no AGE/Cypher); gated on
+# BRAIN_GRAPH_ENABLED + the presence of graph data. NEVER raw SQL from the user.
+# ---------------------------------------------------------------------------
+
+# Actionable error shown when the graph layer is disabled — timeline needs the
+# entity layer to bucket mentions and surface co-topics.
+_TIMELINE_NO_GRAPH_MSG = (
+    "timeline requires the graph — set BRAIN_GRAPH_ENABLED=true and run "
+    "`brain graphrag build` to populate the entity layer"
+)
+
+
+@app.command("timeline")
+def timeline(
+    query: str = typer.Argument(
+        ..., help="Entity/theme name to track over time (ILIKE-resolved)."
+    ),
+    person: str | None = typer.Option(
+        None,
+        "--person",
+        help="Scope to documents where this person co-appears as a participant.",
+    ),
+    granularity: str | None = typer.Option(
+        None,
+        "--granularity",
+        help="Bucket width: month | quarter | year (default: BRAIN_TIMELINE_GRANULARITY).",
+    ),
+    since: str | None = typer.Option(
+        None, "--since", help="Lower cutoff, inclusive (ISO month YYYY-MM)."
+    ),
+    until: str | None = typer.Option(
+        None, "--until", help="Upper cutoff, inclusive of the month (ISO month YYYY-MM)."
+    ),
+    limit: int | None = typer.Option(
+        None, "--limit", "-n", help="Max buckets (default: BRAIN_TIMELINE_LIMIT)."
+    ),
+    synthesize: bool = typer.Option(
+        False,
+        "--synthesize",
+        help=(
+            "Attach a best-effort local-Ollama summary to the densest buckets "
+            "(opt-in; never required — a missing/failed Ollama yields no summary)."
+        ),
+    ),
+    tenant: str | None = typer.Option(
+        None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
+    ),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """How a theme or entity evolved over time (spec Plan 05).
+
+    Buckets the documents that mention ``QUERY`` by document date
+    (``COALESCE(sent_at, ingested_at)``), showing per-period doc counts,
+    co-topics, representative titles, and — with ``--synthesize`` — a one-line
+    Ollama narrative. Requires the graph layer (``BRAIN_GRAPH_ENABLED`` +
+    ``brain graphrag build``); an unknown entity prints a friendly note and exits
+    0. No raw SQL is accepted — the query is ILIKE-resolved to graph entities and
+    every clause is parameterized + tenant-scoped.
+    """
+    from .timeline import build_timeline
+
+    cfg = Config.load()
+    if not cfg.graph_enabled:
+        typer.secho(f"timeline: {_TIMELINE_NO_GRAPH_MSG}", fg="red", err=True)
+        raise typer.Exit(code=1)
+    enricher = _build_enricher(cfg) if synthesize else None
+    try:
+        with connect(cfg.database_url) as conn:
+            ctx = build_timeline(
+                conn,
+                cfg,
+                query,
+                granularity=granularity,
+                since=since,
+                until=until,
+                limit=limit,
+                person=person,
+                synthesize=synthesize,
+                enricher=enricher,
+                tenant=tenant,
+            )
+    except (PersonNotFound, PersonAmbiguous) as exc:
+        typer.secho(f"timeline: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+    except GraphTenantError as exc:
+        typer.secho(f"timeline: {exc}", fg="red", err=True)
+        raise typer.Exit(code=1) from exc
+    except ValueError as exc:
+        # Bad granularity / since / until / limit — a usage error.
+        raise typer.BadParameter(str(exc)) from exc
+
+    if json_output:
+        emit_json(timeline_context_json(ctx))
+        return
+    if not ctx.entity_names:
+        typer.secho(f"No entities found for {query!r}.", fg="yellow")
+        return
+    console.print(timeline_renderable(ctx))
 
 
 # ---------------------------------------------------------------------------
