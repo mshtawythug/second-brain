@@ -346,13 +346,14 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     # observable side effect of install-launchd having fired.
     launchctl_calls = _read_log(stub_dir / "launchctl.calls")
     bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
-    assert len(bootstrap_calls) == 2, (
-        f"brain-up must bootstrap BOTH watcher and build LaunchAgents; "
+    assert len(bootstrap_calls) == 3, (
+        f"brain-up must bootstrap the watcher, build, and brief LaunchAgents; "
         f"saw {bootstrap_calls!r} (full launchctl call log: {launchctl_calls!r}; "
         f"brain-up stdout: {result.stdout!r}; stderr: {result.stderr!r})"
     )
     assert any("com.brain.watcher.plist" in c for c in bootstrap_calls), bootstrap_calls
     assert any("com.brain.build.plist" in c for c in bootstrap_calls), bootstrap_calls
+    assert any("com.brain.brief.plist" in c for c in bootstrap_calls), bootstrap_calls
 
     # Both plists landed on disk in the tmp dir, not the developer's
     # real ~/Library/LaunchAgents.
@@ -889,9 +890,10 @@ def test_install_launchd_writes_plists_and_bootstraps(
 
     launchctl_calls = _read_log(stub_dir / "launchctl.calls")
     bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
-    assert len(bootstrap_calls) == 2, launchctl_calls
+    assert len(bootstrap_calls) == 3, launchctl_calls
     assert any("com.brain.watcher.plist" in c for c in bootstrap_calls)
     assert any("com.brain.build.plist" in c for c in bootstrap_calls)
+    assert any("com.brain.brief.plist" in c for c in bootstrap_calls)
 
 
 def test_uninstall_launchd_boots_out_and_removes_plists(

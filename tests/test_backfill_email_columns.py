@@ -500,7 +500,10 @@ def test_backfill_aborts_when_columns_missing(
             "participants",
             "duration_min",
         ):
-            conn.execute(f"ALTER TABLE documents DROP COLUMN {col}")
+            # CASCADE: migration 021 added the generated column doc_date,
+            # which depends on sent_at; the plain DROP started failing once
+            # 021 landed. CASCADE keeps this pre-007 schema simulation valid.
+            conn.execute(f"ALTER TABLE documents DROP COLUMN {col} CASCADE")
 
         with pytest.raises(BrainError, match="migration 007"):
             script_module.backfill_email_columns(conn)
@@ -786,7 +789,10 @@ def test_main_returns_nonzero_on_missing_migration(
             "participants",
             "duration_min",
         ):
-            conn.execute(f"ALTER TABLE documents DROP COLUMN {col}")
+            # CASCADE: migration 021 added the generated column doc_date,
+            # which depends on sent_at; the plain DROP started failing once
+            # 021 landed. CASCADE keeps this pre-007 schema simulation valid.
+            conn.execute(f"ALTER TABLE documents DROP COLUMN {col} CASCADE")
 
     rc = script_module.main([])
     assert rc != 0
