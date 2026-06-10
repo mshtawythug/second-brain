@@ -20,12 +20,14 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from . import capture as capture_mod
+from . import connect as connect_mod
 from .config import Config
 from .db import PersistentConnection, age_extension_available, connect, connect_age
 from .embeddings import OllamaEmbedError, make_embedder
 from .enrichment import OllamaEnricher, make_enricher
 from .errors import (
     BrainError,
+    ConnectError,
     GraphBackendError,
     GraphReconcileError,
     GraphTenantError,
@@ -2749,6 +2751,152 @@ def _warmup_embed(embedder: Embedder) -> None:
             logger.warning(
                 "warmup embed failed (continuing without): %s", type(e).__name__
             )
+
+
+def _resolve_suggestion(conn: psycopg.Connection[Any], prefix: str) -> str:
+    """Resolve a suggestion-id prefix to a full id, mapping errors to McpError."""
+    try:
+        return connect_mod.resolve_suggestion_prefix(conn, prefix)
+    except ConnectError as e:
+        raise _mcp_error(INVALID_PARAMS, str(e)) from e
+
+
+@mcp_app.tool()
+def brain_connect_list(
+    limit: int = 20,
+    status: str = "pending",
+) -> list[dict[str, Any]]:
+    """List proactive auto-link suggestions (Plan 07 `brain connect`).
+
+    WHEN TO USE: surface note pairs that share entities / semantics but aren't
+    linked yet, so the user (or you) can accept or reject them. Mirrors
+    ``brain connect list --json``.
+
+    ``status`` filters to ``'pending'`` (default), ``'accepted'``, or
+    ``'rejected'``; pass ``'all'`` for every status. Results are ordered by
+    blended score descending. ``graph_score`` / ``embed_score`` are the raw
+    per-leg signals (``null`` when the pair came from only one leg); ``score``
+    is the RRF blend.
+    """
+    state = _get_state()
+    logger.debug("brain_connect_list: status=%s limit=%d", status, limit)
+    if status not in ("pending", "accepted", "rejected", "all"):
+        # Reject typos loudly — a silent empty list reads as "queue is empty"
+        # rather than "you passed a bad status" (Codex R1 #3).
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "status must be one of: pending, accepted, rejected, all "
+            f"(got {status!r})",
+        )
+    effective_status = None if status == "all" else status
+    try:
+        with _mcp_conn(state) as conn:
+            rows = connect_mod.iter_suggestions(
+                conn, status=effective_status, limit=limit
+            )
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    return [
+        {
+            "id": r.id,
+            "source_title": r.source_title,
+            "target_title": r.target_title,
+            "score": round(r.score, 6),
+            "graph_score": None if r.graph_score is None else round(r.graph_score, 6),
+            "embed_score": None if r.embed_score is None else round(r.embed_score, 6),
+        }
+        for r in rows
+    ]
+
+
+@mcp_app.tool()
+def brain_connect_accept(id: str, write: bool = False) -> dict[str, Any]:
+    """Accept an auto-link suggestion; with ``write=True`` insert the wikilink.
+
+    WHEN TO USE: the user agrees two notes should be linked. Flips the
+    suggestion to ``accepted`` (frozen — never re-proposed on refresh). With
+    ``write=True`` the path-form wikilink is appended (idempotently) under a
+    ``## See Also`` section in the source doc's vault file.
+
+    ``id`` is a suggestion-id prefix (6+ hex chars). Returns
+    ``{status: "accepted", wikilink_written: bool}`` — ``wikilink_written`` is
+    ``False`` when ``write`` is omitted or the link was already present. A
+    too-short / unknown / ambiguous id, or a ``write`` request where the
+    source/target vault path is missing, raises ``INVALID_PARAMS``.
+    """
+    state = _get_state()
+    logger.debug("brain_connect_accept: write=%s", write)
+    try:
+        with _mcp_conn(state) as conn:
+            conn.autocommit = True
+            resolved = _resolve_suggestion(conn, id)
+            try:
+                ctx = connect_mod.load_action_context(conn, resolved)
+            except ConnectError as e:
+                raise _mcp_error(INVALID_PARAMS, str(e)) from e
+            # Write the wikilink FIRST so a write failure (missing path / IO
+            # error) leaves the suggestion pending, not frozen accepted-without
+            # -link (Codex R1 #1).
+            wikilink_written = (
+                _connect_write_wikilink(state.cfg, ctx) if write else False
+            )
+            try:
+                connect_mod.set_suggestion_status(conn, resolved, "accepted")
+            except ConnectError as e:
+                raise _mcp_error(INVALID_PARAMS, str(e)) from e
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    return {"status": "accepted", "wikilink_written": wikilink_written}
+
+
+def _connect_write_wikilink(cfg: Config, action: connect_mod.ActionResult) -> bool:
+    """Append the accepted suggestion's wikilink to the source vault file.
+
+    Returns ``True`` when newly written, ``False`` when already present. Raises
+    ``INVALID_PARAMS`` when the source/target vault path (or the on-disk file)
+    is missing, so the link cannot be located.
+    """
+    if action.source_vault_path is None:
+        raise _mcp_error(
+            INVALID_PARAMS, "cannot write wikilink: source doc has no vault file"
+        )
+    if action.target_vault_path is None:
+        raise _mcp_error(
+            INVALID_PARAMS, "cannot write wikilink: target doc has no vault path"
+        )
+    source_file = Path(cfg.vault_path) / action.source_vault_path
+    if not source_file.is_file():
+        raise _mcp_error(
+            INVALID_PARAMS,
+            "cannot write wikilink: source vault file not found",
+        )
+    wikilink = connect_mod.build_see_also_wikilink(
+        action.target_vault_path, action.target_title
+    )
+    return connect_mod.append_see_also_link(source_file, wikilink)
+
+
+@mcp_app.tool()
+def brain_connect_reject(id: str) -> dict[str, Any]:
+    """Reject an auto-link suggestion; it is frozen and not re-proposed.
+
+    WHEN TO USE: the user disagrees two notes should be linked. ``id`` is a
+    suggestion-id prefix (6+ hex chars). Returns ``{status: "rejected"}``. A
+    too-short / unknown / ambiguous id raises ``INVALID_PARAMS``.
+    """
+    state = _get_state()
+    logger.debug("brain_connect_reject: called")
+    try:
+        with _mcp_conn(state) as conn:
+            conn.autocommit = True
+            resolved = _resolve_suggestion(conn, id)
+            try:
+                connect_mod.set_suggestion_status(conn, resolved, "rejected")
+            except ConnectError as e:
+                raise _mcp_error(INVALID_PARAMS, str(e)) from e
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    return {"status": "rejected"}
 
 
 def _configure_logging() -> None:

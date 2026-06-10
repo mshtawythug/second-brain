@@ -72,6 +72,7 @@ from ._capture_command import _INBOX_TAG as _CAPTURE_INBOX_TAG
 from ._capture_command import capture_app
 from .cli_claude import SkillInstallError
 from .cli_claude import install_skill as _install_skill
+from .cli_connect import connect_app
 from .eval import (
     EvalBaselineError,
     EvalCorpusError,
@@ -292,6 +293,11 @@ review_app = typer.Typer(
     help="Periodic synthesis over the corpus (weekly review; scan/list/dismiss).",
 )
 app.add_typer(review_app, name="review")
+
+# Plan 07 — proactive auto-link suggestions. Command logic lives in
+# `cli_connect.py`; scoring core in `connect.py`. Migration 020 is applied by
+# `brain init` automatically (run_migrations auto-discovers migrations/*.sql).
+app.add_typer(connect_app, name="connect")
 
 
 @app.callback()

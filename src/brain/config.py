@@ -267,6 +267,23 @@ DEFAULT_TIMELINE_SYNTH_LIMIT = 5
 DEFAULT_TIMELINE_TRIM = "oldest"
 _VALID_TIMELINE_TRIMS = frozenset({"oldest", "sparsest"})
 
+# Plan 07 -- `brain connect` proactive auto-link suggestion knobs.
+#
+# ``DEFAULT_CONNECT_MIN_SCORE`` is the RRF-blend confidence floor: candidate
+# pairs scoring below this are silently discarded (no DB write). RRF scores are
+# bounded by ~2/(RRF_K+1) ≈ 0.033 for a rank-1 pair in both legs, so the 0.30
+# default is intentionally conservative on the *normalized* blend; see
+# :mod:`brain.connect`. Override via ``BRAIN_CONNECT_MIN_SCORE``; must be a
+# float in (0.0, 1.0].
+DEFAULT_CONNECT_MIN_SCORE = 0.30
+# Per-source-doc cap on candidate targets pulled from EACH leg (graph +
+# embedding) before the RRF blend. Bounds the per-doc cost. Override via
+# ``BRAIN_CONNECT_CANDIDATE_LIMIT``; must be an integer >= 1.
+DEFAULT_CONNECT_CANDIDATE_LIMIT = 50
+# Max suggestions persisted per source doc after gating + ranking. Keeps the
+# review queue focused. Override via ``BRAIN_CONNECT_MAX_PER_DOC``; integer >= 1.
+DEFAULT_CONNECT_MAX_PER_DOC = 5
+
 
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
@@ -539,6 +556,13 @@ class Config:
     timeline_limit: int = DEFAULT_TIMELINE_LIMIT
     timeline_synth_limit: int = DEFAULT_TIMELINE_SYNTH_LIMIT
     timeline_trim: str = DEFAULT_TIMELINE_TRIM
+    # Plan 07 -- `brain connect` auto-link suggestion knobs. ``connect_min_score``
+    # is the RRF-blend confidence floor in (0.0, 1.0]; ``connect_candidate_limit``
+    # and ``connect_max_per_doc`` are positive-integer caps. All three are
+    # eager-validated at load time, mirroring the other env knobs.
+    connect_min_score: float = DEFAULT_CONNECT_MIN_SCORE
+    connect_candidate_limit: int = DEFAULT_CONNECT_CANDIDATE_LIMIT
+    connect_max_per_doc: int = DEFAULT_CONNECT_MAX_PER_DOC
 
     @classmethod
     def load(cls) -> "Config":
@@ -1465,6 +1489,61 @@ class Config:
                     f"(got {timeline_trim_raw!r})"
                 )
 
+        # Plan 07 -- `brain connect` knobs. Same eager-validation idiom as the
+        # elicit / graph knobs above: unset/blank -> default; non-parseable /
+        # out-of-range -> ConfigError at startup so a typo never surfaces
+        # mid-refresh.
+        connect_min_score_raw = os.environ.get("BRAIN_CONNECT_MIN_SCORE")
+        if connect_min_score_raw is None or connect_min_score_raw.strip() == "":
+            connect_min_score = DEFAULT_CONNECT_MIN_SCORE
+        else:
+            try:
+                connect_min_score = float(connect_min_score_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_CONNECT_MIN_SCORE must be a float in (0.0, 1.0] "
+                    f"(got {connect_min_score_raw!r})"
+                ) from exc
+            if not (0.0 < connect_min_score <= 1.0):
+                raise ConfigError(
+                    "BRAIN_CONNECT_MIN_SCORE must be a float in (0.0, 1.0] "
+                    f"(got {connect_min_score_raw!r})"
+                )
+
+        connect_candidate_raw = os.environ.get("BRAIN_CONNECT_CANDIDATE_LIMIT")
+        if connect_candidate_raw is None or connect_candidate_raw.strip() == "":
+            connect_candidate_limit = DEFAULT_CONNECT_CANDIDATE_LIMIT
+        else:
+            try:
+                connect_candidate_limit = int(connect_candidate_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_CONNECT_CANDIDATE_LIMIT must be an integer >= 1 "
+                    f"(got {connect_candidate_raw!r})"
+                ) from exc
+            if connect_candidate_limit < 1:
+                raise ConfigError(
+                    "BRAIN_CONNECT_CANDIDATE_LIMIT must be an integer >= 1 "
+                    f"(got {connect_candidate_raw!r})"
+                )
+
+        connect_max_per_doc_raw = os.environ.get("BRAIN_CONNECT_MAX_PER_DOC")
+        if connect_max_per_doc_raw is None or connect_max_per_doc_raw.strip() == "":
+            connect_max_per_doc = DEFAULT_CONNECT_MAX_PER_DOC
+        else:
+            try:
+                connect_max_per_doc = int(connect_max_per_doc_raw)
+            except ValueError as exc:
+                raise ConfigError(
+                    "BRAIN_CONNECT_MAX_PER_DOC must be an integer >= 1 "
+                    f"(got {connect_max_per_doc_raw!r})"
+                ) from exc
+            if connect_max_per_doc < 1:
+                raise ConfigError(
+                    "BRAIN_CONNECT_MAX_PER_DOC must be an integer >= 1 "
+                    f"(got {connect_max_per_doc_raw!r})"
+                )
+
         return {
             # brain_home resolves via default_factory=_brain_home_root.
             "database_url": database_url,
@@ -1528,4 +1607,7 @@ class Config:
             "timeline_limit": timeline_limit,
             "timeline_synth_limit": timeline_synth_limit,
             "timeline_trim": timeline_trim,
+            "connect_min_score": connect_min_score,
+            "connect_candidate_limit": connect_candidate_limit,
+            "connect_max_per_doc": connect_max_per_doc,
         }

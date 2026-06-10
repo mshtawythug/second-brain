@@ -992,3 +992,76 @@ class TestResurfaceAccessHalflifeDays:
         monkeypatch.setenv("BRAIN_RESURFACE_ACCESS_HALFLIFE_DAYS", "-5")
         with pytest.raises(ConfigError, match="positive float"):
             Config.load()
+
+
+# ---------------------------------------------------------------------------
+# Plan 07 — BRAIN_CONNECT_* auto-link suggestion knobs.
+# ---------------------------------------------------------------------------
+
+
+class TestConnectKnobs:
+    """Env parsing + validation for the three ``BRAIN_CONNECT_*`` knobs."""
+
+    def test_defaults(self, monkeypatch, isolated_dotenv) -> None:
+        from brain.config import (
+            DEFAULT_CONNECT_CANDIDATE_LIMIT,
+            DEFAULT_CONNECT_MAX_PER_DOC,
+            DEFAULT_CONNECT_MIN_SCORE,
+        )
+
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        for key in (
+            "BRAIN_CONNECT_MIN_SCORE",
+            "BRAIN_CONNECT_CANDIDATE_LIMIT",
+            "BRAIN_CONNECT_MAX_PER_DOC",
+        ):
+            monkeypatch.delenv(key, raising=False)
+        cfg = Config.load()
+        assert cfg.connect_min_score == DEFAULT_CONNECT_MIN_SCORE == 0.30
+        assert cfg.connect_candidate_limit == DEFAULT_CONNECT_CANDIDATE_LIMIT == 50
+        assert cfg.connect_max_per_doc == DEFAULT_CONNECT_MAX_PER_DOC == 5
+
+    def test_valid_overrides(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_CONNECT_MIN_SCORE", "0.5")
+        monkeypatch.setenv("BRAIN_CONNECT_CANDIDATE_LIMIT", "10")
+        monkeypatch.setenv("BRAIN_CONNECT_MAX_PER_DOC", "3")
+        cfg = Config.load()
+        assert cfg.connect_min_score == 0.5
+        assert cfg.connect_candidate_limit == 10
+        assert cfg.connect_max_per_doc == 3
+
+    def test_min_score_zero_rejected(self, monkeypatch, isolated_dotenv) -> None:
+        # (0.0, 1.0] — zero is out of range.
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_CONNECT_MIN_SCORE", "0")
+        with pytest.raises(ConfigError, match=r"\(0.0, 1.0\]"):
+            Config.load()
+
+    def test_min_score_above_one_rejected(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_CONNECT_MIN_SCORE", "1.5")
+        with pytest.raises(ConfigError, match=r"\(0.0, 1.0\]"):
+            Config.load()
+
+    def test_min_score_non_float_rejected(self, monkeypatch, isolated_dotenv) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_CONNECT_MIN_SCORE", "high")
+        with pytest.raises(ConfigError):
+            Config.load()
+
+    def test_candidate_limit_below_one_rejected(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_CONNECT_CANDIDATE_LIMIT", "0")
+        with pytest.raises(ConfigError, match="integer >= 1"):
+            Config.load()
+
+    def test_max_per_doc_non_integer_rejected(
+        self, monkeypatch, isolated_dotenv
+    ) -> None:
+        monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+        monkeypatch.setenv("BRAIN_CONNECT_MAX_PER_DOC", "lots")
+        with pytest.raises(ConfigError, match="integer >= 1"):
+            Config.load()

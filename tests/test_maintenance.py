@@ -17,7 +17,7 @@ def test_build_stages_canonical_order_and_ids() -> None:
     stages = m.build_stages(vault_path=Path("/tmp/vault"), keep=3)
     assert [s.stage_id for s in stages] == [
         "embeddings", "summaries", "search",
-        "graph", "graph-weights", "communities", "wiki",
+        "graph", "graph-weights", "communities", "connect", "wiki",
     ]
     assert stages[0].steps[0].argv == ("brain", "reembed")
     assert stages[0].steps[0].fatal is True
@@ -25,6 +25,9 @@ def test_build_stages_canonical_order_and_ids() -> None:
     assert stages[3].steps[0].argv == ("brain", "graphrag", "build", "--backfill")
     assert stages[4].steps[0].argv == ("brain", "graphrag", "refresh")
     assert stages[5].steps[0].argv == ("brain", "graphrag", "communities", "refresh")
+    # Plan 07 — connect stage runs after communities, non-fatal (enhancement).
+    assert stages[6].steps[0].argv == ("brain", "connect", "refresh")
+    assert stages[6].steps[0].fatal is False
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +56,16 @@ def test_select_only_subset_preserves_registry_order() -> None:
 
 def test_select_skip_removes() -> None:
     got = m.select_stages(_stages(), only=None, skip=["summaries", "wiki"], wiki_only=False)
-    assert _ids(got) == ["embeddings", "search", "graph", "graph-weights", "communities"]
+    assert _ids(got) == [
+        "embeddings", "search", "graph", "graph-weights", "communities", "connect",
+    ]
+
+
+def test_select_skip_connect_stage() -> None:
+    # Plan 07 — `--skip connect` drops just the auto-link suggestion stage.
+    got = m.select_stages(_stages(), only=None, skip=["connect"], wiki_only=False)
+    assert "connect" not in _ids(got)
+    assert "wiki" in _ids(got)
 
 
 def test_select_wiki_only() -> None:
