@@ -53,3 +53,6 @@ docs/
 # Real PII-gate denylist (real names/customers/codenames) — keep local (rule 15).
 # The checked-in file is .pii-denylist.local.txt.example (synthetic).
 /.pii-denylist.local.txt
+
+# Generated audio-overview artifacts (brain audio) — real content, never commit
+audio/
