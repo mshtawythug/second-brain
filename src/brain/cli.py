@@ -2399,7 +2399,11 @@ def timeline(
     granularity: str | None = typer.Option(
         None,
         "--granularity",
-        help="Bucket width: month | quarter | year (default: BRAIN_TIMELINE_GRANULARITY).",
+        help=(
+            "Bucket width: auto | month | quarter | year (default: "
+            "BRAIN_TIMELINE_GRANULARITY, normally 'auto' — picks the coarsest width "
+            "yielding >=3 buckets; an explicit value forces it)."
+        ),
     ),
     since: str | None = typer.Option(
         None, "--since", help="Lower cutoff, inclusive (ISO month YYYY-MM)."

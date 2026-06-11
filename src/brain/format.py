@@ -705,6 +705,7 @@ def timeline_context_json(ctx: "TimelineContext") -> dict[str, Any]:
         "query": ctx.query,
         "tenant_id": ctx.tenant_id,
         "granularity": ctx.granularity,
+        "granularity_auto": ctx.granularity_auto,
         "entity_names": list(ctx.entity_names),
         "person": ctx.person,
         "buckets_omitted": ctx.buckets_omitted,
@@ -732,9 +733,15 @@ def _timeline_entity_label(ctx: "TimelineContext") -> str:
 
 
 def _timeline_header(ctx: "TimelineContext") -> Text:
-    """Build the one-line timeline header (query / granularity / bucket count)."""
+    """Build the one-line timeline header (query / granularity / bucket count).
+
+    The granularity part shows ``"<width> (auto)"`` when the width was chosen
+    automatically (``granularity_auto``), so the user can see that ``auto``
+    landed on, e.g., month — and could override with ``--granularity`` if wanted.
+    """
     label = _timeline_entity_label(ctx)
-    parts = [label, f"{ctx.granularity}"]
+    gran_part = f"{ctx.granularity} (auto)" if ctx.granularity_auto else ctx.granularity
+    parts = [label, gran_part]
     if ctx.person:
         parts.append(f"with {ctx.person}")
     suffix = f" — {len(ctx.buckets)} bucket(s)" if ctx.buckets else ""

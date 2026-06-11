@@ -246,10 +246,13 @@ DEFAULT_ELICIT_CONTRADICTION_MIN_DOCS = 5
 # Plan 05 -- `brain timeline` (temporal evolution) knobs.
 #
 # ``DEFAULT_TIMELINE_GRANULARITY`` is the default time-bucket width; one of
-# ``month`` / ``quarter`` / ``year``. Quarter is a good default for a personal
-# corpus that spans a few years. Override via ``BRAIN_TIMELINE_GRANULARITY``.
-DEFAULT_TIMELINE_GRANULARITY = "quarter"
-_VALID_TIMELINE_GRANULARITIES = frozenset({"month", "quarter", "year"})
+# ``auto`` / ``month`` / ``quarter`` / ``year``. ``auto`` (the default) picks the
+# coarsest of {year, quarter, month} that yields >=3 non-empty buckets for the
+# matched docs' date span — a fixed ``quarter`` collapsed a young (few-month)
+# corpus into a single bucket, hiding all evolution. An explicit value forces
+# that granularity exactly. Override via ``BRAIN_TIMELINE_GRANULARITY``.
+DEFAULT_TIMELINE_GRANULARITY = "auto"
+_VALID_TIMELINE_GRANULARITIES = frozenset({"auto", "month", "quarter", "year"})
 
 # Max buckets returned by ``brain timeline`` before the sparse tail is trimmed.
 # Positive int. Override via ``BRAIN_TIMELINE_LIMIT``.
@@ -633,7 +636,7 @@ class Config:
     # Minimum docs per target before contradiction detection runs. Non-negative int.
     elicit_contradiction_min_docs: int = DEFAULT_ELICIT_CONTRADICTION_MIN_DOCS
     # Plan 05 -- `brain timeline` knobs. ``timeline_granularity`` is the default
-    # bucket width (validated ∈ {month, quarter, year}); ``timeline_limit`` the
+    # bucket width (validated ∈ {auto, month, quarter, year}); ``timeline_limit`` the
     # default max buckets (positive int); ``timeline_synth_limit`` the max
     # densest buckets synthesized (non-negative int, 0 disables);
     # ``timeline_trim`` which end is trimmed at the limit (∈ {oldest, sparsest}).
@@ -1557,7 +1560,7 @@ class Config:
             timeline_granularity = timeline_gran_raw.strip().lower()
             if timeline_granularity not in _VALID_TIMELINE_GRANULARITIES:
                 raise ConfigError(
-                    "BRAIN_TIMELINE_GRANULARITY must be one of month/quarter/year "
+                    "BRAIN_TIMELINE_GRANULARITY must be one of auto/month/quarter/year "
                     f"(got {timeline_gran_raw!r})"
                 )
 

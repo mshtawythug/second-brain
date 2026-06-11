@@ -207,25 +207,40 @@ _GROUP_SUMMARY_SYSTEM_PROMPT = (
     "- never invent facts, never exceed 50 words"
 )
 
-# Plan 05 — `brain timeline --synthesize`. Per-time-bucket narrative synthesis:
-# given one period's documents + co-topics for an entity, write a one-to-two
-# sentence "what happened this period" line. Best-effort + never-raises, same
-# discipline as :data:`_GROUP_SUMMARY_SYSTEM_PROMPT`.
+# Plan 05 — `brain timeline --synthesize`. Per-time-bucket narrative synthesis
+# GROUNDED in the period's document SUMMARIES (not just titles): write a concrete
+# "what happened this period" line naming the actual decisions / deliverables /
+# problems. When a PREVIOUS period is supplied the model states what CHANGED.
+# Best-effort + never-raises, same discipline as :data:`_GROUP_SUMMARY_SYSTEM_PROMPT`.
 _BUCKET_SUMMARY_SYSTEM_PROMPT = (
-    "You write a one-to-two sentence synthesis of what happened in one time "
-    "period for a recurring theme in a personal knowledge base.\n"
+    "You write a 1-3 sentence synthesis of what concretely happened in one time "
+    "period for a recurring theme in a personal knowledge base. You are graded on "
+    "SPECIFICITY: a reader must learn something they could not guess from the "
+    "topic name alone.\n"
     "\n"
-    "Inputs: PERIOD (the time bucket label), ENTITY (the theme/entity tracked "
-    "over time), CO-TOPICS (entities that co-occurred this period), and "
-    "DOCUMENTS (the period's document titles).\n"
+    "Inputs: PERIOD (the time-bucket label), ENTITY (the theme tracked over "
+    "time), CO-TOPICS (entities that co-occurred this period), DOCUMENT SUMMARIES "
+    "(the period's source-document summaries — your PRIMARY evidence), DOCUMENT "
+    "TITLES, and optionally PREVIOUS PERIOD (the prior bucket's label, co-topics, "
+    "and synthesis) for contrast.\n"
     "\n"
     "Return ONLY valid JSON:\n"
     '{"summary": "..."}\n'
     "\n"
     "Rules:\n"
-    "- 1-2 sentences, factual, plain past tense\n"
-    "- describe how the entity showed up this period and what it connected to\n"
-    "- never invent facts, never exceed 50 words"
+    "- Ground EVERY claim in the DOCUMENT SUMMARIES. Name the concrete specifics "
+    "they contain: decisions made, deliverables or artifacts produced, problems "
+    "or blockers hit, and named systems / tools / documents.\n"
+    "- If a PREVIOUS PERIOD is given, state what CHANGED versus it (a new focus, a "
+    "decision reversed, a problem resolved) — but ONLY when the summaries support "
+    "it; never fabricate a change.\n"
+    "- FORBIDDEN — these phrasings are an automatic failure: 'discussions about', "
+    "'discussions on', 'conversations around', 'connecting to', 'topics related "
+    "to', 'focused on various', 'a range of', 'integration, reports, and "
+    "planning', or any vacuous paraphrase of the topic / co-topic names.\n"
+    "- 1-3 sentences, factual, plain past tense. Never invent facts. Never exceed "
+    "60 words. If the summaries are too thin to say anything concrete, write a "
+    "single short factual sentence rather than padding with generic filler."
 )
 
 # Wave elicit Wave 4 — contradiction detection between document summaries.
@@ -564,22 +579,45 @@ class OllamaEnricher:
         entity_name: str,
         doc_titles: list[str],
         cotopics: list[str],
+        doc_summaries: list[str] | None = None,
+        prev_bucket_label: str | None = None,
+        prev_cotopics: list[str] | None = None,
+        prev_synthesis: str | None = None,
     ) -> str | None:
-        """Best-effort one-to-two sentence synthesis of one timeline bucket.
+        """Best-effort 1-3 sentence, content-grounded synthesis of one timeline bucket.
 
         Used by the Plan 05 ``brain timeline --synthesize`` path: opt-in,
-        default-off, and **never required** for the timeline to render. Returns
-        the synthesized text, or ``None`` (logging a WARN) when Ollama is
+        default-off, and **never required** for the timeline to render.
+
+        ``doc_summaries`` is the period's source-document summaries (the caller
+        token-budgets the bundle and falls back to titles where a summary is
+        NULL). They are the model's PRIMARY evidence — passing them is what makes
+        the synthesis concrete instead of a paraphrase of the titles. The
+        ``prev_*`` parameters carry the chronologically PREVIOUS bucket's label /
+        co-topics / already-generated synthesis so the model can state what
+        CHANGED (the caller synthesizes oldest→newest so a prior synthesis is
+        available). All four new params are optional and default-absent so older
+        callers keep working.
+
+        Returns the synthesized text, or ``None`` (logging a WARN) when Ollama is
         unavailable / times out / returns invalid JSON / yields an empty summary.
         NEVER raises — mirroring :meth:`summarize_group`'s never-raise discipline
         so the display command never becomes a hard live-Ollama dependency.
         """
-        user_message = (
-            f"PERIOD: {bucket_label}\n"
-            f"ENTITY: {entity_name}\n"
-            f"CO-TOPICS: {json.dumps(cotopics)}\n"
-            f"DOCUMENTS: {json.dumps(doc_titles)}"
-        )
+        parts = [
+            f"PERIOD: {bucket_label}",
+            f"ENTITY: {entity_name}",
+            f"CO-TOPICS: {json.dumps(cotopics)}",
+            f"DOCUMENT SUMMARIES: {json.dumps(doc_summaries or [])}",
+            f"DOCUMENT TITLES: {json.dumps(doc_titles)}",
+        ]
+        if prev_bucket_label:
+            prev_lines = [f"PREVIOUS PERIOD: {prev_bucket_label}"]
+            prev_lines.append(f"PREVIOUS CO-TOPICS: {json.dumps(prev_cotopics or [])}")
+            if prev_synthesis:
+                prev_lines.append(f"PREVIOUS SYNTHESIS: {prev_synthesis}")
+            parts.append("\n".join(prev_lines))
+        user_message = "\n".join(parts)
         try:
             body = self._chat_with_retry(
                 system=_BUCKET_SUMMARY_SYSTEM_PROMPT,

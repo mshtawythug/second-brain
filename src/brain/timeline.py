@@ -19,7 +19,9 @@ instead (auto-detected via ``information_schema``).
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -45,6 +47,14 @@ _COTOPIC_LIMIT = 3
 # this many entities is almost certainly too broad; mirrors the
 # ``relational.list_entities`` default LIMIT (spec §3f).
 _ENTITY_RESOLVE_LIMIT = 50
+# Auto-granularity: the coarsest of {year, quarter, month} that yields at least
+# this many non-empty buckets wins; if none clears the bar, fall back to month
+# (so a young/sparse corpus still shows the finest-grained view available).
+_AUTO_MIN_BUCKETS = 3
+# Token budget for the per-bucket DOCUMENT SUMMARIES bundle fed to the synthesis
+# LLM. Caps the prompt so it stays fast on a local 8B model; the bundle is the
+# grounding evidence, so a few hundred tokens of summaries is plenty.
+_SYNTH_DOC_SUMMARY_BUDGET_TOKENS = 1200
 
 
 @dataclass(frozen=True)
@@ -91,16 +101,20 @@ class TimelineContext:
     """The wire shape returned by :func:`build_timeline` (CLI ``--json`` / MCP).
 
     ``query`` is the free-text entity/theme; ``entity_names`` the resolved seed
-    entities; ``granularity`` the bucket width; ``person`` the resolved display
-    name when ``--person`` scoped (else ``None``); ``buckets`` the ascending
-    time series; ``buckets_omitted`` how many buckets ``--limit`` trimmed (0 when
-    untrimmed). An all-empty result (no entities / no docs) carries an empty
-    ``buckets`` list — never an exception.
+    entities; ``granularity`` the RESOLVED concrete bucket width (always one of
+    ``month`` / ``quarter`` / ``year`` — the ``auto`` sentinel is resolved before
+    this is built); ``granularity_auto`` is ``True`` when that width was chosen
+    automatically (vs. an explicit ``--granularity``). ``person`` is the resolved
+    display name when ``--person`` scoped (else ``None``); ``buckets`` the
+    ascending time series; ``buckets_omitted`` how many buckets ``--limit``
+    trimmed (0 when untrimmed). An all-empty result (no entities / no docs)
+    carries an empty ``buckets`` list — never an exception.
     """
 
     query: str
     tenant_id: str
     granularity: str
+    granularity_auto: bool = False
     entity_names: list[str] = field(default_factory=list)
     person: str | None = None
     buckets: list[TimelineBucket] = field(default_factory=list)
@@ -115,16 +129,48 @@ class TimelineContext:
 def _validate_granularity(granularity: str) -> str:
     """Return ``granularity`` if valid, else raise ``ValueError``.
 
-    Validated against the same ``{month, quarter, year}`` set the config knob
-    uses; the value is later interpolated as the ``date_trunc`` field, so a
+    Validated against the same ``{auto, month, quarter, year}`` set the config
+    knob uses. ``auto`` is a sentinel resolved to a concrete width by
+    :func:`_resolve_auto_granularity` once the matched docs' date span is known;
+    the concrete value is later interpolated as the ``date_trunc`` field, so a
     closed whitelist keeps that interpolation safe.
     """
     normalized = granularity.strip().lower()
     if normalized not in _VALID_TIMELINE_GRANULARITIES:
         raise ValueError(
-            f"granularity must be one of month/quarter/year (got {granularity!r})"
+            "granularity must be one of auto/month/quarter/year "
+            f"(got {granularity!r})"
         )
     return normalized
+
+
+def _resolve_auto_granularity(dates: list[datetime]) -> str:
+    """Pick the auto bucket width for the matched docs' date span (else month).
+
+    Pure: given the distinct date-anchors, return the COARSEST width
+    (iterating ``year`` → ``quarter`` → ``month``) that still produces at least
+    :data:`_AUTO_MIN_BUCKETS` non-empty buckets. Coarsest-that-clears-the-bar
+    keeps evolution visible (>=3 periods) while minimizing fragmentation — a
+    2-year span shows ~8 quarters rather than ~24 months, while a 5-month span
+    can only reach the bar at month granularity.
+
+    Note on ordering: a finer width always yields >= as many buckets as a coarser
+    one, so "the finest yielding >=3" would degenerate to always-month and make
+    the fallback below unreachable. Coarsest-first is the reading consistent with
+    the spec's ``{year, quarter, month}`` ordering AND its explicit
+    "if even month yields <3, use month" fallback.
+
+    When NO width clears the bar — a young or sparse corpus, e.g. the original
+    ~5-month report where quarter collapsed to one bucket — fall back to
+    ``month`` so the finest-grained (most informative) view is still shown rather
+    than collapsing everything into one coarse bucket. An empty ``dates`` list
+    yields ``month``.
+    """
+    for gran in ("year", "quarter", "month"):
+        distinct = {_bucket_label(d, gran) for d in dates}
+        if len(distinct) >= _AUTO_MIN_BUCKETS:
+            return gran
+    return "month"
 
 
 def _validate_trim(trim: str) -> str:
@@ -335,6 +381,73 @@ class _RawBucket:
     doc_ids: list[str]
 
 
+def _compose_doc_filter(
+    entity_ids: list[str],
+    tenant_id: str,
+    *,
+    date_expr: str,
+    since: datetime | None,
+    until: datetime | None,
+    doc_scope: list[str] | None,
+) -> tuple[list[str], list[Any]]:
+    """Build the shared parameterized WHERE clauses for the bucketing queries.
+
+    Both :func:`_query_buckets` (the grouped bucket query) and
+    :func:`_distinct_doc_dates` (the auto-granularity probe) constrain the same
+    ``graph_entity_mentions``↔``documents`` join the same way, so the clause +
+    bound-param composition lives here once (DRY). ``date_expr`` is an internal
+    whitelist literal; everything else is bound as ``%s`` parameters.
+    """
+    where = ["gem.entity_id = ANY(%s)", "gem.tenant_id = %s"]
+    params: list[Any] = [entity_ids, tenant_id]
+    if since is not None:
+        where.append(f"{date_expr} >= %s")
+        params.append(since)
+    if until is not None:
+        where.append(f"{date_expr} < %s")
+        params.append(until)
+    if doc_scope is not None:
+        where.append("d.id = ANY(%s)")
+        params.append(doc_scope)
+    return where, params
+
+
+def _distinct_doc_dates(
+    conn: psycopg.Connection[Any],
+    tenant_id: str,
+    entity_ids: list[str],
+    *,
+    date_expr: str,
+    since: datetime | None,
+    until: datetime | None,
+    doc_scope: list[str] | None,
+) -> list[datetime]:
+    """Distinct document date-anchors for the matched set (auto-granularity probe).
+
+    Runs the same join + WHERE as :func:`_query_buckets` but selects the distinct
+    ``date_expr`` values (one per distinct anchor), so :func:`_resolve_auto_granularity`
+    can count how many buckets each width would produce before the full grouped
+    query runs. NULL anchors are dropped. Only invoked when granularity is
+    ``auto``.
+    """
+    where, params = _compose_doc_filter(
+        entity_ids,
+        tenant_id,
+        date_expr=date_expr,
+        since=since,
+        until=until,
+        doc_scope=doc_scope,
+    )
+    sql = (
+        f"SELECT DISTINCT {date_expr} AS d "
+        "FROM graph_entity_mentions gem "
+        "JOIN documents d ON d.id = gem.document_id "
+        f"WHERE {' AND '.join(where)}"
+    )
+    rows = conn.execute(sql, params).fetchall()
+    return [row[0] for row in rows if row[0] is not None]
+
+
 def _query_buckets(
     conn: psycopg.Connection[Any],
     tenant_id: str,
@@ -356,17 +469,14 @@ def _query_buckets(
     named month — ``until`` is already first-of-next-month) and ``doc_scope``
     (person filter) compose as extra parameterized clauses.
     """
-    where = ["gem.entity_id = ANY(%s)", "gem.tenant_id = %s"]
-    params: list[Any] = [entity_ids, tenant_id]
-    if since is not None:
-        where.append(f"{date_expr} >= %s")
-        params.append(since)
-    if until is not None:
-        where.append(f"{date_expr} < %s")
-        params.append(until)
-    if doc_scope is not None:
-        where.append("d.id = ANY(%s)")
-        params.append(doc_scope)
+    where, params = _compose_doc_filter(
+        entity_ids,
+        tenant_id,
+        date_expr=date_expr,
+        since=since,
+        until=until,
+        doc_scope=doc_scope,
+    )
     sql = (
         f"SELECT date_trunc(%s, {date_expr}) AS bucket_start, "
         "       COUNT(DISTINCT d.id) AS doc_count, "
@@ -453,19 +563,78 @@ def _bucket_doc_titles(
     return [str(r[0]) for r in rows]
 
 
+def _bucket_doc_summaries(
+    conn: psycopg.Connection[Any], doc_ids: list[str]
+) -> list[tuple[str, str | None]]:
+    """Project ``(title, summary)`` pairs for a bucket's docs (synthesis grounding).
+
+    Selects ``title`` + ``summary`` ONLY — never ``content`` — mirroring the
+    audio bundle's summary-only privacy projection
+    (:func:`brain.queries.fetch_document_summary`). Ordered most-recent-first by
+    the inline doc-date anchor so the budget keeps the freshest summaries when it
+    trims. ``summary`` is ``None`` for a not-yet-enriched doc; the budgeter falls
+    back to the title.
+    """
+    if not doc_ids:
+        return []
+    rows = conn.execute(
+        "SELECT title, summary FROM documents WHERE id = ANY(%s) "
+        "ORDER BY COALESCE(sent_at, ingested_at) DESC, title ASC",
+        (doc_ids,),
+    ).fetchall()
+    return [(str(r[0]), r[1]) for r in rows]
+
+
+def _budget_doc_summaries(
+    rows: list[tuple[str, str | None]],
+    *,
+    count_tokens: Callable[[str], int],
+    max_tokens: int,
+) -> list[str]:
+    """Greedily project ``(title, summary)`` rows into a token-budgeted bundle.
+
+    Each row becomes its ``summary`` (the grounding evidence) or, when the
+    summary is NULL/blank, its ``title`` (the documented fallback). Rows are
+    included most-recent-first while the running total stays within
+    ``max_tokens`` (measured by the injected ``count_tokens`` so the budget is
+    testable without tiktoken); the first row is always included even if it alone
+    exceeds the budget, so the bundle is never empty when docs exist. Mirrors
+    :func:`brain.audio.build_prompt`'s greedy budgeting pattern.
+    """
+    out: list[str] = []
+    used = 0
+    for title, summary in rows:
+        text = summary.strip() if summary and summary.strip() else title
+        cost = count_tokens(text)
+        if out and used + cost > max_tokens:
+            break
+        out.append(text)
+        used += cost
+    return out
+
+
 def _synthesize_buckets(
     buckets: list[TimelineBucket],
     *,
     entity_name: str,
     enricher: OllamaEnricher,
     synth_limit: int,
+    fetch_summaries: Callable[[list[str]], list[str]],
 ) -> list[TimelineBucket]:
-    """Attach best-effort Ollama summaries to the densest buckets (spec §3f step 5).
+    """Attach best-effort, content-grounded Ollama summaries (spec §3f step 5).
 
     Synthesizes the top ``synth_limit`` buckets by ``doc_count`` (ties broken by
-    most-recent ``bucket_start``). Best-effort: ``summarize_bucket`` never raises,
-    returning ``None`` on Ollama failure, so the timeline still renders. Returns a
-    new bucket list (immutability) preserving the original ascending order.
+    most-recent ``bucket_start``), but iterates the buckets OLDEST→NEWEST so each
+    synthesized bucket can be handed the chronologically previous bucket's label,
+    co-topics, and (when that previous bucket was itself synthesized) its
+    already-generated synthesis — enabling the model to state what CHANGED. Each
+    chosen bucket's document summaries are fetched + token-budgeted via
+    ``fetch_summaries`` (injected so this stays unit-testable without a DB) and
+    passed as the model's primary grounding evidence.
+
+    Best-effort: ``summarize_bucket`` never raises, returning ``None`` on Ollama
+    failure, so the timeline still renders. Returns a new bucket list
+    (immutability) preserving the original ascending order.
     """
     if synth_limit <= 0 or not buckets:
         return buckets
@@ -474,28 +643,26 @@ def _synthesize_buckets(
     )[:synth_limit]
     chosen = {id(b) for b in densest}
     out: list[TimelineBucket] = []
-    for bucket in buckets:
+    prev: TimelineBucket | None = None
+    for bucket in buckets:  # ascending (oldest → newest)
         if id(bucket) in chosen:
+            doc_summaries = fetch_summaries(bucket.doc_ids)
             summary = enricher.summarize_bucket(
                 bucket_label=bucket.bucket,
                 entity_name=entity_name,
                 doc_titles=bucket.doc_titles,
                 cotopics=bucket.cotopics,
+                doc_summaries=doc_summaries,
+                prev_bucket_label=prev.bucket if prev else None,
+                prev_cotopics=prev.cotopics if prev else None,
+                prev_synthesis=prev.synthesis if prev else None,
             )
-            out.append(
-                TimelineBucket(
-                    bucket=bucket.bucket,
-                    bucket_start=bucket.bucket_start,
-                    doc_count=bucket.doc_count,
-                    mention_count=bucket.mention_count,
-                    doc_ids=bucket.doc_ids,
-                    doc_titles=bucket.doc_titles,
-                    cotopics=bucket.cotopics,
-                    synthesis=summary,
-                )
-            )
+            new_bucket = dataclasses.replace(bucket, synthesis=summary)
+            out.append(new_bucket)
+            prev = new_bucket
         else:
             out.append(bucket)
+            prev = bucket
     return out
 
 
@@ -516,10 +683,13 @@ def build_timeline(
     """Build the temporal timeline for ``query`` (spec §3f — the orchestrator).
 
     Resolves the entity/theme to ``graph_entities`` (ILIKE), optionally scopes to
-    a ``--person``'s co-documents, buckets mentions by document date at
-    ``granularity``, attaches per-bucket co-topics + doc titles, trims to
-    ``limit`` (``BRAIN_TIMELINE_TRIM`` end), and — when ``synthesize`` and an
-    ``enricher`` are supplied — adds a best-effort summary to the densest buckets.
+    a ``--person``'s co-documents, picks the bucket width (``auto`` — the default
+    — chooses the coarsest of {year, quarter, month} yielding >=3 buckets, else
+    month; an explicit value forces it), buckets mentions by document date,
+    attaches per-bucket co-topics + doc titles, trims to ``limit``
+    (``BRAIN_TIMELINE_TRIM`` end), and — when ``synthesize`` and an ``enricher``
+    are supplied — adds a best-effort, content-grounded summary to the densest
+    buckets (the docs' summaries feed the LLM, not just their titles).
 
     Graceful, never-raising on data shape: zero matching entities or zero docs
     yields an empty :class:`TimelineContext`. Only programmer/usage errors raise:
@@ -527,7 +697,10 @@ def build_timeline(
     unknown / ambiguous ``person`` propagates ``PersonNotFound`` /
     ``PersonAmbiguous`` (mapped to clean CLI/MCP errors by the caller).
     """
-    gran = _validate_granularity(granularity or cfg.timeline_granularity)
+    requested = _validate_granularity(granularity or cfg.timeline_granularity)
+    auto = requested == "auto"
+    # Concrete width for the empty-data early returns (auto with no docs → month).
+    empty_gran = "month" if auto else requested
     trim = _validate_trim(cfg.timeline_trim)
     limit_n = cfg.timeline_limit if limit is None else limit
     if limit_n < 1:
@@ -541,7 +714,12 @@ def build_timeline(
 
     entities = _resolve_entities(conn, tenant_id, query)
     if not entities:
-        return TimelineContext(query=query, tenant_id=tenant_id, granularity=gran)
+        return TimelineContext(
+            query=query,
+            tenant_id=tenant_id,
+            granularity=empty_gran,
+            granularity_auto=auto,
+        )
 
     entity_ids = [e.id for e in entities]
     entity_names = [e.name for e in entities]
@@ -560,12 +738,29 @@ def build_timeline(
             return TimelineContext(
                 query=query,
                 tenant_id=tenant_id,
-                granularity=gran,
+                granularity=empty_gran,
+                granularity_auto=auto,
                 entity_names=entity_names,
                 person=person_display,
             )
 
     date_expr = _doc_date_expr(conn)
+    # Auto-granularity: probe the matched docs' distinct date-anchors and pick the
+    # coarsest width yielding >=3 buckets (else month) BEFORE the grouped query.
+    if auto:
+        dates = _distinct_doc_dates(
+            conn,
+            tenant_id,
+            entity_ids,
+            date_expr=date_expr,
+            since=since_dt,
+            until=until_dt,
+            doc_scope=doc_scope,
+        )
+        gran = _resolve_auto_granularity(dates)
+    else:
+        gran = requested
+
     raw_buckets = _query_buckets(
         conn,
         tenant_id,
@@ -581,6 +776,7 @@ def build_timeline(
             query=query,
             tenant_id=tenant_id,
             granularity=gran,
+            granularity_auto=auto,
             entity_names=entity_names,
             person=person_display,
         )
@@ -605,17 +801,32 @@ def build_timeline(
     kept, omitted = _trim_buckets(enriched, limit_n, trim)
 
     if synthesize and enricher is not None and cfg.timeline_synth_limit > 0:
+        # Grounding evidence: the docs' SUMMARIES (title fallback), token-budgeted
+        # so the prompt stays fast on a local 8B model. Injected as a closure so
+        # ``_synthesize_buckets`` stays unit-testable without a DB.
+        token_counter = enricher.count_tokens
+
+        def _fetch_bucket_summaries(doc_ids: list[str]) -> list[str]:
+            rows = _bucket_doc_summaries(conn, doc_ids)
+            return _budget_doc_summaries(
+                rows,
+                count_tokens=token_counter,
+                max_tokens=_SYNTH_DOC_SUMMARY_BUDGET_TOKENS,
+            )
+
         kept = _synthesize_buckets(
             kept,
             entity_name=entity_names[0],
             enricher=enricher,
             synth_limit=cfg.timeline_synth_limit,
+            fetch_summaries=_fetch_bucket_summaries,
         )
 
     return TimelineContext(
         query=query,
         tenant_id=tenant_id,
         granularity=gran,
+        granularity_auto=auto,
         entity_names=entity_names,
         person=person_display,
         buckets=kept,
