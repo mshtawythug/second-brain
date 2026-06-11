@@ -2214,7 +2214,7 @@ def brain_graphrag_entity(
 def brain_timeline(
     query: str,
     person: str | None = None,
-    granularity: str = "quarter",
+    granularity: str = "auto",
     since: str | None = None,
     until: str | None = None,
     limit: int = 20,
@@ -2243,7 +2243,11 @@ def brain_timeline(
     - ``person``: scope to documents where this person co-appears as a
       participant (resolved via the directory). Unknown / ambiguous →
       ``INVALID_PARAMS``.
-    - ``granularity``: ``month`` | ``quarter`` (default) | ``year``.
+    - ``granularity``: ``auto`` (default) | ``month`` | ``quarter`` | ``year``.
+      ``auto`` picks the finest width yielding >=3 non-empty buckets for the
+      matched docs' date span (else month); an explicit value forces it. The
+      resolved concrete width is returned in ``granularity`` with a
+      ``granularity_auto`` flag.
     - ``since`` / ``until``: ISO month (``YYYY-MM``) cutoffs; ``since`` inclusive,
       ``until`` inclusive of the named month.
     - ``limit``: max buckets returned (default 20); the sparse tail is trimmed

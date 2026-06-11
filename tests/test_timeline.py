@@ -48,8 +48,10 @@ from brain.timeline import (
     TimelineContext,
     _add_one_month,
     _bucket_label,
+    _budget_doc_summaries,
     _doc_date_expr,
     _parse_month,
+    _resolve_auto_granularity,
     _trim_buckets,
     _validate_granularity,
     _validate_trim,
@@ -180,14 +182,92 @@ def _cfg(**overrides: Any) -> Config:
 # ===========================================================================
 
 
-@pytest.mark.parametrize("value", ["month", "QUARTER", " year "])
+@pytest.mark.parametrize("value", ["auto", "month", "QUARTER", " year "])
 def test_validate_granularity_accepts_valid(value: str) -> None:
-    assert _validate_granularity(value) in {"month", "quarter", "year"}
+    assert _validate_granularity(value) in {"auto", "month", "quarter", "year"}
+
+
+def test_validate_granularity_accepts_auto() -> None:
+    assert _validate_granularity("AUTO") == "auto"
 
 
 def test_validate_granularity_rejects_invalid() -> None:
-    with pytest.raises(ValueError, match="month/quarter/year"):
+    with pytest.raises(ValueError, match="auto/month/quarter/year"):
         _validate_granularity("week")
+
+
+# --- _resolve_auto_granularity (pure) --------------------------------------
+
+
+def test_auto_granularity_empty_dates_is_month() -> None:
+    # No docs → finest fallback so a future/sparse corpus still shows month view.
+    assert _resolve_auto_granularity([]) == "month"
+
+
+def test_auto_granularity_five_month_span_picks_month() -> None:
+    # The reported failure: a ~5-month span. year=1, quarter<3, month<3 → fall
+    # back to month (the finest available), NOT the degenerate single quarter.
+    dates = [_dt(2024, m, 5) for m in (1, 2, 3, 4, 5)]
+    # 5 distinct months (>=3) but only 2 quarters and 1 year.
+    assert _resolve_auto_granularity(dates) == "month"
+
+
+def test_auto_granularity_two_distinct_months_picks_month() -> None:
+    # Exactly the user's "co-topic shift across 2 buckets": 2 months, all <3 →
+    # month fallback (2 buckets beats 1 collapsed quarter).
+    dates = [_dt(2024, 3, 1), _dt(2024, 3, 20), _dt(2024, 4, 2)]
+    assert _resolve_auto_granularity(dates) == "month"
+
+
+def test_auto_granularity_prefers_coarsest_clearing_bar_quarter() -> None:
+    # >=3 quarters but <3 years → quarter (coarsest clearing >=3), avoiding the
+    # finer month view's fragmentation.
+    dates = [_dt(2024, 1, 1), _dt(2024, 4, 1), _dt(2024, 7, 1), _dt(2024, 10, 1)]
+    assert _resolve_auto_granularity(dates) == "quarter"
+
+
+def test_auto_granularity_prefers_year_for_multi_year_span() -> None:
+    # >=3 distinct years → year (coarsest), not 36 month buckets.
+    dates = [_dt(y, 6, 1) for y in (2022, 2023, 2024)]
+    assert _resolve_auto_granularity(dates) == "year"
+
+
+# --- _budget_doc_summaries (pure) ------------------------------------------
+
+
+def _word_count(text: str) -> int:
+    return len(text.split())
+
+
+def test_budget_doc_summaries_uses_summary_when_present() -> None:
+    rows = [("Title A", "Concrete summary of A"), ("Title B", "Concrete summary of B")]
+    out = _budget_doc_summaries(rows, count_tokens=_word_count, max_tokens=100)
+    assert out == ["Concrete summary of A", "Concrete summary of B"]
+
+
+def test_budget_doc_summaries_falls_back_to_title_when_summary_null() -> None:
+    rows = [("Title A", None), ("Title B", "   ")]
+    out = _budget_doc_summaries(rows, count_tokens=_word_count, max_tokens=100)
+    assert out == ["Title A", "Title B"]
+
+
+def test_budget_doc_summaries_truncates_at_budget_but_keeps_first() -> None:
+    rows = [
+        ("T1", "one two three four"),  # 4 tokens
+        ("T2", "five six seven eight"),  # would exceed a 5-token budget
+    ]
+    out = _budget_doc_summaries(rows, count_tokens=_word_count, max_tokens=5)
+    assert out == ["one two three four"]  # first kept, second dropped
+
+
+def test_budget_doc_summaries_first_always_included_even_if_over_budget() -> None:
+    rows = [("T1", "a b c d e f")]  # 6 tokens > budget 2
+    out = _budget_doc_summaries(rows, count_tokens=_word_count, max_tokens=2)
+    assert out == ["a b c d e f"]  # never empty when docs exist
+
+
+def test_budget_doc_summaries_empty_rows() -> None:
+    assert _budget_doc_summaries([], count_tokens=_word_count, max_tokens=100) == []
 
 
 def test_validate_trim_accepts_and_rejects() -> None:
@@ -350,6 +430,78 @@ def test_summarize_bucket_returns_none_on_empty_summary() -> None:
         )
         is None
     )
+
+
+def test_summarize_bucket_grounds_prompt_in_doc_summaries() -> None:
+    # The grounding fix: the doc SUMMARIES (not just titles) reach the model.
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"message": {"content": json.dumps({"summary": "ok"})}}
+        )
+
+    enricher = _enricher(httpx.MockTransport(handler))
+    enricher.summarize_bucket(
+        bucket_label="2024-03",
+        entity_name="migration-project",
+        doc_titles=["Kickoff note"],
+        cotopics=["data-pipeline"],
+        doc_summaries=["Decided to migrate the billing service to the new schema."],
+    )
+    user_turn = captured["body"]["messages"][-1]["content"]
+    assert "DOCUMENT SUMMARIES:" in user_turn
+    assert "migrate the billing service" in user_turn
+
+
+def test_summarize_bucket_includes_previous_period_context() -> None:
+    # Evolution contrast: the previous bucket's label / co-topics / synthesis
+    # are handed to the model so it can state what changed.
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"message": {"content": json.dumps({"summary": "ok"})}}
+        )
+
+    enricher = _enricher(httpx.MockTransport(handler))
+    enricher.summarize_bucket(
+        bucket_label="2024-04",
+        entity_name="migration-project",
+        doc_titles=["Phase 2 review"],
+        cotopics=["rollout"],
+        doc_summaries=["Rolled out the migrated service to production."],
+        prev_bucket_label="2024-03",
+        prev_cotopics=["data-pipeline"],
+        prev_synthesis="Designed the new schema and validated it in staging.",
+    )
+    user_turn = captured["body"]["messages"][-1]["content"]
+    assert "PREVIOUS PERIOD: 2024-03" in user_turn
+    assert "PREVIOUS SYNTHESIS: Designed the new schema" in user_turn
+
+
+def test_summarize_bucket_omits_previous_block_when_absent() -> None:
+    # Oldest bucket (no prior period): no PREVIOUS PERIOD block in the prompt.
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"message": {"content": json.dumps({"summary": "ok"})}}
+        )
+
+    enricher = _enricher(httpx.MockTransport(handler))
+    enricher.summarize_bucket(
+        bucket_label="2024-03",
+        entity_name="x",
+        doc_titles=["t"],
+        cotopics=[],
+        doc_summaries=["s"],
+    )
+    user_turn = captured["body"]["messages"][-1]["content"]
+    assert "PREVIOUS PERIOD" not in user_turn
 
 
 # ===========================================================================
@@ -604,6 +756,9 @@ def test_synthesize_attaches_to_densest_bucket(
         _mention(test_db, entity, doc_id)
 
     class _FakeEnricher:
+        def count_tokens(self, text: str) -> int:
+            return len(text.split())
+
         def summarize_bucket(self, **_kwargs: Any) -> str:
             return "synthetic summary"
 
@@ -618,6 +773,59 @@ def test_synthesize_attaches_to_densest_bucket(
     by_label = {b.bucket: b for b in ctx.buckets}
     assert by_label["2024-Q2"].synthesis == "synthetic summary"
     assert by_label["2024-Q1"].synthesis is None
+
+
+def test_synthesize_grounds_in_doc_summaries_and_prev_context(
+    test_db: psycopg.Connection[Any], seed_doc: Callable[..., str]
+) -> None:
+    """build_timeline feeds doc SUMMARIES + previous-period context to the enricher.
+
+    Synthesizes oldest→newest across two synthesized buckets and records the
+    kwargs each call received, proving (a) the docs' ``summary`` values reach
+    ``summarize_bucket`` as ``doc_summaries`` (title fallback when NULL) and
+    (b) bucket N>0 gets the prior bucket's label + already-generated synthesis.
+    """
+    entity = _insert_entity(test_db, name="migration")
+    # Q1 doc has a real summary; Q2 doc has none (title fallback).
+    q1 = _doc(seed_doc, test_db, "Q1 kickoff", sent_at=_dt(2024, 1, 10))
+    q2 = _doc(seed_doc, test_db, "Q2 rollout", sent_at=_dt(2024, 4, 10))
+    test_db.execute(
+        "UPDATE documents SET summary = %s WHERE id = %s",
+        ("Designed the new billing schema.", q1),
+    )
+    _mention(test_db, entity, q1)
+    _mention(test_db, entity, q2)
+
+    calls: list[dict[str, Any]] = []
+
+    class _RecordingEnricher:
+        def count_tokens(self, text: str) -> int:
+            return len(text.split())
+
+        def summarize_bucket(self, **kwargs: Any) -> str:
+            calls.append(kwargs)
+            return f"synthesis-for-{kwargs['bucket_label']}"
+
+    ctx = build_timeline(
+        test_db,
+        _cfg(timeline_synth_limit=5),  # synthesize both buckets
+        "migration",
+        granularity="quarter",
+        synthesize=True,
+        enricher=_RecordingEnricher(),  # type: ignore[arg-type]
+    )
+
+    # Oldest→newest order, both synthesized.
+    assert [c["bucket_label"] for c in calls] == ["2024-Q1", "2024-Q2"]
+    # Q1: grounded in its real summary; no previous period.
+    assert calls[0]["doc_summaries"] == ["Designed the new billing schema."]
+    assert calls[0]["prev_bucket_label"] is None
+    # Q2: summary NULL → title fallback; previous period carried forward.
+    assert calls[1]["doc_summaries"] == ["Q2 rollout"]
+    assert calls[1]["prev_bucket_label"] == "2024-Q1"
+    assert calls[1]["prev_synthesis"] == "synthesis-for-2024-Q1"
+    by_label = {b.bucket: b for b in ctx.buckets}
+    assert by_label["2024-Q2"].synthesis == "synthesis-for-2024-Q2"
 
 
 def test_synthesis_skipped_when_synth_limit_zero(
@@ -642,10 +850,79 @@ def test_synthesis_skipped_when_synth_limit_zero(
     assert ctx.buckets[0].synthesis is None
 
 
+def test_build_timeline_auto_picks_month_for_short_span(
+    test_db: psycopg.Connection[Any], seed_doc: Callable[..., str]
+) -> None:
+    """The headline fix: a ~5-month span under the default 'auto' shows month
+    buckets (evolution visible), not one collapsed quarter."""
+    entity = _insert_entity(test_db, name="regional-migration")
+    for title, sent_at in [
+        ("jan", _dt(2024, 1, 10)),
+        ("feb", _dt(2024, 2, 10)),
+        ("mar", _dt(2024, 3, 10)),
+        ("apr", _dt(2024, 4, 10)),
+        ("may", _dt(2024, 5, 10)),
+    ]:
+        doc_id = _doc(seed_doc, test_db, title, sent_at=sent_at)
+        _mention(test_db, entity, doc_id)
+
+    ctx = build_timeline(test_db, _cfg(), "regional-migration", granularity="auto")
+    assert ctx.granularity == "month"
+    assert ctx.granularity_auto is True
+    assert [b.bucket for b in ctx.buckets] == [
+        "2024-01",
+        "2024-02",
+        "2024-03",
+        "2024-04",
+        "2024-05",
+    ]
+
+
+def test_build_timeline_auto_picks_quarter_for_full_year(
+    test_db: psycopg.Connection[Any], seed_doc: Callable[..., str]
+) -> None:
+    # >=3 quarters, <3 years → auto resolves to quarter (coarsest clearing >=3).
+    entity = _insert_entity(test_db, name="annual")
+    for month in (1, 4, 7, 10):
+        doc_id = _doc(seed_doc, test_db, f"m{month}", sent_at=_dt(2024, month, 5))
+        _mention(test_db, entity, doc_id)
+
+    ctx = build_timeline(test_db, _cfg(), "annual", granularity="auto")
+    assert ctx.granularity == "quarter"
+    assert ctx.granularity_auto is True
+    assert len(ctx.buckets) == 4
+
+
+def test_build_timeline_explicit_granularity_not_auto_flagged(
+    test_db: psycopg.Connection[Any], seed_doc: Callable[..., str]
+) -> None:
+    # Explicit --granularity forces it exactly; granularity_auto stays False.
+    entity = _insert_entity(test_db, name="forced")
+    doc_id = _doc(seed_doc, test_db, "doc", sent_at=_dt(2024, 3, 10))
+    _mention(test_db, entity, doc_id)
+
+    ctx = build_timeline(test_db, _cfg(), "forced", granularity="quarter")
+    assert ctx.granularity == "quarter"
+    assert ctx.granularity_auto is False
+    assert ctx.buckets[0].bucket == "2024-Q1"
+
+
+def test_build_timeline_auto_unknown_entity_resolves_concrete_granularity(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    # No entities + auto → empty context with a concrete (month) granularity,
+    # never the unresolved 'auto' sentinel, and the auto flag set.
+    ctx = build_timeline(test_db, _cfg(), "no-such-entity-xyz", granularity="auto")
+    assert ctx.granularity == "month"
+    assert ctx.granularity_auto is True
+    assert ctx.buckets == []
+
+
 def test_empty_helpers_short_circuit(test_db: psycopg.Connection[Any]) -> None:
     # Direct guards: empty doc/seed inputs return [] without touching real rows.
     assert timeline_mod._top_cotopics(test_db, TENANT, [], ["x"], []) == []
     assert timeline_mod._bucket_doc_titles(test_db, []) == []
+    assert timeline_mod._bucket_doc_summaries(test_db, []) == []
     assert timeline_mod._scope_to_person(test_db, TENANT, [], ["k"]) == []
     assert timeline_mod._owner_entity_ids(test_db, TENANT, frozenset()) == []
 
@@ -656,8 +933,15 @@ def test_synthesize_buckets_empty_short_circuits() -> None:
         def summarize_bucket(self, **_kwargs: Any) -> str:
             raise AssertionError("enricher must not be called for an empty list")
 
+    def _boom_fetch(_doc_ids: list[str]) -> list[str]:
+        raise AssertionError("fetch_summaries must not be called for an empty list")
+
     out = timeline_mod._synthesize_buckets(
-        [], entity_name="x", enricher=_BoomEnricher(), synth_limit=1  # type: ignore[arg-type]
+        [],
+        entity_name="x",
+        enricher=_BoomEnricher(),  # type: ignore[arg-type]
+        synth_limit=1,
+        fetch_summaries=_boom_fetch,
     )
     assert out == []
 
@@ -675,6 +959,43 @@ def _ctx(entity_names: list[str], *, query: str = "hub-theme") -> TimelineContex
         granularity="quarter",
         entity_names=entity_names,
     )
+
+
+def test_timeline_header_shows_auto_marker() -> None:
+    ctx = TimelineContext(
+        query="q",
+        tenant_id=TENANT,
+        granularity="month",
+        granularity_auto=True,
+        entity_names=["topic"],
+    )
+    assert "month (auto)" in _timeline_header(ctx).plain
+
+
+def test_timeline_header_no_auto_marker_when_explicit() -> None:
+    ctx = TimelineContext(
+        query="q",
+        tenant_id=TENANT,
+        granularity="quarter",
+        granularity_auto=False,
+        entity_names=["topic"],
+    )
+    header = _timeline_header(ctx).plain
+    assert "quarter" in header
+    assert "(auto)" not in header
+
+
+def test_timeline_json_includes_granularity_auto() -> None:
+    ctx = TimelineContext(
+        query="q",
+        tenant_id=TENANT,
+        granularity="month",
+        granularity_auto=True,
+        entity_names=["topic"],
+    )
+    payload = timeline_context_json(ctx)
+    assert payload["granularity"] == "month"
+    assert payload["granularity_auto"] is True
 
 
 def test_timeline_header_three_entities_unchanged() -> None:
@@ -742,15 +1063,35 @@ def test_cli_timeline_json_output(
     doc_id = _doc(seed_doc, test_db, "prod note", sent_at=_dt(2024, 3, 10))
     _mention(test_db, entity, doc_id)
 
-    result = runner.invoke(app, ["timeline", "productivity", "--json"])
+    # Explicit --granularity quarter keeps this focused on the JSON plumbing.
+    result = runner.invoke(
+        app, ["timeline", "productivity", "--granularity", "quarter", "--json"]
+    )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["query"] == "productivity"
     assert payload["granularity"] == "quarter"
+    assert payload["granularity_auto"] is False
     assert payload["entity_names"] == ["productivity"]
     assert payload["buckets"][0]["bucket"] == "2024-Q1"
     assert payload["buckets"][0]["doc_count"] == 1
     assert "bucket_start" in payload["buckets"][0]
+
+
+def test_cli_timeline_auto_default_json(
+    test_db: psycopg.Connection[Any], seed_doc: Callable[..., str]
+) -> None:
+    # Default (no --granularity) → 'auto'. One doc → month, flagged auto.
+    entity = _insert_entity(test_db, name="productivity")
+    doc_id = _doc(seed_doc, test_db, "prod note", sent_at=_dt(2024, 3, 10))
+    _mention(test_db, entity, doc_id)
+
+    result = runner.invoke(app, ["timeline", "productivity", "--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["granularity"] == "month"
+    assert payload["granularity_auto"] is True
+    assert payload["buckets"][0]["bucket"] == "2024-03"
 
 
 def test_cli_timeline_human_output(
@@ -760,10 +1101,12 @@ def test_cli_timeline_human_output(
     doc_id = _doc(seed_doc, test_db, "prod note", sent_at=_dt(2024, 3, 10))
     _mention(test_db, entity, doc_id)
 
+    # Default auto → month; header shows the auto marker.
     result = runner.invoke(app, ["timeline", "productivity"])
     assert result.exit_code == 0, result.output
     assert "Timeline" in result.output
-    assert "2024-Q1" in result.output
+    assert "month (auto)" in result.output
+    assert "2024-03" in result.output
 
 
 def test_cli_timeline_no_graph(
@@ -784,7 +1127,7 @@ def test_cli_timeline_unknown_entity(test_db: psycopg.Connection[Any]) -> None:
 def test_cli_timeline_bad_granularity(test_db: psycopg.Connection[Any]) -> None:
     result = runner.invoke(app, ["timeline", "x", "--granularity", "week"])
     assert result.exit_code == 2  # BadParameter
-    assert "month/quarter/year" in result.output
+    assert "auto/month/quarter/year" in result.output
 
 
 # ===========================================================================
@@ -815,10 +1158,30 @@ def test_mcp_timeline_returns_buckets(
     _mention(test_db, entity, doc_id)
     _mcp_state(monkeypatch, fake_embedder)
 
-    payload = mcp_server.brain_timeline(query="productivity")
+    # Explicit granularity keeps this on the MCP wire-shape plumbing.
+    payload = mcp_server.brain_timeline(query="productivity", granularity="quarter")
     assert payload["entity_names"] == ["productivity"]
     assert payload["buckets"][0]["bucket"] == "2024-Q1"
     assert payload["granularity"] == "quarter"
+    assert payload["granularity_auto"] is False
+
+
+def test_mcp_timeline_auto_default(
+    test_db: psycopg.Connection[Any],
+    seed_doc: Callable[..., str],
+    fake_embedder: object,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # MCP default granularity is 'auto' (mirrors the CLI / env default).
+    entity = _insert_entity(test_db, name="productivity")
+    doc_id = _doc(seed_doc, test_db, "prod note", sent_at=_dt(2024, 3, 10))
+    _mention(test_db, entity, doc_id)
+    _mcp_state(monkeypatch, fake_embedder)
+
+    payload = mcp_server.brain_timeline(query="productivity")
+    assert payload["granularity"] == "month"
+    assert payload["granularity_auto"] is True
+    assert payload["buckets"][0]["bucket"] == "2024-03"
 
 
 def test_mcp_timeline_graph_disabled(

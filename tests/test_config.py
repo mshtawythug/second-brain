@@ -9,6 +9,7 @@ from brain.config import (
     DEFAULT_EMBEDDER,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_QWEN3_MODEL,
+    DEFAULT_TIMELINE_GRANULARITY,
     Config,
     ConfigError,
 )
@@ -163,6 +164,41 @@ def test_embedder_invalid_value_raises(monkeypatch, isolated_dotenv):
     monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
     monkeypatch.setenv("BRAIN_EMBEDDER", "bogus-backend")
     with pytest.raises(ConfigError, match="must be one of"):
+        Config.load()
+
+
+def test_timeline_granularity_defaults_to_auto(monkeypatch, isolated_dotenv):
+    """No ``BRAIN_TIMELINE_GRANULARITY`` set → 'auto' (the new useful default)."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    cfg = Config.load()
+    assert cfg.timeline_granularity == DEFAULT_TIMELINE_GRANULARITY
+    assert cfg.timeline_granularity == "auto"
+
+
+def test_timeline_granularity_auto_env_override(monkeypatch, isolated_dotenv):
+    """``BRAIN_TIMELINE_GRANULARITY=auto`` is accepted verbatim (lowercased)."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("BRAIN_TIMELINE_GRANULARITY", "AUTO")
+    cfg = Config.load()
+    assert cfg.timeline_granularity == "auto"
+
+
+@pytest.mark.parametrize("value", ["month", "quarter", "year"])
+def test_timeline_granularity_explicit_values_accepted(
+    monkeypatch, isolated_dotenv, value
+):
+    """Explicit month/quarter/year still honored exactly."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("BRAIN_TIMELINE_GRANULARITY", value)
+    cfg = Config.load()
+    assert cfg.timeline_granularity == value
+
+
+def test_timeline_granularity_invalid_raises(monkeypatch, isolated_dotenv):
+    """A value outside auto/month/quarter/year raises at load time."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://x:y@h:5432/d")
+    monkeypatch.setenv("BRAIN_TIMELINE_GRANULARITY", "week")
+    with pytest.raises(ConfigError, match="auto/month/quarter/year"):
         Config.load()
 
 
