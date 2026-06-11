@@ -673,6 +673,11 @@ def alias_result_summary(res: "AliasResult") -> str:
 _TIMELINE_BAR_WIDTH = 24
 # Max representative doc titles listed under a bucket in the terminal view.
 _TIMELINE_TITLES_SHOWN = 3
+# Max matched entity names shown in the human header before collapsing the rest
+# into a "(+N more matched entities)" note. A broad hub theme can ILIKE-match
+# dozens of aliases; dumping them all floods the header (and can surface
+# sensitive alias strings). ``--json`` keeps the full ``entity_names`` list.
+_TIMELINE_HEADER_ENTITIES_SHOWN = 3
 
 
 def _timeline_bucket_json(bucket: "TimelineBucket") -> dict[str, Any]:
@@ -707,9 +712,28 @@ def timeline_context_json(ctx: "TimelineContext") -> dict[str, Any]:
     }
 
 
+def _timeline_entity_label(ctx: "TimelineContext") -> str:
+    """Build the header's entity label, capped at the first N matched names.
+
+    With no matched entities the label is the raw ``query``. Otherwise it joins
+    the first :data:`_TIMELINE_HEADER_ENTITIES_SHOWN` names; when more matched,
+    a ``(+N more matched entities)`` note replaces the overflow — keeping a broad
+    hub theme's header readable instead of dumping every alias. The full list
+    still goes out over ``--json`` via :func:`timeline_context_json`.
+    """
+    names = ctx.entity_names
+    if not names:
+        return ctx.query
+    shown = ", ".join(names[:_TIMELINE_HEADER_ENTITIES_SHOWN])
+    overflow = len(names) - _TIMELINE_HEADER_ENTITIES_SHOWN
+    if overflow > 0:
+        return f"{shown} (+{overflow} more matched entities)"
+    return shown
+
+
 def _timeline_header(ctx: "TimelineContext") -> Text:
     """Build the one-line timeline header (query / granularity / bucket count)."""
-    label = ", ".join(ctx.entity_names) if ctx.entity_names else ctx.query
+    label = _timeline_entity_label(ctx)
     parts = [label, f"{ctx.granularity}"]
     if ctx.person:
         parts.append(f"with {ctx.person}")
