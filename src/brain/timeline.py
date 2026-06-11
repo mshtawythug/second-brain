@@ -47,7 +47,7 @@ _COTOPIC_LIMIT = 3
 # this many entities is almost certainly too broad; mirrors the
 # ``relational.list_entities`` default LIMIT (spec §3f).
 _ENTITY_RESOLVE_LIMIT = 50
-# Auto-granularity: the finest of {month, quarter, year} that yields at least
+# Auto-granularity: the coarsest of {year, quarter, month} that yields at least
 # this many non-empty buckets wins; if none clears the bar, fall back to month
 # (so a young/sparse corpus still shows the finest-grained view available).
 _AUTO_MIN_BUCKETS = 3
@@ -684,7 +684,7 @@ def build_timeline(
 
     Resolves the entity/theme to ``graph_entities`` (ILIKE), optionally scopes to
     a ``--person``'s co-documents, picks the bucket width (``auto`` — the default
-    — chooses the finest of {year, quarter, month} yielding >=3 buckets, else
+    — chooses the coarsest of {year, quarter, month} yielding >=3 buckets, else
     month; an explicit value forces it), buckets mentions by document date,
     attaches per-bucket co-topics + doc titles, trims to ``limit``
     (``BRAIN_TIMELINE_TRIM`` end), and — when ``synthesize`` and an ``enricher``

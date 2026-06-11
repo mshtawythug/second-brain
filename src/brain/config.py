@@ -247,7 +247,7 @@ DEFAULT_ELICIT_CONTRADICTION_MIN_DOCS = 5
 #
 # ``DEFAULT_TIMELINE_GRANULARITY`` is the default time-bucket width; one of
 # ``auto`` / ``month`` / ``quarter`` / ``year``. ``auto`` (the default) picks the
-# finest of {year, quarter, month} that yields >=3 non-empty buckets for the
+# coarsest of {year, quarter, month} that yields >=3 non-empty buckets for the
 # matched docs' date span — a fixed ``quarter`` collapsed a young (few-month)
 # corpus into a single bucket, hiding all evolution. An explicit value forces
 # that granularity exactly. Override via ``BRAIN_TIMELINE_GRANULARITY``.

@@ -2244,7 +2244,7 @@ def brain_timeline(
       participant (resolved via the directory). Unknown / ambiguous →
       ``INVALID_PARAMS``.
     - ``granularity``: ``auto`` (default) | ``month`` | ``quarter`` | ``year``.
-      ``auto`` picks the finest width yielding >=3 non-empty buckets for the
+      ``auto`` picks the coarsest width yielding >=3 non-empty buckets for the
       matched docs' date span (else month); an explicit value forces it. The
       resolved concrete width is returned in ``granularity`` with a
       ``granularity_auto`` flag.
