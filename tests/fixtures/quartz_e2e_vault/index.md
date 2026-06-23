@@ -17,6 +17,6 @@ the Quartz build has a root to render.
 ## Recently captured
 
 <!-- BRAIN_RECENT_START -->
-- 📧 [[_ingested/gmail/2026-04-22-fixture-gmail-thread|P4 Recent Rail Canary]] · today
-- 🎙️ [[_ingested/krisp/2026-04-15-fixture-krisp-call|P4 Krisp Recent Canary]] · 2w ago
+- 📧 [[_ingested/gmail/2026-04-22-fixture-gmail-thread|P4 Recent Rail Canary]] · <span class="brain-rel-date" data-date="2026-01-02T00:00:00+00:00">Jan 2</span>
+- 🎙️ [[_ingested/krisp/2026-04-15-fixture-krisp-call|P4 Krisp Recent Canary]] · <span class="brain-rel-date" data-date="2026-01-15T00:00:00+00:00">Jan 15</span>
 <!-- BRAIN_RECENT_END -->

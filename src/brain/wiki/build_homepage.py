@@ -298,9 +298,13 @@ def _render_bullets(docs: Sequence[RecentDoc]) -> str:
 
     Each non-empty line is shaped:
 
-        ``- {icon} [[<vault_path-without-md>|<safe_title>]] · {relative-date}``
+        ``- {icon} [[<vault_path-without-md>|<safe_title>]] · <span ...>{abs}</span>``
 
-    where:
+    where the trailing token is a machine-readable relative-date span:
+
+        ``<span class="brain-rel-date" data-date="{iso}">{absolute}</span>``
+
+    and:
 
     - ``{icon}`` comes from :data:`_SOURCE_ICONS` (with the ``"vault"``
       fallback for unknown kinds).
@@ -313,22 +317,33 @@ def _render_bullets(docs: Sequence[RecentDoc]) -> str:
       ``[^\\[\\]\\#]``; bracketed prefixes like ``Re: [External] Re: …``
       from Gmail subjects would otherwise emit raw text. Same trick the
       derived-edges fence uses.
-    - ``{relative-date}`` is :func:`_format_relative_date` of
-      ``ingested_at``.
+    - ``{iso}`` is ``ingested_at.isoformat()`` — the machine-readable
+      source of truth the client script (``/static/relativeDate.js``)
+      reads to recompute the relative text ("today" / "3d ago" / …) live
+      on every page load. Baking a relative string here would decay: a
+      doc ingested 3 days before a build still reads "3d ago" weeks later
+      because the home note isn't re-rendered daily. Emitting the absolute
+      date + recomputing client-side keeps the rail honest.
+    - ``{absolute}`` is :func:`_format_absolute_date` of ``ingested_at`` —
+      a NON-decaying fallback (e.g. ``"Jun 10"``) shown verbatim if the
+      client script never runs (JS disabled, parse failure). Both the ISO
+      attribute and the absolute fallback are machine-generated (no user
+      content), so neither needs HTML-escaping.
 
     Trailing newline so the body always ends Unix-cleanly.
     """
     if not docs:
         return "*No documents ingested yet — try `brain ingest <file>`.*\n"
 
-    today = datetime.date.today()
     lines: list[str] = []
     for doc in docs:
         icon = _SOURCE_ICONS.get(doc.source_kind or "vault", _DEFAULT_SOURCE_ICON)
         target = strip_md_extension(doc.vault_path)
         alias = safe_wikilink_alias(doc.title)
-        when = _format_relative_date(doc.ingested_at, today=today)
-        lines.append(f"- {icon} [[{target}|{alias}]] · {when}")
+        iso = doc.ingested_at.isoformat()
+        absolute = _format_absolute_date(doc.ingested_at)
+        span = f'<span class="brain-rel-date" data-date="{iso}">{absolute}</span>'
+        lines.append(f"- {icon} [[{target}|{alias}]] · {span}")
     return "\n".join(lines) + "\n"
 
 
@@ -400,9 +415,31 @@ def _format_relative_date(
         return f"{delta}d ago"
     if delta < 35:
         return f"{delta // 7}w ago"
-    # ``%-d`` is GNU/BSD-specific (no leading zero); on Windows the right
-    # spelling is ``%#d``. Both are absent from POSIX. Build the day
-    # ourselves to stay portable.
+    # 35+ days ago → the same absolute "Mon D" form the recent-rail span
+    # falls back to. Delegated to :func:`_format_absolute_date` so the two
+    # surfaces (this >= 35-day branch and the client-side span fallback)
+    # stay byte-identical without a second copy of the portable day-build.
+    return _format_absolute_date(when)
+
+
+def _format_absolute_date(when: datetime.datetime) -> str:
+    """Render ``when`` as a locale-independent absolute ``"Mon D"`` date.
+
+    Example: a doc ingested 2026-06-10 → ``"Jun 10"`` (no leading zero on
+    the day). This is the NON-decaying fallback baked into the recent-rail
+    span's text content — the client script overwrites it with a live
+    relative string, but if JS never runs (disabled, parse failure) the
+    absolute date is what the reader sees.
+
+    ``%-d`` is GNU/BSD-specific (no leading zero); on Windows the right
+    spelling is ``%#d``. Both are absent from POSIX. Build the day
+    ourselves from ``.day`` (an ``int``) to stay portable across hosts.
+
+    Projects ``when`` onto the local calendar date via :func:`_to_date`
+    first, matching the relative-date buckets so the absolute fallback and
+    the relative text agree on which calendar day a doc lands on.
+    """
+    when_date = _to_date(when)
     month = when_date.strftime("%b")
     return f"{month} {when_date.day}"
 

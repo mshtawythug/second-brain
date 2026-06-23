@@ -158,6 +158,20 @@ const config: QuartzConfig = {
       // for the inject contract and the static script for the
       // tagging logic.
       Plugin.LinkSourceTag(),
+      // brain: Recent rail — inject the live relative-date recomputer
+      // (`/static/relativeDate.js`) into every page. The home-page Recent
+      // rail emits `<span class="brain-rel-date" data-date="<ISO>">{abs}</span>`
+      // (see `brain.wiki.build_homepage`); this script reads each
+      // `data-date` and recomputes the relative text ("3d ago") live on
+      // `DOMContentLoaded` + Quartz SPA `nav`, so the rail never decays
+      // between daily builds. Bucket logic mirrors
+      // `build_homepage._format_relative_date`. Always emits (no env-var
+      // gate, like `LinkSourceTag`); no markdown ordering requirement;
+      // grouped here next to `LinkSourceTag` so the brain script-only
+      // transformers stay co-located. See
+      // `quartz/plugins/transformers/relativeDate.ts` for the inject
+      // contract and `quartz/static/relativeDate.js` for the recomputer.
+      Plugin.RelativeDate(),
       // brain: Lane C redesign — inject the runtime code-copy injector
       // (`/static/codeCopy.js`) into every page. The injector walks
       // every `<pre>` in the article body, lifts the `data-language`
