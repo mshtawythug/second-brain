@@ -392,6 +392,15 @@ def _format_relative_date(
 ) -> str:
     """Render ``when`` as a coarse human-friendly relative date.
 
+    PARITY REFERENCE — NOT dead code. As of the live-relative-date change
+    the renderer no longer calls this: :func:`_render_bullets` emits an
+    absolute date + a machine-readable ``data-date`` span, and the browser
+    (``quartz/static/relativeDate.js``) recomputes the relative bucket on
+    every page load. This function is now exercised only by the parity
+    tests in ``tests/test_brain_recent_homepage.py`` and MUST stay in
+    lock-step with ``relativeDate.js``'s bucket logic — keep it as the
+    canonical Python reference; do NOT delete it as "unused."
+
     Buckets, in order:
 
     - same calendar day → ``"today"``
