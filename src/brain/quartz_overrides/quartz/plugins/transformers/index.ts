@@ -92,6 +92,12 @@ export { DerivedFenceMark } from "./derivedFenceMark"
 export { ReloadSignal } from "./reloadSignal"
 export { LinkKindMark } from "./linkKindMark"
 export { LinkSourceTag } from "./linkSourceTag"
+//   * RelativeDate     — Recent rail — injects `/static/relativeDate.js`
+//     to recompute the home-page Recent rail's relative timestamps
+//     ("3d ago") live on every page load, instead of baking a decaying
+//     string at build time. Pairs with the `<span class="brain-rel-date"
+//     data-date="<ISO>">` markup emitted by `build_homepage`.
+export { RelativeDate } from "./relativeDate"
 export { CodeCopy } from "./codeCopy"
 //   * EmptyDoorFilter   — P4.1 — strips home-page list-items whose
 //     internal link resolves to an empty folder (e.g. `daily/` when

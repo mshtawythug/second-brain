@@ -756,6 +756,21 @@ def test_p4_home_renders_daily_door_and_recent_rail(e2e_build: str) -> None:
     ):
         assert needle in html, f"expected {needle!r} in rendered home page"
 
+    # Live relative-date span: the recent rail emits machine-readable
+    # `<span class="brain-rel-date" data-date="<ISO>">` markup (recomputed
+    # client-side) instead of a decaying baked string, and the recomputer
+    # script is injected. See `build_homepage` + the `RelativeDate`
+    # transformer.
+    assert 'class="brain-rel-date"' in html, (
+        "expected the `.brain-rel-date` recent-rail span in rendered home HTML"
+    )
+    assert "data-date=" in html, (
+        "expected a machine-readable `data-date` attribute on the recent-rail span"
+    )
+    assert "/static/relativeDate.js" in html, (
+        "expected the live relative-date recomputer script to be injected"
+    )
+
     daily_html = _fetch_first_text(
         e2e_build,
         ("/daily/", "/daily/index.html", "/daily/index", "/daily"),

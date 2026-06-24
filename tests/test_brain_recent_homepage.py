@@ -36,6 +36,7 @@ from brain.wiki.build_homepage import (
     RECENT_LIMIT,
     RecentDoc,
     _fetch_recent_docs,
+    _format_absolute_date,
     _format_relative_date,
     _render_bullets,
     _replace_fence,
@@ -136,6 +137,49 @@ def test_format_relative_date_buckets() -> None:
     assert _format_relative_date(future, today=today) == "today"
 
 
+def test_format_relative_date_boundary_table() -> None:
+    """Pin every bucket boundary so the Python side can't drift.
+
+    The client-side mirror (``static/relativeDate.js``) is exercised by the
+    e2e build; this table locks the source-of-truth buckets the JS copies:
+    0 → today, 1/6 → "Nd ago", 7/13/34 → "Nw ago", 35 → absolute, and a
+    future date → today.
+    """
+    today = datetime.date(2026, 6, 23)
+
+    def at(days: int) -> datetime.datetime:
+        d = today - datetime.timedelta(days=days)
+        return datetime.datetime(d.year, d.month, d.day, 12, 0, 0)
+
+    cases = {
+        0: "today",
+        1: "1d ago",
+        6: "6d ago",
+        7: "1w ago",
+        13: "1w ago",
+        34: "4w ago",
+    }
+    for days, expected in cases.items():
+        assert _format_relative_date(at(days), today=today) == expected, days
+    # 35 days → first day that rolls into the absolute "Mon D" branch.
+    assert _format_relative_date(at(35), today=today) == _format_absolute_date(at(35))
+    # Future date buckets as today.
+    future = datetime.datetime(today.year + 1, 1, 1, 12, 0, 0)
+    assert _format_relative_date(future, today=today) == "today"
+
+
+def test_format_absolute_date_no_leading_zero() -> None:
+    """``_format_absolute_date`` renders a portable ``"Mon D"`` (no zero-pad)."""
+    when = datetime.datetime(2026, 6, 5, 9, 30, 0)
+    assert _format_absolute_date(when) == "Jun 5"
+    # Two-digit day stays two digits.
+    assert _format_absolute_date(datetime.datetime(2026, 1, 10, 0, 0, 0)) == "Jan 10"
+    # The >= 35-day relative branch must agree with the absolute helper.
+    today = datetime.date(2026, 6, 23)
+    old = datetime.datetime(2026, 1, 10, 12, 0, 0)
+    assert _format_relative_date(old, today=today) == "Jan 10"
+
+
 def test_render_bullets_empty_corpus_emits_placeholder() -> None:
     """Empty docs list renders an italic placeholder, not a blank string."""
     out = _render_bullets([])
@@ -169,6 +213,76 @@ def test_render_bullets_strips_brackets_from_alias() -> None:
     docs = [_doc(title="Re: [External] foo", vault_path="_ingested/gmail/x.md")]
     out = _render_bullets(docs)
     assert "[[_ingested/gmail/x|Re: (External) foo]]" in out
+
+
+def test_render_bullets_emits_machine_readable_date_span() -> None:
+    """Each bullet ends with a ``.brain-rel-date`` span, not a baked string.
+
+    The span carries the ISO ``data-date`` (machine-readable source of
+    truth, recomputed client-side) and a NON-decaying absolute fallback
+    ("Jun 10") as its visible text. This is the fix for the decaying-string
+    bug: nothing relative ("today" / "1d ago") may be baked into the body.
+    """
+    ingested = datetime.datetime(2026, 6, 10, 14, 30, 0, tzinfo=datetime.UTC)
+    docs = [
+        RecentDoc(
+            title="Span doc",
+            source_kind="manual",
+            ingested_at=ingested,
+            vault_path="_ingested/manual/span.md",
+        )
+    ]
+    out = _render_bullets(docs)
+    # The span class hook + machine-readable ISO attribute are present.
+    assert 'class="brain-rel-date"' in out
+    assert f'data-date="{ingested.isoformat()}"' in out
+    # The inner text is the absolute fallback, not a relative literal.
+    expected_abs = _format_absolute_date(ingested)
+    assert f">{expected_abs}</span>" in out
+    # Full span shape, exact.
+    assert (
+        f'<span class="brain-rel-date" data-date="{ingested.isoformat()}">'
+        f"{expected_abs}</span>"
+    ) in out
+
+
+def test_render_bullets_bakes_no_decaying_relative_literal() -> None:
+    """No decaying relative phrase is baked into the rendered bullet.
+
+    Regression for the home-rail decay bug: a doc rendered N days before a
+    build used to read "Nd ago" forever. The body must now carry only the
+    absolute date — the relative phrase is computed client-side.
+    """
+    # Use a "1 day ago" doc — the old code would have baked literally "1d ago".
+    ingested = datetime.datetime.now().astimezone() - datetime.timedelta(days=1)
+    docs = [
+        RecentDoc(
+            title="Yesterday doc",
+            source_kind="manual",
+            ingested_at=ingested,
+            vault_path="_ingested/manual/yest.md",
+        )
+    ]
+    out = _render_bullets(docs)
+    assert "1d ago" not in out
+    assert "today" not in out
+    assert "ago" not in out
+    # But the machine-readable date IS present for the client to recompute.
+    assert 'class="brain-rel-date"' in out
+
+
+def test_quartz_config_registers_relative_date_plugin() -> None:
+    """``Plugin.RelativeDate()`` must be wired into the transformers list."""
+    cfg_path = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "brain" / "quartz_overrides"
+        / "quartz.config.ts"
+    )
+    src = cfg_path.read_text(encoding="utf-8")
+    assert "Plugin.RelativeDate()" in src, (
+        "the live relative-date transformer must be registered in "
+        "quartz.config.ts so /static/relativeDate.js is injected"
+    )
 
 
 # --------------------------------------------------------------------------
