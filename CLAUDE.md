@@ -5,7 +5,7 @@ IMPORTANT:
 2. You must pass ALL tests before committing.
 3. Maintain a minimum test coverage threshold of 85%. Per-module targets: pure logic (chunker, search, format) 95%, ingest pipeline 90%, CLI commands 85%.
 4. **NEVER commit or push without explicit user permission.** No exceptions — even in bypass permissions mode.
-5. USE Team mode (TeamCreate + teammates) for any multi-task work to keep the main context window clear. **Always use team-driven execution** (not inline) when executing implementation plans. See "Team Mode Override" section below.
+5. USE Team mode (native agent teams — dispatch Agent teammates; the team auto-forms, no TeamCreate/TeamDelete needed) for any multi-task work to keep the main context window clear. **Always use team-driven execution** (not inline) when executing implementation plans. See "Team Mode Override" section below.
 6. After edits, run the full test suite (`pytest`) and lint (`ruff check`). Fix bugs and update tests before claiming work complete.
 7. NEVER jump straight to code. Produce a written plan FIRST for any multi-file task. Get explicit approval before writing code.
 8. When referencing existing modules/functions, READ the actual source file first. Never guess field names, import paths, or function signatures.
@@ -28,13 +28,13 @@ IMPORTANT:
 
 ## Team Mode Override (MANDATORY — overrides superpowers skill routing)
 
-**ALL agent dispatching MUST use Team mode** (TeamCreate + Agent with team_name) instead of standalone Agent subagents. This applies to every superpowers skill that spawns agents:
+**ALL agent dispatching MUST use Team mode** (native agent teams — dispatch Agent teammates; the team auto-forms and is torn down automatically, so there is no TeamCreate/TeamDelete and no team_name to pass) instead of standalone Agent subagents. This applies to every superpowers skill that spawns agents:
 
 | Superpowers skill | Use instead | What changes |
 |---|---|---|
-| `superpowers:subagent-driven-development` | `team-driven-development` skill | TeamCreate at start, teammates with worktree isolation, SendMessage for coordination |
-| `superpowers:dispatching-parallel-agents` | `team-parallel-dispatch` skill | TeamCreate at start, parallel teammates with worktree isolation |
-| `superpowers:requesting-code-review` | Dispatch reviewer as teammate on existing team (if one exists), otherwise standalone Agent | Add team_name if team active |
+| `superpowers:subagent-driven-development` | `team-driven-development` skill | Teammates with worktree isolation, SendMessage for coordination (team auto-forms — no TeamCreate) |
+| `superpowers:dispatching-parallel-agents` | `team-parallel-dispatch` skill | Parallel teammates with worktree isolation (team auto-forms — no TeamCreate) |
+| `superpowers:requesting-code-review` | Dispatch reviewer as a teammate (it auto-joins the active team), otherwise standalone Agent | No team_name needed |
 | `superpowers:executing-plans` | Use `team-driven-development` instead of `subagent-driven-development` when it suggests subagents | Same redirect |
 | `superpowers:writing-plans` execution handoff | **NEVER offer a choice.** Skip the two-option prompt and proceed directly with `team-driven-development`. | No "Inline Execution" option, no question asked |
 

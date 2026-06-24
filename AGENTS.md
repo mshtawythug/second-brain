@@ -21,7 +21,7 @@ work*; these two files configure the workers themselves).
 
 ## Codex Agenting
 
-Codex does not provide Claude's `TeamCreate` tool in this session. The closest equivalent is Codex sub-agents:
+Codex does not provide Claude Code's native agent-teams (and Claude's old `TeamCreate`/`TeamDelete` tools no longer exist anywhere). The closest equivalent in Codex is sub-agents:
 
 - Use `explorer` agents for bounded codebase questions.
 - Use `worker` agents for scoped implementation work with clear file ownership.
