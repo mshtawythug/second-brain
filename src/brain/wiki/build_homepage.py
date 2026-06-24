@@ -94,11 +94,21 @@ class RecentDoc:
     ``vault_path`` is guaranteed non-empty by the SQL filter — the renderer
     relies on it to build the wiki-link target. Rows without a vault_path
     are excluded at the SQL layer (they aren't browseable yet).
+
+    ``display_date`` carries the doc's CONTENT/EVENT date, not its raw ingest
+    time: the SQL projects ``COALESCE(d.doc_date, d.ingested_at)`` so a Krisp
+    meeting held last week but ingested today ranks (and renders) by the
+    meeting date, not the processing timestamp. ``documents.doc_date`` is the
+    generated ``COALESCE(sent_at, ingested_at)`` column (migration 021); the
+    outer ``COALESCE`` guards corpora predating that migration. Both the
+    ordering and the rendered ``data-date`` span read this field, so the rail
+    stops mis-ranking on ``ingested_at`` (which the pipeline bulk-bumps when it
+    regenerates derived pages).
     """
 
     title: str
     source_kind: str | None
-    ingested_at: datetime.datetime
+    display_date: datetime.datetime
     vault_path: str
 
 
@@ -246,7 +256,7 @@ def regenerate_recent_fence(
 def _fetch_recent_docs(
     conn: psycopg.Connection[Any], *, limit: int
 ) -> list[RecentDoc]:
-    """Return the ``limit`` most-recently-ingested docs eligible for the rail.
+    """Return the ``limit`` most-recent docs (by event date) eligible for the rail.
 
     Filters applied at the SQL layer:
 
@@ -256,9 +266,25 @@ def _fetch_recent_docs(
       browseable from the wiki, so emitting a wiki-link would 404.
     - ``ingested_at IS NOT NULL`` — defensive; the column is ``NOT NULL``
       in 001_init.sql but the predicate guards a future schema relax.
+    - ``vault_path <> 'index.md'`` — the home note itself. Without this the
+      rail would list itself (the rail lives inside index.md), and because the
+      pipeline re-stamps the home note's ``ingested_at`` on every derived-page
+      regeneration it would otherwise sit permanently at the top.
+    - ``vault_path NOT LIKE 'people/%%'`` — the People-Hub auto-page namespace.
+      ``brain.wiki.build_people.emit_people_pages`` writes EVERY page it emits
+      under ``<vault>/people/`` (the per-person ``people/<slug>.md`` roster
+      pages + ``people/index.md``); those are machine-generated derived pages,
+      re-stamped ``ingested_at = now()`` on each People-Hub regeneration, so
+      after any Krisp/Slack batch they would swamp the rail. Path-based (not a
+      jsonb ``?`` lookup) so it never collides with psycopg ``%s`` placeholders;
+      the literal ``%`` is doubled because psycopg treats the SQL string as a
+      format template.
 
-    Sort is ``ingested_at DESC`` (the spec). LEFT JOIN against ``sources``
-    so vault-tier docs (no ``sources`` row) come back with ``source_kind=NULL``
+    Ranking + display both use ``COALESCE(d.doc_date, d.ingested_at)`` (the
+    doc's content/event date — see :class:`RecentDoc`), NOT raw ``ingested_at``,
+    so a meeting held last week but ingested today ranks by the meeting date.
+    Sort is that expression ``DESC``. LEFT JOIN against ``sources`` so
+    vault-tier docs (no ``sources`` row) come back with ``source_kind=NULL``
     rather than being silently dropped.
 
     Read-only — never INSERT/UPDATE/DELETE. Safe to call from any
@@ -266,13 +292,16 @@ def _fetch_recent_docs(
     """
     rows = conn.execute(
         """
-        SELECT d.title, s.kind, d.ingested_at, d.vault_path
+        SELECT d.title, s.kind, COALESCE(d.doc_date, d.ingested_at) AS display_date,
+               d.vault_path
         FROM documents d
         LEFT JOIN sources s ON s.id = d.source_id
         WHERE d.draft = FALSE
           AND d.vault_path IS NOT NULL
           AND d.ingested_at IS NOT NULL
-        ORDER BY d.ingested_at DESC
+          AND d.vault_path <> 'index.md'
+          AND d.vault_path NOT LIKE 'people/%%'
+        ORDER BY COALESCE(d.doc_date, d.ingested_at) DESC
         LIMIT %s
         """,
         (limit,),
@@ -281,10 +310,10 @@ def _fetch_recent_docs(
         RecentDoc(
             title=str(title),
             source_kind=str(kind) if kind is not None else None,
-            ingested_at=ingested_at,
+            display_date=display_date,
             vault_path=str(vault_path),
         )
-        for (title, kind, ingested_at, vault_path) in rows
+        for (title, kind, display_date, vault_path) in rows
     ]
 
 
@@ -317,14 +346,16 @@ def _render_bullets(docs: Sequence[RecentDoc]) -> str:
       ``[^\\[\\]\\#]``; bracketed prefixes like ``Re: [External] Re: …``
       from Gmail subjects would otherwise emit raw text. Same trick the
       derived-edges fence uses.
-    - ``{iso}`` is ``ingested_at.isoformat()`` — the machine-readable
+    - ``{iso}`` is ``display_date.isoformat()`` — the machine-readable
       source of truth the client script (``/static/relativeDate.js``)
       reads to recompute the relative text ("today" / "3d ago" / …) live
-      on every page load. Baking a relative string here would decay: a
-      doc ingested 3 days before a build still reads "3d ago" weeks later
-      because the home note isn't re-rendered daily. Emitting the absolute
-      date + recomputing client-side keeps the rail honest.
-    - ``{absolute}`` is :func:`_format_absolute_date` of ``ingested_at`` —
+      on every page load. ``display_date`` is the doc's content/event date
+      (``COALESCE(doc_date, ingested_at)``), so a meeting held last week but
+      ingested today renders "1w ago", not "today". Baking a relative string
+      here would decay: a doc 3 days old at build time still reads "3d ago"
+      weeks later because the home note isn't re-rendered daily. Emitting the
+      absolute date + recomputing client-side keeps the rail honest.
+    - ``{absolute}`` is :func:`_format_absolute_date` of ``display_date`` —
       a NON-decaying fallback (e.g. ``"Jun 10"``) shown verbatim if the
       client script never runs (JS disabled, parse failure). Both the ISO
       attribute and the absolute fallback are machine-generated (no user
@@ -340,8 +371,8 @@ def _render_bullets(docs: Sequence[RecentDoc]) -> str:
         icon = _SOURCE_ICONS.get(doc.source_kind or "vault", _DEFAULT_SOURCE_ICON)
         target = strip_md_extension(doc.vault_path)
         alias = safe_wikilink_alias(doc.title)
-        iso = doc.ingested_at.isoformat()
-        absolute = _format_absolute_date(doc.ingested_at)
+        iso = doc.display_date.isoformat()
+        absolute = _format_absolute_date(doc.display_date)
         span = f'<span class="brain-rel-date" data-date="{iso}">{absolute}</span>'
         lines.append(f"- {icon} [[{target}|{alias}]] · {span}")
     return "\n".join(lines) + "\n"

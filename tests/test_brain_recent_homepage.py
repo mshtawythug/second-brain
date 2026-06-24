@@ -57,7 +57,7 @@ def _doc(
     days_ago: int = 0,
     vault_path: str = "_ingested/manual/stub.md",
 ) -> RecentDoc:
-    """Build a ``RecentDoc`` with a date offset N days from today.
+    """Build a ``RecentDoc`` with a ``display_date`` offset N days from today.
 
     Defaults match the simplest seed; tests override per-case.
     """
@@ -65,7 +65,7 @@ def _doc(
     return RecentDoc(
         title=title,
         source_kind=source_kind,
-        ingested_at=today - datetime.timedelta(days=days_ago),
+        display_date=today - datetime.timedelta(days=days_ago),
         vault_path=vault_path,
     )
 
@@ -228,7 +228,7 @@ def test_render_bullets_emits_machine_readable_date_span() -> None:
         RecentDoc(
             title="Span doc",
             source_kind="manual",
-            ingested_at=ingested,
+            display_date=ingested,
             vault_path="_ingested/manual/span.md",
         )
     ]
@@ -259,7 +259,7 @@ def test_render_bullets_bakes_no_decaying_relative_literal() -> None:
         RecentDoc(
             title="Yesterday doc",
             source_kind="manual",
-            ingested_at=ingested,
+            display_date=ingested,
             vault_path="_ingested/manual/yest.md",
         )
     ]
@@ -428,10 +428,12 @@ def test_fence_idempotent_byte_stable(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------
 
 
-def test_fetch_recent_docs_orders_by_ingested_at_desc(
+def test_fetch_recent_docs_orders_by_display_date_desc(
     test_db: psycopg.Connection, seed_doc: Callable[..., str]
 ) -> None:
-    """Newest first. Uses seeded ingest order = ingest time order in tests."""
+    """Newest first by display date. Manual seeds have NULL ``sent_at``, so
+    ``doc_date`` falls back to ``ingested_at`` and ingest order == display
+    order here."""
     seed_doc(title="oldest", content="o")
     seed_doc(title="middle", content="m")
     seed_doc(title="newest", content="n")
@@ -500,6 +502,117 @@ def test_fetch_recent_docs_caps_at_limit(
         )
     docs = _fetch_recent_docs(test_db, limit=RECENT_LIMIT)
     assert len(docs) == RECENT_LIMIT
+
+
+def test_fetch_recent_docs_excludes_home_note(
+    test_db: psycopg.Connection, seed_doc: Callable[..., str]
+) -> None:
+    """The home note (``vault_path='index.md'``) must not list itself.
+
+    Regression: the rail lives inside ``index.md`` and the pipeline re-stamps
+    that row's ``ingested_at`` on every derived-page regen, so without the
+    explicit exclusion the home note would sit permanently at the top of its
+    own rail.
+    """
+    home_id = seed_doc(title="Second Brain", content="home")
+    keep_id = seed_doc(title="real doc", content="r")
+    test_db.execute(
+        "UPDATE documents SET vault_path = 'index.md' WHERE id = %s", (home_id,)
+    )
+    test_db.execute(
+        "UPDATE documents SET vault_path = '_ingested/manual/real-doc.md' "
+        "WHERE id = %s",
+        (keep_id,),
+    )
+    docs = _fetch_recent_docs(test_db, limit=10)
+    paths = [d.vault_path for d in docs]
+    titles = [d.title for d in docs]
+    assert "index.md" not in paths
+    assert "Second Brain" not in titles
+    assert "real doc" in titles
+
+
+def test_fetch_recent_docs_excludes_people_hub_pages(
+    test_db: psycopg.Connection, seed_doc: Callable[..., str]
+) -> None:
+    """People-Hub auto-pages (``people/*``) must not flood the rail.
+
+    Regression: ``emit_people_pages`` writes every page under ``people/`` and
+    re-stamps ``ingested_at = now()`` on each regen. Without the
+    ``NOT LIKE 'people/%'`` exclusion, a Krisp/Slack batch + People-Hub regen
+    would make the 12 newest rows ALL auto-generated person/index pages.
+    """
+    person_id = seed_doc(title="Pat Roster", content="p")
+    index_id = seed_doc(title="People", content="i")
+    keep_id = seed_doc(title="genuine note", content="g")
+    test_db.execute(
+        "UPDATE documents SET vault_path = 'people/pat-roster.md' WHERE id = %s",
+        (person_id,),
+    )
+    test_db.execute(
+        "UPDATE documents SET vault_path = 'people/index.md' WHERE id = %s",
+        (index_id,),
+    )
+    test_db.execute(
+        "UPDATE documents SET vault_path = '_ingested/manual/genuine-note.md' "
+        "WHERE id = %s",
+        (keep_id,),
+    )
+    docs = _fetch_recent_docs(test_db, limit=10)
+    paths = [d.vault_path for d in docs]
+    titles = [d.title for d in docs]
+    assert not any(p.startswith("people/") for p in paths)
+    assert "Pat Roster" not in titles
+    assert "People" not in titles
+    assert "genuine note" in titles
+
+
+def test_fetch_recent_docs_ranks_and_renders_by_event_date(
+    test_db: psycopg.Connection, seed_doc: Callable[..., str]
+) -> None:
+    """A doc whose event date (``doc_date``) predates its ``ingested_at`` ranks
+    and renders by the EVENT date, not the processing timestamp.
+
+    Regression for the bulk-bump bug: a Krisp meeting held 2026-06-11 but
+    ingested today must render its span ``data-date`` = the meeting date, not
+    ``ingested_at``. ``doc_date`` is the generated ``COALESCE(sent_at,
+    ingested_at)`` column, so we set ``sent_at`` to drive it.
+    """
+    # Krisp-style doc: event date well before ingest. ``sent_at`` feeds the
+    # generated ``doc_date`` column.
+    event_dt = datetime.datetime(2026, 6, 11, 9, 0, 0, tzinfo=datetime.UTC)
+    krisp_id = seed_doc(title="standup meeting", content="notes")
+    # Plain doc ingested before the Krisp event but with no event date — it
+    # must rank BELOW the Krisp doc once we order by event date.
+    older_id = seed_doc(title="older note", content="o")
+    test_db.execute(
+        "UPDATE documents SET vault_path = '_ingested/krisp/standup.md', "
+        "ingested_at = now(), sent_at = %s WHERE id = %s",
+        (event_dt, krisp_id),
+    )
+    test_db.execute(
+        "UPDATE documents SET vault_path = '_ingested/manual/older.md', "
+        "ingested_at = %s WHERE id = %s",
+        (datetime.datetime(2026, 6, 1, 0, 0, 0, tzinfo=datetime.UTC), older_id),
+    )
+
+    docs = _fetch_recent_docs(test_db, limit=10)
+    by_title = {d.title: d for d in docs}
+    assert "standup meeting" in by_title
+    # display_date carries the EVENT date, not the (today) ingest time.
+    assert by_title["standup meeting"].display_date == event_dt
+
+    # The rendered span's data-date is the event date, NOT ingested_at.
+    out = _render_bullets([by_title["standup meeting"]])
+    assert f'data-date="{event_dt.isoformat()}"' in out
+    assert f">{_format_absolute_date(event_dt)}</span>" in out
+
+    # Ranking: event-dated Krisp doc (2026-06-11) outranks the older note
+    # (ingested 2026-06-01), proving the ORDER BY uses the event date.
+    ordered_titles = [d.title for d in docs]
+    assert ordered_titles.index("standup meeting") < ordered_titles.index(
+        "older note"
+    )
 
 
 def test_refresh_homepage_writes_partial_and_fence(
