@@ -63,9 +63,12 @@
   ]
 
   // brain: project a Date onto local midnight so the delta is a calendar-
-  // day count (matching Python's `_to_date` → `astimezone().date()`),
-  // not a raw elapsed-hours count. Without this, a doc ingested at 23:59
-  // yesterday vs one at 00:01 today would mis-bucket near the boundary.
+  // day count (matching Python's local-midnight calendar-day delta; the
+  // UTC-vs-local date decision is made server-side in
+  // `_recent_calendar_date`, then emitted as the `YYYY-MM-DD` `data-date`
+  // this script parses as a local naive date), not a raw elapsed-hours
+  // count. Without this, a doc ingested at 23:59 yesterday vs one at 00:01
+  // today would mis-bucket near the boundary.
   function localMidnight(d) {
     return new Date(d.getFullYear(), d.getMonth(), d.getDate())
   }
