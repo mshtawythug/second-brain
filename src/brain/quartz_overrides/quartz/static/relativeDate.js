@@ -14,8 +14,12 @@
 // of its plugin pipeline. The only contracts are (a) Quartz keeps
 // copying `quartz/static/*` into `<build>/static/`, and (b) the
 // recent-rail markup keeps emitting `<span class="brain-rel-date"
-// data-date="<ISO 8601>">…</span>` (see
-// `brain.wiki.build_homepage._render_bullets`).
+// data-date="YYYY-MM-DD">…</span>` (see
+// `brain.wiki.build_homepage._render_bullets`). The `data-date` is a plain
+// CALENDAR date (`YYYY-MM-DD`, no time, no offset) — NOT a full ISO 8601
+// timestamp. It is parsed here as a LOCAL naive date (no UTC parse), so a
+// Krisp meeting stored at UTC-midnight renders on its real calendar day in
+// every timezone instead of shifting back a day.
 //
 // What this script does, and why: the recent rail in `index.md` used to
 // bake a relative string ("today", "3d ago") at BUILD time. That string
@@ -66,13 +70,23 @@
     return new Date(d.getFullYear(), d.getMonth(), d.getDate())
   }
 
-  // brain: compute the relative-date text for an ISO 8601 `data-date`.
-  // Returns `null` when the value is missing or parses to `Invalid Date`
-  // so the caller can leave the absolute fallback in place. Mirrors the
-  // bucket order in `_format_relative_date`.
+  // brain: compute the relative-date text for a `YYYY-MM-DD` `data-date`.
+  // Parses STRICTLY as a calendar date — split the parts and build a LOCAL
+  // midnight `Date` (`new Date(y, m-1, d)`), NEVER `new Date(iso)` (which
+  // would parse a bare `YYYY-MM-DD` as UTC and shift the day back in
+  // negative-offset zones — the off-by-one bug). Returns `null` when the
+  // value is missing or doesn't match the calendar-date shape (empty,
+  // garbage, or an old full-ISO timestamp) so the caller leaves the absolute
+  // fallback in place. Mirrors the bucket order in `_format_relative_date`.
   function relativeText(iso) {
     if (typeof iso !== "string" || iso.length === 0) return null
-    var when = new Date(iso)
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso)
+    if (m === null) return null
+    var when = new Date(
+      parseInt(m[1], 10),
+      parseInt(m[2], 10) - 1,
+      parseInt(m[3], 10),
+    )
     if (isNaN(when.getTime())) return null
 
     var nowMid = localMidnight(new Date())

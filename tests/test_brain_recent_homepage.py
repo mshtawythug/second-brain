@@ -38,6 +38,7 @@ from brain.wiki.build_homepage import (
     _fetch_recent_docs,
     _format_absolute_date,
     _format_relative_date,
+    _recent_calendar_date,
     _render_bullets,
     _replace_fence,
     refresh_homepage,
@@ -162,18 +163,22 @@ def test_format_relative_date_boundary_table() -> None:
     for days, expected in cases.items():
         assert _format_relative_date(at(days), today=today) == expected, days
     # 35 days → first day that rolls into the absolute "Mon D" branch.
-    assert _format_relative_date(at(35), today=today) == _format_absolute_date(at(35))
+    assert _format_relative_date(at(35), today=today) == _format_absolute_date(
+        _recent_calendar_date(at(35))
+    )
     # Future date buckets as today.
     future = datetime.datetime(today.year + 1, 1, 1, 12, 0, 0)
     assert _format_relative_date(future, today=today) == "today"
 
 
 def test_format_absolute_date_no_leading_zero() -> None:
-    """``_format_absolute_date`` renders a portable ``"Mon D"`` (no zero-pad)."""
-    when = datetime.datetime(2026, 6, 5, 9, 30, 0)
-    assert _format_absolute_date(when) == "Jun 5"
+    """``_format_absolute_date`` renders a portable ``"Mon D"`` (no zero-pad).
+
+    Takes a ``datetime.date`` (the already-computed calendar date) directly.
+    """
+    assert _format_absolute_date(datetime.date(2026, 6, 5)) == "Jun 5"
     # Two-digit day stays two digits.
-    assert _format_absolute_date(datetime.datetime(2026, 1, 10, 0, 0, 0)) == "Jan 10"
+    assert _format_absolute_date(datetime.date(2026, 1, 10)) == "Jan 10"
     # The >= 35-day relative branch must agree with the absolute helper.
     today = datetime.date(2026, 6, 23)
     old = datetime.datetime(2026, 1, 10, 12, 0, 0)
@@ -218,12 +223,18 @@ def test_render_bullets_strips_brackets_from_alias() -> None:
 def test_render_bullets_emits_machine_readable_date_span() -> None:
     """Each bullet ends with a ``.brain-rel-date`` span, not a baked string.
 
-    The span carries the ISO ``data-date`` (machine-readable source of
-    truth, recomputed client-side) and a NON-decaying absolute fallback
-    ("Jun 10") as its visible text. This is the fix for the decaying-string
-    bug: nothing relative ("today" / "1d ago") may be baked into the body.
+    The span carries a plain ``YYYY-MM-DD`` calendar ``data-date`` (the
+    machine-readable source of truth, recomputed client-side) and a
+    NON-decaying absolute fallback ("Jun 22") as its visible text. This is
+    the fix for the decaying-string bug: nothing relative ("today" / "1d
+    ago") may be baked into the body. ``data-date`` is a calendar date, NOT a
+    full ISO timestamp, so the client never re-parses it as UTC.
+
+    A real timestamp (non-UTC-midnight) goes through the LOCAL branch of
+    :func:`_recent_calendar_date`, which is host-tz-dependent — so assert
+    against the helper's own output, not a hardcoded date, to stay portable.
     """
-    ingested = datetime.datetime(2026, 6, 10, 14, 30, 0, tzinfo=datetime.UTC)
+    ingested = datetime.datetime(2026, 6, 22, 14, 30, 0, tzinfo=datetime.UTC)
     docs = [
         RecentDoc(
             title="Span doc",
@@ -233,15 +244,19 @@ def test_render_bullets_emits_machine_readable_date_span() -> None:
         )
     ]
     out = _render_bullets(docs)
-    # The span class hook + machine-readable ISO attribute are present.
+    cal_date = _recent_calendar_date(ingested)
+    expected_iso = cal_date.isoformat()
+    # data-date is a plain calendar date (YYYY-MM-DD), not a full timestamp.
+    assert "T" not in expected_iso
+    # The span class hook + machine-readable calendar-date attribute present.
     assert 'class="brain-rel-date"' in out
-    assert f'data-date="{ingested.isoformat()}"' in out
+    assert f'data-date="{expected_iso}"' in out
     # The inner text is the absolute fallback, not a relative literal.
-    expected_abs = _format_absolute_date(ingested)
+    expected_abs = _format_absolute_date(cal_date)
     assert f">{expected_abs}</span>" in out
     # Full span shape, exact.
     assert (
-        f'<span class="brain-rel-date" data-date="{ingested.isoformat()}">'
+        f'<span class="brain-rel-date" data-date="{expected_iso}">'
         f"{expected_abs}</span>"
     ) in out
 
@@ -269,6 +284,52 @@ def test_render_bullets_bakes_no_decaying_relative_literal() -> None:
     assert "ago" not in out
     # But the machine-readable date IS present for the client to recompute.
     assert 'class="brain-rel-date"' in out
+
+
+def test_recent_calendar_date_uses_utc_for_utc_midnight_date_only() -> None:
+    """DATE-ONLY content (UTC-midnight) keeps its UTC calendar date — no shift.
+
+    Regression for the off-by-one timezone bug: a Krisp meeting stored as
+    ``2026-06-11T00:00:00+00:00`` must render "Jun 11", NOT "Jun 10". The old
+    code projected to local time (``astimezone().date()``), so in a UTC−7 zone
+    the date slipped back a day. The fix detects exact-UTC-midnight datetimes
+    and uses the UTC calendar date verbatim.
+
+    Asserted on the UTC branch directly (deterministic, host-tz-independent):
+    we do NOT rely on the test host being in a negative-offset zone.
+    """
+    date_only = datetime.datetime(2026, 6, 11, 0, 0, tzinfo=datetime.UTC)
+    # Helper returns the UTC calendar date, regardless of the host's tz.
+    assert _recent_calendar_date(date_only) == datetime.date(2026, 6, 11)
+
+    # And the rendered bullet carries data-date="2026-06-11" + "Jun 11".
+    docs = [
+        RecentDoc(
+            title="standup",
+            source_kind="krisp",
+            display_date=date_only,
+            vault_path="_ingested/krisp/standup.md",
+        )
+    ]
+    out = _render_bullets(docs)
+    assert 'data-date="2026-06-11"' in out
+    assert ">Jun 11</span>" in out
+    # The bug would have produced "Jun 10" / "2026-06-10" in a UTC−7 host.
+    assert "Jun 10" not in out
+    assert "2026-06-10" not in out
+
+
+def test_recent_calendar_date_uses_local_for_real_timestamp() -> None:
+    """REAL timestamps (non-UTC-midnight) keep the LOCAL projection.
+
+    Gmail ``sent_at`` / note ``ingested_at`` are true wall-clock instants and
+    genuinely want local-date projection (a 23:30 UTC send is "tomorrow" in a
+    positive-offset zone). This branch is host-tz-dependent, so assert the
+    helper equals ``when.astimezone().date()`` rather than a hardcoded date —
+    portable across whatever tz the test host runs in.
+    """
+    real_ts = datetime.datetime(2026, 6, 22, 3, 0, tzinfo=datetime.UTC)
+    assert _recent_calendar_date(real_ts) == real_ts.astimezone().date()
 
 
 def test_quartz_config_registers_relative_date_plugin() -> None:
@@ -602,10 +663,14 @@ def test_fetch_recent_docs_ranks_and_renders_by_event_date(
     # display_date carries the EVENT date, not the (today) ingest time.
     assert by_title["standup meeting"].display_date == event_dt
 
-    # The rendered span's data-date is the event date, NOT ingested_at.
+    # The rendered span's data-date is the event date's calendar date, NOT
+    # ingested_at. ``event_dt`` is 09:00 UTC (a real timestamp), so it goes
+    # through the LOCAL branch of ``_recent_calendar_date`` — assert against
+    # the helper output to stay host-tz-independent.
     out = _render_bullets([by_title["standup meeting"]])
-    assert f'data-date="{event_dt.isoformat()}"' in out
-    assert f">{_format_absolute_date(event_dt)}</span>" in out
+    event_cal = _recent_calendar_date(event_dt)
+    assert f'data-date="{event_cal.isoformat()}"' in out
+    assert f">{_format_absolute_date(event_cal)}</span>" in out
 
     # Ranking: event-dated Krisp doc (2026-06-11) outranks the older note
     # (ingested 2026-06-01), proving the ORDER BY uses the event date.
