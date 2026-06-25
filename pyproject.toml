@@ -152,3 +152,15 @@ strict = true
 [[tool.mypy.overrides]]
 module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*", "watchdog.*", "networkx.*"]
 ignore_missing_imports = true
+
+# numpy (transitive via networkx) ships PEP 695 `type X = ...` aliases in its
+# bundled stubs, which are 3.12+ syntax. With our `python_version = "3.11"`
+# target, mypy rejects that syntax in `numpy/__init__.pyi` and halts before it
+# ever reaches brain code ("errors prevented further checking"). We never import
+# numpy directly, so skip following into it entirely — keeps the 3.11 target for
+# our own code while unblocking the gate. `follow_imports_for_stubs` makes the
+# skip apply to the `.pyi` too (not just runtime modules).
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
