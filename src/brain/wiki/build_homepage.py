@@ -331,7 +331,7 @@ def _render_bullets(docs: Sequence[RecentDoc]) -> str:
 
     where the trailing token is a machine-readable relative-date span:
 
-        ``<span class="brain-rel-date" data-date="{iso}">{absolute}</span>``
+        ``<span class="brain-rel-date" data-date="YYYY-MM-DD">{absolute}</span>``
 
     and:
 
@@ -346,20 +346,25 @@ def _render_bullets(docs: Sequence[RecentDoc]) -> str:
       ``[^\\[\\]\\#]``; bracketed prefixes like ``Re: [External] Re: …``
       from Gmail subjects would otherwise emit raw text. Same trick the
       derived-edges fence uses.
-    - ``{iso}`` is ``display_date.isoformat()`` — the machine-readable
-      source of truth the client script (``/static/relativeDate.js``)
-      reads to recompute the relative text ("today" / "3d ago" / …) live
-      on every page load. ``display_date`` is the doc's content/event date
-      (``COALESCE(doc_date, ingested_at)``), so a meeting held last week but
-      ingested today renders "1w ago", not "today". Baking a relative string
-      here would decay: a doc 3 days old at build time still reads "3d ago"
-      weeks later because the home note isn't re-rendered daily. Emitting the
-      absolute date + recomputing client-side keeps the rail honest.
-    - ``{absolute}`` is :func:`_format_absolute_date` of ``display_date`` —
-      a NON-decaying fallback (e.g. ``"Jun 10"``) shown verbatim if the
-      client script never runs (JS disabled, parse failure). Both the ISO
-      attribute and the absolute fallback are machine-generated (no user
-      content), so neither needs HTML-escaping.
+    - ``{cal_date}`` is :func:`_recent_calendar_date` of ``display_date`` —
+      a plain ``YYYY-MM-DD`` calendar date (NOT a full ISO timestamp), the
+      machine-readable source of truth the client script
+      (``/static/relativeDate.js``) reads to recompute the relative text
+      ("today" / "3d ago" / …) live on every page load. ``display_date`` is
+      the doc's content/event date (``COALESCE(doc_date, ingested_at)``), so a
+      meeting held last week but ingested today renders "1w ago", not "today".
+      Emitting a plain calendar date (parsed client-side as a LOCAL naive
+      date) avoids the off-by-one timezone drift that a full ISO timestamp
+      caused for UTC-midnight date-only docs (Krisp meetings, ``--date``
+      ingests). Baking a relative string here would decay: a doc 3 days old at
+      build time still reads "3d ago" weeks later because the home note isn't
+      re-rendered daily. Emitting the calendar date + recomputing client-side
+      keeps the rail honest.
+    - ``{absolute}`` is :func:`_format_absolute_date` of the computed
+      calendar date — a NON-decaying fallback (e.g. ``"Jun 11"``) shown
+      verbatim if the client script never runs (JS disabled, parse failure).
+      Both the ``data-date`` attribute and the absolute fallback are
+      machine-generated (no user content), so neither needs HTML-escaping.
 
     Trailing newline so the body always ends Unix-cleanly.
     """
@@ -371,8 +376,12 @@ def _render_bullets(docs: Sequence[RecentDoc]) -> str:
         icon = _SOURCE_ICONS.get(doc.source_kind or "vault", _DEFAULT_SOURCE_ICON)
         target = strip_md_extension(doc.vault_path)
         alias = safe_wikilink_alias(doc.title)
-        iso = doc.display_date.isoformat()
-        absolute = _format_absolute_date(doc.display_date)
+        cal_date = _recent_calendar_date(doc.display_date)
+        # ``date.isoformat()`` yields ``YYYY-MM-DD`` — a plain calendar date,
+        # no time component, no tz offset. The client parses it as a local
+        # naive date, so no timezone shift occurs on either side.
+        iso = cal_date.isoformat()
+        absolute = _format_absolute_date(cal_date)
         span = f'<span class="brain-rel-date" data-date="{iso}">{absolute}</span>'
         lines.append(f"- {icon} [[{target}|{alias}]] · {span}")
     return "\n".join(lines) + "\n"
@@ -446,8 +455,14 @@ def _format_relative_date(
     Future dates (clock skew, manual ``ingested_at`` overrides) bucket as
     ``"today"`` — a recent rail with a pretend-future bullet shouldn't
     surface ``"-3d ago"``.
+
+    The calendar-day delta is computed from :func:`_recent_calendar_date`
+    (NOT a plain local projection) so this parity reference applies the same
+    UTC-midnight-vs-local rule the rendered span carries — keeping it in
+    lock-step with what ``relativeDate.js`` recomputes from the emitted
+    ``data-date``.
     """
-    when_date = _to_date(when)
+    when_date = _recent_calendar_date(when)
     delta = (today - when_date).days
     if delta <= 0:
         return "today"
@@ -459,40 +474,68 @@ def _format_relative_date(
     # falls back to. Delegated to :func:`_format_absolute_date` so the two
     # surfaces (this >= 35-day branch and the client-side span fallback)
     # stay byte-identical without a second copy of the portable day-build.
-    return _format_absolute_date(when)
+    return _format_absolute_date(when_date)
 
 
-def _format_absolute_date(when: datetime.datetime) -> str:
-    """Render ``when`` as a locale-independent absolute ``"Mon D"`` date.
+def _format_absolute_date(cal_date: datetime.date) -> str:
+    """Render an already-computed calendar date as a portable ``"Mon D"``.
 
-    Example: a doc ingested 2026-06-10 → ``"Jun 10"`` (no leading zero on
-    the day). This is the NON-decaying fallback baked into the recent-rail
-    span's text content — the client script overwrites it with a live
-    relative string, but if JS never runs (disabled, parse failure) the
-    absolute date is what the reader sees.
+    Example: ``date(2026, 6, 11)`` → ``"Jun 11"`` (no leading zero on the
+    day). This is the NON-decaying fallback baked into the recent-rail span's
+    text content — the client script overwrites it with a live relative
+    string, but if JS never runs (disabled, parse failure) the absolute date
+    is what the reader sees.
 
     ``%-d`` is GNU/BSD-specific (no leading zero); on Windows the right
-    spelling is ``%#d``. Both are absent from POSIX. Build the day
-    ourselves from ``.day`` (an ``int``) to stay portable across hosts.
+    spelling is ``%#d``. Both are absent from POSIX. Build the day ourselves
+    from ``.day`` (an ``int``) to stay portable across hosts.
 
-    Projects ``when`` onto the local calendar date via :func:`_to_date`
-    first, matching the relative-date buckets so the absolute fallback and
-    the relative text agree on which calendar day a doc lands on.
+    Takes the calendar ``date`` directly (computed by
+    :func:`_recent_calendar_date`) so the absolute fallback and the relative
+    text agree on which calendar day a doc lands on — no second projection,
+    no chance of drift.
     """
-    when_date = _to_date(when)
-    month = when_date.strftime("%b")
-    return f"{month} {when_date.day}"
+    month = cal_date.strftime("%b")
+    return f"{month} {cal_date.day}"
 
 
-def _to_date(when: datetime.datetime) -> datetime.date:
-    """Project a (possibly tz-aware) datetime onto the local calendar date.
+def _recent_calendar_date(when: datetime.datetime) -> datetime.date:
+    """Project a doc's ``display_date`` onto the calendar date to display.
 
-    ``ingested_at`` is stored as ``TIMESTAMPTZ`` in Postgres; psycopg
-    returns a tz-aware datetime. Convert to local time before slicing the
-    date so a doc ingested at 23:30 UTC doesn't render as "tomorrow" for
-    a user in UTC-5.
+    Two kinds of timestamp flow through the recent rail and they want
+    different projections:
+
+    - DATE-ONLY content — Krisp meeting dates and ``--date`` ingests are
+      stored as UTC-midnight date-only values (e.g.
+      ``2026-06-11T00:00:00+00:00``). These carry no real time-of-day; the
+      intent is purely "June 11". Projecting them to LOCAL time shifts the
+      date back a day in any negative-offset zone (UTC−7 → "Jun 10"), the
+      off-by-one bug this fixes. For these, use the **UTC** calendar date
+      verbatim — no local shift.
+    - REAL timestamps — Gmail ``sent_at`` and note ``ingested_at`` are true
+      wall-clock instants. A doc sent at 23:30 UTC genuinely belongs to the
+      reader's local "tomorrow" in a positive-offset zone, so these keep the
+      LOCAL projection (``astimezone().date()``), the original behavior.
+
+    The heuristic — "exactly 00:00:00.000000 in UTC ⇒ date-only" — is safe
+    because real timestamps essentially never land on exact UTC midnight:
+    ``ingested_at`` is a microsecond-resolution clock and Gmail send-times
+    carry seconds. The worst-case misfire is a 1-day display difference on an
+    astronomically rare exact-UTC-midnight email; the upside is correct dates
+    for every Krisp call and ``--date`` ingest.
+
+    Naive (tz-less) datetimes are treated as already-local and projected via
+    ``.date()`` directly — they predate the TIMESTAMPTZ era and the UTC
+    heuristic can't apply without a tzinfo.
     """
-    if when.tzinfo is not None:
-        when = when.astimezone()
-    return when.date()
+    if when.tzinfo is None:
+        return when.date()
+    as_utc = when.astimezone(datetime.UTC)
+    if as_utc.hour == 0 and as_utc.minute == 0 and as_utc.second == 0 and (
+        as_utc.microsecond == 0
+    ):
+        # Date-only content: trust the UTC calendar date, no local shift.
+        return as_utc.date()
+    # Real timestamp: project onto the reader's local calendar date.
+    return when.astimezone().date()
 
