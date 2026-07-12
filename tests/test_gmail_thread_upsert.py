@@ -462,6 +462,7 @@ def test_legacy_per_message_ingest_still_works(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.fresh_schema
 def test_migration_008_is_idempotent(test_db: psycopg.Connection) -> None:
     """Running migration 008 twice is a no-op (CREATE INDEX IF NOT EXISTS)."""
     # The fixture already ran every migration once, including 008.

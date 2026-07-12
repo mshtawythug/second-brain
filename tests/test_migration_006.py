@@ -14,6 +14,10 @@ that previously ran migration 004 converges to the same shape, and
 from pathlib import Path
 
 import psycopg
+import pytest
+
+# Tests here DROP/CREATE indexes to simulate pre-006 states (schema mutation).
+pytestmark = pytest.mark.fresh_schema
 
 _MIGRATION_006 = (
     Path(__file__).parent.parent / "migrations" / "006_dedup_file_by_source_path.sql"

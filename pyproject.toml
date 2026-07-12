@@ -130,6 +130,17 @@ markers = [
   # ``eval`` / ``benchmark``) so v1/v2 CI passes without migration 021 applied;
   # opt IN with `-m phase3`.
   "phase3: requires the optional migration-021 doc_date column (brain timeline Phase 3)",
+  # Wave 6.1 — test-DB reset strategy opt-out. The per-test ``test_db`` fixture
+  # normally does a cheap ``TRUNCATE`` reset on top of a schema migrated ONCE per
+  # session (conftest ``_truncate_reset``). Tests that mutate the *schema* itself
+  # (DROP/ALTER/CREATE on tables, indexes, extensions; ``ensure_embedding_column``
+  # resizes; ``finalize_embedding_index`` NOT NULL/index; re-running migrations;
+  # own-connection ``DROP SCHEMA``) must carry this marker: the fixture then falls
+  # back to the full ``DROP SCHEMA`` + migrate reset for that test AND an autouse
+  # teardown re-establishes the migrated-once baseline afterwards, so the next
+  # (TRUNCATE-only) test is not poisoned by the leaked schema mutation. INCLUDED
+  # in the default suite — it is a routing hint, not an exclusion filter.
+  "fresh_schema: needs a full drop+migrate reset (mutates schema, not just data)",
 ]
 
 [tool.ruff]

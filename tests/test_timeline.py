@@ -557,6 +557,7 @@ def test_coalesce_fallback_to_ingested_at(
     assert ctx.buckets[0].doc_count == 1
 
 
+@pytest.mark.fresh_schema
 def test_build_timeline_inline_coalesce_when_doc_date_absent(
     test_db: psycopg.Connection[Any], seed_doc: Callable[..., str]
 ) -> None:

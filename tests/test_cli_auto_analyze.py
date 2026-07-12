@@ -8,6 +8,7 @@ Two layers:
 """
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -227,28 +228,33 @@ def test_ingest_dir_updates_pg_stat_last_analyze(
     fixtures_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """After a real ingest-dir, ANALYZE lands on chunks + documents.
+    """After a real ingest-dir, ANALYZE ADVANCES last_analyze on chunks + documents.
 
-    ``test_db`` reset the schema, so ``last_analyze`` starts NULL for both
-    tables. The CLI opens its own connection and runs ANALYZE at the end of
-    the ingest; ``pg_stat_user_tables`` is database-global, so we read it back
-    from the fixture connection.
+    ``pg_stat_user_tables.last_analyze`` is NOT reset by the per-test TRUNCATE
+    reset (migrate-once strategy), so a prior test's ANALYZE can leave it
+    non-NULL. Capture the values BEFORE the ingest and assert the run moved them
+    forward — an ``IS NOT NULL`` check alone would pass vacuously. The CLI opens
+    its own connection and runs ANALYZE at the end of the ingest;
+    ``pg_stat_user_tables`` is database-global, so we read it back from the
+    fixture connection.
     """
     _wire_env(monkeypatch, tmp_path)
 
     before = _last_analyze(test_db)
-    assert before["chunks"] is None
-    assert before["documents"] is None
 
     result = CliRunner().invoke(app, ["ingest-dir", str(fixtures_dir)])
     assert result.exit_code == 0, result.output
 
     after = _last_analyze(test_db)
-    assert after["chunks"] is not None, "chunks should have been ANALYZEd"
-    assert after["documents"] is not None, "documents should have been ANALYZEd"
+    for table in ("chunks", "documents"):
+        prev, now = before.get(table), after.get(table)
+        assert now is not None, f"{table} should have been ANALYZEd"
+        assert prev is None or now > prev, (
+            f"{table}.last_analyze did not advance: {prev} -> {now}"
+        )
 
 
-def _last_analyze(conn: psycopg.Connection) -> dict[str, object]:
+def _last_analyze(conn: psycopg.Connection) -> dict[str, datetime | None]:
     conn.execute("SELECT pg_stat_clear_snapshot()")
     rows = conn.execute(
         "SELECT relname, last_analyze FROM pg_stat_user_tables "

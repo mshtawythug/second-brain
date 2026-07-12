@@ -1,6 +1,11 @@
 """Test harness — uses a real Postgres test DB and a fake embedder.
 
-The test DB is reset (schema dropped + recreated) before each test that uses it.
+The schema is migrated ONCE per session (:func:`_ensure_test_db_initialized`);
+each test that takes ``test_db`` then gets a cheap ``TRUNCATE`` data-reset
+(:func:`_truncate_reset`). Tests that mutate the schema itself carry
+``@pytest.mark.fresh_schema`` and get the full ``DROP SCHEMA`` + migrate reset,
+with :func:`_restore_baseline_after_fresh_schema` restoring the migrated-once
+baseline afterwards so the next TRUNCATE-only test is unaffected.
 """
 
 import hashlib
@@ -13,6 +18,7 @@ from urllib.parse import urlparse
 import psycopg
 import pytest
 from dotenv import dotenv_values, load_dotenv
+from psycopg import sql
 
 from brain.db import connect, run_migrations
 from brain.ingest import ExtractedDoc, ingest_document
@@ -310,13 +316,102 @@ def _ensure_test_db_initialized(_force_test_database_url: None) -> Iterator[None
     yield
 
 
+def _truncate_reset(conn: psycopg.Connection) -> None:
+    """Cheap per-test reset: empty every user table + reset the AGE graph.
+
+    The migrate-once session fixture (:func:`_ensure_test_db_initialized`) applies
+    all migrations exactly once at session start; this is the per-test cleanup that
+    every test uses UNLESS it carries ``@pytest.mark.fresh_schema``. It touches
+    DATA only — never the schema or extensions — so it is immune to the
+    vector-extension orphaning that historically bricked the whole test DB when a
+    ``DROP SCHEMA`` reset was killed mid-flight (see
+    :func:`_reset_schema_and_migrate`). There is deliberately NO extension/schema
+    shuffling here: the only DDL is ``TRUNCATE`` (data, not schema) plus the
+    canonical-graph drop that mirrors the full reset.
+
+    Two steps:
+
+    1. :func:`_reset_age_graph` drops the canonical ``brain_graph``. AGE graph
+       state lives in ``ag_catalog`` + a per-graph schema, NOT ``public``, so
+       ``TRUNCATE`` on public tables cannot reach it; this mirrors exactly what the
+       full reset does (and idempotently ensures the ``age`` extension exists).
+    2. ``TRUNCATE ... RESTART IDENTITY CASCADE`` every base table in ``public``
+       EXCEPT ``schema_migrations`` — that table records the migrate-once state and
+       MUST survive, or the next test would find an unmigrated schema. Identifiers
+       are schema-qualified and quoted via :class:`psycopg.sql.Identifier`.
+
+    Tests that mutate the schema itself (DDL — dropped indexes, resized embedding
+    columns, re-run migrations, own-connection ``DROP SCHEMA``) must instead carry
+    ``@pytest.mark.fresh_schema``; the :func:`test_db` fixture routes those to the
+    full reset and :func:`_restore_baseline_after_fresh_schema` re-establishes the
+    migrated-once baseline afterwards.
+    """
+    # DB-SAFETY: guard the ACTUAL connection target before any writes — mirrors
+    # the guard in :func:`_reset_schema_and_migrate`.
+    _assert_not_prod_db(conn.info.host, conn.info.port, conn.info.dbname)
+
+    # AGE graph state lives outside ``public`` — TRUNCATE can't reach it. Drop the
+    # canonical graph first, exactly as the full reset does.
+    _reset_age_graph(conn)
+
+    rows = conn.execute(
+        "SELECT tablename FROM pg_tables "
+        "WHERE schemaname = 'public' AND tablename <> 'schema_migrations'"
+    ).fetchall()
+    tables = [str(r[0]) for r in rows]
+    if not tables:
+        return
+    stmt = sql.SQL("TRUNCATE TABLE {} RESTART IDENTITY CASCADE").format(
+        sql.SQL(", ").join(sql.Identifier("public", t) for t in tables)
+    )
+    conn.execute(stmt)
+
+
 @pytest.fixture
-def test_db() -> Iterator[psycopg.Connection]:
-    """Fresh schema in the test DB for each test."""
+def test_db(request: pytest.FixtureRequest) -> Iterator[psycopg.Connection]:
+    """Per-test test-DB connection with a clean starting state.
+
+    Default (no marker): a cheap ``TRUNCATE`` reset (:func:`_truncate_reset`) on
+    top of the schema migrated ONCE per session — data cleared, schema untouched.
+
+    ``@pytest.mark.fresh_schema``: the full ``DROP SCHEMA`` + migrate reset
+    (:func:`_reset_schema_and_migrate`), for tests that mutate the schema itself.
+    :func:`_restore_baseline_after_fresh_schema` restores the migrated-once
+    baseline after such a test so the next TRUNCATE-only test is not poisoned.
+    """
     with connect(TEST_DATABASE_URL) as conn:
         conn.autocommit = True
-        _reset_schema_and_migrate(conn)
+        if request.node.get_closest_marker("fresh_schema"):
+            _reset_schema_and_migrate(conn)
+        else:
+            _truncate_reset(conn)
         yield conn
+
+
+@pytest.fixture(autouse=True)
+def _restore_baseline_after_fresh_schema(
+    request: pytest.FixtureRequest,
+) -> Iterator[None]:
+    """Restore the migrated-once baseline after any ``fresh_schema`` test.
+
+    ``fresh_schema`` tests mutate the schema (dropped indexes, resized embedding
+    columns, re-run migrations, own-connection ``DROP SCHEMA``). The per-test
+    :func:`_truncate_reset` that every OTHER test uses clears DATA only — it cannot
+    undo a schema mutation. So after a ``fresh_schema`` test finishes we run the
+    full drop+migrate reset once, re-establishing the baseline the next
+    TRUNCATE-only test relies on. This also covers tests that DDL on their own
+    connection and never take the :func:`test_db` fixture (e.g. the
+    ``run_migrations`` tests in ``test_db.py``).
+
+    Autouse so it fires for EVERY test, but the teardown is just a marker check for
+    the ~5.3k non-schema tests — only the handful of ``fresh_schema`` tests pay the
+    reset.
+    """
+    yield
+    if request.node.get_closest_marker("fresh_schema"):
+        with connect(TEST_DATABASE_URL) as conn:
+            conn.autocommit = True
+            _reset_schema_and_migrate(conn)
 
 
 class FakeEmbedder:

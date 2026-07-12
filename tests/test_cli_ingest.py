@@ -16,10 +16,31 @@ TEST_DATABASE_URL = os.environ.get(
 
 
 def _patch_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Swap the real Qwen3Embedder builder for the FakeEmbedder fixture."""
+    """Swap the real embedder for FakeEmbedder and disable the two LLM
+    post-ingest hooks (Ollama enrichment + graph sync).
+
+    These CLI ingest tests assert file-walking / dedup / mirror / output
+    behavior — NOT enrichment summaries or graph entities (each covered by its
+    own suite). With a warm Ollama on the dev box, the default hooks fire a
+    per-document LLM call on every non-trivial fixture (the 51 KB text file, the
+    two 36 KB .docx, the quartz-vault markdown), which is what made
+    ``test_ingest_dir_recursive`` (~123 s) and ``test_ingest_dir_ext_filter``
+    (~50 s) the two slowest tests in the suite. Stubbing the hooks keeps the
+    ingest-walking behavior under test while removing that incidental — and
+    Ollama-availability-dependent — LLM overhead, so the tests are fast and
+    deterministic regardless of whether a model is loaded (matching CI, which has
+    no Ollama).
+
+    - ``_build_enricher`` → ``None``: ``ingest_document`` treats a ``None``
+      enricher as a no-op (documented in the pipeline), so no summary is fetched.
+    - ``BRAIN_GRAPH_ENABLED=false``: the real ``GraphSyncer.reconcile`` returns
+      immediately when graph sync is disabled — no per-doc entity extraction.
+    """
     from tests.conftest import FakeEmbedder
 
     monkeypatch.setattr("brain.cli._build_embedder", lambda cfg: FakeEmbedder())
+    monkeypatch.setattr("brain.cli._build_enricher", lambda cfg: None)
+    monkeypatch.setenv("BRAIN_GRAPH_ENABLED", "false")
 
 
 def test_ingest_single_file(

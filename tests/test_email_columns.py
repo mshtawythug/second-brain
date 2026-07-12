@@ -26,6 +26,10 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
 
+# Tests here own-connection ``DROP SCHEMA`` + migrate and re-apply migration 007
+# SQL directly (schema mutation).
+pytestmark = pytest.mark.fresh_schema
+
 
 # --- migration ---------------------------------------------------------------
 

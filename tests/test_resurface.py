@@ -432,6 +432,7 @@ def test_resurface_docs_uses_config_defaults(test_db: psycopg.Connection) -> Non
     assert len(items) == 2
 
 
+@pytest.mark.fresh_schema
 def test_resurface_docs_null_doc_ts_excluded(test_db: psycopg.Connection) -> None:
     """A row with both sent_at and ingested_at NULL is excluded by the guard.
 

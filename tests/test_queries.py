@@ -29,6 +29,11 @@ from brain.queries import (
     summary_counts,
 )
 
+# The ``finalize_embedding_index`` tests below apply NOT NULL / build indexes /
+# resize the embedding column (schema mutation) — route the whole module to the
+# full drop+migrate reset via the Wave 6.1 ``fresh_schema`` marker.
+pytestmark = pytest.mark.fresh_schema
+
 
 def _seed_doc_for_chunks(conn: psycopg.Connection) -> str:
     """Insert a parent ``documents`` row and return its id (no chunks)."""

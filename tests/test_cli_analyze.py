@@ -6,6 +6,7 @@ post-pg_restore "chunks stats WARN — never analyzed" state. All fixtures are
 synthetic; no production data.
 """
 import os
+from datetime import datetime
 
 import psycopg
 import pytest
@@ -90,25 +91,34 @@ def test_analyze_all_tables(
     assert "all tables" in result.output.lower()
 
 
+def _chunks_last_analyze(conn: psycopg.Connection) -> datetime | None:
+    """Fresh read of ``chunks.last_analyze`` (None until the first ANALYZE)."""
+    conn.execute("SELECT pg_stat_clear_snapshot()")
+    row = conn.execute(
+        "SELECT last_analyze FROM pg_stat_user_tables WHERE relname = 'chunks'"
+    ).fetchone()
+    return row[0] if row is not None else None
+
+
 def test_analyze_clears_doctor_warn(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
 ) -> None:
-    """After `brain analyze`, the chunks table reports a non-NULL last_analyze.
+    """After `brain analyze`, chunks.last_analyze ADVANCES.
 
-    This is the end-to-end contract behind the doctor remediation: running the
-    command makes the stale-stats WARN condition (both analyze timestamps NULL)
-    no longer hold.
+    End-to-end contract behind the doctor remediation. Under the migrate-once +
+    TRUNCATE reset, ``pg_stat_user_tables.last_analyze`` is not cleared between
+    tests, so capture it BEFORE and assert the command moved it forward — an
+    ``IS NOT NULL`` check alone would pass vacuously.
     """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     _ingest_one(test_db, fake_embedder)
 
+    before = _chunks_last_analyze(test_db)
     result = CliRunner().invoke(app, ["analyze"])
     assert result.exit_code == 0, result.output
+    after = _chunks_last_analyze(test_db)
 
-    row = test_db.execute(
-        "SELECT last_analyze FROM pg_stat_user_tables WHERE relname = 'chunks'"
-    ).fetchone()
-    assert row is not None
-    assert row[0] is not None
+    assert after is not None
+    assert before is None or after > before

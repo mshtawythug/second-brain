@@ -649,6 +649,7 @@ def test_graph_rag_search_global_honors_session_id(
 # --------------------------------------------------------------------------- #
 # Integration: build → summarize → retrieve
 # --------------------------------------------------------------------------- #
+@pytest.mark.fresh_schema
 def test_global_integration_build_summarize_retrieve(
     test_db: psycopg.Connection[Any],
 ) -> None:

@@ -527,6 +527,7 @@ def test_brain_search_logs_query(
     assert row[3] is None
 
 
+@pytest.mark.fresh_schema
 def test_cli_search_survives_pre_019_schema(
     test_db: psycopg.Connection,
     patch_embedder: Any,
@@ -547,6 +548,7 @@ def test_cli_search_survives_pre_019_schema(
     assert "Traceback" not in res.output
 
 
+@pytest.mark.fresh_schema
 def test_cli_gaps_clean_error_pre_019_schema(
     test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -561,6 +563,7 @@ def test_cli_gaps_clean_error_pre_019_schema(
         assert "Traceback" not in res.output
 
 
+@pytest.mark.fresh_schema
 def test_cli_search_survives_pre_023_schema(
     test_db: psycopg.Connection,
     patch_embedder: Any,
@@ -582,6 +585,7 @@ def test_cli_search_survives_pre_023_schema(
     assert "Traceback" not in res.output
 
 
+@pytest.mark.fresh_schema
 def test_cli_gaps_clean_error_pre_023_schema(
     test_db: psycopg.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -8,6 +8,11 @@ import pytest
 from brain.db import connect, ensure_embedding_column, migrations_dir, run_migrations
 from brain.errors import BrainError
 
+# Every test here mutates the schema (own-connection ``DROP SCHEMA`` + migrate,
+# or ``ensure_embedding_column`` resizes) — see the Wave 6.1 ``fresh_schema``
+# marker in pyproject.toml. Route the whole module to the full drop+migrate reset.
+pytestmark = pytest.mark.fresh_schema
+
 
 def test_connect_returns_open_connection() -> None:
     url = os.environ.get(

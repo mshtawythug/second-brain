@@ -193,6 +193,7 @@ def test_load_age_enables_cypher_on_fresh_connection(
         assert _cypher_one(conn) == "1"
 
 
+@pytest.mark.fresh_schema
 def test_load_age_does_not_leak_global_search_path(
     test_db: psycopg.Connection,
 ) -> None:

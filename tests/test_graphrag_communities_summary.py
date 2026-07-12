@@ -41,6 +41,11 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
 
+# ``summarize_communities`` reconciles ``graph_communities.summary_embedding`` to
+# the (4096-dim FakeEmbedder) dim — a schema mutation. Route the whole module to
+# the full drop+migrate reset.
+pytestmark = pytest.mark.fresh_schema
+
 
 # --------------------------------------------------------------------------- #
 # Test doubles (DI seam — no monkeypatching, no live Ollama)

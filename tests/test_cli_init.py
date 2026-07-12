@@ -15,6 +15,10 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
 
+# ``brain init`` runs migrations, bootstraps AGE, and reconciles embedding-column
+# dims (schema mutation) — route the module to the full drop+migrate reset.
+pytestmark = pytest.mark.fresh_schema
+
 
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -78,6 +78,7 @@ def test_brain_gaps_push_runs_without_error(
     assert payload["gaps"][0]["count"] == 3
 
 
+@pytest.mark.fresh_schema
 def test_brain_gaps_pre_023_schema_surfaces_init_hint(
     gaps_state: mcp_server._State,  # noqa: ARG001 — installs state
     test_db: psycopg.Connection,

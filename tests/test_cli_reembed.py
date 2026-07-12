@@ -12,10 +12,15 @@ from unittest.mock import patch as upatch
 
 import httpx
 import psycopg
+import pytest
 from typer.testing import CliRunner
 
 from brain.cli import app
 from tests.conftest import FakeEmbedder
+
+# ``brain reembed`` finalizes the embedding column (applies NOT NULL + builds the
+# HNSW index) — a schema mutation. Route the module to the full drop+migrate reset.
+pytestmark = pytest.mark.fresh_schema
 
 
 @contextlib.contextmanager

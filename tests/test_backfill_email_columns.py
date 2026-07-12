@@ -33,6 +33,10 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
 
+# Tests here own-connection ``DROP SCHEMA`` + migrate and ``ALTER TABLE ... DROP
+# COLUMN`` to simulate pre-migration states (schema mutation).
+pytestmark = pytest.mark.fresh_schema
+
 
 def _load_script() -> ModuleType:
     """Import ``scripts/backfill_email_columns.py`` as a module.

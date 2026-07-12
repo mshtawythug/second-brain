@@ -17,6 +17,10 @@ TEST_DATABASE_URL = os.environ.get(
     "postgresql://brain:brain@localhost:5434/second_brain_test",
 )
 
+# ``brain init`` here runs migrations against a freshly-dropped schema (schema
+# mutation) — route the module to the full drop+migrate reset.
+pytestmark = pytest.mark.fresh_schema
+
 
 @pytest.fixture()
 def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

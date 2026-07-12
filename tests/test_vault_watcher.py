@@ -1901,6 +1901,7 @@ def test_vanished_file_with_cached_body_is_noop(
     thread.join(timeout=5.0)
 
 
+@pytest.mark.fresh_schema
 def test_handle_delete_logs_error_on_multi_row_delete(
     test_db: psycopg.Connection,
     tmp_path: Path,
