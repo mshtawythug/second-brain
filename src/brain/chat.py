@@ -191,11 +191,19 @@ def chat_json_with_client(
             parsed = json.loads(response_text)
         except json.JSONDecodeError as exc:
             last_error = exc
-            # Truncation: the model exhausted ``num_predict`` mid-string. The
-            # same budget would re-truncate deterministically; double it for the
-            # retry so the next call can complete. Schema / non-dict failures
-            # don't trigger the bump.
-            if "Unterminated" in exc.msg:
+            # Truncation: the model exhausted ``num_predict`` before closing the
+            # JSON. Two signals, both meaning "the response was cut off, not
+            # malformed from the start": an unterminated string (cut mid-value),
+            # OR a decode failure that lands at/after the end of the received text
+            # (cut mid-object — e.g. "Expecting ',' delimiter" / "Expecting
+            # property name …" at EOF). Either way the SAME budget would
+            # re-truncate deterministically at temperature 0.0, so double
+            # ``num_predict`` for the retry to give the next call room to finish.
+            # A genuinely malformed response (garbage decoded well before EOF, e.g.
+            # "Expecting value" at position 0) is NOT truncation and doesn't bump —
+            # the retry there is a deliberate best-effort second try. Schema /
+            # non-dict failures don't reach this branch.
+            if "Unterminated" in exc.msg or exc.pos >= len(response_text):
                 current_num_predict *= 2
             _logger.debug(
                 "chat attempt %d: JSON decode failed (%s); response=%r",

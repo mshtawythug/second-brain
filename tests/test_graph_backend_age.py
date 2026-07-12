@@ -402,6 +402,58 @@ def test_upsert_mention_edges_split_merge_idempotent(
     assert _mention_count_for(test_db, "default", _A) == 9
 
 
+def test_upsert_mention_edges_atomic_on_partial_recreate_failure(
+    test_db: psycopg.Connection,
+) -> None:
+    """REGRESSION (Wave 3, item 3.6): the delete-then-recreate of a document's
+    MENTIONED_IN edges must be atomic.
+
+    ``upsert_mention_edges`` DELETEs all of a doc's existing mention edges then
+    CREATEs the new set. Without its own ``conn.transaction()`` (every sibling
+    write has one — ``upsert_entities`` / ``refresh_cooccur_edges`` /
+    ``clear_tenant``), a failure partway through the recreate loop on an
+    autocommit connection leaves the DELETE committed and only some edges
+    recreated — a half-rebuilt edge set. Wrapping the delete+recreate in one
+    transaction makes it all-or-nothing: a mid-recreate failure rolls the DELETE
+    back too, so the prior edge set survives intact.
+    """
+    backend = AgeBackend()
+    backend.bootstrap(test_db)
+    backend.upsert_entities(
+        test_db, "default", [_entity(_A, "default"), _entity(_B, "default")]
+    )
+    two = [
+        EntityMention(entity_id=_A, document_id=_DOC1, source="people", mention_count=1),
+        EntityMention(entity_id=_B, document_id=_DOC1, source="people", mention_count=1),
+    ]
+    # Establish a committed 2-edge baseline for _DOC1.
+    assert backend.upsert_mention_edges(test_db, "default", _DOC1, two) == 2
+    assert _mention_count(test_db, "default") == 2
+
+    # Re-run, failing on the SECOND recreate CREATE. Without the transaction the
+    # DELETE (both edges) has already committed and only A's edge got recreated,
+    # leaving 1 edge; with the transaction the whole rebuild rolls back to 2.
+    real_cypher = backend._cypher
+    creates = {"n": 0}
+
+    def _fail_second_create(conn, query, params=None, **kwargs):  # type: ignore[no-untyped-def]
+        if "CREATE (e)-[:MENTIONED_IN" in query:
+            creates["n"] += 1
+            if creates["n"] == 2:
+                raise GraphBackendError("simulated mid-recreate failure")
+        return real_cypher(conn, query, params, **kwargs)
+
+    with (
+        patch.object(backend, "_cypher", side_effect=_fail_second_create),
+        pytest.raises(GraphBackendError, match="simulated mid-recreate"),
+    ):
+        backend.upsert_mention_edges(test_db, "default", _DOC1, two)
+
+    # All-or-nothing: the failed rebuild rolled back, so the original 2 edges
+    # survive (a non-atomic delete+recreate would have left only 1).
+    assert _mention_count(test_db, "default") == 2
+
+
 def test_upsert_mention_edges_scope_mismatch_raises(
     test_db: psycopg.Connection,
 ) -> None:

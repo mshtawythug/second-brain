@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from typing import Any
+from unittest.mock import patch
 
 import psycopg
 import pytest
@@ -289,6 +290,59 @@ def test_enrichment_failure_post_commit_leaves_doc_with_null_summary(
     ).fetchone()
     assert chunks is not None and chunks[0] >= 1
     assert any("Ollama unavailable" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# (b2) — a raw psycopg.Error from a POST-COMMIT source hook must not fail the
+# already-committed ingest (Wave 3, item 3.9).
+# ---------------------------------------------------------------------------
+
+
+def test_post_commit_source_hook_psycopg_error_does_not_fail_committed_ingest(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """REGRESSION (Wave 3, item 3.9): a raw ``psycopg.Error`` raised by a
+    POST-COMMIT source hook must not fail an already-committed ingest.
+
+    The Krisp calendar/contacts refresh runs AFTER the write transaction commits
+    (Task 2.11). If it raises a raw ``psycopg.Error`` (e.g. an OperationalError
+    from its ``directory_refresh_state`` SELECT), that must be caught + logged —
+    the document is already durably committed — never propagated out of
+    ``ingest_document`` (mirroring the ``_enrich_post_ingest_hook`` guard).
+    """
+    boom = psycopg.OperationalError("simulated post-commit hook failure")
+    title = "PostCommitHookBoom Doc"
+    with (
+        patch("brain.ingest._krisp_post_ingest_hook", side_effect=boom) as hook,
+        caplog.at_level(logging.WARNING, logger="brain.ingest"),
+    ):
+        result = ingest_document(
+            test_db,
+            embedder=fake_embedder,
+            doc=_doc(
+                content="Krisp transcript body for the hook-boom test. " * 8,
+                title=title,
+            ),
+            source_kind="krisp",
+            source_external_id="meet-hook-boom",
+        )
+
+    # The post-commit hook was invoked and raised, but ingest still succeeded.
+    assert hook.called
+    assert result.created is True
+    assert result.document_id is not None
+    # The document is durably committed despite the hook failure.
+    row = test_db.execute(
+        "SELECT id FROM documents WHERE id=%s", (result.document_id,)
+    ).fetchone()
+    assert row is not None
+    # The failure was surfaced as a WARNING, not swallowed silently.
+    assert any(
+        r.levelname == "WARNING" and "post-commit" in r.getMessage().lower()
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -310,6 +310,18 @@ def _in_scope_edges(
     the weight is ``normalized_lift(co_doc, df_src_in_scope, df_dst_in_scope)``.
     Both endpoints are constrained to ``eligible_ids`` so a suppressed/excluded
     entity never forms an edge. Fewer than two eligible entities → no edges.
+
+    **Relational-mirror-drift tolerance.** ``co_doc`` (from
+    ``graph_edge_contributions``) and each endpoint's in-scope df (from
+    ``graph_entity_mentions``) come from two separate relational tables that can
+    fall out of sync — e.g. an edge-contribution row whose corresponding mention
+    row was never written. When that happens ``co_doc`` can exceed the rarer
+    endpoint's in-scope df, which ``normalized_lift`` rejects with a
+    ``WeightingError`` that would otherwise abort the ENTIRE ``themes --person``
+    query. To keep one drifted edge from killing the whole query, a drifted edge
+    is clamped to a valid weight (``co_doc → min(co_doc, min(df))``) with a WARN;
+    an edge missing an in-scope normalizer entirely (df 0 — no valid lift) is
+    skip-logged instead.
     """
     if not doc_ids or len(eligible_ids) < 2:
         return []
@@ -325,7 +337,33 @@ def _in_scope_edges(
     for src_id, dst_id, co_doc in rows:
         src = str(src_id)
         dst = str(dst_id)
-        weight = normalized_lift(int(co_doc), in_scope_df[src], in_scope_df[dst])
+        df_src = in_scope_df.get(src, 0)
+        df_dst = in_scope_df.get(dst, 0)
+        min_df = min(df_src, df_dst)
+        co = int(co_doc)
+        if min_df < 1 or co < 1:
+            # Mirror drift: an endpoint has no in-scope mention row (df 0), so the
+            # edge has no valid normalizer. Skip it — a single drifted edge must
+            # never abort the whole themes query.
+            _logger.warning(
+                "themes: skipping drifted in-scope edge (%s, %s): missing "
+                "normalizer (df_src=%d df_dst=%d co_doc=%d) — relational mirror "
+                "drift between graph_edge_contributions and graph_entity_mentions",
+                src, dst, df_src, df_dst, co,
+            )
+            continue
+        if co > min_df:
+            # Mirror drift: the edge's in-scope co-document count exceeds the
+            # rarer endpoint's in-scope df. Clamp to the valid maximum so
+            # normalized_lift never raises (co_doc → min(co_doc, min(df))).
+            _logger.warning(
+                "themes: clamping drifted in-scope edge (%s, %s): co_doc %d "
+                "exceeds min in-scope df %d — relational mirror drift between "
+                "graph_edge_contributions and graph_entity_mentions",
+                src, dst, co, min_df,
+            )
+            co = min_df
+        weight = normalized_lift(co, df_src, df_dst)
         edges.append(Edge(src_id=src, dst_id=dst, weight=weight, tenant_id=tenant_id))
     return edges
 

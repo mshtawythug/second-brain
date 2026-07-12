@@ -1460,9 +1460,27 @@ def _run_post_commit_source_hooks(
     Gmail's directory upsert runs IN-TRANSACTION via :func:`_run_source_hooks`
     because it has an atomic-rollback contract; keeping it there is a
     deliberately preserved guarantee, NOT an oversight.
+
+    **Post-commit failure containment.** This runs AFTER the document
+    transaction has already committed (Task 2.11), so a failure here must never
+    surface as an ingest failure — the row is durably saved. The refresh helpers
+    already soft-degrade on ``gws``/runner failures, but the hook still issues its
+    own ``directory_refresh_state`` SELECTs, whose raw ``psycopg.Error`` (e.g. a
+    connection dropped after commit) would otherwise propagate out of
+    :func:`ingest_document`. We catch it, log a WARN, and return — mirroring the
+    :func:`_enrich_post_ingest_hook` guard (the calendar/contacts refresh is
+    simply skipped; a later ingest re-triggers it).
     """
-    if source_kind == "krisp":
-        _krisp_post_ingest_hook(conn, doc, document_id, gws_runner)
+    try:
+        if source_kind == "krisp":
+            _krisp_post_ingest_hook(conn, doc, document_id, gws_runner)
+    except psycopg.Error as exc:
+        _logger.warning(
+            "post-commit source hook for %s failed (%s); ingest already "
+            "committed — calendar/contacts refresh skipped",
+            source_kind,
+            exc,
+        )
 
 
 def apply_tags(

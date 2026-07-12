@@ -433,6 +433,66 @@ def test_themes_two_clusters_grouping(test_db: psycopg.Connection[Any]) -> None:
     assert backend.calls[0]["frontier_cap"] == 200
 
 
+def test_themes_survives_mirror_drift_co_doc_exceeds_in_scope_df(
+    test_db: psycopg.Connection[Any],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """REGRESSION (Wave 3, item 3.5): a relational-mirror drift where an edge's
+    in-scope co-document count exceeds an endpoint's in-scope document frequency
+    must NOT raise ``WeightingError`` and kill the whole ``themes --person`` query.
+
+    Drift: ``graph_edge_contributions`` records the (a, b) edge in BOTH of Dana's
+    scoped docs (co_doc = 2), but ``graph_entity_mentions`` only carries b's
+    mention in ONE of them (in_scope_df[b] = 1) — so co_doc (2) exceeds
+    ``min(df_a=2, df_b=1)`` = 1, which ``normalized_lift`` rejects. The themes
+    path must clamp the drifted edge to a valid weight (and log the anomaly)
+    instead of raising and aborting the query.
+    """
+    _seed_directory(test_db, [("dana lee", "dana@example.com")])
+    dana = _insert_entity(
+        test_db, entity_type="person", name="Dana Lee",
+        canonical_key="dana lee", doc_count=2,
+    )
+    a = _insert_entity(test_db, name="Topic A", canonical_key="topic-a", doc_count=2)
+    b = _insert_entity(test_db, name="Topic B", canonical_key="topic-b", doc_count=2)
+    d1 = _insert_doc(test_db, title="D1", content="alpha")
+    d2 = _insert_doc(test_db, title="D2", content="beta")
+    for doc in (d1, d2):
+        _insert_mention(test_db, entity_id=dana, document_id=doc)
+        _insert_mention(test_db, entity_id=a, document_id=doc)
+    # DRIFT: b is only mentioned in d1 (in_scope_df[b] = 1) ...
+    _insert_mention(test_db, entity_id=b, document_id=d1)
+    # ... yet the (a, b) edge is recorded as contributing in BOTH d1 and d2
+    # (co_doc = 2 > min(df_a=2, df_b=1) = 1) — the mirror is out of sync.
+    for doc in (d1, d2):
+        _insert_contribution(test_db, document_id=doc, a=a, b=b)
+    scope = PersonScope(
+        seed_entity_uuid=dana,
+        entity_uuids=tuple(sorted((a, b))),
+        document_uuids=tuple(sorted((d1, d2))),
+    )
+
+    with caplog.at_level("WARNING", logger="brain.graph_rag.themes"):
+        ctx = graph_rag_search(
+            test_db,
+            _make_cfg(),
+            "",
+            backend=FakeScopeBackend({dana: scope}),
+            mode=THEMES_MODE,
+            person="dana lee",
+        )
+
+    # Never-raise: the drifted edge is clamped, the query completes.
+    assert _theme_keysets(ctx) == {frozenset({"topic-a", "topic-b"})}
+    # co_doc clamped to min(df) = 1 → normalized_lift(1, 2, 1) = 1.0.
+    assert ctx.themes[0].score == pytest.approx(1.0)
+    # The drift was surfaced (WARN), not silently swallowed.
+    assert any(
+        r.levelname == "WARNING" and "drift" in r.getMessage().lower()
+        for r in caplog.records
+    )
+
+
 def test_themes_in_scope_lift_is_fractional(
     test_db: psycopg.Connection[Any],
 ) -> None:

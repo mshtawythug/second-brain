@@ -145,7 +145,15 @@ class QueryDiff:
 
 @dataclass(frozen=True)
 class BaselineDiff:
-    """Aggregate diff between a baseline :class:`EvalReport` and a current run."""
+    """Aggregate diff between a baseline :class:`EvalReport` and a current run.
+
+    Per-query deltas and the aggregate means cover the INTERSECTION of the two
+    runs' query sets (queries present in BOTH). Queries present in only one run
+    are surfaced separately in :attr:`added_queries` / :attr:`removed_queries`
+    and excluded from the aggregate, so a growing or shrinking query set never
+    dilutes a real regression toward 0 — the aggregate always compares
+    like-for-like. This is the input contract for the ``--fail-below`` gate.
+    """
 
     per_query: list[QueryDiff]
     mean_ndcg_at_5_delta: float
@@ -154,46 +162,59 @@ class BaselineDiff:
     config_signature_changed: bool
     baseline_signature: dict[str, Any]
     current_signature: dict[str, Any]
+    # Query strings present in ``current`` but not ``baseline`` (added), and in
+    # ``baseline`` but not ``current`` (removed). Reported separately so the
+    # aggregate stays intersection-only; deterministic source order.
+    added_queries: list[str]
+    removed_queries: list[str]
 
 
 def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
     """Compute the delta between *baseline* and *current*.
 
-    Queries are matched by query string.  A query present in one report but
-    not the other contributes a delta of 0.0 for the missing side.
+    Queries are matched by query string. Per-query deltas AND the aggregate mean
+    deltas are computed over the INTERSECTION of the two query sets (queries
+    present in BOTH reports), in the baseline's result order. Queries present in
+    only one report are surfaced separately as
+    :attr:`~BaselineDiff.added_queries` (in *current* only) /
+    :attr:`~BaselineDiff.removed_queries` (in *baseline* only) and excluded from
+    the aggregate — so a growing or shrinking query set never dilutes a real
+    regression toward 0 (an earlier union-with-0-fill averaged each added query's
+    ``current - 0`` positive delta into the mean, masking regressions on the
+    shared queries).
 
     Args:
         baseline: The reference (earlier) eval report.
         current: The new eval report to compare.
 
     Returns:
-        A :class:`BaselineDiff` with per-query and aggregate deltas.
+        A :class:`BaselineDiff` whose per-query and aggregate deltas cover the
+        shared queries, plus the added/removed query id lists.
     """
     # Build lookup dicts keyed by query string.
     base_by_q = {r.query: r for r in baseline.results}
     curr_by_q = {r.query: r for r in current.results}
 
-    all_queries = dict.fromkeys(list(base_by_q) + list(curr_by_q))
+    # Per-query deltas over the SHARED queries only, in baseline result order.
     per_query: list[QueryDiff] = []
-    for q_str in all_queries:
-        base_r = base_by_q.get(q_str)
+    for q_str, base_r in base_by_q.items():
         curr_r = curr_by_q.get(q_str)
-        base_ndcg = base_r.ndcg_at_5 if base_r else 0.0
-        base_mrr = base_r.mrr if base_r else 0.0
-        base_recall = base_r.recall_at_20 if base_r else 0.0
-        curr_ndcg = curr_r.ndcg_at_5 if curr_r else 0.0
-        curr_mrr = curr_r.mrr if curr_r else 0.0
-        curr_recall = curr_r.recall_at_20 if curr_r else 0.0
-        category = (curr_r or base_r).category  # type: ignore[union-attr]
+        if curr_r is None:
+            continue  # removed query — reported separately, not in the aggregate
         per_query.append(
             QueryDiff(
                 query=q_str,
-                category=category,
-                ndcg_at_5_delta=curr_ndcg - base_ndcg,
-                mrr_delta=curr_mrr - base_mrr,
-                recall_at_20_delta=curr_recall - base_recall,
+                category=curr_r.category,
+                ndcg_at_5_delta=curr_r.ndcg_at_5 - base_r.ndcg_at_5,
+                mrr_delta=curr_r.mrr - base_r.mrr,
+                recall_at_20_delta=curr_r.recall_at_20 - base_r.recall_at_20,
             )
         )
+
+    # Query-set changes surfaced separately (deterministic source order): never
+    # folded into the aggregate.
+    added_queries = [q for q in curr_by_q if q not in base_by_q]
+    removed_queries = [q for q in base_by_q if q not in curr_by_q]
 
     n = len(per_query)
     mean_ndcg_delta = sum(d.ndcg_at_5_delta for d in per_query) / n if n else 0.0
@@ -208,4 +229,6 @@ def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
         config_signature_changed=baseline.config_signature != current.config_signature,
         baseline_signature=dict(baseline.config_signature),
         current_signature=dict(current.config_signature),
+        added_queries=added_queries,
+        removed_queries=removed_queries,
     )

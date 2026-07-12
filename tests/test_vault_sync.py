@@ -2270,3 +2270,52 @@ def test_sync_preserves_existing_fence_in_body(
         "sync must preserve the existing fence byte-for-byte; "
         "the renderer's canonical text was not found in the file"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 3.3: production assert in _reparse_link_text must not abort sync.
+# ---------------------------------------------------------------------------
+
+
+def test_reparse_link_text_divergent_display_does_not_abort(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stored display_text diverging from a re-parse must NOT crash sync.
+
+    Regression (Task 3.3): ``_reparse_link_text`` guarded a stored
+    ``unresolved_links.display_text`` against the display text re-extracted
+    from the same raw link with a bare ``assert``. A production ``assert``
+    aborts a *foreground* ``brain vault sync`` the moment such a divergence
+    appears (parser drift after an upgrade, a manual DB edit, a migration)
+    — and is silently stripped under ``python -O``, making the behavior
+    inconsistent. The hardened contract: log a warning and continue,
+    returning the re-parsed link so resolution still proceeds. The caller
+    inserts the STORED ``display_text``, so no alias is dropped either way.
+    """
+    from brain.vault.sync import _reparse_link_text
+
+    # ``[[Foo|Bar]]`` re-parses to display_text="Bar", which deliberately
+    # diverges from the stored "Stale-Alias" — the exact condition the old
+    # assert treated as fatal.
+    with caplog.at_level("WARNING", logger="brain.vault.sync"):
+        parsed = _reparse_link_text("[[Foo|Bar]]", "wiki", "Stale-Alias")
+
+    # No AssertionError; resolution still proceeds with the re-parsed link.
+    assert parsed is not None
+    assert parsed.target_value == "Foo"
+    # The divergence surfaced as a warning instead of aborting the sync.
+    assert any(
+        r.levelname == "WARNING" and "display" in r.getMessage().lower()
+        for r in caplog.records
+    ), f"expected a divergence warning, got {[r.getMessage() for r in caplog.records]!r}"
+
+
+# NOTE (Task 3.4 — CLEARED, not a bug): the plan hypothesized that
+# ``_retry_unresolved`` could drive ``report.links_unresolved`` negative by
+# decrementing for resolves of PRIOR runs' unresolved rows the current run's
+# counter never accrued. It cannot: every seen doc runs ``_materialize_links``
+# on every sync, which unconditionally wipes + re-inserts + re-counts its
+# unresolved links BEFORE the retry pass, so the retry only ever resolves rows
+# this run already accrued. A cross-run reproduction test confirmed the counter
+# stays >= 0; it was removed as it asserted the absence of a bug that does not
+# exist. See the Wave 3 report for the evidence.

@@ -41,6 +41,33 @@ _MIN_PREFIX_LEN = 6
 # Markdown heading the ``accept --write`` path appends suggested wikilinks under.
 _SEE_ALSO_HEADING = "## See Also"
 
+# --------------------------------------------------------------------------- #
+# ``embedding_affinity`` KNN tuning (Task 4.1 — HNSW-friendly rewrite).
+# --------------------------------------------------------------------------- #
+
+# Starting KNN batch size = ``candidate_limit`` × this multiplier. On the live
+# corpus nearly every doc sits above the cosine floor, so the first batch yields
+# far more than ``candidate_limit`` distinct docs and the adaptive re-query
+# below never fires; the multiplier is headroom for a rare cold / sparse source
+# whose nearest chunks cluster onto a handful of docs.
+_KNN_CANDIDATE_MULTIPLIER = 8
+
+# Max adaptive doublings before falling back to the exhaustive scan. Bounds the
+# worst case; correctness holds either way (the fallback is exact).
+_KNN_MAX_ITERATIONS = 4
+
+# pgvector 0.8.2 GUC. A *filtered* HNSW scan under a post-filter ``LIMIT``
+# under-returns by default: the index hands the planner only ``hnsw.ef_search``
+# rows, most of which the JOIN + eligibility filters then drop (measured on
+# prod: a ``LIMIT 400`` yielded only 27 rows). ``strict_order`` makes the scan
+# ITERATE until the ``LIMIT`` is satisfied AND keeps rows in exact ascending-
+# distance order, which the per-doc-max exactness argument in
+# :func:`_embedding_affinity_knn` relies on. ``SET LOCAL`` scopes it to the one
+# transaction — never a session/global ``SET``. Verified against pgvector 0.8.2:
+# the enum is ``{off, relaxed_order, strict_order}``; ``relaxed_order`` would be
+# faster but breaks the exact-order precondition, so we require ``strict_order``.
+_SET_ITERATIVE_SCAN = "SET LOCAL hnsw.iterative_scan = strict_order"
+
 
 @dataclass(frozen=True)
 class SuggestionRow:
@@ -219,6 +246,7 @@ def embedding_affinity(
     source_doc_id: str,
     candidate_limit: int,
     vector_sim_floor: float,
+    knn_multiplier: int = _KNN_CANDIDATE_MULTIPLIER,
 ) -> dict[str, float]:
     """Return ``{target_doc_id: best_cosine}`` for one source doc, rank-ordered.
 
@@ -226,14 +254,169 @@ def embedding_affinity(
     :func:`brain.wiki.build_related._avg_embedding`); each candidate doc's score
     is its best per-chunk cosine similarity, floored at ``vector_sim_floor``
     (the same floor runtime ``brain search`` uses). Dict insertion order is the
-    cosine-descending rank order. Empty when the source doc has no embedded
-    chunks (cold corpus) — the feature degrades to graph-only.
+    cosine-descending rank order (ties broken by target-doc id). Empty when the
+    source doc has no embedded chunks (cold corpus) — the feature degrades to
+    graph-only.
+
+    Task 4.1 rewrite: the primary path (:func:`_embedding_affinity_knn`) rides
+    the ``chunks_embedding_idx`` HNSW index via a top-K nearest-neighbour scan
+    with the eligibility predicates IN the SQL, instead of the pre-4.1
+    ``MAX(...) GROUP BY`` + range-predicate query that seq-scanned every chunk
+    (measured ~1.2s/doc on prod → ~40ms). When the adaptive re-query cannot
+    converge within :data:`_KNN_MAX_ITERATIONS` (a cold / sparse source whose
+    nearest chunks pile onto a handful of docs) it falls back to the exact
+    :func:`_embedding_affinity_exhaustive` — correctness beats speed. The
+    output contract is identical across both paths.
+
+    ``knn_multiplier`` sets the first KNN batch (``candidate_limit`` ×
+    multiplier); it exists so tests can force truncation with a small value and
+    prove the adaptive re-query converges to the exhaustive result. Production
+    callers leave it at the default.
     """
     if candidate_limit < 1:
         raise ConnectError(f"candidate_limit must be >= 1 (got {candidate_limit})")
+    if knn_multiplier < 1:
+        raise ConnectError(f"knn_multiplier must be >= 1 (got {knn_multiplier})")
     src_embedding = _avg_embedding(conn, source_doc_id)
     if src_embedding is None:
         return {}
+    knn = _embedding_affinity_knn(
+        conn,
+        src_embedding=src_embedding,
+        source_doc_id=source_doc_id,
+        candidate_limit=candidate_limit,
+        vector_sim_floor=vector_sim_floor,
+        knn_multiplier=knn_multiplier,
+    )
+    if knn is not None:
+        return knn
+    return _embedding_affinity_exhaustive(
+        conn,
+        src_embedding=src_embedding,
+        source_doc_id=source_doc_id,
+        candidate_limit=candidate_limit,
+        vector_sim_floor=vector_sim_floor,
+    )
+
+
+# KNN leg: the eligibility predicates live IN the query so ``LIMIT k`` counts
+# only eligible chunks and the HNSW index (``chunks_embedding_idx``) drives the
+# ordering. Paired with :data:`_SET_ITERATIVE_SCAN` so the filtered scan does
+# not under-return.
+_KNN_SQL = """
+    SELECT c.document_id::text AS doc_id,
+           1 - (c.embedding <=> %(vec)s::vector) AS cosine
+    FROM chunks c
+    JOIN documents d ON d.id = c.document_id
+    WHERE d.draft = FALSE
+      AND d.vault_path IS NOT NULL
+      AND d.id <> %(source)s::uuid
+      AND c.embedding IS NOT NULL
+    ORDER BY c.embedding <=> %(vec)s::vector
+    LIMIT %(k)s
+"""
+
+
+def _embedding_affinity_knn(
+    conn: psycopg.Connection[Any],
+    *,
+    src_embedding: Any,
+    source_doc_id: str,
+    candidate_limit: int,
+    vector_sim_floor: float,
+    knn_multiplier: int,
+) -> dict[str, float] | None:
+    """Ride ``chunks_embedding_idx``: fetch K nearest eligible chunks → floor →
+    per-doc max → sort → truncate. Returns the ``{doc: best_cosine}`` mapping, or
+    ``None`` to signal "did not converge — use the exhaustive fallback".
+
+    Exactness argument (why the returned docs match the exhaustive scan): with
+    ``strict_order`` the ``LIMIT k`` rows are the true k nearest eligible chunks
+    in exact ascending-distance (descending-cosine) order. So:
+
+    * Every doc that APPEARS has its globally-best chunk among the k — that
+      chunk's cosine is ≥ the k-th (smallest returned) cosine, and any other
+      chunk of the doc is ≤ its best, so nothing better sits beyond the cut.
+      Its per-doc max is therefore exact.
+    * Every doc NOT among the k has all chunks below the k-th cosine, hence a
+      true best below every captured doc's best.
+
+    Consequently, once the k nearest chunks contain ≥ ``candidate_limit``
+    distinct floor-passing docs, the top ``candidate_limit`` by best cosine are
+    fully and exactly determined (no unseen doc can outrank them). We also stop
+    early when the batch is provably complete: it under-filled (all eligible
+    chunks seen) or its smallest returned cosine already fell below the floor
+    (nothing further can pass). Otherwise we double k and retry, capped at
+    :data:`_KNN_MAX_ITERATIONS` before conceding to the exhaustive fallback.
+
+    ``SET LOCAL`` is scoped by :meth:`psycopg.Connection.transaction`; under the
+    autocommit connection the CLI uses this opens a real ``BEGIN``/``COMMIT`` so
+    the GUC never leaks past the scan. (Assumes the eligible chunk count stays
+    within ``hnsw.max_scan_tuples`` so an under-fill means true exhaustion —
+    true for the current corpus; the exhaustive fallback backstops the rest.)
+    """
+    k = candidate_limit * knn_multiplier
+    with conn.transaction():
+        conn.execute(_SET_ITERATIVE_SCAN)
+        for _ in range(_KNN_MAX_ITERATIONS):
+            rows = conn.execute(
+                _KNN_SQL,
+                {"vec": src_embedding, "source": source_doc_id, "k": k},
+            ).fetchall()
+            floor_rows = [
+                (str(r[0]), float(r[1]))
+                for r in rows
+                if float(r[1]) >= vector_sim_floor
+            ]
+            distinct_docs = {doc_id for doc_id, _ in floor_rows}
+            # Provably complete when the batch under-filled (every eligible
+            # chunk seen) or its smallest returned cosine is already below the
+            # floor (rows are in exact descending-cosine order, so nothing
+            # further can pass).
+            seen_all = len(rows) < k or (
+                len(rows) > 0 and float(rows[-1][1]) < vector_sim_floor
+            )
+            if seen_all or len(distinct_docs) >= candidate_limit:
+                return _group_per_doc_max(floor_rows, candidate_limit)
+            k *= 2
+    return None
+
+
+def _group_per_doc_max(
+    floor_rows: list[tuple[str, float]], candidate_limit: int
+) -> dict[str, float]:
+    """Collapse floor-passing ``(doc_id, cosine)`` rows to the per-doc max,
+    ordered cosine-descending then doc-id, truncated to ``candidate_limit``.
+
+    Mirrors the exhaustive query's ``MAX(...) ... ORDER BY cosine DESC, doc_id
+    LIMIT`` in Python. Values are byte-identical to the SQL aggregate: both take
+    the max of the same float8 cosines each backend computed.
+    """
+    by_doc: dict[str, float] = {}
+    for doc_id, cosine in floor_rows:
+        prev = by_doc.get(doc_id)
+        if prev is None or cosine > prev:
+            by_doc[doc_id] = cosine
+    ordered = sorted(by_doc.items(), key=lambda item: (-item[1], item[0]))
+    return {doc_id: cosine for doc_id, cosine in ordered[:candidate_limit]}
+
+
+def _embedding_affinity_exhaustive(
+    conn: psycopg.Connection[Any],
+    *,
+    src_embedding: Any,
+    source_doc_id: str,
+    candidate_limit: int,
+    vector_sim_floor: float,
+) -> dict[str, float]:
+    """Pre-4.1 exhaustive ``MAX(...) GROUP BY`` scan — exact but seq-scans every
+    chunk (the range predicate on the cosine defeats the HNSW index).
+
+    Retained verbatim as the correctness fallback for the rare case where the
+    adaptive KNN re-query in :func:`_embedding_affinity_knn` cannot converge
+    (a cold / sparse corpus where k would have to grow past the cap). Callers
+    reach it only after that path returns ``None``.
+    """
     rows = conn.execute(
         """
         SELECT d.id::text AS doc_id,

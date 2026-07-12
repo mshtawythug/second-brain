@@ -103,6 +103,40 @@ def test_chat_json_with_client_retries_on_truncated_json() -> None:
     assert budgets == [128, 256]  # doubled on the Unterminated retry
 
 
+def test_chat_json_with_client_retries_on_mid_object_truncation() -> None:
+    """REGRESSION (Wave 3, item 3.7): a mid-object truncation (cut after a comma,
+    key, or colon — NOT an unterminated string) must ALSO double the num_predict
+    budget on retry.
+
+    The old heuristic only bumped on ``"Unterminated"`` in the decode error, so a
+    response cut off mid-object ("Expecting property name …", "Expecting ','
+    delimiter") kept the SAME budget on the retry — which, at temperature 0.0,
+    deterministically re-truncates, making the retry a no-op. Widening the
+    detection to "the decoder ran out of input" (error position at/after EOF)
+    makes the retry meaningful.
+    """
+    budgets: list[int] = []
+    # First reply is truncated right after a comma → JSONDecodeError
+    # "Expecting property name enclosed in double quotes" at EOF (NOT
+    # "Unterminated"). Second reply completes.
+    replies = [_raw('{"answer": "hello",'), _ok({"answer": "complete"})]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        budgets.append(json.loads(request.read())["options"]["num_predict"])
+        return replies[len(budgets) - 1]
+
+    result = chat_json_with_client(
+        _client(httpx.MockTransport(handler)),
+        model="m",
+        messages=[{"role": "user", "content": "q"}],
+        required_keys=("answer",),
+        keep_alive="30m",
+        num_predict=128,
+    )
+    assert result == {"answer": "complete"}
+    assert budgets == [128, 256]  # doubled on the mid-object truncation retry
+
+
 def test_chat_json_with_client_raises_after_two_bad_responses() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return _raw("not json at all")

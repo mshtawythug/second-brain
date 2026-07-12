@@ -292,8 +292,21 @@ class AgeBackend:
         *,
         document_props: Mapping[str, Any] | None = None,
     ) -> int:
-        """Split-MERGE the doc + entities, then delete+recreate MENTIONED_IN."""
-        with self._age_session(conn):
+        """Split-MERGE the doc + entities, then delete+recreate MENTIONED_IN.
+
+        **Atomic, all-or-nothing** (matches :meth:`upsert_entities` /
+        :meth:`refresh_cooccur_edges` / :meth:`_detach_delete_vertices`): the
+        whole MERGE + delete + recreate batch runs inside one
+        ``conn.transaction()`` — a real transaction on an autocommit connection, a
+        SAVEPOINT when already nested (e.g. under the reconcile transaction). The
+        step-3 DELETE drops ALL of this document's existing MENTIONED_IN edges
+        before step 4 recreates them, so without the transaction a failure partway
+        through the recreate loop would leave a half-rebuilt edge set (the DELETE
+        already committed, only some CREATEs applied) for any caller outside
+        reconcile's own transaction. Wrapping here makes it either fully replaced
+        or left exactly as it was.
+        """
+        with self._age_session(conn), conn.transaction():
             # 1. MERGE the Document vertex (split MERGE — vertex first).
             self._cypher(
                 conn,

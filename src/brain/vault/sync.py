@@ -105,6 +105,15 @@ class SyncReport:
     # effect, and when every link is already in canonical path form
     # (idempotent re-sync).
     links_rewritten: int = 0
+    # Fence-stripped body baseline the vault watcher caches for fence-only-write
+    # detection. Set only by the single-file path (:func:`_sync_one` via
+    # :func:`sync_one_file`) and reflects the content sync actually INDEXED —
+    # NOT a fresh disk read that could have picked up a racing user edit. The
+    # watcher prefers this over re-reading disk so an edit landing between
+    # sync's write and the cache refresh is never masked as a no-op. Stays
+    # ``None`` on dry-run, on documentation-skips, and on bulk ``sync_vault``
+    # aggregate reports (only the per-file watcher path consumes it).
+    body_baseline: str | None = None
     errors: list[tuple[Path, str]] = field(default_factory=list)
 
 
@@ -822,6 +831,17 @@ def _sync_one(
             relative_posix=walked.relative_posix,
         )
 
+    # Record the fence-stripped body baseline the watcher should cache for
+    # fence-only-write detection: the content sync actually INDEXED, NOT a
+    # fresh disk read that could have picked up a racing user edit. When we
+    # wrote frontmatter back, reconstruct the intended on-disk text from the
+    # indexed body so the write-back's own follow-up event is recognized as a
+    # no-op; otherwise the file is untouched on disk and equals ``text``.
+    baseline_text = (
+        dump_frontmatter(frontmatter, body) if needs_disk_write else text
+    )
+    report.body_baseline = strip_fence(baseline_text)
+
     return document_id
 
 
@@ -1475,9 +1495,19 @@ def _reparse_link_text(
     only = parsed[0]
     # The retry pass uses the stored ``display_text`` rather than the
     # re-parsed one — the writer already extracted aliases, so they should
-    # always agree. Defensive: the assertion catches a future divergence
-    # rather than silently dropping the alias.
-    assert only.display_text == display_text or only.display_text is None
+    # always agree. A divergence (parser drift after an upgrade, a manual DB
+    # edit, a migration) must NOT abort a foreground ``brain vault sync``, and
+    # a bare ``assert`` here would (and is silently stripped under ``python
+    # -O``, making the behavior inconsistent). Log it and continue: the caller
+    # inserts the STORED ``display_text``, so no alias is dropped either way.
+    if only.display_text is not None and only.display_text != display_text:
+        logger.warning(
+            "vault sync: unresolved link %r re-parsed display text %r differs "
+            "from stored %r; using the stored display text and continuing",
+            link_text,
+            only.display_text,
+            display_text,
+        )
     if link_kind not in {"wiki", "embed"}:
         return None
     return only

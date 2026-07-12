@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time as _time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from datetime import date as date_cls
 from pathlib import Path
@@ -498,20 +499,84 @@ _BACKEND_OLLAMA_MODEL = {
 }
 
 
-def _check_voyage(cfg: Config, failures: list[str]) -> None:
+@dataclasses.dataclass(frozen=True)
+class _DoctorLine:
+    """One buffered ``brain doctor`` output line (text + colour + stream).
+
+    Probes that run in parallel can't echo directly without interleaving, so
+    they buffer their output as ``_DoctorLine``s and doctor prints them back in
+    a fixed order (Task 4.2). ``fg`` is a Typer colour (``None`` → plain stdout
+    echo); ``err`` routes FAIL lines to stderr, matching the prior inline
+    ``typer.secho(..., err=True)`` behaviour.
+    """
+
+    text: str
+    fg: str | None = None
+    err: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class _ProbeResult:
+    """Buffered output + recorded failures from one independent doctor probe."""
+
+    lines: tuple[_DoctorLine, ...] = ()
+    failures: tuple[str, ...] = ()
+
+
+def _emit_probe_result(result: _ProbeResult, failures: list[str]) -> None:
+    """Print a probe's buffered lines in order and accrue its failures."""
+    for line in result.lines:
+        if line.fg is not None:
+            typer.secho(line.text, fg=line.fg, err=line.err)
+        else:
+            typer.echo(line.text)
+    failures.extend(result.failures)
+
+
+def _resolve_probe(future: Future[_ProbeResult], label: str) -> _ProbeResult:
+    """Resolve a probe future, degrading an unexpected crash to a FAIL line.
+
+    Per-probe isolation (Task 4.2): a probe that raises an *unexpected* exception
+    (its own handled errors already return a WARN/FAIL line) must not crash
+    doctor or suppress the sibling checks. It surfaces as this check's own FAIL
+    line + a recorded failure so the run still exits non-zero.
+    """
+    try:
+        return future.result()
+    except Exception as exc:  # noqa: BLE001 - deliberately isolate one probe
+        return _ProbeResult(
+            lines=(_DoctorLine(f"{label:<15} FAIL — {exc}", fg="red", err=True),),
+            failures=(f"{label}: {exc}",),
+        )
+
+
+def _probe_embedder(cfg: Config) -> _ProbeResult:
+    """Embedder-backend probe: voyage API-key check or Ollama ``/api/tags`` ping.
+
+    Buffered (returns a :class:`_ProbeResult`) so it can run in a worker thread
+    concurrently with the serial DB block. Neither branch touches the Postgres
+    connection, so it is thread-safe alongside the main-thread DB checks.
+    """
+    if cfg.embedder == "voyage":
+        return _check_voyage(cfg)
+    return _check_ollama(cfg)
+
+
+def _check_voyage(cfg: Config) -> _ProbeResult:
     """Doctor sub-check: verify ``VOYAGE_API_KEY`` is set when backend is voyage."""
     if cfg.voyage_api_key:
-        typer.echo("voyage          OK (api key set)")
-        return
-    failures.append("VOYAGE_API_KEY not set")
-    typer.secho(
-        "voyage          FAIL — VOYAGE_API_KEY not set",
-        fg="red",
-        err=True,
+        return _ProbeResult(lines=(_DoctorLine("voyage          OK (api key set)"),))
+    return _ProbeResult(
+        lines=(
+            _DoctorLine(
+                "voyage          FAIL — VOYAGE_API_KEY not set", fg="red", err=True
+            ),
+        ),
+        failures=("VOYAGE_API_KEY not set",),
     )
 
 
-def _check_ollama(cfg: Config, failures: list[str]) -> None:
+def _check_ollama(cfg: Config) -> _ProbeResult:
     """Doctor sub-check: ping Ollama and verify the backend's model is loaded.
 
     Also reports presence of ``cfg.enrich_model`` (Wave Q1-D auto-summary
@@ -524,6 +589,7 @@ def _check_ollama(cfg: Config, failures: list[str]) -> None:
         wanted = cfg.qwen3_model
     else:
         wanted = _BACKEND_OLLAMA_MODEL.get(cfg.embedder, cfg.qwen3_model)
+    lines: list[_DoctorLine] = []
     try:
         with httpx.Client(
             base_url=cfg.ollama_host, timeout=httpx.Timeout(5.0)
@@ -533,39 +599,52 @@ def _check_ollama(cfg: Config, failures: list[str]) -> None:
             tags_payload = response.json()
         loaded_models = _ollama_loaded_models(tags_payload)
         if _model_loaded(wanted, loaded_models):
-            typer.echo(f"ollama          OK ({cfg.ollama_host})")
+            lines.append(_DoctorLine(f"ollama          OK ({cfg.ollama_host})"))
         else:
             # Soft warning — daemon up but the configured model isn't pulled.
             # Don't fail doctor; embed calls will surface "no such model"
             # later if anyone tries to use it.
-            typer.secho(
-                f"ollama          OK ({cfg.ollama_host}) — model {wanted} "
-                f"NOT loaded — run `ollama pull {wanted}`",
-                fg="yellow",
+            lines.append(
+                _DoctorLine(
+                    f"ollama          OK ({cfg.ollama_host}) — model {wanted} "
+                    f"NOT loaded — run `ollama pull {wanted}`",
+                    fg="yellow",
+                )
             )
         # Wave Q1-D — enrich model check. Soft (never failure).
         if _model_loaded(cfg.enrich_model, loaded_models):
-            typer.echo(f"enrich model    OK ({cfg.enrich_model} loaded)")
+            lines.append(
+                _DoctorLine(f"enrich model    OK ({cfg.enrich_model} loaded)")
+            )
         else:
-            typer.secho(
-                f"enrich model    WARN ({cfg.enrich_model} not in /api/tags — "
-                f"run `ollama pull {cfg.enrich_model}` to enable auto-summary)",
-                fg="yellow",
+            lines.append(
+                _DoctorLine(
+                    f"enrich model    WARN ({cfg.enrich_model} not in /api/tags — "
+                    f"run `ollama pull {cfg.enrich_model}` to enable auto-summary)",
+                    fg="yellow",
+                )
             )
         # Plan 04 — audio script model check. Soft (never failure).
         if _model_loaded(cfg.audio_script_model, loaded_models):
-            typer.echo(f"audio model     OK ({cfg.audio_script_model} loaded)")
+            lines.append(
+                _DoctorLine(f"audio model     OK ({cfg.audio_script_model} loaded)")
+            )
         else:
-            typer.secho(
-                f"audio model     WARN ({cfg.audio_script_model} not in /api/tags "
-                f"— run `ollama pull {cfg.audio_script_model}` to enable "
-                "`brain audio`)",
-                fg="yellow",
+            lines.append(
+                _DoctorLine(
+                    f"audio model     WARN ({cfg.audio_script_model} not in /api/tags "
+                    f"— run `ollama pull {cfg.audio_script_model}` to enable "
+                    "`brain audio`)",
+                    fg="yellow",
+                )
             )
     except (httpx.HTTPError, ValueError) as e:
         # ValueError covers a non-JSON /api/tags response (json.JSONDecodeError).
-        failures.append(f"ollama: {e}")
-        typer.secho(f"ollama          FAIL — {e}", fg="red", err=True)
+        return _ProbeResult(
+            lines=(_DoctorLine(f"ollama          FAIL — {e}", fg="red", err=True),),
+            failures=(f"ollama: {e}",),
+        )
+    return _ProbeResult(lines=tuple(lines))
 
 
 def _ollama_reachable(cfg: Config) -> bool:
@@ -1086,61 +1165,84 @@ def doctor() -> None:
         typer.secho(f"env             FAIL — {e}", fg="red", err=True)
         raise typer.Exit(code=1) from e
 
-    try:
-        with connect(cfg.database_url) as conn:
-            conn.execute("SELECT 1")
-            ext = conn.execute(
-                "SELECT extversion FROM pg_extension WHERE extname='vector'"
-            ).fetchone()
-            if ext:
-                typer.echo(f"postgres        OK (pgvector {ext[0]})")
-                _report_embedding_column(conn)
-                _report_mirror_drift(conn, vault_path=cfg.vault_path)
-                # Perf wave T1: warn when chunks stats are stale (e.g. post-restore).
-                _check_chunks_stats(conn)
-                # Plan 09: warn when the quick-capture inbox has grown large.
-                _check_inbox_size(conn, cfg)
-            else:
-                failures.append("pgvector extension not installed (run brain init)")
-                typer.echo("postgres        FAIL — pgvector not installed")
-            # GraphRAG (wave G0): soft AGE health line — reuses the open
-            # connection. Self-contained (catches its own probe errors) so an
-            # AGE hiccup never masquerades as a postgres failure below.
-            _check_age(conn)
-            # GraphRAG (wave G2-h): relational↔AGE graph drift check, only when
-            # the people-aspect graph sync is opted into. Self-contained WARN —
-            # never flips doctor's exit code (mirrors _check_age).
-            if cfg.graph_enabled:
-                _check_graph_drift(conn, cfg)
-                # GraphRAG (wave G3-g): community counts + stale-fingerprint
-                # check (spec §17c). Same gating + self-contained WARN contract
-                # as _check_graph_drift; never flips doctor's exit code.
-                _check_graph_communities(conn, cfg)
-    except psycopg.Error as e:
-        failures.append(f"database: {e}")
-        typer.secho(f"postgres        FAIL — {e}", fg="red", err=True)
+    # Task 4.2: the external probes (embedder HTTP/API, gws + npx subprocess) are
+    # independent of the Postgres connection, so run them concurrently with the
+    # serial DB block below. psycopg connections are NOT thread-safe, so the DB
+    # checks stay on the main thread's single connection; the external probes
+    # touch no DB. Output order is preserved — the DB lines print inline and the
+    # external-probe results are gathered + printed in a fixed order afterwards.
+    # Each future is resolved through _resolve_probe so one probe's crash can
+    # never crash doctor or suppress the siblings.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        embedder_future = pool.submit(_probe_embedder, cfg)
+        gws_future = pool.submit(_probe_gws)
+        npx_future = pool.submit(_probe_npx)
 
-    if cfg.embedder == "voyage":
-        _check_voyage(cfg, failures)
-    else:
-        _check_ollama(cfg, failures)
+        try:
+            with connect(cfg.database_url) as conn:
+                conn.execute("SELECT 1")
+                ext = conn.execute(
+                    "SELECT extversion FROM pg_extension WHERE extname='vector'"
+                ).fetchone()
+                if ext:
+                    typer.echo(f"postgres        OK (pgvector {ext[0]})")
+                    _report_embedding_column(conn)
+                    _report_mirror_drift(conn, vault_path=cfg.vault_path)
+                    # Perf wave T1: warn when chunks stats are stale (post-restore).
+                    _check_chunks_stats(conn)
+                    # Plan 09: warn when the quick-capture inbox has grown large.
+                    _check_inbox_size(conn, cfg)
+                else:
+                    failures.append(
+                        "pgvector extension not installed (run brain init)"
+                    )
+                    typer.echo("postgres        FAIL — pgvector not installed")
+                # GraphRAG (wave G0): soft AGE health line — reuses the open
+                # connection. Self-contained (catches its own probe errors) so an
+                # AGE hiccup never masquerades as a postgres failure below.
+                _check_age(conn)
+                # GraphRAG (wave G2-h): relational↔AGE graph drift check, only
+                # when the people-aspect graph sync is opted into. Self-contained
+                # WARN — never flips doctor's exit code (mirrors _check_age).
+                if cfg.graph_enabled:
+                    _check_graph_drift(conn, cfg)
+                    # GraphRAG (wave G3-g): community counts + stale-fingerprint
+                    # check (spec §17c). Same gating + self-contained WARN
+                    # contract as _check_graph_drift; never flips the exit code.
+                    _check_graph_communities(conn, cfg)
+        except psycopg.Error as e:
+            failures.append(f"database: {e}")
+            typer.secho(f"postgres        FAIL — {e}", fg="red", err=True)
 
-    if shutil.which("gws"):
-        typer.echo("gws CLI         OK")
-    else:
-        typer.echo("gws CLI         missing — Gmail ingestion disabled")
-
-    _check_npx()
+        # Gather the parallel external probes in a fixed order so the output is
+        # deterministic regardless of which probe finished first (Task 4.2).
+        _emit_probe_result(_resolve_probe(embedder_future, "embedder"), failures)
+        _emit_probe_result(_resolve_probe(gws_future, "gws CLI"), failures)
+        _emit_probe_result(_resolve_probe(npx_future, "quartz/npx"), failures)
 
     if failures:
         raise typer.Exit(code=1)
 
 
-def _check_npx() -> None:
-    """Doctor sub-check: probe ``npx`` for the Quartz integration.
+def _probe_gws() -> _ProbeResult:
+    """Doctor sub-check (buffered): is the ``gws`` CLI on PATH (Gmail ingestion)?
+
+    Soft — a missing ``gws`` only disables Gmail ingestion, never fails doctor.
+    Buffered so it can run in a worker thread alongside the DB block (Task 4.2);
+    ``shutil.which`` touches no Postgres connection.
+    """
+    if shutil.which("gws"):
+        return _ProbeResult(lines=(_DoctorLine("gws CLI         OK"),))
+    return _ProbeResult(
+        lines=(_DoctorLine("gws CLI         missing — Gmail ingestion disabled"),)
+    )
+
+
+def _probe_npx() -> _ProbeResult:
+    """Doctor sub-check (buffered): probe ``npx`` for the Quartz integration.
 
     Soft check — Quartz is optional; missing npx is a warning, never a
-    failure. We only print one line either way:
+    failure. We only emit one line either way:
 
     - ``quartz/npx       OK (npx 10.x.x at /path/to/npx)`` — present.
     - ``quartz/npx       not installed`` — absent.
@@ -1149,15 +1251,22 @@ def _check_npx() -> None:
     timeout, non-zero exit, or unparseable stdout. Doctor never fails
     on Quartz absence — `brain vault render` is the only command that
     needs it and it surfaces its own setup errors when invoked.
+
+    Buffered (returns a :class:`_ProbeResult`) so it can run in a worker thread
+    concurrently with the serial DB block (Task 4.2).
     """
+    not_installed = _ProbeResult(
+        lines=(
+            _DoctorLine(
+                "quartz/npx      not installed — `brain vault render` will fail; "
+                "install Node.js if you want HTML rendering",
+                fg="yellow",
+            ),
+        )
+    )
     npx_path = shutil.which("npx")
     if npx_path is None:
-        typer.secho(
-            "quartz/npx      not installed — `brain vault render` will fail; "
-            "install Node.js if you want HTML rendering",
-            fg="yellow",
-        )
-        return
+        return not_installed
     try:
         completed = subprocess.run(  # noqa: S603 — list-form args, no shell
             [npx_path, "--version"],
@@ -1169,23 +1278,17 @@ def _check_npx() -> None:
     except (subprocess.TimeoutExpired, OSError):
         # Daemon hung, npx not executable, etc. Treat as "not
         # installed" — we don't want a flaky probe to red-flag doctor.
-        typer.secho(
-            "quartz/npx      not installed — `brain vault render` will fail; "
-            "install Node.js if you want HTML rendering",
-            fg="yellow",
-        )
-        return
+        return not_installed
     if completed.returncode != 0:
-        typer.secho(
-            "quartz/npx      not installed — `brain vault render` will fail; "
-            "install Node.js if you want HTML rendering",
-            fg="yellow",
-        )
-        return
+        return not_installed
     version = completed.stdout.strip() or "?"
-    typer.echo(
-        f"quartz/npx      OK (npx {version} at {npx_path}) — "
-        "`brain vault render` available"
+    return _ProbeResult(
+        lines=(
+            _DoctorLine(
+                f"quartz/npx      OK (npx {version} at {npx_path}) — "
+                "`brain vault render` available"
+            ),
+        )
     )
 
 
@@ -2274,6 +2377,41 @@ def _emit_graph_context(ctx: GraphContext, *, json_output: bool) -> None:
     console.print(graph_context_renderable(ctx))
 
 
+# graphrag entity default neighbour cap — high-degree entities otherwise dump
+# every reached neighbour (measured 282 lines on the live corpus). `-n 0` shows
+# all; the CLI states the default in its --help (Task 4.3).
+_ENTITY_NEIGHBOUR_CAP_DEFAULT = 30
+
+
+def _cap_entity_neighbours(ctx: GraphContext, cap: int) -> tuple[GraphContext, int]:
+    """Truncate a local-mode neighbourhood to ``cap`` rendered neighbours.
+
+    Seeds (``ctx.explanation.seed_entity_ids``) are always kept; only the reached
+    neighbours are capped, preserving order so the render stays deterministic.
+    ``cap <= 0`` means unlimited (returns ``ctx`` untouched). Returns the
+    possibly-truncated context and the number of hidden neighbours (0 when
+    nothing was dropped — i.e. no footer is needed).
+
+    Render-layer only (Task 4.3): the underlying traversal in ``graph_rag`` still
+    returns the full neighbourhood, so ``--json`` callers see everything; a
+    deeper query-level cap would live in ``graph_rag/retrieve.py`` (not owned by
+    this module).
+    """
+    if cap <= 0:
+        return ctx, 0
+    seed_ids = (
+        set(ctx.explanation.seed_entity_ids)
+        if ctx.explanation is not None
+        else set()
+    )
+    neighbours = [e for e in ctx.entities if e.id not in seed_ids]
+    if len(neighbours) <= cap:
+        return ctx, 0
+    seeds = [e for e in ctx.entities if e.id in seed_ids]
+    kept = [*seeds, *neighbours[:cap]]
+    return dataclasses.replace(ctx, entities=kept), len(neighbours) - cap
+
+
 @graphrag_app.command("search")
 def graphrag_search(
     query: str = typer.Argument(..., help="Free-text graph retrieval query."),
@@ -2392,7 +2530,11 @@ def graphrag_entity(
         None, "--depth", help="Neighbourhood depth (default: BRAIN_GRAPH_DEPTH)."
     ),
     limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Max documents returned (default: 10)."
+        None,
+        "--limit",
+        "-n",
+        min=0,
+        help="Max neighbours rendered (default: 30; -n 0 shows all).",
     ),
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
@@ -2405,6 +2547,12 @@ def graphrag_entity(
     resolves the entity, traverses its bounded ``CO_OCCURS`` neighbourhood, and
     returns the seed + reached entities and their documents. No new traversal
     logic — it reuses the same path as ``graphrag search --mode local``.
+
+    High-degree entities can reach hundreds of neighbours, so the human render
+    caps them at ``--limit/-n`` (default 30; ``-n 0`` shows all) and prints a
+    "... and N more" footer when it truncated (Task 4.3). ``--json`` is never
+    capped — machine consumers get the full neighbourhood. Documents stay at the
+    graph default (the cap is a neighbour-render concern, not a document count).
     """
     cfg = Config.load()
     ctx = _graphrag_search_or_exit(
@@ -2414,10 +2562,16 @@ def graphrag_entity(
         tenant=tenant,
         person=None,
         depth=depth,
-        limit=limit,
+        limit=None,
         synthesize=False,
     )
+    cap = _ENTITY_NEIGHBOUR_CAP_DEFAULT if limit is None else limit
+    hidden = 0
+    if not json_output:
+        ctx, hidden = _cap_entity_neighbours(ctx, cap)
     _emit_graph_context(ctx, json_output=json_output)
+    if hidden:
+        typer.secho(f"... and {hidden} more (use -n 0 for all)", fg="yellow")
 
 
 # ---------------------------------------------------------------------------

@@ -56,6 +56,7 @@ path, so we never silently drop a real edit.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import queue
@@ -258,7 +259,17 @@ def run_watcher(
     #    Observer runs on its own thread (managed by watchdog).
     factory = observer_factory or Observer
     observer = factory()
-    handler = _Handler(config=config, state=state)
+    # ``scheduled_dirs`` (shared by reference with the handler) tracks every
+    # top-level directory that already has a recursive watch, so the handler
+    # can schedule one for a NEW top-level dir created after startup without
+    # double-scheduling the ones we set up here.
+    scheduled_dirs: set[Path] = set()
+    handler = _Handler(
+        config=config,
+        state=state,
+        observer=observer,
+        scheduled_dirs=scheduled_dirs,
+    )
     # brain (2026-05-08): schedule per non-hidden top-level subdir + root
     # non-recursively, instead of `recursive=True` on the vault root.
     # PollingObserver snapshots every file in the watched tree on every
@@ -267,11 +278,20 @@ def run_watcher(
     # starves the polling thread and edits stop being detected. The
     # event filter (_filter_path) already drops paths under hidden dirs,
     # so excluding them from the WATCHED tree is correct + cheap.
+    #
+    # brain (2026-07-12, Task 3.1): a NEW top-level dir created after this
+    # loop runs is scheduled on the fly by the handler (see
+    # _Handler._maybe_watch_new_directory), so files inside it are no longer
+    # invisible until restart.
     scheduled_names: list[str] = []
     observer.schedule(handler, str(config.vault_path), recursive=False)
     for child in config.vault_path.iterdir():
         if child.is_dir() and not child.name.startswith("."):
             observer.schedule(handler, str(child), recursive=True)
+            # A subdir that vanished between iterdir and resolve leaves the
+            # watch above standing; just skip the dedup bookkeeping for it.
+            with contextlib.suppress(OSError):
+                scheduled_dirs.add(child.resolve())
             scheduled_names.append(child.name)
     logger.info(
         "vault watcher: scoped polling on top-level dirs: %s",
@@ -364,15 +384,36 @@ class _Handler(FileSystemEventHandler):
     them together.
     """
 
-    def __init__(self, *, config: WatchConfig, state: _WatcherState) -> None:
+    def __init__(
+        self,
+        *,
+        config: WatchConfig,
+        state: _WatcherState,
+        observer: BaseObserver | None = None,
+        scheduled_dirs: set[Path] | None = None,
+    ) -> None:
         self._config = config
         self._state = state
+        # ``observer`` + ``scheduled_dirs`` let the handler schedule a
+        # recursive watch on a NEW top-level directory created after startup
+        # (see :meth:`_maybe_watch_new_directory`). Both are optional so a
+        # handler can be constructed standalone in tests; production always
+        # passes them from :func:`run_watcher`.
+        self._observer = observer
+        self._scheduled_dirs = (
+            scheduled_dirs if scheduled_dirs is not None else set()
+        )
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         # ``on_any_event`` fires for every event type — we route
         # everything through one classifier rather than per-type
         # handlers so the filtering logic lives in one place.
         try:
+            # A brand-new top-level directory (and every file under it) is
+            # invisible to the startup-enumerated recursive watches; schedule
+            # one on the fly before classifying the (directory) event, which
+            # itself has no per-file action.
+            self._maybe_watch_new_directory(event)
             classified = _classify_event(event, self._config.vault_path)
         except Exception:
             # Defensive: a misbehaving event must never kill the
@@ -383,6 +424,59 @@ class _Handler(FileSystemEventHandler):
             return
         for action, path, dest in classified:
             _schedule_debounced(self._config, self._state, action, path, dest)
+
+    def _maybe_watch_new_directory(self, event: FileSystemEvent) -> None:
+        """Schedule a recursive watch for a NEW top-level directory.
+
+        The vault root is watched non-recursively and per-subdir recursive
+        watches are enumerated only once, at startup, so a top-level directory
+        created afterwards — and every ``.md`` file under it — would be
+        invisible until the watcher restarted. When such a directory is
+        created we schedule a recursive watch on it (so future edits inside it
+        are seen) and enqueue any ``.md`` files that already exist in it (they
+        predate the watch, so the polling observer treats them as baseline and
+        never emits a create event for them).
+
+        Only NEW directories DIRECTLY under the vault root are handled: a
+        nested directory is already covered by its top-level ancestor's
+        recursive watch, and scheduling a second watch would double-deliver
+        every event. Hidden directories (``.git/`` etc.) are skipped, matching
+        the startup schedule filter.
+        """
+        if self._observer is None:
+            return
+        if not event.is_directory or event.event_type != "created":
+            return
+        new_dir = _to_path(event.src_path)
+        vault_path = self._config.vault_path
+        try:
+            resolved = new_dir.resolve()
+            relative = resolved.relative_to(vault_path.resolve())
+        except (ValueError, OSError):
+            return
+        # Top-level == exactly one path component directly under the root.
+        if len(relative.parts) != 1 or relative.parts[0].startswith("."):
+            return
+        if resolved in self._scheduled_dirs:
+            return
+        self._observer.schedule(self, str(new_dir), recursive=True)
+        self._scheduled_dirs.add(resolved)
+        logger.info(
+            "vault watcher: scheduled recursive watch on new top-level dir %s",
+            relative.parts[0],
+        )
+        # Enqueue notes that already exist inside the new dir — they predate
+        # the watch and would otherwise never generate a create event.
+        try:
+            existing = sorted(new_dir.rglob("*.md"))
+        except OSError:
+            return
+        for md in existing:
+            filtered = _filter_path(md, vault_path)
+            if filtered is not None:
+                _schedule_debounced(
+                    self._config, self._state, "upsert", filtered, None
+                )
 
 
 def _classify_event(
@@ -656,7 +750,7 @@ def _worker_loop(
                     if _is_fence_only_write(state, job.abs_path):
                         state.skipped_fence_only += 1
                     else:
-                        sync_one_file(
+                        report = sync_one_file(
                             conn,
                             embedder=embedder,
                             vault_path=config.vault_path,
@@ -665,7 +759,7 @@ def _worker_loop(
                             owner_participants=config.owner_participants,
                             graph_syncer=graph_syncer,
                         )
-                        _refresh_body_cache(state, job.abs_path)
+                        _cache_after_sync(state, job.abs_path, report)
                 else:
                     _handle_delete(
                         conn,
@@ -706,7 +800,7 @@ def _worker_loop(
                         job.abs_path,
                     )
                 else:
-                    sync_one_file(
+                    report = sync_one_file(
                         conn,
                         embedder=embedder,
                         vault_path=config.vault_path,
@@ -715,11 +809,12 @@ def _worker_loop(
                         owner_participants=config.owner_participants,
                         graph_syncer=graph_syncer,
                     )
-                    # Re-read after sync so the cache reflects whatever
-                    # fence the linker just rewrote — that way the
-                    # follow-up filesystem event triggered by our own
-                    # write is recognized as fence-only and skipped.
-                    _refresh_body_cache(state, job.abs_path)
+                    # Prime the cache from the baseline sync indexed rather
+                    # than a fresh disk read: the fence the linker rewrote is
+                    # excluded by strip_fence, and a user edit that raced
+                    # sync's write must NOT be baselined in (which would mask
+                    # its follow-up event as fence-only). See _cache_after_sync.
+                    _cache_after_sync(state, job.abs_path, report)
             state.processed += 1
         except Exception:
             state.errors += 1
@@ -776,6 +871,29 @@ def _refresh_body_cache(state: _WatcherState, abs_path: Path) -> None:
         state.body_cache.pop(abs_path, None)
         return
     state.body_cache[abs_path] = strip_fence(current)
+
+
+def _cache_after_sync(
+    state: _WatcherState,
+    abs_path: Path,
+    report: SyncReport | None,
+) -> None:
+    """Prime the fence-only-write cache after a per-file sync (Task 3.2).
+
+    Prefers the fence-stripped baseline sync reported (``report.body_baseline``
+    — the content it actually INDEXED) over a fresh disk read. A disk read here
+    would baseline a racing user edit that landed between sync's write and this
+    call, so the follow-up event for that edit would be misclassified as
+    fence-only and skipped — the DB would never catch up until a full sync.
+
+    Falls back to re-reading disk when sync did not report a baseline (a
+    skipped documentation file, or a test double that returns no report), which
+    preserves the pre-fix behavior for those cases.
+    """
+    if report is not None and report.body_baseline is not None:
+        state.body_cache[abs_path] = report.body_baseline
+    else:
+        _refresh_body_cache(state, abs_path)
 
 
 def _vault_relative_posix(abs_path: Path, vault_path: Path) -> str | None:
@@ -916,7 +1034,7 @@ def _handle_move(
     # the row by frontmatter id and updates it in place (full-sync
     # semantics), re-materializing the moved doc's OUTGOING links and retrying
     # any previously-unresolved refs scoped to it.
-    sync_one_file(
+    report = sync_one_file(
         conn,
         embedder=embedder,
         vault_path=config.vault_path,
@@ -927,7 +1045,8 @@ def _handle_move(
     )
 
     # The source path's cached fence-stripped body is now stale (file gone);
-    # refresh the destination so the follow-up filesystem event triggered by
-    # sync's own write is recognized as fence-only and skipped.
+    # prime the destination from the baseline sync indexed (not a fresh disk
+    # read) so a racing edit isn't masked while the follow-up event from
+    # sync's own write is still recognized as fence-only.
     state.body_cache.pop(src_abs, None)
-    _refresh_body_cache(state, dst_abs)
+    _cache_after_sync(state, dst_abs, report)

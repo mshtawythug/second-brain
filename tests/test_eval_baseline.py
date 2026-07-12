@@ -174,6 +174,58 @@ def test_diff_reports_regression_is_negative_delta() -> None:
     assert qd.ndcg_at_5_delta < 0
 
 
+def test_diff_reports_aggregate_uses_intersection_not_union() -> None:
+    """REGRESSION (Wave 3, item 3.8): aggregate mean deltas must be computed over
+    the INTERSECTION of the two query sets, and added/removed queries reported
+    separately.
+
+    The old code averaged per-query deltas over the UNION, 0-filling the missing
+    side. When the query set grows, each ADDED query contributes ``current - 0``
+    (a large positive delta) that dilutes — even flips — a genuine regression on
+    the shared queries.
+
+    Here q1 regresses (−0.4) and a NEW q2 is added. Union-averaging yields a
+    positive aggregate (~+0.25), masking the regression. Intersection-averaging
+    reports the true shared-query delta (−0.4); q2 is surfaced as an added query.
+    """
+    baseline = _make_report(results=[_make_result(query="q1", ndcg=0.9)])
+    current = _make_report(
+        results=[
+            _make_result(query="q1", ndcg=0.5),  # regressed −0.4 on the shared query
+            _make_result(query="q2", ndcg=0.9),  # brand-new query
+        ]
+    )
+
+    diff = diff_reports(baseline, current)
+
+    # Aggregate mean delta is the shared-query regression, NOT diluted by q2.
+    assert diff.mean_ndcg_at_5_delta == pytest.approx(-0.4, abs=1e-6)
+    # per_query carries only the comparable (intersection) queries.
+    assert [qd.query for qd in diff.per_query] == ["q1"]
+    # The query-set change is reported separately.
+    assert diff.added_queries == ["q2"]
+    assert diff.removed_queries == []
+
+
+def test_diff_reports_reports_removed_queries() -> None:
+    """A query present in the baseline but dropped from the current run is
+    surfaced as a removed query and excluded from the aggregate."""
+    baseline = _make_report(
+        results=[
+            _make_result(query="q1", ndcg=0.8),
+            _make_result(query="q2", ndcg=0.6),
+        ]
+    )
+    current = _make_report(results=[_make_result(query="q1", ndcg=0.8)])
+
+    diff = diff_reports(baseline, current)
+
+    assert diff.removed_queries == ["q2"]
+    assert diff.added_queries == []
+    assert [qd.query for qd in diff.per_query] == ["q1"]
+    assert diff.mean_ndcg_at_5_delta == pytest.approx(0.0, abs=1e-6)
+
+
 # ---------------------------------------------------------------------------
 # Atomic write safety
 # ---------------------------------------------------------------------------

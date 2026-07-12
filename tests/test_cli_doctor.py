@@ -72,6 +72,53 @@ def test_doctor_passes_when_env_and_db_ok(monkeypatch: pytest.MonkeyPatch) -> No
     assert "OK" in result.output
 
 
+# ---------------------------------------------------------------------------
+# Parallel external probes (Task 4.2) — the embedder HTTP/API, gws, and npx
+# probes run concurrently with the serial DB block. Two invariants matter:
+# (1) one probe's failure must not suppress the others, and (2) the printed
+# order is fixed regardless of which probe finishes first.
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_failing_probe_does_not_suppress_other_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unexpected crash in one external probe surfaces as that check's FAIL
+    without crashing doctor or hiding the other checks."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    boom = RuntimeError("simulated npx probe crash")
+    with patch("brain.cli._probe_npx", side_effect=boom), _patch_httpx_client(
+        _ok_ollama_transport()
+    ):
+        result = CliRunner().invoke(app, ["doctor"])
+    combined = result.output + (result.stderr if result.stderr else "")
+    # The crashed probe is isolated: doctor still ran the survivors.
+    assert "postgres" in combined
+    assert "ollama" in combined
+    assert "gws CLI" in combined
+    # The crash is surfaced as the npx check's own FAIL, non-zero exit.
+    assert "quartz/npx" in combined
+    assert "FAIL" in combined
+    assert result.exit_code != 0
+
+
+def test_doctor_external_probe_output_order_is_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parallelism must not reorder output: postgres → embedder → gws → npx."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    assert (
+        out.index("postgres")
+        < out.index("ollama")
+        < out.index("gws CLI")
+        < out.index("quartz/npx")
+    )
+
+
 def test_doctor_pings_ollama(monkeypatch: pytest.MonkeyPatch) -> None:
     """When Ollama responds 200, doctor prints ``ollama OK``."""
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)

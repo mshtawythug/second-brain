@@ -20,7 +20,6 @@ from .embedding_targets import (
     validate_embedding_target,
 )
 from .errors import (
-    BrainError,
     IdPrefixAmbiguous,
     IdPrefixNotFound,
     IdPrefixNotHex,
@@ -29,7 +28,15 @@ from .errors import (
     PersonNotFound,
 )
 from .ingest import Embedder
-from .vault.frontmatter import parse_frontmatter
+
+# libyaml's C loader parses the flat scalar frontmatter mappings ~11x faster
+# than the pure-Python SafeLoader while returning identical values; fall back to
+# the pure-Python loader when the C extension is unavailable so mirror-drift
+# behavior is unchanged on those builds.
+try:
+    from yaml import CSafeLoader as _FrontmatterLoader
+except ImportError:  # pragma: no cover - libyaml ships in supported envs
+    from yaml import SafeLoader as _FrontmatterLoader  # type: ignore[assignment]
 
 # pgvector 0.8.x caps HNSW (and IVFFlat) at 2000 dims for ``vector`` and 4000
 # for ``halfvec``. Backends with native dims at or below this limit get an
@@ -879,6 +886,78 @@ def embedding_column_state(conn: psycopg.Connection[Any]) -> EmbeddingColumnStat
 # ``vault.sync`` module just to read a string.
 _INGESTED_DIR_NAME = "_ingested"
 
+# Frontmatter fence delimiter. Mirrors :data:`brain.vault.frontmatter._FENCE`;
+# duplicated here so the mirror-drift scan can slice a file's frontmatter block
+# without importing the heavier ``vault.frontmatter`` module.
+_FRONTMATTER_FENCE = "---"
+
+
+def _read_mirror_frontmatter_id(path: Path) -> str | None:
+    """Return the frontmatter ``id`` of a mirror file, or ``None`` to skip it.
+
+    Semantically identical to ``parse_frontmatter(path.read_text())[0].get("id")``
+    for the drift scan's needs — same fence rules, same "no fence / no closing
+    fence / malformed YAML / non-mapping / no string id ⇒ skip" behavior — but
+    reads only the frontmatter block (never the possibly-megabyte body) and
+    loads that block with libyaml when available. Returns the ``id`` string only
+    when the file opens with a ``---`` fence, has a closing ``---`` fence, whose
+    enclosed YAML parses to a mapping carrying a non-empty string ``id``.
+
+    ``OSError`` (and, matching the previous ``read_text``-based code, a
+    ``UnicodeDecodeError`` on a non-UTF-8 file) propagates to the caller rather
+    than being swallowed; every real mirror file is UTF-8, so this never fires.
+    """
+    try:
+        with path.open(encoding="utf-8") as handle:
+            first = handle.readline()
+            if first.rstrip("\r\n") != _FRONTMATTER_FENCE:
+                return None
+            fm_lines: list[str] = []
+            for line in handle:
+                if line.rstrip("\r\n") == _FRONTMATTER_FENCE:
+                    break
+                fm_lines.append(line)
+            else:
+                # No closing fence: the whole file is body, no frontmatter.
+                return None
+    except OSError:
+        return None
+    yaml_text = "".join(fm_lines)
+    if not yaml_text.strip():
+        return None
+    try:
+        parsed = yaml.load(yaml_text, Loader=_FrontmatterLoader)
+    except yaml.YAMLError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    doc_id = parsed.get("id")
+    if not isinstance(doc_id, str) or not doc_id:
+        return None
+    return doc_id
+
+
+def _iter_ingested_mirror_ids(vault_path: Path) -> Iterator[tuple[Path, str]]:
+    """Yield ``(path, id)`` for every ``.md`` mirror under ``<vault>/_ingested/``.
+
+    Walks the mirror tree once in :py:meth:`Path.rglob` sort order (deterministic
+    output) and yields only files that carry a resolvable string frontmatter
+    ``id`` (see :func:`_read_mirror_frontmatter_id`). Files without parseable
+    frontmatter or without a string ``id`` are silently skipped — they can't be
+    classified by id. Shared by :func:`iter_orphan_mirror_files`,
+    :func:`iter_stale_mirror_files`, and :func:`mirror_drift_summary` so the
+    expensive read+parse happens exactly once per call site.
+    """
+    ingested_dir = vault_path / _INGESTED_DIR_NAME
+    if not ingested_dir.is_dir():
+        return
+    for path in sorted(ingested_dir.rglob("*.md")):
+        if not path.is_file():
+            continue
+        doc_id = _read_mirror_frontmatter_id(path)
+        if doc_id is not None:
+            yield path, doc_id
+
 
 @dataclass(frozen=True)
 class MirrorDriftSummary:
@@ -931,20 +1010,7 @@ def iter_orphan_mirror_files(
         return
     rows = conn.execute("SELECT id::text FROM documents").fetchall()
     known_ids = {str(r[0]) for r in rows}
-    for path in sorted(ingested_dir.rglob("*.md")):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        try:
-            frontmatter, _body = parse_frontmatter(text)
-        except (ValueError, yaml.YAMLError):
-            continue
-        doc_id = frontmatter.get("id")
-        if not isinstance(doc_id, str) or not doc_id:
-            continue
+    for path, doc_id in _iter_ingested_mirror_ids(vault_path):
         if doc_id in known_ids:
             continue
         yield path
@@ -984,20 +1050,7 @@ def iter_stale_mirror_files(
         "SELECT id::text, vault_path FROM documents WHERE vault_path IS NOT NULL"
     ).fetchall()
     canonical: dict[str, str] = {str(r[0]): str(r[1]) for r in rows}
-    for path in sorted(ingested_dir.rglob("*.md")):
-        if not path.is_file():
-            continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            continue
-        try:
-            frontmatter, _body = parse_frontmatter(text)
-        except (ValueError, yaml.YAMLError):
-            continue
-        doc_id = frontmatter.get("id")
-        if not isinstance(doc_id, str) or not doc_id:
-            continue
+    for path, doc_id in _iter_ingested_mirror_ids(vault_path):
         canonical_path = canonical.get(doc_id)
         if canonical_path is None:
             continue
@@ -1012,10 +1065,12 @@ def mirror_drift_summary(
 ) -> MirrorDriftSummary:
     """Compute the four-counter drift snapshot for ``<vault>/_ingested/``.
 
-    Three SQL round-trips (total ingested rows, NULL-vault_path rows, and the
-    set of vault_path strings claimed by ingested rows) plus one filesystem
-    walk via :func:`iter_orphan_mirror_files`. Safe to call from
-    ``brain doctor`` on every invocation — bounded by the corpus size.
+    One SQL round-trip (``id``, ``kind``, ``vault_path`` for every row) feeds
+    all three DB-derived signals — the ingested/NULL counts and the known-id
+    set — plus one filesystem walk via :func:`_iter_ingested_mirror_ids`. Safe
+    to call from ``brain doctor`` on every invocation: at personal-corpus scale
+    the whole pass is dominated by walking the mirror tree, and that walk reads
+    only each file's frontmatter block.
 
     Ghost rows are counted purely against the filesystem: a row whose
     ``vault_path`` points at a file that doesn't exist on disk under
@@ -1024,34 +1079,34 @@ def mirror_drift_summary(
     orphan file with the same id happens to also exist — these are
     independent symptoms with different fixes).
     """
-    total_row = conn.execute(
-        "SELECT count(*) FROM documents WHERE kind = 'ingested'"
-    ).fetchone()
-    null_row = conn.execute(
-        "SELECT count(*) FROM documents "
-        "WHERE kind = 'ingested' AND vault_path IS NULL"
-    ).fetchone()
-    ghost_paths = conn.execute(
-        "SELECT vault_path FROM documents "
-        "WHERE kind = 'ingested' AND vault_path IS NOT NULL"
-    ).fetchall()
-    if total_row is None or null_row is None:
-        # count(*) always returns one row in practice; guard explicitly so
-        # the failure mode survives `python -O` (which strips asserts).
-        raise BrainError("count(*) returned no row from documents")
+    rows = conn.execute("SELECT id::text, kind, vault_path FROM documents").fetchall()
+    known_ids: set[str] = set()
+    total_ingested = 0
+    null_vault_path = 0
+    ingested_vault_paths: list[str] = []
+    for doc_id, kind, vault_path_value in rows:
+        known_ids.add(str(doc_id))
+        if kind != "ingested":
+            continue
+        total_ingested += 1
+        if vault_path_value is None:
+            null_vault_path += 1
+        else:
+            ingested_vault_paths.append(str(vault_path_value))
 
     ghost_count = 0
-    for (vp,) in ghost_paths:
-        if vp is None:
-            continue
-        if not (vault_path / str(vp)).is_file():
+    for relative in ingested_vault_paths:
+        if not (vault_path / relative).is_file():
             ghost_count += 1
 
-    orphan_count = sum(1 for _ in iter_orphan_mirror_files(conn, vault_path=vault_path))
+    orphan_count = 0
+    for _path, doc_id in _iter_ingested_mirror_ids(vault_path):
+        if doc_id not in known_ids:
+            orphan_count += 1
 
     return MirrorDriftSummary(
-        total_ingested_rows=int(total_row[0]),
-        rows_with_null_vault_path=int(null_row[0]),
+        total_ingested_rows=total_ingested,
+        rows_with_null_vault_path=null_vault_path,
         ghost_rows=ghost_count,
         orphan_files=orphan_count,
     )

@@ -735,8 +735,141 @@ def test_mirror_drift_summary(
         encoding="utf-8",
     )
 
+    # 5. A vault-tier (non-ingested) row: excluded from every ingested counter,
+    #    but its id still joins ``known_ids`` for orphan resolution.
+    vault_id = _ingest_unique("vault-tier", "vault-tier distinct body")
+    test_db.execute(
+        "UPDATE documents SET kind='vault', vault_path=%s WHERE id=%s",
+        ("some-note.md", vault_id),
+    )
+
     summary = mirror_drift_summary(test_db, vault_path=vault)
     assert summary.total_ingested_rows == 3
     assert summary.rows_with_null_vault_path == 1
     assert summary.ghost_rows == 1
     assert summary.orphan_files == 1
+
+
+def test_iter_orphan_mirror_files_frontmatter_edge_cases(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: "Any"
+) -> None:
+    """The scan reads only the *frontmatter* block and skips unparseable files.
+
+    Regression guard for the drift scan reading just each file's frontmatter
+    region (rather than the whole file) and loading it with libyaml. Four
+    tricky mirror files exercise the boundaries:
+
+    1. Healthy row whose *body* contains a ``---`` line and a decoy ``id:`` —
+       the id must come from the top frontmatter (resolves ⇒ NOT orphan), never
+       from the body. Proves the region read stops at the first closing fence.
+    2. A true orphan (unresolved id) whose body also contains a ``---`` line —
+       the single expected yield.
+    3. Malformed YAML frontmatter — must be skipped (matches the previous
+       ``except yaml.YAMLError`` behavior), not counted as orphan.
+    4. A leading ``---`` fence with no closing fence — treated as bodyless /
+       no-frontmatter and skipped.
+
+    Verify: :func:`iter_orphan_mirror_files` yields exactly the orphan.
+    """
+    from brain.queries import iter_orphan_mirror_files
+
+    real_id = _seed(test_db, fake_embedder, title="real")
+    vault = tmp_path / "vault"
+
+    # 1. Healthy: real id in frontmatter, decoy ``---`` + ``id:`` in the body.
+    healthy = vault / "_ingested" / "manual" / "real.md"
+    _write_mirror_file(
+        healthy,
+        frontmatter={"id": real_id, "title": "real"},
+        body="intro line\n---\nid: 22222222-2222-4222-8222-222222222222\noutro\n",
+    )
+
+    # 2. True orphan: unresolved id, body also carries a ``---`` fence.
+    orphan_id = "00000000-0000-4000-8000-0000000edcba"
+    orphan = vault / "_ingested" / "manual" / "orphan.md"
+    _write_mirror_file(
+        orphan,
+        frontmatter={"id": orphan_id, "title": "ghost"},
+        body="body\n---\ntrailing\n",
+    )
+
+    # 3. Malformed YAML frontmatter — unterminated flow sequence.
+    malformed = vault / "_ingested" / "manual" / "malformed.md"
+    malformed.parent.mkdir(parents=True, exist_ok=True)
+    malformed.write_text(
+        "---\nid: [unclosed\ntitle: broken\n---\nbody\n", encoding="utf-8"
+    )
+
+    # 4. Leading fence, no closing fence — no frontmatter, skipped.
+    no_close = vault / "_ingested" / "manual" / "no-close.md"
+    no_close.write_text(
+        "---\nid: 33333333-3333-4333-8333-333333333333\nbody with no second fence\n",
+        encoding="utf-8",
+    )
+
+    # 5. Empty frontmatter block — no id, skipped.
+    empty_fm = vault / "_ingested" / "manual" / "empty-fm.md"
+    empty_fm.write_text("---\n---\nbody\n", encoding="utf-8")
+
+    # 6. Non-mapping frontmatter (a bare YAML list) — skipped, matching the
+    #    previous ``parse_frontmatter`` ValueError path.
+    non_mapping = vault / "_ingested" / "manual" / "non-mapping.md"
+    non_mapping.write_text("---\n- one\n- two\n---\nbody\n", encoding="utf-8")
+
+    # 7. Frontmatter with no ``id`` key — skipped.
+    no_id = vault / "_ingested" / "manual" / "no-id.md"
+    no_id.write_text("---\ntitle: has no id\n---\nbody\n", encoding="utf-8")
+
+    # 8. A directory whose name ends in ``.md`` — rglob yields it, the scan
+    #    skips it (not a regular file).
+    (vault / "_ingested" / "manual" / "a-directory.md").mkdir(
+        parents=True, exist_ok=True
+    )
+
+    yielded = list(iter_orphan_mirror_files(test_db, vault_path=vault))
+    assert yielded == [orphan]
+
+
+def test_read_mirror_frontmatter_id_on_directory_returns_none(
+    tmp_path: "Any",
+) -> None:
+    """Opening a directory path yields ``OSError`` → ``None`` (skip), not a crash.
+
+    Guards the ``except OSError`` branch of :func:`_read_mirror_frontmatter_id`:
+    ``path.open()`` on a directory raises ``IsADirectoryError`` (an ``OSError``),
+    which the scan swallows into a skip rather than propagating.
+    """
+    from brain.queries import _read_mirror_frontmatter_id
+
+    a_dir = tmp_path / "not-a-file.md"
+    a_dir.mkdir()
+    assert _read_mirror_frontmatter_id(a_dir) is None
+
+
+def test_mirror_scan_on_vault_without_ingested_tier(
+    test_db: psycopg.Connection, tmp_path: "Any"
+) -> None:
+    """A vault with no ``_ingested/`` tier scans cleanly instead of crashing.
+
+    Guards the ``if not ingested_dir.is_dir(): return`` short-circuits in
+    :func:`iter_orphan_mirror_files` and :func:`iter_stale_mirror_files` (which
+    also skip their SQL when there is nothing on disk to compare against) and
+    the analogous empty-summary path of :func:`mirror_drift_summary`.
+    """
+    from brain.queries import (
+        iter_orphan_mirror_files,
+        iter_stale_mirror_files,
+        mirror_drift_summary,
+    )
+
+    vault = tmp_path / "vault"
+    vault.mkdir()  # exists, but no `_ingested/` subdirectory
+
+    assert list(iter_orphan_mirror_files(test_db, vault_path=vault)) == []
+    assert list(iter_stale_mirror_files(test_db, vault_path=vault)) == []
+
+    summary = mirror_drift_summary(test_db, vault_path=vault)
+    assert summary.total_ingested_rows == 0
+    assert summary.rows_with_null_vault_path == 0
+    assert summary.ghost_rows == 0
+    assert summary.orphan_files == 0

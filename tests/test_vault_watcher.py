@@ -2282,3 +2282,178 @@ def test_handle_move_dest_vanished_falls_back_to_delete(
         ).fetchone()[0]
         == 0
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 3.1: a new top-level directory created AFTER the watcher starts must be
+# scheduled for watching, and any files already inside it must be picked up.
+#
+# The root is watched non-recursively and per-subdir recursive watches are
+# enumerated only at startup, so a brand-new top-level dir (and every file
+# under it) was invisible until the watcher restarted.
+# ---------------------------------------------------------------------------
+
+
+def test_new_top_level_dir_created_after_start_is_watched_and_synced(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """A top-level dir created post-startup is watched + its notes synced.
+
+    Repro: with the root watched ``recursive=False`` and per-subdir recursive
+    watches only enumerated at startup, a directory created afterwards is
+    never scheduled — its ``.md`` files stay invisible until restart. The fix
+    schedules a recursive watch on the new dir (so future edits inside it are
+    seen) and enqueues the notes that already exist in it (which predate the
+    watch and would otherwise never generate a create event).
+    """
+    from watchdog.events import DirCreatedEvent  # noqa: PLC0415
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    # A pre-existing top-level dir so startup schedules at least one subtree.
+    (vault / "notes").mkdir()
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+
+    # A brand-new top-level directory appears with a note already inside it —
+    # the note predates any watch on the new directory.
+    newdir = vault / "fresh-project"
+    newdir.mkdir()
+    note = newdir / "kickoff.md"
+    note_id = str(uuid.uuid4())
+    _write(note, {"id": note_id, "title": "Kickoff"}, "hello\n")
+
+    # The OS surfaces the new directory via the root's non-recursive watch.
+    observer.inject(DirCreatedEvent(str(newdir)))
+
+    # (a) A recursive watch is now scheduled on the new directory so future
+    #     edits inside it are seen.
+    _wait_for(
+        lambda: any(
+            Path(p) == newdir and recursive
+            for _h, p, recursive in observer.scheduled
+        ),
+        timeout=2.0,
+    )
+    # (b) The note that already existed inside the new dir is synced without a
+    #     separate file event.
+    _wait_for(
+        lambda: test_db.execute(
+            "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
+        ).fetchone()[0]
+        == 1,
+        timeout=2.0,
+    )
+
+    state = observer.handler._state
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Task 3.2: an edit landing during sync must not be masked by the body cache.
+#
+# The worker refreshed its fence-only-write cache by RE-READING disk after
+# ``sync_one_file`` returned. A save landing between sync's read and that
+# refresh was baselined into the cache, so the follow-up event for the save
+# was misclassified as fence-only and skipped — the DB never got the edit
+# until a full sync. The fix caches the fence-stripped body sync actually
+# indexed instead of re-reading disk.
+# ---------------------------------------------------------------------------
+
+
+class _EditDuringEmbed:
+    """Embedder that overwrites a target file the first time it embeds.
+
+    Models a user save landing during the (slow, real-backend) embed call
+    inside ``sync_one_file``: the DB is built from the body sync READ, but the
+    file on disk ends up holding the racing edit by the time sync returns.
+    Standard test double (not monkey-patching) — it conforms to the
+    ``Embedder`` protocol and delegates the actual vectors to ``inner``.
+    """
+
+    def __init__(self, inner: Any, target: Path, new_text: str) -> None:
+        self.dim = inner.dim
+        self._inner = inner
+        self._target = target
+        self._new_text = new_text
+        self.fired = False
+
+    def embed(
+        self, texts: list[str], input_type: str = "document"
+    ) -> list[list[float]]:
+        if not self.fired:
+            self.fired = True
+            self._target.write_text(self._new_text, encoding="utf-8")
+        return self._inner.embed(texts, input_type=input_type)  # type: ignore[no-any-return]
+
+    def count_tokens(self, text: str) -> int:
+        return self._inner.count_tokens(text)  # type: ignore[no-any-return]
+
+
+def test_racing_edit_during_sync_is_not_masked_by_body_cache(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """A user edit landing during sync must still reach the DB (Task 3.2).
+
+    Sync indexes the body it READ (``body_indexed``); a concurrent save
+    replaces the file with ``body_raced`` before sync returns. The follow-up
+    filesystem event for that save must trigger a real re-sync so the DB
+    catches up — it must NOT be masked as a fence-only no-op by a cache that
+    was baselined from the raced disk content.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note = vault / "raced.md"
+    note_id = str(uuid.uuid4())
+    fm = {"id": note_id, "title": "Raced"}
+    body_indexed = "alpha body version one\n"
+    body_raced = "beta body version two — the edit that raced\n"
+    raced_text = dump_frontmatter(fm, body_raced)
+
+    # The note does NOT exist at startup, so the startup sync embeds nothing
+    # and the edit-during-embed only fires on the post-startup event.
+    embedder = _EditDuringEmbed(fake_embedder, note, raced_text)
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    state = observer.handler._state
+
+    # First save: body_indexed on disk. The event triggers sync, whose embed
+    # writes body_raced to disk mid-flight (the racing user edit).
+    _write(note, fm, body_indexed)
+    observer.inject(FileModifiedEvent(str(note)))
+
+    # Sync 1 done: DB holds the INDEXED body, disk holds the raced body, and
+    # the cache has been primed.
+    _wait_for(lambda: embedder.fired, timeout=2.0)
+    _wait_for(lambda: note in state.body_cache, timeout=2.0)
+    row = test_db.execute(
+        "SELECT content FROM documents WHERE id = %s", (note_id,)
+    ).fetchone()
+    assert row is not None and "alpha body version one" in row[0]
+
+    # Second event: the racing save's own filesystem event. It must NOT be
+    # masked as fence-only — the DB has to catch up to the raced body.
+    observer.inject(FileModifiedEvent(str(note)))
+    _wait_for(
+        lambda: "beta body version two"
+        in test_db.execute(
+            "SELECT content FROM documents WHERE id = %s", (note_id,)
+        ).fetchone()[0],
+        timeout=2.0,
+    )
+
+    state.stop_event.set()
+    thread.join(timeout=5.0)
