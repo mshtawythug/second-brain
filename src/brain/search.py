@@ -213,6 +213,21 @@ def _query_embed(
     return list(_cached_query_embed(identity, input_type, text))
 
 
+def _ensure_utc(dt: datetime) -> datetime:
+    """Stamp a naive datetime as UTC so ``timestamptz`` comparisons don't shift.
+
+    ``--after 2026-01-01`` reaches the search layer as a *naive* midnight. Bound
+    directly against a ``timestamptz`` column, Postgres interprets a naive
+    literal in the **session** ``TimeZone``, shifting the boundary by the
+    session's UTC offset — a doc sent at ``2026-01-01T03:00:00Z`` would fall
+    *outside* ``--after 2026-01-01`` under an ``America/New_York`` session.
+    Stamping UTC makes the boundary session-TZ-independent. Already-aware
+    datetimes pass through unchanged. Mirrors the recency-boost idiom below
+    (``recency_ts.replace(tzinfo=UTC)``).
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 def hybrid_search(
     conn: psycopg.Connection,
     *,
@@ -327,10 +342,10 @@ def hybrid_search(
         where_params.append(person_keys)
     if after is not None:
         where_clauses.append("coalesce(d.sent_at, d.ingested_at) >= %s")
-        where_params.append(after)
+        where_params.append(_ensure_utc(after))
     if before is not None:
         where_clauses.append("coalesce(d.sent_at, d.ingested_at) < %s")
-        where_params.append(before)
+        where_params.append(_ensure_utc(before))
     if content_type is not None:
         where_clauses.append("d.content_type = %s")
         where_params.append(content_type)
@@ -489,7 +504,13 @@ def hybrid_search(
     now = datetime.now(tz=UTC)
     results: list[SearchResult] = []
     for doc_id, (rrf_score, best_chunk_idx, snippet_content, best_cid) in by_doc.items():
-        meta = docs[doc_id]
+        meta = docs.get(doc_id)
+        if meta is None:
+            # The document was deleted (e.g. `brain rm`) between the
+            # chunk-ranking queries and the per-document metadata fetch above;
+            # its chunk rows can still linger in ``by_doc``. Skip the now-
+            # orphaned doc instead of KeyError-ing the whole search. Task 2.2.
+            continue
 
         score = rrf_score
         recency_age_days: float | None = None
@@ -577,7 +598,13 @@ def hybrid_search(
             )
         )
     results.sort(key=lambda r: r.score, reverse=True)
-    return results[:limit]
+    # Defensive floor. A non-positive ``limit`` reaching this far is a caller
+    # bug — the CLI (Typer ``min=1``) and MCP (INVALID_PARAMS) boundaries reject
+    # it first. Clamp to 1 so a stray negative never silently slices the tail
+    # off the ranked list (``results[:-3]`` would drop the 3 lowest-ranked docs
+    # and quietly return wrong data). Task 2.10.
+    effective_limit = max(1, limit)
+    return results[:effective_limit]
 
 
 # ---------------------------------------------------------------------------

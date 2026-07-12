@@ -15,7 +15,7 @@ import httpx
 import pytest
 
 from brain import chat
-from brain.chat import chat_json, chat_json_with_client
+from brain.chat import chat_json, chat_json_with_client, coerce_bool
 from brain.config import Config
 from brain.errors import EnrichmentError, OllamaUnavailable
 
@@ -285,3 +285,48 @@ def test_chat_json_propagates_unavailable(
     )
     with pytest.raises(OllamaUnavailable):
         chat_json("q", schema={"answer": "..."}, cfg=_cfg())
+
+
+# ---------------------------------------------------------------------------
+# coerce_bool — stringified/int boolean coercion (Task 2.7 shared helper)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        # Real booleans pass through.
+        (True, True),
+        (False, False),
+        # Stringified booleans (the failure mode `bool(...)` mishandles).
+        ("true", True),
+        ("false", False),
+        ("True", True),
+        ("FALSE", False),
+        ("  yes  ", True),
+        ("no", False),
+        ("1", True),
+        ("0", False),
+        # Ints.
+        (1, True),
+        (0, False),
+        # Anything unrecognised falls back to the default (False here).
+        (None, False),
+        ("maybe", False),
+        ("", False),
+        (2, False),
+        (1.0, False),
+        ({"x": 1}, False),
+    ],
+)
+def test_coerce_bool_normalises(value: Any, expected: bool) -> None:
+    assert coerce_bool(value) is expected
+
+
+def test_coerce_bool_custom_default_used_only_for_unrecognised() -> None:
+    # Unrecognised values honour the caller's default ...
+    assert coerce_bool("garbage", default=True) is True
+    assert coerce_bool(None, default=True) is True
+    # ... but a recognised token always wins over the default.
+    assert coerce_bool("false", default=True) is False
+    assert coerce_bool("true", default=False) is True

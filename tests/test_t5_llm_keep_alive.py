@@ -284,6 +284,73 @@ def test_qwen3_embedder_default_keep_alive() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Wire coercion: the bare "-1"/"0" sentinels must go over the wire as JSON
+# numbers, not strings. Ollama 0.24.0 rejects the STRING "-1" in keep_alive with
+# HTTP 400 ``time: missing unit in duration "-1"`` and accepts it only as a JSON
+# number (-1 = keep loaded forever, 0 = unload immediately). Unit-bearing
+# duration strings ("30m", "1h", "60s") stay strings.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sentinel", ["-1", "0"])
+def test_keep_alive_sentinel_sent_as_json_number(sentinel: str) -> None:
+    """"-1"/"0" are coerced to JSON numbers in the /api/embed payload."""
+    captured: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.read())
+        return _ok_embed(1, dim=1024)
+
+    emb = ArcticEmbedder(
+        host="http://x",
+        client=_embed_client(httpx.MockTransport(handler)),
+        keep_alive=sentinel,
+    )
+    emb.embed(["hello"], input_type="document")
+    value = json.loads(captured[0])["keep_alive"]
+    assert value == int(sentinel)
+    assert isinstance(value, int)
+
+
+def test_keep_alive_sentinel_sent_as_json_number_qwen3() -> None:
+    """The sentinel coercion is in the shared base — Qwen3 gets it too."""
+    captured: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.read())
+        return _ok_embed(1, dim=4096)
+
+    emb = Qwen3Embedder(
+        host="http://x",
+        client=_embed_client(httpx.MockTransport(handler)),
+        keep_alive="-1",
+    )
+    emb.embed(["hello"], input_type="document")
+    value = json.loads(captured[0])["keep_alive"]
+    assert value == -1
+    assert isinstance(value, int)
+
+
+def test_keep_alive_duration_string_sent_unchanged() -> None:
+    """A unit-bearing duration string passes through verbatim (still a str)."""
+    captured: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(request.read())
+        return _ok_embed(1, dim=1024)
+
+    emb = ArcticEmbedder(
+        host="http://x",
+        client=_embed_client(httpx.MockTransport(handler)),
+        keep_alive="30m",
+    )
+    emb.embed(["hello"], input_type="document")
+    value = json.loads(captured[0])["keep_alive"]
+    assert value == "30m"
+    assert isinstance(value, str)
+
+
+# ---------------------------------------------------------------------------
 # LLM-03: keep_alive in OllamaEnricher /api/chat payload
 # ---------------------------------------------------------------------------
 

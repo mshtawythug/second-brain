@@ -272,3 +272,75 @@ def test_ingested_classification_for_underscore_ingested(
         "SELECT kind FROM documents WHERE id=%s", (note_id,)
     ).fetchone()
     assert row == ("ingested",)
+
+
+class _EmbedderThatEditsFileMidSync:
+    """Fake embedder that simulates a concurrent user save landing DURING the
+    (multi-second) embed call.
+
+    This is the exact race window the first-sync write-back clobber bug lives
+    in: ``_sync_one`` reads the body, embeds (slow for a real backend), then
+    writes ``dump_frontmatter(frontmatter, stale_body)`` back to disk to stamp
+    the assigned id. A user save in that window would be overwritten by the
+    stale body captured before the embed.
+
+    Standard test double (mirrors ``dim`` + the Embedder Protocol surface),
+    not monkey-patching of production code.
+    """
+
+    def __init__(self, inner: object, target: Path, new_text: str) -> None:
+        self.dim = inner.dim  # type: ignore[attr-defined]
+        self._inner = inner
+        self._target = target
+        self._new_text = new_text
+        self.fired = False
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> list[list[float]]:
+        if not self.fired:
+            self.fired = True
+            # The concurrent user save lands right when the slow embed starts.
+            self._target.write_text(self._new_text, encoding="utf-8")
+        return self._inner.embed(texts, input_type=input_type)  # type: ignore[attr-defined,no-any-return]
+
+    def count_tokens(self, text: str) -> int:
+        return self._inner.count_tokens(text)  # type: ignore[attr-defined,no-any-return]
+
+
+def test_write_back_preserves_concurrent_user_edit(
+    test_db: psycopg.Connection, fake_embedder, tmp_path: Path
+) -> None:
+    """The deferred first-sync write-back must not clobber a concurrent edit.
+
+    Regression: a file with no frontmatter ``id`` gets an id assigned + a
+    deferred write-back. ``_sync_one`` read the body, embedded (a multi-second
+    call for real backends), then wrote back the STALE body it had captured
+    before the embed. A user save during that window was silently overwritten.
+    """
+    from brain.vault.frontmatter import dump_frontmatter  # noqa: PLC0415
+
+    vault = tmp_path / "vault"
+    file_path = vault / "fresh.md"
+    # No id → triggers the deferred frontmatter write-back path.
+    _write(file_path, {"title": "Fresh"}, "original body\n")
+
+    user_edit = dump_frontmatter(
+        {"title": "Fresh"}, "USER EDIT — keep this text\n"
+    )
+    embedder = _EmbedderThatEditsFileMidSync(fake_embedder, file_path, user_edit)
+
+    report = sync_one_file(
+        test_db, embedder=embedder, vault_path=vault, file_path=file_path
+    )
+    assert report.created == 1
+    assert report.id_assigned == 1
+    assert embedder.fired, "test invariant: the embed hook must have run"
+
+    final = file_path.read_text()
+    # The id was still stamped (write-back happened)...
+    assert "id:" in final
+    # ...but the user's concurrent edit survived instead of being clobbered by
+    # the stale body sync read before embedding.
+    assert "USER EDIT — keep this text" in final
+    assert "original body" not in final

@@ -517,6 +517,140 @@ def test_launchd_receives_resolved_vault_path(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Task 2.4 — brain setup must render the chosen --port into the generated .env
+# ---------------------------------------------------------------------------
+
+
+def _packaged_env_template() -> str:
+    """Read the shipped env.example template the same way run_setup does."""
+    from importlib.resources import files as resource_files
+
+    return (resource_files("brain.templates") / "env.example").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_render_env_substitutes_default_port() -> None:
+    """The default 55432 must land in DATABASE_URL with no placeholder left."""
+    from brain.setup import render_env_from_template
+
+    out = render_env_from_template(
+        _packaged_env_template(), pg_port=55432, vault_path=None
+    )
+
+    assert "localhost:55432/second_brain" in out, (
+        f"rendered .env missing the 55432 DATABASE_URL:\n{out}"
+    )
+    assert "{{ pg_port }}" not in out, "placeholder left unrendered in .env"
+    # TEST_DATABASE_URL must be untouched (still the 5434 AGE test instance).
+    assert "localhost:5434/second_brain_test" in out, (
+        "TEST_DATABASE_URL was unexpectedly rewritten by the port substitution"
+    )
+
+
+def test_render_env_nondefault_port_replaces_dead_url() -> None:
+    """Regression (Task 2.4): a non-default --port must produce a LIVE .env.
+
+    Before the fix, setup rendered the chosen port into docker-compose.yml but
+    copied env.example verbatim, so the generated DATABASE_URL kept the
+    template's default port and was dead whenever --port differed.
+    """
+    from brain.setup import render_env_from_template
+
+    out = render_env_from_template(
+        _packaged_env_template(), pg_port=5599, vault_path=None
+    )
+
+    assert "localhost:5599/second_brain" in out, (
+        f"chosen --port 5599 did not reach DATABASE_URL:\n{out}"
+    )
+    # The historical dead default must be gone — that was the bug.
+    assert "localhost:5433/second_brain" not in out, (
+        "stale port 5433 survived into the generated .env"
+    )
+
+
+def test_render_env_activates_vault_path(tmp_path: Path) -> None:
+    """A vault override must activate the commented-out BRAIN_VAULT_PATH line."""
+    from brain.setup import render_env_from_template
+
+    vault = tmp_path / "my-vault"
+    out = render_env_from_template(
+        _packaged_env_template(), pg_port=55432, vault_path=vault
+    )
+
+    assert f"BRAIN_VAULT_PATH={vault}" in out, (
+        f"vault override not activated in rendered .env:\n{out}"
+    )
+    assert "# BRAIN_VAULT_PATH=" not in out, (
+        "commented BRAIN_VAULT_PATH placeholder should be gone once activated"
+    )
+
+
+def test_render_env_no_vault_keeps_placeholder_commented() -> None:
+    """With no vault override the BRAIN_VAULT_PATH line stays commented out."""
+    from brain.setup import render_env_from_template
+
+    out = render_env_from_template(
+        _packaged_env_template(), pg_port=55432, vault_path=None
+    )
+
+    assert "# BRAIN_VAULT_PATH=" in out, (
+        "BRAIN_VAULT_PATH placeholder must remain commented when no --vault given"
+    )
+
+
+def test_run_setup_default_port_is_canonical_55432() -> None:
+    """run_setup's default --port must match the committed compose / prod port."""
+    import inspect
+
+    from brain.setup import run_setup
+
+    default = inspect.signature(run_setup).parameters["pg_port"].default
+    assert default == 55432, (
+        f"run_setup pg_port default is {default}; expected 55432 (matches "
+        "docker-compose.yml + prod)"
+    )
+
+
+def test_setup_renders_chosen_port_into_generated_env(tmp_path: Path) -> None:
+    """Wiring regression: the full run_setup path writes the chosen port to .env.
+
+    Patches _check_port_free so a real port (55432, occupied by prod on the dev
+    box) never trips the preflight, then confirms _write_env actually threads the
+    chosen port through render_env_from_template.
+    """
+    from brain.setup import PreflightResult, run_setup
+
+    brain_home = tmp_path / ".brain"
+
+    def _always_free(port: int, check_name: str) -> PreflightResult:
+        return PreflightResult(name=check_name, ok=True, message=f"port {port} free")
+
+    with (
+        patch("brain.setup._check_port_free", side_effect=_always_free),
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+        patch("brain.setup.ensure_shim"),
+    ):
+        run_setup(
+            dry_run=False,
+            non_interactive=True,
+            brain_home_override=brain_home,
+            vault_override=tmp_path / "vault",
+            pg_port=55432,
+            skip_wiki=True,
+            skip_skill=True,
+        )
+
+    env_text = (brain_home / ".env").read_text(encoding="utf-8")
+    assert "localhost:55432/second_brain" in env_text, (
+        f"run_setup did not render pg_port into .env DATABASE_URL:\n{env_text}"
+    )
+    assert "{{ pg_port }}" not in env_text, "unrendered placeholder in generated .env"
+
+
+# ---------------------------------------------------------------------------
 # Regression: Bug 2 — interactive wiki decline must suppress launchd
 # ---------------------------------------------------------------------------
 

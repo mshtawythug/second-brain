@@ -212,6 +212,17 @@ def test_list_limit(
     assert len(lines) == 2
 
 
+def test_list_limit_zero_exits_2() -> None:
+    """``brain list --limit 0`` is rejected by Typer (min=1) with exit 2.
+
+    Regression for overhaul Task 2.10: a non-positive ``--limit`` must fail
+    loudly at parse time rather than silently returning wrong data. Parsing
+    fails before the command body, so no DB/env setup is needed.
+    """
+    result = CliRunner().invoke(app, ["list", "--limit", "0"])
+    assert result.exit_code == 2, result.output
+
+
 def test_list_json_output(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,

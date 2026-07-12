@@ -40,11 +40,15 @@ from brain.vault.derived_links.fence import (
     strip_fence,
 )
 from brain.vault.frontmatter import dump_frontmatter
+from brain.vault.sync import sync_vault
 from brain.vault.watch import (
     WatchConfig,
     _classify_event,
     _filter_path,
     _handle_delete,
+    _Job,
+    _WatcherState,
+    _worker_loop,
     run_watcher,
 )
 
@@ -199,39 +203,45 @@ def test_classify_created_yields_upsert(tmp_path: Path) -> None:
     event = FileCreatedEvent(str(target))
     classified = _classify_event(event, tmp_path)
     assert classified is not None
-    [(action, path)] = classified
+    [(action, path, dest)] = classified
     assert action == "upsert"
     assert path.name == "note.md"
+    assert dest is None
 
 
 def test_classify_deleted_yields_delete(tmp_path: Path) -> None:
     event = FileDeletedEvent(str(tmp_path / "gone.md"))
     classified = _classify_event(event, tmp_path)
     assert classified is not None
-    [(action, _path)] = classified
+    [(action, _path, dest)] = classified
     assert action == "delete"
+    assert dest is None
 
 
-def test_classify_moved_yields_delete_plus_upsert(tmp_path: Path) -> None:
-    """A file rename should remove the old row and upsert the new one."""
+def test_classify_moved_within_vault_yields_single_move(tmp_path: Path) -> None:
+    """A within-vault rename is threaded as a single ``move`` (src + dst) so
+    the worker can UPDATE vault_path in place and preserve incoming links."""
     src = tmp_path / "old.md"
     dst = tmp_path / "new.md"
     event = FileMovedEvent(str(src), str(dst))
     classified = _classify_event(event, tmp_path)
     assert classified is not None
-    actions = [a for a, _ in classified]
-    assert actions == ["delete", "upsert"]
+    assert len(classified) == 1
+    (action, path, dest) = classified[0]
+    assert action == "move"
+    assert path.name == "old.md"
+    assert dest is not None and dest.name == "new.md"
 
 
 def test_classify_moved_outside_vault_skips_dst(tmp_path: Path) -> None:
     """If a file is moved out of the vault, the destination is skipped
-    but the source still becomes a delete event."""
+    but the source still becomes a delete event (no ``move`` threading)."""
     src = tmp_path / "old.md"
     dst = tmp_path / "_attachments" / "new.md"
     event = FileMovedEvent(str(src), str(dst))
     classified = _classify_event(event, tmp_path)
     assert classified is not None
-    actions = [a for a, _ in classified]
+    actions = [a for a, *_ in classified]
     assert actions == ["delete"]
 
 
@@ -243,7 +253,7 @@ def test_filter_path_handles_bytes(tmp_path: Path) -> None:
     event = FileCreatedEvent(encoded)
     classified = _classify_event(event, tmp_path)
     assert classified is not None
-    [(_, path)] = classified
+    [(_, path, _dest)] = classified
     assert path.name == "note.md"
 
 
@@ -1981,4 +1991,294 @@ def test_handle_delete_logs_error_on_multi_row_delete(
     ), (
         f"expected an ERROR log mentioning the broken uniqueness invariant, "
         f"got records: {[r.getMessage() for r in error_records]!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Watcher rename/move preserves incoming backlinks (Task 2.1).
+#
+# The old classifier decomposed a within-vault move into two independent
+# jobs — ``delete(src)`` + ``upsert(dst)``. The delete ran
+# ``DELETE FROM documents WHERE vault_path=src`` whose ON DELETE CASCADE
+# wiped every ``links`` row pointing AT the moved doc (its incoming
+# backlinks); the follow-up upsert restored only the doc's OUTGOING links.
+# The fix threads a single ``move`` action that UPDATEs the row's
+# ``vault_path`` in place (preserving the document id → incoming links
+# survive) then upserts the destination to refresh content/mirror.
+# ---------------------------------------------------------------------------
+
+
+def _run_events_through_worker(
+    conn: psycopg.Connection,
+    embedder: Any,
+    config: WatchConfig,
+    *events: Any,
+) -> _WatcherState:
+    """Classify each event, enqueue the resulting job(s) in order, then drain
+    the worker synchronously.
+
+    Deterministic by construction: no debounce timers and no thread race
+    between the two jobs the *legacy* classifier emitted for a move
+    (``delete(src)`` then ``upsert(dst)``). Shape-tolerant so the same test
+    exercises both the pre-fix 2-tuple classifier (behavioral RED) and the
+    post-fix 3-tuple ``move`` classifier (GREEN).
+    """
+    state = _WatcherState()
+    for event in events:
+        classified = _classify_event(event, config.vault_path)
+        if classified is None:
+            continue
+        for item in classified:
+            action = item[0]
+            path = item[1]
+            dest = item[2] if len(item) > 2 else None
+            job = _Job(action=action, abs_path=path)
+            if dest is not None:
+                job.dest_path = dest  # field only exists post-fix
+            state.jobs.put(job)
+    state.jobs.put(None)  # sentinel closes the worker loop
+    _worker_loop(conn, embedder, config, state)
+    return state
+
+
+def test_move_within_vault_preserves_incoming_backlinks(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """A within-vault rename must NOT destroy backlinks pointing at the doc.
+
+    Regression: renaming ``b.md`` → ``b2.md`` used to DELETE the ``b`` row
+    (cascading away the ``a → b`` backlink) and re-insert it, leaving the
+    incoming link orphaned until the next full ``brain vault sync``.
+
+    Drives ``classify → enqueue → worker`` synchronously so the pre-fix
+    ``delete(src) + upsert(dst)`` ordering is deterministic (the delete runs
+    first and cascades the backlink away) rather than racing on debounce
+    timers.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    a_id = str(uuid.uuid4())
+    b_id = str(uuid.uuid4())
+    # a → b (incoming backlink for b) and b → a (outgoing link for b).
+    _write(vault / "a.md", {"id": a_id, "title": "A"}, "see [[B]]\n")
+    _write(vault / "b.md", {"id": b_id, "title": "B"}, "see [[A]]\n")
+    sync_vault(test_db, embedder=fake_embedder, vault_path=vault)
+
+    # Sanity: startup sync resolved a → b (the backlink we must protect).
+    assert (
+        test_db.execute(
+            "SELECT count(*) FROM links "
+            "WHERE src_document_id = %s AND dst_document_id = %s",
+            (a_id, b_id),
+        ).fetchone()[0]
+        == 1
+    )
+
+    # Rename on disk, then drive the corresponding move event through the
+    # classifier + worker in order.
+    src = vault / "b.md"
+    dst = vault / "b2.md"
+    src.rename(dst)
+    state = _run_events_through_worker(
+        test_db, fake_embedder, WatchConfig(vault_path=vault, debounce_ms=10),
+        FileMovedEvent(str(src), str(dst)),
+    )
+    assert state.errors == 0, "worker recorded an error handling the move"
+
+    # The moved doc's vault_path is updated in place...
+    assert test_db.execute(
+        "SELECT vault_path FROM documents WHERE id = %s", (b_id,)
+    ).fetchone() == ("b2.md",)
+
+    # ...and crucially the INCOMING backlink a → b still exists, pointing at
+    # the SAME document id (UPDATE-in-place, not delete + re-insert).
+    incoming = test_db.execute(
+        "SELECT src_document_id::text, dst_document_id::text FROM links "
+        "WHERE dst_document_id = %s",
+        (b_id,),
+    ).fetchall()
+    assert incoming == [(a_id, b_id)], (
+        f"incoming backlink to the moved doc was destroyed: {incoming!r}"
+    )
+
+    # The document id is unchanged (exactly one row still carries it).
+    assert (
+        test_db.execute(
+            "SELECT count(*) FROM documents WHERE id = %s", (b_id,)
+        ).fetchone()[0]
+        == 1
+    )
+
+    # The moved doc's OUTGOING link b → a was re-materialized by the upsert
+    # on the destination — proving the normal per-file resolution pipeline
+    # (materialize + unresolved retry) ran for the new path.
+    outgoing = test_db.execute(
+        "SELECT dst_document_id::text FROM links WHERE src_document_id = %s",
+        (b_id,),
+    ).fetchall()
+    assert outgoing == [(a_id,)], f"outgoing link not re-materialized: {outgoing!r}"
+
+    # Derived rows are a vault-tier-inert concern here (no gmail/krisp docs);
+    # the move must not spuriously create any.
+    assert (
+        test_db.execute("SELECT count(*) FROM derived_links").fetchone()[0] == 0
+    )
+
+
+def test_move_within_vault_preserves_backlinks_end_to_end(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """Integration: the full ``run_watcher`` machinery (observer → debounce →
+    worker) also preserves incoming backlinks across a rename.
+
+    Post-fix a within-vault move is a single ``move`` job, so this is
+    deterministic (no delete/upsert ordering race).
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    a_id = str(uuid.uuid4())
+    b_id = str(uuid.uuid4())
+    _write(vault / "a.md", {"id": a_id, "title": "A"}, "see [[B]]\n")
+    _write(vault / "b.md", {"id": b_id, "title": "B"}, "see [[A]]\n")
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+    _wait_for(
+        lambda: test_db.execute(
+            "SELECT count(*) FROM links "
+            "WHERE src_document_id = %s AND dst_document_id = %s",
+            (a_id, b_id),
+        ).fetchone()[0]
+        == 1,
+        timeout=2.0,
+    )
+
+    src = vault / "b.md"
+    dst = vault / "b2.md"
+    src.rename(dst)
+    observer.inject(FileMovedEvent(str(src), str(dst)))
+
+    _wait_for(
+        lambda: test_db.execute(
+            "SELECT vault_path FROM documents WHERE id = %s", (b_id,)
+        ).fetchone()
+        == ("b2.md",),
+        timeout=2.0,
+    )
+    incoming = test_db.execute(
+        "SELECT src_document_id::text, dst_document_id::text FROM links "
+        "WHERE dst_document_id = %s",
+        (b_id,),
+    ).fetchall()
+    assert incoming == [(a_id, b_id)], (
+        f"incoming backlink to the moved doc was destroyed: {incoming!r}"
+    )
+
+    state = observer.handler._state
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def test_move_out_of_vault_still_deletes(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """A move whose destination lands OUTSIDE the vault still removes the row.
+
+    The destination is filtered out by ``_filter_path`` (outside the vault),
+    so the classifier emits a plain ``delete`` for the source — today's
+    behavior, preserved.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    note_id = str(uuid.uuid4())
+    _write(vault / "leaving.md", {"id": note_id, "title": "Leaving"}, "x\n")
+
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    thread, _ = _start_watcher(
+        conn_factory=_conn_factory(test_db),
+        embedder=fake_embedder,
+        config=config,
+    )
+    observer = _wait_for_observer()
+
+    _wait_for(
+        lambda: test_db.execute(
+            "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
+        ).fetchone()[0]
+        == 1,
+        timeout=2.0,
+    )
+
+    src = vault / "leaving.md"
+    dst = outside / "leaving.md"
+    src.rename(dst)
+    observer.inject(FileMovedEvent(str(src), str(dst)))
+
+    _wait_for(
+        lambda: test_db.execute(
+            "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
+        ).fetchone()[0]
+        == 0,
+        timeout=2.0,
+    )
+
+    state = observer.handler._state
+    state.stop_event.set()
+    thread.join(timeout=5.0)
+
+
+def test_handle_move_dest_vanished_falls_back_to_delete(
+    test_db: psycopg.Connection, fake_embedder: Any, tmp_path: Path
+) -> None:
+    """If the move destination has vanished by the time the worker runs, the
+    source row is removed (plain delete) rather than pointed at a missing file.
+
+    Reproduces a move-then-delete inside the debounce window. Driving
+    ``_handle_move`` directly keeps the edge case deterministic.
+    """
+    from brain.vault.sync import sync_one_file  # noqa: PLC0415
+    from brain.vault.watch import _handle_move, _WatcherState  # noqa: PLC0415
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    note_id = str(uuid.uuid4())
+    _write(vault / "gone.md", {"id": note_id, "title": "Gone"}, "x\n")
+    sync_one_file(
+        test_db, embedder=fake_embedder, vault_path=vault, file_path=vault / "gone.md"
+    )
+    assert (
+        test_db.execute(
+            "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
+        ).fetchone()[0]
+        == 1
+    )
+
+    src = vault / "gone.md"
+    dst = vault / "gone2.md"  # never created on disk — the vanished dest
+    src.unlink()  # source also gone (a move away then delete)
+    config = WatchConfig(vault_path=vault, debounce_ms=10)
+    state = _WatcherState()
+
+    _handle_move(
+        test_db,
+        embedder=fake_embedder,
+        config=config,
+        state=state,
+        src_abs=src,
+        dst_abs=dst,
+    )
+
+    # Row removed; no crash; vault_path never points at the missing dest.
+    assert (
+        test_db.execute(
+            "SELECT count(*) FROM documents WHERE id = %s", (note_id,)
+        ).fetchone()[0]
+        == 0
     )

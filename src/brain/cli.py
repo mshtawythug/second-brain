@@ -111,6 +111,7 @@ from .gaps import (
 )
 from .ingest import (
     Embedder,
+    IngestResult,
     UpdateResult,
     apply_tags,
     extract_path,
@@ -338,7 +339,7 @@ def setup_cmd(
     vault: Path | None = typer.Option(
         None, "--vault", help="Override $BRAIN_VAULT_PATH"
     ),
-    port: int = typer.Option(5433, "--port", help="Postgres host port"),
+    port: int = typer.Option(55432, "--port", help="Postgres host port"),
     wiki_port: int = typer.Option(8080, "--wiki-port", help="Caddy port for the wiki"),
     embedder: str | None = typer.Option(
         None, "--embedder", help="arctic|voyage|qwen3 (non-interactive choice)"
@@ -1393,6 +1394,29 @@ def _build_graph_syncer(cfg: Config) -> GraphSyncer:
     return make_graph_syncer(cfg)
 
 
+def _ingest_outcome_verb(
+    result: IngestResult, *, force: bool = False,
+    already_verb: str = "skipped (already ingested)",
+) -> str:
+    """Map an :class:`IngestResult` to a human status verb.
+
+    A doc that produced no chunks (whitespace-only file, image-only PDF) comes
+    back as ``document_id=None, created=False`` — that is an *empty* document,
+    not an unchanged re-ingest, so it gets its own verb (Task 2.12(b)). ``force``
+    (single-file / stdin ingest) reports an in-place rewrite as "updated" even
+    when the body hash is unchanged. ``already_verb`` lets ``ingest-dir`` keep
+    its historical bare "skipped" wording while ``ingest`` / ``ingest-stdin``
+    spell out "skipped (already ingested)".
+    """
+    if result.document_id is None:
+        return "skipped (empty document)"
+    if result.created:
+        return "ingested"
+    if result.body_changed or force:
+        return "updated"
+    return already_verb
+
+
 @app.command()
 def ingest(
     path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
@@ -1430,12 +1454,7 @@ def ingest(
             enrich_min_tokens=cfg.enrich_min_tokens,
             graph_syncer=graph_syncer,
         )
-    if result.created:
-        verb = "ingested"
-    elif result.body_changed or force:
-        verb = "updated"
-    else:
-        verb = "skipped (already ingested)"
+    verb = _ingest_outcome_verb(result, force=force)
     typer.echo(f"{verb}: {path.name} → {result.document_id}")
 
 
@@ -1495,14 +1514,9 @@ def ingest_dir(
                     enrich_min_tokens=cfg.enrich_min_tokens,
                     graph_syncer=graph_syncer,
                 )
-                if result.created:
-                    verb = "ingested"
+                verb = _ingest_outcome_verb(result, already_verb="skipped")
+                if result.created or result.body_changed:
                     wrote += 1
-                elif result.body_changed:
-                    verb = "updated"
-                    wrote += 1
-                else:
-                    verb = "skipped"
                 typer.echo(f"  {verb}: {f.name}")
             except (ValueError, OSError, psycopg.Error) as e:
                 typer.secho(f"  failed: {f.name} — {e}", fg="red")
@@ -1588,12 +1602,7 @@ def ingest_stdin(
             enrich_min_tokens=cfg.enrich_min_tokens,
             graph_syncer=graph_syncer,
         )
-    if result.created:
-        verb = "ingested"
-    elif result.body_changed or force:
-        verb = "updated"
-    else:
-        verb = "skipped (already ingested)"
+    verb = _ingest_outcome_verb(result, force=force)
     typer.echo(f"{verb}: {title} → {result.document_id}")
 
 
@@ -3352,7 +3361,7 @@ def _resolve_search_person(
 @app.command()
 def search(
     query: str = typer.Argument(...),
-    limit: int = typer.Option(5, "--limit", "-n"),
+    limit: int = typer.Option(5, "--limit", "-n", min=1),
     source: str | None = typer.Option(None, "--source"),
     tag: str | None = typer.Option(None, "--tag"),
     since_days: int | None = typer.Option(None, "--since", help="Days lookback"),
@@ -3478,7 +3487,7 @@ def search(
 @app.command()
 def explain(
     query: str = typer.Argument(...),
-    limit: int = typer.Option(10, "--limit", "-n"),
+    limit: int = typer.Option(10, "--limit", "-n", min=1),
     source: str | None = typer.Option(None, "--source"),
     tag: str | None = typer.Option(None, "--tag"),
     since_days: int | None = typer.Option(None, "--since", help="Days lookback"),
@@ -4907,7 +4916,7 @@ def show(
 def list_docs(
     source: str | None = typer.Option(None, "--source"),
     tag: str | None = typer.Option(None, "--tag"),
-    limit: int = typer.Option(20, "--limit", "-n"),
+    limit: int = typer.Option(20, "--limit", "-n", min=1),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """List documents in the brain."""

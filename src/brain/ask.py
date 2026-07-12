@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import psycopg
 
+from .chat import coerce_bool
 from .search import SearchResult, hybrid_search
 
 if TYPE_CHECKING:
@@ -217,7 +218,12 @@ def _call_reflect_step(
         num_predict=_REFLECT_NUM_PREDICT,
         timeout=cfg.ask_timeout_seconds,
     )
-    sufficient = bool(body.get("sufficient"))
+    # Coerce defensively: a local model that returns ``"sufficient": "false"``
+    # would be treated as True by a bare ``bool(...)`` (non-empty string is
+    # truthy), stopping the loop early. ``coerce_bool`` maps stringified/int
+    # booleans correctly and defaults unparseable verdicts to False (insufficient)
+    # so the loop keeps retrieving rather than truncating on garbage.
+    sufficient = coerce_bool(body.get("sufficient"))
     follow_ups = _clean_query_list(
         body.get("follow_up_queries"), limit=_MAX_FOLLOW_UPS
     )

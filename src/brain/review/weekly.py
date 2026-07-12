@@ -175,19 +175,35 @@ def weekly_active_communities(
     edge endpoint belongs to. Tenant-scoped on both the edge and the membership
     join. Returns ``[]`` when the graph has no in-window activity (no crash) —
     the caller then falls back to tag clusters.
+
+    The membership join matches an edge once per endpoint that belongs to a
+    community, so an **intra-community edge** (both endpoints in the same
+    community) matches that community *twice*. Summing directly would
+    double-count its weight. The inner ``SELECT DISTINCT`` collapses each
+    ``(community, edge)`` pair to one row before the ``SUM`` so an intra-community
+    edge contributes its weight once; a cross-community edge still attributes its
+    weight to each endpoint's distinct community exactly once.
     """
     rows = conn.execute(
         """
-        SELECT gcm.community_key::text, SUM(gec.cooccur_count) AS weekly_weight
-        FROM   graph_edge_contributions gec
-        JOIN   graph_community_members gcm
-                 ON gcm.tenant_id = gec.tenant_id
-                AND (gcm.entity_id = gec.src_id OR gcm.entity_id = gec.dst_id)
-        JOIN   documents d ON d.id = gec.document_id
-        WHERE  gec.tenant_id = %s
-          AND  d.ingested_at BETWEEN %s AND %s
-        GROUP  BY gcm.community_key
-        ORDER  BY weekly_weight DESC, gcm.community_key
+        SELECT community_key, SUM(cooccur_count) AS weekly_weight
+        FROM (
+            SELECT DISTINCT
+                   gcm.community_key::text AS community_key,
+                   gec.document_id,
+                   gec.src_id,
+                   gec.dst_id,
+                   gec.cooccur_count
+            FROM   graph_edge_contributions gec
+            JOIN   graph_community_members gcm
+                     ON gcm.tenant_id = gec.tenant_id
+                    AND (gcm.entity_id = gec.src_id OR gcm.entity_id = gec.dst_id)
+            JOIN   documents d ON d.id = gec.document_id
+            WHERE  gec.tenant_id = %s
+              AND  d.ingested_at BETWEEN %s AND %s
+        ) AS edge_community
+        GROUP  BY community_key
+        ORDER  BY weekly_weight DESC, community_key
         LIMIT  %s
         """,
         (tenant_id, after, before, theme_limit),

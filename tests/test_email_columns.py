@@ -591,6 +591,27 @@ def test_helper_rejects_bool_duration() -> None:
     assert "duration_min" not in out
 
 
+def test_helper_coerces_numeric_string_duration_to_int() -> None:
+    """Regression (Task 2.12c): a numeric string like ``"42.7"`` must round
+    down to ``42`` via ``int(float(...))`` — matching the docstring's promise
+    that floats round down. ``int("42.7")`` alone raises ``ValueError`` and
+    silently dropped the column, which was the bug."""
+    from brain.ingest import _promote_metadata_to_columns
+
+    # Float-valued string → round down (the bug: previously dropped as ValueError).
+    assert _promote_metadata_to_columns({"duration_min": "42.7"})["duration_min"] == 42
+    # Integer-valued string still works.
+    assert _promote_metadata_to_columns({"duration_min": "42"})["duration_min"] == 42
+    # Native float rounds down (already worked; guard against regression).
+    assert _promote_metadata_to_columns({"duration_min": 42.7})["duration_min"] == 42
+    # Native int passes through.
+    assert _promote_metadata_to_columns({"duration_min": 30})["duration_min"] == 30
+    # Non-numeric strings are still skipped, not coerced.
+    assert "duration_min" not in _promote_metadata_to_columns(
+        {"duration_min": "twelve"}
+    )
+
+
 def test_helper_omits_missing_keys() -> None:
     """Empty / absent metadata produces an empty promotion dict so the
     INSERT path collapses to its base column list."""

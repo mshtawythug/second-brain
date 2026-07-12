@@ -23,11 +23,12 @@ from . import capture as capture_mod
 from . import connect as connect_mod
 from .config import Config
 from .db import PersistentConnection, age_extension_available, connect, connect_age
-from .embeddings import OllamaEmbedError, make_embedder
+from .embeddings import make_embedder
 from .enrichment import ContradictionVerdict, OllamaEnricher, make_enricher
 from .errors import (
     BrainError,
     ConnectError,
+    EmbedError,
     EnrichmentError,
     GraphBackendError,
     GraphReconcileError,
@@ -210,9 +211,12 @@ def _wrap_db_error(e: psycopg.Error) -> McpError:
     return _mcp_error(INTERNAL_ERROR, f"database error: {type(e).__name__}")
 
 
-def _wrap_embed_error(e: OllamaEmbedError) -> McpError:
-    """Wrap a Qwen3/Ollama embedding failure as an MCP error.
+def _wrap_embed_error(e: EmbedError) -> McpError:
+    """Wrap any embedding-backend failure as an MCP error.
 
+    Accepts the shared :class:`~brain.errors.EmbedError` base, so it maps a
+    failure from any backend — :class:`~brain.embeddings.OllamaEmbedError`
+    (arctic / qwen3) or :class:`~brain.embeddings.VoyageEmbedError` — uniformly.
     Mirrors :func:`_wrap_db_error`: the user-facing message exposes only the
     exception class name; the full exception is logged to stderr.
     """
@@ -377,6 +381,11 @@ def brain_search(
     state = _get_state()
     logger.debug("brain_search: query=%r limit=%d", query, limit)
 
+    # Fail fast on a non-positive limit (mirrors brain_ask) — otherwise the
+    # ``results[:limit]`` slice silently drops the tail and returns wrong data.
+    if limit < 1:
+        raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
+
     if tag is not None and has_tag is not None and tag != has_tag:
         raise _mcp_error(
             INVALID_PARAMS,
@@ -447,7 +456,7 @@ def brain_search(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except OllamaEmbedError as e:
+    except EmbedError as e:
         raise _wrap_embed_error(e) from e
     return {
         "session_id": session_id,
@@ -655,6 +664,10 @@ def brain_list(
     """
     state = _get_state()
     logger.debug("brain_list: source=%s tag=%s limit=%d", source, tag, limit)
+    # Fail fast on a non-positive limit (mirrors brain_ask) — otherwise
+    # ``LIMIT -N`` reaches Postgres and surfaces as an opaque INTERNAL_ERROR.
+    if limit < 1:
+        raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
     try:
         with _mcp_conn(state) as conn:
             rows = list_documents(conn, source=source, tag=tag, limit=limit)
@@ -701,6 +714,11 @@ def brain_resurface(
         min_age_days,
         source_kind,
     )
+    # Fail fast on a non-positive limit (mirrors brain_ask) — before opening a
+    # connection. ``limit`` is optional here (None → cfg default), so only a
+    # supplied out-of-range value is rejected.
+    if limit is not None and limit < 1:
+        raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
     try:
         with _mcp_conn(state) as conn:
             items = resurface_docs(
@@ -821,7 +839,7 @@ def brain_ingest_stdin(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except OllamaEmbedError as e:
+    except EmbedError as e:
         raise _wrap_embed_error(e) from e
     return {
         "document_id": result.document_id,
@@ -891,7 +909,7 @@ def brain_capture(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except OllamaEmbedError as e:
+    except EmbedError as e:
         raise _wrap_embed_error(e) from e
     except VaultNoteSyncError as e:
         raise _mcp_error(INVALID_PARAMS, str(e)) from e
@@ -1032,7 +1050,7 @@ def brain_edit(
                 raise _mcp_error(INVALID_PARAMS, str(e)) from e
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except OllamaEmbedError as e:
+    except EmbedError as e:
         raise _wrap_embed_error(e) from e
     return {
         "document_id": result.document_id,
@@ -1234,7 +1252,7 @@ def brain_note_new(
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except OllamaEmbedError as e:
+    except EmbedError as e:
         raise _wrap_embed_error(e) from e
     if report.errors:
         # The on-disk file is intact; surface the first error so the
@@ -1354,7 +1372,7 @@ def brain_daily(date: str | None = None) -> dict[str, Any]:
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    except OllamaEmbedError as e:
+    except EmbedError as e:
         raise _wrap_embed_error(e) from e
     if report.errors:
         _path, reason = report.errors[0]
@@ -3154,18 +3172,20 @@ def _warmup_embed(embedder: Embedder) -> None:
     cold-boot race where the Ollama daemon is up but the model is still
     loading.  Persistent failure is logged at WARNING and swallowed — the
     server stays up and real tool calls surface errors through the normal
-    ``_wrap_embed_error`` path.  Only :class:`~brain.embeddings.OllamaEmbedError`
-    is caught so import / programming errors still surface here.
+    ``_wrap_embed_error`` path.  Only the shared
+    :class:`~brain.errors.EmbedError` base is caught (so any backend's typed
+    embed failure is tolerated) while import / programming errors still surface
+    here.
     """
     try:
         embedder.embed(["hello"], input_type="document")
         logger.info("warmup embed completed")
-    except OllamaEmbedError:
+    except EmbedError:
         time.sleep(_WARMUP_RETRY_DELAY_SECONDS)
         try:
             embedder.embed(["hello"], input_type="document")
             logger.info("warmup embed completed (after retry)")
-        except OllamaEmbedError as e:
+        except EmbedError as e:
             logger.warning(
                 "warmup embed failed (continuing without): %s", type(e).__name__
             )

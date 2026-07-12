@@ -18,6 +18,16 @@ if TYPE_CHECKING:
 
 _VALID_TYPES = frozenset({"person", "org", "project", "topic", "tool"})
 
+# ``graph_entity_mentions.source`` value for person mentions — a mirror of
+# :data:`brain.graph_rag.reconcile.PEOPLE_MENTION_SOURCE`. Duplicated as a plain
+# literal (not imported) so this module stays import-cheap and free of the
+# ``reconcile`` → ``aggregates`` → ``concepts`` chain (the same late-import
+# discipline the rest of the module follows). Person mentions are *presence
+# flags* (always ``mention_count = 1``); concept mentions carry real counts under
+# an ``"extractor:<model>@<ver>"`` source — the two aspects merge differently
+# (see :func:`_repoint_mentions`).
+_PEOPLE_MENTION_SOURCE = "people"
+
 
 @dataclass(frozen=True)
 class AliasRule:
@@ -256,28 +266,50 @@ def _repoint_mentions(
     """Move every source-entity mention onto *dst_id*; return rows moved.
 
     Two-step: INSERT the source rows under ``dst_id`` (collapsing the PK
-    ``(tenant_id, entity_id, document_id)`` by *summing* ``mention_count`` on
-    conflict), then DELETE the old source-keyed rows so the source ends up
-    zero-mention. Returns the number of source rows that existed pre-move (= the
-    number routed to the target).
+    ``(tenant_id, entity_id, document_id)`` on conflict), then DELETE the old
+    source-keyed rows so the source ends up zero-mention. Returns the number of
+    source rows that existed pre-move (= the number routed to the target).
+
+    The on-conflict collapse is **aspect-aware** because ``mention_count`` means
+    different things per aspect. Person mentions (``source = 'people'``) are
+    *presence flags* — always ``1`` — so summing two ``1``s into ``2`` when both
+    the source and target already mention the same document would fabricate a
+    count the reconcile pipeline never writes. For those we keep presence via
+    ``GREATEST`` (``1``). Concept mentions carry real per-document counts, so
+    they still *sum*. The determinant is the row's ``source`` (not entity type):
+    if either the existing target row or the incoming source row is a
+    people-presence mention, clamp; otherwise sum.
     """
     moved_row = conn.execute(
         """
         WITH moved AS (
             INSERT INTO graph_entity_mentions
                 (tenant_id, entity_id, document_id, mention_count, source)
-            SELECT tenant_id, %s, document_id, mention_count, source
+            SELECT tenant_id, %(dst)s, document_id, mention_count, source
             FROM graph_entity_mentions
-            WHERE tenant_id = %s AND entity_id = %s
+            WHERE tenant_id = %(tenant)s AND entity_id = %(src)s
             ON CONFLICT (tenant_id, entity_id, document_id)
             DO UPDATE SET
-                mention_count =
-                    graph_entity_mentions.mention_count + EXCLUDED.mention_count
+                mention_count = CASE
+                    WHEN graph_entity_mentions.source = %(people)s
+                         OR EXCLUDED.source = %(people)s
+                    THEN GREATEST(
+                        graph_entity_mentions.mention_count,
+                        EXCLUDED.mention_count
+                    )
+                    ELSE graph_entity_mentions.mention_count
+                         + EXCLUDED.mention_count
+                END
             RETURNING 1
         )
         SELECT count(*) FROM moved
         """,
-        (dst_id, tenant_id, src_id),
+        {
+            "dst": dst_id,
+            "tenant": tenant_id,
+            "src": src_id,
+            "people": _PEOPLE_MENTION_SOURCE,
+        },
     ).fetchone()
     assert moved_row is not None
     moved = int(moved_row[0])
@@ -304,7 +336,15 @@ def _repoint_contributions(
     * **drop self-edges** (``LEAST == GREATEST``) — re-pointing produces a
       self-edge when the variant already co-occurred with the target in the
       same document.
-    * collapse PK conflicts by *summing* ``cooccur_count``.
+    * collapse PK conflicts **aspect-aware** — like :func:`_repoint_mentions`,
+      person-person co-occurrence edges are *presence flags* (the people
+      pipeline emits ``cooccur_count = 1`` for every same-doc pair), so summing
+      two ``1``s when the source and target both co-occurred with a third person
+      in the same document would fabricate a weight. ``graph_edge_contributions``
+      carries no ``source`` column, so the aspect is derived from the endpoints'
+      types: a conflict whose two endpoints are BOTH ``person`` keeps presence
+      via ``GREATEST``; every other edge (concept-concept, or a cross-type merge)
+      still *sums*.
     * delete the old source-touching rows so the source is fully detached at
       the contributions table too.
 
@@ -342,8 +382,23 @@ def _repoint_contributions(
             FROM rewritten
             ON CONFLICT (tenant_id, document_id, src_id, dst_id)
             DO UPDATE SET
-                cooccur_count =
-                    graph_edge_contributions.cooccur_count + EXCLUDED.cooccur_count
+                cooccur_count = CASE
+                    WHEN (
+                        SELECT bool_and(ge.entity_type = 'person')
+                        FROM graph_entities ge
+                        WHERE ge.tenant_id = graph_edge_contributions.tenant_id
+                          AND ge.id IN (
+                              graph_edge_contributions.src_id,
+                              graph_edge_contributions.dst_id
+                          )
+                    )
+                    THEN GREATEST(
+                        graph_edge_contributions.cooccur_count,
+                        EXCLUDED.cooccur_count
+                    )
+                    ELSE graph_edge_contributions.cooccur_count
+                         + EXCLUDED.cooccur_count
+                END
             RETURNING 1
         )
         SELECT (SELECT count(*) FROM source_rows)

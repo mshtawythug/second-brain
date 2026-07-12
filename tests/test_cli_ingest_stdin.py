@@ -15,6 +15,7 @@ from typing import Any
 
 import psycopg
 import pytest
+from psycopg.pq import TransactionStatus
 from typer.testing import CliRunner
 
 from brain.cli import app
@@ -368,6 +369,43 @@ def test_krisp_ingest_first_run_uses_ytd_window(
     assert parsed.day == 1
     assert parsed.tzinfo is not None
     assert parsed.utcoffset() == datetime.timedelta(0)
+
+
+def test_krisp_source_hook_runs_outside_write_transaction(
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+) -> None:
+    """Regression (Task 2.11): the Krisp post-ingest hook (Calendar/Contacts
+    refresh via multi-second ``gws`` subprocess calls) must run AFTER the
+    document write transaction commits — never while holding it open.
+
+    The gws runner therefore observes an ``IDLE`` (not-in-transaction)
+    connection. Pre-fix ``_run_source_hooks`` ran INSIDE ``conn.transaction()``,
+    so the runner would observe ``INTRANS`` and the slow refresh held the write
+    txn open across network I/O.
+    """
+    observed: list[TransactionStatus] = []
+
+    def observing_runner(args: list[str]) -> str:
+        # Recorded each time refresh_calendar / refresh_contacts shells out.
+        observed.append(test_db.info.transaction_status)
+        return "[]"
+
+    result = ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=_krisp_doc(),
+        source_kind="krisp",
+        source_external_id="meeting-txn-status",
+        gws_runner=observing_runner,
+    )
+    assert result.created is True
+    # First-run Krisp ingest fires the Calendar refresh plus a stale Contacts
+    # refresh, so the runner is invoked at least once.
+    assert observed, "gws runner was never called — source hook did not run"
+    assert all(status == TransactionStatus.IDLE for status in observed), (
+        f"source hook ran inside a write transaction: {observed}"
+    )
 
 
 def test_krisp_ingest_subsequent_run_uses_incremental_window(

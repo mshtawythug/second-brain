@@ -7,7 +7,7 @@ test modules; here we focus on the WHERE-clause composition.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import psycopg
@@ -325,6 +325,36 @@ def test_after_uses_sent_at_when_present(
     # EarlySent is filtered out (sent_at=2026-01-01 < 2026-04-01) — only
     # LateIngest's coalesce(NULL, ingested_at=2026-05-01) clears the bar.
     assert [r.title for r in results] == ["LateIngest"]
+
+
+def test_after_filter_is_utc_immune_to_session_timezone(
+    test_db: psycopg.Connection, fake_embedder: Any
+) -> None:
+    """``--after`` boundaries are UTC, independent of the session TimeZone.
+
+    Regression for overhaul Task 2.5. A naive ``after`` bound directly against
+    the ``timestamptz`` recency column was interpreted in the *session*
+    ``TimeZone``, shifting the boundary by the session's UTC offset. Under
+    ``America/New_York`` a doc sent at ``2026-01-01T03:00:00Z`` fell *outside*
+    ``--after 2026-01-01`` (the naive midnight resolved to ``2026-01-01T05:00Z``
+    and excluded the 03:00Z doc). Stamping the bound UTC fixes the shift so the
+    same query returns the doc regardless of session TZ.
+    """
+    _seed(
+        test_db, fake_embedder,
+        title="EarlyMorning", content="shared term",
+        sent_at=datetime(2026, 1, 1, 3, 0, 0, tzinfo=UTC),
+    )
+    # Force a negative-offset session zone: without the UTC stamp the naive
+    # midnight resolves to 2026-01-01T05:00Z and wrongly excludes the 03:00Z doc.
+    test_db.execute("SET TIME ZONE 'America/New_York'")
+    results = hybrid_search(
+        test_db,
+        embedder=fake_embedder,
+        query="shared",
+        after=datetime(2026, 1, 1),  # naive midnight — the user means UTC Jan 1
+    )
+    assert [r.title for r in results] == ["EarlyMorning"]
 
 
 # ---------------------------------------------------------------------------

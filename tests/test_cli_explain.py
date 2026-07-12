@@ -325,3 +325,14 @@ def test_brain_explain_person_ambiguous_exits_nonzero(
     monkeypatch.setattr("brain.cli.resolve_person_to_keys", _raise)
     result = CliRunner().invoke(app, ["explain", "foo", "--person", "Alice"])
     assert result.exit_code != 0
+
+
+def test_explain_limit_zero_exits_2() -> None:
+    """`brain explain --limit 0` is rejected by Typer (min=1) with exit 2.
+
+    Keeps the explain surface consistent with search/list (overhaul Task 2.10):
+    a non-positive ``--limit`` fails loudly at parse time. Parsing fails before
+    the command body, so no DB/embedder setup is needed.
+    """
+    result = CliRunner().invoke(app, ["explain", "foo", "--limit", "0"])
+    assert result.exit_code == 2, result.output

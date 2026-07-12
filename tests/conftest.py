@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import psycopg
 import pytest
-from dotenv import load_dotenv
+from dotenv import dotenv_values, load_dotenv
 
 from brain.db import connect, run_migrations
 from brain.ingest import ExtractedDoc, ingest_document
@@ -30,11 +30,13 @@ TEST_DATABASE_URL = os.environ.get(
 # --- DB-SAFETY HARD GUARD ---------------------------------------------------
 # The schema reset below runs ``DROP SCHEMA public CASCADE`` — irreversibly
 # destructive. It must NEVER target the prod container. Prod is the
-# ``second_brain`` database on localhost:5433 (docker-compose.yml); the test
-# instance is ``*_test`` on port 5434 (docker-compose.age-test.yml). If
-# ``TEST_DATABASE_URL`` / ``DATABASE_URL`` is ever pointed at prod (e.g. an
-# accidental export), we ABORT loudly rather than wipe production data.
-_PROD_PORT = 5433
+# ``second_brain`` database on localhost:55432 (docker-compose.yml,
+# ./data/postgres bind-mount); 5433 was the historical prod mapping and is
+# still refused defensively. The test instance is ``*_test`` on port 5434
+# (docker-compose.age-test.yml). If ``TEST_DATABASE_URL`` / ``DATABASE_URL`` is
+# ever pointed at prod (e.g. an accidental export), we ABORT loudly rather than
+# wipe production data.
+_PROD_PORTS = frozenset({5433, 55432})
 _PROD_DB_NAME = "second_brain"
 _LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
 
@@ -42,11 +44,13 @@ _LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
 def _looks_like_prod_db(host: str | None, port: int | None, dbname: str | None) -> bool:
     """True if (host, port, dbname) resolves to the prod container.
 
-    Refuses the prod port on a local host, OR the exact prod database name on
-    any host (belt-and-suspenders: catches a non-default prod port mapping).
+    Refuses ANY known prod host port (55432 current, 5433 historical) on a local
+    host, OR the exact prod database name on any host (belt-and-suspenders:
+    catches a prod restore under a different db name, or a non-default port
+    mapping).
     """
     is_local = (host or "").lower() in _LOCAL_HOSTS
-    return (is_local and port == _PROD_PORT) or (dbname == _PROD_DB_NAME)
+    return (is_local and port in _PROD_PORTS) or (dbname == _PROD_DB_NAME)
 
 
 def _assert_not_prod_db(host: str | None, port: int | None, dbname: str | None) -> None:
@@ -66,6 +70,32 @@ _test_url = urlparse(TEST_DATABASE_URL)
 _assert_not_prod_db(
     _test_url.hostname, _test_url.port, (_test_url.path or "").lstrip("/")
 )
+
+
+# --- Live PROD DB URL for read-only canary / eval tests ---------------------
+# The ``live_db``-marked canary tests query the real prod corpus (read-only) to
+# guard search ranking against silent regressions. They must reach PROD (host
+# port 55432, db ``second_brain``) — NOT the test DB that the session autouse
+# fixture pins into ``os.environ["DATABASE_URL"]``. Resolve the prod URL from an
+# explicit ``BRAIN_PROD_DATABASE_URL`` override, else the repo ``.env`` FILE
+# (read directly via ``dotenv_values`` so the pinned env var is bypassed), else
+# the canonical default. Never returns a ``*_test`` URL: a test-DB value means
+# "prod not configured", so canaries skip (unreachable) rather than run against
+# the empty test corpus. All canary queries are read-only SELECTs.
+_DEFAULT_PROD_DB_URL = "postgresql://brain:brain@localhost:55432/second_brain"
+
+
+def prod_database_url() -> str:
+    """Resolve the live PROD ``DATABASE_URL`` for read-only canary/eval tests."""
+    override = os.environ.get("BRAIN_PROD_DATABASE_URL")
+    if override:
+        return override
+    repo_env = Path(__file__).resolve().parent.parent / ".env"
+    if repo_env.exists():
+        value = dotenv_values(repo_env).get("DATABASE_URL")
+        if value and not value.rstrip("/").endswith("/second_brain_test"):
+            return value
+    return _DEFAULT_PROD_DB_URL
 
 
 @pytest.fixture(autouse=True, scope="session")

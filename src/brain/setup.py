@@ -320,6 +320,30 @@ def materialize_age_dockerfile(brain_home: Path) -> Path:
     return dest
 
 
+def render_env_from_template(
+    template_text: str, *, pg_port: int, vault_path: Path | None
+) -> str:
+    """Render the packaged ``env.example`` template into a concrete ``.env`` body.
+
+    Substitutes the chosen Postgres host port into ``DATABASE_URL`` via the same
+    ``{{ pg_port }}`` placeholder mechanism ``docker-compose.yml.j2`` uses, so a
+    non-default ``--port`` produces a live ``.env`` instead of one pinned to the
+    template's default port (the bug this fixes: the compose file honoured
+    ``--port`` but the ``.env`` was copied verbatim, leaving a dead
+    ``DATABASE_URL`` whenever ``--port`` differed). When ``vault_path`` is given,
+    the commented-out ``# BRAIN_VAULT_PATH=`` line is activated with the chosen
+    vault. Pure function — no filesystem or environment access — so the
+    substitution is unit-testable in isolation.
+    """
+    text = template_text.replace("{{ pg_port }}", str(pg_port))
+    if vault_path is not None:
+        text = text.replace(
+            "# BRAIN_VAULT_PATH=",
+            f"BRAIN_VAULT_PATH={vault_path}",
+        )
+    return text
+
+
 # ---------------------------------------------------------------------------
 # T3.5 — brain init + doctor
 # ---------------------------------------------------------------------------
@@ -522,7 +546,7 @@ def run_setup(
     dry_run: bool = False,
     brain_home_override: Path | None = None,
     vault_override: Path | None = None,
-    pg_port: int = 5433,
+    pg_port: int = 55432,
     wiki_port: int = 8080,
     embedder_choice: str | None = None,
     skip_wiki: bool = False,
@@ -682,13 +706,14 @@ def run_setup(
 
         def _write_env() -> None:
             template_src = resource_files("brain.templates") / "env.example"
-            env_text = template_src.read_text(encoding="utf-8")
-            # Activate the commented-out BRAIN_VAULT_PATH line if --vault was given.
-            if vault_path is not None:
-                env_text = env_text.replace(
-                    "# BRAIN_VAULT_PATH=",
-                    f"BRAIN_VAULT_PATH={vault_path}",
-                )
+            # Substitute the chosen Postgres port into DATABASE_URL (same
+            # {{ pg_port }} mechanism as the compose render) and activate the
+            # commented-out BRAIN_VAULT_PATH line if --vault was given.
+            env_text = render_env_from_template(
+                template_src.read_text(encoding="utf-8"),
+                pg_port=pg_port,
+                vault_path=vault_path,
+            )
             env_dest.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(env_dest, env_text)
             typer.echo(f"  [ok] wrote {env_dest}")

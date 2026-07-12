@@ -545,3 +545,119 @@ def test_apply_aliases_collapses_contributions_and_drops_self_edge(
 
     # F2: source row still present (caller GCs it via refresh_aggregates).
     assert _entity_id(test_db, "org", "acme") is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 2.8 — presence-flag aspects must not double-count on merge
+# ---------------------------------------------------------------------------
+
+
+def _mention_count_for_doc(
+    conn: psycopg.Connection[Any],
+    entity_type: str,
+    canonical_key: str,
+    document_id: str,
+    *,
+    tenant_id: str = "default",
+) -> int | None:
+    """Return the ``mention_count`` on the (entity, doc) mention row, or None."""
+    eid = _entity_id(conn, entity_type, canonical_key, tenant_id=tenant_id)
+    if eid is None:
+        return None
+    row = conn.execute(
+        "SELECT mention_count FROM graph_entity_mentions "
+        "WHERE tenant_id = %s AND entity_id = %s AND document_id = %s",
+        (tenant_id, eid, document_id),
+    ).fetchone()
+    return None if row is None else int(row[0])
+
+
+def test_apply_aliases_person_mentions_stay_presence(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Person mentions are presence flags — merging two people that both mention
+    the same doc must keep ``mention_count`` at 1, not sum to 2 (Task 2.8).
+
+    Regression: the on-conflict clause used to always SUM ``mention_count``, which
+    inflated the person presence flag (``source = 'people'``, always 1) to 2.
+    """
+    # Arrange: two PERSON entities that both mention doc D (presence 1 each).
+    _seed_entity(test_db, "person", "jane doe")
+    _seed_entity(test_db, "person", "jane d")  # variant to merge into 'jane doe'
+    d = _make_doc(test_db)
+    _seed_mention(test_db, "person", "jane doe", document_id=d, mention_count=1)
+    _seed_mention(test_db, "person", "jane d", document_id=d, mention_count=1)
+
+    # Act: merge the variant into the canonical person.
+    apply_aliases(
+        test_db,
+        "default",
+        [AliasRule("person", "jane d", "person", "jane doe")],
+    )
+
+    # Assert: presence preserved (1), NOT summed to 2.
+    assert _mention_count_for_doc(test_db, "person", "jane doe", d) == 1
+
+
+def test_apply_aliases_concept_mentions_still_sum(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Concept mentions carry real counts (``source = 'extractor:...'``) and must
+    still SUM on merge — the aspect-aware clause only clamps people presence.
+    """
+    # Arrange: two TOPIC (concept) entities that both mention doc D with real
+    # counts under a concept extractor source.
+    concept_source = "extractor:test-model@concepts-v5"
+    _seed_entity(test_db, "topic", "widget a")
+    _seed_entity(test_db, "topic", "widget b")
+    d = _make_doc(test_db)
+    _seed_mention(
+        test_db, "topic", "widget a", document_id=d, mention_count=2, source=concept_source
+    )
+    _seed_mention(
+        test_db, "topic", "widget b", document_id=d, mention_count=3, source=concept_source
+    )
+
+    # Act
+    apply_aliases(
+        test_db,
+        "default",
+        [AliasRule("topic", "widget a", "topic", "widget b")],
+    )
+
+    # Assert: concept counts still sum (2 + 3 = 5).
+    assert _mention_count_for_doc(test_db, "topic", "widget b", d) == 5
+
+
+def test_apply_aliases_person_cooccur_stays_presence(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Person co-occurrence edges are presence flags too — merging two people who
+    both co-occur with a third in the same doc must keep ``cooccur_count`` at 1,
+    not sum to 2 (Task 2.8, contribution side).
+    """
+    # Arrange: 'jane doe' and its variant both co-occur with 'carol' in doc D
+    # (person-person presence, cooccur 1 each).
+    _seed_entity(test_db, "person", "jane doe")
+    _seed_entity(test_db, "person", "jane d")
+    _seed_entity(test_db, "person", "carol")
+    d = _make_doc(test_db)
+    _seed_contribution(
+        test_db, "person", "jane doe", "person", "carol", document_id=d, cooccur_count=1
+    )
+    _seed_contribution(
+        test_db, "person", "jane d", "person", "carol", document_id=d, cooccur_count=1
+    )
+
+    # Act
+    apply_aliases(
+        test_db,
+        "default",
+        [AliasRule("person", "jane d", "person", "jane doe")],
+    )
+
+    # Assert: the (jane doe, carol) presence edge stays at 1, not summed to 2.
+    assert (
+        _cooccur_total(test_db, "person", "jane doe", "person", "carol", document_id=d)
+        == 1
+    )

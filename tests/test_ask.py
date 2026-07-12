@@ -114,6 +114,28 @@ def test_reflect_returns_followups() -> None:
     assert verdict.follow_up_queries == ["follow up", "extra"]
 
 
+def test_reflect_coerces_stringified_false() -> None:
+    """A model returning ``"sufficient": "false"`` is INSUFFICIENT (Task 2.7).
+
+    Regression: ``bool("false")`` is ``True`` in Python, so the old
+    ``bool(body.get("sufficient"))`` coercion wrongly stopped the loop early on a
+    stringified-false verdict. ``coerce_bool`` must map "false" → False so the
+    follow-up queries are honoured and retrieval continues.
+    """
+    chat = _ScriptedChat([{"sufficient": "false", "follow_up_queries": ["needle"]}])
+    verdict = _call_reflect_step(chat, _cfg(), "q", [_doc("d1")])
+    assert verdict.sufficient is False
+    assert verdict.follow_up_queries == ["needle"]
+
+
+def test_reflect_coerces_stringified_true() -> None:
+    """Symmetric guard: ``"sufficient": "true"`` maps to True (stops the loop)."""
+    chat = _ScriptedChat([{"sufficient": "true", "follow_up_queries": []}])
+    verdict = _call_reflect_step(chat, _cfg(), "q", [_doc("d1")])
+    assert verdict.sufficient is True
+    assert verdict.follow_up_queries == []
+
+
 def test_clean_query_list_rejects_non_list() -> None:
     assert _clean_query_list(None, limit=3) == []
     assert _clean_query_list("not a list", limit=3) == []

@@ -1,13 +1,17 @@
 """Pluggable tacit-knowledge gap detectors (Open/Closed)."""
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Any, Protocol, runtime_checkable
 
 import psycopg
 
+from ..errors import EnrichmentError
 from ..gaps import SearchFailureDetector
 from .schema import Gap
+
+_logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -149,9 +153,26 @@ class ContradictionDetector:
 
         gaps: list[Gap] = []
         for eid, etype, name, doc_ids, summaries in rows:
-            verdict = self._enricher.assess_contradiction(
-                subject=name, summaries=list(summaries)
-            )
+            try:
+                verdict = self._enricher.assess_contradiction(
+                    subject=name, summaries=list(summaries)
+                )
+            except EnrichmentError as exc:
+                # One entity's LLM verdict failing (a transient Ollama outage,
+                # a malformed response, or a permanent 4xx) must not abort the
+                # whole scan — mirror the per-item guard the ``brain enrich
+                # --backfill`` loop uses. ``OllamaUnavailable`` is an
+                # ``EnrichmentError`` subclass, so this single clause covers
+                # both. Log the entity id/type only (never the summaries — they
+                # can carry sensitive transcript/email text) and skip it so the
+                # other entities' gaps still persist.
+                _logger.warning(
+                    "contradiction assess failed for entity %s (%s); skipping: %s",
+                    eid,
+                    etype,
+                    exc,
+                )
+                continue
             if verdict.contradicts:
                 gaps.append(
                     Gap(

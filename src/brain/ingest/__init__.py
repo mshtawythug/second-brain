@@ -234,9 +234,9 @@ def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
     - ``participants`` — accept ``list[str]`` (Krisp speakers, Gmail headers
       already-parsed by an upstream extractor). Non-list / mixed-type lists
       log + skip rather than silently coercing.
-    - ``duration_min`` — accept ``int`` (or a ``str`` that parses cleanly).
-      Floats like ``42.7`` round down via ``int(...)``; non-numeric values
-      log + skip.
+    - ``duration_min`` — accept ``int``, ``float``, or a numeric ``str``.
+      Floats — and float-valued strings like ``"42.7"`` — round down via
+      ``int(float(...))``; ``bool`` and non-numeric values log + skip.
     """
     out: dict[str, Any] = {}
 
@@ -284,7 +284,10 @@ def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
             # explicitly so ``True`` doesn't end up as ``1`` in the column.
             if isinstance(raw_duration, bool):
                 raise TypeError("bool is not a valid duration")
-            out["duration_min"] = int(raw_duration)
+            # ``int(float(...))`` so numeric strings with a fractional part
+            # ("42.7", Krisp's occasional float-minute serialization) round
+            # down instead of raising ValueError under a bare ``int("42.7")``.
+            out["duration_min"] = int(float(raw_duration))
         except (TypeError, ValueError):
             _logger.warning(
                 "metadata.duration_min expected int, got %r; "
@@ -458,11 +461,14 @@ def ingest_document(
     still be tagged as e.g. ``krisp`` if needed. Stdin ingests must pass
     ``source_kind`` explicitly — they get no default.
 
-    Source-specific side effects (Gmail directory upserts, Krisp directory
-    refresh triggers) are dispatched via :func:`_run_source_hooks`. The
-    ``gws_runner`` argument is only consulted by the Krisp hook; passing
-    ``None`` skips the calendar / contacts refresh with a logged warning so
-    callers without a runner wired (early CLI paths, tests) still succeed.
+    Source-specific side effects split by cost (Task 2.11): the Gmail directory
+    upsert runs IN-TRANSACTION via :func:`_run_source_hooks` (fast local write
+    with an atomic-rollback contract), while the Krisp calendar / contacts
+    refresh runs POST-COMMIT via :func:`_run_post_commit_source_hooks` because it
+    shells out to ``gws`` (multi-second) and must not hold the write
+    transaction. The ``gws_runner`` argument is only consulted by the Krisp hook;
+    passing ``None`` skips the calendar / contacts refresh with a logged warning
+    so callers without a runner wired (early CLI paths, tests) still succeed.
 
     Vault mirror: when ``vault_root`` is supplied AND the call actually wrote
     a row (``result.created`` or ``force``), the corresponding mirror file
@@ -732,15 +738,18 @@ def _insert_new_document(
     draft: bool,
     chunks: list[Chunk],
     embeddings: list[list[float]],
-    gws_runner: GwsRunner | None,
 ) -> str:
     """INSERT a brand-new document row + its chunks; return the new id.
 
     Runs inside the caller's open transaction. Embeddings are PRECOMPUTED by the
     caller (outside the transaction, Wave perf-T3 / F1), so this helper performs
     no Ollama calls and the transaction holds no locks across network I/O.
-    Auto-summary enrichment is NOT run here — the caller invokes
-    :func:`_enrich_post_ingest_hook` AFTER the commit.
+    Auto-summary enrichment AND the slow Krisp calendar/contacts refresh are NOT
+    run here — the caller invokes :func:`_enrich_post_ingest_hook` and
+    :func:`_run_post_commit_source_hooks` AFTER the commit (Task 2.11), so the
+    Krisp ``gws`` subprocess calls never hold the write transaction open. The
+    fast in-transaction Gmail directory upsert (:func:`_run_source_hooks`) DOES
+    run here, preserving its atomic-rollback contract.
     """
     source_id = _upsert_source(
         conn,
@@ -803,14 +812,15 @@ def _insert_new_document(
     # --auto`` (D19 + D20).
     _maybe_autotag_action_items(conn, document_id=document_id, doc=doc, tags=tags)
 
-    # Source-specific hooks (gmail directory upsert / krisp refresh) run INSIDE
-    # the transaction so a hook failure rolls the document back too.
+    # In-transaction source hook (Gmail directory upsert). Its rollback contract
+    # is intentional — a directory-write failure rolls the document back. The
+    # slow Krisp calendar/contacts refresh runs POST-COMMIT instead — see
+    # :func:`_ingest_within_transaction` (Task 2.11).
     _run_source_hooks(
         conn,
         source_kind=source_kind,
         doc=doc,
         document_id=document_id,
-        gws_runner=gws_runner,
     )
     return document_id
 
@@ -906,7 +916,6 @@ def _ingest_within_transaction(
                 tags=tags,
                 content_hash=h,
                 body_changed=action.body_changed,
-                gws_runner=gws_runner,
                 draft=draft,
                 chunks=chunks,
                 embeddings=embeddings,
@@ -937,10 +946,29 @@ def _ingest_within_transaction(
                 draft=draft,
                 chunks=chunks,
                 embeddings=embeddings,
-                gws_runner=gws_runner,
             )
             created = True
             body_changed = True
+
+    # --- Post-commit Krisp source hook (Task 2.11). ---
+    # The Krisp calendar+contacts refresh runs AFTER the document transaction
+    # commits, on the same ``did_write`` gate the enrich step uses. Previously it
+    # ran INSIDE ``conn.transaction()``, so the hook held the write transaction
+    # open across multi-second ``gws`` subprocess calls (calendar + contacts
+    # refresh). Moving it post-commit loses no rollback semantics: both refresh
+    # helpers soft-degrade (catch runner failures and return 0). The Gmail
+    # directory upsert deliberately stays IN-TRANSACTION (fast local write with
+    # an atomic-rollback contract) — it already ran inside the transaction above.
+    # ``did_write`` is False only on the partial-window draft no-op, which wrote
+    # nothing — matching the prior in-transaction gating.
+    if did_write:
+        _run_post_commit_source_hooks(
+            conn,
+            source_kind=source_kind,
+            doc=doc,
+            document_id=document_id,
+            gws_runner=gws_runner,
+        )
 
     # --- Post-commit auto-summary (Wave perf-T3 / F1). ---
     # Runs in autocommit (the transaction has committed) as its own short
@@ -983,7 +1011,6 @@ def _update_doc_in_place(
     tags: list[str],
     content_hash: str,
     body_changed: bool,
-    gws_runner: GwsRunner | None,
     chunks: list[Chunk],
     embeddings: list[list[float]],
     draft: bool = False,
@@ -998,9 +1025,11 @@ def _update_doc_in_place(
     ``links`` / ``derived_links`` / ``unresolved_links`` referencing this doc
     keep pointing at the same row across re-ingest. Old chunks are deleted via
     direct DELETE (no need for ON DELETE CASCADE — we know the parent doc id)
-    and re-inserted from the precomputed vectors. Source-specific post-ingest
-    hooks (gmail directory upsert) re-run so headers from the latest message in
-    the rebuilt thread propagate.
+    and re-inserted from the precomputed vectors. The Gmail directory upsert
+    re-runs IN-TRANSACTION so headers from the latest message in the rebuilt
+    thread propagate (its atomic-rollback contract is preserved); the slow Krisp
+    calendar/contacts refresh runs POST-COMMIT — see
+    :func:`_ingest_within_transaction` (Task 2.11).
 
     Wave perf-T3 (F1): chunks + embeddings are PRECOMPUTED by the caller
     (outside the transaction) and passed in — this helper performs no Ollama
@@ -1149,12 +1178,15 @@ def _update_doc_in_place(
         tags_text=tags_text,
     )
 
+    # In-transaction source hook: the Gmail directory upsert re-runs so headers
+    # from the latest message in the rebuilt thread propagate; its rollback
+    # contract is intentional. The slow Krisp calendar/contacts refresh runs
+    # POST-COMMIT — see :func:`_ingest_within_transaction` (Task 2.11).
     _run_source_hooks(
         conn,
         source_kind=source_kind,
         doc=doc,
         document_id=document_id,
-        gws_runner=gws_runner,
     )
     return True
 
@@ -1387,17 +1419,49 @@ def _run_source_hooks(
     source_kind: str,
     doc: ExtractedDoc,
     document_id: str,
-    gws_runner: GwsRunner | None,
 ) -> None:
-    """Dispatch to the source-specific post-ingest hook (Gmail / Krisp / ...).
+    """Dispatch the IN-TRANSACTION source-specific post-ingest hooks.
 
-    Sources without a registered hook are a no-op. New sources should add a
-    new ``_<kind>_post_ingest_hook`` function and a branch here — the body of
-    :func:`ingest_document` stays untouched (Open/Closed).
+    Only Gmail's directory upsert runs here — it is a fast local DB write
+    (no network / subprocess) with a deliberate atomic-rollback contract: a
+    directory-write failure rolls the whole document back
+    (``test_directory_upsert_runs_in_same_transaction``). Keeping it in the
+    write transaction is a preserved guarantee.
+
+    Krisp's calendar / contacts refresh does NOT run here — it shells out to
+    ``gws`` (multi-second subprocess / network calls) and would otherwise hold
+    the write transaction open, so it runs POST-COMMIT via
+    :func:`_run_post_commit_source_hooks` (Task 2.11).
+
+    Sources without an in-transaction hook are a no-op. A new fast/atomic hook
+    adds a branch here; a new slow / soft-degrading hook adds a branch to
+    :func:`_run_post_commit_source_hooks` instead (Open/Closed).
     """
     if source_kind == "gmail":
         _gmail_post_ingest_hook(conn, doc, document_id)
-    elif source_kind == "krisp":
+
+
+def _run_post_commit_source_hooks(
+    conn: psycopg.Connection,
+    *,
+    source_kind: str,
+    doc: ExtractedDoc,
+    document_id: str,
+    gws_runner: GwsRunner | None,
+) -> None:
+    """Dispatch the POST-COMMIT source-specific post-ingest hooks (Task 2.11).
+
+    Only Krisp's calendar + contacts refresh runs here. It shells out to the
+    ``gws`` CLI (multi-second subprocess / network calls) and soft-degrades —
+    ``refresh_calendar`` / ``refresh_contacts`` catch runner failures and
+    return 0 — so running it AFTER the document transaction commits holds no
+    write lock across the slow refresh and loses no rollback semantics.
+
+    Gmail's directory upsert runs IN-TRANSACTION via :func:`_run_source_hooks`
+    because it has an atomic-rollback contract; keeping it there is a
+    deliberately preserved guarantee, NOT an oversight.
+    """
+    if source_kind == "krisp":
         _krisp_post_ingest_hook(conn, doc, document_id, gws_runner)
 
 

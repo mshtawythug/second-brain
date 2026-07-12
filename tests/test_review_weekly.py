@@ -392,3 +392,99 @@ def test_build_weekly_report_graph_disabled_falls_back(
     )
     assert report.graph_used is False
     assert report.themes[0].entity_names == ["topic-alpha"]
+
+
+# ---------------------------------------------------------------------------
+# Task 2.9 — intra-community edge weight must not be double-counted
+# ---------------------------------------------------------------------------
+
+
+def _seed_entity_node(
+    conn: psycopg.Connection, eid: str, *, entity_type: str, key: str
+) -> None:
+    conn.execute(
+        "INSERT INTO graph_entities (id, tenant_id, entity_type, name, canonical_key) "
+        "VALUES (%s, 'default', %s, %s, %s)",
+        (eid, entity_type, key, key),
+    )
+
+
+def _seed_community(conn: psycopg.Connection, ck: str, *, member_count: int) -> None:
+    # members_hash must be unique per community (uq_graph_communities on
+    # (tenant_id, level, members_hash)); derive it from the community key.
+    conn.execute(
+        "INSERT INTO graph_communities "
+        "(tenant_id, community_key, source_graph_hash, members_hash, member_count) "
+        "VALUES ('default', %s, %s, %s, %s)",
+        (ck, f"h-{ck}", f"mh-{ck}", member_count),
+    )
+
+
+def _seed_member(conn: psycopg.Connection, ck: str, eid: str, *, rank: int) -> None:
+    conn.execute(
+        "INSERT INTO graph_community_members "
+        "(tenant_id, community_key, entity_id, member_rank, member_weight) "
+        "VALUES ('default', %s, %s, %s, 1.0)",
+        (ck, eid, rank),
+    )
+
+
+def _seed_edge(
+    conn: psycopg.Connection, doc: str, a: str, b: str, *, cooccur: int
+) -> None:
+    # Canonical ordering for the gec_canonical CHECK (src_id < dst_id).
+    src, dst = sorted([a, b])
+    conn.execute(
+        "INSERT INTO graph_edge_contributions "
+        "(tenant_id, document_id, src_id, dst_id, cooccur_count) "
+        "VALUES ('default', %s, %s, %s, %s)",
+        (doc, src, dst, cooccur),
+    )
+
+
+def test_weekly_active_communities_dedups_intra_community_edge(
+    test_db: psycopg.Connection, seed_doc: Callable[..., str]
+) -> None:
+    """An intra-community edge (both endpoints in one community) contributes its
+    weight ONCE, not once per endpoint (Task 2.9 regression).
+
+    The membership join matched such an edge twice (via src AND dst membership),
+    so the old direct ``SUM`` double-counted it. A cross-community edge must still
+    attribute its weight to each endpoint's community exactly once.
+    """
+    weight = 5
+    d_intra = seed_doc(title="Intra", content="intra body")
+    d_cross = seed_doc(title="Cross", content="cross body")
+    _set_ingested_at(test_db, d_intra, IN_WINDOW)
+    _set_ingested_at(test_db, d_cross, IN_WINDOW)
+
+    ea, eb, ec, ed = (str(uuid.uuid4()) for _ in range(4))
+    for i, eid in enumerate((ea, eb, ec, ed)):
+        _seed_entity_node(test_db, eid, entity_type="topic", key=f"ent-{i}")
+
+    c1, c2, c3 = (str(uuid.uuid4()) for _ in range(3))
+    _seed_community(test_db, c1, member_count=2)
+    _seed_community(test_db, c2, member_count=1)
+    _seed_community(test_db, c3, member_count=1)
+    # C1 owns BOTH endpoints of the intra edge; C2 and C3 own one cross endpoint.
+    _seed_member(test_db, c1, ea, rank=0)
+    _seed_member(test_db, c1, eb, rank=1)
+    _seed_member(test_db, c2, ec, rank=0)
+    _seed_member(test_db, c3, ed, rank=0)
+
+    _seed_edge(test_db, d_intra, ea, eb, cooccur=weight)  # intra: both in C1
+    _seed_edge(test_db, d_cross, ec, ed, cooccur=weight)  # cross: C2 <-> C3
+
+    result = dict(
+        weekly_active_communities(
+            test_db,
+            tenant_id="default",
+            after=WIN_AFTER,
+            before=WIN_BEFORE,
+            theme_limit=10,
+        )
+    )
+
+    assert result[c1] == weight  # intra edge counted ONCE (bug counted it twice)
+    assert result[c2] == weight  # cross edge attributed to C2 once
+    assert result[c3] == weight  # cross edge attributed to C3 once

@@ -93,10 +93,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# Per-file actions the worker can run. Filesystem moves are decomposed
-# into ``deleted(src) + created(dst)`` upstream so this short list covers
-# every event type the worker actually sees.
-_Action = Literal["upsert", "delete"]
+# Per-file actions the worker can run. A within-vault markdown rename is a
+# single ``move`` job (carrying both src + dst) so the worker can UPDATE the
+# row's ``vault_path`` in place — preserving the document id and, with it,
+# every incoming backlink (``links.dst_document_id``). Moves whose
+# destination leaves the vault (or stops being a ``.md`` file) still
+# decompose into ``delete(src)`` + ``upsert(dst)`` in ``_classify_event``.
+_Action = Literal["upsert", "delete", "move"]
 
 # Hard cap on the debounce buffer. If the user (or an editor's autosave
 # loop) outpaces this, we fall back to a full vault sync to recover —
@@ -146,10 +149,18 @@ class WatchConfig:
 
 @dataclass
 class _Job:
-    """One unit of work for the worker thread."""
+    """One unit of work for the worker thread.
+
+    ``dest_path`` is only set for ``move`` jobs — it carries the rename
+    destination so the worker can UPDATE ``documents.vault_path`` from
+    ``abs_path`` (the source) to ``dest_path`` in place, preserving the
+    document id and every incoming backlink. It stays ``None`` for every
+    other action.
+    """
 
     action: _Action
     abs_path: Path
+    dest_path: Path | None = None
 
 
 @dataclass
@@ -370,18 +381,28 @@ class _Handler(FileSystemEventHandler):
             return
         if classified is None:
             return
-        for action, path in classified:
-            _schedule_debounced(self._config, self._state, action, path)
+        for action, path, dest in classified:
+            _schedule_debounced(self._config, self._state, action, path, dest)
 
 
 def _classify_event(
     event: FileSystemEvent, vault_path: Path
-) -> list[tuple[_Action, Path]] | None:
+) -> list[tuple[_Action, Path, Path | None]] | None:
     """Decide what to do with a watchdog event.
 
-    Returns a list of (action, absolute_path) tuples — usually one entry,
-    but a ``moved`` event becomes two (delete src + upsert dst). Returns
-    ``None`` to skip the event entirely.
+    Returns a list of ``(action, absolute_path, dest_path)`` tuples — usually
+    one entry with ``dest_path=None``. A within-vault ``.md`` rename becomes a
+    single ``("move", src, dst)`` so the worker can UPDATE the row's
+    ``vault_path`` in place, preserving the document id and every incoming
+    backlink. A move whose destination leaves the vault (or stops being a
+    ``.md`` file) still decomposes into ``("delete", src, None)`` +
+    ``("upsert", dst, None)``. Returns ``None`` to skip the event entirely.
+
+    Note: editors that emulate a rename as an atomic delete+create (and
+    cross-device moves) emit no ``FileMovedEvent`` — those arrive as separate
+    ``deleted`` / ``created`` events and keep the delete+upsert behavior, so a
+    heavily-linked note renamed that way still relies on a full
+    ``brain vault sync`` to restore its incoming backlinks.
 
     Filtering rules (kept conservative — the worker can always re-derive
     state from the DB if a real edit slipped past, but we do NOT want to
@@ -406,18 +427,24 @@ def _classify_event(
         src = _filter_path(_to_path(event.src_path), vault_path)
         dest_attr = getattr(event, "dest_path", None)
         dst = _filter_path(_to_path(dest_attr), vault_path) if dest_attr else None
-        results: list[tuple[_Action, Path]] = []
+        if src is not None and dst is not None:
+            # Within-vault markdown rename: thread it as a single ``move`` so
+            # the worker UPDATEs ``vault_path`` in place instead of
+            # delete-cascading (then re-inserting) the row, which would wipe
+            # every incoming backlink pointing at the moved doc.
+            return [("move", src, dst)]
+        results: list[tuple[_Action, Path, Path | None]] = []
         if src is not None:
-            results.append(("delete", src))
+            results.append(("delete", src, None))
         if dst is not None:
-            results.append(("upsert", dst))
+            results.append(("upsert", dst, None))
         return results or None
 
     path = _filter_path(_to_path(event.src_path), vault_path)
     if path is None:
         return None
     action: _Action = "delete" if event_type == "deleted" else "upsert"
-    return [(action, path)]
+    return [(action, path, None)]
 
 
 def _to_path(raw: str | bytes) -> Path:
@@ -475,12 +502,17 @@ def _schedule_debounced(
     state: _WatcherState,
     action: _Action,
     path: Path,
+    dest: Path | None = None,
 ) -> None:
     """Cancel any pending timer for ``path`` and start a new one.
 
     Each new event for the same path resets the debounce timer to
     ``config.debounce_ms`` from now. Once the path goes ``debounce_ms``
-    without a new event, the timer fires and enqueues a job.
+    without a new event, the timer fires and enqueues a job. ``dest`` is the
+    rename destination for a ``move`` action (``None`` otherwise); the
+    debounce is keyed on ``path`` (the source), so repeated moves of the same
+    source coalesce and the last one's destination wins — the desired
+    outcome for a burst of rename events.
 
     If the pending-timer dict overflows (a misbehaving editor or a
     bulk-replace operation), we fall back to "trigger an immediate full
@@ -492,7 +524,11 @@ def _schedule_debounced(
     def _fire() -> None:
         with state.lock:
             state.pending_timers.pop(path, None)
-        _enqueue(state, _Job(action=action, abs_path=path), config=config)
+        _enqueue(
+            state,
+            _Job(action=action, abs_path=path, dest_path=dest),
+            config=config,
+        )
 
     with state.lock:
         existing = state.pending_timers.pop(path, None)
@@ -544,14 +580,17 @@ def _worker_loop(
 ) -> None:
     """Consume jobs serially. Owns the DB connection.
 
-    Three classes of work, distinguished by ``job.abs_path``:
+    Four classes of work, distinguished by ``job.action`` / ``job.abs_path``:
 
     1. ``upsert`` of a regular file → ``sync_one_file`` (preceded by a
        fence-only-write check; see :func:`_is_fence_only_write`)
     2. ``delete`` of a regular file → DB row removal + link cleanup
        (we don't touch disk; the file is already gone) plus body-cache
        eviction so a re-creation event hits the cold-start path
-    3. ``upsert`` of the vault root path → full ``sync_vault`` (the
+    3. ``move`` of a regular file → ``_handle_move``: UPDATE the row's
+       ``vault_path`` in place (preserving the document id and every
+       incoming backlink) then upsert the destination
+    4. ``upsert`` of the vault root path → full ``sync_vault`` (the
        overflow-recovery path) plus full body-cache flush so subsequent
        per-file events re-prime the cache from the post-sync state
 
@@ -581,6 +620,19 @@ def _worker_loop(
                 # take the cold-start path (one extra sync per file,
                 # then dedup resumes) — safer than a half-stale map.
                 state.body_cache.clear()
+            elif job.action == "move" and job.dest_path is not None:
+                # Within-vault rename: UPDATE vault_path in place so the
+                # document id (and every incoming backlink) survives, then
+                # refresh the destination. See :func:`_handle_move`.
+                _handle_move(
+                    conn,
+                    embedder=embedder,
+                    config=config,
+                    state=state,
+                    src_abs=job.abs_path,
+                    dst_abs=job.dest_path,
+                    graph_syncer=graph_syncer,
+                )
             elif job.action == "delete":
                 # Defensive re-stat: a "deleted" fsevent can fire spuriously
                 # when a file is atomically replaced. ``_atomic.atomic_write_text``
@@ -726,6 +778,23 @@ def _refresh_body_cache(state: _WatcherState, abs_path: Path) -> None:
     state.body_cache[abs_path] = strip_fence(current)
 
 
+def _vault_relative_posix(abs_path: Path, vault_path: Path) -> str | None:
+    """Return ``abs_path`` relative to the vault as a POSIX string, or None.
+
+    Mirrors the ``resolve()``-then-lexical-fallback ladder used elsewhere in
+    the watcher so a vanished path (a delete or move source, already gone
+    from disk) still yields the correct relative key without touching the FS.
+    Returns ``None`` when the path is outside the vault.
+    """
+    try:
+        return abs_path.relative_to(vault_path.resolve()).as_posix()
+    except ValueError:
+        try:
+            return abs_path.relative_to(vault_path).as_posix()
+        except ValueError:
+            return None
+
+
 def _handle_delete(
     conn: psycopg.Connection[Any],
     abs_path: Path,
@@ -760,17 +829,13 @@ def _handle_delete(
     left with a half-finished delete and orphaned chunks; the error log
     is what surfaces the invariant break.
     """
-    try:
-        relative = abs_path.relative_to(vault_path.resolve()).as_posix()
-    except ValueError:
-        try:
-            relative = abs_path.relative_to(vault_path).as_posix()
-        except ValueError:
-            logger.debug(
-                "vault watcher: delete event for %s outside vault — skipping",
-                abs_path,
-            )
-            return
+    relative = _vault_relative_posix(abs_path, vault_path)
+    if relative is None:
+        logger.debug(
+            "vault watcher: delete event for %s outside vault — skipping",
+            abs_path,
+        )
+        return
     deleted = conn.execute(
         "DELETE FROM documents WHERE kind = 'vault' AND vault_path = %s "
         "RETURNING id",
@@ -789,3 +854,80 @@ def _handle_delete(
     if graph_syncer is not None:
         for row in deleted:
             graph_syncer.remove(conn, str(row[0]))
+
+
+def _handle_move(
+    conn: psycopg.Connection[Any],
+    *,
+    embedder: Embedder,
+    config: WatchConfig,
+    state: _WatcherState,
+    src_abs: Path,
+    dst_abs: Path,
+    graph_syncer: GraphSyncer | None = None,
+) -> None:
+    """Handle a within-vault markdown rename WITHOUT destroying incoming links.
+
+    The old classifier decomposed a move into ``delete(src) + upsert(dst)``.
+    The delete ran ``DELETE FROM documents WHERE vault_path=src`` whose
+    ``ON DELETE CASCADE`` wiped every ``links`` row pointing AT the moved doc
+    (its incoming backlinks); the follow-up upsert only restored the doc's
+    OUTGOING links. Renaming a heavily-linked note therefore silently
+    orphaned every backlink until the next full ``brain vault sync``.
+
+    The fix mirrors the full-sync rename semantics: UPDATE the row's
+    ``vault_path`` in place so the document id — and thus every incoming
+    ``links`` row — survives, then run the normal per-file upsert on the
+    destination to refresh content / tags / chunks / outgoing links / mirror
+    bookkeeping (it matches the row by frontmatter id and updates it in
+    place). The UPDATE is a single statement, so this keeps the DB write
+    window no larger than the old DELETE — it does not widen the historically
+    deadlock-prone lock footprint.
+
+    A move whose destination has vanished by the time the worker runs
+    (a move-then-delete inside the debounce window) can't be applied in
+    place — there's no file to sync, and pointing ``vault_path`` at a missing
+    file would strand the row. In that case we fall back to a plain delete of
+    the source row, symmetric to the stale-upsert existence guard in the
+    worker loop.
+    """
+    if not dst_abs.exists():
+        _handle_delete(
+            conn, src_abs, config.vault_path, graph_syncer=graph_syncer
+        )
+        state.body_cache.pop(src_abs, None)
+        state.body_cache.pop(dst_abs, None)
+        return
+
+    src_rel = _vault_relative_posix(src_abs, config.vault_path)
+    dst_rel = _vault_relative_posix(dst_abs, config.vault_path)
+    if src_rel is not None and dst_rel is not None and src_rel != dst_rel:
+        # Preserve the document id (and every incoming ``links`` row) by
+        # moving ``vault_path`` in place instead of delete + re-insert. The
+        # worker connection is autocommit, so this commits immediately — the
+        # same single-statement footprint as ``_handle_delete``'s DELETE.
+        conn.execute(
+            "UPDATE documents SET vault_path = %s "
+            "WHERE kind = 'vault' AND vault_path = %s",
+            (dst_rel, src_rel),
+        )
+
+    # Refresh content / mirror bookkeeping on the destination. This matches
+    # the row by frontmatter id and updates it in place (full-sync
+    # semantics), re-materializing the moved doc's OUTGOING links and retrying
+    # any previously-unresolved refs scoped to it.
+    sync_one_file(
+        conn,
+        embedder=embedder,
+        vault_path=config.vault_path,
+        file_path=dst_abs,
+        link_rewrite=config.link_rewrite,
+        owner_participants=config.owner_participants,
+        graph_syncer=graph_syncer,
+    )
+
+    # The source path's cached fence-stripped body is now stale (file gone);
+    # refresh the destination so the follow-up filesystem event triggered by
+    # sync's own write is recognized as fence-only and skipped.
+    state.body_cache.pop(src_abs, None)
+    _refresh_body_cache(state, dst_abs)

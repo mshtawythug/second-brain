@@ -1,6 +1,15 @@
 """Integration tests for hybrid search (FTS + vector via RRF)."""
+import os
+from typing import Any
+
+from brain.db import connect
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.search import hybrid_search
+
+TEST_DATABASE_URL = os.environ.get(
+    "TEST_DATABASE_URL",
+    "postgresql://brain:brain@localhost:5434/second_brain_test",
+)
 
 
 def _seed(test_db, embedder, items):
@@ -131,3 +140,88 @@ def test_search_no_matches_returns_empty(test_db, fake_embedder):
         fts_only=True,
     )
     assert results == []
+
+
+class _MidSearchDeleteConn:
+    """Connection test-double that lands a concurrent DELETE in a precise window.
+
+    ``hybrid_search`` ranks chunks first (building ``by_doc``), then fetches
+    per-document metadata via a second query (``... FROM documents d ...
+    d.id = ANY(%s)``). This wrapper delegates every call to the real connection
+    but, the first time it sees that metadata query, deletes ``victim_id`` on a
+    *separate* connection first — reproducing the exact race an in-flight
+    ``brain rm`` opens. Composition over inheritance; NOT monkey-patching
+    (CLAUDE.md rule 13) — a purpose-built stand-in whose only extra behavior is
+    the interleaved delete.
+    """
+
+    def __init__(self, real: Any, victim_id: str) -> None:
+        self._real = real
+        self._victim_id = victim_id
+        self.delete_fired = False
+
+    def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
+        if (
+            not self.delete_fired
+            and "FROM documents d" in sql
+            and "d.id = ANY" in sql
+        ):
+            self.delete_fired = True
+            with connect(TEST_DATABASE_URL) as other:
+                other.autocommit = True
+                other.execute(
+                    "DELETE FROM documents WHERE id = %s", (self._victim_id,)
+                )
+        return self._real.execute(sql, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+def test_hybrid_search_skips_doc_deleted_mid_search(test_db, fake_embedder):
+    """A doc deleted between chunk ranking and metadata fetch is skipped, not KeyError.
+
+    Regression for overhaul Task 2.2. The ranked-chunk phase can surface a
+    ``document_id`` that a concurrent ``brain rm`` removes before the
+    per-document metadata SELECT runs, leaving ``docs[doc_id]`` a ``KeyError``
+    that blew up the whole search. The fix skips the now-orphaned doc.
+    """
+    _seed(test_db, fake_embedder, [
+        ("Keeper", "company-id shared keyword", [], "manual"),
+        ("Victim", "company-id shared keyword", [], "manual"),
+    ])
+    victim_id = str(
+        test_db.execute(
+            "SELECT id FROM documents WHERE title = %s", ("Victim",)
+        ).fetchone()[0]
+    )
+
+    race = _MidSearchDeleteConn(test_db, victim_id)
+    results = hybrid_search(
+        race, embedder=fake_embedder, query="company-id shared keyword", limit=5
+    )
+
+    assert race.delete_fired, "the mid-search delete window was never hit"
+    titles = [r.title for r in results]
+    assert "Victim" not in titles
+    assert "Keeper" in titles
+
+
+def test_hybrid_search_negative_limit_does_not_silently_truncate(
+    test_db, fake_embedder
+):
+    """A negative ``limit`` must not silently slice the tail off the ranked list.
+
+    Regression for overhaul Task 2.10. ``results[:limit]`` with ``limit=-2``
+    returned all-but-the-last-2 docs (silent wrong data). The defensive floor
+    clamps a non-positive limit to 1 instead.
+    """
+    _seed(test_db, fake_embedder, [
+        (f"Doc{i}", "shared keyword term", [], "manual") for i in range(5)
+    ])
+    results = hybrid_search(
+        test_db, embedder=fake_embedder, query="shared keyword term", limit=-2
+    )
+    # Old code returned len(all_docs) - 2 == 3 (tail silently dropped); the
+    # floor clamps to exactly 1.
+    assert len(results) == 1

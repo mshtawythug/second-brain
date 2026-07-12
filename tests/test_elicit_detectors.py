@@ -89,6 +89,27 @@ class _RaisingEnricher:
         raise AssertionError("assess_contradiction should NOT have been called")
 
 
+class _SelectiveRaisingEnricher:
+    """Fake that raises ``EnrichmentError`` for ONE subject, contradicts=True else.
+
+    Records every subject it was asked about so a test can assert the scan kept
+    going past the failing entity (all subjects attempted, in order).
+    """
+
+    def __init__(self, *, raise_for: str) -> None:
+        self._raise_for = raise_for
+        self.subjects: list[str] = []
+
+    def assess_contradiction(self, *, subject: str, summaries: list):  # noqa: ARG002
+        from brain.enrichment import ContradictionVerdict
+        from brain.errors import EnrichmentError
+
+        self.subjects.append(subject)
+        if subject == self._raise_for:
+            raise EnrichmentError("simulated per-entity LLM failure")
+        return ContradictionVerdict(contradicts=True, rationale="opposing decisions")
+
+
 # ---------------------------------------------------------------------------
 # Pre-existing tests (unchanged)
 # ---------------------------------------------------------------------------
@@ -272,3 +293,40 @@ def test_contradiction_perf_guard(test_db):
     assert gaps == []
     assert fake.call_count == 200
     assert elapsed < 30.0, f"detect() took {elapsed:.2f}s — exceeded 30s budget"
+
+
+def test_contradiction_survives_per_entity_llm_failure(test_db, caplog):
+    """One entity's LLM verdict raising must not abort the whole scan (Task 2.6).
+
+    Regression: before the fix, an ``EnrichmentError`` from any single entity's
+    ``assess_contradiction`` call propagated out of ``detect()`` and aborted
+    ``build_queue``, dropping every gap. The scan must now skip the failed
+    entity, log a warning, and still return the other entities' gaps.
+    """
+    # Arrange: three qualifying entities in deterministic doc_count DESC order
+    # (Alpha=3, Beta=2, Gamma=1). The middle one (Beta) raises.
+    eids: dict[str, str] = {}
+    for name, dc in (("AlphaTopic", 3), ("BetaTopic", 2), ("GammaTopic", 1)):
+        eid, _doc_ids = _seed_entity_with_summaries(
+            test_db,
+            name=name,
+            entity_type="topic",
+            doc_count=dc,
+            summaries=[f"{name} decided approach A.", f"{name} reversed to B."],
+        )
+        eids[name] = eid
+    enricher = _SelectiveRaisingEnricher(raise_for="BetaTopic")
+    detector = ContradictionDetector(enabled=True, enricher=enricher, min_docs=1)
+
+    # Act
+    with caplog.at_level("WARNING", logger="brain.elicit.detectors"):
+        gaps = detector.detect(test_db, tenant_id="default", limit=10)
+
+    # Assert: every entity was attempted (the scan did not stop at Beta) ...
+    assert enricher.subjects == ["AlphaTopic", "BetaTopic", "GammaTopic"]
+    # ... the two healthy entities produced gaps, the failed one is skipped ...
+    assert {g.target_id for g in gaps} == {eids["AlphaTopic"], eids["GammaTopic"]}
+    assert all(g.signal_kind == "contradiction" for g in gaps)
+    # ... and the failure was logged (entity id surfaced, summaries NOT logged).
+    assert eids["BetaTopic"] in caplog.text
+    assert any(r.levelname == "WARNING" for r in caplog.records)

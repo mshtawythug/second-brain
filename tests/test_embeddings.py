@@ -8,7 +8,10 @@ behavior. The factory dispatch is covered separately in
 """
 from unittest.mock import MagicMock
 
-from brain.embeddings import VoyageEmbedder
+import pytest
+
+from brain.embeddings import VoyageEmbedder, VoyageEmbedError
+from brain.errors import EmbedError
 
 
 def _client_returning(vectors: list[list[float]]) -> MagicMock:
@@ -62,3 +65,49 @@ def test_count_tokens_uses_local_tokenizer() -> None:
     emb = VoyageEmbedder(api_key="test", client=MagicMock())
     n = emb.count_tokens("hello world this is a test")
     assert n > 0
+
+
+def test_voyage_embed_wraps_sdk_error_in_typed_embed_error() -> None:
+    """Regression (Task 2.12a): a Voyage SDK failure surfaces as the shared
+    typed :class:`VoyageEmbedError` (an :class:`EmbedError`) — the same typed
+    contract the Ollama backends honor — never a leaked ``voyageai`` exception.
+    """
+    from voyageai.error import RateLimitError
+
+    client = MagicMock()
+    client.embed.side_effect = RateLimitError("rate limited")
+    emb = VoyageEmbedder(api_key="test", client=client)
+
+    with pytest.raises(VoyageEmbedError) as excinfo:
+        emb.embed(["hello"], input_type="document")
+    # Shared base so callers can ``except EmbedError`` across backends.
+    assert isinstance(excinfo.value, EmbedError)
+    # Original SDK error preserved for diagnostics.
+    assert isinstance(excinfo.value.__cause__, RateLimitError)
+
+
+def test_voyage_embed_empty_input_makes_no_sdk_call() -> None:
+    """Empty input returns ``[]`` with no SDK round-trip (matches the Ollama base)."""
+    client = MagicMock()
+    emb = VoyageEmbedder(api_key="test", client=client)
+    assert emb.embed([]) == []
+    client.embed.assert_not_called()
+
+
+def test_keep_alive_payload_coerces_numeric_sentinels() -> None:
+    """Regression (Wave 1 addendum): the ``"-1"`` / ``"0"`` keep_alive sentinels
+    must be coerced to JSON NUMBERS so Ollama 0.24.0 accepts them (it rejects the
+    unit-less strings with HTTP 400 ``missing unit in duration``); unit-bearing
+    duration strings pass through unchanged. The full on-the-wire payload
+    assertion (via the httpx transport) lives in ``tests/test_arctic_embedder.py``.
+    """
+    from brain.embeddings import _keep_alive_payload
+
+    assert _keep_alive_payload("-1") == -1
+    assert isinstance(_keep_alive_payload("-1"), int)
+    assert _keep_alive_payload("0") == 0
+    assert isinstance(_keep_alive_payload("0"), int)
+    assert _keep_alive_payload("30m") == "30m"
+    assert isinstance(_keep_alive_payload("30m"), str)
+    assert _keep_alive_payload("1h") == "1h"
+    assert isinstance(_keep_alive_payload("1h"), str)

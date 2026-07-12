@@ -363,3 +363,51 @@ def test_cli_ingest_verb_reflects_in_place_update(
     rs4 = runner.invoke(app, stdin_args, input="stdin version two — changed body.")
     assert rs4.exit_code == 0, rs4.output
     assert "updated:" in rs4.output.lower()
+
+
+def test_ingest_empty_file_reports_empty_document(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    """A whitespace-only file yields no chunks → "skipped (empty document)".
+
+    Regression for overhaul Task 2.12(b). The extractor strips to empty content,
+    the chunker emits zero chunks, and the pipeline returns
+    ``document_id=None, created=False`` — an *empty* doc, not an unchanged
+    re-ingest. The message previously mislabeled it "skipped (already ingested)".
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    _patch_embedder(monkeypatch)
+    empty_file = tmp_path / "blank.txt"
+    empty_file.write_text("   \n\n  ", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["ingest", str(empty_file)])
+
+    assert result.exit_code == 0, result.output
+    assert "skipped (empty document)" in result.output.lower()
+    assert "already ingested" not in result.output.lower()
+
+
+def test_ingest_dir_empty_file_reports_empty_document(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+) -> None:
+    """``ingest-dir`` labels a whitespace-only file "skipped (empty document)".
+
+    Companion to the single-file case (Task 2.12(b)); ingest-dir has no early
+    empty-content guard, so the empty branch is reachable here too.
+    """
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    _patch_embedder(monkeypatch)
+    dir_src = tmp_path / "dir_src"
+    dir_src.mkdir()
+    (dir_src / "blank.txt").write_text("   \n\n  ", encoding="utf-8")
+
+    result = CliRunner().invoke(app, ["ingest-dir", str(dir_src)])
+
+    assert result.exit_code == 0, result.output
+    assert "skipped (empty document)" in result.output.lower()

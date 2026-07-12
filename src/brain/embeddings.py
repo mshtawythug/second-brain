@@ -19,7 +19,7 @@ import httpx
 import tiktoken
 
 from .config import Config, ConfigError
-from .errors import BrainError
+from .errors import EmbedError
 from .ingest import Embedder
 
 # Shared Ollama transport defaults — both Ollama-backed embedders use these.
@@ -31,6 +31,23 @@ _DEFAULT_OLLAMA_TIMEOUT_S = 60.0
 # sites). Production always threads the value from ``Config.ollama_keep_alive``
 # (set at construction time, not re-read per request).
 _DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
+
+
+def _keep_alive_payload(keep_alive: str) -> str | int:
+    """Coerce the numeric keep_alive sentinels to JSON numbers for Ollama.
+
+    Ollama's ``/api/embed`` accepts ``keep_alive`` as either a duration STRING
+    with a unit (``"30m"``, ``"1h"``) or a bare JSON NUMBER of seconds
+    (``-1`` = keep the model loaded indefinitely, ``0`` = unload immediately).
+    It rejects the unit-less strings ``"-1"`` / ``"0"`` with HTTP 400
+    (``time: missing unit in duration "-1"``). Config validation
+    (:mod:`brain.config`) accepts ``"-1"`` / ``"0"`` as the documented sentinels
+    (Wave 1), so translate them to ints at this wire boundary; every
+    unit-bearing string passes through unchanged.
+    """
+    if keep_alive in ("-1", "0"):
+        return int(keep_alive)
+    return keep_alive
 
 # Arctic Embed v2 query prefix per Snowflake's HF model card guidance:
 #   https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0
@@ -54,8 +71,19 @@ _VOYAGE_MODEL = "voyage-3.5"
 _VOYAGE_DEFAULT_BATCH = 128
 
 
-class OllamaEmbedError(BrainError):
+class OllamaEmbedError(EmbedError):
     """Raised when an Ollama-backed embed call fails (network / 4xx / 5xx / shape)."""
+
+
+class VoyageEmbedError(EmbedError):
+    """Raised when a Voyage SDK embed call fails (transport / API / rate-limit / shape).
+
+    The Voyage sibling of :class:`OllamaEmbedError`: :meth:`VoyageEmbedder.embed`
+    wraps any ``voyageai.error.VoyageError`` (its rate-limit / connection /
+    timeout / API subclasses) in this so callers get the same typed embed error
+    the Ollama backends raise instead of a leaked SDK exception. The originating
+    SDK error is preserved as ``__cause__`` (``raise ... from e``).
+    """
 
 
 class _OllamaEmbedderBase:
@@ -125,7 +153,7 @@ class _OllamaEmbedderBase:
                 json={
                     "model": self._model,
                     "input": batch,
-                    "keep_alive": self._keep_alive,
+                    "keep_alive": _keep_alive_payload(self._keep_alive),
                 },
             )
             response.raise_for_status()
@@ -261,13 +289,33 @@ class VoyageEmbedder:
     def embed(
         self, texts: list[str], *, input_type: str = "document"
     ) -> list[list[float]]:
-        """Embed ``texts`` in batches of ``batch_size`` and return all vectors in order."""
+        """Embed ``texts`` in batches of ``batch_size`` and return all vectors in order.
+
+        An empty input returns an empty list with no SDK round-trip (matching the
+        Ollama base). Any Voyage SDK failure — rate limit, transport error,
+        timeout, or a malformed/API error, all subclasses of
+        ``voyageai.error.VoyageError`` — is wrapped in :class:`VoyageEmbedError`
+        (an :class:`~brain.errors.EmbedError`) so callers get the same typed
+        embed error the Ollama backends raise. The explicit per-request timeout
+        set on the SDK client (see :meth:`__init__`) surfaces as a
+        ``voyageai.error.Timeout``, which is wrapped here too.
+        """
+        if not texts:
+            return []
+        # ``voyageai`` is an optional dependency imported lazily (only the voyage
+        # backend constructs this class), so reference its exception base lazily
+        # too — a top-level import would break arctic/qwen3-only installs.
+        from voyageai.error import VoyageError
+
         out: list[list[float]] = []
         for start in range(0, len(texts), self._batch_size):
             batch = texts[start : start + self._batch_size]
-            response = self._client.embed(
-                texts=batch, model=_VOYAGE_MODEL, input_type=input_type
-            )
+            try:
+                response = self._client.embed(
+                    texts=batch, model=_VOYAGE_MODEL, input_type=input_type
+                )
+            except VoyageError as e:
+                raise VoyageEmbedError(f"Voyage embed request failed: {e}") from e
             out.extend(response.embeddings)
         return out
 

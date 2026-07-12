@@ -166,3 +166,33 @@ def test_count_tokens_uses_local_tokenizer() -> None:
     )
     n = emb.count_tokens("hello world this is a test")
     assert n > 0
+
+
+@pytest.mark.parametrize(("value", "expected"), [("-1", -1), ("0", 0)])
+def test_keep_alive_sentinels_sent_as_json_numbers(value: str, expected: int) -> None:
+    """Regression (Wave 1 addendum): Ollama 0.24.0 rejects the unit-less strings
+    ``"-1"`` / ``"0"`` with HTTP 400 (``missing unit in duration``). The keep_alive
+    sentinels must go on the wire as JSON NUMBERS, not verbatim strings.
+    """
+    captured: list[bytes] = []
+    transport = _transport_returning(
+        {"embeddings": [[0.0] * 1024]}, captured=captured
+    )
+    emb = ArcticEmbedder(host="http://x", client=_client(transport), keep_alive=value)
+    emb.embed(["doc"], input_type="document")
+    body = json.loads(captured[0])
+    assert body["keep_alive"] == expected
+    assert isinstance(body["keep_alive"], int)
+
+
+def test_keep_alive_duration_string_passes_through() -> None:
+    """A unit-bearing keep_alive (``"30m"``) is a valid Ollama duration — sent as-is."""
+    captured: list[bytes] = []
+    transport = _transport_returning(
+        {"embeddings": [[0.0] * 1024]}, captured=captured
+    )
+    emb = ArcticEmbedder(host="http://x", client=_client(transport), keep_alive="30m")
+    emb.embed(["doc"], input_type="document")
+    body = json.loads(captured[0])
+    assert body["keep_alive"] == "30m"
+    assert isinstance(body["keep_alive"], str)

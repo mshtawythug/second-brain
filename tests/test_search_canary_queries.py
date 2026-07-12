@@ -20,8 +20,14 @@ from brain.config import Config
 from brain.db import connect
 from brain.embeddings import OllamaEmbedError, make_embedder
 from brain.search import hybrid_search
+from tests.conftest import prod_database_url
 
-LIVE_DB_URL = "postgresql://brain:brain@localhost:5433/second_brain"
+# Point the canary at the REAL prod corpus (host port 55432), read-only. The
+# session autouse fixture pins DATABASE_URL to the *test* DB, so the prod URL is
+# resolved from BRAIN_PROD_DATABASE_URL / the repo .env (see
+# conftest.prod_database_url) and monkeypatched in per-test below. Skips cleanly
+# when prod/Ollama are unreachable (CI), so it never runs against the test DB.
+LIVE_DB_URL = prod_database_url()
 
 
 @pytest.fixture()

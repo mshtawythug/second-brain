@@ -49,6 +49,20 @@ class DirectoryRefreshError(BrainError):
     """Raised when a Calendar / Contacts refresh fails (gws missing, JSON parse, etc.)."""
 
 
+class EmbedError(BrainError):
+    """Base class for embedding-backend failures (network / transport / API / shape).
+
+    Every embedder backend raises a subclass: the Ollama-hosted models raise
+    :class:`brain.embeddings.OllamaEmbedError` and the Voyage SDK backend raises
+    :class:`brain.embeddings.VoyageEmbedError`. Callers that must degrade on an
+    embed failure regardless of the active backend (the MCP server's
+    ``_wrap_embed_error``, ``brain eval``'s per-query tolerance) ``except
+    EmbedError`` once instead of enumerating concrete backends. Inherits
+    :class:`BrainError` so the CLI / MCP layers map it without a
+    framework-specific import.
+    """
+
+
 class AgeBootstrapError(BrainError):
     """Raised when Apache AGE session/graph bootstrap fails (wave G0).
 

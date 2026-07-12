@@ -808,25 +808,95 @@ def _sync_one(
             report=report,
         )
 
-    # DB transaction has now committed. Stamp the assigned id back onto disk —
-    # if this fails, the DB row is intact and a follow-up sync will detect
-    # the orphaned-id-on-disk via the vault_path recovery branch above.
+    # DB transaction has now committed. Stamp the assigned id (and any
+    # normalized tags) back onto disk — if this fails, the DB row is intact
+    # and a follow-up sync will detect the orphaned-id-on-disk via the
+    # vault_path recovery branch above.
     if needs_disk_write:
-        try:
-            walked.abs_path.write_text(
-                dump_frontmatter(frontmatter, body), encoding="utf-8"
-            )
-        except OSError as e:
-            logger.error(
-                "vault sync: %s — DB row %s is committed but failed to "
-                "write id back to disk: %s. Next sync will detect the "
-                "missing id and rewrite the frontmatter.",
-                walked.relative_posix,
-                document_id[:8],
-                e,
-            )
+        _write_frontmatter_back(
+            walked.abs_path,
+            frontmatter=frontmatter,
+            body=body,
+            original_text=text,
+            document_id=document_id,
+            relative_posix=walked.relative_posix,
+        )
 
     return document_id
+
+
+def _write_frontmatter_back(
+    abs_path: Path,
+    *,
+    frontmatter: dict[str, Any],
+    body: str,
+    original_text: str,
+    document_id: str,
+    relative_posix: str,
+) -> None:
+    """Stamp frontmatter (assigned id / canonical tags) back onto disk without
+    clobbering a concurrent user edit.
+
+    ``_sync_one`` reads the file, then embeds — a multi-second call for a real
+    backend. If the user saves the file during that window, the naive
+    ``write_text(dump_frontmatter(frontmatter, body))`` would overwrite their
+    new text with the stale ``body`` captured before the embed. Guard against
+    that: re-read the file; if its bytes changed since the initial read
+    (``original_text``), splice ONLY the frontmatter onto the freshly-read
+    body so the user's edit survives. If the fresh file can't be read or its
+    frontmatter no longer parses, skip the write-back with a WARN — a later
+    sync reconciles the missing id rather than risk clobbering the edit.
+
+    The DB row is one sync behind in this case (it was built from the body we
+    read before the embed); the next sync's body-hash check re-embeds the
+    freshly-saved content, so the two converge on the following pass.
+    """
+    try:
+        current_text = abs_path.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.error(
+            "vault sync: %s — DB row %s is committed but the file could not "
+            "be re-read for id write-back: %s. Next sync will detect the "
+            "missing id and rewrite the frontmatter.",
+            relative_posix,
+            document_id[:8],
+            e,
+        )
+        return
+
+    body_to_write = body
+    if current_text != original_text:
+        # A concurrent edit landed between the initial read and now.
+        try:
+            _fresh_frontmatter, fresh_body = parse_frontmatter(current_text)
+        except (ValueError, yaml.YAMLError):
+            logger.warning(
+                "vault sync: %s changed during sync and now has malformed "
+                "frontmatter — skipping id write-back to avoid clobbering the "
+                "concurrent edit; next sync will reconcile.",
+                relative_posix,
+            )
+            return
+        body_to_write = fresh_body
+        logger.info(
+            "vault sync: %s changed during sync — splicing frontmatter onto "
+            "the freshly-read body so the concurrent edit survives.",
+            relative_posix,
+        )
+
+    try:
+        abs_path.write_text(
+            dump_frontmatter(frontmatter, body_to_write), encoding="utf-8"
+        )
+    except OSError as e:
+        logger.error(
+            "vault sync: %s — DB row %s is committed but failed to write id "
+            "back to disk: %s. Next sync will detect the missing id and "
+            "rewrite the frontmatter.",
+            relative_posix,
+            document_id[:8],
+            e,
+        )
 
 
 def _normalized_body(body: str) -> str:

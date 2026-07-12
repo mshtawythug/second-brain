@@ -291,3 +291,25 @@ def test_brain_search_person_ambiguous_exits_nonzero(
     combined = (result.output or "") + (result.stderr or "")
     # Surface the candidate list so the user can disambiguate.
     assert "Alice Doe" in combined or "Alice Xanthus" in combined
+
+
+# ---------------------------------------------------------------------------
+# limit >= 1 enforcement (overhaul Task 2.10)
+# ---------------------------------------------------------------------------
+
+
+def test_search_limit_zero_exits_2() -> None:
+    """``brain search --limit 0`` is rejected by Typer (min=1) with exit 2.
+
+    Regression for overhaul Task 2.10: a non-positive ``--limit`` must fail
+    loudly at parse time instead of returning silently-wrong (empty) data.
+    Parsing fails before the command body, so no DB/embedder setup is needed.
+    """
+    result = CliRunner().invoke(app, ["search", "BrandName", "--limit", "0"])
+    assert result.exit_code == 2, result.output
+
+
+def test_search_limit_negative_exits_2() -> None:
+    """``brain search --limit=-3`` is rejected by Typer (min=1) with exit 2."""
+    result = CliRunner().invoke(app, ["search", "BrandName", "--limit=-3"])
+    assert result.exit_code == 2, result.output

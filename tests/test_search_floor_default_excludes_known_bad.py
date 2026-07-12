@@ -31,13 +31,17 @@ from brain import config as config_module
 from brain.config import DEFAULT_VECTOR_SIM_FLOOR, Config
 from brain.db import connect
 from brain.embeddings import OllamaEmbedError, make_embedder
+from tests.conftest import prod_database_url
 
 # The known-bad doc surfaced by the Phase 0 baseline as a top-5 false
 # positive for ``person-x``. Doc title: ``cheatsheet-numbers``.
 KNOWN_BAD_DOC_ID = "7aeb2167-febe-470a-a108-079f120bac29"
 KNOWN_BAD_QUERY = "person-x"
 
-LIVE_DB_URL = "postgresql://brain:brain@localhost:5433/second_brain"
+# Real prod corpus (host port 55432), read-only. Resolved from
+# BRAIN_PROD_DATABASE_URL / the repo .env (see conftest.prod_database_url); skips
+# cleanly when prod/Ollama are unreachable, so it never hits the test DB.
+LIVE_DB_URL = prod_database_url()
 
 
 def _cosine(a: list[float], b: list[float]) -> float:

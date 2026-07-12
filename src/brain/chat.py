@@ -35,6 +35,52 @@ DEFAULT_NUM_PREDICT = 256
 # One chat message: ``{"role": ..., "content": ...}``.
 ChatMessage = dict[str, str]
 
+# Stringified boolean tokens local models commonly emit instead of a JSON bool.
+# Shared by :func:`coerce_bool`; kept in lockstep with the (raise-on-unknown)
+# variant in :meth:`brain.enrichment.OllamaEnricher._coerce_contradicts`.
+_TRUE_TOKENS = frozenset({"true", "yes", "1"})
+_FALSE_TOKENS = frozenset({"false", "no", "0"})
+
+
+def coerce_bool(value: Any, *, default: bool = False) -> bool:
+    """Coerce a model's JSON boolean-ish field into a real ``bool``.
+
+    Local models frequently emit a *stringified* boolean (``"true"`` /
+    ``"false"``) or an int (``1`` / ``0``) where a JSON boolean was asked for.
+    Passing such a value straight through ``bool(...)`` is a trap: ``bool("false")``
+    is ``True`` (any non-empty string is truthy), so a control-flow flag like
+    ``ask``'s ``sufficient`` verdict silently flips.
+
+    Normalisation:
+
+    * a real ``bool`` returns as-is;
+    * an ``int`` (``1`` → ``True``, ``0`` → ``False``; any other int → ``default``);
+    * a ``str`` matched case-insensitively / trimmed against ``"true"/"yes"/"1"``
+      (→ ``True``) and ``"false"/"no"/"0"`` (→ ``False``);
+    * anything else (an unrecognised string, a float, a dict, ``None``) falls
+      back to ``default``.
+
+    Unlike :meth:`brain.enrichment.OllamaEnricher._coerce_contradicts` this never
+    raises: it is meant for control-flow flags where a safe default beats an
+    abort. Callers pick the conservative fallback (``ask`` passes ``default=False``
+    so an unparseable sufficiency verdict keeps the retrieval loop going).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):  # bool already handled above; plain 1/0 only.
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        return default
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in _TRUE_TOKENS:
+            return True
+        if token in _FALSE_TOKENS:
+            return False
+    return default
+
 
 def _build_client(host: str, timeout: float) -> httpx.Client:
     """Construct the Ollama HTTP client (single seam tests patch).
