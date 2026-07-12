@@ -57,7 +57,6 @@ from .gaps import (
     search_queries_schema_hint,
     top_search_failures,
 )
-from .graph_rag.sync import GraphSyncer, make_graph_syncer
 from .ingest import (
     Embedder,
     apply_tags,
@@ -86,6 +85,7 @@ if TYPE_CHECKING:
     from .ask import AskResult
     from .graph_rag.reconcile import ReconcileConfig
     from .graph_rag.schema import GraphContext
+    from .graph_rag.sync import GraphSyncer
 from .vault.frontmatter import (
     dump_frontmatter,
     parse_frontmatter,
@@ -154,7 +154,9 @@ class _State:
     # ``brain_edit`` so MCP-driven writes keep the graph in lock-step. ``None``
     # (tests that build ``_State`` directly) skips graph sync; production
     # :func:`main` always populates it via :func:`make_graph_syncer`.
-    graph_syncer: GraphSyncer | None = None
+    # String-quoted forward ref: ``GraphSyncer`` is TYPE_CHECKING-only so the
+    # networkx-pulling graph_rag chain stays off MCP-server startup.
+    graph_syncer: "GraphSyncer | None" = None
     # DB-08: persistent connection opened at server startup, reused per call.
     # ``None`` preserves per-call ``connect()`` semantics for existing tests.
     db_conn: PersistentConnection | None = None
@@ -3351,7 +3353,10 @@ def main() -> None:
     enricher = make_enricher(cfg)
     # Wave G1-c: build the per-process people-aspect graph syncer (shares one
     # ReconcileConfig). Cheap + self-gating on BRAIN_GRAPH_ENABLED + AGE
-    # availability, so it's a no-op on a stock pgvector DB.
+    # availability, so it's a no-op on a stock pgvector DB. Imported lazily so
+    # the networkx graph_rag chain stays off the hot import path.
+    from .graph_rag.sync import make_graph_syncer
+
     graph_syncer = make_graph_syncer(cfg)
     # DB-08: open the persistent connection once at server startup; every tool
     # call reuses it via _mcp_conn(state), saving the ~10–30 ms TCP handshake

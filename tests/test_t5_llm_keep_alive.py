@@ -92,7 +92,13 @@ def test_default_ollama_keep_alive_is_30m() -> None:
     assert DEFAULT_OLLAMA_KEEP_ALIVE == "30m"
 
 
-@pytest.mark.parametrize("value", ["30m", "1h", "60s", "60", "5m", "120"])
+@pytest.mark.parametrize(
+    "value",
+    # Positive durations/seconds PLUS the two Ollama sentinels "-1" (keep the
+    # model loaded indefinitely) and "0" (unload immediately) — both accepted
+    # verbatim as of Task 1.2 (kills the measured 5,028ms cold-embed cliff).
+    ["30m", "1h", "60s", "60", "5m", "120", "-1", "0"],
+)
 def test_keep_alive_valid_values_accepted(
     monkeypatch: pytest.MonkeyPatch,
     value: str,
@@ -109,9 +115,12 @@ def test_keep_alive_valid_values_accepted(
     [
         # NOTE: empty / whitespace-only strings fall back to the default (not an error),
         # consistent with every other config field's unset-vs-invalid semantics.
-        "0",      # zero seconds — unloads model immediately
-        "0m",     # zero minutes
-        "-1",     # negative integer
+        # "-1" (keep loaded forever) and "0" (unload immediately) are the two
+        # valid Ollama sentinels (Task 1.2) — asserted accepted above, so they
+        # are deliberately absent from this rejected list.
+        "0m",     # zero minutes — a bare "0" is valid but "0m" is not
+        "-2",     # negative integer other than the "-1" sentinel
+        "-1m",    # "-1" is a bare sentinel only; with a unit it is invalid
         "-30m",   # negative duration
         "abc",    # non-numeric
         "1x",     # unknown unit
@@ -129,6 +138,23 @@ def test_keep_alive_invalid_values_rejected(
         Config.load()
 
 
+@pytest.mark.parametrize("sentinel", ["-1", "0"])
+def test_keep_alive_accepts_ollama_sentinels(
+    monkeypatch: pytest.MonkeyPatch,
+    sentinel: str,
+) -> None:
+    """The two Ollama sentinels are accepted and stored verbatim (Task 1.2).
+
+    "-1" keeps the model loaded indefinitely (eliminating the measured
+    5,028ms cold-embed cliff after an idle gap past the keep_alive window);
+    "0" unloads it immediately after each call.
+    """
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+    monkeypatch.setenv("BRAIN_OLLAMA_KEEP_ALIVE", sentinel)
+    cfg = Config.load()
+    assert cfg.ollama_keep_alive == sentinel
+
+
 def test_keep_alive_absent_uses_default(
     monkeypatch: pytest.MonkeyPatch,
     isolated_dotenv: None,
@@ -136,6 +162,21 @@ def test_keep_alive_absent_uses_default(
     """Absent BRAIN_OLLAMA_KEEP_ALIVE falls back to DEFAULT_OLLAMA_KEEP_ALIVE."""
     monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
     monkeypatch.delenv("BRAIN_OLLAMA_KEEP_ALIVE", raising=False)
+    cfg = Config.load()
+    assert cfg.ollama_keep_alive == DEFAULT_OLLAMA_KEEP_ALIVE
+
+
+def test_keep_alive_empty_string_uses_default(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: None,
+) -> None:
+    """An explicit empty BRAIN_OLLAMA_KEEP_ALIVE falls back to the default.
+
+    Empty / whitespace-only matches the unset semantics (NOT a ConfigError),
+    consistent with every other config field's unset-vs-invalid handling.
+    """
+    monkeypatch.setenv("DATABASE_URL", _TEST_DB_URL)
+    monkeypatch.setenv("BRAIN_OLLAMA_KEEP_ALIVE", "")
     cfg = Config.load()
     assert cfg.ollama_keep_alive == DEFAULT_OLLAMA_KEEP_ALIVE
 

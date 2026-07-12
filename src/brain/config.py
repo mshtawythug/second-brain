@@ -15,16 +15,23 @@ _VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
 # How long Ollama keeps a model loaded in VRAM between requests. Passed as
 # ``keep_alive`` in every outgoing Ollama HTTP payload (``/api/embed``,
 # ``/api/chat``, ``/api/generate``). "30m" keeps the model hot across bursts of
-# ingest/search; raise to "1h" if your workflow has longer idle gaps. Set via
+# ingest/search; raise to "1h" if your workflow has longer idle gaps, or set
+# "-1" to keep the model loaded indefinitely (never unloaded). Set via
 # ``BRAIN_OLLAMA_KEEP_ALIVE``; accepts any format Ollama understands: a positive
-# integer duration string ("30m", "1h", "60s") or a bare positive integer seconds
-# string ("60"). Zero and negative values are rejected — they would unload the
-# model between calls (defeating the purpose) and cause latency spikes.
+# integer duration string ("30m", "1h", "60s"), a bare positive integer seconds
+# string ("60"), "-1" (keep loaded forever), or "0" (unload immediately after
+# each call). The shipped default stays "30m" so a machine shared with other GPU
+# workloads frees VRAM on idle; on a dedicated box, "-1" eliminates the measured
+# 5,028ms cold-embed latency cliff that hits the first embed once the model has
+# gone idle past the keep_alive window. Other malformed values are rejected.
 DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
 
 # Accepts "30m", "1h", "60s", "60" etc. — any POSITIVE integer optionally
-# followed by m/h/s. "0", "-1", empty, and non-numeric strings are rejected.
-_KEEP_ALIVE_RE = re.compile(r"^([1-9]\d*)(m|h|s)?$")
+# followed by m/h/s — plus the two Ollama sentinels "-1" (keep loaded
+# indefinitely) and "0" (unload immediately). Empty / whitespace-only strings
+# fall back to the default; every other malformed value ("-2", "-1m", "0m",
+# "abc", "1.5m", …) is rejected at load time.
+_KEEP_ALIVE_RE = re.compile(r"^(-1|0|[1-9]\d*(?:m|h|s)?)$")
 
 # Cosine-similarity floor for the vector leg of hybrid search. Tuned
 # empirically against the live corpus on 2026-05-06 (see Phase D of
@@ -551,10 +558,12 @@ class Config:
     # ``/api/embed``, enricher ``/api/chat``, extractor ``/api/generate``). Keeps
     # the model loaded in VRAM for this long after the last request, preventing
     # the cold-load latency spike on the next call. Accepts any format Ollama
-    # understands: a positive integer duration string ("30m", "1h", "60s") or a
-    # bare positive integer seconds string ("60"). Zero and negative values are
-    # rejected at load time via ConfigError (they unload the model between calls).
-    # Override via ``BRAIN_OLLAMA_KEEP_ALIVE``.
+    # understands: a positive integer duration string ("30m", "1h", "60s"), a
+    # bare positive integer seconds string ("60"), "-1" (keep loaded
+    # indefinitely — kills the measured 5,028ms cold-embed cliff), or "0"
+    # (unload immediately). Malformed values ("-2", "-1m", "abc", …) are
+    # rejected at load time via ConfigError. Override via
+    # ``BRAIN_OLLAMA_KEEP_ALIVE``.
     ollama_keep_alive: str = DEFAULT_OLLAMA_KEEP_ALIVE
     # Wave G1-c -- GraphRAG people-aspect incremental sync. ``graph_enabled``
     # gates the post-write/delete reconcile hook; the other four resolve into
@@ -1057,9 +1066,11 @@ class Config:
                     f"(got {enrich_timeout_raw!r})"
                 )
 
-        # Ollama keep_alive -- see DEFAULT_OLLAMA_KEEP_ALIVE. Accepts a
-        # positive integer optionally followed by m/h/s (e.g. "30m", "1h",
-        # "60s", "60"). Zero, negative, empty, and non-numeric strings are
+        # Ollama keep_alive -- see DEFAULT_OLLAMA_KEEP_ALIVE. Accepts a positive
+        # integer optionally followed by m/h/s (e.g. "30m", "1h", "60s", "60")
+        # plus the two Ollama sentinels "-1" (keep loaded indefinitely) and "0"
+        # (unload immediately). Empty / whitespace-only falls back to the
+        # default; every other malformed value ("-2", "-1m", "abc", …) is
         # rejected via ConfigError so a config typo surfaces at startup, not
         # during an embed/chat call.
         keep_alive_raw = os.environ.get("BRAIN_OLLAMA_KEEP_ALIVE")
@@ -1069,7 +1080,8 @@ class Config:
             stripped_ka = keep_alive_raw.strip()
             if not _KEEP_ALIVE_RE.match(stripped_ka):
                 raise ConfigError(
-                    "BRAIN_OLLAMA_KEEP_ALIVE must be a positive integer or duration "
+                    "BRAIN_OLLAMA_KEEP_ALIVE must be '-1' (keep loaded), '0' "
+                    "(unload immediately), or a positive integer / duration "
                     "string like '30m', '1h', '60s', '60' "
                     f"(got {keep_alive_raw!r})"
                 )

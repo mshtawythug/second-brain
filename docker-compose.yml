@@ -5,6 +5,11 @@ services:
     # docker-compose.age-test.yml (separate project, port 5434, named volume).
     image: pgvector/pgvector:pg16
     container_name: second-brain-postgres
+    # shared_buffers 512MB: the working set (~266MB) exceeds the stock 128MB
+    # default, forcing cold FTS re-reads from disk. 512MB gives headroom on a
+    # 32GB host. Applied as a `postgres -c` flag (no custom postgresql.conf).
+    # Takes effect on the next container restart (coordinator-supervised).
+    command: postgres -c shared_buffers=512MB
     environment:
       POSTGRES_USER: brain
       POSTGRES_PASSWORD: brain

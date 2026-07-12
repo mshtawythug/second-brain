@@ -78,20 +78,10 @@ from ._capture_command import capture_app
 from .cli_claude import SkillInstallError
 from .cli_claude import install_skill as _install_skill
 from .cli_connect import connect_app
-from .eval import (
-    EvalBaselineError,
-    EvalCorpusError,
-    answer_eval_report_to_dict,
-    diff_reports,
-    load_answer_corpus,
-    load_baseline,
-    load_corpus,
-    run_answer_eval,
-    run_eval,
-    save_baseline,
-)
-from .eval.baseline import _assert_baseline_name
-from .eval.corpus import _DEFAULT_CORPUS_PATH, _VALID_CATEGORIES
+
+# NOTE: the `brain.eval` package + graph-eval chain (which pulls networkx) is
+# imported lazily inside the `eval` command bodies below, not at module top —
+# it added ~150ms to every `brain` invocation. See tests/test_import_hygiene.py.
 from .format import (
     alias_result_json,
     alias_result_summary,
@@ -206,7 +196,13 @@ from .wiki.install import wiki_install as _wiki_install
 logger = logging.getLogger(__name__)
 
 # Baseline JSON files live next to the golden corpus: tests/eval/baselines/.
-_BASELINES_DIR: Path = _DEFAULT_CORPUS_PATH.parent / "baselines"
+# Derived from the repo layout independently of `brain.eval.corpus`
+# (importing that package pulls the networkx graph-eval chain and slows every
+# `brain` invocation) — mirrors `_DEFAULT_CORPUS_PATH.parent / "baselines"`.
+# Kept a module-level attribute so tests can monkeypatch `brain.cli._BASELINES_DIR`.
+_BASELINES_DIR: Path = (
+    Path(__file__).resolve().parent.parent.parent / "tests" / "eval" / "baselines"
+)
 
 _KRISP_INGEST_HELP = (
     "Importing Krisp calls — Krisp has no CLI, so transcripts are pulled by "
@@ -1247,6 +1243,39 @@ def analyze(
     typer.secho(f"ANALYZE {table} — done", fg="green")
 
 
+# Tables whose planner stats go stale after a bulk write. Refreshed via ANALYZE
+# at the end of ingest-dir / reembed / vault sync so the FTS + vector planner
+# keeps good row estimates without waiting for autovacuum's first pass.
+_BULK_WRITE_ANALYZE_TABLES = ["chunks", "documents"]
+
+
+def _analyze_after_bulk_write(conn: psycopg.Connection[Any], *, context: str) -> None:
+    """Refresh planner stats on the hot tables after a bulk write.
+
+    ``conn`` must be in autocommit mode: ANALYZE writes transactional catalog
+    stats that would otherwise roll back on connection close (same contract as
+    the ``analyze`` command). Emits one INFO line naming the trigger context.
+
+    Best-effort only. This runs *after* the bulk work has already committed, so
+    a failed ANALYZE (``ShareUpdateExclusiveLock`` contention, lock timeout, a
+    transient error) must never turn a successful ingest/reembed/sync into a
+    non-zero exit — it's downgraded to a warning and swallowed.
+    """
+    try:
+        analyze_tables(conn, _BULK_WRITE_ANALYZE_TABLES)
+    except psycopg.Error as exc:
+        logger.warning(
+            "auto-ANALYZE %s failed after %s: %s",
+            ", ".join(_BULK_WRITE_ANALYZE_TABLES),
+            context,
+            exc,
+        )
+        return
+    logger.info(
+        "auto-ANALYZE %s after %s", ", ".join(_BULK_WRITE_ANALYZE_TABLES), context
+    )
+
+
 def _report_embedding_column(conn: psycopg.Connection[Any]) -> None:
     """Print a one-line status for the ``chunks.embedding`` column.
 
@@ -1448,6 +1477,7 @@ def ingest_dir(
     embedder = _build_embedder(cfg)
     enricher = None if no_enrich else _build_enricher(cfg)
     graph_syncer = _build_graph_syncer(cfg)
+    wrote = 0
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         for f in files:
@@ -1467,13 +1497,18 @@ def ingest_dir(
                 )
                 if result.created:
                     verb = "ingested"
+                    wrote += 1
                 elif result.body_changed:
                     verb = "updated"
+                    wrote += 1
                 else:
                     verb = "skipped"
                 typer.echo(f"  {verb}: {f.name}")
             except (ValueError, OSError, psycopg.Error) as e:
                 typer.secho(f"  failed: {f.name} — {e}", fg="red")
+        # Refresh planner stats once, after the batch, only if anything landed.
+        if wrote:
+            _analyze_after_bulk_write(conn, context="ingest-dir")
 
 
 @app.command(name="ingest-stdin")
@@ -1780,10 +1815,10 @@ def reembed(
             typer.echo(f"  ({target_total} {scope})")
             return
 
+        embedded = 0
         if target_total == 0:
             typer.echo("nothing to embed (all chunks have embeddings)")
         else:
-            embedded = 0
             for batch in iter_chunks_missing_embedding(
                 conn, batch_size=batch_size, include_embedded=all_chunks
             ):
@@ -1818,6 +1853,10 @@ def reembed(
                 typer.echo(
                     f"finalize skipped: {remaining} chunk(s) still have NULL embedding"
                 )
+
+        # Refresh planner stats once the embeddings actually changed.
+        if embedded:
+            _analyze_after_bulk_write(conn, context="reembed")
 
 
 # ---------------------------------------------------------------------------
@@ -3570,6 +3609,12 @@ def _run_answer_eval_cli(
     clean error (exit 1) when Ollama is unavailable.
     """
     from .ask import ask_no_loop
+    from .eval import (
+        answer_eval_report_to_dict,
+        load_answer_corpus,
+        run_answer_eval,
+    )
+    from .eval.errors import EvalCorpusError
 
     try:
         cases = load_answer_corpus(corpus_path)
@@ -3662,6 +3707,19 @@ def eval_cmd(
     if answer:
         _run_answer_eval_cli(corpus_path=corpus_path, json_output=json_output)
         return
+
+    # Lazy-imported here (not at module top) so the graph-eval chain / networkx
+    # stays off the hot `brain` startup path — see tests/test_import_hygiene.py.
+    from .eval import (
+        diff_reports,
+        load_baseline,
+        load_corpus,
+        run_eval,
+        save_baseline,
+    )
+    from .eval.baseline import _assert_baseline_name
+    from .eval.corpus import _DEFAULT_CORPUS_PATH, _VALID_CATEGORIES
+    from .eval.errors import EvalBaselineError, EvalCorpusError
 
     # Validate mutual-exclusion and dependency constraints.
     if diff and not baseline:
@@ -5959,6 +6017,11 @@ def vault_sync(
             owner_participants=cfg.owner_participants,
             graph_syncer=graph_syncer,
         )
+        # Refresh planner stats when the full sync actually changed DB rows
+        # (dry-run writes nothing). Watch mode is incremental and owns its own
+        # connection, so auto-ANALYZE is scoped to the one-shot full sync here.
+        if not dry_run and (report.created or report.updated or report.deleted):
+            _analyze_after_bulk_write(conn, context="vault sync")
 
     suffix = " (dry-run)" if dry_run else ""
     typer.echo(f"vault path:     {target}{suffix}")
