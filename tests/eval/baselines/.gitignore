@@ -1,1 +1,5 @@
+# Eval baselines are local-only by default (they encode live-corpus metrics).
+# Explicitly-named committed baselines are allowlisted below — add new ones the
+# same way (never blanket-allow *.json).
 *.json
+!ci.json

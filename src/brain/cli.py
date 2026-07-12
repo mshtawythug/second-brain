@@ -36,6 +36,7 @@ from .db import (
     load_age,
     run_migrations,
 )
+from .durations import since_window
 from .edit_session import (
     EditorAbortedError,
     EditorError,
@@ -516,80 +517,152 @@ class _DoctorLine:
 
 
 @dataclasses.dataclass(frozen=True)
-class _ProbeResult:
-    """Buffered output + recorded failures from one independent doctor probe."""
+class _DoctorCheck:
+    """One structured ``brain doctor`` result (Task 5.1).
 
+    ``lines`` carries the EXACT human output (byte-for-byte the pre-JSON
+    echo/secho) so the human path is unchanged; ``check`` / ``status`` /
+    ``detail`` / ``remedy`` are the machine-readable projection surfaced by
+    ``brain doctor --json``. ``status`` is one of ``"ok"`` / ``"warn"`` /
+    ``"fail"`` — only ``"fail"`` flips doctor's exit code.
+    """
+
+    check: str
+    status: str
+    detail: str
+    remedy: str | None = None
     lines: tuple[_DoctorLine, ...] = ()
-    failures: tuple[str, ...] = ()
 
 
-def _emit_probe_result(result: _ProbeResult, failures: list[str]) -> None:
-    """Print a probe's buffered lines in order and accrue its failures."""
-    for line in result.lines:
-        if line.fg is not None:
-            typer.secho(line.text, fg=line.fg, err=line.err)
-        else:
-            typer.echo(line.text)
-    failures.extend(result.failures)
+class _DoctorReport:
+    """Sink for doctor checks: prints live in human mode, always buffers.
+
+    ONE probe run feeds both surfaces (Task 5.1 — no re-probing for ``--json``).
+    The default (``json_output=False``) prints each recorded check's exact
+    ``_DoctorLine``s via ``typer.echo`` / ``typer.secho`` — byte-identical to the
+    pre-refactor inline output, so sub-checks invoked directly in tests keep
+    printing. ``--json`` mode buffers only; :meth:`to_payload` renders the
+    structured ``[{check, status, detail, remedy}]`` array at the end.
+    """
+
+    def __init__(self, *, json_output: bool = False) -> None:
+        self.json_output = json_output
+        self.checks: list[_DoctorCheck] = []
+
+    def record(self, check: _DoctorCheck) -> None:
+        """Buffer ``check`` and, in human mode, print its exact lines in order."""
+        self.checks.append(check)
+        if self.json_output:
+            return
+        for line in check.lines:
+            if line.fg is not None:
+                typer.secho(line.text, fg=line.fg, err=line.err)
+            else:
+                typer.echo(line.text)
+
+    def record_all(self, checks: list[_DoctorCheck]) -> None:
+        """Record a probe's buffered checks in order (see :meth:`record`)."""
+        for check in checks:
+            self.record(check)
+
+    @property
+    def failed(self) -> bool:
+        """True iff any recorded check FAILed — drives doctor's exit code."""
+        return any(c.status == "fail" for c in self.checks)
+
+    def to_payload(self) -> list[dict[str, Any]]:
+        """The ``--json`` array: one ``{check, status, detail, remedy}`` per check."""
+        return [
+            {
+                "check": c.check,
+                "status": c.status,
+                "detail": c.detail,
+                "remedy": c.remedy,
+            }
+            for c in self.checks
+        ]
 
 
-def _resolve_probe(future: Future[_ProbeResult], label: str) -> _ProbeResult:
-    """Resolve a probe future, degrading an unexpected crash to a FAIL line.
+def _resolve_probe(
+    future: Future[list[_DoctorCheck]], label: str
+) -> list[_DoctorCheck]:
+    """Resolve a probe future, degrading an unexpected crash to a FAIL check.
 
     Per-probe isolation (Task 4.2): a probe that raises an *unexpected* exception
-    (its own handled errors already return a WARN/FAIL line) must not crash
-    doctor or suppress the sibling checks. It surfaces as this check's own FAIL
-    line + a recorded failure so the run still exits non-zero.
+    (its own handled errors already return a WARN/FAIL check) must not crash
+    doctor or suppress the sibling checks. It surfaces as this check's own FAIL —
+    which flips the run to a non-zero exit.
     """
     try:
         return future.result()
     except Exception as exc:  # noqa: BLE001 - deliberately isolate one probe
-        return _ProbeResult(
-            lines=(_DoctorLine(f"{label:<15} FAIL — {exc}", fg="red", err=True),),
-            failures=(f"{label}: {exc}",),
-        )
+        return [
+            _DoctorCheck(
+                check=label,
+                status="fail",
+                detail=str(exc),
+                lines=(
+                    _DoctorLine(f"{label:<15} FAIL — {exc}", fg="red", err=True),
+                ),
+            )
+        ]
 
 
-def _probe_embedder(cfg: Config) -> _ProbeResult:
+def _probe_embedder(cfg: Config) -> list[_DoctorCheck]:
     """Embedder-backend probe: voyage API-key check or Ollama ``/api/tags`` ping.
 
-    Buffered (returns a :class:`_ProbeResult`) so it can run in a worker thread
-    concurrently with the serial DB block. Neither branch touches the Postgres
-    connection, so it is thread-safe alongside the main-thread DB checks.
+    Buffered (returns structured :class:`_DoctorCheck`s) so it can run in a
+    worker thread concurrently with the serial DB block. Neither branch touches
+    the Postgres connection, so it is thread-safe alongside the main-thread DB
+    checks.
     """
     if cfg.embedder == "voyage":
         return _check_voyage(cfg)
     return _check_ollama(cfg)
 
 
-def _check_voyage(cfg: Config) -> _ProbeResult:
+def _check_voyage(cfg: Config) -> list[_DoctorCheck]:
     """Doctor sub-check: verify ``VOYAGE_API_KEY`` is set when backend is voyage."""
     if cfg.voyage_api_key:
-        return _ProbeResult(lines=(_DoctorLine("voyage          OK (api key set)"),))
-    return _ProbeResult(
-        lines=(
-            _DoctorLine(
-                "voyage          FAIL — VOYAGE_API_KEY not set", fg="red", err=True
+        return [
+            _DoctorCheck(
+                check="voyage",
+                status="ok",
+                detail="api key set",
+                lines=(_DoctorLine("voyage          OK (api key set)"),),
+            )
+        ]
+    return [
+        _DoctorCheck(
+            check="voyage",
+            status="fail",
+            detail="VOYAGE_API_KEY not set",
+            remedy="set VOYAGE_API_KEY in your environment / .env",
+            lines=(
+                _DoctorLine(
+                    "voyage          FAIL — VOYAGE_API_KEY not set",
+                    fg="red",
+                    err=True,
+                ),
             ),
-        ),
-        failures=("VOYAGE_API_KEY not set",),
-    )
+        )
+    ]
 
 
-def _check_ollama(cfg: Config) -> _ProbeResult:
+def _check_ollama(cfg: Config) -> list[_DoctorCheck]:
     """Doctor sub-check: ping Ollama and verify the backend's model is loaded.
 
     Also reports presence of ``cfg.enrich_model`` (Wave Q1-D auto-summary
-    backend) on the same ``/api/tags`` payload — one HTTP call, two checks.
-    The enrich-model check is informational only (yellow warn when missing);
-    the user can disable enrichment with ``--no-enrich`` if the model isn't
-    available.
+    backend) on the same ``/api/tags`` payload — one HTTP call, three checks.
+    The enrich/audio-model checks are informational only (yellow warn when
+    missing); the user can disable enrichment with ``--no-enrich`` if the model
+    isn't available.
     """
     if cfg.embedder == "qwen3":
         wanted = cfg.qwen3_model
     else:
         wanted = _BACKEND_OLLAMA_MODEL.get(cfg.embedder, cfg.qwen3_model)
-    lines: list[_DoctorLine] = []
+    checks: list[_DoctorCheck] = []
     try:
         with httpx.Client(
             base_url=cfg.ollama_host, timeout=httpx.Timeout(5.0)
@@ -599,52 +672,106 @@ def _check_ollama(cfg: Config) -> _ProbeResult:
             tags_payload = response.json()
         loaded_models = _ollama_loaded_models(tags_payload)
         if _model_loaded(wanted, loaded_models):
-            lines.append(_DoctorLine(f"ollama          OK ({cfg.ollama_host})"))
+            checks.append(
+                _DoctorCheck(
+                    check="ollama",
+                    status="ok",
+                    detail=cfg.ollama_host,
+                    lines=(_DoctorLine(f"ollama          OK ({cfg.ollama_host})"),),
+                )
+            )
         else:
             # Soft warning — daemon up but the configured model isn't pulled.
             # Don't fail doctor; embed calls will surface "no such model"
             # later if anyone tries to use it.
-            lines.append(
-                _DoctorLine(
-                    f"ollama          OK ({cfg.ollama_host}) — model {wanted} "
-                    f"NOT loaded — run `ollama pull {wanted}`",
-                    fg="yellow",
+            checks.append(
+                _DoctorCheck(
+                    check="ollama",
+                    status="warn",
+                    detail=f"model {wanted} not loaded ({cfg.ollama_host})",
+                    remedy=f"ollama pull {wanted}",
+                    lines=(
+                        _DoctorLine(
+                            f"ollama          OK ({cfg.ollama_host}) — model {wanted} "
+                            f"NOT loaded — run `ollama pull {wanted}`",
+                            fg="yellow",
+                        ),
+                    ),
                 )
             )
         # Wave Q1-D — enrich model check. Soft (never failure).
         if _model_loaded(cfg.enrich_model, loaded_models):
-            lines.append(
-                _DoctorLine(f"enrich model    OK ({cfg.enrich_model} loaded)")
+            checks.append(
+                _DoctorCheck(
+                    check="enrich model",
+                    status="ok",
+                    detail=f"{cfg.enrich_model} loaded",
+                    lines=(
+                        _DoctorLine(f"enrich model    OK ({cfg.enrich_model} loaded)"),
+                    ),
+                )
             )
         else:
-            lines.append(
-                _DoctorLine(
-                    f"enrich model    WARN ({cfg.enrich_model} not in /api/tags — "
-                    f"run `ollama pull {cfg.enrich_model}` to enable auto-summary)",
-                    fg="yellow",
+            checks.append(
+                _DoctorCheck(
+                    check="enrich model",
+                    status="warn",
+                    detail=f"{cfg.enrich_model} not in /api/tags",
+                    remedy=f"ollama pull {cfg.enrich_model} (enables auto-summary)",
+                    lines=(
+                        _DoctorLine(
+                            f"enrich model    WARN ({cfg.enrich_model} not in "
+                            f"/api/tags — run `ollama pull {cfg.enrich_model}` to "
+                            "enable auto-summary)",
+                            fg="yellow",
+                        ),
+                    ),
                 )
             )
         # Plan 04 — audio script model check. Soft (never failure).
         if _model_loaded(cfg.audio_script_model, loaded_models):
-            lines.append(
-                _DoctorLine(f"audio model     OK ({cfg.audio_script_model} loaded)")
+            checks.append(
+                _DoctorCheck(
+                    check="audio model",
+                    status="ok",
+                    detail=f"{cfg.audio_script_model} loaded",
+                    lines=(
+                        _DoctorLine(
+                            f"audio model     OK ({cfg.audio_script_model} loaded)"
+                        ),
+                    ),
+                )
             )
         else:
-            lines.append(
-                _DoctorLine(
-                    f"audio model     WARN ({cfg.audio_script_model} not in /api/tags "
-                    f"— run `ollama pull {cfg.audio_script_model}` to enable "
-                    "`brain audio`)",
-                    fg="yellow",
+            checks.append(
+                _DoctorCheck(
+                    check="audio model",
+                    status="warn",
+                    detail=f"{cfg.audio_script_model} not in /api/tags",
+                    remedy=f"ollama pull {cfg.audio_script_model} (enables `brain audio`)",
+                    lines=(
+                        _DoctorLine(
+                            f"audio model     WARN ({cfg.audio_script_model} not in "
+                            "/api/tags — run `ollama pull "
+                            f"{cfg.audio_script_model}` to enable `brain audio`)",
+                            fg="yellow",
+                        ),
+                    ),
                 )
             )
     except (httpx.HTTPError, ValueError) as e:
         # ValueError covers a non-JSON /api/tags response (json.JSONDecodeError).
-        return _ProbeResult(
-            lines=(_DoctorLine(f"ollama          FAIL — {e}", fg="red", err=True),),
-            failures=(f"ollama: {e}",),
-        )
-    return _ProbeResult(lines=tuple(lines))
+        return [
+            _DoctorCheck(
+                check="ollama",
+                status="fail",
+                detail=str(e),
+                lines=(
+                    _DoctorLine(f"ollama          FAIL — {e}", fg="red", err=True),
+                ),
+            )
+        ]
+    return checks
 
 
 def _ollama_reachable(cfg: Config) -> bool:
@@ -717,7 +844,9 @@ def _age_graph_present(conn: psycopg.Connection[Any], graph_name: str) -> bool:
     return present
 
 
-def _check_chunks_stats(conn: psycopg.Connection[Any]) -> None:
+def _check_chunks_stats(
+    conn: psycopg.Connection[Any], report: _DoctorReport | None = None
+) -> None:
     """Doctor sub-check: warn when ``chunks`` table stats are stale or absent.
 
     Soft check — never flips doctor's exit code. Catches the post-restore
@@ -734,7 +863,11 @@ def _check_chunks_stats(conn: psycopg.Connection[Any]) -> None:
       table is non-empty. Suggests ``brain analyze`` (which runs the SQL).
     - Silently skips the check (no output) when the table is empty (fresh
       install before any ingest).
+
+    Records to ``report`` (a fresh human-printing report by default, so a direct
+    test call keeps echoing exactly as before).
     """
+    report = report or _DoctorReport()
     try:
         row = conn.execute(
             """
@@ -745,9 +878,19 @@ def _check_chunks_stats(conn: psycopg.Connection[Any]) -> None:
         ).fetchone()
     except psycopg.Error as exc:
         _rollback_quietly(conn)
-        typer.secho(
-            f"chunks stats    WARN — could not probe pg_stat_user_tables: {exc}",
-            fg="yellow",
+        report.record(
+            _DoctorCheck(
+                check="chunks stats",
+                status="warn",
+                detail=f"could not probe pg_stat_user_tables: {exc}",
+                lines=(
+                    _DoctorLine(
+                        "chunks stats    WARN — could not probe "
+                        f"pg_stat_user_tables: {exc}",
+                        fg="yellow",
+                    ),
+                ),
+            )
         )
         return
 
@@ -767,19 +910,40 @@ def _check_chunks_stats(conn: psycopg.Connection[Any]) -> None:
         most_recent = last_autoanalyze
 
     if most_recent is None:
-        typer.secho(
-            f"chunks stats    WARN — never analyzed ({n_live_tup:,} live rows, "
-            "stats NULL). Run: brain analyze  (or SQL: ANALYZE chunks;)  "
-            "This can happen after pg_restore — planners use default estimates "
-            "until ANALYZE runs.",
-            fg="yellow",
+        report.record(
+            _DoctorCheck(
+                check="chunks stats",
+                status="warn",
+                detail=f"never analyzed ({n_live_tup:,} live rows, stats NULL)",
+                remedy="brain analyze  (or SQL: ANALYZE chunks;)",
+                lines=(
+                    _DoctorLine(
+                        f"chunks stats    WARN — never analyzed ({n_live_tup:,} "
+                        "live rows, stats NULL). Run: brain analyze  (or SQL: "
+                        "ANALYZE chunks;)  This can happen after pg_restore — "
+                        "planners use default estimates until ANALYZE runs.",
+                        fg="yellow",
+                    ),
+                ),
+            )
         )
     else:
         analyzed_at = most_recent.strftime("%Y-%m-%d %H:%M UTC")
-        typer.echo(f"chunks stats    OK (last analyzed {analyzed_at})")
+        report.record(
+            _DoctorCheck(
+                check="chunks stats",
+                status="ok",
+                detail=f"last analyzed {analyzed_at}",
+                lines=(
+                    _DoctorLine(f"chunks stats    OK (last analyzed {analyzed_at})"),
+                ),
+            )
+        )
 
 
-def _check_inbox_size(conn: psycopg.Connection[Any], cfg: Config) -> None:
+def _check_inbox_size(
+    conn: psycopg.Connection[Any], cfg: Config, report: _DoctorReport | None = None
+) -> None:
     """Doctor sub-check: warn when the quick-capture inbox has grown large.
 
     Soft check — never flips doctor's exit code. Counts documents still
@@ -788,27 +952,62 @@ def _check_inbox_size(conn: psycopg.Connection[Any], cfg: Config) -> None:
     ``brain capture review``; otherwise it prints a plain OK line. The count is
     sourced from :func:`brain.queries.count_documents_with_tag` so the SQL lives
     in exactly one place (shared with ``brain capture``).
+
+    Records to ``report`` (a fresh human-printing report by default).
     """
+    report = report or _DoctorReport()
     try:
         count = count_documents_with_tag(conn, _CAPTURE_INBOX_TAG)
     except psycopg.Error as exc:
         _rollback_quietly(conn)
-        typer.secho(
-            f"inbox           WARN — could not probe inbox size: {exc}",
-            fg="yellow",
+        report.record(
+            _DoctorCheck(
+                check="inbox",
+                status="warn",
+                detail=f"could not probe inbox size: {exc}",
+                lines=(
+                    _DoctorLine(
+                        f"inbox           WARN — could not probe inbox size: {exc}",
+                        fg="yellow",
+                    ),
+                ),
+            )
         )
         return
     if count > cfg.capture_inbox_warn_threshold:
-        typer.secho(
-            f"inbox           WARN — {count} items "
-            f"(> {cfg.capture_inbox_warn_threshold}); run `brain capture review`",
-            fg="yellow",
+        report.record(
+            _DoctorCheck(
+                check="inbox",
+                status="warn",
+                detail=f"{count} items (> {cfg.capture_inbox_warn_threshold})",
+                remedy="brain capture review",
+                lines=(
+                    _DoctorLine(
+                        f"inbox           WARN — {count} items "
+                        f"(> {cfg.capture_inbox_warn_threshold}); run "
+                        "`brain capture review`",
+                        fg="yellow",
+                    ),
+                ),
+            )
         )
     else:
-        typer.echo(f"inbox           OK ({count} items)")
+        report.record(
+            _DoctorCheck(
+                check="inbox",
+                status="ok",
+                detail=f"{count} items",
+                lines=(_DoctorLine(f"inbox           OK ({count} items)"),),
+            )
+        )
 
 
-def _check_age(conn: psycopg.Connection[Any]) -> None:
+_AGE_WARN_PREFIX = "age             WARN — "
+
+
+def _check_age(
+    conn: psycopg.Connection[Any], report: _DoctorReport | None = None
+) -> None:
     """Doctor sub-check: verify the Apache AGE GraphRAG backend is provisioned.
 
     Soft check — never flips doctor's exit code. The AGE rollout (wave G0) can
@@ -829,17 +1028,33 @@ def _check_age(conn: psycopg.Connection[Any]) -> None:
        ``load_age``'s LOAD/rollback/error-wrapping logic inline.
     4. The canonical ``brain_graph`` graph exists in ``ag_catalog.ag_graph``.
 
-    Prints ``age             OK (age <ver>, graph brain_graph present)`` when all
+    Records ``age             OK (age <ver>, graph brain_graph present)`` when all
     four hold; otherwise a single WARN line naming the failed condition and the
-    next step to fix it.
+    next step to fix it. Records to ``report`` (a fresh human-printing report by
+    default, so a direct test call keeps echoing exactly as before).
     """
+    report = report or _DoctorReport()
+
+    def warn(line: str) -> None:
+        detail = (
+            line[len(_AGE_WARN_PREFIX):]
+            if line.startswith(_AGE_WARN_PREFIX)
+            else line
+        )
+        report.record(
+            _DoctorCheck(
+                check="age",
+                status="warn",
+                detail=detail,
+                lines=(_DoctorLine(line, fg="yellow"),),
+            )
+        )
+
     try:
         installed = _installed_extension_versions(conn)
     except psycopg.Error as exc:
         _rollback_quietly(conn)
-        typer.secho(
-            f"age             WARN — extension probe failed: {exc}", fg="yellow"
-        )
+        warn(f"age             WARN — extension probe failed: {exc}")
         return
 
     if "age" not in installed:
@@ -853,22 +1068,17 @@ def _check_age(conn: psycopg.Connection[Any]) -> None:
             available = age_extension_available(conn)
         except psycopg.Error as exc:
             _rollback_quietly(conn)
-            typer.secho(
-                f"age             WARN — couldn't determine AGE availability: {exc}",
-                fg="yellow",
-            )
+            warn(f"age             WARN — couldn't determine AGE availability: {exc}")
             return
         if available:
-            typer.secho(
+            warn(
                 "age             WARN — Apache AGE is available but not installed "
-                "— run `brain init` to install + bootstrap AGE",
-                fg="yellow",
+                "— run `brain init` to install + bootstrap AGE"
             )
         else:
-            typer.secho(
+            warn(
                 "age             WARN — the DB image lacks Apache AGE — rebuild/cut "
-                f"over to the AGE image; see {_AGE_IMAGE_SPEC}",
-                fg="yellow",
+                f"over to the AGE image; see {_AGE_IMAGE_SPEC}"
             )
         return
 
@@ -876,10 +1086,9 @@ def _check_age(conn: psycopg.Connection[Any]) -> None:
         name for name in ("vector", "pgcrypto") if name not in installed
     ]
     if missing_support:
-        typer.secho(
+        warn(
             "age             WARN — missing extension(s): "
-            f"{', '.join(missing_support)} — run `brain init`",
-            fg="yellow",
+            f"{', '.join(missing_support)} — run `brain init`"
         )
         return
 
@@ -890,20 +1099,18 @@ def _check_age(conn: psycopg.Connection[Any]) -> None:
         # exception may have left an aborted transaction; clearing it keeps the
         # connection usable so this check can never poison a later one.
         _rollback_quietly(conn)
-        typer.secho(
+        warn(
             f"age             WARN — `LOAD 'age'` failed ({exc}) — the AGE "
             "extension isn't loadable in this database/image; rebuild or cut "
-            f"over to the AGE image (see {_AGE_IMAGE_SPEC})",
-            fg="yellow",
+            f"over to the AGE image (see {_AGE_IMAGE_SPEC})"
         )
         return
     if not loaded:
         # Extension row present but load_age found it absent — defensive guard;
         # treat as the image-missing case.
-        typer.secho(
+        warn(
             "age             WARN — the DB image lacks Apache AGE — rebuild/cut "
-            f"over to the AGE image; see {_AGE_IMAGE_SPEC}",
-            fg="yellow",
+            f"over to the AGE image; see {_AGE_IMAGE_SPEC}"
         )
         return
 
@@ -911,23 +1118,28 @@ def _check_age(conn: psycopg.Connection[Any]) -> None:
         graph_present = _age_graph_present(conn, DEFAULT_GRAPH_NAME)
     except psycopg.Error as exc:
         _rollback_quietly(conn)
-        typer.secho(
-            f"age             WARN — graph catalog probe failed: {exc}",
-            fg="yellow",
-        )
+        warn(f"age             WARN — graph catalog probe failed: {exc}")
         return
 
     if not graph_present:
-        typer.secho(
+        warn(
             f"age             WARN — graph {DEFAULT_GRAPH_NAME} absent — run "
-            "`brain init` to bootstrap the AGE graph",
-            fg="yellow",
+            "`brain init` to bootstrap the AGE graph"
         )
         return
 
-    typer.echo(
-        f"age             OK (age {installed['age']}, "
-        f"graph {DEFAULT_GRAPH_NAME} present)"
+    report.record(
+        _DoctorCheck(
+            check="age",
+            status="ok",
+            detail=f"age {installed['age']}, graph {DEFAULT_GRAPH_NAME} present",
+            lines=(
+                _DoctorLine(
+                    f"age             OK (age {installed['age']}, "
+                    f"graph {DEFAULT_GRAPH_NAME} present)"
+                ),
+            ),
+        )
     )
 
 
@@ -954,7 +1166,12 @@ def _relational_graph_counts(
     )
 
 
-def _check_graph_drift(conn: psycopg.Connection[Any], cfg: Config) -> None:
+_GRAPH_DRIFT_WARN_PREFIX = "graph drift     WARN — "
+
+
+def _check_graph_drift(
+    conn: psycopg.Connection[Any], cfg: Config, report: _DoctorReport | None = None
+) -> None:
     """Doctor sub-check: relational ↔ AGE graph entity/edge parity (spec §7).
 
     Gated by the caller on ``BRAIN_GRAPH_ENABLED``; here it additionally requires
@@ -967,7 +1184,26 @@ def _check_graph_drift(conn: psycopg.Connection[Any], cfg: Config) -> None:
     every failure mode is a WARN that never flips doctor's exit code (it catches
     its own probe errors so a graph hiccup never masquerades as a postgres
     failure).
+
+    Records to ``report`` (a fresh human-printing report by default).
     """
+    report = report or _DoctorReport()
+
+    def warn(line: str) -> None:
+        detail = (
+            line[len(_GRAPH_DRIFT_WARN_PREFIX):]
+            if line.startswith(_GRAPH_DRIFT_WARN_PREFIX)
+            else line
+        )
+        report.record(
+            _DoctorCheck(
+                check="graph drift",
+                status="warn",
+                detail=detail,
+                lines=(_DoctorLine(line, fg="yellow"),),
+            )
+        )
+
     try:
         if not age_extension_available(conn):
             _rollback_quietly(conn)
@@ -976,10 +1212,7 @@ def _check_graph_drift(conn: psycopg.Connection[Any], cfg: Config) -> None:
             return
     except (psycopg.Error, AgeBootstrapError) as exc:
         _rollback_quietly(conn)
-        typer.secho(
-            f"graph drift     WARN — AGE availability probe failed: {exc}",
-            fg="yellow",
-        )
+        warn(f"graph drift     WARN — AGE availability probe failed: {exc}")
         return
 
     from .graph_rag.backends import AgeBackend
@@ -988,7 +1221,7 @@ def _check_graph_drift(conn: psycopg.Connection[Any], cfg: Config) -> None:
     try:
         tenant_id = resolve_tenant(cfg)
     except GraphTenantError as exc:
-        typer.secho(f"graph drift     WARN — {exc}", fg="yellow")
+        warn(f"graph drift     WARN — {exc}")
         return
 
     try:
@@ -998,9 +1231,7 @@ def _check_graph_drift(conn: psycopg.Connection[Any], cfg: Config) -> None:
         age_edges = backend.count_cooccur_edges(conn, tenant_id)
     except (psycopg.Error, GraphBackendError) as exc:
         _rollback_quietly(conn)
-        typer.secho(
-            f"graph drift     WARN — graph count probe failed: {exc}", fg="yellow"
-        )
+        warn(f"graph drift     WARN — graph count probe failed: {exc}")
         return
     finally:
         _rollback_quietly(conn)
@@ -1010,13 +1241,35 @@ def _check_graph_drift(conn: psycopg.Connection[Any], cfg: Config) -> None:
         f"co_occurs rel={rel_edges} age={age_edges}, tenant {tenant_id!r}"
     )
     if rel_entities == age_entities and rel_edges == age_edges:
-        typer.echo(f"graph drift     OK ({counters})")
+        report.record(
+            _DoctorCheck(
+                check="graph drift",
+                status="ok",
+                detail=counters,
+                lines=(_DoctorLine(f"graph drift     OK ({counters})"),),
+            )
+        )
         return
-    typer.secho(f"graph drift     drift detected ({counters})", fg="yellow")
-    typer.secho(
-        "                — run `brain graphrag build --force` to rebuild the "
-        "AGE mirror from the relational source-of-truth",
-        fg="yellow",
+    report.record(
+        _DoctorCheck(
+            check="graph drift",
+            status="warn",
+            detail=f"drift detected ({counters})",
+            remedy=(
+                "run `brain graphrag build --force` to rebuild the AGE mirror "
+                "from the relational source-of-truth"
+            ),
+            lines=(
+                _DoctorLine(
+                    f"graph drift     drift detected ({counters})", fg="yellow"
+                ),
+                _DoctorLine(
+                    "                — run `brain graphrag build --force` to "
+                    "rebuild the AGE mirror from the relational source-of-truth",
+                    fg="yellow",
+                ),
+            ),
+        )
     )
 
 
@@ -1078,7 +1331,12 @@ def _relationship_edges(
     return [(str(src), str(dst), float(weight)) for src, dst, weight in rows]
 
 
-def _check_graph_communities(conn: psycopg.Connection[Any], cfg: Config) -> None:
+_COMMUNITIES_WARN_PREFIX = "communities     WARN — "
+
+
+def _check_graph_communities(
+    conn: psycopg.Connection[Any], cfg: Config, report: _DoctorReport | None = None
+) -> None:
     """Doctor sub-check: community counts + stale-fingerprint detection (§17c).
 
     Gated by the caller on ``BRAIN_GRAPH_ENABLED``; here it additionally requires
@@ -1092,7 +1350,26 @@ def _check_graph_communities(conn: psycopg.Connection[Any], cfg: Config) -> None
     communities refresh`` (the authoritative rebuild). Soft check: every failure
     mode is a WARN that never flips doctor's exit code (it catches its own probe
     errors so a community hiccup never masquerades as a postgres failure).
+
+    Records to ``report`` (a fresh human-printing report by default).
     """
+    report = report or _DoctorReport()
+
+    def warn(line: str) -> None:
+        detail = (
+            line[len(_COMMUNITIES_WARN_PREFIX):]
+            if line.startswith(_COMMUNITIES_WARN_PREFIX)
+            else line
+        )
+        report.record(
+            _DoctorCheck(
+                check="communities",
+                status="warn",
+                detail=detail,
+                lines=(_DoctorLine(line, fg="yellow"),),
+            )
+        )
+
     try:
         if not age_extension_available(conn):
             _rollback_quietly(conn)
@@ -1101,10 +1378,7 @@ def _check_graph_communities(conn: psycopg.Connection[Any], cfg: Config) -> None
             return
     except (psycopg.Error, AgeBootstrapError) as exc:
         _rollback_quietly(conn)
-        typer.secho(
-            f"communities     WARN — AGE availability probe failed: {exc}",
-            fg="yellow",
-        )
+        warn(f"communities     WARN — AGE availability probe failed: {exc}")
         return
 
     from .graph_rag.communities import compute_source_graph_hash
@@ -1113,7 +1387,7 @@ def _check_graph_communities(conn: psycopg.Connection[Any], cfg: Config) -> None
     try:
         tenant_id = resolve_tenant(cfg)
     except GraphTenantError as exc:
-        typer.secho(f"communities     WARN — {exc}", fg="yellow")
+        warn(f"communities     WARN — {exc}")
         return
 
     try:
@@ -1122,9 +1396,7 @@ def _check_graph_communities(conn: psycopg.Connection[Any], cfg: Config) -> None
         current_hash = compute_source_graph_hash(_relationship_edges(conn, tenant_id))
     except psycopg.Error as exc:
         _rollback_quietly(conn)
-        typer.secho(
-            f"communities     WARN — community probe failed: {exc}", fg="yellow"
-        )
+        warn(f"communities     WARN — community probe failed: {exc}")
         return
     finally:
         _rollback_quietly(conn)
@@ -1133,44 +1405,104 @@ def _check_graph_communities(conn: psycopg.Connection[Any], cfg: Config) -> None
         f"{community_count} communities, {member_count} members, tenant {tenant_id!r}"
     )
     if community_count == 0:
-        typer.echo(
-            f"communities     OK ({counts}) — none built; run "
-            "`brain graphrag communities build`"
+        report.record(
+            _DoctorCheck(
+                check="communities",
+                status="ok",
+                detail=f"{counts} — none built",
+                remedy="brain graphrag communities build",
+                lines=(
+                    _DoctorLine(
+                        f"communities     OK ({counts}) — none built; run "
+                        "`brain graphrag communities build`"
+                    ),
+                ),
+            )
         )
         return
     if stored_hashes == {current_hash}:
-        typer.echo(f"communities     OK ({counts}, fingerprint current)")
+        report.record(
+            _DoctorCheck(
+                check="communities",
+                status="ok",
+                detail=f"{counts}, fingerprint current",
+                lines=(
+                    _DoctorLine(
+                        f"communities     OK ({counts}, fingerprint current)"
+                    ),
+                ),
+            )
+        )
         return
-    typer.secho(f"communities     stale ({counts}, fingerprint stale)", fg="yellow")
-    typer.secho(
-        "                — communities are stale; run `brain graphrag communities "
-        "refresh` to rebuild from the current graph",
-        fg="yellow",
+    report.record(
+        _DoctorCheck(
+            check="communities",
+            status="warn",
+            detail=f"stale ({counts}, fingerprint stale)",
+            remedy=(
+                "run `brain graphrag communities refresh` to rebuild from the "
+                "current graph"
+            ),
+            lines=(
+                _DoctorLine(
+                    f"communities     stale ({counts}, fingerprint stale)",
+                    fg="yellow",
+                ),
+                _DoctorLine(
+                    "                — communities are stale; run `brain graphrag "
+                    "communities refresh` to rebuild from the current graph",
+                    fg="yellow",
+                ),
+            ),
+        )
     )
 
 
 @app.command()
-def doctor() -> None:
+def doctor(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
+) -> None:
     """Check environment, database connection, and external dependencies.
 
     Backend-aware: voyage runs the API-key check; arctic and qwen3 ping
-    Ollama and verify their respective models are loaded.
+    Ollama and verify their respective models are loaded. ``--json`` emits a
+    ``[{check, status, detail, remedy}]`` array built from the SAME single probe
+    run as the human path (Task 5.1); it still exits non-zero when any check
+    FAILs.
     """
-    failures: list[str] = []
+    report = _DoctorReport(json_output=json_output)
 
     try:
         cfg = Config.load()
-        typer.echo(f"env             OK (embedder={cfg.embedder})")
     except ConfigError as e:
-        typer.secho(f"env             FAIL — {e}", fg="red", err=True)
+        report.record(
+            _DoctorCheck(
+                check="env",
+                status="fail",
+                detail=str(e),
+                lines=(_DoctorLine(f"env             FAIL — {e}", fg="red", err=True),),
+            )
+        )
+        if json_output:
+            emit_json(report.to_payload())
         raise typer.Exit(code=1) from e
+    report.record(
+        _DoctorCheck(
+            check="env",
+            status="ok",
+            detail=f"embedder={cfg.embedder}",
+            lines=(_DoctorLine(f"env             OK (embedder={cfg.embedder})"),),
+        )
+    )
 
     # Task 4.2: the external probes (embedder HTTP/API, gws + npx subprocess) are
     # independent of the Postgres connection, so run them concurrently with the
     # serial DB block below. psycopg connections are NOT thread-safe, so the DB
     # checks stay on the main thread's single connection; the external probes
-    # touch no DB. Output order is preserved — the DB lines print inline and the
-    # external-probe results are gathered + printed in a fixed order afterwards.
+    # touch no DB. Output order is preserved — the DB checks record inline and the
+    # external-probe results are gathered + recorded in a fixed order afterwards.
     # Each future is resolved through _resolve_probe so one probe's crash can
     # never crash doctor or suppress the siblings.
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -1185,60 +1517,103 @@ def doctor() -> None:
                     "SELECT extversion FROM pg_extension WHERE extname='vector'"
                 ).fetchone()
                 if ext:
-                    typer.echo(f"postgres        OK (pgvector {ext[0]})")
-                    _report_embedding_column(conn)
-                    _report_mirror_drift(conn, vault_path=cfg.vault_path)
-                    # Perf wave T1: warn when chunks stats are stale (post-restore).
-                    _check_chunks_stats(conn)
-                    # Plan 09: warn when the quick-capture inbox has grown large.
-                    _check_inbox_size(conn, cfg)
-                else:
-                    failures.append(
-                        "pgvector extension not installed (run brain init)"
+                    report.record(
+                        _DoctorCheck(
+                            check="postgres",
+                            status="ok",
+                            detail=f"pgvector {ext[0]}",
+                            lines=(
+                                _DoctorLine(f"postgres        OK (pgvector {ext[0]})"),
+                            ),
+                        )
                     )
-                    typer.echo("postgres        FAIL — pgvector not installed")
+                    _report_embedding_column(conn, report)
+                    _report_mirror_drift(conn, vault_path=cfg.vault_path, report=report)
+                    # Perf wave T1: warn when chunks stats are stale (post-restore).
+                    _check_chunks_stats(conn, report)
+                    # Plan 09: warn when the quick-capture inbox has grown large.
+                    _check_inbox_size(conn, cfg, report)
+                else:
+                    report.record(
+                        _DoctorCheck(
+                            check="postgres",
+                            status="fail",
+                            detail="pgvector not installed",
+                            remedy="run brain init",
+                            lines=(
+                                _DoctorLine("postgres        FAIL — pgvector not installed"),
+                            ),
+                        )
+                    )
                 # GraphRAG (wave G0): soft AGE health line — reuses the open
                 # connection. Self-contained (catches its own probe errors) so an
                 # AGE hiccup never masquerades as a postgres failure below.
-                _check_age(conn)
+                _check_age(conn, report)
                 # GraphRAG (wave G2-h): relational↔AGE graph drift check, only
                 # when the people-aspect graph sync is opted into. Self-contained
                 # WARN — never flips doctor's exit code (mirrors _check_age).
                 if cfg.graph_enabled:
-                    _check_graph_drift(conn, cfg)
+                    _check_graph_drift(conn, cfg, report)
                     # GraphRAG (wave G3-g): community counts + stale-fingerprint
                     # check (spec §17c). Same gating + self-contained WARN
                     # contract as _check_graph_drift; never flips the exit code.
-                    _check_graph_communities(conn, cfg)
+                    _check_graph_communities(conn, cfg, report)
         except psycopg.Error as e:
-            failures.append(f"database: {e}")
-            typer.secho(f"postgres        FAIL — {e}", fg="red", err=True)
+            report.record(
+                _DoctorCheck(
+                    check="postgres",
+                    status="fail",
+                    detail=str(e),
+                    lines=(
+                        _DoctorLine(
+                            f"postgres        FAIL — {e}", fg="red", err=True
+                        ),
+                    ),
+                )
+            )
 
         # Gather the parallel external probes in a fixed order so the output is
         # deterministic regardless of which probe finished first (Task 4.2).
-        _emit_probe_result(_resolve_probe(embedder_future, "embedder"), failures)
-        _emit_probe_result(_resolve_probe(gws_future, "gws CLI"), failures)
-        _emit_probe_result(_resolve_probe(npx_future, "quartz/npx"), failures)
+        report.record_all(_resolve_probe(embedder_future, "embedder"))
+        report.record_all(_resolve_probe(gws_future, "gws CLI"))
+        report.record_all(_resolve_probe(npx_future, "quartz/npx"))
 
-    if failures:
+    if json_output:
+        emit_json(report.to_payload())
+    if report.failed:
         raise typer.Exit(code=1)
 
 
-def _probe_gws() -> _ProbeResult:
+def _probe_gws() -> list[_DoctorCheck]:
     """Doctor sub-check (buffered): is the ``gws`` CLI on PATH (Gmail ingestion)?
 
     Soft — a missing ``gws`` only disables Gmail ingestion, never fails doctor.
-    Buffered so it can run in a worker thread alongside the DB block (Task 4.2);
-    ``shutil.which`` touches no Postgres connection.
+    Buffered (returns structured checks) so it can run in a worker thread
+    alongside the DB block (Task 4.2); ``shutil.which`` touches no Postgres
+    connection.
     """
     if shutil.which("gws"):
-        return _ProbeResult(lines=(_DoctorLine("gws CLI         OK"),))
-    return _ProbeResult(
-        lines=(_DoctorLine("gws CLI         missing — Gmail ingestion disabled"),)
-    )
+        return [
+            _DoctorCheck(
+                check="gws CLI",
+                status="ok",
+                detail="on PATH",
+                lines=(_DoctorLine("gws CLI         OK"),),
+            )
+        ]
+    return [
+        _DoctorCheck(
+            check="gws CLI",
+            status="warn",
+            detail="missing — Gmail ingestion disabled",
+            lines=(
+                _DoctorLine("gws CLI         missing — Gmail ingestion disabled"),
+            ),
+        )
+    ]
 
 
-def _probe_npx() -> _ProbeResult:
+def _probe_npx() -> list[_DoctorCheck]:
     """Doctor sub-check (buffered): probe ``npx`` for the Quartz integration.
 
     Soft check — Quartz is optional; missing npx is a warning, never a
@@ -1252,18 +1627,24 @@ def _probe_npx() -> _ProbeResult:
     on Quartz absence — `brain vault render` is the only command that
     needs it and it surfaces its own setup errors when invoked.
 
-    Buffered (returns a :class:`_ProbeResult`) so it can run in a worker thread
+    Buffered (returns structured checks) so it can run in a worker thread
     concurrently with the serial DB block (Task 4.2).
     """
-    not_installed = _ProbeResult(
-        lines=(
-            _DoctorLine(
-                "quartz/npx      not installed — `brain vault render` will fail; "
-                "install Node.js if you want HTML rendering",
-                fg="yellow",
+    not_installed = [
+        _DoctorCheck(
+            check="quartz/npx",
+            status="warn",
+            detail="not installed — `brain vault render` will fail",
+            remedy="install Node.js if you want HTML rendering",
+            lines=(
+                _DoctorLine(
+                    "quartz/npx      not installed — `brain vault render` will fail; "
+                    "install Node.js if you want HTML rendering",
+                    fg="yellow",
+                ),
             ),
         )
-    )
+    ]
     npx_path = shutil.which("npx")
     if npx_path is None:
         return not_installed
@@ -1282,22 +1663,47 @@ def _probe_npx() -> _ProbeResult:
     if completed.returncode != 0:
         return not_installed
     version = completed.stdout.strip() or "?"
-    return _ProbeResult(
-        lines=(
-            _DoctorLine(
-                f"quartz/npx      OK (npx {version} at {npx_path}) — "
-                "`brain vault render` available"
+    return [
+        _DoctorCheck(
+            check="quartz/npx",
+            status="ok",
+            detail=f"npx {version} at {npx_path}",
+            lines=(
+                _DoctorLine(
+                    f"quartz/npx      OK (npx {version} at {npx_path}) — "
+                    "`brain vault render` available"
+                ),
             ),
         )
-    )
+    ]
 
 
 @app.command()
-def status() -> None:
+def status(
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
+) -> None:
     """Show counts and last-ingest timestamp."""
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
         counts = summary_counts(conn)
+
+    if json_output:
+        emit_json(
+            {
+                "documents": counts.documents,
+                "chunks": counts.chunks,
+                "sources": counts.sources,
+                "by_source": {kind: count for kind, count in counts.by_kind},
+                "last_ingest": (
+                    counts.last_ingest.isoformat()
+                    if counts.last_ingest is not None
+                    else None
+                ),
+            }
+        )
+        return
 
     typer.echo(f"documents       {counts.documents}")
     typer.echo(f"chunks          {counts.chunks}")
@@ -1380,14 +1786,18 @@ def _analyze_after_bulk_write(conn: psycopg.Connection[Any], *, context: str) ->
     )
 
 
-def _report_embedding_column(conn: psycopg.Connection[Any]) -> None:
-    """Print a one-line status for the ``chunks.embedding`` column.
+def _report_embedding_column(
+    conn: psycopg.Connection[Any], report: _DoctorReport | None = None
+) -> None:
+    """Report a one-line status for the ``chunks.embedding`` column.
 
     Informational only — never fails the doctor check. Reports column type,
     NOT NULL status, and (for low-dim backends) HNSW index presence. For
     Qwen3 (4096 dims) the index is absent by design — pgvector caps
-    HNSW/IVFFlat at 2000 dims for ``vector``.
+    HNSW/IVFFlat at 2000 dims for ``vector``. Records to ``report`` (a fresh
+    human-printing report by default).
     """
+    report = report or _DoctorReport()
     state = embedding_column_state(conn)
     parts = [state.column_type]
     if state.not_null:
@@ -1397,18 +1807,34 @@ def _report_embedding_column(conn: psycopg.Connection[Any]) -> None:
     if state.has_index:
         parts.append("indexed [hnsw]")
     summary = ", ".join(parts)
-    typer.echo(f"embedding       OK ({summary})")
+    lines = [_DoctorLine(f"embedding       OK ({summary})")]
+    remedy: str | None = None
     if not state.not_null:
-        typer.secho(
-            "                — run `brain reembed` to backfill and finalize",
-            fg="yellow",
+        remedy = "run `brain reembed` to backfill and finalize"
+        lines.append(
+            _DoctorLine(
+                "                — run `brain reembed` to backfill and finalize",
+                fg="yellow",
+            )
         )
+    report.record(
+        _DoctorCheck(
+            check="embedding",
+            status="ok",
+            detail=summary,
+            remedy=remedy,
+            lines=tuple(lines),
+        )
+    )
 
 
 def _report_mirror_drift(
-    conn: psycopg.Connection[Any], *, vault_path: Path
+    conn: psycopg.Connection[Any],
+    *,
+    vault_path: Path,
+    report: _DoctorReport | None = None,
 ) -> None:
-    """Print a one-line "vault drift" status for the ``_ingested/`` mirror tier.
+    """Report a one-line "vault drift" status for the ``_ingested/`` mirror tier.
 
     Informational only — never fails the doctor check. Counts ingested
     rows, rows missing ``vault_path``, on-disk orphan files (file present,
@@ -1422,10 +1848,23 @@ def _report_mirror_drift(
     The vault directory may not exist yet (fresh install before
     ``brain vault init``); in that case we skip the check entirely with a
     soft "not initialized" line. Doctor never fails here — vault drift is
-    a hygiene signal, not a runtime blocker.
+    a hygiene signal, not a runtime blocker. Records to ``report`` (a fresh
+    human-printing report by default).
     """
+    report = report or _DoctorReport()
     if not vault_path.is_dir():
-        typer.echo(f"vault drift     not initialized ({vault_path} missing)")
+        report.record(
+            _DoctorCheck(
+                check="vault drift",
+                status="ok",
+                detail=f"not initialized ({vault_path} missing)",
+                lines=(
+                    _DoctorLine(
+                        f"vault drift     not initialized ({vault_path} missing)"
+                    ),
+                ),
+            )
+        )
         return
     summary = mirror_drift_summary(conn, vault_path=vault_path)
     counters = (
@@ -1435,27 +1874,56 @@ def _report_mirror_drift(
         f"{summary.ghost_rows} ghost rows"
     )
     if _drift_clean(summary):
-        typer.echo(f"vault drift     OK ({counters})")
+        report.record(
+            _DoctorCheck(
+                check="vault drift",
+                status="ok",
+                detail=counters,
+                lines=(_DoctorLine(f"vault drift     OK ({counters})"),),
+            )
+        )
         return
-    typer.secho(f"vault drift     drift detected ({counters})", fg="yellow")
+    lines = [_DoctorLine(f"vault drift     drift detected ({counters})", fg="yellow")]
+    remedies: list[str] = []
     if summary.rows_with_null_vault_path:
-        typer.secho(
-            "                — `brain vault export --force` to populate "
-            "NULL vault_path",
-            fg="yellow",
+        lines.append(
+            _DoctorLine(
+                "                — `brain vault export --force` to populate "
+                "NULL vault_path",
+                fg="yellow",
+            )
         )
+        remedies.append("`brain vault export --force` to populate NULL vault_path")
     if summary.orphan_files:
-        typer.secho(
-            "                — `brain vault prune-orphans` to inspect "
-            "orphan files (dry-run)",
-            fg="yellow",
+        lines.append(
+            _DoctorLine(
+                "                — `brain vault prune-orphans` to inspect "
+                "orphan files (dry-run)",
+                fg="yellow",
+            )
         )
+        remedies.append("`brain vault prune-orphans` to inspect orphan files (dry-run)")
     if summary.ghost_rows:
-        typer.secho(
-            "                — `brain vault export --force` to recreate "
-            "missing files (or `brain rm <id>` per ghost)",
-            fg="yellow",
+        lines.append(
+            _DoctorLine(
+                "                — `brain vault export --force` to recreate "
+                "missing files (or `brain rm <id>` per ghost)",
+                fg="yellow",
+            )
         )
+        remedies.append(
+            "`brain vault export --force` to recreate missing files "
+            "(or `brain rm <id>` per ghost)"
+        )
+    report.record(
+        _DoctorCheck(
+            check="vault drift",
+            status="warn",
+            detail=f"drift detected ({counters})",
+            remedy="; ".join(remedies) if remedies else None,
+            lines=tuple(lines),
+        )
+    )
 
 
 def _drift_clean(summary: MirrorDriftSummary) -> bool:
@@ -2440,7 +2908,9 @@ def graphrag_search(
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
     synthesize: bool = typer.Option(
         False,
         "--synthesize",
@@ -2495,7 +2965,9 @@ def graphrag_themes(
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
     synthesize: bool = typer.Option(
         False,
         "--synthesize",
@@ -2539,7 +3011,9 @@ def graphrag_entity(
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """Show a single entity's neighbourhood (spec §9).
 
@@ -2627,7 +3101,9 @@ def timeline(
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to query (default: BRAIN_GRAPH_TENANT)."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """How a theme or entity evolved over time (spec Plan 05).
 
@@ -2868,7 +3344,9 @@ def graphrag_communities_build(
         "-n",
         help="Max stale/new communities to (re)summarize this run (default: all).",
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """Detect + persist + summarize the tenant's communities (spec §17c Q3).
 
@@ -2896,7 +3374,9 @@ def graphrag_communities_refresh(
         "-n",
         help="Max stale/new communities to (re)summarize this run (default: all).",
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """Force a community rebuild regardless of the dirty gate (spec §17c Q3).
 
@@ -2920,7 +3400,9 @@ def graphrag_communities_list(
     limit: int | None = typer.Option(
         None, "--limit", "-n", help="Max communities to show (default: all)."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """List the tenant's materialized communities (admin view; spec §17c Q3).
 
@@ -2960,7 +3442,9 @@ def graphrag_aliases_apply(
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to apply rules to (default: BRAIN_GRAPH_TENANT)."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """Apply curated entity alias/merge rules + refresh aggregates (C3).
 
@@ -3141,7 +3625,9 @@ def graphrag_entities(
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to list (default: BRAIN_GRAPH_TENANT)."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """List the tenant's entities (admin view; all types or filtered by --type).
 
@@ -3166,7 +3652,9 @@ def graphrag_stats(
     tenant: str | None = typer.Option(
         None, "--tenant", help="Tenant to summarize (default: BRAIN_GRAPH_TENANT)."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """Show an at-a-glance graph overview for the tenant.
 
@@ -3424,9 +3912,10 @@ def enrich(
         None, "--limit", "-n",
         help="Max docs to enrich in --backfill mode.",
     ),
-    since: int | None = typer.Option(
+    since: str | None = typer.Option(
         None, "--since",
-        help="Days lookback (used by --krisp-action-items only).",
+        help="Lookback window (used by --krisp-action-items only); a bare "
+             "number is DAYS. Suffixes: 7d / 24h / 90m.",
     ),
     source_id: str | None = typer.Option(
         None, "--source-id",
@@ -3464,9 +3953,10 @@ def enrich(
             "expected --backfill or --krisp-action-items"
         )
     if krisp_action_items:
+        since_days = None if since is None else since_window(since, unit="days")
         typer.echo(
             _KRISP_ACTION_ITEMS_OUTPUT.format(
-                window=_krisp_action_items_window(since),
+                window=_krisp_action_items_window(since_days),
                 meeting_filter=_krisp_action_items_meeting_filter(source_id),
             )
         )
@@ -3512,14 +4002,47 @@ def _resolve_search_person(
         raise typer.BadParameter(str(e)) from e
 
 
+# Canonical ingest source kinds (``documents.source_kind`` via ``sources.kind``).
+# A genuinely closed enum — only ever written by the ingest paths. Mirrors
+# :data:`brain.vault.links._SOURCE_KINDS`; duplicated here (not imported) so the
+# CLI's ``--source`` validation surface stays stable independent of any internal
+# refactor of that module-private set (same pattern as _DIRECTORY_VALID_SOURCES).
+_VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack"})
+
+
+def _validate_source_choice(source: str | None) -> str | None:
+    """Return ``source`` if None or a known source kind; else exit 2 loudly.
+
+    Turns a silently-empty result set (an unknown ``--source`` value matching no
+    rows) into a ``BadParameter`` naming the value + the accepted set (Task 5.3).
+    ``--kind``/``content_type`` is deliberately NOT validated here: it is an open,
+    user-extensible field (``brain note new --type``, ``ingest-stdin
+    --content-type``), so a fixed allowlist would reject legitimate custom types.
+    """
+    if source is None or source in _VALID_SOURCE_KINDS:
+        return source
+    raise typer.BadParameter(
+        f"unknown source {source!r} "
+        f"(expected: {'|'.join(sorted(_VALID_SOURCE_KINDS))})",
+        param_hint="--source",
+    )
+
+
 @app.command()
 def search(
     query: str = typer.Argument(...),
     limit: int = typer.Option(5, "--limit", "-n", min=1),
     source: str | None = typer.Option(None, "--source"),
     tag: str | None = typer.Option(None, "--tag"),
-    since_days: int | None = typer.Option(None, "--since", help="Days lookback"),
-    json_output: bool = typer.Option(False, "--json"),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Lookback window; a bare number is DAYS (e.g. 7 = 7d). "
+             "Suffixes: 7d / 24h / 90m.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
     fts_only: bool = typer.Option(False, "--fts-only"),
     # — Q1-C metadata filters — same set on `brain explain` below.
     person: str | None = typer.Option(
@@ -3560,7 +4083,9 @@ def search(
     ),
 ) -> None:
     """Hybrid search across the brain."""
+    _validate_source_choice(source)
     effective_tag = _reconcile_tag_flags(tag, has_tag)
+    since_days = None if since is None else since_window(since, unit="days")
     cfg = Config.load()
     embedder = _build_embedder(cfg)
     with connect(cfg.database_url) as conn:
@@ -3644,8 +4169,15 @@ def explain(
     limit: int = typer.Option(10, "--limit", "-n", min=1),
     source: str | None = typer.Option(None, "--source"),
     tag: str | None = typer.Option(None, "--tag"),
-    since_days: int | None = typer.Option(None, "--since", help="Days lookback"),
-    json_output: bool = typer.Option(False, "--json"),
+    since: str | None = typer.Option(
+        None,
+        "--since",
+        help="Lookback window; a bare number is DAYS (e.g. 7 = 7d). "
+             "Suffixes: 7d / 24h / 90m.",
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
     fts_only: bool = typer.Option(False, "--fts-only"),
     verbose: bool = typer.Option(False, "--verbose", "-v"),
     # — Q1-C metadata filters — same set as `brain search` above.
@@ -3690,7 +4222,9 @@ def explain(
     which filter flags were active.  Use ``--json`` for the full machine-readable
     payload including all :class:`~brain.search.SearchExplanation` fields.
     """
+    _validate_source_choice(source)
     effective_tag = _reconcile_tag_flags(tag, has_tag)
+    since_days = None if since is None else since_window(since, unit="days")
     cfg = Config.load()
     embedder = _build_embedder(cfg)
     with connect(cfg.database_url) as conn:
@@ -3831,6 +4365,12 @@ def eval_cmd(
         None, "--baseline", help="Baseline name for --diff comparison."
     ),
     diff: bool = typer.Option(False, "--diff", help="Show delta vs --baseline."),
+    fail_below: bool = typer.Option(
+        False,
+        "--fail-below",
+        help="With --diff: exit 3 if any mean metric (nDCG@5/MRR/Recall@20) "
+             "regresses by more than 1e-4 vs the baseline.",
+    ),
     record_baseline: str | None = typer.Option(
         None, "--record-baseline", help="Write result as named baseline file."
     ),
@@ -3880,7 +4420,7 @@ def eval_cmd(
         run_eval,
         save_baseline,
     )
-    from .eval.baseline import _assert_baseline_name
+    from .eval.baseline import _assert_baseline_name, mean_metrics_regressed
     from .eval.corpus import _DEFAULT_CORPUS_PATH, _VALID_CATEGORIES
     from .eval.errors import EvalBaselineError, EvalCorpusError
 
@@ -3889,6 +4429,8 @@ def eval_cmd(
         raise typer.BadParameter("--diff requires --baseline")
     if diff and record_baseline is not None:
         raise typer.BadParameter("--diff and --record-baseline are mutually exclusive")
+    if fail_below and not diff:
+        raise typer.BadParameter("--fail-below requires --diff")
 
     # Validate baseline names (prevent path traversal).
     if baseline is not None:
@@ -3956,6 +4498,11 @@ def eval_cmd(
             emit_json(dataclasses.asdict(diff_result))
         else:
             console.print(eval_diff_table(diff_result))
+        # --fail-below runs in BOTH branches (the report is emitted above first):
+        # a mean-metric regression flips the exit code to 3, distinct from
+        # 1 (generic error) and 2 (Typer BadParameter).
+        if fail_below and mean_metrics_regressed(diff_result):
+            raise typer.Exit(code=3)
         return
 
     # Default: display report.
@@ -4121,16 +4668,18 @@ def todo(
         "krisp", "--source",
         help="Filter to one source kind. Today only 'krisp' is supported.",
     ),
-    since: int | None = typer.Option(
+    since: str | None = typer.Option(
         None, "--since",
-        help="Only items from docs ingested in the last N days.",
+        help="Lookback window; a bare number is DAYS. Suffixes: 7d / 24h / 90m.",
     ),
     closed: bool = typer.Option(
         False, "--closed",
         help="Include closed [x] items (default: open only).",
     ),
     limit: int = typer.Option(50, "--limit", "-n"),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """List action items parsed from ``krisp_action_items`` documents.
 
@@ -4143,12 +4692,13 @@ def todo(
     from .todo import iter_action_item_docs
 
     cfg = Config.load()
+    since_days = None if since is None else since_window(since, unit="days")
     rows = []
     with connect(cfg.database_url) as conn:
         for row in iter_action_item_docs(
             conn,
             source_kind=source,
-            since_days=since,
+            since_days=since_days,
             include_closed=closed,
         ):
             rows.append(row)
@@ -4560,11 +5110,15 @@ def _print_brief(data: Any) -> None:
 
 @app.command()
 def brief(
-    since: int | None = typer.Option(
-        None, "--since", help="Capture window in hours (default: config)."
+    since: str | None = typer.Option(
+        None, "--since",
+        help="Capture window; a bare number is HOURS (default: config). "
+             "Suffixes: 7d / 24h / 90m.",
     ),
-    todo_since: int | None = typer.Option(
-        None, "--todo-since", help="Open-todo window in days (default: config)."
+    todo_since: str | None = typer.Option(
+        None, "--todo-since",
+        help="Open-todo window; a bare number is DAYS (default: config). "
+             "Suffixes: 7d / 24h / 90m.",
     ),
     date: str | None = typer.Option(
         None, "--date", help="ISO date for the header (YYYY-MM-DD, default: today)."
@@ -4577,7 +5131,9 @@ def brief(
         "--wiki/--no-wiki",
         help="Write the digest to <vault>/daily/<YYYY>/<date>-brief.md.",
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """Proactive daily digest: recent captures, open todos, pins, and next steps.
 
@@ -4590,9 +5146,13 @@ def brief(
     from .brief import assemble_brief, suggest_next_steps, write_brief_to_vault
 
     cfg = Config.load()
-    since_hours = since if since is not None else cfg.brief_since_hours
+    since_hours = (
+        cfg.brief_since_hours if since is None
+        else since_window(since, unit="hours")
+    )
     todo_since_days = (
-        todo_since if todo_since is not None else cfg.brief_todo_since_days
+        cfg.brief_todo_since_days if todo_since is None
+        else since_window(todo_since, unit="days")
     )
     if date is not None:
         try:
@@ -4688,6 +5248,7 @@ def ask(
     limit: int | None = typer.Option(
         None,
         "--limit",
+        "-n",
         min=1,
         help="Max documents retrieved per iteration (default: config ask_docs_per_iter).",
     ),
@@ -4968,7 +5529,9 @@ def _default_audio_base(
 @app.command()
 def show(
     id: str = typer.Argument(...),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
     query: str | None = typer.Option(
         None,
         "--query",
@@ -5071,9 +5634,12 @@ def list_docs(
     source: str | None = typer.Option(None, "--source"),
     tag: str | None = typer.Option(None, "--tag"),
     limit: int = typer.Option(20, "--limit", "-n", min=1),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """List documents in the brain."""
+    _validate_source_choice(source)
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
         rows = list_documents(conn, source=source, tag=tag, limit=limit)
@@ -5110,7 +5676,9 @@ def resurface(
     source: str | None = typer.Option(
         None, "--source", help="Filter by source kind (krisp, gmail, manual, slack)."
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """Surface older notes due for a spaced-repetition review.
 
@@ -5122,6 +5690,7 @@ def resurface(
         raise typer.BadParameter("--limit must be an integer >= 1")
     if min_age_days is not None and min_age_days < 0:
         raise typer.BadParameter("--min-age-days must be a non-negative integer")
+    _validate_source_choice(source)
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
         items = resurface_docs(
@@ -7536,7 +8105,9 @@ _GRAPH_FORMATTERS: dict[str, Any] = {
 @app.command()
 def backlinks(
     id: str = typer.Argument(..., help="Document id (or 6+ char prefix)."),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """List documents that link TO this one.
 
@@ -7600,7 +8171,9 @@ def backlinks(
 @app.command()
 def links(
     id: str = typer.Argument(..., help="Document id (or 6+ char prefix)."),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
     unresolved: bool = typer.Option(
         False,
         "--unresolved",
@@ -7682,7 +8255,9 @@ def orphans_cmd(
         "--all",
         help="Include ingested-tier orphans (default: vault-tier only).",
     ),
-    json_output: bool = typer.Option(False, "--json"),
+    json_output: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of the table."
+    ),
 ) -> None:
     """List documents with zero incoming AND zero outgoing links.
 
@@ -8980,9 +9555,10 @@ _GAP_KIND_DISPLAY = {"zero_results": "zero-results", "no_click": "no-click"}
 @gaps_app.callback(invoke_without_command=True)
 def gaps(
     ctx: typer.Context,
-    since: int = typer.Option(
-        0, "--since",
-        help="Lookback window in days (0 = BRAIN_GAPS_LOOKBACK_DAYS).",
+    since: str = typer.Option(
+        "0", "--since",
+        help="Lookback window; a bare number is DAYS (0 = "
+             "BRAIN_GAPS_LOOKBACK_DAYS). Suffixes: 7d / 24h / 90m.",
     ),
     limit: int = typer.Option(
         20, "--limit", "-n", help="Max failed queries to show."
@@ -9005,7 +9581,8 @@ def gaps(
     from rich.table import Table
 
     cfg = _load_config_or_exit()
-    since_days = since if since > 0 else cfg.gaps_lookback_days
+    since_arg = since_window(since, unit="days")
+    since_days = since_arg if since_arg > 0 else cfg.gaps_lookback_days
     try:
         with connect(cfg.database_url) as conn:
             failures = top_search_failures(

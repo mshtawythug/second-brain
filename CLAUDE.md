@@ -80,12 +80,13 @@ Run after every change: `ruff check` (lint) or `ruff check --fix` (auto-fix), th
 ### Eval gate (CI)
 The eval-marker harness (`tests/test_eval_harness_live.py`) is **excluded from the default pytest invocation** (`pyproject.toml` → `addopts = "... -m 'not eval'"`). Rationale: it requires a live Postgres + Ollama, would slow every local `pytest` run, and the threshold assertions assume the live brain corpus.
 
-**CI enforces it separately.** `.github/workflows/eval.yml` runs on every PR + every push to `master`:
+**CI enforces it separately.** `.github/workflows/eval.yml` runs on every PR, every push to `main`/`master`, and manual `workflow_dispatch`:
 
-1. Spins up Postgres 16 + pgvector as a service container on port 5433.
-2. Installs the package with `pip install -e ".[dev]"`.
-3. Runs `pytest -m eval --no-cov -v` — gate fails on any harness regression.
-4. Conditionally runs `brain eval --baseline ci --diff --fail-below` when `tests/eval/baselines/ci.json` exists (added by Wave A.4).
+1. Brings up the pinned Apache AGE test instance via `docker compose -f docker-compose.age-test.yml up -d --build` (PostgreSQL 16 + pgvector 0.8.2 + AGE, port **5434**, db `second_brain_test` — the same instance the local test suite uses). A GitHub Actions `services:` block can't `build:` an image inline, so compose is used instead of a service container; one eval-marked test reaches the AGE-backed graph layer.
+2. Installs the package with `pip install -e ".[dev]"` and waits for `pg_isready` on port 5434.
+3. Runs `pytest -m eval --no-cov -v`. The eval-marked tests SKIP cleanly without a live corpus + Ollama, so in CI this is import/collection regression coverage — it turns red only when the harness itself breaks.
+4. Conditionally runs `brain eval --baseline ci --diff --fail-below`, but only when `tests/eval/baselines/ci.json` exists (dormant otherwise, printing a skip notice — recording that baseline needs a live corpus + Ollama, so it is a coordinator step, not CI's).
+5. Tears down the AGE instance with `docker compose -f docker-compose.age-test.yml down -v` (always, even on failure).
 
 **Decision recorded (Wave A.1):** the eval marker stays OFF in the default `pytest` invocation. Gate lives in CI only. Local devs run `pytest -m eval` manually when needed.
 
@@ -139,7 +140,7 @@ Full design in `docs/specs/2026-04-24-second-brain-design.md`. Implementation pl
 
 - **Language:** Python 3.11+
 - **CLI framework:** Typer
-- **Database:** PostgreSQL 16 + pgvector (Docker, port 5433)
+- **Database:** PostgreSQL 16 + pgvector (Docker, port 55432)
 - **Embeddings:** Pluggable backends behind a single `Embedder` Protocol.
   Default `arctic` (Snowflake Arctic Embed v2 over local Ollama, 1024-dim).
   Alternates: `voyage` (Voyage AI SaaS, 1024-dim) and `qwen3` (Qwen3-Embedding-8B
@@ -167,7 +168,7 @@ cp .env.example .env                     # BRAIN_EMBEDDER=arctic by default
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-docker compose up -d                     # Postgres + pgvector on port 5433
+docker compose up -d                     # Postgres + pgvector on port 55432
 brain init                               # applies migrations + aligns chunks.embedding dim
 brain reembed                            # backfill any NULL embeddings + finalize column
 brain doctor                             # health check (env, Postgres, embedder, gws CLI)

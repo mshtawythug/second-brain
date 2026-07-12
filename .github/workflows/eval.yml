@@ -1,0 +1,104 @@
+# =============================================================================
+# Retrieval eval gate — golden-corpus ranking harness CI (Task 5.5)
+# -----------------------------------------------------------------------------
+# Design decisions (CLAUDE.md "Eval gate (CI)"; plan
+# docs/plans/2026-07-12-second-brain-overhaul.md Task 5.5):
+#
+#   * DEDICATED workflow, mirroring the benchmark-gate precedent. The `eval`
+#     pytest marker stays OFF by default (pyproject.toml
+#     addopts = "... -m 'not eval and not benchmark ...'") so local devs never
+#     pay the live-corpus load on a normal `pytest`; this workflow opts in with
+#     `-m eval`. The eval-marked tests (golden-corpus harness, answer harness,
+#     concept-extractor gate) all SKIP cleanly when Ollama / a curated corpus is
+#     unavailable, so this job's value in CI is import/collection regression
+#     coverage — it turns red only when the harness itself breaks.
+#
+#   * PINNED Apache AGE image, same as benchmark.yml. One of the eval-marked
+#     tests (test_graphrag_concept_gate) reaches the AGE-backed graph layer, so
+#     we bring up the custom PG16 + pgvector 0.8.2 + AGE image via
+#     docker-compose.age-test.yml (port 5434, db `second_brain_test`) — the same
+#     instance the local test suite uses. A GitHub Actions `services:` block
+#     can't `build:` an image inline, so compose is used instead of a service
+#     container.
+#
+#   * The regression gate step (`brain eval --baseline ci --diff --fail-below`)
+#     is CONDITIONAL on a committed baseline: it runs only when
+#     tests/eval/baselines/ci.json exists (allowlisted in that dir's
+#     .gitignore). Until a baseline is recorded from a populated brain + Ollama
+#     the step is dormant and prints a skip notice — recording ci.json is a
+#     coordinator step (needs a live corpus, which CI does not have).
+#
+#   * Concurrency: cancel in-progress runs only on PRs (most recent push wins);
+#     master/main keeps a complete audit trail.
+# =============================================================================
+name: eval
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: eval-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  eval:
+    name: Retrieval eval gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      DATABASE_URL: postgresql://brain:brain@localhost:5434/second_brain_test
+      TEST_DATABASE_URL: postgresql://brain:brain@localhost:5434/second_brain_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Build + start the pinned AGE test instance
+        run: docker compose -f docker-compose.age-test.yml up -d --build
+
+      - name: Install package (with dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: Wait for the AGE instance to be ready
+        run: |
+          for i in $(seq 1 60); do
+            if pg_isready -h localhost -p 5434 -U brain -d second_brain_test; then
+              echo "AGE instance is ready"
+              exit 0
+            fi
+            echo "waiting for AGE instance ($i/60)..."
+            sleep 2
+          done
+          echo "AGE instance did not become ready in time" >&2
+          docker compose -f docker-compose.age-test.yml logs --tail=50
+          exit 1
+
+      - name: Run the eval harness (skips cleanly without a live corpus/Ollama)
+        run: pytest -m eval --no-cov -v
+
+      - name: Eval regression gate (only when a committed baseline exists)
+        run: |
+          # Dormant until tests/eval/baselines/ci.json is committed (see that
+          # dir's .gitignore allowlist). Recording the baseline needs a
+          # populated brain + Ollama, so it is a coordinator step, not CI's.
+          if [ -f tests/eval/baselines/ci.json ]; then
+            echo "ci.json present — running the eval regression gate"
+            brain eval --baseline ci --diff --fail-below
+          else
+            echo "tests/eval/baselines/ci.json absent — eval regression gate dormant (skipping)"
+          fi
+
+      - name: Tear down the AGE test instance
+        if: always()
+        run: docker compose -f docker-compose.age-test.yml down -v

@@ -25,6 +25,10 @@ On top of plain search it adds: a **GraphRAG** layer (an entity graph of people,
   - [Tags, edits, draft hiding, and deletes](#tags-edits-draft-hiding-and-deletes)
   - [Gmail ingest](#gmail-ingest)
   - [Status and health](#status-and-health)
+  - [brain capture](#brain-capture)
+  - [brain enrich](#brain-enrich)
+  - [brain rate](#brain-rate)
+  - [brain people](#brain-people)
 - [GraphRAG (graph retrieval)](#graphrag-graph-retrieval)
   - [How it works](#how-it-works)
   - [Enabling GraphRAG](#enabling-graphrag)
@@ -119,7 +123,7 @@ Caveats:
 
 - **Git** — used to clone this repo and the optional Quartz wiki renderer.
 - **Python 3.11+** — `python3.11 --version` should work. On macOS: `brew install python@3.11`.
-- **Docker Desktop** (or Docker Engine) — running. The Postgres + pgvector database lives in a container on port 5433. Get it from [docker.com](https://www.docker.com/products/docker-desktop/).
+- **Docker Desktop** (or Docker Engine) — running. The Postgres + pgvector database lives in a container on port 55432. Get it from [docker.com](https://www.docker.com/products/docker-desktop/).
 - **[Ollama](https://ollama.com/)** (for the default `arctic` backend, and for `qwen3`). On macOS:
   ```bash
   brew install ollama
@@ -159,7 +163,7 @@ Replace `<your-github-username>` with your GitHub user/org. The script:
 - Installs `pipx` if missing (`brew install pipx` on macOS, `pip install --user pipx` on Linux), then `pipx ensurepath`.
 - `pipx install`s the `brain` CLI from the tagged release (default `v0.2.0`; override with `BRAIN_INSTALL_REF=...`). Refuses non-tag refs unless `BRAIN_INSECURE=1` is set.
 - Resolves the pipx bin directory explicitly (doesn't rely on PATH) and execs `brain setup`, which runs:
-  - 8 pre-flight checks (Docker daemon, Ollama, port 5433 + 8080 free, Caddy installed, `~/.claude/skills/` writable, pinned Quartz commit reachable on GitHub).
+  - 8 pre-flight checks (Docker daemon, Ollama, port 55432 + 8080 free, Caddy installed, `~/.claude/skills/` writable, pinned Quartz commit reachable on GitHub).
   - Creates `$BRAIN_HOME` (default `~/.brain`) with `data/postgres/`, `logs/`, `.shims/`.
   - Renders `docker-compose.yml` + `.env` from packaged templates, brings up the Postgres + pgvector container, waits for `pg_isready`, and runs `brain init` + `brain doctor`.
   - Prompts (default Y) to install the wiki UI (`brain wiki install` — clones Quartz at a pinned commit + applies the overlay + `npm install`) and the Claude Code skill (`~/.claude/skills/brain/SKILL.md`).
@@ -295,7 +299,7 @@ no need to remember Quartz or watcher invocations.
 | Layer | Choice | Why |
 |---|---|---|
 | CLI | Python 3.11 + [Typer](https://typer.tiangolo.com/) | Fast to write, good ergonomics, easy to test. |
-| Storage | PostgreSQL 16 + [`pgvector`](https://github.com/pgvector/pgvector) | One database for both lexical (`tsvector`) and semantic (vector) search — no separate vector store to operate. Runs in Docker on port 5433. |
+| Storage | PostgreSQL 16 + [`pgvector`](https://github.com/pgvector/pgvector) | One database for both lexical (`tsvector`) and semantic (vector) search — no separate vector store to operate. Runs in Docker on port 55432. |
 | Embeddings | Pluggable via `BRAIN_EMBEDDER` — default [Snowflake Arctic Embed v2](https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0) over local [Ollama](https://ollama.com/) (1024-dim, Apache 2.0, free). [Voyage AI](https://docs.voyageai.com/) (`voyage-3.5`, paid SaaS) and [Qwen3-Embedding-8B](https://huggingface.co/Qwen/Qwen3-Embedding-8B) (4096-dim, local Ollama) are alternates behind the same `Embedder` Protocol. | Local-by-default keeps the corpus off vendor servers; the abstraction lets the user upgrade or downgrade backends without touching ingest/search code. |
 | Search | Hybrid: Postgres FTS + vector cosine, fused via [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (k=60) | Lexical alone misses paraphrases ("what did I say about X"); vector alone misses exact names ("a coworker", "a former employer"). RRF combines both ranks without tuning weights. |
 | Graph retrieval | [Apache AGE](https://age.apache.org/) (openCypher inside Postgres) + [`networkx`](https://networkx.org/) for Louvain community detection | Entity-centric retrieval for themes, patterns, and connections that hybrid search misses. Graph sync defaults on; on stock pgvector, ingest-time graph sync is a no-op and `brain graphrag …` commands return an AGE-not-available guard. |
@@ -351,10 +355,30 @@ brain show <id-prefix> --json
 brain list --source gmail --limit 20
 brain list --tag career
 brain list --json
+
+# Rank diagnostics: why did these results surface, and in what order?
+brain explain "platform migration tradeoffs"
+brain explain "platform migration tradeoffs" --verbose --json
 ```
 
 ID prefixes must be at least 6 hex characters and must uniquely identify one
 document. `--json` is the machine-readable path for agents or scripts.
+
+`brain explain` runs the same query as `brain search` but prints per-result
+ranking diagnostics — FTS rank, vector cosine, RRF contributions, and the
+recency boost — so you can see *why* a result surfaced and in what order. Add
+`--verbose` to show which filters were active, or `--json` for the full
+`SearchExplanation` payload. It accepts the same filter flags as `search`
+(`--source`, `--tag`, `--since`, `--person`, `--after`/`--before`, `--kind`, …).
+
+`--since` takes a bare number or a duration suffix — `7d` (days), `24h`
+(hours), `90m` (minutes) — on the commands that share this parser: `search`,
+`explain`, `todo`, `enrich`, and `gaps` (bare number = **days**), plus `brain
+brief` (`--since` bare = **hours**; its `--todo-since` bare = days). Bare
+numbers keep each command's existing unit, so old scripts are unaffected. The
+remaining `--since` flags are unchanged and do **not** take suffixes:
+`ingest-gmail` expects a Gmail `YYYY/MM/DD` date, `timeline` an ISO `YYYY-MM`
+month, and `gaps push` a plain integer day count.
 
 ### Tags, edits, draft hiding, and deletes
 
@@ -406,13 +430,91 @@ passed through and can use any Gmail search syntax.
 ### Status and health
 
 ```bash
-brain status   # counts and last-ingest time
-brain doctor   # env, Postgres/pgvector, embedder, gws, npx, mirror drift, AGE + graph health
+brain status          # counts and last-ingest time
+brain status --json   # machine-readable: {documents, chunks, sources, by_source, last_ingest}
+brain doctor          # env, Postgres/pgvector, embedder, gws, npx, mirror drift, AGE + graph health
+brain doctor --json   # machine-readable [{check, status, detail, remedy}]; still exits non-zero on FAIL
+
+# Refresh Postgres planner statistics. Fixes the "chunks stats — never analyzed"
+# warning doctor reports after a pg_restore (a restore bulk-loads rows via COPY
+# but never runs ANALYZE, so the planner uses bad row estimates until autovacuum).
+brain analyze         # ANALYZE the chunks table (the one doctor warns about)
+brain analyze --all   # ANALYZE every table in the database
 ```
 
 `brain doctor` exits non-zero only for required failures: config, database, or
 active embedder. Optional integrations (`gws`, `npx`, the AGE extension, the
 concept-extractor model, community materialization staleness) are warnings.
+`brain status --json` and `brain doctor --json` are the scripting-friendly
+paths; `doctor --json` preserves the same non-zero exit on any FAIL check.
+
+### brain capture
+
+```bash
+# Jot a thought straight into the brain — always tagged `inbox`.
+brain capture --text "Follow up with the platform team about the migration cutover"
+echo "Idea: batch the nightly re-embed to cut Ollama warmups" | brain capture --title "re-embed idea" -t ideas
+
+# Review the inbox later: promote, tag, or discard each item; or just list it.
+brain capture list
+brain capture review
+```
+
+`brain capture` is a zero-friction inbox: pipe text on stdin or pass `--text`,
+optionally adding `-t/--tag` alongside the always-on `inbox` tag. `brain capture
+list` shows what's waiting; `brain capture review` walks each item so you can
+promote it into a real note, retag, or discard it.
+
+### brain enrich
+
+```bash
+# Backfill LLM auto-summaries for documents that don't have one yet (idempotent).
+brain enrich --backfill
+brain enrich --backfill --limit 50
+brain enrich --backfill --remodel        # also re-summarize rows whose summary_model is stale
+
+# Print the Krisp MCP request Claude should run to pull action items (the CLI
+# never calls MCP itself — Claude pipes results back via ingest-stdin).
+brain enrich --krisp-action-items --since 7
+```
+
+`brain enrich` has two mutually-exclusive modes. `--backfill` runs the Ollama
+enricher over rows where `summary IS NULL` (add `--remodel` to also refresh
+summaries written by an older `BRAIN_ENRICH_MODEL`; honors `--limit/-n`).
+`--krisp-action-items` prints the MCP + `ingest-stdin` commands for Claude to
+execute, then exits without contacting MCP itself.
+
+### brain rate
+
+```bash
+# Thumbs up / down a document (verdict is `useful` or `irrelevant`).
+brain rate 3f9a2b useful
+brain rate 3f9a2b irrelevant
+
+# Rate a graph target instead of a document, and/or mark it as graph-surfaced.
+brain rate <entity-uuid> useful --target-type entity
+brain rate <community-key> useful --graph-retrieved
+```
+
+`brain rate` records relevance feedback into the `interactions` table. Ratings
+append — re-rating a target creates a fresh row and the full history is
+preserved. Pass `--target-type entity|community|theme` to rate a GraphRAG
+target by its durable id instead of a document; `--graph-retrieved` marks the
+rating as produced by a graph surface.
+
+### brain people
+
+```bash
+brain people                 # alphabetised People Hub roster (everyone above the doc threshold)
+brain people "Jane"          # one person's full document list (case-insensitive substring)
+brain people --json          # machine-readable aggregation
+```
+
+`brain people` is a read-only view of the same People Hub aggregation that
+renders the `<vault>/people/` pages and drives the derived-link participant
+filter. The visibility threshold (`BRAIN_PEOPLE_HUB_MIN_DOCS`, default 3) and
+owner filter (`BRAIN_OWNER_PARTICIPANTS`) flow through the normal config, so
+flipping either env var changes the roster on the next invocation.
 
 ## GraphRAG (graph retrieval)
 
@@ -490,8 +592,11 @@ brain graphrag search "..." --json                      # machine-readable
 brain graphrag themes --person "Jane Doe"
 brain graphrag themes --person "Jane Doe" --limit 5 --synthesize
 
-# Inspect one entity's co-occurrence neighbourhood.
+# Inspect one entity's co-occurrence neighbourhood. High-degree entities cap
+# rendered neighbours at -n (default 30; -n 0 shows all); --json is never capped
+# and documents stay at the graph default regardless of -n.
 brain graphrag entity "Project Phoenix"
+brain graphrag entity "Project Phoenix" -n 50
 
 # Community admin (global mode).
 brain graphrag communities build        # detect + summarize (skips if graph unchanged)
@@ -554,6 +659,17 @@ If something goes wrong, `docker compose down && docker compose up -d` with
 the override removed returns you to stock pgvector (the data on disk is
 unchanged — graph rows live in their own tables and AGE catalogue, both of
 which are safely re-derivable from the backup).
+
+**Postgres tuning + the override `command:` caveat.** The committed
+`docker-compose.yml` starts Postgres with `command: postgres -c
+shared_buffers=512MB` — the brain's working set (~266MB) exceeds Postgres's
+stock 128MB default, which otherwise forces cold-cache FTS re-reads from disk.
+The AGE override above replaces only `image:`, so it *inherits* that `command:`
+unchanged. But Compose **replaces** the `command:` field — it does not merge
+it — so if you ever add your own `command:` to `docker-compose.override.yml`,
+you must restate `-c shared_buffers=512MB` there too, or the container silently
+drops back to the 128MB default. The new setting takes effect on the next
+container restart.
 
 ## Tacit-knowledge elicitation
 
@@ -760,7 +876,7 @@ brain ask "what did we decide about the data pipeline?" --explain
 brain ask "..." --no-loop              # single retrieve+synthesize pass (faster)
 brain ask "..." --mode fuse            # RRF of graph + hybrid retrieval
 brain ask "..." --mode auto            # graph router  | local | hybrid (default)
-brain ask "..." --limit 8 --max-iter 4
+brain ask "..." -n 8 --max-iter 4      # -n is shorthand for --limit (docs retrieved per iteration)
 brain ask "..." --json
 ```
 
@@ -1232,7 +1348,7 @@ Add the following to `~/Library/Application Support/Claude/claude_desktop_config
     "brain": {
       "command": "/Users/mshtawythug/workspace/second-brain/.venv/bin/brain-mcp",
       "env": {
-        "DATABASE_URL": "postgresql://brain:brain@localhost:5433/second_brain",
+        "DATABASE_URL": "postgresql://brain:brain@localhost:55432/second_brain",
         "BRAIN_EMBEDDER": "arctic",
         "OLLAMA_HOST": "http://localhost:11434",
         "BRAIN_VAULT_PATH": "/Users/<you>/brain-vault",

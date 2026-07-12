@@ -232,3 +232,34 @@ def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
         added_queries=added_queries,
         removed_queries=removed_queries,
     )
+
+
+# ---------------------------------------------------------------------------
+# ``--fail-below`` regression gate (Task 5.5)
+# ---------------------------------------------------------------------------
+
+# A mean metric "regresses" when its 4-decimal-ROUNDED delta is more negative
+# than one unit at the baseline's 4-decimal serialization precision (``-1e-4``).
+# Comparing the ROUNDED delta — not the raw float — keeps the boundary
+# constructible: a delta of exactly ``-0.0001`` is NOT a regression (it equals
+# the threshold), whereas ``-0.0002`` is. A raw-float compare would be
+# IEEE-754-fragile right at that boundary. Uniform across all three metrics
+# (nDCG@5 / MRR / Recall@20) — no per-metric overrides (CLAUDE.md decision).
+_FAIL_BELOW_THRESHOLD: float = -1e-4
+
+
+def mean_metrics_regressed(diff: BaselineDiff) -> bool:
+    """True iff any mean metric delta regressed past the ``--fail-below`` gate.
+
+    Checks ``round(delta, 4) < -1e-4`` for each of nDCG@5 / MRR / Recall@20 (the
+    aggregate over the shared query set — :func:`diff_reports` already excludes
+    added/removed queries so a changed corpus never dilutes a real regression).
+    """
+    return any(
+        round(delta, 4) < _FAIL_BELOW_THRESHOLD
+        for delta in (
+            diff.mean_ndcg_at_5_delta,
+            diff.mean_mrr_delta,
+            diff.mean_recall_at_20_delta,
+        )
+    )

@@ -2204,13 +2204,19 @@ def brain_graphrag_entity(
     clusters use ``brain_graphrag_search(mode='global')``; to merely ENUMERATE
     entities (not traverse one) use ``brain_graphrag_entities``.
 
-    Full parity with ``brain graphrag entity``: a thin wrapper over local
-    (entity-centric) retrieval seeded on ``name`` — it reuses the SAME path as
-    ``brain_graphrag_search(mode='local')``, resolving the entity, traversing
-    its bounded ``CO_OCCURS`` neighbourhood, and returning the seed + reached
-    entities and their documents in the
-    :func:`brain.format.graph_context_json` wire shape. ``name`` is REQUIRED; an
-    empty / whitespace-only value raises ``INVALID_PARAMS``.
+    Same local (entity-centric) retrieval as ``brain graphrag entity``: a thin
+    wrapper that reuses the SAME path as ``brain_graphrag_search(mode='local')``,
+    resolving the entity seeded on ``name``, traversing its bounded
+    ``CO_OCCURS`` neighbourhood, and returning the seed + reached entities and
+    their documents in the :func:`brain.format.graph_context_json` wire shape.
+    ``name`` is REQUIRED; an empty / whitespace-only value raises
+    ``INVALID_PARAMS``.
+
+    NOTE — ``limit`` semantics differ from the CLI. The CLI's ``-n/--limit`` is a
+    neighbour-render cap (default 30; ``-n 0`` = all) that only trims the human
+    table, leaving documents at the graph default. Here ``limit`` is the
+    max-documents bound passed straight through to local retrieval, and the JSON
+    payload is never neighbour-capped.
     """
     if not name.strip():
         raise _mcp_error(INVALID_PARAMS, "name is required")

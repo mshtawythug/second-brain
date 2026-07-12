@@ -33,7 +33,14 @@ from .answer_eval import (
     run_answer_eval,
     score_answer,
 )
-from .baseline import BaselineDiff, QueryDiff, diff_reports, load_baseline, save_baseline
+from .baseline import (
+    BaselineDiff,
+    QueryDiff,
+    diff_reports,
+    load_baseline,
+    mean_metrics_regressed,
+    save_baseline,
+)
 from .concept_extraction import (
     ConceptF1Report,
     ConceptFixtureDoc,
@@ -89,6 +96,7 @@ __all__ = [
     "save_baseline",
     "load_baseline",
     "diff_reports",
+    "mean_metrics_regressed",
     # GraphRAG concept-extractor eval gate (G2-j)
     "ConceptF1Report",
     "ConceptFixtureDoc",

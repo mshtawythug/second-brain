@@ -46,7 +46,7 @@ Second Brain is a local personal knowledge base with hybrid search, designed to 
 
 - Python 3.11+
 - Typer CLI
-- PostgreSQL 16 + pgvector in Docker on port `5433`
+- PostgreSQL 16 + pgvector in Docker on port `55432`
 - Pluggable embedders via `BRAIN_EMBEDDER`: `arctic` default, `voyage`, or `qwen3`
 - Extraction: `pypdf`, `pdfplumber`, `python-docx`, `markdown-it-py`
 - Graph retrieval (experimental): Apache AGE (openCypher graph in-Postgres) + `networkx` (Louvain community detection) for entity-centric GraphRAG alongside the vector/FTS search; default-OFF via `BRAIN_GRAPH_ENABLED`; needs the custom AGE Postgres image
@@ -146,12 +146,13 @@ docs/plans/         Implementation plans
 
 The eval-marker harness (`tests/test_eval_harness_live.py`) is excluded from the default `pytest` invocation via `pyproject.toml` → `addopts = "... -m 'not eval'"`. It requires a live Postgres + Ollama and assumes the live brain corpus, so it would slow every local run and fail without that environment. Local devs run `pytest -m eval` manually when needed.
 
-CI enforces it separately. `.github/workflows/eval.yml` runs on every PR and every push to `master`:
+CI enforces it separately. `.github/workflows/eval.yml` runs on every PR, every push to `main`/`master`, and manual `workflow_dispatch`:
 
-1. Spins up Postgres 16 + pgvector as a service container on port `5433`.
-2. Installs the package with `pip install -e ".[dev]"`.
-3. Runs `pytest -m eval --no-cov -v` — gate fails on any harness regression.
-4. Conditionally runs `brain eval --baseline ci --diff --fail-below` when `tests/eval/baselines/ci.json` exists (added by Wave A.4).
+1. Brings up the pinned Apache AGE test instance via `docker compose -f docker-compose.age-test.yml up -d --build` (PostgreSQL 16 + pgvector 0.8.2 + AGE, port `5434`, db `second_brain_test` — the same instance the local test suite uses). A GitHub Actions `services:` block can't `build:` an image inline, so compose is used instead of a service container; one eval-marked test reaches the AGE-backed graph layer.
+2. Installs the package with `pip install -e ".[dev]"` and waits for `pg_isready` on port 5434.
+3. Runs `pytest -m eval --no-cov -v`. The eval-marked tests skip cleanly without a live corpus + Ollama, so in CI this is import/collection regression coverage — it turns red only when the harness itself breaks.
+4. Conditionally runs `brain eval --baseline ci --diff --fail-below`, but only when `tests/eval/baselines/ci.json` exists (dormant otherwise, printing a skip notice — recording that baseline needs a live corpus + Ollama, so it is a coordinator step, not CI's).
+5. Tears down the AGE instance with `docker compose -f docker-compose.age-test.yml down -v` (always, even on failure).
 
 Decision recorded (Wave A.1): the eval marker stays OFF in the default `pytest` invocation. Gate lives in CI only.
 

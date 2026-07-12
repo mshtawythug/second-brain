@@ -74,7 +74,11 @@ the brain *say*", reach for `entities` / `stats`.
 
 ### Retrieval (`search` / `themes` / `entity`)
 
-All support `--json` for clean parsing, plus `--limit/-n`, `--depth`, `--tenant`:
+All support `--json` for clean parsing, plus `--limit/-n`, `--depth`, `--tenant`.
+Note `--limit/-n` means different things per command: on `search`/`themes` it
+caps **documents returned** (default 10); on `entity` it caps **rendered
+neighbours** (default 30, `-n 0` = all) while documents stay at the graph
+default and `--json` is never capped.
 
 ```bash
 # Themes in conversations with a person (the headline) — synthetic example
@@ -154,7 +158,7 @@ these over shelling out when you're already driving via tools:
 
 - `brain_graphrag_search(query, mode="auto", person=None, depth=None, limit=None, tenant=None, synthesize=False)` — the five-mode retrieval surface
 - `brain_graphrag_themes(person, depth=None, limit=None, tenant=None, synthesize=False)` — "themes with X"; `person` required
-- `brain_graphrag_entity(name, depth=None, limit=None, tenant=None)` — one entity's neighbourhood
+- `brain_graphrag_entity(name, depth=None, limit=None, tenant=None)` — one entity's neighbourhood. Here `limit` caps **documents** (unlike the CLI's `-n`, which caps rendered neighbours); the JSON is never neighbour-capped
 - `brain_graphrag_entities(entity_type=None, sort="docs", limit=50, tenant=None)` — **enumerate** the graph's entities (what orgs/people/projects/topics/tools exist; "list all projects" → `entity_type="project"`); returns `{tenant_id, count, entities:[…]}`
 - `brain_graphrag_stats(tenant=None)` — **graph overview** (how big / what's in it); returns `{tenant_id, counts_by_type, total_entities, total_relationships, total_communities, top_entities:[…]}`
 - `brain_graphrag_communities(tenant=None, limit=None)` — list materialized clusters

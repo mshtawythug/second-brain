@@ -1,5 +1,6 @@
 """Tests for the `brain doctor` CLI command."""
 import contextlib
+import json
 import os
 from collections.abc import Iterator
 from typing import Any
@@ -830,3 +831,48 @@ def test_doctor_no_community_line_when_disabled(
         result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "communities" not in result.output
+
+
+# ---------------------------------------------------------------------------
+# --json output (Task 5.1) — a structured [{check, status, detail, remedy}]
+# array built from the SAME single probe run as the human path; still exits
+# non-zero when any check FAILs.
+# ---------------------------------------------------------------------------
+
+_ALLOWED_STATUSES = {"ok", "warn", "fail"}
+
+
+def _parse_doctor_json(result: Any) -> list:
+    """Doctor --json stdout must be a pure JSON array (no human lines mixed in)."""
+    payload = json.loads(result.output)
+    assert isinstance(payload, list)
+    return payload
+
+
+def test_doctor_json_shape_when_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    with _patch_httpx_client(_ok_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    checks = _parse_doctor_json(result)
+    assert checks, "expected at least the env/postgres/ollama checks"
+    for c in checks:
+        assert set(c) == {"check", "status", "detail", "remedy"}
+        assert c["status"] in _ALLOWED_STATUSES
+    names = {c["check"] for c in checks}
+    assert {"env", "postgres", "ollama"} <= names
+    env = next(c for c in checks if c["check"] == "env")
+    assert env["status"] == "ok"
+
+
+def test_doctor_json_exits_nonzero_and_marks_fail_when_ollama_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    with _patch_httpx_client(_down_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor", "--json"])
+    assert result.exit_code != 0
+    # stdout is still pure JSON even on failure (FAIL detail never leaks to it).
+    checks = _parse_doctor_json(result)
+    ollama = next(c for c in checks if c["check"] == "ollama")
+    assert ollama["status"] == "fail"
