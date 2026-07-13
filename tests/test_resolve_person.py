@@ -215,3 +215,33 @@ def test_resolve_person_still_raises_when_canonical_forms_differ(
     msg = str(exc_info.value)
     assert "John Smith" in msg
     assert "John Smith Jr" in msg
+
+
+def test_resolve_person_merged_variants_emit_combo_form_for_every_member(
+    test_db: psycopg.Connection[Any]
+) -> None:
+    """REGRESSION (Wave A.2, ported 2026-07-13): when step-2/3 merges several
+    directory records that canonicalize to ONE person, the key expansion must
+    union over EVERY member's display-name variant — not just the
+    alphabetically-first canonical record. A Gmail doc stored under the
+    non-canonical variant's ``Display <email>`` combo form was silently
+    invisible to ``--person`` because its combo key was never emitted.
+    """
+    # Two variants of one logical person ("alice doe" canonical form):
+    # space-form from Krisp labels, dot-form from Gmail headers.
+    _seed_person(test_db, display_name="Alice Doe", email="alice@example.com")
+    _seed_person(
+        test_db, display_name="alice.doe", email="adoe@example.com"
+    )
+
+    match = resolve_person_to_keys(test_db, "alice doe")
+
+    # Canonical-variant keys (pre-fix behavior, must keep working).
+    assert "alice doe" in match.keys
+    assert "alice doe <alice@example.com>" in match.keys
+    assert "alice doe <adoe@example.com>" in match.keys
+    # Non-canonical variant keys — THE regression: pre-fix these were
+    # missing because only the canonical record's name was expanded.
+    assert "alice.doe" in match.keys
+    assert "alice.doe <alice@example.com>" in match.keys
+    assert "alice.doe <adoe@example.com>" in match.keys

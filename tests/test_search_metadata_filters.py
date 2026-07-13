@@ -627,3 +627,39 @@ def test_filters_resist_sql_injection_in_string_args(
     row = test_db.execute("SELECT count(*) FROM documents").fetchone()
     assert row is not None
     assert row[0] == 1
+
+
+def test_person_filter_matches_gmail_doc_under_merged_canonical_variant(
+    test_db: psycopg.Connection, fake_embedder: Any
+) -> None:
+    """REGRESSION (Wave A.2, ported 2026-07-13): end-to-end resolver →
+    ``--person`` path. A doc whose participant is stored under a merged
+    person's NON-canonical display-name variant ("alice.doe <email>")
+    must be matched when filtering by the canonical name — pre-fix the
+    resolver never emitted the variant's combo key, so the doc was
+    silently dropped.
+    """
+    from brain.queries import resolve_person_to_keys
+    from brain.vault.derived_links.directory import DirectoryStore
+
+    store = DirectoryStore(test_db)
+    store.upsert_pair(
+        display_name="Alice Doe", email="alice@example.com", source="contacts"
+    )
+    store.upsert_pair(
+        display_name="alice.doe", email="alice@example.com", source="gmail"
+    )
+    _seed(
+        test_db, fake_embedder,
+        title="Variant Doc", content="shared term",
+        participants=["alice.doe <alice@example.com>"],
+    )
+
+    match = resolve_person_to_keys(test_db, "alice doe")
+    results = hybrid_search(
+        test_db,
+        embedder=fake_embedder,
+        query="shared",
+        person_keys=match.keys,
+    )
+    assert [r.title for r in results] == ["Variant Doc"]

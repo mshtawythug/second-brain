@@ -172,6 +172,41 @@ def _expand_person_keys(display_name: str, emails: list[str]) -> list[str]:
     return sorted(keys)
 
 
+def _expand_keys_with_directory_variants(
+    conn: psycopg.Connection[Any], *, display_name: str, emails: list[str]
+) -> list[str]:
+    """Expand person keys across every RAW directory display-name variant.
+
+    :func:`brain.wiki.build_people.aggregate_people` collapses separator /
+    ordering variants of one person (``jane.doe`` vs ``Jane Doe``) into a
+    single canonical record, so the resolver only ever sees the canonical
+    display name. Docs, however, store ``participants`` under whichever RAW
+    variant their source emitted — Gmail dot-form headers vs Krisp space-form
+    speaker labels. A variant whose combo key is never emitted makes its docs
+    silently invisible to ``--person`` (Wave A.2, Codex Q1 HIGH). Re-fetch the
+    raw variants (linked by shared email or identical canonical key) and union
+    the expansion over all of them.
+    """
+    from .wiki._person_name import normalize_person_name
+
+    keys: set[str] = set(_expand_person_keys(display_name, emails))
+    base = normalize_person_name(display_name)
+    canonical_key = base.canonical_key if base is not None else None
+    email_set = {e.strip().lower() for e in emails if e and e.strip()}
+    rows = conn.execute(
+        "SELECT DISTINCT display_name, email FROM directory_entries "
+        "WHERE display_name <> ''"
+    ).fetchall()
+    for raw_name, raw_email in rows:
+        linked = (raw_email or "").strip().lower() in email_set
+        if not linked and canonical_key is not None:
+            normalized = normalize_person_name(raw_name)
+            linked = normalized is not None and normalized.canonical_key == canonical_key
+        if linked:
+            keys.update(_expand_person_keys(raw_name, emails))
+    return sorted(keys)
+
+
 def resolve_person_to_keys(
     conn: psycopg.Connection[Any], name_or_email: str
 ) -> PersonMatch:
@@ -218,7 +253,9 @@ def resolve_person_to_keys(
             if email.casefold() == needle:
                 return PersonMatch(
                     display_name=humanize_display_name(rec.display_name),
-                    keys=_expand_person_keys(rec.display_name, rec.all_emails),
+                    keys=_expand_keys_with_directory_variants(
+                        conn, display_name=rec.display_name, emails=rec.all_emails
+                    ),
                 )
 
     def _merge_or_ambiguous(hits: list[Any]) -> PersonMatch | None:
@@ -250,7 +287,11 @@ def resolve_person_to_keys(
             canonical_rec = sorted(members, key=lambda r: r.display_name)[0]
             return PersonMatch(
                 display_name=humanize_display_name(canonical_rec.display_name),
-                keys=_expand_person_keys(canonical_rec.display_name, merged_emails),
+                keys=_expand_keys_with_directory_variants(
+                    conn,
+                    display_name=canonical_rec.display_name,
+                    emails=merged_emails,
+                ),
             )
         raise PersonAmbiguous(
             name_or_email,

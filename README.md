@@ -371,6 +371,12 @@ recency boost — so you can see *why* a result surfaced and in what order. Add
 `SearchExplanation` payload. It accepts the same filter flags as `search`
 (`--source`, `--tag`, `--since`, `--person`, `--after`/`--before`, `--kind`, …).
 
+`--person` resolves the name or email you pass against the directory and
+matches docs recorded under **any** known variant of that person — space-form
+(`jane doe`), dot-form (`jane.doe`), bare email, and every `Name <email>`
+combination the sources emitted — so Gmail-header and Krisp-label spellings of
+the same person all count as one identity.
+
 `--since` takes a bare number or a duration suffix — `7d` (days), `24h`
 (hours), `90m` (minutes) — on the commands that share this parser: `search`,
 `explain`, `todo`, `enrich`, and `gaps` (bare number = **days**), plus `brain
