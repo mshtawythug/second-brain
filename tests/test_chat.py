@@ -364,3 +364,63 @@ def test_coerce_bool_custom_default_used_only_for_unrecognised() -> None:
     # ... but a recognised token always wins over the default.
     assert coerce_bool("false", default=True) is False
     assert coerce_bool("true", default=False) is True
+
+
+# ---------------------------------------------------------------------------
+# keep_alive wire format (regression: Ollama rejects the string "-1")
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("value", "expected"), [("-1", -1), ("0", 0)])
+def test_chat_keep_alive_sentinels_sent_as_json_numbers(
+    value: str, expected: int
+) -> None:
+    """REGRESSION (2026-07-17): the chat/generate path sent ``keep_alive``
+    verbatim as a string, so ``-1`` reached Ollama as ``"-1"`` → HTTP 400
+    ``time: missing unit in duration "-1"`` — breaking community summaries,
+    enrich, ask, and audio whenever BRAIN_OLLAMA_KEEP_ALIVE=-1. Sentinels
+    must go on the wire as JSON numbers (the embed path was fixed in Wave 2;
+    this pins the chat path).
+    """
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200, json={"message": {"content": '{"ok": true}'}}
+        )
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://ollama.test"
+    )
+    chat_json_with_client(
+        client,
+        model="fake-model",
+        messages=[{"role": "user", "content": "hi"}],
+        required_keys=frozenset({"ok"}),
+        keep_alive=value,
+    )
+    assert captured["keep_alive"] == expected
+    assert isinstance(captured["keep_alive"], int)
+
+
+def test_chat_keep_alive_duration_string_passes_through() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200, json={"message": {"content": '{"ok": true}'}}
+        )
+
+    client = httpx.Client(
+        transport=httpx.MockTransport(handler), base_url="http://ollama.test"
+    )
+    chat_json_with_client(
+        client,
+        model="fake-model",
+        messages=[{"role": "user", "content": "hi"}],
+        required_keys=frozenset({"ok"}),
+        keep_alive="30m",
+    )
+    assert captured["keep_alive"] == "30m"

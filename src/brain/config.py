@@ -33,6 +33,23 @@ DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
 # "abc", "1.5m", …) is rejected at load time.
 _KEEP_ALIVE_RE = re.compile(r"^(-1|0|[1-9]\d*(?:m|h|s)?)$")
 
+
+def keep_alive_wire_value(keep_alive: str) -> str | int:
+    """Coerce the numeric keep_alive sentinels to JSON numbers for Ollama.
+
+    Ollama's ``/api/embed`` and ``/api/chat`` accept ``keep_alive`` as either
+    a duration STRING with a unit (``"30m"``, ``"1h"``) or a bare JSON NUMBER
+    of seconds (``-1`` = keep the model loaded indefinitely, ``0`` = unload
+    immediately). They reject the unit-less strings ``"-1"`` / ``"0"`` with
+    HTTP 400 (``time: missing unit in duration "-1"``). Config validation
+    accepts ``"-1"`` / ``"0"`` as the documented sentinels, so EVERY Ollama
+    payload site must translate through this one function; unit-bearing
+    strings pass through unchanged.
+    """
+    if keep_alive in ("-1", "0"):
+        return int(keep_alive)
+    return keep_alive
+
 # Cosine-similarity floor for the vector leg of hybrid search. Tuned
 # empirically against the live corpus on 2026-05-06 (see Phase D of
 # `docs/plans/2026-05-06-search-ranking-fix.md` and

@@ -23,7 +23,7 @@ from typing import Any
 
 import httpx
 
-from .config import Config
+from .config import Config, keep_alive_wire_value
 from .errors import EnrichmentError, OllamaUnavailable
 
 _logger = logging.getLogger(__name__)
@@ -251,7 +251,7 @@ def _chat_once(
         "model": model,
         "stream": False,
         "format": "json",
-        "keep_alive": keep_alive,
+        "keep_alive": keep_alive_wire_value(keep_alive),
         "messages": messages,
         "options": {"temperature": 0.0, "num_predict": num_predict},
     }

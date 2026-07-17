@@ -18,7 +18,7 @@ from typing import Any
 import httpx
 import tiktoken
 
-from .config import Config, ConfigError
+from .config import Config, ConfigError, keep_alive_wire_value
 from .errors import EmbedError
 from .ingest import Embedder
 
@@ -33,21 +33,10 @@ _DEFAULT_OLLAMA_TIMEOUT_S = 60.0
 _DEFAULT_OLLAMA_KEEP_ALIVE = "30m"
 
 
-def _keep_alive_payload(keep_alive: str) -> str | int:
-    """Coerce the numeric keep_alive sentinels to JSON numbers for Ollama.
-
-    Ollama's ``/api/embed`` accepts ``keep_alive`` as either a duration STRING
-    with a unit (``"30m"``, ``"1h"``) or a bare JSON NUMBER of seconds
-    (``-1`` = keep the model loaded indefinitely, ``0`` = unload immediately).
-    It rejects the unit-less strings ``"-1"`` / ``"0"`` with HTTP 400
-    (``time: missing unit in duration "-1"``). Config validation
-    (:mod:`brain.config`) accepts ``"-1"`` / ``"0"`` as the documented sentinels
-    (Wave 1), so translate them to ints at this wire boundary; every
-    unit-bearing string passes through unchanged.
-    """
-    if keep_alive in ("-1", "0"):
-        return int(keep_alive)
-    return keep_alive
+# Wire-boundary sentinel coercion now lives in ``brain.config`` (shared with
+# the chat path in ``brain.chat``); kept under the historical private name so
+# existing call sites and tests stay valid.
+_keep_alive_payload = keep_alive_wire_value
 
 # Arctic Embed v2 query prefix per Snowflake's HF model card guidance:
 #   https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0
