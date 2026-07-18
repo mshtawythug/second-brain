@@ -65,9 +65,9 @@ Use filters to sharpen. Most useful flags:
 | `--source krisp\|slack\|gmail\|manual` | Scope by source kind |
 | `--tag <name>` *(or `--has-tag <name>`)* | Require a tag |
 | `--without-tag <name>` | Exclude docs carrying a tag |
-| `--since N` | Last N days by **ingestion time** (`documents.ingested_at`). When the user means "the call/email happened in the last N days," reach for `--after` instead — `--since` will misfire on content ingested today but dated months ago. |
+| `--since N` | Last N days by **ingestion time** (`documents.ingested_at`); a bare number is days, or pass a duration suffix (`7d` / `24h` / `90m`). When the user means "the call/email happened in the last N days," reach for `--after` instead — `--since` will misfire on content ingested today but dated months ago. |
 | `--after YYYY-MM-DD` / `--before YYYY-MM-DD` | Absolute event-date window — filters on `coalesce(sent_at, ingested_at)`, inclusive lower / exclusive upper. Prefer this for "last month / Q1 / since the kickoff" queries. |
-| `--person "<name or email>"` | Resolves through the directory (exact email → exact display name → substring; alpha tiebreak). Ambiguous match exits 2 with candidates — narrow it down or use email |
+| `--person "<name or email>"` | Resolves through the directory (exact email → exact display name → substring; alpha tiebreak). Matches **every recorded name-variant** of a merged person, so docs stored under different forms (Gmail `jane.doe` vs Krisp `Jane Doe`) all surface — the match is complete across sources. A genuinely ambiguous name (two *different* people) exits 2 with candidates — narrow it down or use email |
 | `--kind <content-type>` | `transcript`, `email`, `krisp_action_items`, `note`, `markdown`, `pdf`, … (this is `documents.content_type`, NOT the tier enum) |
 | `--thread <gmail_thread_id>` | Pull every doc in one Gmail thread |
 | `--draft / --no-draft` | Tri-state; default both. `--no-draft` excludes quarantined docs |

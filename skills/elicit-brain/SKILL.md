@@ -64,10 +64,15 @@ brain elicit list                    # refresh detectors and show the queue
 brain elicit list --json             # machine-readable (for synthesis)
 brain elicit list --limit 10         # show at most 10 gaps
 brain elicit list --low-confidence   # include gaps below the score floor
+brain elicit list --type person --type org   # only person/org gaps (repeatable)
 ```
 
 JSON shape per gap: `signal_kind`, `target_type`, `target_id`, `score`,
 `evidence_ids` (list of doc IDs), `rationale`, `status`.
+
+`--type` filters the queue to one or more entity types
+(`person` / `org` / `project` / `topic` / `tool` / `doc`, repeatable) — pass it
+when the user scopes the ask ("what haven't I written down about my *projects*").
 
 ## Interactive loop — `brain elicit`
 
@@ -81,8 +86,13 @@ brain elicit --target "engineering culture"  # user-flagged: jump to this specif
 brain elicit --signal delta                  # only surface delta gaps this run
 brain elicit --signal orphan
 brain elicit --signal contradiction          # needs BRAIN_ELICIT_CONTRADICTION_ENABLED=true
+brain elicit --type project                  # only draft gaps about projects (repeatable)
 brain elicit --include-low-confidence        # include below-score-floor gaps
 ```
+
+`--type` (repeatable: `person` / `org` / `project` / `topic` / `tool`) narrows
+the loop to gaps about those entity types — combine with `--signal` to be
+precise ("interview me about my *orgs*, delta signal only").
 
 Interactive keymap:
 

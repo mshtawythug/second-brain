@@ -39,7 +39,7 @@ Flags:
 | Flag | Purpose |
 |---|---|
 | `--source krisp` | Currently the only supported source. Stays as a flag for future Slack/Gmail extension. |
-| `--since N` | Only items from action-item docs **ingested** in the last N days. Filters on `documents.ingested_at` — not the Krisp meeting date. A meeting from six months ago that you ingested yesterday still surfaces under `--since 7`. |
+| `--since N` | Only items from action-item docs **ingested** in the last N days (bare number = days; duration suffixes `7d` / `24h` / `90m` also accepted). Filters on `documents.ingested_at` — not the Krisp meeting date. A meeting from six months ago that you ingested yesterday still surfaces under `--since 7`. |
 | `--closed` | Include `- [x]` items. Default is open-only. |
 | `--limit N` | Cap rows (default 50). |
 | `--json` | Machine-readable. Each row carries `document_id`, `document_title`, `ingested_at` (ISO 8601 string or `null`), `state` (`"open"` or `"done"`), `text`. |

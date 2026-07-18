@@ -7,14 +7,15 @@ description: >
   asks whether the brain is healthy, asks to rebuild embeddings, asks to
   resync summaries to the wiki, asks to regenerate the people pages, asks
   to refresh derived links or directory, or reports a brain CLI error that
-  suggests an ops-level repair. Covers brain doctor / status / reembed /
-  init / backfill / vault sync-summaries / vault relink-derived / vault
-  directory refresh.
+  suggests an ops-level repair. Covers brain doctor / status / analyze /
+  reembed / init / backfill / vault sync-summaries / vault relink-derived /
+  vault directory refresh.
   MANDATORY TRIGGERS: brain doctor, is my brain healthy, brain status,
   rebuild embeddings, reembed, brain reembed, backfill the brain, backfill
   tags, backfill search, sync summaries, sync summaries to wiki, regenerate
   people pages, refresh derived links, refresh directory, relink, switch
-  embedder, ollama down, postgres down, brain init.
+  embedder, ollama down, postgres down, brain init, brain analyze, analyze
+  tables, refresh planner stats, chunks stats warn.
 ---
 
 # Brain Maintenance
@@ -55,11 +56,28 @@ When it flags something, the printed lines name the remediation step:
 - `embedding model not loaded` → `ollama pull <model>`
 - `enrich model not in /api/tags` → `ollama pull llama3.1:8b`
 - Postgres unreachable → check `docker compose ps` and `docker compose up -d`.
+- `chunks stats WARN — never analyzed` (common after a `pg_restore`) → `brain analyze` (see below).
 
 ### `brain status`
 
 Counts of documents / chunks / sources, last ingest timestamp, breakdown by
 source kind. Use after a bulk ingest to confirm rows landed.
+
+### `brain analyze`
+
+Runs Postgres `ANALYZE` to refresh planner statistics. This is the fix for the
+`chunks stats WARN — never analyzed` line `brain doctor` prints after a
+`pg_restore` — a restore bulk-loads rows via `COPY` but leaves the planner with
+no stats, so queries pick bad plans until analyzed. Safe, fast, read-only to
+your data (touches only planner metadata).
+
+```bash
+brain analyze                # ANALYZE the whole database
+brain analyze chunks         # ANALYZE just one table (optional positional)
+```
+
+Run it after a restore, or any time `brain doctor` flags stale/never-analyzed
+table stats.
 
 ## Re-embedding — `brain reembed`
 
