@@ -248,6 +248,48 @@ def test_vault_path_expands_user_tilde(monkeypatch, isolated_dotenv):
     assert cfg.vault_path == Path.home() / "my-brain"
 
 
+def test_direct_config_construction_honors_vault_path_env(monkeypatch, tmp_path):
+    """Regression (2026-07-17 vault leak): a ``Config`` constructed DIRECTLY —
+    bypassing :meth:`Config.load` — must honor ``BRAIN_VAULT_PATH`` instead of
+    silently defaulting to the real ``~/brain-vault``.
+
+    Many test fixtures build ``Config(database_url=...)`` directly (e.g. the MCP
+    ``mcp_state`` fixtures in ``test_mcp_server.py`` / ``test_mcp_limit_guard.py``).
+    When such a Config ignored the env var, its ``vault_path`` resolved to the
+    live vault, so ingest mirrors leaked test fixtures into
+    ``~/brain-vault/_ingested/`` while the doc rows landed in the isolated test
+    DB — producing orphan files. The conftest ``BRAIN_VAULT_PATH`` session pin
+    only guarded ``Config.load()``; the ``vault_path`` field default itself must
+    resolve from the env so the direct-construction bypass is closed at its root.
+    """
+    from brain.config import DEFAULT_VAULT_PATH
+
+    sandbox = tmp_path / "sandbox-vault"
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(sandbox))
+    cfg = Config(database_url="postgresql://x:y@h:5432/d")
+    assert cfg.vault_path == sandbox
+    assert cfg.vault_path != DEFAULT_VAULT_PATH
+
+
+def test_direct_config_construction_expands_tilde_from_env(monkeypatch):
+    """Direct construction expands a leading ``~`` in ``BRAIN_VAULT_PATH`` too —
+    parity with :func:`test_vault_path_expands_user_tilde` for ``Config.load``."""
+    monkeypatch.setenv("BRAIN_VAULT_PATH", "~/my-direct-brain")
+    cfg = Config(database_url="postgresql://x:y@h:5432/d")
+    assert cfg.vault_path == Path.home() / "my-direct-brain"
+
+
+def test_direct_config_construction_defaults_without_env(monkeypatch):
+    """With ``BRAIN_VAULT_PATH`` unset, a directly-constructed Config still
+    defaults to ``~/brain-vault`` — production ``Config.load`` parity, so the
+    root-cause fix is behavior-neutral when no env override is present."""
+    from brain.config import DEFAULT_VAULT_PATH
+
+    monkeypatch.delenv("BRAIN_VAULT_PATH", raising=False)
+    cfg = Config(database_url="postgresql://x:y@h:5432/d")
+    assert cfg.vault_path == DEFAULT_VAULT_PATH
+
+
 # ---------------------------------------------------------------------------
 # BRAIN_OWNER_PARTICIPANTS — corpus-owner identifiers stripped from
 # ``DocSnapshot.participant_keys`` before R2/R3 derived-edge rules evaluate.

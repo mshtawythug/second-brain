@@ -482,6 +482,23 @@ def _parse_unit_interval_env(env_var: str, default: float) -> float:
     return value
 
 
+def _default_vault_path() -> Path:
+    """Resolve the vault root from ``BRAIN_VAULT_PATH``, else ``DEFAULT_VAULT_PATH``.
+
+    Single source of truth for vault-root resolution. Used BOTH as the
+    :attr:`Config.vault_path` field ``default_factory`` AND inside
+    :meth:`Config._load_field_dict`. Because the field default resolves the env
+    var at construction time, a ``Config`` built directly — bypassing
+    :meth:`Config.load` (as many test fixtures do) — honors ``BRAIN_VAULT_PATH``
+    exactly like ``Config.load()`` instead of silently falling back to the real
+    ``~/brain-vault``. That parity is what stops the test suite's ingest mirrors
+    from leaking into the live vault; an empty / unset value yields the packaged
+    default.
+    """
+    raw = os.environ.get("BRAIN_VAULT_PATH")
+    return Path(raw).expanduser() if raw else DEFAULT_VAULT_PATH
+
+
 @dataclass(frozen=True)
 class Config:
     """Project configuration loaded from environment / .env.
@@ -507,7 +524,7 @@ class Config:
     qwen3_model: str = DEFAULT_QWEN3_MODEL
     embedder: str = DEFAULT_EMBEDDER
     voyage_api_key: str | None = None
-    vault_path: Path = DEFAULT_VAULT_PATH
+    vault_path: Path = field(default_factory=_default_vault_path)
     user_email: str | None = None
     vector_sim_floor: float = DEFAULT_VECTOR_SIM_FLOOR
     # Comma-separated list of identifiers (emails AND/OR display names) that
@@ -778,12 +795,7 @@ class Config:
                 f"(got {embedder!r})"
             )
         voyage_api_key = os.environ.get("VOYAGE_API_KEY")
-        vault_path_env = os.environ.get("BRAIN_VAULT_PATH")
-        vault_path = (
-            Path(vault_path_env).expanduser()
-            if vault_path_env
-            else DEFAULT_VAULT_PATH
-        )
+        vault_path = _default_vault_path()
         # P4.4 -- owner identity for the email-thread "Show only my replies"
         # filter. Optional; an unset/empty value renders the button but
         # the runtime filter no-ops (no message ever matches the empty

@@ -31,13 +31,21 @@ def mcp_state(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,  # noqa: ARG001 — fixture keeps schema fresh
     fake_embedder: object,
+    tmp_path: Path,
 ) -> Iterator[mcp_server._State]:
     """Install a server state pointing at the test DB + fake embedder.
+
+    ``vault_path`` is sandboxed to a per-test ``tmp_path`` so any MCP tool that
+    mirrors to ``state.cfg.vault_path`` (ingest-stdin / edit / tag) writes into
+    the test's tmp dir, never the live ``~/brain-vault``. The
+    ``_default_vault_path`` env fix already prevents the leak via the conftest
+    ``BRAIN_VAULT_PATH`` session pin; passing an explicit path here is
+    belt-and-suspenders and documents the intent.
 
     Uses ``monkeypatch.setattr`` so the previous value is restored after the
     test (whether or not main() was ever called)."""
     state = mcp_server._State(
-        cfg=Config(database_url=TEST_DATABASE_URL),
+        cfg=Config(database_url=TEST_DATABASE_URL, vault_path=tmp_path),
         embedder=fake_embedder,  # type: ignore[arg-type]
     )
     monkeypatch.setattr(mcp_server, "_state", state)
@@ -620,6 +628,54 @@ def test_brain_ingest_stdin_creates_vault_mirror(
     mirrors = list(mirror_dir.glob("*.md"))
     assert len(mirrors) == 1, f"expected one mirror file, got {mirrors}"
     assert "Mirror this slack thread via MCP" in mirrors[0].read_text(
+        encoding="utf-8"
+    )
+
+
+def test_brain_ingest_stdin_bare_config_mirrors_into_env_vault_not_real(
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,  # noqa: ARG001 — ensures fresh schema
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Regression (2026-07-17 vault leak): a ``_State`` built from a BARE
+    ``Config(database_url=...)`` — no explicit ``vault_path``, exactly the shape
+    the pre-fix ``mcp_state`` fixture used — must mirror into the
+    ``BRAIN_VAULT_PATH`` sandbox, never the real ``~/brain-vault``.
+
+    Before the fix the bare Config's ``vault_path`` resolved to
+    ``DEFAULT_VAULT_PATH`` and ``brain_ingest_stdin`` wrote its mirror into the
+    live vault while the doc row went to the isolated test DB (an orphan file).
+    The pre-mirror ``assert`` guards the real vault: under the unfixed code the
+    Config resolves to ``~/brain-vault`` and the assert trips BEFORE any write,
+    so a RED run of this test never touches the live corpus.
+    """
+    from brain.config import DEFAULT_VAULT_PATH
+
+    sandbox = tmp_path / "env-sandbox-vault"
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(sandbox))
+    state = mcp_server._State(
+        cfg=Config(database_url=TEST_DATABASE_URL),
+        embedder=fake_embedder,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(mcp_server, "_state", state)
+
+    # Guard: fail before any mirror write if the bare Config still resolves to
+    # the live vault (the pre-fix bug). Keeps a RED run off ~/brain-vault.
+    assert state.cfg.vault_path == sandbox
+    assert state.cfg.vault_path != DEFAULT_VAULT_PATH
+
+    payload = mcp_server.brain_ingest_stdin(
+        content="Env-pinned mirror canary via MCP.\n",
+        source="krisp",
+        external_id="krisp:env-leak-canary",
+        title="Env Leak Canary",
+        content_type="transcript",
+    )
+    assert payload["created"] is True
+    mirrors = list((sandbox / "_ingested" / "krisp").glob("*.md"))
+    assert len(mirrors) == 1, f"expected one mirror in the sandbox, got {mirrors}"
+    assert "Env-pinned mirror canary via MCP" in mirrors[0].read_text(
         encoding="utf-8"
     )
 

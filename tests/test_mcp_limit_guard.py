@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Iterator
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -36,9 +37,13 @@ def mcp_state(
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,  # noqa: ARG001 — keeps the schema fresh
     fake_embedder: object,
+    tmp_path: Path,
 ) -> Iterator[mcp_server._State]:
+    # ``vault_path`` sandboxed to a per-test tmp dir so any mirroring MCP tool
+    # writes there, never the live ``~/brain-vault`` (belt-and-suspenders atop
+    # the ``_default_vault_path`` env fix + conftest ``BRAIN_VAULT_PATH`` pin).
     state = mcp_server._State(
-        cfg=Config(database_url=TEST_DATABASE_URL),
+        cfg=Config(database_url=TEST_DATABASE_URL, vault_path=tmp_path),
         embedder=fake_embedder,  # type: ignore[arg-type]
     )
     monkeypatch.setattr(mcp_server, "_state", state)
