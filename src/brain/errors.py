@@ -224,6 +224,7 @@ class ConnectError(BrainError):
     layers map it without a framework-specific import.
     """
 
+
 class DemoError(BrainError):
     """Raised when the ``brain demo`` sandbox cannot be provisioned / torn down.
 
