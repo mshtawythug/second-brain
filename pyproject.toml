@@ -1,10 +1,32 @@
 [project]
 name = "second-brain"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local personal knowledge base with hybrid search, queryable by Claude"
+readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
+keywords = [
+  "second-brain",
+  "knowledge-base",
+  "rag",
+  "pgvector",
+  "hybrid-search",
+  "mcp",
+  "ollama",
+  "local-first",
+]
+# NOTE: no `License ::` trove classifier here — the license is declared via the
+# PEP 639 SPDX expression (`license = "MIT"` + `license-files`) above. setuptools
+# >= 77 rejects a `License ::` classifier alongside an SPDX license expression
+# ("License classifiers have been superseded by license expressions"), so the
+# classifier would break the build. PyPI derives the license from the expression.
+classifiers = [
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Environment :: Console",
+  "Topic :: Text Processing :: Indexing",
+]
 dependencies = [
   "psycopg[binary]>=3.2",
   "pgvector>=0.3",
@@ -37,6 +59,11 @@ brain-rebuild = "brain.bin.rebuild:main"
 brain-install-launchd = "brain.bin.launchd:install_main"
 brain-uninstall-launchd = "brain.bin.launchd:uninstall_main"
 brain-monitor = "brain.bin.monitor:cli_main"
+
+[project.urls]
+Homepage = "https://github.com/mshtawythug/second-brain"
+Repository = "https://github.com/mshtawythug/second-brain"
+Issues = "https://github.com/mshtawythug/second-brain/issues"
 
 [build-system]
 requires = ["setuptools>=68"]
