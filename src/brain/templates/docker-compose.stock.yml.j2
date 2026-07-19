@@ -1,0 +1,26 @@
+# Jinja variables: brain_home, pg_port, compose_project
+# Stock pgvector compose — the FTS/hybrid twin of the committed root
+# docker-compose.yml, with NO AGE build stanza. Used by `brain setup --profile
+# minimal|standard`; the AGE image (docker-compose.yml.j2) is full-profile only.
+name: {{ compose_project }}
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: {{ compose_project }}-postgres
+    # shared_buffers 512MB: the working set exceeds the stock 128MB default,
+    # forcing cold FTS re-reads from disk. Applied as a `postgres -c` flag
+    # (no custom postgresql.conf). Matches the committed root compose.
+    command: postgres -c shared_buffers=512MB
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain
+      POSTGRES_DB: second_brain
+    ports:
+      - "{{ pg_port }}:5432"
+    volumes:
+      - {{ brain_home }}/data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d second_brain"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

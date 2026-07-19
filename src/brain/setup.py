@@ -11,7 +11,7 @@ from pathlib import Path
 
 import typer
 
-from ._compose import compose_cmd
+from ._compose import compose_cmd, compose_project_name
 from .bin._launcher import ensure_shim
 from .config import DEFAULT_VAULT_PATH, _brain_home_root
 from .errors import BrainError
@@ -320,8 +320,35 @@ def materialize_age_dockerfile(brain_home: Path) -> Path:
     return dest
 
 
+def render_compose_from_template(
+    template_text: str,
+    *,
+    brain_home: Path,
+    pg_port: int,
+    compose_project: str,
+) -> str:
+    """Render a packaged ``docker-compose*.yml.j2`` into a concrete compose body.
+
+    Substitutes the three placeholders every compose template shares
+    (``{{ brain_home }}``, ``{{ pg_port }}``, ``{{ compose_project }}``). The
+    project name flows into both the top-level ``name:`` and the derived
+    ``container_name`` so a non-default ``BRAIN_COMPOSE_PROJECT`` cannot collide
+    with the real ``brain`` stack. Pure function — unit-testable in isolation.
+    """
+    return (
+        template_text.replace("{{ brain_home }}", str(brain_home))
+        .replace("{{ pg_port }}", str(pg_port))
+        .replace("{{ compose_project }}", compose_project)
+    )
+
+
 def render_env_from_template(
-    template_text: str, *, pg_port: int, vault_path: Path | None
+    template_text: str,
+    *,
+    pg_port: int,
+    vault_path: Path | None,
+    embedder: str | None = None,
+    graph_enabled: bool | None = None,
 ) -> str:
     """Render the packaged ``env.example`` template into a concrete ``.env`` body.
 
@@ -332,10 +359,29 @@ def render_env_from_template(
     ``--port`` but the ``.env`` was copied verbatim, leaving a dead
     ``DATABASE_URL`` whenever ``--port`` differed). When ``vault_path`` is given,
     the commented-out ``# BRAIN_VAULT_PATH=`` line is activated with the chosen
-    vault. Pure function — no filesystem or environment access — so the
-    substitution is unit-testable in isolation.
+    vault.
+
+    ``embedder`` and ``graph_enabled`` let a profile pin those two settings
+    EXPLICITLY: minimal/standard must write ``BRAIN_GRAPH_ENABLED=false`` because
+    :class:`~brain.config.Config` defaults the graph ON, and minimal writes
+    ``BRAIN_EMBEDDER=none`` for an FTS-only brain. Left as ``None`` (the default)
+    the template's own ``BRAIN_EMBEDDER=arctic`` line and the commented
+    ``# BRAIN_GRAPH_ENABLED=true`` line are preserved untouched. Pure function —
+    no filesystem or environment access — so the substitution is unit-testable
+    in isolation.
     """
     text = template_text.replace("{{ pg_port }}", str(pg_port))
+    if embedder is not None:
+        text = text.replace(
+            "BRAIN_EMBEDDER=arctic",
+            f"BRAIN_EMBEDDER={embedder}",
+        )
+    if graph_enabled is not None:
+        value = "true" if graph_enabled else "false"
+        text = text.replace(
+            "# BRAIN_GRAPH_ENABLED=true",
+            f"BRAIN_GRAPH_ENABLED={value}",
+        )
     if vault_path is not None:
         text = text.replace(
             "# BRAIN_VAULT_PATH=",
@@ -670,10 +716,11 @@ def run_setup(
 
     def _write_compose_yml() -> None:
         template = resource_files("brain.templates") / "docker-compose.yml.j2"
-        text = template.read_text(encoding="utf-8")
-        text = (
-            text.replace("{{ brain_home }}", str(brain_home))
-            .replace("{{ pg_port }}", str(pg_port))
+        text = render_compose_from_template(
+            template.read_text(encoding="utf-8"),
+            brain_home=brain_home,
+            pg_port=pg_port,
+            compose_project=compose_project_name(),
         )
         compose_dest.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(compose_dest, text)

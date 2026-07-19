@@ -651,6 +651,49 @@ def test_setup_renders_chosen_port_into_generated_env(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# D5b — compose project isolation seam (BRAIN_COMPOSE_PROJECT)
+# ---------------------------------------------------------------------------
+
+
+def _packaged_compose_template(name: str) -> str:
+    """Read a shipped compose template the same way run_setup does."""
+    from importlib.resources import files as resource_files
+
+    return (resource_files("brain.templates") / name).read_text(encoding="utf-8")
+
+
+def test_render_compose_default_project_container_name() -> None:
+    """The default 'brain' project yields a 'brain-postgres' container name."""
+    from brain.setup import render_compose_from_template
+
+    out = render_compose_from_template(
+        _packaged_compose_template("docker-compose.stock.yml.j2"),
+        brain_home=Path("/tmp/bh"),
+        pg_port=55432,
+        compose_project="brain",
+    )
+    assert "container_name: brain-postgres" in out
+    assert "name: brain" in out
+    assert "55432:5432" in out
+    assert "{{ " not in out, "unrendered placeholder left in compose"
+
+
+def test_render_compose_project_derives_noncolliding_container_name() -> None:
+    """A non-default project derives a distinct container name (no prod collision)."""
+    from brain.setup import render_compose_from_template
+
+    out = render_compose_from_template(
+        _packaged_compose_template("docker-compose.stock.yml.j2"),
+        brain_home=Path("/tmp/bh"),
+        pg_port=5599,
+        compose_project="brain-qa-x",
+    )
+    assert "container_name: brain-qa-x-postgres" in out
+    assert "container_name: brain-postgres" not in out
+    assert "name: brain-qa-x" in out
+
+
+# ---------------------------------------------------------------------------
 # Regression: Bug 2 — interactive wiki decline must suppress launchd
 # ---------------------------------------------------------------------------
 

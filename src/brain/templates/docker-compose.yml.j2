@@ -1,5 +1,5 @@
-# Jinja variables: brain_home, pg_port
-name: brain
+# Jinja variables: brain_home, pg_port, compose_project
+name: {{ compose_project }}
 services:
   postgres:
     # Custom PG16 image: pgvector 0.8.2 + pgcrypto + Apache AGE 1.5.0-rc0 (GraphRAG).
@@ -13,7 +13,7 @@ services:
       context: {{ brain_home }}/docker/age
       dockerfile: Dockerfile
     image: ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
-    container_name: second-brain-postgres
+    container_name: {{ compose_project }}-postgres
     environment:
       POSTGRES_USER: brain
       POSTGRES_PASSWORD: brain
