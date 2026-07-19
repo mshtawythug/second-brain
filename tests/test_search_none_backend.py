@@ -11,6 +11,7 @@ consumer — inherits it. These tests lock:
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Any
 
@@ -122,7 +123,11 @@ def test_cli_search_degrades_and_prints_hint(
     test_db: psycopg.Connection,
     patch_embedder: Any,
 ) -> None:
-    """``brain search`` under a no-vector embedder still finds docs + warns once."""
+    """``brain search`` degrades, finds docs on stdout, and warns ONLY on stderr.
+
+    The hint must never leak into stdout — that is what keeps ``--json`` output
+    machine-parseable (see :func:`test_cli_search_json_stdout_is_clean`).
+    """
     _seed(
         test_db,
         title="Quarterly roadmap",
@@ -131,15 +136,38 @@ def test_cli_search_degrades_and_prints_hint(
     patch_embedder(_RaisingNoVectorEmbedder())
     result = CliRunner().invoke(app, ["search", "quarterly planning roadmap"])
     assert result.exit_code == 0, result.output
-    assert "Quarterly roadmap" in result.output
-    assert _HINT in result.output
+    # Results render on stdout; the hint is routed to stderr and stays off stdout.
+    assert "Quarterly roadmap" in result.stdout
+    assert _HINT in result.stderr
+    assert _HINT not in result.stdout
+
+
+def test_cli_search_json_stdout_is_clean(
+    test_db: psycopg.Connection,
+    patch_embedder: Any,
+) -> None:
+    """``brain search --json`` stdout parses as JSON; the hint rides on stderr only."""
+    doc_id = _seed(
+        test_db,
+        title="Quarterly roadmap",
+        content="Synthetic body about the quarterly planning roadmap and goals.",
+    )
+    patch_embedder(_RaisingNoVectorEmbedder())
+    result = CliRunner().invoke(
+        app, ["search", "quarterly planning roadmap", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)  # must be pure JSON — no hint mixed in
+    assert doc_id in [row["id"] for row in payload]
+    assert _HINT in result.stderr
+    assert _HINT not in result.stdout
 
 
 def test_cli_explain_degrades_and_prints_hint(
     test_db: psycopg.Connection,
     patch_embedder: Any,
 ) -> None:
-    """``brain explain`` degrades identically and prints the same hint."""
+    """``brain explain`` degrades identically and prints the same hint on stderr."""
     _seed(
         test_db,
         title="Quarterly roadmap",
@@ -148,7 +176,8 @@ def test_cli_explain_degrades_and_prints_hint(
     patch_embedder(_RaisingNoVectorEmbedder())
     result = CliRunner().invoke(app, ["explain", "quarterly planning roadmap"])
     assert result.exit_code == 0, result.output
-    assert _HINT in result.output
+    assert _HINT in result.stderr
+    assert _HINT not in result.stdout
 
 
 def test_cli_search_no_hint_with_normal_embedder(
