@@ -40,6 +40,14 @@ on:
       - "src/brain/templates/docker/age/**"
   workflow_dispatch:
 
+# Serialize builds: all runs push the SAME fixed image tag, so overlapping
+# master-Dockerfile pushes (or a dispatch overlapping a push) would otherwise race
+# duplicate ~20-min QEMU builds to the same ref. A single static group (not
+# ref-scoped) with cancel-in-progress keeps at most one build in flight, newest wins.
+concurrency:
+  group: publish-age-image
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
