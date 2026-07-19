@@ -7,13 +7,16 @@ Three implementations satisfy the :class:`brain.ingest.Embedder` Protocol:
 - :class:`VoyageEmbedder` — Voyage AI SDK. 1024-dim, paid SaaS.
 - :class:`Qwen3Embedder` — Qwen3-Embedding-8B over local Ollama. 4096-dim,
   free, but exceeds pgvector's HNSW cap so search uses sequential scan.
+- :class:`NullEmbedder` — FTS-only backend (``BRAIN_EMBEDDER=none``). Produces
+  no vectors; for users with no Ollama. Ingest + lexical search + doctor work;
+  the vector leg of hybrid search is skipped.
 
 Token counting is via tiktoken (cl100k_base) — offline and good enough for
 chunker budgeting. Each backend's :meth:`embed` accepts ``input_type`` to
 dispatch query vs document prompt formatting; the formatting is per-backend
 because each model is trained with a different convention (see comments).
 """
-from typing import Any
+from typing import Any, NoReturn
 
 import httpx
 import tiktoken
@@ -58,6 +61,31 @@ _QWEN3_DEFAULT_MODEL = "qwen3-embedding:8b"
 # if the user wants the newer generation.
 _VOYAGE_MODEL = "voyage-3.5"
 _VOYAGE_DEFAULT_BATCH = 128
+
+
+# The FTS-only backend surfaces this exact message everywhere it must explain
+# that semantic search is off. Kept as a module constant so the exception class
+# and any future reference stay in lockstep (DRY).
+_EMBED_DISABLED_MESSAGE = (
+    "semantic search is disabled (BRAIN_EMBEDDER=none) — install Ollama, set "
+    "BRAIN_EMBEDDER=arctic, then run 'brain init' and 'brain reembed' to enable it"
+)
+
+
+class EmbedDisabledError(EmbedError):
+    """Raised when an embed is attempted under the FTS-only ``none`` backend.
+
+    A sibling of :class:`OllamaEmbedError` / :class:`VoyageEmbedError` — it is an
+    :class:`~brain.errors.EmbedError`, so every ``except EmbedError`` handler
+    (the MCP server's ``_wrap_embed_error``, ``brain eval``'s per-query
+    tolerance) catches it uniformly. Distinct from the transport-failure
+    siblings because nothing *failed*: the ``NullEmbedder`` never produces
+    vectors by design, so any code path that reaches an actual embed call under
+    the ``none`` backend (e.g. ``brain ask`` / ``graphrag --mode fuse``) gets a
+    clear "install Ollama to enable it" message rather than a crash. The
+    ingest / search / doctor paths never reach it — they degrade earlier via the
+    duck-typed ``produces_embeddings`` flag.
+    """
 
 
 class OllamaEmbedError(EmbedError):
@@ -313,18 +341,69 @@ class VoyageEmbedder:
         return len(self._tokenizer.encode(text))
 
 
+class NullEmbedder:
+    """FTS-only backend: satisfies the Protocol but produces no vectors.
+
+    Selected via ``BRAIN_EMBEDDER=none`` for a user with no Ollama — ingest,
+    lexical (FTS) search, and ``brain doctor`` all work; only the vector leg of
+    hybrid search is unavailable. Two contract points make the upgrade path
+    painless:
+
+    - ``dim == 1024`` matches the arctic / voyage schema, so switching to a real
+      1024-dim backend later is a plain ``brain reembed`` backfill — NO
+      destructive column rebuild (``db.ensure_embedding_column`` sees the dims
+      already agree).
+    - ``produces_embeddings = False`` is a duck-typed flag (NOT part of the
+      :class:`brain.ingest.Embedder` Protocol — the real backends never declare
+      it). Callers check it via ``getattr(embedder, "produces_embeddings",
+      True)`` to degrade gracefully: the ingest pipeline stores NULL embeddings
+      and :func:`brain.search.hybrid_search` coerces to ``fts_only``.
+
+    :meth:`count_tokens` uses the same offline ``cl100k_base`` tokenizer as
+    every other backend so the chunker's token budgeting is unchanged.
+    :meth:`embed` never runs under the ingest / search / doctor paths (they
+    degrade earlier); if any other path calls it, it raises
+    :class:`EmbedDisabledError` with an upgrade hint rather than crashing
+    opaquely.
+    """
+
+    dim: int = 1024
+    produces_embeddings: bool = False
+
+    def __init__(self) -> None:
+        self._tokenizer = tiktoken.get_encoding("cl100k_base")
+
+    def embed(
+        self, texts: list[str], *, input_type: str = "document"
+    ) -> NoReturn:
+        """Always raise :class:`EmbedDisabledError` — the null backend has no vectors.
+
+        The keyword-only ``input_type`` default mirrors the
+        :class:`brain.ingest.Embedder` Protocol so the signature is substitutable
+        for the real backends.
+        """
+        raise EmbedDisabledError(_EMBED_DISABLED_MESSAGE)
+
+    def count_tokens(self, text: str) -> int:
+        """Return the number of tokens in ``text`` per the local tiktoken tokenizer."""
+        return len(self._tokenizer.encode(text))
+
+
 def make_embedder(cfg: Config) -> Embedder:
     """Return the active embedder based on ``BRAIN_EMBEDDER`` config.
 
-    Dispatches on ``cfg.embedder`` ∈ ``{"arctic", "voyage", "qwen3"}``.
-    Raises :class:`ConfigError` when the chosen backend's required config is
-    missing (e.g. ``VOYAGE_API_KEY`` for the voyage backend) — earlier than
-    the first embed call so ``brain init`` and ``brain doctor`` surface the
+    Dispatches on ``cfg.embedder`` ∈ ``{"arctic", "voyage", "qwen3", "none"}``.
+    ``none`` returns the FTS-only :class:`NullEmbedder` (no Ollama / no API key
+    required). Raises :class:`ConfigError` when the chosen backend's required
+    config is missing (e.g. ``VOYAGE_API_KEY`` for the voyage backend) — earlier
+    than the first embed call so ``brain init`` and ``brain doctor`` surface the
     misconfiguration cleanly.
 
     Returns the :class:`brain.ingest.Embedder` Protocol; callers should not
     depend on the concrete subclass.
     """
+    if cfg.embedder == "none":
+        return NullEmbedder()
     if cfg.embedder == "arctic":
         return ArcticEmbedder(host=cfg.ollama_host, keep_alive=cfg.ollama_keep_alive)
     if cfg.embedder == "qwen3":
@@ -340,5 +419,6 @@ def make_embedder(cfg: Config) -> Embedder:
             )
         return VoyageEmbedder(api_key=cfg.voyage_api_key)
     raise ConfigError(
-        f"BRAIN_EMBEDDER must be one of: arctic, voyage, qwen3 (got {cfg.embedder!r})"
+        f"BRAIN_EMBEDDER must be one of: arctic, voyage, qwen3, none "
+        f"(got {cfg.embedder!r})"
     )

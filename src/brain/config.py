@@ -10,7 +10,11 @@ from dotenv import dotenv_values, find_dotenv
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_QWEN3_MODEL = "qwen3-embedding:8b"
 DEFAULT_EMBEDDER = "arctic"
-_VALID_EMBEDDERS = {"arctic", "voyage", "qwen3"}
+# ``none`` is the FTS-only backend (see :class:`brain.embeddings.NullEmbedder`):
+# a user with no Ollama gets a working brain (ingest + lexical search + passing
+# doctor) instead of crashes. It produces no vectors, so hybrid search degrades
+# to the FTS leg.
+_VALID_EMBEDDERS = {"arctic", "voyage", "qwen3", "none"}
 
 # How long Ollama keeps a model loaded in VRAM between requests. Passed as
 # ``keep_alive`` in every outgoing Ollama HTTP payload (``/api/embed``,
@@ -791,7 +795,7 @@ class Config:
         embedder = os.environ.get("BRAIN_EMBEDDER", DEFAULT_EMBEDDER).lower()
         if embedder not in _VALID_EMBEDDERS:
             raise ConfigError(
-                f"BRAIN_EMBEDDER must be one of: arctic, voyage, qwen3 "
+                f"BRAIN_EMBEDDER must be one of: arctic, voyage, qwen3, none "
                 f"(got {embedder!r})"
             )
         voyage_api_key = os.environ.get("VOYAGE_API_KEY")
