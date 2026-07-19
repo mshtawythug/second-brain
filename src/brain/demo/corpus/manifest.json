@@ -1,0 +1,403 @@
+[
+  {
+    "external_id": "demo-manual-0001",
+    "source": "manual",
+    "title": "Compliance Horror Stories — collected war stories",
+    "date": "2026-06-02",
+    "content_type": "note",
+    "tags": [
+      "compliance",
+      "soc2",
+      "war-stories"
+    ],
+    "participants": [],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "A running list of the compliance horror stories I never want to repeat. Every entry is a real lesson dressed up as a war story: the audit we failed because nobody owned evidence collection, the vendor who shipped customer data to an unencrypted bucket, the deletion request that took three weeks because no one could say where the data actually lived. I keep these stories close because they are cheaper to learn from on paper than in a board meeting. The pattern is always the same — a control looked green on a dashboard while the reality underneath quietly rotted. When a new engineer joins Larkspur I walk them through this list first. Compliance is not paperwork; it is the difference between a calm quarter and a genuine horror story with our name on it. Add yours below, keep the collection honest, and please write the moral at the bottom so the next reader gets the lesson without living it."
+  },
+  {
+    "external_id": "demo-krisp-0002",
+    "source": "krisp",
+    "title": "SOC 2 Type II readiness sync — Sam & Priya",
+    "date": "2026-05-11",
+    "content_type": "transcript",
+    "tags": [
+      "soc2",
+      "compliance",
+      "audit"
+    ],
+    "participants": [
+      "Sam Rivera",
+      "Priya Okafor"
+    ],
+    "duration_min": 45,
+    "thread_id": null,
+    "body": "Priya walked me through where our SOC 2 Type II controls actually stand versus where the dashboard claims they stand, and the gap is uncomfortable. Change management has no consistent approval trail, access reviews are three months overdue, and our logging retention quietly resets every fourteen days. Priya has seen this movie before — she told me two compliance horror stories from other startups that failed their first Type II because evidence was reconstructed the night before fieldwork. We agreed to stop treating readiness as a checkbox and start treating it as a habit. Action items: assign a control owner for every trust-services criterion, automate evidence capture, and rehearse the auditor interview so nobody freezes. The stories Priya shared were sobering, but better a rehearsal now than a real horror when fieldwork starts. We meet again in two weeks to review the evidence backlog and confirm every criterion finally has a name attached to it."
+  },
+  {
+    "external_id": "demo-krisp-0003",
+    "source": "krisp",
+    "title": "Incident postmortem — payments outage",
+    "date": "2026-04-28",
+    "content_type": "transcript",
+    "tags": [
+      "incident",
+      "postmortem",
+      "compliance"
+    ],
+    "participants": [
+      "Sam Rivera",
+      "Riley Nakamura"
+    ],
+    "duration_min": 30,
+    "thread_id": null,
+    "body": "Riley led the blameless postmortem for the six-hour payments outage. Root cause: a config change disabled retries against the payment processor, and because our logging retention had silently dropped to seven days, we lost the evidence we needed to reconstruct the first ninety minutes. That missing window turned a bad night into a compliance problem — we could not prove to the auditor when the incident actually started. Riley reframed it as one of those on-call horror stories that teaches two lessons at once: fix the retry logic, and never let observability retention drift below the compliance floor. We are the sum of the stories we refuse to repeat. Action items: restore ninety-day retention, add a synthetic payment probe that pages before customers notice, and write the runbook we wished we had at two in the morning. Nobody was blamed, but everybody left the room with homework and a healthier respect for boring guardrails."
+  },
+  {
+    "external_id": "demo-slack-0004",
+    "source": "slack",
+    "title": "#compliance — audit war stories thread",
+    "date": "2026-05-14",
+    "content_type": "message",
+    "tags": [
+      "compliance",
+      "audit",
+      "war-stories"
+    ],
+    "participants": [
+      "Sam Rivera",
+      "Marcus Chen"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "sam.rivera: ok drop your worst-audit-ever war stories here, I'll start — the auditor asked for our access review evidence and we had a spreadsheet last touched eleven months ago\nmarcus.chen: rookie numbers. at my last shop the SOC 2 auditor found a service account with a password of 'password' still live in production. genuine horror.\nsam.rivera: that is a real horror story. mine at least was just neglect, not malice\nmarcus.chen: the compliance stories that keep me up are the boring ones — no evidence, no owner, no trail. malice is rare, entropy is constant\nsam.rivera: writing that on a sticky note, entropy is the real auditor\nmarcus.chen: exactly. every one of these stories is just a control nobody watered. let's turn the thread into a checklist before we forget the lesson\nsam.rivera: agreed. I'll collect the war stories into the horror-stories doc so new folks read them on day one"
+  },
+  {
+    "external_id": "demo-gmail-0005",
+    "source": "gmail",
+    "title": "Re: SOC 2 Type II — evidence request (URGENT)",
+    "date": "2026-05-09",
+    "content_type": "email",
+    "tags": [
+      "soc2",
+      "audit",
+      "compliance"
+    ],
+    "participants": [
+      "Priya Okafor",
+      "Sam Rivera"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "Sam,\n\nAhead of fieldwork next week I need the evidence package uploaded to the shared portal. There are forty artifacts on the request list; the ones most likely to slip are the quarterly access reviews, the change-management approvals for the last two release trains, and the vendor risk assessments for anyone touching customer data. Please prioritize those three.\n\nI know forty artifacts in forty-eight hours sounds brutal, but most of it already exists — it just needs to be exported, dated, and named consistently. Inconsistent file names are the number-one reason auditors send follow-up questions, which is what actually blows the timeline.\n\nIf a control genuinely has no evidence, tell me now rather than at fieldwork. A known gap with a remediation plan is a manageable finding; a surprise gap is a scramble. I will hold thirty minutes tomorrow to unblock anything you flag.\n\nBest,\nPriya Okafor\npriya.okafor@example.com"
+  },
+  {
+    "external_id": "demo-gmail-0006",
+    "source": "gmail",
+    "title": "Vendra security review — findings",
+    "date": "2026-05-20",
+    "content_type": "email",
+    "tags": [
+      "vendor-risk",
+      "compliance",
+      "legal"
+    ],
+    "participants": [
+      "Dana Whitfield",
+      "Sam Rivera"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "Sam,\n\nLegal finished reviewing Vendra's security questionnaire and I have concerns before we counter-sign. Vendra could not produce a current SOC 2 report — they pointed to a Type I from two years ago and a Type II 'in progress.' Their answers on data residency were vague, and they declined to commit to a breach-notification window shorter than thirty days, which is outside our standard.\n\nNone of this is automatically disqualifying, but it changes the shape of the deal. I want a security addendum that pins a seventy-two-hour breach-notification clause, a right-to-audit provision, and a hard requirement that customer data stays in-region. If Vendra will not sign that, we should treat this as a vendor-risk red flag and escalate to the risk committee.\n\nCan you loop in Jordan on their side so we are negotiating from the same document? I would rather fix this in the contract now than discover it during an incident later.\n\nDana Whitfield\ndana.whitfield@example.com"
+  },
+  {
+    "external_id": "demo-krisp-0007",
+    "source": "krisp",
+    "title": "PCI scope creep review — Marcus & Sam",
+    "date": "2026-06-01",
+    "content_type": "transcript",
+    "tags": [
+      "pci",
+      "compliance",
+      "scope-creep"
+    ],
+    "participants": [
+      "Marcus Chen",
+      "Sam Rivera"
+    ],
+    "duration_min": 40,
+    "thread_id": null,
+    "body": "Marcus flagged that a new checkout API is quietly pulling almost our entire production environment into PCI scope. The moment that endpoint started handling raw card numbers instead of tokens, every system it touches inherited the compliance burden — logging, network segmentation, quarterly scans, the works. What should have been a narrow cardholder-data enclave is now sprawling. Marcus called it a classic scope-creep horror story: nobody decided to expand PCI scope, it just crept because one shortcut skipped tokenization. We traded a two-week integration for a six-month audit surface. The fix is to reintroduce the tokenization proxy so raw card data never lands in our services, shrinking scope back to the enclave. These are the stories I want in the postmortem library so the next team feels the cost before they take the shortcut. Action items: front the tokenization proxy, redraw the network diagram, and brief the assessor before the next scan so nothing surprises them."
+  },
+  {
+    "external_id": "demo-slack-0008",
+    "source": "slack",
+    "title": "#security — GDPR deletion request panic",
+    "date": "2026-05-22",
+    "content_type": "message",
+    "tags": [
+      "gdpr",
+      "compliance",
+      "privacy"
+    ],
+    "participants": [
+      "Sam Rivera",
+      "Dana Whitfield"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "dana.whitfield: we got a GDPR erasure request and the clock is ticking — thirty days to prove the person is gone from every system\nsam.rivera: define every system, because that's the scary part. prod db, the analytics warehouse, backups, the email tool, and the support desk all hold copies\ndana.whitfield: five systems, five different deletion mechanisms, and backups can't be selectively purged\nsam.rivera: right, so the compliance answer is a documented retention policy that ages backups out, plus a deletion runbook for the four live systems\ndana.whitfield: can we actually attest deletion today or are we improvising\nsam.rivera: improvising, which is exactly why this keeps happening. let's build the runbook now so the next erasure request is boring instead of a fire drill\ndana.whitfield: agreed, boring is the goal. I'll draft the retention policy, you map the five systems and their deletion paths"
+  },
+  {
+    "external_id": "demo-manual-0009",
+    "source": "manual",
+    "title": "Larkspur security controls cheatsheet",
+    "date": "2026-03-30",
+    "content_type": "note",
+    "tags": [
+      "soc2",
+      "controls",
+      "reference"
+    ],
+    "participants": [],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "A one-page reference for the controls we care about most, so nobody has to rediscover them mid-audit. Access management: SSO everywhere, quarterly access reviews, no shared accounts. Change management: every production change rides a pull request with a second reviewer and an automated deploy record. Logging: ninety-day retention minimum, centralized and tamper-evident. Encryption: TLS in transit, disk encryption at rest, secrets in the vault and never in code. Vendor management: a signed security addendum and a current attestation before any vendor touches customer data. Incident response: a named on-call, a severity rubric, and a blameless postmortem for anything customer-facing. Backups: encrypted, tested quarterly, with a documented retention schedule. None of this is exotic; the value is in doing it consistently and being able to show the evidence on demand. Print it, pin it above your desk, and update it the day a control changes. Consistency beats heroics, and a boring cheatsheet beats a clever memory every single time."
+  },
+  {
+    "external_id": "demo-gmail-0010",
+    "source": "gmail",
+    "title": "Board update — audit status",
+    "date": "2026-06-05",
+    "content_type": "email",
+    "tags": [
+      "audit",
+      "board",
+      "soc2"
+    ],
+    "participants": [
+      "Sam Rivera"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "Board,\n\nA short update on our audit posture heading into the second half. We are on track for our SOC 2 Type II observation window to close on schedule. The evidence backlog that worried me last quarter is now largely automated — access reviews, change approvals, and logging retention all generate their own trail without a human chasing screenshots.\n\nTwo open items I want visible at the board level. First, a vendor security review surfaced gaps with one of our data processors; legal is negotiating a stronger security addendum and I will report the outcome next month. Second, a checkout integration briefly expanded our PCI scope, and we have a remediation underway to shrink it back.\n\nNeither item is a fire, but I would rather you hear about them from me early than in a findings report later. Our compliance maturity is trending in the right direction, and the automation investment is already paying for itself in reduced audit thrash.\n\nSam Rivera\nsam.rivera@example.com"
+  },
+  {
+    "external_id": "demo-krisp-0011",
+    "source": "krisp",
+    "title": "Vendor risk committee — Q2",
+    "date": "2026-05-18",
+    "content_type": "transcript",
+    "tags": [
+      "vendor-risk",
+      "compliance",
+      "risk"
+    ],
+    "participants": [
+      "Marcus Chen",
+      "Sam Rivera"
+    ],
+    "duration_min": 45,
+    "thread_id": null,
+    "body": "The Q2 vendor risk committee reviewed our top data processors. Vendra dominated the conversation — no current attestation, vague data-residency answers, and a thirty-day breach clause we will not accept. Marcus then told the committee a genuine vendor horror story from his last company: a marketing tool with over-broad access was breached, and because the contract had no notification clause, they learned about it from a customer, not the vendor. That single story reset the room's risk appetite. We agreed compliance for vendors has to be contractual, not aspirational: current attestation on file, right-to-audit, and a seventy-two-hour breach window or we walk. These stories are exactly why the committee exists — to price risk before it becomes an incident with our name on it. Action items: put Vendra on a remediation clock, standardize the security addendum across all processors, and re-score the portfolio next quarter. A vendor breach becomes our headline whether or not the contract admits it."
+  },
+  {
+    "external_id": "demo-slack-0012",
+    "source": "slack",
+    "title": "#eng — logging retention gotcha",
+    "date": "2026-04-30",
+    "content_type": "message",
+    "tags": [
+      "incident",
+      "logging",
+      "eng"
+    ],
+    "participants": [
+      "Riley Nakamura",
+      "Sam Rivera"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "riley.nakamura: PSA for everyone — the logging retention gotcha that bit us in the payments outage is a config default, not a bug\nsam.rivera: the one where retention silently drops to seven days?\nriley.nakamura: that one. the log shipper resets to its packaged default whenever the config map is recreated, and nobody notices until you need the old logs\nsam.rivera: which is always the worst possible moment. see the payments postmortem for the full write-up\nriley.nakamura: exactly. I've pinned an alert that fires if retention drops below ninety days so it can't drift silently again\nsam.rivera: this is the kind of compliance guardrail I love — invisible until the day it saves you\nriley.nakamura: cheap insurance. the alert took an hour, the outage cost us six. adding it to the controls cheatsheet so it outlives both of us"
+  },
+  {
+    "external_id": "demo-gmail-0013",
+    "source": "gmail",
+    "title": "Re: PCI DSS 4.0 gap assessment",
+    "date": "2026-05-25",
+    "content_type": "email",
+    "tags": [
+      "pci",
+      "compliance"
+    ],
+    "participants": [
+      "Marcus Chen",
+      "Sam Rivera"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "Sam,\n\nI finished a first pass at our PCI DSS 4.0 gap assessment and the headline is good news with an asterisk. Most of the tightened 4.0 requirements — stronger authentication, more granular access, and the new targeted-risk-analysis language — we already meet because of the SOC 2 work. The asterisk is scope. As long as the checkout integration keeps raw card data in our environment, the number of in-scope systems roughly triples, and so does the assessment cost.\n\nMy recommendation is to treat the tokenization remediation as the single highest-leverage compliance investment this quarter. Shrinking scope back to the cardholder-data enclave does more for our 4.0 readiness than any individual control tweak.\n\nI have attached the requirement-by-requirement matrix. The red rows are all downstream of scope, not of missing controls, which is the encouraging part. Let's align with the assessor before the next quarterly scan so we are not surprised.\n\nMarcus Chen\nmarcus.chen@example.com"
+  },
+  {
+    "external_id": "demo-manual-0014",
+    "source": "manual",
+    "title": "Interview prep — tell me about a compliance failure",
+    "date": "2026-06-08",
+    "content_type": "note",
+    "tags": [
+      "interview-prep",
+      "compliance",
+      "career"
+    ],
+    "participants": [],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "STAR notes for the inevitable 'tell me about a time a compliance effort failed' question. Situation: we walked into our first SOC 2 Type II observation window with controls that looked green on a dashboard but had no evidence trail underneath. Task: I owned readiness and had to turn a paperwork exercise into an operating habit before fieldwork. Action: I assigned a control owner to every trust-services criterion, automated evidence capture so nobody was chasing screenshots, and ran a mock auditor interview so the team would not freeze under real questions. Result: we closed the window with a small, well-documented set of findings and a remediation plan the auditor accepted, instead of a last-minute scramble.\n\nThe lesson I lead with: compliance fails quietly, as entropy, not as malice. The teams that pass treat controls like habits they water daily. Keep the answer specific, own the early mistake honestly, and finish on the system you built so the failure cannot recur next cycle."
+  },
+  {
+    "external_id": "demo-krisp-0015",
+    "source": "krisp",
+    "title": "SOC 2 kickoff — scoping call",
+    "date": "2026-04-15",
+    "content_type": "transcript",
+    "tags": [
+      "soc2",
+      "kickoff",
+      "compliance"
+    ],
+    "participants": [
+      "Priya Okafor",
+      "Sam Rivera"
+    ],
+    "duration_min": 35,
+    "thread_id": null,
+    "body": "Kickoff call with Priya to scope our SOC 2 Type II engagement. We agreed on the trust-services criteria in scope: security is mandatory, and we are adding availability and confidentiality because our customers ask about uptime and data handling. Privacy stays out of scope for this cycle to keep the first observation window achievable. Priya walked through the timeline — a three-month observation window, then fieldwork — and set expectations that the work is mostly evidence discipline, not heroics. We mapped the systems in scope: the production platform, the deploy pipeline, the logging stack, and the vendor processors that touch customer data. Priya's guidance was to start capturing evidence on day one rather than reconstructing it later, because reconstruction is where compliance programs quietly go wrong. Action items: finalize the system description, name control owners, and stand up the evidence portal before the window opens. A calm, well-scoped kickoff sets the tone for the entire engagement, and Priya has run enough of these to know."
+  },
+  {
+    "external_id": "demo-slack-0016",
+    "source": "slack",
+    "title": "#compliance — evidence automation idea",
+    "date": "2026-06-03",
+    "content_type": "message",
+    "tags": [
+      "compliance",
+      "automation",
+      "ideas"
+    ],
+    "participants": [
+      "Sam Rivera"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "sam.rivera: idea I can't shake — most of our audit pain is evidence collection, so what if we automated it end to end?\nsam.rivera: every access review, every change approval, every backup test already emits a signal. we just don't capture it in one place\nsam.rivera: imagine a job that snapshots the evidence weekly, timestamps it, and drops it in the portal auditors already use. no human chasing screenshots\nsam.rivera: the compliance win is huge — evidence stops being a fire drill and becomes a byproduct of doing the work\nsam.rivera: bonus, it kills the number-one auditor follow-up, which is inconsistent or undated artifacts\nsam.rivera: going to prototype this against the SOC 2 request list and see how many of the forty artifacts we can generate automatically. if it is even half, that is a week of my life back every quarter"
+  },
+  {
+    "external_id": "demo-gmail-0017",
+    "source": "gmail",
+    "title": "Re: Vendra contract — security addendum",
+    "date": "2026-05-28",
+    "content_type": "email",
+    "tags": [
+      "vendor-risk",
+      "legal",
+      "contract"
+    ],
+    "participants": [
+      "Jordan Alvarez",
+      "Dana Whitfield",
+      "Sam Rivera"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "Sam and Dana,\n\nThanks for sending the redlined security addendum. I have taken it to our security lead at Vendra and here is where we land. We can commit to the seventy-two-hour breach-notification window and the data-residency requirement — both are already close to our internal standard. The right-to-audit clause is where we need to negotiate; an unlimited annual on-site audit is a lot for a company our size, so we would propose one scheduled audit per year plus our SOC 2 report on request once the Type II completes next quarter.\n\nI think that gets us most of the way to what Dana's risk committee wants without either side signing something we cannot operationally honor. If the once-yearly cadence works, I can turn the addendum around by end of week.\n\nHappy to jump on a call if it is faster.\n\nBest,\nJordan Alvarez\njordan.alvarez@example.com"
+  },
+  {
+    "external_id": "demo-manual-0018",
+    "source": "manual",
+    "title": "Postmortem template + blameless norms",
+    "date": "2026-04-10",
+    "content_type": "note",
+    "tags": [
+      "postmortem",
+      "template",
+      "process"
+    ],
+    "participants": [],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "Our standard postmortem template and the norms that make it work. Header: incident name, severity, start and end time, and the customer impact in one plain sentence. Timeline: a factual sequence of events with timestamps, written without blame or hindsight language. Root cause: the honest technical and organizational reasons, plural — single-cause postmortems are usually incomplete. Contributing factors: the conditions that made the incident possible or worse. What went well: the recovery steps and detection that actually helped, so we reinforce them. Action items: each with an owner and a due date, tracked to completion, not filed and forgotten.\n\nThe norms matter more than the template. We assume everyone acted reasonably with the information they had. We critique systems, not people. We write for the engineer who joins next year and needs to learn without shame. A blameless culture is what makes people report the near-misses, and near-misses are the cheapest lessons we ever get. Protect that, and the template mostly fills itself in."
+  },
+  {
+    "external_id": "demo-krisp-0019",
+    "source": "krisp",
+    "title": "Weekly staff — risk register review",
+    "date": "2026-05-30",
+    "content_type": "transcript",
+    "tags": [
+      "risk",
+      "compliance",
+      "staff"
+    ],
+    "participants": [
+      "Marcus Chen",
+      "Sam Rivera"
+    ],
+    "duration_min": 30,
+    "thread_id": null,
+    "body": "Weekly staff meeting, risk-register review. Marcus walked the leadership team through the top five risks and the near-misses from the past month. The one that got attention was a near-miss where a deploy almost shipped a logging change that would have dropped our retention below the compliance floor — caught in review by the new alert Riley added. Marcus made the point that a near-miss is a free lesson: the same signal as an incident with none of the cost. We agreed to start logging near-misses in the risk register alongside real incidents so the pattern is visible over time. Other items: the Vendra remediation clock is ticking, PCI scope reduction is on track, and the SOC 2 evidence backlog is now automated. The register is healthier than last quarter, but Marcus reminded everyone that a quiet register is earned weekly, not granted permanently. Action item: add a near-miss column and start populating it this sprint."
+  },
+  {
+    "external_id": "demo-slack-0020",
+    "source": "slack",
+    "title": "#random — worst on-call ever",
+    "date": "2026-05-05",
+    "content_type": "message",
+    "tags": [
+      "on-call",
+      "incident",
+      "war-stories"
+    ],
+    "participants": [
+      "Riley Nakamura",
+      "Sam Rivera"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "riley.nakamura: #random poll — what is your worst on-call ever? I'll go: paged at three in the morning because a certificate expired that nobody owned, fixed it, then got paged again an hour later because the fix rotated a second cert that ALSO nobody owned\nsam.rivera: that is a genuine horror story\nriley.nakamura: it gets better — the expired cert was on the log shipper, so we had a gap in the exact logs we needed, which turned an ops incident into a compliance one\nsam.rivera: the crossover episode nobody asked for. on-call horror meets audit finding\nriley.nakamura: the moral of most of my on-call stories is the same: unowned things fail at the worst time. every cert, every job, every control needs a name on it\nsam.rivera: adding 'ownership' to the compliance cheatsheet in giant letters. best worst-on-call story yet, honestly"
+  },
+  {
+    "external_id": "demo-gmail-0021",
+    "source": "gmail",
+    "title": "SOC 2 report DELIVERED",
+    "date": "2026-06-12",
+    "content_type": "email",
+    "tags": [
+      "soc2",
+      "milestone",
+      "compliance"
+    ],
+    "participants": [
+      "Priya Okafor",
+      "Sam Rivera"
+    ],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "Sam,\n\nIt is done — your SOC 2 Type II report is final and uploaded to the portal. Congratulations to you and the whole Larkspur team. This was one of the cleaner first-time engagements I have run: a small number of well-documented findings, each with a remediation plan already in motion, and no last-minute evidence scramble because you automated capture early.\n\nA few notes for next cycle. Keep the evidence automation running — the thing that makes a second Type II easy is never letting the trail go cold. Close out the two open remediations, the vendor addendum and the PCI scope reduction, before the next window opens so they do not reappear as repeat findings. And keep telling the team why this matters; culture is the control that holds all the others up.\n\nIt has been a pleasure working with you. Share the report with your board and your customers with confidence.\n\nBest,\nPriya Okafor\npriya.okafor@example.com"
+  },
+  {
+    "external_id": "demo-manual-0022",
+    "source": "manual",
+    "title": "Lessons learned — audit season retro",
+    "date": "2026-06-15",
+    "content_type": "note",
+    "tags": [
+      "retro",
+      "compliance",
+      "lessons-learned"
+    ],
+    "participants": [],
+    "duration_min": null,
+    "thread_id": null,
+    "body": "Audit season is over; here is what I want to carry forward. The single biggest lever was evidence automation — the moment collecting evidence became a byproduct of doing the work instead of a quarterly fire drill, the whole program relaxed. Second lever: ownership. Every control, cert, vendor, and job that caused pain this year did so because nobody owned it, and naming an owner is the cheapest reliability and compliance upgrade we have. Third: contracts beat hope. The vendor risk that scared us most was the one with no notification clause, and the fix was legal, not technical. Finally, culture. Blameless postmortems and honest risk reviews are what surfaced the near-misses early enough to fix them cheaply.\n\nThe throughline across every meeting, thread, and postmortem this cycle is the same: compliance is not a document you produce at the end, it is a set of habits you maintain all year. We got measurably better at the habits. Let's not let the trail go cold over the summer."
+  }
+]

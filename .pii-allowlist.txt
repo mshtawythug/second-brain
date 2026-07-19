@@ -20,6 +20,19 @@ Sidekick
 Jane Doe
 John Doe
 
+# --- `brain demo` synthetic cast + companies (invented — see src/brain/demo) --
+# The zero-Ollama demo corpus is 100% fictional. These names/companies are
+# invented for the demo world and must never be confused with real PII.
+Sam Rivera
+Priya Okafor
+Marcus Chen
+Dana Whitfield
+Jordan Alvarez
+Riley Nakamura
+Larkspur
+Vendra
+Meridian
+
 # --- Public / generic terms confirmed safe (not the user's PII) ----------
 # Known false positives that surfaced from the corpus as generic public terms.
 NFPA
