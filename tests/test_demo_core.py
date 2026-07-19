@@ -7,6 +7,7 @@ structurally incapable of touching the prod database (port 55432 / db
 prod-looking URL before opening any connection.
 """
 import socket
+import subprocess
 from pathlib import Path
 
 import psycopg
@@ -14,7 +15,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from brain import demo as demo_mod
-from brain.errors import BrainError
+from brain.errors import BrainError, DemoError
 
 # URLs that must be refused by every demo primitive (mirror conftest's prod
 # fingerprints: current + historical ports, and the exact prod db name).
@@ -160,3 +161,32 @@ def test_teardown_passes_compose_file_when_present(
     assert "-f" in called
     assert str(tmp_path / demo_mod.COMPOSE_FILENAME) in called
     assert called[-2:] == ["down", "-v"]
+
+
+def test_teardown_translates_docker_unavailable(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    mocker.patch("brain.demo.DEMO_HOME", tmp_path)
+    mocker.patch("brain.demo._run", side_effect=FileNotFoundError("docker"))
+    with pytest.raises(DemoError, match="Docker"):
+        demo_mod.teardown()
+
+
+def test_run_docker_translates_daemon_down(mocker: MockerFixture) -> None:
+    # CalledProcessError → DemoError carrying docker's own stderr.
+    err = subprocess.CalledProcessError(1, ["docker"], stderr="daemon is not running")
+    mocker.patch("brain.demo._run", side_effect=err)
+    with pytest.raises(DemoError, match="daemon is not running"):
+        demo_mod._run_docker(["docker", "compose", "up", "-d"])
+
+
+def test_run_docker_translates_missing_binary(mocker: MockerFixture) -> None:
+    mocker.patch("brain.demo._run", side_effect=FileNotFoundError("docker"))
+    with pytest.raises(DemoError, match="Docker CLI not found"):
+        demo_mod._run_docker(["docker", "compose", "up", "-d"])
+
+
+def test_run_docker_translates_timeout(mocker: MockerFixture) -> None:
+    mocker.patch("brain.demo._run", side_effect=subprocess.TimeoutExpired(["docker"], 120))
+    with pytest.raises(DemoError, match="timed out"):
+        demo_mod._run_docker(["docker", "compose", "up", "-d"])

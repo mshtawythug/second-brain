@@ -27,7 +27,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from brain.db import connect, ensure_embedding_column, run_migrations
-from brain.errors import BrainError
+from brain.errors import BrainError, DemoError
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.queries import finalize_embedding_index
 from brain.search import SearchResult, hybrid_search
@@ -263,6 +263,35 @@ def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[
     )
 
 
+def _run_docker(args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run a docker command (check=True), translating failures into ``DemoError``.
+
+    Mirrors the boundary translation in :class:`brain.audio.TtsCommandRunner`: a
+    missing binary, a dead daemon, or a timeout surfaces as a single actionable
+    :class:`DemoError` carrying Docker's own stderr — never a raw traceback that
+    escapes the CLI's ``except BrainError`` catch.
+    """
+    try:
+        return _run(args)
+    except FileNotFoundError as exc:
+        raise DemoError(
+            "Docker CLI not found while starting the demo container — install "
+            "Docker, or pass --database-url <postgres-url> to seed an existing "
+            "empty database."
+        ) from exc
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip() or "<no stderr captured>"
+        raise DemoError(
+            f"Docker failed to start the demo container (exit {exc.returncode}). "
+            f"Is the Docker daemon running?\n{detail}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DemoError(
+            f"Docker timed out after {exc.timeout:.0f}s while starting the demo "
+            "container. Check that the Docker daemon is responsive."
+        ) from exc
+
+
 def _compose_file_text(port: int) -> str:
     """Render the minimal demo compose file (stock image, named volume)."""
     return (
@@ -342,7 +371,7 @@ def provision(port: int) -> str:
     database_url = demo_database_url(port)
     _assert_not_demo_prod_db(database_url)
     _write_compose_file(port)
-    _run(
+    _run_docker(
         [
             "docker", "compose",
             "-p", COMPOSE_PROJECT,
@@ -403,10 +432,21 @@ def teardown() -> None:
     ``down -v`` removes the named volume too, so nothing of the demo survives.
     Only ever targets the ``brain-demo`` compose project — never prod (a
     separate project on a bind-mount that ``down -v`` cannot reach anyway).
+
+    ``check=False`` already tolerates a non-zero ``down`` (nothing to remove),
+    but a missing Docker binary (``FileNotFoundError``) or a hung daemon
+    (``TimeoutExpired``) would still escape — translate those into a clean
+    :class:`DemoError` so the CLI reports gracefully instead of tracebacking.
     """
     compose_file = DEMO_HOME / COMPOSE_FILENAME
     args = ["docker", "compose", "-p", COMPOSE_PROJECT]
     if compose_file.is_file():
         args += ["-f", str(compose_file)]
     args += ["down", "-v"]
-    _run(args, check=False)
+    try:
+        _run(args, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DemoError(
+            f"Docker was unavailable while tearing down the demo sandbox: {exc}. "
+            "If Docker isn't installed there is nothing to tear down."
+        ) from exc

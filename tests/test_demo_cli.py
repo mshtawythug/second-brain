@@ -6,6 +6,7 @@ Docker in CI); status/teardown mock the single subprocess boundary
 test double, not monkey-patching production code.
 """
 import subprocess
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -159,3 +160,71 @@ def test_port_out_of_range_is_rejected_cleanly() -> None:
     assert result.exit_code == 2  # Typer BadParameter
     assert "OverflowError" not in result.output
     _assert_clean_failure(result)
+
+
+# --- I1: docker provisioning failures must be actionable, not raw tracebacks ---
+
+
+def _patch_docker_present(mocker: MockerFixture, tmp_path: Path) -> None:
+    """Make the default flow attempt provisioning against a mocked `_run`."""
+    mocker.patch("brain.cli_demo.shutil.which", return_value="/usr/bin/docker")
+    mocker.patch("brain.demo.DEMO_HOME", tmp_path)
+
+
+def test_provision_docker_daemon_down_exits_clean(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    _patch_docker_present(mocker, tmp_path)
+    stderr = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+    mocker.patch(
+        "brain.demo._run",
+        side_effect=subprocess.CalledProcessError(1, ["docker"], stderr=stderr),
+    )
+
+    result = runner.invoke(demo_app, [])
+
+    assert result.exit_code == 1
+    _assert_clean_failure(result)
+    assert "Cannot connect to the Docker daemon" in result.output
+
+
+def test_provision_docker_binary_missing_exits_clean(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    _patch_docker_present(mocker, tmp_path)
+    mocker.patch("brain.demo._run", side_effect=FileNotFoundError("docker"))
+
+    result = runner.invoke(demo_app, [])
+
+    assert result.exit_code == 1
+    _assert_clean_failure(result)
+    assert "Docker" in result.output
+
+
+def test_provision_docker_timeout_exits_clean(
+    mocker: MockerFixture, tmp_path: Path
+) -> None:
+    _patch_docker_present(mocker, tmp_path)
+    mocker.patch(
+        "brain.demo._run",
+        side_effect=subprocess.TimeoutExpired(["docker"], 120),
+    )
+
+    result = runner.invoke(demo_app, [])
+
+    assert result.exit_code == 1
+    _assert_clean_failure(result)
+    assert "timed out" in result.output.lower()
+
+
+# --- M1: teardown must not traceback when docker is unavailable ---------------
+
+
+def test_teardown_without_docker_reports_gracefully(mocker: MockerFixture) -> None:
+    mocker.patch("brain.demo._run", side_effect=FileNotFoundError("docker"))
+
+    result = runner.invoke(demo_app, ["teardown"])
+
+    assert result.exit_code == 1
+    _assert_clean_failure(result)
+    assert "Docker" in result.output

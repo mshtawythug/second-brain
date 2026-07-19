@@ -259,5 +259,8 @@ def demo_status(
 @demo_app.command("teardown")
 def demo_teardown() -> None:
     """Destroy the demo sandbox and its data (`docker compose down -v`)."""
-    demo_mod.teardown()
+    try:
+        demo_mod.teardown()
+    except BrainError as exc:
+        _fail(str(exc))
     typer.echo("demo: torn down (container + volume removed)")
