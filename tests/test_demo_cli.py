@@ -141,3 +141,21 @@ def test_teardown_invokes_compose_down_v(mocker: MockerFixture) -> None:
     called_args = run_mock.call_args.args[0]
     assert called_args[:4] == ["docker", "compose", "-p", "brain-demo"]
     assert called_args[-2:] == ["down", "-v"]
+
+
+def _assert_clean_failure(result: object) -> None:
+    """No raw traceback leaked — a clean Typer/SystemExit exit only."""
+    exc = getattr(result, "exception", None)
+    assert exc is None or isinstance(exc, SystemExit), f"leaked exception: {exc!r}"
+    assert "Traceback" not in getattr(result, "output", "")
+
+
+# --- M3: --port must be range-validated, not overflow deep in a socket bind ----
+
+
+def test_port_out_of_range_is_rejected_cleanly() -> None:
+    result = runner.invoke(demo_app, ["--port", "99999"])
+
+    assert result.exit_code == 2  # Typer BadParameter
+    assert "OverflowError" not in result.output
+    _assert_clean_failure(result)

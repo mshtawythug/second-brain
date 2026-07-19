@@ -26,6 +26,11 @@ from .search import SearchResult
 # The headline query a first-time visitor sees ranked results for.
 HERO_QUERY = "compliance horror stories"
 
+# Valid host-port range for --port. Below 1024 needs root; above 65535 is not a
+# port at all (an unbounded value would overflow deep inside socket.bind()).
+_MIN_PORT = 1024
+_MAX_PORT = 65535
+
 # Follow-up query prompts printed after the hero query so the visitor keeps
 # exploring (the show + teardown lines are appended dynamically).
 _NEXT_STEPS: tuple[str, ...] = (
@@ -139,7 +144,7 @@ def _resolve_default_database_url(port: int, database_url: str | None) -> str:
 def demo_default(
     ctx: typer.Context,
     port: int = typer.Option(
-        demo_mod.DEFAULT_DEMO_PORT, "--port",
+        demo_mod.DEFAULT_DEMO_PORT, "--port", min=_MIN_PORT, max=_MAX_PORT,
         help="Host port for the demo Postgres (auto-bumps if busy).",
     ),
     with_embeddings: bool = typer.Option(
@@ -199,7 +204,8 @@ def demo_query(
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit JSON instead."),
     port: int = typer.Option(
-        demo_mod.DEFAULT_DEMO_PORT, "--port", help="Host port of the demo Postgres."
+        demo_mod.DEFAULT_DEMO_PORT, "--port", min=_MIN_PORT, max=_MAX_PORT,
+        help="Host port of the demo Postgres.",
     ),
     database_url: str | None = typer.Option(
         None, "--database-url", help="Query this Postgres instead of the demo container."
@@ -226,7 +232,8 @@ def demo_query(
 @demo_app.command("status")
 def demo_status(
     port: int = typer.Option(
-        demo_mod.DEFAULT_DEMO_PORT, "--port", help="Host port of the demo Postgres."
+        demo_mod.DEFAULT_DEMO_PORT, "--port", min=_MIN_PORT, max=_MAX_PORT,
+        help="Host port of the demo Postgres.",
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit JSON instead."),
 ) -> None:
