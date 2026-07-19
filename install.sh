@@ -53,7 +53,7 @@ install_brain() {
   [[ "$BRAIN_REPO" == *"<"* ]] && \
     _fail "BRAIN_REPO still contains a placeholder. Set BRAIN_REPO=https://github.com/<your-fork>/second-brain.git"
   [[ "$BRAIN_INSTALL_REF" != v* ]] && [[ "$BRAIN_INSECURE" != "1" ]] && \
-    _fail "Installing from non-tag refs is opt-in. Set BRAIN_INSECURE=1 to override."
+    _fail "Refusing to install from non-tag ref '${BRAIN_INSTALL_REF}' (installs pin a release tag like v0.2.0 by default). To install an untagged ref such as master, opt in explicitly: BRAIN_INSTALL_REF=master BRAIN_INSECURE=1"
   [[ "$DRY" == "1" ]] && { _ok "brain install [dry-run] ref=${BRAIN_INSTALL_REF}"; return; }
   pipx install --pip-args "--no-cache-dir" "git+${BRAIN_REPO}@${BRAIN_INSTALL_REF}"
   _ok "brain installed from ${BRAIN_INSTALL_REF}"

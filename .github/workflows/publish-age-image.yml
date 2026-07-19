@@ -1,0 +1,97 @@
+# =============================================================================
+# Publish the custom Apache AGE Postgres image to GHCR (multi-arch)
+# -----------------------------------------------------------------------------
+# Builds the pinned PG16 + pgvector 0.8.2 + Apache AGE 1.5.0-rc0 image from the
+# canonical Dockerfile (src/brain/templates/docker/age/Dockerfile) and pushes it
+# to the GitHub Container Registry so fresh installs can PULL a prebuilt image
+# instead of compiling AGE from C source on every machine (slow + fragile on
+# Apple Silicon). The compose files still carry a `build:` stanza as a local
+# fallback when the pull is unavailable.
+#
+# Image ref produced: ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
+#
+# TWO INDEPENDENT VERSION AXES (see CHANGELOG.md intro):
+#   * age-image-*  tags  -> AGE Postgres IMAGE releases (this workflow)
+#   * v*           tags  -> brain CLI releases           (release.yml)
+# The image tag string (pg16-v1.5.0-rc0-pgv0.8.2) is pinned to the AGE +
+# pgvector versions baked into the Dockerfile, NOT to the CLI version — bumping
+# the CLI does not rebuild the image, and rebuilding the image does not bump the
+# CLI.
+#
+# One-time setup after the FIRST successful publish: the GHCR package is created
+# PRIVATE by default. Toggle its visibility to Public in the repo/org package
+# settings so anonymous `docker pull` (and the compose pull-first path) works
+# without auth. This is a manual, one-time GitHub UI action.
+#
+# Performance note: the linux/arm64 leg builds under QEMU emulation and is slow
+# (~10-20 min for the AGE compile). It is cached (type=gha, mode=max) and this
+# workflow runs rarely (only when the Dockerfile changes or an age-image-* tag
+# is pushed), so the cost is acceptable.
+# =============================================================================
+name: publish-age-image
+
+on:
+  push:
+    tags:
+      - "age-image-*"
+    branches:
+      - master
+    paths:
+      - "src/brain/templates/docker/age/**"
+  workflow_dispatch:
+
+# Serialize builds: all runs push the SAME fixed image tag, so overlapping
+# master-Dockerfile pushes (or a dispatch overlapping a push) would otherwise race
+# duplicate ~20-min QEMU builds to the same ref. A single static group (not
+# ref-scoped) with cancel-in-progress keeps at most one build in flight, newest wins.
+concurrency:
+  group: publish-age-image
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build + push multi-arch AGE image
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (arm64 emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/mshtawythug/second-brain-age
+          tags: |
+            type=raw,value=pg16-v1.5.0-rc0-pgv0.8.2
+            type=raw,value=latest
+
+      - name: Build + push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: src/brain/templates/docker/age
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: false

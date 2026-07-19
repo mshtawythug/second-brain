@@ -62,6 +62,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Build + start the pinned AGE test instance
+        # TODO flip to pull-first once ghcr.io/mshtawythug/second-brain-age is public
         run: docker compose -f docker-compose.age-test.yml up -d --build
 
       - name: Install package (with dev extras)

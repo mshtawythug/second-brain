@@ -14,13 +14,17 @@ name: second-brain-age-test
 services:
   postgres-age-test:
     # Custom PG16 image: pgvector 0.8.2 + pgcrypto + Apache AGE 1.5.0-rc0 (GraphRAG).
-    # Canonical Dockerfile is packaged at src/brain/templates/docker/age/Dockerfile
-    # (single source). All versions pinned. `docker compose -f docker-compose.age-test.yml
-    # up --build` produces the `image:` tag below; subsequent `up` reuses it.
+    # `image:` points at the prebuilt multi-arch image on GHCR (published by
+    # .github/workflows/publish-age-image.yml) so `docker compose pull` fetches it
+    # instead of compiling AGE from C source. The `build:` stanza is retained as a
+    # LOCAL FALLBACK: `docker compose -f docker-compose.age-test.yml up --build`
+    # compiles from the canonical Dockerfile at src/brain/templates/docker/age/
+    # (single source, all versions pinned) and tags the result as the same ref,
+    # for when the registry image is unavailable. Subsequent `up` reuses it.
     build:
       context: ./src/brain/templates/docker/age
       dockerfile: Dockerfile
-    image: second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
+    image: ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
     container_name: second-brain-age-test
     environment:
       POSTGRES_USER: brain
