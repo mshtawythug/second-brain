@@ -1,0 +1,41 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mshtawythug/second-brain",
+  "title": "Second Brain",
+  "description": "Local-first personal knowledge base: hybrid pgvector + FTS and GraphRAG search, queryable via MCP",
+  "version": "0.2.0",
+  "repository": {
+    "url": "https://github.com/mshtawythug/second-brain",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "second-brain",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "DATABASE_URL",
+          "description": "PostgreSQL + pgvector connection string. Defaults to the local Docker instance (postgresql://brain:brain@localhost:55432/second_brain).",
+          "isRequired": false
+        },
+        {
+          "name": "BRAIN_EMBEDDER",
+          "description": "Embedding backend: arctic (default, local Ollama), voyage (SaaS), qwen3 (local Ollama), or none (FTS-only, no embedder).",
+          "default": "arctic",
+          "isRequired": false
+        },
+        {
+          "name": "BRAIN_VAULT_PATH",
+          "description": "Absolute path to the Obsidian-style vault the note / capture / daily tools write to.",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}
