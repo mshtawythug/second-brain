@@ -314,6 +314,14 @@ def hybrid_search(
       given tag. Combines with ``tag`` (AND) so callers can express
       "tagged X but not Y".
     """
+    # Auto-degrade to FTS-only when the active embedder produces no vectors
+    # (the FTS-only ``NullEmbedder`` under ``BRAIN_EMBEDDER=none``). Duck-typed
+    # via ``getattr`` so the real backends (Arctic / Qwen3 / Voyage) — which
+    # never declare the flag — are unaffected, and EVERY caller (CLI, MCP,
+    # library) degrades here rather than each re-implementing the check. This
+    # also flows into ``matched_filters["fts_only"]`` below so ``explain`` shows
+    # the effective mode.
+    fts_only = fts_only or not getattr(embedder, "produces_embeddings", True)
     where_clauses = ["TRUE"]
     where_params: list[Any] = []
     if source_kind:

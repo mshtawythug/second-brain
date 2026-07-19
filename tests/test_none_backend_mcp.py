@@ -82,6 +82,32 @@ def _non_null_embedding_count(conn: psycopg.Connection, document_id: str) -> int
 
 
 # ---------------------------------------------------------------------------
+# A8 — brain_search degrades through the library coercion (no embed call)
+# ---------------------------------------------------------------------------
+
+
+def test_brain_search_degrades_to_fts_under_null_backend(
+    null_mcp_state: mcp_server._State,  # noqa: ARG001 — installs the state
+    test_db: psycopg.Connection,
+) -> None:
+    """``brain_search`` returns FTS results and never raises under the null backend.
+
+    The MCP tool adds NO coercion of its own — degradation lives inside
+    ``hybrid_search``. If it did not apply to the library caller,
+    ``NullEmbedder.embed()`` would raise; a non-empty, exception-free result set
+    is the proof.
+    """
+    doc_id = _seed_null_doc(
+        test_db,
+        title="Quarterly planning",
+        content="Synthetic body about the quarterly planning roadmap and goals.",
+    )
+    payload = mcp_server.brain_search(query="quarterly planning roadmap")
+    ids = [r["id"] for r in payload["results"]]
+    assert doc_id in ids
+
+
+# ---------------------------------------------------------------------------
 # A6 — brain_edit content edit under the null backend leaves NULL embeddings
 # ---------------------------------------------------------------------------
 

@@ -4028,6 +4028,23 @@ def _validate_source_choice(source: str | None) -> str | None:
     )
 
 
+def _warn_if_fts_only_degraded(embedder: Embedder) -> None:
+    """Print a one-line stderr hint when semantic search is off (``none`` backend).
+
+    Mirrors the ``hybrid_search`` degradation condition (duck-typed
+    ``produces_embeddings``) so ``brain search`` / ``brain explain`` tell the
+    user WHY only the lexical leg ran and how to enable hybrid search. Emitted to
+    stderr so it never pollutes ``--json`` stdout.
+    """
+    if not getattr(embedder, "produces_embeddings", True):
+        typer.echo(
+            "semantic search off (BRAIN_EMBEDDER=none) — install Ollama, set "
+            "BRAIN_EMBEDDER=arctic, then 'brain init' + 'brain reembed' for "
+            "hybrid search",
+            err=True,
+        )
+
+
 @app.command()
 def search(
     query: str = typer.Argument(...),
@@ -4088,6 +4105,7 @@ def search(
     since_days = None if since is None else since_window(since, unit="days")
     cfg = Config.load()
     embedder = _build_embedder(cfg)
+    _warn_if_fts_only_degraded(embedder)
     with connect(cfg.database_url) as conn:
         # Autocommit so the Plan 08 search-failure log INSERT below is a single
         # round-trip that persists immediately (hybrid_search reads are fine
@@ -4227,6 +4245,7 @@ def explain(
     since_days = None if since is None else since_window(since, unit="days")
     cfg = Config.load()
     embedder = _build_embedder(cfg)
+    _warn_if_fts_only_degraded(embedder)
     with connect(cfg.database_url) as conn:
         person_match = _resolve_search_person(conn, person)
         results = hybrid_search(
