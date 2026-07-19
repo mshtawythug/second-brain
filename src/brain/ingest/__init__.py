@@ -348,12 +348,36 @@ def _upsert_source(
     return str(row[0])
 
 
+def _embed_chunks(
+    embedder: Embedder, texts: list[str]
+) -> list[list[float] | None]:
+    """Embed ``texts``, or return NULL placeholders under a no-vector backend.
+
+    Under the FTS-only ``none`` backend (:class:`brain.embeddings.NullEmbedder`,
+    ``produces_embeddings = False``) the pipeline must store NULL embeddings
+    rather than call ``embed()`` (which raises :class:`~brain.errors.EmbedError`).
+    Duck-typed via ``getattr`` so the real backends (Arctic / Qwen3 / Voyage) —
+    which never declare the flag — embed normally with zero changes. Returns one
+    entry per input text: a real vector, or ``None`` (bound as SQL NULL by
+    :func:`_insert_chunks`; the column is nullable pre-finalize). An empty
+    ``texts`` makes no embed call and returns ``[]``.
+    """
+    if not getattr(embedder, "produces_embeddings", True):
+        return [None] * len(texts)
+    # Widen the concrete ``list[list[float]]`` to the nullable element type via
+    # ``extend`` (Iterable is covariant, so this stays mypy-clean) — the real
+    # backends only ever contribute non-NULL vectors here.
+    embeddings: list[list[float] | None] = []
+    embeddings.extend(embedder.embed(texts, input_type="document"))
+    return embeddings
+
+
 def _insert_chunks(
     conn: psycopg.Connection,
     *,
     document_id: str,
     chunks: list[Chunk],
-    embeddings: list[list[float]],
+    embeddings: list[list[float] | None],
     title_text: str,
     tags_text: str,
 ) -> None:
@@ -737,7 +761,7 @@ def _insert_new_document(
     content_hash: str,
     draft: bool,
     chunks: list[Chunk],
-    embeddings: list[list[float]],
+    embeddings: list[list[float] | None],
 ) -> str:
     """INSERT a brand-new document row + its chunks; return the new id.
 
@@ -895,11 +919,7 @@ def _ingest_within_transaction(
         # (The update path still proceeds on empty chunks — it rebuilds zero
         # chunk rows, preserving the prior in-place behavior.)
         return IngestResult(document_id=None, created=False)
-    embeddings = (
-        embedder.embed([c.content for c in chunks], input_type="document")
-        if chunks
-        else []
-    )
+    embeddings = _embed_chunks(embedder, [c.content for c in chunks])
 
     replaced_id: str | None = None
     did_write = True
@@ -1012,7 +1032,7 @@ def _update_doc_in_place(
     content_hash: str,
     body_changed: bool,
     chunks: list[Chunk],
-    embeddings: list[list[float]],
+    embeddings: list[list[float] | None],
     draft: bool = False,
 ) -> bool:
     """Replace title / body / metadata / tags / typed columns on an existing
@@ -1719,9 +1739,7 @@ def update_document(
             assert new_content is not None  # gated by the empty-check above
             chunks = chunk_text(new_content, count_tokens=embedder.count_tokens)
             if chunks:
-                embeddings = embedder.embed(
-                    [c.content for c in chunks], input_type="document"
-                )
+                embeddings = _embed_chunks(embedder, [c.content for c in chunks])
                 # Project the post-update title/tags onto the new chunks so
                 # the weighted tsv reflects the user's new edits, not the
                 # pre-edit state. Falls back to current values when the

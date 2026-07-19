@@ -19,12 +19,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import psycopg
 import pytest
 
 from brain import config as config_module
 from brain.config import Config
 from brain.embeddings import ArcticEmbedder, NullEmbedder, make_embedder
 from brain.errors import EmbedError
+from brain.ingest import ExtractedDoc, ingest_document, update_document
+from brain.search import hybrid_search
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -161,3 +164,129 @@ def test_null_embedder_embed_message_guides_upgrade() -> None:
     assert "BRAIN_EMBEDDER=arctic" in message
     assert "brain init" in message
     assert "brain reembed" in message
+
+
+# ---------------------------------------------------------------------------
+# A5 — ingest under the null backend stores NULL embeddings + stays FTS-findable
+# ---------------------------------------------------------------------------
+
+
+def _null_ingest(conn: psycopg.Connection, *, title: str, content: str) -> str:
+    """Ingest one manual doc under the ``NullEmbedder`` and return its id."""
+    result = ingest_document(
+        conn,
+        embedder=NullEmbedder(),
+        doc=ExtractedDoc(
+            title=title,
+            content=content,
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        tags=[],
+    )
+    assert result.document_id is not None
+    return result.document_id
+
+
+def _count_non_null_embeddings(conn: psycopg.Connection, document_id: str) -> int:
+    row = conn.execute(
+        "SELECT count(*) FROM chunks "
+        "WHERE document_id = %s AND embedding IS NOT NULL",
+        (document_id,),
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _count_chunks(conn: psycopg.Connection, document_id: str) -> int:
+    row = conn.execute(
+        "SELECT count(*) FROM chunks WHERE document_id = %s", (document_id,)
+    ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_ingest_under_null_backend_stores_null_embeddings(
+    test_db: psycopg.Connection,
+) -> None:
+    """Ingesting under ``NullEmbedder`` creates chunks with NULL embeddings.
+
+    No embed call is made (``embed()`` would raise); the pipeline stores NULL
+    placeholders because the column is nullable pre-finalize.
+    """
+    doc_id = _null_ingest(
+        test_db,
+        title="Roadmap note",
+        content="Synthetic body about the quarterly planning roadmap and goals.",
+    )
+    assert _count_chunks(test_db, doc_id) > 0
+    assert _count_non_null_embeddings(test_db, doc_id) == 0
+
+
+def test_ingest_under_null_backend_is_fts_retrievable(
+    test_db: psycopg.Connection,
+) -> None:
+    """A null-backend doc is still found via the FTS-only search leg."""
+    doc_id = _null_ingest(
+        test_db,
+        title="Roadmap note",
+        content="Synthetic body about the quarterly planning roadmap and goals.",
+    )
+    results = hybrid_search(
+        test_db,
+        embedder=NullEmbedder(),
+        query="quarterly planning roadmap",
+        fts_only=True,
+    )
+    assert doc_id in [r.document_id for r in results]
+
+
+# ---------------------------------------------------------------------------
+# A6 — editing a doc body under the null backend succeeds (NULL embeddings),
+# exercising update_document's re-embed path (the CLI edit seam).
+# ---------------------------------------------------------------------------
+
+
+def test_edit_body_under_null_backend_leaves_null_embeddings(
+    test_db: psycopg.Connection,
+) -> None:
+    """``update_document`` re-chunks a body edit under ``NullEmbedder`` w/o raising."""
+    doc_id = _null_ingest(
+        test_db,
+        title="Editable note",
+        content="Original synthetic body mentioning the alpha milestone.",
+    )
+    result = update_document(
+        test_db,
+        document_id=doc_id,
+        embedder=NullEmbedder(),
+        new_content="Rewritten synthetic body mentioning the beta milestone.",
+    )
+    assert "content" in result.fields_changed
+    assert result.rechunked is True
+    # Rebuilt chunks are present and all NULL — no embed call happened.
+    assert _count_chunks(test_db, doc_id) > 0
+    assert _count_non_null_embeddings(test_db, doc_id) == 0
+
+
+def test_edit_body_under_null_backend_reindexes_fts(
+    test_db: psycopg.Connection,
+) -> None:
+    """After a null-backend body edit, the new term is FTS-findable."""
+    doc_id = _null_ingest(
+        test_db,
+        title="Editable note",
+        content="Original synthetic body mentioning the alpha milestone.",
+    )
+    update_document(
+        test_db,
+        document_id=doc_id,
+        embedder=NullEmbedder(),
+        new_content="Rewritten synthetic body mentioning the zeta milestone.",
+    )
+    results = hybrid_search(
+        test_db, embedder=NullEmbedder(), query="zeta milestone", fts_only=True
+    )
+    assert doc_id in [r.document_id for r in results]
