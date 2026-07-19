@@ -344,7 +344,7 @@ def setup_cmd(
     port: int = typer.Option(55432, "--port", help="Postgres host port"),
     wiki_port: int = typer.Option(8080, "--wiki-port", help="Caddy port for the wiki"),
     embedder: str | None = typer.Option(
-        None, "--embedder", help="arctic|voyage|qwen3 (non-interactive choice)"
+        None, "--embedder", help="arctic|voyage|qwen3|none (non-interactive choice)"
     ),
     skip_wiki: bool = typer.Option(False, "--skip-wiki", help="Don't install the wiki UI"),
     skip_skill: bool = typer.Option(
