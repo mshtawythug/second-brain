@@ -876,3 +876,45 @@ def test_doctor_json_exits_nonzero_and_marks_fail_when_ollama_down(
     checks = _parse_doctor_json(result)
     ollama = next(c for c in checks if c["check"] == "ollama")
     assert ollama["status"] == "fail"
+
+
+# ---------------------------------------------------------------------------
+# FTS-only backend (BRAIN_EMBEDDER=none) — a user with no Ollama gets a
+# healthy-degraded doctor (exit 0), not an embedder FAIL. THE acceptance test
+# for Task A. The Ollama transport is DOWN to prove the none backend never
+# probes it.
+# ---------------------------------------------------------------------------
+
+
+def test_doctor_none_backend_reports_fts_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``BRAIN_EMBEDDER=none`` + no Ollama → exit 0, ``FTS-only``, no embedder FAIL."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_EMBEDDER", "none")
+    with _patch_httpx_client(_down_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor"])
+    assert result.exit_code == 0, result.output
+    assert "FTS-only" in result.output
+    # No Ollama probe (and thus no ollama FAIL line) under the null backend.
+    assert "ollama" not in result.output
+    combined = result.output + (result.stderr if result.stderr else "")
+    assert "FAIL" not in combined
+
+
+def test_doctor_none_backend_json_embedder_ok(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``--json`` embedder check is ``ok`` with an ``FTS-only`` detail, exit 0."""
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setenv("BRAIN_EMBEDDER", "none")
+    with _patch_httpx_client(_down_ollama_transport()):
+        result = CliRunner().invoke(app, ["doctor", "--json"])
+    assert result.exit_code == 0, result.output
+    checks = _parse_doctor_json(result)
+    embedder = next(c for c in checks if c["check"] == "embedder")
+    assert embedder["status"] == "ok"
+    assert "FTS-only" in embedder["detail"]
+    # No Ollama / enrich-model / audio-model checks are emitted under none.
+    names = {c["check"] for c in checks}
+    assert "ollama" not in names

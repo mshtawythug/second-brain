@@ -616,9 +616,31 @@ def _probe_embedder(cfg: Config) -> list[_DoctorCheck]:
     the Postgres connection, so it is thread-safe alongside the main-thread DB
     checks.
     """
+    if cfg.embedder == "none":
+        return _check_fts_only()
     if cfg.embedder == "voyage":
         return _check_voyage(cfg)
     return _check_ollama(cfg)
+
+
+def _check_fts_only() -> list[_DoctorCheck]:
+    """Doctor sub-check: healthy-degraded FTS-only mode (``BRAIN_EMBEDDER=none``).
+
+    Returned BEFORE the Ollama branch so a user with no Ollama gets a green
+    doctor (exit 0) instead of an embedder FAIL. The null backend needs no
+    Ollama, so the Ollama-dependent enrich/audio-model WARNs from
+    :func:`_check_ollama` would be pure noise here — this single OK line replaces
+    the whole block.
+    """
+    detail = "FTS-only (BRAIN_EMBEDDER=none) — no embedder configured"
+    return [
+        _DoctorCheck(
+            check="embedder",
+            status="ok",
+            detail=detail,
+            lines=(_DoctorLine(f"embedder        OK ({detail})"),),
+        )
+    ]
 
 
 def _check_voyage(cfg: Config) -> list[_DoctorCheck]:
