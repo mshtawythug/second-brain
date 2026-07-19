@@ -74,6 +74,10 @@ where = ["src"]
 "brain.templates.bin" = ["*.sh"]
 "brain.templates.launchd" = ["*.j2"]
 "brain.templates.skill" = ["*.md"]
+# brain.demo: the synthetic `brain demo` corpus manifest (a plain data subdir
+# under corpus/, no __init__.py) shipped so the zero-Ollama taste test works on
+# pipx/wheel installs. Explicit "corpus/*.json" (not "**/*") avoids bytecode.
+"brain.demo" = ["corpus/*.json"]
 
 [tool.setuptools.exclude-package-data]
 # Strip bytecode caches that Python creates on-disk when the package is imported
@@ -83,6 +87,7 @@ where = ["src"]
 "brain.templates.bin" = ["__pycache__/*", "*.pyc"]
 "brain.templates.launchd" = ["__pycache__/*", "*.pyc"]
 "brain.templates.skill" = ["__pycache__/*", "*.pyc"]
+"brain.demo" = ["__pycache__/*", "*.pyc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

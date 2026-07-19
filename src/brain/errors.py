@@ -224,6 +224,17 @@ class ConnectError(BrainError):
     layers map it without a framework-specific import.
     """
 
+class DemoError(BrainError):
+    """Raised when the ``brain demo`` sandbox cannot be provisioned / torn down.
+
+    Wraps Docker-CLI subprocess failures (daemon down, binary missing, timeout)
+    into a single actionable message that carries Docker's own stderr, so the
+    CLI layer maps it to a clean ``typer.Exit`` instead of leaking a raw
+    traceback. Inherits :class:`BrainError` so the demo CLI's existing
+    ``except BrainError`` catch handles it.
+    """
+
+
 class ReviewError(BrainError):
     """Raised when a ``brain review scan`` pass fails partway through (Plan 03).
 

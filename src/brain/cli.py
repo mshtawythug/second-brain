@@ -80,6 +80,7 @@ from ._capture_command import capture_app
 from .cli_claude import SkillInstallError
 from .cli_claude import install_skill as _install_skill
 from .cli_connect import connect_app
+from .cli_demo import demo_app
 
 # NOTE: the `brain.eval` package + graph-eval chain (which pulls networkx) is
 # imported lazily inside the `eval` command bodies below, not at module top —
@@ -320,6 +321,10 @@ gaps_app = typer.Typer(
     help="Surface knowledge gaps from repeated search failures.",
 )
 app.add_typer(gaps_app, name="gaps")
+
+# Task B — `brain demo` zero-Ollama taste test. Command logic + provisioning
+# live in `cli_demo.py` / `demo/`; this is the only cli.py touchpoint.
+app.add_typer(demo_app, name="demo")
 
 
 @app.callback()
