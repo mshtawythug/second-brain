@@ -29,6 +29,9 @@ def test_guard_refuses_real_prod_port_55432_any_dbname() -> None:
     """
     assert _looks_like_prod_db("localhost", 55432, "second_brain") is True
     assert _looks_like_prod_db("localhost", 55432, "second_brain_restore") is True
+    # 0.0.0.0 is a local alias too (parity with brain.demo's guard) — without it
+    # a 0.0.0.0:55432 URL under a non-prod db name slipped past the port check.
+    assert _looks_like_prod_db("0.0.0.0", 55432, "second_brain_restore") is True
     with pytest.raises(RuntimeError, match="PROD database"):
         _assert_not_prod_db("localhost", 55432, "second_brain")
 

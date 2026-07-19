@@ -44,7 +44,7 @@ TEST_DATABASE_URL = os.environ.get(
 # wipe production data.
 _PROD_PORTS = frozenset({5433, 55432})
 _PROD_DB_NAME = "second_brain"
-_LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+_LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 
 def _looks_like_prod_db(host: str | None, port: int | None, dbname: str | None) -> bool:
