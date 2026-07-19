@@ -2404,6 +2404,19 @@ def reembed(
     cfg = Config.load()
     embedder = _build_embedder(cfg)
 
+    # FTS-only backend: there are no vectors to backfill, and finalize (NOT NULL
+    # + HNSW) must NOT run — the column stays nullable so the docs are still
+    # ingestable/searchable. Short-circuit BEFORE any DB work (and before the
+    # --dry-run branch) so `brain reembed` is a friendly no-op instead of
+    # crashing on ``NullEmbedder.embed()``.
+    if not getattr(embedder, "produces_embeddings", True):
+        typer.echo(
+            "FTS-only backend (BRAIN_EMBEDDER=none) — nothing to reembed. "
+            "Install Ollama, set BRAIN_EMBEDDER=arctic, then run 'brain init' "
+            "and 'brain reembed'."
+        )
+        return
+
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         target_total = count_chunks_missing_embedding(

@@ -106,6 +106,39 @@ def test_reembed_backfills_null_chunks(
     assert dim_row[0] == 4096
 
 
+def test_reembed_none_backend_is_a_graceful_noop(
+    test_db: psycopg.Connection,
+    patch_embedder: Callable[[object], None],
+) -> None:
+    """Under ``BRAIN_EMBEDDER=none`` reembed is a friendly no-op — exit 0, no finalize.
+
+    Regression: the backfill loop's ``embedder.embed(...)`` was the one embed path
+    without the ``produces_embeddings`` guard, so ``brain reembed`` under the FTS-only
+    backend crashed on ``NullEmbedder.embed()``. It must now short-circuit before any
+    DB work: chunks stay NULL, and finalize must NOT run (column stays nullable, no
+    HNSW index).
+    """
+    from brain.embeddings import NullEmbedder
+
+    doc_id = _seed_doc(test_db)
+    _seed_null_chunks(test_db, document_id=doc_id, n=3)
+    patch_embedder(NullEmbedder())
+
+    result = CliRunner().invoke(app, ["reembed"])
+
+    assert result.exit_code == 0, result.output
+    assert "nothing to reembed" in result.output
+    assert "BRAIN_EMBEDDER=none" in result.output
+    # No embed happened → every chunk stays NULL.
+    assert _null_count(test_db) == 3
+    # Finalize did NOT run → column stays nullable, no HNSW index built.
+    assert _embedding_column_is_not_null(test_db) is False
+    idx = test_db.execute(
+        "SELECT 1 FROM pg_indexes WHERE indexname = 'chunks_embedding_idx'"
+    ).fetchone()
+    assert idx is None
+
+
 def test_reembed_dry_run_reports_counts_without_writing(
     test_db: psycopg.Connection,
     fake_embedder: FakeEmbedder,
