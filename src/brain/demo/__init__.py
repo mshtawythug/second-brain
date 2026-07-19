@@ -56,7 +56,9 @@ COMPOSE_FILENAME = "docker-compose.yml"
 # Prod-safety guard values — mirror ``tests/conftest.py``'s ``_assert_not_prod_db``.
 _PROD_PORTS = frozenset({5433, 55432})
 _PROD_DB_NAME = "second_brain"
-_LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+# ``0.0.0.0`` binds all interfaces on the local host — treat it as local so a
+# ``0.0.0.0:55432`` URL can't slip past the prod guard.
+_LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 # How long to wait for the freshly-provisioned container to accept connections.
 _PROVISION_READY_TIMEOUT_S = 30.0

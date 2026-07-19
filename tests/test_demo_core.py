@@ -21,6 +21,7 @@ from brain.errors import BrainError
 _PROD_URLS = [
     "postgresql://brain:brain@localhost:55432/second_brain_demo",
     "postgresql://brain:brain@localhost:5433/second_brain_demo",
+    "postgresql://brain:brain@0.0.0.0:55432/second_brain_demo",  # 0.0.0.0 = local
     "postgresql://brain:brain@localhost:55432/second_brain",
     "postgresql://brain:brain@example.com:5432/second_brain",  # prod name, any host
 ]
