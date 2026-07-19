@@ -78,8 +78,10 @@ def _quiet_internal_logs() -> Iterator[None]:
         logger.setLevel(previous)
 
 
-def _render_results(results: list[SearchResult], *, json_output: bool) -> None:
-    """Render hero/query results as JSON or a Rich table."""
+def _render_results(
+    results: list[SearchResult], *, json_output: bool, query: str
+) -> None:
+    """Render hero/query results as JSON or a Rich table titled with ``query``."""
     if json_output:
         emit_json(
             [
@@ -99,7 +101,7 @@ def _render_results(results: list[SearchResult], *, json_output: bool) -> None:
     if not results:
         typer.echo("(no results)")
         return
-    console.print(search_table(results, title=f"brain demo · {HERO_QUERY!r}"))
+    console.print(search_table(results, title=f"brain demo · {query!r}"))
 
 
 def _print_next_steps(results: list[SearchResult]) -> None:
@@ -172,7 +174,7 @@ def demo_default(
             )
     except BrainError as exc:
         _fail(str(exc))
-    _render_results(results, json_output=json_output)
+    _render_results(results, json_output=json_output, query=HERO_QUERY)
     if not json_output:
         _print_next_steps(results)
 
@@ -218,13 +220,7 @@ def demo_query(
         )
     except BrainError as exc:
         _fail(str(exc))
-    if json_output:
-        _render_results(results, json_output=True)
-        return
-    if not results:
-        typer.echo("(no results)")
-        return
-    console.print(search_table(results, title=f"brain demo · {query!r}"))
+    _render_results(results, json_output=json_output, query=query)
 
 
 @demo_app.command("status")
