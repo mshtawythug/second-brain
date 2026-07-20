@@ -1,0 +1,255 @@
+#!/usr/bin/env bash
+# brain-usage-gif — regenerate the README "daily workflow" GIF from
+# docs/assets/usage.tape.
+#
+# Unlike bin/brain-demo-gif (which records `brain demo` against its own
+# self-managed sandbox), this records the REGULAR `brain` CLI — ingest → search
+# → show → status — against a THROWAWAY, fully-isolated Postgres that this
+# script provisions just for the recording and destroys afterward:
+#
+#   * compose project  brain-usage-gif        (NEVER the prod `brain` project)
+#   * container        brain-usage-gif-postgres
+#   * host port        55440                  (prod 55432, demo 55433, tests 5434)
+#   * storage          a NAMED docker volume  (never a host bind-mount)
+#   * database         second_brain_usage_gif
+#
+# The CLI is pointed at that sandbox purely through the environment
+# (DATABASE_URL + BRAIN_HOME + BRAIN_VAULT_PATH), exported here and inherited by
+# vhs. A dev checkout's repo-root .env would otherwise win and point the CLI at
+# the PROD database, so every relevant var is overridden explicitly here, and the
+# tape hard-aborts unless DATABASE_URL is the :55440 sandbox — a stray run can
+# never touch personal data.
+#
+# All seeded content is synthetic (Larkspur compliance corpus; zero PII).
+#
+# Requires: vhs (brew install vhs — bundles ttyd + ffmpeg) and Docker. Uses the
+# local Ollama `arctic` embedder for an authentic recording when Ollama + the
+# snowflake-arctic-embed2 model are available; otherwise falls back to
+# BRAIN_EMBEDDER=none (FTS-only — a truthful "upgrade to hybrid" hint appears on
+# search, which is fine).
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+TAPE="docs/assets/usage.tape"
+GIF="docs/assets/usage.gif"
+MAX_BYTES=$(( 2560 * 1024 ))  # 2.5 MB README budget for the usage GIF.
+
+# --- Isolated-sandbox identifiers (kept distinct from prod/demo/test) -------
+PROJECT="brain-usage-gif"
+CONTAINER="brain-usage-gif-postgres"
+DB_PORT="55440"
+DB_NAME="second_brain_usage_gif"
+DB_URL="postgresql://brain:brain@localhost:${DB_PORT}/${DB_NAME}"
+PG_IMAGE="pgvector/pgvector:pg16"
+
+WORKDIR="${TMPDIR:-/tmp}/brain-usage-gif"
+COMPOSE_FILE="$WORKDIR/docker-compose.usage-gif.yml"
+NOTES_DIR="$WORKDIR/notes"
+PRESEED_DIR="$WORKDIR/preseed"
+HOME_DIR="$WORKDIR/home"
+VAULT_DIR="$WORKDIR/vault"
+VOLUME_NAME="${PROJECT}_brain-usage-gif-pgdata"
+
+usage() {
+  echo "Usage: brain-usage-gif [-h|--help]  — record docs/assets/usage.tape into docs/assets/usage.gif via vhs against a throwaway :55440 Postgres sandbox (leaves nothing behind)."
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+# --- Teardown: ALWAYS scoped to our own project, ALWAYS runs on exit --------
+cleanup() {
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+  else
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm "$VOLUME_NAME" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORKDIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# --- Preflight --------------------------------------------------------------
+if ! command -v vhs >/dev/null 2>&1; then
+  echo "error: 'vhs' not found on PATH — install it with 'brew install vhs'" >&2
+  echo "       (vhs bundles the ttyd + ffmpeg dependencies it needs)." >&2
+  exit 1
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo "error: 'docker' not found on PATH — install Docker Desktop or Engine." >&2
+  exit 1
+fi
+if ! command -v brain >/dev/null 2>&1; then
+  echo "error: 'brain' not found on PATH — install it with 'pip install -e .'" >&2
+  exit 1
+fi
+
+cd "$REPO_ROOT"
+[[ -f "$TAPE" ]] || { echo "error: tape not found: $REPO_ROOT/$TAPE" >&2; exit 1; }
+
+# --- Embedder selection -----------------------------------------------------
+# Prefer the local arctic backend (authentic hybrid search + auto-summary) when
+# Ollama is reachable and the embedding model is pulled; else fall back to the
+# FTS-only NullEmbedder so the recording still works on a machine without Ollama.
+if ollama list >/dev/null 2>&1 && ollama list 2>/dev/null | grep -q 'snowflake-arctic-embed2'; then
+  EMBEDDER="arctic"
+else
+  EMBEDDER="none"
+fi
+echo "Embedder for this recording: ${EMBEDDER}."
+
+# --- Fresh workdir + synthetic seed corpus (zero PII) -----------------------
+rm -rf "$WORKDIR"
+mkdir -p "$NOTES_DIR" "$PRESEED_DIR" "$HOME_DIR" "$VAULT_DIR"
+
+cat > "$COMPOSE_FILE" <<YAML
+services:
+  postgres:
+    image: ${PG_IMAGE}
+    container_name: ${CONTAINER}
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - brain-usage-gif-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d ${DB_NAME}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  brain-usage-gif-pgdata:
+YAML
+
+# The one note ingested ON CAMERA (Scene 1).
+cat > "$NOTES_DIR/weekly-standup.md" <<'NOTE'
+# Weekly compliance standup — evidence automation
+
+Notes from this week's compliance standup at Larkspur. The theme, again, was
+evidence automation: most of our audit pain is collecting evidence, so we agreed
+to make evidence a byproduct of doing the work instead of a quarterly fire drill.
+
+Decisions:
+
+- Snapshot access reviews, change approvals, and backup tests weekly, timestamp
+  them, and drop them straight into the auditor portal — no human chasing
+  screenshots.
+- Every SOC 2 trust-services criterion gets a named owner before fieldwork.
+- Kill the number-one auditor follow-up (inconsistent or undated artifacts) by
+  generating file names from a single template.
+
+Owner: Sam Rivera. Next check-in in two weeks to review the evidence backlog.
+NOTE
+
+# Pre-seeded corpus (ingested BEFORE recording, off camera) so search returns a
+# realistic ranked list. Same synthetic Larkspur universe as the demo corpus.
+cat > "$PRESEED_DIR/soc2-evidence-plan.md" <<'NOTE'
+# SOC 2 evidence automation plan
+
+The plan to stop reconstructing SOC 2 evidence the night before fieldwork. Every
+access review, change approval, and backup test already emits a signal — we just
+never captured it in one place. A weekly job snapshots each signal, timestamps
+it, and files it in the auditor portal. Evidence stops being a fire drill and
+becomes a byproduct of the work. Target: generate at least half of the forty
+audit artifacts automatically before the observation window opens.
+NOTE
+
+cat > "$PRESEED_DIR/vendor-risk-breach-clause.md" <<'NOTE'
+# Vendor risk review — breach-notification clause
+
+Legal reviewed the Vendra security questionnaire before counter-signing. No
+current SOC 2 report, vague data-residency answers, and a thirty-day breach
+window we will not accept. We want a security addendum pinning a seventy-two-hour
+breach-notification clause, a right-to-audit provision, and customer data kept
+in-region. If they will not sign, escalate to the risk committee as a vendor-risk
+red flag.
+NOTE
+
+cat > "$PRESEED_DIR/pci-tokenization-scope.md" <<'NOTE'
+# PCI tokenization — shrink the scope
+
+A new checkout API quietly pulled almost the entire production environment into
+PCI scope the moment it started handling raw card numbers instead of tokens. The
+fix is to front the services with a tokenization proxy so raw card data never
+lands in our systems, shrinking scope back to the cardholder-data enclave. This
+is the highest-leverage compliance investment this quarter — it does more for PCI
+DSS 4.0 readiness than any individual control tweak.
+NOTE
+
+cat > "$PRESEED_DIR/incident-logging-retention.md" <<'NOTE'
+# Incident postmortem — logging retention gap
+
+Blameless postmortem for the payments outage. Root cause: a config change
+disabled retries, and because log retention had silently dropped to seven days,
+we lost the evidence needed to reconstruct the first ninety minutes. The missing
+window turned an ops incident into a compliance problem. Action items: restore
+ninety-day retention, add an alert that fires if retention drifts below the
+compliance floor, and write the runbook we wished we had at 2am.
+NOTE
+
+# --- Point the CLI at the sandbox purely through the environment ------------
+# Exported here → inherited by vhs → inherited by the recorded shell. Overriding
+# DATABASE_URL in the process env makes it win over any repo-root .env (which is
+# resolved via os.environ.setdefault and therefore never clobbers a value that
+# is already set — see src/brain/config.py).
+export DATABASE_URL="$DB_URL"
+export BRAIN_HOME="$HOME_DIR"
+export BRAIN_VAULT_PATH="$VAULT_DIR"
+export BRAIN_EMBEDDER="$EMBEDDER"
+export BRAIN_GRAPH_ENABLED="false"
+export USAGE_GIF_NOTES_DIR="$NOTES_DIR"
+# Disable the post-ingest Ollama auto-summary for the recording. It is a fine
+# daily-use feature, but on a machine that also runs the arctic embedder it
+# forces an arctic->llama model swap mid-ingest whose latency is unpredictable
+# (several seconds), which would race the fixed vhs Sleep and garble the frame
+# right after `brain ingest`. Setting the min-tokens gate above any note keeps
+# the on-camera ingest a fast, deterministic embed-only op. Search/show/status
+# stay 100% real.
+export BRAIN_ENRICH_MIN_TOKENS="1000000"
+
+# --- Provision the throwaway Postgres (fresh every run) ---------------------
+echo "Provisioning the throwaway usage-gif Postgres on port ${DB_PORT} …"
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d >/dev/null
+
+echo "Waiting for Postgres to accept connections …"
+ready=""
+for _ in $(seq 1 30); do
+  if docker exec "$CONTAINER" pg_isready -U brain -d "$DB_NAME" >/dev/null 2>&1; then
+    ready="yes"; break
+  fi
+  sleep 2
+done
+[[ -n "$ready" ]] || { echo "error: ${CONTAINER} never became ready" >&2; exit 1; }
+
+# --- Seed the corpus (init + off-camera pre-seed) ---------------------------
+echo "Applying migrations + seeding the synthetic corpus …"
+brain init >/dev/null
+# Pre-seed off camera. With arctic this embeds inline (and warms llama for the
+# on-camera enrichment); with none it populates FTS only. The single on-camera
+# note (weekly-standup.md) is ingested by the tape itself.
+brain ingest-dir "$PRESEED_DIR" --tag compliance >/dev/null
+
+# --- Record -----------------------------------------------------------------
+echo "Recording $TAPE with vhs …"
+vhs "$TAPE"
+
+[[ -f "$GIF" ]] || { echo "error: vhs did not produce $GIF" >&2; exit 1; }
+
+# stat is BSD (macOS) vs GNU (Linux); try both invocations.
+bytes="$( stat -f%z "$GIF" 2>/dev/null || stat -c%s "$GIF" )"
+human="$( awk -v b="$bytes" 'BEGIN { printf "%.2f MB", b / 1048576 }' )"
+
+echo "Wrote $GIF ($human, $bytes bytes)."
+if (( bytes > MAX_BYTES )); then
+  echo "warning: $GIF exceeds the 2.5 MB README budget — tune the tape's" >&2
+  echo "         FontSize/framerate/Sleep durations to shrink it." >&2
+fi
