@@ -52,7 +52,7 @@ Seeded 22 new doc(s) (0 already present).
 Try these next:
   brain demo query "SOC 2 evidence request"
   brain demo query "PCI scope creep"
-  brain demo query "vendor risk" --source slack
+  brain demo query "vendor risk" --source gmail
   brain demo query "GDPR deletion request"
   brain show <id>       # read the top hit in full (in your own brain)
   brain demo teardown   # remove the sandbox when done

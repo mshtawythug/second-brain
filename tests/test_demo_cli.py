@@ -5,6 +5,7 @@ Docker in CI); status/teardown mock the single subprocess boundary
 (:func:`brain.demo._run` and its helpers) with ``pytest-mock`` — a standard
 test double, not monkey-patching production code.
 """
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -13,8 +14,8 @@ import pytest
 from pytest_mock import MockerFixture
 from typer.testing import CliRunner
 
-from brain.cli_demo import _DOCKER_MISSING_MSG, demo_app
-from brain.demo import seed_demo
+from brain.cli_demo import _DOCKER_MISSING_MSG, _NEXT_STEPS, demo_app
+from brain.demo import query_demo, seed_demo
 from tests.conftest import TEST_DATABASE_URL
 
 runner = CliRunner()
@@ -93,6 +94,67 @@ def test_query_no_results_is_clean(test_db: psycopg.Connection) -> None:
 
     assert result.exit_code == 0, result.output
     assert "(no results)" in result.output
+
+
+# --- "Try these next" suggestions must be live, not dead-ends ------------------
+# Every `brain demo query …` line printed after the hero query is a first-touch
+# command a visitor is invited to run. A suggestion that returns "(no results)"
+# undercuts the demo, so these guard both the exact vendor-risk fix and, more
+# durably, that EVERY suggestion returns ≥1 result against the seeded corpus.
+
+# Known `brain demo query` flags → their `query_demo` kwarg. Keeps the parser
+# honest: a new flag in a suggestion trips the assert rather than being ignored.
+_QUERY_FLAG_TO_KWARG = {
+    "--source": "source",
+    "--tag": "tag",
+    "--person": "person",
+}
+
+
+def _parse_demo_query(suggestion: str) -> tuple[str, dict[str, str]]:
+    """Parse a ``brain demo query …`` suggestion into (query, query_demo kwargs)."""
+    tokens = shlex.split(suggestion)
+    assert tokens[:3] == ["brain", "demo", "query"], f"not a demo query: {suggestion!r}"
+    query = tokens[3]
+    kwargs: dict[str, str] = {}
+    rest = tokens[4:]
+    i = 0
+    while i < len(rest):
+        flag = rest[i]
+        assert flag in _QUERY_FLAG_TO_KWARG, f"unhandled flag {flag!r} in {suggestion!r}"
+        kwargs[_QUERY_FLAG_TO_KWARG[flag]] = rest[i + 1]
+        i += 2
+    return query, kwargs
+
+
+def test_vendor_risk_suggestion_targets_gmail_not_slack() -> None:
+    """Regression: the vendor-risk suggestion points at gmail, where the content
+    lives; slack held no vendor-risk docs, so it returned a dead-end."""
+    vendor = [s for s in _NEXT_STEPS if "vendor risk" in s.lower()]
+    assert vendor, "expected a vendor-risk suggestion in _NEXT_STEPS"
+    for suggestion in vendor:
+        assert "--source gmail" in suggestion
+        assert "--source slack" not in suggestion
+
+
+@pytest.mark.fresh_schema
+def test_every_next_step_suggestion_returns_results(test_db: psycopg.Connection) -> None:
+    """Every seeded ``brain demo query …`` suggestion must return ≥1 result.
+
+    Parses each suggestion through the same seam the CLI uses (``query_demo``)
+    so a future suggestion that names a source/tag/query with no matching demo
+    doc fails the build instead of shipping a "(no results)" first touch.
+    """
+    seed_demo(TEST_DATABASE_URL)
+    suggestions = [s for s in _NEXT_STEPS if s.startswith("brain demo query")]
+    assert suggestions, "no `brain demo query` suggestions found in _NEXT_STEPS"
+    for suggestion in suggestions:
+        query, kwargs = _parse_demo_query(suggestion)
+        results = query_demo(TEST_DATABASE_URL, query, **kwargs)
+        assert results, (
+            f"suggested demo command returned no results: {suggestion!r} "
+            f"(query={query!r}, filters={kwargs!r})"
+        )
 
 
 def test_default_flow_without_docker_exits_one(mocker: MockerFixture) -> None:

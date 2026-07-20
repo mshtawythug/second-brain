@@ -36,7 +36,7 @@ _MAX_PORT = 65535
 _NEXT_STEPS: tuple[str, ...] = (
     'brain demo query "SOC 2 evidence request"',
     'brain demo query "PCI scope creep"',
-    'brain demo query "vendor risk" --source slack',
+    'brain demo query "vendor risk" --source gmail',
     'brain demo query "GDPR deletion request"',
 )
 
