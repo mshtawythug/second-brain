@@ -151,10 +151,24 @@ mypy src/ && pytest` gate green, no PII, and docs updated (README / `docs/` /
 
 ## Docs assets
 
-The README's hero GIF is generated from `docs/assets/demo.tape` (a
-[VHS](https://github.com/charmbracelet/vhs) script). If a CLI output change makes
-it stale, regenerate it with `bin/brain-demo-gif` (needs `brew install vhs` and
-Docker; it provisions and tears down the isolated `brain demo` sandbox).
+The README embeds two [VHS](https://github.com/charmbracelet/vhs) recordings,
+each with its own tape and regenerator script (both need `brew install vhs` and
+Docker):
+
+- **Hero GIF** — `docs/assets/demo.gif`, from `docs/assets/demo.tape` via
+  `bin/brain-demo-gif`. Records the `brain demo` sandbox flow; the script
+  provisions and tears down the isolated `brain demo` sandbox.
+- **Daily-workflow GIF** — `docs/assets/usage.gif`, from `docs/assets/usage.tape`
+  via `bin/brain-usage-gif`. Records the regular `brain` CLI (ingest → search →
+  show → status) against a **throwaway, fully-isolated** Postgres the script
+  spins up just for the recording (compose project `brain-usage-gif`, port
+  55440, named volume) and destroys afterward — it never touches the prod, demo,
+  or test databases, and every seeded doc is synthetic. It uses the local Ollama
+  `arctic` embedder when available, else falls back to FTS-only
+  (`BRAIN_EMBEDDER=none`).
+
+If a CLI output change makes either GIF stale, regenerate it with the matching
+script.
 
 ## Codebase layout
 

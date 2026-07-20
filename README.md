@@ -109,6 +109,12 @@ brain tag <id-prefix> +interview +career -old-tag         # add (+name) / remove
 
 Add `--json` to `search` / `show` / `list` for machine-readable output, and `--fts-only` to `search` to skip the embedding call. The full command surface — Gmail ingest, enrichment, tacit-knowledge elicitation, GraphRAG, the proactivity/synthesis commands, and vault authoring — lives in the [CLI reference](docs/cli-reference.md).
 
+## Daily workflow
+
+The everyday loop — capture a note, search it back, read the top hit, check the corpus:
+
+![brain daily workflow](docs/assets/usage.gif)
+
 ## Claude integrations
 
 `brain` and the bundled `brain-mcp` server are harness-agnostic — any agent that runs a shell command or speaks MCP can query the corpus.
