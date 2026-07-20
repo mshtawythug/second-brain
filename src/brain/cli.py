@@ -334,6 +334,11 @@ def _main() -> None:
 
 @app.command("setup")
 def setup_cmd(
+    profile: str = typer.Option(
+        "standard",
+        "--profile",
+        help="minimal (PG+FTS) | standard (+Ollama hybrid) | full (+graph/wiki/daemons)",
+    ),
     non_interactive: bool = typer.Option(
         False, "--non-interactive", help="Use defaults for every prompt"
     ),
@@ -374,6 +379,7 @@ def setup_cmd(
 
     try:
         run_setup(
+            profile=profile,
             non_interactive=non_interactive,
             dry_run=dry_run,
             brain_home_override=brain_home,

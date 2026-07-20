@@ -33,6 +33,88 @@ class PreflightResult:
     remediation: str | None = None
 
 
+@dataclass(frozen=True)
+class SetupProfile:
+    """The dependency matrix for one `brain setup --profile` choice.
+
+    Every gating decision in :func:`run_setup` derives from this object — no
+    scattered string compares on the profile name. Three profiles ship:
+
+    * **minimal** — Postgres + FTS only. Stock compose, ``BRAIN_EMBEDDER=none``,
+      graph off, no Ollama, no wiki/daemons/skill. A user with only Docker +
+      Git + Python gets a working brain.
+    * **standard** — + Ollama hybrid search. Stock compose,
+      ``BRAIN_EMBEDDER=arctic`` (or ``--embedder``), graph off, Ollama preflight
+      + pull, soft skill install (only if ``~/.claude`` exists), no wiki/daemons.
+    * **full** — today's behaviour: the AGE compose + Dockerfile, graph on,
+      Ollama pull, and the interactive wiki / daemons / skill offers.
+    """
+
+    name: str
+    needs_ollama: bool
+    wants_graph: bool
+    compose_template: str
+    offer_wiki: bool
+    offer_daemons: bool
+    offer_skill: bool
+    env_embedder_default: str
+    env_graph_enabled: bool
+
+
+_STOCK_COMPOSE = "docker-compose.stock.yml.j2"
+_AGE_COMPOSE = "docker-compose.yml.j2"
+
+_PROFILES: dict[str, SetupProfile] = {
+    "minimal": SetupProfile(
+        name="minimal",
+        needs_ollama=False,
+        wants_graph=False,
+        compose_template=_STOCK_COMPOSE,
+        offer_wiki=False,
+        offer_daemons=False,
+        offer_skill=False,
+        env_embedder_default="none",
+        env_graph_enabled=False,
+    ),
+    "standard": SetupProfile(
+        name="standard",
+        needs_ollama=True,
+        wants_graph=False,
+        compose_template=_STOCK_COMPOSE,
+        offer_wiki=False,
+        offer_daemons=False,
+        offer_skill=True,
+        env_embedder_default="arctic",
+        env_graph_enabled=False,
+    ),
+    "full": SetupProfile(
+        name="full",
+        needs_ollama=True,
+        wants_graph=True,
+        compose_template=_AGE_COMPOSE,
+        offer_wiki=True,
+        offer_daemons=True,
+        offer_skill=True,
+        env_embedder_default="arctic",
+        env_graph_enabled=True,
+    ),
+}
+
+# Public tuple of valid profile names, in install-weight order (for --help + validation).
+PROFILE_NAMES: tuple[str, ...] = ("minimal", "standard", "full")
+
+
+def resolve_profile(name: str) -> SetupProfile:
+    """Return the :class:`SetupProfile` for *name*, or raise on an unknown choice."""
+    try:
+        return _PROFILES[name]
+    except KeyError as exc:
+        valid = ", ".join(PROFILE_NAMES)
+        raise SetupError(
+            f"unknown profile {name!r} — choose one of: {valid}"
+        ) from exc
+
+
 # Shim names installed to $BRAIN_HOME/.shims/ (sans .sh suffix).
 # Each must have a corresponding <name>.sh in brain.templates.bin/.
 _SHIM_NAMES: tuple[str, ...] = (
@@ -240,31 +322,50 @@ def _check_quartz_sha(*, dry_run: bool = False) -> PreflightResult:
 # ---------------------------------------------------------------------------
 
 
+def _embedder_uses_ollama(embedder: str | None) -> bool:
+    """True when the (resolved) embedder needs a local Ollama daemon.
+
+    ``arctic`` and ``qwen3`` embed over Ollama; ``voyage`` is SaaS and ``none``
+    is FTS-only. ``None`` defaults to ``arctic`` (the historical default).
+    """
+    return embedder in (None, "arctic", "qwen3")
+
+
 def run_preflight(
     pg_port: int,
     wiki_port: int,
     embedder: str | None,
+    profile: SetupProfile,
     skip_wiki: bool,
     skip_skill: bool,
     *,
     dry_run: bool = False,
 ) -> list[PreflightResult]:
-    """Run all 8 preflight checks; return the result list.
+    """Run the profile's preflight checks; return the result list.
 
-    Order matches the plan spec: Python, docker, ollama, PG port,
-    wiki port (cond.), caddy (cond.), skills dir, quartz SHA (cond.).
+    Every optional check derives from *profile* + the resolved *embedder*:
+
+    * ollama — only when the profile needs Ollama AND the resolved embedder
+      actually embeds over it (an auto-detect fallback to ``none`` drops it).
+    * wiki-port / caddy / skills-dir / quartz-sha — only for the full profile
+      (``offer_wiki``), which hard-requires the heavy optional components;
+      standard/minimal skip them so a missing caddy/quartz/skills-dir is never
+      a preflight failure. Order preserved: Python, docker, ollama, PG port,
+      wiki port, caddy, skills dir, quartz SHA.
     """
     results: list[PreflightResult] = []
     results.append(_check_python_version())
     results.append(_check_docker(dry_run=dry_run))
-    results.append(_check_ollama(embedder))
+    if profile.needs_ollama and _embedder_uses_ollama(embedder):
+        results.append(_check_ollama(embedder))
     results.append(_check_port_free(pg_port, "postgres-port"))
-    if not skip_wiki:
-        results.append(_check_port_free(wiki_port, "wiki-port"))
-        results.append(_check_caddy())
-    results.append(_check_skills_dir_writable(skip=skip_skill))
-    if not skip_wiki:
-        results.append(_check_quartz_sha(dry_run=dry_run))
+    if profile.offer_wiki:
+        if not skip_wiki:
+            results.append(_check_port_free(wiki_port, "wiki-port"))
+            results.append(_check_caddy())
+        results.append(_check_skills_dir_writable(skip=skip_skill))
+        if not skip_wiki:
+            results.append(_check_quartz_sha(dry_run=dry_run))
     return results
 
 
@@ -476,14 +577,24 @@ def _maybe_install_skill(
     skip: bool,
     non_interactive: bool,
     dry_run: bool,
+    *,
+    soft: bool = False,
 ) -> bool:
     """Prompt for and optionally perform the Claude Code skill sub-install.
 
     Returns True if the skill was installed (or dry-run would install it),
     False if skipped via flag or user declined.
+
+    When ``soft`` is set (the standard profile), a missing ``~/.claude``
+    directory is a silent skip rather than an install attempt — the user isn't
+    a Claude Code user, and this is never a preflight failure. The full profile
+    passes ``soft=False`` and keeps the interactive offer.
     """
     if skip:
         typer.echo("[skipped] Claude Code skill (--skip-skill)")
+        return False
+    if soft and not dry_run and not (Path.home() / ".claude").exists():
+        typer.echo("[skipped] Claude Code skill (~/.claude not present)")
         return False
     if non_interactive:
         do_install = True
@@ -588,6 +699,7 @@ def _print_final_report(
 
 def run_setup(
     *,
+    profile: str = "standard",
     non_interactive: bool = False,
     dry_run: bool = False,
     brain_home_override: Path | None = None,
@@ -627,6 +739,14 @@ def run_setup(
         vault_path = DEFAULT_VAULT_PATH
 
     # ------------------------------------------------------------------
+    # Resolve the profile + the effective embedder BEFORE preflight so every
+    # downstream gate (preflight checks, compose template, AGE materialize, .env
+    # contents, ollama pull, optional installs) derives from one object.
+    # ------------------------------------------------------------------
+    prof = resolve_profile(profile)
+    effective_embedder = embedder_choice or prof.env_embedder_default
+
+    # ------------------------------------------------------------------
     # T3.1 — Reset handling (DESTRUCTIVE; typed confirmation required)
     # ------------------------------------------------------------------
     if reset:
@@ -662,7 +782,8 @@ def run_setup(
     results = run_preflight(
         pg_port=pg_port,
         wiki_port=wiki_port,
-        embedder=embedder_choice,
+        embedder=effective_embedder,
+        profile=prof,
         skip_wiki=skip_wiki,
         skip_skill=skip_skill,
         dry_run=dry_run,
@@ -715,7 +836,7 @@ def run_setup(
     compose_dest = brain_home / "docker-compose.yml"
 
     def _write_compose_yml() -> None:
-        template = resource_files("brain.templates") / "docker-compose.yml.j2"
+        template = resource_files("brain.templates") / prof.compose_template
         text = render_compose_from_template(
             template.read_text(encoding="utf-8"),
             brain_home=brain_home,
@@ -724,18 +845,21 @@ def run_setup(
         )
         compose_dest.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(compose_dest, text)
-        typer.echo(f"  [ok] wrote {compose_dest}")
+        typer.echo(f"  [ok] wrote {compose_dest} ({prof.compose_template})")
 
     _perform_action(f"render {compose_dest}", _write_compose_yml, dry_run)
 
     # 3b. Materialize the packaged AGE Dockerfile so the compose build context
-    # ($BRAIN_HOME/docker/age) resolves before `docker compose up` runs.
-    dockerfile_dest = brain_home / "docker" / "age" / "Dockerfile"
-    _perform_action(
-        f"materialize AGE Dockerfile → {dockerfile_dest}",
-        lambda: materialize_age_dockerfile(brain_home),
-        dry_run,
-    )
+    # ($BRAIN_HOME/docker/age) resolves before `docker compose up` runs. Only the
+    # full profile's AGE compose has a build stanza; the stock (minimal/standard)
+    # compose has no build context, so the Dockerfile is not materialized.
+    if prof.wants_graph:
+        dockerfile_dest = brain_home / "docker" / "age" / "Dockerfile"
+        _perform_action(
+            f"materialize AGE Dockerfile → {dockerfile_dest}",
+            lambda: materialize_age_dockerfile(brain_home),
+            dry_run,
+        )
 
     # 4. Render .env — only if missing; never overwrite.
     env_dest = brain_home / ".env"
@@ -754,12 +878,17 @@ def run_setup(
         def _write_env() -> None:
             template_src = resource_files("brain.templates") / "env.example"
             # Substitute the chosen Postgres port into DATABASE_URL (same
-            # {{ pg_port }} mechanism as the compose render) and activate the
-            # commented-out BRAIN_VAULT_PATH line if --vault was given.
+            # {{ pg_port }} mechanism as the compose render), activate the
+            # commented-out BRAIN_VAULT_PATH line if --vault was given, and pin
+            # BRAIN_EMBEDDER + BRAIN_GRAPH_ENABLED EXPLICITLY to the profile's
+            # values (Config defaults the graph ON, so minimal/standard must
+            # write it false).
             env_text = render_env_from_template(
                 template_src.read_text(encoding="utf-8"),
                 pg_port=pg_port,
                 vault_path=vault_path,
+                embedder=effective_embedder,
+                graph_enabled=prof.env_graph_enabled,
             )
             env_dest.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(env_dest, env_text)
@@ -768,7 +897,7 @@ def run_setup(
         _perform_action(f"render {env_dest} from env.example template", _write_env, dry_run)
 
     # 5. Voyage API key prompt
-    if embedder_choice == "voyage" and not os.environ.get("VOYAGE_API_KEY"):
+    if effective_embedder == "voyage" and not os.environ.get("VOYAGE_API_KEY"):
         if non_interactive:
             typer.secho(
                 "error: --embedder voyage requires VOYAGE_API_KEY to be set "
@@ -827,8 +956,9 @@ def run_setup(
 
     _perform_action("wait for Postgres (pg_isready inside container)", _wait_for_postgres, dry_run)
 
-    # 3. ollama pull (arctic or qwen3 only; voyage is SaaS)
-    effective_embedder = embedder_choice or "arctic"
+    # 3. ollama pull (arctic or qwen3 only; voyage is SaaS, none is FTS-only).
+    # Uses the profile-resolved effective_embedder — a minimal profile or a
+    # standard run that fell back to FTS-only never pulls a ~1 GB model.
     if effective_embedder in {"arctic", "qwen3"}:
         model = (
             "snowflake-arctic-embed2" if effective_embedder == "arctic" else "qwen3-embedding:8b"
@@ -854,32 +984,47 @@ def run_setup(
     _run_brain_doctor(dry_run)
 
     # ------------------------------------------------------------------
-    # T3.6 — interactive sub-installs (wiki + Claude Code skill)
+    # T3.6 — optional sub-installs (wiki + Claude Code skill), gated by profile
     # ------------------------------------------------------------------
     typer.echo("\n── Optional components ────────────────────────────")
-    wiki_installed = _maybe_install_wiki(
-        skip=skip_wiki,
-        non_interactive=non_interactive,
-        dry_run=dry_run,
-        vault=vault_path,
-        brain_home=brain_home,
-        wiki_port=wiki_port,
-    )
-    skill_installed = _maybe_install_skill(
-        skip=skip_skill,
-        non_interactive=non_interactive,
-        dry_run=dry_run,
-    )
+    if prof.offer_wiki:
+        wiki_installed = _maybe_install_wiki(
+            skip=skip_wiki,
+            non_interactive=non_interactive,
+            dry_run=dry_run,
+            vault=vault_path,
+            brain_home=brain_home,
+            wiki_port=wiki_port,
+        )
+    else:
+        wiki_installed = False
+        typer.echo(f"[skipped] wiki install (profile {prof.name})")
+
+    if prof.offer_skill:
+        # Standard does a SOFT install (only when ~/.claude exists); full offers
+        # it interactively. minimal never installs the skill.
+        skill_installed = _maybe_install_skill(
+            skip=skip_skill,
+            non_interactive=non_interactive,
+            dry_run=dry_run,
+            soft=not prof.offer_wiki,
+        )
+    else:
+        skill_installed = False
+        typer.echo(f"[skipped] Claude Code skill (profile {prof.name})")
 
     # ------------------------------------------------------------------
-    # T3.7 — launchd install LAST (after DB + wiki are healthy)
+    # T3.7 — launchd install LAST (after DB + wiki are healthy); full only
     # ------------------------------------------------------------------
-    _maybe_install_launchd(
-        wiki_installed=wiki_installed,
-        vault_path=vault_path,
-        brain_home=brain_home,
-        dry_run=dry_run,
-    )
+    if prof.offer_daemons:
+        _maybe_install_launchd(
+            wiki_installed=wiki_installed,
+            vault_path=vault_path,
+            brain_home=brain_home,
+            dry_run=dry_run,
+        )
+    else:
+        typer.echo(f"[skipped] launchd background daemons (profile {prof.name})")
 
     # ------------------------------------------------------------------
     # T3.8 — final report

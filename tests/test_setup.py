@@ -237,6 +237,7 @@ def test_setup_vault_override_appended_to_existing_env(tmp_path: Path) -> None:
 def _dry_run_output(
     tmp_path: Path,
     *,
+    profile: str = "standard",
     skip_wiki: bool = True,
     skip_skill: bool = True,
     vault_override: Path | None = None,
@@ -266,6 +267,7 @@ def _dry_run_output(
         from brain.setup import run_setup
 
         run_setup(
+            profile=profile,
             dry_run=True,
             non_interactive=True,
             brain_home_override=brain_home,
@@ -318,6 +320,7 @@ def test_setup_preflight_caddy_missing_only_when_wiki_enabled(
         return f"/usr/bin/{name}"
 
     # --- skip_wiki=True: caddy check is bypassed; setup succeeds ---
+    # (caddy is a full-profile-only preflight, so exercise the full profile.)
     with (
         patch("shutil.which", side_effect=_which_no_caddy),
         patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
@@ -326,6 +329,7 @@ def test_setup_preflight_caddy_missing_only_when_wiki_enabled(
 
         # Should NOT raise
         run_setup(
+            profile="full",
             dry_run=True,
             non_interactive=True,
             brain_home_override=brain_home,
@@ -341,6 +345,7 @@ def test_setup_preflight_caddy_missing_only_when_wiki_enabled(
         patch("shutil.which", side_effect=_which_no_caddy),
     ):
         run_setup(
+            profile="full",
             dry_run=True,
             non_interactive=True,
             brain_home_override=brain_home,
@@ -369,9 +374,12 @@ def test_setup_preflight_caddy_missing_only_when_wiki_enabled(
 
 
 def test_setup_launchd_skipped_when_skip_wiki(tmp_path: Path) -> None:
-    """With --skip-wiki the launchd-skip line appears; without it the dry-run line appears."""
+    """Full profile: --skip-wiki suppresses launchd; without it the launchd path runs.
+
+    launchd is a full-profile-only component; standard/minimal never reach it.
+    """
     # skip_wiki=True → wiki not installed → launchd skipped
-    out_skipped = _dry_run_output(tmp_path / "skip", skip_wiki=True)
+    out_skipped = _dry_run_output(tmp_path / "skip", profile="full", skip_wiki=True)
     assert "launchd" in out_skipped.lower(), (
         "expected launchd mention when --skip-wiki"
     )
@@ -380,7 +388,7 @@ def test_setup_launchd_skipped_when_skip_wiki(tmp_path: Path) -> None:
     )
 
     # skip_wiki=False → launchd either dry-runs (macOS) or reports not-macOS
-    out_enabled = _dry_run_output(tmp_path / "enabled", skip_wiki=False)
+    out_enabled = _dry_run_output(tmp_path / "enabled", profile="full", skip_wiki=False)
     assert "launchd" in out_enabled.lower(), (
         "expected launchd mention when wiki is enabled"
     )
@@ -691,6 +699,157 @@ def test_render_compose_project_derives_noncolliding_container_name() -> None:
     assert "container_name: brain-qa-x-postgres" in out
     assert "container_name: brain-postgres" not in out
     assert "name: brain-qa-x" in out
+
+
+# ---------------------------------------------------------------------------
+# D1 — install profiles (minimal | standard | full)
+# ---------------------------------------------------------------------------
+
+
+def _run_profile_setup(
+    tmp_path: Path,
+    profile: str,
+    *,
+    skip_wiki: bool = True,
+    skip_skill: bool = True,
+) -> tuple[Path, list[Path]]:
+    """Run a real (non-dry) profile setup with every external call mocked.
+
+    Returns (brain_home, materialize_calls) so a test can assert both the
+    rendered artifacts on disk and whether the AGE Dockerfile materializer ran.
+    """
+    brain_home = tmp_path / ".brain"
+    mat_calls: list[Path] = []
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+        patch("brain.setup.ensure_shim"),
+        patch(
+            "brain.setup.materialize_age_dockerfile",
+            side_effect=lambda bh: mat_calls.append(bh) or (bh / "df"),
+        ),
+    ):
+        from brain.setup import run_setup
+
+        run_setup(
+            profile=profile,
+            dry_run=False,
+            non_interactive=True,
+            brain_home_override=brain_home,
+            vault_override=tmp_path / "vault",
+            pg_port=0,
+            skip_wiki=skip_wiki,
+            skip_skill=skip_skill,
+        )
+
+    return brain_home, mat_calls
+
+
+def test_minimal_preflight_omits_optional_checks() -> None:
+    """D1a: minimal preflight has NO ollama/caddy/quartz/wiki-port/skills-dir checks."""
+    from brain.setup import resolve_profile, run_preflight
+
+    results = run_preflight(
+        pg_port=0,
+        wiki_port=0,
+        embedder="none",
+        profile=resolve_profile("minimal"),
+        skip_wiki=False,
+        skip_skill=False,
+        dry_run=True,
+    )
+    names = {r.name for r in results}
+    assert names.isdisjoint(
+        {"ollama", "caddy", "quartz-sha", "wiki-port", "skills-dir"}
+    ), f"minimal preflight leaked an optional check: {names}"
+    # The always-on checks must still be present.
+    assert {"python>=3.11", "docker", "postgres-port"} <= names
+
+
+def test_minimal_renders_stock_compose_and_skips_age_materialize(tmp_path: Path) -> None:
+    """D1b: minimal renders the stock pgvector compose and never materializes AGE."""
+    brain_home, mat_calls = _run_profile_setup(tmp_path, "minimal")
+
+    compose = (brain_home / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "pgvector/pgvector:pg16" in compose, "minimal must use the stock image"
+    assert "build:" not in compose, "stock compose must have no AGE build stanza"
+    assert "ghcr.io" not in compose, "stock compose must not reference the GHCR AGE image"
+    assert mat_calls == [], "minimal must NOT materialize the AGE Dockerfile"
+    assert not (brain_home / "docker" / "age" / "Dockerfile").exists()
+
+
+def test_minimal_writes_fts_only_env(tmp_path: Path) -> None:
+    """D1c: minimal writes BRAIN_EMBEDDER=none + BRAIN_GRAPH_ENABLED=false to a fresh .env."""
+    brain_home, _ = _run_profile_setup(tmp_path, "minimal")
+
+    env_text = (brain_home / ".env").read_text(encoding="utf-8")
+    assert "BRAIN_EMBEDDER=none" in env_text
+    assert "BRAIN_EMBEDDER=arctic" not in env_text
+    # Config defaults the graph ON, so the .env MUST say false explicitly.
+    assert "BRAIN_GRAPH_ENABLED=false" in env_text
+    assert "# BRAIN_GRAPH_ENABLED=true" not in env_text
+
+
+def test_standard_and_full_preflight_run_ollama() -> None:
+    """D1f: standard + full run the ollama preflight for an Ollama-backed embedder."""
+    from brain.setup import resolve_profile, run_preflight
+
+    for name in ("standard", "full"):
+        results = run_preflight(
+            pg_port=0,
+            wiki_port=0,
+            embedder="arctic",
+            profile=resolve_profile(name),
+            skip_wiki=True,
+            skip_skill=True,
+            dry_run=True,
+        )
+        assert "ollama" in {r.name for r in results}, (
+            f"{name} profile must run the ollama preflight"
+        )
+
+
+def test_full_preflight_includes_wiki_and_skill_checks() -> None:
+    """D1f: full keeps today's heavy-component preflight (wiki-port/caddy/skills/quartz)."""
+    from brain.setup import resolve_profile, run_preflight
+
+    results = run_preflight(
+        pg_port=0,
+        wiki_port=0,
+        embedder="arctic",
+        profile=resolve_profile("full"),
+        skip_wiki=False,
+        skip_skill=False,
+        dry_run=True,
+    )
+    names = {r.name for r in results}
+    assert {"wiki-port", "caddy", "skills-dir", "quartz-sha"} <= names
+
+
+def test_full_materializes_age_and_writes_graph_on_env(tmp_path: Path) -> None:
+    """D1f: full renders the AGE compose, materializes the Dockerfile, graph on."""
+    brain_home, mat_calls = _run_profile_setup(
+        tmp_path, "full", skip_wiki=True, skip_skill=True
+    )
+
+    compose = (brain_home / "docker-compose.yml").read_text(encoding="utf-8")
+    assert "ghcr.io" in compose and "build:" in compose, "full must use the AGE compose"
+    assert mat_calls == [brain_home], "full must materialize the AGE Dockerfile once"
+
+    env_text = (brain_home / ".env").read_text(encoding="utf-8")
+    assert "BRAIN_GRAPH_ENABLED=true" in env_text
+    assert "BRAIN_EMBEDDER=arctic" in env_text
+
+
+def test_resolve_profile_rejects_unknown() -> None:
+    """An unknown --profile raises SetupError with the valid choices listed."""
+    import pytest as _pytest
+
+    from brain.setup import SetupError, resolve_profile
+
+    with _pytest.raises(SetupError, match="unknown profile"):
+        resolve_profile("gigantic")
 
 
 # ---------------------------------------------------------------------------
