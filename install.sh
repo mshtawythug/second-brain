@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # install.sh — one-liner installer for second-brain / brain CLI.
-# Usage: curl -fsSL https://raw.githubusercontent.com/mshtawythug/second-brain/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/mshtawythug/second-brain/v0.2.0/install.sh | bash
 # Env overrides: BRAIN_INSTALL_REF  BRAIN_REPO  BRAIN_INSECURE  BRAIN_INSTALL_SH_DRY_RUN
 set -euo pipefail
 
