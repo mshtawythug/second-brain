@@ -25,13 +25,19 @@ Set WindowBar Colorful
 # Resolve the worktree's own `brain` (its venv), put Docker on PATH, set a
 # clean prompt so the recording never leaks the real username/hostname, and
 # start from a torn-down sandbox so the visible run is a genuine first-run.
+#
+# The settling Sleeps below are load-bearing: the prompt redraw after the PS1
+# export and the `clear` must fully land while frames are still HIDDEN, or the
+# first recorded frames leak the setup buffer / a doubled-letter prompt race.
 Hide
 Type "export PATH=/opt/homebrew/bin:/usr/local/bin:$PATH" Enter
 Type "source .venv/bin/activate 2>/dev/null || true" Enter
 Type 'export PS1="\[\033[1;35m\]brain-demo\[\033[0m\] \[\033[38;5;245m\]❯\[\033[0m\] "' Enter
+Sleep 500ms
 Type "docker image inspect pgvector/pgvector:pg16 >/dev/null 2>&1 || docker pull pgvector/pgvector:pg16" Enter
 Type "brain demo teardown >/dev/null 2>&1 || true" Enter
 Type "clear" Enter
+Sleep 1500ms
 Show
 
 # --- Scene 1: spin up + seed + hero query ----------------------------------
