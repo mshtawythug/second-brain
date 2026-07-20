@@ -1,5 +1,7 @@
 # Hooking the Second Brain into Claude Desktop
 
+> Part of the [Second Brain](../../README.md) docs — see [docs/README.md](../README.md) for the full index.
+
 Step-by-step to get the `brain_*` MCP tools usable from any Claude Desktop chat.
 
 > Paths below use `/Users/you/...` as a placeholder — replace `/Users/you`
@@ -138,4 +140,4 @@ Then **Cmd-Q + reopen Claude Desktop** so the server re-spawns with the updated 
 
 ## Reference
 
-- README "Claude Desktop (MCP server)" section (in [docs/configuration.md](../configuration.md)): high-level summary + the full env-var table.
+- The "Claude Desktop (MCP server)" section in [docs/configuration.md](../configuration.md): high-level summary + the full env-var table.

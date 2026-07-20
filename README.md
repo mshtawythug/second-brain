@@ -24,7 +24,7 @@ Brain stores pre-extracted, quote-stripped bodies and hybrid-ranks *before* fetc
 
 ## See it in 60 seconds
 
-Install the CLI, then run the offline demo — a throwaway Postgres seeded with a synthetic compliance corpus. No Ollama, no personal data, no model downloads:
+Install the CLI, then run the offline demo — a throwaway Postgres seeded with a synthetic *Larkspur* compliance corpus. No Ollama, no personal data, no model downloads:
 
 ```bash
 pipx install git+https://github.com/mshtawythug/second-brain.git@v0.2.0
@@ -58,7 +58,11 @@ Try these next:
   brain demo teardown   # remove the sandbox when done
 ```
 
-_(IDs and scores are per-run; the seeded corpus and its ranking are deterministic. The top hit is always the "Compliance Horror Stories" note.)_ `brain demo` needs only Docker; `brain demo teardown` destroys the sandbox.
+_(IDs and scores are per-run; the seeded corpus and its ranking are deterministic — the top hit is always the "Compliance Horror Stories" note.)_
+
+`brain demo` needs only Docker; `brain demo teardown` destroys the sandbox.
+
+Already ran the demo? You have `brain` installed — jump straight to `brain setup --profile …` below.
 
 ## Quick start
 
@@ -72,7 +76,7 @@ The installer pipx-installs `brain` from the `v0.2.0` tag, then runs `brain setu
 
 | Profile | Search | Extra dependencies beyond the core |
 |---|---|---|
-| `minimal` | FTS-only (`BRAIN_EMBEDDER=none`) | Docker only. |
+| `minimal` | FTS-only (`BRAIN_EMBEDDER=none`) | None — core only (no Ollama, no models). |
 | `standard` *(default)* | Hybrid (FTS + vector) | + Ollama + one ~1 GB embedding model (`snowflake-arctic-embed2`). |
 | `full` | Hybrid + GraphRAG + wiki | + Apache AGE image, concept-extraction LLM, Quartz/Caddy wiki, and (opt-in) launchd daemons via `--daemons`. |
 
@@ -135,7 +139,7 @@ claude mcp add brain -- brain-mcp
 
 ## How it works
 
-**Hybrid search.** Every document is chunked, embedded, and indexed for Postgres full-text search. A query runs both legs — lexical `tsvector` ranking and vector cosine similarity — and fuses them with [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (k=60), then applies a recency boost and metadata filters. Lexical alone misses paraphrases ("what did I say about X"); vector alone misses exact names (a coworker, a former employer); RRF gets both in one ranked list without tuning weights. Set `BRAIN_EMBEDDER=none` for a pure-FTS brain with no embedding dependency at all.
+**Hybrid search.** Every document is chunked, embedded, and indexed for Postgres full-text search. A query runs both legs — lexical `tsvector` ranking and vector cosine similarity — and fuses them with [Reciprocal Rank Fusion](https://plg.uwaterloo.ca/~gvcormac/cormacksigir09-rrf.pdf) (k=60), then applies a recency boost and metadata filters. Lexical alone misses paraphrases ("what did I say about X"); vector alone misses exact names (a coworker, a former employer); RRF gets both in one ranked list without tuning weights. Set `BRAIN_EMBEDDER=none` for an FTS-only brain with no embedding dependency at all.
 
 **GraphRAG.** Alongside search, brain builds an entity graph of the people and concepts that co-occur across the corpus ([Apache AGE](https://age.apache.org/) inside the same Postgres) and retrieves over that structure — answering "what themes come up in my conversations with X" or "which clusters of people and topics dominate my notes" by traversing relationships instead of matching text. It runs alongside plain search, not instead of it. See [docs/graphrag.md](docs/graphrag.md).
 
