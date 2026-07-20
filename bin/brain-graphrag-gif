@@ -1,0 +1,400 @@
+#!/usr/bin/env bash
+# brain-graphrag-gif — regenerate the docs/graphrag.md "entity-graph retrieval"
+# GIF from docs/assets/graphrag.tape.
+#
+# Records the `brain graphrag …` CLI — "themes with a person" and a fused
+# graph+vector search — against a THROWAWAY, fully-isolated Apache-AGE Postgres
+# that this script provisions just for the recording and destroys afterward:
+#
+#   * compose project  brain-graphrag-gif      (NEVER the prod `brain` project)
+#   * container        brain-graphrag-gif-postgres
+#   * host port        55442                    (prod 55432, demo 55433, tests 5434,
+#                                                usage-gif 55440)
+#   * storage          a NAMED docker volume    (never a host bind-mount)
+#   * database         second_brain_graphrag_gif
+#   * image            the custom Apache-AGE image (GraphRAG needs the graph
+#                      extension) — pulled from GHCR, never the stock pgvector prod image
+#
+# The CLI is pointed at that sandbox purely through the environment (DATABASE_URL
+# + BRAIN_HOME + BRAIN_VAULT_PATH + the BRAIN_GRAPH_* knobs), exported here and
+# inherited by vhs. A dev checkout's repo-root .env would otherwise win and point
+# the CLI at the PROD database, so every relevant var is overridden explicitly
+# here (config.py resolves .env via os.environ.setdefault, so an exported value
+# always wins), and the tape hard-aborts unless DATABASE_URL is the :55442
+# sandbox — a stray run can never touch personal data.
+#
+# All seeded content is synthetic (Larkspur compliance corpus; recurring
+# synthetic people + concepts so the graph's themes/communities are non-trivial;
+# zero PII).
+#
+# Unlike bin/brain-usage-gif (which can fall back to the FTS-only NullEmbedder),
+# this recorder REQUIRES a local Ollama with:
+#   * snowflake-arctic-embed2  — the embedder (fuse's vector leg is real)
+#   * llama3.1:8b              — the graph concept extractor (config default)
+# The off-camera graph build runs the LLM extractor over every seeded document
+# (serialized when Ollama's NUM_PARALLEL=1), so provisioning takes a few minutes.
+#
+# Requires: vhs (brew install vhs — bundles ttyd + ffmpeg), Docker, and Ollama.
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+TAPE="docs/assets/graphrag.tape"
+GIF="docs/assets/graphrag.gif"
+MAX_BYTES=$(( 2560 * 1024 ))  # 2.5 MB docs budget for the graphrag GIF.
+
+# --- Isolated-sandbox identifiers (kept distinct from prod/demo/test/usage) --
+PROJECT="brain-graphrag-gif"
+CONTAINER="brain-graphrag-gif-postgres"
+DB_PORT="55442"
+DB_NAME="second_brain_graphrag_gif"
+DB_URL="postgresql://brain:brain@localhost:${DB_PORT}/${DB_NAME}"
+# The custom PG16 + pgvector + Apache AGE image (GraphRAG needs AGE). Pulled from
+# GHCR; the same ref docker-compose.age-test.yml uses. NEVER the stock pgvector
+# prod image, which has no graph extension.
+AGE_IMAGE="ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2"
+# Ollama models this recorder hard-requires (see header).
+EMBED_MODEL="snowflake-arctic-embed2"
+EXTRACT_MODEL="llama3.1:8b"   # == config.DEFAULT_GRAPH_EXTRACT_MODEL
+
+WORKDIR="${TMPDIR:-/tmp}/brain-graphrag-gif"
+COMPOSE_FILE="$WORKDIR/docker-compose.graphrag-gif.yml"
+HOME_DIR="$WORKDIR/home"
+VAULT_DIR="$WORKDIR/vault"
+ALIASES_FILE="$WORKDIR/aliases.yml"
+VOLUME_NAME="${PROJECT}_brain-graphrag-gif-pgdata"
+
+usage() {
+  echo "Usage: brain-graphrag-gif [-h|--help]  — record docs/assets/graphrag.tape into docs/assets/graphrag.gif via vhs against a throwaway :55442 Apache-AGE Postgres sandbox (leaves nothing behind)."
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+# --- Teardown: ALWAYS scoped to our own project, ALWAYS runs on exit ---------
+cleanup() {
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+  else
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm "$VOLUME_NAME" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORKDIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# --- Preflight --------------------------------------------------------------
+if ! command -v vhs >/dev/null 2>&1; then
+  echo "error: 'vhs' not found on PATH — install it with 'brew install vhs'" >&2
+  echo "       (vhs bundles the ttyd + ffmpeg dependencies it needs)." >&2
+  exit 1
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo "error: 'docker' not found on PATH — install Docker Desktop or Engine." >&2
+  exit 1
+fi
+if ! command -v brain >/dev/null 2>&1; then
+  echo "error: 'brain' not found on PATH — install it with 'pip install -e .'" >&2
+  exit 1
+fi
+if ! command -v ollama >/dev/null 2>&1; then
+  echo "error: 'ollama' not found on PATH — GraphRAG needs a local Ollama for" >&2
+  echo "       the concept extractor + embedder. Install from ollama.com." >&2
+  exit 1
+fi
+if ! ollama list >/dev/null 2>&1; then
+  echo "error: 'ollama list' failed — is the Ollama server running?" >&2
+  echo "       Start it with 'brew services start ollama' (or 'ollama serve')." >&2
+  exit 1
+fi
+# Capture the model list ONCE and match against the string — piping `ollama
+# list` straight into `grep -q` would SIGPIPE `ollama list` when grep exits
+# early on a match, which `set -o pipefail` then reports as a failed pipeline
+# (a false "missing" for any model not on the last line).
+installed_models="$(ollama list 2>/dev/null || true)"
+missing=""
+grep -qF "$EMBED_MODEL"   <<<"$installed_models" || missing="${missing} ${EMBED_MODEL}"
+grep -qF "$EXTRACT_MODEL" <<<"$installed_models" || missing="${missing} ${EXTRACT_MODEL}"
+if [[ -n "$missing" ]]; then
+  echo "error: required Ollama model(s) not pulled:${missing}" >&2
+  for m in $missing; do echo "       ollama pull $m" >&2; done
+  exit 1
+fi
+
+cd "$REPO_ROOT"
+[[ -f "$TAPE" ]] || { echo "error: tape not found: $REPO_ROOT/$TAPE" >&2; exit 1; }
+
+# --- Fresh workdir + compose file (AGE image, named volume) -----------------
+rm -rf "$WORKDIR"
+mkdir -p "$HOME_DIR" "$VAULT_DIR"
+
+cat > "$COMPOSE_FILE" <<YAML
+services:
+  postgres:
+    image: ${AGE_IMAGE}
+    container_name: ${CONTAINER}
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - brain-graphrag-gif-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d ${DB_NAME}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  brain-graphrag-gif-pgdata:
+YAML
+
+# Concept fragments the local llama3.1:8b extractor commonly emits for this
+# corpus, consolidated onto clean canonical concepts via the product's curated
+# alias-merge (brain graphrag aliases apply / --aliases at build). Best-effort:
+# a rule whose source didn't get extracted on a given run is a silent no-op, so
+# the recording is robust to the extractor's run-to-run variance. Targets are
+# find-or-create, so a canonical concept need not pre-exist.
+cat > "$ALIASES_FILE" <<'YAML'
+rules:
+  - from: {type: topic, key: vendorriskassessments}
+    to:   {type: topic, key: vendor risk}
+  - from: {type: topic, key: vendorriskcommittee}
+    to:   {type: topic, key: vendor risk}
+  - from: {type: topic, key: vendorriskreview}
+    to:   {type: topic, key: vendor risk}
+  - from: {type: topic, key: vendorriskmanagement}
+    to:   {type: topic, key: vendor risk}
+  - from: {type: topic, key: evidencecollection}
+    to:   {type: topic, key: evidence automation}
+  - from: {type: topic, key: soc2typeii}
+    to:   {type: org, key: soc2}
+  - from: {type: topic, key: pcidss40}
+    to:   {type: topic, key: pci}
+YAML
+
+# --- Point the CLI at the sandbox purely through the environment ------------
+# Exported here → inherited by vhs → inherited by the recorded shell. Overriding
+# DATABASE_URL in the process env makes it win over any repo-root .env (resolved
+# via os.environ.setdefault — see src/brain/config.py).
+export DATABASE_URL="$DB_URL"
+export BRAIN_HOME="$HOME_DIR"
+export BRAIN_VAULT_PATH="$VAULT_DIR"
+export BRAIN_EMBEDDER="arctic"
+export BRAIN_GRAPH_ENABLED="true"
+# Concepts OFF at ingest (fast, people-only inline sync); the off-camera
+# `graphrag build --concepts` runs the LLM concept extraction in one controlled
+# pass (this is the multi-minute step).
+export BRAIN_GRAPH_CONCEPTS="false"
+# The default 0.30 generic-df ratio suppresses any entity in >~4 of 15 docs as
+# "generic" — far too aggressive for this small demo corpus, which would strip
+# the recurring SOC 2 / vendor-risk / evidence-automation edges the graph is
+# meant to show. 0.85 keeps them (small-corpus tuning; prod stays on the default).
+export BRAIN_GRAPH_GENERIC_DF="0.85"
+export BRAIN_GRAPH_ALIASES_PATH="$ALIASES_FILE"
+export BRAIN_GRAPH_THEME_LIMIT="4"
+# No owner to strip — every recurring synthetic participant should appear.
+export BRAIN_OWNER_PARTICIPANTS=""
+# Disable the post-ingest Ollama auto-summary during seeding (keeps ingest a
+# fast, deterministic people-only op; the graph build owns all the LLM work).
+export BRAIN_ENRICH_MIN_TOKENS="1000000"
+# The tape cds here and fails closed unless the sandbox is active.
+export GRAPHRAG_GIF_WORK="$WORKDIR"
+
+# --- Provision the throwaway AGE Postgres (fresh every run) ------------------
+echo "Provisioning the throwaway graphrag-gif Apache-AGE Postgres on port ${DB_PORT} …"
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d >/dev/null
+
+echo "Waiting for Postgres to accept connections …"
+ready=""
+for _ in $(seq 1 30); do
+  if docker exec "$CONTAINER" pg_isready -U brain -d "$DB_NAME" >/dev/null 2>&1; then
+    ready="yes"; break
+  fi
+  sleep 2
+done
+[[ -n "$ready" ]] || { echo "error: ${CONTAINER} never became ready" >&2; exit 1; }
+
+# --- Init (migrations + AGE bootstrap) --------------------------------------
+echo "Applying migrations + bootstrapping the AGE graph …"
+brain init >/dev/null
+
+# --- Seed the directory so synthetic participants resolve to people ---------
+# The people aspect resolves participants through the People-Hub directory
+# (directory_entries), normally populated by a gws Calendar/Contacts refresh.
+# There's no gws in the sandbox, so seed the synthetic cast directly (source
+# 'contacts'). Every krisp speaker label + gmail From/To below resolves against
+# these rows.
+echo "Seeding the synthetic directory …"
+docker exec -i "$CONTAINER" psql -U brain -d "$DB_NAME" -q >/dev/null <<'SQL'
+INSERT INTO directory_entries (display_name, email, source) VALUES
+ ('Sam Rivera','sam.rivera@example.com','contacts'),
+ ('Priya Patel','priya.patel@example.com','contacts'),
+ ('Marcus Chen','marcus.chen@example.com','contacts'),
+ ('Dana Whitfield','dana.whitfield@example.com','contacts'),
+ ('Riley Nakamura','riley.nakamura@example.com','contacts'),
+ ('Jordan Alvarez','jordan.alvarez@example.com','contacts'),
+ ('Nadia Osei','nadia.osei@example.com','contacts')
+ON CONFLICT (display_name, email, source) DO NOTHING;
+SQL
+
+# --- Seed the synthetic corpus (off camera) ---------------------------------
+# krisp transcripts use **Name | mm:ss** speaker labels (extract_krisp_speakers);
+# gmail docs carry From/To headers (extract_gmail_addresses + the directory
+# hook); slack/manual are concept-only. Recurring synthetic people + concepts
+# co-occur across docs so the graph's themes/communities are non-trivial.
+krisp() { # $1 ext_id  $2 title  $3 date  $4 tags(comma)
+  local tagargs=() t; IFS=',' read -ra _t <<< "$4"
+  for t in "${_t[@]}"; do tagargs+=(--tag "$t"); done
+  brain ingest-stdin --source krisp --external-id "$1" --title "$2" \
+    --content-type transcript --date "$3" --no-enrich "${tagargs[@]}" >/dev/null
+}
+mail() { # $1 ext_id  $2 title  $3 date  $4 from  $5 to  $6 tags(comma)
+  local tagargs=() t; IFS=',' read -ra _t <<< "$6"
+  for t in "${_t[@]}"; do tagargs+=(--tag "$t"); done
+  brain ingest-stdin --source gmail --external-id "$1" --title "$2" \
+    --content-type email --date "$3" \
+    --metadata "{\"from\":\"$4\",\"to\":\"$5\"}" --no-enrich "${tagargs[@]}" >/dev/null
+}
+plain() { # $1 source  $2 ext_id  $3 title  $4 ctype  $5 date  $6 tags(comma)
+  local tagargs=() t; IFS=',' read -ra _t <<< "$6"
+  for t in "${_t[@]}"; do tagargs+=(--tag "$t"); done
+  brain ingest-stdin --source "$1" --external-id "$2" --title "$3" \
+    --content-type "$4" --date "$5" --no-enrich "${tagargs[@]}" >/dev/null
+}
+
+echo "Seeding the synthetic Larkspur corpus …"
+krisp gg-0001 "SOC 2 Type II readiness sync" 2026-05-11 soc2,compliance,audit <<'BODY'
+**Sam Rivera | 00:00**
+Let's walk the SOC 2 Type II readiness plan end to end. The theme again is evidence automation — most of our audit pain is evidence collection, so I want evidence to be a byproduct of the work instead of a quarterly fire drill.
+**Priya Patel | 01:12**
+Agreed. Right now access reviews are three months overdue and change approvals have no consistent trail. Before fieldwork, every SOC 2 trust-services criterion needs a named owner.
+**Sam Rivera | 02:40**
+So a weekly job snapshots access reviews, change approvals, and backup tests, timestamps them, and files them in the auditor portal automatically. Evidence automation is the single biggest lever for a clean SOC 2 result.
+BODY
+
+krisp gg-0002 "Evidence automation working session" 2026-05-13 soc2,automation,compliance <<'BODY'
+**Sam Rivera | 00:00**
+I prototyped a collector that snapshots each control signal weekly and drops it in the auditor portal. Which of the forty SOC 2 evidence artifacts can we generate automatically?
+**Priya Patel | 00:55**
+Access reviews, change approvals, backup tests, and logging retention proofs. Fix the artifact naming so inconsistent, undated files stop generating auditor follow-ups.
+**Sam Rivera | 02:05**
+Target is to automate at least half before the observation window opens. Evidence automation turns SOC 2 readiness from heroics into a habit, and the same pipeline makes the second cycle nearly free.
+BODY
+
+mail gg-0003 "SOC 2 evidence request (fieldwork)" 2026-05-09 "Priya Patel <priya.patel@example.com>" "Sam Rivera <sam.rivera@example.com>" soc2,audit,compliance <<'BODY'
+Ahead of SOC 2 fieldwork, here is the evidence request: forty artifacts, with access reviews, change-management approvals, and vendor risk assessments most likely to slip. Most evidence already exists and just needs exporting, dating, and consistent naming, because inconsistent file names are the number-one reason auditors send follow-up questions. A known gap with a remediation plan is a manageable finding; a surprise gap is a scramble. This is exactly the pain evidence automation is meant to remove for good.
+BODY
+
+krisp gg-0004 "Vendor risk committee — Q2" 2026-05-18 vendor-risk,risk,compliance <<'BODY'
+**Nadia Osei | 00:00**
+The Q2 vendor risk committee is reviewing our top data processors. One vendor has no current SOC 2 attestation, vague data-residency answers, and a thirty-day breach-notification window.
+**Marcus Chen | 01:20**
+That thirty-day breach window is a non-starter. Vendor risk has to be contractual, not aspirational.
+**Sam Rivera | 02:10**
+So the standard is a current attestation on file, a right-to-audit provision, and a seventy-two-hour breach-notification clause, or the deal does not proceed. Put the vendor on a remediation clock and standardize the security addendum across every processor.
+BODY
+
+mail gg-0005 "Vendor security review — findings" 2026-05-20 "Dana Whitfield <dana.whitfield@example.com>" "Sam Rivera <sam.rivera@example.com>" vendor-risk,legal,compliance <<'BODY'
+Legal finished the vendor risk review and I have concerns before we counter-sign. The vendor could not produce a current SOC 2 report, answered vaguely on data residency, and declined a breach-notification window shorter than thirty days. I want a security addendum pinning a seventy-two-hour breach-notification clause, a right-to-audit provision, and customer data kept in-region. If they will not sign, treat it as a vendor risk red flag and escalate to the risk committee. Please loop in the vendor's counsel so both sides negotiate from the same document rather than discovering the gap during a real incident.
+BODY
+
+mail gg-0006 "Vendor addendum — breach notification" 2026-05-28 "Jordan Alvarez <jordan.alvarez@example.com>" "Dana Whitfield <dana.whitfield@example.com>, Sam Rivera <sam.rivera@example.com>" vendor-risk,contract,legal <<'BODY'
+Thanks for the redlined security addendum. We can commit to the seventy-two-hour breach-notification window and the data-residency requirement, both close to our internal standard. The open point is the right-to-audit clause: an unlimited annual on-site audit is heavy, so we propose one scheduled audit per year plus our SOC 2 report on request once our Type II completes. Breach notification and right-to-audit were the two clauses that mattered most, and both are now essentially settled.
+BODY
+
+krisp gg-0007 "PCI scope creep review" 2026-06-01 pci,compliance,scope-creep <<'BODY'
+**Marcus Chen | 00:00**
+A new checkout API quietly pulled almost the entire production environment into PCI scope the moment it began handling raw card numbers instead of tokens. Logging, network segmentation, quarterly scans — everything it touches inherited the compliance burden.
+**Sam Rivera | 01:30**
+Classic scope creep. The fix is to reintroduce a tokenization proxy so raw card data never lands in our services, shrinking PCI scope back to the cardholder-data enclave. Tokenization is the highest-leverage PCI investment this quarter.
+BODY
+
+mail gg-0008 "PCI DSS 4.0 gap assessment" 2026-05-25 "Marcus Chen <marcus.chen@example.com>" "Sam Rivera <sam.rivera@example.com>" pci,compliance <<'BODY'
+I finished a first pass at the PCI DSS 4.0 gap assessment. Good news with an asterisk: most tightened 4.0 requirements — stronger authentication, more granular access, targeted risk analysis — are already met thanks to the SOC 2 work. The asterisk is scope. As long as the checkout integration keeps raw card data in the environment, in-scope systems roughly triple and so does assessment cost. Treat the tokenization remediation as the single highest-leverage PCI investment this quarter. The red rows are all downstream of scope, not missing controls.
+BODY
+
+krisp gg-0009 "Payments incident postmortem" 2026-04-28 incident,postmortem,compliance <<'BODY'
+**Riley Nakamura | 00:00**
+Blameless postmortem for the payments outage. Root cause: a config change disabled retries, and because logging retention had silently dropped to seven days, we lost the evidence needed to reconstruct the first ninety minutes.
+**Sam Rivera | 01:15**
+Which turned an ops incident into a compliance problem — we could not prove to the auditor when it started. Incident-response action items: restore ninety-day logging retention, add an alert that fires if retention drifts below the compliance floor, and write the runbook. Logging retention is a compliance control now, not just an ops setting.
+BODY
+
+plain slack gg-0010 "#eng — logging retention gotcha" message 2026-04-30 incident,logging,eng <<'BODY'
+riley.nakamura: PSA — the logging retention gotcha that bit us in the payments outage is a config default, not a bug. the log shipper resets to a seven-day default whenever the config map is recreated
+sam.rivera: which is always the worst possible moment. see the payments incident postmortem for the full write-up
+riley.nakamura: I pinned an alert that fires if logging retention drops below ninety days so it cannot drift silently again
+sam.rivera: this is the incident-response guardrail I love — invisible until the day it saves you. adding it to the controls cheatsheet
+BODY
+
+plain slack gg-0011 "#compliance — evidence automation idea" message 2026-06-03 compliance,automation,soc2 <<'BODY'
+sam.rivera: idea I cannot shake — most of our audit pain is evidence collection, so what if we automated it end to end
+sam.rivera: every access review, every change approval, every backup test already emits a signal. we just never capture it in one place
+priya.patel: that is exactly what carries a SOC 2 Type II with no scramble. snapshot weekly, timestamp, drop it in the portal auditors already use
+sam.rivera: evidence automation stops being a fire drill and becomes a byproduct of doing the work. bonus, it kills the number-one auditor follow-up, undated artifacts
+BODY
+
+krisp gg-0012 "Weekly staff — risk register review" 2026-05-30 risk,compliance,staff <<'BODY'
+**Nadia Osei | 00:00**
+Risk-register review. The near-miss that got attention: a deploy almost shipped a logging change that would have dropped retention below the compliance floor, caught by Riley's new alert.
+**Marcus Chen | 01:05**
+Tie that back to PCI scope and the tokenization remediation still in flight.
+**Sam Rivera | 02:00**
+And the vendor risk remediation clock is ticking while evidence automation for SOC 2 is now largely done. Add a near-miss column so vendor risk, PCI, and incident-response lessons stay visible over time.
+BODY
+
+mail gg-0013 "Board update — audit status" 2026-06-05 "Sam Rivera <sam.rivera@example.com>" "Nadia Osei <nadia.osei@example.com>" audit,board,soc2 <<'BODY'
+A short audit-posture update for the board. The SOC 2 Type II observation window is on track to close on schedule; the evidence backlog that worried leadership last quarter is now largely automated, with access reviews, change approvals, and logging retention all generating their own trail. Two open items kept visible at board level: a vendor risk review surfaced gaps with a data processor, and legal is negotiating a stronger security addendum with a seventy-two-hour breach-notification clause; and a checkout integration briefly expanded PCI scope, with a tokenization remediation underway to shrink it. Compliance maturity is trending up and evidence automation is paying for itself.
+BODY
+
+mail gg-0014 "SOC 2 report delivered" 2026-06-12 "Priya Patel <priya.patel@example.com>" "Sam Rivera <sam.rivera@example.com>" soc2,milestone,compliance <<'BODY'
+The SOC 2 Type II report is final and uploaded. Congratulations to the whole team on one of the cleaner first-time engagements I have run: a small set of well-documented findings, each with a remediation plan already moving, and no last-minute evidence scramble because evidence automation captured the trail early. Notes for next cycle: keep evidence automation running so the trail never goes cold, close out the vendor risk addendum and the PCI scope reduction before the next window, and keep telling the team why compliance matters. Culture is the control that holds all the others up.
+BODY
+
+plain manual gg-0015 "Larkspur security controls cheatsheet" note 2026-03-30 soc2,controls,reference <<'BODY'
+A one-page reference for the controls Larkspur cares about most. Access management: SSO everywhere, quarterly access reviews, no shared accounts. Change management: every production change rides a reviewed pull request with a deploy record. Logging: ninety-day retention minimum, centralized and tamper-evident, treated as a compliance control. Vendor risk: a signed security addendum and a current SOC 2 attestation before any vendor touches customer data, with a seventy-two-hour breach-notification clause. PCI: keep raw card data out of scope via tokenization. Incident response: a named on-call, a severity rubric, and a blameless postmortem. Evidence automation captures proof of every control on a weekly schedule.
+BODY
+
+# --- Build the graph (heavy: LLM concept extraction over every document) -----
+echo "Building the entity graph (people + concepts; runs the local LLM extractor — this takes a few minutes) …"
+build_start=$SECONDS
+brain graphrag build --force --concepts >/dev/null
+echo "Detecting + summarizing communities …"
+brain graphrag communities build >/dev/null 2>&1 || true
+build_secs=$(( SECONDS - build_start ))
+echo "Graph build finished in ${build_secs}s."
+
+# --- Fail closed: refuse to record an empty-looking graph -------------------
+# The whole point of the GIF is a rich themed graph; an empty themes table would
+# ship a misleading asset. Assert the headline query returns a populated Themes
+# table before we spend time recording.
+themes_out="$(brain graphrag themes --person "Sam Rivera" 2>/dev/null || true)"
+if ! grep -q "Themes" <<<"$themes_out" || ! grep -Eq "Marcus Chen|Priya Patel|Dana Whitfield|Nadia Osei" <<<"$themes_out"; then
+  echo "error: graph build produced an empty/low-signal themes result — refusing" >&2
+  echo "       to record a misleading GIF. Inspect with:" >&2
+  echo "         brain graphrag themes --person 'Sam Rivera'" >&2
+  exit 1
+fi
+
+# --- Record -----------------------------------------------------------------
+echo "Recording $TAPE with vhs …"
+vhs "$TAPE"
+
+[[ -f "$GIF" ]] || { echo "error: vhs did not produce $GIF" >&2; exit 1; }
+
+# stat is BSD (macOS) vs GNU (Linux); try both invocations.
+bytes="$( stat -f%z "$GIF" 2>/dev/null || stat -c%s "$GIF" )"
+human="$( awk -v b="$bytes" 'BEGIN { printf "%.2f MB", b / 1048576 }' )"
+
+echo "Wrote $GIF ($human, $bytes bytes)."
+if (( bytes > MAX_BYTES )); then
+  echo "warning: $GIF exceeds the 2.5 MB docs budget — tune the tape's" >&2
+  echo "         FontSize/framerate/Sleep durations to shrink it." >&2
+fi

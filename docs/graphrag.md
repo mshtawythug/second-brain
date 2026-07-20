@@ -2,6 +2,10 @@
 
 > Part of the [Second Brain](../README.md) docs — see [docs/README.md](README.md) for the full index.
 
+![GraphRAG: "themes with a person" then a fused graph+vector search, over a synthetic corpus](assets/graphrag.gif)
+
+*Entity-graph retrieval in action: the themes that cluster around a person, then a fused graph + vector search. (Synthetic Larkspur corpus; regenerate with `bin/brain-graphrag-gif`.)*
+
 ## How it works
 
 GraphRAG adds **entity-centric graph retrieval alongside** the existing
