@@ -1087,6 +1087,38 @@ def test_autodetect_prints_hint_in_setup_narrative(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# D6 — minimal happy-path dry-run narrative (Docker + Git + Python only)
+# ---------------------------------------------------------------------------
+
+
+def test_minimal_dry_run_narrative_reaches_doctor(tmp_path: Path) -> None:
+    """D6: minimal previews compose + init + doctor, skips every heavy component.
+
+    A user with only Docker + Git + Python must reach `brain doctor` (the gate
+    that Wave 1's none-branch keeps green) with no Ollama, no AGE, no wiki, no
+    launchd — proving the FTS-only path is self-contained.
+    """
+    out = _dry_run_output(tmp_path, profile="minimal", skip_wiki=True, skip_skill=True)
+
+    # Renders a compose file, but never the AGE Dockerfile.
+    assert "docker-compose.yml" in out
+    assert "materialize AGE Dockerfile" not in out
+    # No Ollama model pull in an FTS-only install.
+    assert "ollama pull" not in out.lower()
+    # Reaches DB init + the doctor gate.
+    assert "brain init" in out
+    assert "brain doctor" in out
+    # Heavy optional components are all skipped for minimal.
+    assert "[skipped] wiki install (profile minimal)" in out
+    assert "[skipped] Claude Code skill (profile minimal)" in out
+    assert "[skipped] launchd background daemons (profile minimal)" in out
+    # Closing banner + FTS-only guidance.
+    assert "brain setup complete" in out
+    assert "embedder:   none" in out
+    assert "Ollama not found" in out
+
+
+# ---------------------------------------------------------------------------
 # Regression: Bug 2 — interactive wiki decline must suppress launchd
 # ---------------------------------------------------------------------------
 
