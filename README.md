@@ -8,7 +8,9 @@ Local, queryable knowledge base and note vault with hybrid search and an entity-
 
 Stores career docs, interview prep, Krisp transcripts, Slack threads, Gmail, and authored Markdown notes in Postgres + pgvector. Any agent reaches all of it through the `brain` CLI or the bundled `brain-mcp` MCP server — no re-pasting context into every chat.
 
-![brain demo](docs/assets/demo.gif)
+The everyday loop — capture a note, search it back, read the top hit, check the corpus:
+
+![brain daily workflow](docs/assets/usage.gif)
 
 ## Token savings
 
@@ -34,31 +36,18 @@ uv tool install git+https://github.com/mshtawythug/second-brain.git@v0.2.0
 brain demo        # spins up a sandbox Postgres, seeds 22 docs, runs a hero query
 ```
 
-Sample output:
-
-```text
-Provisioning the demo Postgres on port 55433 …
-Seeding the synthetic Larkspur corpus (22 docs, no Ollama) …
-Seeded 22 new doc(s) (0 already present).
-
-               brain demo · 'compliance horror stories'
-┌──────────┬─────────────────────────────────────────────┬────────┬───────┬───────────────────────────────…
-│ ID       │ Title                                       │ Source │ Score │ Snippet
-├──────────┼─────────────────────────────────────────────┼────────┼───────┼───────────────────────────────…
-│ …        │ Compliance Horror Stories — collected war … │ manual │   …   │ A running list of the compliance horror stories I never want to repeat …
-│ …        │ … 4 more ranked hits (SOC 2 readiness sync, incident postmortem, #compliance war-stories thread, …)
-└──────────┴─────────────────────────────────────────────┴────────┴───────┴───────────────────────────────…
-
-Try these next:
-  brain demo query "SOC 2 evidence request"
-  brain demo query "PCI scope creep"
-  brain demo query "vendor risk" --source gmail
-  brain demo query "GDPR deletion request"
-  brain show <id>       # read the top hit in full (in your own brain)
-  brain demo teardown   # remove the sandbox when done
-```
+![brain demo](docs/assets/demo.gif)
 
 _(IDs and scores are per-run; the seeded corpus and its ranking are deterministic — the top hit is always the "Compliance Horror Stories" note.)_
+
+Try these next:
+
+```bash
+brain demo query "SOC 2 evidence request"      # a targeted follow-up query
+brain demo query "vendor risk" --source gmail  # narrow by source
+brain show <id>                                # read the top hit in full (in your own brain)
+brain demo teardown                            # remove the sandbox when done
+```
 
 `brain demo` needs only Docker; `brain demo teardown` destroys the sandbox.
 
@@ -108,12 +97,6 @@ brain tag <id-prefix> +interview +career -old-tag         # add (+name) / remove
 ```
 
 Add `--json` to `search` / `show` / `list` for machine-readable output, and `--fts-only` to `search` to skip the embedding call. The full command surface — Gmail ingest, enrichment, tacit-knowledge elicitation, GraphRAG, the proactivity/synthesis commands, and vault authoring — lives in the [CLI reference](docs/cli-reference.md).
-
-## Daily workflow
-
-The everyday loop — capture a note, search it back, read the top hit, check the corpus:
-
-![brain daily workflow](docs/assets/usage.gif)
 
 ## Claude integrations
 
