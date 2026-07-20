@@ -11,7 +11,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELOAD_JS = REPO_ROOT / "src" / "brain" / "quartz_overrides" / "quartz" / "static" / "reload.js"
-README = REPO_ROOT / "README.md"
+# The Caddy recipe + reload-mechanism docs moved README → docs/vault-and-wiki.md
+# in the 2026-07 README/docs split.
+WIKI_DOC = REPO_ROOT / "docs" / "vault-and-wiki.md"
 
 
 def _read(path: Path) -> str:
@@ -436,7 +438,7 @@ def test_reload_client_preserves_visibility_pause_and_resume(tmp_path: Path) -> 
 
 def test_build_id_caddy_recipe_uses_short_revalidating_cache() -> None:
     """Docs should keep Caddy on a short build-id cache with ETag revalidation."""
-    text = _read(README)
+    text = _read(WIKI_DOC)
 
     assert 'header @build_id Cache-Control "max-age=2, must-revalidate"' in text
     assert "If-None-Match" in text
