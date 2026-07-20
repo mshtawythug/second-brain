@@ -1,4 +1,4 @@
-"""Regression: pyproject.toml [project.scripts] declares all 9 brain console scripts."""
+"""Regression: pyproject.toml [project.scripts] declares all 10 brain console scripts."""
 import importlib
 import os
 import subprocess
@@ -11,6 +11,8 @@ PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
 EXPECTED_ENTRY_POINTS = {
     "brain": "brain.cli:app",
     "brain-mcp": "brain.mcp_server:main",
+    # uvx alias: `uvx second-brain` launches the MCP server (matches server.json).
+    "second-brain": "brain.mcp_server:main",
     "brain-up": "brain.bin.up:main",
     "brain-down": "brain.bin.down:main",
     "brain-status": "brain.bin.status:main",
