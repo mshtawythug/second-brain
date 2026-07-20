@@ -2,6 +2,10 @@
 
 > Part of the [Second Brain](../README.md) docs — see [docs/README.md](README.md) for the full index.
 
+![Rendered wiki — Quartz graph view, backlinks, and the People Hub](assets/wiki.gif)
+
+The [optional wiki view](#wiki-rendered-view-optional) renders your vault as an Obsidian-style site (graph, backlinks, full-text search, People Hub) via Quartz. Above: a synthetic demo vault — regenerate with [`bin/brain-wiki-gif`](../bin/brain-wiki-gif).
+
 ## Vault model
 
 Brain has two storage tiers, both searchable through the same hybrid index:
