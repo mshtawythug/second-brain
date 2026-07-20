@@ -804,6 +804,55 @@ def test_render_compose_project_derives_noncolliding_container_name() -> None:
 
 
 # ---------------------------------------------------------------------------
+# D5 — GHCR pull with local-image/build fallback
+# ---------------------------------------------------------------------------
+
+
+def test_compose_pull_failure_still_reaches_up(tmp_path: Path) -> None:
+    """D5: a failed `docker compose pull` still proceeds to `docker compose up -d`."""
+    calls: list[list[str]] = []
+
+    def _run(*args: Any, **kwargs: Any) -> MagicMock:
+        cmd = args[0] if args else kwargs.get("args", [])
+        if isinstance(cmd, list):
+            calls.append(cmd)
+        m = MagicMock()
+        # Fail ONLY the compose pull; every other subprocess call succeeds.
+        is_pull = isinstance(cmd, list) and "pull" in cmd and "postgres" in cmd
+        m.returncode = 1 if is_pull else 0
+        m.stdout = ""
+        return m
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", side_effect=_run),
+        patch("brain.setup.ensure_shim"),
+    ):
+        from brain.setup import run_setup
+
+        run_setup(
+            profile="minimal",  # stock compose, no ollama/wiki/skill/launchd noise
+            dry_run=False,
+            non_interactive=True,
+            brain_home_override=tmp_path / ".brain",
+            vault_override=tmp_path / "vault",
+            pg_port=0,
+            skip_wiki=True,
+            skip_skill=True,
+        )
+
+    pull_idx = next(
+        (i for i, c in enumerate(calls) if "pull" in c and "postgres" in c), None
+    )
+    up_idx = next((i for i, c in enumerate(calls) if "up" in c and "-d" in c), None)
+    assert pull_idx is not None, f"expected a `docker compose pull`; calls={calls}"
+    assert up_idx is not None, f"expected a `docker compose up -d`; calls={calls}"
+    assert pull_idx < up_idx, (
+        f"`up -d` must run even after a failed pull; calls={calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # D1 — install profiles (minimal | standard | full)
 # ---------------------------------------------------------------------------
 

@@ -988,14 +988,28 @@ def run_setup(
     # ------------------------------------------------------------------
     typer.echo("\n── Service startup ────────────────────────────────")
 
-    # 1. docker compose up -d
+    # 1. docker compose pull (best-effort) + up -d.
     def _compose_up() -> None:
+        # Best-effort prebuilt-image pull BEFORE `up -d`: activates the GHCR
+        # prebuilt AGE image for full-profile users (once the package is public)
+        # and refreshes the stock pgvector image otherwise. A non-zero pull (the
+        # registry image is private / unavailable / offline) is swallowed with a
+        # log line so `up -d` still resolves via the local image or build stanza.
+        pull = subprocess.run(
+            compose_cmd("pull", "postgres", brain_home=brain_home),
+            check=False,
+        )
+        if pull.returncode != 0:
+            typer.echo(
+                "  [info] docker compose pull failed — falling back to the "
+                "local image / build"
+            )
         subprocess.run(
             compose_cmd("up", "-d", brain_home=brain_home),
             check=True,
         )
 
-    _perform_action("docker compose up -d (Postgres)", _compose_up, dry_run)
+    _perform_action("docker compose pull + up -d (Postgres)", _compose_up, dry_run)
 
     # 2. Wait for Postgres readiness via pg_isready inside the container.
     def _wait_for_postgres() -> None:
