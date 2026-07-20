@@ -42,8 +42,21 @@ run/
 # Brainstorm artifacts (kept local-only — can contain PII / personal references)
 .superpowers/
 
-# Plans / specs / audits / QA — local-only working docs (may contain personal references)
-docs/
+# Plans / specs / audits / QA — local-only working docs (may contain personal
+# references). docs/ is private-by-subdir: the publishable reference docs
+# (docs/README.md, docs/cli-reference.md, docs/graphrag.md,
+# docs/vault-and-wiki.md, docs/configuration.md), docs/guides/, and docs/assets/
+# stay trackable; everything below is ignored. Add any NEW private subdir/file
+# to this list before it can leak.
+docs/plans/
+docs/audits/
+docs/specs/
+docs/notes/
+docs/qa/
+docs/summaries/
+docs/launch/
+docs/elicit-slack-blurb.txt
+docs/HOW-TO-TEST-elicit.md
 
 # Real GraphRAG alias rules contain real entity names (CLAUDE.md rule 15) — keep local.
 # The checked-in file is aliases/default.yml.example (synthetic, documentation only).
