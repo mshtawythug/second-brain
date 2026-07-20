@@ -772,8 +772,33 @@ def _packaged_compose_template(name: str) -> str:
     return (resource_files("brain.templates") / name).read_text(encoding="utf-8")
 
 
+def test_default_project_preserves_historical_container_name() -> None:
+    """Regression: the default 'brain' project MUST keep container_name
+    second-brain-postgres exactly.
+
+    Existing users re-running `brain setup` (documented upgrade flow) would have
+    their container recreated under a new name if this drifted. The D5b seam is
+    for QA isolation only — the default must not change.
+    """
+    from brain.setup import render_compose_from_template
+
+    for tpl in ("docker-compose.stock.yml.j2", "docker-compose.yml.j2"):
+        out = render_compose_from_template(
+            _packaged_compose_template(tpl),
+            brain_home=Path("/tmp/bh"),
+            pg_port=55432,
+            compose_project="brain",
+        )
+        assert "container_name: second-brain-postgres" in out, (
+            f"{tpl}: default project must render the historical container name"
+        )
+        assert "container_name: brain-postgres" not in out
+        assert "name: brain" in out
+        assert "{{ " not in out, f"{tpl}: unrendered placeholder left in compose"
+
+
 def test_render_compose_default_project_container_name() -> None:
-    """The default 'brain' project yields a 'brain-postgres' container name."""
+    """The default 'brain' project keeps the historical second-brain-postgres name."""
     from brain.setup import render_compose_from_template
 
     out = render_compose_from_template(
@@ -782,7 +807,7 @@ def test_render_compose_default_project_container_name() -> None:
         pg_port=55432,
         compose_project="brain",
     )
-    assert "container_name: brain-postgres" in out
+    assert "container_name: second-brain-postgres" in out
     assert "name: brain" in out
     assert "55432:5432" in out
     assert "{{ " not in out, "unrendered placeholder left in compose"
@@ -799,7 +824,7 @@ def test_render_compose_project_derives_noncolliding_container_name() -> None:
         compose_project="brain-qa-x",
     )
     assert "container_name: brain-qa-x-postgres" in out
-    assert "container_name: brain-postgres" not in out
+    assert "container_name: second-brain-postgres" not in out
     assert "name: brain-qa-x" in out
 
 

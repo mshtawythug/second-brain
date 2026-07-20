@@ -11,7 +11,7 @@ from pathlib import Path
 
 import typer
 
-from ._compose import compose_cmd, compose_project_name
+from ._compose import DEFAULT_COMPOSE_PROJECT, compose_cmd, compose_project_name
 from .bin._launcher import ensure_shim
 from .config import DEFAULT_VAULT_PATH, _brain_home_root
 from .errors import BrainError
@@ -450,6 +450,20 @@ def materialize_age_dockerfile(brain_home: Path) -> Path:
     return dest
 
 
+def _container_name_for_project(compose_project: str) -> str:
+    """Derive the postgres container name for a compose project.
+
+    The DEFAULT project (``brain``) keeps the exact historical literal
+    ``second-brain-postgres`` for backward compatibility — existing users
+    re-running ``brain setup`` (a documented upgrade flow) must not have their
+    container recreated under a new name. A non-default project (the D5b QA
+    isolation seam) derives ``<project>-postgres`` so it can't collide.
+    """
+    if compose_project == DEFAULT_COMPOSE_PROJECT:
+        return "second-brain-postgres"
+    return f"{compose_project}-postgres"
+
+
 def render_compose_from_template(
     template_text: str,
     *,
@@ -459,15 +473,18 @@ def render_compose_from_template(
 ) -> str:
     """Render a packaged ``docker-compose*.yml.j2`` into a concrete compose body.
 
-    Substitutes the three placeholders every compose template shares
-    (``{{ brain_home }}``, ``{{ pg_port }}``, ``{{ compose_project }}``). The
-    project name flows into both the top-level ``name:`` and the derived
-    ``container_name`` so a non-default ``BRAIN_COMPOSE_PROJECT`` cannot collide
-    with the real ``brain`` stack. Pure function — unit-testable in isolation.
+    Substitutes the placeholders every compose template shares
+    (``{{ brain_home }}``, ``{{ pg_port }}``, ``{{ compose_project }}``,
+    ``{{ container_name }}``). The project name flows into the top-level
+    ``name:``; the container name is derived so the default ``brain`` project
+    keeps the historical ``second-brain-postgres`` while a non-default
+    ``BRAIN_COMPOSE_PROJECT`` gets an isolated, non-colliding name. Pure
+    function — unit-testable in isolation.
     """
     return (
         template_text.replace("{{ brain_home }}", str(brain_home))
         .replace("{{ pg_port }}", str(pg_port))
+        .replace("{{ container_name }}", _container_name_for_project(compose_project))
         .replace("{{ compose_project }}", compose_project)
     )
 
