@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# brain-demo-gif — regenerate the README hero GIF from docs/assets/demo.tape.
+#
+# Records the REAL `brain demo` flow (provision → seed → hero query → filtered
+# queries → teardown) against the isolated demo sandbox and writes
+# docs/assets/demo.gif. The tape's hidden setup tears the sandbox down first and
+# tears it down again at the end, so this never touches the prod stack (55432).
+#
+# Requires the `vhs` CLI (brew install vhs — it bundles ttyd + ffmpeg).
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+TAPE="docs/assets/demo.tape"
+GIF="docs/assets/demo.gif"
+MAX_BYTES=$(( 3 * 1024 * 1024 ))  # README hero budget: 3 MB.
+
+usage() {
+  echo "Usage: brain-demo-gif [-h|--help]  — record docs/assets/demo.tape into docs/assets/demo.gif via vhs (real brain demo flow; leaves no demo sandbox behind)."
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+if ! command -v vhs >/dev/null 2>&1; then
+  echo "error: 'vhs' not found on PATH — install it with 'brew install vhs'" >&2
+  echo "       (vhs bundles the ttyd + ffmpeg dependencies it needs)." >&2
+  exit 1
+fi
+
+cd "$REPO_ROOT"
+
+[[ -f "$TAPE" ]] || { echo "error: tape not found: $REPO_ROOT/$TAPE" >&2; exit 1; }
+
+echo "Recording $TAPE with vhs (this runs the real demo sandbox) …"
+vhs "$TAPE"
+
+[[ -f "$GIF" ]] || { echo "error: vhs did not produce $GIF" >&2; exit 1; }
+
+# stat is BSD (macOS) vs GNU (Linux); try both invocations.
+bytes="$( stat -f%z "$GIF" 2>/dev/null || stat -c%s "$GIF" )"
+human="$( awk -v b="$bytes" 'BEGIN { printf "%.2f MB", b / 1048576 }' )"
+
+echo "Wrote $GIF ($human, $bytes bytes)."
+if (( bytes > MAX_BYTES )); then
+  echo "warning: $GIF exceeds the 3 MB README budget — tune the tape's" >&2
+  echo "         FontSize/framerate/Sleep durations to shrink it." >&2
+fi
