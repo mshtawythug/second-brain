@@ -1010,7 +1010,10 @@ def run_setup(
     # 4. Render .env — only if missing; never overwrite.
     env_dest = brain_home / ".env"
     if not dry_run and env_dest.exists():
-        typer.echo(f"  [skipped] {env_dest} (already exists)")
+        typer.echo(
+            f"  [skipped] {env_dest} (already exists — profile env defaults NOT "
+            "applied; edit .env or re-run with --reset to change profiles)"
+        )
         # If --vault was given and BRAIN_VAULT_PATH isn't already in the file,
         # append it so the running .env reflects the chosen vault location.
         if vault_path is not None:
