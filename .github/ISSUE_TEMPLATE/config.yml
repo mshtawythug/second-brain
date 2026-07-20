@@ -1,0 +1,14 @@
+# Keep the "Open a blank issue" escape hatch available alongside the templates.
+blank_issues_enabled: true
+
+# TODO (launch follow-up): once GitHub Discussions is enabled for this repo,
+# add a contact_links entry pointing at the Discussions Q&A board so usage
+# questions route there instead of the bug tracker. Left commented for now —
+# Discussions is NOT enabled yet, and linking a surface that 404s is worse than
+# no link. Enable Discussions (Settings -> Features -> Discussions), then
+# uncomment and verify the URL resolves before merging.
+#
+# contact_links:
+#   - name: Questions & discussion
+#     url: https://github.com/mshtawythug/second-brain/discussions
+#     about: Ask and answer usage questions, and share what's in your second brain.
