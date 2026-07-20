@@ -115,6 +115,35 @@ def resolve_profile(name: str) -> SetupProfile:
         ) from exc
 
 
+# Printed when the standard profile auto-detects a missing Ollama and falls back
+# to the FTS-only backend. Also reiterated in the final report.
+OLLAMA_FALLBACK_HINT = (
+    "Ollama not found — installing FTS-only (BRAIN_EMBEDDER=none). To enable "
+    "semantic search later: install Ollama, set BRAIN_EMBEDDER=arctic in .env, "
+    "then run 'brain init' and 'brain reembed'."
+)
+
+
+def resolve_effective_embedder(
+    profile: SetupProfile, embedder_choice: str | None
+) -> tuple[str, bool]:
+    """Resolve the embedder to use, applying the standard-profile FTS fallback.
+
+    Returns ``(embedder, fell_back)``. An explicit ``--embedder`` always wins.
+    Otherwise the profile default applies — except the **standard** profile
+    falls back to the FTS-only ``none`` backend when the ``ollama`` binary is
+    absent. Resolved BEFORE preflight so a standard run doesn't hard-fail on the
+    very binary it was about to fall back from. Pure except for the
+    ``shutil.which`` probe — no printing — so the caller controls when the hint
+    is shown (once before preflight, once in the final report).
+    """
+    if embedder_choice is not None:
+        return embedder_choice, False
+    if profile.name == "standard" and shutil.which("ollama") is None:
+        return "none", True
+    return profile.env_embedder_default, False
+
+
 # Shim names installed to $BRAIN_HOME/.shims/ (sans .sh suffix).
 # Each must have a corresponding <name>.sh in brain.templates.bin/.
 _SHIM_NAMES: tuple[str, ...] = (
@@ -698,21 +727,28 @@ def _print_final_report(
     wiki_port: int,
     wiki_installed: bool,
     skill_installed: bool,
+    effective_embedder: str,
 ) -> None:
     """Print the closing banner matching brain-up's visual style.
 
     Uses the actual install results (not the raw skip flags) so that an
-    interactive decline is reflected correctly in the summary.
+    interactive decline is reflected correctly in the summary. When the brain
+    ended up FTS-only (``BRAIN_EMBEDDER=none`` — minimal profile or a standard
+    run that fell back), reiterates how to enable semantic search later.
     """
     typer.echo("")
     typer.echo("🧠 brain setup complete:")
     typer.echo(f"   brain_home: {brain_home}")
     typer.echo(f"   vault:      {vault}")
+    typer.echo(f"   embedder:   {effective_embedder}")
     if wiki_installed:
         typer.echo(f"   wiki url:   http://localhost:{wiki_port}")
         typer.echo(f"   start wiki: caddy run --config {brain_home}/Caddyfile")
     if skill_installed:
         typer.echo("   skill:      ~/.claude/skills/brain/SKILL.md")
+    if effective_embedder == "none":
+        typer.echo("")
+        typer.echo(f"   {OLLAMA_FALLBACK_HINT}")
     typer.echo("")
     typer.echo("   next steps:")
     typer.echo("     brain ingest <path>            # ingest a file or directory")
@@ -773,7 +809,11 @@ def run_setup(
     # contents, ollama pull, optional installs) derives from one object.
     # ------------------------------------------------------------------
     prof = resolve_profile(profile)
-    effective_embedder = embedder_choice or prof.env_embedder_default
+    effective_embedder, ollama_fell_back = resolve_effective_embedder(
+        prof, embedder_choice
+    )
+    if ollama_fell_back:
+        typer.echo(OLLAMA_FALLBACK_HINT)
 
     # ------------------------------------------------------------------
     # T3.1 — Reset handling (DESTRUCTIVE; typed confirmation required)
@@ -1066,4 +1106,5 @@ def run_setup(
         wiki_port=wiki_port,
         wiki_installed=wiki_installed,
         skill_installed=skill_installed,
+        effective_embedder=effective_embedder,
     )

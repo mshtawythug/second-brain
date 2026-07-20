@@ -955,6 +955,89 @@ def test_resolve_profile_rejects_unknown() -> None:
 
 
 # ---------------------------------------------------------------------------
+# D4 / D1e — Ollama auto-detect fallback to FTS-only
+# ---------------------------------------------------------------------------
+
+
+def _which_no_ollama(name: str) -> str | None:
+    return None if name == "ollama" else f"/usr/bin/{name}"
+
+
+def test_autodetect_falls_back_to_none_when_ollama_missing() -> None:
+    """D1e: standard + no --embedder + no ollama → resolve to none (fell_back=True)."""
+    from brain.setup import resolve_effective_embedder, resolve_profile
+
+    with patch("shutil.which", side_effect=_which_no_ollama):
+        embedder, fell_back = resolve_effective_embedder(
+            resolve_profile("standard"), None
+        )
+    assert embedder == "none"
+    assert fell_back is True
+
+
+def test_autodetect_keeps_arctic_when_ollama_present() -> None:
+    """standard + ollama present → arctic, no fallback."""
+    from brain.setup import resolve_effective_embedder, resolve_profile
+
+    with patch("shutil.which", return_value="/usr/bin/ollama"):
+        embedder, fell_back = resolve_effective_embedder(
+            resolve_profile("standard"), None
+        )
+    assert embedder == "arctic"
+    assert fell_back is False
+
+
+def test_autodetect_explicit_embedder_wins() -> None:
+    """An explicit --embedder is never overridden by the ollama probe."""
+    from brain.setup import resolve_effective_embedder, resolve_profile
+
+    with patch("shutil.which", return_value=None):
+        embedder, fell_back = resolve_effective_embedder(
+            resolve_profile("standard"), "voyage"
+        )
+    assert embedder == "voyage"
+    assert fell_back is False
+
+
+def test_autodetect_full_profile_does_not_fall_back() -> None:
+    """full never auto-falls-back — it keeps arctic and hard-requires Ollama."""
+    from brain.setup import resolve_effective_embedder, resolve_profile
+
+    with patch("shutil.which", side_effect=_which_no_ollama):
+        embedder, fell_back = resolve_effective_embedder(
+            resolve_profile("full"), None
+        )
+    assert embedder == "arctic"
+    assert fell_back is False
+
+
+def test_autodetect_prints_hint_in_setup_narrative(tmp_path: Path) -> None:
+    """D1e: a standard run with ollama missing prints the FTS-only hint + no pull."""
+    buf = io.StringIO()
+    with (
+        patch("shutil.which", side_effect=_which_no_ollama),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+        redirect_stdout(buf),
+    ):
+        from brain.setup import run_setup
+
+        run_setup(
+            profile="standard",
+            dry_run=True,
+            non_interactive=True,
+            brain_home_override=tmp_path / ".brain",
+            vault_override=tmp_path / "vault",
+            pg_port=0,
+            skip_wiki=True,
+            skip_skill=True,
+        )
+    out = buf.getvalue()
+    assert "Ollama not found" in out, f"expected FTS-only fallback hint:\n{out}"
+    assert "BRAIN_EMBEDDER=none" in out
+    assert "ollama pull" not in out.lower(), "must not pull a model when falling back"
+
+
+# ---------------------------------------------------------------------------
 # Regression: Bug 2 — interactive wiki decline must suppress launchd
 # ---------------------------------------------------------------------------
 
