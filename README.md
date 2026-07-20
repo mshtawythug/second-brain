@@ -102,6 +102,10 @@ Add `--json` to `search` / `show` / `list` for machine-readable output, and `--f
 
 `brain` and the bundled `brain-mcp` server are harness-agnostic — any agent that runs a shell command or speaks MCP can query the corpus.
 
+Register the MCP server once, then just ask — the agent searches the brain and answers from it, no context pasted in:
+
+![Claude answering a question from the brain over the brain-mcp MCP server](docs/assets/mcp.gif)
+
 **Claude Code** — register the MCP server (or symlink the [skills](docs/configuration.md#claude-code-consult-brain-skill)):
 
 ```bash

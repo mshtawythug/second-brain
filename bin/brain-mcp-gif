@@ -1,0 +1,344 @@
+#!/usr/bin/env bash
+# brain-mcp-gif — regenerate the README "Claude integrations" GIF from
+# docs/assets/mcp.tape.
+#
+# Records the `claude` CLI answering a question BY CALLING the bundled
+# `brain-mcp` MCP server — the headline pitch of the project ("searchable by any
+# AI coding agent") shown end-to-end. Everything runs against a THROWAWAY,
+# fully-isolated Postgres that this script provisions just for the recording and
+# destroys afterward:
+#
+#   * compose project  brain-mcp-gif          (NEVER the prod `brain` project)
+#   * container        brain-mcp-gif-postgres
+#   * host port        55441                  (prod 55432, demo 55433, tests 5434)
+#   * storage          a NAMED docker volume  (never a host bind-mount)
+#   * database         second_brain_mcp_gif
+#
+# `brain-mcp` is pointed at that sandbox purely through the MCP config's `env`
+# block (DATABASE_URL + BRAIN_EMBEDDER + BRAIN_HOME + BRAIN_VAULT_PATH), written
+# below. Because src/brain/config.py resolves .env via os.environ.setdefault, an
+# explicitly-set DATABASE_URL always wins over a dev checkout's repo-root .env,
+# so `brain-mcp` can never be tricked into opening the PROD database. As a second
+# guard the tape HARD-ABORTS unless DATABASE_URL is the :55441 sandbox, and this
+# script refuses to record unless the generated MCP config names that sandbox and
+# none of the prod/demo/test databases.
+#
+# All seeded content is synthetic (Larkspur compliance corpus; zero PII).
+#
+# The `claude` invocation used on camera (wrapped in the generated `ask-brain`):
+#   claude -p "<question>" \
+#     --mcp-config brain.json --strict-mcp-config --disable-slash-commands \
+#     --allowedTools "mcp__brain__brain_search" \
+#     --system-prompt "<concise-answer instruction>" \
+#     --output-format stream-json --verbose | jq -rf render.jq
+# stream-json + a whitelisting jq renderer is what makes the MCP tool call
+# legible in print mode; the renderer only ever emits the brain_search query and
+# the final answer text (never system/init events, home paths, or account ids).
+#
+# Requires: vhs (brew install vhs — bundles ttyd + ffmpeg), Docker, the `claude`
+# CLI (logged in), and jq. Uses the local Ollama `arctic` embedder for authentic
+# hybrid search when Ollama + the snowflake-arctic-embed2 model are available;
+# otherwise falls back to BRAIN_EMBEDDER=none (FTS-only — still answers).
+#
+# Claude API usage during the recording is expected (one short print-mode turn).
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+TAPE="docs/assets/mcp.tape"
+GIF="docs/assets/mcp.gif"
+MAX_BYTES=$(( 2560 * 1024 ))  # 2.5 MB README budget for the MCP GIF.
+
+# --- Isolated-sandbox identifiers (kept distinct from prod/demo/test) -------
+PROJECT="brain-mcp-gif"
+CONTAINER="brain-mcp-gif-postgres"
+DB_PORT="55441"
+DB_NAME="second_brain_mcp_gif"
+DB_URL="postgresql://brain:brain@localhost:${DB_PORT}/${DB_NAME}"
+PG_IMAGE="pgvector/pgvector:pg16"
+
+WORKDIR="${TMPDIR:-/tmp}/brain-mcp-gif"
+COMPOSE_FILE="$WORKDIR/docker-compose.mcp-gif.yml"
+SEED_DIR="$WORKDIR/seed"
+STAGE_DIR="$WORKDIR/stage"
+HOME_DIR="$WORKDIR/home"
+VAULT_DIR="$WORKDIR/vault"
+VOLUME_NAME="${PROJECT}_brain-mcp-gif-pgdata"
+
+# The question asked on camera. Its answer lives entirely in the seeded notes.
+QUESTION="what did we decide about vendor risk?"
+
+usage() {
+  echo "Usage: brain-mcp-gif [-h|--help]  — record docs/assets/mcp.tape into docs/assets/mcp.gif via vhs: the claude CLI answering a question through the brain-mcp MCP server, against a throwaway :55441 Postgres sandbox (leaves nothing behind)."
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+# --- Teardown: ALWAYS scoped to our own project, ALWAYS runs on exit --------
+cleanup() {
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+  else
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm "$VOLUME_NAME" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORKDIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# --- Preflight --------------------------------------------------------------
+if ! command -v vhs >/dev/null 2>&1; then
+  echo "error: 'vhs' not found on PATH — install it with 'brew install vhs'" >&2
+  echo "       (vhs bundles the ttyd + ffmpeg dependencies it needs)." >&2
+  exit 1
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo "error: 'docker' not found on PATH — install Docker Desktop or Engine." >&2
+  exit 1
+fi
+if ! command -v brain >/dev/null 2>&1; then
+  echo "error: 'brain' not found on PATH — install it with 'pip install -e .'" >&2
+  exit 1
+fi
+if ! command -v brain-mcp >/dev/null 2>&1; then
+  echo "error: 'brain-mcp' not found on PATH — install it with 'pip install -e .'" >&2
+  exit 1
+fi
+if ! command -v claude >/dev/null 2>&1; then
+  echo "error: 'claude' not found on PATH — install the Claude Code CLI and log in." >&2
+  exit 1
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: 'jq' not found on PATH — install it with 'brew install jq'." >&2
+  exit 1
+fi
+
+cd "$REPO_ROOT"
+[[ -f "$TAPE" ]] || { echo "error: tape not found: $REPO_ROOT/$TAPE" >&2; exit 1; }
+
+# --- Embedder selection -----------------------------------------------------
+# Prefer the local arctic backend (authentic hybrid search) when Ollama is
+# reachable and the embedding model is pulled; else fall back to the FTS-only
+# NullEmbedder so the recording still works on a machine without Ollama.
+if ollama list >/dev/null 2>&1 && ollama list 2>/dev/null | grep -q 'snowflake-arctic-embed2'; then
+  EMBEDDER="arctic"
+else
+  EMBEDDER="none"
+fi
+echo "Embedder for this recording: ${EMBEDDER}."
+
+# --- Fresh workdir + synthetic seed corpus (zero PII) -----------------------
+rm -rf "$WORKDIR"
+mkdir -p "$SEED_DIR" "$STAGE_DIR" "$HOME_DIR" "$VAULT_DIR"
+
+cat > "$COMPOSE_FILE" <<YAML
+services:
+  postgres:
+    image: ${PG_IMAGE}
+    container_name: ${CONTAINER}
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - brain-mcp-gif-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d ${DB_NAME}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  brain-mcp-gif-pgdata:
+YAML
+
+# The five synthetic notes that hold the answer. Same Larkspur universe as the
+# demo corpus (src/brain/demo/corpus/manifest.json) — all names/companies are
+# invented; zero personal data.
+cat > "$SEED_DIR/vendra-security-review.md" <<'NOTE'
+# Vendor risk review — Vendra security findings
+
+Legal reviewed Vendra's security questionnaire before we counter-sign. Vendra could
+not produce a current SOC 2 report, gave vague data-residency answers, and would not
+commit to a breach-notification window shorter than thirty days.
+
+Decision: we require a security addendum that pins a seventy-two-hour breach-notification
+clause, a right-to-audit provision, and customer data kept in-region. If Vendra will not
+sign, we treat it as a vendor-risk red flag and escalate to the risk committee.
+NOTE
+
+cat > "$SEED_DIR/vendor-risk-committee.md" <<'NOTE'
+# Vendor risk committee — Q2 review
+
+The Q2 vendor risk committee reviewed our top data processors. We decided that
+compliance for vendors has to be contractual, not aspirational: a current attestation on
+file, a right-to-audit clause, and a seventy-two-hour breach window, or we walk. Vendra
+goes on a remediation clock and we standardize the security addendum across all
+processors.
+NOTE
+
+cat > "$SEED_DIR/vendra-addendum-outcome.md" <<'NOTE'
+# Vendra contract — security addendum outcome
+
+Jordan came back on the redlined addendum. Vendra will commit to the seventy-two-hour
+breach-notification window and the in-region data-residency requirement. On right-to-audit
+we landed on one scheduled audit per year plus their SOC 2 report on request once the
+Type II completes. Decision: accept that cadence and sign.
+NOTE
+
+cat > "$SEED_DIR/soc2-evidence-plan.md" <<'NOTE'
+# SOC 2 evidence automation plan
+
+The plan to stop reconstructing SOC 2 evidence the night before fieldwork. A weekly job
+snapshots each access review, change approval, and backup test, timestamps it, and files
+it in the auditor portal. Evidence becomes a byproduct of the work instead of a fire drill.
+NOTE
+
+cat > "$SEED_DIR/incident-logging-retention.md" <<'NOTE'
+# Incident postmortem — logging retention gap
+
+Blameless postmortem for the payments outage. Log retention had silently dropped to seven
+days, so we lost the evidence to reconstruct the first ninety minutes. Action items:
+restore ninety-day retention and alert if it drifts below the compliance floor.
+NOTE
+
+# --- Generate the isolated MCP config (points brain-mcp at the sandbox) ------
+# Every var here lands in os.environ for the brain-mcp subprocess that `claude`
+# spawns, so config.py's os.environ.setdefault never falls back to a repo-root
+# .env pointing at prod.
+cat > "$STAGE_DIR/brain.json" <<JSON
+{
+  "mcpServers": {
+    "brain": {
+      "command": "brain-mcp",
+      "env": {
+        "DATABASE_URL": "${DB_URL}",
+        "BRAIN_EMBEDDER": "${EMBEDDER}",
+        "BRAIN_HOME": "${HOME_DIR}",
+        "BRAIN_VAULT_PATH": "${VAULT_DIR}",
+        "BRAIN_GRAPH_ENABLED": "false"
+      }
+    }
+  }
+}
+JSON
+
+# --- Generate the stream-json → pretty-print renderer ------------------------
+# Whitelists ONLY what is safe to show: the brain_* tool call (its name + query)
+# and the assistant's final answer text. Every other event (system/init with
+# cwd + model + account id, thinking blocks, tool results) is dropped, so no
+# identity or home-dir path can ever reach a frame.
+CYAN=$'\033[36m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
+cat > "$STAGE_DIR/render.jq" <<JQ
+if .type=="assistant" then
+  ( .message.content[]?
+    | if (.type=="tool_use" and (.name | startswith("mcp__brain__")))
+        then "${CYAN}⏺ ${BOLD}" + (.name | ltrimstr("mcp__brain__")) + "${RESET}${CYAN}(\"" + ((.input.query) // (.input | tojson)) + "\")${RESET}"
+      elif .type=="text" then "\n" + .text
+      else empty end )
+else empty end
+JQ
+
+# --- Generate the on-camera wrapper -----------------------------------------
+# Keeps the recorded command legible while running the full print-mode
+# invocation. --strict-mcp-config loads ONLY our brain server (never the dev's
+# other global MCP servers); --disable-slash-commands keeps harness skills out
+# of the answer; the system prompt forces one focused search + a concise,
+# note-citing reply so the clip stays short.
+cat > "$STAGE_DIR/ask-brain" <<'ASK'
+#!/usr/bin/env bash
+set -euo pipefail
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+SYS="You answer the user's question using ONLY the brain_search MCP tool, which searches their personal notes. Call brain_search once with a focused query, then give a concise 2-3 sentence answer that cites the note titles you used. Do not use any other tool."
+# Immediate dim status line so the print-mode latency (model reasoning + MCP
+# server cold-boot before the first tool call) is not a blank screen on camera.
+printf '\033[2m  · asking claude (mcp server: brain) …\033[0m\n'
+claude -p "$1" \
+  --mcp-config "$DIR/brain.json" --strict-mcp-config --disable-slash-commands \
+  --allowedTools "mcp__brain__brain_search" \
+  --system-prompt "$SYS" \
+  --output-format stream-json --verbose 2>/dev/null \
+  | jq -rf "$DIR/render.jq"
+ASK
+chmod +x "$STAGE_DIR/ask-brain"
+
+# --- Fail-closed: refuse to record unless the config names ONLY the sandbox --
+grep -q ":${DB_PORT}/${DB_NAME}" "$STAGE_DIR/brain.json" || {
+  echo "error: generated MCP config does not point at the :${DB_PORT} sandbox — refusing to record" >&2
+  exit 1
+}
+# Defense-in-depth: never let the config name the prod / demo / test databases.
+# The ports are built from variables so this script never itself contains a
+# forbidden ":PORT/" connection literal.
+for forbidden_port in 55432 55433 5434; do
+  if grep -q ":${forbidden_port}/" "$STAGE_DIR/brain.json"; then
+    echo "error: generated MCP config references a forbidden database (:${forbidden_port}/) — refusing to record" >&2
+    exit 1
+  fi
+done
+
+# --- Point the seeding CLI at the sandbox purely through the environment -----
+# (Same sandbox brain-mcp will read from its config env — one embedder, one DB,
+# so the off-camera ingest and the on-camera search agree.)
+export DATABASE_URL="$DB_URL"
+export BRAIN_HOME="$HOME_DIR"
+export BRAIN_VAULT_PATH="$VAULT_DIR"
+export BRAIN_EMBEDDER="$EMBEDDER"
+export BRAIN_GRAPH_ENABLED="false"
+# Disable the post-ingest Ollama auto-summary for the seed (it would force an
+# arctic->llama model swap mid-ingest); search stays 100% real.
+export BRAIN_ENRICH_MIN_TOKENS="1000000"
+# Consumed by the tape's hidden setup (cd target + fail-closed sandbox guard).
+export MCP_GIF_STAGE="$STAGE_DIR"
+
+# --- Provision the throwaway Postgres (fresh every run) ---------------------
+echo "Provisioning the throwaway mcp-gif Postgres on port ${DB_PORT} …"
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d >/dev/null
+
+echo "Waiting for Postgres to accept connections …"
+ready=""
+for _ in $(seq 1 30); do
+  if docker exec "$CONTAINER" pg_isready -U brain -d "$DB_NAME" >/dev/null 2>&1; then
+    ready="yes"; break
+  fi
+  sleep 2
+done
+[[ -n "$ready" ]] || { echo "error: ${CONTAINER} never became ready" >&2; exit 1; }
+
+# --- Seed the corpus (init + off-camera ingest) -----------------------------
+echo "Applying migrations + seeding the synthetic corpus …"
+brain init >/dev/null
+brain ingest-dir "$SEED_DIR" --tag compliance >/dev/null
+
+# --- Warm the model + verify the agent can actually answer (fail closed) ----
+# One dry run: confirms claude is logged in, the MCP server boots against the
+# sandbox, and brain_search returns before we commit a frame to the recording.
+echo "Verifying the claude → brain-mcp path against the sandbox …"
+if ! "$STAGE_DIR/ask-brain" "$QUESTION" | grep -qi "vendor\|risk\|breach\|vendra"; then
+  echo "error: dry run did not produce an answer from the brain — refusing to record" >&2
+  echo "       (is 'claude' logged in? try: claude -p 'hi')" >&2
+  exit 1
+fi
+
+# --- Record -----------------------------------------------------------------
+echo "Recording $TAPE with vhs …"
+vhs "$TAPE"
+
+[[ -f "$GIF" ]] || { echo "error: vhs did not produce $GIF" >&2; exit 1; }
+
+# stat is BSD (macOS) vs GNU (Linux); try both invocations.
+bytes="$( stat -f%z "$GIF" 2>/dev/null || stat -c%s "$GIF" )"
+human="$( awk -v b="$bytes" 'BEGIN { printf "%.2f MB", b / 1048576 }' )"
+
+echo "Wrote $GIF ($human, $bytes bytes)."
+if (( bytes > MAX_BYTES )); then
+  echo "warning: $GIF exceeds the 2.5 MB README budget — tune the tape's" >&2
+  echo "         FontSize/framerate/Sleep durations to shrink it." >&2
+fi
