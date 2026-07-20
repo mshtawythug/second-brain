@@ -360,6 +360,11 @@ def setup_cmd(
     skip_skill: bool = typer.Option(
         False, "--skip-skill", help="Don't install the Claude Code skill"
     ),
+    daemons: bool = typer.Option(
+        False,
+        "--daemons/--no-daemons",
+        help="Install launchd background daemons (full profile only; default no)",
+    ),
     reset: bool = typer.Option(
         False,
         "--reset",
@@ -389,6 +394,7 @@ def setup_cmd(
             embedder_choice=embedder,
             skip_wiki=skip_wiki,
             skip_skill=skip_skill,
+            daemons=daemons,
             reset=reset,
         )
     except SetupError as exc:

@@ -374,9 +374,11 @@ def test_setup_preflight_caddy_missing_only_when_wiki_enabled(
 
 
 def test_setup_launchd_skipped_when_skip_wiki(tmp_path: Path) -> None:
-    """Full profile: --skip-wiki suppresses launchd; without it the launchd path runs.
+    """Full profile: --skip-wiki suppresses launchd; daemons stay opt-in otherwise.
 
     launchd is a full-profile-only component; standard/minimal never reach it.
+    ``_dry_run_output`` runs --non-interactive, and daemons are opt-in only, so
+    neither run may install them.
     """
     # skip_wiki=True → wiki not installed → launchd skipped
     out_skipped = _dry_run_output(tmp_path / "skip", profile="full", skip_wiki=True)
@@ -387,19 +389,117 @@ def test_setup_launchd_skipped_when_skip_wiki(tmp_path: Path) -> None:
         "expected wiki-not-installed rationale in launchd skip message"
     )
 
-    # skip_wiki=False → launchd either dry-runs (macOS) or reports not-macOS
+    # skip_wiki=False + --non-interactive → daemons NEVER auto-install.
     out_enabled = _dry_run_output(tmp_path / "enabled", profile="full", skip_wiki=False)
-    assert "launchd" in out_enabled.lower(), (
-        "expected launchd mention when wiki is enabled"
+    assert "launchd" in out_enabled.lower() or "daemons" in out_enabled.lower(), (
+        "expected launchd/daemons mention when wiki is enabled"
     )
-    if sys.platform == "darwin":
-        assert "brain-install-launchd" in out_enabled, (
-            "expected dry-run launchd line on macOS"
-        )
-    else:
+    # The dry-run *install* line must be absent — daemons are opt-in only. (The
+    # skip message legitimately mentions `brain-install-launchd` as the opt-in
+    # command, so assert on the "would:" install action specifically.)
+    assert "would: brain-install-launchd" not in out_enabled, (
+        "--non-interactive must NEVER install launchd daemons"
+    )
+    if sys.platform != "darwin":
         assert "not macos" in out_enabled.lower(), (
             "expected 'not macOS' skip message on Linux"
         )
+
+
+def test_setup_noninteractive_never_installs_launchd(tmp_path: Path) -> None:
+    """D1d: --non-interactive (full profile) must NOT invoke install_plists.
+
+    Regression for the default-on bug: previously wiki auto-installed in
+    --non-interactive mode and launchd registration rode along unconditionally.
+    """
+    from brain.setup import PreflightResult
+
+    install_plists_calls: list[Any] = []
+
+    def _quartz_ok(*, dry_run: bool = False) -> PreflightResult:
+        return PreflightResult(name="quartz-sha", ok=True, message="ok (patched)")
+
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+        patch("brain.setup.ensure_shim"),
+        # Avoid the real `git ls-remote` network call in the full preflight.
+        patch("brain.setup._check_quartz_sha", side_effect=_quartz_ok),
+        patch("brain.wiki.install.wiki_install"),
+        patch("brain.cli_claude.install_skill"),
+        patch(
+            "brain.bin.launchd.install_plists",
+            side_effect=lambda *a, **k: install_plists_calls.append((a, k)),
+        ),
+    ):
+        from brain.setup import run_setup
+
+        run_setup(
+            profile="full",
+            dry_run=False,
+            non_interactive=True,
+            brain_home_override=tmp_path / ".brain",
+            vault_override=tmp_path / "vault",
+            pg_port=0,
+            wiki_port=0,
+            skip_wiki=False,
+            skip_skill=True,
+        )
+
+    assert install_plists_calls == [], (
+        "install_plists must NOT run in --non-interactive mode"
+    )
+
+
+def test_setup_daemons_flag_installs_when_interactive(tmp_path: Path) -> None:
+    """--daemons pre-answers the opt-in prompt so launchd installs (interactive)."""
+    install_plists_calls: list[Any] = []
+
+    with (
+        patch("brain.bin.launchd.install_plists",
+              side_effect=lambda *a, **k: install_plists_calls.append((a, k))),
+        patch("sys.platform", "darwin"),
+    ):
+        from brain.setup import _maybe_install_launchd
+
+        _maybe_install_launchd(
+            wiki_installed=True,
+            vault_path=tmp_path / "vault",
+            brain_home=tmp_path / ".brain",
+            dry_run=False,
+            non_interactive=False,
+            daemons=True,
+        )
+
+    assert len(install_plists_calls) == 1, (
+        "--daemons must install launchd without prompting"
+    )
+
+
+def test_setup_launchd_interactive_default_no(tmp_path: Path) -> None:
+    """Interactively, the launchd prompt defaults to No — declining skips install."""
+    install_plists_calls: list[Any] = []
+
+    with (
+        patch("typer.confirm", return_value=False),  # user accepts the No default
+        patch("brain.bin.launchd.install_plists",
+              side_effect=lambda *a, **k: install_plists_calls.append((a, k))),
+        patch("sys.platform", "darwin"),
+    ):
+        from brain.setup import _maybe_install_launchd
+
+        _maybe_install_launchd(
+            wiki_installed=True,
+            vault_path=tmp_path / "vault",
+            brain_home=tmp_path / ".brain",
+            dry_run=False,
+            non_interactive=False,
+            daemons=False,
+        )
+
+    assert install_plists_calls == [], (
+        "declining the default-No launchd prompt must skip install"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +612,8 @@ def test_launchd_receives_resolved_vault_path(tmp_path: Path) -> None:
             vault_path=custom_vault,
             brain_home=brain_home,
             dry_run=False,
+            # daemons=True pre-answers the now-default-No opt-in prompt.
+            daemons=True,
         )
 
     assert captured.get("vault_path") == custom_vault, (

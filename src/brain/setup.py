@@ -625,26 +625,54 @@ def _maybe_install_launchd(
     vault_path: Path,
     brain_home: Path,
     dry_run: bool,
+    *,
+    non_interactive: bool = False,
+    daemons: bool = False,
 ) -> None:
-    """Install launchd plists ONLY after every prereq passed.
+    """Install launchd plists ONLY after every prereq passed — opt-in, default No.
 
     Runs LAST so DB + wiki are healthy before supervisors start.
 
-    Guarded by ``wiki_installed`` (not the raw ``--skip-wiki`` flag) so
-    that an interactive decline also suppresses the launchd registration
-    — there would be no Quartz workspace for the watcher to supervise.
+    Background daemons are OPT-IN (ticket contract):
 
-    Passes ``vault_path`` and ``brain_home`` directly to
-    ``install_plists`` rather than going through ``install_main()``,
-    which would silently use the default vault and brain_home resolved
-    from env/config at call time instead of the values chosen for this
-    setup run.
+    * ``--non-interactive`` NEVER installs daemons — a scripted install must not
+      register three KeepAlive LaunchAgents behind the user's back.
+    * Interactively the prompt defaults to **No**; pass ``--daemons`` to install
+      without being asked.
+
+    Guarded by ``wiki_installed`` (not the raw ``--skip-wiki`` flag) so that an
+    interactive decline also suppresses the launchd registration — there would
+    be no Quartz workspace for the watcher to supervise.
+
+    Passes ``vault_path`` and ``brain_home`` directly to ``install_plists``
+    rather than going through ``install_main()``, which would silently use the
+    default vault and brain_home resolved from env/config at call time instead
+    of the values chosen for this setup run.
     """
     if not wiki_installed:
         typer.echo("[skipped] launchd install (wiki not installed)")
         return
     if sys.platform != "darwin":
         typer.echo("[skipped] launchd install (not macOS)")
+        return
+    if non_interactive:
+        # Never auto-install daemons in a scripted run — opt in later with
+        # `brain-install-launchd` or an interactive `brain setup --daemons`.
+        typer.echo(
+            "[skipped] launchd background daemons "
+            "(--non-interactive; opt in with `brain-install-launchd`)"
+        )
+        return
+    if daemons:
+        do_install = True
+    else:
+        do_install = typer.confirm(
+            "Install launchd background daemons "
+            "(auto-start Postgres + wiki watcher on login)?",
+            default=False,
+        )
+    if not do_install:
+        typer.echo("[skipped] launchd background daemons (declined)")
         return
     if dry_run:
         typer.echo("[dry-run] would: brain-install-launchd")
@@ -709,6 +737,7 @@ def run_setup(
     embedder_choice: str | None = None,
     skip_wiki: bool = False,
     skip_skill: bool = False,
+    daemons: bool = False,
     reset: bool = False,
 ) -> None:
     """Orchestrate the full setup flow.  Public surface for testing.
@@ -1022,6 +1051,8 @@ def run_setup(
             vault_path=vault_path,
             brain_home=brain_home,
             dry_run=dry_run,
+            non_interactive=non_interactive,
+            daemons=daemons,
         )
     else:
         typer.echo(f"[skipped] launchd background daemons (profile {prof.name})")
