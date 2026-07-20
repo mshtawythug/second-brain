@@ -503,6 +503,62 @@ def test_setup_launchd_interactive_default_no(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# M7 — warn (don't silently drop) when --daemons is set but ignored
+# ---------------------------------------------------------------------------
+
+
+def test_daemons_ignored_warns_under_non_interactive(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--daemons + --non-interactive prints an explicit 'ignored' warning."""
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+    ):
+        from brain.setup import run_setup
+
+        run_setup(
+            profile="full",
+            dry_run=True,
+            non_interactive=True,
+            daemons=True,
+            brain_home_override=tmp_path / ".brain",
+            vault_override=tmp_path / "vault",
+            pg_port=0,
+            wiki_port=0,
+            skip_wiki=True,
+            skip_skill=True,
+        )
+
+    assert "--daemons ignored under --non-interactive" in capsys.readouterr().err
+
+
+def test_daemons_ignored_warns_on_profile_without_daemons(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--daemons on a profile that offers no daemons (standard) warns."""
+    with (
+        patch("shutil.which", return_value="/usr/bin/fake"),
+        patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
+    ):
+        from brain.setup import run_setup
+
+        run_setup(
+            profile="standard",
+            dry_run=True,
+            non_interactive=False,
+            daemons=True,
+            brain_home_override=tmp_path / ".brain",
+            vault_override=tmp_path / "vault",
+            pg_port=0,
+            skip_wiki=True,
+            skip_skill=True,
+        )
+
+    assert "--daemons ignored (profile standard" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
 # Test 9 — --skip-skill prevents skill install
 # ---------------------------------------------------------------------------
 
@@ -710,6 +766,49 @@ def test_render_env_no_vault_keeps_placeholder_commented() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# M6 — render_env fails loud when a required marker is absent (template drift)
+# ---------------------------------------------------------------------------
+
+
+def test_render_env_raises_when_pg_port_marker_missing() -> None:
+    """A template lacking the {{ pg_port }} placeholder raises SetupError."""
+    import pytest as _pytest
+
+    from brain.setup import SetupError, render_env_from_template
+
+    with _pytest.raises(SetupError, match="pg_port"):
+        render_env_from_template(
+            "BRAIN_EMBEDDER=arctic\n", pg_port=55432, vault_path=None
+        )
+
+
+def test_render_env_raises_when_embedder_marker_missing() -> None:
+    """A template lacking BRAIN_EMBEDDER=arctic raises SetupError naming the marker."""
+    import pytest as _pytest
+
+    from brain.setup import SetupError, render_env_from_template
+
+    drifted = "DATABASE_URL=postgresql://x:{{ pg_port }}/second_brain\n"
+    with _pytest.raises(SetupError, match="BRAIN_EMBEDDER=arctic"):
+        render_env_from_template(
+            drifted, pg_port=55432, vault_path=None, embedder="none"
+        )
+
+
+def test_render_env_raises_when_graph_marker_missing() -> None:
+    """A template lacking # BRAIN_GRAPH_ENABLED=true raises SetupError."""
+    import pytest as _pytest
+
+    from brain.setup import SetupError, render_env_from_template
+
+    drifted = "BRAIN_EMBEDDER=arctic\nDATABASE_URL=x:{{ pg_port }}/second_brain\n"
+    with _pytest.raises(SetupError, match="BRAIN_GRAPH_ENABLED"):
+        render_env_from_template(
+            drifted, pg_port=55432, vault_path=None, graph_enabled=False
+        )
+
+
 def test_run_setup_default_port_is_canonical_55432() -> None:
     """run_setup's default --port must match the committed compose / prod port."""
     import inspect
@@ -826,6 +925,22 @@ def test_render_compose_project_derives_noncolliding_container_name() -> None:
     assert "container_name: brain-qa-x-postgres" in out
     assert "container_name: second-brain-postgres" not in out
     assert "name: brain-qa-x" in out
+
+
+def test_both_compose_templates_tune_shared_buffers() -> None:
+    """M2: both compose templates set shared_buffers=512MB (stock + AGE)."""
+    from brain.setup import render_compose_from_template
+
+    for tpl in ("docker-compose.stock.yml.j2", "docker-compose.yml.j2"):
+        out = render_compose_from_template(
+            _packaged_compose_template(tpl),
+            brain_home=Path("/tmp/bh"),
+            pg_port=55432,
+            compose_project="brain",
+        )
+        assert "command: postgres -c shared_buffers=512MB" in out, (
+            f"{tpl} must tune shared_buffers=512MB"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1137,10 +1252,12 @@ def test_minimal_dry_run_narrative_reaches_doctor(tmp_path: Path) -> None:
     assert "[skipped] wiki install (profile minimal)" in out
     assert "[skipped] Claude Code skill (profile minimal)" in out
     assert "[skipped] launchd background daemons (profile minimal)" in out
-    # Closing banner + FTS-only guidance.
+    # Closing banner + FTS-only guidance. Minimal is FTS-only BY CHOICE, so the
+    # truthful note is shown — NOT the "Ollama not found" auto-detect hint.
     assert "brain setup complete" in out
     assert "embedder:   none" in out
-    assert "Ollama not found" in out
+    assert "FTS-only brain" in out
+    assert "Ollama not found" not in out
 
 
 # ---------------------------------------------------------------------------

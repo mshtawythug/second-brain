@@ -1,4 +1,5 @@
 """brain setup — interactive one-command installer for the second-brain runtime."""
+import enum
 import os
 import shutil
 import socket
@@ -57,8 +58,23 @@ class SetupProfile:
     offer_wiki: bool
     offer_daemons: bool
     offer_skill: bool
+    soft_skill: bool
     env_embedder_default: str
     env_graph_enabled: bool
+
+
+class ProfileName(enum.StrEnum):
+    """Valid ``brain setup --profile`` choices.
+
+    Used directly as the Typer option type so Typer renders it as a
+    ``click.Choice`` — earlier validation (exit 2 on a bad value), shell
+    completion, and a richer ``--help`` — with :func:`resolve_profile`'s
+    ``SetupError`` as the backstop for direct ``run_setup`` callers.
+    """
+
+    minimal = "minimal"
+    standard = "standard"
+    full = "full"
 
 
 _STOCK_COMPOSE = "docker-compose.stock.yml.j2"
@@ -73,6 +89,7 @@ _PROFILES: dict[str, SetupProfile] = {
         offer_wiki=False,
         offer_daemons=False,
         offer_skill=False,
+        soft_skill=False,
         env_embedder_default="none",
         env_graph_enabled=False,
     ),
@@ -84,6 +101,7 @@ _PROFILES: dict[str, SetupProfile] = {
         offer_wiki=False,
         offer_daemons=False,
         offer_skill=True,
+        soft_skill=True,
         env_embedder_default="arctic",
         env_graph_enabled=False,
     ),
@@ -95,13 +113,14 @@ _PROFILES: dict[str, SetupProfile] = {
         offer_wiki=True,
         offer_daemons=True,
         offer_skill=True,
+        soft_skill=False,
         env_embedder_default="arctic",
         env_graph_enabled=True,
     ),
 }
 
 # Public tuple of valid profile names, in install-weight order (for --help + validation).
-PROFILE_NAMES: tuple[str, ...] = ("minimal", "standard", "full")
+PROFILE_NAMES: tuple[str, ...] = tuple(p.value for p in ProfileName)
 
 
 def resolve_profile(name: str) -> SetupProfile:
@@ -115,12 +134,22 @@ def resolve_profile(name: str) -> SetupProfile:
         ) from exc
 
 
-# Printed when the standard profile auto-detects a missing Ollama and falls back
-# to the FTS-only backend. Also reiterated in the final report.
+# Printed when the standard profile auto-detects a MISSING Ollama and falls back
+# to the FTS-only backend (the surprise case — leads with "Ollama not found").
+# Shown at fallback time and reiterated in the final report.
 OLLAMA_FALLBACK_HINT = (
     "Ollama not found — installing FTS-only (BRAIN_EMBEDDER=none). To enable "
     "semantic search later: install Ollama, set BRAIN_EMBEDDER=arctic in .env, "
     "then run 'brain init' and 'brain reembed'."
+)
+
+# Printed in the final report when the brain is FTS-only BY CHOICE (minimal
+# profile, or an explicit --embedder none) — a truthful variant that does NOT
+# claim Ollama was missing.
+FTS_ONLY_NOTE = (
+    "FTS-only brain (BRAIN_EMBEDDER=none). To enable semantic search later: "
+    "install Ollama, set BRAIN_EMBEDDER=arctic in .env, then run 'brain init' "
+    "and 'brain reembed'."
 )
 
 
@@ -217,14 +246,14 @@ def _check_docker(*, dry_run: bool = False) -> PreflightResult:
     )
 
 
-def _check_ollama(embedder: str | None) -> PreflightResult:
-    """Check 3: ollama CLI present — skipped for voyage (SaaS-only) embedder."""
-    if embedder == "voyage":
-        return PreflightResult(
-            name="ollama",
-            ok=True,
-            message="ollama (skipped — voyage embedder uses SaaS, no local Ollama required)",
-        )
+def _check_ollama() -> PreflightResult:
+    """Check 3: ollama CLI present.
+
+    Only invoked when :func:`run_preflight` has already established that the
+    resolved embedder needs a local Ollama (:func:`_embedder_uses_ollama`), so
+    the SaaS ``voyage`` / FTS-only ``none`` skip lives with that single owner —
+    this function no longer second-guesses the gate.
+    """
     ok = shutil.which("ollama") is not None
     if ok:
         return PreflightResult(name="ollama", ok=True, message="ollama found")
@@ -386,7 +415,7 @@ def run_preflight(
     results.append(_check_python_version())
     results.append(_check_docker(dry_run=dry_run))
     if profile.needs_ollama and _embedder_uses_ollama(embedder):
-        results.append(_check_ollama(embedder))
+        results.append(_check_ollama())
     results.append(_check_port_free(pg_port, "postgres-port"))
     if profile.offer_wiki:
         if not skip_wiki:
@@ -489,6 +518,22 @@ def render_compose_from_template(
     )
 
 
+def _require_replace(text: str, target: str, replacement: str) -> str:
+    """Replace *target* in *text*, raising :class:`SetupError` if it is absent.
+
+    Fails loud at the point of use (not only in CI) so a drifted template — the
+    packaged marker renamed or removed — can never silently render a
+    partially-substituted ``.env`` that leaves a placeholder or a stale default
+    in the live config.
+    """
+    if target not in text:
+        raise SetupError(
+            f".env template missing expected marker {target!r} — refusing to "
+            "render a silently-wrong .env (has the packaged env.example drifted?)"
+        )
+    return text.replace(target, replacement)
+
+
 def render_env_from_template(
     template_text: str,
     *,
@@ -517,22 +562,17 @@ def render_env_from_template(
     no filesystem or environment access — so the substitution is unit-testable
     in isolation.
     """
-    text = template_text.replace("{{ pg_port }}", str(pg_port))
+    text = _require_replace(template_text, "{{ pg_port }}", str(pg_port))
     if embedder is not None:
-        text = text.replace(
-            "BRAIN_EMBEDDER=arctic",
-            f"BRAIN_EMBEDDER={embedder}",
-        )
+        text = _require_replace(text, "BRAIN_EMBEDDER=arctic", f"BRAIN_EMBEDDER={embedder}")
     if graph_enabled is not None:
         value = "true" if graph_enabled else "false"
-        text = text.replace(
-            "# BRAIN_GRAPH_ENABLED=true",
-            f"BRAIN_GRAPH_ENABLED={value}",
+        text = _require_replace(
+            text, "# BRAIN_GRAPH_ENABLED=true", f"BRAIN_GRAPH_ENABLED={value}"
         )
     if vault_path is not None:
-        text = text.replace(
-            "# BRAIN_VAULT_PATH=",
-            f"BRAIN_VAULT_PATH={vault_path}",
+        text = _require_replace(
+            text, "# BRAIN_VAULT_PATH=", f"BRAIN_VAULT_PATH={vault_path}"
         )
     return text
 
@@ -745,13 +785,16 @@ def _print_final_report(
     wiki_installed: bool,
     skill_installed: bool,
     effective_embedder: str,
+    ollama_fell_back: bool,
 ) -> None:
     """Print the closing banner matching brain-up's visual style.
 
     Uses the actual install results (not the raw skip flags) so that an
     interactive decline is reflected correctly in the summary. When the brain
-    ended up FTS-only (``BRAIN_EMBEDDER=none`` — minimal profile or a standard
-    run that fell back), reiterates how to enable semantic search later.
+    ended up FTS-only (``BRAIN_EMBEDDER=none``), reiterates how to enable
+    semantic search later — the exact "Ollama not found" hint only when it was
+    an auto-detect fallback; a truthful "FTS-only brain" note when FTS was
+    chosen (minimal profile / explicit ``--embedder none``).
     """
     typer.echo("")
     typer.echo("🧠 brain setup complete:")
@@ -765,7 +808,7 @@ def _print_final_report(
         typer.echo("   skill:      ~/.claude/skills/brain/SKILL.md")
     if effective_embedder == "none":
         typer.echo("")
-        typer.echo(f"   {OLLAMA_FALLBACK_HINT}")
+        typer.echo(f"   {OLLAMA_FALLBACK_HINT if ollama_fell_back else FTS_ONLY_NOTE}")
     typer.echo("")
     typer.echo("   next steps:")
     typer.echo("     brain ingest <path>            # ingest a file or directory")
@@ -831,6 +874,23 @@ def run_setup(
     )
     if ollama_fell_back:
         typer.echo(OLLAMA_FALLBACK_HINT)
+
+    # Warn loudly when --daemons was asked for but will be ignored, rather than
+    # silently dropping the request.
+    if daemons and non_interactive:
+        typer.secho(
+            "--daemons ignored under --non-interactive "
+            "(daemons are never auto-installed in a scripted run)",
+            fg="yellow",
+            err=True,
+        )
+    elif daemons and not prof.offer_daemons:
+        typer.secho(
+            f"--daemons ignored (profile {prof.name} has no background daemons; "
+            "use --profile full)",
+            fg="yellow",
+            err=True,
+        )
 
     # ------------------------------------------------------------------
     # T3.1 — Reset handling (DESTRUCTIVE; typed confirmation required)
@@ -1107,7 +1167,7 @@ def run_setup(
             skip=skip_skill,
             non_interactive=non_interactive,
             dry_run=dry_run,
-            soft=not prof.offer_wiki,
+            soft=prof.soft_skill,
         )
     else:
         skill_installed = False
@@ -1138,4 +1198,5 @@ def run_setup(
         wiki_installed=wiki_installed,
         skill_installed=skill_installed,
         effective_embedder=effective_embedder,
+        ollama_fell_back=ollama_fell_back,
     )

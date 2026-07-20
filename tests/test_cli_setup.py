@@ -35,3 +35,49 @@ def test_setup_cli_port_default_is_canonical_55432(
 
     assert result.exit_code == 0, result.output
     assert captured["pg_port"] == 55432
+
+
+def test_setup_cli_default_profile_is_standard(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`brain setup` with no --profile threads the canonical 'standard' profile."""
+    captured: dict[str, Any] = {}
+
+    def _spy(**kwargs: Any) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr("brain.setup.run_setup", _spy)
+    result = CliRunner().invoke(app, ["setup", "--dry-run", "--non-interactive"])
+
+    assert result.exit_code == 0, result.output
+    assert captured["profile"] == "standard"
+
+
+def test_setup_cli_rejects_unknown_profile() -> None:
+    """M8: --profile is a click.Choice — an invalid value exits 2 (BadParameter).
+
+    resolve_profile's SetupError remains the backstop for direct run_setup
+    callers, but the CLI layer rejects the bad value before run_setup is reached.
+    """
+    result = CliRunner().invoke(
+        app, ["setup", "--profile", "gigantic", "--dry-run", "--non-interactive"]
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "gigantic" in result.output or "Invalid value" in result.output
+
+
+def test_setup_cli_accepts_each_valid_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every profile name in the Choice is accepted and threaded to run_setup."""
+    for name in ("minimal", "standard", "full"):
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr(
+            "brain.setup.run_setup", lambda _c=captured, **kw: _c.update(kw)
+        )
+        result = CliRunner().invoke(
+            app, ["setup", "--profile", name, "--dry-run", "--non-interactive"]
+        )
+        assert result.exit_code == 0, result.output
+        assert captured["profile"] == name

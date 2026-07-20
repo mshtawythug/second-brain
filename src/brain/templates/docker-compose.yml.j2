@@ -14,6 +14,11 @@ services:
       dockerfile: Dockerfile
     image: ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
     container_name: {{ container_name }}
+    # shared_buffers 512MB: the working set exceeds the stock 128MB default,
+    # forcing cold FTS re-reads from disk. Applied as a `postgres -c` flag (no
+    # custom postgresql.conf). Matches the stock template + committed root
+    # compose; the heavier full profile (graph + FTS + vector) benefits most.
+    command: postgres -c shared_buffers=512MB
     environment:
       POSTGRES_USER: brain
       POSTGRES_PASSWORD: brain

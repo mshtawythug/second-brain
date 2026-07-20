@@ -153,6 +153,7 @@ from .queries import (
 )
 from .resurface import resurface_docs
 from .search import SearchDiagnostics, hybrid_search
+from .setup import ProfileName  # lightweight StrEnum for `brain setup --profile` (no networkx)
 from .tags import normalize_tag, normalize_tags
 from .vault import init_vault
 from .vault.daily_index import regenerate_daily_index
@@ -334,8 +335,8 @@ def _main() -> None:
 
 @app.command("setup")
 def setup_cmd(
-    profile: str = typer.Option(
-        "standard",
+    profile: ProfileName = typer.Option(
+        ProfileName.standard,
         "--profile",
         help="minimal (PG+FTS) | standard (+Ollama hybrid) | full (+graph/wiki/daemons)",
     ),
@@ -384,7 +385,7 @@ def setup_cmd(
 
     try:
         run_setup(
-            profile=profile,
+            profile=profile.value,
             non_interactive=non_interactive,
             dry_run=dry_run,
             brain_home_override=brain_home,
