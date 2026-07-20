@@ -149,6 +149,13 @@ reviewer expects: tests added/updated (red-first for fixes), the `ruff check &&
 mypy src/ && pytest` gate green, no PII, and docs updated (README / `docs/` /
 `CHANGELOG.md`) whenever the change is user-facing.
 
+## Docs assets
+
+The README's hero GIF is generated from `docs/assets/demo.tape` (a
+[VHS](https://github.com/charmbracelet/vhs) script). If a CLI output change makes
+it stale, regenerate it with `bin/brain-demo-gif` (needs `brew install vhs` and
+Docker; it provisions and tears down the isolated `brain demo` sandbox).
+
 ## Codebase layout
 
 ```
