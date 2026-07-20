@@ -1,6 +1,97 @@
 # CLI reference
 
-> Part of the [Second Brain](../README.md) docs — see [docs/README.md](README.md) for the full index. Core `ingest` / `search` / `show` / `list` / `tag` usage lives in the [README](../README.md#core-usage); this file covers the rest of the command surface.
+> Part of the [Second Brain](../README.md) docs — see [docs/README.md](README.md) for the full index. The [README](../README.md#core-usage) shows the everyday `ingest` / `search` / `show` / `list` / `tag` commands; this file covers everything else — the advanced flags and diagnostics for those core commands, plus the full command surface beyond them.
+
+## Ingest options
+
+```bash
+# Single files: TXT, Markdown, PDF, DOCX.
+brain ingest ~/Documents/resume.pdf --tag career --tag resume
+brain ingest ./notes.md --force       # re-ingest even if the content already exists
+
+# Directories: recursive, idempotent by content hash.
+brain ingest-dir ~/Documents/career
+brain ingest-dir ~/Documents/career --tag career --ext pdf,md,docx
+brain ingest-dir ~/Documents/career --dry-run
+
+# Piped content: used for Krisp / Slack / arbitrary text from agents.
+echo "<transcript>" | brain ingest-stdin \
+  --source krisp \
+  --external-id meeting-42 \
+  --title "1:1 - 2026-04-24" \
+  --content-type transcript \
+  --date 2026-04-24 \
+  --tag one-on-one \
+  --metadata '{"participants":["Alice","Bob"],"duration_min":30}'
+```
+
+All ingest paths write rows + chunks to Postgres and, when `BRAIN_VAULT_PATH`
+exists, mirror ingested documents into `_ingested/<source>/` so the wiki can
+show them. Re-running unchanged content is a no-op unless you pass `--force`.
+
+## Search diagnostics and filters
+
+```bash
+brain search "exact product name" --fts-only   # skip the embedding call
+
+# Rank diagnostics: why did these results surface, and in what order?
+brain explain "platform migration tradeoffs"
+brain explain "platform migration tradeoffs" --verbose --json
+```
+
+ID prefixes must be at least 6 hex characters and must uniquely identify one
+document. `--json` is the machine-readable path for agents or scripts.
+
+`brain explain` runs the same query as `brain search` but prints per-result
+ranking diagnostics — FTS rank, vector cosine, RRF contributions, and the
+recency boost — so you can see *why* a result surfaced and in what order. Add
+`--verbose` to show which filters were active, or `--json` for the full
+`SearchExplanation` payload. It accepts the same filter flags as `search`
+(`--source`, `--tag`, `--since`, `--person`, `--after`/`--before`, `--kind`, …).
+
+`--person` resolves the name or email you pass against the directory and
+matches docs recorded under **any** known variant of that person — space-form
+(`jane doe`), dot-form (`jane.doe`), bare email, and every `Name <email>`
+combination the sources emitted — so Gmail-header and Krisp-label spellings of
+the same person all count as one identity.
+
+`--since` takes a bare number or a duration suffix — `7d` (days), `24h`
+(hours), `90m` (minutes) — on the commands that share this parser: `search`,
+`explain`, `todo`, `enrich`, and `gaps` (bare number = **days**), plus `brain
+brief` (`--since` bare = **hours**; its `--todo-since` bare = days). Bare
+numbers keep each command's existing unit, so old scripts are unaffected. The
+remaining `--since` flags are unchanged and do **not** take suffixes:
+`ingest-gmail` expects a Gmail `YYYY/MM/DD` date, `timeline` an ISO `YYYY-MM`
+month, and `gaps push` a plain integer day count.
+
+## Tags, edits, draft hiding, and deletes
+
+```bash
+# Tags accept +name and -name modifiers. Existing vault mirrors are rewritten
+# so frontmatter stays aligned with the DB.
+brain tag <id-prefix> +interview +career -old-tag
+brain tag <id-prefix> +career --regenerate-file   # recover a missing ingested mirror
+
+# Ingested-tier docs: targeted updates or JSON-header editor flow.
+brain edit <id-prefix> --title "New title"
+brain edit <id-prefix> --metadata '{"date":"2026-04-26"}'   # shallow merge
+brain edit <id-prefix> --metadata '{"date":"2026-04-26"}' --replace-metadata
+brain edit <id-prefix> --content-file ./fixed.md            # re-chunks + re-embeds
+cat ./fixed.md | brain edit <id-prefix> --content-stdin
+brain edit <id-prefix>                                      # opens $EDITOR
+
+# Vault-tier docs: the file is source of truth. `brain edit <id>` opens the
+# Markdown file directly; mutating flags are rejected for vault docs.
+brain edit <vault-id-prefix>
+
+# Hide a doc from the rendered wiki without removing it from local CLI search.
+brain mark-draft <id-prefix>
+brain mark-published <id-prefix>
+
+# Delete a document and its chunks. If a vault mirror exists, it is unlinked too.
+brain rm <id-prefix>
+brain rm <id-prefix> --yes
+```
 
 ## Gmail ingest
 

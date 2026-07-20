@@ -4,7 +4,7 @@ Reference docs for [Second Brain](../README.md). The [top-level README](../READM
 
 | Doc | Covers |
 |---|---|
-| [cli-reference.md](cli-reference.md) | The full command surface beyond the README's core five: Gmail ingest, status/health, `capture` / `enrich` / `rate` / `people`, tacit-knowledge `elicit`, and the eight proactivity/synthesis commands (`resurface` / `brief` / `review` / `timeline` / `connect` / `ask` / `audio` / `gaps`). |
+| [cli-reference.md](cli-reference.md) | Advanced flags and diagnostics for the core commands (ingest options, `explain`, `edit`, `mark-draft`/`mark-published`, `rm`), plus the full command surface beyond the README's core five: Gmail ingest, status/health, `capture` / `enrich` / `rate` / `people`, tacit-knowledge `elicit`, and the eight proactivity/synthesis commands (`resurface` / `brief` / `review` / `timeline` / `connect` / `ask` / `audio` / `gaps`). |
 | [graphrag.md](graphrag.md) | Entity-graph retrieval (Apache AGE): how it works, enabling it, the five query modes, and upgrading an existing brain to the AGE image. |
 | [vault-and-wiki.md](vault-and-wiki.md) | The two-tier vault model (ingested + authored notes), authoring/link-graph/maintenance commands, and the optional Quartz + Caddy rendered wiki. |
 | [configuration.md](configuration.md) | Tech stack, installing from source, running `brain` from any directory, feature tuning knobs, Claude Desktop + Claude Code integrations, choosing/switching embedder backends, data-hygiene backfills, and uninstall. |
