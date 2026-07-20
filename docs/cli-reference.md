@@ -1,6 +1,69 @@
 # CLI reference
 
-> Part of the [Second Brain](../README.md) docs — see [docs/README.md](README.md) for the full index. The [README](../README.md#core-usage) shows the everyday `ingest` / `search` / `show` / `list` / `tag` commands; this file covers everything else — the advanced flags and diagnostics for those core commands, plus the full command surface beyond them.
+> Part of the [Second Brain](../README.md) docs — see [docs/README.md](README.md) for the full index. The [README](../README.md#core-usage) shows the everyday `ingest` / `search` / `show` / `list` / `tag` commands; this file covers everything else — first-run `setup` and the offline `demo`, the advanced flags and diagnostics for those core commands, plus the full command surface beyond them.
+
+## brain setup
+
+`brain setup` is the one-command installer for the runtime: it creates
+`$BRAIN_HOME`, installs the `brain` shims, starts the Postgres container via
+Docker, and optionally wires the wiki (Caddy + Quartz) and the Claude Code
+skill. How much it stands up is chosen with `--profile` — `minimal` (Postgres +
+FTS only, `BRAIN_EMBEDDER=none`), `standard` (default; adds Ollama hybrid
+search), or `full` (adds GraphRAG, the wiki, and opt-in daemons). The
+[README profiles table](../README.md#quick-start) is the canonical description
+of what each profile pulls in.
+
+```bash
+brain setup                              # standard profile, interactive prompts
+brain setup --profile minimal            # Postgres + FTS only (no Ollama, no models)
+brain setup --profile full --daemons     # + graph/wiki + launchd background daemons
+brain setup --non-interactive            # take the default for every prompt
+brain setup --dry-run                    # print planned actions; touch nothing
+brain setup --embedder none              # non-interactive backend: arctic|voyage|qwen3|none
+brain setup --reset                      # destructive wipe of $BRAIN_HOME (typed confirmation)
+```
+
+`--daemons` installs the launchd background agents and applies only to the
+`full` profile (default `--no-daemons`). `--embedder` picks the backend
+non-interactively — `arctic` (default hybrid), `voyage` (SaaS), `qwen3`, or
+`none` (FTS-only, the `minimal` default). `--non-interactive` uses defaults for
+every prompt; `--dry-run` prints every planned action without touching the
+filesystem. `--reset` requires a typed confirmation that cannot be bypassed even
+with `--non-interactive`.
+
+To stand up a second, isolated stack (QA, a throwaway `$BRAIN_HOME`) alongside
+the real one, export `BRAIN_COMPOSE_PROJECT=<name>` — every `docker compose`
+call and the rendered `container_name` switch to that project so it never
+collides with the default `brain` stack.
+
+## brain demo
+
+`brain demo` is a zero-Ollama taste test: it provisions a throwaway Postgres
+sandbox (its own compose project `brain-demo`, container, and volume — never the
+prod stack), seeds a 22-doc synthetic *Larkspur* compliance corpus with a
+deterministic offline embedder, and runs a hero query inline — ranked results in
+under two minutes with no personal data and no model downloads. It needs only
+Docker, or an existing empty database via `--database-url`.
+
+```bash
+brain demo                               # provision + seed + run the hero query
+brain demo --with-embeddings             # also build the vector leg + HNSW index (default: FTS-only)
+brain demo --port 55444                  # host port for the sandbox (auto-bumps if busy; default 55433)
+brain demo --database-url postgresql://…  # seed an existing empty DB instead of Docker
+brain demo --json                        # emit the hero-query results as JSON
+
+brain demo query "PCI scope creep"              # search the running sandbox
+brain demo query "vendor risk" --source gmail   # filters: --source/--tag/--person/--after
+brain demo status                        # is the sandbox up, and how many docs?
+brain demo teardown                      # destroy the sandbox (docker compose down -v)
+```
+
+The default flow is FTS-only (no Ollama); pass `--with-embeddings` to exercise
+the vector leg too. `query` accepts the same corpus filters as real search
+(`--source`, `--tag`, `--person`, `--after`) plus `--json`. `--port` and
+`--database-url` are shared by the sub-commands so they target the same sandbox.
+`teardown` removes both the container and its volume, leaving no demo state
+behind.
 
 ## Ingest options
 
