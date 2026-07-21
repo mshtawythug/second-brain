@@ -151,23 +151,49 @@ mypy src/ && pytest` gate green, no PII, and docs updated (README / `docs/` /
 
 ## Docs assets
 
-The README embeds two [VHS](https://github.com/charmbracelet/vhs) recordings,
-each with its own tape and regenerator script (both need `brew install vhs` and
-Docker):
+The docs embed **seven** generated GIFs, each rebuilt by its own script under
+`bin/`. Six are [VHS](https://github.com/charmbracelet/vhs) terminal recordings
+driven by a tape in `docs/assets/*.tape`; the seventh (the wiki clip) is a
+Playwright **browser** capture of the rendered Quartz site, not a VHS tape. The
+GIFs live across `README.md`, `docs/graphrag.md`, `docs/cli-reference.md`, and
+`docs/vault-and-wiki.md`. Every regenerator needs Docker plus either
+`brew install vhs` (the six VHS ones) or Node (the wiki one); a few need more, as
+noted below (Ollama, the Apache AGE image, ffmpeg).
 
-- **Hero GIF** — `docs/assets/demo.gif`, from `docs/assets/demo.tape` via
-  `bin/brain-demo-gif`. Records the `brain demo` sandbox flow; the script
-  provisions and tears down the isolated `brain demo` sandbox.
-- **Daily-workflow GIF** — `docs/assets/usage.gif`, from `docs/assets/usage.tape`
-  via `bin/brain-usage-gif`. Records the regular `brain` CLI (ingest → search →
-  show → status) against a **throwaway, fully-isolated** Postgres the script
-  spins up just for the recording (compose project `brain-usage-gif`, port
-  55440, named volume) and destroys afterward — it never touches the prod, demo,
-  or test databases, and every seeded doc is synthetic. It uses the local Ollama
-  `arctic` embedder when available, else falls back to FTS-only
-  (`BRAIN_EMBEDDER=none`).
+- **Hero / demo** — `bin/brain-demo-gif` → `docs/assets/demo.gif` (README, "See
+  it in 60 seconds"), from `docs/assets/demo.tape`. Records the `brain demo`
+  sandbox flow; the script provisions and tears down the isolated `brain demo`
+  sandbox.
+- **Daily workflow** — `bin/brain-usage-gif` → `docs/assets/usage.gif` (README
+  hero), from `docs/assets/usage.tape`. Records the regular `brain` CLI (ingest →
+  search → show → status) against a **throwaway, fully-isolated** Postgres it
+  spins up just for the recording (compose project `brain-usage-gif`, port 55440,
+  named volume) and destroys afterward — never the prod, demo, or test databases,
+  and every seeded doc is synthetic. Uses the local Ollama `arctic` embedder when
+  available, else FTS-only (`BRAIN_EMBEDDER=none`).
+- **Claude integrations** — `bin/brain-mcp-gif` → `docs/assets/mcp.gif` (README,
+  "Claude integrations"), from `docs/assets/mcp.tape`. Drives the `claude` CLI
+  answering a question over the bundled `brain-mcp` MCP server.
+- **Entity-graph retrieval** — `bin/brain-graphrag-gif` →
+  `docs/assets/graphrag.gif` (`docs/graphrag.md`), from
+  `docs/assets/graphrag.tape`. Records `brain graphrag` against a throwaway,
+  isolated Apache AGE Postgres; additionally needs the AGE image and Ollama (for
+  the graph build).
+- **Ask your corpus** — `bin/brain-ask-gif` → `docs/assets/ask.gif`
+  (`docs/cli-reference.md`), from `docs/assets/ask.tape`. Records the `brain ask`
+  plan → retrieve → synthesize loop; additionally needs Ollama and ffmpeg (to
+  trim).
+- **Proactive commands** — `bin/brain-proactivity-gif` →
+  `docs/assets/proactivity.gif` (`docs/cli-reference.md`), from
+  `docs/assets/proactivity.tape`. Records `brain brief` + `brain resurface`;
+  additionally needs Ollama.
+- **Rendered wiki** — `bin/brain-wiki-gif` (with
+  `bin/brain-wiki-gif-capture.cjs`) → `docs/assets/wiki.gif`
+  (`docs/vault-and-wiki.md`). A Playwright **browser** capture of the built
+  Quartz wiki (graph view, backlinks, People Hub) — **not** a VHS tape. Needs
+  Node + Playwright (auto-installed) and Docker.
 
-If a CLI output change makes either GIF stale, regenerate it with the matching
+If a CLI or UI change makes any GIF stale, regenerate it with the matching
 script.
 
 ## Codebase layout

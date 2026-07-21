@@ -91,15 +91,23 @@ def test_readme_embeds_both_gifs() -> None:
     assert "](docs/assets/usage.gif)" in text, "README does not embed the usage GIF"
 
 
-def test_contributing_documents_both_tapes_and_regenerators() -> None:
+def test_contributing_documents_all_regenerators() -> None:
     text = CONTRIBUTING.read_text(encoding="utf-8")
-    for ref in (
-        "docs/assets/demo.tape",
-        "docs/assets/usage.tape",
+    # Every GIF regenerator under bin/ must be named in the "Docs assets" section
+    # so contributors know which script rebuilds which asset. Substring checks on
+    # the seven script names stay robust to prose/formatting changes.
+    for script in (
         "bin/brain-demo-gif",
         "bin/brain-usage-gif",
+        "bin/brain-mcp-gif",
+        "bin/brain-graphrag-gif",
+        "bin/brain-ask-gif",
+        "bin/brain-wiki-gif",
+        "bin/brain-proactivity-gif",
     ):
-        assert ref in text, f"CONTRIBUTING 'Docs assets' does not mention {ref}"
+        assert script in text, (
+            f"CONTRIBUTING 'Docs assets' does not mention regenerator {script}"
+        )
 
 
 # --------------------------------------------------------------------------- #
