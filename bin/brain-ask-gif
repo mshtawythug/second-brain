@@ -1,0 +1,423 @@
+#!/usr/bin/env bash
+# brain-ask-gif — regenerate the CLI-reference "ask your corpus" GIF from
+# docs/assets/ask.tape.
+#
+# Records the REGULAR `brain` CLI's `ask` flow — one `brain search` to show the
+# corpus exists, then `brain ask "<question>" --explain` (plan → retrieve →
+# reflect → synthesize, ending in a single cited answer) — against a THROWAWAY,
+# fully-isolated Postgres this script provisions just for the recording and
+# destroys afterward:
+#
+#   * compose project  brain-ask-gif          (NEVER the prod `brain` project)
+#   * container        brain-ask-gif-postgres
+#   * host port        55443                   (prod 55432, demo 55433, tests 5434)
+#   * storage          a NAMED docker volume   (never a host bind-mount)
+#   * database         second_brain_ask_gif
+#
+# Unlike search/show, `brain ask` ALWAYS needs a local Ollama CHAT model
+# (llama3.1:8b by default — brain's ask/enrich model) for the plan/reflect/
+# synthesize steps; the embedder is a separate concern (arctic if pulled, else
+# the FTS-only `none` backend). This script preflights that the chat model is
+# pulled and PRE-WARMS both the chat model and (when arctic) the embedding model
+# off-camera with keep_alive=-1 so neither cold-loads during the recorded ask —
+# the single biggest latency lever on a NUM_PARALLEL=1 host.
+#
+# The CLI is pointed at the sandbox purely through the environment
+# (DATABASE_URL + BRAIN_HOME + BRAIN_VAULT_PATH), exported here and inherited by
+# vhs. A dev checkout's repo-root .env would otherwise win and point the CLI at
+# the PROD database, so every relevant var is overridden explicitly here, and the
+# tape hard-aborts unless DATABASE_URL is the :55443 sandbox — a stray run can
+# never touch personal data.
+#
+# All seeded content is synthetic (Larkspur compliance corpus; zero PII).
+#
+# Requires: vhs (brew install vhs — bundles ttyd + ffmpeg), Docker, and a local
+# Ollama with the chat model pulled (`ollama pull llama3.1:8b`). ffmpeg (bundled
+# with vhs) trims the long LLM "thinking" freeze out of the raw recording.
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+TAPE="docs/assets/ask.tape"
+GIF="docs/assets/ask.gif"
+MAX_BYTES=$(( 2560 * 1024 ))  # 2.5 MB CLI-reference budget for the ask GIF.
+
+# --- Isolated-sandbox identifiers (kept distinct from prod/demo/test) -------
+PROJECT="brain-ask-gif"
+CONTAINER="brain-ask-gif-postgres"
+DB_PORT="55443"
+DB_NAME="second_brain_ask_gif"
+DB_URL="postgresql://brain:brain@localhost:${DB_PORT}/${DB_NAME}"
+PG_IMAGE="pgvector/pgvector:pg16"
+# brain's default ask model (config DEFAULT_ENRICH_MODEL → ask_model). Override
+# with BRAIN_ASK_MODEL to record against a different pulled chat model.
+CHAT_MODEL="${BRAIN_ASK_MODEL:-llama3.1:8b}"
+ARCTIC_MODEL="snowflake-arctic-embed2"
+
+WORKDIR="${TMPDIR:-/tmp}/brain-ask-gif"
+COMPOSE_FILE="$WORKDIR/docker-compose.ask-gif.yml"
+NOTES_DIR="$WORKDIR/notes"
+HOME_DIR="$WORKDIR/home"
+VAULT_DIR="$WORKDIR/vault"
+VOLUME_NAME="${PROJECT}_brain-ask-gif-pgdata"
+
+usage() {
+  echo "Usage: brain-ask-gif [-h|--help]  — record docs/assets/ask.tape into docs/assets/ask.gif via vhs against a throwaway :55443 Postgres sandbox (leaves nothing behind)."
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+# --- Teardown: ALWAYS scoped to our own project, ALWAYS runs on exit --------
+cleanup() {
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+  else
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm "$VOLUME_NAME" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORKDIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# --- Preflight --------------------------------------------------------------
+if ! command -v vhs >/dev/null 2>&1; then
+  echo "error: 'vhs' not found on PATH — install it with 'brew install vhs'" >&2
+  echo "       (vhs bundles the ttyd + ffmpeg dependencies it needs)." >&2
+  exit 1
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo "error: 'docker' not found on PATH — install Docker Desktop or Engine." >&2
+  exit 1
+fi
+if ! command -v brain >/dev/null 2>&1; then
+  echo "error: 'brain' not found on PATH — install it with 'pip install -e .'" >&2
+  exit 1
+fi
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "error: 'ffmpeg' not found on PATH — it ships with vhs ('brew install vhs')." >&2
+  exit 1
+fi
+if ! command -v ffprobe >/dev/null 2>&1; then
+  echo "error: 'ffprobe' not found on PATH — it ships with vhs ('brew install vhs')." >&2
+  exit 1
+fi
+if ! command -v ollama >/dev/null 2>&1; then
+  echo "error: 'ollama' not found on PATH — 'brain ask' needs a local Ollama." >&2
+  echo "       Install it (https://ollama.com) and 'ollama pull ${CHAT_MODEL}'." >&2
+  exit 1
+fi
+
+cd "$REPO_ROOT"
+[[ -f "$TAPE" ]] || { echo "error: tape not found: $REPO_ROOT/$TAPE" >&2; exit 1; }
+
+# --- Ollama model preflight -------------------------------------------------
+# The CHAT model is MANDATORY (ask can't synthesize without it); the embedding
+# model is optional (we fall back to the FTS-only `none` backend without it).
+# Capture the model list ONCE and grep here-strings: piping `ollama list` into
+# `grep -q` races SIGPIPE under `set -o pipefail` (grep exits on first match and
+# closes the pipe, so `ollama list` dies with 141 and the pipeline "fails" even
+# on a match — nondeterministic false negatives).
+ollama_models="$(ollama list 2>/dev/null || true)"
+if [[ -z "$ollama_models" ]]; then
+  echo "error: Ollama is not reachable — start it (e.g. 'brew services start ollama')." >&2
+  exit 1
+fi
+if ! grep -qF "$CHAT_MODEL" <<<"$ollama_models"; then
+  echo "error: chat model '${CHAT_MODEL}' is not pulled — 'brain ask' cannot run." >&2
+  echo "       Pull it with: ollama pull ${CHAT_MODEL}" >&2
+  echo "       (or point BRAIN_ASK_MODEL at a pulled chat model)." >&2
+  exit 1
+fi
+if grep -qF "$ARCTIC_MODEL" <<<"$ollama_models"; then
+  EMBEDDER="arctic"
+else
+  EMBEDDER="none"
+fi
+echo "Chat model: ${CHAT_MODEL}. Embedder for this recording: ${EMBEDDER}."
+
+# --- Fresh workdir + synthetic seed corpus (zero PII) -----------------------
+rm -rf "$WORKDIR"
+mkdir -p "$NOTES_DIR" "$HOME_DIR" "$VAULT_DIR"
+
+cat > "$COMPOSE_FILE" <<YAML
+services:
+  postgres:
+    image: ${PG_IMAGE}
+    container_name: ${CONTAINER}
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - brain-ask-gif-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d ${DB_NAME}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  brain-ask-gif-pgdata:
+YAML
+
+# --- Point the CLI at the sandbox purely through the environment ------------
+# Exported here → inherited by vhs → inherited by the recorded shell. Overriding
+# DATABASE_URL in the process env makes it win over any repo-root .env (which is
+# resolved via os.environ.setdefault and therefore never clobbers a value that
+# is already set — see src/brain/config.py).
+export DATABASE_URL="$DB_URL"
+export BRAIN_HOME="$HOME_DIR"
+export BRAIN_VAULT_PATH="$VAULT_DIR"
+export BRAIN_EMBEDDER="$EMBEDDER"
+export BRAIN_GRAPH_ENABLED="false"
+export ASK_GIF_WORK_DIR="$HOME_DIR"
+# Skip the post-ingest Ollama auto-summary during the off-camera seed: it would
+# force a chat-model round-trip per doc and, on a NUM_PARALLEL=1 host, thrash the
+# arctic↔chat model swap. The recorded ask still exercises the chat model for
+# real; the seed only needs embeddings (or FTS with `none`).
+export BRAIN_ENRICH_MIN_TOKENS="1000000"
+# Keep both models resident in VRAM across the recording so the on-camera ask
+# never pays a cold-load. -1 = "never unload" (see config.keep_alive_wire_value).
+export BRAIN_OLLAMA_KEEP_ALIVE="-1"
+
+# --- Provision the throwaway Postgres (fresh every run) ---------------------
+echo "Provisioning the throwaway ask-gif Postgres on port ${DB_PORT} …"
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d >/dev/null
+
+echo "Waiting for Postgres to accept connections …"
+ready=""
+for _ in $(seq 1 30); do
+  if docker exec "$CONTAINER" pg_isready -U brain -d "$DB_NAME" >/dev/null 2>&1; then
+    ready="yes"; break
+  fi
+  sleep 2
+done
+[[ -n "$ready" ]] || { echo "error: ${CONTAINER} never became ready" >&2; exit 1; }
+
+# --- Seed the synthetic corpus (all off camera) -----------------------------
+echo "Applying migrations + seeding the synthetic corpus …"
+brain init >/dev/null
+
+# Ingest one synthetic doc with a chosen source kind so the ask "Sources" list
+# shows realistic, varied provenance (manual / slack / gmail). Body arrives on
+# stdin; --no-enrich keeps the seed a fast embed-only op.
+seed() {
+  local source="$1" external_id="$2" title="$3" ctype="$4" date="$5"
+  brain ingest-stdin --source "$source" --external-id "$external_id" \
+    --title "$title" --content-type "$ctype" --date "$date" --no-enrich \
+    --tag compliance >/dev/null
+}
+
+seed manual ask-note-0001 "SOC 2 evidence automation plan" note 2026-06-03 <<'NOTE'
+The plan to stop reconstructing SOC 2 evidence the night before fieldwork. Every
+access review, change approval, and backup test already emits a signal we never
+captured in one place. A weekly job snapshots each signal, timestamps it, and
+files it in the auditor portal, so evidence becomes a byproduct of the work
+instead of a quarterly fire drill. Target: generate at least half of the forty
+audit artifacts automatically before the observation window opens.
+NOTE
+
+seed slack ask-slack-0002 "#compliance — evidence automation idea" message 2026-06-03 <<'NOTE'
+sam.rivera: idea I can't shake — most of our audit pain is evidence collection,
+so what if we automated it end to end?
+sam.rivera: every access review, every change approval, every backup test already
+emits a signal. we just don't capture it in one place.
+sam.rivera: imagine a job that snapshots the evidence weekly, timestamps it, and
+drops it in the portal auditors already use. no human chasing screenshots.
+sam.rivera: evidence stops being a fire drill and becomes a byproduct of the work,
+and it kills the number-one auditor follow-up: inconsistent or undated artifacts.
+NOTE
+
+seed slack ask-slack-0003 "#compliance — weekly standup notes" message 2026-06-01 <<'NOTE'
+sam.rivera: standup recap — the theme again was evidence automation.
+sam.rivera: decision: snapshot access reviews, change approvals, and backup tests
+weekly, timestamp them, and drop them straight into the auditor portal.
+sam.rivera: every SOC 2 trust-services criterion gets a named owner before
+fieldwork so nothing is orphaned when the auditor asks who owns it.
+sam.rivera: next check-in in two weeks to review the shrinking evidence backlog.
+NOTE
+
+seed gmail ask-gmail-0004 "Board update — audit status" email 2026-06-05 <<'NOTE'
+A short update on our audit posture. We are on track for the SOC 2 Type II
+observation window to close on schedule. The evidence backlog that worried me
+last quarter is now largely automated — access reviews, change approvals, and
+logging retention all generate their own trail without a human chasing
+screenshots. The automation investment is already paying for itself in reduced
+audit thrash, and I would rather you hear the two open remediation items from me
+early than in a findings report later.
+NOTE
+
+seed gmail ask-gmail-0005 "SOC 2 Type II — evidence request" email 2026-05-09 <<'NOTE'
+Ahead of fieldwork next week I need the evidence package uploaded to the shared
+portal. There are forty artifacts on the request list; the ones most likely to
+slip are the quarterly access reviews, the change-management approvals, and the
+vendor risk assessments for anyone touching customer data. Most of it already
+exists — it just needs to be exported, dated, and named consistently. Inconsistent
+file names are the number-one reason auditors send follow-up questions, which is
+what actually blows the timeline.
+NOTE
+
+seed manual ask-note-0006 "Larkspur security controls cheatsheet" note 2026-03-30 <<'NOTE'
+A one-page reference for the controls we care about most. Access management: SSO
+everywhere, quarterly access reviews, no shared accounts. Change management: every
+production change rides a pull request with a second reviewer and an automated
+deploy record. Logging: ninety-day retention minimum, centralized and
+tamper-evident. Vendor management: a signed security addendum and a current
+attestation before any vendor touches customer data. The value is in doing this
+consistently and being able to show the evidence on demand.
+NOTE
+
+seed slack ask-slack-0007 "#eng — logging retention gotcha" message 2026-04-30 <<'NOTE'
+riley.nakamura: PSA — the logging retention gotcha that bit us is a config
+default, not a bug. the log shipper resets to seven days whenever the config map
+is recreated, and nobody notices until you need the old logs.
+sam.rivera: which is always the worst possible moment, and it turns an ops
+incident into a compliance one because we lose the evidence trail.
+riley.nakamura: I pinned an alert that fires if retention drops below ninety days
+so it can't drift silently again. cheap insurance for the evidence trail.
+NOTE
+
+seed gmail ask-gmail-0008 "Vendra security review — findings" email 2026-05-20 <<'NOTE'
+Legal finished reviewing Vendra's security questionnaire and I have concerns
+before we counter-sign. Vendra could not produce a current SOC 2 report, their
+data-residency answers were vague, and they declined a breach-notification window
+shorter than thirty days. I want a security addendum that pins a seventy-two-hour
+breach-notification clause, a right-to-audit provision, and customer data kept
+in-region. If they will not sign, we treat this as a vendor-risk red flag and
+escalate to the risk committee.
+NOTE
+
+seed manual ask-note-0009 "Audit season retro — lessons learned" note 2026-06-15 <<'NOTE'
+What I want to carry forward from audit season. The single biggest lever was
+evidence automation — the moment collecting evidence became a byproduct of doing
+the work instead of a quarterly fire drill, the whole program relaxed. Second
+lever: ownership. Every control, cert, and job that caused pain this year did so
+because nobody owned it, and naming an owner is the cheapest compliance upgrade
+we have. The throughline across every meeting and thread this cycle is the same:
+compliance is not a document you produce at the end, it is a set of habits you
+maintain all year.
+NOTE
+
+# --- Pre-warm Ollama off camera --------------------------------------------
+# Load the chat model (and the arctic embedder when active) into VRAM with
+# keep_alive=-1 so the recorded `brain ask` runs fully warm — no cold-load
+# latency spike races the fixed vhs Sleep. A single throwaway chat call is
+# enough to resident the model; the embed call residents arctic in parallel.
+echo "Pre-warming Ollama (${CHAT_MODEL}${EMBEDDER:+ + $EMBEDDER}) …"
+if [[ "$EMBEDDER" == "arctic" ]]; then
+  curl -s "${OLLAMA_HOST:-http://localhost:11434}/api/embed" \
+    -d "{\"model\":\"${ARCTIC_MODEL}\",\"input\":\"warmup\",\"keep_alive\":-1}" \
+    >/dev/null 2>&1 || true
+fi
+curl -s "${OLLAMA_HOST:-http://localhost:11434}/api/chat" \
+  -d "{\"model\":\"${CHAT_MODEL}\",\"stream\":false,\"messages\":[{\"role\":\"user\",\"content\":\"warmup\"}],\"keep_alive\":-1}" \
+  >/dev/null 2>&1 || true
+
+# --- Record -----------------------------------------------------------------
+echo "Recording $TAPE with vhs …"
+vhs "$TAPE"
+
+[[ -f "$GIF" ]] || { echo "error: vhs did not produce $GIF" >&2; exit 1; }
+
+# --- Trim the long static stretches -----------------------------------------
+# `brain ask` prints nothing until the plan→retrieve→reflect→synthesize loop
+# finishes (~20s warm), so the raw recording (a) holds a static prompt for the
+# full think time, then (b) holds the finished answer for whatever is left of the
+# fixed vhs Sleep — both look long and their lengths swing with LLM speed.
+#
+# The LONGEST freeze is always the think-time: the shell is busy, so nothing
+# moves (freezedetect finds it cleanly on the pristine gif). Its END is exactly
+# where the answer renders. So we (a) drop the think body, keeping KEEP_THINK
+# seconds of "question typed, working…", and (b) drop the ENTIRE trailing hold
+# after KEEP_ANSWER seconds of the answer — the answer hold itself is NOT a
+# freeze (the returned prompt blinks a cursor), so it must be cut by position,
+# not by freeze detection. Both windows drop in a SINGLE re-encode; `dither=none`
+# keeps terminal text crisp (no gradients to band). A no-op when no think freeze
+# is found, so it never corrupts an already-short clip.
+echo "Trimming the long static stretches out of the recording …"
+FREEZE_LOG="$WORKDIR/freeze.log"
+ffmpeg -hide_banner -nostats -i "$GIF" \
+  -vf "freezedetect=n=-55dB:d=2" -map 0:v:0 -f null - 2>"$FREEZE_LOG" || true
+
+# awk over the freezedetect metadata (value is always the trailing field): emit
+# "think_start think_dur" for the LAST freeze that clears the think threshold, or
+# "0 0" if none does. We pick the LAST such freeze, not the longest: `brain ask`
+# renders its answer ATOMICALLY (the plan→retrieve→reflect→synthesize loop prints
+# nothing until it returns), so the think-freeze is always the final freeze before
+# the answer appears — whereas the longest freeze could be the Scene-1 search hold
+# if an unusually fast LLM (or a lengthened search Sleep) ever outran it. Keep the
+# `s != ""` guard so a freeze at position 0 (empty preceding start) is ignored, and
+# reset `s` after each duration so a stray duration can't pair with an old start.
+# No fragile bash arithmetic.
+KEEP_THINK="2.5"    # seconds of "working…" kept before cutting to the answer
+KEEP_ANSWER="3.2"   # seconds of the finished answer kept before the loop restarts
+read -r think_start think_dur <<EOF
+$(awk '
+    /lavfi.freezedetect.freeze_start:/    { s = $NF }
+    /lavfi.freezedetect.freeze_duration:/ { d = $NF; if (s != "" && d > 3.0) { last_s = s; last_d = d }; s = "" }
+    END { if (last_d != "") printf "%.3f %.3f\n", last_s, last_d; else print "0 0" }
+  ' "$FREEZE_LOG")
+EOF
+
+# Build the drop expression: the think body, then everything past the answer
+# read-pause. total = gif duration (upper bound of the tail cut).
+drop=""
+if awk "BEGIN{exit !(${think_dur:-0} > $KEEP_THINK + 1.0)}"; then
+  total="$( ffprobe -v error -show_entries format=duration -of csv=p=0 "$GIF" | head -1 )"
+  # ffprobe can emit an empty string or "N/A" for duration on a malformed clip;
+  # coerce to a numeric 0 so the tail-cut gate below stays valid awk (0 fails the
+  # `total > tail_start` test, cleanly skipping the tail-cut while the body-cut
+  # still applies) instead of aborting on `BEGIN{exit !( > …)}`.
+  [[ "$total" =~ ^[0-9]+([.][0-9]+)?$ ]] || total="0"
+  think_end="$( awk "BEGIN{printf \"%.3f\", $think_start + $think_dur}" )"
+  body_start="$( awk "BEGIN{printf \"%.3f\", $think_start + $KEEP_THINK}" )"
+  body_end="$( awk "BEGIN{printf \"%.3f\", $think_end - 0.1}" )"
+  # think_end is exactly the answer-render point (the last freeze ends the instant
+  # the synthesized answer prints). Clamp tail_start to never precede it, so the
+  # tail-cut can only ever excise a static hold AFTER the answer is on screen —
+  # never the answer itself, whatever KEEP_ANSWER is set to.
+  tail_start="$( awk "BEGIN{ ts = $think_end + $KEEP_ANSWER; if (ts < $think_end) ts = $think_end; printf \"%.3f\", ts }" )"
+  drop="between(t,${body_start},${body_end})"
+  echo "  · collapsing the ${think_dur}s think freeze → keeping ${KEEP_THINK}s head"
+  if awk "BEGIN{exit !($total > $tail_start + 0.2)}"; then
+    drop="${drop}+between(t,${tail_start},${total})"
+    echo "  · cutting the trailing answer hold → keeping ${KEEP_ANSWER}s of the answer"
+  fi
+fi
+
+if [[ -n "$drop" ]]; then
+  src_fps="$( ffprobe -v error -select_streams v:0 -show_entries stream=avg_frame_rate \
+              -of csv=p=0 "$GIF" | head -1 )"
+  [[ "$src_fps" == */* && "${src_fps#*/}" != "0" ]] || src_fps="50/1"
+  TRIMMED="$WORKDIR/ask-trimmed.gif"
+  PALETTE="$WORKDIR/palette.png"
+  SEL="select='not(${drop})',setpts=N/FRAME_RATE/TB,fps=${src_fps}"
+  ffmpeg -hide_banner -nostats -i "$GIF" -vf "${SEL},palettegen=stats_mode=full" -y "$PALETTE" >/dev/null 2>&1
+  ffmpeg -hide_banner -nostats -i "$GIF" -i "$PALETTE" \
+    -lavfi "${SEL}[x];[x][1:v]paletteuse=dither=none" -y "$TRIMMED" >/dev/null 2>&1
+  if [[ -s "$TRIMMED" ]]; then
+    mv "$TRIMMED" "$GIF"
+    echo "Collapsed the long static stretches."
+  else
+    echo "warning: freeze trim produced an empty file — keeping the untrimmed GIF." >&2
+  fi
+else
+  echo "note: no long static stretch detected — keeping the recording as-is."
+fi
+
+# stat is BSD (macOS) vs GNU (Linux); try both invocations.
+bytes="$( stat -f%z "$GIF" 2>/dev/null || stat -c%s "$GIF" )"
+human="$( awk -v b="$bytes" 'BEGIN { printf "%.2f MB", b / 1048576 }' )"
+
+echo "Wrote $GIF ($human, $bytes bytes)."
+if (( bytes > MAX_BYTES )); then
+  echo "warning: $GIF exceeds the 2.5 MB CLI-reference budget — tune the tape's" >&2
+  echo "         FontSize/framerate/Sleep durations to shrink it." >&2
+fi
