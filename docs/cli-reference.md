@@ -466,6 +466,10 @@ for the plan/reflect/synthesize steps; if Ollama is down the command exits
 non-zero with a clear message (no partial answer). Only document **snippets**
 are sent to the LLM — never full bodies.
 
+![brain ask plans sub-queries over the corpus, then synthesizes one answer with inline citations back to the source documents](docs/assets/ask.gif)
+
+_Recorded against a throwaway synthetic corpus; regenerate with `bin/brain-ask-gif`._
+
 ```bash
 brain ask "what did I learn negotiating across my job searches?"
 brain ask "what did we decide about the data pipeline?" --explain
