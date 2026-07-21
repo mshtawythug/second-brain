@@ -195,3 +195,42 @@ def test_uninstall_runs_launchd_uninstall_on_macos(tmp_path: Path) -> None:
         )
 
     assert called, "uninstall_main (launchd) must be called on macOS"
+
+
+# ---------------------------------------------------------------------------
+# Test 5 — the final removal hint names the current distribution (secondbrain-py)
+# ---------------------------------------------------------------------------
+
+
+def test_uninstall_hint_uses_current_distribution_name(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression: `brain uninstall`'s final hint must print the real pipx name.
+
+    The distribution was renamed to ``secondbrain-py``, so the printed
+    ``pipx uninstall …`` command MUST name ``secondbrain-py`` — the old
+    hyphenated target errors (no such package). Note the old name is not a
+    substring of ``secondbrain-py`` (no hyphen after "second"), so the negative
+    assertion below is meaningful.
+    """
+    home = _build_brain_home(tmp_path)
+
+    with patch("subprocess.run", side_effect=_subprocess_noop):
+        from brain.uninstall import run_uninstall
+
+        run_uninstall(
+            yes=True,
+            remove_db=False,
+            remove_vault=False,
+            brain_home=home,
+            vault_path=tmp_path / "vault",
+            _launchd_uninstall=MagicMock(),
+        )
+
+    out = capsys.readouterr().out
+    assert "pipx uninstall secondbrain-py" in out, (
+        f"uninstall hint must name the current distribution 'secondbrain-py'; got:\n{out}"
+    )
+    assert "second-brain" not in out, (
+        f"uninstall hint must not reference the OLD distribution name 'second-brain'; got:\n{out}"
+    )

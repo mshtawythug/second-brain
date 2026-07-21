@@ -9280,7 +9280,7 @@ def uninstall_cmd(
     The pipx installation itself is NOT removed — a CLI cannot safely
     uninstall its own running process.  After this command completes, run:
 
-        pipx uninstall second-brain
+        pipx uninstall secondbrain-py
     """
     from .uninstall import run_uninstall
 

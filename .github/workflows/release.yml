@@ -51,11 +51,17 @@ jobs:
   # on PyPI (project `secondbrain-py`, owner `mshtawythug`, repo `second-brain`,
   # workflow `release.yml`, environment `pypi`).
   #
-  # Runs on every `v*` tag push (in parallel with github-release) and on manual
-  # workflow_dispatch, so a failed publish can be re-driven without re-tagging.
+  # Runs on `v*` tag pushes (in parallel with github-release), and on a manual
+  # workflow_dispatch that SELECTS a `v*` tag — so a failed publish can be
+  # re-driven without re-tagging. The `if:` ref-guard means a dispatch from a
+  # branch (e.g. master, ref `refs/heads/master`) SKIPS instead of publishing
+  # that branch's version; only `refs/tags/v*` refs publish.
   # ---------------------------------------------------------------------------
   pypi-publish:
     name: Publish to PyPI (Trusted Publishing)
+    # Guard: publish only for `v*` tag refs. Covers both a tag push and a
+    # workflow_dispatch selecting a `v*` tag; a dispatch from a branch skips.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:

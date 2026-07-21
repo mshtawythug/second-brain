@@ -2,7 +2,7 @@
 
 Does NOT remove the pipx installation itself; a CLI cannot safely uninstall
 its own running process.  After running this command, the user should manually
-run `pipx uninstall second-brain`.
+run `pipx uninstall secondbrain-py`.
 """
 from __future__ import annotations
 
@@ -181,5 +181,5 @@ def run_uninstall(
     # -----------------------------------------------------------------------
     typer.echo("")
     typer.secho("Done. To complete removal, run:", fg="cyan")
-    typer.secho("  pipx uninstall second-brain", bold=True)
+    typer.secho("  pipx uninstall secondbrain-py", bold=True)
     typer.echo("")
