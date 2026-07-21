@@ -1,6 +1,6 @@
 [project]
-name = "second-brain"
-version = "0.2.0"
+name = "secondbrain-py"
+version = "0.2.1"
 description = "Local personal knowledge base with hybrid search, queryable by Claude"
 readme = "README.md"
 license = "MIT"
@@ -52,9 +52,10 @@ dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.13", "pytest-mock>=3.14", "
 [project.scripts]
 brain = "brain.cli:app"
 brain-mcp = "brain.mcp_server:main"
-# Alias so `uvx second-brain` launches the MCP server (matches server.json's
-# uvx runtimeHint for the MCP registry; the human CLI remains `brain`).
-second-brain = "brain.mcp_server:main"
+# Alias so `uvx secondbrain-py` launches the MCP server (uvx matches the console
+# script to the normalized distribution name; matches server.json's uvx
+# runtimeHint for the MCP registry; the human CLI remains `brain`).
+secondbrain-py = "brain.mcp_server:main"
 brain-up = "brain.bin.up:main"
 brain-down = "brain.bin.down:main"
 brain-status = "brain.bin.status:main"

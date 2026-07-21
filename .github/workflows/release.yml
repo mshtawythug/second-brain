@@ -1,13 +1,15 @@
 # =============================================================================
-# GitHub Release on CLI version tags (v*)
+# GitHub Release + PyPI publish on CLI version tags (v*)
 # -----------------------------------------------------------------------------
-# Cuts a GitHub Release with auto-generated notes whenever a `v*` tag is pushed
-# (e.g. v0.2.0). This is the brain CLI release axis — distinct from the AGE
-# Postgres IMAGE axis (age-image-* tags -> publish-age-image.yml). See the
-# CHANGELOG.md intro for the two-version-axes rationale.
+# Cuts a GitHub Release with auto-generated notes and publishes the sdist+wheel
+# to PyPI whenever a `v*` tag is pushed (e.g. v0.2.1). This is the brain CLI
+# release axis — distinct from the AGE Postgres IMAGE axis (age-image-* tags ->
+# publish-age-image.yml). See the CHANGELOG.md intro for the two-version-axes
+# rationale.
 #
 # Publishing (tag creation) is a deliberate human action: nothing here creates a
-# tag. It only reacts to a tag the maintainer pushes.
+# tag. It only reacts to a tag the maintainer pushes. `workflow_dispatch` is also
+# wired so the PyPI publish can be re-run manually if a publish step fails.
 # =============================================================================
 name: release
 
@@ -15,6 +17,7 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,6 +25,9 @@ permissions:
 jobs:
   github-release:
     name: Create GitHub Release
+    # Only cut a Release for real tag pushes. A manual workflow_dispatch (used to
+    # re-run the PyPI publish) has no tag to release from, so this job is skipped.
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -37,34 +43,42 @@ jobs:
         run: gh release create "$GITHUB_REF_NAME" --generate-notes
 
   # ---------------------------------------------------------------------------
-  # PyPI publish via Trusted Publishing (OIDC) — DISABLED until the PyPI project
-  # and its trusted publisher are configured.
+  # PyPI publish via Trusted Publishing (OIDC) — distribution `secondbrain-py`.
   #
-  # To enable: create the `second-brain` project on PyPI, register this repo +
-  # this workflow as a Trusted Publisher (PyPI project -> Settings -> Publishing),
-  # then uncomment the job below. No API token/secret is needed — OIDC exchanges
-  # a short-lived token at publish time (hence `permissions: id-token: write`).
+  # No API token/secret is needed: the `pypi` deployment environment plus
+  # `permissions: id-token: write` let pypa/gh-action-pypi-publish exchange a
+  # short-lived OIDC token at publish time. The Trusted Publisher is configured
+  # on PyPI (project `secondbrain-py`, owner `mshtawythug`, repo `second-brain`,
+  # workflow `release.yml`, environment `pypi`).
+  #
+  # Runs on `v*` tag pushes (in parallel with github-release), and on a manual
+  # workflow_dispatch that SELECTS a `v*` tag — so a failed publish can be
+  # re-driven without re-tagging. The `if:` ref-guard means a dispatch from a
+  # branch (e.g. master, ref `refs/heads/master`) SKIPS instead of publishing
+  # that branch's version; only `refs/tags/v*` refs publish.
   # ---------------------------------------------------------------------------
-  # pypi-publish:
-  #   name: Publish to PyPI (Trusted Publishing)
-  #   runs-on: ubuntu-latest
-  #   needs: github-release
-  #   environment: pypi
-  #   permissions:
-  #     id-token: write
-  #   steps:
-  #     - name: Checkout
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Set up Python 3.11
-  #       uses: actions/setup-python@v5
-  #       with:
-  #         python-version: "3.11"
-  #
-  #     - name: Build sdist + wheel
-  #       run: |
-  #         python -m pip install --upgrade build
-  #         python -m build
-  #
-  #     - name: Publish to PyPI
-  #       uses: pypa/gh-action-pypi-publish@release/v1
+  pypi-publish:
+    name: Publish to PyPI (Trusted Publishing)
+    # Guard: publish only for `v*` tag refs. Covers both a tag push and a
+    # workflow_dispatch selecting a `v*` tag; a dispatch from a branch skips.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

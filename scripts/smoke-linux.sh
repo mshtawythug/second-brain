@@ -5,7 +5,7 @@
 #   - installed Docker (the daemon, not just the CLI — `docker info` must work),
 #   - installed Python 3.11+ (apt + deadsnakes or pyenv),
 #   - installed Caddy (`brain setup` refuses to bring the wiki up without it),
-#   - tagged + pushed v0.2.0 (or set BRAIN_INSTALL_REF / BRAIN_INSECURE=1
+#   - tagged + pushed v0.2.1 (or set BRAIN_INSTALL_REF / BRAIN_INSECURE=1
 #     to test against a branch / commit).
 #
 # Important difference from smoke-macos.sh:
@@ -26,10 +26,10 @@
 # Re-runnable: yes. The EXIT trap stops the daemons this run started; the
 # install itself is preserved.  Full reset:
 #   brain uninstall --yes --remove-db --remove-vault
-#   pipx uninstall second-brain
+#   pipx uninstall secondbrain-py
 #
 # Env overrides:
-#   BRAIN_INSTALL_REF   (default: v0.2.0)
+#   BRAIN_INSTALL_REF   (default: v0.2.1)
 #   BRAIN_INSECURE      (default: 0)
 #   BRAIN_REPO          (default: https://github.com/mshtawythug/second-brain.git)
 
@@ -166,7 +166,7 @@ fi
 # 2026-05-08 launchd handoff.
 #
 # CRITICAL: `python -m brain.wiki.*` MUST run in the pipx-managed venv
-# (where `second-brain` is installed), NOT the system python3. Resolve
+# (where `secondbrain-py` is installed), NOT the system python3. Resolve
 # the pipx Python from the brain script's shebang — robust regardless
 # of pipx version or whether `pipx environment` is on PATH.
 # ---------------------------------------------------------------------------
@@ -183,7 +183,7 @@ fi
 #
 # Two paths:
 #   1. Preferred — `pipx environment --value PIPX_LOCAL_VENVS` returns the
-#      venvs dir; the interpreter lives at <venvs>/second-brain/bin/python.
+#      venvs dir; the interpreter lives at <venvs>/secondbrain-py/bin/python.
 #      This is robust across pipx versions and across pip's long-shebang
 #      workaround.
 #   2. Fallback — parse the shebang on the `brain` console script. ONLY
@@ -202,8 +202,8 @@ resolve_pipx_python() {
     if command -v pipx >/dev/null 2>&1; then
         local venvs
         venvs="$(pipx environment --value PIPX_LOCAL_VENVS 2>/dev/null || true)"
-        if [[ -n "$venvs" && -x "$venvs/second-brain/bin/python" ]]; then
-            py="$venvs/second-brain/bin/python"
+        if [[ -n "$venvs" && -x "$venvs/secondbrain-py/bin/python" ]]; then
+            py="$venvs/secondbrain-py/bin/python"
         fi
     fi
 
@@ -229,7 +229,7 @@ resolve_pipx_python() {
 }
 
 if ! BRAIN_PY="$(resolve_pipx_python)"; then
-    _fail "Could not resolve the pipx-managed Python for second-brain.
+    _fail "Could not resolve the pipx-managed Python for secondbrain-py.
        Tried: 'pipx environment --value PIPX_LOCAL_VENVS' then 'brain'
        shebang. If pipx put the venv in a path >128 bytes the shebang
        fallback is /bin/sh — ensure 'pipx' is on PATH so the preferred
@@ -407,10 +407,10 @@ Known Linux gaps:
     long-lived install on Linux, run Caddy + `brain vault sync --watch` +
     `<pipx-venv-python> -m brain.wiki.build_watcher` inside tmux panes or
     a systemd-user unit. Find the pipx Python with:
-        echo "$(pipx environment --value PIPX_LOCAL_VENVS)/second-brain/bin/python"
+        echo "$(pipx environment --value PIPX_LOCAL_VENVS)/secondbrain-py/bin/python"
     A first-class systemd-user template is a post-v0.2.0 follow-up.
 
 To clean up the install entirely:
   brain uninstall --yes --remove-db --remove-vault
-  pipx uninstall second-brain
+  pipx uninstall secondbrain-py
 EOF

@@ -2,7 +2,7 @@
 # scripts/smoke-macos.sh — T4.4 clean-machine smoke test for macOS.
 #
 # Run this on a fresh macOS user account (or a clean macOS VM) AFTER you have:
-#   - tagged + pushed v0.2.0 (or set BRAIN_INSTALL_REF / BRAIN_INSECURE=1 to
+#   - tagged + pushed v0.2.1 (or set BRAIN_INSTALL_REF / BRAIN_INSECURE=1 to
 #     test against a branch / commit), AND
 #   - installed Docker Desktop and started it.
 #
@@ -22,11 +22,11 @@
 # Re-runnable: yes — each step is idempotent against an existing install.
 # Cleanup: NOT automatic. After the smoke passes, run:
 #   brain uninstall --yes --remove-db --remove-vault
-#   pipx uninstall second-brain
+#   pipx uninstall secondbrain-py
 # to return to a clean state.
 #
 # Env overrides (passed through to install.sh):
-#   BRAIN_INSTALL_REF   (default: v0.2.0)
+#   BRAIN_INSTALL_REF   (default: v0.2.1)
 #   BRAIN_INSECURE      (default: 0; set to 1 to install from a branch)
 #   BRAIN_REPO          (default: https://github.com/mshtawythug/second-brain.git)
 
@@ -92,7 +92,7 @@ else
         _fail "install.sh not found or not executable at $INSTALL_SH"
         exit 1
     fi
-    _info "Running $INSTALL_SH (this will pipx-install second-brain)"
+    _info "Running $INSTALL_SH (this will pipx-install secondbrain-py)"
     if bash "$INSTALL_SH" --non-interactive --skip-skill; then
         _pass "install.sh + brain setup completed"
     else
@@ -245,5 +245,5 @@ Manual step that cannot be automated:
 
 To clean up:
   brain uninstall --yes --remove-db --remove-vault
-  pipx uninstall second-brain
+  pipx uninstall secondbrain-py
 EOF

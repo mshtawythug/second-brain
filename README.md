@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.mshtawythug/second-brain -->
+
 # Second Brain
 
 Local, queryable knowledge base and note vault with hybrid search and an entity-graph layer — searchable by any AI coding agent or assistant from any conversation.
@@ -29,9 +31,11 @@ Brain stores pre-extracted, quote-stripped bodies and hybrid-ranks *before* fetc
 Install the CLI, then run the offline demo — a throwaway Postgres seeded with a synthetic *Larkspur* compliance corpus. No Ollama, no personal data, no model downloads:
 
 ```bash
-pipx install git+https://github.com/mshtawythug/second-brain.git@v0.2.0
+pipx install secondbrain-py
 # or, with uv:
-uv tool install git+https://github.com/mshtawythug/second-brain.git@v0.2.0
+uv tool install secondbrain-py
+# or, pin the git tag (no PyPI needed):
+pipx install git+https://github.com/mshtawythug/second-brain.git@v0.2.1
 
 brain demo        # spins up a sandbox Postgres, seeds 22 docs, runs a hero query
 ```
@@ -58,10 +62,10 @@ Already ran the demo? You have `brain` installed — jump straight to `brain set
 Full install — the `brain` CLI plus the runtime (Postgres, and optionally Ollama / graph / wiki):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mshtawythug/second-brain/v0.2.0/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/mshtawythug/second-brain/v0.2.1/install.sh | bash
 ```
 
-The installer pipx-installs `brain` from the `v0.2.0` tag, then runs `brain setup` to provision `$BRAIN_HOME`, start the Postgres container, and (optionally) install the wiki + Claude Code skill. Choose how much to stand up with `--profile`:
+The installer pipx-installs `brain` from the `v0.2.1` tag, then runs `brain setup` to provision `$BRAIN_HOME`, start the Postgres container, and (optionally) install the wiki + Claude Code skill. Choose how much to stand up with `--profile`:
 
 | Profile | Search | Extra dependencies beyond the core |
 |---|---|---|
@@ -128,7 +132,7 @@ claude mcp add brain -- brain-mcp
 }
 ```
 
-`uvx second-brain` also launches the MCP server. Full walkthrough (symlink, smoke-test, troubleshooting): [docs/guides/claude-desktop-setup.md](docs/guides/claude-desktop-setup.md).
+`uvx secondbrain-py` also launches the MCP server. Full walkthrough (symlink, smoke-test, troubleshooting): [docs/guides/claude-desktop-setup.md](docs/guides/claude-desktop-setup.md).
 
 ## How it works
 
