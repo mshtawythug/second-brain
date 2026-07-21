@@ -1,0 +1,478 @@
+#!/usr/bin/env bash
+# brain-wiki-gif — regenerate the rendered-wiki GIF at docs/assets/wiki.gif.
+#
+# Unlike bin/brain-demo-gif / bin/brain-usage-gif (which record a TERMINAL with
+# vhs), this is a BROWSER capture of the actual rendered Quartz wiki — the graph
+# view, backlinks, and People Hub. The full pipeline runs against a THROWAWAY,
+# fully-isolated stack this script provisions and destroys:
+#
+#   * compose project  brain-wiki-gif        (NEVER the prod `brain` project)
+#   * container        brain-wiki-gif-postgres
+#   * host port        55444                  (prod 55432, demo 55433, tests 5434,
+#                                              usage-gif 55440, other gif jobs
+#                                              55441-55443/55445 — all avoided)
+#   * storage          a NAMED docker volume  (never a host bind-mount)
+#   * database         second_brain_wiki_gif
+#   * vault            a fresh tempdir under $TMPDIR (never the user's real vault)
+#   * Quartz workspace a fresh `git clone` in the same tempdir (never the user's
+#                      real Quartz workspace, so no running wiki daemon is touched)
+#
+# The CLI is pointed at that sandbox purely through the environment
+# (DATABASE_URL + BRAIN_HOME + BRAIN_VAULT_PATH), exported here. A dev checkout's
+# repo-root .env would otherwise win and point the CLI at the PROD database, so
+# every relevant var is overridden explicitly AND a fail-closed guard hard-aborts
+# unless DATABASE_URL is the :55444 sandbox and BRAIN_VAULT_PATH sits under this
+# run's tempdir. A stray run can never touch personal data or the real vault.
+#
+# All seeded content is synthetic (Larkspur compliance corpus; zero PII).
+#
+# Pipeline: provision Postgres -> seed synthetic vault (cross-linked notes +
+# Krisp transcripts + 3 recurring people) -> emit People Hub -> clone Quartz +
+# npm install -> `brain vault render` -> serve the static build on a free local
+# port -> Playwright captures homepage/note/graph/People-Hub frames -> ffmpeg
+# assembles docs/assets/wiki.gif. Everything is torn down on exit.
+#
+# Requires: docker, node/npx (Node 18+), git, ffmpeg, and the `brain` CLI.
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+CAPTURE_JS="$SCRIPT_DIR/brain-wiki-gif-capture.cjs"
+GIF="docs/assets/wiki.gif"
+MAX_BYTES=$(( 3 * 1024 * 1024 ))  # docs budget: 3 MB.
+GIF_WIDTH=1200
+
+# --- Isolated-sandbox identifiers (kept distinct from prod/demo/test/others) --
+PROJECT="brain-wiki-gif"
+CONTAINER="brain-wiki-gif-postgres"
+DB_PORT="55444"
+DB_NAME="second_brain_wiki_gif"
+DB_URL="postgresql://brain:brain@localhost:${DB_PORT}/${DB_NAME}"
+PG_IMAGE="pgvector/pgvector:pg16"
+VOLUME_NAME="${PROJECT}_brain-wiki-gif-pgdata"
+
+WORKDIR="${TMPDIR:-/tmp}/brain-wiki-gif"
+COMPOSE_FILE="$WORKDIR/docker-compose.wiki-gif.yml"
+VAULT_DIR="$WORKDIR/vault"
+HOME_DIR="$WORKDIR/home"
+DIST_DIR="$WORKDIR/dist"
+WORKSPACE="$WORKDIR/quartz"
+CAP_DIR="$WORKDIR/cap"
+FRAMES_DIR="$WORKDIR/frames"
+SERVE_PY="$WORKDIR/serve.py"
+SERVE_PID=""
+
+usage() {
+  echo "Usage: brain-wiki-gif [-h|--help]  — browser-capture docs/assets/wiki.gif from the rendered Quartz wiki against a throwaway :55444 sandbox + temp vault (leaves nothing behind)."
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+# --- Teardown: ALWAYS scoped to our own project + tempdir, ALWAYS on exit -----
+cleanup() {
+  if [[ -n "$SERVE_PID" ]]; then
+    kill "$SERVE_PID" >/dev/null 2>&1 || true
+    wait "$SERVE_PID" 2>/dev/null || true
+  fi
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+  else
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm "$VOLUME_NAME" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORKDIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# --- Preflight ----------------------------------------------------------------
+for tool in docker node npx git ffmpeg brain; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "error: '$tool' not found on PATH — it is required to regenerate the wiki GIF." >&2
+    exit 1
+  fi
+done
+[[ -f "$CAPTURE_JS" ]] || { echo "error: capture script missing: $CAPTURE_JS" >&2; exit 1; }
+
+cd "$REPO_ROOT"
+
+# --- Point the CLI at the sandbox purely through the environment --------------
+export DATABASE_URL="$DB_URL"
+export BRAIN_HOME="$HOME_DIR"
+export BRAIN_VAULT_PATH="$VAULT_DIR"
+export BRAIN_EMBEDDER="none"        # FTS-only: no Ollama needed to render a wiki.
+export BRAIN_GRAPH_ENABLED="false"  # stock pgvector image, no AGE.
+export BRAIN_ENRICH_MIN_TOKENS="1000000"  # skip the post-ingest Ollama summary.
+
+# --- Fail-closed safety guard -------------------------------------------------
+# Refuse to run unless the effective DATABASE_URL is exactly this run's sandbox
+# and BRAIN_VAULT_PATH sits under this run's tempdir. If the exports above were
+# ever mangled (or a caller forced a conflicting value), this aborts BEFORE any
+# `brain` command can touch prod / demo / test / the real vault.
+if [[ "$DATABASE_URL" != "$DB_URL" ]]; then
+  echo "refusing to run: DATABASE_URL ($DATABASE_URL) is not the wiki-gif sandbox." >&2
+  exit 1
+fi
+case "$BRAIN_VAULT_PATH/" in
+  "$WORKDIR"/*) ;;
+  *) echo "refusing to run: BRAIN_VAULT_PATH ($BRAIN_VAULT_PATH) is not under $WORKDIR." >&2
+     exit 1 ;;
+esac
+case "$WORKDIR" in
+  /tmp/*|/private/tmp/*|/var/folders/*|/private/var/folders/*) ;;
+  *) echo "refusing to run: sandbox workdir ($WORKDIR) is not under a temp directory." >&2
+     exit 1 ;;
+esac
+
+# --- Fresh workdir ------------------------------------------------------------
+rm -rf "$WORKDIR"
+mkdir -p "$WORKDIR" "$VAULT_DIR" "$HOME_DIR" "$CAP_DIR" "$FRAMES_DIR"
+
+cat > "$COMPOSE_FILE" <<YAML
+services:
+  postgres:
+    image: ${PG_IMAGE}
+    container_name: ${CONTAINER}
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - brain-wiki-gif-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d ${DB_NAME}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  brain-wiki-gif-pgdata:
+YAML
+
+# --- Provision the throwaway Postgres (fresh every run) -----------------------
+echo "Provisioning the throwaway wiki-gif Postgres on port ${DB_PORT} ..."
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d >/dev/null
+
+echo "Waiting for Postgres to accept connections ..."
+ready=""
+for _ in $(seq 1 30); do
+  if docker exec "$CONTAINER" pg_isready -U brain -d "$DB_NAME" >/dev/null 2>&1; then
+    ready="yes"; break
+  fi
+  sleep 2
+done
+[[ -n "$ready" ]] || { echo "error: ${CONTAINER} never became ready" >&2; exit 1; }
+
+echo "Applying migrations + scaffolding the vault ..."
+brain init >/dev/null
+brain vault init >/dev/null
+
+# --- Synthetic Larkspur compliance corpus (ZERO PII) --------------------------
+# People: Jordan Alvarez, Priya Chandra, Sam Rivera. Vault notes cross-linked
+# with [[wiki-links]] so the graph view + backlinks render non-trivially; Krisp
+# transcripts carry `**Name | mm:ss**` speaker labels so the People Hub rosters
+# populate from _people.yml.
+write_note() {  # $1=slug $2=title $3=tags $4=date  body=stdin
+  { printf -- '---\ntitle: %s\ndate: %s\ntags: [%s]\nkind: vault\n---\n\n# %s\n\n' \
+      "$2" "$4" "$3" "$2"; cat; } > "$VAULT_DIR/$1.md"
+}
+
+cat > "$VAULT_DIR/index.md" <<'MD'
+---
+title: Larkspur Compliance Vault
+date: 2026-06-01
+tags: [overview]
+---
+
+# Larkspur Compliance Vault
+
+A working knowledge base for Larkspur's security-compliance program. Everything
+here is cross-linked: open any note and follow the graph.
+
+## Programs
+
+- [[soc2-evidence-automation]] — make audit evidence a byproduct of the work
+- [[pci-tokenization]] — shrink PCI scope with a tokenization proxy
+- [[vendor-risk-review]] — security addenda before we counter-sign
+- [[access-reviews]] — quarterly access certification
+- [[audit-evidence-portal]] — the single place auditors pull from
+- [[compliance-roadmap]] — how the pieces fit this quarter
+
+See the [[people/index|People Hub]] for who owns what.
+MD
+
+write_note soc2-evidence-automation "SOC 2 Evidence Automation" "soc2, evidence" 2026-06-22 <<'MD'
+Most of our audit pain is collecting evidence, so the plan is to make evidence a
+byproduct of doing the work instead of a quarterly fire drill. Every
+[[access-reviews|access review]], change approval, and backup test already emits
+a signal; a weekly job snapshots it, timestamps it, and files it in the
+[[audit-evidence-portal]].
+
+Owner: Priya Chandra. Related: [[pci-tokenization]], [[incident-retention]].
+MD
+
+write_note pci-tokenization "PCI Tokenization" "pci, scope" 2026-06-20 <<'MD'
+A new checkout API pulled almost the entire production environment into PCI scope
+the moment it handled raw card numbers instead of tokens. Front the services with
+a tokenization proxy so raw card data never lands in our systems, shrinking scope
+back to the [[cardholder-data-enclave]].
+
+This is the highest-leverage compliance investment this quarter — see the
+[[compliance-roadmap]]. Owner: Jordan Alvarez.
+MD
+
+write_note vendor-risk-review "Vendor Risk Review" "vendor, legal" 2026-06-17 <<'MD'
+Legal reviewed a vendor security questionnaire before counter-signing: no current
+SOC 2 report, vague data-residency answers, and a thirty-day breach window we will
+not accept. We want a security addendum pinning the
+[[breach-notification-clause]], a right-to-audit provision, and customer data kept
+in-region.
+
+Owner: Jordan Alvarez. Feeds the [[audit-evidence-portal]].
+MD
+
+write_note access-reviews "Access Reviews" "soc2, access" 2026-06-15 <<'MD'
+Quarterly access certification: every system owner attests who has access and why.
+Snapshots drop straight into the [[audit-evidence-portal]] so
+[[soc2-evidence-automation|evidence automation]] can pick them up.
+
+Owner: Sam Rivera.
+MD
+
+write_note audit-evidence-portal "Audit Evidence Portal" "evidence, audit" 2026-06-19 <<'MD'
+The single place auditors pull from. Timestamped artifacts land here automatically
+from [[access-reviews]], [[soc2-evidence-automation]], [[incident-retention]], and
+[[vendor-risk-review]] — no human chasing screenshots.
+
+Owner: Priya Chandra.
+MD
+
+write_note incident-retention "Incident Retention" "incident, logging" 2026-06-12 <<'MD'
+A payments outage postmortem found log retention had silently dropped to seven
+days, so we lost the evidence to reconstruct the first ninety minutes. Restore
+ninety-day retention per [[logging-standards]] and alert if it drifts below the
+compliance floor. Artifacts feed the [[audit-evidence-portal]].
+
+Owner: Sam Rivera.
+MD
+
+write_note logging-standards "Logging Standards" "logging" 2026-06-08 <<'MD'
+Baseline logging + retention standard for every production service: ninety-day
+retention, structured events, and a drift alert. Referenced by
+[[incident-retention]].
+
+Owner: Sam Rivera.
+MD
+
+write_note breach-notification-clause "Breach Notification Clause" "vendor, legal" 2026-06-14 <<'MD'
+The contract language we require of vendors: a seventy-two-hour breach-notification
+window, a right-to-audit provision, and in-region data residency. Pulled into every
+[[vendor-risk-review]].
+
+Owner: Jordan Alvarez.
+MD
+
+write_note cardholder-data-enclave "Cardholder Data Enclave" "pci, scope" 2026-06-11 <<'MD'
+The minimized zone that raw cardholder data is allowed to touch once
+[[pci-tokenization]] is in place. Everything outside the enclave is out of PCI
+scope.
+
+Owner: Jordan Alvarez.
+MD
+
+write_note compliance-roadmap "Compliance Roadmap" "overview, roadmap" 2026-06-25 <<'MD'
+How this quarter's compliance work fits together:
+
+- [[soc2-evidence-automation]] and [[access-reviews]] feed the
+  [[audit-evidence-portal]].
+- [[pci-tokenization]] shrinks scope to the [[cardholder-data-enclave]].
+- [[vendor-risk-review]] enforces the [[breach-notification-clause]].
+- [[incident-retention]] closes the gap [[logging-standards]] defines.
+MD
+
+cat > "$VAULT_DIR/_people.yml" <<'YML'
+Jordan Alvarez: jordan.alvarez@example.com
+Priya Chandra: priya.chandra@example.com
+Sam Rivera: sam.rivera@example.com
+YML
+
+# Note: no `brain vault sync` is needed — `brain vault render` shells out to
+# `npx quartz build --directory <vault>`, which reads the authored .md files
+# straight off disk. Only the Krisp transcripts need to reach the DB (below), so
+# the People Hub roster + directory can be built from them.
+
+# --- Krisp transcripts (mirror into _ingested/krisp for the People Hub) -------
+ingest_krisp() {  # $1=external-id $2=title $3=date  body=stdin
+  brain ingest-stdin --source krisp --external-id "$1" --title "$2" \
+    --content-type transcript --date "$3" >/dev/null
+}
+
+ingest_krisp wgif-standup "Weekly Compliance Standup" 2026-06-24 <<'MD'
+**Priya Chandra | 00:03**
+Kicking off the weekly compliance standup. The theme again is evidence
+automation — let's make audit evidence a byproduct of the work.
+
+**Sam Rivera | 00:41**
+Access reviews are ready to snapshot weekly into the audit evidence portal.
+
+**Jordan Alvarez | 01:12**
+Good. On PCI, the tokenization proxy is the highest-leverage item this quarter.
+
+**Priya Chandra | 02:05**
+Agreed. Every SOC 2 criterion gets a named owner before fieldwork.
+MD
+
+ingest_krisp wgif-vendor "Vendor Risk Review Call" 2026-06-18 <<'MD'
+**Jordan Alvarez | 00:05**
+Legal flagged the vendor questionnaire — no current SOC 2 report and a thirty-day
+breach window.
+
+**Priya Chandra | 00:48**
+We push a security addendum: seventy-two-hour breach notification, right to audit,
+in-region data.
+
+**Jordan Alvarez | 01:30**
+If they won't sign, it escalates to the risk committee.
+MD
+
+ingest_krisp wgif-soc2 "SOC 2 Kickoff" 2026-06-10 <<'MD'
+**Priya Chandra | 00:04**
+SOC 2 kickoff. Target: generate at least half the audit artifacts automatically.
+
+**Sam Rivera | 00:39**
+I'll wire access reviews and backup tests into the evidence portal first.
+
+**Priya Chandra | 01:15**
+Every trust-services criterion gets an owner today.
+MD
+
+ingest_krisp wgif-pci "PCI Scope Planning" 2026-06-05 <<'MD'
+**Jordan Alvarez | 00:06**
+PCI scope planning. The checkout API dragged prod into scope by handling raw PANs.
+
+**Sam Rivera | 00:44**
+Tokenization proxy fronts it so raw card data stays in the cardholder-data enclave.
+
+**Jordan Alvarez | 01:20**
+That shrinks scope back to the enclave. Big win for DSS 4.0 readiness.
+MD
+
+echo "Emitting the People Hub (directory + derived edges + people pages) ..."
+brain vault relink-derived >/dev/null
+
+# --- Quartz workspace: fresh clone + npm install (never the real workspace) ---
+echo "Cloning Quartz + installing dependencies (first run may take a minute) ..."
+git clone --depth 1 --branch v4 https://github.com/jackyzha0/quartz.git "$WORKSPACE" >/dev/null 2>&1
+( cd "$WORKSPACE" && npm install --no-audit --no-fund >/dev/null 2>&1 )
+
+echo "Rendering the wiki with brain vault render ..."
+( cd "$WORKDIR" && brain vault render --overlay --to dist --vault "$VAULT_DIR" --quartz-dir "$WORKSPACE" >/dev/null )
+[[ -f "$DIST_DIR/index.html" ]] || { echo "error: render produced no index.html" >&2; exit 1; }
+
+# --- Serve the static build on a free localhost port (Quartz try_files) -------
+cat > "$SERVE_PY" <<'PY'
+"""Static server with Quartz-style try_files: {path} -> {path}/index.html -> {path}.html -> 404.html."""
+import sys
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+
+class TryFilesHandler(SimpleHTTPRequestHandler):
+    def do_GET(self) -> None:  # noqa: N802
+        root = Path(self.directory)
+        raw = self.path.split("?", 1)[0].split("#", 1)[0].lstrip("/")
+        candidates = [raw, f"{raw}/index.html", f"{raw}.html"] if raw else ["index.html"]
+        for rel in candidates:
+            if (root / rel).is_file():
+                self.path = "/" + rel
+                return super().do_GET()
+        self.path = "/404.html"
+        return super().do_GET()
+
+    def log_message(self, *args):  # noqa: A002 — silence request logging
+        return
+
+
+def main() -> None:
+    port, directory = int(sys.argv[1]), sys.argv[2]
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), partial(TryFilesHandler, directory=directory))
+    httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
+PY
+
+# A kernel-allocated free port on 127.0.0.1 — never collides with a running
+# wiki/Caddy on 8080 or any of the reserved sandbox DB ports.
+SERVE_PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')"
+echo "Serving the static build on 127.0.0.1:${SERVE_PORT} ..."
+python3 "$SERVE_PY" "$SERVE_PORT" "$DIST_DIR" &
+SERVE_PID=$!
+BASE_URL="http://127.0.0.1:${SERVE_PORT}"
+
+served=""
+for _ in $(seq 1 30); do
+  if curl -sf -o /dev/null "${BASE_URL}/"; then served="yes"; break; fi
+  sleep 0.5
+done
+[[ -n "$served" ]] || { echo "error: static server never became reachable" >&2; exit 1; }
+
+# --- Playwright frame capture -------------------------------------------------
+echo "Installing Playwright into the throwaway sandbox ..."
+( cd "$CAP_DIR" && npm init -y >/dev/null 2>&1 \
+  && npm install playwright@latest --no-audit --no-fund >/dev/null 2>&1 \
+  && npx --yes playwright install chromium >/dev/null 2>&1 )
+
+echo "Capturing wiki frames with Playwright ..."
+WGIF_BASE="$BASE_URL" WGIF_FRAMES="$FRAMES_DIR" \
+  NODE_PATH="$CAP_DIR/node_modules" node "$CAPTURE_JS"
+
+# Collect frames in filename order (capture.cjs numbers them 01-..05-..). The
+# glob expands already-sorted; built as a loop for bash 3.2 (no mapfile).
+FRAMES=()
+shopt -s nullglob
+for f in "$FRAMES_DIR"/*.png; do
+  FRAMES+=("$f")
+done
+shopt -u nullglob
+(( ${#FRAMES[@]} >= 4 )) || { echo "error: capture produced only ${#FRAMES[@]} frames" >&2; exit 1; }
+LAST_IDX=$(( ${#FRAMES[@]} - 1 ))
+
+# --- Assemble the GIF ---------------------------------------------------------
+# Slideshow with per-frame hold durations (seconds). Frame order matches
+# capture.cjs: home, note+backlinks, global graph (held longest), People index,
+# person page.
+DURATIONS=(3.6 3.6 4.2 2.4 3.6)
+LIST_FILE="$FRAMES_DIR/list.txt"
+: > "$LIST_FILE"
+for i in "${!FRAMES[@]}"; do
+  dur="${DURATIONS[$i]:-3.2}"
+  printf "file '%s'\nduration %s\n" "${FRAMES[$i]}" "$dur" >> "$LIST_FILE"
+done
+# The concat demuxer ignores the final entry's duration, so repeat the last frame.
+printf "file '%s'\n" "${FRAMES[$LAST_IDX]}" >> "$LIST_FILE"
+
+echo "Assembling ${GIF} with ffmpeg ..."
+ffmpeg -y -f concat -safe 0 -i "$LIST_FILE" \
+  -vf "fps=12,scale=${GIF_WIDTH}:-1:flags=lanczos,split[s0][s1];[s0]palettegen=max_colors=192[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3" \
+  -loop 0 "$REPO_ROOT/$GIF" >/dev/null 2>&1
+
+[[ -f "$REPO_ROOT/$GIF" ]] || { echo "error: ffmpeg did not produce $GIF" >&2; exit 1; }
+
+# stat is BSD (macOS) vs GNU (Linux); try both invocations.
+bytes="$( stat -f%z "$REPO_ROOT/$GIF" 2>/dev/null || stat -c%s "$REPO_ROOT/$GIF" )"
+human="$( awk -v b="$bytes" 'BEGIN { printf "%.2f MB", b / 1048576 }' )"
+
+echo "Wrote $GIF ($human, $bytes bytes)."
+if (( bytes > MAX_BYTES )); then
+  echo "warning: $GIF exceeds the 3 MB docs budget — trim frames or lower the" >&2
+  echo "         palette max_colors / hold durations to shrink it." >&2
+fi

@@ -33,6 +33,12 @@ Larkspur
 Vendra
 Meridian
 
+# --- bin/brain-wiki-gif synthetic corpus (rendered-wiki GIF) -------------
+# The wiki-GIF demo vault is 100% fictional (Larkspur compliance universe,
+# same cast as `brain demo`; emails use the synthetic example.com domain).
+# Jordan Alvarez / Sam Rivera / Larkspur are already listed above.
+Priya Chandra
+
 # --- Public / generic terms confirmed safe (not the user's PII) ----------
 # Known false positives that surfaced from the corpus as generic public terms.
 NFPA
