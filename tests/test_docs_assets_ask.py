@@ -74,7 +74,7 @@ def test_ask_tape_outputs_its_own_gif() -> None:
 # --------------------------------------------------------------------------- #
 def test_cli_reference_embeds_the_ask_gif() -> None:
     text = CLI_REFERENCE.read_text(encoding="utf-8")
-    assert "](docs/assets/ask.gif)" in text, (
+    assert "](assets/ask.gif)" in text, (
         "docs/cli-reference.md no longer embeds the ask GIF"
     )
 
