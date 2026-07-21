@@ -101,6 +101,10 @@ if ! command -v ffmpeg >/dev/null 2>&1; then
   echo "error: 'ffmpeg' not found on PATH — it ships with vhs ('brew install vhs')." >&2
   exit 1
 fi
+if ! command -v ffprobe >/dev/null 2>&1; then
+  echo "error: 'ffprobe' not found on PATH — it ships with vhs ('brew install vhs')." >&2
+  exit 1
+fi
 if ! command -v ollama >/dev/null 2>&1; then
   echo "error: 'ollama' not found on PATH — 'brain ask' needs a local Ollama." >&2
   echo "       Install it (https://ollama.com) and 'ollama pull ${CHAT_MODEL}'." >&2
@@ -343,15 +347,22 @@ ffmpeg -hide_banner -nostats -i "$GIF" \
   -vf "freezedetect=n=-55dB:d=2" -map 0:v:0 -f null - 2>"$FREEZE_LOG" || true
 
 # awk over the freezedetect metadata (value is always the trailing field): emit
-# "think_start think_dur" for the single LONGEST freeze, or "0 0" if none clears
-# a sane minimum. No fragile bash arithmetic.
+# "think_start think_dur" for the LAST freeze that clears the think threshold, or
+# "0 0" if none does. We pick the LAST such freeze, not the longest: `brain ask`
+# renders its answer ATOMICALLY (the plan→retrieve→reflect→synthesize loop prints
+# nothing until it returns), so the think-freeze is always the final freeze before
+# the answer appears — whereas the longest freeze could be the Scene-1 search hold
+# if an unusually fast LLM (or a lengthened search Sleep) ever outran it. Keep the
+# `s != ""` guard so a freeze at position 0 (empty preceding start) is ignored, and
+# reset `s` after each duration so a stray duration can't pair with an old start.
+# No fragile bash arithmetic.
 KEEP_THINK="2.5"    # seconds of "working…" kept before cutting to the answer
 KEEP_ANSWER="3.2"   # seconds of the finished answer kept before the loop restarts
 read -r think_start think_dur <<EOF
 $(awk '
     /lavfi.freezedetect.freeze_start:/    { s = $NF }
-    /lavfi.freezedetect.freeze_duration:/ { d = $NF; if (s != "" && d > best) { best = d; bs = s }; s = "" }
-    END { if (best > 3.0) printf "%.3f %.3f\n", bs, best; else print "0 0" }
+    /lavfi.freezedetect.freeze_duration:/ { d = $NF; if (s != "" && d > 3.0) { last_s = s; last_d = d }; s = "" }
+    END { if (last_d != "") printf "%.3f %.3f\n", last_s, last_d; else print "0 0" }
   ' "$FREEZE_LOG")
 EOF
 
@@ -360,10 +371,19 @@ EOF
 drop=""
 if awk "BEGIN{exit !(${think_dur:-0} > $KEEP_THINK + 1.0)}"; then
   total="$( ffprobe -v error -show_entries format=duration -of csv=p=0 "$GIF" | head -1 )"
+  # ffprobe can emit an empty string or "N/A" for duration on a malformed clip;
+  # coerce to a numeric 0 so the tail-cut gate below stays valid awk (0 fails the
+  # `total > tail_start` test, cleanly skipping the tail-cut while the body-cut
+  # still applies) instead of aborting on `BEGIN{exit !( > …)}`.
+  [[ "$total" =~ ^[0-9]+([.][0-9]+)?$ ]] || total="0"
   think_end="$( awk "BEGIN{printf \"%.3f\", $think_start + $think_dur}" )"
   body_start="$( awk "BEGIN{printf \"%.3f\", $think_start + $KEEP_THINK}" )"
   body_end="$( awk "BEGIN{printf \"%.3f\", $think_end - 0.1}" )"
-  tail_start="$( awk "BEGIN{printf \"%.3f\", $think_end + $KEEP_ANSWER}" )"
+  # think_end is exactly the answer-render point (the last freeze ends the instant
+  # the synthesized answer prints). Clamp tail_start to never precede it, so the
+  # tail-cut can only ever excise a static hold AFTER the answer is on screen —
+  # never the answer itself, whatever KEEP_ANSWER is set to.
+  tail_start="$( awk "BEGIN{ ts = $think_end + $KEEP_ANSWER; if (ts < $think_end) ts = $think_end; printf \"%.3f\", ts }" )"
   drop="between(t,${body_start},${body_end})"
   echo "  · collapsing the ${think_dur}s think freeze → keeping ${KEEP_THINK}s head"
   if awk "BEGIN{exit !($total > $tail_start + 0.2)}"; then
