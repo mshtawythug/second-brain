@@ -232,7 +232,7 @@ brain init >/dev/null
 # 'contacts'). Every krisp speaker label + gmail From/To below resolves against
 # these rows.
 echo "Seeding the synthetic directory …"
-docker exec -i "$CONTAINER" psql -U brain -d "$DB_NAME" -q >/dev/null <<'SQL'
+docker exec -i "$CONTAINER" psql -U brain -d "$DB_NAME" -v ON_ERROR_STOP=1 -q >/dev/null <<'SQL'
 INSERT INTO directory_entries (display_name, email, source) VALUES
  ('Sam Rivera','sam.rivera@example.com','contacts'),
  ('Priya Patel','priya.patel@example.com','contacts'),
@@ -378,8 +378,9 @@ echo "Graph build finished in ${build_secs}s."
 themes_out="$(brain graphrag themes --person "Sam Rivera" 2>/dev/null || true)"
 if ! grep -q "Themes" <<<"$themes_out" || ! grep -Eq "Marcus Chen|Priya Patel|Dana Whitfield|Nadia Osei" <<<"$themes_out"; then
   echo "error: graph build produced an empty/low-signal themes result — refusing" >&2
-  echo "       to record a misleading GIF. Inspect with:" >&2
-  echo "         brain graphrag themes --person 'Sam Rivera'" >&2
+  echo "       to record a misleading GIF. The themes output that failed" >&2
+  echo "       validation was:" >&2
+  echo "$themes_out" >&2
   exit 1
 fi
 
