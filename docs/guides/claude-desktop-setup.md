@@ -134,7 +134,7 @@ After pulling new commits:
 ```bash
 cd ~/workspace/second-brain && source .venv/bin/activate
 pip install -e ".[dev]"        # only if pyproject.toml changed
-brain init                      # only if migrations/ has new files
+brain init                      # only if src/brain/migrations/ has new files
 ```
 Then **Cmd-Q + reopen Claude Desktop** so the server re-spawns with the updated code.
 

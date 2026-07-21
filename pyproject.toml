@@ -109,6 +109,12 @@ where = ["src"]
 # under corpus/, no __init__.py) shipped so the zero-Ollama taste test works on
 # pipx/wheel installs. Explicit "corpus/*.json" (not "**/*") avoids bytecode.
 "brain.demo" = ["corpus/*.json"]
+# brain/migrations: the numbered SQL schema migrations `brain init` applies in
+# name order (discovered by db.migrations_dir()). They live INSIDE the package —
+# migrations/ under src/brain/, NOT the repo root — so wheel / pip installs
+# bundle them; without this `brain init` globs an empty dir and never creates the
+# schema. Explicit "migrations/*.sql" (not "**/*") ships only the SQL.
+"brain" = ["migrations/*.sql"]
 
 [tool.setuptools.exclude-package-data]
 # Strip bytecode caches that Python creates on-disk when the package is imported

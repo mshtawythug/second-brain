@@ -23,18 +23,17 @@ hooks all execute exactly as they will in production.
 """
 import base64
 import json
-from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
 
-from brain.db import run_migrations
+from brain.db import migrations_dir, run_migrations
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.ingest.gmail import to_extracted_thread
 from tests.conftest import FakeEmbedder
 
-MIGRATIONS_DIR = Path(__file__).parent.parent / "migrations"
+MIGRATIONS_DIR = migrations_dir()
 
 
 # ---------------------------------------------------------------------------

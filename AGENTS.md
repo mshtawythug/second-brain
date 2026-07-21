@@ -113,8 +113,8 @@ src/brain/
   ingest/           Extractors, chunking, and ingest/update pipeline
   vault/            Vault sync, links, graph, rendering, and derived links
   wiki/             Quartz build watcher and atomic build swap
+  migrations/       Numbered SQL migrations (packaged inside the brain package)
 
-migrations/         Numbered SQL migrations
 tests/              Unit and integration tests
 docs/specs/         Design specs
 docs/plans/         Implementation plans

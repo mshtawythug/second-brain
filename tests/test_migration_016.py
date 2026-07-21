@@ -13,15 +13,11 @@ All rows are synthetic; no production data.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import psycopg
 
-_MIGRATION_016 = (
-    Path(__file__).parent.parent
-    / "migrations"
-    / "016_index_hygiene.sql"
-)
+from brain.db import migrations_dir
+
+_MIGRATION_016 = migrations_dir() / "016_index_hygiene.sql"
 
 # ---------------------------------------------------------------------------
 # The one provably-dead index must be gone

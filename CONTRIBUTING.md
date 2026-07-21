@@ -239,7 +239,7 @@ src/brain/
   quartz_overrides/   — Quartz overlay applied to <vault>/.quartz at render time
   graph_rag/          — GraphRAG package: backend (AGE), schema (frozen value objects), extractor (Ollama), cooccur, weighting, traversal, router, communities, sync, reconcile
   eval/               — retrieval + answer eval harness (metrics, baselines, corpus, runner, answer_eval for `brain eval --answer`)
-migrations/           — numbered SQL files (001..023) + schema_migrations tracking
+src/brain/migrations/ — numbered SQL files (001..023) packaged inside the brain package + schema_migrations tracking
 bin/                  — brain-up / brain-down / brain-rebuild / brain-status convenience scripts
 quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
 skills/               — Claude Code skills (consult-brain, brain-graph, elicit-brain, brain-todo, ingest-brain)

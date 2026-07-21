@@ -1,4 +1,5 @@
 """Postgres connection + migration helpers."""
+import importlib.resources
 from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -143,8 +144,20 @@ def connect_age(database_url: str) -> Iterator[psycopg.Connection]:
 
 
 def migrations_dir() -> Path:
-    """Path to the migrations directory at the repo root."""
-    return Path(__file__).parent.parent.parent / "migrations"
+    """Path to the packaged migrations directory (``brain/migrations``).
+
+    Resolved via :mod:`importlib.resources` so it works in BOTH editable
+    (``pip install -e``) and wheel / pip installs: the SQL files ship inside the
+    ``brain`` package itself (see pyproject ``[tool.setuptools.package-data]``),
+    not at the repo root. Before 0.2.1 they lived at ``<repo>/migrations`` — a
+    sibling of ``src/`` — which setuptools never bundled, so ``brain init``
+    globbed an empty directory and applied zero migrations on wheel installs.
+
+    ``brain`` is a regular, never-zip-imported package, so the ``Traversable``
+    returned by ``files()`` is already a concrete filesystem path; the ``Path``
+    cast is safe and keeps ``.glob`` working at the call site.
+    """
+    return Path(str(importlib.resources.files("brain").joinpath("migrations")))
 
 
 _SCHEMA_MIGRATIONS_DDL = """

@@ -19,14 +19,12 @@ All rows are synthetic; no production data.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import psycopg
 import pytest
 
-_MIGRATION_013 = (
-    Path(__file__).parent.parent / "migrations" / "013_graphrag_communities.sql"
-)
+from brain.db import migrations_dir
+
+_MIGRATION_013 = migrations_dir() / "013_graphrag_communities.sql"
 
 _COMMUNITY_TABLES = ("graph_communities", "graph_community_members")
 

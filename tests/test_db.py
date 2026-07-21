@@ -1,6 +1,5 @@
 """Tests for brain.db — connection helper + migration runner."""
 import os
-from pathlib import Path
 
 import psycopg
 import pytest
@@ -24,6 +23,29 @@ def test_connect_returns_open_connection() -> None:
         assert cur.fetchone() == (1,)
 
 
+def test_migrations_dir_exists_with_all_committed_sql() -> None:
+    """``migrations_dir()`` must resolve to a real directory holding every
+    committed migration.
+
+    Guards the packaging fix: after the migrations moved under
+    ``src/brain/migrations/``, the resolver must still find them in both editable
+    and wheel installs. If it regresses to an empty / nonexistent location,
+    :func:`run_migrations` globs nothing and ``brain init`` silently applies zero
+    migrations — the pre-0.2.1 broken-install bug.
+    """
+    d = migrations_dir()
+    assert d.is_dir(), (
+        f"migrations_dir() {d} does not exist — brain init would apply zero "
+        "migrations (packaging regression)."
+    )
+    sql_files = sorted(p.name for p in d.glob("*.sql"))
+    assert "001_init.sql" in sql_files
+    # One .sql per committed migration (001..023). schema_migrations tracks by
+    # filename, so the resolver must surface all of them. Bump this count when a
+    # new migrations/*.sql lands.
+    assert len(sql_files) == 23, sql_files
+
+
 def test_run_migrations_creates_tables(test_db: psycopg.Connection) -> None:
     # test_db fixture already applies migrations; verify the schema exists
     rows = test_db.execute(
@@ -38,7 +60,7 @@ def test_run_migrations_creates_tables(test_db: psycopg.Connection) -> None:
 
 def test_run_migrations_is_idempotent_on_fresh_schema(test_db: psycopg.Connection) -> None:
     # Re-running on a freshly-migrated schema should not raise
-    migrations_path = Path(__file__).parent.parent / "migrations"
+    migrations_path = migrations_dir()
     assert migrations_path.exists()
     # this will fail because tables already exist — we expect the runner to handle that
     # so this test asserts we get a clear error or the runner detects existing schema
@@ -55,7 +77,7 @@ def test_run_migrations_applies_all_sql_files_in_order() -> None:
         "TEST_DATABASE_URL",
         "postgresql://brain:brain@localhost:5434/second_brain_test",
     )
-    # migrations_dir() resolves to the repo-root migrations/ directory
+    # migrations_dir() resolves to the packaged brain/migrations/ directory
     expected_files = sorted(p.name for p in migrations_dir().glob("*.sql"))
     assert expected_files, "no migration files discovered"
 

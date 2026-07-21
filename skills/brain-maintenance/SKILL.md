@@ -183,8 +183,8 @@ build is showing, `bin/brain-rebuild` swaps in a fresh one atomically.
 
 ## Init / migrations — `brain init`
 
-Apply `migrations/*.sql` in name order, then `ensure_embedding_column` to
-align `chunks.embedding`'s declared dim against the active `BRAIN_EMBEDDER`.
+Apply `src/brain/migrations/*.sql` in name order, then `ensure_embedding_column`
+to align `chunks.embedding`'s declared dim against the active `BRAIN_EMBEDDER`.
 
 ```bash
 brain init
@@ -218,7 +218,7 @@ prior accidental wipe; do not repeat it.
 ## Safety rules
 
 - **Never run destructive ops on the production DB without explicit user approval.** That includes `DROP`, `TRUNCATE`, unbounded `DELETE`, `docker compose down -v`, `rm -rf data/postgres/`.
-- **Migrations are additive-only.** Schema changes go in a new numbered file under `migrations/`. Never edit a shipped migration.
+- **Migrations are additive-only.** Schema changes go in a new numbered file under `src/brain/migrations/`. Never edit a shipped migration.
 - **`brain doctor` is the diagnostic; the remediation is in the printed line.** If the line doesn't tell you what to do, ask the user before guessing — don't go straight to a reset.
 - **Soft warnings are warnings, not failures.** Missing `npx`, missing Ollama enrich model — note them, don't escalate.
 - **Idempotency means run-once vs. run-many is the same.** All backfills and the relink are safe to rerun. If a run errors midway, fix the root cause and rerun.

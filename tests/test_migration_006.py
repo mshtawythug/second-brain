@@ -11,17 +11,15 @@ These tests verify (a) a fresh DB ends in the right shape, (b) a DB
 that previously ran migration 004 converges to the same shape, and
 (c) the migration SQL is safely re-runnable.
 """
-from pathlib import Path
-
 import psycopg
 import pytest
+
+from brain.db import migrations_dir
 
 # Tests here DROP/CREATE indexes to simulate pre-006 states (schema mutation).
 pytestmark = pytest.mark.fresh_schema
 
-_MIGRATION_006 = (
-    Path(__file__).parent.parent / "migrations" / "006_dedup_file_by_source_path.sql"
-)
+_MIGRATION_006 = migrations_dir() / "006_dedup_file_by_source_path.sql"
 _OLD_004_INDEX_DDL = (
     "CREATE UNIQUE INDEX documents_content_hash_ingested_idx "
     "ON documents (content_hash) WHERE kind = 'ingested'"

@@ -16,16 +16,12 @@ All rows are synthetic; no production data.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import psycopg
 import pytest
 
-_MIGRATION_015 = (
-    Path(__file__).parent.parent
-    / "migrations"
-    / "015_interactions_graph_targets.sql"
-)
+from brain.db import migrations_dir
+
+_MIGRATION_015 = migrations_dir() / "015_interactions_graph_targets.sql"
 
 
 # --------------------------------------------------------------------------- #

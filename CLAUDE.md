@@ -102,7 +102,7 @@ The `--fail-below` flag exits with code `3` (distinct from `1` = generic error a
 **Wave A.1 source:** audit `docs/audits/2026-05-14-q1-codex-cumulative-review.md`, plan `docs/plans/2026-05-14-plan-audit-gap-remediation.md`. The plan tracks the remaining waves (A.2 person-variant key expansion, A.3 EXEC tracker reconciliation, A.4 first committed `ci.json` baseline).
 
 ### Migration Safety
-- Migrations are raw SQL files in `migrations/`, applied in name order by `brain init`.
+- Migrations are raw SQL files in `src/brain/migrations/` (shipped inside the `brain` package so wheel/pip installs bundle them), applied in name order by `brain init` via `db.migrations_dir()`.
 - **Never reference Python code in migrations** — they are pure SQL, frozen in time.
 - **Every migration must be idempotent or applied to a fresh schema.** During development, `docker compose down && rm -rf data/postgres && docker compose up -d && brain init` resets cleanly. (`docker compose down -v` alone won't wipe the data — Postgres is mounted from a host bind-mount at `./data/postgres`, not a Docker-managed volume.)
 - **Schema changes** = new numbered migration file. Never edit `001_init.sql` once shipped.
@@ -259,7 +259,7 @@ src/brain/
     gmail.py        — shells out to gws CLI
     stdin.py        — generic stdin ingester (Krisp, Slack)
 
-migrations/         — numbered SQL files
+src/brain/migrations/ — numbered SQL files (packaged inside the brain package; applied by brain init)
   001_init.sql                    — base schema (chunks.embedding starts as vector(1024))
   002_qwen3_embedding.sql         — drops + re-adds chunks.embedding as vector(4096), nullable
                                     (ensure_embedding_column then resizes for the active backend)

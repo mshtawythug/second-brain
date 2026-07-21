@@ -1,5 +1,6 @@
 """Regression: pyproject.toml [project.scripts] declares all 10 brain console scripts."""
 import importlib
+import importlib.resources
 import os
 import subprocess
 import sys
@@ -80,6 +81,32 @@ def test_dev_backcompat_wrappers_exec_venv_not_path() -> None:
             f"bin/{name} contains a bare `exec brain-*` which loops when bin/ precedes "
             f".venv/bin/ on PATH"
         )
+
+
+def test_migrations_shipped_inside_brain_package() -> None:
+    """Regression: the migration SQL must ship INSIDE the importable ``brain``
+    package so wheel / pip installs can apply it.
+
+    The pre-0.2.1 packaging bug: the migrations lived at the repo root
+    ``migrations/`` (a sibling of ``src/``), OUTSIDE ``src/brain/``, so
+    setuptools never bundled them into the wheel. ``brain init`` then globbed an
+    empty/nonexistent directory and applied ZERO migrations — the entire schema
+    (``chunks`` included) was never created and every fresh install was broken.
+
+    This resolves the migrations via the packaged/importable location
+    (independent of the source-tree layout), so it fails if they ever drift back
+    outside the package. It is the check that would have caught the original bug.
+    """
+    pkg_migrations = importlib.resources.files("brain").joinpath("migrations")
+    assert pkg_migrations.joinpath("001_init.sql").is_file(), (
+        "001_init.sql is not shipped inside the brain package — migrations are "
+        "not packaged, so `brain init` applies zero migrations on wheel installs."
+    )
+    sql_files = sorted(
+        p.name for p in pkg_migrations.iterdir() if p.name.endswith(".sql")
+    )
+    # Every committed migration must be present, not just the first one.
+    assert len(sql_files) >= 23, sql_files
 
 
 def test_python_m_brain_entry_point() -> None:
