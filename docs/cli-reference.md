@@ -352,6 +352,11 @@ Their tuning env vars are collected under
 [Feature config knobs](configuration.md#feature-config-knobs) in the
 configuration docs.
 
+`brain brief` and `brain resurface` in action — the day's digest, then the
+older notes ranked for another look (recorded against a synthetic corpus):
+
+![brain brief's daily digest followed by brain resurface's spaced-repetition table, over a synthetic compliance corpus](assets/proactivity.gif)
+
 ### brain resurface
 
 Spaced-repetition resurfacing — the brain picks older notes you haven't

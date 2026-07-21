@@ -1,0 +1,369 @@
+#!/usr/bin/env bash
+# brain-proactivity-gif — regenerate the cli-reference "proactive half" GIF from
+# docs/assets/proactivity.tape.
+#
+# Records two of the REGULAR `brain` CLI's proactive/assistant commands — the
+# daily digest (`brain brief`) and spaced-repetition resurfacing
+# (`brain resurface`) — against a THROWAWAY, fully-isolated Postgres that this
+# script provisions just for the recording and destroys afterward:
+#
+#   * compose project  brain-proactivity-gif   (NEVER the prod `brain` project)
+#   * container        brain-proactivity-gif-postgres
+#   * host port        55445                    (prod 55432, demo 55433, tests 5434,
+#                                                 usage 55440, graphrag 55442)
+#   * storage          a NAMED docker volume    (never a host bind-mount)
+#   * database         second_brain_proactivity_gif
+#
+# The CLI is pointed at that sandbox purely through the environment
+# (DATABASE_URL + BRAIN_HOME + BRAIN_VAULT_PATH), exported here and inherited by
+# vhs. A dev checkout's repo-root .env would otherwise win and point the CLI at
+# the PROD database, so every relevant var is overridden explicitly here, and the
+# tape hard-aborts unless DATABASE_URL is the :55445 sandbox — a stray run can
+# never touch personal data.
+#
+# All seeded content is synthetic (Larkspur compliance corpus; zero PII). Dates
+# are computed relative to NOW at record time (never hardcoded), so the 24h
+# window `brain brief` reads and the recency scoring `brain resurface` reads
+# always have fresh material: a RECENT cohort (last few days) powers the digest;
+# an OLDER cohort (weeks/months ago) powers the resurfacing.
+#
+# Both recorded commands are pure-DB reads (no LLM inference on camera):
+# `brain brief` runs with `--no-enrich` so its frames render instantly and
+# deterministically — the same reasoning bin/brain-usage-gif uses to keep
+# unpredictable Ollama latency from racing the fixed vhs Sleeps. `brain
+# resurface` never calls the model at all. No ffmpeg dead-time trimming needed.
+#
+# Requires: vhs (brew install vhs — bundles ttyd + ffmpeg) and Docker. Uses the
+# local Ollama `arctic` embedder for an authentic corpus when Ollama + the
+# snowflake-arctic-embed2 model are available; otherwise falls back to
+# BRAIN_EMBEDDER=none (FTS-only). Neither recorded command reads embeddings, so
+# the fallback changes nothing on screen.
+set -euo pipefail
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+TAPE="docs/assets/proactivity.tape"
+GIF="docs/assets/proactivity.gif"
+MAX_BYTES=$(( 2560 * 1024 ))  # 2.5 MB cli-reference budget for the proactivity GIF.
+
+# --- Isolated-sandbox identifiers (kept distinct from prod/demo/test/other) --
+PROJECT="brain-proactivity-gif"
+CONTAINER="brain-proactivity-gif-postgres"
+DB_PORT="55445"
+DB_NAME="second_brain_proactivity_gif"
+DB_URL="postgresql://brain:brain@localhost:${DB_PORT}/${DB_NAME}"
+PG_IMAGE="pgvector/pgvector:pg16"
+
+WORKDIR="${TMPDIR:-/tmp}/brain-proactivity-gif"
+COMPOSE_FILE="$WORKDIR/docker-compose.proactivity-gif.yml"
+HOME_DIR="$WORKDIR/home"
+VAULT_DIR="$WORKDIR/vault"
+VOLUME_NAME="${PROJECT}_brain-proactivity-gif-pgdata"
+
+usage() {
+  echo "Usage: brain-proactivity-gif [-h|--help]  — record docs/assets/proactivity.tape into docs/assets/proactivity.gif via vhs against a throwaway :55445 Postgres sandbox (leaves nothing behind)."
+}
+
+case "${1:-}" in
+  -h|--help) usage; exit 0 ;;
+  "") ;;
+  *) echo "error: unknown argument: $1" >&2; usage >&2; exit 2 ;;
+esac
+
+# --- Teardown: ALWAYS scoped to our own project, ALWAYS runs on exit ---------
+cleanup() {
+  if [[ -f "$COMPOSE_FILE" ]]; then
+    docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+  else
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    docker volume rm "$VOLUME_NAME" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORKDIR" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# --- Preflight --------------------------------------------------------------
+if ! command -v vhs >/dev/null 2>&1; then
+  echo "error: 'vhs' not found on PATH — install it with 'brew install vhs'" >&2
+  echo "       (vhs bundles the ttyd + ffmpeg dependencies it needs)." >&2
+  exit 1
+fi
+if ! command -v docker >/dev/null 2>&1; then
+  echo "error: 'docker' not found on PATH — install Docker Desktop or Engine." >&2
+  exit 1
+fi
+if ! command -v brain >/dev/null 2>&1; then
+  echo "error: 'brain' not found on PATH — install it with 'pip install -e .'" >&2
+  exit 1
+fi
+
+cd "$REPO_ROOT"
+[[ -f "$TAPE" ]] || { echo "error: tape not found: $REPO_ROOT/$TAPE" >&2; exit 1; }
+
+# --- Embedder selection -----------------------------------------------------
+# Prefer the local arctic backend for an authentic corpus when Ollama is
+# reachable and the model is pulled; else fall back to the FTS-only NullEmbedder
+# so the recording still works on a machine without Ollama. Neither recorded
+# command (`brain brief`, `brain resurface`) reads embeddings, so the choice is
+# invisible on screen.
+if command -v ollama >/dev/null 2>&1 && ollama list >/dev/null 2>&1 \
+   && ollama list 2>/dev/null | grep -q 'snowflake-arctic-embed2'; then
+  EMBEDDER="arctic"
+else
+  EMBEDDER="none"
+fi
+echo "Embedder for this recording: ${EMBEDDER}."
+
+# --- Date helper: N days ago as YYYY-MM-DD, portable across BSD (macOS) + GNU -
+days_ago() {
+  local n="$1"
+  if date -v-1d >/dev/null 2>&1; then
+    date -v-"${n}"d +%Y-%m-%d          # BSD / macOS
+  else
+    date -d "${n} days ago" +%Y-%m-%d  # GNU / Linux
+  fi
+}
+
+# --- Fresh workdir + compose file (stock pgvector image, named volume) -------
+rm -rf "$WORKDIR"
+mkdir -p "$HOME_DIR" "$VAULT_DIR"
+
+cat > "$COMPOSE_FILE" <<YAML
+services:
+  postgres:
+    image: ${PG_IMAGE}
+    container_name: ${CONTAINER}
+    environment:
+      POSTGRES_USER: brain
+      POSTGRES_PASSWORD: brain
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "${DB_PORT}:5432"
+    volumes:
+      - brain-proactivity-gif-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brain -d ${DB_NAME}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  brain-proactivity-gif-pgdata:
+YAML
+
+# --- Point the CLI at the sandbox purely through the environment ------------
+# Exported here → inherited by vhs → inherited by the recorded shell. Overriding
+# DATABASE_URL in the process env makes it win over any repo-root .env (resolved
+# via os.environ.setdefault — see src/brain/config.py).
+export DATABASE_URL="$DB_URL"
+export BRAIN_HOME="$HOME_DIR"
+export BRAIN_VAULT_PATH="$VAULT_DIR"
+export BRAIN_EMBEDDER="$EMBEDDER"
+export BRAIN_GRAPH_ENABLED="false"
+# Skip the post-ingest Ollama auto-summary during seeding — with arctic it would
+# force an arctic->llama model swap mid-ingest whose latency is unpredictable.
+# Summaries that matter for resurface importance are set deterministically via
+# SQL below.
+export BRAIN_ENRICH_MIN_TOKENS="1000000"
+# The tape cds here and fails closed unless the sandbox is active.
+export PROACTIVITY_GIF_WORK="$WORKDIR"
+
+# --- Provision the throwaway Postgres (fresh every run) ---------------------
+echo "Provisioning the throwaway proactivity-gif Postgres on port ${DB_PORT} …"
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" down -v >/dev/null 2>&1 || true
+docker compose -p "$PROJECT" -f "$COMPOSE_FILE" up -d >/dev/null
+
+echo "Waiting for Postgres to accept connections …"
+ready=""
+for _ in $(seq 1 30); do
+  if docker exec "$CONTAINER" pg_isready -U brain -d "$DB_NAME" >/dev/null 2>&1; then
+    ready="yes"; break
+  fi
+  sleep 2
+done
+[[ -n "$ready" ]] || { echo "error: ${CONTAINER} never became ready" >&2; exit 1; }
+
+# --- Init (migrations + embedding column alignment) -------------------------
+echo "Applying migrations + aligning the embedding column …"
+brain init >/dev/null
+
+# --- Seed the synthetic corpus (off camera; real chunk + index pipeline) -----
+# Recurring synthetic cast (all clearly synthetic @example.com), same Larkspur
+# compliance universe as the demo/graphrag corpora. Two cohorts:
+#   * RECENT (last few days, ingested now)   → power `brain brief`.
+#   * OLDER  (weeks/months ago via --date)   → power `brain resurface`.
+krisp() { # $1 ext_id  $2 title  $3 date  $4 tags(comma)
+  local tagargs=() t; IFS=',' read -ra _t <<< "$4"
+  for t in "${_t[@]}"; do tagargs+=(--tag "$t"); done
+  brain ingest-stdin --source krisp --external-id "$1" --title "$2" \
+    --content-type transcript --date "$3" --no-enrich "${tagargs[@]}" >/dev/null
+}
+mail() { # $1 ext_id  $2 title  $3 date  $4 from  $5 to  $6 tags(comma)
+  local tagargs=() t; IFS=',' read -ra _t <<< "$6"
+  for t in "${_t[@]}"; do tagargs+=(--tag "$t"); done
+  brain ingest-stdin --source gmail --external-id "$1" --title "$2" \
+    --content-type email --date "$3" \
+    --metadata "{\"from\":\"$4\",\"to\":\"$5\"}" --no-enrich "${tagargs[@]}" >/dev/null
+}
+note() { # $1 ext_id  $2 title  $3 date  $4 tags(comma)
+  local tagargs=() t; IFS=',' read -ra _t <<< "$4"
+  for t in "${_t[@]}"; do tagargs+=(--tag "$t"); done
+  brain ingest-stdin --source manual --external-id "$1" --title "$2" \
+    --content-type note --date "$3" --no-enrich "${tagargs[@]}" >/dev/null
+}
+
+echo "Seeding the synthetic Larkspur corpus …"
+
+# --- RECENT cohort (last few days) — powers `brain brief` -------------------
+note pg-r03 "Weekly compliance standup — notes" "$(days_ago 0)" compliance,standup,evidence <<'BODY'
+Notes from this week's compliance standup at Larkspur. Evidence automation stays the headline: access reviews, change approvals, and backup tests will snapshot weekly into the auditor portal so nobody chases screenshots. Every SOC 2 criterion gets a named owner before fieldwork, and we kill the number-one auditor follow-up — undated, inconsistently named artifacts — with a single filename template. Next check-in in two weeks to review the evidence backlog.
+BODY
+
+krisp pg-r01 "SOC 2 evidence automation sync" "$(days_ago 2)" soc2,compliance,evidence <<'BODY'
+**Sam Rivera | 00:00**
+Let's lock the SOC 2 evidence automation plan. The theme again is that most of our audit pain is evidence collection, so I want evidence to be a byproduct of the work, not a quarterly fire drill.
+**Priya Patel | 01:12**
+Agreed. A weekly job snapshots access reviews, change approvals, and backup tests, timestamps them, and files them straight in the auditor portal. Every trust-services criterion still needs a named owner before fieldwork.
+**Sam Rivera | 02:40**
+Target is to automate at least half of the forty artifacts before the observation window opens. That turns readiness from heroics into a habit.
+BODY
+
+mail pg-r02 "Vendor security addendum — breach-clause redlines" "$(days_ago 1)" "Dana Whitfield <dana.whitfield@example.com>" "Sam Rivera <sam.rivera@example.com>" vendor-risk,legal,compliance <<'BODY'
+Legal finished the vendor risk review and I have redlines before we counter-sign. The processor could not produce a current SOC 2 report and declined a breach-notification window shorter than thirty days. I want a security addendum pinning a seventy-two-hour breach-notification clause, a right-to-audit provision, and customer data kept in-region. If they will not sign, treat it as a vendor risk red flag and escalate to the risk committee.
+BODY
+
+krisp pg-r04 "PCI tokenization scoping call" "$(days_ago 3)" pci,scope,compliance <<'BODY'
+**Marcus Chen | 00:00**
+The new checkout API quietly pulled almost the entire production environment into PCI scope the moment it began handling raw card numbers instead of tokens.
+**Sam Rivera | 01:30**
+Classic scope creep. Front the services with a tokenization proxy so raw card data never lands in our systems, shrinking scope back to the cardholder-data enclave. Tokenization is the highest-leverage PCI investment this quarter.
+BODY
+
+# Action-items doc (parented to the SOC 2 sync) — feeds `brain brief`'s open
+# todos. `krisp_action_items` docs require a parent_meeting_external_id.
+brain ingest-stdin --source krisp --external-id pg-r05 \
+  --title "Action items — SOC 2 evidence automation sync" \
+  --content-type krisp_action_items --date "$(days_ago 2)" \
+  --metadata '{"parent_meeting_external_id": "pg-r01"}' \
+  --no-enrich --tag action-items >/dev/null <<'BODY'
+- [ ] Assign a control owner to every SOC 2 trust-services criterion
+- [ ] Ship the weekly evidence collector into the auditor portal
+- [ ] Send the vendor security addendum redlines back to legal
+BODY
+
+# --- OLDER cohort (weeks/months ago) — powers `brain resurface` -------------
+note pg-o01 "Larkspur security controls cheatsheet" "$(days_ago 110)" soc2,controls,reference <<'BODY'
+A one-page reference for the controls Larkspur cares about most. Access management: SSO everywhere, quarterly access reviews, no shared accounts. Change management: every production change rides a reviewed pull request with a deploy record. Logging: ninety-day retention minimum, centralized and tamper-evident, treated as a compliance control. Vendor risk: a signed security addendum and a current SOC 2 attestation before any vendor touches customer data. PCI: keep raw card data out of scope via tokenization. Incident response: a named on-call, a severity rubric, and a blameless postmortem.
+BODY
+
+krisp pg-o02 "Payments incident postmortem" "$(days_ago 85)" incident,postmortem,compliance <<'BODY'
+**Riley Nakamura | 00:00**
+Blameless postmortem for the six-hour payments outage. Root cause: a config change disabled retries, and because logging retention had silently dropped to seven days, we lost the evidence needed to reconstruct the first ninety minutes.
+**Sam Rivera | 01:15**
+Which turned an ops incident into a compliance problem — we could not prove to the auditor when it started. Restore ninety-day retention, alert if it drifts below the compliance floor, and write the runbook.
+BODY
+
+mail pg-o03 "SOC 2 fieldwork evidence request" "$(days_ago 60)" "Priya Patel <priya.patel@example.com>" "Sam Rivera <sam.rivera@example.com>" soc2,audit,compliance <<'BODY'
+Ahead of SOC 2 fieldwork, here is the evidence request: forty artifacts, with access reviews, change-management approvals, and vendor risk assessments most likely to slip. Most evidence already exists and just needs exporting, dating, and consistent naming — inconsistent file names are the number-one reason auditors send follow-up questions. A known gap with a remediation plan is a manageable finding; a surprise gap is a scramble.
+BODY
+
+note pg-o04 "Compliance horror stories — collected war stories" "$(days_ago 45)" compliance,war-stories,reference <<'BODY'
+A running list of the compliance horror stories I never want to repeat: the audit we failed because nobody owned evidence collection, the vendor who shipped customer data to an unencrypted bucket, the deletion request that took three weeks because no one could say where the data actually lived. The pattern is always the same — a control looked green on a dashboard while the reality underneath quietly rotted. Compliance is the difference between a calm quarter and a genuine horror story with our name on it.
+BODY
+
+krisp pg-o05 "Vendor risk committee — Q2 review" "$(days_ago 30)" vendor-risk,risk,compliance <<'BODY'
+**Nadia Osei | 00:00**
+The Q2 vendor risk committee is reviewing our top data processors. One vendor has no current SOC 2 attestation, vague data-residency answers, and a thirty-day breach-notification window.
+**Sam Rivera | 02:10**
+So the standard is a current attestation on file, a right-to-audit provision, and a seventy-two-hour breach-notification clause, or the deal does not proceed. Standardize the security addendum across every processor.
+BODY
+
+note pg-o06 "Data retention policy — draft" "$(days_ago 70)" data-retention,policy,logging <<'BODY'
+Draft data-retention policy for Larkspur. Application and audit logs: ninety-day minimum retention, centralized, tamper-evident, treated as a compliance control rather than an ops setting. Customer records: retained only as long as the contract plus the statutory window, then hard-deleted on a documented schedule. Backups: encrypted, thirty-five-day rolling window, restore-tested quarterly. The retention floor exists so an incident review can always reconstruct the timeline auditors ask for.
+BODY
+
+# --- Deterministic date + signal shaping via SQL ----------------------------
+# ingest-stdin sets sent_at from --date but ingested_at is always NOW(). Age the
+# OLDER cohort's ingested_at to match so it leaves brief's 24h capture window
+# while resurface still reads it as old via coalesce(sent_at, ingested_at). Age
+# the action-items doc past 24h so it feeds todos (7-day window) without doubling
+# as a "recent capture". Then seed a few summaries (resurface importance) and
+# pins (brief's follow-up docs). All timestamps relative to NOW.
+echo "Shaping dates + signals (age older docs, seed summaries + pins) …"
+docker exec -i "$CONTAINER" psql -U brain -d "$DB_NAME" -v ON_ERROR_STOP=1 -q >/dev/null <<'SQL'
+-- Age the older cohort's ingested_at down to its sent_at date.
+UPDATE documents
+   SET ingested_at = coalesce(sent_at, ingested_at)
+ WHERE title IN (
+   'Larkspur security controls cheatsheet',
+   'Payments incident postmortem',
+   'SOC 2 fieldwork evidence request',
+   'Compliance horror stories — collected war stories',
+   'Vendor risk committee — Q2 review',
+   'Data retention policy — draft'
+ );
+
+-- Push the action-items doc just outside the 24h capture window (still inside
+-- the 7-day todo window), so it contributes todos without cluttering captures.
+UPDATE documents
+   SET ingested_at = NOW() - INTERVAL '40 hours'
+ WHERE title = 'Action items — SOC 2 evidence automation sync';
+
+-- Synthetic one-line summaries → resurface importance boost.
+UPDATE documents SET summary =
+  'Reference sheet: access, change, logging, vendor, PCI, and incident controls.'
+ WHERE title = 'Larkspur security controls cheatsheet';
+UPDATE documents SET summary =
+  'Postmortem: short log retention lost the evidence to reconstruct an outage.'
+ WHERE title = 'Payments incident postmortem';
+UPDATE documents SET summary =
+  'Fieldwork evidence request: forty artifacts; naming + dating are the risk.'
+ WHERE title = 'SOC 2 fieldwork evidence request';
+
+-- Pins for brief's "Pinned / follow-up docs": one recent, one older follow-up.
+-- 'pinned' is NOT counted as access by resurface (only 'opened'/'clicked' are),
+-- so pinning the older cheatsheet keeps it "never" accessed in the resurface view.
+INSERT INTO interactions (document_id, action, source, at)
+SELECT id, 'pinned', 'cli', NOW() - INTERVAL '3 hours'
+  FROM documents WHERE title = 'Vendor security addendum — breach-clause redlines';
+INSERT INTO interactions (document_id, action, source, at)
+SELECT id, 'pinned', 'cli', NOW() - INTERVAL '5 hours'
+  FROM documents WHERE title = 'Larkspur security controls cheatsheet';
+SQL
+
+# --- Fail closed: refuse to record empty-looking proactivity surfaces --------
+# The GIF is only worth shipping if both commands produce rich output. Assert
+# each headline surface is populated BEFORE spending time recording.
+brief_out="$(brain brief --no-enrich 2>/dev/null || true)"
+if ! grep -q "Recent captures" <<<"$brief_out" \
+   || ! grep -q "Open action items" <<<"$brief_out" \
+   || ! grep -Eq "\[ \]" <<<"$brief_out" \
+   || ! grep -q "Pinned" <<<"$brief_out"; then
+  echo "error: 'brain brief' produced an empty/low-signal digest — refusing to" >&2
+  echo "       record a misleading GIF. The brief output was:" >&2
+  echo "$brief_out" >&2
+  exit 1
+fi
+resurface_out="$(brain resurface 2>/dev/null || true)"
+if ! grep -q "Due for review" <<<"$resurface_out" \
+   || ! grep -Eq "cheatsheet|postmortem|retention|horror|committee|evidence request" <<<"$resurface_out"; then
+  echo "error: 'brain resurface' produced an empty result — refusing to record." >&2
+  echo "$resurface_out" >&2
+  exit 1
+fi
+
+# --- Record -----------------------------------------------------------------
+echo "Recording $TAPE with vhs …"
+vhs "$TAPE"
+
+[[ -f "$GIF" ]] || { echo "error: vhs did not produce $GIF" >&2; exit 1; }
+
+# stat is BSD (macOS) vs GNU (Linux); try both invocations.
+bytes="$( stat -f%z "$GIF" 2>/dev/null || stat -c%s "$GIF" )"
+human="$( awk -v b="$bytes" 'BEGIN { printf "%.2f MB", b / 1048576 }' )"
+
+echo "Wrote $GIF ($human, $bytes bytes)."
+if (( bytes > MAX_BYTES )); then
+  echo "warning: $GIF exceeds the 2.5 MB cli-reference budget — tune the tape's" >&2
+  echo "         FontSize/framerate/Sleep durations to shrink it." >&2
+fi
