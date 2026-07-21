@@ -106,7 +106,7 @@ def test_render_plist_is_valid_xml(label: str) -> None:
         brain_home=Path("/home/user/.brain"),
         vault_path=Path("/home/user/brain-vault"),
         pipx_bin_dir=Path("/home/user/.local/bin"),
-        brain_py=Path("/home/user/.local/pipx/venvs/second-brain/bin/python"),
+        brain_py=Path("/home/user/.local/pipx/venvs/secondbrain-py/bin/python"),
     )
     ET.fromstring(text)  # raises ET.ParseError on invalid XML
 

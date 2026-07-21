@@ -36,7 +36,7 @@ Paste the full output of `brain doctor` (redact any personal paths or data):
 - **Python version:** (output of `python3 --version`)
 - **Install method / profile:** (pipx one-liner · `pip install -e ".[dev]"` dev install · `brain setup --profile minimal|standard|full`)
 - **Embedder backend (`BRAIN_EMBEDDER`):** (arctic · voyage · qwen3 · none)
-- **brain version:** (from `pip show second-brain`, or the git commit SHA)
+- **brain version:** (from `pip show secondbrain-py`, or the git commit SHA)
 
 ## Logs / traceback
 

@@ -461,5 +461,5 @@ brain uninstall --remove-db --remove-vault   # --remove-db requires a typed
 
 # 3. Remove the pipx-installed CLI itself (must be a separate command —
 #    a Python CLI can't safely uninstall its own running process).
-pipx uninstall second-brain
+pipx uninstall secondbrain-py
 ```

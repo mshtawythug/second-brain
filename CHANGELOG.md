@@ -10,15 +10,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 This repository ships two independently versioned artifacts, each with its own
 git tag scheme:
 
-- **`v*` tags** — the **brain CLI** (the Python package `second-brain`). These
-  entries below track that axis. A `v*` tag cuts a GitHub Release
-  (`.github/workflows/release.yml`).
+- **`v*` tags** — the **brain CLI** (the Python package `secondbrain-py`). These
+  entries below track that axis. A `v*` tag cuts a GitHub Release and publishes
+  the sdist+wheel to PyPI (`.github/workflows/release.yml`).
 - **`age-image-*` tags** — the prebuilt **Apache AGE Postgres image**
   (`ghcr.io/mshtawythug/second-brain-age`, tag
   `pg16-v1.5.0-rc0-pgv0.8.2`). Its version string is pinned to the AGE +
   pgvector versions baked into the Dockerfile, not to the CLI version, and it is
   published by `.github/workflows/publish-age-image.yml`. Bumping the CLI does
   not rebuild the image; rebuilding the image does not bump the CLI.
+
+## [0.2.1] - 2026-07-20
+
+### Changed
+
+- **Distribution renamed to `secondbrain-py`** (was `second-brain`). PyPI's
+  anti-typosquat rule blocks `second-brain` — its separator-collapsed form
+  collides with the unrelated existing `secondbrain` project — so the published
+  package name is now `secondbrain-py`. The import package stays `brain` and the
+  human CLI stays `brain`; only the distribution name and the uvx convenience
+  alias changed.
+- The uvx alias is now `uvx secondbrain-py` (was `uvx second-brain`), matching the
+  renamed distribution and the MCP-registry `server.json` package identifier.
+- PyPI Trusted Publishing is now enabled in `release.yml`, so `v*` tags publish
+  the sdist+wheel to PyPI (`pipx install secondbrain-py`). A `workflow_dispatch`
+  trigger allows re-running a publish manually.
+
+No functional changes to the CLI, search, ingest, or graph behavior.
 
 ## [0.2.0] - 2026-07-19
 
@@ -57,5 +75,6 @@ Initial public release.
   wiki.
 - `brain-mcp` MCP server for querying the brain from any MCP-compatible client.
 
+[0.2.1]: https://github.com/mshtawythug/second-brain/releases/tag/v0.2.1
 [0.2.0]: https://github.com/mshtawythug/second-brain/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mshtawythug/second-brain/releases/tag/v0.1.0

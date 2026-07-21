@@ -31,7 +31,7 @@ def _run(
         "PATH": SANDBOX_PATH,
         "HOME": os.environ.get("HOME", "/tmp"),
         # Prevent the script from trying to reach the network.
-        "BRAIN_INSTALL_REF": "v0.2.0",
+        "BRAIN_INSTALL_REF": "v0.2.1",
         **(env_overrides or {}),
     }
     cmd = ["bash", str(INSTALL_SH)] + (extra_args or [])
@@ -106,7 +106,7 @@ def test_install_sh_refuses_branch_without_insecure() -> None:
 def test_install_sh_accepts_tag_ref() -> None:
     result = _run(
         {
-            "BRAIN_INSTALL_REF": "v0.2.0",
+            "BRAIN_INSTALL_REF": "v0.2.1",
             "OSTYPE": "darwin21.0",
             "BRAIN_INSTALL_SH_DRY_RUN": "1",
         }
@@ -165,7 +165,7 @@ def test_install_sh_refuses_placeholder_repo() -> None:
     result = _run(
         {
             "BRAIN_REPO": "https://github.com/<your-fork>/second-brain.git",
-            "BRAIN_INSTALL_REF": "v0.2.0",
+            "BRAIN_INSTALL_REF": "v0.2.1",
             "OSTYPE": "darwin21.0",
             "BRAIN_INSTALL_SH_DRY_RUN": "1",
         }
