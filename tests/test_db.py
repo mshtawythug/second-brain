@@ -1,8 +1,10 @@
 """Tests for brain.db — connection helper + migration runner."""
 import os
+from pathlib import Path
 
 import psycopg
 import pytest
+from pytest_mock import MockerFixture
 
 from brain.db import connect, ensure_embedding_column, migrations_dir, run_migrations
 from brain.errors import BrainError
@@ -40,10 +42,34 @@ def test_migrations_dir_exists_with_all_committed_sql() -> None:
     )
     sql_files = sorted(p.name for p in d.glob("*.sql"))
     assert "001_init.sql" in sql_files
-    # One .sql per committed migration (001..023). schema_migrations tracks by
-    # filename, so the resolver must surface all of them. Bump this count when a
-    # new migrations/*.sql lands.
-    assert len(sql_files) == 23, sql_files
+    # One .sql per committed migration (001..023 at time of writing).
+    # schema_migrations tracks by filename, so the resolver must surface all of
+    # them; ``>=`` so adding a future migration doesn't break this assertion.
+    assert len(sql_files) >= 23, sql_files
+
+
+def test_run_migrations_raises_when_no_migrations_packaged(
+    tmp_path: Path, mocker: MockerFixture
+) -> None:
+    """Loud-fail guard (regression for the pre-0.2.1 packaging bug).
+
+    If ``migrations_dir()`` resolves to a directory with no ``*.sql`` — exactly
+    what happened on wheel installs before the migrations were packaged inside
+    the ``brain`` package — :func:`run_migrations` must raise a clear
+    ``BrainError`` instead of silently applying zero migrations and leaving an
+    empty schema. The guard fires before any DB work, so no live connection is
+    needed (a mock connection proves the short-circuit).
+    """
+    empty_dir = tmp_path / "no_migrations"
+    empty_dir.mkdir()
+    mocker.patch("brain.db.migrations_dir", return_value=empty_dir)
+    conn = mocker.MagicMock()
+
+    with pytest.raises(BrainError, match="No migration files found"):
+        run_migrations(conn)
+
+    # The guard must short-circuit before touching the database.
+    conn.execute.assert_not_called()
 
 
 def test_run_migrations_creates_tables(test_db: psycopg.Connection) -> None:

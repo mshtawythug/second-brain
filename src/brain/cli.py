@@ -407,7 +407,7 @@ def setup_cmd(
 def init() -> None:
     """Apply database migrations and align embedding column with active embedder.
 
-    After running every SQL file in ``migrations/``, reconciles the
+    After running every SQL file in ``src/brain/migrations/``, reconciles the
     ``chunks.embedding`` column dim against ``BRAIN_EMBEDDER``'s native
     output. On a fresh DB this drops + re-adds the column at the right
     dim; on an existing DB with chunks already present it errors clearly

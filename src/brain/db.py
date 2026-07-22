@@ -241,6 +241,18 @@ def run_migrations(conn: psycopg.Connection) -> list[str]:
     :func:`_seed_applied_migrations` so the prior CREATE TABLE / ALTER COLUMN
     statements aren't re-attempted.
     """
+    mdir = migrations_dir()
+    migration_files = sorted(mdir.glob("*.sql"))
+    if not migration_files:
+        # Loud-fail guard: an empty migrations dir means the package was installed
+        # without its SQL (the pre-0.2.1 wheel bug). Raise instead of silently
+        # applying zero migrations and leaving an empty schema.
+        raise BrainError(
+            f"No migration files found under {mdir} — the package is installed "
+            "incorrectly (migrations were not shipped in the wheel). Reinstall "
+            "from a build that includes src/brain/migrations/*.sql."
+        )
+
     conn.execute(_SCHEMA_MIGRATIONS_DDL)
     seeded_row = conn.execute("SELECT count(*) FROM schema_migrations").fetchone()
     assert seeded_row is not None  # count(*) always yields one row
@@ -251,7 +263,7 @@ def run_migrations(conn: psycopg.Connection) -> list[str]:
     applied_names = {str(r[0]) for r in rows}
 
     applied: list[str] = []
-    for sql_file in sorted(migrations_dir().glob("*.sql")):
+    for sql_file in migration_files:
         if sql_file.name in applied_names:
             continue
         conn.execute(sql_file.read_text())
