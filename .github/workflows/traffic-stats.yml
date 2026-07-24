@@ -71,5 +71,10 @@ jobs:
           else
             git add stats/traffic.json
             git commit -m "chore(stats): daily traffic snapshot [skip ci]"
+            # Rebase our single stats commit onto anything that landed on the
+            # branch since checkout, so the push can't fail with a
+            # non-fast-forward. Only this job writes stats/traffic.json (and the
+            # concurrency group serializes runs), so a conflict is not expected.
+            git pull --rebase origin "${{ github.ref_name }}"
             git push
           fi

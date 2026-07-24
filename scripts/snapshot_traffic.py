@@ -31,6 +31,12 @@ dates, trailing newline)::
       "latest": {"date": "YYYY-MM-DD", "stars": int, "forks": int}
     }
 
+Seed note: the committed seed's ``views`` map is intentionally EMPTY — only
+14-day view *totals* were available when the history was first seeded (kept in
+``summaries.views_14d``). Daily ``views`` records backfill automatically once
+the workflow runs with a token that has traffic access, so an empty ``views``
+map is expected at seed time, not a bug.
+
 The merge (:func:`merge_traffic`) is a pure function with NO network / file
 IO, so it is unit-testable in isolation; :func:`main` does the HTTP + file IO
 and delegates the actual merge to it.
@@ -38,9 +44,16 @@ and delegates the actual merge to it.
 Auth: reads ``TRAFFIC_TOKEN`` if set, else ``GITHUB_TOKEN`` (the workflow
 supplies one). The traffic endpoints require push access, so a bare
 ``GITHUB_TOKEN`` may be rejected — in that case the script prints a clear
-message about creating a ``TRAFFIC_TOKEN`` repo secret and EXITS 0
-(snapshotting is best-effort and must never fail the workflow). The token is
-never printed or logged.
+message about creating a ``TRAFFIC_TOKEN`` repo secret and EXITS 0.
+
+Snapshotting is best-effort and must NEVER fail the workflow, so every
+*transient / access* failure is swallowed (print one reason line, exit 0
+without writing): HTTP 401/403/404 (no push access / bad token), 429 (rate
+limit), any 5xx (server/gateway blip), and network-level failures
+(``URLError`` / socket timeout). Genuinely unexpected errors — a
+``JSONDecodeError``, a ``KeyError``, other programming bugs — stay fail-loud
+(non-zero) so real breakage still surfaces. The token is never printed or
+logged (no skip message contains it).
 
 Usage::
 
@@ -75,6 +88,15 @@ _ACCESS_HINT = (
     "fine-grained PAT with 'Administration: read' on this repo, or a classic PAT "
     "with the 'repo' scope. Exiting 0 without writing."
 )
+_RATE_LIMIT_HINT = (
+    "GitHub traffic snapshot skipped (best-effort): rate-limited (HTTP 429). "
+    "Exiting 0 without writing — the next daily run will retry."
+)
+_NETWORK_HINT = (
+    "GitHub traffic snapshot skipped (best-effort): could not reach the GitHub "
+    "API (network error / timeout). Exiting 0 without writing — the next daily "
+    "run will retry."
+)
 
 
 def _iso_date(timestamp: str) -> str:
@@ -105,7 +127,9 @@ def merge_traffic(
     is overwritten with the freshest value. The rolling 14-day totals in
     ``summaries`` are refreshed from the API's top-level count/uniques, and the
     stars/forks ``snapshot`` for ``run_date`` is upserted into ``snapshots``
-    (idempotent within a day) with ``latest`` pointing at the newest one.
+    (idempotent within a day) with ``latest`` pointing at the newest snapshot
+    *by date* — a backfill / out-of-order run with an older ``run_date`` cannot
+    make ``latest`` regress.
 
     Does not mutate ``existing`` — carried-over records are deep-copied.
     """
@@ -143,7 +167,9 @@ def merge_traffic(
         "views": views_daily,
         "summaries": summaries,
         "snapshots": snapshots,
-        "latest": snapshot,
+        # Newest snapshot by date (snapshots is date-sorted and non-empty) — an
+        # out-of-order backfill run cannot regress ``latest``.
+        "latest": snapshots[-1],
     }
 
 
@@ -174,6 +200,39 @@ def _load_existing(path: Path) -> dict[str, Any]:
     return {}
 
 
+def classify_fetch_error(exc: BaseException) -> str | None:
+    """Classify a fetch failure as a best-effort skip vs a fatal error.
+
+    Returns a short one-line reason (safe to print — never contains the token)
+    when ``exc`` is a *transient / access* failure that should be swallowed so
+    the daily cron stays green, or ``None`` when the caller should re-raise it.
+
+    Swallowed (returns a reason):
+      * HTTP 401 / 403 / 404 — no push access or an invalid token;
+      * HTTP 429 — rate limited;
+      * HTTP 5xx — a GitHub server / gateway blip;
+      * ``URLError`` / ``TimeoutError`` (socket timeout) — network trouble.
+
+    Fatal (returns ``None`` → re-raise): every other ``HTTPError`` code (e.g. a
+    400 / 422 signalling a real request bug) and any non-network exception such
+    as ``JSONDecodeError`` or ``KeyError`` — those are programming bugs that
+    must surface loudly.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in _INSUFFICIENT_ACCESS_CODES:
+            return _ACCESS_HINT
+        if exc.code == 429:
+            return _RATE_LIMIT_HINT
+        if exc.code >= 500:
+            return _NETWORK_HINT
+        return None
+    # HTTPError subclasses URLError, so this branch only sees genuine network
+    # errors (DNS/connection) and socket timeouts (TimeoutError since 3.10).
+    if isinstance(exc, urllib.error.URLError | TimeoutError):
+        return _NETWORK_HINT
+    return None
+
+
 def main() -> int:
     """CLI entrypoint. Returns a process exit code (0 = ok or best-effort skip)."""
     token = os.environ.get("TRAFFIC_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
@@ -191,11 +250,15 @@ def main() -> int:
         clones = _fetch_json(clones_url, token)
         views = _fetch_json(views_url, token)
         repo_meta = _fetch_json(repo_url, token)
-    except urllib.error.HTTPError as exc:
-        if exc.code in _INSUFFICIENT_ACCESS_CODES:
-            print(_ACCESS_HINT)
-            return 0
-        raise
+    except (urllib.error.URLError, TimeoutError) as exc:
+        # HTTPError (a URLError subclass), 429/5xx, and network/timeout failures
+        # are best-effort skips (exit 0). A fatal HTTPError code re-raises;
+        # JSONDecodeError / KeyError aren't caught here at all → fail loud.
+        reason = classify_fetch_error(exc)
+        if reason is None:
+            raise
+        print(reason)
+        return 0
 
     # UTC "today" marks this snapshot's stars/forks and the summaries' as_of.
     run_date = datetime.now(UTC).strftime("%Y-%m-%d")
