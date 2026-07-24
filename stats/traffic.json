@@ -1,0 +1,77 @@
+{
+  "clones": {
+    "2026-07-12": {
+      "count": 1,
+      "uniques": 1
+    },
+    "2026-07-13": {
+      "count": 4,
+      "uniques": 3
+    },
+    "2026-07-14": {
+      "count": 1,
+      "uniques": 1
+    },
+    "2026-07-15": {
+      "count": 3,
+      "uniques": 3
+    },
+    "2026-07-16": {
+      "count": 0,
+      "uniques": 0
+    },
+    "2026-07-17": {
+      "count": 12,
+      "uniques": 8
+    },
+    "2026-07-18": {
+      "count": 16,
+      "uniques": 9
+    },
+    "2026-07-19": {
+      "count": 3,
+      "uniques": 3
+    },
+    "2026-07-20": {
+      "count": 275,
+      "uniques": 20
+    },
+    "2026-07-21": {
+      "count": 55,
+      "uniques": 22
+    },
+    "2026-07-22": {
+      "count": 35,
+      "uniques": 14
+    },
+    "2026-07-23": {
+      "count": 4,
+      "uniques": 4
+    }
+  },
+  "latest": {
+    "date": "2026-07-24",
+    "forks": 1,
+    "stars": 9
+  },
+  "snapshots": [
+    {
+      "date": "2026-07-24",
+      "forks": 1,
+      "stars": 9
+    }
+  ],
+  "summaries": {
+    "clones_14d": {
+      "as_of": "2026-07-24",
+      "count": 409,
+      "uniques": 74
+    },
+    "views_14d": {
+      "as_of": "2026-07-24",
+      "count": 201,
+      "uniques": 110
+    }
+  },
+  "views": {}
+}

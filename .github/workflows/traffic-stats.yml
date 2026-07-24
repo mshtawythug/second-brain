@@ -1,0 +1,75 @@
+# =============================================================================
+# Daily repo-traffic snapshot -> committed permanent history
+# -----------------------------------------------------------------------------
+# GitHub only keeps repository traffic (clones / views) for a rolling 14 days
+# and exposes it solely to accounts with push access. This job runs
+# `scripts/snapshot_traffic.py` once a day to pull the current window and merge
+# it into `stats/traffic.json`, so the clone/visitor history accumulates
+# permanently instead of scrolling off after two weeks. It then commits the
+# file back only when it actually changed.
+#
+# Token / 403 note:
+#   The traffic endpoints (/traffic/clones, /traffic/views) require PUSH access.
+#   The default GITHUB_TOKEN often lacks it and the API returns 403 — the script
+#   handles that gracefully (prints a hint and exits 0; the job stays green).
+#   To capture real traffic history, create a repo secret named TRAFFIC_TOKEN:
+#     * a fine-grained PAT with "Administration: read" on this repo, OR
+#     * a classic PAT with the "repo" scope.
+#   The script reads TRAFFIC_TOKEN first, then GITHUB_TOKEN, so once the secret
+#   exists it is used automatically with no workflow change.
+#
+# `[skip ci]` in the commit message keeps the snapshot commit from re-triggering
+# the eval / benchmark / other workflows (avoids a daily CI storm).
+# =============================================================================
+name: traffic-stats
+
+on:
+  schedule:
+    # Daily at ~06:17 UTC (offset off the hour to dodge scheduler congestion).
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+# Needed so the job can commit stats/traffic.json back to the repo.
+permissions:
+  contents: write
+
+# Never run two snapshots at once (they would race on the same file).
+concurrency:
+  group: traffic-stats
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    name: Snapshot repo traffic
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Snapshot traffic into stats/traffic.json
+        env:
+          # Prefer an admin-scoped TRAFFIC_TOKEN secret; fall back to the
+          # default GITHUB_TOKEN (which may 403 on the traffic endpoints —
+          # the script degrades gracefully and exits 0 in that case).
+          GITHUB_TOKEN: ${{ secrets.TRAFFIC_TOKEN || secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python scripts/snapshot_traffic.py
+
+      - name: Commit updated history if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet -- stats/traffic.json; then
+            echo "No traffic changes to commit."
+          else
+            git add stats/traffic.json
+            git commit -m "chore(stats): daily traffic snapshot [skip ci]"
+            git push
+          fi
