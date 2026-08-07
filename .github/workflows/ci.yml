@@ -141,8 +141,17 @@ jobs:
       - name: Start the AGE test instance
         run: docker compose -f docker-compose.age-test.yml up -d
 
-      - name: Install package (with dev extras)
-        run: pip install -e ".[dev]"
+      - name: Install package (with dev extras) into a repo-local .venv
+        # Into `.venv/` specifically, not the hosted Python. The `bin/` wrapper
+        # scripts exec `<repo>/.venv/bin/<script>` deliberately — resolving via
+        # PATH would exec-loop when `bin/` precedes `.venv/bin/` — and
+        # tests/test_bin_scripts.py asserts on that behaviour. Without a .venv
+        # those tests fail here and nowhere else, which is the CI-vs-developer
+        # divergence this gate exists to catch, pointed the wrong way.
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
 
       - name: Wait for the AGE instance to be ready
         run: |
@@ -159,10 +168,19 @@ jobs:
           exit 1
 
       - name: Run the quality gate (default markers + 85% coverage floor)
-        # Bare `pytest` on purpose — pyproject.toml owns the marker filter and
+        # No extra flags on purpose — pyproject.toml owns the marker filter and
         # the coverage floor. Adding flags here would let CI drift from what a
         # contributor runs locally.
-        run: pytest
+        #
+        # Invoked through `.venv/bin/` rather than bare `pytest` because the
+        # `bin/` wrapper tests exec `<repo>/.venv/bin/<script>` by design (a
+        # deliberate choice: resolving those console scripts via PATH would
+        # exec-loop whenever `bin/` precedes `.venv/bin/`). Installing into the
+        # hosted Python instead left no `.venv`, so those tests failed in CI
+        # while passing for every contributor — CI green, developers red, or
+        # here the reverse. Matching the dev-checkout layout keeps the two
+        # environments honest about each other.
+        run: .venv/bin/pytest
 
       - name: Tear down the AGE test instance
         if: always()

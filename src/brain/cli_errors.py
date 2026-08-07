@@ -37,7 +37,18 @@ class BrainGroup(TyperGroup):
     would trade one bad experience for a worse one.
     """
 
-    def invoke(self, ctx: click.Context) -> Any:
+    # `ctx` is deliberately `Any` rather than `click.Context`. Typer changed
+    # which Context class `TyperGroup.invoke` declares: older releases use
+    # `click.Context`, newer ones a vendored `typer._click.core.Context` (a
+    # module that does not even exist in the older package). Naming either one
+    # here type-checks against that Typer and fails Liskov against the other,
+    # and `pyproject.toml` pins only `typer>=0.13` — so a fresh resolve in CI
+    # and a developer's older lockfile legitimately disagree. That divergence
+    # is real and version-dependent; `Any` is honest about it, where a
+    # `# type: ignore` would be dead weight on whichever version does not need
+    # it (`strict = true` flags unused ignores). The runtime object is a Click
+    # Context either way, which is all `click.UsageError(ctx=...)` requires.
+    def invoke(self, ctx: Any) -> Any:
         try:
             return super().invoke(ctx)
         except ConfigError as exc:
