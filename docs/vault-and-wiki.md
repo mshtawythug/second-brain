@@ -189,6 +189,26 @@ in the configuration docs.
 
 Quartz is a Node.js project, so this assumes Node 18+ is on your PATH. `brain doctor` prints a `quartz/npx` line (`OK` / `not installed`) so you can tell at a glance whether you're set up.
 
+**The one-command path is `brain wiki install`** — it does everything below for
+you: clones `jackyzha0/quartz` at the pinned commit into `<vault>/.quartz/`,
+applies the brain overlay from `quartz_overrides/`, runs `npm install`, and
+writes `$BRAIN_HOME/Caddyfile` ready for `caddy run`. (`brain setup --profile
+full` runs it as part of first-run provisioning; `--skip-wiki` opts out.)
+
+```bash
+brain wiki install --dry-run     # print planned actions, touch nothing
+brain wiki install               # clone + overlay + npm install + Caddyfile
+brain wiki install --port 9090   # Caddy port written into the Caddyfile (default 8080)
+```
+
+Re-running on an existing workspace re-applies the overlay and re-renders the
+Caddyfile **without** re-cloning, so it is safe to repeat after a repo update.
+`--force` wipes and re-clones (destructive — it `rmtree`s `.quartz/`), and
+`--no-npm` skips the install step for offline environments. It does not install
+Caddy or npm for you; it prints remediation messages if either is missing.
+
+The manual equivalent, if you would rather drive each step yourself:
+
 ```bash
 # 1. Clone Quartz into your vault as `.quartz/`. (Quartz isn't published
 #    to npm — there's no `npx quartz create`; the canonical install is
@@ -210,14 +230,16 @@ cp ~/workspace/second-brain/quartz.config.ts ./quartz.config.ts
 
 ```bash
 brain vault render
-# → rendered to /…/dist (open dist/index.html or serve with `python -m http.server` from there)
+# → rendered to ~/brain-vault/.quartz/dist (open …/dist/index.html or serve with `python -m http.server` from there)
 ```
+
+The output directory is derived from the vault, not from where you happen to be standing, so the site lands in the same place whether you run it from a shell, a script, or a scheduled job.
 
 Flags:
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--to PATH` | `./dist` | Where to write the rendered site. Must stay under the cwd (no `..` traversal). |
+| `--to PATH` | `<quartz-dir>/dist` (i.e. `<vault>/.quartz/dist`) | Where to write the rendered site. A relative path is resolved against the current directory. The Quartz build **deletes** its output directory before emitting, so render refuses any path that contains the vault, the Quartz workspace, or the current directory — `--to .` included. |
 | `--vault PATH` | `cfg.vault_path` | Render a different vault than the configured one. |
 | `--quartz-dir PATH` | `<vault>/.quartz` | Point at a Quartz workspace elsewhere on disk. |
 | `--no-build` | off | Verify the Quartz workspace is wired up correctly without running the build. |

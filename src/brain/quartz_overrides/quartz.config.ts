@@ -33,6 +33,10 @@
 
 import { QuartzConfig } from "./quartz/cfg"
 import * as Plugin from "./quartz/plugins"
+// brain-extension (F6): imported by PATH rather than through the `Plugin`
+// barrel, so the overlay does not have to replace upstream's
+// `quartz/plugins/filters/index.ts` — one fewer upstream file to keep in sync.
+import { RemoveConfidential } from "./quartz/plugins/filters/sensitivity"
 
 const config: QuartzConfig = {
   configuration: {
@@ -240,12 +244,31 @@ const config: QuartzConfig = {
       // once per build to compute which folders are empty.
       Plugin.EmptyDoorFilter(),
       Plugin.Description(),
-      // strict: "ignore" suppresses KaTeX strict-mode build warnings for
-      // typographic chars (en/em-dashes, », ¢) in math contexts — cosmetic
-      // only, rendering unchanged.
+      // strict: "ignore" quiets KaTeX's strict-mode `unicodeTextInMathMode`
+      // report for Latin-1 typographic chars. It does NOT silence the
+      // `No character metrics for '<c>' in style 'Main-Regular'` warnings —
+      // those come from an unconditional console.warn in katex's makeSymbol
+      // and no option gates them. The earlier comment here claimed otherwise;
+      // it was wrong, and the warnings kept accumulating in the build log.
+      //
+      // The actual cause of those warnings was single-dollar inline math
+      // swallowing ordinary prose between two dollar amounts. That is fixed in
+      // the overlay's own quartz/plugins/transformers/latex.ts, which passes
+      // `singleDollarTextMath: false` to remarkMath — see the comment there.
+      // `$$…$$` block math still works.
       Plugin.Latex({ renderEngine: "katex", katexOptions: { strict: "ignore" } }),
     ],
-    filters: [Plugin.RemoveDrafts()],
+    // brain-extension (F6): TWO filters, deliberately separate.
+    //
+    // `RemoveDrafts` is upstream and means "not ready to show".
+    // `RemoveConfidential` is ours and means "must not leak". They share a
+    // mechanism (`shouldPublish`, which drops the file before ANY emitter
+    // runs — page, RSS feed, tag listings, contentIndex, contentBodies) but
+    // not a branch, because sharing a branch is how a publish *guarantee*
+    // got assumed rather than checked: filtering only the contentIndex
+    // emitter left confidential bodies live at `<slug>.html`, in `index.xml`,
+    // and on `tags/<tag>.html`. See the plugin's own file for the measurement.
+    filters: [Plugin.RemoveDrafts(), RemoveConfidential()],
     emitters: [
       Plugin.AliasRedirects(),
       Plugin.ComponentResources(),

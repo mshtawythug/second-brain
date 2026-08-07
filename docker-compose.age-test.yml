@@ -3,7 +3,7 @@
 # NAMED docker volume (`second-brain-age-test-postgres`), never the prod
 # bind-mount at ./data/postgres.
 #
-# Prod stays on stock pgvector on port 5433 (./data/postgres) via
+# Prod stays on stock pgvector on port 55432 (./data/postgres) via
 # docker-compose.yml and is NEVER touched by this file. The Apache AGE cutover
 # of the prod container is gated — see docs/specs/2026-05-20-graphrag-age-image.md.
 #

@@ -86,7 +86,10 @@ def _build_doc_results(
         "SELECT DISTINCT ON (c.document_id) c.document_id::text, c.content "
         "FROM chunks c WHERE c.document_id = ANY(%s) "
         "ORDER BY c.document_id, "
-        "ts_rank(c.tsv, to_tsquery('english', %s)) DESC, c.chunk_index ASC",
+        # %s::tsquery — _build_tsquery returns LEXEMES; re-parsing them
+        # with the english config double-stems and stops matching the
+        # stored tsv. See brain.search._build_tsquery.
+        "ts_rank(c.tsv, %s::tsquery) DESC, c.chunk_index ASC",
         (doc_ids, tsquery),
     ).fetchall()
     snippet_by_doc = {str(row[0]): str(row[1]) for row in snippet_rows}

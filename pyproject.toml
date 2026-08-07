@@ -1,6 +1,6 @@
 [project]
 name = "secondbrain-py"
-version = "0.2.1"
+version = "0.3.0"
 description = "Local personal knowledge base with hybrid search, queryable by Claude"
 readme = "README.md"
 license = "MIT"
@@ -40,6 +40,11 @@ dependencies = [
   "python-dotenv>=1.0",
   "tiktoken>=0.8",
   "mcp>=1.0,<2.0",
+  # `brain ui` imports these directly. They resolve transitively via `mcp`
+  # today, so declaring them adds zero new wheels — it stops a silent
+  # import-time break if `mcp` ever drops them.
+  "starlette>=0.47,<2",
+  "uvicorn>=0.30",
   "voyageai>=0.3",
   "pyyaml>=6.0",
   "watchdog>=4.0",
@@ -105,6 +110,16 @@ where = ["src"]
 "brain.templates.bin" = ["*.sh"]
 "brain.templates.launchd" = ["*.j2"]
 "brain.templates.skill" = ["*.md"]
+# Pre-landed by Task 0B (plan 2026-07-25) so no later wave has to edit this
+# file: `packages.find` auto-discovers, so an entry whose package does not exist
+# yet is simply inert until the wave that creates it lands.
+#   brain.templates.claude: the session-end capture hook shell script that
+#     `brain claude install-hooks` copies into the user's Claude Code config
+#     directory (Task 1B, F1).
+#   brain.ui: the static assets `brain ui` serves -- HTML/CSS/JS only, no
+#     bytecode, mirroring the explicit-extension rule used above (Task 5A, F14).
+"brain.templates.claude" = ["*.sh"]
+"brain.ui" = ["static/*.html", "static/*.css", "static/*.js"]
 # brain.demo: the synthetic `brain demo` corpus manifest (a plain data subdir
 # under corpus/, no __init__.py) shipped so the zero-Ollama taste test works on
 # pipx/wheel installs. Explicit "corpus/*.json" (not "**/*") avoids bytecode.
@@ -125,10 +140,14 @@ where = ["src"]
 "brain.templates.launchd" = ["__pycache__/*", "*.pyc"]
 "brain.templates.skill" = ["__pycache__/*", "*.pyc"]
 "brain.demo" = ["__pycache__/*", "*.pyc"]
+# Twins of the two Task 0B package-data entries above; inert until Waves 1/5
+# create those packages.
+"brain.templates.claude" = ["__pycache__/*", "*.pyc"]
+"brain.ui" = ["__pycache__/*", "*.pyc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval and not benchmark and not e2e and not phase3'"
+addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval and not benchmark and not e2e and not phase3 and not live_db'"
 markers = [
   # P3.5 — frontend integration harness. Tests under this marker shell
   # out to `npx quartz build` and serve the artifact over HTTP (or rsync the
@@ -146,7 +165,34 @@ markers = [
   # a known-bad doc. Used to tune ``DEFAULT_VECTOR_SIM_FLOOR`` and to
   # canary-check the post-fix corpus. Skipped on hosts without those
   # services; opt out via `-m "not live_db"`.
-  "live_db: requires live local Postgres + Ollama (Phase D verification)",
+  # EXCLUDED from the default suite as of C7 (2026-08-07), for the same reason
+  # ``eval`` is: a gating suite whose pass/fail depends on a live daemon, a live
+  # corpus and free RAM is not a gate. On 2026-08-07 these three tests failed
+  # inside a full run and passed 3/3 in isolation, in a 584-test search slice,
+  # and with no unrestored env writes anywhere — they were reporting machine
+  # conditions, and they looked exactly like a search-ranking regression. That
+  # near-miss is the reason for this line.
+  #
+  # Do NOT re-enable them thinking it raises coverage: they assert ranking
+  # against whatever happens to be in the operator's production corpus, so what
+  # they add is variance, not coverage. Run them deliberately:
+  #
+  #     pytest -m live_db --no-cov   # canaries + similarity-floor checks
+  #
+  # `--no-cov` is not optional: addopts still carries --cov-fail-under=85,
+  # which a 7-test run trips even when every test passes.
+  #
+  "live_db: requires live local Postgres + Ollama; opt-IN via -m live_db",
+  # NOTE ``live_ollama`` is deliberately NOT in the deselect list, and is
+  # registered in tests/conftest.py rather than here. It does double duty: on
+  # the canaries it means "needs a real embedder", but on
+  # tests/test_llm_hermeticity.py::test_live_ollama_marker_lifts_the_guard it
+  # only lifts the socket ban — that test needs no live service, runs in 0.25 s,
+  # and is the ONLY proof that the escape hatch still works. Excluding the
+  # marker took it out of the gate, so a future break in `_forbid_live_ollama`'s
+  # opt-out would have surfaced as a confusing corpus error under `-m live_db`
+  # instead of a red test. `not live_db` alone already deselects both canary
+  # modules, since they carry both markers.
   # Wave Q1-B — Eval harness. Tests under this marker run the 20-query
   # golden corpus against the live local Postgres + Ollama, scoring
   # nDCG@5 / MRR / Recall@20.  Excluded from the default suite; opt-IN

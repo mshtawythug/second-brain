@@ -1,0 +1,169 @@
+# =============================================================================
+# Quality gate — ruff + mypy + the default pytest suite
+# -----------------------------------------------------------------------------
+# This is the workflow the README's **CI** badge points at, and the gate
+# .github/PULL_REQUEST_TEMPLATE.md already promises ("`ruff check && mypy src/
+# && pytest` all pass, coverage floors met"). Before this existed, no workflow
+# ran any of the three: eval.yml and benchmark.yml are marker-gated harnesses
+# that both pass `--no-cov`, so a PR could break the type checker or drop
+# coverage below the floor and still show green.
+#
+# Design decisions:
+#
+#   * TWO JOBS, one workflow. `lint` needs no Docker and finishes in well under
+#     a minute, so a formatting or typing mistake fails fast and cheap instead
+#     of after a container bring-up plus the full suite. Both live here so a
+#     single `ci.yml` badge covers the union.
+#
+#   * BARE `pytest`, no extra flags. pyproject.toml's `addopts` already carries
+#     `--cov=brain --cov-fail-under=85` and already deselects the five gated
+#     markers, so CI runs exactly what a contributor runs locally. Do NOT add
+#     `--no-cov` (as eval.yml/benchmark.yml deliberately do) — the coverage
+#     floor is the entire point of this workflow.
+#
+#     Marker exclusions inherited from pyproject.toml, and why each stays out:
+#       - `e2e`       needs a Node toolchain + the live ~/brain-vault/.quartz/
+#                     workspace; non-hermetic by construction.
+#       - `benchmark` loads a 50k-entity graph; gated in benchmark.yml.
+#       - `eval`      needs a live corpus + Ollama; gated in eval.yml.
+#       - `phase3`    needs the optional migration-021 doc_date column, so v1/v2
+#                     databases stay green.
+#       - `live_db`   needs the operator's live PRODUCTION corpus + Ollama.
+#                     Excluded since 2026-08-07 (C7): it self-skipped here, but
+#                     locally it asserted ranking against whatever happened to
+#                     be in that corpus, so it reported machine conditions
+#                     rather than code. Run it deliberately:
+#                     `pytest -m live_db --no-cov`.
+#
+#     `integration` is intentionally NOT excluded: it needs only the port-5434
+#     container this job starts. Nor is `live_ollama` — it does double duty,
+#     and on tests/test_llm_hermeticity.py it merely lifts the socket ban on a
+#     test that needs no live service and is the only proof that escape hatch
+#     still works.
+#
+#   * NO OLLAMA on the runner, deliberately. Every default-suite test that
+#     reaches an embedder either carries the `eval` marker (deselected) or calls
+#     `pytest.skip()` on the connection failure — see
+#     tests/test_search_canary_queries.py and
+#     tests/test_search_floor_default_excludes_known_bad.py. A non-zero skip
+#     count in this job's summary is EXPECTED; a run with zero skips would mean
+#     something reached a live service it should not have.
+#
+#   * PINNED Apache AGE image via docker-compose.age-test.yml (port 5434, db
+#     `second_brain_test`) — the same instance the local suite uses, and the
+#     same pattern as eval.yml/benchmark.yml. A GitHub Actions `services:`
+#     block can't `build:` an image inline, so compose is used instead of a
+#     service container. Unlike those two workflows this one PULLS first rather
+#     than `up -d --build`: ci.yml runs on every PR, so it is the workflow that
+#     most needs the fast path. Compose v2 builds rather than pulls on a bare
+#     `up` when both `image:` and `build:` are present, hence the explicit pull
+#     step; `|| true` preserves the local-build fallback the compose file
+#     promises if GHCR is unreachable or the image is still private.
+#
+#   * DB SAFETY: DATABASE_URL/TEST_DATABASE_URL are pinned to port 5434 and a
+#     `*_test` database. tests/conftest.py aborts at collection time if either
+#     ever resolves to a prod host/port/dbname, and `down -v` targets only the
+#     named `second-brain-age-test-postgres` volume — never the prod
+#     ./data/postgres bind-mount.
+#
+#   * Least privilege: `permissions: contents: read`. Nothing here writes, and
+#     no secret is referenced, so fork PRs run unchanged.
+#
+#   * Concurrency: cancel in-progress runs only on PRs (most recent push wins);
+#     master/main keeps a complete audit trail. Matches eval.yml.
+# =============================================================================
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: Lint and types (ruff + mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package (with dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check
+
+      - name: mypy src/
+        run: mypy src/
+
+  test:
+    name: Tests (pytest, AGE Postgres)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      DATABASE_URL: postgresql://brain:brain@localhost:5434/second_brain_test
+      TEST_DATABASE_URL: postgresql://brain:brain@localhost:5434/second_brain_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Pull the pinned AGE image (falls back to a local build)
+        # `|| true`: on a registry miss the following `up -d` compiles AGE from
+        # src/brain/templates/docker/age/Dockerfile instead. Slower, still green.
+        run: docker compose -f docker-compose.age-test.yml pull --quiet || true
+
+      - name: Start the AGE test instance
+        run: docker compose -f docker-compose.age-test.yml up -d
+
+      - name: Install package (with dev extras)
+        run: pip install -e ".[dev]"
+
+      - name: Wait for the AGE instance to be ready
+        run: |
+          for i in $(seq 1 60); do
+            if pg_isready -h localhost -p 5434 -U brain -d second_brain_test; then
+              echo "AGE instance is ready"
+              exit 0
+            fi
+            echo "waiting for AGE instance ($i/60)..."
+            sleep 2
+          done
+          echo "AGE instance did not become ready in time" >&2
+          docker compose -f docker-compose.age-test.yml logs --tail=50
+          exit 1
+
+      - name: Run the quality gate (default markers + 85% coverage floor)
+        # Bare `pytest` on purpose — pyproject.toml owns the marker filter and
+        # the coverage floor. Adding flags here would let CI drift from what a
+        # contributor runs locally.
+        run: pytest
+
+      - name: Tear down the AGE test instance
+        if: always()
+        run: docker compose -f docker-compose.age-test.yml down -v

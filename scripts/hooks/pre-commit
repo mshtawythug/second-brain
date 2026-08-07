@@ -22,6 +22,68 @@ repo_root="$(git rev-parse --show-toplevel)"
 allowlist="${repo_root}/.pii-allowlist.txt"
 denylist="${repo_root}/.pii-denylist.local.txt"
 
+# --- 0. Lint + type gate (runs FIRST: cheapest, most deterministic) ---------
+#
+# Why this is here and not only in CI: on 2026-08-05 SIX undefined-name defects
+# landed in one session, and every one of them reached another teammate's gate
+# run before its author noticed — a circular import that broke `import
+# brain.ingest` (so NO pytest run in the repo could collect), plus five
+# NameErrors. CI catches them eventually; by then they have already cost
+# somebody else a debugging cycle. Local-first is what stops that.
+#
+# BOTH tools, as separate steps with distinct messages, because neither is
+# sufficient alone — measured on those six:
+#   5 caught by `ruff check` (F821 undefined name)
+#   1 caught ONLY by `mypy`  (routes_search.py:57, inside security-relevant code)
+#   0 caught by any runtime test that existed at the time
+# The mechanism, verified directly: ruff's F821 is a NAME-scope check, so it
+# sees `_helper()` but not `self.missing_attr`; mypy reports both
+# (`name-defined` AND `attr-defined`). So mypy strictly dominates on this class
+# and ruff is the fast first pass — hence both, in that order.
+# A combined "lint failed" message is worse than either alone, so they stay
+# split and each prints the command to reproduce.
+#
+# Cost measured on this repo: ruff ~0.2s, mypy ~1.0s warm. Cheap enough to run
+# on every commit, and both run BEFORE the `claude -p` semantic pass below so a
+# syntax-level failure never waits on a network round-trip.
+#
+# CAVEAT: these check the WORKING TREE, not the staged snapshot. A commit made
+# with unrelated unstaged edits present can therefore pass or fail on code that
+# is not being committed. Checking the staged tree exactly would need a
+# temporary checkout, which is not worth the complexity or the risk in a repo
+# where several agents share a worktree — CI checks the real committed state.
+#
+# A missing tool WARNS rather than blocks: refusing to commit because a dev
+# extra is not installed is hostile, and CI is the hard gate. Mirrors the
+# `claude`-not-found path below.
+if git diff --cached --name-only --diff-filter=ACM | grep -qE '\.py$'; then
+  if command -v ruff >/dev/null 2>&1; then
+    if ! ruff_out="$(cd "${repo_root}" && ruff check 2>&1)"; then
+      echo "🚫 pre-commit lint gate: ruff check failed" >&2
+      printf '%s\n' "${ruff_out}" >&2
+      echo "   Reproduce: ruff check   (auto-fix many: ruff check --fix)" >&2
+      echo "   Bypass consciously: git commit --no-verify" >&2
+      exit 1
+    fi
+  else
+    echo "⚠️  pre-commit lint gate: 'ruff' not found — skipping lint." >&2
+    echo "   Install dev extras (pip install -e '.[dev]') to gate locally." >&2
+  fi
+
+  if command -v mypy >/dev/null 2>&1; then
+    if ! mypy_out="$(cd "${repo_root}" && mypy src/ 2>&1)"; then
+      echo "🚫 pre-commit type gate: mypy src/ failed" >&2
+      printf '%s\n' "${mypy_out}" >&2
+      echo "   Reproduce: mypy src/" >&2
+      echo "   Bypass consciously: git commit --no-verify" >&2
+      exit 1
+    fi
+  else
+    echo "⚠️  pre-commit type gate: 'mypy' not found — skipping type check." >&2
+    echo "   Install dev extras (pip install -e '.[dev]') to gate locally." >&2
+  fi
+fi
+
 # Added content lines of the staged diff (what actually enters history). awk
 # skips the `+++ ` file-header line and strips the single leading `+` marker, so
 # a real added line whose content itself starts with `+` (e.g. `+sk-...`) is
@@ -42,17 +104,58 @@ fail() {
 # its upstream writer and flip the pipeline status under `pipefail`.
 
 # Secrets / API keys / private keys.
-if grep -nEi \
-  '(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[0-9A-Za-z-]{10,}|sk-[A-Za-z0-9]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{18,}|AIza[0-9A-Za-z_-]{35})' \
-  <<<"${added}" >/dev/null; then
+#
+# The alternation below is the SHARED artifact between this hook and
+# src/brain/secret_patterns.py, which the ingest-time secret guard imports. The
+# hook keeps its own copy because it must run offline, with no venv, from a
+# `git commit` in any shell — it cannot `import brain`. Byte-equality is
+# enforced by tests/test_secret_pattern_hook_parity.py, so adding a pattern in
+# Python without regenerating this line turns the suite red.
+#
+#   Regenerate:  python -m brain.secret_patterns --emit-egrep
+#
+# --- BEGIN GENERATED: brain.secret_patterns.egrep_alternation() — do not edit by hand ---
+_SECRET_RE='(AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|xox[baprs]-[0-9A-Za-z-]{10,}|sk-[A-Za-z0-9]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|sk_live_[A-Za-z0-9]{20,}|rk_live_[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{18,}|AIza[0-9A-Za-z_-]{35})'
+# --- END GENERATED ---
+
+# Matches are EXTRACTED (-o) rather than merely detected, so allowlisted tokens
+# can be subtracted before failing. Previously this stage ignored
+# .pii-allowlist.txt entirely — only the semantic pass consulted it — which
+# meant a synthetic credential fixture could never be committed at all, however
+# obviously fake. tests/secret_fixtures.py needs exactly that, and the
+# allowlist's own header already scopes it to "FALSE POSITIVES ONLY".
+#
+# Subtraction is EXACT-LINE (-x) and fixed-string (-F): a short allowlist entry
+# like "API" cannot accidentally allow a longer real token that merely contains
+# it. Blank/comment lines are stripped first — an empty -F pattern would match
+# every line and silently disable the gate.
+secret_hits="$(grep -oEi "${_SECRET_RE}" <<<"${added}" || true)"
+if [ -n "${secret_hits}" ] && [ -f "${allowlist}" ]; then
+  allow_tokens="$(grep -vE '^[[:space:]]*(#|$)' "${allowlist}" || true)"
+  if [ -n "${allow_tokens}" ]; then
+    secret_hits="$(grep -vixF -- "${allow_tokens}" <<<"${secret_hits}" || true)"
+  fi
+fi
+if [ -n "${secret_hits}" ]; then
   fail "possible secret / API key in staged diff"
 fi
 
 # Real-looking email addresses. Allowed synthetic/example domains are anchored to
 # the END of the address, so a lookalike that appends a longer suffix to a
 # synthetic domain (e.g. a "example.com.evil" host) is NOT treated as synthetic.
+#
+# The optional `([A-Z0-9.-]+\.)?` prefix admits SUBDOMAINS of a reserved domain.
+# RFC 2606 reserves everything under example.com/net/org, so `db.example.com` is
+# exactly as synthetic as `example.com`; requiring the reserved name to sit
+# immediately after the `@` rejected legitimate fixtures and taught people to
+# reach for `--no-verify`, which disables every gate at once. The `$` anchor is
+# retained, so `example.com.evil` is still caught.
+#
+# `test|example|invalid|localhost` also appear as bare TLDs because RFC 2606
+# reserves them at that level (`person@example.invalid`), not only as
+# second-level names under .com/.org/.net.
 emails="$(grep -oEi '[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}' <<<"${added}" \
-  | grep -viE '@((example|test|acme|contoso|northwind|invalid)\.(com|org|net)|localhost)$' \
+  | grep -viE '@([A-Z0-9.-]+\.)?((example|test|acme|contoso|northwind|invalid)\.(com|org|net)|(test|example|invalid|localhost))$' \
   || true)"
 if [ -n "${emails}" ]; then
   fail "real-looking email address(es): $(printf '%s' "${emails}" | tr '\n' ' ')"

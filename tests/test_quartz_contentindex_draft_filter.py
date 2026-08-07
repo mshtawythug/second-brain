@@ -58,6 +58,42 @@ def test_emitter_filters_draft_entries(emitter_source: str) -> None:
     )
 
 
+def test_emitter_filters_confidential_entries(emitter_source: str) -> None:
+    """F6: the same filter drops ``sensitivity: confidential`` entries.
+
+    This is the publish half of F6's trust boundary, and it is load-bearing:
+    plan decision Q7 declines to filter ``hybrid_search`` *because the local CLI
+    is inside the trust boundary*, which concedes F6's whole security value to
+    the egress points. The other one is the hosted-embedder veto at ingest; this
+    is the one that governs what reaches a published site.
+
+    Strict string equality, mirroring ``draft``'s ``=== true``. A truthy check
+    would drop ``sensitivity: normal`` too — the exact opposite of the intent,
+    and it would silently empty the entire wiki.
+    """
+    assert 'fm.sensitivity === "confidential"' in emitter_source, (
+        'sensitivity filter missing or weakened — expected '
+        '`fm.sensitivity === "confidential"` in contentIndex.ts. See F6.'
+    )
+
+
+def test_emitter_confidential_filter_shares_the_draft_branch(
+    emitter_source: str,
+) -> None:
+    """Both quarantine rules live in ONE branch, so they cannot diverge.
+
+    Keeping them in the same ``if`` is what guarantees a confidential document
+    is dropped everywhere ``draft`` is — Explorer, graph, and search — rather
+    than in whichever subset a second, separately-maintained branch happened to
+    cover. It also means the ordering guarantee asserted below (filter before
+    the graft block) applies to both without a second assertion.
+    """
+    assert 'fm.draft === true || fm.sensitivity === "confidential"' in emitter_source, (
+        "the draft and sensitivity quarantine rules must share a single "
+        "branch; splitting them invites one to be updated without the other"
+    )
+
+
 def test_emitter_filter_drops_entry_via_delete(emitter_source: str) -> None:
     """The filter actually removes the entry rather than zero-filling it.
 

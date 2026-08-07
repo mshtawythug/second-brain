@@ -48,6 +48,16 @@ fi
 
 export BRAIN_WIKI_RELOAD=1
 
+# Cap oversized logs left by a previous (possibly crash-looping) generation
+# BEFORE this one starts writing. launchd owns fd 1/2 here and keeps them open
+# across the exec below, so rotation has to copy-truncate the file in place —
+# see src/brain/log_rotation.py for why a Python logging handler cannot do this
+# job. This wrapper especially needs the file-level cap: the Quartz build spawns
+# esbuild, whose Go runtime dumps goroutine traces straight to fd 2 on a hang,
+# bypassing Python entirely. --log-dir is omitted deliberately: the module
+# resolves $BRAIN_HOME/logs itself, and the plist now exports BRAIN_HOME.
+"$PY" -m brain.log_rotation 2>/dev/null || true
+
 mkdir -p "$(dirname "$BUILD_PID")"
 echo "$$" >"$BUILD_PID"
 exec "$PY" -m brain.wiki.build_watcher --vault "$VAULT" --keep "$KEEP"

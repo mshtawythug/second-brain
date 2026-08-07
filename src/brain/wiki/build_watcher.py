@@ -44,9 +44,11 @@ from watchdog.observers.polling import PollingObserver as Observer
 # delivering events on Python 3.13 — Observer starts cleanly, stays
 # alive, but never invokes the handler. See identical comment in
 # brain/vault/watch.py for the diagnosis.
+from ..log_rotation import default_log_dir, start_background_rotator
 from .build_partial import BrainWikiPartialBuildError, run_build_partial
 from .build_swap import BuildResult, _replace_vault_path, build_and_swap
 from .edit_classifier import EditClassification, classify_edit
+from .errors import BrainWikiConfigError
 from .fastpath_state import FastpathState, FastpathStateError, write_state
 from .slug import slugify_source_path
 
@@ -224,6 +226,51 @@ def run_watcher(
 # ---------------------------------------------------------------------------
 
 
+class _ErrorLatch:
+    """Log a recurring fault once, then stay quiet until the fault changes.
+
+    The watcher retries on every vault edit, so a *persistent* fault — a dead
+    config chain, a broken Quartz workspace — otherwise emits one record per
+    event. That is precisely the generator that produced a 506,756,066-byte
+    ``com.brain.watcher.err.log``: the same ~2 KB traceback written roughly a
+    quarter of a million times. Measured live on 2026-08-07, a 20-second
+    Postgres outage alone drove that log from 238 B to 157,791 B (~8 KB/sec).
+
+    Latching collapses that to a single line. The latch keys on the fault's
+    identity, so a genuinely *different* error still logs immediately, and
+    :meth:`clear` re-arms on success so a recurrence after a recovery is not
+    swallowed.
+
+    Complements — does not replace — the size cap in :mod:`brain.log_rotation`:
+    the cap bounds the file, the latch stops generating the garbage.
+
+    Thread-safe: ``_do_full_build`` runs on the debounce/build thread while
+    ``_run_refresh_related_once`` runs on the refresh thread.
+    """
+
+    def __init__(self) -> None:
+        self._key: str | None = None
+        self._lock = threading.Lock()
+
+    def should_log(self, key: str) -> bool:
+        """Return True when *key* differs from the currently latched fault."""
+        with self._lock:
+            if self._key == key:
+                return False
+            self._key = key
+            return True
+
+    def clear(self) -> None:
+        """Re-arm after a success so the next fault logs again."""
+        with self._lock:
+            self._key = None
+
+
+def _fault_key(exc: BaseException) -> str:
+    """Identity of a fault for latching: type plus message."""
+    return f"{type(exc).__name__}: {exc}"
+
+
 class _Handler(FileSystemEventHandler):
     """Watchdog handler that gates events into the debounce + build path.
 
@@ -263,6 +310,11 @@ class _Handler(FileSystemEventHandler):
         self._keep = keep
         self._on_build = on_build
         self._refresh_runner = refresh_runner
+        # One latch per fault channel so a build failure and a config failure
+        # never mask one another (each keeps its own "last seen" fault).
+        self._build_latch = _ErrorLatch()
+        self._config_latch = _ErrorLatch()
+        self._refresh_latch = _ErrorLatch()
         # Part 4 (T6b): read state.json on startup for telemetry only.
         # We use the state purely for logging — it never overrides routing.
         self._read_startup_state()
@@ -527,9 +579,29 @@ class _Handler(FileSystemEventHandler):
                 # blocking edit-to-UI on this one.
                 refresh_related_inline=False,
             )
-        except Exception:
-            logger.exception("wiki watcher: build failed")
+        except BrainWikiConfigError as exc:
+            # The box is misconfigured; the build itself is fine. Emit ONE
+            # bounded line and no traceback: this arm fires on every vault
+            # edit for as long as the fault lasts, and an unlatched
+            # logger.exception here is exactly what produced the 506 MB
+            # err.log. Deliberately does not exit — this runs under launchd
+            # KeepAlive, so exiting would convert a config outage into a
+            # respawn loop, i.e. the same log flood by another route.
+            # `brain doctor` carries the machine-readable signal instead.
+            if self._config_latch.should_log(_fault_key(exc)):
+                logger.error("wiki watcher: %s", exc)
             return
+        except Exception as exc:
+            # Latched too: a persistent build fault (e.g. a Quartz build that
+            # exceeds its timeout on every attempt) is just as capable of
+            # flooding the log. First occurrence keeps the full traceback;
+            # identical repeats are suppressed until the fault changes.
+            if self._build_latch.should_log(_fault_key(exc)):
+                logger.exception("wiki watcher: build failed")
+            return
+        # Build succeeded — re-arm both latches so a later fault still reports.
+        self._build_latch.clear()
+        self._config_latch.clear()
         # Build succeeded — update state.json (advisory, non-blocking).
         workspace = (
             self._quartz_dir if self._quartz_dir is not None else self._vault / ".quartz"
@@ -791,11 +863,21 @@ class _Handler(FileSystemEventHandler):
         try:
             cfg = Config.load()
         except ConfigError as exc:
-            logger.warning(
-                "wiki watcher: refresh_related skipped (Config.load failed: %s)",
-                exc,
-            )
+            # ERROR, not WARNING: this is the second line from the original
+            # 12-day-outage report, and at WARNING it read as routine noise
+            # while the daemon was in fact doing nothing useful.
+            #
+            # Latched because this runs per refresh, and NOT raised because we
+            # are on a daemon thread — raising here cannot exit the process the
+            # way it can in build_swap.main, it would just kill this thread
+            # silently. `brain doctor` carries the machine-readable signal.
+            if self._refresh_latch.should_log(_fault_key(exc)):
+                logger.error(
+                    "wiki watcher: refresh_related skipped (Config.load failed: %s)",
+                    exc,
+                )
             return
+        self._refresh_latch.clear()
         target_vault = self._vault.expanduser().resolve()
         cfg_for_build = (
             cfg
@@ -930,6 +1012,14 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    # Keep this daemon's launchd logs bounded while it is UP. The shim wrapper
+    # rotates once before exec, which caps the crash-loop shape (process dies,
+    # launchd respawns, repeat); this covers the complementary case, where the
+    # process stays alive for weeks and writes errors from its internal loop.
+    # Matters most here because the Quartz build spawns esbuild, whose Go
+    # runtime dumps goroutine traces straight to fd 2 on a hang.
+    start_background_rotator(default_log_dir())
+
     vault: Path = args.vault.expanduser().resolve()
     quartz_dir: Path | None = (
         args.quartz_dir.expanduser().resolve() if args.quartz_dir is not None else None
@@ -960,6 +1050,14 @@ def _run_initial_build(
     """
     try:
         result = build_and_swap(vault, quartz_dir=quartz_dir, keep=keep)
+    except BrainWikiConfigError as exc:
+        # One bounded line, no traceback. No latch needed — this runs once per
+        # process — but launchd restarts the process on a throttle, so under a
+        # persistent config fault this still fires repeatedly across restarts.
+        # Trading a ~2 KB Rich traceback for a ~100 byte line is what keeps
+        # that restart loop from refilling the log.
+        logger.error("wiki watcher: initial build skipped: %s", exc)
+        return None
     except Exception:
         logger.exception("wiki watcher: initial build failed")
         return None

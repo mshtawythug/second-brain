@@ -187,6 +187,14 @@ def _run_through_state_creation(
         patch("shutil.which", return_value="/usr/bin/fake"),
         patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="")),
         patch("brain.setup.ensure_shim"),  # skip real shim install
+        # Fresh-install shape: no repo .env anywhere, so setup renders a REAL
+        # $BRAIN_HOME/.env. Without this the developer's own checkout .env is
+        # visible and setup would symlink at it instead (and the test would
+        # then be asserting against the live repo config).
+        patch(
+            "brain.config._project_dotenv",
+            return_value=brain_home.parent / "no-such-project.env",
+        ),
     ):
         from brain.setup import run_setup
 
@@ -1019,6 +1027,11 @@ def _run_profile_setup(
         patch(
             "brain.setup.materialize_age_dockerfile",
             side_effect=lambda bh: mat_calls.append(bh) or (bh / "df"),
+        ),
+        # Fresh-install shape — see _run_through_state_creation for why.
+        patch(
+            "brain.config._project_dotenv",
+            return_value=tmp_path / "no-such-project.env",
         ),
     ):
         from brain.setup import run_setup

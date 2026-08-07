@@ -11,7 +11,10 @@ pin / click). Q1-C populated this table from two DOCUMENT surfaces:
 
 The wiki click surface (source='wiki') is reserved in the schema for a
 future wave; this module accepts it today so the deferred surface needs
-no additional migration.
+no additional migration. The local web UI (source='ui') joined the enum
+in migration 024, on BOTH telemetry tables — see that migration's header
+for why widening the SQL without this Python mirror silently rejects
+every UI interaction.
 
 G4-a (migration 015, spec §17d Q2) generalizes the writer so the graph
 surfaces — entity / community / theme — become FIRST-CLASS rateable
@@ -43,21 +46,26 @@ from .errors import InteractionError
 InteractionAction = Literal[
     "clicked", "opened", "rated_useful", "rated_irrelevant", "pinned"
 ]
-InteractionSource = Literal["cli", "mcp", "wiki"]
+InteractionSource = Literal["cli", "mcp", "wiki", "ui"]
 InteractionTargetType = Literal["entity", "community", "theme"]
 
 
 # Python-side enum gates — kept in sync with the SQL ``CHECK`` constraints
-# on ``interactions.action`` / ``interactions.source`` (migration 010) and
-# ``interactions.target_type`` (migration 015).
+# on ``interactions.action`` / ``interactions.source`` (migration 010, source
+# widened by 024) and ``interactions.target_type`` (migration 015).
 # Adding a new value here without the matching migration would silently
 # bypass the Python gate but still trip the SQL ``CHECK``; adding to the
 # SQL side without updating these sets would let a Python caller pass an
 # enum value the DB rejects at INSERT time. Keep both in lockstep.
+#
+# That lockstep is now ENFORCED, not merely requested:
+# ``tests/test_telemetry_source_enum.py`` asserts ``_VALID_SOURCES`` equals the
+# value set read back from the live constraint via ``pg_get_constraintdef``.
+# Widening one side alone turns that test red.
 _VALID_ACTIONS: frozenset[str] = frozenset({
     "clicked", "opened", "rated_useful", "rated_irrelevant", "pinned",
 })
-_VALID_SOURCES: frozenset[str] = frozenset({"cli", "mcp", "wiki"})
+_VALID_SOURCES: frozenset[str] = frozenset({"cli", "mcp", "wiki", "ui"})
 _VALID_TARGET_TYPES: frozenset[str] = frozenset({"entity", "community", "theme"})
 
 
@@ -98,6 +106,7 @@ def record_interaction(
     target_type: InteractionTargetType | None = None,
     target_id: str | None = None,
     graph_retrieved: bool = False,
+    agent_id: str | None = None,
 ) -> str:
     """INSERT one row into ``interactions`` and return its UUID as text.
 
@@ -144,6 +153,15 @@ def record_interaction(
             produced this interaction. Orthogonal to the target shape: a
             document row surfaced via a graph path is still a document row
             with ``graph_retrieved=True``.
+        agent_id: Which agent produced this interaction (F10, migration
+            027). Orthogonal to ``source``, which records the SURFACE:
+            two agents both working over MCP share ``source='mcp'`` and are
+            told apart only by this. ``None`` — the default, and every
+            pre-027 row — means unattributed, which ``brain usage`` renders
+            as an honest ``(unattributed)`` bucket rather than coalescing it
+            into a fake ``cli`` agent. Callers pass the value resolved by
+            :func:`brain.agent.resolve_agent_id`, which has already
+            validated it.
 
     Returns:
         The inserted row's UUID as a string.
@@ -186,8 +204,8 @@ def record_interaction(
         """
         INSERT INTO interactions
             (document_id, query, action, source, session_id,
-             target_type, target_id, graph_retrieved)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+             target_type, target_id, graph_retrieved, agent_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id::text
         """,
         (
@@ -199,6 +217,7 @@ def record_interaction(
             target_type,
             target_id,
             graph_retrieved,
+            agent_id,
         ),
     ).fetchone()
     assert row is not None  # RETURNING always yields one row

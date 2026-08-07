@@ -4,15 +4,19 @@ description: >
   Graph retrieval over the user's local "second brain" — an entity-centric
   GraphRAG layer (Apache AGE) alongside hybrid search. Use for THEMES,
   PATTERNS, or CONNECTIONS across interactions, or to ENUMERATE the graph
-  (people / orgs / projects / topics). For single-doc lookups, quotes, or
-  voice writing, use `consult-brain` instead.
+  (people / orgs / projects / topics). Also owns `brain owner`, the
+  corpus-owner identifier list that keeps the user out of their own
+  participant graph. For single-doc lookups, quotes, or voice writing, use
+  `consult-brain` instead.
   MANDATORY TRIGGERS: themes with, themes in my conversations, patterns
   across, what connects, what keeps coming up, recurring themes, recurring
   topics, how has my thinking evolved, map out my, who is related to, what is
   related to, the bigger picture across, graph of my, cluster my notes,
   overall themes in my brain, what orgs are in my brain, what people are in
   my brain, list all projects, what topics are in my brain, what entities,
-  how big is my graph, what's in my graph, graph overview, graph stats.
+  how big is my graph, what's in my graph, graph overview, graph stats, why
+  am I in my own people list, exclude myself from the graph, owner
+  participants, brain owner, stop linking me to my own docs.
 ---
 
 # Brain Graph (GraphRAG)
@@ -30,7 +34,11 @@ without setup. Just run them. (If a command *does* error, see
 
 For plain document lookup, voice writing, and per-doc Q&A, use `consult-brain`.
 For ingest, see `ingest-brain`; authoring `brain-authoring`; TODO/action-items
-`brain-todo`; health/maintenance `brain-maintenance`.
+`brain-todo`; health/maintenance `brain-maintenance`; daily digests, weekly
+reviews, timelines and link suggestions `brain-proactivity`. **Boundary with
+`brain-memory`:** that skill covers what *you the agent* remember about the
+user between sessions; this one queries the entity graph built from the
+*user's own* documents.
 
 ## Graph vs. plain search — pick the right tool
 
@@ -212,6 +220,48 @@ brain graphrag communities refresh     # force re-detect regardless of dirty gat
 
 For everyday questions, stick to `search` / `themes` / `entity` / `entities` /
 `stats` / `communities`.
+
+## Owner configuration — `brain owner`
+
+`BRAIN_OWNER_PARTICIPANTS` is the list of identifiers that mean **the corpus
+owner** — the user themself. Those identifiers are stripped from the
+derived-edge participant rules (R2 `shared_participant`, R3
+`same_day_participant`) and filtered out of the People Hub roster. Without it
+the user is a participant in nearly every document they own, so they become a
+hub node connected to everything and the participant edges stop carrying
+signal.
+
+Reach for this when the user asks why they show up in their own people list,
+why everything appears connected to everything, or asks to exclude themself
+(or an alias / old address of theirs) from the graph.
+
+```bash
+brain owner show                                  # active list, one entry per line
+brain owner add jane.doe@example.com              # append one identifier
+brain owner add "Jane Doe"                        # display names work too
+brain owner remove jane.doe@example.com           # drop one identifier
+brain owner set "Jane Doe,jane.doe@example.com"   # replace the whole list
+```
+
+| Subcommand | Behaviour |
+|---|---|
+| `show` | Reads `Config.owner_participants`, so a shell-env override of `BRAIN_OWNER_PARTICIPANTS` (which beats `.env`) is reflected. An empty list prints `(none — BRAIN_OWNER_PARTICIPANTS unset)` rather than nothing. |
+| `add <identifier>` | Appends. Case-insensitive; entries are stored lowercased. A duplicate add is a **silent no-op** — no `.env` rewrite, no relink hint. |
+| `remove <identifier>` | Drops one entry. Case-insensitive; removing an absent entry is a silent no-op. |
+| `set <csv>` | Replaces the entire list from a comma-separated string. Trims, lowercases, dedupes (the same normalisation `Config.load()` performs), quotes the on-disk value when it contains spaces or commas, and writes atomically. Idempotent — an identical resulting list prints "no change" and skips the rewrite. |
+
+Gotchas worth knowing before you run one:
+
+- **The subcommand is `remove`, not `rm`.** `brain owner rm` is a usage error.
+- **There is no `brain owner list`** — `show` is the read command.
+- **A real change only prints a hint; it does not rebuild anything.** Existing
+  `derived_links` rows and People Hub pages were computed under the old list.
+  To make the change take effect, run `brain vault relink-derived` — a
+  full-corpus rebuild, so hand off to `brain-maintenance` and confirm with the
+  user rather than firing it off mid-conversation.
+- `brain owner set` / `add` / `remove` **edit `.env`**. Treat them as
+  configuration changes: state what you are about to write and confirm first.
+  `brain owner show` is read-only and always safe.
 
 ## If a command errors
 

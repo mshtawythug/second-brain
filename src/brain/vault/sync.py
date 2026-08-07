@@ -38,10 +38,13 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 import yaml
 
-from ..ingest import Embedder, _chunk_search_metadata
+from ..errors import SecretGuardError
+from ..ingest import Embedder, _chunk_search_metadata, _frontmatter_allows_secrets
 from ..ingest.chunker import chunk_text
+from ..ingest.guard import apply_guard
 from ..ingest.sub_tokens import extract_sub_tokens
 from ..queries import sync_chunk_search_metadata
+from ..sensitivity import DEFAULT_SENSITIVITY, normalize_level
 from ..tags import normalize_tags
 from .derived_links import DirectoryStore, rebuild_derived_for
 from .derived_links.fence import rewrite_derived_fences, strip_fence
@@ -62,6 +65,24 @@ _ATTACHMENTS_DIR_NAME = "_attachments"
 _INGESTED_DIR_NAME = "_ingested"
 
 logger = logging.getLogger(__name__)
+
+#: Default guard mode for the sync entry points. Deliberately ``off`` rather
+#: than ``brain.config.DEFAULT_SECRET_GUARD`` ("warn"): sync has seven existing
+#: call sites (``cli.py`` x4, ``mcp_server.py`` x2, the watcher) and defaulting
+#: to anything active would change all of their behaviour silently. Callers opt
+#: in by passing ``cfg.secret_guard`` explicitly.
+_GUARD_OFF = "off"
+
+#: Marker prefix on the ``_SyncError`` message a guard refusal raises. Lets the
+#: per-file handlers count refusals separately from genuine failures without a
+#: second exception type — the two share a handler by design, since both mean
+#: "this file was skipped, the walk continues".
+_GUARD_REFUSAL_PREFIX = "secret guard:"
+
+
+def _is_guard_refusal(exc: Exception) -> bool:
+    """True iff this ``_SyncError`` came from the secret guard."""
+    return str(exc).startswith(_GUARD_REFUSAL_PREFIX)
 
 
 @dataclass
@@ -105,6 +126,13 @@ class SyncReport:
     # effect, and when every link is already in canonical path form
     # (idempotent re-sync).
     links_rewritten: int = 0
+    # Files the F4 secret guard refused, so one credential-bearing note is a
+    # REPORTED SKIP rather than a dead walk. Counted separately from ``errors``
+    # (which it also appears in) because a guard refusal is a deliberate policy
+    # outcome, not a malfunction: a caller showing "3 files refused by the
+    # secret guard" is telling the user something actionable, whereas folding it
+    # into a generic error count reads as breakage.
+    secrets_refused: int = 0
     # Fence-stripped body baseline the vault watcher caches for fence-only-write
     # detection. Set only by the single-file path (:func:`_sync_one` via
     # :func:`sync_one_file`) and reflects the content sync actually INDEXED —
@@ -136,6 +164,7 @@ def sync_vault(
     link_rewrite: bool = True,
     owner_participants: frozenset[str] = frozenset(),
     graph_syncer: GraphSyncer | None = None,
+    secret_guard: str = _GUARD_OFF,
 ) -> SyncReport:
     """Reconcile every ``.md`` file under ``vault_path`` into the DB.
 
@@ -188,9 +217,12 @@ def sync_vault(
                 walked=walked_file,
                 report=report,
                 dry_run=dry_run,
+                secret_guard=secret_guard,
             )
         except _SyncError as e:
             report.errors.append((walked_file.abs_path, str(e)))
+            if _is_guard_refusal(e):
+                report.secrets_refused += 1
             continue
         if doc_id is not None:
             seen_doc_ids.add(doc_id)
@@ -264,6 +296,7 @@ def sync_one_file(
     link_rewrite: bool = True,
     owner_participants: frozenset[str] = frozenset(),
     graph_syncer: GraphSyncer | None = None,
+    secret_guard: str = _GUARD_OFF,
 ) -> SyncReport:
     """Sync exactly one ``.md`` file under ``vault_path``.
 
@@ -359,9 +392,12 @@ def sync_one_file(
             walked=walked,
             report=report,
             dry_run=False,
+            secret_guard=secret_guard,
         )
     except _SyncError as e:
         report.errors.append((walked.abs_path, str(e)))
+        if _is_guard_refusal(e):
+            report.secrets_refused += 1
         return report
 
     if doc_id is not None:
@@ -538,6 +574,7 @@ def _sync_one(
     walked: _WalkedFile,
     report: SyncReport,
     dry_run: bool,
+    secret_guard: str = _GUARD_OFF,
 ) -> str | None:
     """Sync a single file. Returns the document id (or None on dry-run / skip).
 
@@ -690,17 +727,35 @@ def _sync_one(
                 report.links_resolved += 1
         return document_id
 
+    # F4 secret guard — BEFORE ``_normalized_body`` feeds the content hash, for
+    # the same load-bearing reason as the ingest pipeline: the stored hash must
+    # describe the bytes actually stored, or a redacted body would be compared
+    # against the hash of the un-redacted text and the next sync would resolve
+    # to a no-op, freezing the redaction while reporting it as up to date.
+    body = _guard_synced_body(
+        body,
+        title=title,
+        mode=secret_guard,
+        tier=classification,
+        metadata=frontmatter,
+    )
     normalized_body = _normalized_body(body)
     with conn.transaction():
         existing = conn.execute(
-            "SELECT content_hash, title, tags, content_type, metadata, kind, vault_path "
-            "FROM documents WHERE id = %s",
+            "SELECT content_hash, title, tags, content_type, metadata, kind, "
+            "vault_path, sensitivity FROM documents WHERE id = %s",
             (document_id,),
         ).fetchone()
         if existing is None:
             # Brand-new row: build metadata fresh (no DB row to merge against).
             metadata = _build_metadata(
                 frontmatter, aliases, tier=classification, existing_metadata=None
+            )
+            sensitivity = _sensitivity_from_frontmatter(
+                frontmatter,
+                tier=classification,
+                current=DEFAULT_SENSITIVITY,
+                path=walked.abs_path,
             )
             try:
                 _insert_document(
@@ -719,6 +774,7 @@ def _sync_one(
                     external_id=_external_id_from_frontmatter(
                         frontmatter, classification
                     ),
+                    sensitivity=sensitivity,
                 )
             except psycopg.errors.UniqueViolation as exc:
                 # Mirror drift: the file's vault_path or content_hash already
@@ -739,6 +795,7 @@ def _sync_one(
                 cur_meta,
                 cur_kind,
                 cur_vault_path,
+                cur_sensitivity,
             ) = existing
             cur_tags = list(cur_tags or [])
             cur_meta = dict(cur_meta or {})
@@ -760,6 +817,16 @@ def _sync_one(
             kind_changed = cur_kind != classification
             vault_path_changed = cur_vault_path != walked.relative_posix
             type_changed = cur_type != content_type
+            # F6: resolved AFTER ``cur_sensitivity`` is known, because the
+            # ingested-tier branch returns it unchanged (the DB is authoritative
+            # there — see the helper's docstring).
+            sensitivity = _sensitivity_from_frontmatter(
+                frontmatter,
+                tier=classification,
+                current=str(cur_sensitivity),
+                path=walked.abs_path,
+            )
+            sensitivity_changed = str(cur_sensitivity) != sensitivity
             user_visible_change = (
                 metadata_changed
                 or tags_changed
@@ -767,6 +834,11 @@ def _sync_one(
                 or kind_changed
                 or vault_path_changed
                 or type_changed
+                # Without this, editing ONLY the ``sensitivity:`` line in a note
+                # would leave the body hash unchanged and every other field
+                # equal, so the update would be skipped entirely and the trust
+                # tier the user just set would never reach the column.
+                or sensitivity_changed
             )
             if not body_unchanged or user_visible_change:
                 try:
@@ -782,6 +854,7 @@ def _sync_one(
                         metadata=metadata,
                         kind=classification,
                         vault_path=walked.relative_posix,
+                        sensitivity=sensitivity,
                         body_changed=not body_unchanged,
                     )
                 except psycopg.errors.UniqueViolation as exc:
@@ -798,6 +871,9 @@ def _sync_one(
                 # new normalization, but the stored hash is in the legacy
                 # (raw) form. Update the hash without re-embedding so the
                 # next run is a clean skip.
+                # updated_at deliberately NOT bumped — the hash FORM changed,
+                # the knowledge did not. One `brain vault sync` would
+                # otherwise restamp every pre-normalization document.
                 conn.execute(
                     "UPDATE documents SET content_hash = %s WHERE id = %s",
                     (new_hash, document_id),
@@ -1003,6 +1079,17 @@ def _build_metadata(
         "created",
         "updated",
         "vault_path",
+        # F6 trust boundary. Reserved so a note's ``sensitivity:`` never lands
+        # in ``documents.metadata`` — it belongs in the typed column, and a
+        # shadow copy in the JSONB blob would be a second source of truth for a
+        # security-relevant value.
+        #
+        # This entry and export's ``_EXPORT_OWNED_FRONTMATTER_KEYS`` entry are a
+        # PAIR and were added in one change. A key present in export's strip set
+        # but absent here is silently deleted from the user's file on the next
+        # export — the exact regression documented at ``export.py:44-57``.
+        # ``tests/test_vault_frontmatter_registry_parity.py`` pins the invariant.
+        "sensitivity",
     }
     for key, value in frontmatter.items():
         if key in reserved:
@@ -1011,6 +1098,129 @@ def _build_metadata(
     if aliases:
         meta["aliases"] = aliases
     return meta
+
+
+def _guard_synced_body(
+    content: str,
+    *,
+    title: str,
+    mode: str,
+    tier: str,
+    metadata: dict[str, Any],
+) -> str:
+    """Run the F4 secret guard over a file's body; return what to STORE.
+
+    Raises :class:`_SyncError` — never :class:`~brain.errors.SecretGuardError` —
+    so the refusal lands in the SAME per-file handler every other bad-file
+    condition uses (``sync_vault``'s walk loop and ``sync_one_file`` both catch
+    ``_SyncError``, record it in ``report.errors``, and continue). Letting the
+    guard's own exception escape would abort the entire walk on one offending
+    file, which the guard's docstring explicitly names as a worse failure than a
+    loud message.
+
+    **``redact`` is refused for VAULT-tier notes rather than applied**, and that
+    asymmetry is load-bearing. Vault-tier files are file-authoritative (see
+    :func:`_sensitivity_from_frontmatter`), so storing a redacted body while the
+    user's file still holds the secret makes the DB and the file disagree — and
+    on the next pass the file wins and the redaction silently evaporates. A
+    redaction that undoes itself is worse than none, because it reports success.
+
+    The two ways out are "rewrite the user's file" or "refuse", and refusing is
+    right here: sync's remit is mirroring file into DB, and rewriting a user's
+    authored PROSE is a categorically larger act than rewriting one generated
+    frontmatter field. Refusal is loud, lossless, and reversible — the same
+    reasoning that makes ``warn`` the guard's default rather than ``redact``.
+    The user redacts the file themselves and syncs again.
+
+    Ingested-tier bodies are generated mirrors, so redaction there is coherent
+    and is applied normally.
+    """
+    try:
+        outcome = apply_guard(
+            content,
+            mode=mode,
+            allow=_frontmatter_allows_secrets(metadata),
+            title=title,
+        )
+    except SecretGuardError as exc:
+        # ``reject`` mode. Converted to ``_SyncError`` HERE — this is the whole
+        # point of the function. Letting it propagate would escape both per-file
+        # handlers and abort the entire walk on one offending note.
+        #
+        # The message is REBUILT rather than reused: ``SecretGuardError``'s text
+        # is the multi-line CLI block, and it must start with
+        # ``_GUARD_REFUSAL_PREFIX`` for the refusal counter to recognize it. The
+        # finding details are deliberately dropped — ``report.errors`` is
+        # rendered by callers into logs and terminals, and echoing the previews
+        # there would spread the credential further than the file it came from.
+        raise _SyncError(
+            f"{_GUARD_REFUSAL_PREFIX} refusing to sync this note "
+            f"(BRAIN_SECRET_GUARD=reject). Remove the credential from the file, "
+            f"or add `allow_secrets: true` to its frontmatter if the note is "
+            f"legitimately about credentials."
+        ) from exc
+    if outcome.findings and mode == "warn":
+        logger.warning(
+            "vault sync: %d secret finding(s) in %r — stored UNCHANGED "
+            "(BRAIN_SECRET_GUARD=warn)",
+            len(outcome.findings),
+            title,
+        )
+    if outcome.redacted and tier == "vault":
+        raise _SyncError(
+            f"{_GUARD_REFUSAL_PREFIX} refusing to redact an authored vault note "
+            f"({len(outcome.findings)} finding(s)). Redacting here would store "
+            f"a clean body while your file keeps the secret, and the file wins "
+            f"on the next sync — so the redaction would silently undo itself. "
+            f"Edit the file to remove the secret, then sync again."
+        )
+    return outcome.content
+
+
+def _sensitivity_from_frontmatter(
+    frontmatter: dict[str, Any],
+    *,
+    tier: str,
+    current: str,
+    path: Path,
+) -> str:
+    """Resolve the sensitivity tier a synced file should carry (F6).
+
+    **Tier split, mirroring :func:`_build_metadata`'s.** For a VAULT-tier note
+    the file is the source of truth, so the frontmatter value wins — including
+    removing the line, which returns the note to ``normal``. That is a
+    deliberate edit of the user's own note and is exactly the round-trip F6
+    documents.
+
+    For an INGESTED-tier row the DB is authoritative, so ``current`` is returned
+    unchanged and the mirror's value is ignored. This is not symmetry for its own
+    sake: ``_ingested/`` files are GENERATED, and a mirror can legitimately be
+    stale (written before the tier changed, restored from a backup, or
+    hand-copied). Honouring a stale mirror would let a background
+    ``vault sync --watch`` pass silently DOWNGRADE a confidential document — the
+    same egress hole the escalate-only rule closes on the re-ingest path.
+    Downgrading an ingested document stays an explicit act (``brain mark-normal``).
+
+    An unrecognized value is COERCED to ``normal`` and logged at WARNING; it
+    never raises. One hand-typed typo must not abort a ``vault sync --watch``
+    pass over the whole corpus. Coercion is one-way by construction —
+    :func:`~brain.sensitivity.normalize_level` only ever lands on ``normal``, so
+    a typo can cost protection the user intended but can never fabricate
+    protection they did not.
+    """
+    if tier != "vault":
+        return current
+
+    raw = frontmatter.get("sensitivity")
+    level = normalize_level(raw, strict=False)
+    if raw not in (None, "", level):
+        logger.warning(
+            "vault note %s has invalid sensitivity %r — coerced to %r",
+            path,
+            raw,
+            level,
+        )
+    return level
 
 
 def _coerce_tag_list(value: Any) -> list[str]:
@@ -1119,6 +1329,7 @@ def _insert_document(
     vault_path: str,
     source: str | None = None,
     external_id: str | None = None,
+    sensitivity: str = DEFAULT_SENSITIVITY,
 ) -> None:
     """Insert a brand-new ``documents`` row + chunks.
 
@@ -1134,12 +1345,14 @@ def _insert_document(
     source_id: str | None = None
     if source is not None and external_id is not None:
         source_id = _upsert_source_row(conn, kind=source, external_id=external_id)
+    # ``updated_at`` is absent by design — migration 025's ``DEFAULT NOW()``
+    # stamps a brand-new row.
     conn.execute(
         """
         INSERT INTO documents
           (id, title, content, content_hash, content_type, tags,
-           metadata, kind, vault_path, source_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+           metadata, kind, vault_path, source_id, sensitivity)
+        VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
         """,
         (
             document_id,
@@ -1152,6 +1365,7 @@ def _insert_document(
             kind,
             vault_path,
             source_id,
+            sensitivity,
         ),
     )
     _embed_and_insert_chunks(
@@ -1178,8 +1392,13 @@ def _update_document(
     kind: str,
     vault_path: str,
     body_changed: bool,
+    sensitivity: str = DEFAULT_SENSITIVITY,
 ) -> None:
-    """Update an existing ``documents`` row + (when body changed) re-chunk."""
+    """Update an existing ``documents`` row + (when body changed) re-chunk.
+
+    Bumps ``updated_at``: editing a note in the vault and letting the watcher
+    reconcile it is the single most common way a document actually changes.
+    """
     conn.execute(
         """
         UPDATE documents SET
@@ -1191,7 +1410,9 @@ def _update_document(
           metadata = %s::jsonb,
           kind = %s,
           vault_path = %s,
-          ingested_at = NOW()
+          sensitivity = %s,
+          ingested_at = NOW(),
+          updated_at = NOW()
         WHERE id = %s
         """,
         (
@@ -1203,6 +1424,7 @@ def _update_document(
             json.dumps(metadata),
             kind,
             vault_path,
+            sensitivity,
             document_id,
         ),
     )
@@ -1249,7 +1471,19 @@ def _embed_and_insert_chunks(
     chunks = chunk_text(content, count_tokens=embedder.count_tokens)
     if not chunks:
         return
-    embeddings = embedder.embed([c.content for c in chunks], input_type="document")
+    # FTS-only backend (BRAIN_EMBEDDER=none / NullEmbedder): store NULL vectors
+    # rather than calling embed(), which raises. Duck-typed on
+    # ``produces_embeddings`` so the real backends — which never declare the
+    # flag — are untouched. Mirrors ``brain.ingest._embed_chunks``; without it
+    # the two write paths disagreed and `brain capture` died under the
+    # documented zero-Ollama setup, which is the first command a new user runs.
+    embeddings: list[list[float] | None]
+    if not getattr(embedder, "produces_embeddings", True):
+        embeddings = [None] * len(chunks)
+    else:
+        embeddings = list(
+            embedder.embed([c.content for c in chunks], input_type="document")
+        )
     title_text, tags_text = _chunk_search_metadata(title, tags)
     for c, vec in zip(chunks, embeddings, strict=True):
         conn.execute(

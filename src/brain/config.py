@@ -2,10 +2,13 @@
 import os
 import re
 from dataclasses import dataclass, field
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
 from dotenv import dotenv_values, find_dotenv
+
+from .errors import missing_database_url_message
 
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_QWEN3_MODEL = "qwen3-embedding:8b"
@@ -196,9 +199,16 @@ DEFAULT_GRAPH_COOCCUR_WINDOW = 3  # == brain.graph_rag.cooccur.DEFAULT_COOCCUR_W
 DEFAULT_GRAPH_MAX_ENTITIES = 40  # == cooccur.DEFAULT_MAX_ENTITIES_PER_DOC
 DEFAULT_GRAPH_GENERIC_DF_RATIO = 0.30  # == weighting.DEFAULT_GENERIC_DF
 
+# Accepted truthy spellings for every boolean env flag in this module (compared
+# case-insensitively after ``.strip()``). Single definition so a simple opt-in
+# flag (``BRAIN_IGNORE_CWD_DOTENV``) and the tri-state graph flags below agree
+# on what "true" looks like.
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
 # Accepted spellings for the boolean ``BRAIN_GRAPH_ENABLED`` /
-# ``BRAIN_GRAPH_CONCEPTS`` flags (compared case-insensitively after ``.strip()``).
-_GRAPH_ENABLED_TRUTHY = frozenset({"1", "true", "yes", "on"})
+# ``BRAIN_GRAPH_CONCEPTS`` flags. These parse tri-state (truthy / falsy /
+# ConfigError), unlike the simple opt-in flags which only test truthiness.
+_GRAPH_ENABLED_TRUTHY = _TRUTHY_ENV_VALUES
 _GRAPH_ENABLED_FALSY = frozenset({"0", "false", "no", "off"})
 
 # Wave G2 -- GraphRAG concept extraction + bounded retrieval (spec §10). Parsed
@@ -376,6 +386,55 @@ DEFAULT_GAPS_LOOKBACK_DAYS = 30
 DEFAULT_GAPS_MIN_CLUSTER_SIZE = 2
 
 
+# ---------------------------------------------------------------------------
+# Pre-landed scaffolding (Task 0B, docs/plans/2026-07-25-agent-memory-safety-ui).
+#
+# No feature reads these yet. They are declared up-front in Wave 0 so this
+# module has exactly ONE writer for the whole release -- five parallel worktrees
+# would otherwise all need to append fields here and would collide on every
+# merge. A later wave that finds a knob missing escalates to the coordinator
+# rather than editing config.py.
+# ---------------------------------------------------------------------------
+
+# F4 -- ingest-time secret guard mode. ``warn`` logs a detection and ingests
+# anyway (the default: never lose content to a false positive), ``redact``
+# masks the match before storage, ``reject`` refuses the document with
+# :class:`brain.errors.SecretGuardError`, and ``off`` skips scanning entirely.
+# Override via ``BRAIN_SECRET_GUARD``; an unrecognized value is a
+# :class:`ConfigError` at load time.
+DEFAULT_SECRET_GUARD = "warn"
+_VALID_SECRET_GUARDS = frozenset({"warn", "redact", "reject", "off"})
+
+# F10 -- `brain recall` budgets. ``recall_budget_tokens`` caps the whole recall
+# payload handed back to an agent, ``recall_passage_tokens`` caps each
+# individual passage inside it, and ``recall_max_candidates`` bounds how many
+# documents are considered before trimming to budget. All positive ints (>= 1)
+# validated by :func:`_parse_positive_int_env`. Override via
+# ``BRAIN_RECALL_BUDGET_TOKENS`` / ``BRAIN_RECALL_PASSAGE_TOKENS`` /
+# ``BRAIN_RECALL_MAX_CANDIDATES``.
+DEFAULT_RECALL_BUDGET_TOKENS = 2000
+DEFAULT_RECALL_PASSAGE_TOKENS = 120
+DEFAULT_RECALL_MAX_CANDIDATES = 25
+
+# F10 -- the agent-id grammar: one alphanumeric leading character followed by up
+# to 63 more alphanumerics / dot / underscore / colon / hyphen (64 chars total).
+# Leading punctuation is rejected so an id can never be confused with a CLI flag.
+#
+# DELIBERATELY inlined here rather than imported: ``brain.agent`` does not exist
+# until Wave 4, and config.py must stay importable without it. Its Wave-4
+# sibling ``brain.agent.normalize_agent_id`` validates against this SAME public
+# constant, so the two can never drift.
+AGENT_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+_AGENT_ID_RE = re.compile(AGENT_ID_PATTERN)
+
+# F3 -- directory `brain backup` writes archives into and `brain restore`
+# discovers them from. Defaults to ``$BRAIN_HOME/backups`` (resolved lazily so a
+# relocated brain home relocates its backups too); override with an absolute or
+# ``~``-relative path via ``BRAIN_BACKUP_DIR``. Never created at load time --
+# only when a backup actually runs.
+DEFAULT_BACKUP_DIR_NAME = "backups"
+
+
 # Boilerplate regex patterns stripped from email bodies during Gmail ingest.
 # Compiled with ``re.MULTILINE | re.IGNORECASE`` in
 # :func:`brain.ingest.gmail.strip_boilerplate`. Default-deny for ``re.DOTALL``;
@@ -431,8 +490,168 @@ def _brain_home_root(_config_file: Path | None = None) -> Path:
 
 
 def _brain_home_dotenv() -> Path:
-    """Path to $BRAIN_HOME/.env (resolved via _brain_home_root)."""
+    """Path to $BRAIN_HOME/.env (resolved via _brain_home_root).
+
+    This is the CANONICAL user config location: a pip / uvx user has no
+    checkout at all, so "the repo's .env" can never be their config, and the
+    cwd walk-up only works while they happen to stand in the right directory.
+    ``brain setup`` / ``brain init`` provision this file (see
+    :func:`brain.setup.provision_brain_home_dotenv`).
+    """
     return _brain_home_root() / ".env"
+
+
+# ---------------------------------------------------------------------------
+# Dotenv chain resolution — shared by Config.load() and `brain doctor`.
+#
+# Deliberately NOT a method on Config: doctor must be able to introspect a
+# BROKEN install, i.e. exactly the case where ``Config.load()`` raises. Keep
+# :func:`dotenv_chain` callable with no successfully-constructed config.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DotenvSource:
+    """One candidate ``.env`` file in the resolution chain, with its state.
+
+    ``exists`` follows symlinks, so a DANGLING symlink reports
+    ``exists=False`` — a caller that must tell "broken link" apart from "never
+    created" (``brain doctor``, which reports a relocated dev checkout) checks
+    ``path.is_symlink()`` on top: that stays True for a dangling link and is
+    False for a path that simply does not exist.
+
+    ``loaded`` is True only when the loader actually read key/value pairs out
+    of the file. ``exists=True, loaded=False`` means the path is there but
+    could not be parsed (a directory, bad permissions) — a different fault
+    from "missing", and the two must never be reported the same way.
+    """
+
+    path: Path
+    exists: bool
+    loaded: bool
+
+
+#: Env var that drops the cwd walk-up (link 3) from the dotenv chain entirely.
+IGNORE_CWD_DOTENV_ENV = "BRAIN_IGNORE_CWD_DOTENV"
+
+
+def _cwd_dotenv_enabled() -> bool:
+    """Whether the cwd walk-up participates in the chain (``BRAIN_IGNORE_CWD_DOTENV``).
+
+    DECISION (2026-08-07), recorded because the walk-up is an ambient-cwd READ
+    on the daemon path and a live candidate for silent misconfiguration:
+
+    **The walk-up STAYS in the chain by default, and non-interactive contexts
+    opt out explicitly.**
+
+    Why keep it: it is long-standing behaviour that makes a source checkout
+    work from any subdirectory, and removing it mid-release would silently
+    break anyone whose workflow depends on it — a second invisible config
+    change on top of the one being fixed.
+
+    Why an explicit opt-out rather than auto-detection: sniffing the context
+    (``isatty``, "am I a daemon?") would make WHICH DATABASE you talk to depend
+    on whether stdout is a pipe. ``brain search | jq`` would resolve config
+    differently from ``brain search``. That is the same class of invisible,
+    environment-dependent divergence as the outage itself, so it is refused.
+
+    Why it matters at all: the walk-up climbs to the filesystem root, so a
+    process started in an arbitrary directory can pick up a stranger's ``.env``
+    and silently talk to the wrong database. A daemon doing that is worse than
+    one with no config, because the failure is invisible instead of loud.
+    Long-running non-interactive contexts (the launchd plists) should therefore
+    set ``BRAIN_IGNORE_CWD_DOTENV=1`` alongside an explicit ``BRAIN_HOME``.
+
+    When set, the link is REMOVED from the chain — it does not appear in
+    :func:`dotenv_chain`, so ``brain doctor`` renders exactly the paths that
+    were really consulted.
+    """
+    raw = os.environ.get(IGNORE_CWD_DOTENV_ENV, "")
+    return raw.strip().lower() not in _TRUTHY_ENV_VALUES
+
+
+def _cwd_dotenv() -> Path:
+    """The cwd walk-up ``.env`` candidate, or ``<cwd>/.env`` when none is found.
+
+    ``find_dotenv`` returns ``""`` when the walk-up finds nothing, but the
+    chain still needs a CONCRETE path to report as missing (an error message
+    that says "somewhere near your cwd" helps nobody), so fall back to the
+    obvious ``<cwd>/.env``.
+    """
+    found = find_dotenv(usecwd=True)
+    return Path(found) if found else Path.cwd() / ".env"
+
+
+def _resolve_dotenv_chain() -> tuple[tuple["DotenvSource", ...], dict[str, str]]:
+    """Resolve the dotenv chain AND its merged payload in a single pass.
+
+    Returns ``(sources, merged)`` where *sources* is ordered highest precedence
+    first and *merged* is the key/value payload the caller layers under
+    ``os.environ``. One pass so the state reported by :func:`dotenv_chain` and
+    the values actually loaded by :meth:`Config._load_field_dict` can never
+    disagree — the whole point of the shared contract.
+
+    Duplicate candidates are collapsed (in a dev checkout ``$BRAIN_HOME`` IS
+    the repo root, so links 2 and 4 are literally the same file). Comparison is
+    on the LITERAL path, never ``resolve()``, so a ``$BRAIN_HOME/.env``
+    symlinked at the repo ``.env`` stays a distinct, separately-reportable
+    entry.
+    """
+    ordered: list[Path] = [_project_dotenv()]
+    if _cwd_dotenv_enabled():
+        ordered.append(_cwd_dotenv())
+    ordered.append(_brain_home_dotenv())
+    candidates: list[Path] = []
+    for candidate in ordered:
+        if candidate not in candidates:
+            candidates.append(candidate)
+    sources: list[DotenvSource] = []
+    parsed_by_path: dict[Path, dict[str, str]] = {}
+    for path in candidates:
+        exists = path.exists()
+        loaded = False
+        if exists:
+            # Read the bytes OURSELVES rather than handing the path to
+            # dotenv_values: python-dotenv swallows an unreadable path and
+            # returns an empty mapping, which would report a directory /
+            # permission-denied .env as cleanly "loaded". Parsing the text we
+            # actually read keeps ``loaded`` honest.
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                pass
+            else:
+                loaded = True
+                parsed_by_path[path] = {
+                    k: v
+                    for k, v in dotenv_values(stream=StringIO(text)).items()
+                    if v is not None
+                }
+        sources.append(DotenvSource(path=path, exists=exists, loaded=loaded))
+    # Layer in REVERSE priority order (lowest first) so a higher-priority file
+    # overwrites a lower-priority one on key collisions.
+    merged: dict[str, str] = {}
+    for source in reversed(sources):
+        merged.update(parsed_by_path.get(source.path, {}))
+    return tuple(sources), merged
+
+
+def dotenv_chain() -> tuple[DotenvSource, ...]:
+    """Ordered dotenv candidates, highest precedence first, with resolution state.
+
+    Order mirrors :meth:`Config._load_field_dict`'s file precedence:
+    ``<repo>/.env`` > ``<cwd>/.env`` (walk-up) > ``$BRAIN_HOME/.env``. Process
+    env outranks every file and is not represented here (it is not a file).
+
+    The cwd walk-up is ABSENT from the returned chain when
+    ``BRAIN_IGNORE_CWD_DOTENV`` is set (see :func:`_cwd_dotenv_enabled`) — the
+    chain always reports exactly the files the loader consulted, so a dropped
+    link never appears and a kept link is always visible.
+
+    Safe to call on a BROKEN install — it never raises and never requires a
+    loadable config.
+    """
+    return _resolve_dotenv_chain()[0]
 
 
 class ConfigError(RuntimeError):
@@ -501,6 +720,25 @@ def _default_vault_path() -> Path:
     """
     raw = os.environ.get("BRAIN_VAULT_PATH")
     return Path(raw).expanduser() if raw else DEFAULT_VAULT_PATH
+
+
+def _default_backup_dir() -> Path:
+    """Resolve the backup root from ``BRAIN_BACKUP_DIR``, else ``$BRAIN_HOME/backups``.
+
+    Single source of truth for backup-root resolution, mirroring
+    :func:`_default_vault_path`. Used BOTH as the :attr:`Config.backup_dir`
+    field ``default_factory`` AND inside :meth:`Config._load_field_dict`, so a
+    ``Config`` built directly -- bypassing :meth:`Config.load`, as many test
+    fixtures do -- honors ``BRAIN_BACKUP_DIR`` exactly like ``Config.load()``.
+    Blank / unset falls back to ``$BRAIN_HOME/backups``, resolved through
+    :func:`_brain_home_root` at call time (never cached) so relocating the brain
+    home relocates its backups with it. Purely a path computation: the directory
+    is NOT created here.
+    """
+    raw = os.environ.get("BRAIN_BACKUP_DIR")
+    if raw and raw.strip():
+        return Path(raw.strip()).expanduser()
+    return _brain_home_root() / DEFAULT_BACKUP_DIR_NAME
 
 
 @dataclass(frozen=True)
@@ -730,6 +968,23 @@ class Config:
     # eager-validated at load time via ``ConfigError`` like the review knobs.
     gaps_lookback_days: int = DEFAULT_GAPS_LOOKBACK_DAYS
     gaps_min_cluster_size: int = DEFAULT_GAPS_MIN_CLUSTER_SIZE
+    # Task 0B pre-landed scaffolding (plan 2026-07-25). No feature reads these
+    # yet; see the DEFAULT_* block above for what each one will govern.
+    # F4 -- ingest secret-guard mode, one of warn/redact/reject/off.
+    secret_guard: str = DEFAULT_SECRET_GUARD
+    # F10 -- `brain recall` budgets. All positive ints (>= 1), eager-validated
+    # at load time via ``ConfigError`` like the other int knobs.
+    recall_budget_tokens: int = DEFAULT_RECALL_BUDGET_TOKENS
+    recall_passage_tokens: int = DEFAULT_RECALL_PASSAGE_TOKENS
+    recall_max_candidates: int = DEFAULT_RECALL_MAX_CANDIDATES
+    # F10 -- optional agent identity attributed to writes. Unset / blank stays
+    # ``None`` (attribution disabled); a set value must match
+    # :data:`AGENT_ID_PATTERN` or load fails.
+    agent_id: str | None = None
+    # F3 -- `brain backup` archive directory; resolves via
+    # :func:`_default_backup_dir` so a directly-constructed Config honors
+    # ``BRAIN_BACKUP_DIR`` identically to ``Config.load()``.
+    backup_dir: Path = field(default_factory=_default_backup_dir)
 
     @classmethod
     def load(cls) -> "Config":
@@ -767,28 +1022,27 @@ class Config:
         #   3. <cwd>/.env (via walk-up) wins over BRAIN_HOME .env.
         #   4. $BRAIN_HOME/.env is the lowest-priority file source.
         #
-        # Files are layered in REVERSE priority order (lowest first) into a
-        # merged dict; higher-priority files overwrite lower-priority ones on
-        # key collisions. Process env is applied last via os.environ.setdefault
-        # so an existing value is never clobbered -- preserving the precedence
+        # Resolution + merging live in _resolve_dotenv_chain() so `brain doctor`
+        # (via the public dotenv_chain()) reports exactly the paths this loader
+        # consulted. Process env is applied last via os.environ.setdefault so an
+        # existing value is never clobbered -- preserving the precedence
         # contract regardless of who set it (shell, parent process, or
         # monkeypatch.setenv).
-        merged: dict[str, str] = {}
-        cwd_env_str = find_dotenv(usecwd=True)
-        for candidate in (
-            _brain_home_dotenv(),
-            Path(cwd_env_str) if cwd_env_str else None,
-            _project_dotenv(),
-        ):
-            if candidate is not None and candidate.exists():
-                merged.update(
-                    {k: v for k, v in dotenv_values(candidate).items() if v is not None}
-                )
+        sources, merged = _resolve_dotenv_chain()
         for key, value in merged.items():
             os.environ.setdefault(key, value)
         database_url = os.environ.get("DATABASE_URL")
         if require_db and not database_url:
-            raise ConfigError("DATABASE_URL is not set (see .env.example)")
+            # Render the message FROM the same chain doctor introspects, so the
+            # error and the health check can never disagree about which files
+            # were searched or what state each one is in. A bare
+            # "DATABASE_URL is not set (see .env.example)" cost 12 days of
+            # debugging a database that was healthy the whole time.
+            raise ConfigError(
+                missing_database_url_message(
+                    sources, brain_home_dotenv=_brain_home_dotenv()
+                )
+            )
         database_url = database_url or ""  # empty sentinel when require_db=False
         ollama_host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
         qwen3_model = os.environ.get("QWEN3_MODEL", DEFAULT_QWEN3_MODEL)
@@ -1863,6 +2117,47 @@ class Config:
             "BRAIN_GAPS_MIN_CLUSTER_SIZE", DEFAULT_GAPS_MIN_CLUSTER_SIZE
         )
 
+        # Task 0B pre-landed scaffolding (plan 2026-07-25). Same eager-validation
+        # idiom as every knob above: unset/blank -> default; invalid -> ConfigError
+        # at startup so a typo surfaces before any command runs.
+        secret_guard_raw = os.environ.get("BRAIN_SECRET_GUARD")
+        if secret_guard_raw is None or secret_guard_raw.strip() == "":
+            secret_guard = DEFAULT_SECRET_GUARD
+        else:
+            secret_guard = secret_guard_raw.strip().lower()
+            if secret_guard not in _VALID_SECRET_GUARDS:
+                raise ConfigError(
+                    "BRAIN_SECRET_GUARD must be one of warn/redact/reject/off "
+                    f"(got {secret_guard_raw!r})"
+                )
+
+        recall_budget_tokens = _parse_positive_int_env(
+            "BRAIN_RECALL_BUDGET_TOKENS", DEFAULT_RECALL_BUDGET_TOKENS
+        )
+        recall_passage_tokens = _parse_positive_int_env(
+            "BRAIN_RECALL_PASSAGE_TOKENS", DEFAULT_RECALL_PASSAGE_TOKENS
+        )
+        recall_max_candidates = _parse_positive_int_env(
+            "BRAIN_RECALL_MAX_CANDIDATES", DEFAULT_RECALL_MAX_CANDIDATES
+        )
+
+        # Validated against the inlined :data:`AGENT_ID_PATTERN` -- NOT by
+        # importing ``brain.agent.normalize_agent_id``, which does not exist
+        # until Wave 4 (see the constant's comment above).
+        agent_id_raw = os.environ.get("BRAIN_AGENT_ID")
+        agent_id: str | None
+        if agent_id_raw is None or agent_id_raw.strip() == "":
+            agent_id = None
+        else:
+            agent_id = agent_id_raw.strip()
+            if not _AGENT_ID_RE.match(agent_id):
+                raise ConfigError(
+                    f"BRAIN_AGENT_ID must match {AGENT_ID_PATTERN} "
+                    f"(got {agent_id_raw!r})"
+                )
+
+        backup_dir = _default_backup_dir()
+
         return {
             # brain_home resolves via default_factory=_brain_home_root.
             "database_url": database_url,
@@ -1946,4 +2241,10 @@ class Config:
             "audio_theme_limit": audio_theme_limit,
             "gaps_lookback_days": gaps_lookback_days,
             "gaps_min_cluster_size": gaps_min_cluster_size,
+            "secret_guard": secret_guard,
+            "recall_budget_tokens": recall_budget_tokens,
+            "recall_passage_tokens": recall_passage_tokens,
+            "recall_max_candidates": recall_max_candidates,
+            "agent_id": agent_id,
+            "backup_dir": backup_dir,
         }

@@ -40,11 +40,18 @@ _PUNCT_RE = re.compile(r"[^\w\s]")
 # zero-result evidence is lost; the new signal applies to rows written after
 # the fix. Both branches are index-backed (migration 019's result_count=0
 # partial index + migration 023's fts_count=0 partial index → a BitmapOr plan).
-_ZERO_RESULT_SQL = """
+#: The lexical-miss predicate on its own, so any surface that needs to count
+#: or filter failed searches expresses "this search failed" identically
+#: instead of re-deriving the two-branch rule and drifting from the detector.
+ZERO_RESULT_PREDICATE_SQL = (
+    "fts_count = 0 OR (fts_count IS NULL AND result_count = 0)"
+)
+
+_ZERO_RESULT_SQL = f"""
     SELECT query, COUNT(*) AS n
     FROM search_queries
     WHERE tenant_id = %s
-      AND (fts_count = 0 OR (fts_count IS NULL AND result_count = 0))
+      AND ({ZERO_RESULT_PREDICATE_SQL})
       AND at >= NOW() - make_interval(days => %s)
     GROUP BY query
     ORDER BY n DESC, query
@@ -81,6 +88,27 @@ _NO_CLICK_SQL = """
 """
 
 
+#: ``search_queries`` columns added by a migration LATER than 019, mapped to
+#: the migration that adds each. A binary can legitimately run against a DB
+#: that has the table but not yet one of these, so both the write path and the
+#: read path degrade with an actionable hint instead of failing.
+#:
+#: Membership test, NOT a substring match: adding a column here is a one-line
+#: change for a future wave, and an unknown column still surfaces as the bug
+#: it is.
+_ADDITIVE_COLUMNS: dict[str, str] = {
+    "fts_count": "023",
+    "duration_ms": "024",
+    "agent_id": "027",
+}
+
+
+def _missing_additive_column(exc: psycopg.Error) -> str | None:
+    """Return the known additive column named by ``exc``, or ``None``."""
+    message = str(exc)
+    return next((col for col in _ADDITIVE_COLUMNS if col in message), None)
+
+
 @dataclass(frozen=True)
 class SearchFailure:
     """One ranked failed-query row for the ``brain gaps`` read view.
@@ -105,6 +133,8 @@ def record_search_query(
     session_id: uuid.UUID | None,
     source: str,
     fts_count: int | None = None,
+    duration_ms: int | None = None,
+    agent_id: str | None = None,
     tenant_id: str = "default",
 ) -> None:
     """INSERT one row into ``search_queries``. Best-effort on a transient blip.
@@ -126,15 +156,21 @@ def record_search_query(
       ``brain gaps`` surfaces fail loudly with the same hint. The INSERT runs
       inside its own ``conn.transaction()`` (savepoint when nested) so the
       failure never poisons or rolls back the caller's transaction.
-    - :class:`psycopg.errors.UndefinedColumn` naming ``fts_count`` (migration
-      023 not applied — a pre-023 DB that has the table but lacks the new
-      column) gets the **same swallow-with-hint** treatment, for the same
-      daily-driver reason: a binary that writes ``fts_count`` must not break
-      search on a DB that hasn't run ``brain init`` since the upgrade. The
-      guard is narrowed to the ``fts_count`` column so a genuinely-unknown
-      column still propagates as a real bug.
+    - :class:`psycopg.errors.UndefinedColumn` naming one of
+      :data:`_ADDITIVE_COLUMNS` (``fts_count`` from migration 023,
+      ``duration_ms`` from 024 — a DB that has the table but not yet the
+      ``agent_id`` from 027 — a DB that has the table but not yet the
+      later additive column) gets the **same swallow-with-hint** treatment,
+      for the same daily-driver reason: a binary that writes a new column
+      must not break search on a DB that hasn't run ``brain init`` since the
+      upgrade. The guard is a SET-MEMBERSHIP test over the known additive
+      columns, not a substring match, so a genuinely-unknown column still
+      propagates as a real bug and a future wave adds one string rather than
+      rewriting the guard.
     - Any other schema/programming error **propagates** — those are real bugs
-      that must surface visibly, never be silently eaten.
+      that must surface visibly, never be silently eaten. In particular a
+      :class:`psycopg.errors.CheckViolation` from an unrecognised ``source``
+      is NOT swallowed: an unknown surface is a code bug, not a migration lag.
 
     Privacy (Plan 08 §6 — firm contract): the raw ``query`` string MUST NOT
     appear at INFO level or above. It may only be logged at DEBUG (the blip
@@ -151,16 +187,19 @@ def record_search_query(
             conn.execute(
                 """
                 INSERT INTO search_queries
-                    (tenant_id, query, result_count, fts_count, session_id, source)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (tenant_id, query, result_count, fts_count, duration_ms,
+                     session_id, source, agent_id)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     tenant_id,
                     query,
                     result_count,
                     fts_count,
+                    duration_ms,
                     str(session_id) if session_id is not None else None,
                     source,
+                    agent_id,
                 ),
             )
     except psycopg.errors.UndefinedTable:
@@ -173,18 +212,20 @@ def record_search_query(
             "`brain gaps`"
         )
     except psycopg.errors.UndefinedColumn as exc:
-        # Pre-023 DB: the table exists but lacks the additive ``fts_count``
-        # column (migration 023 not applied — e.g. binary upgraded before
-        # `brain init` re-ran). Same daily-driver contract as the missing-table
-        # case above: search must keep working; nag until the operator
-        # migrates. Narrowed to the fts_count column so a genuinely-unknown
-        # column still propagates as a real bug.
-        if "fts_count" not in str(exc):
+        # The table exists but lacks one of the later additive columns (e.g.
+        # binary upgraded before `brain init` re-ran). Same daily-driver
+        # contract as the missing-table case above: search must keep working;
+        # nag until the operator migrates. Narrowed to the KNOWN additive
+        # columns so a genuinely-unknown column still propagates as a real bug.
+        missing = _missing_additive_column(exc)
+        if missing is None:
             raise
         logger.warning(
-            "search-query logging skipped: search_queries.fts_count column "
-            "missing (migration 023 not applied) — run `brain init` to enable "
-            "lexical-gap detection in `brain gaps`"
+            "search-query logging skipped: search_queries.%s column missing "
+            "(migration %s not applied) — run `brain init` to restore full "
+            "`brain gaps` signal",
+            missing,
+            _ADDITIVE_COLUMNS[missing],
         )
     except psycopg.OperationalError as exc:
         # Transient blip only — schema/programming errors other than the
@@ -199,15 +240,16 @@ def search_queries_schema_hint(exc: psycopg.Error) -> str | None:
     """Map a missing ``search_queries`` schema object to a `brain init` hint.
 
     The ``brain gaps`` read path (:func:`top_search_failures`,
-    :class:`SearchFailureDetector`) reads the ``search_queries`` table and,
-    since migration 023, its ``fts_count`` column. On a DB that hasn't applied
-    migration 019 (no table) or 023 (no column) the query raises, and the
-    surfaces (CLI / MCP) must fail loudly-but-cleanly with an actionable hint
-    instead of a traceback — mirroring the swallow-with-hint contract the
-    search write path uses in :func:`record_search_query`.
+    :class:`SearchFailureDetector`) reads the ``search_queries`` table and its
+    later additive columns (:data:`_ADDITIVE_COLUMNS`). On a DB that hasn't
+    applied migration 019 (no table) or a later additive migration (no
+    column), the query raises, and the surfaces (CLI / MCP) must fail
+    loudly-but-cleanly with an actionable hint instead of a traceback —
+    mirroring the swallow-with-hint contract the search write path uses in
+    :func:`record_search_query`.
 
-    Returns the hint string for the two known migration gaps, or ``None`` for
-    any other error (a genuinely-unknown column / real bug) so the caller
+    Returns the hint string for a known migration gap, or ``None`` for any
+    other error (a genuinely-unknown column / real bug) so the caller
     re-raises it.
     """
     if isinstance(exc, psycopg.errors.UndefinedTable):
@@ -215,11 +257,14 @@ def search_queries_schema_hint(exc: psycopg.Error) -> str | None:
             "search_queries table missing (migration 019 not applied) — "
             "run `brain init` first"
         )
-    if isinstance(exc, psycopg.errors.UndefinedColumn) and "fts_count" in str(exc):
-        return (
-            "search_queries.fts_count column missing (migration 023 not "
-            "applied) — run `brain init` first"
-        )
+    if isinstance(exc, psycopg.errors.UndefinedColumn):
+        missing = _missing_additive_column(exc)
+        if missing is not None:
+            return (
+                f"search_queries.{missing} column missing (migration "
+                f"{_ADDITIVE_COLUMNS[missing]} not applied) — run "
+                "`brain init` first"
+            )
     return None
 
 
@@ -229,7 +274,7 @@ def _normalize_tokens(query: str) -> frozenset[str]:
     return frozenset(cleaned.split())
 
 
-def _canonical_key(query: str) -> str:
+def canonical_query_key(query: str) -> str:
     """Collision-resistant normalized label: sorted distinct tokens, space-joined.
 
     Aggressive normalization (casefold + dedup + sort) so two queries that
@@ -328,7 +373,7 @@ class SearchFailureDetector:
             if size < self._min_cluster_size:
                 continue
             most_common = Counter(cluster).most_common(1)[0][0]
-            canonical_label = _canonical_key(most_common)
+            canonical_label = canonical_query_key(most_common)
             gaps.append(
                 Gap(
                     gap_id=str(uuid.uuid4()),
@@ -379,7 +424,7 @@ def top_search_failures(
     if normalize:
         agg: dict[tuple[str, str], int] = {}
         for query, n, kind in rows:
-            key = (_canonical_key(query), kind)
+            key = (canonical_query_key(query), kind)
             agg[key] = agg.get(key, 0) + n
         rows = [(label, n, kind) for (label, kind), n in agg.items()]
 

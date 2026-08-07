@@ -1,6 +1,7 @@
 """Postgres connection + migration helpers."""
 import importlib.resources
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from .embedding_targets import (
     embedding_index_name,
     validate_embedding_target,
 )
-from .errors import AgeBootstrapError, BrainError
+from .errors import AgeBootstrapError, BrainError, MigrationLockTimeout
 from .ingest import Embedder
 
 # Canonical Apache AGE graph name created by the ``brain init`` bootstrap and
@@ -168,6 +169,103 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 
+#: Advisory-lock key serialising schema mutation on one database.
+#:
+#: ``0x6272_6E6D`` spells "brnm" (brain-migrate). Deliberately distinct from the
+#: ``brain-rebuild`` orchestrator key ``0x62726E72`` ("brnr",
+#: :mod:`brain.maintenance`) and the pytest suite-exclusivity key ``0x62726E74``
+#: ("brnt", ``tests/db_lock.py``): those answer different questions and must
+#: never block one another.
+MIGRATION_LOCK_KEY = 0x62726E6D
+
+#: How long :func:`migration_lock` waits before giving up. Migrations against a
+#: personal-scale corpus finish in seconds; a full ``DROP SCHEMA`` + re-migrate
+#: test reset is a few more. A minute is "somebody else is genuinely working,
+#: wait for them"; past that, something is wedged and a named error beats a hang.
+MIGRATION_LOCK_TIMEOUT_S = 60.0
+
+#: Poll interval while waiting. ``pg_try_advisory_lock`` never blocks, so the
+#: wait is a poll loop rather than a blocking acquire — that keeps the timeout
+#: enforceable in Python instead of depending on server-side ``lock_timeout``.
+_MIGRATION_LOCK_POLL_S = 0.25
+
+
+@contextmanager
+def migration_lock(
+    conn: psycopg.Connection,
+    *,
+    key: int = MIGRATION_LOCK_KEY,
+    timeout_s: float | None = None,
+    poll_s: float | None = None,
+    sleep: Callable[[float], None] | None = None,
+    monotonic: Callable[[], float] | None = None,
+) -> Iterator[None]:
+    """Hold the per-database schema-mutation mutex for the enclosed block.
+
+    Schema mutation is not safe to interleave. Two processes migrating the same
+    database race in a way that reads like a code bug rather than a collision:
+    one runner's ``INSERT INTO schema_migrations`` fails because the table
+    vanished under it while the other dropped the schema, and the other's
+    ``CREATE TABLE sources`` fails because the table reappeared. That exact pair
+    was logged against the shared test database on 2026-08-07 (backends 29232 /
+    29264 / 29282), and cost a wall of bogus failures across unrelated suites.
+
+    The lock is a Postgres **session**-level advisory lock, so it is released
+    automatically if the process dies — a crashed migration never wedges the
+    database permanently. It is also *per database*, which is exactly the right
+    scope: migrations mutate one database, and two runs against two different
+    databases genuinely do not conflict.
+
+    It is **re-entrant**: Postgres grants a session a lock it already holds, so
+    an outer caller may wrap a wider critical section (e.g. a test reset's
+    ``DROP SCHEMA`` plus the re-migrate) around :func:`run_migrations`, which
+    takes it again internally. Each acquire is matched by one release.
+
+    Every tunable defaults to ``None`` and is resolved HERE rather than in the
+    signature. Default arguments bind once at import time, so a signature
+    default of ``MIGRATION_LOCK_TIMEOUT_S`` would capture the value — and a test
+    patching the module constant would silently have no effect and wait out the
+    real minute. Resolving at call time keeps both the constant and the injected
+    ``sleep`` / ``monotonic`` genuinely overridable.
+
+    :raises MigrationLockTimeout: if the lock is still held at the deadline.
+    """
+    wait_s = MIGRATION_LOCK_TIMEOUT_S if timeout_s is None else timeout_s
+    interval_s = _MIGRATION_LOCK_POLL_S if poll_s is None else poll_s
+    do_sleep = time.sleep if sleep is None else sleep
+    now = time.monotonic if monotonic is None else monotonic
+
+    deadline = now() + wait_s
+    while True:
+        row = conn.execute("SELECT pg_try_advisory_lock(%s)", (key,)).fetchone()
+        if row is not None and bool(row[0]):
+            break
+        if now() >= deadline:
+            raise MigrationLockTimeout(
+                f"another process is migrating {conn.info.dbname!r} on "
+                f"{conn.info.host}:{conn.info.port} and did not finish within "
+                f"{wait_s:g}s. Schema changes cannot safely interleave, so "
+                f"this run is stopping instead of corrupting the schema. Wait "
+                f"for the other run to finish, or point this one at its own "
+                f"database."
+            )
+        do_sleep(interval_s)
+    try:
+        yield
+    finally:
+        try:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
+        except psycopg.errors.InFailedSqlTransaction:
+            # The body raised mid-transaction, so the connection refuses further
+            # statements until the transaction is unwound. Roll back and release
+            # explicitly: the body's work is already lost either way, and
+            # handing the lock back beats making the next run wait out the full
+            # timeout. (Closing the connection would also release it — this just
+            # does not depend on the caller closing it promptly.)
+            conn.rollback()
+            conn.execute("SELECT pg_advisory_unlock(%s)", (key,))
+
+
 def _table_exists(conn: psycopg.Connection, name: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM information_schema.tables "
@@ -240,6 +338,15 @@ def run_migrations(conn: psycopg.Connection) -> list[str]:
     ``schema_migrations`` table yet), seeds the table from schema state via
     :func:`_seed_applied_migrations` so the prior CREATE TABLE / ALTER COLUMN
     statements aren't re-attempted.
+
+    The whole read-then-apply sequence runs under :func:`migration_lock`. That
+    is load-bearing rather than defensive: "which migrations are already
+    applied" is read, then acted on, so two concurrent runners both read the
+    same pending list and both apply it. Holding the mutex across the read makes
+    the check-then-act atomic. Every migrating entry point — ``brain init``,
+    ``brain demo``, ``brain backup restore``, and the pytest session reset —
+    funnels through here, so they all serialise per database without each having
+    to remember to take the lock.
     """
     mdir = migrations_dir()
     migration_files = sorted(mdir.glob("*.sql"))
@@ -253,25 +360,26 @@ def run_migrations(conn: psycopg.Connection) -> list[str]:
             "from a build that includes src/brain/migrations/*.sql."
         )
 
-    conn.execute(_SCHEMA_MIGRATIONS_DDL)
-    seeded_row = conn.execute("SELECT count(*) FROM schema_migrations").fetchone()
-    assert seeded_row is not None  # count(*) always yields one row
-    if int(seeded_row[0]) == 0:
-        _seed_applied_migrations(conn)
+    with migration_lock(conn):
+        conn.execute(_SCHEMA_MIGRATIONS_DDL)
+        seeded_row = conn.execute("SELECT count(*) FROM schema_migrations").fetchone()
+        assert seeded_row is not None  # count(*) always yields one row
+        if int(seeded_row[0]) == 0:
+            _seed_applied_migrations(conn)
 
-    rows = conn.execute("SELECT name FROM schema_migrations").fetchall()
-    applied_names = {str(r[0]) for r in rows}
+        rows = conn.execute("SELECT name FROM schema_migrations").fetchall()
+        applied_names = {str(r[0]) for r in rows}
 
-    applied: list[str] = []
-    for sql_file in migration_files:
-        if sql_file.name in applied_names:
-            continue
-        conn.execute(sql_file.read_text())
-        conn.execute(
-            "INSERT INTO schema_migrations (name) VALUES (%s)",
-            (sql_file.name,),
-        )
-        applied.append(sql_file.name)
+        applied: list[str] = []
+        for sql_file in migration_files:
+            if sql_file.name in applied_names:
+                continue
+            conn.execute(sql_file.read_text())
+            conn.execute(
+                "INSERT INTO schema_migrations (name) VALUES (%s)",
+                (sql_file.name,),
+            )
+            applied.append(sql_file.name)
     return applied
 
 

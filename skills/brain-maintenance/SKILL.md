@@ -7,15 +7,20 @@ description: >
   asks whether the brain is healthy, asks to rebuild embeddings, asks to
   resync summaries to the wiki, asks to regenerate the people pages, asks
   to refresh derived links or directory, or reports a brain CLI error that
-  suggests an ops-level repair. Covers brain doctor / status / analyze /
+  suggests an ops-level repair. Also covers first-time provisioning
+  (`brain setup`), the zero-Ollama sandbox (`brain demo`), and the retrieval
+  eval harness (`brain eval`). Covers brain doctor / status / analyze /
   reembed / init / backfill / vault sync-summaries / vault relink-derived /
-  vault directory refresh.
+  vault directory refresh / setup / demo / eval.
   MANDATORY TRIGGERS: brain doctor, is my brain healthy, brain status,
   rebuild embeddings, reembed, brain reembed, backfill the brain, backfill
   tags, backfill search, sync summaries, sync summaries to wiki, regenerate
   people pages, refresh derived links, refresh directory, relink, switch
   embedder, ollama down, postgres down, brain init, brain analyze, analyze
-  tables, refresh planner stats, chunks stats warn.
+  tables, refresh planner stats, chunks stats warn, set up my brain, brain
+  setup, install the brain, provision the brain, run the demo, brain demo,
+  try the demo, sandbox corpus, run the eval, eval harness, retrieval
+  quality, did retrieval regress, record a baseline, ranking metrics.
 ---
 
 # Brain Maintenance
@@ -24,7 +29,51 @@ Operational commands for the brain corpus. Most of these are idempotent and
 safe to re-run.
 
 For searching, see `consult-brain`. For ingestion, see `ingest-brain`. For
-authoring, see `brain-authoring`. For action items, see `brain-todo`.
+authoring, see `brain-authoring`. For action items, see `brain-todo`. For
+digests, reviews, timelines and link suggestions, see `brain-proactivity`.
+**Boundary with `brain-memory`:** that skill governs what *you the agent*
+remember about the user across sessions; this one operates the *corpus
+infrastructure* underneath.
+
+## First-run provisioning — `brain setup`
+
+The one-command installer: provisions `$BRAIN_HOME`, installs shims, starts
+Postgres via Docker, and optionally configures the wiki (Caddy + Quartz) and the
+Claude Code skill. Use it when the user has no working brain yet — not as a
+repair for one that already works (that is `brain doctor`).
+
+```bash
+brain setup --dry-run                  # print every planned action, touch nothing
+brain setup --profile minimal          # Postgres + FTS only; no Ollama, no models
+brain setup --profile full --daemons   # + graph / wiki / launchd daemons (full only)
+```
+
+`--profile standard` is the default (adds Ollama hybrid search); run
+`brain setup --help` for the rest. **`--reset` is destructive — it wipes an
+existing `$BRAIN_HOME` — and requires a typed confirmation
+`--non-interactive` cannot bypass.** Never run it to "clean things up"; get
+explicit user approval first.
+
+## Taste-test sandbox — `brain demo`
+
+A throwaway Postgres seeded with a synthetic compliance corpus. Zero Ollama,
+zero personal data, no model downloads — needs only Docker. Reach for it when the
+user wants to see what the brain does before committing, or when you need a safe
+corpus to demonstrate ranking against.
+
+```bash
+brain demo                                  # provision + seed + run the hero query
+brain demo --with-embeddings                # also build vectors + HNSW (default: FTS-only)
+brain demo query "SOC 2 evidence request"   # a targeted follow-up query
+brain demo status                           # is the sandbox up, how many docs
+brain demo teardown                         # destroy the sandbox and its data
+```
+
+Also `--port` (default **55433**, auto-bumps if busy), `--database-url`, and
+`--json`. **It is a separate instance on a separate port — never the
+production brain on 55432**, and `teardown` destroys only the sandbox. Don't
+use demo commands to answer a real question about the user's corpus; that is
+`consult-brain`.
 
 ## Health and status
 
@@ -215,9 +264,36 @@ brain reembed
 document. There is a memory file (`feedback_db_safety.md`) documenting a
 prior accidental wipe; do not repeat it.
 
+## Retrieval quality — `brain eval`
+
+Runs the eval harness over a golden corpus and reports **nDCG@5 / MRR /
+Recall@20** per query plus aggregate means — how you answer "did retrieval get
+worse?" with a number instead of a vibe. Reach for it after a change to
+search, chunking, or the embedder, not as a routine health check.
+
+```bash
+brain eval                                     # all queries, Rich table
+brain eval -c <category> -n 20                 # restrict categories (repeatable) + cap
+brain eval --record-baseline ci                # → tests/eval/baselines/ci.json
+brain eval --baseline ci --diff --fail-below   # compare, exit 3 on any regression
+```
+
+`--fail-below` requires `--diff` and trips on a regression greater than `1e-4`.
+`--answer` swaps in the answer-quality harness — `tests/eval/answer_corpus.yaml`
+run through `brain ask --no-loop` against a live Ollama, reporting
+`mean_fact_recall` / `mean_citation_count`, with no baselines (live-model
+gated). Also `--corpus <path>` and `--json`.
+
+**The default corpus is gitignored.** `tests/eval/golden_corpus.yaml` must be
+authored locally; without it the command raises `EvalCorpusError` — a
+missing-input condition, not a broken install, so say so rather than routing the
+user to `brain doctor`. Exit codes are meaningful: **3** = `--fail-below`
+regression, **2** = bad parameter (e.g. `--fail-below` without `--diff`), **1** =
+generic error; don't collapse them into "it failed".
+
 ## Safety rules
 
-- **Never run destructive ops on the production DB without explicit user approval.** That includes `DROP`, `TRUNCATE`, unbounded `DELETE`, `docker compose down -v`, `rm -rf data/postgres/`.
+- **Never run destructive ops on the production DB without explicit user approval.** That includes `DROP`, `TRUNCATE`, unbounded `DELETE`, `docker compose down -v`, `rm -rf data/postgres/`, `brain setup --reset`, and `brain uninstall` (which tears down runtime state and supervised daemons — never reach for it on "clean up my brain").
 - **Migrations are additive-only.** Schema changes go in a new numbered file under `src/brain/migrations/`. Never edit a shipped migration.
 - **`brain doctor` is the diagnostic; the remediation is in the printed line.** If the line doesn't tell you what to do, ask the user before guessing — don't go straight to a reset.
 - **Soft warnings are warnings, not failures.** Missing `npx`, missing Ollama enrich model — note them, don't escalate.

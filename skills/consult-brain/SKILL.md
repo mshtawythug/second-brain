@@ -4,8 +4,9 @@ description: >
   Answer questions or write content using the user's local "second brain" — a
   hybrid-search knowledge base of career artifacts, meeting transcripts, Slack
   threads, Gmail, and authored vault notes. Use for lookups about the user's
-  own history, quotes, facts, and drafting in their voice. For themes /
-  patterns / connections across interactions, use `brain-graph` instead.
+  own history, quotes, facts, and drafting in their voice. For ONE synthesized
+  answer with inline citations, or an audio overview, use `brain-ask`. For
+  themes / patterns / connections across interactions, use `brain-graph`.
   MANDATORY TRIGGERS: ask my brain, second brain, what did I say, my
   conversations, my notes about, write in my voice, draft like me, my career,
   my interview prep, summarize my emails about, what did I tell, did I ever
@@ -31,6 +32,11 @@ answer about content → stay here; relationships, themes, or clustering →
 For ingesting new content into the brain, see `ingest-brain`. For authoring
 new notes, see `brain-authoring`. For action-item / TODO queries, see
 `brain-todo`. For health / re-embedding / maintenance, see `brain-maintenance`.
+For the unprompted side — daily digests, resurfacing, weekly reviews,
+timelines, link suggestions — see `brain-proactivity`. **Boundary with
+`brain-memory`:** that skill governs what *you the agent* record and recall
+about the user across sessions; this one only reads the corpus the *user*
+built.
 
 ## When this fires
 
@@ -49,6 +55,12 @@ If the question is a generic technical/coding/news question, defer — that's
 not what the brain is for.
 
 ## How to consult the brain
+
+The manual loop below (search → show → synthesize) is the default and is right
+for most questions. Reach for it when you need the raw documents in context —
+voice mimicry, verbatim quoting, drafting. **If the deliverable is instead one
+composed answer with inline citations, do not hand-roll it: hand off to
+`brain-ask`.**
 
 ### Step 1 — Distill the question into search terms
 
@@ -131,6 +143,17 @@ brain rate <id-prefix> irrelevant    # this doc was a false positive
 This appends to the `interactions` table; future ranking iterations use it.
 Don't ask for permission — log silently when the user reacts positively to a
 specific cited doc, or when they tell you a doc was off-base.
+
+## Cited synthesis and audio overviews — hand off to `brain-ask`
+
+The manual loop above returns a ranked list you read and synthesize yourself.
+When the user instead wants **one** composed answer carrying inline citations
+back to their own documents, or a two-host audio overview of a person or topic,
+that is `brain-ask`'s territory — hand off rather than stitching several
+`brain show` calls together by hand.
+
+Rule of thumb: reading documents to write something yourself → stay here; the
+deliverable *is* a cited answer or a narrated overview → `brain-ask`.
 
 ## Debugging weird results — `brain explain`
 

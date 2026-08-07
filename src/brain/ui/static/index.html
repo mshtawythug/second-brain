@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>brain</title>
+<!--
+  NO inline <script> and NO inline <style> anywhere in this file. That is not a
+  style preference: it is what lets the Content-Security-Policy stay at
+  `default-src 'none'; script-src 'self'; style-src 'self'` with no nonce and no
+  'unsafe-inline'. Adding one inline handler or one style="" attribute with a
+  behaviour would force a nonce and weaken the whole policy. Keep it out.
+
+  theme.js is loaded (not deferred) in <head> so the stored theme is applied
+  before first paint and the page never flashes the wrong ground colour.
+-->
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/theme.js"></script>
+<script type="module" src="/static/app.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <button class="icon-btn rail-toggle" id="rail-toggle" type="button"
+          aria-label="Show or hide the vault (Cmd+B)">☰</button>
+  <span class="brand">brain</span>
+  <nav class="tabs" aria-label="Sections">
+    <button class="tab is-active" data-tab="notes" type="button" aria-current="page">Notes</button>
+    <button class="tab" data-tab="ingest" type="button">Ingest</button>
+    <button class="tab" data-tab="agent" type="button">Agent</button>
+    <button class="tab" data-tab="publish" type="button">Publish</button>
+  </nav>
+  <div class="topbar-right">
+    <span class="badge" id="mode-badge" hidden>read-only</span>
+    <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle colour theme">☾</button>
+  </div>
+</header>
+
+<main class="shell" id="tab-notes">
+
+  <nav class="rail" aria-label="Vault">
+    <div class="rail-head">
+      <h2 class="rail-title">Vault</h2>
+      <button class="ghost-btn" id="new-note" type="button">+ New</button>
+    </div>
+    <div class="tree" id="tree" role="tree" aria-label="Vault notes" tabindex="0"></div>
+  </nav>
+
+  <section class="ledger" aria-label="Search results">
+    <div class="search-head">
+      <div class="search-box">
+        <span class="search-glyph" aria-hidden="true">⌕</span>
+        <input type="search" id="q" placeholder="search your brain…"
+               aria-label="Search query" autocomplete="off" spellcheck="false">
+        <kbd class="hint">⌘K</kbd>
+      </div>
+      <div class="filters">
+        <select id="f-source" aria-label="Filter by source"><option value="">Source</option></select>
+        <select id="f-type" aria-label="Filter by type"><option value="">Type</option></select>
+        <select id="f-tag" aria-label="Filter by tag"><option value="">Tag</option></select>
+        <input type="date" id="f-after" aria-label="Updated after">
+        <input type="date" id="f-before" aria-label="Updated before">
+      </div>
+      <p class="meta-line" id="meta" aria-live="polite"></p>
+      <p class="meta-sub" id="meta-sub"></p>
+    </div>
+    <ol class="results" id="results"></ol>
+  </section>
+
+  <article class="inspector" id="inspector" aria-label="Note">
+    <p class="empty">Select a note from the vault, or search.</p>
+  </article>
+
+</main>
+
+<section class="shell deferred-tab" id="tab-ingest" hidden>
+  <div class="deferred">
+    <h2>Ingest</h2>
+    <p>Deferred to a later release. Ingest chunks, embeds and enriches each
+       document, which takes tens of seconds to minutes — it needs a
+       background-job subsystem this UI does not have yet, and a progress bar
+       that lied about untracked work would be worse than none.</p>
+    <p>Use the CLI today:</p>
+    <pre><code>brain ingest &lt;file&gt;
+brain ingest-dir &lt;directory&gt;</code></pre>
+  </div>
+</section>
+
+<section class="shell deferred-tab" id="tab-agent" hidden>
+  <div class="deferred">
+    <h2>Agent</h2>
+    <p>Deferred to a later release. <code>brain ask</code> is a multi-iteration
+       plan → retrieve → reflect → synthesize loop against a local model; it
+       needs streaming, mid-flight cancellation and conversation state. It also
+       renders model-generated text into the DOM, which deserves its own
+       hardening pass rather than riding along on v1.</p>
+    <p>Use the CLI today:</p>
+    <pre><code>brain ask "your question"</code></pre>
+  </div>
+</section>
+
+<section class="shell deferred-tab" id="tab-publish" hidden>
+  <div class="deferred">
+    <h2>Publish</h2>
+    <p>Deferred to a later release. The wiki is a static Quartz build —
+       <code>npm install</code>, build, blue/green swap behind a proxy —
+       and triggering that from a request handler is the worst case of the
+       background-job problem.</p>
+    <p>The one instant piece has already shipped: the
+       <strong>draft ↔ published toggle</strong> lives in the Notes inspector.</p>
+    <p>Use the CLI for a full rebuild:</p>
+    <pre><code>brain-rebuild</code></pre>
+  </div>
+</section>
+
+<dialog id="confirm-dialog" class="modal">
+  <form method="dialog" class="modal-body">
+    <h2 id="confirm-title">Delete note</h2>
+    <p id="confirm-text"></p>
+    <label class="field">
+      <span id="confirm-label">Type the exact title to confirm</span>
+      <input type="text" id="confirm-input" autocomplete="off">
+    </label>
+    <menu class="modal-actions">
+      <button value="cancel" class="ghost-btn" type="submit">Cancel</button>
+      <button value="ok" class="danger-btn" id="confirm-ok" type="submit" disabled>Delete</button>
+    </menu>
+  </form>
+</dialog>
+
+<dialog id="new-dialog" class="modal">
+  <form method="dialog" class="modal-body">
+    <h2>New note</h2>
+    <label class="field"><span>Title</span>
+      <input type="text" id="new-title" autocomplete="off"></label>
+    <label class="field"><span>Folder (optional)</span>
+      <input type="text" id="new-folder" autocomplete="off" placeholder="projects"></label>
+    <label class="field"><span>Tags (comma separated)</span>
+      <input type="text" id="new-tags" autocomplete="off"></label>
+    <menu class="modal-actions">
+      <button value="cancel" class="ghost-btn" type="submit">Cancel</button>
+      <button value="ok" class="accent-btn" type="submit">Create</button>
+    </menu>
+  </form>
+</dialog>
+
+<p class="toast" id="toast" role="status" aria-live="polite" hidden></p>
+
+</body>
+</html>

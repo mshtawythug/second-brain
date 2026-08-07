@@ -280,6 +280,13 @@ class VoyageEmbedder:
     """
 
     dim: int = 1024
+    #: F6 trust boundary: this backend POSTs raw chunk text to a third party, so
+    #: a confidential document's body must never be handed to it. Duck-typed
+    #: exactly like :attr:`NullEmbedder.produces_embeddings` — NOT part of the
+    #: :class:`brain.ingest.Embedder` Protocol, so the local backends need no
+    #: change and a test double can stand in for a hosted backend without an API
+    #: key or a live client. Read only through :func:`is_hosted_embedder`.
+    hosted_egress: bool = True
 
     def __init__(
         self,
@@ -387,6 +394,35 @@ class NullEmbedder:
     def count_tokens(self, text: str) -> int:
         """Return the number of tokens in ``text`` per the local tiktoken tokenizer."""
         return len(self._tokenizer.encode(text))
+
+
+def is_hosted_embedder(embedder: object) -> bool:
+    """True when the backend POSTs chunk text off-machine (F6 trust boundary).
+
+    Adding a hosted backend means declaring ``hosted_egress = True`` on it — one
+    place, Open/Closed. This function is the ONLY reader of that flag, so the
+    definition of "hosted" lives in exactly one expression.
+
+    Duck-typed via ``getattr`` rather than ``isinstance(embedder,
+    VoyageEmbedder)`` for two reasons, both load-bearing:
+
+    - Constructing a real :class:`VoyageEmbedder` requires an API key and a live
+      client, so an ``isinstance`` gate would be untestable without either
+      monkeypatching the production class (banned by CLAUDE.md rule 13) or
+      putting a network call in the suite.
+    - It mirrors the established :attr:`NullEmbedder.produces_embeddings`
+      precedent, so the two duck-typed backend capability flags are read the same
+      way and neither is part of the :class:`brain.ingest.Embedder` Protocol —
+      the local backends stay untouched.
+
+    Defaults to ``False`` (local) for any object that does not declare the flag.
+    That direction is deliberate: the veto's cost is a NULL embedding, so
+    mis-classifying a *local* backend as hosted would silently degrade retrieval
+    for every confidential document, whereas the opposite mistake — a genuinely
+    hosted backend that forgets the flag — is caught by the explicit
+    per-backend parity test in ``tests/test_sensitivity_egress.py``.
+    """
+    return getattr(embedder, "hosted_egress", False) is True
 
 
 def make_embedder(cfg: Config) -> Embedder:

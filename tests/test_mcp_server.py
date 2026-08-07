@@ -165,8 +165,13 @@ def test_brain_search_returns_expected_shape(
         content="Doc B: krisp meeting transcript about pizza",
     )
     payload = mcp_server.brain_search(query="company-id")
-    # Q1-C: brain_search now returns {session_id, results} (breaking shape).
-    assert set(payload.keys()) == {"session_id", "results"}
+    # Q1-C: brain_search returns a dict carrying {session_id, results}.
+    # A SUPERSET check, not equality: F5 added metadata keys, and adding named
+    # keys to a JSON object is the non-breaking way this surface evolves.
+    # Pinning the exact key set would turn every future additive key into a
+    # false failure. The two keys below are the frozen contract —
+    # tests/test_search_output_unchanged.py owns it.
+    assert {"session_id", "results"} <= set(payload.keys())
     import uuid as _uuid
 
     _uuid.UUID(payload["session_id"])  # parses cleanly

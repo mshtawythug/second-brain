@@ -67,6 +67,11 @@ def isolated_dotenv(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.mark.live_db
+# The live embedder IS the point here: this measures real cosine similarity
+# against the real corpus to keep DEFAULT_VECTOR_SIM_FLOOR honest, so stubbing
+# it would test nothing. Exempts it from the hermeticity guard's default ban on
+# Ollama sockets (tests/conftest.py).
+@pytest.mark.live_ollama
 def test_default_floor_excludes_known_bad_person_b_match(
     monkeypatch: pytest.MonkeyPatch,
     isolated_dotenv: None,

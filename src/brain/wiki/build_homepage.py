@@ -142,8 +142,22 @@ def refresh_homepage(cfg: Config) -> tuple[bool, bool]:
         with connect(cfg.database_url) as conn:
             docs = _fetch_recent_docs(conn, limit=RECENT_LIMIT)
     except psycopg.Error as exc:
-        _logger.warning(
-            "wiki recent rail: DB query failed (%s) — skipping refresh", exc
+        # ERROR, not WARNING — deliberate, and the same call the sibling
+        # `build_related.refresh_related` makes. This function's return value
+        # is (False, False) here, which is BYTE-IDENTICAL to the happy "no
+        # drift, nothing to rewrite" result, so the caller cannot tell a
+        # failed refresh from a successful no-op. That makes this log line the
+        # only signal that the recent rail silently froze — and a WARNING is
+        # precisely what let the 2026-07-26 wiki staleness run twelve days
+        # unnoticed. Still non-fatal: a DB blip is transient and the next
+        # build repairs the rail, whereas an unloadable Config is a permanent
+        # misconfiguration and DOES abort the build (see
+        # `build_swap._refresh_pre_build_adornments`).
+        _logger.error(
+            "wiki recent rail: DB query failed (%s) — the recent rail is now"
+            " stale and stays stale until a build succeeds with the DB"
+            " reachable. The build itself continues.",
+            exc,
         )
         return (False, False)
 

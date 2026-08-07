@@ -600,6 +600,7 @@ def test_summarize_group_returns_none_on_empty_summary(
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.real_llm_backends
 def test_make_extractor_uses_graph_extract_model() -> None:
     cfg = Config(database_url="postgresql://x/y", graph_extract_model="custom:7b")
     extractor = make_extractor(cfg)
@@ -607,18 +608,21 @@ def test_make_extractor_uses_graph_extract_model() -> None:
     assert extractor.version == "custom:7b@concepts-v6"
 
 
+@pytest.mark.real_llm_backends
 def test_make_extractor_threads_max_entities() -> None:
     cfg = Config(database_url="postgresql://x/y", graph_max_entities=2)
     extractor = make_extractor(cfg)
     assert extractor._max_entities == 2
 
 
+@pytest.mark.real_llm_backends
 def test_make_extractor_defaults_input_cap_to_8000() -> None:
     """Fix C: the generous default input head cap (8000 tokens) is wired by default."""
     cfg = Config(database_url="postgresql://x/y")
     assert make_extractor(cfg)._max_input_tokens == 8000
 
 
+@pytest.mark.real_llm_backends
 def test_make_extractor_threads_max_input_tokens() -> None:
     cfg = Config(database_url="postgresql://x/y", graph_extract_max_input_tokens=1234)
     extractor = make_extractor(cfg)

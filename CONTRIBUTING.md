@@ -86,6 +86,59 @@ pytest            # full suite against the port-5434 test DB
 
 `pytest` runs with coverage enforcement built in (`--cov-fail-under=85`).
 
+Note that `addopts` applies to collection-only runs too, so `pytest
+--collect-only` reports `FAIL Required test coverage of 85% not reached. Total
+coverage: 24.30%` — no tests ran, so nothing was covered. That is not a broken
+gate; pass `--no-cov` when you are only debugging collection.
+
+### Continuous integration
+
+Every pull request and every push to `main`/`master` runs
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) — the same gate, in two
+jobs:
+
+| Job | What it runs |
+|-----|--------------|
+| **Lint and types (ruff + mypy)** | `ruff check` and `mypy src/`. No Docker, finishes in under a minute, so a formatting or typing mistake fails fast and cheap. |
+| **Tests (pytest, AGE Postgres)** | A bare `pytest` against the pinned AGE test instance on port 5434. |
+
+The test job runs **bare `pytest`** on purpose: `pyproject.toml` owns the marker
+filter and the coverage floor, so CI runs exactly what you run locally. Never
+add `--no-cov` or `--cov-fail-under` to the workflow — if coverage comes up
+short in CI, the fix is hermetic unit tests for the uncovered lines, not a
+lowered floor.
+
+CI has no Ollama and no production corpus, so a **non-zero skip count is
+expected**; a run with zero skips would mean a test reached a live service it
+should not have. To reproduce CI conditions locally, stop Ollama
+(`brew services stop ollama`) and stop the production container, then run
+`pytest`.
+
+### Claude Code skills
+
+The agent-facing skills under `skills/` are installed into `~/.claude/skills`
+by a copy-based sync script. **Run it after every upgrade** — `--check` counts
+"not installed" as drift, so a newly added skill makes it exit non-zero until
+you re-sync:
+
+```bash
+bin/brain-skills-sync           # install / update every brain skill
+bin/brain-skills-sync --check   # verify none has drifted (exits 1 if any has)
+```
+
+Adding a skill needs no registration anywhere: create
+`skills/<name>/SKILL.md`, match the frontmatter contract that
+`tests/test_skill_frontmatter.py` locks (a `name` equal to the directory name, a
+`description` carrying a `MANDATORY TRIGGERS:` list whose phrases no other skill
+claims, one `#` H1, 100-300 lines), then run the sync.
+
+### PII pre-commit hook
+
+The PII / secret gate is a **local** hook, deliberately not a CI job: it needs
+the gitignored `.pii-denylist.local.txt` (which contains the real sensitive
+terms) and the `claude` CLI, neither of which exists on a runner. Install it
+once per clone — see [`scripts/hooks/README.md`](scripts/hooks/README.md).
+
 ### Coverage floors
 
 | Area | Minimum |
@@ -242,7 +295,7 @@ src/brain/
 src/brain/migrations/ — numbered SQL files (001..023) packaged inside the brain package + schema_migrations tracking
 bin/                  — brain-up / brain-down / brain-rebuild / brain-status convenience scripts
 quartz.config.ts      — sample Quartz v4 config (copy into <vault>/.quartz/)
-skills/               — Claude Code skills (consult-brain, brain-graph, elicit-brain, brain-todo, ingest-brain)
+skills/               — Claude Code skills, one directory per skill (installed by bin/brain-skills-sync)
 tests/                — real-DB pattern, fake embedder fixture, one test module per source module (~290 modules)
 ```
 

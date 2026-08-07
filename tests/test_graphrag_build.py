@@ -46,9 +46,8 @@ from brain.graph_rag.reconcile import (
 from brain.graph_rag.weighting import normalized_lift
 from brain.queries import count_documents, iter_all_document_ids
 from brain.vault.derived_links.directory import DirectoryStore
+from tests.conftest import TEST_DATABASE_URL
 from tests.graphrag.benchmark_fixture import BenchmarkSpec, generate_benchmark_graph
-
-TEST_DATABASE_URL = "postgresql://brain:brain@localhost:5434/second_brain_test"
 
 # Suppression-disabled ratio (cap = round(N * 1.0) = N) so the tiny corpora
 # materialize edges. Mirrors ``_NO_SUPPRESS`` in test_graphrag_reconcile.

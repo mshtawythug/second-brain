@@ -347,9 +347,15 @@ def test_doctor_reports_zero_drift_clean_state(
         result = CliRunner().invoke(app, ["doctor"])
     assert result.exit_code == 0, result.output
     assert "vault drift" in result.output
-    assert "OK (0 mirrors, 0 NULL vault_path, 0 orphan files, 0 ghost rows)" in (
-        result.output
-    )
+    # `clobbered mirrors` (C6) is a 5th counter split out of `orphan files`: a
+    # file whose frontmatter id resolves to nothing but whose PATH is a live
+    # row's vault_path. It must appear in the clean line too — omitting it from
+    # the counters/_drift_clean pair is what would let doctor report "OK" over
+    # an intact data-loss hazard.
+    assert (
+        "OK (0 mirrors, 0 NULL vault_path, 0 orphan files, 0 ghost rows, "
+        "0 clobbered mirrors)"
+    ) in result.output
     # No suggested-fix hints when clean.
     assert "prune-orphans" not in result.output
     assert "vault export --force" not in result.output

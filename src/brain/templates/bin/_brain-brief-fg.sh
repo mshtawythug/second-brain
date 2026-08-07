@@ -22,4 +22,12 @@ else
     exit 1
 fi
 
+# Cap oversized logs left by a previous (possibly crash-looping) generation
+# BEFORE this one starts writing. launchd owns fd 1/2 here and keeps them open
+# across the exec below, so rotation has to copy-truncate the file in place —
+# see src/brain/log_rotation.py for why a Python logging handler cannot do this
+# job. --log-dir is omitted deliberately: the module resolves $BRAIN_HOME/logs
+# itself, and the plist now exports BRAIN_HOME explicitly.
+"$PY" -m brain.log_rotation 2>/dev/null || true
+
 exec "$PY" -m brain brief --wiki

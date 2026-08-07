@@ -210,6 +210,253 @@ commands.
 | `BRAIN_AUDIO_THEME_LIMIT` | `4` | Max themes/communities folded into the overview. |
 | `BRAIN_GAPS_LOOKBACK_DAYS` | `30` | Lookback window for `brain gaps` surfaces. |
 | `BRAIN_GAPS_MIN_CLUSTER_SIZE` | `2` | Min failed-query count before a cluster becomes a gap. |
+| `BRAIN_RECALL_BUDGET_TOKENS` | `2000` | Default token budget for the whole `brain recall` block, header included. |
+| `BRAIN_RECALL_PASSAGE_TOKENS` | `120` | Context window stitched around each document's best chunk. |
+| `BRAIN_RECALL_MAX_CANDIDATES` | `25` | Upper bound on documents considered before packing. |
+| `BRAIN_SNIPPET_CONTEXT_TOKENS` | `200` | Context tokens stitched around a `brain search` snippet. |
+| `BRAIN_VECTOR_SIM_FLOOR` | `0.25` | Min cosine similarity for a vector-leg candidate to count. See the note below — it trades recall for precision. |
+| `BRAIN_RECENCY_HALFLIFE_DAYS` | `180` | Half-life of the recency boost applied to search scores. |
+| `BRAIN_BACKUP_DIR` | `$BRAIN_HOME/backups` | Where `brain backup` writes archives and `brain restore` discovers them. Absolute or `~`-relative. Resolved lazily, so relocating the brain home relocates its backups; never created until a backup actually runs. |
+
+### `BRAIN_VECTOR_SIM_FLOOR` — why a good semantic match can rank last
+
+The floor discards vector-leg candidates below `0.25` cosine similarity. It
+buys precision: without it, the vector leg always returns *something*, so every
+query gets nearest-neighbour filler whether or not anything is actually
+relevant.
+
+The cost is real and you will meet it. **Very short documents embed weakly**,
+so a genuine semantic match can fall under the floor and score `0.0` on the
+vector leg — surviving only on its lexical rank, or ranking first with no
+vector contribution at all. Observed in QA: the query *"watering the plants"*
+against a short *Garden Irrigation Plan* note. Nothing is broken; the document
+simply had too little text to embed strongly.
+
+If your corpus is mostly short notes and search feels blunt, lower the floor
+(`0.15` is a reasonable next stop) and accept more filler. Raise it if you get
+too many loosely-related hits. There is no universally right value — it is a
+recall-versus-precision dial, and the default is tuned for a corpus of mostly
+long-form documents.
+
+## Search and retrieval trust boundaries
+
+Two of the variables above decide what leaves this machine, and one design
+decision governs which surface shows what. All three need more than a
+one-line table cell.
+
+### `BRAIN_SECRET_GUARD` — ingest-time credential scanning
+
+| Value | Behaviour |
+|---|---|
+| `warn` *(default)* | Findings are printed to **stderr**; the document is stored unchanged. `stdout` stays byte-identical, so scripts parsing it are unaffected. |
+| `redact` | The matched span is replaced with `[REDACTED:<pattern-name>]` before storage. |
+| `reject` | The ingest is refused and **nothing is written** — the guard raises before the content hash and before the write transaction opens. |
+| `off` | No scanning. |
+
+`--allow-secrets` bypasses the *action* for one invocation while still printing
+findings, so you can force through a known false positive without disabling the
+guard globally.
+
+**`brain vault sync` is the exception: it defaults to `off`, not `warn`.** That
+is deliberate. Sync has seven call sites (`brain vault sync`, the `--watch`
+daemon, MCP, and others), and defaulting them to an active mode would have
+silently changed all of their behaviour at once. Callers opt in by passing the
+configured mode explicitly.
+
+When sync *is* guarded, a refusal is **per-file, not fatal**: the offending
+note is skipped, the walk continues, and the count surfaces as
+`SyncReport.secrets_refused`. One credential-bearing note therefore cannot
+abort a whole-corpus sync — and a report showing `3 files refused` is a
+correct outcome, not a malfunction.
+
+**`redact` on a vault-tier note refuses instead of redacting.** This looks
+inconsistent and is the only correct behaviour. A vault note's file is the
+source of truth, so redacting would store a clean body in the database while
+your file on disk keeps the secret — and the file wins on the next sync, which
+means the redaction silently undoes itself. Worse, you would believe the
+credential was scrubbed. The fix is to edit the file, remove the secret, and
+sync again; the refusal message says so.
+
+### The CLI and MCP treat confidential documents differently, on purpose
+
+`brain search`, `brain show` and `brain recall` all return confidential bodies
+in full. The MCP tools of the same names withhold them unless the caller passes
+`include_confidential=true`. **That asymmetry is the design, not an oversight
+on the CLI side.**
+
+The trust boundary runs between *your machine* and *a hosted model*, not
+between you and your own corpus:
+
+| Surface | Behaviour | Why |
+|---|---|---|
+| CLI | serves everything | You are reading your own notes on your own machine. Hiding them from you protects nobody and makes the tier unusable. |
+| MCP | withholds by default | It feeds a model that may be hosted. This is the egress point F6 exists for. |
+| Wiki | drops from the published index | The rendered site can be served to others. |
+
+`brain search --sensitivity confidential` is therefore a **lens, not an access
+control** — it answers "show me only what I've marked", the same way `--kind`
+answers "show me only transcripts". `search_predicate.py` says so at the filter
+itself.
+
+> If you are about to make CLI `recall` withhold bodies "for consistency with
+> MCP": don't. That is a regression dressed as hardening. The consistent thing
+> is the *rule* — content leaves the machine only on an explicit opt-in — and
+> the CLI is not a way off the machine.
+
+### `BRAIN_AGENT_ID` — who is doing the work
+
+Records the **actor**, as opposed to `source` (`cli` / `mcp` / `wiki`), which
+records the **surface**. Two agents both working over MCP are indistinguishable
+by `source`; this is what tells them apart in `brain usage`.
+
+Must match `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$` — one alphanumeric character,
+then up to 63 more alphanumerics, dots, underscores, colons or hyphens. Leading
+punctuation is rejected so an id can never be mistaken for a CLI flag. A
+malformed value fails at startup rather than being silently dropped, because a
+silently dropped id shows up only as a permanently empty `brain usage` bucket.
+
+Unset means **unattributed**, which is a first-class answer rather than a
+failure: every row written before migration 027 is genuinely unattributed, and
+`brain usage` renders that as `(unattributed)` instead of inventing an agent.
+
+> **Read this before exporting it in a shell profile.** `BRAIN_AGENT_ID`
+> attributes **everything** that process writes — including documents you
+> ingest by hand with `brain ingest` and `brain ingest-dir`. Setting it
+> globally will therefore mark manually-added documents as authored by that
+> agent. `search_queries.agent_id` is ephemeral telemetry, but
+> `documents.agent_id` is durable provenance on your own corpus, so wrong
+> provenance there is the more expensive mistake. Prefer setting it per-process
+> (`BRAIN_AGENT_ID=research-agent brain search …`) or in the agent's own
+> environment rather than in `~/.zshrc`.
+
+Per-invocation `--agent` overrides it on `search`, `recall`, `rate` and
+`ingest-stdin`. Those four are the agent-facing surfaces; `brain ingest` /
+`ingest-dir` deliberately have **no** `--agent` flag, because attaching an
+explicit agent to a hand-run ingest would be a fabricated fact. The ambient
+env var still applies to them — see the warning above.
+
+## Design notes worth knowing before you change something
+
+Four decisions that look arbitrary from the outside, are load-bearing, and
+have each already cost someone an afternoon to rediscover.
+
+**`regenerate_vault_file` refuses vault-tier rows, by design.** Ingested-tier
+mirrors under `_ingested/` are generated *from* the database, so regenerating
+one is safe. A vault-tier note is the opposite — the file is the source of
+truth, and regenerating it from the DB could discard authored edits that have
+not been re-synced. Any future "update a field, then re-mirror" command hits
+this immediately. The pattern to copy is `cli_docs._set_sensitivity`: pre-check
+`kind` from the database and branch — rewrite one frontmatter field in place
+for vault tier, regenerate for ingested tier. Pre-check the tier rather than
+catching the `ValueError` and matching its message; the message can be
+rephrased, the tier cannot.
+
+**`brain ui`'s assets live in a flat `static/`, superseding spec §2.1.** The
+design document describes a nested tree; the shipped layout is flat
+(`app.css`, `app.js`, `index.html`, `theme.js`). The code is correct and the
+spec is stale.
+
+**`MarkdownIt("commonmark")` does *not* default to `html=False`.** Verified on
+markdown-it-py 4.2.0: the CommonMark preset turns raw HTML **on**, so the bare
+preset renders a literal `<script>` tag straight through. `html=False` is
+passed explicitly in `ui/render.py` and `tests/test_ui_render.py` asserts the
+escaping rather than trusting the preset. The F14 design document states the
+opposite — the document is wrong and the code follows the measurement. If you
+construct a `MarkdownIt` anywhere else, pass the option.
+
+**`confidential` and `draft` share a seam but not a guarantee.** Both are
+frontmatter flags that the Quartz `contentIndex` emitter drops, so they look
+interchangeable at the publish boundary. They are not. `draft` is a *publish
+quarantine* — the document is still fully readable everywhere else, including
+over MCP. `confidential` is an *egress control*: it additionally keeps the
+body off a hosted embedder and withholds it from every MCP retrieval surface.
+Treating one as a substitute for the other is a security mistake in one
+direction and a usability annoyance in the other.
+
+## Where config lives (`.env` resolution order)
+
+`$BRAIN_HOME/.env` (default `~/.brain/.env`) is the **canonical** config
+location. It is the only one a `pip` / `uvx` install can see: those users have
+no checkout, and the `brain` console script on your `PATH` loads no environment
+of its own.
+
+`Config.load()` layers four sources, highest precedence first:
+
+| # | Source | Notes |
+|---|---|---|
+| 1 | process environment | Never overwritten by any file. |
+| 2 | `<repo>/.env` | Source checkouts only — resolved relative to the installed `brain/config.py`. |
+| 3 | `<cwd>/.env` | Walk-up from the current directory. Only works while you stand in the right place. Drop it with `BRAIN_IGNORE_CWD_DOTENV=1`. |
+| 4 | `$BRAIN_HOME/.env` | The canonical location. Honors `$BRAIN_HOME`; defaults to `~/.brain`. |
+
+### `BRAIN_IGNORE_CWD_DOTENV`
+
+The cwd walk-up climbs to the filesystem root, so a process started in an
+arbitrary directory can pick up an unrelated `.env` and silently talk to the
+wrong database. That is fine for interactive use — it is what makes a checkout
+work from any subdirectory — but it is a liability for anything long-running
+and unattended, where the failure is invisible rather than loud.
+
+Set `BRAIN_IGNORE_CWD_DOTENV=1` (accepted: `1`, `true`, `yes`, `on`) to remove
+link 3 from the chain entirely. **Background daemons should set it**, alongside
+an explicit `BRAIN_HOME`, so their config resolution does not depend on where
+they happened to be started.
+
+The link is *removed*, not merely deprioritized: it disappears from
+`dotenv_chain()` too, so `brain doctor` and the error message report exactly the
+files that were really consulted. Resolution is never auto-detected from
+context (`isatty`, "am I a daemon?") — that would make which database you talk
+to depend on whether stdout is a pipe, which is the same class of invisible,
+environment-dependent divergence this section exists to prevent.
+
+`brain setup` provisions link 4 for you, and `brain init` repairs it when it can:
+
+* **Fresh install** — a real `.env` is written at `$BRAIN_HOME/.env`.
+* **Dev checkout** — `$BRAIN_HOME/.env` becomes a **symlink** to the repo
+  `.env`. Deliberately not a copy: a copy would put `VOYAGE_API_KEY` /
+  `DATABASE_URL` on disk twice and the two would silently drift. The trade-off
+  is that moving the checkout breaks the link — `brain doctor` reports that
+  explicitly as a dangling symlink rather than as "missing".
+* **Re-running either command never overwrites** an existing `$BRAIN_HOME/.env`,
+  file or symlink.
+
+When `DATABASE_URL` cannot be resolved, the error prints every path that was
+searched with its state, so you can see which link of the chain is dead:
+
+```text
+DATABASE_URL is not set.
+No .env file was found in any of:
+  /Users/you/src/second-brain/.env  (missing)
+  /Users/you/somewhere/.env         (missing)
+  /Users/you/.brain/.env            (missing)
+Run `brain setup` to create /Users/you/.brain/.env (or export DATABASE_URL).
+```
+
+A file that *was* found and loaded but lacks the key reports that instead —
+a different fault with a different fix. `brain doctor` checks the same chain
+via `brain.config.dotenv_chain()`, so the two can never disagree.
+
+## Session-end capture hook (`BRAIN_HOOK_*`)
+
+> **These four are real environment variables, not `.env` entries.** Putting
+> them in `.env` has no effect.
+
+The Claude Code Stop hook runs as a short-lived subprocess on every session
+end, and it must work when the database is down, when `DATABASE_URL` is unset,
+and before any `.env` exists. So it reads the process environment directly:
+`Config.load()` would demand `DATABASE_URL`, and even the minimal loader would
+pay dotenv resolution on every Stop event. Both would couple the hook to
+infrastructure it is specifically designed to survive the absence of.
+
+Set them where the hook process will actually see them — your shell profile,
+or the `env` block of the hook entry in `settings.json`.
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `BRAIN_HOOK_ENABLED` | enabled | Set to a falsey value (`0`, `false`, `no`, `off`) to disable the hook without unregistering it. |
+| `BRAIN_HOOK_MIN_TOOL_CALLS` | `12` | Sessions below this floor with no file mutation read as a lookup rather than work, and are skipped. The one threshold here with no principled derivation — it is overridable precisely so someone who finds it noisy raises it instead of turning the hook off entirely. |
+| `BRAIN_HOOK_TRANSCRIPT_MAX_BYTES` | `8388608` (8 MiB) | Above this, only the tail window is scanned, so one enormous transcript cannot stall session exit. |
+| `BRAIN_HOOK_SENTINEL_TTL_DAYS` | `7` | How long the per-session sentinel file is kept before cleanup. |
 
 ## Claude integrations
 
@@ -315,27 +562,41 @@ embedder cold start cost (Ollama loading the model, or the Voyage
 SDK/network path warming up). Logs go to stderr and are surfaced by Claude
 Desktop if a tool call fails.
 
-### Claude Code (consult-brain skill)
+### Claude Code (bundled skills)
 
-For Claude Code (the CLI), this repo ships skills under `skills/` that teach
-Claude when and how to use each brain feature. Install the ones you want with
-symlinks so live edits to the repo update the skills:
+For Claude Code (the CLI), this repo ships eight skills under `skills/` that
+teach Claude when and how to reach for each brain feature. Install them with
+the bundled sync script, which enumerates `skills/` directly rather than
+carrying a hardcoded list — so a skill added to the repo is never missed:
 
 ```bash
-mkdir -p ~/.claude/skills
-ln -s "$(pwd)/skills/consult-brain"  ~/.claude/skills/consult-brain   # hybrid search + Q&A
-ln -s "$(pwd)/skills/brain-graph"    ~/.claude/skills/brain-graph      # GraphRAG themes/patterns
-ln -s "$(pwd)/skills/elicit-brain"   ~/.claude/skills/elicit-brain     # tacit-knowledge elicitation
-ln -s "$(pwd)/skills/brain-todo"     ~/.claude/skills/brain-todo       # action-item view
-ln -s "$(pwd)/skills/ingest-brain"   ~/.claude/skills/ingest-brain     # Krisp/Slack ingest
+bin/brain-skills-sync                # copy-install every skill into ~/.claude/skills
+bin/brain-skills-sync --check        # report drift, copy nothing (exit 1 if any are stale)
+bin/brain-skills-sync --dest <dir>   # install somewhere else ($BRAIN_SKILLS_DEST also works)
 ```
 
-The `consult-brain` skill (plain search + Q&A) is the one you most likely want
-first — it triggers on phrases like "what did I say to X", "summarize my
-conversations about Y", "write this in my voice". The `elicit-brain` skill
-triggers on elicitation phrases like "what do I know that I haven't written
-down", "surface my knowledge gaps", "interview me about X", or "brain elicit".
-The MCP server above covers Claude Desktop; these skills cover Claude Code.
+It touches only the brain-family skills, never anything else in
+`~/.claude/skills/`, and is idempotent — each skill reports `installed`,
+`updated`, or `unchanged`. The install is a **copy**, not a symlink, so it is
+predictable across upgrades; the trade-off is that editing a skill in the repo
+does not take effect until you re-run the script. `--check` is the drift guard:
+after pulling, it exits non-zero and names any skill the repo has moved ahead on.
+
+| Skill | Reach for it when the user… |
+|---|---|
+| `consult-brain` | asks about their own history, wants a quote or writing in their voice, or wants one cited multi-hop answer (`brain ask`) or an audio overview (`brain audio`) |
+| `brain-graph` | asks about themes, patterns, or connections across interactions, or wants to enumerate the entity graph (also owns `brain owner`) |
+| `brain-proactivity` | asks what to look at, what they missed, what has gone stale, what should be linked, how a theme changed over time, or wants to quick-capture a thought |
+| `brain-authoring` | creates, renames, edits, or tags a note, or asks about the wikilink graph (`backlinks` / `links` / `orphans` / `graph`) |
+| `brain-maintenance` | asks whether the brain is healthy, or needs `setup`, `demo`, re-embedding, backfills, or the `eval` harness |
+| `brain-todo` | asks what is on their plate, or wants Krisp action items pulled in |
+| `ingest-brain` | wants a file, directory, Gmail thread, Krisp transcript, or Slack thread added to the brain |
+| `elicit-brain` | wants tacit knowledge surfaced — "what do I know that I haven't written down" |
+
+`consult-brain` is the one you most likely want first. The MCP server above
+covers Claude Desktop; these skills cover Claude Code. For the full map — and
+the difference between this script and `brain claude install-skill` — see
+[Agent skills](agent-skills.md).
 
 ### Example prompts
 

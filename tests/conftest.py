@@ -20,8 +20,9 @@ import pytest
 from dotenv import dotenv_values, load_dotenv
 from psycopg import sql
 
-from brain.db import connect, run_migrations
+from brain.db import connect, migration_lock, run_migrations
 from brain.ingest import ExtractedDoc, ingest_document
+from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 
 load_dotenv()
 
@@ -151,6 +152,52 @@ def _force_test_vault_path(tmp_path_factory: pytest.TempPathFactory) -> Iterator
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _force_test_runtime_home(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Isolate the runtime-health inputs `brain doctor` reads (C4).
+
+    The ``config`` / ``daemons`` checks in :mod:`brain.doctor_runtime` inspect
+    state OUTSIDE the current process — ``$BRAIN_HOME/.env`` and the installed
+    LaunchAgents — which is precisely what makes them able to catch a daemon
+    outage, and precisely what would otherwise make every `brain doctor` test
+    depend on the developer's machine:
+
+    * ``BRAIN_LAUNCHD_DIR`` → a session tmp dir, so the daemon check reports
+      "not installed" instead of reading the real ``~/Library/LaunchAgents``
+      and inheriting whatever exit status the user's real daemons last had.
+    * ``BRAIN_HOME`` → a session tmp dir holding a synthetic ``.env``, so the
+      config check passes deterministically. Without it the check resolves
+      ``$BRAIN_HOME`` to the repo root, which has a developer ``.env`` locally
+      but NOT in CI (it is gitignored) — the suite would pass here and fail
+      there.
+
+    Mirrors :func:`_force_test_vault_path`: session-scoped so per-test
+    ``monkeypatch.setenv`` overrides still work and self-restore afterwards.
+    """
+    runtime_home = tmp_path_factory.mktemp("brain_home")
+    # Synthetic only — never copy the real ~/.brain/.env or the repo .env,
+    # which hold live secrets (CLAUDE.md Rule 15 / the no-secrets rule).
+    (runtime_home / ".env").write_text(
+        f"DATABASE_URL={TEST_DATABASE_URL}\n", encoding="utf-8"
+    )
+    launchd_dir = tmp_path_factory.mktemp("launchagents")
+
+    originals = {
+        "BRAIN_HOME": os.environ.get("BRAIN_HOME"),
+        "BRAIN_LAUNCHD_DIR": os.environ.get("BRAIN_LAUNCHD_DIR"),
+    }
+    os.environ["BRAIN_HOME"] = str(runtime_home)
+    os.environ["BRAIN_LAUNCHD_DIR"] = str(launchd_dir)
+    try:
+        yield
+    finally:
+        for key, original in originals.items():
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _force_test_database_url() -> Iterator[None]:
     """Bulletproof prod-DB isolation for the entire test session.
 
@@ -182,6 +229,39 @@ def _force_test_database_url() -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _exclusive_test_database() -> Iterator[None]:
+    """Refuse to run when another pytest session already owns the test DB.
+
+    Every ``test_db`` consumer resets state by ``TRUNCATE``-ing the shared
+    tables, which is safe exactly once per database. Two suites pointed at the
+    same ``TEST_DATABASE_URL`` truncate each other's fixtures mid-test.
+
+    On 2026-07-26 two concurrent full-suite runs produced two entirely disjoint
+    failure sets — 2 failures in ``tests/test_vault_sync.py`` on one run, 11
+    failures across six unrelated files on the next, several surfacing as raw
+    ``psycopg`` errors. All of them passed when re-run alone, and about an hour
+    went into hunting a production bug that did not exist.
+
+    Same spirit as :func:`_force_test_database_url` and
+    :func:`_force_test_vault_path`: fail immediately, and say why, rather than
+    letting the suite produce confident nonsense.
+
+    The lock is a Postgres *session*-level advisory lock, so it is released
+    automatically when this process exits — a crashed or killed run never
+    leaves the database wedged.
+    """
+    conn = psycopg.connect(TEST_DATABASE_URL, connect_timeout=5)
+    with conn.cursor() as cur:
+        if not try_acquire_suite_lock(cur):
+            conn.close()
+            pytest.exit(concurrent_suite_message(TEST_DATABASE_URL), returncode=1)
+    try:
+        yield
+    finally:
+        conn.close()  # releases the advisory lock
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _force_graph_flags_default() -> Iterator[None]:
     """Isolate the whole suite from the local ``.env``'s GraphRAG feature flags.
 
@@ -203,7 +283,22 @@ def _force_graph_flags_default() -> Iterator[None]:
     """
     keys = ("BRAIN_GRAPH_ENABLED", "BRAIN_GRAPH_CONCEPTS")
     originals = {key: os.environ.get(key) for key in keys}
+    # Honor a genuine operator export, but NOT a value that merely arrived from
+    # the repo ``.env`` via the module-level ``load_dotenv()`` at import time.
+    # By the time this fixture runs the two are indistinguishable in
+    # ``os.environ`` — a naive ``if key not in os.environ`` check therefore
+    # hands control straight back to ``.env``, defeating the isolation this
+    # fixture exists for (``.env`` currently sets BOTH flags to ``true``).
+    # ``dotenv_values()`` re-reads the FILE without touching the environment,
+    # so a key whose live value still equals the file's is treated as
+    # file-provided and gets neutralized.
+    from_dotenv = dotenv_values() or {}
     for key in keys:
+        came_from_env_file = (
+            key in from_dotenv and os.environ.get(key) == from_dotenv[key]
+        )
+        if key in os.environ and not came_from_env_file:
+            continue  # explicit external override — respect it
         os.environ[key] = ""
     try:
         yield
@@ -215,13 +310,28 @@ def _force_graph_flags_default() -> Iterator[None]:
                 os.environ[key] = original
 
 
-def _reset_age_graph(conn: psycopg.Connection) -> None:
-    """Reset Apache AGE graph state between DB tests.
+def _age_graph_exists(conn: psycopg.Connection, name: str = "brain_graph") -> bool:
+    """True iff AGE's catalog exists AND holds a graph called ``name``.
 
-    The AGE test instance (``docker-compose.age-test.yml``, port 5434) ships
-    the ``age`` shared library; the extension *object* must still be created
-    once per database (``CREATE EXTENSION age CASCADE``), after which
-    ``LOAD 'age'`` makes its catalog functions callable in the session.
+    Deliberately answerable with **plain SQL on plain tables** — no
+    ``CREATE EXTENSION``, no ``LOAD 'age'``. ``ag_graph`` is an ordinary table
+    in the ``ag_catalog`` schema, and ``to_regclass`` is core Postgres, so this
+    probe is safe on a database that has never seen AGE (it returns NULL rather
+    than erroring on a missing schema). That is what lets
+    :func:`_reset_age_graph` decide whether any AGE work is needed *before*
+    doing AGE work.
+    """
+    reg = conn.execute("SELECT to_regclass('ag_catalog.ag_graph')").fetchone()
+    if reg is None or reg[0] is None:
+        return False
+    row = conn.execute(
+        "SELECT 1 FROM ag_catalog.ag_graph WHERE name = %s", (name,)
+    ).fetchone()
+    return row is not None
+
+
+def _reset_age_graph(conn: psycopg.Connection) -> None:
+    """Drop the canonical AGE graph — but only when one actually exists.
 
     AGE keeps graphs in the ``ag_catalog`` schema plus a per-graph schema —
     neither lives in ``public``, so the ``DROP SCHEMA public CASCADE`` performed
@@ -229,24 +339,51 @@ def _reset_age_graph(conn: psycopg.Connection) -> None:
     ``brain_graph`` (the canonical graph the G0-2 bootstrap creates) so each
     test starts from a clean graph, mirroring that bootstrap.
 
+    **Why the early-out is not just an optimisation.** This runs from
+    :func:`_truncate_reset`, i.e. once per DB test. It used to issue
+    ``CREATE EXTENSION IF NOT EXISTS age CASCADE`` + ``LOAD 'age'``
+    unconditionally, so *every* test backend loaded AGE and populated its
+    per-backend label cache — including the large majority that never touch the
+    graph. AGE invalidates that cache poorly across sessions when graphs are
+    dropped and recreated, and the result is::
+
+        ERROR:  label (relation) cache corrupted
+        FATAL:  terminating connection because protocol synchronization was lost
+
+    which **kills the connection**, so the failure surfaces in the *next* test's
+    setup and indicts an innocent bystander. 140 such events are in the test
+    container's log, clustered on 2026-07-26, 2026-08-06 and 2026-08-07 — the
+    first two being the dates ``tests/db_lock.py`` cites as the
+    mysterious-disjoint-failure incidents that motivated the suite lock.
+
+    The repo already knew this hazard from one direction: the standing rule
+    against ``--faulthandler-timeout`` exists because its hard kill corrupts the
+    AGE label cache and needs a ``DROP DATABASE`` to recover. What was missed is
+    that ordinary per-test reset churn reaches the same state with no hard kill
+    anywhere. Not touching AGE at all on the ~83% of resets that have no graph
+    (measured: 24 of 141 on a 206-test slice) removes most of the exposure.
+
+    Correctness is unchanged: any test that HAS a graph still gets the full
+    drop, and any test that USES AGE loads it through production code
+    (:func:`brain.db.load_age` / :func:`brain.db.connect_graph`), which issues
+    its own ``LOAD``. The extension object is created once per session by
+    :func:`_reset_schema_and_migrate` instead of once per test.
+
     Runs under autocommit (the caller sets ``conn.autocommit = True``) because
     AGE catalog DDL wants explicit commits under psycopg v3. ``search_path`` is
     set to ``ag_catalog`` ONLY for the AGE statements and reset immediately
     afterward, so the later ``run_migrations`` DDL still lands in ``public`` and
     never leaks the ``ag_catalog`` namespace onto the session.
     """
-    # Idempotent: the .so is in the AGE image; the extension object may not
-    # exist yet on a freshly-created database.
-    conn.execute("CREATE EXTENSION IF NOT EXISTS age CASCADE")
+    if not _age_graph_exists(conn):
+        return
+
+    # A graph exists, so AGE work is genuinely required: LOAD makes drop_graph
+    # callable in this session.
     conn.execute("LOAD 'age'")
     conn.execute('SET search_path = ag_catalog, "$user", public')
     try:
-        existing = conn.execute(
-            "SELECT 1 FROM ag_catalog.ag_graph WHERE name = %s",
-            ("brain_graph",),
-        ).fetchone()
-        if existing is not None:
-            conn.execute("SELECT drop_graph('brain_graph', true)")
+        conn.execute("SELECT drop_graph('brain_graph', true)")
     finally:
         # Restore the default search_path so migration DDL targets public —
         # never leak ag_catalog onto the session.
@@ -270,36 +407,58 @@ def _reset_schema_and_migrate(conn: psycopg.Connection) -> None:
     AGE graph state lives in ``ag_catalog`` (outside ``public``) and so
     survives the schema drop; :func:`_reset_age_graph` clears the canonical
     ``brain_graph`` first so each test gets a clean graph.
+
+    The whole body runs under :func:`brain.db.migration_lock`, which is what
+    stops a non-pytest writer — ``brain init`` / ``brain demo`` /
+    ``brain backup restore`` with ``DATABASE_URL`` pointed at a test database —
+    from landing inside this window. The suite-exclusivity lock in
+    :mod:`tests.db_lock` only excludes other *pytest* sessions; it cannot see a
+    bare CLI invocation. Wrapping here rather than relying on
+    :func:`run_migrations`' own acquisition matters because the destructive
+    half (``DROP SCHEMA public CASCADE``) runs BEFORE that call. The lock is
+    re-entrant, so the nested acquire inside ``run_migrations`` is a no-op.
     """
     # DB-SAFETY: guard the ACTUAL connection target (not just the env var) — if
     # this connection somehow points at the prod container, abort before the
     # destructive DROP SCHEMA below ever runs.
     _assert_not_prod_db(conn.info.host, conn.info.port, conn.info.dbname)
 
-    # Reset AGE graph state first — it lives outside public and would otherwise
-    # leak across tests. Scopes ag_catalog to its own statements (no leakage).
-    _reset_age_graph(conn)
+    with migration_lock(conn):
+        # Ensure the AGE extension object exists. This lives HERE, on the
+        # session-scoped / fresh_schema path, rather than in
+        # :func:`_reset_age_graph` where it used to run once per test: the .so
+        # ships in the AGE image but the extension object must be created once
+        # per database, and once per database is exactly what this path is.
+        conn.execute("CREATE EXTENSION IF NOT EXISTS age CASCADE")
 
-    # Move vector to pg_catalog before the schema drop so it survives.
-    # pgcrypto cannot go to pg_catalog (DuplicateFunction on gen_random_uuid).
-    if conn.execute("SELECT 1 FROM pg_extension WHERE extname='vector'").fetchone():
-        conn.execute("ALTER EXTENSION vector SET SCHEMA pg_catalog")
+        # Reset AGE graph state first — it lives outside public and would otherwise
+        # leak across tests. Scopes ag_catalog to its own statements (no leakage).
+        _reset_age_graph(conn)
 
-    # Drop pgcrypto explicitly: chunks has no pgcrypto dependency, so no cascade needed.
-    conn.execute("DROP EXTENSION IF EXISTS pgcrypto")
+        # Move vector to pg_catalog before the schema drop so it survives.
+        # pgcrypto cannot go to pg_catalog (DuplicateFunction on gen_random_uuid).
+        if conn.execute("SELECT 1 FROM pg_extension WHERE extname='vector'").fetchone():
+            conn.execute("ALTER EXTENSION vector SET SCHEMA pg_catalog")
 
-    conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+        # Drop pgcrypto explicitly: chunks has no pgcrypto dependency, so no
+        # cascade needed.
+        conn.execute("DROP EXTENSION IF EXISTS pgcrypto")
 
-    # Move vector back to public — run_migrations will see it there and skip re-install.
-    if conn.execute("SELECT 1 FROM pg_extension WHERE extname='vector'").fetchone():
-        conn.execute("ALTER EXTENSION vector SET SCHEMA public")
+        conn.execute("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
 
-    # pgcrypto is gone, so run_migrations will reinstall it from migration 001.
-    run_migrations(conn)
+        # Move vector back to public — run_migrations sees it there and skips
+        # re-install.
+        if conn.execute("SELECT 1 FROM pg_extension WHERE extname='vector'").fetchone():
+            conn.execute("ALTER EXTENSION vector SET SCHEMA public")
+
+        # pgcrypto is gone, so run_migrations will reinstall it from migration 001.
+        run_migrations(conn)
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _ensure_test_db_initialized(_force_test_database_url: None) -> Iterator[None]:
+def _ensure_test_db_initialized(
+    _force_test_database_url: None, _exclusive_test_database: None
+) -> Iterator[None]:
     """Reset the test DB to a known migrated state at session start.
 
     Tests that don't take the per-test ``test_db`` fixture (e.g. doctor checks
@@ -309,6 +468,16 @@ def _ensure_test_db_initialized(_force_test_database_url: None) -> Iterator[None
 
     Depends on :func:`_force_test_database_url` so the schema reset happens
     against ``second_brain_test``, never against prod.
+
+    Also depends on :func:`_exclusive_test_database` — and that ordering is
+    load-bearing, not decorative. Session-scoped autouse fixtures have no
+    guaranteed order relative to one another, so without this parameter the
+    ``DROP SCHEMA`` below can run *before* the concurrency lock is taken and
+    destroy a rival suite's schema mid-run. Observed on 2026-07-26: the reset
+    reached ``ALTER EXTENSION vector SET SCHEMA public`` on an already-``[BAD]``
+    connection and every test errored in setup. Requesting the lock here makes
+    pytest resolve it first, so a second suite exits cleanly before touching
+    anything.
     """
     with connect(TEST_DATABASE_URL) as conn:
         conn.autocommit = True
@@ -339,6 +508,16 @@ def _truncate_reset(conn: psycopg.Connection) -> None:
        EXCEPT ``schema_migrations`` — that table records the migrate-once state and
        MUST survive, or the next test would find an unmigrated schema. Identifiers
        are schema-qualified and quoted via :class:`psycopg.sql.Identifier`.
+
+    **Deliberately NOT under** :func:`brain.db.migration_lock`, unlike
+    :func:`_reset_schema_and_migrate`. The lock exists to serialise SCHEMA
+    mutation; this function touches DATA only (``TRUNCATE`` plus the AGE graph
+    drop) and runs once per test, so taking a cross-process advisory lock
+    thousands of times per suite would cost more than it protects. The genuine
+    window it leaves is narrow — a bare ``brain init`` against the test DB
+    concurrently with a TRUNCATE — and the pytest-vs-pytest case is already
+    covered by the suite-exclusivity lock in :mod:`tests.db_lock`. Recorded
+    here so the asymmetry reads as a decision rather than an oversight.
 
     Tests that mutate the schema itself (DDL — dropped indexes, resized embedding
     columns, re-run migrations, own-connection ``DROP SCHEMA``) must instead carry
@@ -562,3 +741,220 @@ def seed_doc(
 @pytest.fixture
 def fixtures_dir() -> Path:
     return Path(__file__).parent / "fixtures"
+
+
+# ---------------------------------------------------------------------------
+# LLM hermeticity — no test reaches a live Ollama unless it opts in.
+# ---------------------------------------------------------------------------
+# Ingesting a document fires TWO independent LLM round-trips: the post-ingest
+# auto-summary hook (via ``cli._build_enricher``) and, because
+# ``BRAIN_GRAPH_CONCEPTS`` defaults on, concept extraction inside the graph
+# syncer. Neither was stubbed, so `ingest-dir` over the fixtures directory —
+# including the 51 KB ``playwright_tree.txt`` — made one live call per document.
+# Measured at ~19-27 s each against a single-slot Ollama, which turned
+# ``test_cli_auto_analyze`` into a 5-minute-per-test crawl that reads exactly
+# like a deadlock: 0% CPU, and Postgres reporting ``idle in transaction`` /
+# ``ClientRead`` because the client is parked on an outbound socket while
+# holding a transaction open.
+#
+# Two layers below, with SEPARATE opt-outs because they answer different
+# questions. ``_stub_llm_backends`` supplies fast deterministic doubles at the
+# two production seams — opt out with ``@pytest.mark.real_llm_backends`` when a
+# test asserts on the concrete enricher/extractor types. ``_forbid_live_ollama``
+# is the backstop that makes any *remaining* outbound call fail loudly rather
+# than silently degrade — opt out with ``@pytest.mark.live_ollama`` only when
+# reaching a real endpoint IS the test. A factory test needs the first marker
+# and not the second, so collapsing them into one would quietly drop the
+# network guard from tests that should still have it.
+
+#: Default Ollama port (``config.DEFAULT_OLLAMA_HOST`` is http://localhost:11434).
+_OLLAMA_DEFAULT_PORT = 11434
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Register markers owned by this file.
+
+    Declared here rather than in ``pyproject.toml`` so the marker ships with
+    the fixtures that implement it — and because ``--strict-markers`` is on,
+    an unregistered marker is a hard error rather than a warning.
+    """
+    config.addinivalue_line(
+        "markers",
+        "real_llm_backends: build the REAL enricher / extractor objects "
+        "instead of the default doubles (for factory tests that assert on "
+        "the concrete types; implies no network by itself)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "live_ollama: test deliberately opens a connection to a real Ollama "
+        "endpoint (disables the live-connection guard)",
+    )
+
+
+def _ollama_port() -> int:
+    """The port the active config would reach Ollama on."""
+    host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+    parsed = urlparse(host if "//" in host else f"http://{host}")
+    return parsed.port or _OLLAMA_DEFAULT_PORT
+
+
+class LiveOllamaForbidden(BaseException):
+    """A test opened a socket to Ollama without ``@pytest.mark.live_ollama``.
+
+    Inherits :class:`BaseException` **deliberately**. Both LLM surfaces are
+    contractually never-raise around transport failures — ``OllamaExtractor.
+    extract`` swallows an outage and returns ``[]``, and the enrich hook
+    catches :class:`OllamaUnavailable` — so an ``Exception`` subclass would be
+    caught and logged at WARN. That is precisely the silent degradation this
+    guard exists to make loud.
+    """
+
+
+def _fake_ollama_transport() -> Any:
+    """An ``httpx.MockTransport`` answering every Ollama chat call.
+
+    The canned body carries the union of the keys the enricher's parsers look
+    for (``summary`` at ``enrichment.py:435``, ``tags`` at ``:477``), so one
+    handler satisfies ``summarize`` / ``propose_tags`` / the group-summary
+    variants without per-test wiring.
+    """
+    import json as _json
+
+    import httpx
+
+    payload = _json.dumps(
+        {"summary": "Synthetic test summary.", "tags": [], "entities": []}
+    )
+
+    def _handler(request: Any) -> Any:
+        return httpx.Response(
+            200,
+            json={
+                "message": {"role": "assistant", "content": payload},
+                "done": True,
+            },
+        )
+
+    return httpx.MockTransport(_handler)
+
+
+def build_fake_enricher() -> Any:
+    """A real ``OllamaEnricher`` wired to a mock transport — no network.
+
+    Deliberately the REAL class rather than a hand-rolled stub: all ten public
+    methods keep their genuine parsing/validation logic, so a test exercising
+    ``propose_tags`` or ``summarize_group`` gets true behaviour, and
+    ``isinstance(x, OllamaEnricher)`` still holds. This is the pattern
+    ``tests/test_enrichment.py`` and ``OllamaExtractor``'s own docstring
+    already establish.
+    """
+    import httpx
+
+    from brain.enrichment import OllamaEnricher
+
+    return OllamaEnricher(
+        host="http://fake-ollama.test",
+        model="fake-model:test",
+        client=httpx.Client(
+            base_url="http://fake-ollama.test", transport=_fake_ollama_transport()
+        ),
+    )
+
+
+class FakeEntityExtractor:
+    """Deterministic ``EntityExtractor`` double — the graph concept seam.
+
+    Returns no entities: the person aspect (which needs no LLM) still
+    reconciles normally, and the concept watermark is still written, so the
+    graph stays consistent. Tests that care about concept CONTENT inject their
+    own extractor via ``make_graph_syncer(extractor=...)``, which this default
+    never overrides.
+    """
+
+    @property
+    def version(self) -> str:
+        return "fake-extractor@test"
+
+    def extract(self, text: str) -> list[Any]:
+        return []
+
+
+@pytest.fixture
+def fake_enricher() -> Any:
+    """Explicit handle on the same double ``_stub_llm_backends`` installs."""
+    return build_fake_enricher()
+
+
+@pytest.fixture(autouse=True)
+def _stub_llm_backends(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Default every LLM seam to a fast local double.
+
+    Two seams cover all the LLM traffic an ingest can generate:
+
+    - ``brain.cli._build_enricher`` — the auto-summary hook. Already the
+      documented monkeypatch point; ``cli_ingest`` delegates to it.
+    - ``brain.graph_rag.extract.make_extractor`` — concept extraction. Patched
+      at the FACTORY rather than at ``make_graph_syncer``, because all three
+      consumers (``cli.py`` graphrag build, ``mcp_server.py``, and
+      ``graph_rag/sync.py``) import it function-locally and therefore resolve
+      it at call time. Stubbing ``make_graph_syncer`` instead would inject a
+      double *ahead* of the fake a test had already installed on
+      ``make_extractor`` — silently defeating it, which is how the first cut
+      of this fixture broke ``test_graphrag_concepts``.
+
+    This only sets a DEFAULT: a test that patches the same attribute itself
+    (``test_cli_enrich.py``, ``test_graphrag_concepts.py``) applies its patch
+    afterwards and wins. So the blast radius is exactly the set of tests that
+    were silently relying on a live Ollama.
+
+    ``brain.enrichment.make_enricher`` is deliberately left alone — its unit
+    tests assert on the concrete return type. Factory tests for
+    ``make_extractor`` opt out with ``@pytest.mark.real_llm_backends``.
+    """
+    if request.node.get_closest_marker("real_llm_backends"):
+        yield
+        return
+
+    monkeypatch.setattr(
+        "brain.cli._build_enricher", lambda cfg: build_fake_enricher()
+    )
+    monkeypatch.setattr(
+        "brain.graph_rag.extract.make_extractor", lambda cfg: FakeEntityExtractor()
+    )
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _forbid_live_ollama(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[None]:
+    """Fail loudly if anything still opens a socket to Ollama.
+
+    The stubs above remove the KNOWN call sites; this catches the next one
+    somebody adds. Guards the Ollama port only — Postgres (5434) and every
+    other destination pass through untouched.
+    """
+    if request.node.get_closest_marker("live_ollama"):
+        yield
+        return
+
+    import socket
+
+    port = _ollama_port()
+    real_connect = socket.socket.connect
+
+    def _guarded(self: Any, address: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(address, tuple) and len(address) >= 2 and address[1] == port:
+            raise LiveOllamaForbidden(
+                f"{request.node.nodeid} tried to connect to Ollama at "
+                f"{address[0]}:{address[1]}. Tests must not call a live LLM: "
+                "inject a double at the seam (see `_stub_llm_backends`), or "
+                "mark the test `@pytest.mark.live_ollama` if the live call "
+                "is the point."
+            )
+        return real_connect(self, address, *args, **kwargs)
+
+    monkeypatch.setattr(socket.socket, "connect", _guarded)
+    yield

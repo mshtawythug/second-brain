@@ -94,6 +94,7 @@ def resurface_docs(
     limit: int | None = None,
     min_age_days: int | None = None,
     source_kind: str | None = None,
+    sensitivity: str | None = None,
 ) -> list[ResurfaceItem]:
     """Return the top scored documents due for review, highest score first.
 
@@ -111,6 +112,10 @@ def resurface_docs(
         min_age_days: Exclude docs younger than this; ``None`` uses
             ``cfg.resurface_min_age_days``.
         source_kind: Optional ``sources.kind`` filter (e.g. ``"manual"``).
+        sensitivity: Optional trust-tier filter. ``None`` (the default) means
+            both tiers — correct for the local CLI, which sits inside F6's
+            trust boundary. MCP passes ``"normal"`` so a confidential
+            document is never resurfaced to a hosted model, snippet or not.
 
     Returns:
         Up to ``limit`` :class:`ResurfaceItem` rows, descending score. Empty
@@ -146,6 +151,15 @@ def resurface_docs(
     if source_kind:
         where.append("s.kind = %s")
         params.append(source_kind)
+    if sensitivity:
+        # F6 — filter in the PREDICATE, not by redacting the snippet after the
+        # fact. A resurfaced row is itself a disclosure: surfacing a
+        # confidential document at all tells the caller it exists and is stale,
+        # and the row carries `left(d.content, N)` as its snippet. Callers
+        # outside the trust boundary (MCP) pass "normal"; the local CLI passes
+        # None and sees everything, as it should.
+        where.append("d.sensitivity = %s")
+        params.append(sensitivity)
 
     query = sql.SQL(
         """

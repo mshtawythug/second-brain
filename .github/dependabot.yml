@@ -1,0 +1,83 @@
+# Dependabot — automated dependency update PRs.
+#
+# Every PR Dependabot opens now runs .github/workflows/ci.yml (ruff + mypy +
+# the coverage-gated pytest suite), which is what makes automated bumps safe to
+# accept at all. Nothing here auto-merges: a red Dependabot PR simply sits until
+# a human triages it.
+#
+# Cadence is tuned for a single maintainer — weekly for the two fast-moving
+# ecosystems, monthly for the pinned base image. Daily would be
+# abandonment-by-noise. Grouping collapses the dev-tooling churn into one PR
+# instead of eight, and the per-ecosystem PR limits (5 / 3 / 2) cap the whole
+# queue at ten open PRs.
+version: 2
+
+updates:
+  # 1. Python dependencies declared in the root pyproject.toml
+  #    ([project.dependencies] and the `dev` extra).
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    commit-message:
+      # Matches the conventional-commit types the PR template requires.
+      prefix: "chore"
+      include: scope
+    groups:
+      dev-dependencies:
+        patterns:
+          - "pytest*"
+          - "ruff"
+          - "mypy"
+          - "coverage"
+          - "types-*"
+          - "reportlab"
+      runtime-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # `coverage<7.13` is pinned deliberately in pyproject.toml — a major bump
+      # breaks the pytest-cov integration. Unpin there first, then drop this
+      # ignore; otherwise Dependabot re-proposes the same failing PR weekly.
+      - dependency-name: "coverage"
+        update-types:
+          - "version-update:semver-major"
+
+  # 2. The workflow files under .github/workflows/ (currently benchmark, ci,
+  #    eval, publish-age-image, release, traffic-stats). `directory: "/"` is
+  #    correct for github-actions — Dependabot always scans .github/workflows/
+  #    relative to the repository root.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # 3. The Apache AGE base image. Note the non-obvious directory: the single
+  #    canonical Dockerfile lives INSIDE the package so wheels ship it, and
+  #    docker-compose.age-test.yml builds from there. The build/ and
+  #    .claude/worktrees/ copies are gitignored and invisible to Dependabot.
+  #
+  #    Monthly, not weekly: the image is version-pinned to
+  #    pg16-v1.5.0-rc0-pgv0.8.2 and lives on its own `age-image-*` tag axis
+  #    (see CHANGELOG.md), so a base-image bump is a deliberate, tested event.
+  - package-ecosystem: docker
+    directory: "/src/brain/templates/docker/age"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "chore"
+      include: scope

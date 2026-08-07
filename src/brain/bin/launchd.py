@@ -66,10 +66,23 @@ def resolve_pipx_bin_dir() -> Path:
 def resolve_brain_py() -> Path:
     """Resolve the Python interpreter that has ``brain`` importable.
 
-    Since this module is part of the brain package, ``sys.executable`` is
-    by definition the right Python — whether we are running inside a pipx venv,
-    a dev-checkout venv, or any other environment.
+    ``BRAIN_PY`` wins when set; ``sys.executable`` is the fallback. This is the
+    same contract ``brain.bin._launcher.exec_shim`` already documents, which
+    until now this function silently disagreed with.
+
+    The override matters because ``sys.executable`` alone makes it impossible to
+    generate plists for any interpreter except the installer's own. Running
+    ``brain-install-launchd`` from a dev checkout would therefore repoint the
+    user's live LaunchAgents at the checkout — swapping a released install for
+    uncommitted code as a side effect of regenerating a plist. With the override
+    you can render plists for the real target:
+
+        BRAIN_PY=~/.local/share/uv/tools/secondbrain-py/bin/python \\
+            brain-install-launchd
     """
+    override = os.environ.get("BRAIN_PY", "").strip()
+    if override:
+        return Path(override).expanduser()
     return Path(sys.executable)
 
 

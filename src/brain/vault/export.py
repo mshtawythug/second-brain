@@ -12,7 +12,7 @@ two such docs with the same date + title can still be disambiguated.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -21,6 +21,7 @@ from typing import Any
 import psycopg
 import yaml
 
+from ..sensitivity import DEFAULT_SENSITIVITY
 from . import init_vault
 from ._atomic import atomic_write_text
 from .frontmatter import dump_frontmatter, parse_frontmatter
@@ -41,6 +42,17 @@ _EXPORT_OWNED_FRONTMATTER_KEYS = frozenset(
         "created",
         "updated",
         "vault_path",
+        # F6 trust boundary. ``sensitivity`` is export-owned: the value is
+        # canonical from ``documents.sensitivity``, so the freeform vault-tier
+        # merge in :func:`_freeform_vault_metadata` must not shadow it with a
+        # stale ``metadata["sensitivity"]``.
+        #
+        # It is added HERE and to sync's ``reserved`` set in the SAME change,
+        # and that is not optional — see the ``summary`` note below for what
+        # happens when the two registries disagree.
+        # ``tests/test_vault_frontmatter_registry_parity.py`` asserts the
+        # invariant directly so the pairing cannot silently come apart.
+        "sensitivity",
         # NOTE: ``summary`` is intentionally NOT in this strip set.
         # Wave Q2-SUMMARY-WIKI's first cut stripped it always (the
         # documented theory was that vault-tier hand-authored
@@ -91,6 +103,10 @@ class _DocumentForExport:
     # readable field. ``None`` for any doc the enricher hasn't touched
     # yet (short docs, Ollama unavailable, ``enrich=False``).
     summary: str | None
+    # F6 trust boundary (migration 026). Defaulted so any construction that
+    # predates the widened SELECT still compiles; the two real call sites both
+    # populate it from ``d.sensitivity``.
+    sensitivity: str = DEFAULT_SENSITIVITY
 
 
 def _is_directory_unmanaged(target: Path) -> bool:
@@ -126,7 +142,11 @@ _DOCUMENT_FOR_EXPORT_COLUMNS = (
     # Wave Q2-SUMMARY-WIKI: pull the Q1-D auto-summary onto the export
     # projection so :func:`_build_frontmatter` can emit it as a
     # ``summary:`` field in the per-doc mirror.
-    "d.summary"
+    "d.summary, "
+    # F6: the publish boundary needs the tier on the export projection so
+    # ``_build_frontmatter`` can stamp it and the Quartz emitter can drop the
+    # document from every index.
+    "d.sensitivity"
 )
 
 
@@ -156,6 +176,8 @@ def _row_to_document_for_export(row: tuple[Any, ...]) -> _DocumentForExport:
         # Coerce to ``str`` only when set so ``_build_frontmatter`` can
         # gate the emit on a truthy check.
         summary=str(row[13]) if row[13] is not None else None,
+        # NOT NULL since migration 026, so no None-coercion is needed.
+        sensitivity=str(row[14]),
     )
 
 
@@ -293,8 +315,39 @@ def _gmail_relative_path(doc: _DocumentForExport) -> str | None:
     return f"_ingested/gmail/{slug}.md"
 
 
+def _paths_taken_by_others(
+    conn: psycopg.Connection[Any], document_id: str
+) -> Callable[[str], bool]:
+    """Return an ``is_taken(path)`` predicate backed by the DATABASE.
+
+    The single-document path previously passed an empty ``set()`` as its
+    collision oracle, which could not see a path an existing row already owned —
+    so the deterministic suffix below never fired and PostgreSQL's
+    ``documents_vault_path_idx`` raised a bare ``UniqueViolation`` instead.
+    That was the whole of issue #23.
+
+    The database is the right authority precisely because it is the thing that
+    rejects. Note that ``note_builder._unique_target`` checks the FILESYSTEM
+    (``target.exists()``) — a different oracle, and not the one that fails here:
+    a row can own a ``vault_path`` whose file is missing (exactly the orphan
+    state this bug produced), and a file can exist with no row.
+
+    Excludes ``document_id`` itself so re-generating a document that already
+    owns its path is never treated as a self-collision.
+    """
+
+    def is_taken(candidate: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM documents WHERE vault_path = %s AND id <> %s LIMIT 1",
+            (candidate, document_id),
+        ).fetchone()
+        return row is not None
+
+    return is_taken
+
+
 def _ingested_relative_path(
-    doc: _DocumentForExport, used_paths: set[str]
+    doc: _DocumentForExport, is_taken: Callable[[str], bool]
 ) -> str:
     """Compute the ``_ingested/<source>/...`` path for an ingested-tier doc.
 
@@ -315,6 +368,13 @@ def _ingested_relative_path(
     On collision (two docs hashing to the same path) we append the short
     document UUID — stable across re-runs because it's keyed off the immutable
     ``documents.id``.
+
+    ``is_taken`` is the collision oracle, injected rather than assumed. The
+    corpus dump passes its in-run ``used_paths`` set; the single-document path
+    passes a DB-backed predicate (:func:`_paths_taken_by_others`). Making it a
+    parameter is what stopped the two callers disagreeing about whether a
+    collision is even detectable — the single-document caller used to pass an
+    empty set and could therefore never detect one.
     """
     source = doc.source_kind or "manual"
     slug = slugify(doc.title)
@@ -342,17 +402,25 @@ def _ingested_relative_path(
         )
         candidate = f"_ingested/{source}/{date_prefix}-{external}-{slug}.md"
 
-    if candidate in used_paths:
+    if is_taken(candidate):
         # Deterministic collision suffix: short hash of the doc id, never a
         # counter (counters would shuffle every re-run).
         suffix = _short_id(doc.id)
         stem, ext = candidate.rsplit(".", 1)
         candidate = f"{stem}-{suffix}.{ext}"
+        # A second collision means two documents share both a slug AND the
+        # first 8 hex of their UUIDs. Vanishingly rare, but "vanishingly rare"
+        # is what the original empty-set bug looked like from the inside, and
+        # the cost of being wrong is another UniqueViolation traceback. Widen
+        # the id rather than appending a counter, so the result stays a pure
+        # function of the immutable document id and is stable across re-runs.
+        if is_taken(candidate):
+            candidate = f"{stem}-{doc.id}.{ext}"
     return candidate
 
 
 def _resolve_relative_path(
-    doc: _DocumentForExport, used_paths: set[str]
+    doc: _DocumentForExport, is_taken: Callable[[str], bool]
 ) -> str:
     """Pick the on-disk path for ``doc``.
 
@@ -363,7 +431,7 @@ def _resolve_relative_path(
     """
     if doc.vault_path:
         return doc.vault_path
-    return _ingested_relative_path(doc, used_paths)
+    return _ingested_relative_path(doc, is_taken)
 
 
 def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
@@ -452,6 +520,17 @@ def _build_frontmatter(doc: _DocumentForExport) -> dict[str, Any]:
             fields["summary"] = doc.summary
     if doc.draft:
         fields["draft"] = True
+    # F6 publish boundary. Emitted ONLY when non-``normal``, exactly as ``draft``
+    # is emitted only when true. That rule is what makes migration 026 a
+    # zero-churn change for the ~1,376 existing mirror files: every one of them
+    # is ``normal``, so none gains a line and none is rewritten.
+    #
+    # This is the field the Quartz emitter reads to drop the document from
+    # contentIndex, so it is the load-bearing half of the publish boundary — the
+    # veto at ingest stops a body reaching a hosted embedder, and this stops it
+    # reaching the published site's indexes.
+    if doc.sensitivity != DEFAULT_SENSITIVITY:
+        fields["sensitivity"] = doc.sensitivity
     return fields
 
 
@@ -595,7 +674,7 @@ def export_vault(
     used_paths: set[str] = set()
 
     for doc in _iter_documents(conn):
-        relative = _resolve_relative_path(doc, used_paths)
+        relative = _resolve_relative_path(doc, used_paths.__contains__)
         used_paths.add(relative)
         try:
             _, written = _write_doc_file(
@@ -670,7 +749,9 @@ def regenerate_vault_file(
             "restore from backup or git instead"
         )
 
-    relative = doc.vault_path or _resolve_relative_path(doc, used_paths=set())
+    relative = doc.vault_path or _resolve_relative_path(
+        doc, _paths_taken_by_others(conn, document_id)
+    )
 
     target, _ = _write_doc_file(
         doc, vault_path=vault_path, relative=relative, force=force

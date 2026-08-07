@@ -50,8 +50,7 @@ from brain.graph_rag.reconcile import (
     remove_document,
 )
 from brain.vault.derived_links.directory import DirectoryStore
-
-TEST_DATABASE_URL = "postgresql://brain:brain@localhost:5434/second_brain_test"
+from tests.conftest import TEST_DATABASE_URL
 
 # Suppression-disabled ratio (cap = round(N * 1.0) = N) so the tiny test corpora
 # always materialize edges. Mirrors ``_NO_SUPPRESS`` in test_graphrag_reconcile.

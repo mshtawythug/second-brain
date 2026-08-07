@@ -27,8 +27,19 @@ This module also exposes a one-shot CLI entry point — ``python -m
 brain.wiki.build_swap --vault PATH [--quartz-dir PATH] [--keep N]`` —
 used by ``bin/brain-up`` (cold-start build) and ``bin/brain-rebuild``
 (forced rebuild) so those scripts never have to import Python directly.
-Exits 0 on success, 1 on a wrapped :class:`BrainWikiError`, and 2 (via
-argparse) on bad arguments.
+Exits 0 on success, 1 on a wrapped :class:`BrainWikiError`, 2 (via
+argparse) on bad arguments, and 3 on :class:`BrainWikiConfigError` — see
+the ``EXIT_*`` constants below.
+
+**A build that cannot refresh its DB-derived surfaces does not publish.**
+:func:`_refresh_pre_build_adornments` runs before the Quartz subprocess and
+raises :class:`BrainWikiConfigError` if ``Config.load`` fails, so the swap
+never happens and the previously-published build stays on the wire. This is
+deliberate: between 2026-07-26 and 2026-08-07 that site logged a WARNING and
+carried on, and the wiki served twelve days of stale content behind a
+completely healthy-looking UI. A stale surface that looks alive is worse
+than one that is visibly down — the visibly-down one gets fixed within the
+hour.
 """
 from __future__ import annotations
 
@@ -49,9 +60,75 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:  # pragma: no cover — type-only import to avoid runtime cycle
     from ..config import Config
 
-from .errors import BrainWikiBuildError, BrainWikiError
+from .errors import BrainWikiBuildError, BrainWikiConfigError, BrainWikiError
 
 logger = logging.getLogger(__name__)
+
+# Process exit codes for ``python -m brain.wiki.build_swap``. Kept as named
+# constants because a cron/launchd wrapper (and ``brain doctor``'s "last
+# exited 0" check) reads them to decide what kind of failure this was.
+EXIT_OK = 0
+EXIT_BUILD_ERROR = 1  # BrainWikiError: workspace broken, build failed/timed out.
+# Argparse owns 2.
+EXIT_CONFIG_ERROR = 3  # BrainWikiConfigError: Config.load failed; box misconfigured.
+
+# Env var overriding the build-subprocess wall-clock ceiling.
+BUILD_TIMEOUT_ENV_VAR = "BRAIN_WIKI_BUILD_TIMEOUT_S"
+
+# THE single Quartz-build timeout for the whole codebase. `brain vault render`
+# in cli.py imports this rather than defining its own — it used to carry a
+# separate 300 s ceiling, so the same operation was allowed 300 s or 600 s
+# depending purely on which entrypoint you came through, which is invisible to
+# the user. One operation, one ceiling.
+#
+# 900 s is derived from measurement on the live 1,392-file vault, not guessed.
+# Observed SUCCESSFUL build wall-clocks: 57 s, 1 m, 1 m, 2 m, 4 m, 4 m, 5 m.
+# That settles two things:
+#   * 300 s was not viable — four observed *successes* exceeded it, so the
+#     cli.py path was failing builds that were working correctly.
+#   * 900 s gives 3x headroom over the slowest observed success (300 s).
+#
+# READ THIS BEFORE RAISING IT AGAIN. Three builds on that vault blew past even
+# 600 s, and a bigger number is NOT the fix for them. In build 20260807-100826
+# the parse phase took 5 m and then "Emitting files" ran past 5 m without
+# finishing, against 17-22 s for the emit phase of every successful build. That
+# is an unexplained emit-phase pathology and a perf bug in its own right; a
+# larger ceiling converts a hard failure into a very slow build, it does not
+# repair it. The ceiling exists so a runaway build cannot hold the process
+# forever — it is a backstop, not a tuning knob.
+DEFAULT_BUILD_TIMEOUT_S = 900.0
+
+
+def resolve_build_timeout_s() -> float:
+    """Return the build timeout: ``$BRAIN_WIKI_BUILD_TIMEOUT_S`` or the default.
+
+    Read at call time rather than at import so a caller's environment is
+    honored no matter when it was set, and so tests need no module reload.
+
+    A malformed or non-positive value raises :class:`BrainWikiConfigError`
+    (exit 3), not a silent fallback to the default. Falling back would mean a
+    typo'd ceiling is applied without anyone noticing — the same
+    degrade-to-silent-success shape this module exists to prevent. It is also
+    the correct classification: a bad env var is a deployment misconfiguration,
+    persistent until a human fixes it.
+    """
+    import os  # local import — this is not needed on the module import path
+
+    raw = os.environ.get(BUILD_TIMEOUT_ENV_VAR)
+    if raw is None or not raw.strip():
+        return DEFAULT_BUILD_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        raise BrainWikiConfigError(
+            f"{BUILD_TIMEOUT_ENV_VAR} must be a positive number of seconds"
+            f" (got {raw!r})"
+        ) from None
+    if value <= 0:
+        raise BrainWikiConfigError(
+            f"{BUILD_TIMEOUT_ENV_VAR} must be > 0 (got {raw!r})"
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -81,7 +158,7 @@ def build_and_swap(
     quartz_dir: Path | None = None,
     keep: int = 3,
     node_path: str | None = None,
-    timeout_seconds: float = 600.0,
+    timeout_seconds: float | None = None,
     env: dict[str, str] | None = None,
     refresh_related_inline: bool = True,
     npx_path: str | None = None,  # Deprecated and ignored. Kept for API compatibility.
@@ -111,9 +188,14 @@ def build_and_swap(
     npm-exec overhead from the watcher hot path.
 
     ``timeout_seconds`` is a hard wall-clock ceiling on the build
-    subprocess. The default (10 min) accommodates large vaults with
-    expensive Quartz transformers without ever leaving a runaway build
-    holding the process forever.
+    subprocess. ``None`` (the default) resolves via
+    :func:`resolve_build_timeout_s` — ``$BRAIN_WIKI_BUILD_TIMEOUT_S`` if set,
+    else :data:`DEFAULT_BUILD_TIMEOUT_S` — so there is exactly one ceiling for
+    a Quartz build no matter which entrypoint reached it. Tests pass an
+    explicit value. A timeout raises :class:`BrainWikiBuildError`, NOT
+    :class:`BrainWikiConfigError`: "the build ran but overran its wall clock"
+    and "this box has no usable config" have different causes and different
+    remedies, and must not be collapsed.
 
     ``env`` is an optional extra-env dict merged into ``os.environ`` for
     the build subprocess — used by tests to opt the stub script into
@@ -125,6 +207,11 @@ def build_and_swap(
     subprocess fails.  Partial output (a half-written ``build_dir`` left
     behind by a failing build) is cleaned up before the exception propagates
     so retries land on a clean slate.
+
+    Raises :class:`BrainWikiConfigError` if ``Config.load`` fails during the
+    pre-build refresh. That check runs *before* the build subprocess and the
+    symlink swap, so on this path nothing is built, nothing is pruned, and
+    ``current`` still points at the last known-good build.
     """
     if npx_path is not None:
         warnings.warn(
@@ -134,6 +221,12 @@ def build_and_swap(
         )
 
     started = time.monotonic()
+    # Resolved up front so a malformed $BRAIN_WIKI_BUILD_TIMEOUT_S aborts
+    # before anything is built, on the same "misconfiguration must not
+    # publish" rule as the Config.load check below.
+    effective_timeout = (
+        resolve_build_timeout_s() if timeout_seconds is None else timeout_seconds
+    )
     workspace = quartz_dir if quartz_dir is not None else vault / ".quartz"
     _check_workspace(workspace)  # Also asserts bootstrap-cli.mjs is present.
 
@@ -172,7 +265,7 @@ def build_and_swap(
             vault=vault,
             build_dir=build_dir,
             build_id=build_id,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=effective_timeout,
             env=env,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
@@ -197,7 +290,9 @@ def build_and_swap(
             ) from exc
         if isinstance(exc, subprocess.TimeoutExpired):
             raise BrainWikiBuildError(
-                f"quartz build exceeded {timeout_seconds}s for vault {vault}"
+                f"quartz build exceeded {effective_timeout:g}s for vault {vault}"
+                f" (raise {BUILD_TIMEOUT_ENV_VAR} if this vault legitimately"
+                f" needs longer; the previously-published build is still live)"
             ) from exc
         raise BrainWikiBuildError(
             f"quartz build raised {type(exc).__name__} for vault {vault}: {exc}"
@@ -480,7 +575,7 @@ def _replace_vault_path(cfg: Config, vault_path: Path) -> Config:
 def _refresh_pre_build_adornments(
     vault: Path, *, refresh_related_inline: bool = True
 ) -> None:
-    """Best-effort generated wiki adornment refresh before any Quartz build.
+    """Refresh generated wiki adornments before any Quartz build.
 
     ``refresh_related_inline=False`` skips ``refresh_related`` (the heavy
     hybrid-search recompute, ~70s on a 1100-doc vault). The build watcher
@@ -488,39 +583,86 @@ def _refresh_pre_build_adornments(
     thread post-build to keep edit-to-UI latency down. ``bin/brain-rebuild``
     keeps the default ``True`` so manual rebuilds always emit fresh
     related-docs JSON synchronously.
-    """
-    # P4.7/P5.1 — refresh generated wiki adornments before the build
-    # so the new build picks up the freshest recent rail and related-doc
-    # JSON. Failures here are logged-and-swallowed by the refresh helpers
-    # themselves (DB unreachable, missing fence, …) — these adornments are
-    # a courtesy, the build is the customer.
-    # Config loading is opt-in: a Config-load failure (no DATABASE_URL on
-    # PATH) shouldn't block the build either, so we wrap the import too.
-    try:
-        from ..config import Config, ConfigError
-        from .build_homepage import refresh_homepage
-        from .build_related import refresh_related
 
-        try:
-            cfg = Config.load()
-        except ConfigError as exc:
-            logger.warning(
-                "wiki pre-build refresh: Config.load failed (%s) — skipping refresh",
-                exc,
-            )
-        else:
-            target_vault = vault.expanduser().resolve()
-            # Honor explicit build vault overrides: the generated adornments
-            # must follow the tree being built, not the env default.
-            cfg_for_build = (
-                cfg
-                if cfg.vault_path == target_vault
-                else _replace_vault_path(cfg, target_vault)
-            )
-            refresh_homepage(cfg_for_build)
-            if refresh_related_inline:
-                refresh_related(cfg_for_build)
-    except Exception as exc:  # noqa: BLE001 — refresh is best-effort
+    Two failure classes, handled deliberately differently — see the inline
+    comments for the rule that separates them:
+
+    * ``Config.load()`` failing raises :class:`BrainWikiConfigError`, which
+      **aborts the build**. Called before ``_run_build``/``_atomic_swap``,
+      so the previously-published build stays live.
+    * A failure *inside* ``refresh_homepage`` / ``refresh_related`` (DB blip,
+      missing fence) is logged and swallowed — the build proceeds.
+    """
+    # This import block is deliberately NOT wrapped in a try/except. An
+    # ImportError here means the installed `brain` package is broken, which
+    # is not a "degrade gracefully" condition — there is nothing to degrade
+    # to. It is kept function-local only to avoid a module-import cycle with
+    # ..config (see the TYPE_CHECKING import at the top of this module).
+    from ..config import Config, ConfigError
+    from .build_homepage import refresh_homepage
+    from .build_related import refresh_related
+
+    # ---- FATAL: cannot load config -> abort the build. ---------------------
+    #
+    # Why this one aborts while the refresh calls below only warn:
+    # Config.load() failing is a *deployment* misconfiguration (DATABASE_URL
+    # absent for the user running the build). It is not transient and cannot
+    # heal on the next build — every scheduled run will fail identically
+    # until a human intervenes. Meanwhile EVERY DB-derived surface of the
+    # wiki silently freezes, and Quartz still renders a complete, healthy-
+    # looking site from the stale vault mirror.
+    #
+    # That is exactly the 2026-07-26 -> 2026-08-07 outage: this site logged a
+    # WARNING, returned, and let the build publish. Twelve days of a wiki that
+    # looked completely alive while serving stale content. A surface that is
+    # stale but healthy-looking is worse than one that is visibly down,
+    # because nobody goes looking for it. Raising here — before _run_build and
+    # _atomic_swap — means the `current` symlink is never retargeted and the
+    # last known-good build keeps serving, visibly frozen at a known build id.
+    try:
+        cfg = Config.load()
+    except ConfigError as exc:
+        # The cause goes LAST, on its own line. Config.load's message is
+        # multi-line (it enumerates the .env chain it searched), and burying a
+        # multi-line block inside a parenthetical mid-sentence makes both
+        # halves unreadable. Prose first, then the actionable detail.
+        raise BrainWikiConfigError(
+            "wiki build aborted: could not load config, so the DB-derived wiki"
+            " surfaces (recent rail, related docs) cannot be refreshed."
+            " Publishing now would serve stale content behind a healthy-looking"
+            " UI, so nothing was built and nothing was published — the"
+            " previously-published build is still live and unchanged."
+            f"\nCause: {exc}"
+        ) from exc
+
+    target_vault = vault.expanduser().resolve()
+    # Honor explicit build vault overrides: the generated adornments
+    # must follow the tree being built, not the env default.
+    cfg_for_build = (
+        cfg
+        if cfg.vault_path == target_vault
+        else _replace_vault_path(cfg, target_vault)
+    )
+
+    # ---- BEST-EFFORT: a failure refreshing one adornment -> warn, build on. -
+    #
+    # The line against the block above: these failures are *transient and
+    # self-healing*. A DB blip or a hand-removed fence marker degrades two
+    # secondary surfaces (the recent rail, the related-docs sidebar) while the
+    # page content itself — which comes from the markdown, not the DB — is
+    # still fresh. The very next build repairs them with no human involved.
+    # Aborting here would mean a five-second Postgres restart blocks a
+    # markdown-only edit from ever reaching the reader, which trades a small
+    # staleness for a total outage. So: warn, and publish.
+    #
+    # refresh_homepage and refresh_related each already log their own DB
+    # failures (at ERROR, so they are greppable); this catch is the backstop
+    # for anything they do not anticipate.
+    try:
+        refresh_homepage(cfg_for_build)
+        if refresh_related_inline:
+            refresh_related(cfg_for_build)
+    except Exception as exc:  # noqa: BLE001 — adornment refresh is best-effort
         logger.warning("wiki pre-build refresh: unexpected failure: %s", exc)
 
 
@@ -534,8 +676,19 @@ def main(argv: list[str] | None = None) -> int:
 
     Mirrors :func:`build_watcher.main` argument shape (``--vault``,
     ``--quartz-dir``, ``--keep``) so the two CLIs feel like siblings.
-    Returns 0 on success and 1 on any :class:`BrainWikiError` (build
-    failure or workspace problem). Bad arguments exit 2 via argparse.
+
+    Exit codes — see the ``EXIT_*`` constants at the top of this module:
+
+    ``0``
+        Build succeeded and ``current`` was retargeted.
+    ``1``
+        :class:`BrainWikiError` — workspace broken, or the Quartz build
+        exited non-zero / timed out.
+    ``2``
+        Bad arguments (argparse).
+    ``3``
+        :class:`BrainWikiConfigError` — ``Config.load`` failed. Nothing was
+        built and nothing was published; the previous build is still live.
     """
     parser = argparse.ArgumentParser(
         prog="brain.wiki.build_swap",
@@ -568,17 +721,32 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = build_and_swap(vault, quartz_dir=quartz_dir, keep=args.keep)
+    except BrainWikiConfigError as exc:
+        # MUST precede the BrainWikiError arm below — it is a subclass.
+        #
+        # Bounded prose, no traceback, by design. This branch fires on EVERY
+        # scheduled build until a human sets DATABASE_URL, so its cost is
+        # multiplied by the retry rate: the 2026-08-07 incident accumulated
+        # 496 MB of repeated Rich tracebacks, which is its own outage. A short
+        # fixed-size message that names the repair is strictly more legible
+        # and cannot fill a disk. The distinct exit code (3) is what carries
+        # the machine-readable signal to launchd / `brain doctor`.
+        #
+        # No "build aborted:" prefix here — the exception message already
+        # opens with "wiki build aborted:", and doubling it up reads badly.
+        sys.stderr.write(f"{exc}\n")
+        return EXIT_CONFIG_ERROR
     except BrainWikiError as exc:
         # Wrapped wiki errors — workspace missing, build subprocess
         # exited non-zero, or timed out. Print a one-line message and
         # exit 1 so callers (brain-up, brain-rebuild) can `|| exit 1`.
         sys.stderr.write(f"build failed: {exc}\n")
-        return 1
+        return EXIT_BUILD_ERROR
 
     sys.stdout.write(
         f"{result.build_id} ({result.elapsed_seconds:.2f}s, method={result.method})\n"
     )
-    return 0
+    return EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover — exercised via subprocess in CLI

@@ -1,0 +1,30 @@
+# Code owners — who GitHub auto-requests a review from.
+#
+# With a single maintainer the narrowed rules below are redundant TODAY: every
+# one of them resolves to the same person as the `*` default. They are kept
+# anyway because they document *why* each path is review-critical, which makes
+# adding a second maintainer a one-line change rather than an archaeology
+# exercise.
+#
+# CODEOWNERS only enforces anything once branch protection has
+# "Require review from Code Owners" enabled (Settings -> Branches). Until then
+# it is advisory: GitHub still auto-requests the review, but does not block.
+
+# Default owner for everything.
+*                               @mshtawythug
+
+# Schema is append-only and forever (CLAUDE.md "Migration Safety") — an edit to
+# an already-shipped migration is a data-loss bug, so review is never optional.
+/src/brain/migrations/          @mshtawythug
+
+# CI, release, and publish workflows hold the PyPI Trusted Publishing and GHCR
+# credentials paths.
+/.github/workflows/             @mshtawythug
+
+# Agent-facing skills ship behavior to every Claude Code user who runs
+# bin/brain-skills-sync.
+/skills/                        @mshtawythug
+
+# Security policy and the PII gate's committed allowlist.
+/SECURITY.md                    @mshtawythug
+/.pii-allowlist.txt             @mshtawythug

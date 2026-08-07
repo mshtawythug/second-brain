@@ -127,6 +127,171 @@ remaining `--since` flags are unchanged and do **not** take suffixes:
 `ingest-gmail` expects a Gmail `YYYY/MM/DD` date, `timeline` an ISO `YYYY-MM`
 month, and `gaps push` a plain integer day count.
 
+### Search transparency and facets
+
+```bash
+brain search "platform migration"                 # footer on stderr by default
+brain search "platform migration" --no-meta       # suppress the footer
+brain search "platform migration" --facets        # add a facet panel
+brain search "platform migration" --json          # bare list — UNCHANGED shape
+brain search "platform migration" --json --meta   # envelope with counts + timings
+```
+
+The footer (`544 matched · 3 shown · embed 5820ms · sql 214ms`) goes to
+**stderr**, so `--json` stays pipeable and `> file` stays clean. `--meta` moves
+the same numbers into a JSON envelope; **`--json` on its own is still a bare
+list of 7-key objects and always will be**, because the list is consumed
+positionally by skills and shell scripts and there is no deprecation channel
+for a personal tool. `--facets --json` implies `--meta`, since facets have
+nowhere else to live.
+
+`total_documents` is **lexical-only** by construction: the vector leg may
+surface near-neighbours it does not count. A vector-inclusive total would be
+capped at the candidate limit and therefore meaningless as a "total".
+
+### Filtering by when a document changed
+
+```bash
+brain search "runway" --updated-after 2026-07-01
+brain search "runway" --updated-before 2026-07-31
+```
+
+Distinct from `--after` / `--before`, which filter on when a document was
+**authored or received** (`coalesce(sent_at, ingested_at)`). These filter on
+when it was last **changed**. Maintenance jobs — enrichment backfills, tag
+normalization, `vault_path` bookkeeping — deliberately do *not* bump
+`updated_at`, so a `brain enrich --backfill` across the corpus will not make
+every document look edited today.
+
+## brain recall
+
+Retrieval sized for an agent's context window. Where `brain search` ranks
+pointers for a human to read, `recall` returns the **material itself**, packed
+to an explicit token budget and cited.
+
+```bash
+brain recall "platform migration runway"
+brain recall "platform migration runway" --budget 800
+brain recall "platform migration runway" --json
+brain recall "platform migration runway" --agent research-agent
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--budget`, `-b` | `BRAIN_RECALL_BUDGET_TOKENS` (2000) | Token budget for the **whole** emitted block, header included. |
+| `--max-candidates` | `BRAIN_RECALL_MAX_CANDIDATES` (25) | Documents considered before packing. |
+| `--json` | off | Machine-readable projection instead of the block. |
+| `--agent` | `BRAIN_AGENT_ID` | Attribute this recall to an agent id. |
+
+It accepts the same metadata filters as `search` (`--source`, `--tag`,
+`--since`, `--person`, `--after`/`--before`, `--kind`, `--thread`,
+`--without-tag`, `--fts-only`).
+
+Output is a `# recall:` header followed by `[N]`-cited passages, one per
+document — the same citation convention `brain ask` uses, so an agent that
+pastes a block and cites `[2]` is speaking a vocabulary the rest of the system
+understands. One passage per document keeps source diversity high, which is
+what a limited budget most wants.
+
+If the budget cannot hold even the top passage, you get **one truncated
+passage** rather than nothing: an agent asked for context, and silence is a
+worse answer than a shortened excerpt.
+
+## brain usage
+
+```bash
+brain usage --days 30
+brain usage --json                  # normalized query labels
+brain usage --json --raw-queries    # opt in to the raw strings
+brain usage --limit 20
+```
+
+Searches, opens, feedback events and ingests over the trailing window, broken
+down by day, by surface (`cli` / `mcp` / `wiki`) and by agent, plus
+search-latency p50/p95.
+
+**`--json` withholds raw query strings by default.** A query log records what
+you were *looking for*, including the searches that found nothing — often more
+revealing than any document it returned. Counts are identical either way; only
+the label changes. Human output is deliberately **not** redacted: the terminal
+is inside the trust boundary, and "what do I search for most" is unactionable
+if you are shown normalized labels.
+
+A row with no `agent_id` reports as `(unattributed)`, never folded into a
+surface. Every row written before migration 027 is genuinely unattributed, and
+saying so is more useful than guessing.
+
+On a database missing migration 019/023/024/027 the command **fails** with a
+`brain init` hint rather than reporting confident zeroes — the opposite of the
+telemetry *write* path, which swallows so that search keeps working. A silently
+incomplete report is worse than no report.
+
+## Confidentiality
+
+```bash
+brain mark-confidential <id-prefix>
+brain mark-normal <id-prefix>
+brain list --sensitivity confidential
+brain ingest notes.md --sensitivity confidential
+```
+
+`confidential` is an **egress** control, not an access control. The document
+stays fully readable from the local CLI — that is inside the trust boundary.
+What changes is what leaves the machine: the body is kept off a hosted
+embedder, withheld from MCP `brain_show` / `brain_search` / `brain_recall` /
+`brain_resurface` unless `include_confidential=true`, and dropped from the
+published wiki index.
+
+Both commands are idempotent. **`mark-normal` is the only sanctioned
+downgrade**: re-ingest is escalate-only, so it can raise a document's tier but
+never lower it — otherwise a background `vault sync --watch` pass would quietly
+reset anything you had marked. That also means marking a document confidential
+writes the tier into its frontmatter for vault-tier notes, because for those
+the file is the source of truth.
+
+An unrecognized `--sensitivity` value is a **usage error (exit 2)**, never a
+silent empty list. For a confidentiality filter, "nothing is marked
+confidential" is the most dangerous possible wrong answer. The same applies to
+`brain search --sensitivity` and `brain list --sensitivity`.
+
+### `--sensitivity` on `search` is a lens, not a filter you can rely on
+
+```bash
+brain search "roadmap" --sensitivity confidential   # only confidential hits
+brain search "roadmap"                              # BOTH tiers — the default
+```
+
+`brain search` accepts `--sensitivity`, but **there is no sensitivity filter on
+the ranked results by default**: an unfiltered `brain search` still returns
+confidential documents and their bodies. That is deliberate — the local CLI is
+inside the trust boundary, and the tier governs *egress* (hosted embedders, MCP
+responses, the published wiki), not local reads.
+
+The practical consequence: `--sensitivity normal` is a convenience lens for
+narrowing what you are looking at, **not** a way to make a local session safe to
+screen-share. If you need output that provably excludes confidential bodies, the
+MCP surfaces are where that guarantee lives.
+
+## Agent attribution
+
+```bash
+brain search "x" --agent research-agent
+brain recall "x" --agent research-agent
+brain rate <id> useful --agent research-agent
+brain ingest-stdin --source slack --external-id t1 --title T --agent capture-bot
+BRAIN_AGENT_ID=research-agent brain search "x"     # ambient, no flag
+```
+
+Precedence is **flag > `BRAIN_AGENT_ID` > unattributed**. `--agent` exists on
+the four agent-facing surfaces above; `brain ingest` / `ingest-dir` have **no**
+`--agent` flag, because attaching an explicit agent to a hand-run ingest would
+be a fabricated fact. The ambient env var does still attribute them — see the
+warning in [configuration.md](configuration.md#brain_agent_id-who-is-doing-the-work)
+before exporting it in a shell profile.
+
+On `ingest-stdin` the flag **wins** over an `agent_id` inside `--metadata`: an
+explicit flag is the more specific and more recent statement of intent.
+
 ## Tags, edits, draft hiding, and deletes
 
 ```bash
@@ -204,13 +369,76 @@ echo "Idea: batch the nightly re-embed to cut Ollama warmups" | brain capture --
 
 # Review the inbox later: promote, tag, or discard each item; or just list it.
 brain capture list
+brain capture list --json     # machine-readable; the safe surface for an agent
 brain capture review
+brain capture review --auto   # non-interactive: LLM-routes items out by tag
 ```
 
 `brain capture` is a zero-friction inbox: pipe text on stdin or pass `--text`,
 optionally adding `-t/--tag` alongside the always-on `inbox` tag. `brain capture
 list` shows what's waiting; `brain capture review` walks each item so you can
 promote it into a real note, retag, or discard it.
+
+`capture review` is interactive and its discard path deletes a document, so it
+is deliberately not something an agent should drive unattended — the
+[`brain-proactivity` skill](agent-skills.md) covers it with that prohibition
+attached.
+
+## brain claude install-hooks
+
+```bash
+brain claude install-hooks                 # install the session-end capture hook
+brain claude install-hooks --dry-run       # show what would change, write nothing
+brain claude install-hooks --target ~/.claude-alt   # non-default config root
+brain claude install-hooks --force         # overwrite a differing hook script
+brain claude install-hooks --uninstall     # remove the hook entry and script
+```
+
+Installs a Claude Code **Stop** hook that nudges exactly one dedupe-then-capture
+pass after a session that did real work and wrote nothing back to the brain. It
+writes `<target>/hooks/brain-capture-hook.sh` and merges an entry into
+`<target>/settings.json`; `--target` moves both (default `~/.claude`).
+
+Opt-in and separately reversible: `--uninstall` removes the entry *and* the
+script. `--force` overwrites a hook script that differs from the shipped one,
+but it **never** bypasses the refusal to touch a malformed `settings.json` —
+merging into a file we cannot parse risks destroying unrelated configuration,
+so that refusal has no override.
+
+Run `--dry-run` first if you have hand-edited your Claude Code settings.
+
+## brain backfill scan-secrets
+
+```bash
+brain backfill scan-secrets                                  # READ-ONLY report
+brain backfill scan-secrets --json                           # same, machine-readable
+brain backfill scan-secrets --limit 200                      # stop after N documents
+brain backfill scan-secrets --apply --action mark-confidential
+brain backfill scan-secrets --apply --action redact          # slow; rewrites bodies
+```
+
+Scans every stored document for credential-shaped strings — the retroactive half
+of the `F4` ingest guard, which only protects documents from the moment it
+shipped.
+
+**Read-only by default, behind two independent gates.** `--apply` is required to
+write anything, *and* the default `--action report` cannot write even when
+`--apply` is passed. Both exist because the destructive action rewrites document
+bodies across the whole corpus. To actually change anything you must name a
+non-`report` action **and** pass `--apply`; either alone is a no-op report.
+
+| `--action` | With `--apply` |
+|---|---|
+| `report` (default) | never writes, regardless of `--apply` |
+| `mark-confidential` | raises the tier on each hit |
+| `redact` | rewrites bodies — re-chunks, re-embeds, re-hashes, regenerates vault mirrors |
+
+`redact` is by far the slowest option for that reason. An unrecognized
+`--action` is a usage error (**exit 2**).
+
+One limit worth stating plainly: this finds what is *already stored*. It cannot
+un-send anything that was already transmitted to a hosted embedder before the
+scan ran.
 
 ## brain enrich
 
@@ -231,6 +459,33 @@ summaries written by an older `BRAIN_ENRICH_MODEL`; honors `--limit/-n`).
 `--krisp-action-items` prints the MCP + `ingest-stdin` commands for Claude to
 execute, then exits without contacting MCP itself.
 
+## brain todo
+
+```bash
+brain todo                          # every open action item
+brain todo --since 30               # from action-item docs ingested in the last 30 days
+brain todo --closed                 # include checked-off items
+brain todo --limit 100 --json
+```
+
+`brain todo` reads the `content_type='krisp_action_items'` documents that
+`brain enrich --krisp-action-items` produces (stored separately from the meeting
+transcript), parses `- [ ]` / `- [x]` checklist lines out of each body, and
+prints one row per item — so you see what you owe without opening N transcripts.
+Default is open items only.
+
+`--since` takes a bare number as **days** (suffixes `7d` / `24h` / `90m` also
+work) and filters on `documents.ingested_at`, not the meeting date: a call from
+six months ago that you ingested yesterday still shows under `--since 7`.
+`--source` accepts only `krisp` today and exists for a future Slack/Gmail
+extension. `--json` emits a flat list of `{document_id, document_title,
+ingested_at, state, text}`.
+
+There is no `brain todo close`. To check an item off, edit the source
+action-item document (`brain edit <id-prefix>`) and change `- [ ]` to `- [x]`;
+the next run reflects it. Agents drive this through the `brain-todo`
+[skill](agent-skills.md).
+
 ## brain rate
 
 ```bash
@@ -248,6 +503,99 @@ append — re-rating a target creates a fresh row and the full history is
 preserved. Pass `--target-type entity|community|theme` to rate a GraphRAG
 target by its durable id instead of a document; `--graph-retrieved` marks the
 rating as produced by a graph surface.
+
+## brain note move
+
+```bash
+brain note move <id-prefix> projects/atlas --dry-run
+brain note move <id-prefix> projects/atlas
+brain note move <id-prefix> "" --yes            # "" or "." = vault root
+brain note move <id-prefix> archive --no-link-refactor
+```
+
+Relocates a vault note to another folder, keeping its title **and its
+document id** — which is why incoming backlinks survive. A move is a rename to
+the same title in a different folder, so it reuses the whole rename machinery:
+the plan phase scans the vault for path-form `[[…]]` references, and the apply
+phase snapshots every file it touches and restores them on any failure.
+
+`NEW-FOLDER` is vault-root-relative and created if missing. A leading slash is
+stripped, so `/projects/atlas` means `projects/atlas` — never the filesystem
+root. Paths that escape the vault are rejected (exit 2).
+
+**Safe to run with `brain vault sync --watch` and `brain-mcp` live.** The file
+is relocated with an atomic rename (same inode) and `documents.vault_path` is
+repointed before the follow-up sync, so the watcher observes a *move* rather
+than a delete-then-create. That distinction matters: the delete branch would
+cascade every incoming link away.
+
+There is **no `--force`**. A note already at the destination is a hard error,
+because silently clobbering one is unrecoverable. Moving a note into the folder
+it already occupies prints `already in <folder> — nothing to do` and exits 0.
+
+Confirmed by default (a move rewrites links across the whole vault and you
+cannot see that blast radius from the command line); `--yes` skips the prompt,
+`--dry-run` skips it too since nothing will be written.
+
+## Maintenance odds and ends
+
+```bash
+brain reembed                       # backfill NULL chunk embeddings
+brain orphans                       # vault notes with no links either way
+brain orphans --all                 # include ingested-tier mirrors
+brain uninstall                     # remove runtime state + daemons
+```
+
+`brain reembed` backfills `chunks.embedding` for rows that have none. After
+`brain init` every chunk starts NULL, so this is the second half of first-run
+setup. Idempotent — only still-NULL rows are touched, so it is safe to re-run
+after a crash. It also finalizes the column (`NOT NULL`, plus an HNSW index
+when the active backend's dimension allows one).
+
+`brain orphans` lists documents with **zero** incoming and zero outgoing links.
+It defaults to vault-tier only: ingested-tier mirrors legitimately have no
+`[[…]]` links of their own, so including them buries the signal. `--all` opts
+them in.
+
+`brain uninstall` removes launchd plists, stops the Docker compose stack and
+deletes the `$BRAIN_HOME` runtime files (`.env`, `.shims/`, `Caddyfile`).
+**Your database and vault are kept by default** — read its `--help` before
+passing anything that widens the blast radius.
+
+## brain backup / brain restore
+
+```bash
+brain backup                        # DB + vault, into BRAIN_BACKUP_DIR
+brain backup --no-vault --label pre-migration
+brain backup --json                 # manifest as JSON
+brain restore <archive>             # y/N confirmation
+brain restore <archive> --db-only --yes
+```
+
+`pg_dump` runs **inside the container** by default. This is not a preference:
+the production Postgres is 16.x while a typical host Homebrew `pg_dump` is
+14.x, and the version mismatch makes a host-side dump abort outright. A host
+binary is used only after an explicit major-version check.
+
+`--yes` skips the y/N prompt but **never** skips the pre-flight compatibility
+checks — those are what stop a restore from half-applying.
+
+## brain ui
+
+```bash
+brain ui                            # loopback only, opens a browser
+brain ui --read-only
+brain ui --host 0.0.0.0 --token <secret>
+```
+
+A local single-user web surface over the same corpus. Adds **no** runtime
+dependency — `starlette` and `uvicorn` already ship as transitive deps of the
+MCP SDK — and the front end is hand-written static assets with no bundler and
+no CDN, so it works fully offline.
+
+`--token` is **required** whenever `--host` is not loopback. Confidential
+bodies are withheld unless `--include-confidential` is passed, matching the MCP
+surfaces.
 
 ## brain people
 
@@ -350,7 +698,10 @@ when it's unavailable.
 
 Their tuning env vars are collected under
 [Feature config knobs](configuration.md#feature-config-knobs) in the
-configuration docs.
+configuration docs. Agents reach this whole set through the
+[`brain-proactivity` skill](agent-skills.md) (`brief` / `resurface` / `review` /
+`timeline` / `connect` / `gaps` / `capture`); `ask` and `audio` live in
+`consult-brain`.
 
 `brain brief` and `brain resurface` in action — the day's digest, then the
 older notes ranked for another look (recorded against a synthetic corpus):
@@ -410,8 +761,24 @@ brain review scan                            # run both scans
 brain review scan --conflicts --dry-run      # conflicts only, no writes
 brain review scan --stale                    # staleness only
 brain review list --kind conflicts -n 10     # read the queue
-brain review dismiss <id-prefix>             # dismiss one finding
+
+# Three distinct verbs for closing a finding — they are not interchangeable.
+brain review dismiss <id-prefix>             # "this was never real" (noise)
+brain review resolve <id-prefix>             # "I acted on it" → status='resolved'
+brain review snooze  <id-prefix>             # "not now" → hidden, returns later
+brain review snooze  <id-prefix> --days 30   # default is 7
 ```
+
+**Pick the verb by what actually happened**, because the queue's usefulness
+degrades if everything is dismissed. `dismiss` is for findings that were never
+real — a false contradiction between two notes that do not in fact disagree.
+`resolve` is for findings you acted on: the contradiction was reconciled, the
+stale note was updated. `snooze` hides the finding for `--days` (default 7) and
+then brings it back, which is the honest option for "real, but not today" —
+dismissing those instead is how a review queue quietly stops reflecting reality.
+
+A snoozed finding disappears from `brain review list` until its snooze expires.
+That is intended, but it does mean a quiet queue is not proof of a clean corpus.
 
 The **contradiction** leg is gated on `BRAIN_ELICIT_CONTRADICTION_ENABLED`
 (default off) and needs Ollama; the **staleness** leg needs neither. Findings

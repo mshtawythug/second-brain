@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from brain.cli import _cap_entity_neighbours, app
 from brain.graph_rag.schema import GraphContext, GraphEntity, GraphExplanation
+from tests.conftest import TEST_DATABASE_URL
 
 _FOOTER_HINT = "use -n 0 for all"
 
@@ -120,9 +121,7 @@ def test_cap_without_explanation_treats_all_as_neighbours() -> None:
 # CLI wiring (mock the retrieval seam; no live DB)
 # --------------------------------------------------------------------------- #
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(
-        "DATABASE_URL", "postgresql://brain:brain@localhost:5434/second_brain_test"
-    )
+    monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
 
 
 def test_entity_default_caps_at_30_with_footer(monkeypatch: pytest.MonkeyPatch) -> None:

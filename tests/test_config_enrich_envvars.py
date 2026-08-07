@@ -14,8 +14,12 @@ from brain.config import (
     Config,
     ConfigError,
 )
+from tests.conftest import TEST_DATABASE_URL
 
-_TEST_DATABASE_URL = "postgresql://brain:brain@localhost:5434/second_brain_test"
+# Resolved from the environment via conftest — a pinned literal here
+# diverges from the database the test_db fixture actually uses the
+# moment anyone overrides TEST_DATABASE_URL (every parallel agent, CI).
+_TEST_DATABASE_URL = TEST_DATABASE_URL
 
 
 @pytest.fixture()

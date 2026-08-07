@@ -23,6 +23,26 @@
         <string>{{ user_home }}</string>
         <key>PATH</key>
         <string>{{ pipx_bin_dir }}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <!-- BRAIN_HOME anchors the whole config chain. Without it
+             _brain_home_root() falls back to a repo-root walk-up from the
+             INSTALLED package location; under a pipx/uv install that resolves
+             nowhere and lands on ~/.brain only by accident, and under a dev
+             checkout it resolves to a different root than the one `brain setup`
+             provisioned $BRAIN_HOME/.env into. Setting it explicitly is what
+             makes $BRAIN_HOME/.env deterministic under launchd's minimal env.
+             Paths only — never bake secret VALUES into a plist. -->
+        <key>BRAIN_HOME</key>
+        <string>{{ brain_home }}</string>
+        <!-- Opt OUT of the cwd .env walk-up. That leg climbs to the filesystem
+             root, so a stray .env in ANY ancestor of WorkingDirectory would
+             silently repoint this daemon at a different database — the same
+             invisible-divergence class as the outage this file exists to fix.
+             It is harmless today only because WorkingDirectory happens to be
+             $BRAIN_HOME; that is incidental, not a guarantee. Daemons are the
+             exact non-interactive case the opt-out was added for. Path-free
+             flag, so no secret is baked in. -->
+        <key>BRAIN_IGNORE_CWD_DOTENV</key>
+        <string>1</string>
         <key>BRAIN_VAULT_PATH</key>
         <string>{{ vault_path }}</string>
         <key>BRAIN_PY</key>

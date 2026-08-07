@@ -90,7 +90,8 @@ def test_brain_search_returns_session_id_and_results(
 ) -> None:
     _ingest(test_db, fake_embedder, title="A", content="A: company-id")
     payload = mcp_server.brain_search(query="company-id")
-    assert set(payload.keys()) == {"session_id", "results"}
+    # Superset, not equality — F5's metadata keys are additive by design.
+    assert {"session_id", "results"} <= set(payload.keys())
     assert isinstance(payload["results"], list)
 
 

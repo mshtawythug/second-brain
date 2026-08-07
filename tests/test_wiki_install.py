@@ -4,6 +4,7 @@ These tests have zero DB dependency. Run with:
     .venv/bin/pytest --no-cov --noconftest -q tests/test_wiki_install.py -v
 """
 
+import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -326,3 +327,73 @@ def test_wiki_install_wrong_commit_raises(mock_config: tuple) -> None:
     # rev-parse must have been called.
     revparse_calls = [c for c in subprocess_calls if "rev-parse" in c]
     assert len(revparse_calls) == 1, "git rev-parse HEAD must have been invoked"
+
+
+# ---------------------------------------------------------------------------
+# Timeouts on every external command
+#
+# `git clone`, `git checkout` and `npm install` shelled out with no timeout=,
+# so a wedged network or registry hung `brain wiki install` forever with no
+# diagnostic — the same silent-hang class as the daemon faults in this repo.
+# (Only the `git rev-parse` probe was bounded, at 10s.)
+# ---------------------------------------------------------------------------
+
+
+def test_every_external_command_is_bounded_by_a_timeout(mock_config: tuple) -> None:
+    """No subprocess in the install path may run unbounded.
+
+    Asserted as an invariant over every call rather than per-command, so a
+    future subprocess added here cannot silently reintroduce an unbounded hang.
+    """
+    _, dirs = mock_config
+    vault_path: Path = dirs["vault"]
+    seen: list[tuple[list[str], object]] = []
+
+    def _run(cmd: list[str], **kwargs: object) -> MagicMock:
+        seen.append((list(cmd), kwargs.get("timeout")))
+        result = MagicMock(returncode=0)
+        if "rev-parse" in cmd:
+            result.stdout = QUARTZ_PINNED_COMMIT + "\n"
+        return result
+
+    with patch("brain.wiki.install.subprocess.run", side_effect=_run), patch(
+        "brain.wiki.install.shutil.which", return_value="/usr/bin/npm"
+    ), patch("brain.wiki.install.plan_overlay", return_value=[]), patch(
+        "brain.wiki.install.apply_overlay", return_value=[]
+    ):
+        wiki_install(vault=vault_path)
+
+    assert seen, "expected at least one external command"
+    unbounded = [cmd for cmd, timeout in seen if timeout is None]
+    assert not unbounded, f"external commands without a timeout: {unbounded}"
+
+
+@pytest.mark.parametrize(
+    ("hanging", "expected"),
+    [
+        ("clone", "git clone timed out"),
+        ("checkout", "git checkout"),
+        ("install", "npm install timed out"),
+    ],
+)
+def test_hung_external_command_fails_loudly(
+    mock_config: tuple, hanging: str, expected: str
+) -> None:
+    """A hung command raises WikiInstallError, never hangs or leaks TimeoutExpired."""
+    _, dirs = mock_config
+    vault_path: Path = dirs["vault"]
+
+    def _run(cmd: list[str], **kwargs: object) -> MagicMock:
+        if hanging in cmd:
+            raise subprocess.TimeoutExpired(cmd, float(kwargs.get("timeout") or 1))
+        result = MagicMock(returncode=0)
+        if "rev-parse" in cmd:
+            result.stdout = QUARTZ_PINNED_COMMIT + "\n"
+        return result
+
+    with patch("brain.wiki.install.subprocess.run", side_effect=_run), patch(
+        "brain.wiki.install.shutil.which", return_value="/usr/bin/npm"
+    ), patch("brain.wiki.install.plan_overlay", return_value=[]), patch(
+        "brain.wiki.install.apply_overlay", return_value=[]
+    ), pytest.raises(WikiInstallError, match=expected):
+        wiki_install(vault=vault_path)

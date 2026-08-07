@@ -17,6 +17,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -329,24 +331,38 @@ def test_empty_text_exits_nonzero(
     assert _documents(test_db) == []
 
 
-def test_inbox_warn_threshold_zero_raises_config_error(
+def test_inbox_warn_threshold_zero_is_a_clean_usage_error(
     patch_embedder: Callable[[object], None],
     monkeypatch: pytest.MonkeyPatch,
     test_db: psycopg.Connection,
     fake_embedder: object,
     tmp_path: Path,
 ) -> None:
-    """An invalid BRAIN_CAPTURE_INBOX_WARN_THRESHOLD fails at config load."""
-    from brain.config import ConfigError
+    """An invalid ``BRAIN_CAPTURE_INBOX_WARN_THRESHOLD`` is a clean exit-2 error.
 
+    This test previously asserted ``isinstance(result.exception, ConfigError)``,
+    which pinned the *presentation* that task #24 existed to remove: a raw
+    ``ConfigError`` escaping as a Rich traceback. The CLI now renders the same
+    boxed error a bad Typer flag gets, so a typo in an env var and a typo in a
+    flag look alike. Assert what the user actually sees instead of the exception
+    type that happened to carry it.
+
+    ``exit_code == 2`` rather than ``!= 0`` is deliberate: ``!= 0`` would pass
+    on a traceback again, silently restoring the behaviour this was rewritten
+    for. A test that would accept the bug it was rewritten for is worse than one
+    that is merely stale. Asserting the message *content* matters for the same
+    reason — the whole point of the boxed form is that it names which variable
+    is wrong.
+    """
     patch_embedder(fake_embedder)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     monkeypatch.setenv("BRAIN_CAPTURE_INBOX_WARN_THRESHOLD", "0")
 
     result = CliRunner().invoke(app, ["capture", "--text", "anything"])
 
-    assert result.exit_code != 0
-    assert isinstance(result.exception, ConfigError)
+    assert result.exit_code == 2, result.output
+    assert "BRAIN_CAPTURE_INBOX_WARN_THRESHOLD" in result.output
+    assert "integer >= 1" in result.output
 
 
 def test_extra_tags_are_normalized_at_capture_boundary(
@@ -1095,3 +1111,119 @@ def test_capture_strips_whitespace_from_explicit_title(
     assert result.exit_code == 0, result.output
     doc_id = _single_doc_id(test_db)
     assert _doc_title(test_db, doc_id) == "Padded Title"
+
+
+# ---------------------------------------------------------------------------
+# F1 — `brain capture --json`, the confirmation a Stop-hook nudge asserts on.
+# ---------------------------------------------------------------------------
+
+#: The human line `brain capture` has always printed. Wrappers, the demo GIF
+#: scripts, and user aliases parse it, so it is pinned byte-for-byte.
+_HUMAN_LINE_RE = re.compile(r"^✓ captured [0-9a-f]{8}  \(.+\)  \[inbox\]$")
+
+#: Exactly the keys F1 documents — no more, no fewer. An agent that learns to
+#: read one shape must not have a seventh key appear under it silently.
+_JSON_KEYS = {"document_id", "id_prefix", "title", "tags", "vault_path", "status"}
+
+
+def test_capture_json_shape(
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """`--json` emits exactly the six documented keys, keyed like the MCP twin."""
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    vault_module.init_vault(tmp_path)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "capture",
+            "--json",
+            "--text",
+            "pgvector caps HNSW at 2000 dims, so the 4096-dim backend has no index",
+            "--tag",
+            "pgvector",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert set(payload) == _JSON_KEYS
+    assert uuid.UUID(payload["document_id"])
+    assert payload["id_prefix"] == payload["document_id"][:8]
+    assert payload["title"]
+    assert "inbox" in payload["tags"]
+    assert "pgvector" in payload["tags"]
+    assert payload["vault_path"].startswith("capture/")
+    assert payload["status"] == "ingested"
+    # The reported path is real, and it is the row the DB agrees on.
+    assert (tmp_path / payload["vault_path"]).is_file()
+    _kind, stored_path = _kind_and_vault_path(test_db, payload["document_id"])
+    assert stored_path == payload["vault_path"]
+
+
+def test_capture_json_suppresses_human_line(
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    vault_module.init_vault(tmp_path)
+
+    result = CliRunner().invoke(
+        app, ["capture", "--json", "--text", "a synthetic thought"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "✓ captured" not in result.output
+
+
+def test_capture_human_output_unchanged(
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """Backward-compat regression: without `--json` the line is byte-identical."""
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    vault_module.init_vault(tmp_path)
+
+    result = CliRunner().invoke(app, ["capture", "--text", "a synthetic thought"])
+
+    assert result.exit_code == 0, result.output
+    lines = [line for line in result.output.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert _HUMAN_LINE_RE.match(lines[0]), f"human line drifted: {lines[0]!r}"
+
+
+def test_capture_json_error_path_is_not_json(
+    patch_embedder: Callable[[object], None],
+    monkeypatch: pytest.MonkeyPatch,
+    test_db: psycopg.Connection,
+    fake_embedder: object,
+    tmp_path: Path,
+) -> None:
+    """A hook must not mistake an error for a success payload.
+
+    `--json` never turns a failure into a success-shaped document: the empty
+    content path keeps its exit code and its red stderr message in both modes.
+    """
+    patch_embedder(fake_embedder)
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    vault_module.init_vault(tmp_path)
+
+    result = CliRunner().invoke(app, ["capture", "--json", "--text", "   "])
+
+    assert result.exit_code == 1
+    assert "capture content is empty" in result.output
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.output)

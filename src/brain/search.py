@@ -24,16 +24,33 @@ combiner (see `docs/plans/2026-05-06-search-ranking-fix.md`):
 
 The fts_only path bypasses (3) entirely.
 """
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
+from time import perf_counter
 from typing import Any
 
 import psycopg
 
+from .facets import count_matching_documents as _count_matching_documents
 from .ingest import Embedder
 from .rank_fusion import rrf_contribution
+
+# ``_ensure_utc`` moved to :mod:`brain.search_predicate` with the predicate
+# block it exists to serve; re-exported here so the ``brain.search._ensure_utc``
+# import path keeps working. ``count_matching_documents`` lives in
+# :mod:`brain.facets` (one module owns match-set measurement, so the footer's
+# total and the facet panel's total cannot disagree) and is bound to the
+# private name that is this module's documented patch point.
+from .search_predicate import (  # noqa: F401 — _ensure_utc is a re-export
+    SearchPredicate,
+    _ensure_utc,
+    build_predicate,
+)
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -80,9 +97,35 @@ class SearchDiagnostics:
     lexical miss is otherwise invisible. ``None`` means the search never ran
     (the holder was created but not passed, or an exception preceded the FTS
     leg).
+
+    ``total_documents`` is a SIBLING of ``fts_count``, deliberately not an
+    extension of it: an exact, uncapped ``count(DISTINCT document_id)`` over
+    the same lexical predicate — the number a user reading ``544 matched``
+    expects. LEXICAL-ONLY by construction: the vector leg may surface extra
+    near-neighbours it does not count, because a vector-inclusive total would
+    be capped at :data:`CANDIDATE_LIMIT` and meaningless as a "total".
+    ``None`` unless ``total_count=True``, and ALSO ``None`` when the count
+    query failed — a caller that asked and got ``None`` must render the total
+    as unknown, never as zero.
+
+    The rest are the phase split of one search, in milliseconds, and are a
+    PROGRAMMATIC surface rather than a formatting detail —
+    :func:`brain.format_search.search_meta_json` projects them for MCP and for
+    ``brain ui``. ``embed_ms`` / ``embed_cached`` stay ``None`` under fts-only
+    (printing ``embed 0ms`` would falsely imply a free embed); ``sql_ms``
+    accumulates the FTS leg, vector leg, optional count and doc-metadata
+    fetch; ``total_ms`` is the wall clock. ``facets_ms`` is written by the
+    CALLER after :func:`brain.facets.compute_facets` — the search module
+    ranks, the facet module aggregates.
     """
 
     fts_count: int | None = None
+    total_documents: int | None = None
+    embed_ms: float | None = None
+    embed_cached: bool | None = None
+    sql_ms: float | None = None
+    total_ms: float | None = None
+    facets_ms: float | None = None
 
 
 @dataclass
@@ -125,8 +168,28 @@ def _build_tsquery(conn: psycopg.Connection, raw_query: str) -> str:
     token like ``[example-group]`` that the English parser stems to
     ``ctolunch``.
 
-    Returns an empty string for empty / pure-punctuation input —
-    ``to_tsquery('')`` is a valid empty tsquery that matches nothing.
+    Returns an empty string for empty / pure-punctuation input — ``''::tsquery``
+    is a valid empty tsquery that matches nothing.
+
+    **The return value is LEXEMES, not user text.** Every consumer must bind it
+    as ``%s::tsquery``, never ``to_tsquery('english', %s)``. Re-parsing an
+    already-stemmed lexeme with the english config stems it a *second* time and
+    the result no longer matches the stored ``tsv``. Measured on the live corpus
+    (1376 docs), that broke three distinct ways:
+
+    * **re-stemming** — ``provisioning`` → ``provis`` → ``provi``; the stored
+      lexeme is ``provis``, so the term matched nothing. 3.2% of the 2000
+      most-frequent corpus lexemes were affected, including ``databas``,
+      ``respons``, ``decis``, ``convers``, ``releas``, ``enterpris``.
+    * **re-parsing of hyphenated compounds** — the stored single lexeme
+      ``interview-prep`` came back as the phrase
+      ``'interview-prep' <-> 'interview' <-> 'prep'``, which cannot match it.
+    * **stop-word annihilation** — ``own`` (400 docs) re-parsed to the EMPTY
+      tsquery, silently deleting the term.
+
+    Because ``plainto_tsquery`` AND-s terms, ONE affected word zeroed the entire
+    FTS leg. Under ``BRAIN_EMBEDDER=none`` (FTS-only) such a query returned
+    nothing at all.
     """
     tokens = _TOKEN_RE.findall(raw_query)
     standard_row = conn.execute(
@@ -143,6 +206,16 @@ def _build_tsquery(conn: psycopg.Connection, raw_query: str) -> str:
     if not compact_tsq or compact_tsq == standard:
         return standard
     return f"({standard}) | ({compact_tsq})"
+
+
+def build_tsquery(conn: psycopg.Connection, raw_query: str) -> str:
+    """Public alias for :func:`_build_tsquery`.
+
+    The facet and count paths live outside :func:`hybrid_search` but must bind
+    the IDENTICAL tsquery, or their numbers would describe a different match
+    set than the ranked rows. The private name stays for existing importers.
+    """
+    return _build_tsquery(conn, raw_query)
 
 
 # ---------------------------------------------------------------------------
@@ -213,19 +286,27 @@ def _query_embed(
     return list(_cached_query_embed(identity, input_type, text))
 
 
-def _ensure_utc(dt: datetime) -> datetime:
-    """Stamp a naive datetime as UTC so ``timestamptz`` comparisons don't shift.
+def _finalize_diagnostics(
+    diagnostics: SearchDiagnostics | None,
+    *,
+    started_at: float,
+    sql_seconds: float,
+) -> None:
+    """Write the accumulated SQL time and wall-clock total into ``diagnostics``.
 
-    ``--after 2026-01-01`` reaches the search layer as a *naive* midnight. Bound
-    directly against a ``timestamptz`` column, Postgres interprets a naive
-    literal in the **session** ``TimeZone``, shifting the boundary by the
-    session's UTC offset — a doc sent at ``2026-01-01T03:00:00Z`` would fall
-    *outside* ``--after 2026-01-01`` under an ``America/New_York`` session.
-    Stamping UTC makes the boundary session-TZ-independent. Already-aware
-    datetimes pass through unchanged. Mirrors the recency-boost idiom below
-    (``recency_ts.replace(tzinfo=UTC)``).
+    Called immediately before EVERY ``return`` in :func:`hybrid_search`,
+    including the zero-result early return — a search that matched nothing is
+    exactly the case a user most wants timed.
     """
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+    if diagnostics is None:
+        return
+    diagnostics.sql_ms = sql_seconds * 1000.0
+    diagnostics.total_ms = (perf_counter() - started_at) * 1000.0
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    """ISO-8601 or ``None`` — keeps ``matched_filters`` JSON-serializable."""
+    return None if value is None else value.isoformat()
 
 
 def hybrid_search(
@@ -243,6 +324,7 @@ def hybrid_search(
     snippet_context_tokens: int = 0,
     explain: bool = False,
     diagnostics: SearchDiagnostics | None = None,
+    total_count: bool = False,
     # — Q1-C metadata filters —
     person_keys: list[str] | None = None,
     person_display_name: str | None = None,
@@ -252,6 +334,11 @@ def hybrid_search(
     thread_id: str | None = None,
     draft: bool | None = None,
     without_tag: str | None = None,
+    # — F9 edit-range filters —
+    updated_after: datetime | None = None,
+    updated_before: datetime | None = None,
+    # — F6 sensitivity lens (opt-in; None = both tiers, the pre-026 behaviour) —
+    sensitivity: str | None = None,
 ) -> list[SearchResult]:
     """Combine FTS and vector ranks via Reciprocal Rank Fusion.
 
@@ -279,9 +366,17 @@ def hybrid_search(
     returns the single-chunk snippet unchanged.
 
     ``diagnostics`` (optional :class:`SearchDiagnostics`) is populated in place
-    with the FTS-leg hit count (``fts_count``). ``None`` (default) skips it.
-    See :class:`SearchDiagnostics` for why this is an out-parameter rather than
-    a return-value change.
+    with the FTS-leg hit count (``fts_count``) and the latency phase split.
+    ``None`` (default) skips it. See :class:`SearchDiagnostics` for why this is
+    an out-parameter rather than a return-value change.
+
+    ``total_count`` opts into one extra ``count(DISTINCT document_id)`` query
+    written to ``diagnostics.total_documents``. Measured at 28-42 ms warm and
+    ~2.7 s cold on a 13k-chunk corpus, so it is OFF by default here: the CLI
+    passes ``total_count=not no_meta`` and MCP passes ``True``, while every
+    other caller (``brain ask``, ``brain review``, the eval harness, graph
+    ``--mode fuse``) pays nothing. Skipped entirely when ``diagnostics`` is
+    ``None`` — there would be nowhere to put the answer.
 
     Q1-C metadata filters (all optional, default ``None`` = no filter):
 
@@ -302,6 +397,10 @@ def hybrid_search(
     - ``after`` / ``before`` — date-range predicate on
       ``coalesce(sent_at, ingested_at)``. Inclusive lower bound,
       exclusive upper bound (so ``after=X, before=X`` returns nothing).
+    - ``updated_after`` / ``updated_before`` (F9) — same bound semantics
+      against ``documents.updated_at``. A DIFFERENT axis: ``coalesce``
+      prefers ``sent_at``, so an old email edited yesterday is invisible
+      to ``after`` and visible here.
     - ``content_type`` — exact match on ``documents.content_type``
       (``email``, ``email_thread``, ``note``, ``transcript``, …). NOT
       ``documents.kind`` (which is the vault/ingested tier enum).
@@ -313,7 +412,23 @@ def hybrid_search(
     - ``without_tag`` — exclude docs whose ``tags`` array contains the
       given tag. Combines with ``tag`` (AND) so callers can express
       "tagged X but not Y".
+    - ``sensitivity`` (F6) — exact match on ``documents.sensitivity``
+      (``normal`` / ``confidential``). ``None`` (the default) means BOTH
+      tiers, which is the pre-026 behaviour, so the unfiltered fast path
+      and every existing caller are unchanged and no eval baseline moves.
+      This is a LENS, not an access control: the local CLI is inside the
+      trust boundary by design (identical posture to ``draft``), so an
+      unfiltered search still returns confidential bodies in full. It
+      answers "show me only what I've marked". The boundaries that
+      actually withhold a body are the hosted-embedder veto at ingest,
+      MCP ``brain_show``, and the published wiki.
     """
+    # Wall clock starts before any work; ``sql_seconds`` accumulates each leg.
+    # ``perf_counter()`` costs nanoseconds, so these run unconditionally rather
+    # than behind a ``diagnostics is not None`` branch.
+    t_start = perf_counter()
+    sql_seconds = 0.0
+
     # Auto-degrade to FTS-only when the active embedder produces no vectors
     # (the FTS-only ``NullEmbedder`` under ``BRAIN_EMBEDDER=none``). Duck-typed
     # via ``getattr`` so the real backends (Arctic / Qwen3 / Voyage) — which
@@ -322,69 +437,31 @@ def hybrid_search(
     # also flows into ``matched_filters["fts_only"]`` below so ``explain`` shows
     # the effective mode.
     fts_only = fts_only or not getattr(embedder, "produces_embeddings", True)
-    where_clauses = ["TRUE"]
-    where_params: list[Any] = []
-    if source_kind:
-        where_clauses.append("d.source_id IN (SELECT id FROM sources WHERE kind=%s)")
-        where_params.append(source_kind)
-    if tag:
-        where_clauses.append("%s = ANY(d.tags)")
-        where_params.append(tag)
-    if since_days:
-        where_clauses.append("d.ingested_at >= NOW() - make_interval(days => %s)")
-        where_params.append(since_days)
-    if person_keys:
-        # Case-insensitive overlap. ``documents.participants`` is written
-        # by ingest extractors in source-preserved case (Gmail emits
-        # ``"Alice Doe <alice@x.com>"``); the resolver's keys are
-        # lowercased + expanded. A plain ``&&`` overlap would miss every
-        # mixed-case stored value, so we unnest the array and lower each
-        # element before comparing. Empty ``keys`` is "no filter" — the
-        # resolver itself raises PersonNotFound on no match, so an empty
-        # list here can only be a caller's explicit "no person filter"
-        # intent.
-        where_clauses.append(
-            "EXISTS (SELECT 1 FROM unnest(d.participants) AS _p "
-            "WHERE lower(_p) = ANY(%s::text[]))"
-        )
-        where_params.append(person_keys)
-    if after is not None:
-        where_clauses.append("coalesce(d.sent_at, d.ingested_at) >= %s")
-        where_params.append(_ensure_utc(after))
-    if before is not None:
-        where_clauses.append("coalesce(d.sent_at, d.ingested_at) < %s")
-        where_params.append(_ensure_utc(before))
-    if content_type is not None:
-        where_clauses.append("d.content_type = %s")
-        where_params.append(content_type)
-    if thread_id is not None:
-        where_clauses.append("d.thread_id = %s")
-        where_params.append(thread_id)
-    if draft is not None:
-        where_clauses.append("d.draft = %s")
-        where_params.append(draft)
-    if without_tag is not None:
-        where_clauses.append("NOT (%s = ANY(d.tags))")
-        where_params.append(without_tag)
-    where_sql = " AND ".join(where_clauses)
 
-    # No-filter fast path (perf F5 + F2). ``where_clauses`` always starts with
-    # the literal ``"TRUE"``; every metadata filter appends a clause *and* a
-    # param. So ``where_sql == "TRUE"`` (the common unfiltered CLI search)
-    # means the ``documents`` JOIN supplies no column the FTS/vector legs
-    # actually read — title/tags/source_kind/recency all come from the separate
-    # ``doc_rows`` fetch below, and the inner JOIN on the ``document_id`` FK
-    # can neither drop nor duplicate chunk rows. We therefore (F5) omit the
-    # JOIN and (F2) force psycopg to prepare the now-static SQL so an
-    # in-process / MCP repeated search reuses the plan (~15 ms planning saved).
-    # The filtered path keeps the JOIN and leaves ``prepare=None`` (psycopg's
-    # auto-prepare heuristic) since each distinct filter combo is a different
-    # statement; a one-shot CLI invocation prepares-then-executes once, a
-    # negligible no-op risk.
-    has_filters = where_sql != "TRUE"
-    prepare_flag: bool | None = None if has_filters else True
-    join_clause = "JOIN documents d ON d.id = c.document_id" if has_filters else ""
-    fts_filter = f" AND {where_sql}" if has_filters else ""
+    # One construction site for the metadata predicate. The FTS leg, the vector
+    # leg, the optional total count and the caller's facet rollup all read the
+    # same object, so they cannot drift apart.
+    predicate = build_predicate(
+        source_kind=source_kind,
+        tag=tag,
+        since_days=since_days,
+        person_keys=person_keys,
+        after=after,
+        before=before,
+        content_type=content_type,
+        thread_id=thread_id,
+        draft=draft,
+        without_tag=without_tag,
+        updated_after=updated_after,
+        updated_before=updated_before,
+        sensitivity=sensitivity,
+    )
+    where_sql = predicate.where_sql
+    where_params = list(predicate.where_params)
+    has_filters = predicate.has_filters
+    prepare_flag = predicate.prepare_flag
+    join_clause = predicate.join_clause
+    fts_filter = predicate.fts_filter
 
     tsquery = _build_tsquery(conn, query)
 
@@ -393,17 +470,22 @@ def hybrid_search(
     # per-document window cap and the final ordering. The previous single-CTE
     # form computed ``ts_rank`` twice (score column + window ORDER BY) and bound
     # ``to_tsquery`` three times. The ``@@`` predicate is deliberately kept as a
-    # direct inline ``to_tsquery(...)`` expression (not hoisted into a CTE) so
-    # the GIN ``chunks_tsv_idx`` Bitmap Index Scan plan is provably unchanged.
+    # direct inline expression (not hoisted into a CTE) so the GIN
+    # ``chunks_tsv_idx`` Bitmap Index Scan plan is provably unchanged.
     # The per-doc cap keeps the top PER_DOC_CHUNK_CAP chunks per ``document_id``
     # before the global LIMIT so one long doc can't fill the candidate slot.
+    #
+    # ``%s::tsquery`` — NOT ``to_tsquery('english', %s)``. ``_build_tsquery``
+    # already returns LEXEMES (``plainto_tsquery(...)::text``); re-parsing them
+    # with the english config stems a second time and the result stops matching
+    # the stored ``tsv``. See :func:`_build_tsquery` for the full contract.
     fts_sql = f"""
         WITH base AS (
             SELECT c.id, c.document_id, c.chunk_index, c.content,
-                   ts_rank(c.tsv, to_tsquery('english', %s)) AS score
+                   ts_rank(c.tsv, %s::tsquery) AS score
             FROM chunks c
             {join_clause}
-            WHERE c.tsv @@ to_tsquery('english', %s){fts_filter}
+            WHERE c.tsv @@ %s::tsquery{fts_filter}
         ),
         ranked AS (
             SELECT id, document_id, chunk_index, content, score,
@@ -418,9 +500,11 @@ def hybrid_search(
         ORDER BY score DESC
         LIMIT {CANDIDATE_LIMIT}
     """
+    _t = perf_counter()
     fts_rows = conn.execute(
         fts_sql, [tsquery, tsquery, *where_params], prepare=prepare_flag
     ).fetchall()
+    sql_seconds += perf_counter() - _t
 
     # Surface the lexical-leg hit count to an opt-in caller (no extra query —
     # ``fts_rows`` is already materialized). ``fts_count == 0`` means the corpus
@@ -431,7 +515,20 @@ def hybrid_search(
 
     vec_rows: list[Any] = []
     if not fts_only:
+        # ``embed_cached`` is derived by snapshotting the LRU's public hit
+        # counter around the call — ``functools.lru_cache`` exposes
+        # ``cache_info()`` as API, so no production module is reopened. Without
+        # this the second search in a process (MCP / ``brain ask``) would look
+        # like a 40x speedup the user cannot reproduce from a fresh shell.
+        _hits_before = _cached_query_embed.cache_info().hits
+        _t = perf_counter()
         q_emb = _query_embed(embedder, query)
+        embed_seconds = perf_counter() - _t
+        if diagnostics is not None:
+            diagnostics.embed_ms = embed_seconds * 1000.0
+            diagnostics.embed_cached = (
+                _cached_query_embed.cache_info().hits > _hits_before
+            )
         floor_pred = "1 - (c.embedding <=> %s::vector) >= %s"
         vec_params: list[Any]
         if has_filters:
@@ -449,9 +546,36 @@ def hybrid_search(
             ORDER BY c.embedding <=> %s::vector
             LIMIT {CANDIDATE_LIMIT}
         """
+        _t = perf_counter()
         vec_rows = conn.execute(
             vec_sql, vec_params, prepare=prepare_flag
         ).fetchall()
+        sql_seconds += perf_counter() - _t
+
+    # Exact total-match count (opt-in). Runs AFTER both ranking legs so a
+    # Ctrl-C during it still leaves the caller its ranked results, and before
+    # the zero-result early return so a search that matched nothing still
+    # reports an honest ``0 matched``.
+    if total_count and diagnostics is not None:
+        _t = perf_counter()
+        try:
+            # Scoped to its own savepoint/transaction: this is a DIAGNOSTIC,
+            # and a failure here must not poison the caller's transaction and
+            # take the ranked results down with it. Same contract as
+            # ``brain.gaps.record_search_query``.
+            with conn.transaction():
+                diagnostics.total_documents = _count_matching_documents(
+                    conn, predicate=predicate, tsquery=tsquery
+                )
+        except psycopg.Error as exc:
+            # ``total_documents`` stays None — callers that asked for it and
+            # got None render the total as unknown, never as zero. The query
+            # string is NOT logged (it may carry sensitive intent); the
+            # exception type is enough to diagnose a blip or a timeout.
+            logger.warning(
+                "total-match count skipped: %s", type(exc).__name__
+            )
+        sql_seconds += perf_counter() - _t
 
     # Per-chunk rank tables (built only when explain=True; zero overhead otherwise).
     fts_rank_by_chunk: dict[str, int] = {}
@@ -494,9 +618,13 @@ def hybrid_search(
             by_doc[doc_id] = (rrf_val, chunk_idx, content, cid)
 
     if not by_doc:
+        _finalize_diagnostics(
+            diagnostics, started_at=t_start, sql_seconds=sql_seconds
+        )
         return []
 
     doc_ids = list(by_doc.keys())
+    _t = perf_counter()
     doc_rows = conn.execute(
         """
         SELECT d.id, d.title, d.content_type, d.tags, s.kind,
@@ -507,6 +635,7 @@ def hybrid_search(
         """,
         (doc_ids,),
     ).fetchall()
+    sql_seconds += perf_counter() - _t
     docs = {str(r[0]): r for r in doc_rows}
 
     now = datetime.now(tz=UTC)
@@ -578,18 +707,21 @@ def hybrid_search(
                     "tag": tag,
                     "since_days": since_days,
                     "fts_only": fts_only,
-                    # Q1-C additions — datetimes serialize as ISO strings
-                    # so the dict round-trips through JSON without a custom
-                    # encoder. ``None`` values stay in the dict; the
-                    # explain formatter skips them at render time.
+                    # ``None`` values stay in the dict; the explain formatter
+                    # skips them at render time. All four datetime filters go
+                    # through ``_iso_or_none`` so the payload round-trips
+                    # through ``json.dumps`` without a custom encoder.
                     "person_keys": list(person_keys) if person_keys else None,
                     "person_display_name": person_display_name,
-                    "after": after.isoformat() if after is not None else None,
-                    "before": before.isoformat() if before is not None else None,
+                    "after": _iso_or_none(after),
+                    "before": _iso_or_none(before),
                     "content_type": content_type,
                     "thread_id": thread_id,
                     "draft": draft,
                     "without_tag": without_tag,
+                    "updated_after": _iso_or_none(updated_after),
+                    "updated_before": _iso_or_none(updated_before),
+                    "sensitivity": sensitivity,
                 },
             )
 
@@ -612,6 +744,7 @@ def hybrid_search(
     # off the ranked list (``results[:-3]`` would drop the 3 lowest-ranked docs
     # and quietly return wrong data). Task 2.10.
     effective_limit = max(1, limit)
+    _finalize_diagnostics(diagnostics, started_at=t_start, sql_seconds=sql_seconds)
     return results[:effective_limit]
 
 

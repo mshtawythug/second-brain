@@ -27,6 +27,28 @@ def compose_project_name() -> str:
     return os.environ.get("BRAIN_COMPOSE_PROJECT") or DEFAULT_COMPOSE_PROJECT
 
 
+def postgres_container_name(project: str | None = None) -> str:
+    """Derive the postgres container name for a compose project.
+
+    The DEFAULT project (``brain``) keeps the exact historical literal
+    ``second-brain-postgres`` for backward compatibility — existing users
+    re-running ``brain setup`` (a documented upgrade flow) must not have their
+    container recreated under a new name. A non-default project (the D5b QA
+    isolation seam) derives ``<project>-postgres`` so it can't collide.
+
+    ``project`` defaults to :func:`compose_project_name`, so callers that just
+    want "the container this brain talks to" — ``brain backup`` / ``brain
+    restore``, which run ``pg_dump`` / ``pg_restore`` inside it — need not
+    resolve the project themselves. ``brain setup`` passes the project
+    explicitly because it renders the name into a compose file before that
+    project is necessarily the active one.
+    """
+    resolved = project if project is not None else compose_project_name()
+    if resolved == DEFAULT_COMPOSE_PROJECT:
+        return "second-brain-postgres"
+    return f"{resolved}-postgres"
+
+
 def compose_cmd(*args: str, brain_home: Path | None = None) -> list[str]:
     """Build a docker-compose argv list with mandatory -f and --project-name flags.
 

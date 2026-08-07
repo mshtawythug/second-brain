@@ -56,6 +56,11 @@ def capture(
     tag: list[str] = typer.Option(
         [], "--tag", "-t", help="Extra tag(s) applied alongside the always-on `inbox` tag."
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit a machine-readable JSON confirmation instead of the human line.",
+    ),
 ) -> None:
     """Capture a quick note into the inbox (tagged `inbox`).
 
@@ -125,6 +130,25 @@ def capture(
                 folder="capture",
                 embedder=embedder,
             )
+            if json_output:
+                # Read inside the same connection so the vault_path lookup does
+                # not pay a second connect. `status` is keyed identically to the
+                # MCP twin (`mcp_server.brain_capture`) so an agent asserts on
+                # one vocabulary regardless of surface.
+                row = conn.execute(
+                    "SELECT vault_path FROM documents WHERE id = %s", (doc_id,)
+                ).fetchone()
+                emit_json(
+                    {
+                        "document_id": doc_id,
+                        "id_prefix": doc_id[:8],
+                        "title": resolved_title,
+                        "tags": tags,
+                        "vault_path": row[0] if row else None,
+                        "status": "ingested",
+                    }
+                )
+                return
     except VaultNoteSyncError as exc:
         for path, reason in exc.errors:
             typer.secho(f"sync error: {path}: {reason}", fg="red", err=True)

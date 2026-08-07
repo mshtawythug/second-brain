@@ -6,13 +6,15 @@ import socket
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.resources import files as resource_files
 from pathlib import Path
 
 import typer
 
-from ._compose import DEFAULT_COMPOSE_PROJECT, compose_cmd, compose_project_name
+from . import config as _config_module
+from ._compose import compose_cmd, compose_project_name, postgres_container_name
 from .bin._launcher import ensure_shim
 from .config import DEFAULT_VAULT_PATH, _brain_home_root
 from .errors import BrainError
@@ -482,15 +484,15 @@ def materialize_age_dockerfile(brain_home: Path) -> Path:
 def _container_name_for_project(compose_project: str) -> str:
     """Derive the postgres container name for a compose project.
 
-    The DEFAULT project (``brain``) keeps the exact historical literal
-    ``second-brain-postgres`` for backward compatibility — existing users
-    re-running ``brain setup`` (a documented upgrade flow) must not have their
-    container recreated under a new name. A non-default project (the D5b QA
-    isolation seam) derives ``<project>-postgres`` so it can't collide.
+    Thin delegation to :func:`brain._compose.postgres_container_name`, which
+    owns the rule now that ``brain backup`` / ``brain restore`` need it too
+    (they exec ``pg_dump`` / ``pg_restore`` inside that container). Kept as a
+    named function because ``setup`` passes its project explicitly, rather than
+    letting the helper resolve the active one from the environment: the compose
+    render below names a container for a project that is not necessarily the
+    one currently selected by ``$BRAIN_COMPOSE_PROJECT``.
     """
-    if compose_project == DEFAULT_COMPOSE_PROJECT:
-        return "second-brain-postgres"
-    return f"{compose_project}-postgres"
+    return postgres_container_name(compose_project)
 
 
 def render_compose_from_template(
@@ -575,6 +577,121 @@ def render_env_from_template(
             text, "# BRAIN_VAULT_PATH=", f"BRAIN_VAULT_PATH={vault_path}"
         )
     return text
+
+
+# ---------------------------------------------------------------------------
+# $BRAIN_HOME/.env provisioning
+#
+# WHY THIS EXISTS: `$BRAIN_HOME/.env` is the CANONICAL user config location.
+# A pip / uvx user has no checkout at all, so "canonical in the repo" can never
+# be right for them, and the cwd walk-up only works while they happen to stand
+# in the right directory. Until 2026-08-07 NOTHING created this file: the
+# console entrypoint on PATH loads no environment, so every `brain` invocation
+# outside the source checkout died with `DATABASE_URL is not set` even though
+# Postgres was healthy — a 12-day outage misdiagnosed as a database problem.
+# `~/.brain/` itself already existed (.shims/, logs/, run/), so directory
+# existence was never evidence that config was complete.
+# ---------------------------------------------------------------------------
+
+#: A real file was written at ``$BRAIN_HOME/.env`` (fresh install).
+PROVISION_WRITTEN = "written"
+#: ``$BRAIN_HOME/.env`` was linked at a dev checkout's ``.env``.
+PROVISION_SYMLINKED = "symlinked"
+#: Something was already there (regular file or symlink) — left untouched.
+PROVISION_PRESENT = "present"
+#: A symlink is there but its target is gone — left untouched, reported loudly.
+PROVISION_DANGLING = "dangling"
+#: Nothing to do and nothing written (no source to link, no body to render).
+PROVISION_UNPROVISIONED = "unprovisioned"
+
+
+@dataclass(frozen=True)
+class DotenvProvision:
+    """Outcome of one :func:`provision_brain_home_dotenv` call.
+
+    ``action`` is one of the ``PROVISION_*`` constants above. ``target`` is the
+    link target for :data:`PROVISION_SYMLINKED` / :data:`PROVISION_DANGLING`
+    and ``None`` otherwise.
+    """
+
+    path: Path
+    action: str
+    target: Path | None = None
+
+
+def _is_repo_checkout(directory: Path) -> bool:
+    """True when *directory* is a source checkout root (has ``pyproject.toml``).
+
+    Mirrors the dev-backcompat branch of
+    :func:`brain.config._brain_home_root`: when ``$BRAIN_HOME`` resolves to the
+    checkout itself, ``$BRAIN_HOME/.env`` and the repo ``.env`` are the SAME
+    file by construction, so there is nothing to link and linking would be a
+    self-reference.
+    """
+    return (directory / "pyproject.toml").is_file()
+
+
+def provision_brain_home_dotenv(
+    brain_home: Path,
+    *,
+    body_factory: Callable[[], str] | None = None,
+) -> DotenvProvision:
+    """Ensure ``$BRAIN_HOME/.env`` exists. Idempotent; never clobbers.
+
+    Three shapes, in order:
+
+    1. **Already there** (regular file OR symlink, including a dangling one) —
+       left completely untouched. Re-running setup twice is a no-op; the
+       caller reports it. A dangling symlink is reported as
+       :data:`PROVISION_DANGLING` rather than silently replaced, because the
+       user's real config is presumably still somewhere and overwriting it
+       would hide the move.
+    2. **Dev checkout** — the repo ``.env`` exists at a DIFFERENT path, so
+       ``$BRAIN_HOME/.env`` becomes a SYMLINK to it. Deliberately not a copy: a
+       copy would duplicate ``VOYAGE_API_KEY`` / ``DATABASE_URL`` onto disk
+       twice and the two would silently drift apart. The symlink's weakness —
+       it breaks if the checkout moves — is accepted for the dev case only and
+       is detectable (``brain doctor`` distinguishes a dangling link from a
+       missing file via ``Path.is_symlink()``; see
+       :class:`brain.config.DotenvSource`).
+    3. **Fresh install** — no repo ``.env`` anywhere, so a REAL file is written
+       from *body_factory*. Callers that cannot render a correct body (``brain
+       init``, which must not invent a ``DATABASE_URL`` that may point at the
+       wrong database) pass ``body_factory=None`` and get
+       :data:`PROVISION_UNPROVISIONED` instead of a guessed file.
+
+    ``$BRAIN_HOME`` is honored exactly as the caller resolved it (env var or
+    the ``~/.brain`` default); this function never re-resolves it.
+    """
+    path = brain_home / ".env"
+    if path.is_symlink():
+        if path.exists():
+            return DotenvProvision(path=path, action=PROVISION_PRESENT)
+        try:
+            target: Path | None = Path(os.readlink(path))
+        except OSError:  # pragma: no cover - link vanished between the calls
+            target = None
+        return DotenvProvision(path=path, action=PROVISION_DANGLING, target=target)
+    if path.exists():
+        return DotenvProvision(path=path, action=PROVISION_PRESENT)
+
+    project_dotenv = _config_module._project_dotenv()
+    if (
+        project_dotenv.is_file()
+        and project_dotenv != path
+        and not _is_repo_checkout(brain_home)
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.symlink_to(project_dotenv)
+        return DotenvProvision(
+            path=path, action=PROVISION_SYMLINKED, target=project_dotenv
+        )
+
+    if body_factory is None:
+        return DotenvProvision(path=path, action=PROVISION_UNPROVISIONED)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, body_factory())
+    return DotenvProvision(path=path, action=PROVISION_WRITTEN)
 
 
 # ---------------------------------------------------------------------------
@@ -1007,43 +1124,77 @@ def run_setup(
             dry_run,
         )
 
-    # 4. Render .env — only if missing; never overwrite.
+    # 4. Provision $BRAIN_HOME/.env — the canonical user config location (see
+    #    the provisioning block above). Written fresh on a real install,
+    #    symlinked at the repo .env in a dev checkout, never clobbered.
     env_dest = brain_home / ".env"
-    if not dry_run and env_dest.exists():
-        typer.echo(
-            f"  [skipped] {env_dest} (already exists — profile env defaults NOT "
-            "applied; edit .env or re-run with --reset to change profiles)"
+
+    def _render_env_body() -> str:
+        template_src = resource_files("brain.templates") / "env.example"
+        # Substitute the chosen Postgres port into DATABASE_URL (same
+        # {{ pg_port }} mechanism as the compose render), activate the
+        # commented-out BRAIN_VAULT_PATH line if --vault was given, and pin
+        # BRAIN_EMBEDDER + BRAIN_GRAPH_ENABLED EXPLICITLY to the profile's
+        # values (Config defaults the graph ON, so minimal/standard must
+        # write it false).
+        return render_env_from_template(
+            template_src.read_text(encoding="utf-8"),
+            pg_port=pg_port,
+            vault_path=vault_path,
+            embedder=effective_embedder,
+            graph_enabled=prof.env_graph_enabled,
         )
+
+    if dry_run:
+        typer.echo(
+            f"[dry-run] would: provision {env_dest} (render from env.example, "
+            "or symlink it at the repo .env in a dev checkout)"
+        )
+    else:
+        provision = provision_brain_home_dotenv(brain_home, body_factory=_render_env_body)
+        if provision.action == PROVISION_WRITTEN:
+            typer.echo(f"  [ok] wrote {env_dest}")
+        elif provision.action == PROVISION_SYMLINKED:
+            typer.echo(f"  [ok] linked {env_dest} -> {provision.target}")
+            typer.echo(
+                "       (dev checkout detected — one config file, so your "
+                "secrets are never duplicated on disk)"
+            )
+        elif provision.action == PROVISION_DANGLING:
+            # Left in place deliberately (never clobber the user's config), so
+            # re-running setup will NOT fix this — say so, and give the exact
+            # command that will. Same wording as `brain doctor`'s remedy.
+            typer.secho(
+                f"  [warn] {env_dest} is a BROKEN symlink -> {provision.target} "
+                "(target moved or was deleted). Left in place — re-running "
+                f"setup will not repair it.\n"
+                f"         Fix: rm {env_dest} && brain setup",
+                fg="yellow",
+                err=True,
+            )
+        elif provision.action == PROVISION_PRESENT:
+            typer.echo(
+                f"  [skipped] {env_dest} (already exists — profile env defaults NOT "
+                "applied; edit .env or re-run with --reset to change profiles)"
+            )
         # If --vault was given and BRAIN_VAULT_PATH isn't already in the file,
         # append it so the running .env reflects the chosen vault location.
-        if vault_path is not None:
+        # ONLY for a file this brain owns: appending through a symlink we just
+        # created would edit the dev's checked-out .env behind their back.
+        if vault_path is not None and provision.action == PROVISION_PRESENT:
             existing_env = env_dest.read_text(encoding="utf-8")
             if "BRAIN_VAULT_PATH" not in existing_env:
                 with open(env_dest, "a", encoding="utf-8") as fh:
                     fh.write(f"\nBRAIN_VAULT_PATH={vault_path}\n")
                 typer.echo(f"  [ok] BRAIN_VAULT_PATH={vault_path} appended to existing .env")
-    else:
-
-        def _write_env() -> None:
-            template_src = resource_files("brain.templates") / "env.example"
-            # Substitute the chosen Postgres port into DATABASE_URL (same
-            # {{ pg_port }} mechanism as the compose render), activate the
-            # commented-out BRAIN_VAULT_PATH line if --vault was given, and pin
-            # BRAIN_EMBEDDER + BRAIN_GRAPH_ENABLED EXPLICITLY to the profile's
-            # values (Config defaults the graph ON, so minimal/standard must
-            # write it false).
-            env_text = render_env_from_template(
-                template_src.read_text(encoding="utf-8"),
-                pg_port=pg_port,
-                vault_path=vault_path,
-                embedder=effective_embedder,
-                graph_enabled=prof.env_graph_enabled,
+        elif vault_path is not None and provision.action == PROVISION_SYMLINKED:
+            typer.secho(
+                f"  [warn] --vault not applied: {env_dest} is linked to "
+                f"{provision.target}; add BRAIN_VAULT_PATH={vault_path} there "
+                "yourself if you want it persisted.",
+                fg="yellow",
+                err=True,
             )
-            env_dest.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(env_dest, env_text)
-            typer.echo(f"  [ok] wrote {env_dest}")
-
-        _perform_action(f"render {env_dest} from env.example template", _write_env, dry_run)
 
     # 5. Voyage API key prompt
     if effective_embedder == "voyage" and not os.environ.get("VOYAGE_API_KEY"):

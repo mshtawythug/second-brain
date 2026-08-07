@@ -15,7 +15,7 @@ from brain.cli import app
 from brain.gaps import (
     SearchFailure,
     SearchFailureDetector,
-    _canonical_key,
+    canonical_query_key,
     cluster_failed_queries,
     record_search_query,
     top_search_failures,
@@ -200,7 +200,7 @@ def test_record_search_query_undefined_fts_count_column_swallowed_with_hint(
 
 
 # ---------------------------------------------------------------------------
-# cluster_failed_queries / _canonical_key (pure)
+# cluster_failed_queries / canonical_query_key (pure)
 # ---------------------------------------------------------------------------
 
 
@@ -243,8 +243,8 @@ def test_cluster_ignores_punctuation_and_case() -> None:
 
 
 def test_canonical_key_sorts_and_dedupes() -> None:
-    assert _canonical_key("Policy benefits Policy") == "benefits policy"
-    assert _canonical_key("q3  hiring,  PLAN!") == "hiring plan q3"
+    assert canonical_query_key("Policy benefits Policy") == "benefits policy"
+    assert canonical_query_key("q3  hiring,  PLAN!") == "hiring plan q3"
 
 
 # ---------------------------------------------------------------------------

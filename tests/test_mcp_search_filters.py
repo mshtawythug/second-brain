@@ -142,8 +142,9 @@ def test_brain_search_has_tag_tag_same_value_is_allowed(
     monkeypatch.setattr(mcp_server, "hybrid_search", _spy_hybrid_search(captured))
     payload = mcp_server.brain_search(query="x", tag="shared", has_tag="shared")
     assert captured["tag"] == "shared"
-    # Return shape is still the Q1-C dict.
-    assert set(payload.keys()) == {"session_id", "results"}
+    # Return shape is still the Q1-C dict. Superset, not equality — F5's
+    # metadata keys are additive by design.
+    assert {"session_id", "results"} <= set(payload.keys())
 
 
 # ---------------------------------------------------------------------------

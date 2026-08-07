@@ -67,6 +67,10 @@ _CANARIES: list[tuple[str, str]] = [
 
 
 @pytest.mark.live_db
+# The live embedder IS the point here: a canary asserts real ranking against the
+# real corpus, so stubbing it would test nothing. Exempts these from the
+# hermeticity guard's default ban on Ollama sockets (tests/conftest.py).
+@pytest.mark.live_ollama
 @pytest.mark.parametrize(("query", "expected_prefix"), _CANARIES)
 def test_canary_pre_fix_top1_remains_in_post_fix_top3(
     query: str,

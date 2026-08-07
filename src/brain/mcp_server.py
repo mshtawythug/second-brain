@@ -21,6 +21,7 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
 
 from . import capture as capture_mod
 from . import connect as connect_mod
+from .agent import resolve_agent_id
 from .config import Config
 from .db import PersistentConnection, age_extension_available, connect, connect_age
 from .embeddings import make_embedder
@@ -42,8 +43,11 @@ from .errors import (
     PersonAmbiguous,
     PersonNotFound,
     ReviewError,
+    SecretGuardError,
     VaultNoteSyncError,
+    VaultPathEscape,
 )
+from .facets import SearchFacets, compute_facets
 from .format import (
     alias_result_json,
     community_record_json,
@@ -52,6 +56,7 @@ from .format import (
     graph_stats_json,
     timeline_context_json,
 )
+from .format_search import search_meta_json, search_results_json
 from .gaps import (
     SearchFailureDetector,
     record_search_query,
@@ -78,8 +83,11 @@ from .queries import (
     resolve_person_to_keys,
     summary_counts,
 )
+from .recall import recall
 from .resurface import resurface_docs
-from .search import SearchDiagnostics, hybrid_search
+from .search import SearchDiagnostics, build_tsquery, hybrid_search
+from .search_predicate import build_predicate
+from .sensitivity import is_confidential
 from .tags import normalize_tags
 
 if TYPE_CHECKING:
@@ -87,6 +95,7 @@ if TYPE_CHECKING:
     from .graph_rag.reconcile import ReconcileConfig
     from .graph_rag.schema import GraphContext
     from .graph_rag.sync import GraphSyncer
+from .vault.delete import delete_document, describe_delete_target
 from .vault.frontmatter import (
     dump_frontmatter,
     parse_frontmatter,
@@ -94,6 +103,7 @@ from .vault.frontmatter import (
 )
 from .vault.graph import backlinks_for, orphans, outgoing_links_for
 from .vault.note_builder import create_vault_note
+from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
 from .vault.slug import slugify
 from .vault.sync import sync_one_file
 from .vault.templates import render_template
@@ -343,10 +353,29 @@ def brain_search(
     draft: bool | None = None,
     has_tag: str | None = None,
     without_tag: str | None = None,
+    facets: bool = False,
+    # — F9 edit-range filters (Wave-2 handoff) —
+    updated_after: str | None = None,
+    updated_before: str | None = None,
+    # — F10 attribution —
+    agent_id: str | None = None,
+    # — F6 confidentiality —
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Hybrid search across the second brain.
 
-    Returns a dict with two keys:
+    ``updated_after`` / ``updated_before`` (F9) filter on when a document was
+    last *changed*, as opposed to ``after`` / ``before``, which filter on when
+    it was authored or received. ISO-8601 strings (``YYYY-MM-DD`` or
+    ``YYYY-MM-DDTHH:MM:SS``).
+
+    ``agent_id`` (F10) records WHICH agent ran the search on the logged
+    ``search_queries`` row. ``source`` already records the surface (``mcp``);
+    this is the actor, so two agents both working over MCP can be told apart
+    in ``brain usage``. Unset means unattributed, which is honest rather than
+    defaulted.
+
+    Returns a dict whose two long-standing keys are:
 
     - ``session_id``: a fresh ``uuid.uuid4()`` minted on every call. Pass
       it back via ``brain_show(..., session_id=...)`` to record the open
@@ -358,6 +387,25 @@ def brain_search(
     **Breaking shape change in Q1-C:** prior versions returned the
     results list directly; the new top-level dict carries ``session_id``
     alongside ``results``. Update callers that assume a top-level list.
+
+    **Additive in F5 (NOT a shape change):** ``total_documents``,
+    ``returned``, ``fts_count``, ``timing_ms``
+    (``{embed, sql, facets, total}`` — nullable floats in milliseconds),
+    ``embed_cached``, ``fts_only`` and ``facets`` join the top level.
+    ``session_id``, ``results`` and every result object are byte-identical
+    to before; reading named keys off a JSON object is the non-breaking way
+    to grow this surface.
+
+    ``total_documents`` is the EXACT, uncapped count of documents whose text
+    LEXICALLY matches — unlike ``fts_count``, which is the candidate-chunk
+    count capped at 50 and meaningful only when it is zero. The vector leg
+    may surface additional near-neighbours that ``total_documents`` does not
+    count. It is ``null`` if the count query failed; never read ``null`` as
+    zero.
+
+    - ``facets``: when ``True``, group the whole match set by source,
+      content type and top tags. ``null`` by default; costs one extra
+      aggregate query.
 
     Filters (all optional, default = no filter):
 
@@ -395,12 +443,31 @@ def brain_search(
 
     after_dt = _parse_iso_datetime(after, field="after") if after else None
     before_dt = _parse_iso_datetime(before, field="before") if before else None
+    updated_after_dt = (
+        _parse_iso_datetime(updated_after, field="updated_after")
+        if updated_after
+        else None
+    )
+    updated_before_dt = (
+        _parse_iso_datetime(updated_before, field="updated_before")
+        if updated_before
+        else None
+    )
 
     session_uuid = uuid.uuid4()
     session_id = str(session_uuid)
 
     try:
         with _mcp_conn(state) as conn:
+            # ``brain_search`` performs one write — the best-effort
+            # ``record_search_query`` row below. Production reaches here on the
+            # persistent connection, which is always autocommit, so the row
+            # lands; the per-call ``connect()`` path is NOT autocommit by
+            # default, and its telemetry INSERT was being rolled back at
+            # context exit and silently discarded. Setting it explicitly makes
+            # the two paths agree and matches every other write-performing
+            # tool in this module.
+            conn.autocommit = True
             person_match = None
             if person is not None:
                 try:
@@ -425,6 +492,10 @@ def brain_search(
                 recency_halflife_days=state.cfg.recency_halflife_days,
                 snippet_context_tokens=state.cfg.snippet_context_tokens,
                 diagnostics=diagnostics,
+                # Always on for MCP: the caller is an agent deciding whether
+                # to widen its query, and "5 of 5" vs "5 of 544" is exactly
+                # the signal it needs. One extra aggregate per call.
+                total_count=True,
                 person_keys=person_match.keys if person_match else None,
                 person_display_name=(
                     person_match.display_name if person_match else None
@@ -435,7 +506,35 @@ def brain_search(
                 thread_id=thread,
                 draft=draft,
                 without_tag=without_tag,
+                updated_after=updated_after_dt,
+                updated_before=updated_before_dt,
+                sensitivity=_confidential_lens(include_confidential),
             )
+            facet_data: SearchFacets | None = None
+            if facets:
+                # Rebuilt from the same kwargs rather than widening
+                # ``hybrid_search``'s return type — ``build_predicate`` is the
+                # single construction site, so the buckets cannot describe a
+                # different match set than the results.
+                t_facets = time.perf_counter()
+                facet_data = compute_facets(
+                    conn,
+                    predicate=build_predicate(
+                        source_kind=source,
+                        tag=effective_tag,
+                        since_days=since_days,
+                        person_keys=person_match.keys if person_match else None,
+                        after=after_dt,
+                        before=before_dt,
+                        content_type=kind,
+                        thread_id=thread,
+                        draft=draft,
+                        without_tag=without_tag,
+                        sensitivity=_confidential_lens(include_confidential),
+                    ),
+                    tsquery=build_tsquery(conn, query),
+                )
+                diagnostics.facets_ms = (time.perf_counter() - t_facets) * 1000.0
             # Plan 08 — best-effort search-failure logging. The minted
             # ``session_uuid`` lets no-click detection join this search against a
             # later ``brain_show`` open in the same session. A transient
@@ -450,29 +549,153 @@ def brain_search(
                 query=query,
                 result_count=len(results),
                 fts_count=diagnostics.fts_count,
+                duration_ms=(
+                    None
+                    if diagnostics.total_ms is None
+                    else round(diagnostics.total_ms)
+                ),
                 session_id=session_uuid,
                 source="mcp",
+                agent_id=resolve_agent_id(agent_id, state.cfg),
                 tenant_id=state.cfg.graph_tenant_id,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     except EmbedError as e:
         raise _wrap_embed_error(e) from e
+    # The two original keys come FIRST and are built exactly as before; the F5
+    # metadata is merged in as additional named keys. ``search_results_json``
+    # is the shared projection the CLI uses, so the two surfaces cannot drift.
     return {
         "session_id": session_id,
-        "results": [
-            {
-                "id": r.document_id,
-                "title": r.title,
-                "source_kind": r.source_kind,
-                "snippet": r.snippet,
-                "score": r.score,
-                "content_type": r.content_type,
-                "tags": r.tags,
-            }
-            for r in results
-        ],
+        "results": search_results_json(results),
+        **search_meta_json(
+            diagnostics, returned=len(results), facets=facet_data
+        ),
     }
+
+
+@mcp_app.tool()
+def brain_recall(
+    query: str,
+    budget_tokens: int | None = None,
+    max_candidates: int | None = None,
+    source: str | None = None,
+    tag: str | None = None,
+    since_days: int | None = None,
+    fts_only: bool = False,
+    person: str | None = None,
+    after: str | None = None,
+    before: str | None = None,
+    kind: str | None = None,
+    thread: str | None = None,
+    draft: bool | None = None,
+    without_tag: str | None = None,
+    agent_id: str | None = None,
+    include_confidential: bool = False,
+) -> dict[str, Any]:
+    """Retrieve context sized to fit a token budget, with citations.
+
+    Use this instead of ``brain_search`` when the goal is to *read* the
+    material rather than to pick a document to open. ``brain_search`` returns
+    ranked pointers with bounded snippets and no notion of total size; this
+    returns whole expanded passages packed to ``budget_tokens``, one per
+    document, each carrying a ``[N]`` citation marker.
+
+    Returns ``{context_block, passages, query, budget_tokens, used_tokens,
+    candidates_considered, dropped, truncated, fts_count}``. ``context_block``
+    is the pasteable artifact; ``passages`` is the same content structured, for
+    a caller that wants to render it itself. Cite as ``[2]`` — the same
+    convention ``brain_ask`` uses.
+
+    When the budget cannot hold even the top passage, one truncated passage is
+    returned with ``truncated=true`` rather than nothing: an agent asked for
+    context, and silence is a worse answer than a shortened excerpt.
+
+    **This tool deliberately mints no ``session_id``, and that is load-bearing
+    — do not "fix" it.** The ``no_click`` gap detector flags any logged search
+    with a session id that no later open follows. A recall's *result is the
+    content*, so an agent will essentially never call ``brain_show``
+    afterwards; minting one would make every recall look like a search failure
+    and poison ``brain gaps``. Logging with ``session_id=NULL`` keeps recall
+    invisible to ``no_click`` while leaving the ``fts_count = 0`` lexical-miss
+    signal fully live.
+
+    Budgets default to the configured ``BRAIN_RECALL_*`` values.
+    """
+    state = _get_state()
+    logger.debug("brain_recall: query=%r budget=%s", query, budget_tokens)
+
+    effective_budget = (
+        state.cfg.recall_budget_tokens if budget_tokens is None else budget_tokens
+    )
+    effective_candidates = (
+        state.cfg.recall_max_candidates
+        if max_candidates is None
+        else max_candidates
+    )
+    if effective_budget < 1:
+        raise _mcp_error(INVALID_PARAMS, "budget_tokens must be >= 1")
+    if effective_candidates < 1:
+        raise _mcp_error(INVALID_PARAMS, "max_candidates must be >= 1")
+
+    after_dt = _parse_iso_datetime(after, field="after") if after else None
+    before_dt = _parse_iso_datetime(before, field="before") if before else None
+    resolved_agent = resolve_agent_id(agent_id, state.cfg)
+
+    try:
+        with _mcp_conn(state) as conn:
+            conn.autocommit = True
+            person_match = None
+            if person is not None:
+                try:
+                    person_match = resolve_person_to_keys(conn, person)
+                except (PersonNotFound, PersonAmbiguous) as e:
+                    raise _mcp_error(INVALID_PARAMS, str(e)) from e
+            result = recall(
+                conn,
+                state.cfg,
+                embedder=state.embedder,
+                query=query,
+                budget_tokens=effective_budget,
+                max_candidates=effective_candidates,
+                source_kind=source,
+                tag=tag,
+                since_days=since_days,
+                fts_only=fts_only,
+                person_keys=person_match.keys if person_match else None,
+                person_display_name=(
+                    person_match.display_name if person_match else None
+                ),
+                after=after_dt,
+                before=before_dt,
+                content_type=kind,
+                thread_id=thread,
+                draft=draft,
+                without_tag=without_tag,
+                sensitivity=_confidential_lens(include_confidential),
+            )
+            # session_id=None — see the docstring. Best-effort by
+            # ``record_search_query``'s own contract: a telemetry failure must
+            # never cost the agent the context it already retrieved.
+            record_search_query(
+                conn,
+                query=query,
+                result_count=result.candidates_considered,
+                fts_count=result.fts_count,
+                session_id=None,
+                source="mcp",
+                agent_id=resolved_agent,
+                tenant_id=state.cfg.graph_tenant_id,
+            )
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    except EmbedError as e:
+        raise _wrap_embed_error(e) from e
+
+    payload = result.to_dict()
+    payload["context_block"] = result.context_block()
+    return payload
 
 
 @mcp_app.tool()
@@ -546,8 +769,25 @@ def brain_show(
     originating_query: str | None = None,
     session_id: str | None = None,
     graph_retrieved: bool = False,
+    include_confidential: bool = False,
+    agent_id: str | None = None,
 ) -> dict[str, Any]:
     """Return the full body and metadata of a single document by id prefix.
+
+    F6 confidentiality: a document marked ``sensitivity='confidential'``
+    returns its **body withheld** unless ``include_confidential=true``. Title,
+    tags, id, source and ``summary`` still return, so the model can reason
+    about the document's existence and ask the user for it rather than being
+    unable to see that it exists at all.
+
+    Be clear about what this is: a cooperating LLM can simply pass
+    ``include_confidential=true``. It is a **speed bump and an audit signal,
+    not authentication** — it stops a confidential body from being pulled into
+    context by an incidental search-and-open, which is the realistic failure,
+    and it makes a deliberate retrieval visible in the call record.
+
+    F10 attribution: ``agent_id`` records WHICH agent opened the document, as
+    opposed to ``source``, which records the surface. Unset means unattributed.
 
     The prefix must be at least 6 hex characters and must uniquely identify
     a document. Raises :class:`McpError` (``INVALID_PARAMS``) if the prefix
@@ -623,6 +863,7 @@ def brain_show(
                         query=originating_query,
                         session_id=session_uuid,
                         graph_retrieved=graph_retrieved,
+                        agent_id=resolve_agent_id(agent_id, state.cfg),
                     )
                 except (psycopg.Error, InteractionError) as log_exc:
                     logger.warning(
@@ -648,6 +889,34 @@ def brain_show(
     # we explicitly do NOT change the brain_search return shape this wave.
     if doc.summary is not None:
         payload["summary"] = doc.summary
+    # F6 — withhold a confidential body unless explicitly asked for. Both new
+    # keys are emitted ONLY on the withheld path, so a normal document's
+    # payload stays byte-identical for every existing consumer (same additive
+    # discipline as ``summary`` above). Pinned by
+    # ``test_normal_doc_payload_is_byte_identical``.
+    #
+    # The open is still logged above: a withheld open is still an open, and
+    # dropping it would blind ``brain usage`` to exactly the accesses most
+    # worth seeing.
+    if is_confidential(doc.sensitivity) and not include_confidential:
+        payload["content"] = None
+        # ``summary`` is withheld TOO, and that is a deliberate departure from
+        # the F6 handoff text ("summary still returns"). The summary is
+        # LLM-generated *from the body* — it is the body's substance,
+        # condensed. Returning it would hand back exactly what withholding the
+        # body is meant to prevent, just shorter, which is a leak wearing the
+        # shape of a compromise.
+        #
+        # Title, tags, id, source and dates DO still return: those are
+        # user-authored or structural, and they are what lets a model see the
+        # document exists and ask the user for it rather than being blind to
+        # it. That was the useful half of the handoff's intent.
+        payload.pop("summary", None)
+        payload["sensitivity"] = doc.sensitivity
+        payload["withheld"] = (
+            "body and summary withheld: sensitivity=confidential. "
+            "Re-call with include_confidential=true to retrieve them."
+        )
     return payload
 
 
@@ -691,6 +960,7 @@ def brain_resurface(
     limit: int | None = None,
     min_age_days: int | None = None,
     source_kind: str | None = None,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Return a spaced-repetition review queue of older, unrevisited docs.
 
@@ -727,6 +997,7 @@ def brain_resurface(
                 limit=limit,
                 min_age_days=min_age_days,
                 source_kind=source_kind,
+                sensitivity=_confidential_lens(include_confidential),
             )
     except ValueError as e:
         raise _mcp_error(INVALID_PARAMS, str(e)) from e
@@ -836,15 +1107,33 @@ def brain_ingest_stdin(
                 tags=merged_tags,
                 vault_root=state.cfg.vault_path,
                 graph_syncer=state.graph_syncer,
+                # F4 — honour the operator's configured guard mode. Without
+                # this the tool silently used the module DEFAULT, so someone
+                # who set BRAIN_SECRET_GUARD=reject got it enforced on the CLI
+                # and NOT here — on the very path Krisp transcripts, Slack
+                # threads and Gmail arrive through, which is where credentials
+                # actually turn up.
+                secret_guard=state.cfg.secret_guard,
             )
+    except SecretGuardError as e:
+        # `reject` mode: nothing was written (the guard raises before the
+        # content hash and before the write transaction opens). Surface it as
+        # a caller error so the agent can redact and retry rather than seeing
+        # an opaque internal failure.
+        raise _mcp_error(INVALID_PARAMS, str(e)) from e
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     except EmbedError as e:
         raise _wrap_embed_error(e) from e
-    return {
+    payload: dict[str, Any] = {
         "document_id": result.document_id,
         "created": result.created,
     }
+    # Additive, and present only when the guard actually found something, so a
+    # clean ingest's payload is unchanged for existing callers.
+    if result.secret_notice:
+        payload["secret_notice"] = result.secret_notice
+    return payload
 
 
 @mcp_app.tool()
@@ -1045,8 +1334,13 @@ def brain_edit(
                     vault_root=state.cfg.vault_path,
                     enricher=enricher,
                     graph_syncer=state.graph_syncer,
+                    # F4 — an edit that replaces the body can introduce a
+                    # credential just as an ingest can.
+                    secret_guard=state.cfg.secret_guard,
                 )
             except ValueError as e:
+                raise _mcp_error(INVALID_PARAMS, str(e)) from e
+            except SecretGuardError as e:
                 raise _mcp_error(INVALID_PARAMS, str(e)) from e
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -1057,6 +1351,310 @@ def brain_edit(
         "fields_changed": result.fields_changed,
         "rechunked": result.rechunked,
     }
+
+
+def _confidential_lens(include_confidential: bool) -> str | None:
+    """The ``sensitivity`` filter every MCP retrieval surface must apply (F6).
+
+    Returns ``"normal"`` — excluding confidential documents — unless the
+    caller explicitly opted in, in which case ``None`` means "both tiers".
+
+    **Why retrieval must exclude, not merely redact.** Hiding a confidential
+    document's snippet while still returning its row leaves the row itself as
+    an oracle: a hit for ``severance`` proves the withheld body contains
+    "severance", and anything that can query reconstructs the body a word at a
+    time. Facet counts computed over a match set that includes what the
+    results exclude leak the same way. So the filter belongs in the predicate,
+    where it removes the document from the match set entirely, and the SAME
+    value must reach the facet predicate or the counts re-open the door.
+
+    This matters more here than on the CLI. F6's premise is that the local CLI
+    sits *inside* the trust boundary while a hosted model sits outside — and
+    MCP serves the hosted model. Confidential body text reaching it through a
+    search snippet is precisely the egress F6 exists to prevent.
+    """
+    return None if include_confidential else "normal"
+
+
+def _require_confirm(confirm: bool, *, operation: str, affected: str) -> None:
+    """Refuse a destructive tool call that did not opt in via ``confirm``.
+
+    Every destructive MCP CRUD tool routes through here BEFORE performing
+    any write. The refusal names exactly what would have been affected —
+    an agent that guessed an id prefix gets to see it picked the wrong
+    document instead of discovering that after the fact.
+
+    Read-only work (resolving the id, planning the rename) is allowed to
+    run first: it is what makes ``affected`` accurate, and it mutates
+    nothing.
+    """
+    if confirm:
+        return
+    raise _mcp_error(
+        INVALID_PARAMS,
+        f"{operation} is destructive — re-call with confirm=true to proceed. "
+        f"Nothing was changed. Would affect: {affected}",
+    )
+
+
+def _vault_relative(path: Path, vault_path: Path) -> str:
+    """POSIX vault-relative form of ``path``, for user-facing messages."""
+    return path.resolve().relative_to(vault_path.resolve()).as_posix()
+
+
+def _reference_summary(op: RenameOp) -> str:
+    """``"N reference(s) in M file(s)"`` for a plan's reference set."""
+    file_count = len({r.file_path for r in op.references})
+    return f"{len(op.references)} reference(s) in {file_count} file(s)"
+
+
+@mcp_app.tool()
+def brain_rm(id: str, confirm: bool = False) -> dict[str, Any]:
+    """Delete a document, its chunks, its graph presence, and its vault mirror.
+
+    **Destructive and irreversible.** ``confirm`` defaults to ``False``,
+    which refuses the call and reports which document *would* have been
+    deleted; pass ``confirm=true`` to actually delete. There is no undo —
+    the row cascade removes the chunks and every ``links`` edge touching
+    the document.
+
+    ``id`` is a document id or a 6+ character prefix. Mirrors ``brain rm``,
+    including the on-disk mirror cleanup: without it the next
+    ``brain vault sync`` would re-ingest the file and silently undo the
+    delete.
+
+    Returns ``{document_id, title, vault_path, mirror_action}``, where
+    ``mirror_action`` is ``"unlinked"``, ``"absent"`` or ``"db_only"``.
+    """
+    state = _get_state()
+    try:
+        with _mcp_conn(state) as conn:
+            conn.autocommit = True
+            doc_id = _resolve_id(conn, id)
+            target = describe_delete_target(conn, document_id=doc_id)
+            if target is None:
+                raise _mcp_error(INVALID_PARAMS, f"document not found: {doc_id}")
+            location = (
+                f"vault file {target.vault_path}"
+                if target.vault_path
+                else "no vault file (db-only row)"
+            )
+            _require_confirm(
+                confirm,
+                operation="brain_rm",
+                affected=f"document {doc_id[:8]} {target.title!r} — {location}",
+            )
+            logger.debug("brain_rm: id=%s title=%r", doc_id[:8], target.title)
+            report = delete_document(
+                conn,
+                document_id=doc_id,
+                vault_root=state.cfg.vault_path,
+                graph_syncer=state.graph_syncer,
+            )
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    return {
+        "document_id": report.document_id,
+        "title": report.title,
+        "vault_path": report.vault_path,
+        "mirror_action": report.mirror_action,
+    }
+
+
+def _plan_note_relocation(
+    state: _State,
+    *,
+    id: str,
+    new_title: str | None,
+    new_folder: str | None,
+    link_refactor: bool,
+) -> tuple[RenameOp, Path]:
+    """Shared plan phase for ``brain_note_rename`` / ``brain_note_move``.
+
+    Returns the planned op plus the resolved vault path. Writes nothing:
+    both tools call this before their ``confirm`` gate so the refusal
+    message can describe the real blast radius.
+    """
+    vault_path = state.cfg.vault_path
+    if not vault_path.is_dir():
+        raise _mcp_error(
+            INVALID_PARAMS,
+            f"vault path does not exist: {vault_path} — run `brain vault init`",
+        )
+    try:
+        with _mcp_conn(state) as conn:
+            conn.autocommit = True
+            doc_id = _resolve_id(conn, id)
+            title = new_title
+            if title is None:
+                row = conn.execute(
+                    "SELECT title FROM documents WHERE id=%s", (doc_id,)
+                ).fetchone()
+                if row is None:
+                    raise _mcp_error(
+                        INVALID_PARAMS, f"document not found: {doc_id}"
+                    )
+                title = row[0]
+            try:
+                op = plan_rename(
+                    conn,
+                    vault_path=vault_path,
+                    document_id=doc_id,
+                    new_title=title,
+                    new_folder=new_folder,
+                )
+            except (RenameError, VaultPathEscape) as e:
+                raise _mcp_error(INVALID_PARAMS, str(e)) from e
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    if not link_refactor:
+        op = RenameOp(
+            document_id=op.document_id,
+            old_title=op.old_title,
+            new_title=op.new_title,
+            old_path=op.old_path,
+            new_path=op.new_path,
+            references=(),
+        )
+    return op, vault_path
+
+
+def _apply_note_relocation(
+    state: _State, *, op: RenameOp, vault_path: Path
+) -> dict[str, Any]:
+    """Shared apply phase for ``brain_note_rename`` / ``brain_note_move``."""
+    try:
+        with _mcp_conn(state) as conn:
+            conn.autocommit = True
+            try:
+                report = apply_rename(
+                    conn,
+                    embedder=state.embedder,
+                    vault_path=vault_path,
+                    op=op,
+                )
+            except RenameError as e:
+                raise _mcp_error(INVALID_PARAMS, str(e)) from e
+    except psycopg.Error as e:
+        raise _wrap_db_error(e) from e
+    except EmbedError as e:
+        raise _wrap_embed_error(e) from e
+    if report.sync_report and report.sync_report.errors:
+        _path, reason = report.sync_report.errors[0]
+        raise _mcp_error(INTERNAL_ERROR, f"sync failed: {reason}")
+    return {
+        "document_id": op.document_id,
+        "old_title": op.old_title,
+        "new_title": op.new_title,
+        "old_vault_path": _vault_relative(op.old_path, vault_path),
+        "vault_path": _vault_relative(op.new_path, vault_path),
+        "file_renamed": report.file_renamed,
+        "references_rewritten": report.references_rewritten,
+        "files_rewritten": report.files_rewritten,
+    }
+
+
+@mcp_app.tool()
+def brain_note_rename(
+    id: str,
+    new_title: str,
+    confirm: bool = False,
+    link_refactor: bool = True,
+) -> dict[str, Any]:
+    """Rename a vault note: title, file slug, and ``[[old-title]]`` references.
+
+    **Destructive** — it rewrites files across the vault. ``confirm``
+    defaults to ``False``, which plans the rename (writing nothing) and
+    refuses, reporting the destination path and how many references in how
+    many files would be rewritten. Pass ``confirm=true`` to apply.
+
+    Only vault-tier notes can be renamed. ``link_refactor=False`` leaves
+    ``[[…]]`` references in other notes alone; the note's own frontmatter
+    title and its filename slug still change.
+
+    The apply phase snapshots every file it touches and restores them on
+    any failure, so a partial rename is not a reachable state. The
+    document id is preserved, so incoming backlinks survive.
+    """
+    state = _get_state()
+    op, vault_path = _plan_note_relocation(
+        state,
+        id=id,
+        new_title=new_title,
+        new_folder=None,
+        link_refactor=link_refactor,
+    )
+    _require_confirm(
+        confirm,
+        operation="brain_note_rename",
+        affected=(
+            f"{_vault_relative(op.old_path, vault_path)} "
+            f"({op.old_title!r}) → {_vault_relative(op.new_path, vault_path)} "
+            f"({op.new_title!r}), rewriting {_reference_summary(op)}"
+        ),
+    )
+    logger.debug(
+        "brain_note_rename: id=%s → %r", op.document_id[:8], op.new_title
+    )
+    return _apply_note_relocation(state, op=op, vault_path=vault_path)
+
+
+@mcp_app.tool()
+def brain_note_move(
+    id: str,
+    new_folder: str,
+    confirm: bool = False,
+    link_refactor: bool = True,
+) -> dict[str, Any]:
+    """Relocate a vault note to another folder, keeping its title and id.
+
+    **Destructive** — it rewrites path-form ``[[…]]`` references across the
+    vault. ``confirm`` defaults to ``False``, which plans the move (writing
+    nothing) and refuses, reporting the destination path and how many
+    references in how many files would be rewritten. Pass ``confirm=true``
+    to apply.
+
+    ``new_folder`` is relative to the vault root; ``""`` or ``"."`` targets
+    the root, and a missing folder is created. Paths that escape the vault
+    are rejected. There is no overwrite: if a note already occupies the
+    destination the call fails rather than clobbering it.
+
+    Moving a note into the folder it already occupies is a no-op — the
+    response carries ``"moved": false`` and nothing is written. The file is
+    relocated with an atomic rename and ``documents.vault_path`` is
+    repointed immediately, so this is safe to call while
+    ``brain vault sync --watch`` is running.
+    """
+    state = _get_state()
+    op, vault_path = _plan_note_relocation(
+        state,
+        id=id,
+        new_title=None,
+        new_folder=new_folder,
+        link_refactor=link_refactor,
+    )
+    destination = _vault_relative(op.new_path, vault_path)
+    origin = _vault_relative(op.old_path, vault_path)
+    if op.new_path.resolve() == op.old_path.resolve():
+        # Nothing to confirm and nothing to do — report it as a success so
+        # an agent retrying a move does not treat the no-op as an error.
+        return {
+            "document_id": op.document_id,
+            "moved": False,
+            "vault_path": destination,
+            "detail": f"already in {Path(origin).parent.as_posix()}",
+        }
+    _require_confirm(
+        confirm,
+        operation="brain_note_move",
+        affected=f"{origin} → {destination}, rewriting {_reference_summary(op)}",
+    )
+    logger.debug(
+        "brain_note_move: id=%s %s → %s", op.document_id[:8], origin, destination
+    )
+    result = _apply_note_relocation(state, op=op, vault_path=vault_path)
+    result["moved"] = True
+    return result
 
 
 @mcp_app.tool()

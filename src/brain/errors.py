@@ -6,11 +6,14 @@ the CLI and MCP server layers can map them to their respective frameworks
 """
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from .config import DotenvSource
 
 
 class BrainError(Exception):
@@ -354,4 +357,194 @@ class DraftSkipped(BrainError):
         is kept so future callers (e.g. a ``--skip-drafts`` flag) can
         raise it without a schema change.
     """
+
+
+# ---------------------------------------------------------------------------
+# Pre-landed scaffolding (Task 0B, docs/plans/2026-07-25-agent-memory-safety-ui).
+#
+# Nothing raises these yet. They are declared up-front in Wave 0 so this module
+# has exactly ONE writer for the whole release: five parallel worktrees would
+# otherwise all need to append here and would collide on every merge. A later
+# wave that finds an exception missing escalates to the coordinator rather than
+# editing this block.
+# ---------------------------------------------------------------------------
+
+
+class HookInstallError(BrainError):
+    """Raised when installing the Claude Code session-end capture hook fails (F1)."""
+
+
+class SettingsFormatError(BrainError):
+    """Raised when a Claude Code ``settings.json`` is malformed or unmergeable (F1)."""
+
+
+class AgentIdInvalid(BrainError):
+    """Raised when an agent id fails the ``BRAIN_AGENT_ID`` pattern (F10).
+
+    The pattern itself lives at :data:`brain.config.AGENT_ID_PATTERN`; the
+    Wave-4 ``brain.agent.normalize_agent_id`` validates against that same
+    constant and raises this when a caller-supplied id does not match.
+    """
+
+
+class BackupError(BrainError):
+    """Base class for ``brain backup`` / ``brain restore`` failures (F3)."""
+
+
+class PgToolUnavailable(BackupError):
+    """No usable ``pg_dump`` / ``pg_restore`` was found (F3).
+
+    Either the binary is missing entirely, or the only one on ``PATH`` has a
+    major version older than the server's -- which produces a silently truncated
+    dump, so it is refused rather than used.
+    """
+
+
+class RestoreIncompatible(BackupError):
+    """The archive cannot be restored into this brain (F3); carries the preflight issues.
+
+    ``issues`` holds the ``brain.backup.PreflightIssue`` records explaining why
+    (embedder mismatch, embedding-dim mismatch, migration drift, ...). It is
+    typed ``tuple[object, ...]`` rather than the concrete element type because
+    :mod:`brain.backup` does not exist until Wave 1 and this module must stay
+    importable without it -- the same widening used by
+    :attr:`ReviewError.findings`. The CLI maps this to exit code 3.
+    """
+
+    def __init__(
+        self, message: str, *, issues: Sequence[object] | None = None
+    ) -> None:
+        super().__init__(message)
+        self.issues: tuple[object, ...] = tuple(issues or ())
+
+
+class RestoreAborted(BackupError):
+    """A restore stopped partway through (F3); carries the manual-recovery SQL.
+
+    ``recovery_sql`` is the statement (or statements) that undo a half-applied
+    database swap, so the message the CLI prints is directly runnable. An empty
+    string means the failure happened before any destructive step and there is
+    nothing to undo.
+    """
+
+    def __init__(self, message: str, *, recovery_sql: str = "") -> None:
+        super().__init__(message)
+        self.recovery_sql = recovery_sql
+
+
+class SecretGuardError(BrainError):
+    """Raised when the ingest secret guard rejects content (F4).
+
+    Only fires under ``BRAIN_SECRET_GUARD=reject``; the ``warn`` and ``redact``
+    modes handle a detection without raising, and ``off`` never scans.
+    """
+
+
+class SensitivityError(BrainError):
+    """Raised on an invalid document sensitivity level or classification failure (F6)."""
+
+
+class VaultPathEscape(BrainError):
+    """Raised when a vault-relative path resolves outside the vault root (F8)."""
+
+
+class MigrationLockTimeout(BrainError):
+    """Raised when the migration mutex could not be taken before the deadline.
+
+    Means another process is migrating (or resetting) the SAME database right
+    now. Waiting it out is the fix; the alternative — proceeding anyway — is the
+    interleaved DDL that produced ``relation "sources" already exists`` and
+    ``column "kind" of relation "documents" already exists`` against the shared
+    test database on 2026-08-07.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Config-resolution diagnostics (not exceptions — message rendering).
+#
+# Rendered from :func:`brain.config.dotenv_chain` so this message and the
+# `brain doctor` $BRAIN_HOME/.env check are derived from ONE resolution pass and
+# can never disagree. ``DotenvSource`` is imported under TYPE_CHECKING only:
+# :mod:`brain.config` imports this module at runtime, so a runtime import back
+# would be a cycle. The chain is passed in as an argument instead.
+# ---------------------------------------------------------------------------
+
+
+def _dotenv_state_label(source: DotenvSource) -> str:
+    """Human-readable per-path state: what was there, and was it usable?
+
+    A dangling symlink is called out explicitly — ``exists`` is False for one
+    (it follows the link), but "missing" would send the user off to create a
+    file that IS already there, just pointing at a target that moved. That is
+    the failure mode a dev checkout hits when it is relocated.
+    """
+    if source.loaded:
+        return "found, loaded"
+    if source.exists:
+        return "found, NOT readable"
+    if source.path.is_symlink():
+        try:
+            target = os.readlink(source.path)
+        except OSError:  # pragma: no cover - readlink on a link we just saw
+            target = "?"
+        return f"BROKEN symlink -> {target}"
+    return "missing"
+
+
+def missing_database_url_message(
+    sources: Sequence[DotenvSource], *, brain_home_dotenv: Path
+) -> str:
+    """Explain a missing ``DATABASE_URL`` in terms of the chain that was searched.
+
+    Two genuinely different faults get two different messages:
+
+    * Nothing usable was loaded — no config file exists anywhere (or the one
+      that does is a broken link / unreadable). The fix is to create or repair
+      a file, so the message points at ``brain setup``.
+    * Something WAS loaded but does not define the key. The fix is to edit a
+      file that already exists, and the message must not read as
+      "no config found" or it sends the user hunting for the wrong problem.
+
+    Every candidate is listed with its real absolute path and per-path state so
+    the reader can see which link of the chain is dead.
+    """
+    width = max((len(str(s.path)) for s in sources), default=0)
+    listing = "\n".join(
+        f"  {str(s.path):<{width}}  ({_dotenv_state_label(s)})" for s in sources
+    )
+    loaded = [s for s in sources if s.loaded]
+    if not loaded:
+        # A path that is THERE but unusable (broken link, directory, bad
+        # permissions) must not be described as "not found" — the remedy is to
+        # repair it, not to create a second one.
+        broken = [s for s in sources if not s.exists and s.path.is_symlink()]
+        present_but_unusable = [s for s in sources if s.exists] + broken
+        header = (
+            "No usable .env file was found:"
+            if present_but_unusable
+            else "No .env file was found in any of:"
+        )
+        # `brain setup` NEVER clobbers an existing path (see
+        # brain.setup.provision_brain_home_dotenv), so on a dangling link it is
+        # a no-op and "run brain setup" would be a wrong remedy that reproduces
+        # the identical error. The link must be removed first. Wording is kept
+        # byte-identical to `brain doctor`'s remedy for the same state so the
+        # two surfaces cannot drift.
+        remedy = (
+            f"{broken[0].path} is a symlink whose target no longer exists.\n"
+            f"Fix: rm {broken[0].path} && brain setup"
+            if broken
+            else f"Run `brain setup` to create {brain_home_dotenv} "
+            "(or export DATABASE_URL)."
+        )
+        return f"DATABASE_URL is not set.\n{header}\n{listing}\n{remedy}"
+    loaded_paths = ", ".join(str(s.path) for s in loaded)
+    return (
+        "DATABASE_URL is not set.\n"
+        ".env files searched (highest precedence first):\n"
+        f"{listing}\n"
+        f"Config WAS found and loaded from: {loaded_paths}\n"
+        "— it just does not define DATABASE_URL. Add a `DATABASE_URL=...` line "
+        f"to {loaded[0].path} (see .env.example), or export DATABASE_URL."
+    )
 

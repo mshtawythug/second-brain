@@ -9,7 +9,19 @@
 # ╚════════════════════════════════════════════════════════════════════════╝
 #
 # One token per line. Blank lines and lines starting with '#' are ignored.
-# Matching is case-insensitive substring (handled by the hook).
+#
+# TWO MATCHING MODES, both handled by the hook:
+#   - Stage 1 (deterministic secret/API-key gate): EXACT whole-token match,
+#     case-insensitive. An entry only ever exempts that one literal token.
+#   - Stage 2 (semantic `claude -p` pass): case-insensitive substring.
+#
+# ⚠  EVERY ENTRY IS A HOLE IN THE GATE. An entry here is a token this repo
+#    asserts is SYNTHETIC and non-resolving. Adding a REAL credential — or a
+#    real name, address, or customer reference — does not "silence a false
+#    positive": it permanently defeats the gate for that value, in a file that
+#    is itself committed and public. If you are not certain a value is fake,
+#    it does not belong here. Real sensitive terms go in the gitignored
+#    .pii-denylist.local.txt so the gate ALWAYS blocks them.
 
 # --- Synthetic placeholders (standard fictional names) -------------------
 Acme
@@ -38,6 +50,36 @@ Meridian
 # same cast as `brain demo`; emails use the synthetic example.com domain).
 # Jordan Alvarez / Sam Rivera / Larkspur are already listed above.
 Priya Chandra
+
+# --- Synthetic credential fixtures (tests/secret_fixtures.py) ------------
+# The ingest secret guard (F4) needs credential-SHAPED strings to test against.
+# Every value below is fake and non-resolving: the AWS pair are Amazon's own
+# published documentation examples, and the rest spell EXAMPLE / NOT / A / REAL
+# in the entropy positions where a genuine credential would carry secret bytes.
+# None authenticates against any service.
+#
+# These are matched exact-line and case-insensitively by the hook's stage-1
+# gate. Adding a NEW fixture to tests/secret_fixtures.py means adding its token
+# here too, or the commit that introduces it will be blocked — which is the
+# gate working as intended.
+AKIAIOSFODNN7EXAMPLE
+ASIAIOSFODNN7EXAMPLE
+# NEVER put a real PEM banner here (RSA / EC / DSA / OPENSSH / ENCRYPTED /
+# bare PRIVATE KEY). Entries are subtracted from the hit list VERBATIM, and on
+# a pasted private key the banner is the ONLY part that matches any pattern —
+# the base64 body matches nothing. Allowlisting a real banner therefore empties
+# the hit list for a genuine key and the gate never fires. This entry is a
+# synthetic banner that no real key can have; keep it that way.
+-----BEGIN EXAMPLE NOT A REAL PRIVATE KEY-----
+xoxb-EXAMPLE-NOT-A-REAL-TOKEN-000000
+sk-EXAMPLENOTAREALKEY0000000000
+sk-proj-EXAMPLE-NOT-A-REAL-KEY-000000
+sk_live_EXAMPLENOTAREAL000000
+rk_live_EXAMPLENOTAREAL000000
+ghp_EXAMPLENOTAREALTOKEN0000000000000000
+github_pat_EXAMPLE_NOT_A_REAL_TOKEN_0000
+glpat-EXAMPLE-NOT-REAL-0000
+AIzaEXAMPLENOTAREALGOOGLEAPIKEY00000000
 
 # --- Public / generic terms confirmed safe (not the user's PII) ----------
 # Known false positives that surfaced from the corpus as generic public terms.

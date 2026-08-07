@@ -12,7 +12,9 @@ where relevant) so the assertions cover the brain-side logic only:
 - exit code propagation from a non-zero npx
 - friendly error when ``npx`` itself isn't on PATH
 - timeout handling
-- ``--to`` path-traversal guard
+- output-path resolution (vault-derived default, explicit ``--to``
+  override) and the guard that refuses output dirs whose contents the
+  Quartz build would ``rm -rf``
 
 The tests use ``CliRunner`` and assert on exit codes + stdout. They
 never touch the database — render is a pure file-tree operation.
@@ -27,7 +29,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from brain.cli import _resolve_render_to, app
+from brain.cli import _assert_render_output_safe, _resolve_render_to, app
+from brain.wiki.build_swap import DEFAULT_BUILD_TIMEOUT_S
 
 
 def _make_vault(tmp_path: Path, with_md: bool = True) -> Path:
@@ -116,8 +119,13 @@ def test_render_invokes_npx_with_correct_args(
     call_args, call_kwargs = run_mock.call_args
     cmd = call_args[0]
     assert cmd[0] == "npx"
-    assert cmd[1] == "quartz"
-    assert cmd[2] == "build"
+    # `--no` before the `--` separator, then the Quartz command line. See
+    # test_render_never_lets_npx_fetch_from_the_registry for why this exact
+    # shape matters.
+    assert cmd[1] == "--no"
+    assert cmd[2] == "--"
+    assert cmd[3] == "quartz"
+    assert cmd[4] == "build"
     assert "--directory" in cmd
     assert str(vault) in cmd
     assert "--output" in cmd
@@ -127,21 +135,89 @@ def test_render_invokes_npx_with_correct_args(
     assert call_kwargs["cwd"] == str(workspace)
     # check=False so we can read the returncode ourselves.
     assert call_kwargs["check"] is False
-    # Five-minute ceiling.
-    assert call_kwargs["timeout"] == 300
+    # Build ceiling comes from the ONE shared constant, not a local one.
+    # This used to pin 300 while `brain.wiki.build_swap` enforced 600 on the
+    # identical operation, so a build's allowed wall-clock depended purely on
+    # which entrypoint you came through. 300 was also simply wrong for a real
+    # vault: four measured *successful* builds on the live 1,392-file corpus
+    # took 2-5 min, i.e. this path was killing builds that were working.
+    assert call_kwargs["timeout"] == DEFAULT_BUILD_TIMEOUT_S
 
     # Final success message points the user at the output.
     assert "rendered to" in result.output
     assert str(output_dir.resolve()) in result.output
 
 
-def test_render_default_to_is_dist_under_cwd(
+def test_render_never_lets_npx_fetch_from_the_registry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
 ) -> None:
-    """With ``--to`` omitted, output goes to ``./dist`` in the cwd."""
+    """``npx`` must be forbidden from installing, and its flags terminated.
+
+    Bare ``npx quartz build`` falls back to FETCHING a package named "quartz"
+    from the npm registry whenever npm cannot resolve one locally — and a
+    workspace in that state still passes ``_check_quartz_workspace``, which
+    only requires package.json + quartz.config.ts. Measured 2026-08-07: in such
+    a directory ``npm exec --no -- quartz`` reports "could not determine
+    executable to run", i.e. without ``--no`` the real thing would go to the
+    network and build the vault with whatever it found. That is a silent
+    substitution of an unpinned package for the overlaid local Quartz.
+
+    ``--`` then ends npx's own option parsing. It matters: ``npx --no quartz
+    --version`` prints *npm's* version (10.9.2), not Quartz's — npx swallowed
+    the flag. With the separator, ``npx --no -- quartz --version`` correctly
+    yields 4.5.2.
+    """
     _env(monkeypatch)
     vault = _make_vault(tmp_path)
     _make_quartz_workspace(vault)
+    monkeypatch.chdir(tmp_path)
+    run_mock = mocker.patch("brain.cli.subprocess.run", return_value=_completed())
+
+    result = CliRunner().invoke(app, ["vault", "render", "--vault", str(vault)])
+    assert result.exit_code == 0, result.output
+
+    cmd = run_mock.call_args[0][0]
+    # No-install must come before the separator, or npx treats it as Quartz's.
+    assert cmd.index("--no") < cmd.index("--")
+    # Everything Quartz needs must come after the separator.
+    assert cmd.index("--") < cmd.index("quartz") < cmd.index("build")
+    assert cmd.index("build") < cmd.index("--directory")
+    assert cmd.index("build") < cmd.index("--output")
+
+
+def test_render_resolves_npx_from_path_at_call_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
+) -> None:
+    """The Node toolchain is looked up fresh, never pinned at install time.
+
+    Guards against the defect class that bit this project repeatedly in one
+    session: a `.env` at a path that no longer existed, a binary pinned to a
+    deleted version, daemons pinned to a stale code snapshot. Passing the bare
+    name ``npx`` (rather than an absolute path captured earlier) means exec
+    resolves it from ``PATH`` on every invocation, so a Node upgrade or a
+    version-manager switch takes effect immediately.
+    """
+    _env(monkeypatch)
+    vault = _make_vault(tmp_path)
+    _make_quartz_workspace(vault)
+    monkeypatch.chdir(tmp_path)
+    run_mock = mocker.patch("brain.cli.subprocess.run", return_value=_completed())
+
+    result = CliRunner().invoke(app, ["vault", "render", "--vault", str(vault)])
+    assert result.exit_code == 0, result.output
+
+    launcher = run_mock.call_args[0][0][0]
+    assert launcher == "npx"
+    assert not Path(launcher).is_absolute()
+
+
+def test_render_default_to_is_dist_under_quartz_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
+) -> None:
+    """With ``--to`` omitted, output goes to ``<vault>/.quartz/dist``."""
+    _env(monkeypatch)
+    vault = _make_vault(tmp_path)
+    workspace = _make_quartz_workspace(vault)
     monkeypatch.chdir(tmp_path)
 
     run_mock = mocker.patch("brain.cli.subprocess.run", return_value=_completed())
@@ -150,8 +226,9 @@ def test_render_default_to_is_dist_under_cwd(
     assert result.exit_code == 0, result.output
 
     cmd = run_mock.call_args[0][0]
-    # The output flag's value should resolve to ``<cwd>/dist``.
-    assert str((tmp_path / "dist").resolve()) in cmd
+    # The output flag's value is derived from the vault, not the cwd.
+    assert str((workspace / "dist").resolve()) in cmd
+    assert str((tmp_path / "dist").resolve()) not in cmd
 
 
 def test_render_uses_default_quartz_dir_under_vault(
@@ -339,64 +416,286 @@ def test_render_rejects_quartz_dir_missing_config(
 
 
 # ---------------------------------------------------------------------------
-# --to path traversal
+# Output-path resolution — the default must never come from the cwd.
+#
+# Regression coverage for the bug where `brain vault render`, run from an
+# unrelated project directory, wrote an entire Quartz site into that
+# project's source tree. The default output is now derived from the
+# vault (via the Quartz workspace); only an explicit `--to` is
+# interpreted relative to the shell.
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_render_to_rejects_traversal(tmp_path: Path) -> None:
-    """``_resolve_render_to`` rejects paths that resolve outside the cwd."""
+def _unrelated_project(tmp_path: Path) -> Path:
+    """A directory shaped like somebody else's checked-out project.
+
+    Mirrors the real-world failure: the user ran render from a source
+    repo, and the site was written into it (with `dist` not gitignored,
+    staged for an accidental commit). Contents are synthetic.
+    """
+    project = tmp_path / "unrelated-project"
+    (project / ".git").mkdir(parents=True)
+    (project / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (project / "package.json").write_text('{"name": "unrelated"}\n', encoding="utf-8")
+    (project / "src").mkdir()
+    (project / "src" / "main.ts").write_text("export const x = 1\n", encoding="utf-8")
+    return project
+
+
+def _tree(root: Path) -> set[Path]:
+    """Every path under ``root``, relative — for before/after comparison."""
+    return {p.relative_to(root) for p in root.rglob("*")}
+
+
+#: Box-drawing characters Typer/Rich frames error panels with. Stripped
+#: before phrase assertions so a border never lands mid-sentence.
+_BOX_CHARS = "│╭╮╰╯─┃┏┓┗┛━"
+
+
+def _flat_output(result: Any) -> str:
+    """Combined stdout+stderr, de-boxed and whitespace-collapsed.
+
+    Typer renders ``BadParameter`` inside a panel drawn to the terminal
+    width, so the message is hard-wrapped at an unpredictable column and
+    every line is fenced by ``│``. Dropping the border glyphs and
+    collapsing whitespace makes a phrase assertion independent of how
+    wide the runner's terminal happens to be — without it the same test
+    passes at ``COLUMNS=80`` and fails at ``COLUMNS=50``.
+    """
+    combined = result.output + (result.stderr if result.stderr else "")
+    for char in _BOX_CHARS:
+        combined = combined.replace(char, " ")
+    return " ".join(combined.split())
+
+
+def test_render_from_unrelated_cwd_targets_vault_not_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
+) -> None:
+    """Run from an unrelated project: output resolves to the vault build
+    dir, and not one byte lands in that project."""
+    # Setup — vault in one place, an unrelated project checkout in another.
+    _env(monkeypatch)
+    vault = _make_vault(tmp_path)
+    workspace = _make_quartz_workspace(vault)
+    project = _unrelated_project(tmp_path)
+    before = _tree(project)
+    monkeypatch.chdir(project)
+    run_mock = mocker.patch("brain.cli.subprocess.run", return_value=_completed())
+
+    # Exercise
+    result = CliRunner().invoke(app, ["vault", "render", "--vault", str(vault)])
+
+    # Verify — half one: the constructed argv points at the vault build dir.
+    assert result.exit_code == 0, result.output
+    cmd = run_mock.call_args[0][0]
+    output_idx = cmd.index("--output")
+    assert cmd[output_idx + 1] == str((workspace / "dist").resolve())
+
+    # Verify — half two: the unrelated project is byte-for-byte untouched.
+    # Asserting only on the argv would still pass if some stray writer
+    # scattered files into the cwd on the way there.
+    assert not (project / "dist").exists()
+    assert _tree(project) == before
+
+
+def test_render_explicit_to_override_is_honored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
+) -> None:
+    """An explicit absolute ``--to`` still wins over the vault default."""
+    _env(monkeypatch)
+    vault = _make_vault(tmp_path)
+    workspace = _make_quartz_workspace(vault)
+    target = tmp_path / "custom-site"
+    monkeypatch.chdir(tmp_path)
+    run_mock = mocker.patch("brain.cli.subprocess.run", return_value=_completed())
+
+    result = CliRunner().invoke(
+        app,
+        ["vault", "render", "--vault", str(vault), "--to", str(target)],
+    )
+    assert result.exit_code == 0, result.output
+
+    cmd = run_mock.call_args[0][0]
+    assert cmd[cmd.index("--output") + 1] == str(target.resolve())
+    assert str((workspace / "dist").resolve()) not in cmd
+
+
+def test_render_explicit_relative_to_resolves_against_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
+) -> None:
+    """A relative ``--to`` keeps ordinary shell semantics (cwd-relative).
+
+    Pins the deliberate asymmetry: the *default* is cwd-independent, an
+    explicit path the user typed is not. ``bin/brain-wiki-gif`` relies on
+    this (``cd $WORKDIR && brain vault render --to dist``).
+    """
+    _env(monkeypatch)
+    vault = _make_vault(tmp_path)
+    _make_quartz_workspace(vault)
+    here = tmp_path / "here"
+    here.mkdir()
+    monkeypatch.chdir(here)
+    run_mock = mocker.patch("brain.cli.subprocess.run", return_value=_completed())
+
+    result = CliRunner().invoke(
+        app,
+        ["vault", "render", "--vault", str(vault), "--to", "site"],
+    )
+    assert result.exit_code == 0, result.output
+
+    cmd = run_mock.call_args[0][0]
+    assert cmd[cmd.index("--output") + 1] == str((here / "site").resolve())
+
+
+def test_resolve_render_to_defaults_to_supplied_dir(tmp_path: Path) -> None:
+    """``to=None`` yields ``default_dir``, ignoring the cwd entirely."""
     cwd = tmp_path / "cwd"
     cwd.mkdir()
-    # `../escape` from cwd goes to tmp_path/escape, which is outside cwd.
-    with pytest.raises(Exception) as excinfo:
-        _resolve_render_to(Path("../escape"), cwd)
-    assert "stay within the current working directory" in str(excinfo.value)
+    default_dir = tmp_path / "vault" / ".quartz" / "dist"
+    assert (
+        _resolve_render_to(None, cwd, default_dir=default_dir) == default_dir.resolve()
+    )
 
 
 def test_resolve_render_to_accepts_relative(tmp_path: Path) -> None:
     """A plain relative output path resolves under the cwd."""
     cwd = tmp_path / "cwd"
     cwd.mkdir()
-    out = _resolve_render_to(Path("dist"), cwd)
+    out = _resolve_render_to(Path("dist"), cwd, default_dir=tmp_path / "unused")
     assert out == (cwd / "dist").resolve()
 
 
-def test_resolve_render_to_accepts_absolute_inside_cwd(tmp_path: Path) -> None:
-    """An absolute path that happens to live under the cwd is accepted."""
+def test_resolve_render_to_accepts_absolute_outside_cwd(tmp_path: Path) -> None:
+    """An explicit absolute path outside the cwd is honored verbatim.
+
+    The old resolver rejected this (``--to`` had to stay under the cwd)
+    while happily accepting ``--to .`` — the single most destructive
+    value. The containment rule is gone; :func:`_assert_render_output_safe`
+    guards the destructive cases instead.
+    """
     cwd = tmp_path / "cwd"
     cwd.mkdir()
-    target = cwd / "subdir" / "site"
-    out = _resolve_render_to(target, cwd)
+    target = tmp_path / "elsewhere" / "site"
+    out = _resolve_render_to(target, cwd, default_dir=tmp_path / "unused")
     assert out == target.resolve()
 
 
-def test_render_rejects_traversal_to(
+# ---------------------------------------------------------------------------
+# Destructive-output guard
+#
+# Quartz rm -rf's its --output directory before emitting (see
+# quartz_overrides/quartz/build.ts). Any output path that CONTAINS the
+# cwd, the vault, or the Quartz workspace therefore deletes that tree.
+# ---------------------------------------------------------------------------
+
+
+def _anchors(tmp_path: Path) -> dict[str, Path]:
+    """The three anchor directories the guard protects.
+
+    Each lives in its own subtree so a test can point the output at the
+    parent of exactly one anchor and pin which one is reported.
+    """
+    cwd = tmp_path / "work" / "cwd"
+    vault = tmp_path / "data" / "vault"
+    workspace = tmp_path / "ws" / "quartz"
+    for path in (cwd, vault, workspace):
+        path.mkdir(parents=True)
+    return {"cwd": cwd, "vault": vault, "workspace": workspace}
+
+
+@pytest.mark.parametrize(
+    ("anchor_key", "expected_label"),
+    [
+        ("cwd", "the current working directory"),
+        ("vault", "the vault"),
+        ("workspace", "the Quartz workspace"),
+    ],
+)
+def test_assert_render_output_safe_rejects_anchor_itself(
+    tmp_path: Path, anchor_key: str, expected_label: str
+) -> None:
+    """Rendering directly into an anchor directory is refused."""
+    anchors = _anchors(tmp_path)
+    with pytest.raises(Exception) as excinfo:
+        _assert_render_output_safe(anchors[anchor_key], **anchors)
+    assert "refusing to render into" in str(excinfo.value)
+    assert expected_label in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("anchor_key", "expected_label"),
+    [
+        ("cwd", "the current working directory"),
+        ("vault", "the vault"),
+        ("workspace", "the Quartz workspace"),
+    ],
+)
+def test_assert_render_output_safe_rejects_ancestor_of_anchor(
+    tmp_path: Path, anchor_key: str, expected_label: str
+) -> None:
+    """An output dir that CONTAINS an anchor is refused — the build's
+    ``rm -rf`` would take the anchor with it."""
+    anchors = _anchors(tmp_path)
+    with pytest.raises(Exception) as excinfo:
+        _assert_render_output_safe(anchors[anchor_key].parent, **anchors)
+    assert "refusing to render into" in str(excinfo.value)
+    assert expected_label in str(excinfo.value)
+    assert str(anchors[anchor_key].resolve()) in str(excinfo.value)
+
+
+def test_assert_render_output_safe_allows_dedicated_dir(tmp_path: Path) -> None:
+    """The default (``<workspace>/dist``) and any sibling output dir pass.
+
+    A dir *under* an anchor is fine — only a dir that would take an
+    anchor down with it is refused.
+    """
+    anchors = _anchors(tmp_path)
+    _assert_render_output_safe(anchors["workspace"] / "dist", **anchors)
+    _assert_render_output_safe(anchors["cwd"] / "site", **anchors)
+    _assert_render_output_safe(tmp_path / "elsewhere" / "site", **anchors)
+
+
+def test_render_refuses_to_dot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
 ) -> None:
-    """A `--to ../escape` path is rejected with a BadParameter."""
+    """``--to .`` (= rm -rf the working directory) is refused."""
     _env(monkeypatch)
-    cwd = tmp_path / "cwd"
-    cwd.mkdir()
-    vault = _make_vault(cwd)
+    vault = _make_vault(tmp_path)
     _make_quartz_workspace(vault)
-    monkeypatch.chdir(cwd)
+    project = _unrelated_project(tmp_path)
+    before = _tree(project)
+    monkeypatch.chdir(project)
     run_mock = mocker.patch("brain.cli.subprocess.run")
 
     result = CliRunner().invoke(
-        app,
-        [
-            "vault",
-            "render",
-            "--vault",
-            str(vault),
-            "--to",
-            "../escape",
-        ],
+        app, ["vault", "render", "--vault", str(vault), "--to", "."]
     )
+
     assert result.exit_code != 0
-    combined = result.output + (result.stderr if result.stderr else "")
-    assert "stay within" in combined
+    assert "refusing to render into" in _flat_output(result)
+    # No build was launched, and the project is untouched.
     assert run_mock.call_count == 0
+    assert _tree(project) == before
+
+
+def test_render_refuses_output_containing_the_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mocker: Any
+) -> None:
+    """``--to <parent of the vault>`` would delete the vault — refused."""
+    _env(monkeypatch)
+    vault = _make_vault(tmp_path)
+    _make_quartz_workspace(vault)
+    monkeypatch.chdir(tmp_path)
+    run_mock = mocker.patch("brain.cli.subprocess.run")
+
+    result = CliRunner().invoke(
+        app, ["vault", "render", "--vault", str(vault), "--to", str(tmp_path)]
+    )
+
+    assert result.exit_code != 0
+    assert "refusing to render into" in _flat_output(result)
+    assert run_mock.call_count == 0
+    assert (vault / "note.md").exists()
 
 
 # ---------------------------------------------------------------------------

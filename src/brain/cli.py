@@ -14,6 +14,8 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from datetime import date as date_cls
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _dist_version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -77,10 +79,60 @@ if TYPE_CHECKING:
     from .graph_rag.sync import GraphSyncer
 from ._capture_command import _INBOX_TAG as _CAPTURE_INBOX_TAG
 from ._capture_command import capture_app
-from .cli_claude import SkillInstallError
+from .agent import resolve_agent_id
+from .cli_backup import backup_doctor_checks, register_backup_commands
+from .cli_claude import SkillInstallError, register_claude_commands
 from .cli_claude import install_skill as _install_skill
 from .cli_connect import connect_app
 from .cli_demo import demo_app
+
+# Commands extracted out of this module live in the `cli_*` modules below and
+# are attached to `app` by the `cli_registry` registrars, each invoked at the
+# point the commands used to be declared (Typer lists commands in registration
+# order, so the call position is what keeps `brain --help` stable).
+#
+# The `as`-aliased imports are explicit re-exports, not accidents: ~100 files
+# reference `brain.cli`, tests reach these by name (e.g. `brain.cli.search`),
+# and `_capture_command.py` calls `brain.cli._rm_unlink_vault_mirror`. Keeping
+# the aliases preserves the public attribute surface of `brain.cli` unchanged.
+from .cli_docs import _rm_unlink_vault_mirror as _rm_unlink_vault_mirror
+from .cli_docs import _set_draft as _set_draft
+from .cli_docs import list_docs as list_docs
+from .cli_docs import mark_draft as mark_draft
+from .cli_docs import mark_published as mark_published
+from .cli_docs import rm as rm
+from .cli_errors import BrainGroup
+from .cli_ingest import (
+    _gmail_thread_subject_for_dry_run as _gmail_thread_subject_for_dry_run,
+)
+from .cli_ingest import _ingest_outcome_verb as _ingest_outcome_verb
+from .cli_ingest import ingest as ingest
+from .cli_ingest import ingest_dir as ingest_dir
+from .cli_ingest import ingest_gmail as ingest_gmail
+from .cli_ingest import ingest_stdin as ingest_stdin
+from .cli_ingest import reembed as reembed
+from .cli_note import _print_rename_plan as _print_rename_plan
+from .cli_note import note_app as note_app
+from .cli_note import note_new as note_new
+from .cli_note import note_rename as note_rename
+from .cli_recall import register as register_recall
+from .cli_registry import (
+    register_backfill_sensitivity,
+    register_ingest,
+    register_lifecycle,
+    register_list,
+    register_note,
+    register_search,
+)
+from .cli_review_extra import register_review_extra_commands
+from .cli_search import _reconcile_tag_flags as _reconcile_tag_flags
+from .cli_search import _resolve_search_person as _resolve_search_person
+from .cli_search import _warn_if_fts_only_degraded as _warn_if_fts_only_degraded
+from .cli_search import explain as explain
+from .cli_search import search as search
+from .cli_ui import register_ui_commands
+from .cli_usage import register as register_usage
+from .doctor_runtime import dotenv_doctor_check, runtime_doctor_checks
 
 # NOTE: the `brain.eval` package + graph-eval chain (which pulls networkx) is
 # imported lazily inside the `eval` command bodies below, not at module top —
@@ -96,63 +148,55 @@ from .format import (
     entity_summaries_table,
     eval_diff_table,
     eval_report_table,
-    explain_table,
     graph_context_json,
     graph_context_renderable,
     graph_stats_json,
     graph_stats_table,
     resurface_table,
-    search_table,
     timeline_context_json,
     timeline_renderable,
 )
 from .gaps import (
     SearchFailureDetector,
-    record_search_query,
     search_queries_schema_hint,
     top_search_failures,
 )
 from .ingest import (
     Embedder,
-    IngestResult,
     UpdateResult,
     apply_tags,
-    extract_path,
-    ingest_document,
-    supported_extensions,
     update_document,
 )
-from .ingest import gmail as gmail_ingest
-from .ingest.gmail import GmailError
-from .ingest.stdin import make_doc as _stdin_make_doc
 from .interactions import record_interaction
 from .queries import (
     MirrorDriftSummary,
-    PersonMatch,
     analyze_tables,
-    count_chunks_missing_embedding,
     count_documents,
     count_documents_with_tag,
     count_unenriched_documents,
     embedding_column_state,
     fetch_document,
-    finalize_embedding_index,
     iter_all_document_ids,
-    iter_chunks_missing_embedding,
     iter_orphan_mirror_files,
     iter_stale_mirror_files,
     iter_unenriched_documents,
-    list_documents,
     list_existing_tags,
     list_public_tables,
     mirror_drift_summary,
+    planner_stats_state,
     resolve_document_prefix,
-    resolve_person_to_keys,
     summary_counts,
     sync_chunk_search_metadata,
 )
+
+# Re-exported (redundant-alias form) purely as patch points: the command bodies
+# that call these moved to `cli_ingest` / `cli_search`, which resolve them back
+# through `brain.cli` at call time so `patch("brain.cli.<name>", ...)` in the
+# test suite keeps working. Nothing in this module calls them any more.
+from .queries import finalize_embedding_index as finalize_embedding_index
+from .queries import resolve_person_to_keys as resolve_person_to_keys
 from .resurface import resurface_docs
-from .search import SearchDiagnostics, hybrid_search
+from .search import hybrid_search as hybrid_search
 from .setup import ProfileName  # lightweight StrEnum for `brain setup --profile` (no networkx)
 from .tags import normalize_tag, normalize_tags
 from .vault import init_vault
@@ -180,10 +224,8 @@ from .vault.graph_format import to_dot, to_json, to_mermaid
 from .vault.note_builder import (
     _build_embedder,
     _build_note_text,
-    create_vault_note,
 )
 from .vault.quartz_overlay import OverlayError, apply_overlay, plan_overlay
-from .vault.rename import RenameError, RenameOp, apply_rename, plan_rename
 from .vault.slug import slugify
 from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.sync_summaries import sync_summaries
@@ -223,6 +265,12 @@ _KRISP_INGEST_HELP = (
 
 
 app = typer.Typer(
+    # `BrainGroup` re-raises ConfigError as a click.UsageError so an invalid
+    # BRAIN_* env value renders like a bad flag (boxed, exit 2) instead of a
+    # traceback. Every command calls Config.load() in its own body, so the
+    # root group's invoke() is the only seam that covers all of them —
+    # including the nested sub-apps. See cli_errors.py.
+    cls=BrainGroup,
     name="brain",
     help="Local personal knowledge base. Hybrid search over your career corpus.",
     epilog=_KRISP_INGEST_HELP,
@@ -243,12 +291,11 @@ vault_directory_app = typer.Typer(
 )
 vault_app.add_typer(vault_directory_app, name="directory")
 
-note_app = typer.Typer(
-    name="note",
-    help="Authoring commands for vault notes.",
-    no_args_is_help=True,
-)
-app.add_typer(note_app, name="note")
+# `brain note` authoring sub-app — the sub-app object and its `new` /
+# `rename` commands live in `cli_note.py`. Registered here because Typer
+# lists sub-apps in `add_typer` order, and `note` must stay between
+# `vault` and `backfill`.
+register_note(app)
 
 backfill_app = typer.Typer(
     name="backfill",
@@ -256,6 +303,10 @@ backfill_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(backfill_app, name="backfill")
+# Scoped to ``backfill_app``, not the root app — deliberately kept out of
+# ``cli_registry.REGISTRARS``, whose entries are all invoked by
+# ``register_all`` with the *root* app (see cli_registry.py:45-54).
+register_backfill_sensitivity(backfill_app)
 
 owner_app = typer.Typer(
     name="owner",
@@ -280,6 +331,10 @@ claude_app = typer.Typer(
     no_args_is_help=True,
 )
 app.add_typer(claude_app, name="claude")
+# `install-hooks` + the hidden `capture-hook` live in `cli_claude`, which cannot
+# import this module back (the dependency only runs cli.py -> cli_claude). It
+# therefore receives the sub-app object and attaches to it here.
+register_claude_commands(claude_app)
 
 graphrag_app = typer.Typer(
     name="graphrag",
@@ -328,8 +383,46 @@ app.add_typer(gaps_app, name="gaps")
 app.add_typer(demo_app, name="demo")
 
 
+#: Distribution name on PyPI. The import package is ``brain``; the *distribution*
+#: is ``secondbrain-py`` (pyproject.toml ``[project] name``), and
+#: ``importlib.metadata`` keys off the distribution.
+_DIST_NAME = "secondbrain-py"
+
+
+def _installed_version() -> str:
+    """Return the installed distribution version, or a sentinel when absent.
+
+    ``PackageNotFoundError`` is the normal case for a source checkout that was
+    never ``pip install``-ed, so it must not crash the CLI — reporting an
+    unknown version is strictly better than refusing to report one.
+    """
+    try:
+        return _dist_version(_DIST_NAME)
+    except PackageNotFoundError:
+        return "unknown (not installed as a distribution)"
+
+
+def _version_callback(value: bool) -> None:
+    """Print the version and exit, before Typer requires a subcommand."""
+    if not value:
+        return
+    typer.echo(f"brain {_installed_version()}")
+    raise typer.Exit()
+
+
 @app.callback()
-def _main() -> None:
+def _main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        help="Show the installed brain version and exit.",
+        # Eager: without this Typer resolves "Missing command" first and exits
+        # non-zero, so `brain --version` on its own would fail.
+        is_eager=True,
+        callback=_version_callback,
+    ),
+) -> None:
     """brain — second brain CLI root."""
 
 
@@ -403,6 +496,43 @@ def setup_cmd(
         raise typer.Exit(code=1) from exc
 
 
+def _provision_brain_home_dotenv_for_init(brain_home: Path) -> None:
+    """Link ``$BRAIN_HOME/.env`` at a dev checkout's ``.env`` if it is missing.
+
+    ``brain init`` reaches this only AFTER ``Config.load()`` succeeded, so a
+    working config exists SOMEWHERE — but possibly only at a location the
+    console entrypoint on PATH can never see (the repo ``.env``, or a cwd
+    walk-up). Linking the canonical ``$BRAIN_HOME/.env`` at it makes the same
+    config reachable from any directory.
+
+    Deliberately passes ``body_factory=None``: init must never invent a fresh
+    ``.env`` from the template, because the template's ``DATABASE_URL`` may
+    point at a different database than the one it was just told to migrate —
+    and that file would then win over the environment in the next shell.
+    Writing a real file is ``brain setup``'s job; it knows the port and profile.
+    """
+    from .setup import (
+        PROVISION_DANGLING,
+        PROVISION_SYMLINKED,
+        provision_brain_home_dotenv,
+    )
+
+    provision = provision_brain_home_dotenv(brain_home)
+    if provision.action == PROVISION_SYMLINKED:
+        typer.echo(f"config          linked {provision.path} -> {provision.target}")
+    elif provision.action == PROVISION_DANGLING:
+        # Never clobbered, so this does not self-heal — print the exact repair
+        # command, worded identically to `brain doctor` and `brain setup`.
+        typer.secho(
+            f"config          WARNING: {provision.path} is a broken symlink -> "
+            f"{provision.target} (target moved or was deleted); `brain` will "
+            "fail outside this directory until it is repaired.\n"
+            f"                Fix: rm {provision.path} && brain setup",
+            fg="yellow",
+            err=True,
+        )
+
+
 @app.command()
 def init() -> None:
     """Apply database migrations and align embedding column with active embedder.
@@ -415,6 +545,7 @@ def init() -> None:
     to switch backends).
     """
     cfg = Config.load()
+    _provision_brain_home_dotenv_for_init(cfg.brain_home)
     embedder = make_embedder(cfg)
     search_backfill_report: backfill_search.BackfillReport | None = None
     with connect(cfg.database_url) as conn:
@@ -896,37 +1027,42 @@ def _check_chunks_stats(
     after restore). Meanwhile ``EXPLAIN`` falls back to default estimates,
     producing bad query plans.
 
+    Reads the AUTHORITATIVE catalogs via
+    :func:`brain.queries.planner_stats_state`, not
+    ``pg_stat_user_tables``. The cumulative-activity counters this check used
+    to read are held in shared memory and discarded on an unclean shutdown,
+    crash recovery, or ``pg_stat_reset*()`` — so they reported a fully-analyzed
+    table as "never analyzed" after any crash-restart, and printed
+    ``n_live_tup`` row counts wrong by orders of magnitude (13 for a 13,078-row
+    table on this machine). A doctor that cries wolf gets ignored, which is its
+    own way of reproducing the outage this wave is about.
+
     Reports:
-    - ``chunks stats   OK (analyzed <ago>)`` — last_analyze or last_autoanalyze
-      is set (whichever is more recent).
-    - ``chunks stats   WARN — never analyzed`` when BOTH are NULL and the
-      table is non-empty. Suggests ``brain analyze`` (which runs the SQL).
-    - Silently skips the check (no output) when the table is empty (fresh
-      install before any ingest).
+    - ``chunks stats   OK (last analyzed <ts>)`` — stats present, counters intact.
+    - ``chunks stats   OK (planner stats present …; counters reset …)`` — stats
+      present but the activity counters were reset. NOT a warning: the planner
+      is fully equipped and no ``ANALYZE`` is needed.
+    - ``chunks stats   WARN — never analyzed`` — the genuine case:
+      ``pg_statistic`` holds nothing for a non-empty table.
+    - Silently skips when the table is absent or empty (fresh install).
 
     Records to ``report`` (a fresh human-printing report by default, so a direct
     test call keeps echoing exactly as before).
     """
     report = report or _DoctorReport()
     try:
-        row = conn.execute(
-            """
-            SELECT last_analyze, last_autoanalyze, n_live_tup
-            FROM pg_stat_user_tables
-            WHERE relname = 'chunks'
-            """
-        ).fetchone()
+        state = planner_stats_state(conn, "chunks")
     except psycopg.Error as exc:
         _rollback_quietly(conn)
         report.record(
             _DoctorCheck(
                 check="chunks stats",
                 status="warn",
-                detail=f"could not probe pg_stat_user_tables: {exc}",
+                detail=f"could not probe planner statistics: {exc}",
                 lines=(
                     _DoctorLine(
-                        "chunks stats    WARN — could not probe "
-                        f"pg_stat_user_tables: {exc}",
+                        "chunks stats    WARN — could not probe planner "
+                        f"statistics: {exc}",
                         fg="yellow",
                     ),
                 ),
@@ -934,51 +1070,64 @@ def _check_chunks_stats(
         )
         return
 
-    if row is None:
-        # Table not yet visible in pg_stat_user_tables (no vacuums/analyzes yet).
+    # Absent or genuinely empty — no statistics are expected. Note this branches
+    # on the bounded EXISTS probe, never on estimated_rows: a never-analyzed
+    # table reports reltuples = -1 (normalized to 0) no matter how many rows it
+    # holds, so branching on the estimate would silently skip the one table most
+    # in need of the warning.
+    if not state.exists or not state.has_rows:
         return
 
-    last_analyze, last_autoanalyze, n_live_tup = row
-    if n_live_tup == 0:
-        # Empty table — no stats needed yet; skip so fresh installs stay clean.
-        return
-
-    most_recent = None
-    if last_analyze is not None:
-        most_recent = last_analyze
-    if last_autoanalyze is not None and (most_recent is None or last_autoanalyze > most_recent):
-        most_recent = last_autoanalyze
-
-    if most_recent is None:
+    if not state.has_planner_stats:
+        rows = f"{state.estimated_rows:,}" if state.estimated_rows else "unknown"
+        detail = f"never analyzed (~{rows} rows, pg_statistic empty)"
         report.record(
             _DoctorCheck(
                 check="chunks stats",
                 status="warn",
-                detail=f"never analyzed ({n_live_tup:,} live rows, stats NULL)",
+                detail=detail,
                 remedy="brain analyze  (or SQL: ANALYZE chunks;)",
                 lines=(
                     _DoctorLine(
-                        f"chunks stats    WARN — never analyzed ({n_live_tup:,} "
-                        "live rows, stats NULL). Run: brain analyze  (or SQL: "
-                        "ANALYZE chunks;)  This can happen after pg_restore — "
-                        "planners use default estimates until ANALYZE runs.",
+                        f"chunks stats    WARN — {detail}. Run: brain analyze  "
+                        "(or SQL: ANALYZE chunks;)  This can happen after "
+                        "pg_restore — planners use default estimates until "
+                        "ANALYZE runs.",
                         fg="yellow",
                     ),
                 ),
             )
         )
-    else:
-        analyzed_at = most_recent.strftime("%Y-%m-%d %H:%M UTC")
+        return
+
+    if state.last_analyzed is None:
+        # Stats are present but the activity counters were reset (crash
+        # recovery, unclean shutdown, pg_stat_reset). The planner is fine —
+        # report OK and explain the missing timestamp rather than demanding a
+        # pointless ANALYZE.
+        detail = (
+            f"planner stats present (~{state.estimated_rows:,} rows); "
+            "activity counters reset since last restart"
+        )
         report.record(
             _DoctorCheck(
                 check="chunks stats",
                 status="ok",
-                detail=f"last analyzed {analyzed_at}",
-                lines=(
-                    _DoctorLine(f"chunks stats    OK (last analyzed {analyzed_at})"),
-                ),
+                detail=detail,
+                lines=(_DoctorLine(f"chunks stats    OK ({detail})"),),
             )
         )
+        return
+
+    analyzed_at = state.last_analyzed.strftime("%Y-%m-%d %H:%M UTC")
+    report.record(
+        _DoctorCheck(
+            check="chunks stats",
+            status="ok",
+            detail=f"last analyzed {analyzed_at}",
+            lines=(_DoctorLine(f"chunks stats    OK (last analyzed {analyzed_at})"),),
+        )
+    )
 
 
 def _check_inbox_size(
@@ -1525,6 +1674,12 @@ def doctor(
                 lines=(_DoctorLine(f"env             FAIL — {e}", fg="red", err=True),),
             )
         )
+        # Config could not load — which is exactly when the user most needs to
+        # know WHY. dotenv_doctor_check is callable on a broken install (it
+        # never constructs a Config), so it can name the missing / dangling /
+        # unreadable .env behind the failure instead of leaving them with a
+        # bare "DATABASE_URL is not set".
+        report.record_all(dotenv_doctor_check())
         if json_output:
             emit_json(report.to_payload())
         raise typer.Exit(code=1) from e
@@ -1617,6 +1772,17 @@ def doctor(
         report.record_all(_resolve_probe(embedder_future, "embedder"))
         report.record_all(_resolve_probe(gws_future, "gws CLI"))
         report.record_all(_resolve_probe(npx_future, "quartz/npx"))
+
+        # Backup freshness (F3). Pure filesystem stat of the backup directory —
+        # no database, no network — so it runs after the probes and cannot fail
+        # the connection block above. Self-contained WARN, like _check_age.
+        report.record_all(backup_doctor_checks(cfg))
+
+        # Runtime health OUTSIDE this process (C4): $BRAIN_HOME/.env, the
+        # launchd daemons, and wiki-build freshness. Every check above stops at
+        # the process boundary, which is how a broken .env silently killed all
+        # three daemons for twelve days while doctor stayed green and exited 0.
+        report.record_all(runtime_doctor_checks(cfg))
 
     if json_output:
         emit_json(report.to_payload())
@@ -1754,6 +1920,14 @@ def status(
         typer.echo(f"  {kind:<12} {count}")
 
 
+# `brain backup` / `brain restore` sit with the other operational commands.
+# Called here (rather than from a single hub call at the end of the module)
+# because Typer renders `brain --help` in registration order — see the
+# call-position note in `cli_registry`.
+register_backup_commands(app)
+register_ui_commands(app)
+
+
 @app.command()
 def analyze(
     table: str = typer.Argument(
@@ -1877,7 +2051,7 @@ def _report_mirror_drift(
     """Report a one-line "vault drift" status for the ``_ingested/`` mirror tier.
 
     Informational only — never fails the doctor check. Counts ingested
-    rows, rows missing ``vault_path``, on-disk orphan files (file present,
+    rows, rows missing ``vault_path``, clobbered mirrors, on-disk orphan files (file present,
     no DB row matches its frontmatter id), and ghost rows (DB claims a
     ``vault_path`` whose file is missing from disk).
 
@@ -1911,7 +2085,8 @@ def _report_mirror_drift(
         f"{summary.total_ingested_rows} mirrors, "
         f"{summary.rows_with_null_vault_path} NULL vault_path, "
         f"{summary.orphan_files} orphan files, "
-        f"{summary.ghost_rows} ghost rows"
+        f"{summary.ghost_rows} ghost rows, "
+        f"{summary.clobbered_mirrors} clobbered mirrors"
     )
     if _drift_clean(summary):
         report.record(
@@ -1926,14 +2101,25 @@ def _report_mirror_drift(
     lines = [_DoctorLine(f"vault drift     drift detected ({counters})", fg="yellow")]
     remedies: list[str] = []
     if summary.rows_with_null_vault_path:
+        # BOTH commands are required and the parenthetical is load-bearing:
+        # `export --force` alone is a NO-OP for the common orphan shape, because
+        # export skips a file whose on-disk hash already matches the row — and it
+        # never writes `vault_path` back at all. Only `vault sync` (file → DB)
+        # sets the column. Without the reason, a user who sees "wrote 0 file(s)"
+        # reasonably stops at the first command.
         lines.append(
             _DoctorLine(
-                "                — `brain vault export --force` to populate "
-                "NULL vault_path",
+                "                — `brain vault export --force` then "
+                "`brain vault sync` to repair NULL vault_path (BOTH: export "
+                "writes the file, sync writes the path back)",
                 fg="yellow",
             )
         )
-        remedies.append("`brain vault export --force` to populate NULL vault_path")
+        remedies.append(
+            "`brain vault export --force` then `brain vault sync` to repair "
+            "NULL vault_path (both commands: export writes the file, sync "
+            "writes the path back)"
+        )
     if summary.orphan_files:
         lines.append(
             _DoctorLine(
@@ -1955,6 +2141,23 @@ def _report_mirror_drift(
             "`brain vault export --force` to recreate missing files "
             "(or `brain rm <id>` per ghost)"
         )
+    if summary.clobbered_mirrors:
+        # Deliberately NOT prune-orphans: the file sits at a live row's
+        # vault_path, so deleting it destroys that row's mirror. Rewriting the
+        # file from its owning row is the only non-destructive repair.
+        lines.append(
+            _DoctorLine(
+                "                — `brain vault export --force` to rewrite "
+                "clobbered mirrors from their owning row (do NOT "
+                "`prune-orphans` — the file belongs to a live row)",
+                fg="yellow",
+            )
+        )
+        remedies.append(
+            "`brain vault export --force` to rewrite clobbered mirrors from "
+            "their owning row (do NOT prune-orphans — the file belongs to a "
+            "live row)"
+        )
     report.record(
         _DoctorCheck(
             check="vault drift",
@@ -1972,6 +2175,12 @@ def _drift_clean(summary: MirrorDriftSummary) -> bool:
         summary.rows_with_null_vault_path == 0
         and summary.orphan_files == 0
         and summary.ghost_rows == 0
+        # A clobbered mirror (file whose frontmatter id resolves to nothing, but
+        # whose PATH is a live row's vault_path) used to be counted as an orphan.
+        # Splitting it out dropped prod's orphan_files 1 → 0, so omitting it here
+        # would make doctor report "vault drift OK" over an intact data-loss
+        # hazard — a silent failure of exactly the kind this wave exists to kill.
+        and summary.clobbered_mirrors == 0
     )
 
 
@@ -2005,491 +2214,11 @@ def _build_graph_syncer(cfg: Config) -> GraphSyncer:
     return make_graph_syncer(cfg)
 
 
-def _ingest_outcome_verb(
-    result: IngestResult, *, force: bool = False,
-    already_verb: str = "skipped (already ingested)",
-) -> str:
-    """Map an :class:`IngestResult` to a human status verb.
-
-    A doc that produced no chunks (whitespace-only file, image-only PDF) comes
-    back as ``document_id=None, created=False`` — that is an *empty* document,
-    not an unchanged re-ingest, so it gets its own verb (Task 2.12(b)). ``force``
-    (single-file / stdin ingest) reports an in-place rewrite as "updated" even
-    when the body hash is unchanged. ``already_verb`` lets ``ingest-dir`` keep
-    its historical bare "skipped" wording while ``ingest`` / ``ingest-stdin``
-    spell out "skipped (already ingested)".
-    """
-    if result.document_id is None:
-        return "skipped (empty document)"
-    if result.created:
-        return "ingested"
-    if result.body_changed or force:
-        return "updated"
-    return already_verb
-
-
-@app.command()
-def ingest(
-    path: Path = typer.Argument(..., exists=True, dir_okay=False, readable=True),
-    tag: list[str] = typer.Option([], "--tag", "-t", help="Apply tag(s) to the document."),
-    force: bool = typer.Option(
-        False, "--force", help="Re-ingest even if content already exists."
-    ),
-    no_enrich: bool = typer.Option(
-        False, "--no-enrich",
-        help=(
-            "Skip the local-Ollama auto-summary post-ingest hook (Q1-D). "
-            "Default: enrichment runs on every ingest; Ollama-down never "
-            "fails the ingest (logged WARN, row stays unenriched)."
-        ),
-    ),
-) -> None:
-    """Ingest a single file (TXT/MD/PDF/DOCX)."""
-    cfg = Config.load()
-    embedder = _build_embedder(cfg)
-    enricher = None if no_enrich else _build_enricher(cfg)
-    graph_syncer = _build_graph_syncer(cfg)
-    doc = extract_path(path)
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        result = ingest_document(
-            conn,
-            embedder=embedder,
-            doc=doc,
-            source_kind="manual",
-            tags=list(tag),
-            force=force,
-            vault_root=cfg.vault_path,
-            enricher=enricher,
-            enrich=not no_enrich,
-            enrich_min_tokens=cfg.enrich_min_tokens,
-            graph_syncer=graph_syncer,
-        )
-    verb = _ingest_outcome_verb(result, force=force)
-    typer.echo(f"{verb}: {path.name} → {result.document_id}")
-
-
-@app.command(name="ingest-dir")
-def ingest_dir(
-    path: Path = typer.Argument(..., exists=True, file_okay=False, readable=True),
-    tag: list[str] = typer.Option([], "--tag", "-t", help="Apply tag(s) to every document."),
-    ext: str | None = typer.Option(
-        None,
-        "--ext",
-        help="Comma-separated extensions to include (default: all supported).",
-    ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="List files that would be ingested without writing."
-    ),
-    no_enrich: bool = typer.Option(
-        False, "--no-enrich",
-        help="Skip the local-Ollama auto-summary post-ingest hook (Q1-D).",
-    ),
-) -> None:
-    """Recursively ingest a directory of files."""
-    cfg = Config.load()
-    extensions = (
-        [f".{e.strip().lstrip('.').lower()}" for e in ext.split(",")]
-        if ext
-        else supported_extensions()
-    )
-    files = [
-        p
-        for p in Path(path).rglob("*")
-        if p.is_file() and p.suffix.lower() in extensions
-    ]
-    typer.echo(f"found {len(files)} file(s)")
-    if dry_run:
-        for f in files:
-            typer.echo(f"  would ingest: {f}")
-        return
-
-    embedder = _build_embedder(cfg)
-    enricher = None if no_enrich else _build_enricher(cfg)
-    graph_syncer = _build_graph_syncer(cfg)
-    wrote = 0
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        for f in files:
-            try:
-                doc = extract_path(f)
-                result = ingest_document(
-                    conn,
-                    embedder=embedder,
-                    doc=doc,
-                    source_kind="manual",
-                    tags=list(tag),
-                    vault_root=cfg.vault_path,
-                    enricher=enricher,
-                    enrich=not no_enrich,
-                    enrich_min_tokens=cfg.enrich_min_tokens,
-                    graph_syncer=graph_syncer,
-                )
-                verb = _ingest_outcome_verb(result, already_verb="skipped")
-                if result.created or result.body_changed:
-                    wrote += 1
-                typer.echo(f"  {verb}: {f.name}")
-            except (ValueError, OSError, psycopg.Error) as e:
-                typer.secho(f"  failed: {f.name} — {e}", fg="red")
-        # Refresh planner stats once, after the batch, only if anything landed.
-        if wrote:
-            _analyze_after_bulk_write(conn, context="ingest-dir")
-
-
-@app.command(name="ingest-stdin")
-def ingest_stdin(
-    source: str = typer.Option(
-        ..., "--source", help="Source kind (krisp, slack, gmail, ...)."
-    ),
-    external_id: str = typer.Option(
-        ..., "--external-id", help="Stable id from the upstream system."
-    ),
-    title: str = typer.Option(..., "--title", help="Document title."),
-    content_type: str = typer.Option(
-        "transcript", "--content-type", help="Content type label (e.g. transcript, note)."
-    ),
-    tag: list[str] = typer.Option([], "--tag", "-t", help="Apply tag(s) to the document."),
-    metadata: str | None = typer.Option(
-        None, "--metadata", help="JSON metadata blob merged into source + document metadata."
-    ),
-    date: str | None = typer.Option(
-        None, "--date", help="Date stamp (ISO); stored under metadata.date."
-    ),
-    force: bool = typer.Option(
-        False, "--force", help="Re-ingest even if content already exists."
-    ),
-    no_enrich: bool = typer.Option(
-        False, "--no-enrich",
-        help="Skip the local-Ollama auto-summary post-ingest hook (Q1-D).",
-    ),
-) -> None:
-    """Ingest content piped on stdin (used by Claude for Krisp/Slack)."""
-    content = sys.stdin.read()
-    if not content.strip():
-        typer.secho("stdin was empty", fg="red", err=True)
-        raise typer.Exit(code=1)
-    meta: dict[str, Any] = _json.loads(metadata) if metadata else {}
-    if date:
-        meta.setdefault("date", date)
-    # Wave Q1-D — action-items docs require a parent_meeting_external_id so
-    # the parent transcript is discoverable. Without it `brain todo` loses
-    # the link; surfacing a clean BadParameter here is friendlier than
-    # letting a malformed row into the DB.
-    if content_type == "krisp_action_items" and "parent_meeting_external_id" not in meta:
-        raise typer.BadParameter(
-            "--content-type krisp_action_items requires "
-            '--metadata \'{"parent_meeting_external_id": "<id>"}\''
-        )
-    doc = _stdin_make_doc(
-        content=content,
-        title=title,
-        content_type=content_type,
-        metadata=meta,
-    )
-
-    cfg = Config.load()
-    embedder = _build_embedder(cfg)
-    enricher = None if no_enrich else _build_enricher(cfg)
-    graph_syncer = _build_graph_syncer(cfg)
-    # Krisp ingest triggers Calendar/Contacts directory refresh via the gws
-    # CLI; other sources don't need a runner. Refresh failures are warnings,
-    # not errors — the ingest itself still succeeds.
-    gws_runner = real_gws_runner if source == "krisp" else None
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        result = ingest_document(
-            conn,
-            embedder=embedder,
-            doc=doc,
-            source_kind=source,
-            source_external_id=external_id,
-            source_metadata=meta,
-            tags=list(tag),
-            force=force,
-            gws_runner=gws_runner,
-            vault_root=cfg.vault_path,
-            enricher=enricher,
-            enrich=not no_enrich,
-            enrich_min_tokens=cfg.enrich_min_tokens,
-            graph_syncer=graph_syncer,
-        )
-    verb = _ingest_outcome_verb(result, force=force)
-    typer.echo(f"{verb}: {title} → {result.document_id}")
-
-
-@app.command(name="ingest-gmail")
-def ingest_gmail(
-    query: str | None = typer.Option(None, "--query", "-q", help="Raw Gmail search query."),
-    label: str | None = typer.Option(None, "--label", "-l", help="Gmail label to scope to."),
-    from_addr: str | None = typer.Option(None, "--from", help="Filter by sender address."),
-    since: str | None = typer.Option(None, "--since", help="Earliest date (YYYY/MM/DD)."),
-    until: str | None = typer.Option(None, "--until", help="Latest date (YYYY/MM/DD)."),
-    tag: list[str] = typer.Option([], "--tag", "-t", help="Apply tag(s) to each document."),
-    max_results: int = typer.Option(50, "--max", help="Max messages to fetch."),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="List matches without ingesting."
-    ),
-    no_enrich: bool = typer.Option(
-        False, "--no-enrich",
-        help="Skip the local-Ollama auto-summary post-ingest hook (Q1-D).",
-    ),
-) -> None:
-    """Ingest Gmail messages via the `gws` CLI, batched per thread.
-
-    P2.3 collapses N messages sharing a ``threadId`` into a single
-    ``content_type='email_thread'`` document via :func:`to_extracted_thread`.
-    Re-ingesting an unchanged thread is a no-op (P2.2 same-hash short-circuit);
-    a thread that has grown by one message updates the existing row in place
-    so downstream links / derived_links continue to point at a stable UUID.
-
-    At least one scope flag is required (no bulk-inbox ingests).
-    """
-    if not any([query, label, from_addr, since, until]):
-        typer.secho(
-            "ingest-gmail requires at least one scope flag: "
-            "--query, --label, --from, --since, --until",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-
-    cfg = Config.load()
-    stubs = gmail_ingest.list_messages(
-        query=query,
-        label=label,
-        since=since,
-        until=until,
-        from_addr=from_addr,
-        max_results=max_results,
-    )
-    typer.echo(f"found {len(stubs)} message(s)")
-    if not stubs:
-        typer.echo("no messages matched")
-        return
-
-    # Group stubs by Gmail ``threadId`` while preserving list-order so the
-    # dry-run report is deterministic across runs that hit the same query.
-    threads: dict[str, list[dict[str, Any]]] = {}
-    for stub in stubs:
-        tid = stub.get("threadId") or stub.get("id")
-        if not isinstance(tid, str) or not tid:
-            # Defensive: malformed stubs without an id at all are unreachable
-            # against real Gmail traffic, but skip rather than crash so a
-            # partial response from `gws` doesn't poison the whole batch.
-            continue
-        threads.setdefault(tid, []).append(stub)
-
-    total_messages = sum(len(t) for t in threads.values())
-
-    if dry_run:
-        typer.echo(f"would ingest {len(threads)} thread(s):")
-        for tid, ts in threads.items():
-            subject = _gmail_thread_subject_for_dry_run(ts)
-            typer.echo(
-                f"  [thread_id={tid} messages={len(ts)}] Subject: {subject}"
-            )
-        typer.echo(
-            f"total: {len(threads)} threads, {total_messages} messages → "
-            f"{len(threads)} documents"
-        )
-        return
-
-    embedder = _build_embedder(cfg)
-    enricher = None if no_enrich else _build_enricher(cfg)
-    graph_syncer = _build_graph_syncer(cfg)
-    ingested = 0
-    ingested_draft = 0
-    skipped = 0
-    failed = 0
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        for tid, ts in threads.items():
-            try:
-                messages = [gmail_ingest.read_message(stub["id"]) for stub in ts]
-                doc = gmail_ingest.to_extracted_thread(messages)
-                result = ingest_document(
-                    conn,
-                    embedder=embedder,
-                    doc=doc,
-                    source_kind="gmail",
-                    source_external_id=tid,
-                    source_metadata={
-                        "thread_id": tid,
-                        "from": doc.metadata.get("from"),
-                        "date": doc.metadata.get("date"),
-                    },
-                    tags=list(tag),
-                    vault_root=cfg.vault_path,
-                    draft=bool(doc.metadata.get("_is_draft", False)),
-                    enricher=enricher,
-                    enrich=not no_enrich,
-                    enrich_min_tokens=cfg.enrich_min_tokens,
-                    graph_syncer=graph_syncer,
-                )
-                # P2.2 thread upsert: ``created`` is True only on first
-                # insert; ``body_changed`` is True when an existing thread
-                # was rewritten in place (new message appended). Either
-                # counts as "ingested" for the per-thread summary; an
-                # unchanged thread (both False) is "skipped".
-                if result.created or result.body_changed:
-                    typer.echo(
-                        f"  ingested thread {tid} ({len(ts)} messages)"
-                    )
-                    ingested += 1
-                    if result.created and doc.metadata.get("_is_draft"):
-                        ingested_draft += 1
-                else:
-                    typer.echo(f"  skipped thread {tid} (unchanged)")
-                    skipped += 1
-            except (GmailError, psycopg.Error, ValueError, KeyError) as e:
-                typer.secho(
-                    f"  failed thread {tid} ({len(ts)} messages): {e}",
-                    fg="red",
-                )
-                failed += 1
-                continue
-    draft_note = f" ({ingested_draft} draft)" if ingested_draft else ""
-    typer.echo(
-        f"{ingested} ingested{draft_note}, {skipped} skipped (unchanged), "
-        f"{failed} failed"
-    )
-
-
-def _gmail_thread_subject_for_dry_run(stubs: list[dict[str, Any]]) -> str:
-    """Best-effort subject lookup for ``brain ingest-gmail --dry-run``.
-
-    Reads the FIRST message of the thread to pull its ``Subject`` header — a
-    single ``read_message`` call per thread is acceptably cheap for a dry-run
-    report (``ingest-gmail`` callers typically scope to <100 threads). On any
-    failure the function returns ``"(unable to fetch)"`` so a single bad
-    message can't abort the whole report; the actual ingest pass will hit
-    the same failure and surface it via the structured per-thread error path.
-    """
-    try:
-        first_id = stubs[0]["id"]
-        full = gmail_ingest.read_message(first_id)
-    except (GmailError, KeyError, IndexError):
-        return "(unable to fetch)"
-    payload = full.get("payload") or {}
-    headers = payload.get("headers") or []
-    for h in headers:
-        if (h.get("name") or "").lower() == "subject":
-            return h.get("value") or "(no subject)"
-    return "(no subject)"
-
-
-@app.command()
-def reembed(
-    limit: int | None = typer.Option(
-        None, "--limit", "-n", help="Max chunks to embed (default: all)."
-    ),
-    batch_size: int = typer.Option(32, "--batch-size", help="Embedding batch size."),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="Report counts without embedding."
-    ),
-    all_chunks: bool = typer.Option(
-        False,
-        "--all",
-        "-a",
-        help="Re-embed every chunk (not just NULL). Use after switching backends.",
-    ),
-    finalize: bool = typer.Option(
-        True,
-        "--finalize/--no-finalize",
-        help="After backfill, apply NOT NULL on chunks.embedding.",
-    ),
-) -> None:
-    """Backfill ``chunks.embedding`` for rows missing an embedding.
-
-    After ``brain init``, chunks have NULL embeddings until this command
-    runs. Idempotent — safe to re-run after a crash; only rows still NULL
-    are touched.
-
-    Pass ``--all`` to re-embed every chunk regardless of NULL state. Use
-    this after switching ``BRAIN_EMBEDDER`` backends, where existing
-    embeddings are still present in the column but live in the wrong
-    vector space.
-
-    By default, after backfill completes (0 NULL rows remain), applies
-    NOT NULL on the embedding column. For backends with ``dim <= 2000``
-    (arctic, voyage), additionally creates an HNSW cosine index. For Qwen3
-    (4096 dims) the index is skipped — pgvector caps HNSW at 2000 dims
-    for ``vector``; sequential scan is acceptable at personal-corpus scale.
-
-    Pass ``--no-finalize`` to skip the constraint + index step (e.g. for
-    incremental runs over multiple sessions).
-    """
-    cfg = Config.load()
-    embedder = _build_embedder(cfg)
-
-    # FTS-only backend: there are no vectors to backfill, and finalize (NOT NULL
-    # + HNSW) must NOT run — the column stays nullable so the docs are still
-    # ingestable/searchable. Short-circuit BEFORE any DB work (and before the
-    # --dry-run branch) so `brain reembed` is a friendly no-op instead of
-    # crashing on ``NullEmbedder.embed()``.
-    if not getattr(embedder, "produces_embeddings", True):
-        typer.echo(
-            "FTS-only backend (BRAIN_EMBEDDER=none) — nothing to reembed. "
-            "Install Ollama, set BRAIN_EMBEDDER=arctic, then run 'brain init' "
-            "and 'brain reembed'."
-        )
-        return
-
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        target_total = count_chunks_missing_embedding(
-            conn, include_embedded=all_chunks
-        )
-        target = min(limit, target_total) if limit is not None else target_total
-        scope = "chunk(s) total" if all_chunks else "chunk(s) have NULL embedding"
-
-        if dry_run:
-            typer.echo(f"would embed {target} chunk(s)")
-            typer.echo(f"  ({target_total} {scope})")
-            return
-
-        embedded = 0
-        if target_total == 0:
-            typer.echo("nothing to embed (all chunks have embeddings)")
-        else:
-            for batch in iter_chunks_missing_embedding(
-                conn, batch_size=batch_size, include_embedded=all_chunks
-            ):
-                if limit is not None and embedded >= limit:
-                    break
-                if limit is not None:
-                    batch = batch[: limit - embedded]
-                vectors = embedder.embed(
-                    [c.content for c in batch], input_type="document"
-                )
-                for c, vec in zip(batch, vectors, strict=True):
-                    conn.execute(
-                        "UPDATE chunks SET embedding=%s WHERE id=%s",
-                        (vec, c.id),
-                    )
-                embedded += len(batch)
-                typer.echo(f"  embedded {embedded}/{target}")
-
-            verb = "re-embedded" if all_chunks else "backfilled"
-            typer.echo(f"{verb} {embedded} chunk(s)")
-
-        if finalize:
-            remaining = count_chunks_missing_embedding(conn)
-            if remaining == 0:
-                try:
-                    finalize_embedding_index(conn, embedder)
-                    typer.echo("finalized: embedding column is now NOT NULL")
-                except ValueError as e:
-                    typer.secho(f"finalize failed: {e}", fg="red", err=True)
-                    raise typer.Exit(code=1) from e
-            else:
-                typer.echo(
-                    f"finalize skipped: {remaining} chunk(s) still have NULL embedding"
-                )
-
-        # Refresh planner stats once the embeddings actually changed.
-        if embedded:
-            _analyze_after_bulk_write(conn, context="reembed")
+# `brain ingest` / `ingest-dir` / `ingest-stdin` / `ingest-gmail` / `reembed`
+# — command bodies live in `cli_ingest.py` (with the `_ingest_outcome_verb` /
+# `_gmail_thread_subject_for_dry_run` helpers they own). Registered here so
+# they keep their `brain --help` position between `analyze` and `timeline`.
+register_ingest(app)
 
 
 # ---------------------------------------------------------------------------
@@ -4019,42 +3748,6 @@ def enrich(
     _enrich_backfill(cfg, enricher=enricher, limit=limit, remodel=remodel)
 
 
-def _reconcile_tag_flags(
-    tag: str | None, has_tag: str | None
-) -> str | None:
-    """Reconcile ``--tag`` and its ``--has-tag`` alias for ``search`` / ``explain``.
-
-    ``--has-tag`` is a strict alias of ``--tag`` per plan D3. Both flags
-    add the same ``%s = ANY(d.tags)`` predicate; supplying both with
-    different values is a user error and exits with ``BadParameter``.
-    Returns the single effective tag value to thread into ``hybrid_search``.
-    """
-    if tag is not None and has_tag is not None and tag != has_tag:
-        raise typer.BadParameter(
-            "--tag and --has-tag both given with different values"
-        )
-    return tag if tag is not None else has_tag
-
-
-def _resolve_search_person(
-    conn: psycopg.Connection[Any], person: str | None
-) -> PersonMatch | None:
-    """Resolve a ``--person`` argument or return ``None`` for the absent case.
-
-    Maps :class:`brain.errors.PersonNotFound` / :class:`PersonAmbiguous`
-    to Typer's :class:`BadParameter` so the CLI surface stays consistent
-    with the rest of the flag-validation path. Returns ``None`` when
-    ``person`` is itself ``None`` so the caller threads ``person_keys=None``
-    / ``person_display_name=None`` into ``hybrid_search`` unchanged.
-    """
-    if person is None:
-        return None
-    try:
-        return resolve_person_to_keys(conn, person)
-    except (PersonNotFound, PersonAmbiguous) as e:
-        raise typer.BadParameter(str(e)) from e
-
-
 # Canonical ingest source kinds (``documents.source_kind`` via ``sources.kind``).
 # A genuinely closed enum — only ever written by the ingest paths. Mirrors
 # :data:`brain.vault.links._SOURCE_KINDS`; duplicated here (not imported) so the
@@ -4081,291 +3774,13 @@ def _validate_source_choice(source: str | None) -> str | None:
     )
 
 
-def _warn_if_fts_only_degraded(embedder: Embedder) -> None:
-    """Print a one-line stderr hint when semantic search is off (``none`` backend).
-
-    Mirrors the ``hybrid_search`` degradation condition (duck-typed
-    ``produces_embeddings``) so ``brain search`` / ``brain explain`` tell the
-    user WHY only the lexical leg ran and how to enable hybrid search. Emitted to
-    stderr so it never pollutes ``--json`` stdout.
-    """
-    if not getattr(embedder, "produces_embeddings", True):
-        typer.echo(
-            "semantic search off (BRAIN_EMBEDDER=none) — install Ollama, set "
-            "BRAIN_EMBEDDER=arctic, then 'brain init' + 'brain reembed' for "
-            "hybrid search",
-            err=True,
-        )
-
-
-@app.command()
-def search(
-    query: str = typer.Argument(...),
-    limit: int = typer.Option(5, "--limit", "-n", min=1),
-    source: str | None = typer.Option(None, "--source"),
-    tag: str | None = typer.Option(None, "--tag"),
-    since: str | None = typer.Option(
-        None,
-        "--since",
-        help="Lookback window; a bare number is DAYS (e.g. 7 = 7d). "
-             "Suffixes: 7d / 24h / 90m.",
-    ),
-    json_output: bool = typer.Option(
-        False, "--json", help="Emit machine-readable JSON instead of the table."
-    ),
-    fts_only: bool = typer.Option(False, "--fts-only"),
-    # — Q1-C metadata filters — same set on `brain explain` below.
-    person: str | None = typer.Option(
-        None, "--person",
-        help="Match docs where this person participated. "
-             "Resolved through the directory (same as `brain people`).",
-    ),
-    after: datetime | None = typer.Option(
-        None, "--after",
-        formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
-        help="Only docs sent/ingested on or after this ISO date "
-             "(YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS).",
-    ),
-    before: datetime | None = typer.Option(
-        None, "--before",
-        formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
-        help="Only docs sent/ingested strictly before this ISO date.",
-    ),
-    kind: str | None = typer.Option(
-        None, "--kind",
-        help="Filter by documents.content_type "
-             "(transcript, email, email_thread, note, markdown, pdf, ...).",
-    ),
-    thread: str | None = typer.Option(
-        None, "--thread", help="Filter by Gmail thread id.",
-    ),
-    draft: bool | None = typer.Option(
-        None, "--draft/--no-draft",
-        help="Include only drafts (--draft) or only published "
-             "(--no-draft). Default: both.",
-    ),
-    has_tag: str | None = typer.Option(
-        None, "--has-tag", help="Strict alias for --tag.",
-    ),
-    without_tag: str | None = typer.Option(
-        None, "--without-tag",
-        help="Exclude docs carrying this tag (combines with --tag).",
-    ),
-) -> None:
-    """Hybrid search across the brain."""
-    _validate_source_choice(source)
-    effective_tag = _reconcile_tag_flags(tag, has_tag)
-    since_days = None if since is None else since_window(since, unit="days")
-    cfg = Config.load()
-    embedder = _build_embedder(cfg)
-    _warn_if_fts_only_degraded(embedder)
-    with connect(cfg.database_url) as conn:
-        # Autocommit so the Plan 08 search-failure log INSERT below is a single
-        # round-trip that persists immediately (hybrid_search reads are fine
-        # under autocommit).
-        conn.autocommit = True
-        person_match = _resolve_search_person(conn, person)
-        # The diagnostics holder captures the FTS-leg hit count from work the
-        # search already does (no extra query) — the lexical-miss signal that
-        # `brain gaps` keys off (the vector leg always returns filler).
-        diagnostics = SearchDiagnostics()
-        results = hybrid_search(
-            conn,
-            embedder=embedder,
-            query=query,
-            limit=limit,
-            source_kind=source,
-            tag=effective_tag,
-            since_days=since_days,
-            fts_only=fts_only,
-            vector_sim_floor=cfg.vector_sim_floor,
-            recency_halflife_days=cfg.recency_halflife_days,
-            snippet_context_tokens=cfg.snippet_context_tokens,
-            diagnostics=diagnostics,
-            person_keys=person_match.keys if person_match else None,
-            person_display_name=(
-                person_match.display_name if person_match else None
-            ),
-            after=after,
-            before=before,
-            content_type=kind,
-            thread_id=thread,
-            draft=draft,
-            without_tag=without_tag,
-        )
-        # Plan 08 — best-effort search-failure logging. ``record_search_query``
-        # is the single narrow-catch chokepoint: it swallows a transient
-        # ``psycopg.OperationalError`` AND the missing-table
-        # ``psycopg.errors.UndefinedTable`` (migration 019 not applied) AND the
-        # missing-column ``psycopg.errors.UndefinedColumn`` for ``fts_count``
-        # (migration 023 not applied) — each warns with a `brain init` hint;
-        # search must keep working on a pre-019/pre-023 DB. Other schema errors
-        # propagate. CLI searches have no session, so ``session_id=None``
-        # (no-click detection is MCP-only).
-        record_search_query(
-            conn,
-            query=query,
-            result_count=len(results),
-            fts_count=diagnostics.fts_count,
-            session_id=None,
-            source="cli",
-            tenant_id=cfg.graph_tenant_id,
-        )
-
-    if json_output:
-        emit_json(
-            [
-                {
-                    "id": r.document_id,
-                    "title": r.title,
-                    "source_kind": r.source_kind,
-                    "snippet": r.snippet,
-                    "score": r.score,
-                    "content_type": r.content_type,
-                    "tags": r.tags,
-                }
-                for r in results
-            ]
-        )
-        return
-    if not results:
-        typer.echo("(no results)")
-        return
-    console.print(search_table(results))
-
-
-@app.command()
-def explain(
-    query: str = typer.Argument(...),
-    limit: int = typer.Option(10, "--limit", "-n", min=1),
-    source: str | None = typer.Option(None, "--source"),
-    tag: str | None = typer.Option(None, "--tag"),
-    since: str | None = typer.Option(
-        None,
-        "--since",
-        help="Lookback window; a bare number is DAYS (e.g. 7 = 7d). "
-             "Suffixes: 7d / 24h / 90m.",
-    ),
-    json_output: bool = typer.Option(
-        False, "--json", help="Emit machine-readable JSON instead of the table."
-    ),
-    fts_only: bool = typer.Option(False, "--fts-only"),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-    # — Q1-C metadata filters — same set as `brain search` above.
-    person: str | None = typer.Option(
-        None, "--person",
-        help="Match docs where this person participated.",
-    ),
-    after: datetime | None = typer.Option(
-        None, "--after",
-        formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
-        help="Only docs sent/ingested on or after this ISO date.",
-    ),
-    before: datetime | None = typer.Option(
-        None, "--before",
-        formats=["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
-        help="Only docs sent/ingested strictly before this ISO date.",
-    ),
-    kind: str | None = typer.Option(
-        None, "--kind",
-        help="Filter by documents.content_type "
-             "(transcript, email, email_thread, note, ...).",
-    ),
-    thread: str | None = typer.Option(
-        None, "--thread", help="Filter by Gmail thread id.",
-    ),
-    draft: bool | None = typer.Option(
-        None, "--draft/--no-draft",
-        help="Include only drafts (--draft) or only published (--no-draft).",
-    ),
-    has_tag: str | None = typer.Option(
-        None, "--has-tag", help="Strict alias for --tag.",
-    ),
-    without_tag: str | None = typer.Option(
-        None, "--without-tag",
-        help="Exclude docs carrying this tag.",
-    ),
-) -> None:
-    """Show per-result ranking diagnostics for a query.
-
-    Displays FTS rank, vector cosine, RRF contributions, recency boost, and
-    the best-matching chunk for each result.  Use ``--verbose`` to also show
-    which filter flags were active.  Use ``--json`` for the full machine-readable
-    payload including all :class:`~brain.search.SearchExplanation` fields.
-    """
-    _validate_source_choice(source)
-    effective_tag = _reconcile_tag_flags(tag, has_tag)
-    since_days = None if since is None else since_window(since, unit="days")
-    cfg = Config.load()
-    embedder = _build_embedder(cfg)
-    _warn_if_fts_only_degraded(embedder)
-    with connect(cfg.database_url) as conn:
-        person_match = _resolve_search_person(conn, person)
-        results = hybrid_search(
-            conn,
-            embedder=embedder,
-            query=query,
-            limit=limit,
-            source_kind=source,
-            tag=effective_tag,
-            since_days=since_days,
-            fts_only=fts_only,
-            vector_sim_floor=cfg.vector_sim_floor,
-            recency_halflife_days=cfg.recency_halflife_days,
-            snippet_context_tokens=cfg.snippet_context_tokens,
-            explain=True,
-            person_keys=person_match.keys if person_match else None,
-            person_display_name=(
-                person_match.display_name if person_match else None
-            ),
-            after=after,
-            before=before,
-            content_type=kind,
-            thread_id=thread,
-            draft=draft,
-            without_tag=without_tag,
-        )
-
-    if json_output:
-        emit_json(
-            [
-                {
-                    "id": r.document_id,
-                    "title": r.title,
-                    "source_kind": r.source_kind,
-                    "snippet": r.snippet,
-                    "score": r.score,
-                    "content_type": r.content_type,
-                    "tags": r.tags,
-                    "explain": (
-                        {
-                            "fts_rank": r.explain.fts_rank,
-                            "fts_score": r.explain.fts_score,
-                            "fts_rrf_contribution": r.explain.fts_rrf_contribution,
-                            "vector_rank": r.explain.vector_rank,
-                            "vector_cosine": r.explain.vector_cosine,
-                            "vector_rrf_contribution": r.explain.vector_rrf_contribution,
-                            "rrf_score": r.explain.rrf_score,
-                            "recency_age_days": r.explain.recency_age_days,
-                            "recency_boost": r.explain.recency_boost,
-                            "final_score": r.explain.final_score,
-                            "best_chunk_id": r.explain.best_chunk_id,
-                            "best_chunk_index": r.explain.best_chunk_index,
-                            "matched_filters": r.explain.matched_filters,
-                            "reranker_score": r.explain.reranker_score,
-                        }
-                        if r.explain is not None
-                        else None
-                    ),
-                }
-                for r in results
-            ]
-        )
-        return
-    if not results:
-        typer.echo("(no results)")
-        return
-    console.print(explain_table(results, verbose=verbose))
+# `brain search` / `brain explain` — command bodies live in `cli_search.py`
+# (with the `_reconcile_tag_flags` / `_resolve_search_person` /
+# `_warn_if_fts_only_degraded` helpers they own). Registered here so both
+# keep their `brain --help` position between `enrich` and `eval`.
+register_search(app)
+# `brain recall` — search's sibling, so it reads best next to it in `--help`.
+register_recall(app)
 
 
 def _run_answer_eval_cli(
@@ -4656,6 +4071,14 @@ def rate(
             "a document rated via a graph path is still a document row."
         ),
     ),
+    agent: str | None = typer.Option(
+        None,
+        "--agent",
+        help=(
+            "Attribute this rating to an agent id. Overrides BRAIN_AGENT_ID. "
+            "Unset means unattributed."
+        ),
+    ),
 ) -> None:
     """Record a thumbs-up / thumbs-down on a document or graph target.
 
@@ -4689,6 +4112,10 @@ def rate(
             + ", ".join(_RATE_TARGET_TYPES)
         )
     cfg = Config.load()
+    # Resolved once, above the branch: the two _record_interaction_best_effort
+    # call sites must not disagree, and a malformed id should fail before the
+    # DB round-trip rather than leave a half-logged row.
+    resolved_agent = resolve_agent_id(agent, cfg)
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
         if target_type is not None:
@@ -4702,6 +4129,7 @@ def rate(
                 target_type=target_type,
                 target_id=id,
                 graph_retrieved=graph_retrieved,
+                agent_id=resolved_agent,
             )
             if new_id is None:
                 typer.secho(
@@ -4723,6 +4151,7 @@ def rate(
             action=action,
             source="cli",
             graph_retrieved=graph_retrieved,
+            agent_id=resolved_agent,
         )
     if new_id is None:
         typer.secho(
@@ -4945,6 +4374,7 @@ def review_scan(
     from .review.queries import (
         count_conflict_docs_missing_summary,
         count_stale_docs_missing_summary,
+        diagnose_stale_candidates,
     )
 
     cfg = _load_config_or_exit()
@@ -4972,11 +4402,28 @@ def review_scan(
                         count_conflict_docs_missing_summary(conn, tenant_id=tenant)
                     )
             if run_stale:
-                findings.extend(
-                    run_staleness_scan(
-                        conn, embedder, cfg, tenant_id=tenant, dry_run=dry_run
-                    )
+                stale_findings = run_staleness_scan(
+                    conn, embedder, cfg, tenant_id=tenant, dry_run=dry_run
                 )
+                findings.extend(stale_findings)
+                # A silent scan is indistinguishable from a broken one. When the
+                # staleness leg produced nothing, say which precondition was the
+                # binding one — in EVERY mode, not just --dry-run.
+                #
+                # NOT the same as moving `_warn_skipped_no_summary` out of the
+                # dry-run branch: `count_stale_docs_missing_summary` is itself
+                # scoped through `graph_entity_mentions`, so on a corpus whose
+                # graph was never built it counts zero and warns about nothing.
+                if not stale_findings:
+                    diagnosis = diagnose_stale_candidates(
+                        conn,
+                        tenant_id=tenant,
+                        stale_age_days=cfg.review_stale_age_days,
+                    )
+                    if diagnosis.hint:
+                        typer.secho(
+                            f"staleness scan: {diagnosis.hint}", fg="yellow", err=True
+                        )
                 if dry_run:
                     _warn_skipped_no_summary(
                         count_stale_docs_missing_summary(
@@ -5076,6 +4523,11 @@ def review_list(
     ),
     limit: int = typer.Option(20, "--limit", "-n", help="Max findings to show."),
     json_output: bool = typer.Option(False, "--json", help="Emit a JSON array."),
+    include_snoozed: bool = typer.Option(
+        False,
+        "--include-snoozed",
+        help="Also show findings that are still snoozed.",
+    ),
 ) -> None:
     """Show the current review queue (contradiction + staleness findings)."""
     from rich.console import Console
@@ -5087,7 +4539,11 @@ def review_list(
     kinds = _resolve_review_kinds(kind)
     with connect(cfg.database_url) as conn:
         rows = list_review_queue(
-            conn, tenant_id=cfg.graph_tenant_id, signal_kinds=kinds, limit=limit
+            conn,
+            tenant_id=cfg.graph_tenant_id,
+            signal_kinds=kinds,
+            limit=limit,
+            include_snoozed=include_snoozed,
         )
 
     if json_output:
@@ -5150,6 +4606,13 @@ def review_dismiss(
         except ValueError as exc:
             raise typer.BadParameter(str(exc), param_hint="id-prefix") from exc
     typer.echo(f"Dismissed {finding_id}.")
+
+
+# `snooze` / `resolve` — the two writers for the `snoozed` / `resolved` states
+# that `review list` has always read but nothing ever set. Registered here, at
+# the point they would have been declared, so Typer lists the four status verbs
+# together in `brain review --help`.
+register_review_extra_commands(review_app)
 
 
 def _print_brief(data: Any) -> None:
@@ -5701,38 +5164,11 @@ def show(
     typer.echo(doc.content or "")
 
 
-@app.command(name="list")
-def list_docs(
-    source: str | None = typer.Option(None, "--source"),
-    tag: str | None = typer.Option(None, "--tag"),
-    limit: int = typer.Option(20, "--limit", "-n", min=1),
-    json_output: bool = typer.Option(
-        False, "--json", help="Emit machine-readable JSON instead of the table."
-    ),
-) -> None:
-    """List documents in the brain."""
-    _validate_source_choice(source)
-    cfg = Config.load()
-    with connect(cfg.database_url) as conn:
-        rows = list_documents(conn, source=source, tag=tag, limit=limit)
-    if json_output:
-        emit_json(
-            [
-                {
-                    "id": r.id,
-                    "title": r.title,
-                    "content_type": r.content_type,
-                    "tags": r.tags,
-                    "source_kind": r.source_kind,
-                    "ingested_at": r.ingested_at,
-                }
-                for r in rows
-            ]
-        )
-        return
-    for r in rows:
-        kind = r.source_kind or "manual"
-        typer.echo(f"{r.id[:8]}  {kind:<8}  {r.content_type:<10}  {r.title}")
+# `brain list` — command body lives in `cli_docs.py`. Registered here so it
+# keeps its `brain --help` position between `show` and `resurface`.
+register_list(app)
+# `brain usage` — grouped with the reporting commands.
+register_usage(app)
 
 
 @app.command()
@@ -6405,142 +5841,11 @@ def edit(
     _print_update_result(result, doc_id)
 
 
-@app.command()
-def rm(
-    id: str = typer.Argument(...),
-    yes: bool = typer.Option(False, "--yes", "-y"),
-) -> None:
-    """Delete a document (and its chunks) from the brain.
-
-    When the document has a ``vault_path`` the on-disk mirror file under
-    ``cfg.vault_path / vault_path`` is also unlinked. Without that step the
-    next ``brain vault sync`` would re-ingest the file by ``content_hash``
-    (or, after a slug rename, create a fresh row), silently undoing the rm.
-    A missing mirror is tolerated (debug log only) — the DB delete still
-    proceeds.
-    """
-    cfg = Config.load()
-    graph_syncer = _build_graph_syncer(cfg)
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        doc_id = _resolve_id(conn, id)
-        # Capture title + vault_path BEFORE the DELETE; the row is gone
-        # afterwards and we need both for the prompt and the file unlink.
-        row = conn.execute(
-            "SELECT title, vault_path FROM documents WHERE id=%s", (doc_id,)
-        ).fetchone()
-        assert row is not None  # _resolve_id confirmed the doc exists
-        title: str = row[0]
-        vault_path_rel: str | None = row[1]
-        if not yes:
-            typer.confirm(f"Delete '{title}' ({doc_id[:8]})?", abort=True)
-        conn.execute("DELETE FROM documents WHERE id=%s", (doc_id,))
-        # Wave G1-c — drop the doc from the people graph. Runs post-DELETE on
-        # the same (autocommit) connection; best-effort / never-raises. The
-        # documents-row delete cascades to the relational graph source rows
-        # (migration 012 FKs), and remove_document is robust whether those are
-        # already gone or not — it then GCs orphaned person vertices + edges.
-        graph_syncer.remove(conn, doc_id)
-    suffix = _rm_unlink_vault_mirror(cfg=cfg, vault_path_rel=vault_path_rel)
-    typer.echo(f"removed {doc_id[:8]}{suffix}")
-
-
-@app.command(name="mark-draft")
-def mark_draft(id: str = typer.Argument(...)) -> None:
-    """Quarantine a document: set ``draft=true`` and regenerate its mirror.
-
-    A draft doc still lives in the DB and is reachable via ``brain search`` /
-    ``brain show`` / ``brain list`` (the CLI is local — the user wants to
-    see drafts). Only the wiki hides it: the Quartz contentIndex emitter
-    skips ``draft: true`` entries entirely, so the doc disappears from the
-    explorer tree, the graph view, and full-text search on the rendered site.
-
-    Idempotent — running it twice on an already-draft doc is a no-op and
-    prints ``<short-id> is already draft``. Use ``brain mark-published`` to
-    re-publish.
-    """
-    _set_draft(id, draft=True)
-
-
-@app.command(name="mark-published")
-def mark_published(id: str = typer.Argument(...)) -> None:
-    """Un-quarantine a document: set ``draft=false`` and regenerate its mirror.
-
-    Inverse of ``brain mark-draft``. Idempotent — running it on a doc that
-    is already published prints ``<short-id> is already published`` and
-    exits 0.
-    """
-    _set_draft(id, draft=False)
-
-
-def _set_draft(id_prefix: str, *, draft: bool) -> None:
-    """Shared body for ``mark-draft`` / ``mark-published``.
-
-    Resolves ``id_prefix``, no-ops idempotently when the column already
-    matches ``draft``, otherwise calls :func:`update_document` with
-    ``new_draft=draft`` and ``vault_root=cfg.vault_path`` so the on-disk
-    mirror is regenerated with the new ``draft:`` frontmatter line. Echoes
-    a one-line confirmation.
-
-    Errors (prefix not found / ambiguous) propagate via
-    :func:`_resolve_id` → ``typer.Exit(code=1)``.
-    """
-    cfg = Config.load()
-    graph_syncer = _build_graph_syncer(cfg)
-    target_state_label = "draft" if draft else "published"
-    other_state_label = "published" if draft else "draft"
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        doc_id = _resolve_id(conn, id_prefix)
-        row = conn.execute(
-            "SELECT draft FROM documents WHERE id=%s", (doc_id,)
-        ).fetchone()
-        assert row is not None  # _resolve_id confirmed the row exists
-        current_draft = bool(row[0])
-        label = doc_id[:8]
-        if current_draft == draft:
-            typer.echo(f"{label} is already {target_state_label}")
-            return
-        try:
-            update_document(
-                conn,
-                document_id=doc_id,
-                new_draft=draft,
-                vault_root=cfg.vault_path,
-                graph_syncer=graph_syncer,
-            )
-        except ValueError as e:
-            typer.secho(str(e), fg="red", err=True)
-            raise typer.Exit(code=1) from e
-    typer.echo(f"marked {label} as {target_state_label} (was {other_state_label})")
-
-
-def _rm_unlink_vault_mirror(*, cfg: Config, vault_path_rel: str | None) -> str:
-    """Remove the on-disk vault mirror after ``brain rm`` deletes the DB row.
-
-    Returns the suffix appended to the CLI's ``removed <id>`` line. The
-    suffix shape is part of the user-facing contract and is asserted by
-    ``tests/test_cli_rm.py`` — keep the strings stable across changes.
-
-    - ``vault_path`` NULL → ``" (db only)"`` (e.g., raw ``ingest-stdin`` rows
-      that never made it into a vault export).
-    - File present + unlinked → ``" (file: <vault_path>)"``.
-    - File already absent on disk → ``" (db only, file already gone)"`` so
-      the user sees that the row was deleted but the cleanup was a no-op
-      (e.g., the user manually removed the mirror first, or a previous
-      partial rm).
-    """
-    if vault_path_rel is None:
-        return " (db only)"
-    abs_path: Path = cfg.vault_path / vault_path_rel
-    if abs_path.exists():
-        abs_path.unlink()
-        logger.debug("brain rm: unlinked vault mirror %s", abs_path)
-        return f" (file: {vault_path_rel})"
-    logger.debug(
-        "brain rm: vault mirror already gone at %s (skipping unlink)", abs_path
-    )
-    return " (db only, file already gone)"
+# `brain rm` / `mark-draft` / `mark-published` — command bodies live in
+# `cli_docs.py`, together with the `_set_draft` / `_rm_unlink_vault_mirror`
+# helpers they own. Registered here so they keep their `brain --help`
+# position between `edit` and `daily`.
+register_lifecycle(app)
 
 
 # ---------------------------------------------------------------------------
@@ -6786,6 +6091,10 @@ def vault_sync(
                 owner_participants=cfg.owner_participants,
             ),
             graph_syncer=graph_syncer,
+            # This is the real long-lived daemon (launchd runs it via
+            # _brain-watcher-fg), so it opts in to keeping its own launchd
+            # logs size-capped while it is up.
+            enable_log_rotation=True,
         )
         typer.echo(f"vault path:     {target}")
         deletion_phrase = (
@@ -6945,51 +6254,124 @@ def vault_prune_orphans(
 # ---------------------------------------------------------------------------
 # Quartz render — `brain vault render`.
 #
-# Thin wrapper around `npx quartz build`. Quartz is purpose-built for
+# Thin wrapper around `npx --no -- quartz build`. Quartz is purpose-built for
 # Obsidian-style vaults; we orchestrate it rather than reinventing
 # backlinks / graph view / search in Python. The user installs Quartz
 # themselves via `npx quartz create` (one-time, per vault); this
 # command just shells out to the binary.
+#
+# On npx vs the daemon's `node bootstrap-cli.mjs` (brain.wiki.build_swap):
+# both reach the SAME entry point. A `npx quartz create` workspace IS the
+# Quartz package and declares `"bin": {"quartz": "./quartz/bootstrap-cli.mjs"}`,
+# so npx resolves the local bin — same version, same overlay, not a second
+# build mechanism. Measured 2026-08-07 on the live vault, the difference is
+# npm-exec startup: ~0.6-1.1 s vs ~0.15 s (build_swap's docstring cites ~100 s;
+# that does not reproduce here and is likely a cold-npm-cache figure). Against
+# a multi-minute build that gap does not justify adding a `node`-on-PATH
+# requirement to this path, which currently needs only npx.
 # ---------------------------------------------------------------------------
 
 
-# Hard ceiling on the build subprocess. Quartz on a small vault runs in
-# seconds; on a 10K-note vault still well under a minute. Five minutes
-# is the "your config is broken" threshold — past that we kill the
-# process so a runaway plugin can't lock the user's terminal forever.
-_QUARTZ_BUILD_TIMEOUT_S = 300
+# Hard ceiling on the build subprocess. NOT defined here — this used to be a
+# local `_QUARTZ_BUILD_TIMEOUT_S = 300` while `brain.wiki.build_swap` enforced
+# 600 on the identical operation, so how long a Quartz build was allowed to run
+# depended purely on which entrypoint you came through. The single source of
+# truth now lives next to the subprocess that enforces it, in
+# `brain.wiki.build_swap`; resolve it per-call via `resolve_build_timeout_s()`
+# so `$BRAIN_WIKI_BUILD_TIMEOUT_S` is honored on both paths identically.
 
 
-def _resolve_render_to(to: Path, cwd: Path) -> Path:
-    """Reject `--to` paths that escape the cwd via `..` traversal.
+def _default_render_output(workspace: Path) -> Path:
+    """The default output directory: ``<workspace>/dist``.
 
-    Mirrors the path-traversal guard `_assert_within_vault` applies to
-    `--folder` in the authoring commands. Relative paths are
-    interpreted against ``cwd`` (so ``--to dist`` lands at
-    ``<cwd>/dist``); absolute paths are honored verbatim. Either way
-    the resolved output directory must live under ``cwd`` — an
-    explicit ``--to ../escape`` or absolute path that points elsewhere
-    is rejected.
+    Cwd-independent **provided the vault path is absolute**, which is the
+    normal case. ``BRAIN_VAULT_PATH`` is ``expanduser``-ed but not
+    ``resolve``-d (:func:`brain.config._default_vault_path`) and nothing
+    rejects a relative value, so a relative vault path makes this resolve
+    against the process cwd after all. That case fails CLOSED — the
+    ``target_vault.is_dir()`` check rejects it with exit 2 before anything is
+    written — but the claim is conditional and saying otherwise would be the
+    kind of overstated guarantee this command's history is made of.
+
+    Anchored to the Quartz workspace — which itself defaults to
+    ``<vault>/.quartz``, i.e. it is derived from a configured value
+    (``BRAIN_VAULT_PATH``) rather than from ambient process state. That
+    is the whole point: the previous default (``./dist``) meant the
+    rendered site landed wherever the shell happened to be, so running
+    the command from an unrelated project wrote a full static site into
+    that project's source tree. A daemon — which has no meaningful cwd —
+    would do the same thing on every scheduled run.
+
+    ``<workspace>/dist`` also sits alongside the blue/green build tree
+    (``<workspace>/builds/<id>`` + ``<workspace>/current``) that
+    :mod:`brain.wiki.build_swap` already writes, so all rendered output
+    for a vault lives under one root, and none of it is inside the
+    Markdown tree Quartz globs for content.
     """
+    return workspace / "dist"
+
+
+def _resolve_render_to(to: Path | None, cwd: Path, *, default_dir: Path) -> Path:
+    """Resolve the render output directory.
+
+    ``to`` is the user's explicit ``--to`` override, or ``None`` to take
+    ``default_dir`` (see :func:`_default_render_output`). An explicit
+    relative path keeps ordinary shell semantics — ``--to dist`` from
+    ``/tmp/x`` means ``/tmp/x/dist`` — because a path the user typed is
+    a deliberate act, interpreted against where they typed it. Only the
+    *default* is cwd-independent.
+
+    Relative paths resolve against the supplied ``cwd``, NOT the process
+    cwd, so callers and tests can pin the anchor explicitly.
+
+    The returned path is not validated here;
+    :func:`_assert_render_output_safe` is the guard.
+    """
+    if to is None:
+        return default_dir.expanduser().resolve()
     expanded = to.expanduser()
-    cwd_resolved = cwd.resolve()
-    # Resolve relative paths against the supplied cwd, NOT the process
-    # cwd — tests pass ``tmp_path / "cwd"`` here even though the actual
-    # process cwd is something else. Absolute paths resolve as-is.
-    resolved = (
-        expanded.resolve()
-        if expanded.is_absolute()
-        else (cwd_resolved / expanded).resolve()
-    )
-    try:
-        resolved.relative_to(cwd_resolved)
-    except ValueError as e:
-        raise typer.BadParameter(
-            f"--to must stay within the current working directory; "
-            f"got a path that resolves outside {cwd_resolved}",
-            param_hint="--to",
-        ) from e
-    return resolved
+    if expanded.is_absolute():
+        return expanded.resolve()
+    return (cwd.resolve() / expanded).resolve()
+
+
+def _assert_render_output_safe(
+    output: Path, *, cwd: Path, vault: Path, workspace: Path
+) -> None:
+    """Refuse output directories whose contents Quartz would destroy.
+
+    Quartz's build does ``rm(output, {recursive: true, force: true})``
+    before it emits anything (see ``quartz_overrides/quartz/build.ts``),
+    so ``--output`` is not merely "where files appear" — it is a
+    directory that gets deleted. Pointing it at a directory that
+    *contains* the vault, the Quartz workspace, or the shell's current
+    directory therefore deletes that tree. ``--to .`` is the sharpest
+    edge: one character, and the build wipes the working directory.
+
+    The rule is deliberately plain path arithmetic against three known
+    anchors — no sniffing of what a directory "looks like". A heuristic
+    ("does it contain a .git / package.json that isn't ours?") would
+    both false-positive (a vault kept under git — common for Obsidian
+    users — makes the *default* output path look like someone else's
+    repo) and false-negative (an unrelated project with neither marker
+    sails through). Refusing to delete a tree that contains something we
+    know we need is exact; guessing whose directory it is, is not.
+    """
+    resolved = output.resolve()
+    for label, anchor in (
+        ("the current working directory", cwd),
+        ("the vault", vault),
+        ("the Quartz workspace", workspace),
+    ):
+        anchor_resolved = anchor.expanduser().resolve()
+        if anchor_resolved == resolved or anchor_resolved.is_relative_to(resolved):
+            raise typer.BadParameter(
+                f"refusing to render into {resolved}: the Quartz build "
+                f"deletes its output directory, and that path contains "
+                f"{label} ({anchor_resolved}). Pick a dedicated output "
+                f"directory (the default is {_default_render_output(workspace)}).",
+                param_hint="--to",
+            )
 
 
 def _vault_has_markdown(vault_path: Path) -> bool:
@@ -7042,10 +6424,14 @@ def _check_quartz_workspace(quartz_dir: Path) -> None:
 
 @vault_app.command("render")
 def vault_render(
-    to: Path = typer.Option(
-        Path("./dist"),
+    to: Path | None = typer.Option(
+        None,
         "--to",
-        help="Output directory for the rendered HTML site (default: ./dist).",
+        help=(
+            "Output directory for the rendered HTML site "
+            "(default: <quartz-dir>/dist, i.e. <vault>/.quartz/dist). "
+            "A relative path is resolved against the current directory."
+        ),
     ),
     vault: Path | None = typer.Option(
         None,
@@ -7083,7 +6469,9 @@ def vault_render(
 ) -> None:
     """Render the vault to a static HTML site via Quartz.
 
-    Shells out to `npx quartz build --directory <vault> --output <to>`.
+    Shells out to `npx --no -- quartz build --directory <vault> --output <to>`
+    (`--no` so a workspace npm cannot resolve fails instead of silently
+    installing some other "quartz" from the registry).
     The user is responsible for one-time Quartz setup (see the README's
     "Wiki rendering (Quartz)" section): scaffold a workspace at
     `<vault>/.quartz/` with `npx quartz create`, then copy the sample
@@ -7093,6 +6481,11 @@ def vault_render(
     ``quartz_overrides/`` tree over the Quartz workspace (custom Graph
     component, contentIndex emitter, etc.). Use `--no-overlay` to skip,
     or `--print-overlay` to see what would be copied without applying.
+
+    The output directory defaults to `<quartz-dir>/dist` — derived from
+    the configured vault, never from the current working directory, so
+    the site lands in the same place whether it is invoked from a shell,
+    a script, or a daemon with no meaningful cwd. `--to` overrides it.
 
     Honours stdout/stderr passthrough so the user sees Quartz's
     progress live. Propagates a non-zero exit code from npx as exit 1.
@@ -7118,12 +6511,30 @@ def vault_render(
         )
         raise typer.Exit(code=2)
 
-    output_dir = _resolve_render_to(to, Path.cwd())
-
     workspace = (
         quartz_dir.expanduser() if quartz_dir is not None else target_vault / ".quartz"
     )
     _check_quartz_workspace(workspace)
+
+    # Resolve the output directory AFTER the workspace, because the
+    # default is derived from it — never from the cwd. Validate before
+    # any overlay copying so a bad `--to` fails before we touch disk.
+    #
+    # `Path.cwd()` raises FileNotFoundError if the working directory has been
+    # deleted out from under the process. That is DELIBERATELY left to
+    # propagate: this command's entire bug class was silent wrong writes, so
+    # failing closed (a crash, nothing written) is the correct side of the
+    # line. Do not "harden" this into a tolerant fallback — a default that
+    # quietly substitutes some other directory would reopen exactly the
+    # failure this code exists to prevent. Note the default output path itself
+    # never consults the cwd; only the guard's third anchor does.
+    cwd = Path.cwd()
+    output_dir = _resolve_render_to(
+        to, cwd, default_dir=_default_render_output(workspace)
+    )
+    _assert_render_output_safe(
+        output_dir, cwd=cwd, vault=target_vault, workspace=workspace
+    )
 
     try:
         plan = plan_overlay(workspace)
@@ -7182,8 +6593,27 @@ def vault_render(
     # `npx quartz build` reads its config from cwd, hence cwd=workspace.
     # `--directory` points it at the vault content; `--output` controls
     # where it writes the rendered site.
+    #
+    # `--no` is load-bearing, not cosmetic: without it, a workspace where npm
+    # cannot resolve `quartz` locally makes npx fall back to FETCHING a package
+    # named "quartz" from the registry and building the vault with it. That
+    # workspace state passes `_check_quartz_workspace` (which only requires
+    # package.json + quartz.config.ts), so the failure would be silent — a site
+    # built by some other package instead of the pinned, overlaid local Quartz.
+    # With `--no`, npx refuses to install and exits non-zero instead. The `--`
+    # then ends npx's own option parsing so every flag after it reaches Quartz.
+    #
+    # Resolution stays dynamic on purpose: "npx" is a bare name looked up on
+    # PATH by exec at call time, never cached or captured at install time, so a
+    # Node upgrade takes effect immediately. In a well-formed workspace npx
+    # resolves the package's own `bin` entry — `./quartz/bootstrap-cli.mjs`,
+    # the exact file `brain.wiki.build_swap` invokes directly — so this path and
+    # the daemon path run the same Quartz build, differing only by npm-exec
+    # startup (measured ~0.6-1.1 s against a multi-minute build).
     args = [
         "npx",
+        "--no",
+        "--",
         "quartz",
         "build",
         "--directory",
@@ -7191,13 +6621,19 @@ def vault_render(
         "--output",
         str(output_dir),
     ]
+    # One ceiling for a Quartz build, wherever it is launched from. Resolved
+    # here rather than at module import so $BRAIN_WIKI_BUILD_TIMEOUT_S is read
+    # from the environment this command actually runs in.
+    from .wiki.build_swap import resolve_build_timeout_s
+
+    quartz_build_timeout_s = resolve_build_timeout_s()
     typer.echo(f"running: {' '.join(args)} (cwd={workspace})")
     try:
         completed = subprocess.run(  # noqa: S603 — args are list-form, no shell
             args,
             cwd=str(workspace),
             check=False,
-            timeout=_QUARTZ_BUILD_TIMEOUT_S,
+            timeout=quartz_build_timeout_s,
         )
     except FileNotFoundError as e:
         # `npx` itself isn't on PATH. `brain doctor` warns about this
@@ -7212,8 +6648,10 @@ def vault_render(
         raise typer.Exit(code=1) from e
     except subprocess.TimeoutExpired as e:
         typer.secho(
-            f"quartz build exceeded {_QUARTZ_BUILD_TIMEOUT_S}s — likely a "
-            "misconfigured plugin or a runaway transformer; aborting.",
+            f"quartz build exceeded {quartz_build_timeout_s:g}s — likely a "
+            "misconfigured plugin or a runaway transformer; aborting. "
+            "Set BRAIN_WIKI_BUILD_TIMEOUT_S if this vault legitimately "
+            "needs longer.",
             fg="red",
             err=True,
         )
@@ -7816,96 +7254,6 @@ def _run_post_write_editor_and_sync(
     return report
 
 
-@note_app.command("new")
-def note_new(
-    title: str = typer.Argument(..., help="Note title (used for frontmatter + slug)."),
-    folder: str = typer.Option(
-        "",
-        "--folder",
-        "-f",
-        help="Subdirectory under the vault root (default: vault root).",
-    ),
-    template: str = typer.Option(
-        "note",
-        "--template",
-        "-T",
-        help="Template name in _templates/ (default: 'note').",
-    ),
-    tag: list[str] = typer.Option(
-        [], "--tag", "-t", help="Initial tag(s) for the note."
-    ),
-    no_edit: bool = typer.Option(
-        False, "--no-edit", help="Skip launching $EDITOR after the file is written."
-    ),
-    vault: Path | None = typer.Option(
-        None, "--vault", help="Override the configured vault path."
-    ),
-) -> None:
-    """Create a new vault note from a template.
-
-    Resolves ``<vault>/<folder>/<slug(title)>.md``. Errors if the file
-    already exists (use ``brain edit <prefix>`` to modify an existing note).
-    Renders ``_templates/<template>.md`` with ``{{title}}`` / ``{{date}}`` /
-    ``{{datetime}}`` / ``{{slug}}`` substitutions, forces the
-    brain-canonical frontmatter (id, title, created, updated, kind, tags),
-    writes the file, runs a single-file sync, and (unless ``--no-edit``)
-    opens ``$EDITOR`` then re-syncs on exit.
-    """
-    cfg = Config.load()
-    vault_path = _resolve_vault(vault, cfg)
-    # Validate the template up front so a bad ``--template`` / missing
-    # ``_templates/`` surfaces a friendly CLI error (``create_vault_note``
-    # re-resolves it internally for the actual render).
-    _ensure_template(vault_path, template)
-
-    slug = slugify(title)
-    target_relative = Path(folder) / f"{slug}.md" if folder else Path(f"{slug}.md")
-    target = vault_path / target_relative
-    # Guard against ``--folder ../../etc`` and similar — we'd otherwise
-    # write outside the vault BEFORE sync ever runs and noticed.
-    _assert_within_vault(target, vault_path, label="--folder")
-    if target.exists():
-        typer.secho(
-            f"note already exists at {target_relative.as_posix()}; "
-            f"use `brain edit <prefix>` to modify it",
-            fg="red",
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # Build the embedder via the CLI factory (the patch point tests wire onto
-    # ``brain.cli._build_embedder``) and hand it to the shared helper so the
-    # session loop and ``brain note new`` share one create+sync path.
-    embedder = _build_embedder(cfg)
-    try:
-        with connect(cfg.database_url) as conn:
-            conn.autocommit = True
-            document_id = create_vault_note(
-                conn,
-                cfg=cfg,
-                vault_path=vault_path,
-                title=title,
-                tags=list(tag),
-                template=template,
-                folder=folder,
-                embedder=embedder,
-            )
-    except VaultNoteSyncError as exc:
-        for path, reason in exc.errors:
-            typer.secho(f"sync error: {path}: {reason}", fg="red", err=True)
-        raise typer.Exit(code=1) from exc
-
-    typer.echo(
-        f"created {target_relative.as_posix()} (id={document_id[:8]})"
-    )
-
-    if no_edit:
-        return
-    _run_post_write_editor_and_sync(
-        cfg, vault_path=vault_path, file_path=target
-    )
-
-
 @app.command()
 def daily(
     date: str | None = typer.Option(
@@ -8043,123 +7391,6 @@ def _refresh_daily_index(cfg: Config, vault_path: Path) -> None:
         )
 
 
-def _print_rename_plan(op: RenameOp, vault_path: Path) -> None:
-    """Pretty-print a :class:`RenameOp` for ``--dry-run`` output."""
-    moved = op.new_path.resolve() != op.old_path.resolve()
-    if moved:
-        old_rel = op.old_path.resolve().relative_to(vault_path.resolve())
-        new_rel = op.new_path.resolve().relative_to(vault_path.resolve())
-        typer.echo(
-            f"would rename {old_rel.as_posix()} → {new_rel.as_posix()}"
-        )
-    else:
-        typer.echo(f"would update title: {op.old_title!r} → {op.new_title!r}")
-    if not op.references:
-        typer.echo("no references to rewrite")
-        return
-    file_count = len({r.file_path for r in op.references})
-    typer.echo(
-        f"would rewrite {len(op.references)} reference(s) "
-        f"in {file_count} file(s):"
-    )
-    for ref in op.references:
-        rel = ref.file_path.resolve().relative_to(vault_path.resolve())
-        typer.echo(
-            f"  {rel.as_posix()}:{ref.line_no}  "
-            f"{ref.old_text} → {ref.new_text}"
-        )
-
-
-@note_app.command("rename")
-def note_rename(
-    id: str = typer.Argument(..., help="Document id (or 6+ char prefix)."),
-    new_title: str = typer.Argument(..., help="New title."),
-    no_link_refactor: bool = typer.Option(
-        False,
-        "--no-link-refactor",
-        help="Skip rewriting [[old-title]] references in other notes.",
-    ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="Print the plan without changing anything."
-    ),
-    vault: Path | None = typer.Option(
-        None, "--vault", help="Override the configured vault path."
-    ),
-) -> None:
-    """Rename a vault note: title, file slug, and ``[[old]]`` references.
-
-    Plans the rename first (vault scan + collision check), then applies
-    atomically — every file we'd write is snapshotted first; on any error
-    the snapshots are restored. With ``--dry-run`` only the plan is
-    printed; no DB or disk writes occur.
-
-    With ``--no-link-refactor``, references in other notes are left alone
-    (the title in this note's frontmatter still updates, and the file is
-    still moved to its new slug).
-    """
-    cfg = Config.load()
-    vault_path = _resolve_vault(vault, cfg)
-
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        document_id = _resolve_id(conn, id)
-        try:
-            op = plan_rename(
-                conn,
-                vault_path=vault_path,
-                document_id=document_id,
-                new_title=new_title,
-            )
-        except RenameError as e:
-            typer.secho(str(e), fg="red", err=True)
-            raise typer.Exit(code=1) from e
-
-    if no_link_refactor:
-        op = RenameOp(
-            document_id=op.document_id,
-            old_title=op.old_title,
-            new_title=op.new_title,
-            old_path=op.old_path,
-            new_path=op.new_path,
-            references=(),
-        )
-
-    if dry_run:
-        _print_rename_plan(op, vault_path)
-        return
-
-    embedder = _build_embedder(cfg)
-    with connect(cfg.database_url) as conn:
-        conn.autocommit = True
-        try:
-            report = apply_rename(
-                conn,
-                embedder=embedder,
-                vault_path=vault_path,
-                op=op,
-            )
-        except RenameError as e:
-            typer.secho(str(e), fg="red", err=True)
-            raise typer.Exit(code=1) from e
-
-    if op.references:
-        file_count = len({r.file_path for r in op.references})
-        typer.echo(
-            f"rewrote {report.references_rewritten} reference(s) "
-            f"in {file_count} file(s)"
-        )
-    if report.file_renamed:
-        old_rel = op.old_path.resolve().relative_to(vault_path.resolve())
-        new_rel = op.new_path.resolve().relative_to(vault_path.resolve())
-        typer.echo(
-            f"renamed {old_rel.as_posix()} → {new_rel.as_posix()}"
-        )
-    else:
-        typer.echo(f"updated title: {op.old_title!r} → {op.new_title!r}")
-    if report.sync_report and report.sync_report.errors:
-        for path, reason in report.sync_report.errors:
-            typer.secho(f"sync error: {path}: {reason}", fg="red", err=True)
-        raise typer.Exit(code=1)
 
 
 # ---------------------------------------------------------------------------

@@ -163,3 +163,48 @@ def rewrite_tags(path: Path, new_tags: list[str]) -> bool:
     fields["updated"] = datetime.now(UTC).isoformat()
     atomic_write_text(path, dump_frontmatter(fields, body))
     return True
+
+
+def rewrite_sensitivity(path: Path, level: str) -> bool:
+    """Rewrite a vault file's frontmatter ``sensitivity:`` field to ``level``.
+
+    The sibling of :func:`rewrite_tags`, and it exists for a specific reason:
+    for a **vault-tier** note the file is the source of truth, so
+    :func:`brain.vault.sync._sensitivity_from_frontmatter` reads the tier back
+    off the frontmatter on every sync — a missing key means ``normal``.
+
+    That makes a DB-only ``brain mark-confidential`` on an authored note
+    silently temporary: the column flips, then the next
+    ``brain vault sync --watch`` pass reads a file with no ``sensitivity:``
+    line and reverts it. The command would appear to succeed and quietly undo
+    itself, which for a confidentiality control is the worst possible failure
+    shape. Writing the line is what makes the mark durable.
+
+    Regenerating the whole file from the DB is NOT an option here —
+    :func:`brain.vault.export.regenerate_vault_file` refuses vault-tier rows
+    outright, because doing so could discard authored edits that have not been
+    re-synced. So this rewrites exactly one frontmatter field and leaves the
+    body byte-identical.
+
+    Returns ``True`` if the file changed, ``False`` if it already carried
+    ``level`` — so a repeat call is a guaranteed no-op with no ``updated:``
+    bump and no mtime change, keeping the vault's git history clean.
+
+    ``normal`` is written explicitly rather than by removing the key: an
+    absent key and ``sensitivity: normal`` resolve identically today, but an
+    explicit value states the user's intent on disk and survives a future
+    change to the default.
+
+    Raises:
+        FileNotFoundError: if ``path`` does not exist.
+        yaml.YAMLError / ValueError: propagated from :func:`parse_frontmatter`
+            if the existing frontmatter is unparseable or not a mapping.
+    """
+    text = path.read_text(encoding="utf-8")
+    fields, body = parse_frontmatter(text)
+    if fields.get("sensitivity") == level:
+        return False
+    fields["sensitivity"] = level
+    fields["updated"] = datetime.now(UTC).isoformat()
+    atomic_write_text(path, dump_frontmatter(fields, body))
+    return True

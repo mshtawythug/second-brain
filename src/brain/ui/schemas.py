@@ -1,0 +1,371 @@
+"""Typed request parsing and response construction.
+
+Every validation rule the UI enforces lives here, so the route modules stay thin
+(parse → service → serialize) and so the rules are unit-testable without an HTTP
+client. Nothing in this module touches the database or the filesystem.
+
+Validation is **fail-closed and explicit**: an out-of-range limit is a 400, not
+a silent clamp, because a silently clamped limit is indistinguishable from a
+working one and hides the caller's bug instead of surfacing it.
+"""
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import Any
+
+from ..tags import normalize_tags
+from .errors import UiBadRequest
+
+#: The four source kinds `brain ingest` recognises. This mirrors
+#: ``brain.cli._VALID_SOURCE_KINDS`` and is duplicated **only** because
+#: importing it would drag a 9,800-line Typer module into every HTTP handler.
+#: (Spec §2.1 called for extracting it to ``brain/source_kinds.py``; that never
+#: landed and ``cli.py`` is not this feature's file to edit.)
+#: ``tests/test_ui_schemas.py`` asserts the two sets are equal and names both
+#: locations on failure, so drift is a red test rather than a silent divergence.
+VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack"})
+
+#: Matches MCP's ``_MAX_NOTE_BODY_BYTES`` so the two write surfaces cannot
+#: disagree about what is too large.
+MAX_BODY_BYTES = 256 * 1024
+MAX_TITLE_CHARS = 200
+MAX_QUERY_CHARS = 512
+MIN_LIMIT = 1
+MAX_LIMIT = 50
+DEFAULT_LIMIT = 25
+
+
+def _require_str(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise UiBadRequest(f"{field} must be a string", code=f"invalid_{field}")
+    return value
+
+
+def parse_iso_date(raw: str, field: str) -> datetime:
+    """Parse an ISO-8601 date or datetime into an aware UTC ``datetime``.
+
+    A bare ``YYYY-MM-DD`` is accepted (the date inputs send exactly that) and is
+    read as midnight UTC. Naive datetimes are assumed UTC rather than local
+    time, so one query string means one thing regardless of the server's zone.
+    """
+    text = raw.strip()
+    if not text:
+        raise UiBadRequest(f"{field} must not be empty", code="invalid_date")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise UiBadRequest(
+            f"{field} must be an ISO-8601 date (YYYY-MM-DD)", code="invalid_date"
+        ) from exc
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+class SearchQuery:
+    """A validated ``GET /api/search`` request.
+
+    Deliberately a plain object built by :func:`parse_search_params` rather than
+    a dataclass with a permissive constructor: there is exactly one way to make
+    one, and it validates.
+    """
+
+    __slots__ = (
+        "after",
+        "before",
+        "content_type",
+        "fts_only",
+        "limit",
+        "query",
+        "session_id",
+        "source_kind",
+        "tag",
+    )
+
+    def __init__(
+        self,
+        *,
+        query: str,
+        limit: int,
+        source_kind: str | None,
+        tag: str | None,
+        content_type: str | None,
+        after: datetime | None,
+        before: datetime | None,
+        fts_only: bool,
+        session_id: str | None,
+    ) -> None:
+        self.query = query
+        self.limit = limit
+        self.source_kind = source_kind
+        self.tag = tag
+        self.content_type = content_type
+        self.after = after
+        self.before = before
+        self.fts_only = fts_only
+        self.session_id = session_id
+
+    def filter_kwargs(self) -> dict[str, Any]:
+        """The filter kwargs to splat into ``hybrid_search``.
+
+        Only the three mandated dropdown axes and the date range. The
+        config-sourced tuning kwargs (``vector_sim_floor`` and friends) are
+        added by the route from ``cfg``, so this object never needs to know
+        configuration exists.
+        """
+        return {
+            "query": self.query,
+            "limit": self.limit,
+            "source_kind": self.source_kind,
+            "tag": self.tag,
+            "content_type": self.content_type,
+            "after": self.after,
+            "before": self.before,
+            "fts_only": self.fts_only,
+        }
+
+
+def parse_search_params(params: Any) -> SearchQuery:
+    """Validate a query-string mapping into a :class:`SearchQuery`.
+
+    ``source`` is checked against :data:`VALID_SOURCE_KINDS` rather than passed
+    through, mirroring ``cli._validate_source_choice`` — an unknown source
+    silently returning zero results is far more confusing than a 400 naming the
+    four legal values.
+    """
+    query = str(params.get("q", "")).strip()
+    if not query:
+        raise UiBadRequest("q is required", code="missing_query")
+    if len(query) > MAX_QUERY_CHARS:
+        raise UiBadRequest(
+            f"q must be at most {MAX_QUERY_CHARS} characters", code="query_too_long"
+        )
+
+    raw_limit = params.get("limit")
+    if raw_limit in (None, ""):
+        limit = DEFAULT_LIMIT
+    else:
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError) as exc:
+            raise UiBadRequest(
+                "limit must be an integer", code="invalid_limit"
+            ) from exc
+        if not MIN_LIMIT <= limit <= MAX_LIMIT:
+            raise UiBadRequest(
+                f"limit must be between {MIN_LIMIT} and {MAX_LIMIT}",
+                code="invalid_limit",
+            )
+
+    source = (params.get("source") or "").strip() or None
+    if source is not None and source not in VALID_SOURCE_KINDS:
+        raise UiBadRequest(
+            f"unknown source {source!r} "
+            f"(expected: {'|'.join(sorted(VALID_SOURCE_KINDS))})",
+            code="invalid_source",
+        )
+
+    tag = (params.get("tag") or "").strip() or None
+    if tag is not None:
+        normalized = normalize_tags([tag])
+        tag = normalized[0] if normalized else None
+
+    content_type = (params.get("type") or "").strip() or None
+    after_raw = (params.get("after") or "").strip()
+    before_raw = (params.get("before") or "").strip()
+    after = parse_iso_date(after_raw, "after") if after_raw else None
+    before = parse_iso_date(before_raw, "before") if before_raw else None
+    if after and before and after > before:
+        raise UiBadRequest("after must not be later than before", code="invalid_date")
+
+    return SearchQuery(
+        query=query,
+        limit=limit,
+        source_kind=source,
+        tag=tag,
+        content_type=content_type,
+        after=after,
+        before=before,
+        fts_only=str(params.get("fts_only", "")).lower() in {"1", "true", "yes"},
+        session_id=(params.get("session_id") or "").strip() or None,
+    )
+
+
+class NotePatch:
+    """A validated ``PUT /api/notes/{id}`` body.
+
+    ``body_hash`` is mandatory, and that is the whole optimistic-concurrency
+    story: the vault watcher and ``brain-mcp`` are both live writers on these
+    files, so a save without a hash is a save that can silently clobber someone
+    else's write.
+    """
+
+    __slots__ = ("body", "body_hash", "content_type", "tags", "title")
+
+    def __init__(
+        self,
+        *,
+        body_hash: str,
+        body: str | None,
+        title: str | None,
+        tags: list[str] | None,
+        content_type: str | None,
+    ) -> None:
+        self.body_hash = body_hash
+        self.body = body
+        self.title = title
+        self.tags = tags
+        self.content_type = content_type
+
+    def is_empty(self) -> bool:
+        """True when the patch would change nothing."""
+        return (
+            self.body is None
+            and self.title is None
+            and self.tags is None
+            and self.content_type is None
+        )
+
+
+def _parse_tags(payload: dict[str, Any]) -> list[str] | None:
+    if payload.get("tags") is None:
+        return None
+    raw = payload["tags"]
+    if not isinstance(raw, list) or not all(isinstance(t, str) for t in raw):
+        raise UiBadRequest("tags must be a list of strings", code="invalid_tags")
+    return normalize_tags(raw)
+
+
+def _parse_title(payload: dict[str, Any], *, required: bool) -> str | None:
+    raw = payload.get("title")
+    if raw is None:
+        if required:
+            raise UiBadRequest("title is required", code="invalid_title")
+        return None
+    title = _require_str(raw, "title").strip()
+    if required and not title:
+        raise UiBadRequest("title must not be empty", code="invalid_title")
+    if len(title) > MAX_TITLE_CHARS:
+        raise UiBadRequest(
+            f"title must be at most {MAX_TITLE_CHARS} characters",
+            code="invalid_title",
+        )
+    return title
+
+
+def _parse_body(payload: dict[str, Any]) -> str | None:
+    if payload.get("body") is None:
+        return None
+    body = _require_str(payload["body"], "body")
+    if len(body.encode("utf-8")) > MAX_BODY_BYTES:
+        raise UiBadRequest(
+            f"body must be at most {MAX_BODY_BYTES} bytes", code="body_too_large"
+        )
+    return body
+
+
+def parse_note_patch(payload: Any) -> NotePatch:
+    """Validate a ``PUT /api/notes/{id}`` body."""
+    if not isinstance(payload, dict):
+        raise UiBadRequest("body must be a JSON object", code="invalid_body")
+    body_hash = payload.get("body_hash")
+    if not isinstance(body_hash, str) or not body_hash.strip():
+        raise UiBadRequest(
+            "body_hash is required so a concurrent write cannot be clobbered",
+            code="missing_body_hash",
+        )
+    content_type = payload.get("content_type")
+    if content_type is not None:
+        content_type = _require_str(content_type, "content_type").strip() or None
+
+    return NotePatch(
+        body_hash=body_hash.strip(),
+        body=_parse_body(payload),
+        title=_parse_title(payload, required=False),
+        tags=_parse_tags(payload),
+        content_type=content_type,
+    )
+
+
+class NoteCreate:
+    """A validated ``POST /api/notes`` body."""
+
+    __slots__ = ("body", "folder", "tags", "template", "title")
+
+    def __init__(
+        self,
+        *,
+        title: str,
+        folder: str,
+        tags: list[str],
+        template: str,
+        body: str | None,
+    ) -> None:
+        self.title = title
+        self.folder = folder
+        self.tags = tags
+        self.template = template
+        self.body = body
+
+
+def parse_note_create(payload: Any) -> NoteCreate:
+    """Validate a ``POST /api/notes`` body.
+
+    ``folder`` is only *shape*-checked here; the traversal guard proper is
+    :func:`brain.vault.paths.assert_within_vault`, applied in the service layer
+    against the real vault root. Rejecting absolute paths and ``..`` segments
+    here as well is defence in depth, not the primary control.
+    """
+    if not isinstance(payload, dict):
+        raise UiBadRequest("body must be a JSON object", code="invalid_body")
+
+    title = _parse_title(payload, required=True)
+    if title is None:  # pragma: no cover — required=True raises first
+        raise UiBadRequest("title is required", code="invalid_title")
+
+    # Check the RAW value before normalizing. Stripping "/" first would make the
+    # absolute-path test dead code and silently coerce "/etc" into "etc" — safe,
+    # because assert_within_vault still guards, but surprising: the note would be
+    # created somewhere the caller did not ask for instead of being refused.
+    raw_folder = (payload.get("folder") or "").strip()
+    if raw_folder.startswith(("/", "\\")) or ".." in raw_folder.replace(
+        "\\", "/"
+    ).split("/"):
+        raise UiBadRequest(
+            "folder must be a relative path inside the vault",
+            code="folder_escapes_vault",
+        )
+    folder = raw_folder.strip("/")
+
+    template = (payload.get("template") or "note").strip() or "note"
+    if "/" in template or "\\" in template or template.startswith("."):
+        raise UiBadRequest("invalid template name", code="invalid_template")
+
+    return NoteCreate(
+        title=title,
+        folder=folder,
+        tags=_parse_tags(payload) or [],
+        template=template,
+        body=_parse_body(payload),
+    )
+
+
+def require_confirm(payload: Any) -> None:
+    """Reject a destructive request that did not opt in explicitly."""
+    if not isinstance(payload, dict) or payload.get("confirm") is not True:
+        raise UiBadRequest(
+            'this operation requires {"confirm": true}', code="confirm_required"
+        )
+
+
+def search_result_payload(result: Any) -> dict[str, Any]:
+    """Project one ``SearchResult`` for the ledger."""
+    return {
+        "id": result.document_id,
+        "title": result.title,
+        "source_kind": result.source_kind,
+        "snippet": result.snippet,
+        "score": round(float(result.score), 6),
+        "content_type": result.content_type,
+        "tags": list(result.tags or []),
+    }

@@ -5,14 +5,20 @@ description: >
   `brain` CLI. Use this skill when the user wants to start a new note, open or
   create today's daily entry, rename an existing note (with reference
   refactoring), edit a note's frontmatter or body, add/remove tags, ask the
-  LLM to propose tags, or quarantine / un-quarantine a note as draft. Covers
+  LLM to propose tags, or quarantine / un-quarantine a note as draft. Also
+  covers the wikilink graph between documents — what links to a note, what it
+  links to, which notes are unlinked, and exporting the link graph. Covers
   brain note new / brain daily / brain note rename / brain edit / brain tag /
-  brain mark-draft / brain mark-published.
+  brain mark-draft / brain mark-published / brain rm / brain backlinks /
+  brain links / brain orphans / brain graph.
   MANDATORY TRIGGERS: new note, create a note, start a note, scaffold a note,
   daily note, today's daily, daily entry, rename this note, rename my note,
   edit this doc, edit this note, tag this, untag this, auto-tag, propose
   tags, mark as draft, mark as published, quarantine this note, unhide this
-  note.
+  note, what links to this, backlinks, what does this link to, outgoing
+  links, orphan notes, unlinked notes, notes with no links, broken links,
+  dangling links, export my link graph, link graph, render my notes as a
+  diagram.
 ---
 
 # Brain Authoring
@@ -23,7 +29,11 @@ from `ingested` mirrors of Krisp/Slack/Gmail (those are managed by
 `ingest-brain`).
 
 For searching, see `consult-brain`. For ingestion, see `ingest-brain`. For
-health and bulk repairs, see `brain-maintenance`.
+health and bulk repairs, see `brain-maintenance`. For proposed links the user
+hasn't made yet — plus daily digests, weekly reviews, and timelines — see
+`brain-proactivity`. **Boundary with `brain-memory`:** that skill covers what
+*you the agent* write down about the user for your own future recall; this one
+authors and links the *user's* notes.
 
 ## Starting new notes
 
@@ -185,14 +195,97 @@ The doc stays in the DB and remains visible to `brain search` / `brain show`
 / `brain list` — only the wiki's Quartz contentIndex filters drafts out of
 Explorer / Graph / Search.
 
-Use `mark-draft` when:
+Use `mark-draft` when a note is half-finished, a Gmail draft thread shouldn't
+surface on the rendered site, or a note is being held for review.
 
-- A note is half-finished and shouldn't be public on the wiki yet
-- A Gmail draft thread shouldn't surface in the rendered site
-- A note is being held for review
+### `brain rm <id-prefix>` — delete, irreversibly
+
+```bash
+brain rm 7a3f9c
+```
+
+Deletes the document and its chunks. **No undo.** `mark-draft` is almost always
+what the user actually wants — it hides the note from the wiki while leaving it
+searchable. Reach for `rm` only when the user explicitly says delete/remove and
+confirms they mean permanently; echo the title back first. Never infer `rm` from
+"get rid of", "hide", "archive", or "clean up".
+
+## The link graph — `backlinks` / `links` / `orphans` / `graph`
+
+Four read-only commands over the **document link graph**: `[[wikilinks]]` the
+user authored, plus metadata-derived edges (`shared_thread`,
+`shared_participant`, `same_day_participant`).
+
+> **Not the same thing as `brain graphrag`.** `brain graph` links *documents to
+> documents*; `brain graphrag` is the entity graph of *people and concepts*
+> extracted from them — a different layer, owned by `brain-graph`. "What links
+> to this note" is here; "what themes come up with this person" is there.
+
+### `backlinks` / `links` — what points at this note, and what it points to
+
+```bash
+brain backlinks ab12cd --json       # incoming edges
+brain links ab12cd --json           # outgoing edges
+brain links ab12cd --unresolved     # also show dangling [[refs]]
+```
+
+Both resolve the id prefix with `brain show` semantics (6+ hex chars) and
+**include derived edges by default**, prefixed `[derived: <rule>]` in human
+output so provenance is obvious. JSON rows are `{src_*|dst_*, link_text,
+link_kind, rule, weight, evidence}` — `rule` / `weight` / `evidence` are
+populated for derived rows and `null` for authored wiki/embed rows, so the shape
+stays uniform across edge kinds.
+
+`--unresolved` (on `links` only) appends dangling `[[refs]]` that point at no
+document yet, carrying `"resolved": false` with null `dst_*` fields. Reach for it
+when the user asks about broken links — the usual cause is a note renamed without
+the link refactor, or a `[[title]]` written before its target existed. `brain
+vault sync` re-resolves references that now match (see `brain-maintenance`).
+
+### `brain orphans` — notes connected to nothing
+
+```bash
+brain orphans                 # vault-tier only (the useful default)
+brain orphans --all           # include ingested-tier mirrors
+brain orphans --json
+```
+
+Zero incoming **and** zero outgoing links. Defaults to vault-tier because
+ingested-tier orphans (raw Krisp / Slack / Gmail mirrors with no `[[links]]`) are
+usually noise, not a problem. `--json` emits `{document_id, title, kind}`.
+
+### `brain graph` — export the graph
+
+```bash
+brain graph                                   # JSON to stdout (default format)
+brain graph --format mermaid                  # paste into any Mermaid renderer
+brain graph --format dot --out graph.dot      # then: dot -Tsvg graph.dot -o graph.svg
+brain graph --root ab12cd --depth 2           # focused BFS subgraph
+brain graph --include-ingested                # every linked doc, any tier
+brain graph --no-derived                      # authored wiki/embed edges only
+```
+
+| Flag | Purpose |
+|---|---|
+| `--format json\|dot\|mermaid` | Output format (default `json`). |
+| `--root <id-prefix>` / `--depth N` | Center a BFS frontier on one document; `--depth` is only meaningful with `--root` (default unlimited). |
+| `--include-ingested` | Include ingested-tier nodes (default: vault-tier only). |
+| `--no-derived` | Drop metadata-derived edges; render only authored links. |
+| `--out <path>` | Write to a file instead of stdout. |
+
+`--root` + `--depth` is the pair to reach for when the user wants something
+viewable — a full-corpus graph is usually too dense to read.
+
+**Empty results are success, not failure.** All four exit **0** on an empty
+result, and `brain graph` emits valid empty syntax (`{"nodes": [], "edges":
+[]}` / `digraph G {}` / `graph TD`). "No backlinks" and "everything is
+connected" are real answers — report them plainly instead of re-running with
+different flags until something appears.
 
 ## Safety rules
 
+- **`brain rm` is irreversible — confirm the exact document first.** Prefer
+  `mark-draft`. Never infer deletion from "hide", "archive", or "clean up".
 - **Don't auto-create notes silently.** When the user says "save this idea",
   scaffold the note but `--no-edit` and confirm the path back.
 - **Don't rename ingested-tier docs.** The CLI will reject it; don't try

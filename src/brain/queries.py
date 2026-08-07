@@ -28,6 +28,7 @@ from .errors import (
     PersonNotFound,
 )
 from .ingest import Embedder
+from .sensitivity import DEFAULT_SENSITIVITY, normalize_level
 
 # libyaml's C loader parses the flat scalar frontmatter mappings ~11x faster
 # than the pure-Python SafeLoader while returning identical values; fall back to
@@ -72,6 +73,11 @@ class DocumentRow:
     summary: str | None = None
     summary_model: str | None = None
     summary_at: datetime | None = None
+    # F6 trust boundary (migration 026). Defaulted so every existing
+    # ``DocumentRow(...)`` construction — including projections that do not
+    # select the column — keeps compiling unchanged. Populated by
+    # :func:`fetch_document` and :func:`list_documents`.
+    sensitivity: str = DEFAULT_SENSITIVITY
 
 
 def resolve_document_prefix(conn: psycopg.Connection[Any], prefix: str) -> str:
@@ -338,7 +344,7 @@ def fetch_document(conn: psycopg.Connection[Any], document_id: str) -> DocumentR
         """
         SELECT d.id::text, d.title, d.content, d.content_type, d.tags,
                d.source_path, d.ingested_at, s.kind,
-               d.summary, d.summary_model, d.summary_at
+               d.summary, d.summary_model, d.summary_at, d.sensitivity
         FROM documents d
         LEFT JOIN sources s ON s.id = d.source_id
         WHERE d.id = %s
@@ -359,6 +365,10 @@ def fetch_document(conn: psycopg.Connection[Any], document_id: str) -> DocumentR
         summary=row[8],
         summary_model=row[9],
         summary_at=row[10],
+        # F6: selected here so MCP ``brain_show`` can decide whether to withhold
+        # the body it just read. A consumer that must gate on sensitivity has to
+        # receive it in the SAME fetch as the content, or the gate races the read.
+        sensitivity=row[11],
     )
 
 
@@ -522,13 +532,19 @@ def list_documents(
     *,
     source: str | None = None,
     tag: str | None = None,
+    sensitivity: str | None = None,
     limit: int = 20,
 ) -> list[DocumentRow]:
     """Return up to ``limit`` documents (most-recently-ingested first).
 
-    Optional ``source`` and ``tag`` filters mirror ``brain list``. The returned
-    rows omit the document body (``content``) and ``source_path`` to keep the
-    projection cheap.
+    Optional ``source``, ``tag``, and ``sensitivity`` filters mirror
+    ``brain list``. The returned rows omit the document body (``content``) and
+    ``source_path`` to keep the projection cheap.
+
+    ``sensitivity`` (F6) defaults to ``None`` = both tiers, so an unfiltered
+    ``brain list`` is unchanged. The column itself is always selected and
+    returned, because ``brain list``'s job is to show the user what state their
+    corpus is in — a tier you cannot see is a tier you will forget you set.
     """
     where = ["TRUE"]
     params: list[Any] = []
@@ -538,8 +554,17 @@ def list_documents(
     if tag:
         where.append("%s = ANY(d.tags)")
         params.append(tag)
+    if sensitivity is not None:
+        # Validated against the closed literal set BEFORE it reaches SQL, and
+        # then bound as a parameter regardless. Belt and braces: the CHECK
+        # constraint would reject a bad value on write, but a bad value on READ
+        # would otherwise silently return zero rows and read as "nothing is
+        # marked" — the most misleading possible answer to this question.
+        where.append("d.sensitivity = %s")
+        params.append(normalize_level(sensitivity))
     sql = f"""
-        SELECT d.id::text, d.title, d.content_type, d.tags, s.kind, d.ingested_at
+        SELECT d.id::text, d.title, d.content_type, d.tags, s.kind, d.ingested_at,
+               d.sensitivity
         FROM documents d
         LEFT JOIN sources s ON s.id = d.source_id
         WHERE {" AND ".join(where)}
@@ -556,9 +581,46 @@ def list_documents(
             tags=list(r[3] or []),
             source_kind=r[4],
             ingested_at=r[5],
+            sensitivity=r[6],
         )
         for r in rows
     ]
+
+
+def set_document_sensitivity(
+    conn: psycopg.Connection[Any], *, document_id: str, level: str
+) -> bool:
+    """Set ``documents.sensitivity``; return ``True`` iff the row actually changed.
+
+    The boolean return is what makes the CLI's idempotent no-op message
+    (``"<id> is already confidential"``) truthful without a second round-trip:
+    the ``sensitivity <> %s`` guard means an already-at-that-level row matches
+    zero rows, so ``rowcount == 0`` distinguishes "no change needed" from
+    "changed" — and never from "not found", which the caller has already
+    established via :func:`resolve_document_prefix`.
+
+    ``updated_at=NOW()`` is deliberate and is a cross-wave obligation from F9:
+    changing a document's trust tier IS a change to the user's knowledge about
+    that document, so ``--updated-after`` must surface it. Contrast the
+    maintenance jobs (enrichment backfill, tag normalization), which
+    deliberately do NOT bump it.
+
+    A direct ``UPDATE`` rather than a 15th ``update_document`` parameter (spec
+    Q5): sensitivity never triggers re-chunking or re-embedding, so routing it
+    through that 300-line function would add branch surface for no behavioural
+    gain. Callers are responsible for regenerating the vault mirror afterwards
+    so the on-disk frontmatter reflects the new tier.
+
+    Raises :class:`~brain.errors.SensitivityError` on an invalid level, before
+    any SQL runs.
+    """
+    validated = normalize_level(level)
+    cur = conn.execute(
+        "UPDATE documents SET sensitivity=%s, updated_at=NOW() "
+        "WHERE id=%s AND sensitivity <> %s",
+        (validated, document_id, validated),
+    )
+    return cur.rowcount > 0
 
 
 @dataclass
@@ -636,11 +698,49 @@ class NullEmbeddingChunk:
     content: str
 
 
+#: SQL fragment excluding chunks whose parent document is not ``normal``.
+#: A literal — no caller value is interpolated — so it is safe to splice into
+#: statement text. Correlated EXISTS rather than a JOIN so the surrounding
+#: keyset pagination over ``chunks.id`` keeps its simple single-table shape.
+_NORMAL_DOC_ONLY = (
+    "EXISTS (SELECT 1 FROM documents d "
+    "WHERE d.id = chunks.document_id AND d.sensitivity = 'normal')"
+)
+
+
+def _chunk_embedding_conditions(
+    *, include_embedded: bool, exclude_confidential: bool
+) -> list[str]:
+    """Assemble the chunk-selection conditions shared by the two reembed helpers.
+
+    Extracted so the iterator and the counter can never disagree about which
+    rows are in scope. They previously duplicated the clause as three separate
+    hand-spliced strings, which is exactly the shape that drifts once a third
+    condition appears — and a counter that disagrees with its iterator shows up
+    as a progress bar that never reaches its total.
+
+    Every element returned is a module-level literal; no caller value is ever
+    placed in statement text.
+    """
+    conditions: list[str] = []
+    if not include_embedded:
+        conditions.append("embedding IS NULL")
+    if exclude_confidential:
+        conditions.append(_NORMAL_DOC_ONLY)
+    return conditions
+
+
+def _where_clause(conditions: list[str]) -> str:
+    """Join literal conditions into a ``WHERE`` clause, or ``""`` when there are none."""
+    return f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+
 def iter_chunks_missing_embedding(
     conn: psycopg.Connection[Any],
     *,
     batch_size: int = 32,
     include_embedded: bool = False,
+    exclude_confidential: bool = False,
 ) -> Iterator[list[NullEmbeddingChunk]]:
     """Yield batches of chunks whose embedding is NULL.
 
@@ -659,28 +759,29 @@ def iter_chunks_missing_embedding(
     dropped — the iterator yields every chunk in the table. Used by
     ``brain reembed --all`` to re-embed an entire corpus after switching
     embedder backends.
+
+    ``exclude_confidential=True`` (F6) additionally skips chunks belonging to a
+    confidential document. ``brain reembed`` passes it when the active embedder
+    is hosted — without it, ``reembed`` would immediately undo the ingest-time
+    egress veto by shipping every previously-withheld body to the hosted service
+    in one batch, which is the single worst way this boundary could fail.
     """
-    null_clause = "" if include_embedded else "WHERE embedding IS NULL"
-    null_clause_and = "" if include_embedded else "WHERE embedding IS NULL AND"
+    conditions = _chunk_embedding_conditions(
+        include_embedded=include_embedded,
+        exclude_confidential=exclude_confidential,
+    )
     last_id: str | None = None
     while True:
         if last_id is None:
-            rows = conn.execute(
-                f"SELECT id::text, content FROM chunks "
-                f"{null_clause} "
-                f"ORDER BY id LIMIT %s",
-                (batch_size,),
-            ).fetchall()
+            where = _where_clause(conditions)
+            params: tuple[Any, ...] = (batch_size,)
         else:
-            cursor_clause = (
-                "WHERE id > %s::uuid" if include_embedded else f"{null_clause_and} id > %s::uuid"
-            )
-            rows = conn.execute(
-                f"SELECT id::text, content FROM chunks "
-                f"{cursor_clause} "
-                f"ORDER BY id LIMIT %s",
-                (last_id, batch_size),
-            ).fetchall()
+            where = _where_clause([*conditions, "id > %s::uuid"])
+            params = (last_id, batch_size)
+        rows = conn.execute(
+            f"SELECT id::text, content FROM chunks {where} ORDER BY id LIMIT %s",
+            params,
+        ).fetchall()
         if not rows:
             return
         last_id = str(rows[-1][0])
@@ -688,19 +789,119 @@ def iter_chunks_missing_embedding(
 
 
 def count_chunks_missing_embedding(
-    conn: psycopg.Connection[Any], *, include_embedded: bool = False
+    conn: psycopg.Connection[Any],
+    *,
+    include_embedded: bool = False,
+    exclude_confidential: bool = False,
 ) -> int:
     """Return the number of chunks whose embedding is NULL.
 
     When ``include_embedded=True``, returns the total chunk count instead.
+    ``exclude_confidential=True`` (F6) excludes chunks of confidential
+    documents, so ``brain reembed``'s progress total under a hosted embedder
+    describes the work it will actually do rather than the work it is about to
+    refuse.
     """
-    sql = (
-        "SELECT count(*) FROM chunks"
-        if include_embedded
-        else "SELECT count(*) FROM chunks WHERE embedding IS NULL"
+    where = _where_clause(
+        _chunk_embedding_conditions(
+            include_embedded=include_embedded,
+            exclude_confidential=exclude_confidential,
+        )
     )
-    row = conn.execute(sql).fetchone()
+    row = conn.execute(f"SELECT count(*) FROM chunks {where}").fetchone()
     assert row is not None  # count(*) always yields one row
+    return int(row[0])
+
+
+@dataclass(frozen=True)
+class ScannableDocument:
+    """One document projected for the ``brain backfill scan-secrets`` sweep.
+
+    Frozen because the sweep must never mutate what it scanned: the redaction
+    path rebuilds content through ``update_document`` rather than editing this
+    in place, so an accidental attribute write here could only ever produce a
+    divergence between what was scanned and what was stored.
+    """
+
+    id: str
+    title: str
+    content: str
+    source_kind: str | None
+    sensitivity: str
+
+
+def iter_documents_for_secret_scan(
+    conn: psycopg.Connection[Any], *, batch: int = 200
+) -> Iterator[ScannableDocument]:
+    """Yield every document, keyset-paged, for the F4/F6 corpus secret sweep.
+
+    Keyset pagination over ``documents.id`` rather than ``OFFSET``: the sweep's
+    ``--action redact`` path WRITES to the rows it is walking, and ``OFFSET``
+    would silently skip records whenever a write reordered the underlying scan.
+    Advancing on the last id read is stable under concurrent modification of
+    rows already passed.
+
+    Yields one document at a time while fetching in batches of ``batch``, so a
+    1,376-document corpus never materializes at once — the bodies are the
+    largest column in the schema and loading them all would dwarf the rest of
+    the process.
+    """
+    last_id: str | None = None
+    while True:
+        if last_id is None:
+            rows = conn.execute(
+                """
+                SELECT d.id::text, d.title, d.content, s.kind, d.sensitivity
+                FROM documents d
+                LEFT JOIN sources s ON s.id = d.source_id
+                ORDER BY d.id
+                LIMIT %s
+                """,
+                (batch,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT d.id::text, d.title, d.content, s.kind, d.sensitivity
+                FROM documents d
+                LEFT JOIN sources s ON s.id = d.source_id
+                WHERE d.id > %s::uuid
+                ORDER BY d.id
+                LIMIT %s
+                """,
+                (last_id, batch),
+            ).fetchall()
+        if not rows:
+            return
+        last_id = str(rows[-1][0])
+        for row in rows:
+            yield ScannableDocument(
+                id=str(row[0]),
+                title=str(row[1]),
+                content=str(row[2] or ""),
+                source_kind=row[3],
+                sensitivity=str(row[4]),
+            )
+
+
+def count_confidential_documents(conn: psycopg.Connection[Any]) -> int:
+    """Count documents at a non-``normal`` sensitivity tier.
+
+    Drives ``brain reembed``'s finalize decision: ``finalize_embedding_index``
+    applies ``NOT NULL`` to ``chunks.embedding``, which cannot hold while
+    confidential documents are deliberately carrying NULL embeddings under a
+    hosted embedder. Without this check the user would be forced to choose
+    between the HNSW index and the trust boundary — and would discover it as a
+    constraint-violation crash rather than a message.
+
+    Hits the migration-026 partial index (``WHERE sensitivity <> 'normal'``),
+    so it stays cheap even on a large corpus.
+    """
+    row = conn.execute(
+        "SELECT count(*) FROM documents WHERE sensitivity <> %s",
+        (DEFAULT_SENSITIVITY,),
+    ).fetchone()
+    assert row is not None
     return int(row[0])
 
 
@@ -1004,7 +1205,7 @@ def _iter_ingested_mirror_ids(vault_path: Path) -> Iterator[tuple[Path, str]]:
 class MirrorDriftSummary:
     """Counts of DB↔disk drift in the ``_ingested/`` mirror tier.
 
-    All four counters are independent; a healthy vault has zeros across the
+    All five counters are independent; a healthy vault has zeros across the
     board. Used by ``brain doctor`` to surface drift the user can act on:
 
     - ``rows_with_null_vault_path`` → ``brain vault export --force`` to
@@ -1013,12 +1214,58 @@ class MirrorDriftSummary:
       whose document row was removed.
     - ``ghost_rows`` → manual ``brain rm <id>`` for each, or
       ``brain vault export --force`` to re-create the missing files.
+    - ``clobbered_mirrors`` → ``brain vault export --force`` to rewrite the
+      file from its owning row. NEVER prune these: see
+      :func:`iter_clobbered_mirror_files`.
     """
 
     total_ingested_rows: int
     rows_with_null_vault_path: int
     ghost_rows: int  # vault_path set, file missing on disk
     orphan_files: int  # file on disk under _ingested/, no DB row matches its id
+    # file on disk whose frontmatter id is unresolvable BUT whose path is the
+    # `vault_path` of a live row — a foreign document overwrote a live mirror.
+    clobbered_mirrors: int = 0
+
+
+def _owned_vault_paths(conn: psycopg.Connection[Any]) -> set[str]:
+    """Every non-NULL ``documents.vault_path``, as vault-relative POSIX strings.
+
+    The authority for "is this on-disk path the canonical mirror of some live
+    row?" — the question that separates a prunable orphan from a clobbered
+    mirror. Kept as one SELECT so callers stay at a single round trip.
+    """
+    rows = conn.execute(
+        "SELECT vault_path FROM documents WHERE vault_path IS NOT NULL"
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def _iter_unresolved_mirror_files(
+    vault_path: Path, known_ids: set[str], owned_paths: set[str], *, clobbered: bool
+) -> Iterator[Path]:
+    """Yield mirror files whose frontmatter id resolves to no row, split by kind.
+
+    A file whose id is unresolvable is one of exactly two things, and the
+    distinction decides whether deleting it is safe:
+
+    - ``clobbered=False`` (**orphan**) — the file's path is owned by nobody.
+      Its row is genuinely gone; the file is dead weight and prunable.
+    - ``clobbered=True`` (**clobbered mirror**) — the file's path IS the
+      ``vault_path`` of a live row. Some other document was written over that
+      row's mirror, so the id no longer matches. Deleting it destroys the live
+      document's only mirror; the fix is to rewrite it from the DB.
+
+    Shared by :func:`iter_orphan_mirror_files`,
+    :func:`iter_clobbered_mirror_files` and :func:`mirror_drift_summary` so the
+    two categories can never drift apart into disagreeing definitions.
+    """
+    for path, doc_id in _iter_ingested_mirror_ids(vault_path):
+        if doc_id in known_ids:
+            continue
+        relative = path.relative_to(vault_path).as_posix()
+        if (relative in owned_paths) is clobbered:
+            yield path
 
 
 def iter_orphan_mirror_files(
@@ -1032,6 +1279,16 @@ def iter_orphan_mirror_files(
     - It is a regular ``.md`` file.
     - Its YAML frontmatter parses cleanly and contains a string ``id`` key.
     - That ``id`` value matches no row in ``documents.id``.
+    - **And its path is not the ``vault_path`` of any live row.**
+
+    That last clause is load-bearing and was added after a live incident: a
+    stray ingest overwrote ``_ingested/manual/<slug>.md``, a file that a real
+    document row still owned. The file's frontmatter id then resolved to
+    nothing, so the id-only test called it an orphan and
+    ``brain vault prune-orphans --apply`` would have deleted the live
+    document's only mirror — turning a repairable clobber into a ghost row.
+    Those files are :func:`iter_clobbered_mirror_files` instead, and are
+    repaired by rewriting from the DB, never by deleting.
 
     Files without parseable frontmatter (e.g. ``_ingested/README.md`` written
     by ``brain vault init``, or any markdown file the user dropped in
@@ -1051,10 +1308,41 @@ def iter_orphan_mirror_files(
         return
     rows = conn.execute("SELECT id::text FROM documents").fetchall()
     known_ids = {str(r[0]) for r in rows}
-    for path, doc_id in _iter_ingested_mirror_ids(vault_path):
-        if doc_id in known_ids:
-            continue
-        yield path
+    owned_paths = _owned_vault_paths(conn)
+    yield from _iter_unresolved_mirror_files(
+        vault_path, known_ids, owned_paths, clobbered=False
+    )
+
+
+def iter_clobbered_mirror_files(
+    conn: psycopg.Connection[Any], *, vault_path: Path
+) -> Iterator[Path]:
+    """Yield mirror files that overwrote a live row's canonical mirror.
+
+    A file is "clobbered" iff its frontmatter ``id`` matches no row **and** its
+    vault-relative path is the ``vault_path`` of some live row. The row is
+    fine; the bytes on disk belong to a different document.
+
+    This is the shape a stray ingest against the real vault leaves behind: the
+    writer computed the same deterministic mirror path as an existing document
+    and overwrote it, then its own row went away (rolled back, or written to a
+    different database). ``brain doctor`` counts zero ghost rows for it — the
+    file exists, so the row's ``vault_path`` still resolves — while the vault
+    and any published wiki quietly serve the wrong document's content.
+
+    The repair is ``brain vault export --force``, which rewrites the file from
+    its owning row. Deleting is never correct here, which is exactly why these
+    are excluded from :func:`iter_orphan_mirror_files`.
+    """
+    ingested_dir = vault_path / _INGESTED_DIR_NAME
+    if not ingested_dir.is_dir():
+        return
+    rows = conn.execute("SELECT id::text FROM documents").fetchall()
+    known_ids = {str(r[0]) for r in rows}
+    owned_paths = _owned_vault_paths(conn)
+    yield from _iter_unresolved_mirror_files(
+        vault_path, known_ids, owned_paths, clobbered=True
+    )
 
 
 def iter_stale_mirror_files(
@@ -1083,6 +1371,18 @@ def iter_stale_mirror_files(
     :func:`iter_orphan_mirror_files`. Rows with ``vault_path IS NULL`` are
     treated as not-yet-mirrored and yield no stales (the file at this path
     might be the row's new canonical mirror once the next export runs).
+
+    **A file that is some OTHER live row's ``vault_path`` is never yielded**,
+    even when its own id points elsewhere. That combination is not staleness —
+    it is a clobbered mirror: document B's bytes were written over document A's
+    mirror, so the id reads B while the path still belongs to A. Deleting it
+    destroys A's only on-disk copy. :func:`iter_orphan_mirror_files` excludes
+    owned paths via :func:`_owned_vault_paths` (both landed in the same change
+    as the orphan/clobbered split); this helper did not,
+    and both feed the same ``path.unlink()`` loop behind
+    ``brain vault prune-orphans --apply --include-stale`` — which
+    :mod:`brain.maintenance` runs UNATTENDED as a step of the wiki stage. So
+    the guard has to be on both iterators or it is on neither.
     """
     ingested_dir = vault_path / _INGESTED_DIR_NAME
     if not ingested_dir.is_dir():
@@ -1091,6 +1391,9 @@ def iter_stale_mirror_files(
         "SELECT id::text, vault_path FROM documents WHERE vault_path IS NOT NULL"
     ).fetchall()
     canonical: dict[str, str] = {str(r[0]): str(r[1]) for r in rows}
+    # Every live row's mirror path, regardless of which row owns it. Built from
+    # the same rows already fetched above — no extra round trip.
+    owned_paths = {str(r[1]) for r in rows}
     for path, doc_id in _iter_ingested_mirror_ids(vault_path):
         canonical_path = canonical.get(doc_id)
         if canonical_path is None:
@@ -1098,17 +1401,24 @@ def iter_stale_mirror_files(
         relative = path.relative_to(vault_path).as_posix()
         if relative == canonical_path:
             continue
+        if relative in owned_paths:
+            # Another live row owns this path — clobbered, not stale. Never
+            # unlink it; `brain vault export --force` rewrites it instead.
+            continue
         yield path
 
 
 def mirror_drift_summary(
     conn: psycopg.Connection[Any], *, vault_path: Path
 ) -> MirrorDriftSummary:
-    """Compute the four-counter drift snapshot for ``<vault>/_ingested/``.
+    """Compute the five-counter drift snapshot for ``<vault>/_ingested/``.
 
     One SQL round-trip (``id``, ``kind``, ``vault_path`` for every row) feeds
-    all three DB-derived signals — the ingested/NULL counts and the known-id
-    set — plus one filesystem walk via :func:`_iter_ingested_mirror_ids`. Safe
+    all four DB-derived signals — the ingested/NULL counts, the known-id set and
+    the owned-path set — plus exactly one filesystem walk via
+    :func:`_iter_ingested_mirror_ids`. Both invariants are load-bearing: the
+    orphan/clobbered split needs the SAME ownership set the prune iterators use,
+    and doctor calls this on every invocation. Safe
     to call from ``brain doctor`` on every invocation: at personal-corpus scale
     the whole pass is dominated by walking the mirror tree, and that walk reads
     only each file's frontmatter block.
@@ -1125,8 +1435,16 @@ def mirror_drift_summary(
     total_ingested = 0
     null_vault_path = 0
     ingested_vault_paths: list[str] = []
+    # EVERY kind's vault_path, not just ingested — this must equal what
+    # _owned_vault_paths(conn) returns, because the iterators behind
+    # `prune-orphans` use that set and the two surfaces must agree. Scoping it
+    # to ingested rows is what let doctor call a live vault-tier row's clobbered
+    # mirror an "orphan" while prune-orphans correctly refused to list it.
+    all_vault_paths: list[str] = []
     for doc_id, kind, vault_path_value in rows:
         known_ids.add(str(doc_id))
+        if vault_path_value is not None:
+            all_vault_paths.append(str(vault_path_value))
         if kind != "ingested":
             continue
         total_ingested += 1
@@ -1140,9 +1458,42 @@ def mirror_drift_summary(
         if not (vault_path / relative).is_file():
             ghost_count += 1
 
+    # An unresolvable id is either a prunable orphan or a clobbered mirror,
+    # never both. The predicate below is DUPLICATED from
+    # :func:`_iter_unresolved_mirror_files` rather than delegated — deliberately,
+    # because delegating meant calling it twice (once per category) and
+    # re-walking the whole mirror tree on doctor's hot path. Duplication is a
+    # real cost: the two definitions can drift, and drift here is precisely the
+    # bug this counter was fixed for. What holds them together is
+    # test_drift_summary_and_prune_orphans_agree_on_a_vault_tier_mirror, which
+    # asserts this counter against what `iter_orphan_mirror_files` actually
+    # yields. If you change either predicate, that test is the tripwire.
+    #
+    # They previously did disagree, on the ownership set: this function scoped
+    # `owned_paths` to ingested-tier rows only (`ingested_vault_paths`), while
+    # `_owned_vault_paths` — used by the iterators — covers ALL kinds. A live
+    # vault-tier row whose mirror sits under `_ingested/` was therefore invisible
+    # here, so doctor counted its clobbered file as an orphan and printed the
+    # `prune-orphans` remedy, while `prune-orphans` itself correctly refused to
+    # list it and reported zero. The user got a warning they could not clear and
+    # advice that contradicted the tool. Two surfaces derived from one definition
+    # can drift; one definition consumed twice cannot.
+    # ONE pass. Calling _iter_unresolved_mirror_files twice (once per category)
+    # would re-walk the whole mirror tree and re-parse every frontmatter block —
+    # the cost this function's docstring names as dominant — and `brain doctor`
+    # calls this on every invocation. The classification below is the same
+    # predicate that helper applies (`relative in owned_paths`), kept in lockstep
+    # by test_drift_summary_and_prune_orphans_agree_on_a_vault_tier_mirror, which
+    # asserts this counter against what iter_orphan_mirror_files actually yields.
+    owned_paths = set(all_vault_paths)
     orphan_count = 0
-    for _path, doc_id in _iter_ingested_mirror_ids(vault_path):
-        if doc_id not in known_ids:
+    clobbered_count = 0
+    for path, doc_id in _iter_ingested_mirror_ids(vault_path):
+        if doc_id in known_ids:
+            continue
+        if path.relative_to(vault_path).as_posix() in owned_paths:
+            clobbered_count += 1
+        else:
             orphan_count += 1
 
     return MirrorDriftSummary(
@@ -1150,6 +1501,109 @@ def mirror_drift_summary(
         rows_with_null_vault_path=null_vault_path,
         ghost_rows=ghost_count,
         orphan_files=orphan_count,
+        clobbered_mirrors=clobbered_count,
+    )
+
+
+@dataclass(frozen=True)
+class PlannerStatsState:
+    """Whether the query planner has usable statistics for one table.
+
+    ``exists``/``has_rows`` are what separate the three states a caller must
+    tell apart, and conflating any two of them is how this check went wrong
+    before:
+
+    - table absent (``exists=False``) — nothing to say.
+    - present but empty (``has_rows=False``) — no statistics are *expected*;
+      staying quiet keeps fresh installs clean.
+    - present, non-empty, ``has_planner_stats=False`` — the genuine
+      "never analyzed" state worth warning about.
+    """
+
+    exists: bool
+    has_rows: bool
+    has_planner_stats: bool
+    last_analyzed: datetime | None
+    estimated_rows: int
+
+
+def planner_stats_state(conn: psycopg.Connection[Any], table: str) -> PlannerStatsState:
+    """Return the planner-statistics state of ``table``.
+
+    Answers the question ``brain doctor`` actually cares about — *does the
+    query planner have statistics for this table?* — from the authoritative
+    catalogs rather than from the cumulative-activity counters.
+
+    Why this exists: ``pg_stat_user_tables.last_analyze`` /
+    ``last_autoanalyze`` / ``n_live_tup`` live in the **cumulative statistics
+    subsystem**, which PostgreSQL keeps in shared memory and discards wholesale
+    on an unclean shutdown, on crash recovery, and on ``pg_stat_reset()``.
+    Planner statistics live in ``pg_statistic`` / ``pg_class`` and survive all
+    three. Reading the counters to decide "has this been analyzed?" therefore
+    reports a fully-analyzed table as *never analyzed* after any crash-restart,
+    and reports ``n_live_tup`` row counts that are wrong by orders of magnitude
+    (they resume from zero and re-accumulate from subsequent writes only).
+
+    So:
+
+    - ``has_planner_stats`` — True iff ``pg_statistic`` holds at least one
+      column entry for ``table``. This is the real signal: it is what
+      ``ANALYZE`` writes and what the planner reads.
+    - ``last_analyzed`` — the more recent of ``last_analyze`` /
+      ``last_autoanalyze``, or ``None`` when the counters have been reset.
+      Recency detail only; never evidence of absence.
+    - ``estimated_rows`` — ``pg_class.reltuples`` (maintained by
+      ANALYZE/VACUUM, crash-durable), not ``n_live_tup``. ``-1`` in
+      ``reltuples`` means "never analyzed" in PostgreSQL 14+, normalized to
+      ``0`` here.
+    - ``has_rows`` — a bounded ``EXISTS`` probe, NOT a row estimate. A caller
+      cannot use ``estimated_rows == 0`` to mean "empty": a never-analyzed
+      table reports ``reltuples = -1`` no matter how many rows it holds, so
+      treating zero as empty silently skips the exact table most in need of
+      the warning. ``EXISTS`` stops at the first row, so this stays cheap on a
+      large table.
+
+    ``table`` is resolved through ``to_regclass`` against the current
+    ``search_path``, so a same-named table in another schema (e.g. an Apache
+    AGE label table) cannot be picked up by accident — the unqualified
+    ``WHERE relname = ...`` match it replaces could return either one.
+    """
+    row = conn.execute(
+        """
+        SELECT
+            EXISTS (SELECT 1 FROM pg_statistic s WHERE s.starelid = c.oid),
+            st.last_analyze,
+            st.last_autoanalyze,
+            c.reltuples
+        FROM pg_class c
+        LEFT JOIN pg_stat_user_tables st ON st.relid = c.oid
+        WHERE c.oid = to_regclass(%s)
+        """,
+        (table,),
+    ).fetchone()
+    if row is None:
+        return PlannerStatsState(
+            exists=False,
+            has_rows=False,
+            has_planner_stats=False,
+            last_analyzed=None,
+            estimated_rows=0,
+        )
+    has_stats, last_analyze, last_autoanalyze, reltuples = row
+    stamps = [ts for ts in (last_analyze, last_autoanalyze) if ts is not None]
+    most_recent = max(stamps) if stamps else None
+    estimated = int(reltuples) if reltuples is not None and reltuples > 0 else 0
+    probe = conn.execute(
+        sql.SQL("SELECT EXISTS (SELECT 1 FROM {table})").format(
+            table=sql.Identifier(*table.split(".")) if "." in table else sql.Identifier(table)
+        )
+    ).fetchone()
+    return PlannerStatsState(
+        exists=True,
+        has_rows=bool(probe[0]) if probe is not None else False,
+        has_planner_stats=bool(has_stats),
+        last_analyzed=most_recent,
+        estimated_rows=estimated,
     )
 
 

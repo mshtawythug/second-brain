@@ -126,8 +126,21 @@ def refresh_related(
     (single source of truth — see plan ``docs/plans/2026-05-06-related-docs-rebuild.md``,
     "Cosine-floor reuse").
 
-    Failures are logged and returned in ``summary.errors`` rather than raised:
-    related docs are a wiki enhancement and must not block the build.
+    Connection/query failures are logged and returned in ``summary.errors``
+    rather than raised: the related-docs sidebar is one secondary surface, and
+    a DB blip here is transient — the next build repairs it with no human
+    involved. Aborting the whole build over it would let a five-second
+    Postgres restart stop a markdown-only edit from ever reaching the reader.
+    Contrast :func:`brain.wiki.build_swap._refresh_pre_build_adornments`,
+    where an unloadable ``Config`` DOES abort: that one is a persistent
+    deployment misconfiguration affecting every DB-derived surface.
+
+    The log is at ERROR, not WARNING, on purpose. The caller discards this
+    summary (the build proceeds either way), so the log line is the ONLY
+    signal that the sidebar silently stopped updating — and a WARNING is
+    exactly what let the 2026-07-26 wiki staleness run for twelve days
+    unnoticed. An empty summary from a healthy but empty DB is NOT an error
+    and does not log here: ``written=0`` on a fresh brain is correct.
     """
     try:
         with connect(cfg.database_url) as conn:
@@ -138,7 +151,12 @@ def refresh_related(
                 vector_sim_floor=cfg.vector_sim_floor,
             )
     except (OSError, psycopg.Error) as exc:
-        _logger.warning("wiki related docs: refresh failed: %s", exc)
+        _logger.error(
+            "wiki related docs: refresh FAILED (%s) — the related-docs sidebar is"
+            " now stale and will stay stale until a build succeeds with the DB"
+            " reachable. The build itself continues.",
+            exc,
+        )
         return RelatedSummary(errors=[str(exc)])
 
 
@@ -364,19 +382,19 @@ def _fts_candidates(
                    ts_rank(
                        '{{0.05, 0.8, 0.3, 0.1}}'::float4[],
                        c.tsv,
-                       to_tsquery('english', %s)
+                       %s::tsquery
                    ) AS score,
                    ROW_NUMBER() OVER (
                        PARTITION BY c.document_id
                        ORDER BY ts_rank(
                            '{{0.05, 0.8, 0.3, 0.1}}'::float4[],
                            c.tsv,
-                           to_tsquery('english', %s)
+                           %s::tsquery
                        ) DESC
                    ) AS rn
             FROM chunks c
             JOIN documents d ON d.id = c.document_id
-            WHERE c.tsv @@ to_tsquery('english', %s)
+            WHERE c.tsv @@ %s::tsquery
               AND d.draft = FALSE
               AND d.vault_path IS NOT NULL
               AND d.id <> %s::uuid
@@ -641,7 +659,12 @@ def _build_self_tsquery(
     if title_tsq:
         parts.append(f"({title_tsq})")
     for lex in body_lexemes:
-        lex_tsq = _to_tsquery_text(conn, lex)
+        # ``_lexeme_to_tsquery_text``, NOT ``_to_tsquery_text``: these came from
+        # ``ts_stat`` over ``chunks.tsv`` and are ALREADY stemmed. Re-stemming
+        # them (provis -> provi) stops them matching the column they came from.
+        # The title path above deliberately keeps ``_to_tsquery_text`` because
+        # its input is RAW tokens, which must be stemmed.
+        lex_tsq = _lexeme_to_tsquery_text(conn, lex)
         if lex_tsq:
             parts.append(f"({lex_tsq})")
 
@@ -655,6 +678,40 @@ def _plainto_tsquery_text(conn: psycopg.Connection[Any], text: str) -> str:
     row = conn.execute(
         "SELECT plainto_tsquery('english', %s)::text", (text,)
     ).fetchone()
+    if row is None:
+        return ""
+    return str(row[0]) if row[0] is not None else ""
+
+
+def _lexeme_to_tsquery_text(conn: psycopg.Connection[Any], lexeme: str) -> str:
+    """Wrap an ALREADY-STEMMED lexeme as a tsquery fragment, without re-stemming.
+
+    Counterpart to :func:`_to_tsquery_text`, and the distinction is load-bearing.
+    That function takes RAW text and stems it, which is correct for the title
+    path (a raw token must become a lexeme to match the stored ``tsv``). This
+    one takes a lexeme that ``ts_stat`` already produced from ``chunks.tsv``;
+    passing it through ``to_tsquery`` would stem it a SECOND time and the result
+    would no longer match the very column it came from — ``provis`` → ``provi``,
+    while the stored lexeme stays ``provis``.
+
+    Validation is preserved by *casting* rather than re-parsing: ``::tsquery``
+    rejects malformed input exactly as ``to_tsquery`` did, but is
+    dictionary-free so lexemes survive intact. The ``[a-z][a-z0-9]*`` guard is
+    kept ahead of it, so the quoting below can never be fed a quote character.
+
+    Returns ``""`` for anything unsafe or unparseable, so callers can keep
+    ``" | ".join``-ing the parts.
+    """
+    if not re.fullmatch(r"[a-z][a-z0-9]*", lexeme):
+        return ""
+    try:
+        row = conn.execute("SELECT (%s::tsquery)::text", (f"'{lexeme}'",)).fetchone()
+    except psycopg.errors.SyntaxError:
+        # Malformed tsquery literal — same outcome the old to_tsquery path gave
+        # for input it could not parse. Rolled back so the caller's transaction
+        # is not left aborted.
+        conn.rollback()
+        return ""
     if row is None:
         return ""
     return str(row[0]) if row[0] is not None else ""

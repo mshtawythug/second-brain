@@ -4,6 +4,7 @@ These tests have zero DB dependency. Run with:
     .venv/bin/pytest --no-cov --noconftest -q tests/test_bin_launchd.py -v
 """
 
+import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from brain.bin.launchd import (
     install_main,
     install_plists,
     render_plist,
+    resolve_brain_py,
     resolve_pipx_bin_dir,
     uninstall_plists,
 )
@@ -273,3 +275,232 @@ def test_install_plists_installs_foreground_wrappers(
         shim = brain_home / ".shims" / wrapper
         assert shim.exists(), f"expected shim {shim} to be installed"
         assert shim.stat().st_mode & 0o111, f"expected {shim} to be executable"
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — generated plists must not depend on the ambient environment
+#
+# Regression for the 12-day silent outage (2026-07-26 -> 2026-08-07): launchd
+# starts agents with a minimal environment and no useful cwd. The plists pinned
+# HOME/PATH/BRAIN_VAULT_PATH/BRAIN_PY but never BRAIN_HOME, so _brain_home_root()
+# fell through to a repo-root walk-up from the *installed* package location and
+# landed on ~/.brain only by accident of the install layout. Every leg of the
+# dotenv chain then missed, Config.load() raised, and all three daemons died.
+# ---------------------------------------------------------------------------
+
+
+def _top_level_nodes(text: str) -> list[ET.Element]:
+    """Return the children of the plist's top-level <dict>."""
+    root = ET.fromstring(text)
+    top = root.find("dict")
+    assert top is not None, "plist has no top-level <dict>"
+    return list(top)
+
+
+def _plist_value(text: str, key: str) -> ET.Element:
+    """Return the value element following *key* in the top-level <dict>."""
+    nodes = _top_level_nodes(text)
+    for index, node in enumerate(nodes):
+        if node.tag == "key" and node.text == key:
+            return nodes[index + 1]
+    raise AssertionError(f"plist has no {key!r} key")
+
+
+def _environment_variables(text: str) -> dict[str, str]:
+    """Parse the plist's EnvironmentVariables block into a plain mapping."""
+    env_dict = _plist_value(text, "EnvironmentVariables")
+    assert env_dict.tag == "dict"
+    children = list(env_dict)
+    return {
+        (children[i].text or ""): (children[i + 1].text or "")
+        for i in range(0, len(children), 2)
+    }
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_plist_pins_every_var_the_daemons_need(label: str) -> None:
+    """Each plist explicitly sets every variable its shim + config chain read.
+
+    Nothing may be inherited from the launching environment, because under
+    launchd there effectively isn't one.
+    """
+    env = _environment_variables(_render(label))
+
+    for required in (
+        "HOME",
+        "PATH",
+        "BRAIN_HOME",
+        "BRAIN_VAULT_PATH",
+        "BRAIN_PY",
+        "BRAIN_IGNORE_CWD_DOTENV",
+    ):
+        assert required in env, f"{label} does not pin {required}"
+        assert env[required].strip(), f"{label} pins {required} to an empty value"
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_plist_opts_out_of_the_cwd_dotenv_walkup(label: str) -> None:
+    """Daemons must not resolve config through an ambient-cwd read.
+
+    The walk-up climbs to the filesystem root, so a stray .env in any ancestor
+    of WorkingDirectory would silently repoint the daemon at another database.
+    Today that leg finds nothing only because WorkingDirectory happens to be
+    $BRAIN_HOME — incidental, not a guarantee.
+    """
+    from brain.config import _TRUTHY_ENV_VALUES
+
+    env = _environment_variables(_render(label))
+    assert env["BRAIN_IGNORE_CWD_DOTENV"] in _TRUTHY_ENV_VALUES, (
+        f"{label} sets BRAIN_IGNORE_CWD_DOTENV to a value config.py "
+        f"does not treat as true"
+    )
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_plist_exports_brain_home(label: str) -> None:
+    """BRAIN_HOME is exported as the rendered brain_home — this is the fix."""
+    env = _environment_variables(_render(label))
+    assert env["BRAIN_HOME"] == str(_FAKE_BRAIN_HOME)
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_plist_sets_explicit_working_directory(label: str) -> None:
+    """A daemon with no useful cwd must never resolve paths relative to one."""
+    working_dir = _plist_value(_render(label), "WorkingDirectory")
+    assert working_dir.tag == "string"
+    assert working_dir.text == str(_FAKE_BRAIN_HOME)
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_plist_bakes_no_secret_values(label: str) -> None:
+    """Only paths belong in a plist; secrets stay in $BRAIN_HOME/.env.
+
+    Baking a secret here would both leak it into a world-readable-ish file and
+    freeze a snapshot that goes stale silently — the exact failure mode this
+    whole fix is about.
+    """
+    env = _environment_variables(_render(label))
+
+    for forbidden in (
+        "DATABASE_URL",
+        "VOYAGE_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ):
+        assert forbidden not in env, f"{label} bakes {forbidden} into the plist"
+
+
+def test_plist_brain_home_drives_config_resolution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End-to-end: the BRAIN_HOME a plist exports is the one Config resolves.
+
+    Ties the plist change to the behaviour it exists to guarantee — with this
+    variable exported, $BRAIN_HOME/.env is deterministic instead of depending on
+    whether the running package happens to sit under a checkout.
+    """
+    from brain.config import _brain_home_root
+
+    synthetic_home = tmp_path / "synthetic-brain-home"
+    env = _environment_variables(_render(_WATCHER, brain_home=synthetic_home))
+
+    monkeypatch.setenv("BRAIN_HOME", env["BRAIN_HOME"])
+
+    assert _brain_home_root() == synthetic_home
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_shim_rotates_logs_before_exec(label: str, tmp_path: Path) -> None:
+    """Every shim caps its log before exec'ing the daemon (item #5).
+
+    Rotation has to happen here rather than in a Python logging handler: launchd
+    writes fd 1/2 straight to StandardOut/ErrorPath, so Rich tracebacks and
+    esbuild's Go goroutine dumps never pass through Python's logging module.
+    """
+    brain_home = tmp_path / "brain"
+    install_plists(
+        brain_home=brain_home,
+        launchd_dir=tmp_path / "agents",
+        launchctl="/usr/bin/true",
+    )
+    program = _plist_value(_render(label), "ProgramArguments")
+    shim_name = Path(str(program[0].text)).name
+
+    body = (brain_home / ".shims" / shim_name).read_text(encoding="utf-8")
+
+    # Match on real command lines, not prose: the surrounding comments mention
+    # both "exec" and the module by name.
+    lines = body.splitlines()
+    rotate_lines = [
+        i
+        for i, line in enumerate(lines)
+        if "-m brain.log_rotation" in line and not line.lstrip().startswith("#")
+    ]
+    exec_lines = [i for i, line in enumerate(lines) if line.startswith("exec ")]
+
+    assert rotate_lines, f"{shim_name} does not rotate its log"
+    assert exec_lines, f"{shim_name} has no exec line"
+    assert rotate_lines[0] < exec_lines[0], (
+        f"{shim_name} rotates after exec — the exec never returns"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 12 — resolve_brain_py honours a BRAIN_PY override
+#
+# Without the override, sys.executable is the only possible answer, so running
+# brain-install-launchd from a dev checkout silently repoints the user's live
+# LaunchAgents at that checkout — swapping a released install for uncommitted
+# code as a side effect of regenerating a plist. This is also the contract
+# brain.bin._launcher.exec_shim already documents ("an existing BRAIN_PY env var
+# is preserved untouched"), which resolve_brain_py used to disagree with.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_brain_py_defaults_to_sys_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default behaviour is unchanged when BRAIN_PY is unset."""
+    monkeypatch.delenv("BRAIN_PY", raising=False)
+    assert resolve_brain_py() == Path(sys.executable)
+
+
+def test_resolve_brain_py_honours_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BRAIN_PY wins, so plists can target an interpreter we are not running."""
+    monkeypatch.setenv("BRAIN_PY", "/fake/tools/secondbrain-py/bin/python")
+    assert resolve_brain_py() == Path("/fake/tools/secondbrain-py/bin/python")
+
+
+def test_resolve_brain_py_ignores_blank_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty/whitespace BRAIN_PY must not yield an unusable empty path."""
+    monkeypatch.setenv("BRAIN_PY", "   ")
+    assert resolve_brain_py() == Path(sys.executable)
+
+
+def test_brain_py_override_reaches_the_rendered_plist(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End-to-end: the override is what install_plists bakes into BRAIN_PY.
+
+    This is the capability that would have let the live plists be regenerated
+    normally instead of hand-rendered.
+    """
+    target_py = "/fake/tools/secondbrain-py/bin/python"
+    monkeypatch.setenv("BRAIN_PY", target_py)
+    launchd_dir = tmp_path / "agents"
+
+    install_plists(
+        brain_home=tmp_path / "brain",
+        launchd_dir=launchd_dir,
+        launchctl="/usr/bin/true",
+    )
+
+    env = _environment_variables(
+        (launchd_dir / f"{_WATCHER}.plist").read_text(encoding="utf-8")
+    )
+    assert env["BRAIN_PY"] == target_py
+    assert str(sys.executable) not in env["BRAIN_PY"]

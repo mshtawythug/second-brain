@@ -178,8 +178,10 @@ def _fts_ranked_keys(
     rows = conn.execute(
         "SELECT community_key::text FROM graph_communities "
         "WHERE tenant_id = %s AND summary IS NOT NULL "
-        "AND summary_tsv @@ to_tsquery('english', %s) "
-        "ORDER BY ts_rank(summary_tsv, to_tsquery('english', %s)) DESC, "
+        # %s::tsquery — _build_tsquery returns LEXEMES; see
+        # brain.search._build_tsquery for why re-parsing breaks matching.
+        "AND summary_tsv @@ %s::tsquery "
+        "ORDER BY ts_rank(summary_tsv, %s::tsquery) DESC, "
         "community_key "
         "LIMIT %s",
         (tenant, tsquery, tsquery, _CANDIDATE_LIMIT),

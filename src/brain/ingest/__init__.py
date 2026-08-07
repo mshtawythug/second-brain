@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -13,7 +13,9 @@ from typing import TYPE_CHECKING, Any, Protocol
 import psycopg
 from pgvector.psycopg import register_vector  # noqa: F401  (ensures adapter loaded)
 
+from brain.config import DEFAULT_SECRET_GUARD
 from brain.errors import EnrichmentError, IngestAmbiguousSource, OllamaUnavailable
+from brain.sensitivity import DEFAULT_SENSITIVITY, is_confidential, normalize_level
 from brain.tags import normalize_tags
 
 if TYPE_CHECKING:
@@ -32,6 +34,7 @@ from brain.vault.derived_links.participants import (
 from brain.vault.export import regenerate_vault_file
 
 from .chunker import Chunk, chunk_text
+from .guard import GuardOutcome, SecretFinding, apply_guard, format_findings
 from .sub_tokens import extract_sub_tokens
 
 _logger = logging.getLogger(__name__)
@@ -106,6 +109,29 @@ class IngestResult:
     # post-commit to drop the stale graph presence. ``None`` on every other
     # path (new insert, in-place update, no-op skip).
     replaced_document_id: str | None = None
+    # F4 secret guard. Both default to "nothing found", so every existing
+    # caller and test that constructs or unpacks an IngestResult is unaffected.
+    # ``secret_findings`` is the structured result (kind / line / col / masked
+    # preview); ``secret_notice`` is the pre-rendered stderr block. The notice
+    # is built HERE rather than by the CLI because only the pipeline knows the
+    # effective display mode — a note carrying ``allow_secrets: true`` in its
+    # frontmatter is bypassed inside ``ingest_document``, and the CLI has no
+    # way to see that.
+    secret_findings: tuple[SecretFinding, ...] = ()
+    secret_notice: str = ""
+    # F6 hosted-egress veto. Non-empty only when a CONFIDENTIAL document was
+    # ingested under a HOSTED embedder, in which case its chunks were stored
+    # with NULL embeddings and the document is findable by full-text search
+    # only. Rendered by the pipeline rather than the CLI for the same reason as
+    # ``secret_notice``: only the pipeline knows both the resolved sensitivity
+    # and whether the active backend is hosted.
+    egress_notice: str = ""
+    # #23 orphan repair. True when this run wrote a mirror that a PREVIOUS run
+    # left owed (the row existed with ``vault_path IS NULL``). Surfaced so the
+    # CLI can avoid reporting a bare "skipped (already ingested)" on a run that
+    # actually repaired something — understating the work done is the same
+    # class of failure as the silent success this repair exists to fix.
+    mirror_repaired: bool = False
 
 
 @dataclass
@@ -121,10 +147,121 @@ class UpdateResult:
     document_id: str
     fields_changed: list[str]
     rechunked: bool
+    # F4 secret guard — same contract as :class:`IngestResult`'s pair. Empty on
+    # every edit that supplied no new body, since the guard only inspects
+    # ``new_content``.
+    secret_findings: tuple[SecretFinding, ...] = ()
+    secret_notice: str = ""
 
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _frontmatter_allows_secrets(metadata: dict[str, Any] | None) -> bool:
+    """Return True iff a note opted out of the guard via its own frontmatter.
+
+    ``brain vault sync`` deposits every non-reserved frontmatter key into
+    ``documents.metadata`` for vault-tier rows, so ``allow_secrets: true`` in a
+    note's YAML arrives here with no registry change and no extra parsing.
+
+    The check is ``is True`` rather than truthiness on purpose: the string
+    ``"false"`` (what a YAML value quoted by hand becomes) is truthy, and a
+    typo'd opt-out that silently disables the guard is the worst possible
+    failure for this feature. Anything that is not the boolean ``True`` leaves
+    the guard on.
+
+    Intended for a note that is *about* credentials -- a rotation runbook
+    quoting a key format -- not as a way to silence the guard globally.
+    """
+    if not metadata:
+        return False
+    return metadata.get("allow_secrets") is True
+
+
+def _guard_content(
+    content: str,
+    *,
+    title: str,
+    mode: str,
+    allow_secrets: bool,
+    metadata: dict[str, Any] | None,
+) -> tuple[GuardOutcome, str]:
+    """Run the F4 secret guard and render its stderr notice.
+
+    Shared by :func:`ingest_document` and :func:`update_document` so the two
+    escape hatches (``--allow-secrets`` and the per-note frontmatter opt-out)
+    compose identically on both write paths, and so the display-mode choice
+    lives in exactly one place.
+
+    Returns the outcome plus the formatted notice (``""`` when nothing was
+    found). Raises :class:`~brain.errors.SecretGuardError` under ``reject``.
+    """
+    allow = allow_secrets or _frontmatter_allows_secrets(metadata)
+    outcome = apply_guard(content, mode=mode, allow=allow, title=title)
+    notice = format_findings(
+        outcome.findings, title=title, mode="allow" if allow else mode
+    )
+    return outcome, notice
+
+
+#: Rendered once per ingest when the F6 hosted-egress veto fires. A module
+#: constant (not an f-string at the call site) so the CLI, the tests, and any
+#: future surface assert against ONE string.
+_EGRESS_NOTICE = (
+    "⚠  confidential document + hosted embedder — body NOT sent off-machine.\n"
+    "   Chunks stored with NULL embeddings; this doc is findable by full-text\n"
+    "   search only. Switch to a local embedder (BRAIN_EMBEDDER=arctic) and run\n"
+    "   `brain reembed` to give it vectors."
+)
+
+
+def _resolve_egress_veto(
+    embedder: Embedder, sensitivity: str
+) -> tuple[bool, str]:
+    """Decide whether this document's body may reach ``embedder``.
+
+    Returns ``(hosted_egress_blocked, notice)``. The notice is ``""`` unless the
+    veto fired, so callers can attach it unconditionally.
+
+    Both halves of the condition are required. Sensitivity alone would block
+    local backends, which buys no confidentiality (no network hop) while
+    permanently degrading retrieval on exactly the documents the user cares most
+    about. A hosted backend alone would block the whole corpus. The conjunction
+    is the only version that is both safe and scoped, and centralizing it here
+    keeps the two ``_embed_chunks`` call sites from drifting apart — which is the
+    specific way this boundary would fail silently.
+    """
+    # Deferred import: ``brain.embeddings`` imports the ``Embedder`` Protocol
+    # from THIS module, so a module-scope import here would be circular. Same
+    # idiom as the ``from ..queries import sync_chunk_search_metadata`` call
+    # below, and as ``embeddings.py``'s own lazy ``voyageai.error`` import.
+    from brain.embeddings import is_hosted_embedder
+
+    blocked = is_confidential(sensitivity) and is_hosted_embedder(embedder)
+    return blocked, _EGRESS_NOTICE if blocked else ""
+
+
+def _vault_path_missing(conn: psycopg.Connection, document_id: str) -> bool:
+    """True iff this row is an ORPHAN — stored, but with no mirror recorded.
+
+    Read as "the mirror is still owed", not "something failed": the check is on
+    the outcome rather than on any particular cause, so it repairs an orphan
+    left by any post-commit failure, not just the slug collision that motivated
+    it (#23).
+
+    Best-effort by design — a read failure here must not turn a successful
+    ingest into an error. Returning ``False`` on a DB hiccup simply skips the
+    repair attempt, leaving exactly the behaviour that existed before.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM documents WHERE id = %s AND vault_path IS NULL",
+            (document_id,),
+        ).fetchone()
+    except psycopg.Error:
+        return False
+    return row is not None
 
 
 def _chunk_search_metadata(title: str, tags: list[str]) -> tuple[str, str]:
@@ -179,6 +316,11 @@ _PROMOTED_COLUMNS: tuple[str, ...] = (
     "sent_at",
     "participants",
     "duration_min",
+    # F10 (migration 027) — WHICH agent wrote this document into the brain.
+    # Populated on the agent-driven ingest path only (`ingest-stdin` via CLI
+    # `--agent` or MCP `brain_ingest_stdin`); `brain ingest` / `ingest-dir`
+    # are human paths and stay unattributed by design.
+    "agent_id",
 )
 
 
@@ -226,8 +368,10 @@ def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
 
     Type-coercion rules:
 
-    - ``thread_id`` / ``rfc_message_id`` / ``in_reply_to`` — accept ``str``;
-      anything else is logged + skipped.
+    - ``thread_id`` / ``rfc_message_id`` / ``in_reply_to`` / ``agent_id`` —
+      accept ``str``; anything else is logged + skipped. ``agent_id`` has
+      already been validated by :func:`brain.agent.normalize_agent_id` at the
+      CLI / MCP boundary, so this loop is a type gate, not a grammar check.
     - ``date`` (RFC 2822 or ISO 8601 string) → ``sent_at`` (TZ-aware UTC).
       Unparseable strings log + skip; we never store a partially-parsed
       datetime.
@@ -240,7 +384,7 @@ def _promote_metadata_to_columns(metadata: dict[str, Any]) -> dict[str, Any]:
     """
     out: dict[str, Any] = {}
 
-    for key in ("thread_id", "rfc_message_id", "in_reply_to"):
+    for key in ("thread_id", "rfc_message_id", "in_reply_to", "agent_id"):
         raw = metadata.get(key)
         if raw is None:
             continue
@@ -349,7 +493,7 @@ def _upsert_source(
 
 
 def _embed_chunks(
-    embedder: Embedder, texts: list[str]
+    embedder: Embedder, texts: list[str], *, hosted_egress_blocked: bool = False
 ) -> list[list[float] | None]:
     """Embed ``texts``, or return NULL placeholders under a no-vector backend.
 
@@ -361,7 +505,23 @@ def _embed_chunks(
     entry per input text: a real vector, or ``None`` (bound as SQL NULL by
     :func:`_insert_chunks`; the column is nullable pre-finalize). An empty
     ``texts`` makes no embed call and returns ``[]``.
+
+    ``hosted_egress_blocked`` (F6) is the per-document veto: the caller sets it
+    when a **confidential** document is being ingested under a **hosted**
+    embedder, and this function then takes the identical NULL-placeholder path
+    the ``none`` backend uses. It is checked FIRST and short-circuits, so no
+    chunk text is ever handed to ``embed()`` — that early return IS the egress
+    boundary, which is why it must remain the first statement in the body.
+
+    The two flags are deliberately separate rather than folded into one
+    parameter: ``produces_embeddings`` is a property of the BACKEND (no vectors
+    exist at all), while ``hosted_egress_blocked`` is a property of THIS
+    DOCUMENT under this backend. Collapsing them would lose the distinction that
+    makes the veto scoped — a normal document under the same hosted backend must
+    still embed.
     """
+    if hosted_egress_blocked:
+        return [None] * len(texts)
     if not getattr(embedder, "produces_embeddings", True):
         return [None] * len(texts)
     # Widen the concrete ``list[list[float]]`` to the nullable element type via
@@ -435,6 +595,9 @@ def ingest_document(
     enrich: bool = True,
     enrich_min_tokens: int = 50,
     graph_syncer: GraphSyncer | None = None,
+    secret_guard: str = DEFAULT_SECRET_GUARD,
+    allow_secrets: bool = False,
+    sensitivity: str = DEFAULT_SENSITIVITY,
 ) -> IngestResult:
     """Ingest a single extracted document.
 
@@ -526,6 +689,14 @@ def ingest_document(
     never raises: a disabled flag, an AGE-absent DB, or any sync error is a
     logged no-op that leaves the committed ingest intact. ``None`` (library
     callers / tests) skips graph sync entirely.
+
+    F4 secret guard: ``secret_guard`` selects the mode (``warn`` default /
+    ``redact`` / ``reject`` / ``off``) and ``allow_secrets`` bypasses the action
+    for this call. The guard runs BEFORE the content hash — see the comment at
+    the call site for why that ordering is load-bearing. Findings ride back on
+    :attr:`IngestResult.secret_findings` / ``secret_notice``; the CLI prints the
+    notice to stderr. ``reject`` raises
+    :class:`~brain.errors.SecretGuardError` and writes nothing.
     """
     if doc.source_path is not None:
         if source_kind is None:
@@ -552,6 +723,47 @@ def ingest_document(
         assert isinstance(thread_id, str) and thread_id
         source_external_id = thread_id
 
+    # --- F4 secret guard -------------------------------------------------
+    # Placed here deliberately: after source-kind defaulting and the
+    # gmail-thread external-id override (so ``doc`` is fully resolved), and
+    # IMMEDIATELY BEFORE ``_content_hash`` below.
+    #
+    # THE ORDERING IS LOAD-BEARING, not stylistic. ``content_hash`` is the
+    # dedup key on the stdin path (rule 4 above) and the collision key in
+    # ``update_document``. If redaction ran AFTER hashing, the stored hash
+    # would describe the un-redacted text while the stored body was redacted.
+    # Re-ingesting the same source would then hash the ORIGINAL text, match the
+    # stored row, and short-circuit to ``skip`` — permanently freezing the
+    # redacted body while reporting it as up to date. ``_resolve_ingest_action``'s
+    # ``body_changed`` flag would be wrong for the same reason, so neither the
+    # vault mirror nor the graph sync would ever fire.
+    #
+    # Hashing the POST-guard bytes makes redaction an ordinary content
+    # transform: the hash describes exactly what is stored, and re-ingesting
+    # the same raw source yields the same redacted body → the same hash → a
+    # correct no-op. It also puts the guard upstream of chunking and embedding,
+    # so a secret never reaches a hosted embedder even under ``redact``.
+    #
+    # F6: validate the sensitivity level BEFORE the guard and before any write.
+    # ``normalize_level`` raises SensitivityError on a typo, so a user who typed
+    # ``--sensitivity confidental`` gets a refusal rather than a document they
+    # believe is protected and which is not. Validating here — above every
+    # INSERT/UPDATE branch — is what makes "a refused ingest writes nothing"
+    # true by construction rather than by cleanup.
+    level = normalize_level(sensitivity)
+
+    guard, secret_notice = _guard_content(
+        doc.content,
+        title=doc.title,
+        mode=secret_guard,
+        allow_secrets=allow_secrets,
+        metadata=doc.metadata,
+    )
+    if guard.redacted:
+        # ``dataclasses.replace`` — a NEW ExtractedDoc, never a mutation of the
+        # caller's object (CLAUDE.md immutability rule).
+        doc = replace(doc, content=guard.content)
+
     h = _content_hash(doc.content)
     tags = tags or []
     source_metadata = source_metadata or {}
@@ -571,6 +783,7 @@ def ingest_document(
         enricher=enricher,
         enrich=enrich,
         enrich_min_tokens=enrich_min_tokens,
+        sensitivity=level,
     )
 
     # Mirror writes happen OUTSIDE the transaction so a filesystem error
@@ -579,10 +792,31 @@ def ingest_document(
     # exists to reconcile). ``body_changed`` covers the gmail-thread
     # in-place upsert case where ``created`` stays ``False`` but the body
     # was rewritten — without it the on-disk mirror would lag the DB.
+    # ORPHAN REPAIR (#23). A mirror write that fails AFTER the row commits
+    # leaves ``vault_path IS NULL``: the document is searchable and scanned by
+    # `backfill scan-secrets`, but invisible in the vault, the wiki and the UI
+    # tree, all of which key on ``vault_path IS NOT NULL``.
+    #
+    # Re-running `brain ingest` used to report `skipped (already ingested)` at
+    # exit 0, because content-hash dedup short-circuits before this block — so
+    # the user was told everything was fine and never learned the document was
+    # missing. Repair WAS possible (`brain vault export --force` then
+    # `brain vault sync`), but nothing pointed there.
+    #
+    # Treating a NULL vault_path as "mirror still owed" makes the retry the
+    # obvious, working remedy. Deliberately keyed off the OUTCOME (no mirror
+    # recorded) rather than any particular cause, so it also covers a future
+    # post-commit failure of a different kind — a full disk, a permissions
+    # change, an interrupted process.
+    needs_mirror_repair = (
+        vault_root is not None
+        and result.document_id is not None
+        and _vault_path_missing(conn, result.document_id)
+    )
     if (
         vault_root is not None
         and result.document_id is not None
-        and (result.created or result.body_changed or force)
+        and (result.created or result.body_changed or force or needs_mirror_repair)
     ):
         try:
             # ``force=True`` because we just inserted/replaced the DB row —
@@ -593,15 +827,29 @@ def ingest_document(
             regenerate_vault_file(
                 conn, result.document_id, vault_path=vault_root, force=True
             )
-        except OSError as exc:
-            # Only OSError is reachable here: ``regenerate_vault_file``'s
-            # ValueError paths (no document with id, kind='vault') are both
-            # impossible for a row we just inserted with default
-            # ``kind='ingested'``. Catching ValueError would mask unrelated
-            # bugs.
+            if needs_mirror_repair:
+                result = replace(result, mirror_repaired=True)
+        except (OSError, psycopg.errors.UniqueViolation) as exc:
+            # OSError: the filesystem write failed (permissions, disk full).
+            #
+            # UniqueViolation: belt-and-braces for ``documents_vault_path_idx``.
+            # The DB-backed collision oracle in ``export._paths_taken_by_others``
+            # should make this unreachable, but before that fix it escaped as a
+            # raw psycopg traceback with SQL and stack frames — never an
+            # acceptable user-facing failure. Degrading to the same warning as a
+            # filesystem error keeps the ingest (the row is committed and
+            # correct) and leaves the mirror owed, which the orphan-repair check
+            # above now retries on the next run.
+            #
+            # ``regenerate_vault_file``'s ValueError paths (no document with id,
+            # kind='vault') stay UNCAUGHT: both are impossible for a row just
+            # inserted with default ``kind='ingested'``, so catching them would
+            # mask unrelated bugs.
             _logger.warning(
                 "vault mirror write failed for document %s: %s; "
-                "DB ingest succeeded — recover via `brain vault export`",
+                "DB ingest succeeded — re-run this ingest to retry the mirror, "
+                "or recover the whole vault via `brain vault export --force` "
+                "followed by `brain vault sync`",
                 result.document_id,
                 exc,
             )
@@ -626,7 +874,9 @@ def ingest_document(
     if graph_syncer is not None and result.replaced_document_id is not None:
         graph_syncer.remove(conn, result.replaced_document_id)
 
-    return result
+    return replace(
+        result, secret_findings=guard.findings, secret_notice=secret_notice
+    )
 
 
 @dataclass(frozen=True)
@@ -762,6 +1012,7 @@ def _insert_new_document(
     draft: bool,
     chunks: list[Chunk],
     embeddings: list[list[float] | None],
+    sensitivity: str = DEFAULT_SENSITIVITY,
 ) -> str:
     """INSERT a brand-new document row + its chunks; return the new id.
 
@@ -797,11 +1048,15 @@ def _insert_new_document(
     extra_cols = "".join(f", {c}" for c in promoted_columns)
     extra_placeholders = ", %s" * len(promoted_columns)
 
+    # ``updated_at`` is deliberately absent: migration 025 declares it
+    # ``DEFAULT NOW()``, so a brand-new document is stamped by the column
+    # itself and naming it here would be redundant.
     doc_row = conn.execute(
         f"""
         INSERT INTO documents (source_id, title, content, content_hash, content_type,
-                               source_path, tags, metadata, draft{extra_cols})
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s{extra_placeholders})
+                               source_path, tags, metadata, draft,
+                               sensitivity{extra_cols})
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s{extra_placeholders})
         RETURNING id
         """,
         (
@@ -814,6 +1069,7 @@ def _insert_new_document(
             tags,
             json.dumps(doc.metadata),
             draft,
+            sensitivity,
             *promoted_values,
         ),
     ).fetchone()
@@ -865,6 +1121,7 @@ def _ingest_within_transaction(
     enricher: OllamaEnricher | None = None,
     enrich: bool = True,
     enrich_min_tokens: int = 50,
+    sensitivity: str = DEFAULT_SENSITIVITY,
 ) -> IngestResult:
     """Decide the dedup action, embed OUTSIDE the transaction, then write.
 
@@ -919,7 +1176,15 @@ def _ingest_within_transaction(
         # (The update path still proceeds on empty chunks — it rebuilds zero
         # chunk rows, preserving the prior in-place behavior.)
         return IngestResult(document_id=None, created=False)
-    embeddings = _embed_chunks(embedder, [c.content for c in chunks])
+    # F6 hosted-egress veto — call site 1 of 2 (the other is in
+    # ``update_document``). Computed here, immediately above the embed, so the
+    # decision and its only consequence stay adjacent.
+    egress_blocked, egress_notice = _resolve_egress_veto(embedder, sensitivity)
+    embeddings = _embed_chunks(
+        embedder,
+        [c.content for c in chunks],
+        hosted_egress_blocked=egress_blocked,
+    )
 
     replaced_id: str | None = None
     did_write = True
@@ -939,6 +1204,7 @@ def _ingest_within_transaction(
                 draft=draft,
                 chunks=chunks,
                 embeddings=embeddings,
+                sensitivity=sensitivity,
             )
             document_id = action.existing_id
             created = False
@@ -966,6 +1232,7 @@ def _ingest_within_transaction(
                 draft=draft,
                 chunks=chunks,
                 embeddings=embeddings,
+                sensitivity=sensitivity,
             )
             created = True
             body_changed = True
@@ -1017,6 +1284,7 @@ def _ingest_within_transaction(
         created=created,
         body_changed=body_changed,
         replaced_document_id=replaced_id,
+        egress_notice=egress_notice,
     )
 
 
@@ -1034,6 +1302,7 @@ def _update_doc_in_place(
     chunks: list[Chunk],
     embeddings: list[list[float] | None],
     draft: bool = False,
+    sensitivity: str = DEFAULT_SENSITIVITY,
 ) -> bool:
     """Replace title / body / metadata / tags / typed columns on an existing
     document row and rebuild its chunks. Returns ``True`` when the row was
@@ -1167,6 +1436,31 @@ def _update_doc_in_place(
     # In both cases the incoming ``draft`` value is authoritative.
     set_parts.append("draft=%s")
     params.append(draft)
+
+    # F6 sensitivity on the RE-INGEST path: ESCALATE ONLY, never downgrade.
+    #
+    # This deliberately does NOT follow ``draft``'s "incoming value is
+    # authoritative" rule, and the asymmetry is the whole point. ``sensitivity``
+    # defaults to ``normal``, and at this layer an incoming ``normal`` is
+    # ambiguous: it means EITHER "the user explicitly asked for normal" OR — far
+    # more often — "no --sensitivity flag was passed at all". Nothing in the
+    # signature can distinguish them.
+    #
+    # Treating that ambiguous ``normal`` as authoritative would silently
+    # UN-PROTECT documents: every re-ingest of a confidential file (a plain
+    # ``brain ingest`` re-run, or any `brain vault sync --watch` pass that
+    # re-reads the note) would reset the column to ``normal``, and the next
+    # ingest under a hosted embedder would then ship the body to Voyage. The
+    # user would have marked the note confidential, seen it succeed, and lost
+    # the protection to an unrelated background job with no message anywhere.
+    #
+    # So escalation is applied and de-escalation is not. Clearing the flag is an
+    # explicit, deliberate act and belongs to `brain mark-normal`, which knows
+    # the user asked for it. Fail-closed on an ambiguous signal.
+    if is_confidential(sensitivity):
+        set_parts.append("sensitivity=%s")
+        params.append(sensitivity)
+
     # Project the rebuilt thread's metadata onto the typed columns so they
     # stay in lockstep with the JSONB blob: a key that's present in the
     # new metadata writes the column; a key that's gone (e.g. an old
@@ -1178,6 +1472,9 @@ def _update_doc_in_place(
             params.append(promoted[column])
         else:
             set_parts.append(f"{column}=NULL")
+    # A new message on an existing thread genuinely changes what the user
+    # knows about that thread, so this is a real edit for `--updated-after`.
+    set_parts.append("updated_at=NOW()")
     params.append(document_id)
     conn.execute(
         f"UPDATE documents SET {', '.join(set_parts)} WHERE id=%s",
@@ -1338,6 +1635,10 @@ def _enrich_post_ingest_hook(
             exc,
         )
         return
+    # updated_at deliberately NOT bumped — an auto-summary is derived
+    # metadata, not a change to the user's knowledge. `brain enrich
+    # --backfill` sweeps the whole corpus, and bumping here would restamp
+    # every row and make `--updated-after` permanently useless.
     conn.execute(
         "UPDATE documents SET summary=%s, summary_model=%s, summary_at=NOW() "
         "WHERE id=%s",
@@ -1531,17 +1832,21 @@ def apply_tags(
 
     add = normalize_tags(add or [])
     remove = normalize_tags(remove or [])
+    # Both statements bump ``updated_at``: tagging is a deliberate user
+    # classification, not derived metadata. The BULK normalizer
+    # (``brain backfill normalize-tags``) deliberately does NOT bump — it
+    # canonicalizes existing tags rather than expressing a new judgement.
     with conn.transaction():
         if add:
             conn.execute(
-                "UPDATE documents SET tags = ARRAY(SELECT DISTINCT unnest(tags || %s::text[])) "
-                "WHERE id = %s",
+                "UPDATE documents SET tags = ARRAY(SELECT DISTINCT unnest(tags || %s::text[])), "
+                "updated_at = NOW() WHERE id = %s",
                 (add, document_id),
             )
         if remove:
             conn.execute(
                 "UPDATE documents SET tags = ARRAY(SELECT t FROM unnest(tags) AS t "
-                "WHERE t <> ALL(%s::text[])) WHERE id = %s",
+                "WHERE t <> ALL(%s::text[])), updated_at = NOW() WHERE id = %s",
                 (remove, document_id),
             )
         # Migration 009 denormalizes documents.tags onto chunks.tags_text so
@@ -1582,6 +1887,8 @@ def update_document(
     enrich: bool = True,
     enrich_min_tokens: int = 50,
     graph_syncer: GraphSyncer | None = None,
+    secret_guard: str = DEFAULT_SECRET_GUARD,
+    allow_secrets: bool = False,
 ) -> UpdateResult:
     """Update one document in place.
 
@@ -1621,11 +1928,20 @@ def update_document(
     :meth:`brain.graph_rag.sync.GraphSyncer.reconcile` (reusing ``conn``,
     OUTSIDE the transaction). Best-effort / never-raises; a ``None`` syncer or a
     no-op edit skips it.
+
+    F4 secret guard: applies to ``new_content`` only (a title / tag / metadata
+    edit never re-inspects the stored body). Runs before the content hash and
+    before the ``new_content != cur_content`` comparison, so a redacted body
+    that already matches what is stored is correctly a no-op. Findings ride
+    back on :attr:`UpdateResult.secret_findings` / ``secret_notice``;
+    ``secret_guard="reject"`` raises
+    :class:`~brain.errors.SecretGuardError` before the transaction writes
+    anything.
     """
     with conn.transaction():
         row = conn.execute(
-            "SELECT title, content, content_type, metadata, tags, kind, draft "
-            "FROM documents WHERE id=%s",
+            "SELECT title, content, content_type, metadata, tags, kind, draft, "
+            "sensitivity FROM documents WHERE id=%s",
             (document_id,),
         ).fetchone()
         if row is None:
@@ -1638,6 +1954,7 @@ def update_document(
             cur_tags,
             cur_kind,
             cur_draft,
+            cur_sensitivity,
         ) = row
         cur_meta = dict(cur_meta or {})
         cur_tags = list(cur_tags or [])
@@ -1648,12 +1965,43 @@ def update_document(
 
         rechunked = False
         new_hash: str | None = None
+        secret_findings: tuple[SecretFinding, ...] = ()
+        secret_notice = ""
         if new_content is not None:
             if embedder is None:
                 raise ValueError("embedder is required when new_content is provided")
             stripped = new_content.strip()
             if not stripped:
                 raise ValueError("content is empty")
+            # --- F4 secret guard ----------------------------------------
+            # Before ``_content_hash`` below, for the same load-bearing reason
+            # documented at the ``ingest_document`` call site: the stored hash
+            # must describe the bytes actually stored. It also runs before the
+            # ``new_content != cur_content`` comparison, so re-submitting raw
+            # text whose redaction equals the stored body is correctly a no-op
+            # rather than an endless "updated" churn.
+            #
+            # The frontmatter opt-out reads the POST-patch metadata: an edit
+            # that adds ``allow_secrets: true`` in the same call takes effect
+            # for that call, which is what a user typing it would expect.
+            effective_meta = (
+                cur_meta
+                if metadata_patch is None
+                else (
+                    metadata_patch
+                    if replace_metadata
+                    else {**cur_meta, **metadata_patch}
+                )
+            )
+            guard, secret_notice = _guard_content(
+                new_content,
+                title=new_title if new_title is not None else cur_title,
+                mode=secret_guard,
+                allow_secrets=allow_secrets,
+                metadata=effective_meta,
+            )
+            secret_findings = guard.findings
+            new_content = guard.content
             if new_content != cur_content:
                 new_hash = _content_hash(new_content)
                 clash = conn.execute(
@@ -1739,7 +2087,23 @@ def update_document(
             assert new_content is not None  # gated by the empty-check above
             chunks = chunk_text(new_content, count_tokens=embedder.count_tokens)
             if chunks:
-                embeddings = _embed_chunks(embedder, [c.content for c in chunks])
+                # F6 hosted-egress veto — call site 2 of 2. The level comes from
+                # the row itself (``cur_sensitivity``), not from a parameter:
+                # ``update_document`` deliberately has no ``new_sensitivity``
+                # (spec Q5 — sensitivity never triggers re-chunking or
+                # re-embedding, so a 15th keyword would add branch surface for
+                # no behavioural gain). Reading the stored level is what makes
+                # an edit to an already-confidential document honour the
+                # boundary: without this, `brain edit` on a confidential note
+                # would re-chunk and ship the new body straight to Voyage.
+                egress_blocked, _ = _resolve_egress_veto(
+                    embedder, cur_sensitivity
+                )
+                embeddings = _embed_chunks(
+                    embedder,
+                    [c.content for c in chunks],
+                    hosted_egress_blocked=egress_blocked,
+                )
                 # Project the post-update title/tags onto the new chunks so
                 # the weighted tsv reflects the user's new edits, not the
                 # pre-edit state. Falls back to current values when the
@@ -1767,6 +2131,12 @@ def update_document(
             # `brain status`'s last-ingest stat and the vault-export
             # `updated:` frontmatter field reflect actual edits.
             sets.append("ingested_at=NOW()")
+            # `brain edit` is the canonical user edit, so it is also the
+            # canonical `updated_at` bump. `brain mark-draft` / `mark-published`
+            # route through here via ``new_draft`` and inherit it — they issue
+            # no UPDATE of their own. NOTE for Wave 3: ``_set_sensitivity``
+            # uses a DIRECT UPDATE and must therefore bump explicitly.
+            sets.append("updated_at=NOW()")
             params.append(document_id)
             conn.execute(
                 f"UPDATE documents SET {', '.join(sets)} WHERE id=%s",
@@ -1869,6 +2239,8 @@ def update_document(
         document_id=document_id,
         fields_changed=fields_changed,
         rechunked=rechunked,
+        secret_findings=secret_findings,
+        secret_notice=secret_notice,
     )
 
 

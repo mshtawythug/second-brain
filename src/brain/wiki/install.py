@@ -18,6 +18,18 @@ class WikiInstallError(BrainError):
     """Raised when wiki install can't proceed."""
 
 
+# Wall-clock ceilings for the external tools this installer shells out to.
+# Without them a wedged git or npm hangs `brain wiki install` forever with no
+# diagnostic — the same silent-hang class as the daemon faults this repo spent a
+# day chasing. Deliberately generous: a cold full clone or a cold npm install on
+# a slow link is legitimately slow, so these bound pathology, not normal use.
+# (The `git rev-parse` probe in _check_quartz_pinned_commit keeps its own tight
+# 10s ceiling — it reads one ref from an existing checkout and can never be slow.)
+CLONE_TIMEOUT_S = 600.0
+CHECKOUT_TIMEOUT_S = 120.0
+NPM_INSTALL_TIMEOUT_S = 900.0
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -209,20 +221,34 @@ def _clone_quartz(quartz_dir: Path) -> None:
         subprocess.run(
             ["git", "clone", QUARTZ_REPO_URL, str(quartz_dir)],
             check=True,
+            timeout=CLONE_TIMEOUT_S,
         )
     except subprocess.CalledProcessError as exc:
         raise WikiInstallError(
             f"git clone failed (exit {exc.returncode}): {QUARTZ_REPO_URL} → {quartz_dir}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise WikiInstallError(
+            f"git clone timed out after {CLONE_TIMEOUT_S:g}s: "
+            f"{QUARTZ_REPO_URL} → {quartz_dir}\n"
+            f"  Check network connectivity, then re-run with --force to retry."
         ) from exc
 
     try:
         subprocess.run(
             ["git", "-C", str(quartz_dir), "checkout", QUARTZ_PINNED_COMMIT],
             check=True,
+            timeout=CHECKOUT_TIMEOUT_S,
         )
     except subprocess.CalledProcessError as exc:
         raise WikiInstallError(
             f"git checkout {QUARTZ_PINNED_COMMIT[:12]} failed (exit {exc.returncode})"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise WikiInstallError(
+            f"git checkout {QUARTZ_PINNED_COMMIT[:12]} timed out after "
+            f"{CHECKOUT_TIMEOUT_S:g}s in {quartz_dir}\n"
+            f"  The workspace may be left at the wrong commit; re-run with --force."
         ) from exc
 
 
@@ -233,10 +259,21 @@ def _npm_install(quartz_dir: Path) -> None:
             "npm not found on PATH — install Node.js (https://nodejs.org)"
         )
     try:
-        subprocess.run(["npm", "install"], cwd=str(quartz_dir), check=True)
+        subprocess.run(
+            ["npm", "install"],
+            cwd=str(quartz_dir),
+            check=True,
+            timeout=NPM_INSTALL_TIMEOUT_S,
+        )
     except subprocess.CalledProcessError as exc:
         raise WikiInstallError(
             f"npm install failed (exit {exc.returncode}) in {quartz_dir}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise WikiInstallError(
+            f"npm install timed out after {NPM_INSTALL_TIMEOUT_S:g}s in {quartz_dir}\n"
+            f"  Check network connectivity and the npm registry, then re-run\n"
+            f"  `brain wiki install` (the clone is preserved, so this is cheap)."
         ) from exc
 
 

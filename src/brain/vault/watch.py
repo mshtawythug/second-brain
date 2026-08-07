@@ -85,6 +85,7 @@ from watchdog.observers.polling import PollingObserver as Observer
 # events from mtime/size diffs. CPU cost is a stat() per file per second
 # (negligible for ~1100 docs); latency is the polling interval.
 from ..ingest import Embedder
+from ..log_rotation import default_log_dir, start_background_rotator
 from .derived_links.fence import strip_fence
 from .sync import SyncReport, sync_one_file, sync_vault
 
@@ -196,6 +197,7 @@ def run_watcher(
     observer_factory: Callable[[], BaseObserver] | None = None,
     install_signal_handlers: bool = True,
     graph_syncer: GraphSyncer | None = None,
+    enable_log_rotation: bool = False,
 ) -> SyncReport:
     """Block until SIGINT/SIGTERM, watching ``config.vault_path``.
 
@@ -219,8 +221,24 @@ def run_watcher(
     ``install_signal_handlers`` defaults to True. Tests set this to False
     so they can drive shutdown via ``state.stop_event`` directly without
     interfering with pytest's own signal handling.
+
+    ``enable_log_rotation`` defaults to False so library callers and tests
+    never spawn a background rotator thread. The CLI passes True for the real
+    ``brain vault sync --watch`` daemon, which keeps its launchd stderr log
+    size-capped for as long as it stays up.
     """
     state = _WatcherState()
+
+    # Keep this daemon's launchd logs bounded while it is UP. The shim wrapper
+    # rotates once before exec, which caps the crash-loop shape (process dies,
+    # launchd respawns, repeat — this is what produced a 496 MB err.log); this
+    # covers the complementary case where the process stays alive for weeks and
+    # writes errors from its internal loop.
+    #
+    # Off by default so library callers and the test suite never get a stray
+    # rotator thread; only the real `brain vault sync --watch` daemon opts in.
+    if enable_log_rotation:
+        start_background_rotator(default_log_dir())
 
     # 1. Startup sync. Use a short-lived connection scoped to this call —
     #    we don't want to hold a connection while parked on the stop event.

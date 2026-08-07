@@ -5,7 +5,7 @@
 Local, queryable knowledge base and note vault with hybrid search and an entity-graph layer — searchable by any AI coding agent or assistant from any conversation.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/mshtawythug/second-brain/actions/workflows/eval.yml/badge.svg)](https://github.com/mshtawythug/second-brain/actions/workflows/eval.yml)
+[![CI](https://github.com/mshtawythug/second-brain/actions/workflows/ci.yml/badge.svg)](https://github.com/mshtawythug/second-brain/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![PyPI version](https://img.shields.io/pypi/v/secondbrain-py)](https://pypi.org/project/secondbrain-py/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/secondbrain-py)](https://pypistats.org/packages/secondbrain-py)
@@ -105,6 +105,24 @@ brain tag <id-prefix> +interview +career -old-tag         # add (+name) / remove
 
 Add `--json` to `search` / `show` / `list` for machine-readable output, and `--fts-only` to `search` to skip the embedding call. The full command surface — Gmail ingest, enrichment, tacit-knowledge elicitation, GraphRAG, the proactivity/synthesis commands, and vault authoring — lives in the [CLI reference](docs/cli-reference.md).
 
+## Proactive side
+
+Search is reactive — you ask, the brain answers. The other half runs unprompted: `brain brief` digests what just landed, `brain resurface` ranks older notes for another look, `brain review weekly` synthesizes an ISO week into a vault page, `brain timeline` shows how a theme moved over time, `brain connect` proposes links between notes that share entities but aren't linked yet, and `brain gaps` mines the queries your brain failed to answer.
+
+![brain brief's daily digest followed by brain resurface's spaced-repetition table, over a synthetic corpus](docs/assets/proactivity.gif)
+
+`brain ask` closes the loop. Instead of a ranked list you read yourself, it plans sub-queries, retrieves across iterations, and composes one answer with inline `[N]` citations back into your own documents:
+
+![brain ask plans sub-queries over the corpus, then synthesizes one answer with inline citations back to the source documents](docs/assets/ask.gif)
+
+```bash
+brain brief                                             # today's digest
+brain resurface                                         # older notes due for review
+brain ask "what did we decide about the data pipeline?" # cited multi-hop answer
+```
+
+Full flags and examples for these and `brain audio` are in the [CLI reference](docs/cli-reference.md#proactivity-and-synthesis).
+
 ## Claude integrations
 
 `brain` and the bundled `brain-mcp` server are harness-agnostic — any agent that runs a shell command or speaks MCP can query the corpus.
@@ -113,7 +131,7 @@ Register the MCP server once, then just ask — the agent searches the brain and
 
 ![Claude answering a question from the brain over the brain-mcp MCP server](docs/assets/mcp.gif)
 
-**Claude Code** — register the MCP server (or symlink the [skills](docs/configuration.md#claude-code-consult-brain-skill)):
+**Claude Code** — register the MCP server (or install the bundled [agent skills](docs/agent-skills.md) with `bin/brain-skills-sync`):
 
 ```bash
 claude mcp add brain -- brain-mcp
@@ -150,6 +168,8 @@ claude mcp add brain -- brain-mcp
 - [GraphRAG](docs/graphrag.md) — entity-graph retrieval (themes, patterns, connections)
 - [Vault and Wiki](docs/vault-and-wiki.md) — the two-tier note vault + optional rendered wiki
 - [Configuration](docs/configuration.md) — tech stack, tuning knobs, integrations, embedder backends, uninstall
+- [Agent skills](docs/agent-skills.md) — the Claude Code skills bundled with the repo, and how to install them
 - [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, codebase layout, running the tests
+- [SECURITY.md](SECURITY.md) — security model and how to report a vulnerability
 - [CHANGELOG.md](CHANGELOG.md) — release history
 - [LICENSE](LICENSE) — MIT

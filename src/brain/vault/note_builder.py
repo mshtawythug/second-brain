@@ -162,8 +162,35 @@ def create_vault_note(
     Raises :class:`~brain.errors.VaultNoteSyncError` if the template is missing
     or the sync reports per-file errors (the file is left on disk on a sync
     error). Returns the generated ``document_id``.
+
+    **``conn`` MUST be in autocommit mode, and this is enforced rather than
+    documented.** The function writes the file to disk *before* the DB work and
+    reports success through its return value, so on a non-autocommit
+    connection it happily writes N files and returns N ids while the caller's
+    single enclosing transaction commits only the last one — no exception, no
+    warning. Observed: 5 files on disk, 5 ids returned, 1 row surviving.
+
+    That divergence is **unreconcilable**: nothing downstream compares disk
+    against the DB, so the orphaned files are permanent and invisible. A
+    contract that fails silently when broken is a design defect rather than
+    merely a caller error, so the precondition is now a guard clause — it
+    converts a permanent silent inconsistency into an immediate error at the
+    call site that got it wrong.
     """
     from .sync import sync_one_file
+
+    if not conn.autocommit:
+        raise VaultNoteSyncError(
+            [
+                (
+                    vault_path,
+                    "create_vault_note requires an autocommit connection; it "
+                    "writes the file before the DB row, so inside an enclosing "
+                    "transaction the file survives on disk while the row rolls "
+                    "back — silently. Set `conn.autocommit = True`.",
+                )
+            ]
+        )
 
     template_path = vault_path / "_templates" / f"{template}.md"
     if not template_path.is_file():

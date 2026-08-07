@@ -600,8 +600,18 @@ def test_rename_cleans_up_partial_new_file_on_failure(
     fake_embedder,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If the source-write succeeds but the old-file unlink fails, restore +
-    remove the new file so the vault is byte-identical to pre-call state."""
+    """If the source-write succeeds but the file relocation fails, restore +
+    remove the new file so the vault is byte-identical to pre-call state.
+
+    The injection point moved with F8: ``apply_rename`` used to write the
+    new file and then ``unlink()`` the old one, so failure was simulated on
+    ``Path.unlink``. It now writes to the old path and ``Path.replace``s it
+    into position (preserving the inode so a live watcher sees a *move*,
+    not a delete), so the relocation step is where a mid-apply failure has
+    to be injected. A non-``OSError`` is used deliberately: ``OSError`` is
+    the cross-device signal and would be caught by the EXDEV fallback,
+    which completes the move rather than failing it.
+    """
     vault, ids = _seed_three_note_vault(test_db, fake_embedder, tmp_path)
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
 
@@ -615,24 +625,24 @@ def test_rename_cleans_up_partial_new_file_on_failure(
     pre_alpha = (vault / "alpha.md").read_text()
     pre_beta = (vault / "beta.md").read_text()
 
-    real_unlink = Path.unlink
+    real_replace = Path.replace
 
-    def flaky_unlink(self: Path, *args, **kwargs) -> None:
-        # Only fail when unlinking the source file mid-rename — every other
-        # unlink (e.g. from snapshot cleanup) goes through.
+    def flaky_replace(self: Path, *args, **kwargs):
+        # Only fail when relocating the source file mid-rename — every other
+        # replace (e.g. atomic writes elsewhere) goes through.
         if self.resolve() == op.old_path.resolve():
-            raise OSError("simulated unlink failure")
-        return real_unlink(self, *args, **kwargs)
+            raise RuntimeError("simulated relocation failure")
+        return real_replace(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "unlink", flaky_unlink)
-    with pytest.raises(OSError, match="simulated unlink failure"):
+    monkeypatch.setattr(Path, "replace", flaky_replace)
+    with pytest.raises(RuntimeError, match="simulated relocation failure"):
         apply_rename(
             test_db,
             embedder=fake_embedder,
             vault_path=vault,
             op=op,
         )
-    monkeypatch.setattr(Path, "unlink", real_unlink)
+    monkeypatch.setattr(Path, "replace", real_replace)
 
     # Restore happened: every original file is byte-identical, and the
     # half-written new file was removed.

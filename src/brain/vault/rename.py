@@ -34,21 +34,28 @@ from typing import Any
 import psycopg
 import yaml
 
+from ..errors import BrainError
 from ..ingest import Embedder
 from .frontmatter import dump_frontmatter, parse_frontmatter
 from .links import iter_wiki_links_with_spans
+from .paths import assert_within_vault
 from .slug import slugify
 from .sync import SyncReport, sync_one_file
 
 logger = logging.getLogger(__name__)
 
 
-class RenameError(Exception):
+class RenameError(BrainError):
     """Rename cannot proceed (collision, doc not found, etc.).
 
     The CLI catches this and surfaces ``str(e)`` as the user-facing diagnostic;
     the rename never partially applies when this is raised from
     :func:`plan_rename`.
+
+    Parented to :class:`~brain.errors.BrainError` (F8) to satisfy the
+    project rule that every exception descends from the project base.
+    ``BrainError`` derives from ``Exception``, so every pre-existing
+    ``except RenameError`` / ``except Exception`` site is unaffected.
     """
 
 
@@ -115,8 +122,9 @@ def plan_rename(
     vault_path: Path,
     document_id: str,
     new_title: str,
+    new_folder: str | None = None,
 ) -> RenameOp:
-    """Build a :class:`RenameOp` describing the rename.
+    """Build a :class:`RenameOp` describing the rename (or move).
 
     Reads:
     - The doc row (must exist, must be ``kind='vault'``, must have a
@@ -125,12 +133,26 @@ def plan_rename(
       references via the wiki-link parser (so code fences / inline code /
       escaped brackets are skipped automatically).
 
+    ``new_folder`` selects the destination directory, vault-root-relative:
+
+    - ``None`` (default) keeps the note in its current folder — today's
+      rename behaviour, byte-identical.
+    - ``""`` or ``"."`` targets the vault root.
+    - anything else is taken relative to the vault root, with surrounding
+      whitespace and slashes stripped.
+
+    A *move* is simply this function called with the note's **current**
+    title and a different folder; ``RenameOp`` needs no extra field because
+    the folder change is fully expressed by ``new_path``.
+
     Errors:
     - :class:`RenameError` if the doc isn't found, isn't vault-tier, or
       has no ``vault_path`` on disk.
     - :class:`RenameError` on slug collision — the new path would overwrite
       another file that already exists.
     - :class:`RenameError` if the new title is empty / whitespace.
+    - :class:`~brain.errors.VaultPathEscape` if ``new_folder`` resolves
+      outside the vault root.
     """
     if not new_title.strip():
         raise RenameError("new title must not be empty")
@@ -161,16 +183,30 @@ def plan_rename(
         )
 
     new_slug = slugify(new_title)
-    new_relative = old_relative.with_name(f"{new_slug}.md")
+    if new_folder is None:
+        new_relative = old_relative.with_name(f"{new_slug}.md")
+    else:
+        stripped = new_folder.strip()
+        folder = (
+            Path() if stripped in {"", "."} else Path(stripped.strip("/"))
+        )
+        new_relative = folder / f"{new_slug}.md"
     new_abs = vault_path / new_relative
+    # Defence in depth: the CLI guards ``--folder``-style input too, but a
+    # library caller (MCP, ``brain ui``) reaches this function directly, so
+    # the traversal check lives on the shared path rather than only at the
+    # edge. Raises VaultPathEscape.
+    assert_within_vault(new_abs, vault_path)
 
     # Slug collision: the new path collides with a different existing file.
-    # Same-file (no-op rename) is allowed — the title may change without the
-    # filename slug changing.
+    # Same-file (no-op rename, or a move to the folder the note is already
+    # in) is allowed — the title may change without the filename slug
+    # changing, and a same-folder move is a legitimate no-op.
     if new_abs.exists() and new_abs.resolve() != old_abs.resolve():
         raise RenameError(
-            f"target path already exists: {new_relative.as_posix()} — "
-            "pick a more distinctive title"
+            f"target path already exists: {new_relative.as_posix()} — rename "
+            f'this note first (`brain note rename {document_id[:8]} '
+            '"<new title>"`) or pick another folder'
         )
 
     # ``old_relative`` (e.g. ``Path("target.md")``) gives the rename
@@ -269,13 +305,47 @@ def apply_rename(
             report.references_rewritten += len(source_matches)
         text = _rewrite_source_frontmatter(text, new_title=op.new_title)
 
-        # Step 3: write the source. If the target path differs (slug change),
-        # write the new file then unlink the old. Same path → in-place write.
+        # Step 3: write the source. If the target path differs (slug change
+        # or folder move), write the rewritten text to the OLD path and then
+        # rename it into place. Same path → plain in-place write.
+        #
+        # Writing-then-renaming (rather than write-new + unlink-old) is what
+        # keeps a live ``brain vault sync --watch`` from destroying the
+        # note's backlinks: watchdog sees modified(old) + moved(old → new),
+        # which the watcher routes to its in-place ``UPDATE vault_path``
+        # branch, instead of created(new) + deleted(old), whose delete
+        # branch issues ``DELETE FROM documents WHERE vault_path = <old>``
+        # and cascades every incoming ``links`` row away. ``Path.replace``
+        # is ``os.replace``: atomic within a filesystem, and it preserves
+        # the inode so an editor holding the file open follows the move.
         if op.new_path.resolve() != op.old_path.resolve():
             op.new_path.parent.mkdir(parents=True, exist_ok=True)
-            op.new_path.write_text(text, encoding="utf-8")
-            op.old_path.unlink()
+            op.old_path.write_text(text, encoding="utf-8")
+            try:
+                op.old_path.replace(op.new_path)
+            except OSError as exc:
+                # Cross-device destination (a symlinked subfolder on another
+                # mount) — EXDEV. Degrade to the old write-new + unlink-old
+                # sequence: correct, just not watcher-friendly.
+                logger.warning(
+                    "vault rename: atomic rename %s → %s failed (%s); falling "
+                    "back to copy+unlink — a running watcher may briefly "
+                    "observe a delete",
+                    op.old_path,
+                    op.new_path,
+                    exc,
+                )
+                op.new_path.write_text(text, encoding="utf-8")
+                op.old_path.unlink()
             report.file_renamed = True
+            # Close the residual race window in the DB *before* sync runs:
+            # from here on a stale ``DELETE … WHERE vault_path = <old_rel>``
+            # matches zero rows. Deliberately a single statement on the
+            # caller's autocommit connection and NOT wrapped in a longer
+            # transaction — see the recorded relink-derived ↔ watcher
+            # deadlock. ``updated_at`` is deliberately not bumped: a move is
+            # path bookkeeping, not a change to the user's knowledge.
+            _update_vault_path(conn, vault_path=vault_path, op=op)
         else:
             op.old_path.write_text(text, encoding="utf-8")
 
@@ -322,6 +392,24 @@ def apply_rename(
         file_path=op.new_path,
     )
     return report
+
+
+def _update_vault_path(
+    conn: psycopg.Connection[Any], *, vault_path: Path, op: RenameOp
+) -> None:
+    """Repoint ``documents.vault_path`` at the note's new location.
+
+    Issued immediately after the on-disk rename and before
+    :func:`sync_one_file`, so the window in which a racing watcher delete
+    job could match the old path is closed. Mirrors the watcher's own idiom
+    (:mod:`brain.vault.watch`), which makes the watcher's follow-up
+    ``_handle_move`` an idempotent no-op.
+    """
+    new_relative = op.new_path.resolve().relative_to(vault_path.resolve())
+    conn.execute(
+        "UPDATE documents SET vault_path = %s WHERE id = %s",
+        (new_relative.as_posix(), op.document_id),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +505,14 @@ def collect_references(
                 embed=parsed.kind == "embed",
                 old_title=matched_old_title,
             )
+            if new_text == old_text:
+                # A move keeps the title, so bare ``[[Title]]`` references
+                # rewrite to themselves. Emitting them would rewrite (and
+                # re-mtime, and re-trigger the watcher on) every file in the
+                # vault that merely mentions the note, and would inflate the
+                # ``rewrote N reference(s)`` count with changes that never
+                # happened. Only real changes belong in the plan.
+                continue
             absolute_start = body_offset + start
             absolute_end = body_offset + end
             line_no = text.count("\n", 0, absolute_start) + 1

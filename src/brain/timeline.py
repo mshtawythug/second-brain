@@ -35,6 +35,7 @@ from .config import (
 )
 from .graph_rag.tenancy import resolve_tenant
 from .queries import resolve_person_to_keys
+from .token_budget import pack_greedy
 
 if TYPE_CHECKING:
     from .enrichment import OllamaEnricher
@@ -598,19 +599,28 @@ def _budget_doc_summaries(
     included most-recent-first while the running total stays within
     ``max_tokens`` (measured by the injected ``count_tokens`` so the budget is
     testable without tiktoken); the first row is always included even if it alone
-    exceeds the budget, so the bundle is never empty when docs exist. Mirrors
-    :func:`brain.audio.build_prompt`'s greedy budgeting pattern.
+    exceeds the budget, so the bundle is never empty when docs exist.
+
+    The packing itself is delegated to :func:`brain.token_budget.pack_greedy`
+    (F2) — the same prefix-greedy, stop-at-first-overflow algorithm this
+    function used inline, extracted so ``brain recall`` and this share one
+    budgeter. Output is byte-identical to the pre-extraction version;
+    ``tests/test_timeline_budget_delegation.py`` is the gate on that.
+
+    What stays here is the only timeline-specific part: choosing the
+    ``summary``-or-``title`` text for each row.
     """
-    out: list[str] = []
-    used = 0
-    for title, summary in rows:
-        text = summary.strip() if summary and summary.strip() else title
-        cost = count_tokens(text)
-        if out and used + cost > max_tokens:
-            break
-        out.append(text)
-        used += cost
-    return out
+    rendered = [
+        summary.strip() if summary and summary.strip() else title
+        for title, summary in rows
+    ]
+    packed = pack_greedy(
+        rendered,
+        cost=count_tokens,
+        budget=max_tokens,
+        always_include_first=True,
+    )
+    return [rendered[i] for i in packed.indices]
 
 
 def _synthesize_buckets(

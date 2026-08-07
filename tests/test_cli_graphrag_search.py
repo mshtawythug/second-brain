@@ -36,9 +36,7 @@ from brain.graph_rag.build import build_graph
 from brain.graph_rag.reconcile import ReconcileConfig
 from brain.queries import iter_all_document_ids
 from brain.vault.derived_links.directory import DirectoryStore
-from tests.conftest import FakeEmbedder
-
-TEST_DATABASE_URL = "postgresql://brain:brain@localhost:5434/second_brain_test"
+from tests.conftest import TEST_DATABASE_URL, FakeEmbedder
 
 # ``graph_communities.summary_embedding`` ships as vector(1024) (migration 013).
 # The community CLI tests monkeypatch ``_build_embedder`` to a 1024-dim

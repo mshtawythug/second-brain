@@ -394,7 +394,27 @@ export const ContentIndex: QuartzEmitterPlugin<Opts> = (opts) => {
           // Explorer) reads from `contentIndex.json`, so dropping the
           // entry quarantines the doc across the whole site without
           // touching individual components.
-          if (fm.draft === true) {
+          // brain-extension (F6): per-document sensitivity. `confidential`
+          // is set by `brain mark-confidential <id>` or by `--sensitivity`
+          // at ingest, stored in `documents.sensitivity` (migration 026),
+          // and mirrored into frontmatter by `vault.export` — which emits
+          // the key ONLY when the tier is not `normal`, so this branch is
+          // inert for every pre-026 document.
+          //
+          // Deliberately the SAME seam as `draft`, for the same
+          // minimum-blast-radius reason: one filter here quarantines the
+          // doc across Explorer, graph view, and site search at once.
+          //
+          // Strict string equality mirrors `draft`'s `=== true`: a truthy
+          // check would also drop `sensitivity: normal`, which is the exact
+          // opposite of what it means.
+          //
+          // HONEST LIMIT: this hides the document from every INDEX. Quartz
+          // still emits the rendered HTML page for the slug, so a direct URL
+          // guess reaches it. That is identical to `draft`'s behaviour and is
+          // stated plainly in the docs — this is a guard rail, not access
+          // control, and the wiki has no authentication.
+          if (fm.draft === true || fm.sensitivity === "confidential") {
             delete parsed[slug]
             continue
           }
