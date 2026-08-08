@@ -125,6 +125,17 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # actions/checkout@v4 defaults to fetch-depth: 1, fetch-tags: false —
+          # a single commit, zero tags. tests/test_repo_hygiene_files.py's
+          # test_changelog_link_definitions_resolve_to_real_tags shells out to
+          # local `git tag --list`, so without this the check silently runs
+          # against an empty tag set and fails for tags that genuinely exist
+          # (confirmed live: GitHub Actions run 31225717460 reported both
+          # v0.2.1 and v0.2.0 — already-released, already-linked versions — as
+          # "tags that do not exist"). The repo stays a shallow, single-commit
+          # clone; only the tag refs themselves are added.
+          fetch-tags: true
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5

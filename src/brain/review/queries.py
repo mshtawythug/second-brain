@@ -346,15 +346,21 @@ def fetch_best_chunk_embeddings(
     ``chunks`` has no ``created_at`` column, so the lead chunk is selected by
     ``ORDER BY document_id, chunk_index`` under ``DISTINCT ON (document_id)``.
     Documents whose chunks are all NULL-embedded are absent from the result.
-    Vectors are returned as plain ``list[float]`` (the ``pgvector`` adapter
-    yields a numpy array; we copy it out so the pure-Python cosine never depends
-    on numpy).
+
+    Vectors are returned as plain ``list[float]``. The ``embedding`` column is
+    cast to ``real[]`` **in SQL** so psycopg decodes it with its built-in array
+    loader and the result never depends on which object the ``pgvector`` adapter
+    happens to return for a bare ``vector`` column. That return type is not
+    stable across releases: pgvector <= 0.4.x yielded a numpy ``ndarray``
+    (iterable), while >= 0.5.0 yields a ``pgvector.Vector`` (**not** iterable),
+    which silently broke every caller of this function. Casting in SQL removes
+    the dependency entirely rather than special-casing each adapter version.
     """
     if not document_ids:
         return {}
     rows = conn.execute(
         """
-        SELECT DISTINCT ON (document_id) document_id::text, embedding
+        SELECT DISTINCT ON (document_id) document_id::text, embedding::real[]
         FROM chunks
         WHERE document_id = ANY(%s::uuid[])
           AND embedding IS NOT NULL

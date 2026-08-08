@@ -36,6 +36,12 @@ RELEASE_LINK_RE = re.compile(
 # `## [0.2.1] - 2026-07-20` or `## [Unreleased]`
 VERSION_HEADING_RE = re.compile(r"(?m)^##\s+\[(?P<label>[^\]]+)\]")
 
+# Any markdown link *definition* at column 0: `[0.2.1]: https://...`. Broader
+# than RELEASE_LINK_RE on purpose — that one only sees `/releases/tag/` links,
+# so it cannot answer "does a definition exist at all?", which is the question
+# the two tests below ask.
+LINK_DEFINITION_RE = re.compile(r"(?m)^\[(?P<label>[^\]]+)\]:\s*\S")
+
 
 def read_repo_file(relative: Path) -> str:
     """Read a repo-root-relative text file, UTF-8."""
@@ -200,6 +206,10 @@ def _changelog_labels() -> list[str]:
     return [m.group("label") for m in VERSION_HEADING_RE.finditer(read_repo_file(CHANGELOG_MD))]
 
 
+def _changelog_link_labels() -> list[str]:
+    return [m.group("label") for m in LINK_DEFINITION_RE.finditer(read_repo_file(CHANGELOG_MD))]
+
+
 def test_changelog_has_unreleased_section() -> None:
     labels = _changelog_labels()
 
@@ -207,6 +217,55 @@ def test_changelog_has_unreleased_section() -> None:
     assert (
         labels[0] == "Unreleased"
     ), f"`## [Unreleased]` must sit above the newest released version; found {labels[0]!r} first"
+
+
+def test_every_changelog_heading_has_a_link_definition() -> None:
+    """A `## [X.Y.Z]` heading with no `[X.Y.Z]:` definition renders as broken text.
+
+    ``## [0.3.0] - 2026-08-07`` is a markdown *reference* link. With no matching
+    definition at the bottom of the file it does not fall back to plain text —
+    GitHub renders the literal characters ``[0.3.0]``, permanently, in every
+    rendering of that release.
+
+    The neighbouring tag check cannot see this: it iterates the definitions that
+    are *present* and validates each against ``git tag``, so an omitted
+    definition yields zero matches and passes. This test is the one that looks
+    for an absence. It shipped broken once (0.3.0) precisely because nothing
+    asked the question in this direction.
+    """
+    headings = _changelog_labels()
+    defined = set(_changelog_link_labels())
+
+    assert headings, "CHANGELOG.md has no `## [...]` version headings"
+    undefined = [label for label in headings if label not in defined]
+
+    assert not undefined, (
+        f"CHANGELOG.md headings have no matching link definition: {undefined}. "
+        "Add `[<version>]: <url>` at the bottom of the file, or drop the brackets "
+        "from the heading if there is nothing to link to."
+    )
+
+
+def test_every_changelog_link_definition_has_a_heading() -> None:
+    """The reverse direction, which nothing else covers either.
+
+    ``test_changelog_link_definitions_resolve_to_real_tags`` asks only whether a
+    definition's *tag* exists, so a definition left behind after its section was
+    renamed or removed — say ``[0.2.0]:`` pointing at a real ``v0.2.0`` tag with
+    no ``## [0.2.0]`` section above it — satisfies every existing assertion. It
+    is dead weight that reads as coverage: a reader scanning the link block
+    concludes the release is documented when the entry is gone.
+    """
+    headings = set(_changelog_labels())
+    definitions = _changelog_link_labels()
+
+    assert definitions, "CHANGELOG.md has no link definitions at all"
+    orphaned = [label for label in definitions if label not in headings]
+
+    assert not orphaned, (
+        f"CHANGELOG.md defines links with no matching `## [...]` heading: {orphaned}. "
+        "Remove the stale definition, or restore the section it points at."
+    )
 
 
 def test_changelog_link_definitions_resolve_to_real_tags() -> None:

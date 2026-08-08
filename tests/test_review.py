@@ -26,6 +26,7 @@ from brain.review.scans import (
     run_conflict_scan,
     run_staleness_scan,
 )
+from tests.conftest import TEST_DATABASE_URL
 
 _DIM = 4096
 _TENANT = "default"
@@ -368,6 +369,47 @@ def test_fetch_best_chunk_embeddings_lead_chunk(test_db: psycopg.Connection) -> 
     )
     embs = queries.fetch_best_chunk_embeddings(test_db, document_ids=[doc_id])
     assert embs[doc_id][:3] == [1.0, 2.0, 3.0]
+
+
+def test_fetch_best_chunk_embeddings_does_not_depend_on_pgvector_adapter(
+    test_db: psycopg.Connection,
+) -> None:
+    """Decoding must not rely on the ``pgvector`` psycopg adapter at all.
+
+    Regression for ``TypeError: 'Vector' object is not iterable``. The SQL used
+    to select the bare ``embedding`` column and rely on whatever object the
+    adapter returned being iterable. That is not a stable contract: pgvector
+    <= 0.4.x yields a numpy ``ndarray`` (iterable) but >= 0.5.0 yields a
+    ``pgvector.Vector`` (**not** iterable), so every conflict/staleness scan blew
+    up under the newer pin while passing on the older one. The fix casts to
+    ``real[]`` in SQL so psycopg's built-in array loader decodes it.
+
+    This runs the query over a connection with the adapter deliberately **not**
+    registered, which is both the sharpest test of "we don't depend on it" and a
+    real production path — :func:`brain.db.connect` skips registration when the
+    ``vector`` extension is not yet installed (the ``brain init`` bootstrap).
+
+    Without the cast an unregistered connection hands back the raw text
+    ``'[4,5,6]'`` and the comprehension dies on ``float('[')``, so this fails on
+    *every* pgvector version rather than only on the one CI happens to pin.
+    """
+    doc_id = _insert_doc(test_db, title="T", summary="s", embedding=[4.0, 5.0, 6.0])
+
+    with psycopg.connect(TEST_DATABASE_URL, connect_timeout=10) as unregistered:
+        # Guard the guard: if some import side-effect ever registers the adapter
+        # globally, this test would silently stop testing what it claims to.
+        raw = unregistered.execute("SELECT '[1,2,3]'::vector").fetchone()
+        assert raw is not None
+        assert isinstance(raw[0], str), (
+            "adapter is registered on this connection — the test no longer "
+            f"exercises the unregistered path (got {type(raw[0]).__name__})"
+        )
+        embs = queries.fetch_best_chunk_embeddings(unregistered, document_ids=[doc_id])
+
+    vec = embs[doc_id]
+    assert type(vec) is list, f"expected a plain list, got {type(vec).__name__}"
+    assert all(type(x) is float for x in vec), "elements must be plain floats"
+    assert vec[:3] == [4.0, 5.0, 6.0]
 
 
 def test_fetch_best_chunk_embeddings_empty() -> None:

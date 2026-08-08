@@ -28,14 +28,235 @@ classifiers = [
   "Topic :: Text Processing :: Indexing",
 ]
 dependencies = [
-  "psycopg[binary]>=3.2",
-  "pgvector>=0.3",
+  # Cap <4: psycopg 4 does not exist yet, which is precisely when the bound is
+  # free to add. `brain` is coupled to psycopg *3* more deeply than to anything
+  # else it depends on — 432 `psycopg.Connection` annotations plus
+  # `psycopg.sql`, `psycopg.errors`, `psycopg.conninfo` and `psycopg.pq` — and
+  # `pgvector.psycopg.register_vector` (db.py:50) adapts psycopg3 specifically,
+  # so a major bump breaks the *pair*, not one call site. Nothing else in the
+  # resolved tree constrains psycopg, so this line is the only gate there is.
+  # Not a claim that 4 will break — a requirement that it be tested first.
+  # Exercised: 3.3.4 only (it is what both venvs resolve). The floor 3.2 is
+  # inherited, not re-measured — unlike typer's, no control run backs it.
+  "psycopg[binary]>=3.2,<4",
+  # Bounded on BOTH sides for the same reason `typer` is (below) — and this one
+  # was not hypothetical either. It broke, silently, during this release cycle.
+  #
+  # Floor >=0.3: honestly, NOT a known-breakage boundary. Probed against a live
+  # PG16 + `vector` database, the entire surface `brain` actually uses —
+  # `pgvector.psycopg.register_vector` (db.py:50), binding a `list[float]` as a
+  # `%s::vector` param, `SELECT avg(embedding)`, re-binding that loaded value
+  # as a param (wiki/build_related.py:347,433), and the `::real[]` cast
+  # (review/queries.py:363) — passes identically on 0.2.0, 0.2.5, 0.3.0, 0.3.6,
+  # 0.4.0, 0.4.2 and 0.5.0. The floor is left where it was rather than raised:
+  # there is no evidence for a higher one, and a pin nobody tested is the thing
+  # this comment block exists to stop.
+  #
+  # Cap <0.6: 0.5.0 is the newest release and is verified green. pgvector is a
+  # 0.x project, so each MINOR is effectively a major — and 0.5.0 proved it:
+  # the loader `register_vector` installs switched from returning a
+  # `numpy.ndarray` (iterable) to a `pgvector.Vector` (NOT iterable), so
+  # `[float(x) for x in vec]` began raising `TypeError: 'Vector' object is not
+  # iterable` and took down every `brain review` contradiction and staleness
+  # scan. Reproduced directly: same code, same DB, 0.4.2 green -> 0.5.0
+  # TypeError. `review/queries.py` now casts to `real[]` in SQL so it no longer
+  # depends on the adapter's return type at all — but that retires the one
+  # dependence we knew about, not the class. The cap is not a claim that 0.6
+  # will break; it is a requirement that the next minor be *tested* before
+  # users get it. Nothing else in the tree constrains pgvector either.
+  #
+  # Exercised: 0.2.0 / 0.2.5 / 0.3.0 / 0.3.6 / 0.4.0 / 0.4.2 / 0.5.0 on the
+  # surface probe above; 0.4.2 and 0.5.0 under the full test suite.
+  "pgvector>=0.3,<0.6",
+  # Deliberately NOT capped, and this was checked rather than assumed: `mcp`
+  # (a hard dependency below) already pins `httpx<1.0.0,>=0.27.1`, so httpx is
+  # ALREADY bounded for every install of this package. A second `<1` here would
+  # constrain nothing the resolver is not constrained by, and would have to be
+  # lifted in two places when `mcp` moves. The exposure is small in any case:
+  # `chat.py`'s narrow `ConnectError/ConnectTimeout/ReadTimeout` catch is
+  # backstopped by an `httpx.HTTPError` branch that raises the same
+  # `OllamaUnavailable`, so a reshuffled exception tree costs message detail,
+  # not behaviour.
   "httpx>=0.27",
+  # The extractors here, plus `rich` and `watchdog` further down, are
+  # deliberately left unbounded — a conclusion, not an oversight. The resolver
+  # has ALREADY carried most of them across at least one major above the
+  # declared floor (pypdf 5 -> 6.15, markdown-it-py 3 -> 4.2, rich 13 -> 15,
+  # watchdog 4 -> 6; python-docx 1.1 -> 1.2 and pdfplumber are still within
+  # their line) and the suite is green on exactly those versions in both venvs.
+  # They are narrow leaf surfaces — pull text out of a file, draw a table —
+  # where a break is a loud ImportError or a visibly failed extraction, not the
+  # silently-wrong result that justifies the caps on `pgvector` and `typer`.
+  # Upper bounds here would buy nothing and cost real resolution conflicts in
+  # shared environments.
   "pypdf>=5.0",
   "pdfplumber>=0.11",
   "python-docx>=1.1",
   "markdown-it-py>=3.0",
-  "typer>=0.13",
+  # Bounded on BOTH sides, and both ends are exercised — see
+  # `tests/test_cli_config_error_presentation.py`. Typer renders the entire
+  # CLI, so an unbounded pin means the exit codes and help output a user gets
+  # depend on the day they installed. That is not hypothetical: it shipped.
+  #
+  # Floor 0.26 — RAISED from 0.16 on 2026-08-07 after the old floor was found
+  # to admit a live, user-facing break. Three earlier versions of this comment
+  # were wrong; this one is written from a differential of the SHIPPED CLI run
+  # as a subprocess, because at the time the defect was found the test suite
+  # did not cover it at all (see "false green" below — that gap is now closed,
+  # but the suite is still not what found this).
+  #
+  # THE BREAK. `brain show` with its required ID argument omitted:
+  #
+  #     typer 0.16.0 + click 8.2.1   exit 2, "Missing argument 'ID'."   OK
+  #     typer 0.16.0 + click 8.3.0   exit 1, Rich traceback            BROKEN
+  #     typer 0.16.0 + click 8.4.2   exit 1, Rich traceback            BROKEN
+  #     typer 0.18.0 + click 8.4.2   exit 2, "Missing argument 'ID'."   OK
+  #
+  # typer 0.16.0-0.17.4 declare `click>=8.0.0` with no cap, so a resolver hands
+  # them click 8.4.2 and every missing-argument error becomes exit 1 plus a
+  # traceback — the exact failure mode `cli_errors.py` was written to remove,
+  # reachable under the OLD pin. Worse, the traceback renders `Config`'s locals,
+  # which include `voyage_api_key`. A required-argument typo printed the user's
+  # API key.
+  #
+  # The break is silent, not loud: Typer passes `id=None` into the command
+  # body, `show()` RUNS, opens a database connection, and only then dies in
+  # `queries.py` on `len(None)`. Nothing rejects the invocation.
+  #
+  # WHY EVERY HARNESS-BASED MEASUREMENT MISSED THIS, which is the part worth
+  # keeping — three separate passes over this pin, all through `CliRunner`, all
+  # blind, for TWO independent reasons:
+  #
+  #   1. The defect is a SILENT ACCEPTANCE. The parser does not reject the
+  #      invocation, so there is no usage error for a runner to observe; the
+  #      command runs and fails later, deep in application code, looking like
+  #      an ordinary bug rather than a framework pairing problem.
+  #   2. Below click 8.2 `CliRunner` is broken on its own account (stderr
+  #      merged into stdout), so the half of the matrix where the pairing
+  #      question actually lives could not be measured through it at all.
+  #
+  # The only method that sees it is running the installed console script in a
+  # subprocess and asking what the USER gets — exit code and stderr — instead
+  # of asking whether the tests pass. If you revisit this pin, use that method;
+  # re-running the suite across versions will tell you nothing new.
+  #
+  # Boundaries, measured on both axes (subprocess against the installed console
+  # script, per the note above):
+  #
+  #     typer 0.16.0 x click 8.0.4 / 8.1.0 / 8.1.8 / 8.2.0 / 8.2.1     clean
+  #     typer 0.16.0 x click 8.3.0 / 8.4.0 / 8.4.2                     BROKEN
+  #     click 8.4.2  x typer 0.16.0 / 0.16.1 / 0.17.0 / 0.17.5         BROKEN
+  #     click 8.4.2  x typer 0.18.0 / 0.19.0 / 0.19.2 / 0.20.1 / 0.21.2 /
+  #                    0.22.0 / 0.23.1 / 0.23.2 / 0.24.0 / 0.25.1 /
+  #                    0.26.0 / 0.26.8 / 0.27.0 / 0.27.1               clean
+  #     click 8.0.4  x typer 0.18.0 / 0.19.2 / 0.20.1 / 0.21.2 /
+  #                    0.22.0 / 0.23.1 / 0.26.0 / 0.27.1               clean
+  #
+  # UPSTREAM CONFIRMS THE READING, which is why this is a pairing defect and
+  # not a guess about our own code:
+  #
+  #     click 8.3.0   released 2025-09-18
+  #     typer 0.17.5  released 2025-09-19   <- caps click<8.3.0
+  #     typer 0.18.0  released 2025-09-19   <- supports click 8.3
+  #
+  # Typer shipped both a cap and a fix the day after click 8.3.0 landed. 0.18.0
+  # is upstream's own compatibility boundary, and it is exactly where the
+  # measured boundary above falls.
+  #
+  # THE FALSE GREEN — WHY THE FLOOR IS 0.26 AND NOT 0.18. Historically the
+  # suite was blind to this defect: on typer 0.16.0 + click 8.4.2 it reported
+  # all-green while the CLI was visibly broken, because nothing in tests/ ever
+  # invoked a command with a required argument missing. "Tests green at version
+  # X" was therefore NOT evidence that X worked, anywhere in this range.
+  #
+  # That blind spot is now CLOSED, and the gate is not vacuous — measured on
+  # the 20-file CLI-surface set, one variable (typer) changed:
+  #
+  #     typer 0.16.0 + click 8.4.2   1 failed, 362 passed, 1 skipped
+  #         ^ the failure IS test_a_missing_required_argument_is_a_usage_error_
+  #           not_a_crash, in tests/test_cli_config_error_presentation.py
+  #     typer 0.18.0 + click 8.4.2   363 passed, 1 skipped, 0 failed
+  #     typer 0.26.0 + click 8.1.8   364 passed, 0 failed
+  #
+  # So `>=0.18` would in fact fix the defect AND be caught by the suite if it
+  # regressed. The floor is nevertheless 0.26, for a narrower reason than the
+  # one first written here: from 0.26 on click is VENDORED (`typer._click`) and
+  # the external-click axis ceases to exist, so the supported window is two
+  # minors with ONE dimension instead of eight minors crossed with every click
+  # release yet to be published. [0.18, 0.26) was measured clean against both
+  # the oldest (8.0.4) and newest (8.4.2) click a resolver can reach — the
+  # exclusion is a hedge against future click releases, not against a known
+  # break. Recorded plainly because it is the one bound in this file that goes
+  # PAST its measured breakage boundary, which the `pgvector` note above
+  # explicitly declines to do.
+  #
+  # Tradeoff, stated once: anyone co-installing a package that pins
+  # `typer<0.26` now gets a resolver error instead of a silently broken CLI.
+  # That is the right trade for a tool installed via pipx/uv-tool into its own
+  # environment, which is how `brain` is documented and shipped.
+  #
+  # Why not fix this with a `click` pin instead: it cannot be done. The bad
+  # pairing needs `click<8.3` to be excluded for typer 0.16-0.17.4 but
+  # `click>=8.2` for the test harness, and typer 0.24+ demands `click>=8.2.1`.
+  # No single click constraint is simultaneously correct across the old range —
+  # the typer floor is the only lever that works.
+  #
+  # For the record, which broken pairings a resolver could actually REACH.
+  # EVERY typer release from 0.15.0 to 0.27.1 was re-read on 2026-08-07 from
+  # its own wheel METADATA, unzipped from the PyPI-hosted wheel — all 43, not a
+  # sample. The rows below are the resulting groups of identical constraints,
+  # so a version absent from a range is absent because it does not differ:
+  #
+  #     typer 0.15.0-0.15.3   click>=8.0.0
+  #     typer 0.15.4          click<8.2,>=8.0.0     <- capped
+  #     typer 0.16.0-0.17.4   click>=8.0.0          <- UNCAPPED: reaches 8.4.2,
+  #                                                    so REACHABLE and BROKEN
+  #     typer 0.17.5          click<8.3.0,>=8.0.0   <- self-capped, safe
+  #     typer 0.18.0-0.23.1   click>=8.0.0          <- uncapped, and clean
+  #     typer 0.23.2          click>=8.0.0 (py<3.10) / click>=8.2.1 (py>=3.10)
+  #                                        <- on 3.11 the >=8.2.1 arm applies
+  #     typer 0.24.0-0.25.1   click>=8.2.1
+  #     typer 0.26.0-0.27.1   (no click dependency — vendored)
+  #
+  # CORRECTION: three earlier versions of this table carried
+  # `typer 0.23.2  click>=8.0.0; python_version < "3.10"` annotated "none on
+  # 3.11". That is FALSE. 0.23.2 ships a SECOND marker, `click>=8.2.1` for
+  # python>=3.10, and on this project's 3.11 floor that is the arm that
+  # applies — so 0.23.2 is one of the SAFE releases, not an unconstrained one.
+  # The error inverted its meaning, making a safe version read as a hazard.
+  # It survived three rewrites because each copied the table forward instead of
+  # re-reading it; the sweep above exists so that cannot happen a fourth time.
+  #
+  # The click cap appears and vanishes across patch releases (0.15.1 no, 0.15.4
+  # yes, 0.16.0 no, 0.17.5 yes, 0.18.0 no), so there is no monotone cut anywhere
+  # in [0.16, 0.26). Note 0.17.5's `click<8.3.0` is exactly what makes it SAFE
+  # while the uncapped 0.16.0 is not — the old floor drew its line one release
+  # short of the protection.
+  #
+  # Cap <0.28: 0.27.1 is the newest release and is verified green. The cap is
+  # not a claim that 0.28 will break — it is a requirement that the next minor
+  # be *tested* before users get it. (Typer 0.26's vendoring is also what broke
+  # a hand-raised `click.UsageError` into exit 1 + traceback; `cli_errors.py`
+  # routes through `ctx.fail()` so both sides of that split behave identically.)
+  #
+  # WHAT IS ACTUALLY ENFORCED, as opposed to claimed. CI installs
+  # `pip install -e ".[dev]"` and so resolves only the CEILING — currently
+  # 0.27.1. It is one point, not a matrix. The floor 0.26.x is NOT exercised by
+  # CI; it was covered by hand (see the run counts above) and will go stale.
+  # The honest summary of coverage inside the shipped range:
+  #
+  #     0.27.1  CI, every push          <- the only automated leg
+  #     0.26.0  hand-run 2026-08-07, full 20-file CLI-surface set + CLI probes
+  #     0.26.8, 0.27.0                  <- CLI probes only, no suite run
+  #
+  # Every figure in this block was produced by hand in throwaway venvs on
+  # 2026-08-07. Dated measurements, not a standing guarantee — if you move
+  # either bound, re-run them, because nothing in this repo will do it for you.
+  # The one thing that IS self-enforcing is the missing-argument gate in
+  # `tests/test_cli_config_error_presentation.py`: it goes red on a broken
+  # pairing (shown above), so a future floor change that reopens this hole
+  # fails the suite rather than shipping quietly.
+  "typer>=0.26,<0.28",
   "rich>=13.9",
   "python-dotenv>=1.0",
   "tiktoken>=0.8",
@@ -52,6 +273,42 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# NO `click` pin here, deliberately, and it was measured rather than assumed.
+#
+# There IS a real click floor in this suite — click < 8.2's `CliRunner` merges
+# stderr into stdout, so the many `result.stderr` reads raise
+# `ValueError: stderr not separately captured`. On typer 0.16.0 that cost
+# `78 failed, 756 passed` against click 8.1.8 versus `0 failed, 834 passed`
+# against 8.4.2 — measured on `tests/test_cli*.py tests/test_new_skills.py`,
+# and note the `834 passed` predates the missing-argument gate: on that same
+# pairing the suite now goes red, which is the whole point of adding it.
+#
+# But it stops existing at typer 0.26, which `[project.dependencies]` now
+# requires: from 0.26 on `typer.testing.CliRunner` comes from the VENDORED
+# click, so the external one is irrelevant to the harness. Verified at the new
+# floor against the oldest click a resolver can reach, on the FULL 20-file
+# CLI-surface set rather than a sample:
+#
+#     typer 0.26.0 + click 8.1.8   364 passed, 0 failed
+#     typer 0.26.0 + click 8.0.4   CLI probes clean (suite not re-run)
+#
+# For contrast, the same 20-file set on a typer that predates the vendoring:
+#
+#     typer 0.16.0 + click 8.1.8   20 failed, 342 passed
+#         ^ 19 of those 20 are `ValueError: stderr not separately captured`;
+#           the 20th is an unrelated AGE/psycopg fixture-state flake that
+#           reproduces identically on click 8.4.2, so it is not click's
+#
+# So a `click>=8.2` here would subtract nothing. It is left out on purpose.
+# **If the typer floor is ever lowered below 0.26, add it back** — that is the
+# single condition under which it becomes load-bearing again.
+#
+# Note the asymmetry, since it is what misled two passes at this file: click
+# < 8.2 breaks the TEST HARNESS only. The shipped CLI is clean there — verified
+# at the ceiling, `typer 0.27.1 + click 8.1.8` and `+ click 8.0.4`, every probe
+# identical to the default resolve. So an environment that caps click below 8.2
+# does NOT give a user a broken CLI. The pairing that does is the inverse — an
+# environment that caps TYPER, which is what the floor above now blocks.
 dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.13", "pytest-mock>=3.14", "ruff>=0.7", "mypy>=1.13", "reportlab>=4.0", "types-PyYAML>=6.0"]
 
 [project.scripts]

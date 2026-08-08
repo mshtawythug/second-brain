@@ -64,6 +64,7 @@ _SPARSE_LEAKAGE_DOCS: tuple[str, ...] = (
 
 
 @pytest.mark.eval
+@pytest.mark.live_ollama
 def test_concept_extractor_gate(caplog: pytest.LogCaptureFixture) -> None:
     """Run the live extractor over the labeled fixture and assert the Q2 gate."""
     cfg = Config.load()
@@ -148,6 +149,7 @@ _FORMER_LEAK_NAMES: frozenset[str] = frozenset({
 
 
 @pytest.mark.eval
+@pytest.mark.live_ollama
 def test_concept_extractor_no_leakage_on_sparse_docs(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

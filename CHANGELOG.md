@@ -126,6 +126,21 @@ git tag scheme:
   (`.github/workflows/traffic-stats.yml`), plus live PyPI version, PyPI download,
   and GitHub star badges in the README.
 
+### Changed
+
+- **The `typer` dependency is now bounded on both sides: `typer>=0.16,<0.28`**
+  (previously unbounded above). This is a user-visible install constraint: in a
+  shared environment, an upper bound can conflict with another package that
+  requires a newer Typer, and `pip install --upgrade typer` past the cap will no
+  longer resolve alongside this release. The bound exists because Typer renders
+  the entire CLI surface — Typer 0.26 vendored Click wholesale, which changed
+  the exit code and traceback behaviour of a hand-raised usage error, and Typer
+  below 0.16 pairs with a current Click in a combination that fails the CLI
+  test suite. Both ends are exercised in CI; the cap is a requirement that the
+  next minor be tested before users get it, not a claim that it is broken.
+  Users who need a Typer outside this range should stay on 0.2.1 until the cap
+  moves.
+
 ### Fixed
 
 - `brain vault render` now invokes `npx --no -- quartz build`. Without `--no`,
@@ -201,9 +216,11 @@ No functional changes to the CLI, search, ingest, or graph behavior.
 - launchd default-install behavior.
 - Caddy preflight abort.
 
-## [0.1.0]
+## 0.1.0
 
-Initial public release.
+Initial public release. Unbracketed on purpose: no `v0.1.0` tag was ever cut, so
+there is no release page to link to, and a bracketed heading with no definition
+renders as the literal text `[0.1.0]`.
 
 ### Added
 
@@ -216,6 +233,7 @@ Initial public release.
   wiki.
 - `brain-mcp` MCP server for querying the brain from any MCP-compatible client.
 
-[Unreleased]: https://github.com/mshtawythug/second-brain/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/mshtawythug/second-brain/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/mshtawythug/second-brain/releases/tag/v0.3.0
 [0.2.1]: https://github.com/mshtawythug/second-brain/releases/tag/v0.2.1
 [0.2.0]: https://github.com/mshtawythug/second-brain/releases/tag/v0.2.0

@@ -1,6 +1,7 @@
 """Unit + integration tests for the brain-rebuild full-corpus orchestrator."""
 from __future__ import annotations
 
+import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,15 +20,55 @@ def test_build_stages_canonical_order_and_ids() -> None:
         "embeddings", "summaries", "search",
         "graph", "graph-weights", "communities", "connect", "wiki",
     ]
-    assert stages[0].steps[0].argv == ("brain", "reembed")
+    assert stages[0].steps[0].argv == m.brain_argv("reembed")
     assert stages[0].steps[0].fatal is True
-    assert stages[1].steps[0].argv == ("brain", "enrich", "--backfill")
-    assert stages[3].steps[0].argv == ("brain", "graphrag", "build", "--backfill")
-    assert stages[4].steps[0].argv == ("brain", "graphrag", "refresh")
-    assert stages[5].steps[0].argv == ("brain", "graphrag", "communities", "refresh")
+    assert stages[1].steps[0].argv == m.brain_argv("enrich", "--backfill")
+    assert stages[3].steps[0].argv == m.brain_argv("graphrag", "build", "--backfill")
+    assert stages[4].steps[0].argv == m.brain_argv("graphrag", "refresh")
+    assert stages[5].steps[0].argv == m.brain_argv("graphrag", "communities", "refresh")
     # Plan 07 — connect stage runs after communities, non-fatal (enhancement).
-    assert stages[6].steps[0].argv == ("brain", "connect", "refresh")
+    assert stages[6].steps[0].argv == m.brain_argv("connect", "refresh")
     assert stages[6].steps[0].fatal is False
+
+
+# ---------------------------------------------------------------------------
+# Regression: every stage must invoke the CLI via the *running* interpreter.
+#
+# Bug: every Step used a bare ``"brain"`` as argv[0], which requires the console
+# script's directory to be on PATH. CI installs into a repo-local ``.venv`` and
+# runs ``.venv/bin/pytest`` without activating it, so PATH has no ``brain`` and
+# the communities stage died with ``FileNotFoundError: 'brain'``. On a developer
+# machine that *does* have a ``brain`` on PATH (a pipx / uv-tool install) the
+# bare name resolved to that unrelated installation instead, so the test passed
+# locally while exercising an entirely different copy of the code.
+# ---------------------------------------------------------------------------
+
+
+def test_brain_argv_targets_running_interpreter_not_path() -> None:
+    """``brain_argv`` builds ``<sys.executable> -m brain ...`` — no PATH lookup."""
+    assert m.brain_argv("doctor") == (sys.executable, "-m", "brain", "doctor")
+    # argv[0] must be an existing absolute interpreter path, never a bare name
+    # that the OS would have to resolve against PATH.
+    argv0 = m.brain_argv("doctor")[0]
+    assert Path(argv0).is_absolute(), argv0
+    assert Path(argv0).exists(), argv0
+
+
+def test_no_stage_step_depends_on_a_bare_brain_on_path() -> None:
+    """No Step may use a bare ``brain`` argv[0]; that is the CI FileNotFoundError.
+
+    Guards every stage, not just the communities one that happened to fail, so a
+    newly added stage cannot silently reintroduce the PATH dependency.
+    """
+    stages = m.build_stages(vault_path=Path("/tmp/vault"), keep=3)
+    steps = [step for stage in stages for step in stage.steps]
+    assert steps, "build_stages returned no steps — this guard would never fire"
+    offenders = [s.argv for s in steps if s.argv[0] == "brain"]
+    assert not offenders, f"steps still shell out to a bare `brain`: {offenders}"
+    # Positive half: every step really does start with the running interpreter,
+    # so the assertion above is not passing merely because argv[0] is some other
+    # unresolvable string.
+    assert all(s.argv[0] == sys.executable for s in steps), [s.argv[0] for s in steps]
 
 
 # ---------------------------------------------------------------------------
@@ -164,15 +205,15 @@ def test_run_stages_fail_fast_stops_after_first_fatal() -> None:
 
     def fake_run(argv: tuple[str, ...], env: dict[str, str] | None = None) -> int:
         calls.append(tuple(argv))
-        return 7 if tuple(argv[:2]) == ("brain", "enrich") else 0
+        return 7 if tuple(argv) == m.brain_argv("enrich", "--backfill") else 0
 
     with pytest.raises(m.StageFailed) as exc:
         m.run_stages(selected, runner=fake_run, clean_cache=False, vault_path=Path("/tmp/v"))
     assert exc.value.stage_id == "summaries"
     assert exc.value.exit_code == 7
-    assert ("brain", "reembed") in calls
-    assert ("brain", "enrich", "--backfill") in calls
-    assert ("brain", "backfill", "search") not in calls
+    assert m.brain_argv("reembed") in calls
+    assert m.brain_argv("enrich", "--backfill") in calls
+    assert m.brain_argv("backfill", "search") not in calls
 
 
 def test_run_stages_nonfatal_step_continues_to_build_swap() -> None:

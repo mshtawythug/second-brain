@@ -99,6 +99,7 @@ _LIVE_QUERIES = _load_live_queries()
 
 
 @pytest.mark.eval
+@pytest.mark.live_ollama
 @pytest.mark.parametrize("query_obj", _LIVE_QUERIES, ids=[q.query for q in _LIVE_QUERIES])
 def test_live_harness_runs_against_brain(query_obj, live_db, live_embedder) -> None:
     """Run one query from the golden corpus and assert per-category thresholds.

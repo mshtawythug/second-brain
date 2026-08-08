@@ -22,7 +22,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from brain.db import DEFAULT_GRAPH_NAME
+from brain.db import DEFAULT_GRAPH_NAME, load_age
 from brain.graph_rag.backends import AgeBackend
 from tests.graphrag.benchmark_fixture import (
     BENCHMARK_SPEC_FULL,
@@ -50,6 +50,14 @@ _SMOKE = BenchmarkSpec(
 def _cypher_scalar(
     conn: psycopg.Connection[Any], query: str, params: Mapping[str, Any]
 ) -> list[tuple[Any, ...]]:
+    # AGE must be loaded once per backend session before ``cypher()`` is
+    # callable, or it raises ``unhandled cypher(cstring) function call``. Done
+    # HERE rather than relied upon from elsewhere: this helper used to inherit
+    # the ``LOAD`` that ``conftest``'s ``_reset_age_graph`` happened to issue on
+    # the same connection, which only ran on the ~17% of resets that had a graph
+    # to drop — so these assertions passed on borrowed state and would fail
+    # whenever the reset took its early-out.
+    load_age(conn)
     conn.execute('SET search_path = ag_catalog, "$user", public')
     try:
         rows = conn.execute(

@@ -275,6 +275,34 @@ app = typer.Typer(
     help="Local personal knowledge base. Hybrid search over your career corpus.",
     epilog=_KRISP_INGEST_HELP,
     no_args_is_help=True,
+    # Keep Rich tracebacks (they are the right output for a real bug) but never
+    # render frame LOCALS. Almost every command body binds `cfg = Config.load()`,
+    # and `Config` is a dataclass whose repr spells out `voyage_api_key=...` and
+    # a `database_url` with the Postgres password in it. With locals on, any
+    # exception that escapes — Postgres down, a bad DSN, a genuine bug — prints
+    # both to stderr. It is the user's own terminal, so this is not remote
+    # disclosure; the realistic harm is that a traceback is the one thing people
+    # reflexively paste into a GitHub issue, a Slack thread, or an LLM prompt.
+    #
+    # This is set EXPLICITLY rather than left to Typer's default because that
+    # default is not stable: it was `True` through typer 0.22, and only became
+    # `False` in 0.23. `[project.dependencies]` currently pins `typer>=0.26,
+    # <0.28`, so the range in force today happens to be safe — but the ceiling
+    # gets raised every few months by whoever is greening the gate, and relying
+    # on an upstream default that has already flipped once is exactly the kind
+    # of invisible dependency this file has been bitten by before (see the
+    # click-vendoring notes in `cli_errors.py` and `pyproject.toml`).
+    #
+    # ROOT APP ONLY, and that is not an oversight. Typer attaches the rendering
+    # config in `Typer.__call__`, which runs only on the object named by the
+    # console script (`brain = "brain.cli:app"`). Sub-apps registered with
+    # `add_typer` are flattened into Click groups underneath it and their own
+    # `pretty_exceptions_*` attributes are never read at runtime — verified in
+    # tests/test_cli_traceback_secrets.py, which drives a `brain graphrag`
+    # subcommand to a crash and asserts the config it inherits is the root's.
+    # Repeating this kwarg on all ~18 sub-apps would be dead configuration that
+    # merely looks thorough.
+    pretty_exceptions_show_locals=False,
 )
 
 vault_app = typer.Typer(

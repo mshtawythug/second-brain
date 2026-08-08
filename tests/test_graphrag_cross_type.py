@@ -31,7 +31,7 @@ from typing import Any
 
 import psycopg
 
-from brain.db import DEFAULT_GRAPH_NAME
+from brain.db import DEFAULT_GRAPH_NAME, load_age
 from brain.graph_rag.aliases import _validate_alias_graph
 from brain.graph_rag.backends import AgeBackend
 from brain.graph_rag.cross_type import (
@@ -237,6 +237,11 @@ def _contribution_count_touching(
 def _cypher(
     conn: psycopg.Connection[Any], query: str, params: Mapping[str, Any]
 ) -> list[tuple[Any, ...]]:
+    # AGE must be loaded once per backend session before ``cypher()`` is
+    # callable, or it raises ``unhandled cypher(cstring) function call``. Kept
+    # local rather than inherited from the fixture's reset, which only issues
+    # ``LOAD`` on the ~17% of resets that have a graph to drop.
+    load_age(conn)
     conn.execute('SET search_path = ag_catalog, "$user", public')
     try:
         rows = conn.execute(

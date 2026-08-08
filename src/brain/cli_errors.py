@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import click
 from typer.core import TyperGroup
 
 from .config import ConfigError
@@ -38,21 +37,39 @@ class BrainGroup(TyperGroup):
     """
 
     # `ctx` is deliberately `Any` rather than `click.Context`. Typer changed
-    # which Context class `TyperGroup.invoke` declares: older releases use
-    # `click.Context`, newer ones a vendored `typer._click.core.Context` (a
+    # which Context class `TyperGroup.invoke` declares: releases before 0.26
+    # use `click.Context`, 0.26+ a *vendored* `typer._click.core.Context` (a
     # module that does not even exist in the older package). Naming either one
     # here type-checks against that Typer and fails Liskov against the other,
-    # and `pyproject.toml` pins only `typer>=0.13` — so a fresh resolve in CI
-    # and a developer's older lockfile legitimately disagree. That divergence
-    # is real and version-dependent; `Any` is honest about it, where a
-    # `# type: ignore` would be dead weight on whichever version does not need
-    # it (`strict = true` flags unused ignores). The runtime object is a Click
-    # Context either way, which is all `click.UsageError(ctx=...)` requires.
+    # so `Any` is the honest annotation, where a `# type: ignore` would be dead
+    # weight on whichever version does not need it (`strict = true` flags
+    # unused ignores).
     def invoke(self, ctx: Any) -> Any:
         try:
             return super().invoke(ctx)
         except ConfigError as exc:
-            # UsageError gives the same boxed presentation and exit code 2 as
-            # a bad flag, so the two typo paths finally look alike. `from None`
-            # suppresses the chained traceback the user was seeing.
-            raise click.UsageError(str(exc), ctx=ctx) from None
+            # Deliberately only capture the message here and fail *below*,
+            # outside the `except` block: that leaves `__context__` unset, so
+            # the chained `ConfigError` traceback the user was seeing stays
+            # suppressed without needing `from None`.
+            message = str(exc)
+
+        # `ctx.fail()`, NOT `raise click.UsageError(...)`.
+        #
+        # Typer 0.26 vendored the whole of Click into `typer._click`, so from
+        # that release on `typer._click.exceptions.UsageError` and the stock
+        # `click.UsageError` are two unrelated classes in disjoint hierarchies.
+        # Typer's runner only recognises its own, so a hand-raised
+        # `click.UsageError` stopped being a usage error to the framework
+        # running it: exit 1 with a Rich traceback of *this file*, instead of
+        # exit 2 with the boxed message — precisely the crash this module was
+        # written to remove, silently restored on any machine whose resolver
+        # picked a current Typer. `pyproject.toml` pinned only `typer>=0.13`,
+        # so which behaviour a user got depended on the day they installed.
+        #
+        # `Context.fail()` is the framework's own "this is a usage error" entry
+        # point and exists in every supported version, so it raises whichever
+        # `UsageError` class the runner actually catches. Routing through it
+        # keeps the two implementations from being able to disagree at all,
+        # rather than us tracking Typer's internals by hand.
+        ctx.fail(message)

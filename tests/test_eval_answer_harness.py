@@ -90,6 +90,7 @@ _MIN_MEAN_FACT_RECALL = 0.60
 
 
 @pytest.mark.eval
+@pytest.mark.live_ollama
 def test_answer_eval_harness_meets_threshold(
     test_db: psycopg.Connection,  # noqa: ARG001 — schema reset
 ) -> None:

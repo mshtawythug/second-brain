@@ -42,6 +42,7 @@ import psycopg
 import pytest
 
 from brain.config import Config
+from brain.db import load_age
 from brain.errors import GraphBackendError
 from brain.graph_rag.aggregates import _recompute_aggregates, refresh_aggregates
 from brain.graph_rag.backends import AgeBackend
@@ -116,6 +117,11 @@ def _age_cooccur_rows(
     """Read every CO_OCCURS edge back from AGE as (src, dst, w, co, dc) tuples."""
     import json
 
+    # AGE must be loaded once per backend session before ``cypher()`` is
+    # callable, or it raises ``unhandled cypher(cstring) function call``. Kept
+    # local rather than inherited from the fixture's reset, which only issues
+    # ``LOAD`` on the ~17% of resets that have a graph to drop.
+    load_age(conn)
     conn.execute('SET search_path = ag_catalog, "$user", public')
     try:
         rows = conn.execute(

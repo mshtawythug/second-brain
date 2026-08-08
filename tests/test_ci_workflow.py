@@ -85,12 +85,119 @@ def test_ci_workflow_file_exists() -> None:
     )
 
 
+# A live pytest invocation: optional indentation, an optional path prefix that
+# must end in `/`, then bare `pytest` and nothing else on the line.
+#
+# The prefix class is `[\w./-]` rather than `\S`, and a `(?!#)` lookahead sits
+# in front of it, because `\S*` matched a leading `#`: under the looser pattern
+# `#.venv/bin/pytest` — a COMMENTED-OUT invocation, exactly what someone writes
+# to unblock a red build under release pressure — satisfied the guard, as did
+# `:/pytest` and `false||/pytest`. All three are rejected again; `.venv/bin/pytest`
+# still passes and any added `-k` / `-m` / `-x` / `--no-cov` still fails on `\s*$`.
+PYTEST_INVOCATION_RE = re.compile(r"(?m)^\s*(?!#)(?:[\w./-]*/)?pytest\s*$")
+
+# pyproject.toml's `addopts` is meant to be the only thing deciding what pytest
+# runs. `PYTEST_ADDOPTS` in the environment is *appended* to it by pytest itself,
+# so a job-level `env:` entry is a complete bypass of that intent — and of
+# test_ci_pytest_does_not_disable_coverage, which only reads `run:` scripts.
+# `PYTEST_PLUGINS` / `PYTEST_DEBUG` are the same door.
+PYTEST_ENV_PREFIX = "PYTEST_"
+
+
 def test_ci_runs_ruff_mypy_and_pytest() -> None:
+    """CI must run the exact same unflagged pytest a contributor runs locally.
+
+    ci.yml installs into a repo-local ``.venv`` and invokes pytest through
+    ``.venv/bin/pytest`` rather than a bare `pytest` on PATH — the `bin/`
+    wrapper scripts exec `<repo>/.venv/bin/<script>` by design (resolving via
+    PATH would exec-loop whenever `bin/` precedes `.venv/bin/`), and
+    tests/test_bin_scripts.py asserts on that behaviour. The pattern accepts
+    that venv-qualified path while still anchoring end-of-line, so a quietly
+    added `-k`, `-m`, `-x`, or `--no-cov` flag fails this test, and it rejects a
+    commented-out or shell-neutered invocation (`#.venv/bin/pytest`, `:/pytest`).
+
+    Scope note: this test reads ``run:`` scripts only. The complementary
+    "nothing but `addopts` decides what pytest runs" half — no ``PYTEST_*`` in
+    any ``env:`` block and no ``PYTEST_ADDOPTS`` anywhere in the file — is
+    asserted by ``test_ci_never_configures_pytest_through_the_environment``.
+    """
     runs = "\n".join(_run_commands(load_workflow("ci.yml")))
 
     assert "ruff check" in runs, "ci.yml never runs `ruff check`"
     assert "mypy src/" in runs, "ci.yml never runs `mypy src/`"
-    assert re.search(r"(?m)^\s*pytest\s*$", runs), "ci.yml never runs a bare `pytest`"
+    assert PYTEST_INVOCATION_RE.search(runs), (
+        "ci.yml never runs pytest without extra flags — expected a bare `pytest`, "
+        "optionally through a venv-relative path like `.venv/bin/pytest`, with "
+        "nothing else on the line and not commented out"
+    )
+
+
+def test_ci_never_configures_pytest_through_the_environment() -> None:
+    """`addopts` must be the only thing deciding what pytest runs — for real.
+
+    ``PYTEST_ADDOPTS`` is appended to ``addopts`` by pytest itself, so
+    ``env: {PYTEST_ADDOPTS: "--no-cov"}`` on the `test` job silently switches the
+    coverage floor off. The `test` job already carries an ``env:`` block, and
+    every other check in this module reads ``run:`` scripts, so nothing noticed.
+    Both doors are closed here: no ``PYTEST_*`` key in any ``env:`` mapping
+    (top-level, job, or step), and no ``PYTEST_ADDOPTS`` token anywhere in the
+    file — which also catches ``export PYTEST_ADDOPTS=...`` inside a ``run:``
+    block and an append to ``$GITHUB_ENV``.
+    """
+    workflow = load_workflow("ci.yml")
+
+    env_keys = sorted(
+        f"{key}={value!r}"
+        for env in _env_blocks(workflow)
+        for key, value in env.items()
+        if str(key).upper().startswith(PYTEST_ENV_PREFIX)
+    )
+    assert not env_keys, (
+        f"ci.yml configures pytest through the environment: {env_keys}. "
+        "PYTEST_ADDOPTS is appended to pyproject.toml's `addopts`, so this "
+        "overrides the marker filter or the coverage floor without touching any "
+        "`run:` line that the other tests in this module inspect."
+    )
+
+    raw = CI_WORKFLOW.read_text(encoding="utf-8")
+    assert "PYTEST_ADDOPTS" not in raw, (
+        "ci.yml mentions PYTEST_ADDOPTS. Even outside an `env:` mapping (an "
+        "`export` in a run script, or an append to $GITHUB_ENV) it changes what "
+        "pytest runs behind the gate's back."
+    )
+
+
+def test_ci_test_job_fetches_tags() -> None:
+    """Without `fetch-tags: true`, the CHANGELOG tag check silently degrades.
+
+    ``actions/checkout@v4`` defaults to ``fetch-depth: 1, fetch-tags: false``. A
+    bare ``uses: actions/checkout@v4`` therefore leaves the runner's ``.git``
+    with a single commit and ZERO tags — not "no v0.3.0", literally none,
+    including tags that are already pushed and already linked in
+    CHANGELOG.md. ``test_changelog_link_definitions_resolve_to_real_tags``
+    (tests/test_repo_hygiene_files.py) shells out to local ``git tag --list``,
+    so on that checkout it silently compares every release link against an
+    EMPTY set and fails for tags that genuinely exist — confirmed against a
+    real GitHub Actions run (31225717460), which reported both `v0.2.1` and
+    `v0.2.0` as "tags that do not exist". Reproduced locally: `git fetch
+    --no-tags --depth=1 origin <branch>` leaves `git tag --list` empty even
+    though the tags are on the remote; adding `--tags` to that same shallow
+    fetch surfaces them while the clone stays shallow. Hence: the `test` job's
+    Checkout step — the one whose pytest run depends on tag visibility — must
+    set `fetch-tags: true`.
+    """
+    steps = _jobs(load_workflow("ci.yml"))["test"]["steps"]
+    checkout = next(
+        (step for step in steps if str(step.get("uses", "")).startswith("actions/checkout")),
+        None,
+    )
+    assert checkout is not None, "ci.yml `test` job has no actions/checkout step"
+    assert checkout.get("with", {}).get("fetch-tags") is True, (
+        "the `test` job's Checkout step must set `fetch-tags: true` — without it "
+        "`git tag --list` returns nothing on the runner and "
+        "test_changelog_link_definitions_resolve_to_real_tags silently checks "
+        "against an empty tag set instead of real ones"
+    )
 
 
 def test_ci_pytest_does_not_disable_coverage() -> None:

@@ -20,6 +20,7 @@ import pytest
 from dotenv import dotenv_values, load_dotenv
 from psycopg import sql
 
+from brain.config import DEFAULT_OLLAMA_HOST
 from brain.db import connect, migration_lock, run_migrations
 from brain.ingest import ExtractedDoc, ingest_document
 from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
@@ -330,7 +331,33 @@ def _age_graph_exists(conn: psycopg.Connection, name: str = "brain_graph") -> bo
     return row is not None
 
 
-def _reset_age_graph(conn: psycopg.Connection) -> None:
+#: How many connections :func:`_reset_age_graph` will burn dropping one graph.
+#:
+#: Two, not more: a fresh backend starts with an EMPTY AGE label cache, so the
+#: only failure the retry exists to absorb — a cache poisoned by the drop itself
+#: — cannot recur on the second attempt. A third attempt would only ever mask a
+#: different, real problem (the graph genuinely refusing to drop) as a slow
+#: success, so the loop stops where its justification does.
+_AGE_DROP_ATTEMPTS = 2
+
+
+def _open_age_connection() -> psycopg.Connection:
+    """A throwaway autocommit connection dedicated to AGE catalog work.
+
+    Deliberately separate from the caller's connection — see
+    :func:`_reset_age_graph` for why that separation is the whole fix. Autocommit
+    because AGE catalog DDL wants explicit commits under psycopg v3.
+    """
+    conn = psycopg.connect(TEST_DATABASE_URL, connect_timeout=5)
+    conn.autocommit = True
+    return conn
+
+
+def _reset_age_graph(
+    conn: psycopg.Connection,
+    *,
+    open_age_conn: Callable[[], psycopg.Connection] | None = None,
+) -> None:
     """Drop the canonical AGE graph — but only when one actually exists.
 
     AGE keeps graphs in the ``ag_catalog`` schema plus a per-graph schema —
@@ -369,25 +396,71 @@ def _reset_age_graph(conn: psycopg.Connection) -> None:
     its own ``LOAD``. The extension object is created once per session by
     :func:`_reset_schema_and_migrate` instead of once per test.
 
-    Runs under autocommit (the caller sets ``conn.autocommit = True``) because
-    AGE catalog DDL wants explicit commits under psycopg v3. ``search_path`` is
-    set to ``ag_catalog`` ONLY for the AGE statements and reset immediately
-    afterward, so the later ``run_migrations`` DDL still lands in ``public`` and
-    never leaks the ``ag_catalog`` namespace onto the session.
+    **Why the AGE work runs on a connection of its own.** The early-out above
+    bounded how OFTEN a backend loads AGE; it did not change WHICH backend pays
+    when it does. On the remaining ~17% of resets, ``conn`` is the connection
+    :func:`_truncate_reset` is about to hand to the test (or the one
+    :func:`_reset_schema_and_migrate` still has a schema reset to finish on) —
+    and the corruption above lands on the connection that just ran
+    ``drop_graph``, at its NEXT statement. Both survivors of the 2026-08-07 full
+    run are that exact shape:
+
+    * ``test_init_auto_runs_backfill`` errored in teardown on
+      ``SELECT 1 FROM pg_extension WHERE extname='vector'`` — the statement
+      immediately after this function returned;
+    * ``test_cli_agent_flag::test_search_and_ingest_agree_on_the_env_var``
+      passed both of its CLI invocations and then died on the verification
+      ``SELECT`` — the first use of ``test_db`` after the reset.
+
+    It is also self-sustaining: a drop that dies mid-flight leaves the graph in
+    place, so the next test's reset takes the AGE path again and can be poisoned
+    again. Two consecutive tests failing that way is the observed signature.
+
+    So the AGE statements go to a throwaway connection that is closed
+    immediately, and a poisoned attempt is retried once on a fresh one (a new
+    backend starts with an empty label cache). ``conn`` never loads AGE, so it
+    cannot be poisoned by this function at all, and a corrupted attempt degrades
+    to a retry instead of killing a test. Reproduced at ~1 run in 12 before,
+    0 in 40 after.
+
+    Autocommit throughout because AGE catalog DDL wants explicit commits under
+    psycopg v3. Nothing resets ``search_path`` any more, and nothing needs to:
+    it is set on a connection that is discarded microseconds later, so the
+    ``ag_catalog`` namespace can no longer leak onto the session whose later DDL
+    must land in ``public``.
+
+    :param open_age_conn: factory for the throwaway AGE connection. Injectable
+        so tests can observe which connection the statements land on; resolved
+        at CALL time rather than as a signature default, matching
+        :func:`brain.db.migration_lock` — a default binds once at import and
+        would silently ignore the injection.
     """
     if not _age_graph_exists(conn):
         return
 
-    # A graph exists, so AGE work is genuinely required: LOAD makes drop_graph
-    # callable in this session.
-    conn.execute("LOAD 'age'")
-    conn.execute('SET search_path = ag_catalog, "$user", public')
-    try:
-        conn.execute("SELECT drop_graph('brain_graph', true)")
-    finally:
-        # Restore the default search_path so migration DDL targets public —
-        # never leak ag_catalog onto the session.
-        conn.execute("RESET search_path")
+    open_conn = _open_age_connection if open_age_conn is None else open_age_conn
+    last_error: Exception | None = None
+
+    for _ in range(_AGE_DROP_ATTEMPTS):
+        age_conn = open_conn()
+        try:
+            # A graph exists, so AGE work is genuinely required: LOAD makes
+            # drop_graph callable in this session.
+            age_conn.execute("LOAD 'age'")
+            age_conn.execute('SET search_path = ag_catalog, "$user", public')
+            age_conn.execute("SELECT drop_graph('brain_graph', true)")
+            return
+        except (psycopg.errors.InternalError, psycopg.OperationalError) as exc:
+            # The AGE label-cache corruption and the dead connection it leaves
+            # behind. Both are recoverable on a fresh backend; anything else is
+            # a real failure and propagates untouched.
+            last_error = exc
+        finally:
+            age_conn.close()
+
+    if last_error is None:  # pragma: no cover - the loop always attempts once
+        raise RuntimeError("AGE graph reset made no attempt")
+    raise last_error
 
 
 def _reset_schema_and_migrate(conn: psycopg.Connection) -> None:
@@ -767,8 +840,31 @@ def fixtures_dir() -> Path:
 # and not the second, so collapsing them into one would quietly drop the
 # network guard from tests that should still have it.
 
-#: Default Ollama port (``config.DEFAULT_OLLAMA_HOST`` is http://localhost:11434).
-_OLLAMA_DEFAULT_PORT = 11434
+def _port_of(host: str) -> int:
+    """The TCP port a client would actually dial for ``host``.
+
+    An explicit ``:port`` wins; otherwise the scheme's default, which is what
+    httpx does with a base URL. Shared by the guard and its fallback so the two
+    cannot disagree about what "the Ollama port" means.
+    """
+    parsed = urlparse(host if "//" in host else f"http://{host}")
+    if parsed.port is not None:
+        return parsed.port
+    return 443 if parsed.scheme == "https" else 80
+
+
+#: The port ``_forbid_live_ollama`` bans when ``OLLAMA_HOST`` is unset.
+#:
+#: DERIVED from ``brain.config.DEFAULT_OLLAMA_HOST``, never hardcoded. A second
+#: literal here would be a second source of truth for one value: the day the
+#: config default moves, the guard would go on banning the OLD port — a port
+#: nothing dials. It would stop guarding silently, every eval gate would keep
+#: skipping for the *wrong* reason (a plain connection refusal rather than the
+#: guard standing down), and nothing would turn red. That near-miss is real:
+#: redirecting only one of the two sources made a `live_ollama` counterfactual
+#: appear to refute the marker's whole purpose.
+#: Pinned by tests/test_conftest_ollama_port.py.
+_OLLAMA_DEFAULT_PORT: int = _port_of(DEFAULT_OLLAMA_HOST)
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -792,10 +888,14 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 def _ollama_port() -> int:
-    """The port the active config would reach Ollama on."""
-    host = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
-    parsed = urlparse(host if "//" in host else f"http://{host}")
-    return parsed.port or _OLLAMA_DEFAULT_PORT
+    """The port the active config would reach Ollama on.
+
+    ``OLLAMA_HOST`` overrides — the operator-facing knob, and the same one
+    ``Config.load()`` honours. With it unset we fall back to the application's
+    own default rather than to a literal of our own, so the guard always bans
+    the port the code under test actually dials.
+    """
+    return _port_of(os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_HOST)
 
 
 class LiveOllamaForbidden(BaseException):

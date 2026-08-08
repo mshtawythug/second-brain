@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
-import click
 import pytest
 import typer.main
 
@@ -197,12 +197,31 @@ def _command_lines(text: str) -> list[str]:
     return lines
 
 
-def _resolve(tokens: list[str]) -> tuple[click.Command, list[str]]:
+def _subcommands(node: Any) -> dict[str, Any]:
+    """The child commands of ``node``, or ``{}`` if it is not a group.
+
+    Deliberately duck-typed on ``.commands`` rather than
+    ``isinstance(node, click.Group)``. Typer 0.26 vendored the whole of Click
+    into ``typer._click``, so from that release on ``typer.main.get_command()``
+    returns a ``typer._click.core.Command`` subclass that is **not** a stock
+    ``click.Group`` — an ``isinstance`` check against the ``click`` package
+    silently stops matching, every lookup below collapses to the root, and this
+    oracle starts reporting that real commands and flags do not exist.
+
+    The oracle for "does ``brain xyz --flag`` exist" must not itself depend on
+    which Typer the resolver happened to pick, so it tests for the capability
+    (``.commands``) instead of a class identity that moved.
+    """
+    commands = getattr(node, "commands", None)
+    return commands if isinstance(commands, dict) else {}
+
+
+def _resolve(tokens: list[str]) -> tuple[Any, list[str]]:
     """Walk the Typer command tree; return the deepest command plus the rest."""
-    node: click.Command = typer.main.get_command(brain_app)
+    node: Any = typer.main.get_command(brain_app)
     index = 0
-    while index < len(tokens) and isinstance(node, click.Group):
-        child = node.commands.get(tokens[index])
+    while index < len(tokens):
+        child = _subcommands(node).get(tokens[index])
         if child is None:
             break
         node = child
@@ -210,7 +229,7 @@ def _resolve(tokens: list[str]) -> tuple[click.Command, list[str]]:
     return node, tokens[index:]
 
 
-def _declared_opts(command: click.Command) -> set[str]:
+def _declared_opts(command: Any) -> set[str]:
     opts: set[str] = set()
     for param in command.params:
         opts.update(param.opts)
@@ -222,7 +241,8 @@ def _declared_opts(command: click.Command) -> set[str]:
 def test_documented_commands_exist(skill_name: str) -> None:
     """A skill naming a command the CLI lacks sends the agent into a dead end."""
     root = typer.main.get_command(brain_app)
-    assert isinstance(root, click.Group)
+    registered = _subcommands(root)
+    assert registered, "the brain app exposes no subcommands — the oracle is broken"
 
     for line in _command_lines(_text(skill_name)):
         tokens = line.split()[1:]  # drop the leading `brain`
@@ -230,7 +250,7 @@ def test_documented_commands_exist(skill_name: str) -> None:
         first = tokens[0]
         if first.startswith("-"):
             continue  # `brain --help` and friends
-        assert first in root.commands, (
+        assert first in registered, (
             f"{skill_name}: documents `brain {first}`, which is not a "
             f"registered command. Line: {line!r}"
         )

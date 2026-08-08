@@ -43,21 +43,42 @@ ALL_STAGE_IDS: tuple[str, ...] = (
 )
 
 
+def brain_argv(*args: str) -> tuple[str, ...]:
+    """Build the argv for a ``brain`` sub-command run as a child process.
+
+    Invokes the CLI as ``<sys.executable> -m brain ...`` rather than the bare
+    ``brain`` console script. The console script is only reachable when its
+    install directory is on ``PATH``, which is *not* guaranteed: CI installs
+    into a repo-local ``.venv`` and calls ``.venv/bin/pytest`` without ever
+    activating it, so a bare ``brain`` raises ``FileNotFoundError``. Worse than
+    failing, on a machine that *does* have some other ``brain`` on ``PATH``
+    (e.g. a pipx/uv-tool install) the bare name silently resolves to a
+    different, possibly stale installation instead of the one running this
+    orchestrator.
+
+    ``-m brain`` is the convention already used by :mod:`brain.setup` and is the
+    documented purpose of :mod:`brain.__main__`; it always targets the
+    interpreter running this process, needs no ``PATH`` entry, and keeps the
+    child on the same code as the parent.
+    """
+    return (sys.executable, "-m", "brain", *args)
+
+
 def build_stages(*, vault_path: Path, keep: int) -> list[Stage]:
     """Construct the canonical stage list in dependency order."""
     py = sys.executable
     wiki_steps = (
-        Step(("brain", "vault", "export", "--to", str(vault_path))),
-        Step(("brain", "vault", "sync-summaries", "--vault", str(vault_path)), fatal=False),
+        Step(brain_argv("vault", "export", "--to", str(vault_path))),
+        Step(brain_argv("vault", "sync-summaries", "--vault", str(vault_path)), fatal=False),
         Step(
-            (
-                "brain", "vault", "prune-orphans", "--apply", "--include-stale",
+            brain_argv(
+                "vault", "prune-orphans", "--apply", "--include-stale",
                 "--vault", str(vault_path),
             ),
             fatal=False,
         ),
         Step(
-            ("brain", "vault", "render", "--overlay", "--no-build", "--vault", str(vault_path)),
+            brain_argv("vault", "render", "--overlay", "--no-build", "--vault", str(vault_path)),
             fatal=False,
         ),
         Step(
@@ -69,39 +90,39 @@ def build_stages(*, vault_path: Path, keep: int) -> list[Stage]:
         Stage(
             "embeddings",
             "backfill NULL embeddings + finalize HNSW",
-            (Step(("brain", "reembed")),),
+            (Step(brain_argv("reembed")),),
         ),
         Stage(
             "summaries",
             "LLM summary backfill (NULL-summary docs)",
-            (Step(("brain", "enrich", "--backfill")),),
+            (Step(brain_argv("enrich", "--backfill")),),
         ),
         Stage(
             "search",
             "denorm title/tags + recompute search_extras",
-            (Step(("brain", "backfill", "search")),),
+            (Step(brain_argv("backfill", "search")),),
         ),
         Stage(
             "graph",
             "entities + CO_OCCURS edges (per-doc watermark)",
-            (Step(("brain", "graphrag", "build", "--backfill")),),
+            (Step(brain_argv("graphrag", "build", "--backfill")),),
         ),
         Stage(
             "graph-weights",
             "recompute all edge weights from contributions",
-            (Step(("brain", "graphrag", "refresh")),),
+            (Step(brain_argv("graphrag", "refresh")),),
         ),
         Stage(
             "communities",
             "Louvain communities + summaries",
-            (Step(("brain", "graphrag", "communities", "refresh")),),
+            (Step(brain_argv("graphrag", "communities", "refresh")),),
         ),
         Stage(
             "connect",
             "recompute proactive auto-link suggestions",
             # Non-fatal: a connect-refresh failure (e.g. graph unbuilt) must not
             # abort the rebuild — suggestions are an enhancement, like the wiki.
-            (Step(("brain", "connect", "refresh"), fatal=False),),
+            (Step(brain_argv("connect", "refresh"), fatal=False),),
         ),
         Stage("wiki", "vault export/sync/prune/overlay + build_swap", wiki_steps),
     ]

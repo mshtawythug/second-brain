@@ -10,6 +10,16 @@
 # Publishing (tag creation) is a deliberate human action: nothing here creates a
 # tag. It only reacts to a tag the maintainer pushes. `workflow_dispatch` is also
 # wired so the PyPI publish can be re-run manually if a publish step fails.
+#
+# THE PyPI PUBLISH IS GATED ON A GREEN `ci` RUN FOR THE SAME COMMIT — see the
+# `ci-gate` job below. Everything else in this repository is recoverable; a PyPI
+# version is not. It can be yanked but never replaced, and it stays resolved in
+# every lockfile that already saw it. `ci.yml` triggers on `pull_request` and
+# `push: branches: [main, master]` and NOT on tags, so before the gate existed a
+# tag push started the publish *concurrently with* CI rather than after it. The
+# `pypi` deployment environment carries no protection rules, so nothing else was
+# in front of it either. Contract pinned by
+# tests/test_release_workflow_contract.py.
 # =============================================================================
 name: release
 
@@ -23,10 +33,175 @@ permissions:
   contents: write
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Gate: the `ci` workflow must have SUCCEEDED for the exact commit this ref
+  # points at, before anything reaches PyPI.
+  #
+  # Why a `needs:`-chained polling job rather than the alternatives:
+  #
+  #   * `workflow_run:` trigger — cannot work here. A `workflow_run` job runs in
+  #     the context of the DEFAULT BRANCH with `github.ref` pointing at it, so
+  #     there is no tag to publish and the `refs/tags/v*` ref-guard below could
+  #     never pass. It also would not fire at all for a tag push, since `ci.yml`
+  #     does not run on tags, and it would abandon the workflow_dispatch
+  #     re-drive path entirely.
+  #
+  #   * A required-reviewer rule on the `pypi` environment — a repository
+  #     SETTING, not code, so it cannot be reviewed, tested, or version
+  #     controlled alongside the workflow, and a human clicking "approve" is not
+  #     the same claim as "the suite passed for this SHA". Worth adding as
+  #     defence in depth; not a substitute for this job.
+  #
+  #   * This job — the verdict lives in the repository, is asserted by a test,
+  #     and pins the check to `head_sha` so it cannot be satisfied by a green run
+  #     on some other commit.
+  #
+  # It blocks by being a `needs:` of `pypi-publish`. GitHub skips a dependent job
+  # when a `needs:` dependency fails, is cancelled, or is skipped — provided the
+  # dependent's own `if:` stays free of `always()` / `!cancelled()` / `failure()`.
+  # `pypi-publish`'s `if:` is a plain ref check for exactly that reason.
+  # ---------------------------------------------------------------------------
+  ci-gate:
+    name: Require a green `ci` run for this commit
+    # Mirrors `pypi-publish`'s guard exactly. Deliberately NOT exempting
+    # workflow_dispatch: that path exists to re-drive a failed publish without
+    # re-tagging, and exempting it would leave a one-click bypass (dispatch on a
+    # `v*` tag whose CI is red, publish anyway). On a re-drive CI has long since
+    # concluded, so the gate resolves on its first poll and costs ~20 seconds.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    # Backstop for a wedged `gh` call. The in-script deadline (35 min) is the
+    # primary bound; without this the loop would be capped only by the 6-hour
+    # runner default. A timed-out job is FAILED, so the `needs:` edge still
+    # skips the publish.
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      # Required to list the `ci` workflow's runs. Without it the API call
+      # errors and the gate fails closed — safe, but permanently red.
+      actions: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve the commit this ref points at
+        id: commit
+        # Resolved from the checkout rather than read from `github.sha` so an
+        # annotated tag cannot contribute a tag-object SHA: `ci.yml` records the
+        # COMMIT as its `head_sha`, and a mismatch here would look like "no `ci`
+        # run for this commit" — fail-closed, but for the wrong reason.
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse "HEAD^{commit}")"
+          echo "resolved ${GITHUB_REF} -> ${sha}"
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - name: Require `ci` to have succeeded for that commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -euo pipefail
+
+          # `ci.yml`'s `test` job carries `timeout-minutes: 30`, so a run that
+          # started in the same push as this one needs ~30 min plus queue time.
+          TOTAL_TIMEOUT_SECONDS=2100   # 35 min
+          # A tag push does not trigger ci.yml. If no run EVER appears for this
+          # commit, waiting the full budget is pointless — fail early with the
+          # actionable message instead.
+          NO_RUN_TIMEOUT_SECONDS=300   # 5 min
+          POLL_INTERVAL_SECONDS=20
+
+          deadline=$(( SECONDS + TOTAL_TIMEOUT_SECONDS ))
+          no_run_deadline=$(( SECONDS + NO_RUN_TIMEOUT_SECONDS ))
+
+          echo "Gating the PyPI publish on a green \`ci\` run for ${SHA}"
+
+          while : ; do
+            # AMBIGUITY 1 — the API errored. A release we cannot PROVE is safe
+            # does not ship. Re-drive with workflow_dispatch once GitHub is
+            # healthy; no retry logic here, because "keep asking until it says
+            # yes" is how a gate turns into a warning.
+            if ! runs="$(gh api --paginate \
+                  "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${SHA}&per_page=100" \
+                  --jq '.workflow_runs[] | "\(.status)\t\(.conclusion // "none")\t\(.html_url)"')"; then
+              echo "::error::Could not query \`ci\` runs for ${SHA}. Failing closed — nothing is published."
+              exit 1
+            fi
+
+            # AMBIGUITY 2 — no run exists for this commit.
+            if [ -z "${runs}" ]; then
+              if [ "${SECONDS}" -ge "${no_run_deadline}" ]; then
+                echo "::error::No \`ci\` run exists for commit ${SHA} after ${NO_RUN_TIMEOUT_SECONDS}s."
+                echo "ci.yml triggers on \`pull_request\` and \`push: branches: [main, master]\` — a TAG push does not match it."
+                echo "Push this commit to master/main (or dispatch ci.yml for it), wait for green, then re-drive this workflow."
+                exit 1
+              fi
+              echo "no \`ci\` run for ${SHA} yet; re-checking in ${POLL_INTERVAL_SECONDS}s"
+              sleep "${POLL_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            pending=0
+            failed=0
+            succeeded=0
+            # A here-string, not a pipe: the loop must run in this shell or the
+            # counters are lost in a subshell and every verdict reads as zero.
+            while IFS=$'\t' read -r status conclusion url; do
+              if [ "${status}" != "completed" ]; then
+                pending=$(( pending + 1 ))
+                echo "  in flight  status=${status} ${url}"
+              elif [ "${conclusion}" = "success" ]; then
+                succeeded=$(( succeeded + 1 ))
+                echo "  green      ${url}"
+              else
+                failed=$(( failed + 1 ))
+                echo "  NOT GREEN  conclusion=${conclusion} ${url}"
+              fi
+            done <<< "${runs}"
+
+            # AMBIGUITY 3 — a run for this commit concluded anything other than
+            # success (failure, cancelled, timed_out, action_required, skipped,
+            # or a completed run with a null conclusion). ALL runs for the SHA
+            # must be green, not merely the newest: if a push run failed and a
+            # separate dispatch run passed, which one describes the commit is
+            # exactly the ambiguity this rule refuses to guess at. Re-running the
+            # failed run updates that run's own conclusion, so the ordinary
+            # "flake, re-run, ship" path still converges.
+            if [ "${failed}" -gt 0 ]; then
+              echo "::error::${failed} \`ci\` run(s) for ${SHA} did not succeed. Refusing to publish — a PyPI version cannot be replaced, only yanked."
+              exit 1
+            fi
+
+            if [ "${pending}" -gt 0 ]; then
+              # AMBIGUITY 4 — still running when the budget expires. Waiting is
+              # legitimate; calling "unfinished" a pass is not.
+              if [ "${SECONDS}" -ge "${deadline}" ]; then
+                echo "::error::Timed out after ${TOTAL_TIMEOUT_SECONDS}s with ${pending} \`ci\` run(s) still in flight for ${SHA}. A timeout is a failure, never an implicit pass."
+                exit 1
+              fi
+              echo "${pending} run(s) still in flight; re-checking in ${POLL_INTERVAL_SECONDS}s"
+              sleep "${POLL_INTERVAL_SECONDS}"
+              continue
+            fi
+
+            echo "\`ci\` succeeded for ${SHA} (${succeeded} run(s)). The publish may proceed."
+            break
+          done
+
   github-release:
     name: Create GitHub Release
     # Only cut a Release for real tag pushes. A manual workflow_dispatch (used to
     # re-run the PyPI publish) has no tag to release from, so this job is skipped.
+    #
+    # NOT gated on `ci-gate`, deliberately. A GitHub Release is fully reversible
+    # (`gh release delete <tag>`), so the asymmetry that justifies the gate does
+    # not apply, and chaining it would mean a red CI leaves a pushed public tag
+    # with no Release at all — a worse operational state than a deletable Release
+    # for a version that did not reach PyPI. The gate guards the one step that
+    # cannot be undone.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -59,8 +234,16 @@ jobs:
   # ---------------------------------------------------------------------------
   pypi-publish:
     name: Publish to PyPI (Trusted Publishing)
+    # THE GATE. `ci` must have succeeded for this exact commit; see `ci-gate`.
+    # GitHub skips this job when `ci-gate` fails, is cancelled, or is skipped.
+    needs: ci-gate
     # Guard: publish only for `v*` tag refs. Covers both a tag push and a
     # workflow_dispatch selecting a `v*` tag; a dispatch from a branch skips.
+    #
+    # This condition MUST stay free of `always()`, `!cancelled()`, and
+    # `failure()`. Any of them re-enables the job when `ci-gate` failed, which
+    # silently converts the gate back into decoration while every other part of
+    # the file still looks correct.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     environment: pypi

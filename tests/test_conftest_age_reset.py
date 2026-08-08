@@ -51,6 +51,7 @@ from brain.db import DEFAULT_GRAPH_NAME, bootstrap_age
 from tests.conftest import (
     TEST_DATABASE_URL,
     _age_graph_exists,
+    _open_age_connection,
     _reset_age_graph,
     _truncate_reset,
 )
@@ -83,6 +84,66 @@ class RecordingConnection:
         """How many recorded statements contain ``needle`` (case-insensitive)."""
         low = needle.lower()
         return sum(1 for s in self.statements if low in s.lower())
+
+
+class _PoisonedConnection:
+    """A connection that dies the way an AGE-corrupted backend dies.
+
+    ``LOAD`` succeeds and the ``drop_graph`` raises, because that is the real
+    sequence: the library loads fine and the label cache only detonates once the
+    graph is touched.
+    """
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def execute(self, sql: Any, params: Any = None) -> Any:
+        if "drop_graph" in str(sql):
+            raise psycopg.errors.InternalError("label (relation) cache corrupted")
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _RaisingConnection:
+    """A connection whose every statement raises a given, non-AGE error."""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def execute(self, sql: Any, params: Any = None) -> Any:
+        raise self._error
+
+    def close(self) -> None:
+        return None
+
+
+class _AgeConnSpy:
+    """Factory + recorder for the throwaway connection ``_reset_age_graph`` opens.
+
+    Callable so it can be passed straight in as ``open_age_conn``; it hands back
+    a :class:`RecordingConnection` over a real connection, so the AGE work still
+    genuinely happens and the statements are still observable.
+    """
+
+    def __init__(self) -> None:
+        self.opened: list[RecordingConnection] = []
+
+    def __call__(self) -> Any:
+        recorder = RecordingConnection(_open_age_connection())
+        self.opened.append(recorder)
+        return recorder
+
+    def issued(self, needle: str) -> int:
+        """How many statements across every opened connection match ``needle``."""
+        return sum(r.issued(needle) for r in self.opened)
+
+
+@pytest.fixture()
+def age_conn_spy() -> _AgeConnSpy:
+    """Observe the AGE connection without patching anything — pure injection."""
+    return _AgeConnSpy()
 
 
 @pytest.fixture()
@@ -149,6 +210,7 @@ def test_per_test_reset_issues_no_age_load_for_a_graph_free_test(
 
 def test_reset_still_drops_a_graph_that_does_exist(
     age_conn: psycopg.Connection,
+    age_conn_spy: _AgeConnSpy,
 ) -> None:
     """Cleanup semantics are unchanged — this removes waste, not correctness.
 
@@ -162,12 +224,99 @@ def test_reset_still_drops_a_graph_that_does_exist(
     recorder = RecordingConnection(age_conn)
 
     # Act
-    _reset_age_graph(recorder)
+    _reset_age_graph(recorder, open_age_conn=age_conn_spy)
 
     # Assert — gone, and it took the AGE path to get there.
     assert _age_graph_exists(age_conn, DEFAULT_GRAPH_NAME) is False
-    assert recorder.issued("LOAD 'age'") == 1
-    assert recorder.issued("drop_graph") == 1
+    assert age_conn_spy.issued("LOAD 'age'") == 1
+    assert age_conn_spy.issued("drop_graph") == 1
+
+
+def test_the_callers_connection_never_loads_age_even_when_a_graph_exists(
+    age_conn: psycopg.Connection,
+    age_conn_spy: _AgeConnSpy,
+) -> None:
+    """C17 bounded how OFTEN AGE loads; this bounds WHICH backend pays.
+
+    The early-out cannot help the ~17% of resets that do have a graph to drop,
+    and on those ``conn`` is the connection about to be handed to the test. AGE
+    poisons the backend that ran ``drop_graph`` at its *next* statement, so
+    loading AGE there hands the test a connection primed to die on its first
+    query — which is exactly how
+    ``test_cli_agent_flag::test_search_and_ingest_agree_on_the_env_var`` failed
+    on 2026-08-07: both CLI invocations returned 0, then the verification
+    ``SELECT`` came back on a dead connection.
+
+    Reproduced at ~1 run in 12 (2 files, 20 tests) before this; 0 in 40 after.
+    """
+    # Arrange
+    bootstrap_age(age_conn)
+    assert _age_graph_exists(age_conn, DEFAULT_GRAPH_NAME) is True
+    recorder = RecordingConnection(age_conn)
+
+    # Act
+    _reset_age_graph(recorder, open_age_conn=age_conn_spy)
+
+    # Assert — the caller's connection is untouched by AGE...
+    assert recorder.issued("LOAD 'age'") == 0
+    assert recorder.issued("drop_graph") == 0
+    assert recorder.issued("search_path") == 0
+    # ...and is still alive, which is the property the failing tests needed.
+    assert age_conn.execute("SELECT 1").fetchone() == (1,)
+
+
+def test_a_poisoned_age_connection_is_retried_on_a_fresh_one(
+    age_conn: psycopg.Connection,
+) -> None:
+    """A corrupted attempt must degrade to a retry, not to a dead test.
+
+    The corruption also leaves the graph undropped, so without the retry the
+    next reset takes the AGE path again and can be poisoned again — the
+    self-sustaining loop behind two consecutive failures in one file.
+
+    The first attempt is made to fail the way Postgres actually fails it
+    (``InternalError`` carrying AGE's message); the second gets a real
+    connection, so the assertion is that the graph really is gone.
+    """
+    # Arrange
+    bootstrap_age(age_conn)
+    assert _age_graph_exists(age_conn, DEFAULT_GRAPH_NAME) is True
+    attempts: list[str] = []
+
+    def flaky_first_attempt() -> Any:
+        if not attempts:
+            attempts.append("poisoned")
+            return _PoisonedConnection()
+        attempts.append("fresh")
+        return _open_age_connection()
+
+    # Act
+    _reset_age_graph(age_conn, open_age_conn=flaky_first_attempt)
+
+    # Assert
+    assert attempts == ["poisoned", "fresh"]
+    assert _age_graph_exists(age_conn, DEFAULT_GRAPH_NAME) is False
+
+
+def test_an_unrecoverable_error_is_not_retried_into_silence(
+    age_conn: psycopg.Connection,
+) -> None:
+    """Only the corruption is absorbed — a real failure must still surface.
+
+    Retrying is a narrow concession to one upstream bug. If it swallowed
+    everything, a graph that genuinely refuses to drop would leak into the next
+    test as a mystery instead of failing here.
+    """
+    # Arrange
+    bootstrap_age(age_conn)
+    boom = psycopg.ProgrammingError("permission denied for schema ag_catalog")
+
+    def always_raises() -> Any:
+        return _RaisingConnection(boom)
+
+    # Act / Assert
+    with pytest.raises(psycopg.ProgrammingError):
+        _reset_age_graph(age_conn, open_age_conn=always_raises)
 
 
 def test_graph_existence_probe_needs_neither_extension_nor_load(
