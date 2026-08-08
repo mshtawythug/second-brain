@@ -309,7 +309,7 @@ dependencies = [
 # identical to the default resolve. So an environment that caps click below 8.2
 # does NOT give a user a broken CLI. The pairing that does is the inverse — an
 # environment that caps TYPER, which is what the floor above now blocks.
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.13", "pytest-mock>=3.14", "ruff>=0.7", "mypy>=1.13", "reportlab>=4.0", "types-PyYAML>=6.0"]
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.16", "pytest-mock>=3.14", "ruff>=0.7", "mypy>=1.13", "reportlab>=4.0", "types-PyYAML>=6.0"]
 
 [project.scripts]
 brain = "brain.cli:app"
