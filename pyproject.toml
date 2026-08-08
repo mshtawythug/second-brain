@@ -260,7 +260,14 @@ dependencies = [
   "rich>=13.9",
   "python-dotenv>=1.0",
   "tiktoken>=0.8",
-  "mcp>=1.0,<3.0",
+  # Capped BELOW 2.0 deliberately — Dependabot widened this to `<3.0` in #7 and
+  # it was merged on 2026-08-08 before that PR's CI had reported. mcp 2.0.0
+  # REMOVES `McpError` from the package root, so `src/brain/mcp_server.py`'s
+  # `from mcp import McpError` raises ImportError: 30 test modules fail at
+  # COLLECTION and `brain-mcp` does not import at all. Verified directly on
+  # mcp 2.0.0 against this tree. Moving to 2.x is a real migration, not a
+  # version bump — do it deliberately, with the import surface ported first.
+  "mcp>=1.0,<2.0",
   # `brain ui` imports these directly. They resolve transitively via `mcp`
   # today, so declaring them adds zero new wheels — it stops a silent
   # import-time break if `mcp` ever drops them.
