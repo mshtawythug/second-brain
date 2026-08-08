@@ -1,19 +1,19 @@
 # =============================================================================
 # Publish the custom Apache AGE Postgres image to GHCR (multi-arch)
 # -----------------------------------------------------------------------------
-# Builds the pinned PG16 + pgvector 0.8.2 + Apache AGE 1.5.0-rc0 image from the
+# Builds the pinned PG16 + pgvector 0.8.6 + Apache AGE 1.5.0-rc0 image from the
 # canonical Dockerfile (src/brain/templates/docker/age/Dockerfile) and pushes it
 # to the GitHub Container Registry so fresh installs can PULL a prebuilt image
 # instead of compiling AGE from C source on every machine (slow + fragile on
 # Apple Silicon). The compose files still carry a `build:` stanza as a local
 # fallback when the pull is unavailable.
 #
-# Image ref produced: ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
+# Image ref produced: ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6
 #
 # TWO INDEPENDENT VERSION AXES (see CHANGELOG.md intro):
 #   * age-image-*  tags  -> AGE Postgres IMAGE releases (this workflow)
 #   * v*           tags  -> brain CLI releases           (release.yml)
-# The image tag string (pg16-v1.5.0-rc0-pgv0.8.2) is pinned to the AGE +
+# The image tag string (pg16-v1.5.0-rc0-pgv0.8.6) is pinned to the AGE +
 # pgvector versions baked into the Dockerfile, NOT to the CLI version — bumping
 # the CLI does not rebuild the image, and rebuilding the image does not bump the
 # CLI.
@@ -80,8 +80,12 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/mshtawythug/second-brain-age
+          # MUST match the Dockerfile FROM (`pgv<version>`) and AGE_REF (`v<version>`).
+          # Publishing new base content under an old tag mislabels an immutable
+          # artifact AND makes CI's pull-first path silently reuse the stale image.
+          # Guarded by tests/test_packaging_templates.py::test_age_image_version_pins_agree_everywhere.
           tags: |
-            type=raw,value=pg16-v1.5.0-rc0-pgv0.8.2
+            type=raw,value=pg16-v1.5.0-rc0-pgv0.8.6
             type=raw,value=latest
 
       - name: Build + push (linux/amd64, linux/arm64)

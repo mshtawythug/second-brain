@@ -12,12 +12,12 @@ from unittest import mock
 
 import psycopg
 import pytest
-from mcp import McpError
 from mcp.types import INVALID_PARAMS
 
 from brain import mcp_server
 from brain.config import Config
 from brain.ingest import ExtractedDoc, ingest_document
+from brain.mcp_compat import MCPError
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -188,7 +188,7 @@ def test_brain_show_session_id_without_query_is_rejected(
     """Plan D15 — a session id without an originating query carries no
     useful signal and must surface as INVALID_PARAMS."""
     doc_id = _ingest(test_db, fake_embedder, title="A", content="A body")
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_show(
             id_prefix=doc_id[:8],
             session_id=str(uuid.uuid4()),
@@ -203,7 +203,7 @@ def test_brain_show_invalid_session_id_uuid_is_rejected(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     doc_id = _ingest(test_db, fake_embedder, title="A", content="A body")
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_show(
             id_prefix=doc_id[:8],
             originating_query="company-id",
@@ -220,7 +220,7 @@ def test_brain_show_failed_id_resolution_writes_nothing(
 ) -> None:
     """When the doc can't be resolved, no interaction row is written —
     the FK would fail anyway, but the resolver short-circuits first."""
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_show(
             id_prefix="ffffff",
             originating_query="company-id",

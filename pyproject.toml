@@ -260,14 +260,18 @@ dependencies = [
   "rich>=13.9",
   "python-dotenv>=1.0",
   "tiktoken>=0.8",
-  # Capped BELOW 2.0 deliberately — Dependabot widened this to `<3.0` in #7 and
-  # it was merged on 2026-08-08 before that PR's CI had reported. mcp 2.0.0
-  # REMOVES `McpError` from the package root, so `src/brain/mcp_server.py`'s
-  # `from mcp import McpError` raises ImportError: 30 test modules fail at
-  # COLLECTION and `brain-mcp` does not import at all. Verified directly on
-  # mcp 2.0.0 against this tree. Moving to 2.x is a real migration, not a
-  # version bump — do it deliberately, with the import surface ported first.
-  "mcp>=1.0,<2.0",
+  # Supports both mcp majors, and both ends are exercised. mcp 2.0 renamed the
+  # two names this project imports — `McpError` -> `MCPError`, and
+  # `mcp.server.fastmcp.FastMCP` -> `mcp.server.mcpserver.MCPServer` — with no
+  # alias in either direction, and changed the error constructor from
+  # `McpError(ErrorData(...))` to `MCPError(code, message)`. `brain/mcp_compat.py`
+  # resolves all three at import time; `tests/test_mcp_compat.py` fails if any
+  # major-specific spelling reappears in `src/`. Floor is 1.2, NOT 1.0:
+  # `mcp.server.fastmcp` landed in 1.2.0, so `brain-mcp` cannot import on
+  # 1.0.0/1.1.0 (verified: ModuleNotFoundError) — the old `>=1.0` was a false
+  # claim already in the pin.
+  # Exercised under the full 626-test MCP suite: 1.2.0, 1.29.0, 2.0.0.
+  "mcp>=1.2,<3.0",
   # `brain ui` imports these directly. They resolve transitively via `mcp`
   # today, so declaring them adds zero new wheels — it stops a silent
   # import-time break if `mcp` ever drops them.
@@ -316,7 +320,72 @@ dependencies = [
 # identical to the default resolve. So an environment that caps click below 8.2
 # does NOT give a user a broken CLI. The pairing that does is the inverse — an
 # environment that caps TYPER, which is what the floor above now blocks.
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.13", "pytest-mock>=3.14", "ruff>=0.7", "mypy>=1.13", "reportlab>=4.0", "types-PyYAML>=6.0"]
+# `coverage` is capped, and the cap was RE-MEASURED on 2026-08-08 rather than
+# inherited. The old bound was `<7.13`, traced to a one-line aside in
+# docs/plans/2026-05-05-wiki-ux-overhaul-finish-handoff.md: "Coverage tooling
+# broken (numpy 2.4.4 + coverage 7.13 + pgvector C-ext) — always use --no-cov".
+# That claim DID NOT REPRODUCE and the bound has been lifted to the current
+# ceiling. Recorded here because the reason was never written at the pin site,
+# which is why Dependabot #5 could propose `<7.16` and nobody could triage it.
+#
+# WHAT THE CAP PROTECTS — the coverage GATE, not pgvector. `addopts` carries
+# `--cov-fail-under=85`, and tests/test_ci_workflow.py forbids CI from passing
+# `--no-cov`, so there is NO escape hatch: a release that changes what gets
+# measured erodes the 85% floor quietly instead of failing loudly. So the thing
+# to measure when moving this bound is not "do the tests pass" — it is "is the
+# reported PERCENTAGE the same". A version that collects fine and measures 3%
+# low is the dangerous one.
+#
+# MEASURED, two slices, coverage collection ON (`--cov-fail-under=0`, never
+# `--no-cov` — that is exactly what hides this), isolated COVERAGE_FILE per run,
+# percentages from --cov-report=json to 6 decimals:
+#
+#     coverage   slice A (111 tests, pgvector/AGE)   slice B (1555 tests)
+#     7.12.0     111 passed   22.727469%            1555 passed   43.733552%
+#     7.13.0     111 passed   22.727469%            1555 passed   43.733552%
+#     7.13.5     111 passed   22.727469%            1555 passed   43.733552%
+#     7.14.3     111 passed   22.727469%            1555 passed   43.733552%
+#     7.15.4     111 passed   22.727469%            1555 passed   43.733552%
+#
+# Bit-identical — same covered-line count, same percentage to 6 decimals. Slice
+# A re-run on Python 3.14.5 (the interpreter .venv uses, where coverage defaults
+# to the sysmon core) on 7.12.0 / 7.13.0 / 7.15.4: identical there too. Three
+# layers isolated separately: all five versions `coverage report` over ONE
+# identical data file -> identical output; `PythonParser` over all 211 files of
+# src/brain -> 23404 statements on all five, zero files differing (so the 85%
+# denominator is version-invariant); `--fail-under=85` still exits 2.
+#
+# WHY 7.13.0 WAS THE WRONG SUSPECT. Its only real behaviour delta vs 7.12.0 is a
+# permanent `a1_coverage.pth` in site-packages (issue 2084) — and that file is
+# inert here: its body is guarded by COVERAGE_PROCESS_START / _CONFIG, neither of
+# which is set anywhere in this repo or by pytest-cov 7.1.0. The rest of 7.13.0
+# is `.coveragerc.toml` support (unused; config lives here) and deprecation
+# banners on the `coverage3` entry points (never invoked — only `python -m
+# pytest`). The "pgvector C-ext" reading has no mechanism behind it, and the
+# contract test's old name (`..._below_pgvector_breaking_range`) was a misnomer
+# copied from the pgvector pin above. Both are now fixed.
+#
+# Cap <7.16: 7.15.4 is the newest release and is verified green. Not a claim that
+# 7.16 breaks — a requirement that the next minor be MEASURED before users get
+# it, same convention as `typer` and `pgvector` above.
+#
+# NO FLOOR, deliberately: `pytest-cov` already bounds coverage from below for
+# every install (7.1.0 requires coverage[toml]>=7.10.6; even the declared floor
+# pytest-cov 5.0.0 requires >=5.2.1). A second floor here would constrain nothing
+# and would need lifting in two places when pytest-cov moves.
+#
+# ONE FORWARD-LOOKING HAZARD worth knowing, since it is new in this range: from
+# 7.14.0 the reporting commands IMPLICITLY COMBINE parallel data files, with no
+# opt-out. A stale `.coverage.*` in the repo root now silently folds into the
+# report. It did not affect the numbers above (checked: one `.coverage`, zero
+# `.coverage.*`), but it is a real way for a future measurement to be wrong —
+# use an isolated COVERAGE_FILE when measuring.
+#
+# The self-enforcing part is tests/test_dev_dependency_pins.py: it asserts the
+# UPPER BOUND against a named MEASURED_COVERAGE_CEILING constant (parsed, not
+# substring-matched, unlike the version it replaced) and its failure message
+# states how to re-measure. Move this bound and that constant must move with it.
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.16", "pytest-mock>=3.14", "ruff>=0.7", "mypy>=1.13", "reportlab>=4.0", "types-PyYAML>=6.0"]
 
 [project.scripts]
 brain = "brain.cli:app"

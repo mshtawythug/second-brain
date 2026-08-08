@@ -20,11 +20,11 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from mcp import McpError
 from mcp.types import INVALID_PARAMS
 
 from brain import mcp_server
 from brain.config import Config
+from brain.mcp_compat import MCPError
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -72,7 +72,7 @@ def test_brain_search_rejects_non_positive_limit(
     Pre-fix ``hybrid_search`` sliced ``results[:limit]`` — a negative limit
     silently dropped the tail and returned a truncated result set with no error.
     """
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         mcp_server.brain_search(query="anything", limit=bad_limit)
     assert excinfo.value.error.code == INVALID_PARAMS
 
@@ -87,7 +87,7 @@ def test_brain_list_rejects_non_positive_limit(
     ``LIMIT -3`` raised a Postgres error surfaced as INTERNAL_ERROR.
     """
     _seed_doc(test_db, title="a")
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         mcp_server.brain_list(limit=bad_limit)
     assert excinfo.value.error.code == INVALID_PARAMS
 
@@ -109,6 +109,6 @@ def test_brain_resurface_rejects_non_positive_limit_fail_fast(
         raise AssertionError("resurface_docs must not run for an invalid limit")
 
     monkeypatch.setattr(mcp_server, "resurface_docs", _must_not_run)
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         mcp_server.brain_resurface(limit=bad_limit)
     assert excinfo.value.error.code == INVALID_PARAMS

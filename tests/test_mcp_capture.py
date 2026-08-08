@@ -21,11 +21,11 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import mcp_server
 from brain import vault as vault_module
 from brain.config import Config
+from brain.mcp_compat import MCPError
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -184,7 +184,7 @@ def test_brain_capture_empty_content_errors(
     capture_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     """Empty / whitespace-only content is rejected as an MCP INVALID_PARAMS error."""
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_capture(content=empty)
     assert "content is empty" in exc_info.value.error.message
 
@@ -242,7 +242,7 @@ def test_brain_capture_raises_mcp_error_when_vault_path_none(
     fake_embedder: object,
     tmp_path: Path,
 ) -> None:
-    """With vault_path=None on the cfg, brain_capture raises McpError INVALID_PARAMS.
+    """With vault_path=None on the cfg, brain_capture raises MCPError INVALID_PARAMS.
 
     Constructs a _State directly with vault_path=None bypassing Config.load()
     (which always resolves a default path).
@@ -261,7 +261,7 @@ def test_brain_capture_raises_mcp_error_when_vault_path_none(
     )
     monkeypatch.setattr(mcp_server, "_state", state)
 
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_capture(content="this should never reach the db")
     assert "vault path is not configured" in exc_info.value.error.message
 
@@ -272,7 +272,7 @@ def test_brain_capture_raises_mcp_error_on_vault_sync_error(
     fake_embedder: object,
     tmp_path: Path,
 ) -> None:
-    """A VaultNoteSyncError from create_vault_note surfaces as McpError INVALID_PARAMS.
+    """A VaultNoteSyncError from create_vault_note surfaces as MCPError INVALID_PARAMS.
 
     Simulated by providing a vault without _templates/note.md (init_vault
     intentionally skipped) so create_vault_note raises VaultNoteSyncError.
@@ -288,7 +288,7 @@ def test_brain_capture_raises_mcp_error_on_vault_sync_error(
     )
     monkeypatch.setattr(mcp_server, "_state", state)
 
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_capture(content="a sync error probe via mcp")
     assert "vault note sync" in exc_info.value.error.message.lower()
 
@@ -313,9 +313,9 @@ def test_brain_capture_wraps_db_error(
     monkeypatch: pytest.MonkeyPatch,
     capture_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    """A Postgres failure surfaces as McpError, never a raw psycopg.Error."""
+    """A Postgres failure surfaces as MCPError, never a raw psycopg.Error."""
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_capture(content="content that never reaches the db")
     assert "database error" in exc_info.value.error.message
 

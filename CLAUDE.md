@@ -82,7 +82,7 @@ The eval-marker harness (`tests/test_eval_harness_live.py`) is **excluded from t
 
 **CI enforces it separately.** `.github/workflows/eval.yml` runs on every PR, every push to `main`/`master`, and manual `workflow_dispatch`:
 
-1. Brings up the pinned Apache AGE test instance via `docker compose -f docker-compose.age-test.yml up -d --build` (PostgreSQL 16 + pgvector 0.8.2 + AGE, port **5434**, db `second_brain_test` — the same instance the local test suite uses). A GitHub Actions `services:` block can't `build:` an image inline, so compose is used instead of a service container; one eval-marked test reaches the AGE-backed graph layer.
+1. Brings up the pinned Apache AGE test instance via `docker compose -f docker-compose.age-test.yml up -d --build` (PostgreSQL 16 + pgvector 0.8.6 + AGE, port **5434**, db `second_brain_test` — the same instance the local test suite uses). A GitHub Actions `services:` block can't `build:` an image inline, so compose is used instead of a service container; one eval-marked test reaches the AGE-backed graph layer.
 2. Installs the package with `pip install -e ".[dev]"` and waits for `pg_isready` on port 5434.
 3. Runs `pytest -m eval --no-cov -v`. The eval-marked tests SKIP cleanly without a live corpus + Ollama, so in CI this is import/collection regression coverage — it turns red only when the harness itself breaks.
 4. Conditionally runs `brain eval --baseline ci --diff --fail-below`, but only when `tests/eval/baselines/ci.json` exists (dormant otherwise, printing a skip notice — recording that baseline needs a live corpus + Ollama, so it is a coordinator step, not CI's).
@@ -187,7 +187,7 @@ docker compose up -d && brain init && brain ingest-dir <…> && brain reembed
 
 # GraphRAG (experimental — entity graph alongside vector/FTS search)
 # Requires the custom Apache AGE Postgres image
-#   (second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2), NOT the stock pgvector prod
+#   (second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6), NOT the stock pgvector prod
 #   image. `pip install -e ".[dev]"` pulls the networkx dep. Set
 #   BRAIN_GRAPH_ENABLED=true in .env to enable the ingest-time graph sync.
 brain init                               # also bootstraps AGE + applies graph migrations when the image ships AGE

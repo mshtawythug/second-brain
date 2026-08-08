@@ -2,8 +2,8 @@
 
 Asserts a strict 1:1 mapping between every ``brain graphrag …`` Typer
 subcommand (including the nested ``communities {build,refresh,list}`` group)
-and every ``brain_graphrag_*`` FastMCP tool. The test is purely introspective —
-it reads the live Typer command registry and the live FastMCP tool registry, so
+and every ``brain_graphrag_*`` MCP tool. The test is purely introspective —
+it reads the live Typer command registry and the live MCP tool registry, so
 it needs no database, no Ollama, and no AGE: it is deterministic and runs in the
 default (non-eval) suite.
 
@@ -31,7 +31,7 @@ from brain.mcp_server import mcp_app
 
 # Explicit, authoritative CLI-command → MCP-tool mapping (spec §9 parity set).
 # Keys are fully-qualified CLI subcommands under ``brain graphrag``; nested group
-# commands are written "<group> <command>". Values are the FastMCP tool names.
+# commands are written "<group> <command>". Values are the MCP tool names.
 # This dict is the single source of truth for the 10↔10 parity contract — adding
 # a capability to one surface means adding its row here AND to the other surface.
 EXPECTED_MAPPING: dict[str, str] = {
@@ -77,7 +77,7 @@ def _collect_cli_commands(app: typer.Typer, prefix: str = "") -> set[str]:
 
 
 def _collect_mcp_graphrag_tools() -> set[str]:
-    """Collect the live ``brain_graphrag_*`` tool names from the FastMCP app."""
+    """Collect the live ``brain_graphrag_*`` tool names from the MCP server app."""
     tools = asyncio.run(mcp_app.list_tools())
     return {tool.name for tool in tools if tool.name.startswith(_MCP_TOOL_PREFIX)}
 

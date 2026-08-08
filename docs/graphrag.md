@@ -40,7 +40,7 @@ tenant + traversal caps.
 
 GraphRAG is on by default after `brain setup` (the one-liner installer). The
 packaged `docker-compose.yml` template provisions a custom Postgres image —
-`second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2` (PostgreSQL 16 + pgvector 0.8.2 +
+`second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6` (PostgreSQL 16 + pgvector 0.8.6 +
 pgcrypto + Apache AGE 1.5.0-rc0), built from
 `src/brain/templates/docker/age/Dockerfile` — and `brain init` bootstraps the
 AGE extension and the recomputable graph mirror automatically.
@@ -121,7 +121,7 @@ docker exec second-brain-postgres pg_dump -U brain -Fc -d second_brain \
   > ~/brain-backups/second_brain-precutover-$(date +%Y%m%d-%H%M%S).dump
 
 # 2. Build the AGE image locally. The Dockerfile is packaged in this repo.
-docker build -t second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2 \
+docker build -t second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6 \
   -f src/brain/templates/docker/age/Dockerfile src/brain/templates/docker/age/
 
 # 3. Create a gitignored docker-compose.override.yml that pins the AGE image
@@ -130,7 +130,7 @@ docker build -t second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2 \
 cat > docker-compose.override.yml <<'YAML'
 services:
   postgres:
-    image: second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
+    image: second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6
 YAML
 
 # 4. Restart the container so Compose picks up the new image.

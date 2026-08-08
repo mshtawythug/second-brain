@@ -10,10 +10,10 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import mcp_server
 from brain.config import Config
+from brain.mcp_compat import MCPError
 
 from .conftest import TEST_DATABASE_URL
 
@@ -78,5 +78,5 @@ def test_brain_review_weekly_emit_writes_page(
 def test_brain_review_weekly_bad_week_raises_mcp_error(
     review_state: mcp_server._State,  # noqa: ARG001 — installs state
 ) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_review_weekly(week="nope", no_graph=True, emit=False)

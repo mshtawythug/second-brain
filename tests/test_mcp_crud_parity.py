@@ -26,11 +26,11 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import mcp_server
 from brain import vault as vault_module
 from brain.config import Config
+from brain.mcp_compat import MCPError
 from brain.vault.frontmatter import dump_frontmatter
 from brain.vault.sync import sync_vault
 
@@ -125,7 +125,7 @@ def test_every_destructive_tool_defaults_confirm_to_false() -> None:
 def test_rm_refuses_without_confirm_and_deletes_nothing(
     test_db: psycopg.Connection, vault_dir: Path, seeded_note: str
 ) -> None:
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         mcp_server.brain_rm(id=seeded_note)
 
     message = str(excinfo.value)
@@ -161,7 +161,7 @@ def test_rm_with_confirm_deletes_row_and_mirror(
 
 
 def test_rm_rejects_an_unknown_id_prefix(mcp_state: mcp_server._State) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_rm(id="deadbeefdeadbeef", confirm=True)
 
 
@@ -173,7 +173,7 @@ def test_rm_rejects_an_unknown_id_prefix(mcp_state: mcp_server._State) -> None:
 def test_rename_refuses_without_confirm_and_writes_nothing(
     vault_dir: Path, seeded_note: str
 ) -> None:
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         mcp_server.brain_note_rename(id=seeded_note, new_title="Platform Sync")
 
     message = str(excinfo.value)
@@ -214,7 +214,7 @@ def test_rename_rejects_a_non_vault_document(
     ).fetchone()
     assert row is not None
 
-    with pytest.raises(McpError, match="not 'vault'"):
+    with pytest.raises(MCPError, match="not 'vault'"):
         mcp_server.brain_note_rename(
             id=str(row[0]), new_title="Renamed", confirm=True
         )
@@ -228,7 +228,7 @@ def test_rename_rejects_a_non_vault_document(
 def test_move_refuses_without_confirm_and_writes_nothing(
     test_db: psycopg.Connection, vault_dir: Path, seeded_note: str
 ) -> None:
-    with pytest.raises(McpError) as excinfo:
+    with pytest.raises(MCPError) as excinfo:
         mcp_server.brain_note_move(id=seeded_note, new_folder="projects/atlas")
 
     message = str(excinfo.value)
@@ -279,7 +279,7 @@ def test_move_to_the_same_folder_is_a_reported_noop(
 def test_move_rejects_a_traversal_folder(
     vault_dir: Path, seeded_note: str
 ) -> None:
-    with pytest.raises(McpError, match="must stay within the vault"):
+    with pytest.raises(MCPError, match="must stay within the vault"):
         mcp_server.brain_note_move(
             id=seeded_note, new_folder="../../escape", confirm=True
         )
@@ -298,7 +298,7 @@ def test_move_refuses_to_overwrite_an_existing_note(
     _write(occupied, {"title": "Weekly Sync Platform Copy"}, "other body\n")
     sync_vault(test_db, embedder=fake_embedder, vault_path=vault_dir)
 
-    with pytest.raises(McpError, match="already exists"):
+    with pytest.raises(MCPError, match="already exists"):
         mcp_server.brain_note_move(
             id=seeded_note, new_folder="projects/atlas", confirm=True
         )

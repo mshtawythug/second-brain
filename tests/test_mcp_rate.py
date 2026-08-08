@@ -20,12 +20,12 @@ from unittest import mock
 
 import psycopg
 import pytest
-from mcp import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 from brain import mcp_server
 from brain.config import Config
 from brain.ingest import ExtractedDoc, ingest_document
+from brain.mcp_compat import MCPError
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -168,7 +168,7 @@ def test_rate_invalid_verdict_invalid_params(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     doc_id = _seed_doc(test_db, fake_embedder)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_rate(id=doc_id, verdict="bogus")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "useful" in exc_info.value.error.message
@@ -181,7 +181,7 @@ def test_rate_unknown_id_invalid_params(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     _seed_doc(test_db, fake_embedder)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_rate(id="deadbeef", verdict="useful")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert _count_interactions() == 0
@@ -194,7 +194,7 @@ def test_rate_short_id_prefix_invalid_params(
 ) -> None:
     """A <6-char prefix is rejected by _resolve_id before any INSERT."""
     _seed_doc(test_db, fake_embedder)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_rate(id="abc", verdict="useful")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert _count_interactions() == 0
@@ -268,7 +268,7 @@ def test_rate_invalid_target_type_invalid_params(
 ) -> None:
     """A bogus target_type is rejected at the boundary; nothing written."""
     _seed_doc(test_db, fake_embedder)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_rate(id="anything", verdict="useful", target_type="bogus")
     assert exc_info.value.error.code == INVALID_PARAMS
     msg = exc_info.value.error.message
@@ -290,7 +290,7 @@ def test_rate_db_failure_internal_error(
     boom = psycopg.OperationalError("simulated logging outage")
     with (
         mock.patch("brain.mcp_server.record_interaction", side_effect=boom),
-        pytest.raises(McpError) as exc_info,
+        pytest.raises(MCPError) as exc_info,
     ):
         mcp_server.brain_rate(id=doc_id, verdict="useful")
     assert exc_info.value.error.code == INTERNAL_ERROR

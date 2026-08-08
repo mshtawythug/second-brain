@@ -29,7 +29,6 @@ from typing import Any
 import httpx
 import psycopg
 import pytest
-from mcp import McpError
 from mcp.types import INVALID_PARAMS
 from typer.testing import CliRunner
 
@@ -43,6 +42,7 @@ from brain.format import (
     timeline_context_json,
     timeline_renderable,
 )
+from brain.mcp_compat import MCPError
 from brain.timeline import (
     TimelineBucket,
     TimelineContext,
@@ -1191,7 +1191,7 @@ def test_mcp_timeline_graph_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _mcp_state(monkeypatch, fake_embedder, graph_enabled=False)
-    with pytest.raises(McpError) as exc:
+    with pytest.raises(MCPError) as exc:
         mcp_server.brain_timeline(query="x")
     assert exc.value.error.code == INVALID_PARAMS
 
@@ -1202,7 +1202,7 @@ def test_mcp_timeline_empty_query(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _mcp_state(monkeypatch, fake_embedder)
-    with pytest.raises(McpError) as exc:
+    with pytest.raises(MCPError) as exc:
         mcp_server.brain_timeline(query="   ")
     assert exc.value.error.code == INVALID_PARAMS
 
@@ -1213,7 +1213,7 @@ def test_mcp_timeline_bad_granularity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _mcp_state(monkeypatch, fake_embedder)
-    with pytest.raises(McpError) as exc:
+    with pytest.raises(MCPError) as exc:
         mcp_server.brain_timeline(query="x", granularity="week")
     assert exc.value.error.code == INVALID_PARAMS
 

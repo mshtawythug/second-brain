@@ -43,7 +43,7 @@ docker compose -f docker-compose.age-test.yml up -d
 ```
 
 This pulls the prebuilt multi-arch Apache AGE image from GHCR
-(`ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2`). If that image
+(`ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6`). If that image
 is unavailable, add `--build` to compile AGE locally from the pinned Dockerfile
 (`src/brain/templates/docker/age/`) — slower, but produces the identical
 pinned image:

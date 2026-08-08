@@ -11,10 +11,10 @@ from collections.abc import Iterator
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import mcp_server
 from brain.config import Config
+from brain.mcp_compat import MCPError
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -141,20 +141,20 @@ def test_brain_resurface_uses_config_defaults(
 def test_brain_resurface_invalid_limit_raises_invalid_params(
     mcp_state: mcp_server._State, test_db: psycopg.Connection
 ) -> None:
-    """limit < 1 surfaces as an McpError (INVALID_PARAMS), not a raw ValueError."""
+    """limit < 1 surfaces as an MCPError (INVALID_PARAMS), not a raw ValueError."""
     _insert_doc(test_db, title="a", age_days=200.0)
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_resurface(limit=0)
 
 
 def test_brain_resurface_wraps_db_error(
     mcp_state: mcp_server._State, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A psycopg error surfaces as an McpError, not a raw DB exception."""
+    """A psycopg error surfaces as an MCPError, not a raw DB exception."""
 
     def _boom(*_args: object, **_kwargs: object) -> object:
         raise psycopg.OperationalError("simulated outage")
 
     monkeypatch.setattr(mcp_server, "resurface_docs", _boom)
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_resurface()

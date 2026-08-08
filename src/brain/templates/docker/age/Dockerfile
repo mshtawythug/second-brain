@@ -17,17 +17,32 @@
 #   PG16 server headers, so the resulting .so/.control/.sql match the server exactly.
 #
 # Pins (immutable):
-#   - Base: pgvector/pgvector:0.8.2-pg16   (PG16 + pgvector 0.8.2; matches running DB)
+#   - Base: pgvector/pgvector:0.8.6-pg16   (PG16 + pgvector 0.8.6; matches running DB)
 #   - AGE : release tag PG16/v1.5.0-rc0    (commit 0048900f372d4dfd5c236f78b8a8453bcdbb458e)
 #           NOTE: upstream Apache AGE has NO GA PG16 tag. `PG16/v1.5.0-rc0` is the
 #           latest released PG16 tag (the only newer one is `PG16/v1.6.0-rc0`). It is
 #           a release candidate, labelled honestly as "1.5.0-rc0" everywhere — not GA.
 #
+# BUMPING THE BASE IMAGE — the FROM line alone is NEVER enough.
+#   The published image TAG encodes both pins:
+#       pg16-v<AGE_REF version>-pgv<pgvector version>   e.g. pg16-v1.5.0-rc0-pgv0.8.6
+#   docker-compose.age-test.yml (and CI, which does `docker compose pull` FIRST and
+#   only falls back to `build:` when the pull FAILS) resolves that tag. So if you
+#   change this FROM without changing the tag, the pull SUCCEEDS, the old image is
+#   used, this Dockerfile is never built, and CI silently validates the OLD base
+#   while every comment and label here claims the new one.
+#   `tests/test_packaging_templates.py::test_age_image_version_pins_agree_everywhere`
+#   fails the build if these ever disagree. Update together:
+#     1. this FROM + the "Pins" comment + the LABEL block below
+#     2. docker-compose.age-test.yml  `image:` tag (and its comment)
+#     3. .github/workflows/publish-age-image.yml  `type=raw,value=` tag (+ header comment)
+#     4. docker-compose.override.yml (gitignored, machine-local prod) — operator action
+#
 # Apache AGE does NOT require `shared_preload_libraries=age` for the per-session
 # `LOAD 'age';` bootstrap used by `brain init` / `connect`. It can be enabled
 # optionally for performance (see docs/specs/2026-05-20-graphrag-age-image.md).
 
-FROM pgvector/pgvector:0.8.2-pg16
+FROM pgvector/pgvector:0.8.6-pg16
 
 # Pinned Apache AGE source. AGE_COMMIT is the immutable checkout; AGE_REF is the
 # release tag it must resolve to — verified at build time so the build FAILS if the
@@ -72,8 +87,8 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*
 
 LABEL org.opencontainers.image.title="second-brain-pg16-age-pgvector" \
-      org.opencontainers.image.description="PostgreSQL 16 + pgvector 0.8.2 + pgcrypto + Apache AGE 1.5.0-rc0 for second-brain GraphRAG" \
-      org.opencontainers.image.base.name="pgvector/pgvector:0.8.2-pg16" \
+      org.opencontainers.image.description="PostgreSQL 16 + pgvector 0.8.6 + pgcrypto + Apache AGE 1.5.0-rc0 for second-brain GraphRAG" \
+      org.opencontainers.image.base.name="pgvector/pgvector:0.8.6-pg16" \
       brain.age.ref="PG16/v1.5.0-rc0" \
       brain.age.commit="0048900f372d4dfd5c236f78b8a8453bcdbb458e" \
-      brain.pgvector.version="0.8.2"
+      brain.pgvector.version="0.8.6"

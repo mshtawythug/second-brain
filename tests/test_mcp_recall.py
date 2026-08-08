@@ -18,11 +18,11 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import mcp_server
 from brain import vault as vault_module
 from brain.config import Config
+from brain.mcp_compat import MCPError
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",
@@ -184,7 +184,7 @@ def test_recall_defaults_to_the_configured_budget(corpus: None) -> None:
 def test_recall_rejects_non_positive_bounds(
     corpus: None, kwargs: dict[str, Any], message: str
 ) -> None:
-    with pytest.raises(McpError, match=message):
+    with pytest.raises(MCPError, match=message):
         mcp_server.brain_recall(query="anything", **kwargs)
 
 
@@ -217,7 +217,7 @@ def test_recall_filters_are_forwarded(
 
 
 def test_recall_rejects_an_unknown_person(corpus: None) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_recall(
             query="platform migration", person="No Such Synthetic Person"
         )
@@ -280,7 +280,7 @@ def test_search_accepts_updated_range_filters(corpus: None) -> None:
 
 
 def test_search_rejects_a_malformed_updated_filter(corpus: None) -> None:
-    with pytest.raises(McpError, match="updated_after"):
+    with pytest.raises(MCPError, match="updated_after"):
         mcp_server.brain_search(query="platform", updated_after="not-a-date")
 
 

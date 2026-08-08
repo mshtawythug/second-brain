@@ -12,11 +12,11 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import chat, mcp_server
 from brain.config import Config
 from brain.errors import OllamaUnavailable
+from brain.mcp_compat import MCPError
 
 from .conftest import TEST_DATABASE_URL
 
@@ -108,7 +108,7 @@ def test_brain_ask_logs_interactions(
 def test_brain_ask_bad_mode_invalid_params(
     ask_state: mcp_server._State,  # noqa: ARG001 — installs state
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_ask(question="q", mode="bogus")
     assert "mode must be one of" in str(exc_info.value)
 
@@ -126,7 +126,7 @@ def test_brain_ask_ollama_unavailable_internal_error(
 
     monkeypatch.setattr(chat, "chat_json", _dead_chat)
 
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_ask(question="synthetic doc", no_loop=True)
     assert "Ollama is not running" in str(exc_info.value)
 
@@ -134,7 +134,7 @@ def test_brain_ask_ollama_unavailable_internal_error(
 def test_brain_ask_rejects_non_positive_max_iterations(
     ask_state: mcp_server._State,  # noqa: ARG001 — installs state
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_ask(question="q", max_iterations=0)
     assert "max_iterations must be >= 1" in str(exc_info.value)
 
@@ -142,7 +142,7 @@ def test_brain_ask_rejects_non_positive_max_iterations(
 def test_brain_ask_rejects_non_positive_limit(
     ask_state: mcp_server._State,  # noqa: ARG001 — installs state
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_ask(question="q", limit=0)
     assert "limit must be >= 1" in str(exc_info.value)
 

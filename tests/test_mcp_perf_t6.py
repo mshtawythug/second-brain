@@ -256,7 +256,7 @@ class TestWrapDbErrorReconnect:
         with caplog.at_level(logging.ERROR, logger="brain.mcp_server"):
             result = mcp_server._wrap_db_error(exc)  # must not raise
 
-        assert result is not None, "_wrap_db_error must return an McpError"
+        assert result is not None, "_wrap_db_error must return an MCPError"
         assert any(
             "reconnect failed" in r.message for r in caplog.records
         ), "failed reconnect must be logged at ERROR"

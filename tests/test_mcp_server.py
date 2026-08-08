@@ -12,12 +12,12 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import mcp_server
 from brain.config import Config
 from brain.embeddings import OllamaEmbedError
 from brain.ingest import ExtractedDoc, ingest_document
+from brain.mcp_compat import MCPError
 from brain.vault.frontmatter import parse_frontmatter
 
 TEST_DATABASE_URL = os.environ.get(
@@ -272,7 +272,7 @@ def test_brain_search_respects_filters(
 class _BoomEmbedder:
     """Embedder stub that always raises a OllamaEmbedError on ``embed``.
 
-    Used to assert each tool wraps embedder failures as ``McpError`` rather
+    Used to assert each tool wraps embedder failures as ``MCPError`` rather
     than letting a raw ``OllamaEmbedError`` propagate to the MCP runtime.
 
     ``dim`` is required by the Embedder Protocol; T2's query-embed LRU
@@ -296,9 +296,9 @@ def test_brain_search_wraps_embed_error(
     monkeypatch: pytest.MonkeyPatch,
     mcp_state: mcp_server._State,
 ) -> None:
-    """An embedder failure must surface as McpError, never a raw OllamaEmbedError."""
+    """An embedder failure must surface as MCPError, never a raw OllamaEmbedError."""
     monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_search(query="anything")
     msg = exc_info.value.error.message
     assert "embedding failed" in msg
@@ -330,7 +330,7 @@ def test_brain_show_full_document(
 def test_brain_show_unknown_id_errors(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_show(id_prefix="ffffff")
     assert "not found" in exc_info.value.error.message
 
@@ -350,7 +350,7 @@ def test_brain_show_ambiguous_prefix_errors(
             "content_type) VALUES (%s, %s, %s, %s, %s)",
             (new_id, content, content, content + "_h", "note"),
         )
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_show(id_prefix="aaaaaa")
     assert "ambiguous" in exc_info.value.error.message
 
@@ -359,7 +359,7 @@ def test_brain_show_short_prefix_errors(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     """Defensive: <6 chars must be rejected before touching the DB."""
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_show(id_prefix="abc")
     assert "6 characters" in exc_info.value.error.message
 
@@ -368,7 +368,7 @@ def test_brain_show_non_hex_prefix_errors(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     """Defensive: a `_` or `%` must not slip through into the LIKE query."""
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_show(id_prefix="abc_de%")
     assert "hex digits" in exc_info.value.error.message
 
@@ -539,7 +539,7 @@ def test_brain_ingest_stdin_empty_content_errors(
     empty: str,
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_ingest_stdin(
             content=empty,
             source="krisp",
@@ -710,7 +710,7 @@ def test_brain_tag_adds_and_removes(
 def test_brain_tag_unknown_id_errors(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_tag(id_prefix="ffffff", add=["x"])
     assert "not found" in exc_info.value.error.message
 
@@ -721,7 +721,7 @@ def test_brain_tag_requires_add_or_remove(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     doc_id = _ingest(test_db, fake_embedder, title="A", content="body")
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_tag(id_prefix=doc_id[:8])
     assert "add or remove" in exc_info.value.error.message
 
@@ -1043,7 +1043,7 @@ def test_brain_edit_no_args_errors(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     doc_id = _ingest(test_db, fake_embedder, title="A", content="body")
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_edit(id_prefix=doc_id[:8])
     assert "no edit fields" in exc_info.value.error.message
 
@@ -1054,7 +1054,7 @@ def test_brain_edit_replace_metadata_without_metadata_errors(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     doc_id = _ingest(test_db, fake_embedder, title="A", content="body")
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_edit(id_prefix=doc_id[:8], replace_metadata=True)
     assert "replace_metadata" in exc_info.value.error.message
 
@@ -1064,11 +1064,11 @@ def test_brain_edit_propagates_value_errors(
     fake_embedder: object,
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    """A ValueError from update_document (e.g. content collision) becomes McpError."""
+    """A ValueError from update_document (e.g. content collision) becomes MCPError."""
     doc_a = _ingest(test_db, fake_embedder, title="A", content="alpha body")
     doc_b = _ingest(test_db, fake_embedder, title="B", content="bravo body")
     # Trying to set doc_b's content to doc_a's content collides on hash.
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_edit(id_prefix=doc_b[:8], content="alpha body")
     assert "collides" in exc_info.value.error.message
     _ = doc_a  # silence unused-warn
@@ -1124,9 +1124,9 @@ def test_brain_status_wraps_db_error(
     monkeypatch: pytest.MonkeyPatch,
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    """If connect() hits psycopg.Error, surface as McpError with redacted text."""
+    """If connect() hits psycopg.Error, surface as MCPError with redacted text."""
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_status()
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -1140,7 +1140,7 @@ def test_brain_search_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_search(query="anything")
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -1153,7 +1153,7 @@ def test_brain_show_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_show(id_prefix="abcdef")
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -1166,7 +1166,7 @@ def test_brain_list_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_list()
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -1179,7 +1179,7 @@ def test_brain_ingest_stdin_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_ingest_stdin(
             content="body", source="krisp", external_id="x", title="t"
         )
@@ -1193,7 +1193,7 @@ def test_brain_tag_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_tag(id_prefix="abcdef", add=["x"])
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -1204,7 +1204,7 @@ def test_brain_edit_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_edit(id_prefix="abcdef", title="new")
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -1215,7 +1215,7 @@ def test_brain_ingest_stdin_wraps_embed_error(
     mcp_state: mcp_server._State,
 ) -> None:
     monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_ingest_stdin(
             content="body that will need embedding",
             source="krisp",
@@ -1233,11 +1233,11 @@ def test_brain_edit_wraps_embed_error(
     monkeypatch: pytest.MonkeyPatch,
     mcp_state: mcp_server._State,
 ) -> None:
-    """A re-embed failure during brain_edit must surface as McpError."""
+    """A re-embed failure during brain_edit must surface as MCPError."""
     doc_id = _ingest(test_db, fake_embedder, title="A", content="original")
     # Swap the state's embedder to one that raises on the new content.
     monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_edit(id_prefix=doc_id[:8], content="brand new body")
     msg = exc_info.value.error.message
     assert "embedding failed" in msg

@@ -13,12 +13,12 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 from mcp.types import INVALID_PARAMS
 
 from brain import mcp_server
 from brain.config import Config
 from brain.errors import PersonAmbiguous, PersonNotFound
+from brain.mcp_compat import MCPError
 from brain.queries import PersonMatch
 
 TEST_DATABASE_URL = os.environ.get(
@@ -60,7 +60,7 @@ def test_brain_search_bad_iso_after_raises_invalid_params(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     """A malformed ISO ``after`` string surfaces as ``INVALID_PARAMS``."""
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_search(query="x", after="not-a-date")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "after" in exc_info.value.error.message
@@ -71,7 +71,7 @@ def test_brain_search_bad_iso_before_raises_invalid_params(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     """Symmetric: a malformed ISO ``before`` raises ``INVALID_PARAMS``."""
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_search(query="x", before="not-a-date")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "before" in exc_info.value.error.message
@@ -93,7 +93,7 @@ def test_brain_search_person_ambiguous_raises_invalid_params(
         raise PersonAmbiguous(name, ["Alice Doe", "Alice Xanthus"])
 
     monkeypatch.setattr(mcp_server, "resolve_person_to_keys", _raise)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_search(query="x", person="Alice")
     assert exc_info.value.error.code == INVALID_PARAMS
     msg = exc_info.value.error.message
@@ -110,7 +110,7 @@ def test_brain_search_person_not_found_raises_invalid_params(
         raise PersonNotFound(name)
 
     monkeypatch.setattr(mcp_server, "resolve_person_to_keys", _raise)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_search(query="x", person="Nobody")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "Nobody" in exc_info.value.error.message
@@ -126,7 +126,7 @@ def test_brain_search_has_tag_tag_conflict_raises_invalid_params(
 ) -> None:
     """Conflicting ``tag`` / ``has_tag`` values raise ``INVALID_PARAMS``
     (mirror of the CLI ``BadParameter``)."""
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_search(query="x", tag="a", has_tag="b")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "tag" in exc_info.value.error.message

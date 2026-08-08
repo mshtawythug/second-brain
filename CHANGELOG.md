@@ -15,7 +15,7 @@ git tag scheme:
   the sdist+wheel to PyPI (`.github/workflows/release.yml`).
 - **`age-image-*` tags** — the prebuilt **Apache AGE Postgres image**
   (`ghcr.io/mshtawythug/second-brain-age`, tag
-  `pg16-v1.5.0-rc0-pgv0.8.2`). Its version string is pinned to the AGE +
+  `pg16-v1.5.0-rc0-pgv0.8.6`). Its version string is pinned to the AGE +
   pgvector versions baked into the Dockerfile, not to the CLI version, and it is
   published by `.github/workflows/publish-age-image.yml`. Bumping the CLI does
   not rebuild the image; rebuilding the image does not bump the CLI.
@@ -127,6 +127,15 @@ git tag scheme:
   and GitHub star badges in the README.
 
 ### Changed
+
+- **`mcp` now supports both major versions: `mcp>=1.2,<3.0`** (was `>=1.0,<2.0`).
+  mcp 2.0 renamed the two names this project imports, so a compatibility layer
+  resolves them at import time; 1.2.0, 1.29.0 and 2.0.0 are all exercised. Note
+  the floor moved up: `mcp.server.fastmcp` did not exist before 1.2.0, so the old
+  `>=1.0` claimed support for versions where `brain-mcp` could not import.
+- The bundled Apache AGE image now builds on `pgvector/pgvector:0.8.6-pg16`.
+  Existing local deployments keep running their current image until you rebuild
+  deliberately — see `docs/graphrag.md`.
 
 - **The `typer` dependency is now bounded on both sides: `typer>=0.16,<0.28`**
   (previously unbounded above). This is a user-visible install constraint: in a

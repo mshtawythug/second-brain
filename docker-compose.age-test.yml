@@ -13,7 +13,7 @@
 name: second-brain-age-test
 services:
   postgres-age-test:
-    # Custom PG16 image: pgvector 0.8.2 + pgcrypto + Apache AGE 1.5.0-rc0 (GraphRAG).
+    # Custom PG16 image: pgvector 0.8.6 + pgcrypto + Apache AGE 1.5.0-rc0 (GraphRAG).
     # `image:` points at the prebuilt multi-arch image on GHCR (published by
     # .github/workflows/publish-age-image.yml) so `docker compose pull` fetches it
     # instead of compiling AGE from C source. The `build:` stanza is retained as a
@@ -21,10 +21,16 @@ services:
     # compiles from the canonical Dockerfile at src/brain/templates/docker/age/
     # (single source, all versions pinned) and tags the result as the same ref,
     # for when the registry image is unavailable. Subsequent `up` reuses it.
+    #
+    # THE TAG ENCODES THE PINS: `pg16-v<AGE ref>-pgv<pgvector version>` MUST match
+    # the Dockerfile's FROM. CI runs `docker compose pull || true` before `up`, so a
+    # stale tag here means the pull SUCCEEDS and CI silently tests the OLD image while
+    # the Dockerfile claims a newer base. Bump this tag in the same commit as the FROM.
+    # Enforced by tests/test_packaging_templates.py::test_age_image_version_pins_agree_everywhere.
     build:
       context: ./src/brain/templates/docker/age
       dockerfile: Dockerfile
-    image: ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.2
+    image: ghcr.io/mshtawythug/second-brain-age:pg16-v1.5.0-rc0-pgv0.8.6
     container_name: second-brain-age-test
     environment:
       POSTGRES_USER: brain

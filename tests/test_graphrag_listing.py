@@ -23,7 +23,6 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 from mcp.types import INTERNAL_ERROR
 from typer.testing import CliRunner
 
@@ -33,6 +32,7 @@ from brain.config import Config
 from brain.errors import GraphBackendError
 from brain.graph_rag.relational import graph_stats, list_entities
 from brain.graph_rag.schema import EntitySummary, GraphStats
+from brain.mcp_compat import MCPError
 from tests.conftest import FakeEmbedder
 
 TEST_DATABASE_URL = os.environ.get(
@@ -691,7 +691,7 @@ def test_mcp_entities_age_absent_internal_error(
     monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
 
     # Act / Assert
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_entities()
     assert exc_info.value.error.code == INTERNAL_ERROR
     assert "Apache AGE" in exc_info.value.error.message
@@ -705,7 +705,7 @@ def test_mcp_entities_invalid_entity_type_raises_internal_error(
     _mcp_state(monkeypatch)
 
     # Act / Assert
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_entities(entity_type="banana")
     assert exc_info.value.error.code == INTERNAL_ERROR
     assert "banana" in exc_info.value.error.message
@@ -776,7 +776,7 @@ def test_mcp_stats_age_absent_internal_error(
     monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
 
     # Act / Assert
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_stats()
     assert exc_info.value.error.code == INTERNAL_ERROR
 

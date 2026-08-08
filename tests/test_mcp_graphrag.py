@@ -37,7 +37,6 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from typer.testing import CliRunner
 
@@ -47,6 +46,7 @@ from brain.config import Config
 from brain.graph_rag.backends import AgeBackend
 from brain.graph_rag.build import build_graph
 from brain.graph_rag.reconcile import ReconcileConfig
+from brain.mcp_compat import MCPError
 from brain.queries import iter_all_document_ids
 from brain.vault.derived_links.directory import DirectoryStore
 from tests.conftest import TEST_DATABASE_URL, FakeEmbedder
@@ -451,7 +451,7 @@ def test_search_unknown_mode_invalid_params(
     """An unrecognized mode surfaces as INVALID_PARAMS (router ValueError)."""
     _seed_triangle(test_db)
     _build(test_db)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_search(query="bob", mode="sideways")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "unknown graph retrieval mode" in exc_info.value.error.message.lower()
@@ -467,7 +467,7 @@ def test_search_fuse_non_default_tenant_invalid_params(
     cross-tenant documents. The gate's ValueError maps to INVALID_PARAMS.
     """
     _build(test_db)  # bootstrap AGE so the gate (not AGE-absent) is what fires
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_search(query="bob", mode="fuse", tenant="custom")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "only available for tenant 'default'" in exc_info.value.error.message.lower()
@@ -504,7 +504,7 @@ def test_search_themes_missing_person_invalid_params(
     """mode='themes' with no person → router ValueError → INVALID_PARAMS."""
     _seed_triangle(test_db)
     _build(test_db)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_search(query="bob", mode="themes")
     assert exc_info.value.error.code == INVALID_PARAMS
 
@@ -559,7 +559,7 @@ def test_themes_tool_requires_person(
     graph_state: mcp_server._State, person: str  # noqa: ARG001
 ) -> None:
     """Blank / whitespace-only person → INVALID_PARAMS (before any DB work)."""
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_themes(person=person)
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "person is required" in exc_info.value.error.message
@@ -614,7 +614,7 @@ def test_entity_tool(
 def test_entity_tool_requires_name(
     graph_state: mcp_server._State, name: str  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_entity(name=name)
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "name is required" in exc_info.value.error.message
@@ -673,7 +673,7 @@ def test_build_concepts_wires_extractor(
 def test_build_force_with_limit_rejected(
     graph_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_build(force=True, limit=2)
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "cannot be combined with limit" in exc_info.value.error.message
@@ -684,7 +684,7 @@ def test_build_no_flags_rejected(
 ) -> None:
     """Calling with neither backfill nor force is rejected (MCP twin of the
     CLI's 'pass --backfill' hint)."""
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_build()
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "backfill" in exc_info.value.error.message
@@ -727,7 +727,7 @@ def test_themes_person_not_found_invalid_params(
 ) -> None:
     _seed_triangle(test_db)
     _build(test_db)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_themes(person="nobody-unknown-xyz")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "no one" in exc_info.value.error.message.lower()
@@ -740,7 +740,7 @@ def test_themes_person_ambiguous_invalid_params(
         test_db,
         [("dana lee", "dana.lee@x.com"), ("dana park", "dana.park@x.com")],
     )
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_themes(person="dana")
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "more specific" in exc_info.value.error.message.lower()
@@ -758,7 +758,7 @@ def test_search_age_absent_internal_error(
     _seed_triangle(test_db)
     _build(test_db)
     monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_search(query="bob", mode="local")
     assert exc_info.value.error.code == INTERNAL_ERROR
     assert "Apache AGE is not available" in exc_info.value.error.message
@@ -917,7 +917,7 @@ def test_communities_build_age_absent_internal_error(
     _community_state(monkeypatch, _FakeCommunityEnricher())
     _seed_communities_corpus(test_db)
     monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_communities_build()
     assert exc_info.value.error.code == INTERNAL_ERROR
     assert "Apache AGE is not available" in exc_info.value.error.message
@@ -995,7 +995,7 @@ def test_refresh_age_absent_internal_error(
     _seed_triangle(test_db)
     _build(test_db)
     monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_refresh()
     assert exc_info.value.error.code == INTERNAL_ERROR
     assert "Apache AGE is not available" in exc_info.value.error.message
@@ -1058,7 +1058,7 @@ def test_communities_refresh_age_absent_internal_error(
     _community_state(monkeypatch, _FakeCommunityEnricher())
     _seed_communities_corpus(test_db)
     monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_communities_refresh()
     assert exc_info.value.error.code == INTERNAL_ERROR
     assert "Apache AGE is not available" in exc_info.value.error.message
@@ -1275,7 +1275,7 @@ def test_aliases_apply_age_absent_internal_error(
     monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(rules_yml))
     _make_aliases_state(monkeypatch, fake_embedder)
     monkeypatch.setattr(mcp_server, "age_extension_available", lambda conn: False)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_aliases_apply()
     assert exc_info.value.error.code == INTERNAL_ERROR
     assert "Apache AGE is not available" in exc_info.value.error.message
@@ -1299,7 +1299,7 @@ def test_aliases_apply_invalid_rules_yields_invalid_params(
     )
     monkeypatch.setenv("BRAIN_GRAPH_ALIASES_PATH", str(rules_yml))
     _make_aliases_state(monkeypatch, fake_embedder)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_graphrag_aliases_apply()
     assert exc_info.value.error.code == INVALID_PARAMS
     assert "chain" in exc_info.value.error.message.lower()

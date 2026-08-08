@@ -12,10 +12,10 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import mcp_server
 from brain.config import Config
+from brain.mcp_compat import MCPError
 from brain.review import queries
 
 from .conftest import TEST_DATABASE_URL
@@ -129,14 +129,14 @@ def test_brain_review_scan_conflicts_skipped_when_disabled(
 def test_brain_review_scan_invalid_type(
     stale_state: mcp_server._State,  # noqa: ARG001 — installs state
 ) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_review_scan(scan_type="bogus")
 
 
 def test_brain_review_scan_invalid_limit(
     stale_state: mcp_server._State,  # noqa: ARG001 — installs state
 ) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_review_scan(limit=0)
 
 
@@ -166,5 +166,5 @@ def test_brain_review_findings_list(
 def test_brain_review_findings_list_invalid_kind(
     stale_state: mcp_server._State,  # noqa: ARG001 — installs state
 ) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_review_findings_list(kind="bogus")

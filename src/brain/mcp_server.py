@@ -15,9 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 import yaml
-from mcp import McpError
-from mcp.server.fastmcp import FastMCP
-from mcp.types import INTERNAL_ERROR, INVALID_PARAMS, ErrorData
+from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 
 from . import capture as capture_mod
 from . import connect as connect_mod
@@ -75,6 +73,7 @@ from .interactions import (
     InteractionTargetType,
     record_interaction,
 )
+from .mcp_compat import MCPServerProtocol, make_server, mcp_error
 from .queries import (
     fetch_document,
     iter_all_document_ids,
@@ -118,7 +117,7 @@ _MCP_AUTO_TAG = "source-mcp"
 
 # Cap on the body argument to ``brain_note_new`` — protects the disk + DB
 # from a runaway LLM that submits a multi-megabyte body. 256 KB is well
-# above any human-authored note size and safely under FastMCP's transport
+# above any human-authored note size and safely under the MCP SDK's transport
 # limits. Documented in the tool docstring + spec's Risks section.
 _MAX_NOTE_BODY_BYTES = 256 * 1024
 
@@ -185,12 +184,19 @@ def _get_state() -> _State:
     return _state
 
 
-def _mcp_error(code: int, message: str) -> McpError:
-    """Construct an :class:`McpError` with ``code`` and ``message``."""
-    return McpError(ErrorData(code=code, message=message))
+def _mcp_error(code: int, message: str) -> Exception:
+    """Construct the SDK's error exception with ``code`` and ``message``.
+
+    Delegates to :func:`brain.mcp_compat.mcp_error`, which bridges the mcp 2.0
+    constructor change (1.x takes a prebuilt ``ErrorData``, 2.x takes ``code``
+    and ``message``). The return is typed as :class:`Exception` because
+    :data:`~brain.mcp_compat.MCPError` is resolved at import time and so is not
+    a statically-known class; every use is ``raise``, which needs no more.
+    """
+    return mcp_error(code, message)
 
 
-def _wrap_db_error(e: psycopg.Error) -> McpError:
+def _wrap_db_error(e: psycopg.Error) -> Exception:
     """Wrap a Postgres failure as an MCP error.
 
     The user-facing message intentionally omits ``str(e)`` (which can include
@@ -221,7 +227,7 @@ def _wrap_db_error(e: psycopg.Error) -> McpError:
     return _mcp_error(INTERNAL_ERROR, f"database error: {type(e).__name__}")
 
 
-def _wrap_embed_error(e: EmbedError) -> McpError:
+def _wrap_embed_error(e: EmbedError) -> Exception:
     """Wrap any embedding-backend failure as an MCP error.
 
     Accepts the shared :class:`~brain.errors.EmbedError` base, so it maps a
@@ -258,7 +264,7 @@ def _resolve_id(conn: psycopg.Connection[Any], prefix: str) -> str:
     """Resolve a UUID prefix (min 6 chars) to a full document id.
 
     Thin wrapper around :func:`brain.queries.resolve_document_prefix` that
-    maps its plain exceptions to ``McpError`` so the MCP runtime can surface
+    maps its plain exceptions to ``MCPError`` so the MCP runtime can surface
     the failure to the caller.
     """
     try:
@@ -280,7 +286,7 @@ def _assert_within_vault(target: Path, vault_path: Path, *, label: str) -> None:
     Typer-based module. The check is the same: resolve both sides through
     symlinks, then assert the target sits under the vault root. Anything
     that escapes the vault (``--folder ../../etc``, ``daily/../../...``)
-    raises an :class:`McpError` with ``INVALID_PARAMS``.
+    raises an :class:`MCPError` with ``INVALID_PARAMS``.
     """
     try:
         target.resolve().relative_to(vault_path.resolve())
@@ -293,7 +299,7 @@ def _assert_within_vault(target: Path, vault_path: Path, *, label: str) -> None:
 
 
 def _ensure_template_path(vault_path: Path, name: str) -> Path:
-    """Resolve ``<vault>/_templates/<name>.md`` or raise ``McpError``.
+    """Resolve ``<vault>/_templates/<name>.md`` or raise ``MCPError``.
 
     Mirror of the CLI's :func:`brain.cli._ensure_template` — same recovery
     semantics (point the user at ``brain vault init`` when the directory
@@ -315,7 +321,7 @@ def _ensure_template_path(vault_path: Path, name: str) -> Path:
     return target
 
 
-mcp_app: FastMCP = FastMCP(name="brain")
+mcp_app: MCPServerProtocol = make_server("brain")
 
 
 def _parse_iso_datetime(value: str, *, field: str) -> datetime:
@@ -790,7 +796,7 @@ def brain_show(
     opposed to ``source``, which records the surface. Unset means unattributed.
 
     The prefix must be at least 6 hex characters and must uniquely identify
-    a document. Raises :class:`McpError` (``INVALID_PARAMS``) if the prefix
+    a document. Raises :class:`MCPError` (``INVALID_PARAMS``) if the prefix
     is too short, non-hex, unknown, or ambiguous.
 
     Q1-C interaction logging: when ``originating_query`` is provided, also
@@ -2509,7 +2515,7 @@ def brain_link_proposal(
 # ---------------------------------------------------------------------------
 
 
-def _wrap_graph_backend_error(e: GraphBackendError) -> McpError:
+def _wrap_graph_backend_error(e: GraphBackendError) -> Exception:
     """Wrap an Apache AGE backend failure as an MCP error.
 
     Mirrors :func:`_wrap_db_error`: the user-facing message exposes only the
@@ -2522,7 +2528,7 @@ def _wrap_graph_backend_error(e: GraphBackendError) -> McpError:
 
 
 def _require_age_or_mcp_error(conn: psycopg.Connection[Any]) -> None:
-    """Raise ``McpError`` when this DB image lacks Apache AGE.
+    """Raise ``MCPError`` when this DB image lacks Apache AGE.
 
     The MCP analogue of the CLI's :func:`brain.cli._require_age_or_exit`: the
     graphrag tools exist solely to query / maintain the AGE graph, so an
@@ -2585,7 +2591,7 @@ def _graphrag_search_or_mcp_error(
     directly (no per-call construction); local / themes / entity ignore it.
     The enricher is the opt-in ``synthesize`` group-summary seam.
 
-    Error → ``McpError`` mapping (spec §17b decision 4 + repo error contract;
+    Error → ``MCPError`` mapping (spec §17b decision 4 + repo error contract;
     mirrors the CLI's exit-code mapping; the G3-e flip means explicit
     ``mode='global'`` now EXECUTES so the former ``GraphModeUnavailable`` reject
     is gone — §17c Q6):
@@ -3796,7 +3802,7 @@ def _warmup_embed(embedder: Embedder) -> None:
 
 
 def _resolve_suggestion(conn: psycopg.Connection[Any], prefix: str) -> str:
-    """Resolve a suggestion-id prefix to a full id, mapping errors to McpError."""
+    """Resolve a suggestion-id prefix to a full id, mapping errors to MCPError."""
     try:
         return connect_mod.resolve_suggestion_prefix(conn, prefix)
     except ConnectError as e:

@@ -21,11 +21,11 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import mcp_server
 from brain import vault as vault_module
 from brain.config import Config
+from brain.mcp_compat import MCPError
 from tests.conftest import TEST_DATABASE_URL
 
 #: AWS's own documented example key. Matches the guard's pattern; resolves to
@@ -111,7 +111,7 @@ def test_reject_mode_refuses_and_writes_nothing(
     test_db: psycopg.Connection[Any], reject_mode: mcp_server._State
 ) -> None:
     """The DB assertion is the point — an exception alone proves nothing."""
-    with pytest.raises(McpError, match="secret guard"):
+    with pytest.raises(MCPError, match="secret guard"):
         mcp_server.brain_ingest_stdin(
             source="slack",
             external_id="w5-guard-2",
@@ -176,7 +176,7 @@ def test_the_configured_mode_is_what_reaches_the_pipeline(
     )
 
     _install(monkeypatch, fake_embedder, vault_dir, "reject")
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_ingest_stdin(
             source="slack",
             external_id="w5-guard-5b",
@@ -210,7 +210,7 @@ def test_edit_refuses_a_body_that_introduces_a_credential(
     doc_id = created["document_id"]
 
     _install(monkeypatch, fake_embedder, vault_dir, "reject")
-    with pytest.raises(McpError, match="secret guard"):
+    with pytest.raises(MCPError, match="secret guard"):
         mcp_server.brain_edit(
             id_prefix=doc_id, content=f"now contains {SYNTHETIC_KEY} oops"
         )

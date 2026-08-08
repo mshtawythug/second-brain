@@ -57,10 +57,15 @@ async def _list_tools_via_stdio() -> dict[str, dict[str, object]]:
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 result = await session.list_tools()
+    # `Tool.inputSchema` (mcp 1.x) was renamed to `Tool.input_schema` in mcp
+    # 2.0, where `inputSchema` survives only as the pydantic *alias* — i.e. it
+    # round-trips on the wire but is no longer reachable by attribute access.
+    # Dumping by alias gives the one spelling that works on both majors, and
+    # keys this dict by the wire name the assertions below already use.
     return {
         t.name: {
             "description": t.description,
-            "inputSchema": t.inputSchema,
+            "inputSchema": t.model_dump(by_alias=True)["inputSchema"],
         }
         for t in result.tools
     }
@@ -81,7 +86,7 @@ def test_brain_mcp_tools_list_advertises_all_tools() -> None:
     for name in EXPECTED_TOOLS:
         schema = tools[name]["inputSchema"]
         assert isinstance(schema, dict), f"{name}: inputSchema not a dict"
-        # FastMCP always emits at minimum {"type":"object","properties":{...}}.
+        # The SDK always emits at minimum {"type":"object","properties":{...}}.
         assert schema.get("type") == "object", f"{name}: schema type != object"
         assert "properties" in schema, f"{name}: schema missing properties"
 

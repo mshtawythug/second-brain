@@ -15,11 +15,11 @@ from typing import Any
 
 import psycopg
 import pytest
-from mcp import McpError
 
 from brain import mcp_server
 from brain import vault as vault_module
 from brain.config import Config
+from brain.mcp_compat import MCPError
 from brain.vault.frontmatter import parse_frontmatter
 
 TEST_DATABASE_URL = os.environ.get(
@@ -173,7 +173,7 @@ def test_brain_backlinks_empty_when_none(
 def test_brain_backlinks_unknown_id_errors(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_backlinks(id_prefix="ffffff")
     assert "not found" in exc_info.value.error.message
 
@@ -181,7 +181,7 @@ def test_brain_backlinks_unknown_id_errors(
 def test_brain_backlinks_short_prefix_errors(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_backlinks(id_prefix="abc")
     assert "6 characters" in exc_info.value.error.message
 
@@ -229,7 +229,7 @@ def test_brain_links_with_unresolved(
 def test_brain_links_unknown_id_errors(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_links(id_prefix="ffffff")
     assert "not found" in exc_info.value.error.message
 
@@ -366,7 +366,7 @@ def test_brain_note_new_rejects_existing_path(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     mcp_server.brain_note_new(title="Same title", body="first")
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_note_new(title="Same title", body="second")
     assert "already exists" in exc_info.value.error.message
     _ = vault_dir  # silence unused warning
@@ -379,7 +379,7 @@ def test_brain_note_new_rejects_traversal(
 ) -> None:
     """``folder='../../etc'`` must be rejected before any disk write."""
     pre_files = sorted(p.name for p in vault_dir.iterdir())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_note_new(
             title="Escape", body="body", folder="../../etc"
         )
@@ -399,7 +399,7 @@ def test_brain_note_new_rejects_unknown_template(
     vault_dir: Path,
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_note_new(
             title="X", body="body", template="nonexistent"
         )
@@ -420,7 +420,7 @@ def test_brain_note_new_rejects_missing_templates_dir(
         embedder=fake_embedder,  # type: ignore[arg-type]
     )
     monkeypatch.setattr(mcp_server, "_state", state)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_note_new(title="X", body="body")
     assert "vault init" in exc_info.value.error.message
 
@@ -439,7 +439,7 @@ def test_brain_note_new_missing_vault_path(
         embedder=fake_embedder,  # type: ignore[arg-type]
     )
     monkeypatch.setattr(mcp_server, "_state", state)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_note_new(title="X", body="body")
     assert "vault path does not exist" in exc_info.value.error.message
 
@@ -466,7 +466,7 @@ def test_brain_note_new_rejects_oversize_body(
 ) -> None:
     """Bodies above 256 KB must be rejected with INVALID_PARAMS."""
     big = "x" * (256 * 1024 + 1)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_note_new(title="Big", body=big)
     assert "262144" in exc_info.value.error.message  # 256 KB in bytes
     assert "max" in exc_info.value.error.message
@@ -475,7 +475,7 @@ def test_brain_note_new_rejects_oversize_body(
 def test_brain_note_new_rejects_empty_title(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_note_new(title="   ", body="body")
     assert "title is empty" in exc_info.value.error.message
 
@@ -532,7 +532,7 @@ def test_brain_daily_year_folder_created(
 def test_brain_daily_invalid_date(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_daily(date="not-a-date")
     assert "YYYY-MM-DD" in exc_info.value.error.message
 
@@ -650,7 +650,7 @@ def test_brain_link_proposal_ambiguous_title(
     _seed_vault_note(
         vault_dir, relative="source.md", doc_id=src_id, title="Source"
     )
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_link_proposal(
             src_id_prefix=src_id[:8],
             dst_id_or_title="Same name",
@@ -671,7 +671,7 @@ def test_brain_link_proposal_unknown_dst(
     _seed_vault_note(
         vault_dir, relative="source.md", doc_id=src_id, title="Source"
     )
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_link_proposal(
             src_id_prefix=src_id[:8],
             dst_id_or_title="Definitely missing title",
@@ -695,7 +695,7 @@ def test_brain_link_proposal_rejects_ingested_src(
         vault_path="_ingested/krisp/x.md",
     )
     _make_doc(test_db, doc_id=dst_id, title="Vault note")
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_link_proposal(
             src_id_prefix=src_id[:8],
             dst_id_or_title="Vault note",
@@ -706,9 +706,9 @@ def test_brain_link_proposal_rejects_ingested_src(
 def test_brain_link_proposal_empty_args(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_link_proposal(src_id_prefix="", dst_id_or_title="x")
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.brain_link_proposal(src_id_prefix="abcdef", dst_id_or_title="")
 
 
@@ -744,7 +744,7 @@ def test_brain_link_proposal_writes_nothing(
 def test_brain_link_proposal_unknown_src(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_link_proposal(
             src_id_prefix="ffffff", dst_id_or_title="anything"
         )
@@ -762,7 +762,7 @@ def test_brain_link_proposal_missing_src_file(
     _make_doc(test_db, doc_id=src_id, title="Phantom", vault_path="phantom.md")
     _make_doc(test_db, doc_id=dst_id, title="person-x")
     # Note: no _seed_vault_note call — file is intentionally missing.
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_link_proposal(
             src_id_prefix=src_id[:8], dst_id_or_title="person-x"
         )
@@ -782,7 +782,7 @@ def test_brain_link_proposal_src_without_vault_path(
         doc_id="22222222-2222-2222-2222-222222222222",
         title="person-x",
     )
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_link_proposal(
             src_id_prefix=src_id[:8], dst_id_or_title="person-x"
         )
@@ -811,7 +811,7 @@ def test_brain_link_proposal_id_prefix_ambiguous(
     _seed_vault_note(
         vault_dir, relative="source.md", doc_id=src_id, title="Source"
     )
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_link_proposal(
             src_id_prefix=src_id[:8], dst_id_or_title="aaaaaaa"
         )
@@ -877,7 +877,7 @@ def test_brain_backlinks_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_backlinks(id_prefix="abcdef")
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -890,7 +890,7 @@ def test_brain_links_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_links(id_prefix="abcdef")
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -901,7 +901,7 @@ def test_brain_orphans_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_orphans()
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -912,7 +912,7 @@ def test_brain_link_proposal_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_link_proposal(
             src_id_prefix="abcdef", dst_id_or_title="anything"
         )
@@ -925,7 +925,7 @@ def test_brain_note_new_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_note_new(title="DBerr", body="body")
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -936,7 +936,7 @@ def test_brain_daily_wraps_db_error(
     mcp_state: mcp_server._State,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_server, "connect", _BoomConnect())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_daily(date="2026-04-29")
     msg = exc_info.value.error.message
     assert "database error" in msg
@@ -968,9 +968,9 @@ def test_brain_note_new_wraps_embed_error(
     mcp_state: mcp_server._State,
     vault_dir: Path,  # noqa: ARG001
 ) -> None:
-    """A re-embed failure during note creation must surface as McpError."""
+    """A re-embed failure during note creation must surface as MCPError."""
     monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_note_new(title="EmbedErr", body="body that needs embedding")
     msg = exc_info.value.error.message
     assert "embedding failed" in msg
@@ -983,7 +983,7 @@ def test_brain_daily_wraps_embed_error(
     vault_dir: Path,  # noqa: ARG001
 ) -> None:
     monkeypatch.setattr(mcp_state, "embedder", _BoomEmbedder())
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_daily(date="2026-04-29")
     msg = exc_info.value.error.message
     assert "embedding failed" in msg
@@ -1004,7 +1004,7 @@ def test_brain_daily_existing_file_missing_id(
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{iso_date}.md"
     target.write_text(f"---\ntitle: \"{iso_date}\"\nkind: vault\n---\n\nbody\n")
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_daily(date=iso_date)
     assert "no id in frontmatter" in exc_info.value.error.message
 
@@ -1019,7 +1019,7 @@ def test_brain_daily_existing_file_malformed_frontmatter(
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{iso_date}.md"
     target.write_text("---\nfoo: [unclosed\n---\nbody\n")
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_daily(date=iso_date)
     assert "malformed frontmatter" in exc_info.value.error.message
 
@@ -1038,6 +1038,6 @@ def test_brain_daily_missing_vault_path(
         embedder=fake_embedder,  # type: ignore[arg-type]
     )
     monkeypatch.setattr(mcp_server, "_state", state)
-    with pytest.raises(McpError) as exc_info:
+    with pytest.raises(MCPError) as exc_info:
         mcp_server.brain_daily(date="2026-04-29")
     assert "vault path does not exist" in exc_info.value.error.message

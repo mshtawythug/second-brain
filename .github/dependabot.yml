@@ -71,7 +71,7 @@ updates:
   #    .claude/worktrees/ copies are gitignored and invisible to Dependabot.
   #
   #    Monthly, not weekly: the image is version-pinned to
-  #    pg16-v1.5.0-rc0-pgv0.8.2 and lives on its own `age-image-*` tag axis
+  #    pg16-v1.5.0-rc0-pgv0.8.6 and lives on its own `age-image-*` tag axis
   #    (see CHANGELOG.md), so a base-image bump is a deliberate, tested event.
   - package-ecosystem: docker
     directory: "/src/brain/templates/docker/age"

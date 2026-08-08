@@ -15,6 +15,7 @@ Guards five properties:
    that previously slipped past T1.8's user-facing-wrapper audit.
 """
 import importlib.resources
+import re
 import tomllib
 from pathlib import Path
 
@@ -234,8 +235,81 @@ def test_age_dockerfile_packaged_and_loadable() -> None:
     text = (root_pkg / "docker" / "age" / "Dockerfile").read_text(encoding="utf-8")
     assert text, "brain.templates/docker/age/Dockerfile is empty or unreadable"
     # Pins must be present + honestly labelled (rc0, not GA).
-    assert "pgvector/pgvector:0.8.2-pg16" in text
+    assert "pgvector/pgvector:0.8.6-pg16" in text
     assert "PG16/v1.5.0-rc0" in text
+
+
+# --- AGE image version-pin drift guard -------------------------------------
+#
+# The published image tag encodes BOTH pins: ``pg16-v<AGE ref>-pgv<pgvector>``.
+# ci.yml runs ``docker compose pull || true`` BEFORE ``up``, and only falls back to
+# the ``build:`` stanza when the pull fails. So bumping the Dockerfile's FROM without
+# bumping the compose ``image:`` tag makes the pull succeed against the OLD image —
+# the modified Dockerfile is never built and CI silently validates the previous base
+# while every comment and label claims the new one. Same for the publish workflow:
+# pushing new base content under a stale ``pgv`` tag mislabels an immutable artifact.
+#
+# This test is the guard whose absence let a one-line Dependabot FROM bump look
+# complete. It reads all three files and asserts a single truthful version.
+
+_AGE_TEST_COMPOSE = REPO_ROOT / "docker-compose.age-test.yml"
+_PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish-age-image.yml"
+
+
+def _dockerfile_pins() -> tuple[str, str]:
+    """Return ``(pgvector_version, age_ref_version)`` parsed from the AGE Dockerfile."""
+    text = (BRAIN_TEMPLATES / "docker" / "age" / "Dockerfile").read_text(encoding="utf-8")
+
+    from_match = re.search(
+        r"^FROM\s+pgvector/pgvector:(?P<version>[\w.]+)-pg16\s*$", text, re.MULTILINE
+    )
+    assert from_match, (
+        "could not parse `FROM pgvector/pgvector:<version>-pg16` from the AGE Dockerfile"
+    )
+
+    age_match = re.search(r"^ARG\s+AGE_REF=PG16/v(?P<version>[\w.\-]+)\s*$", text, re.MULTILINE)
+    assert age_match, "could not parse `ARG AGE_REF=PG16/v<version>` from the AGE Dockerfile"
+
+    return from_match.group("version"), age_match.group("version")
+
+
+def test_age_image_version_pins_agree_everywhere() -> None:
+    """Dockerfile FROM/AGE_REF, the compose ``image:`` tag, and the publish tag agree.
+
+    Failing here means the AGE image version was bumped in one place but not the
+    others. The compose tag is what CI actually pulls, so a mismatch is not cosmetic
+    drift — it silently runs CI against a different image than the one on disk.
+    """
+    pgvector_version, age_version = _dockerfile_pins()
+    expected_tag = f"pg16-v{age_version}-pgv{pgvector_version}"
+
+    compose = _AGE_TEST_COMPOSE.read_text(encoding="utf-8")
+    compose_tag = re.search(
+        r"^\s*image:\s*ghcr\.io/[\w\-./]*second-brain-age:(?P<tag>\S+)\s*$", compose, re.MULTILINE
+    )
+    assert compose_tag, f"no second-brain-age `image:` tag found in {_AGE_TEST_COMPOSE.name}"
+    assert compose_tag.group("tag") == expected_tag, (
+        f"{_AGE_TEST_COMPOSE.name} pins image tag {compose_tag.group('tag')!r} but the "
+        f"Dockerfile builds {expected_tag!r} (pgvector {pgvector_version}, AGE {age_version}). "
+        "CI pulls this tag before falling back to `build:`, so a stale tag means CI "
+        "silently tests the OLD image. Bump both in the same commit."
+    )
+
+    workflow = _PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    publish_tags = re.findall(r"type=raw,value=(?P<tag>pg16-\S+)", workflow)
+    assert publish_tags, f"no `type=raw,value=pg16-*` tag found in {_PUBLISH_WORKFLOW.name}"
+    for tag in publish_tags:
+        assert tag == expected_tag, (
+            f"{_PUBLISH_WORKFLOW.name} would publish tag {tag!r} for an image built from "
+            f"{expected_tag!r} — that mislabels an immutable artifact."
+        )
+
+    # The compose comment and the Dockerfile must not still advertise an older
+    # pgvector line in prose while the pins say otherwise.
+    stale = re.findall(r"pgvector (?P<version>\d+\.\d+\.\d+)", compose)
+    assert all(v == pgvector_version for v in stale), (
+        f"{_AGE_TEST_COMPOSE.name} prose mentions pgvector {set(stale)} but pins {pgvector_version}"
+    )
 
 
 def test_age_dockerfile_materialized_into_brain_home(tmp_path: Path) -> None:
