@@ -95,10 +95,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -124,9 +124,9 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
-          # actions/checkout@v4 defaults to fetch-depth: 1, fetch-tags: false —
+          # actions/checkout@v7 defaults to fetch-depth: 1, fetch-tags: false —
           # a single commit, zero tags. tests/test_repo_hygiene_files.py's
           # test_changelog_link_definitions_resolve_to_real_tags shells out to
           # local `git tag --list`, so without this the check silently runs
@@ -138,7 +138,7 @@ jobs:
           fetch-tags: true
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
