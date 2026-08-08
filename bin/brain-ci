@@ -1,0 +1,575 @@
+#!/usr/bin/env bash
+# brain-ci — run the GitHub Actions quality gate locally, faithfully.
+#
+# Mirrors .github/workflows/ci.yml (both jobs) on your own machine:
+#
+#   lint job  →  ruff check           +  mypy src/
+#   test job  →  a BARE `pytest` against the pinned AGE Postgres on port 5434
+#
+# WHY THIS EXISTS
+# ---------------
+# Every serious defect in the v0.3.0 release cycle came from a local run and a
+# CI run disagreeing. Each guard below is a real failure, not a hypothetical:
+#
+#   1. STALE RESOLVE. The repo `.venv` carried typer 0.25.1 / pgvector 0.4.2 /
+#      coverage 7.12; a fresh `pip install -e ".[dev]"` resolves newer pins. A
+#      full suite run against that venv was GREEN while CI was RED. So this
+#      script REBUILDS `.venv` from scratch by default — it tests a fresh
+#      resolve, never "whatever happens to be installed".
+#
+#   2. THE ENVIRONMENT, NOT JUST THE PACKAGES. Typer binds
+#      `typer.rich_utils.FORCE_TERMINAL` at import time from GITHUB_ACTIONS /
+#      FORCE_COLOR / PY_COLORS. Because CI sets GITHUB_ACTIONS and no developer
+#      machine does, 20 CLI tests failed ONLY on CI for an entire release
+#      cycle — and a purpose-built venv that matched every package version
+#      still missed it, because it is not a package. That specific bug is now
+#      fixed at the source (tests/__init__.py disables Typer's colour forcing
+#      for the whole session), so these exports are NOT its remedy; see the
+#      long comment in `apply_ci_environment` for why they stay anyway. This
+#      script exports the CI environment and scrubs the local-only
+#      colour/width/pytest variables a runner would not have.
+#
+#   3. PYTHON VERSION. CI runs 3.11; the dev checkout was on 3.14. The
+#      interpreter is pinned via `uv` to the same minor CI uses.
+#
+#   4. DATABASE. CI points DATABASE_URL and TEST_DATABASE_URL at the
+#      docker-compose.age-test.yml instance on port 5434. Port 55432 is
+#      PRODUCTION; `assert_not_prod_db` refuses to run if either URL ever
+#      resolves there, and nothing here touches ./data/postgres.
+#
+#   5. EXIT CODES. A wrapper that ends in `tail` reports TAIL's status. That
+#      nearly published a broken release. pytest is never piped here; its raw
+#      status is captured and re-exported, and the summary says so out loud.
+#
+#   6. THE SAME FLAGS. pyproject.toml's `addopts` owns the marker filter and
+#      `--cov-fail-under=85`; CI runs a bare `pytest` deliberately. This script
+#      adds NOTHING to that command line. The fast/partial modes exist, but
+#      they announce loudly that they are NOT the gate.
+#
+# USAGE
+# -----
+#   bin/brain-ci                      # the full, faithful gate (default)
+#   bin/brain-ci --reuse-venv         # fast re-run, NOT the gate (loud banner)
+#   bin/brain-ci --lint-only          # just the `lint` job
+#   bin/brain-ci --tests-only         # just the `test` job
+#   bin/brain-ci --skip-compose       # assume the AGE test DB is already up
+#   bin/brain-ci --teardown           # `compose down -v` the TEST stack after
+#   bin/brain-ci -- tests/test_x.py -k name   # pass-through, NOT the gate
+#
+# EXIT CODES
+# ----------
+#   0   everything the run attempted passed
+#   N   pytest's OWN status, verbatim, whenever pytest ran and failed
+#       (1 tests failed / 2 interrupted / 3 internal / 4 usage / 5 no tests)
+#   1   pytest passed (or did not run) but ruff / mypy failed
+#   64  usage error (bad flag)
+#   70  environment failure — no uv, no Docker, venv build failed, DB never
+#       came up, or a refusal to target the production database
+#
+# The venv it builds lives at <repo>/.venv, exactly as ci.yml's test job does.
+# That is not incidental: bin/brain-{up,down,status,rebuild} exec
+# `<repo>/.venv/bin/<script>` by design, and tests/test_bin_scripts.py asserts
+# on it, so a run against a venv anywhere else would test a different layout
+# than the one CI tests.
+
+set -uo pipefail
+
+# =============================================================================
+# CI CONTRACT — mirrors .github/workflows/ci.yml.
+#
+# tests/test_bin_brain_ci.py parses these NAME="value" lines and compares each
+# against the workflow itself, so editing ci.yml without editing this block
+# turns a test red. Drift is the disease this whole script exists to cure;
+# keep the format simple and machine-readable.
+# =============================================================================
+CI_PYTHON_VERSION="3.11"
+CI_COMPOSE_FILE="docker-compose.age-test.yml"
+CI_DATABASE_URL="postgresql://brain:brain@localhost:5434/second_brain_test"
+CI_PG_HOST="localhost"
+CI_PG_PORT="5434"
+CI_PG_USER="brain"
+CI_PG_DB="second_brain_test"
+CI_VENV_DIR=".venv"
+CI_WAIT_TRIES="60"
+CI_WAIT_SLEEP="2"
+
+# Ports that mean PRODUCTION. 55432 is the live corpus (docker-compose.yml,
+# ./data/postgres bind-mount); 5433 was the historical prod mapping and is
+# still refused defensively. Mirrors tests/conftest.py::_PROD_PORTS.
+PROD_PORTS=("55432" "5433")
+PROD_DB_NAME="second_brain"
+
+SCRIPT_NAME="$(basename "${BASH_SOURCE[0]}")"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/.." && pwd )"
+VENV="$REPO_ROOT/$CI_VENV_DIR"
+
+# -----------------------------------------------------------------------------
+# Options
+# -----------------------------------------------------------------------------
+REUSE_VENV=0
+RUN_LINT=1
+RUN_TESTS=1
+USE_COMPOSE=1
+TEARDOWN=0
+PYTEST_ARGS=()
+# Set by anything that makes this run something other than the full gate. The
+# summary refuses to print a "gate passed" verdict while this is 1.
+NOT_THE_GATE=0
+GATE_CAVEATS=()
+
+# -----------------------------------------------------------------------------
+# Output helpers. Colour only on a tty, so a redirected log stays plain text.
+# -----------------------------------------------------------------------------
+if [[ -t 1 ]]; then
+  C_BOLD=$'\033[1m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'
+  C_RED=$'\033[31m'; C_OFF=$'\033[0m'
+else
+  C_BOLD=""; C_GREEN=""; C_YELLOW=""; C_RED=""; C_OFF=""
+fi
+
+say()   { printf '%s\n' "$*"; }
+step()  { printf '\n%s==> %s%s\n' "$C_BOLD" "$*" "$C_OFF"; }
+info()  { printf '    %s\n' "$*"; }
+ok()    { printf '    %s✔%s %s\n' "$C_GREEN" "$C_OFF" "$*"; }
+warn()  { printf '    %s!%s %s\n' "$C_YELLOW" "$C_OFF" "$*" >&2; }
+# die <message> [exit-code] — note "$1", not "$*": the exit code is an argument,
+# never part of the message.
+die()   { printf '\n%s%s: %s%s\n' "$C_RED" "$SCRIPT_NAME" "$1" "$C_OFF" >&2; exit "${2:-70}"; }
+
+banner() {
+  # A loud, unmissable block. Used only for "this run is NOT the gate".
+  local rule="──────────────────────────────────────────────────────────────────"
+  printf '\n%s┌%s┐\n' "$C_YELLOW" "$rule"
+  local line
+  for line in "$@"; do
+    printf '│ %-64s │\n' "$line"
+  done
+  printf '└%s┘%s\n' "$rule" "$C_OFF"
+}
+
+mark_not_the_gate() {
+  NOT_THE_GATE=1
+  GATE_CAVEATS+=("$1")
+}
+
+usage() {
+  cat <<USAGE
+$SCRIPT_NAME — run .github/workflows/ci.yml locally, faithfully.
+
+  $SCRIPT_NAME                    the full, faithful gate (default)
+  $SCRIPT_NAME --reuse-venv       fast re-run against the existing .venv;
+                              NOT the gate (announced loudly)
+  $SCRIPT_NAME --lint-only        only ci.yml's 'lint' job (ruff + mypy)
+  $SCRIPT_NAME --tests-only       only ci.yml's 'test' job (pytest)
+  $SCRIPT_NAME --skip-compose     assume the AGE test DB on $CI_PG_PORT is up
+  $SCRIPT_NAME --teardown         'compose down -v' the TEST stack afterwards
+  $SCRIPT_NAME -- <pytest args>   pass-through; NOT the gate
+
+The default run rebuilds <repo>/$CI_VENV_DIR from a fresh resolve on Python
+$CI_PYTHON_VERSION, exports the CI environment (CI/GITHUB_ACTIONS), starts
+$CI_COMPOSE_FILE on port $CI_PG_PORT, and runs an unflagged pytest.
+
+Exit codes: 0 pass · pytest's own status when pytest failed · 1 lint-only
+failure · 64 usage error · 70 environment failure (incl. a refusal to target
+the production database).
+USAGE
+}
+
+# -----------------------------------------------------------------------------
+# Argument parsing
+# -----------------------------------------------------------------------------
+while (( $# )); do
+  case "$1" in
+    -h|--help)      usage; exit 0 ;;
+    --reuse-venv|--fast)
+      REUSE_VENV=1
+      # Banner lines are padded with printf %-64s, which counts BYTES: keep
+      # them plain ASCII or the box edges drift.
+      mark_not_the_gate "--reuse-venv: ran against the EXISTING .venv, so a stale or"
+      mark_not_the_gate "  wrong-Python resolve is exactly what it cannot rule out."
+      shift ;;
+    --lint-only)
+      RUN_TESTS=0
+      mark_not_the_gate "--lint-only: only ci.yml's 'lint' job ran; pytest did not."
+      shift ;;
+    --tests-only)
+      RUN_LINT=0
+      mark_not_the_gate "--tests-only: only ci.yml's 'test' job ran; ruff/mypy did not."
+      shift ;;
+    --skip-compose) USE_COMPOSE=0; shift ;;
+    --teardown)     TEARDOWN=1; shift ;;
+    --)
+      shift
+      PYTEST_ARGS=("$@")
+      if (( ${#PYTEST_ARGS[@]} )); then
+        mark_not_the_gate "extra pytest arguments narrow or reshape the run:"
+        mark_not_the_gate "  ${PYTEST_ARGS[*]}"
+      fi
+      break ;;
+    *)
+      printf '%s: unknown option %q (try --help)\n' "$SCRIPT_NAME" "$1" >&2
+      exit 64 ;;
+  esac
+done
+
+if (( RUN_LINT == 0 && RUN_TESTS == 0 )); then
+  die "--lint-only and --tests-only are mutually exclusive" 64
+fi
+
+# -----------------------------------------------------------------------------
+# Safety: never, ever point at production.
+# -----------------------------------------------------------------------------
+assert_not_prod_db() {
+  # $1 = label, $2 = url. Refuses a prod port, the prod database name, or any
+  # database name that does not end in `_test`.
+  local label="$1" url="$2" port
+  for port in "${PROD_PORTS[@]}"; do
+    if [[ "$url" == *":${port}/"* ]]; then
+      die "$label targets the PRODUCTION database (port $port): $url
+    Refusing to run. The CI gate must only ever touch the AGE test instance on
+    port $CI_PG_PORT (database '${CI_PG_DB}'). Nothing here may reach the live corpus." 70
+    fi
+  done
+  if [[ "$url" == *"/${PROD_DB_NAME}" ]]; then
+    die "$label names the PRODUCTION database '${PROD_DB_NAME}': $url" 70
+  fi
+  if [[ "$url" != *_test ]]; then
+    die "$label does not name a '*_test' database: $url" 70
+  fi
+  if [[ "$url" != *":${CI_PG_PORT}/"* ]]; then
+    die "$label is not on the test port ${CI_PG_PORT}: $url" 70
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# The CI environment (failure #2 — the one a version-matched venv still missed)
+# -----------------------------------------------------------------------------
+apply_ci_environment() {
+  # Set what a GitHub Actions runner sets and library code branches on.
+  #
+  # READ THIS BEFORE DELETING THESE TWO LINES. The ANSI bug they were originally
+  # aimed at is FIXED somewhere else and better: tests/__init__.py sets Typer's
+  # `_TYPER_FORCE_DISABLE_TERMINAL=1` before anything imports Typer, so the test
+  # session renders identically with or without GITHUB_ACTIONS. These exports
+  # are therefore NOT the fix for that bug, and re-adding them "to fix colour"
+  # would be cargo cult.
+  #
+  # They stay for a different, load-bearing reason: this script's job is to
+  # reproduce the CI ENVIRONMENT, and that neutraliser leans on a PRIVATE Typer
+  # API behind a range pin (typer>=0.26,<0.28). If an upgrade renames or drops
+  # the hatch, the breakage only manifests where GITHUB_ACTIONS is set. Without
+  # these exports, that means: CI red, every developer green — the precise
+  # asymmetry this script exists to end. Setting them costs nothing and keeps
+  # the neutraliser exercised under the one condition it was written for.
+  export CI=true
+  export GITHUB_ACTIONS=true
+
+  # The database, pinned to the test instance and validated above. Exported
+  # rather than left to `.env`: brain.config layers dotenv values UNDER the
+  # process environment (os.environ.setdefault), so an explicit export wins.
+  export DATABASE_URL="$CI_DATABASE_URL"
+  export TEST_DATABASE_URL="$CI_DATABASE_URL"
+
+  # Scrub what a runner does NOT have but a developer shell often does.
+  #   FORCE_COLOR / PY_COLORS — the other two inputs to Typer's FORCE_TERMINAL.
+  #     Leaving them set would mask a regression in the opposite direction.
+  #   NO_COLOR                — same knob, other polarity.
+  #   COLUMNS / LINES         — Rich reads COLUMNS before falling back to its
+  #     80-column default; CI has no tty, so 80 is the width every help-text
+  #     assertion is written against.
+  #   PYTEST_*                — PYTEST_ADDOPTS is APPENDED to pyproject's
+  #     addopts, so a stray export silently rewrites the marker filter or the
+  #     coverage floor. ci.yml is forbidden from setting these
+  #     (tests/test_ci_workflow.py); this script inherits the same rule.
+  unset FORCE_COLOR PY_COLORS NO_COLOR COLUMNS LINES
+  unset PYTEST_ADDOPTS PYTEST_PLUGINS PYTEST_DEBUG PYTEST_CURRENT_TEST
+}
+
+report_dotenv_divergence() {
+  # A runner has no .env; a dev checkout usually does, and brain.config merges
+  # it in as defaults for every key the process environment does not already
+  # carry. That is a genuine local-vs-CI divergence this script CANNOT remove
+  # (the repo-root .env is an unconditional link in brain.config's chain), so
+  # it is reported instead of hidden. Keys only — never values: the file holds
+  # credentials and personal identifiers.
+  local dotenv="$REPO_ROOT/.env"
+  [[ -f "$dotenv" ]] || return 0
+
+  local keys=()
+  local key
+  while IFS= read -r key; do
+    [[ -n "$key" ]] || continue
+    # DATABASE_URL / TEST_DATABASE_URL are exported above, so the dotenv values
+    # for them can never apply. Everything else can.
+    [[ "$key" == "DATABASE_URL" || "$key" == "TEST_DATABASE_URL" ]] && continue
+    keys+=("$key")
+  done < <(sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$dotenv")
+
+  if (( ${#keys[@]} )); then
+    warn "$REPO_ROOT/.env injects ${#keys[@]} setting(s) that a CI runner does not have."
+    warn "  ${keys[*]}"
+    warn "  brain.config layers these UNDER the process environment, so they still"
+    warn "  apply. DATABASE_URL/TEST_DATABASE_URL are overridden to the test instance."
+  fi
+}
+
+# -----------------------------------------------------------------------------
+# Stage: rebuild <repo>/.venv exactly the way ci.yml's test job does
+# -----------------------------------------------------------------------------
+resolve_ci_python() {
+  # ci.yml uses actions/setup-python with python-version: "3.11", which
+  # resolves to the newest 3.11.x. `uv python find` does the same locally.
+  #
+  # `--system --no-project` is LOAD-BEARING, not tidiness. A bare
+  # `uv python find 3.11` searches virtual environments FIRST, so once this
+  # script had built a 3.11 `.venv`, the next run resolved the interpreter to
+  # `<repo>/.venv/bin/python3` — the very venv it then deleted — and died with
+  # "No such file or directory". Caught on the second consecutive full run;
+  # the first passed because the pre-existing venv was 3.14 and did not match.
+  # Everything except the resolved path goes to stderr: this function's stdout
+  # IS its return value (captured with $(...)), so a stray info() line would
+  # become part of the interpreter path.
+  local found=""
+  if command -v uv >/dev/null 2>&1; then
+    found="$(uv python find --system --no-project "$CI_PYTHON_VERSION" 2>/dev/null)"
+    if [[ -z "$found" ]]; then
+      info "installing CPython $CI_PYTHON_VERSION via uv..." >&2
+      uv python install "$CI_PYTHON_VERSION" >&2 || true
+      found="$(uv python find --system --no-project "$CI_PYTHON_VERSION" 2>/dev/null)"
+    fi
+  fi
+  if [[ -z "$found" ]] && command -v "python$CI_PYTHON_VERSION" >/dev/null 2>&1; then
+    found="$(command -v "python$CI_PYTHON_VERSION")"
+  fi
+  # Belt and braces: whatever the source, the interpreter must not live inside
+  # the venv this function's caller is about to delete.
+  if [[ -n "$found" && "$found" == "$VENV/"* ]]; then
+    found=""
+  fi
+  [[ -n "$found" ]] || die "no Python $CI_PYTHON_VERSION interpreter found outside $CI_VENV_DIR.
+    Install uv (https://docs.astral.sh/uv/) or put python$CI_PYTHON_VERSION on PATH.
+    CI runs $CI_PYTHON_VERSION; a run on any other minor version proves nothing." 70
+  printf '%s\n' "$found"
+}
+
+rebuild_venv() {
+  local python_bin
+  python_bin="$(resolve_ci_python)" || exit 70
+
+  if [[ -e "$VENV" ]]; then
+    # Narrow guard before an rm -rf: only ever delete something that is
+    # unmistakably a virtualenv at the one path CI uses.
+    [[ -d "$VENV" && -f "$VENV/pyvenv.cfg" ]] || die "$VENV exists but is not a virtualenv
+    (no pyvenv.cfg). Refusing to delete it. Move it aside and re-run." 70
+    info "removing the existing $CI_VENV_DIR ($("$VENV/bin/python" -V 2>&1 || echo 'unknown'))"
+    rm -rf "$VENV" || die "could not remove $VENV" 70
+  fi
+
+  info "interpreter: $python_bin ($("$python_bin" -V 2>&1))"
+  # The same three commands ci.yml runs, in the same order, with plain `pip` —
+  # uv supplies only the interpreter. Using uv's resolver here would test a
+  # different dependency resolution than the one CI performs.
+  "$python_bin" -m venv "$VENV" || die "python -m venv $CI_VENV_DIR failed" 70
+  "$VENV/bin/pip" install --upgrade pip --quiet || die "pip self-upgrade failed" 70
+  info "pip install -e \".[dev]\" (fresh resolve — this is the slow part)"
+  ( cd "$REPO_ROOT" && "$VENV/bin/pip" install -e ".[dev]" --quiet ) \
+    || die "pip install -e \".[dev]\" failed" 70
+  ok "$CI_VENV_DIR rebuilt from a fresh resolve"
+}
+
+report_resolved_versions() {
+  # The three pins whose staleness made a local run green while CI was red,
+  # plus pytest itself. Printed every run so the resolve is on the record.
+  info "resolved: $("$VENV/bin/python" -V 2>&1)"
+  local line
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && info "resolved: $line"
+  done < <("$VENV/bin/pip" list --format=freeze 2>/dev/null |
+             grep -E '^(typer|pgvector|coverage|pytest|click)==' || true)
+}
+
+# -----------------------------------------------------------------------------
+# Stage: the AGE test Postgres (port 5434) — never production
+# -----------------------------------------------------------------------------
+compose() {
+  ( cd "$REPO_ROOT" && docker compose -f "$CI_COMPOSE_FILE" "$@" )
+}
+
+start_test_database() {
+  command -v docker >/dev/null 2>&1 || die "docker not found — the test job needs the
+    AGE instance from $CI_COMPOSE_FILE. Re-run with --skip-compose if it is already up." 70
+  # `|| true` mirrors ci.yml: on a registry miss, `up` falls back to a local
+  # build from the pinned Dockerfile.
+  info "docker compose -f $CI_COMPOSE_FILE pull --quiet"
+  compose pull --quiet >/dev/null 2>&1 || true
+  info "docker compose -f $CI_COMPOSE_FILE up -d"
+  compose up -d || die "could not start the AGE test instance" 70
+}
+
+wait_for_test_database() {
+  local i
+  for (( i = 1; i <= CI_WAIT_TRIES; i++ )); do
+    if pg_ready; then
+      ok "AGE test instance ready on ${CI_PG_HOST}:${CI_PG_PORT} (${CI_PG_DB})"
+      return 0
+    fi
+    (( i == 1 )) && info "waiting for ${CI_PG_HOST}:${CI_PG_PORT}..."
+    sleep "$CI_WAIT_SLEEP"
+  done
+  warn "AGE test instance did not become ready in time; last 50 log lines:"
+  compose logs --tail=50 || true
+  die "database never became ready on ${CI_PG_HOST}:${CI_PG_PORT}" 70
+}
+
+pg_ready() {
+  # Prefer the host binary (what ci.yml uses); fall back to the container's own
+  # pg_isready so a machine without libpq client tools still works.
+  if command -v pg_isready >/dev/null 2>&1; then
+    pg_isready -h "$CI_PG_HOST" -p "$CI_PG_PORT" -U "$CI_PG_USER" -d "$CI_PG_DB" \
+      >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  compose exec -T postgres-age-test \
+    pg_isready -U "$CI_PG_USER" -d "$CI_PG_DB" >/dev/null 2>&1
+}
+
+teardown_test_database() {
+  # Only ever the TEST compose project: a named docker volume, never the
+  # production ./data/postgres bind-mount. Opt-in (ci.yml always tears down;
+  # locally the instance is usually shared with your next run).
+  step "Tear down the AGE test instance (--teardown)"
+  compose down -v || warn "teardown reported an error"
+}
+
+# =============================================================================
+# Run
+# =============================================================================
+say "════════════════════════════════════════════════════════════════════"
+say " $SCRIPT_NAME — local reproduction of .github/workflows/ci.yml"
+say " repo: $REPO_ROOT"
+say "════════════════════════════════════════════════════════════════════"
+
+if (( NOT_THE_GATE )); then
+  banner "THIS RUN IS NOT THE GATE." "" "${GATE_CAVEATS[@]}" "" \
+          "A green result here does NOT mean CI will be green." \
+          "Run bin/brain-ci with no arguments before you trust it."
+fi
+
+step "Safety check — database targets"
+# Checked THREE times on purpose. (a) the contract constant itself, so a bad
+# edit to this file is refused rather than executed; (b) an inherited value
+# that points at production is called out before it is overridden; (c) the
+# values actually exported, re-read from the environment, so what pytest will
+# see is what was validated. Nothing here can leave the run pointed at 55432.
+assert_not_prod_db "CI_DATABASE_URL (this script's contract constant)" "$CI_DATABASE_URL"
+for var in DATABASE_URL TEST_DATABASE_URL; do
+  inherited="${!var:-}"
+  if [[ -n "$inherited" && "$inherited" != "$CI_DATABASE_URL" ]]; then
+    for prod_port in "${PROD_PORTS[@]}"; do
+      if [[ "$inherited" == *":${prod_port}/"* ]]; then
+        warn "inherited $var pointed at the PRODUCTION database (port $prod_port)."
+        warn "  It is being replaced with the test instance for this run."
+      fi
+    done
+    info "overriding inherited $var with the CI value"
+  fi
+done
+
+step "CI environment"
+apply_ci_environment
+assert_not_prod_db "exported DATABASE_URL" "$DATABASE_URL"
+assert_not_prod_db "exported TEST_DATABASE_URL" "$TEST_DATABASE_URL"
+ok "database pinned to ${CI_PG_HOST}:${CI_PG_PORT}/${CI_PG_DB} — production port 55432 is unreachable from this run"
+ok "CI=true GITHUB_ACTIONS=true; colour/width/PYTEST_* overrides scrubbed"
+report_dotenv_divergence
+
+if (( REUSE_VENV )); then
+  step "Virtualenv (REUSED — not a fresh resolve)"
+  [[ -x "$VENV/bin/pytest" ]] || die "$CI_VENV_DIR has no pytest; drop --reuse-venv" 70
+  report_resolved_versions
+else
+  step "Virtualenv — fresh resolve at $CI_VENV_DIR (mirrors ci.yml)"
+  rebuild_venv
+  report_resolved_versions
+fi
+
+if (( RUN_TESTS )); then
+  if (( USE_COMPOSE )); then
+    step "AGE test Postgres (docker compose -f $CI_COMPOSE_FILE)"
+    start_test_database
+  else
+    step "AGE test Postgres (--skip-compose: assuming it is already up)"
+  fi
+  wait_for_test_database
+fi
+
+RUFF_STATUS=0
+MYPY_STATUS=0
+PYTEST_STATUS=0
+PYTEST_RAN=0
+
+if (( RUN_LINT )); then
+  step "ci.yml job 'lint' — ruff check"
+  ( cd "$REPO_ROOT" && "$VENV/bin/ruff" check )
+  RUFF_STATUS=$?
+  (( RUFF_STATUS == 0 )) && ok "ruff check passed"
+
+  step "ci.yml job 'lint' — mypy src/"
+  ( cd "$REPO_ROOT" && "$VENV/bin/mypy" src/ )
+  MYPY_STATUS=$?
+  (( MYPY_STATUS == 0 )) && ok "mypy src/ passed"
+fi
+
+if (( RUN_TESTS )); then
+  step "ci.yml job 'test' — pytest"
+  info "exactly \`pytest\` — pyproject.toml's addopts owns the marker filter and"
+  info "the 85% coverage floor. This script adds no flags of its own."
+  # NEVER pipe this. A pipeline reports the LAST command's status, so a wrapper
+  # ending in `| tee` or `| tail` reports the pager's success and hides a failed
+  # suite — that nearly shipped a broken release. Run it bare; capture $?.
+  ( cd "$REPO_ROOT" && "$VENV/bin/pytest" "${PYTEST_ARGS[@]+"${PYTEST_ARGS[@]}"}" )
+  PYTEST_STATUS=$?
+  PYTEST_RAN=1
+fi
+
+(( TEARDOWN )) && teardown_test_database
+
+# -----------------------------------------------------------------------------
+# Summary. The exit code is pytest's own whenever pytest ran and failed.
+# -----------------------------------------------------------------------------
+step "Summary"
+render() { printf '    %-24s %s\n' "$1" "$2"; }
+if (( RUN_LINT )); then
+  render "ruff check" "$( (( RUFF_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $RUFF_STATUS)")"
+  render "mypy src/" "$( (( MYPY_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $MYPY_STATUS)")"
+else
+  render "ruff check" "skipped (--tests-only)"
+  render "mypy src/" "skipped (--tests-only)"
+fi
+if (( PYTEST_RAN )); then
+  render "pytest" "$( (( PYTEST_STATUS == 0 )) && echo 'PASS' || echo "FAIL (exit $PYTEST_STATUS)")"
+else
+  render "pytest" "skipped (--lint-only)"
+fi
+
+EXIT_STATUS=0
+EXIT_REASON="everything this run attempted passed"
+if (( PYTEST_RAN && PYTEST_STATUS != 0 )); then
+  EXIT_STATUS=$PYTEST_STATUS
+  EXIT_REASON="pytest's own exit status, verbatim (not a wrapper's)"
+elif (( RUFF_STATUS != 0 || MYPY_STATUS != 0 )); then
+  EXIT_STATUS=1
+  EXIT_REASON="pytest passed but ruff/mypy did not"
+fi
+
+say ""
+info "exit $EXIT_STATUS — $EXIT_REASON"
+
+if (( NOT_THE_GATE )); then
+  banner "REMINDER: this run was NOT the gate." "" "${GATE_CAVEATS[@]}"
+elif (( EXIT_STATUS == 0 )); then
+  ok "full CI-equivalent gate reproduced locally and passed"
+fi
+
+exit "$EXIT_STATUS"

@@ -110,9 +110,63 @@ lowered floor.
 
 CI has no Ollama and no production corpus, so a **non-zero skip count is
 expected**; a run with zero skips would mean a test reached a live service it
-should not have. To reproduce CI conditions locally, stop Ollama
-(`brew services stop ollama`) and stop the production container, then run
-`pytest`.
+should not have.
+
+### Reproducing CI locally — `bin/brain-ci`
+
+Do not try to reassemble CI conditions by hand. Run the script:
+
+```bash
+bin/brain-ci                    # the full, faithful gate — this is the one to trust
+bin/brain-ci --reuse-venv       # fast re-run against the existing .venv; NOT the gate
+bin/brain-ci --lint-only        # only the `lint` job (ruff + mypy)
+bin/brain-ci --tests-only       # only the `test` job (pytest)
+bin/brain-ci --skip-compose     # the AGE test DB on 5434 is already up
+bin/brain-ci --teardown         # `compose down -v` the TEST stack afterwards
+bin/brain-ci -- tests/test_x.py -k name   # pass-through; NOT the gate
+```
+
+The default run mirrors `ci.yml` step for step, and every part of it is a fix
+for a real v0.3.0 failure:
+
+| What it does | Why |
+|---|---|
+| Rebuilds `<repo>/.venv` from a **fresh resolve** on Python 3.11 (interpreter pinned via `uv`) | A stale checkout venv (typer 0.25.1 / pgvector 0.4.2 / coverage 7.12, on Python 3.14) ran the whole suite green while CI was red. |
+| Exports `CI=true` and `GITHUB_ACTIONS=true`, and unsets `FORCE_COLOR` / `PY_COLORS` / `NO_COLOR` / `COLUMNS` / `PYTEST_*` | Typer binds `rich_utils.FORCE_TERMINAL` at import time from `GITHUB_ACTIONS`; 20 CLI tests failed only in CI for a whole release cycle, and a venv that matched every pinned version still could not reproduce it — the trigger was not a package. |
+| Pins `DATABASE_URL` / `TEST_DATABASE_URL` to `postgresql://brain:brain@localhost:5434/second_brain_test` and starts `docker-compose.age-test.yml` | Same instance CI uses. Port **55432 is production**: the script validates its own constant, warns when it overrides an inherited prod value, re-checks what it exported, and exits `70` rather than run against the live corpus. |
+| Runs a **bare `pytest`** | `pyproject.toml`'s `addopts` owns the marker filter and `--cov-fail-under=85`. The script adds no flags of its own; `tests/test_bin_brain_ci.py` fails if it ever does. |
+| Exits with **pytest's own status** | A wrapper that ends in `\| tail` reports *tail's* status. That nearly published a broken release, so pytest is never piped and the summary names the exit code's source. |
+
+Exit codes: `0` pass · pytest's own status when pytest failed · `1` when only
+ruff/mypy failed · `64` usage error · `70` environment failure (no `uv`/Docker,
+venv build failed, DB never came up, or a refusal to target production).
+
+Any mode that is not the full run — `--reuse-venv`, `--lint-only`,
+`--tests-only`, pass-through arguments — prints a loud **"THIS RUN IS NOT THE
+GATE"** banner before and after the run. A green result from those does not
+predict CI.
+
+Two caveats the script reports rather than hides:
+
+- A local `.env` has no counterpart on a runner, and `brain.config` layers it
+  *under* the process environment, so its keys still apply. The script lists the
+  affected key names (never values) at startup. `DATABASE_URL` /
+  `TEST_DATABASE_URL` are always overridden to the test instance.
+- Like `ci.yml`, it runs `docker compose pull` before `up -d`. If the pinned tag
+  has been republished, compose **recreates** the `second-brain-age-test`
+  container (the named volume, and therefore the test data, survives — `down -v`
+  only ever runs under `--teardown`). Pass `--skip-compose` if something else is
+  mid-run against port 5434.
+- It rebuilds `<repo>/.venv` in place, because `bin/brain-{up,down,status,rebuild}`
+  exec `<repo>/.venv/bin/<script>` and `tests/test_bin_scripts.py` asserts on
+  that layout — a venv anywhere else would test a layout CI does not have. Your
+  working venv is replaced by the CI-equivalent one.
+
+`tests/test_bin_brain_ci.py` parses the `CI_*` contract block at the top of the
+script and compares it against `ci.yml` (database URLs, Python version, compose
+file, readiness probe, venv directory), so changing the workflow without
+changing the script turns a test red. Drift is the disease; that test is the
+thermometer.
 
 ### Claude Code skills
 

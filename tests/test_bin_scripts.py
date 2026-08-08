@@ -625,6 +625,10 @@ def test_brain_rebuild_dry_run_lists_stages(tmp_path: Path) -> None:
         "brain-uninstall-launchd",
         # T7: end-to-end fastpath verification script.
         "brain-verify-fastpath",
+        # v0.3.0 postmortem: the local reproduction of .github/workflows/ci.yml.
+        # Its agreement with that workflow is pinned separately in
+        # tests/test_bin_brain_ci.py; this entry only keeps it parseable and +x.
+        "brain-ci",
     ],
 )
 def test_bin_script_is_executable_and_parses(name: str) -> None:
