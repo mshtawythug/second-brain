@@ -27,7 +27,7 @@
 # `LOAD 'age';` bootstrap used by `brain init` / `connect`. It can be enabled
 # optionally for performance (see docs/specs/2026-05-20-graphrag-age-image.md).
 
-FROM pgvector/pgvector:0.8.6-pg16
+FROM pgvector/pgvector:0.8.2-pg16
 
 # Pinned Apache AGE source. AGE_COMMIT is the immutable checkout; AGE_REF is the
 # release tag it must resolve to — verified at build time so the build FAILS if the
