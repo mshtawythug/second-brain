@@ -69,3 +69,12 @@ docs/HOW-TO-TEST-elicit.md
 
 # Generated audio-overview artifacts (brain audio) — real content, never commit
 audio/
+
+# Ad-hoc screenshots dropped at the repo root during UI/design work (e.g.
+# `w5-1440-light.png` from the wave-5 web-UI pass). Root-level only, so
+# committed assets under docs/ or src/ are unaffected. Kept out of history
+# because they are one-off working artifacts, not deliverables — and because a
+# stray root PNG is exactly what a `git add -A` sweeps into a release commit.
+/*.png
+/*.jpg
+/*.jpeg
