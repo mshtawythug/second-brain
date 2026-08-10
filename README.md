@@ -11,7 +11,7 @@ Local, queryable knowledge base and note vault with hybrid search and an entity-
 [![PyPI downloads](https://img.shields.io/pypi/dm/secondbrain-py)](https://pypistats.org/packages/secondbrain-py)
 [![GitHub stars](https://img.shields.io/github/stars/mshtawythug/second-brain)](https://github.com/mshtawythug/second-brain)
 
-Stores career docs, interview prep, Krisp transcripts, Slack threads, Gmail, and authored Markdown notes in Postgres + pgvector. Any agent reaches all of it through the `brain` CLI or the bundled `brain-mcp` MCP server — no re-pasting context into every chat.
+Stores career docs, interview prep, Krisp transcripts, Slack threads, Gmail, and authored Markdown notes in Postgres + pgvector. Any agent reaches all of it through the `brain` CLI or the bundled `brain-mcp` MCP server — no re-pasting context into every chat. You get the same corpus through the CLI, a [local web UI](#local-web-ui), or a [rendered wiki](docs/vault-and-wiki.md).
 
 The everyday loop — capture a note, search it back, read the top hit, check the corpus:
 
@@ -28,6 +28,12 @@ Querying `brain` returns a ranked snippet instead of dumping whole threads and f
 | **Long PDF / DOCX (30+ pages)** | 15–25k (read the whole file) | ~1–9k (one snippet + targeted `show`) | **~5–15×** |
 
 Brain stores pre-extracted, quote-stripped bodies and hybrid-ranks *before* fetching, so only the passage that matched enters context. See the [full per-source breakdown](docs/configuration.md#token-economics).
+
+When the reader is an agent rather than a person, `brain recall` goes one step further. Instead of a ranked list someone has to open, it returns the passages themselves — packed to an explicit token budget, one per document to keep sources diverse, with the same inline `[N]` citations `brain ask` uses:
+
+```bash
+brain recall "platform migration runway" --budget 800
+```
 
 ## See it in 60 seconds
 
@@ -101,9 +107,10 @@ brain search "what did I tell my manager about the migration"   # hybrid FTS + v
 brain show <id-prefix>                                    # full document body (6+ hex prefix)
 brain list --source gmail --limit 20                      # browse by source
 brain tag <id-prefix> +interview +career -old-tag         # add (+name) / remove (-name) tags
+brain capture --text "follow up on the migration cutover" # zero-friction inbox, tagged `inbox`
 ```
 
-Add `--json` to `search` / `show` / `list` for machine-readable output, and `--fts-only` to `search` to skip the embedding call. The full command surface — Gmail ingest, enrichment, tacit-knowledge elicitation, GraphRAG, the proactivity/synthesis commands, and vault authoring — lives in the [CLI reference](docs/cli-reference.md).
+Add `--json` to `search` / `show` / `list` for machine-readable output, and `--fts-only` to `search` to skip the embedding call. The full command surface — Gmail ingest, the quick-capture inbox, enrichment, tacit-knowledge elicitation, GraphRAG, ranking diagnostics (`brain explain`) and relevance feedback (`brain rate`), the proactivity/synthesis commands, and vault authoring — lives in the [CLI reference](docs/cli-reference.md).
 
 ## Proactive side
 
@@ -122,6 +129,18 @@ brain ask "what did we decide about the data pipeline?" # cited multi-hop answer
 ```
 
 Full flags and examples for these and `brain audio` are in the [CLI reference](docs/cli-reference.md#proactivity-and-synthesis).
+
+## Local web UI
+
+If you would rather read and write in a browser, `brain ui` serves a single-user web surface over the same corpus — browse the tree, search with facets, read a document, and create, edit, move, or delete vault notes:
+
+```bash
+brain ui                                  # binds 127.0.0.1:8765 and opens a browser
+brain ui --read-only                      # serve the corpus, block every mutation
+brain ui --host 0.0.0.0 --token <secret>  # a shared secret is required off loopback
+```
+
+It adds no runtime dependency — `starlette` and `uvicorn` already ship as transitive deps of the MCP SDK — and the front end is hand-written static assets with no bundler and no CDN, so it works fully offline.
 
 ## Claude integrations
 
@@ -154,6 +173,31 @@ claude mcp add brain -- brain-mcp
 ```
 
 `uvx secondbrain-py` also launches the MCP server. Full walkthrough (symlink, smoke-test, troubleshooting): [docs/guides/claude-desktop-setup.md](docs/guides/claude-desktop-setup.md).
+
+`search`, `recall`, `rate` and `ingest-stdin` accept `--agent <id>` (or an ambient `BRAIN_AGENT_ID`), so when several agents share one brain, `brain usage` can report which of them has been reading what.
+
+## Confidential documents
+
+Not everything in a personal corpus should leave the machine:
+
+```bash
+brain ingest board-deck.pdf --sensitivity confidential
+brain mark-confidential <id-prefix>       # brain mark-normal downgrades it again
+brain list --sensitivity confidential
+```
+
+`confidential` is an **egress** control, not an access control. The document stays fully readable from the local CLI — that is inside the trust boundary. What changes is what leaves the machine: the body is kept off a hosted embedder, withheld from the MCP `brain_show` / `brain_search` / `brain_recall` / `brain_resurface` responses unless the caller passes `include_confidential=true`, and dropped from the published wiki index. Re-ingest is escalate-only — it can raise a document's tier but never lower it — so a background `vault sync --watch` pass cannot quietly reset what you marked.
+
+## Backups and health
+
+```bash
+brain backup --label pre-upgrade    # checksummed DB + vault archive, with a manifest
+brain restore <archive> --db-only   # y/N confirmed; the pre-flight checks are not skippable
+brain usage --days 30               # searches, opens, ingests, and search latency p50/p95
+brain doctor                        # environment, database, embedder, daemons, wiki freshness
+```
+
+`pg_dump` runs inside the container by default: the server is 16.x while a typical host Homebrew `pg_dump` is 14.x, and that mismatch aborts the dump outright. The archive is a logical dump holding the corpus in **plaintext**, not a copy of the `data/postgres` bind mount.
 
 ## How it works
 

@@ -593,9 +593,13 @@ dependency — `starlette` and `uvicorn` already ship as transitive deps of the
 MCP SDK — and the front end is hand-written static assets with no bundler and
 no CDN, so it works fully offline.
 
-`--token` is **required** whenever `--host` is not loopback. Confidential
-bodies are withheld unless `--include-confidential` is passed, matching the MCP
-surfaces.
+`--token` is **required** whenever `--host` is not loopback.
+
+Confidential bodies follow the bind, not a flag. On a **loopback** bind they are
+always served — the UI is exactly as inside the trust boundary as `brain show`
+is — and `--include-confidential` is ignored. On a **non-loopback** bind they
+are withheld unless you pass `--include-confidential`, since the material is
+then crossing the wire. The startup banner states which of the two you got.
 
 ## brain people
 
