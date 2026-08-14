@@ -72,6 +72,49 @@ IMPORTANT:
 - **Every external HTTP/DB client MUST have explicit timeouts.** Voyage SDK retries handled in `embeddings.py`; Postgres connections set `connect_timeout`.
 - **No bare `except:`** — always catch specific exceptions (`psycopg.OperationalError`, `voyageai.error.RateLimitError`, etc.).
 
+### File-size ceiling — 800 lines
+
+The global rules set a **800-line ceiling** per file (200–400 typical). It binds
+**new modules and new growth**, not a retroactive split mandate: this repo has
+**16 files in `src/` already over it**, and splitting a 9,000-line CLI to satisfy
+a number is how you turn a working module into six broken ones.
+
+The rule as it actually applies here:
+
+- A **new** module lands under 800. No exceptions.
+- An **existing** file under 800 must stay under it — extract rather than grow
+  past. This is why `brain/format_search.py` exists (`format.py` was at 783/800)
+  and why `brain/snippet_context.py` exists (`search.py` is now 793).
+- A file **already over** may grow only for a reason written down at the point
+  of growth, in its module docstring — see `mcp_server.py`'s header. "It was
+  already over" is not that reason.
+
+**Files over the ceiling** (`find src -name '*.py' | xargs wc -l | sort -rn` —
+re-derive, never inherit; these were measured on `feat/agentic-token-reduction`,
+2026-08-14):
+
+| File | Lines | Why it is not being split |
+|---|---|---|
+| `cli.py` | 9,019 | One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and **deferred** deliberately. |
+| `mcp_server.py` | 4,275 | Same shape — one MCP tool registry. The Wave-3 growth is disclosed and justified in its own docstring. Split deferred alongside `cli.py`. |
+| `config.py` | 2,443 | **Grew this branch: 2,250 → 2,443 (+193).** It is the largest file over the ceiling *and* it grew, in the same PR that split `search.py` citing the ceiling. Stated rather than smoothed over: the additions are the six MCP-ceiling knobs and the snippet knob, each carrying a measurement block in prose. The knobs belong beside the other knobs; the *evidence blocks* are the growth and they are the reason to split this file next, into `config.py` + a measurements/rationale doc. |
+| `ingest/__init__.py` | 2,298 | Dispatcher + both pipelines; the extractors are already separate modules. |
+| `vault/sync.py` | 1,747 | One reconciliation algorithm. |
+| `queries.py` | 1,642 | Flat read-helper collection — cohesive, low coupling; splitting buys nothing. |
+| `setup.py` | 1,356 | One linear install script with three profile branches. |
+| `wiki/build_watcher.py` | 1,073 | |
+| `vault/watch.py` | 1,070 | |
+| `wiki/build_people.py` | 934 | |
+| `connect.py` | 925 | |
+| `graph_rag/extract.py` | 885 | |
+| `timeline.py` | 844 | |
+| `cli_ingest.py` | 844 | |
+| `wiki/build_related.py` | 815 | |
+| `enrichment.py` | 808 | |
+
+There is **no automated gate** on this — the ceiling is a review checkpoint, not
+CI. If you add a file to this table, add the row in the same edit.
+
 ### Linting — Ruff + mypy
 Run after every change: `ruff check` (lint) or `ruff check --fix` (auto-fix), then `mypy src/`. Config in `pyproject.toml` under `[tool.ruff]` and `[tool.mypy]`.
 

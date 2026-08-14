@@ -166,21 +166,36 @@ CONTENT_MARKERS = (
 """Keys :func:`apply_content_ceiling` may add. Emitted only on the paths that
 produce them, so an unbounded normal payload stays byte-identical.
 
-**This tuple is guarded in ONE direction only.** Deleting a marker here goes
-red in ``tests/test_mcp_show_ceiling.py`` (verified 2026-08-13 by removing
-``content_truncated_recovery``: both confidential-withhold tests fail) — so a
-key can never quietly stop being stripped. Note *which* assertion catches it on
-each path: the ``summary_only`` test iterates this tuple, but that loop cannot
-see a deleted marker the path never emits, so there it is the
-``len(CONTENT_MARKERS) >= 5`` guard-the-guard that fires; the truncation twin
-catches it independently by name. Nothing forces the reverse: a NEW marker in
-:func:`apply_content_ceiling` that is never added to this tuple would leak past
-the confidential branch, and every test would stay green, because they all
-enumerate this tuple rather than the payload. The bidirectional twin exists for
-the recall payload (``measure_recall`` vs ``brain_recall``, compared as KEY
-SETS with both ``missing`` and ``extra`` asserted); this one is the single
-direction. **So: when you add a marker key to** :func:`apply_content_ceiling`,
-**add it here in the same edit** — no gate will remind you."""
+**This tuple is now guarded in BOTH directions**, which it was not when the
+markers shipped.
+
+*Deleting* a marker here goes red in ``tests/test_mcp_show_ceiling.py``
+(verified 2026-08-13 by removing ``content_truncated_recovery``: both
+confidential-withhold tests fail) — so a key can never quietly stop being
+stripped. Note *which* assertion catches it on each path: the ``summary_only``
+test iterates this tuple, but that loop cannot see a deleted marker the path
+never emits, so there it is the ``len(CONTENT_MARKERS) >= 5`` guard-the-guard
+that fires; the truncation twin catches it independently by name.
+
+*Adding* a marker to :func:`apply_content_ceiling` and forgetting it here — the
+direction that would leak a key past the confidential branch with the whole
+suite green — is caught by
+``test_every_key_apply_content_ceiling_adds_is_declared_in_content_markers``
+(``tests/test_mcp_limits_unit.py``). It walks all eight paths through the
+function (``summary_only`` × ``has_summary`` × over/under the cap) and asserts
+the union of keys they add ``==`` this tuple. Both mutations were verified
+2026-08-14: an undeclared emitted key and a declared-but-unemitted entry each
+redden it, each naming the offending key. This tuple is therefore now the same
+bidirectional shape as the recall payload's guard (``measure_recall`` vs
+``brain_recall``, compared as KEY SETS with both ``missing`` and ``extra``
+asserted).
+
+**What the gate still cannot catch.** It knows only what
+:func:`apply_content_ceiling` adds. A marker-like key added to a ``brain_show``
+payload *anywhere else* — in ``mcp_server`` around the call, or in a future
+sibling helper — is invisible to it and would still ride past
+:func:`strip_content_markers`. The gate binds this one function; keep the
+markers in it."""
 
 
 def apply_content_ceiling(

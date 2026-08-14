@@ -222,6 +222,54 @@ def test_apply_content_ceiling_does_not_mutate_its_input() -> None:
     assert payload == {"content": "z" * 4000}
 
 
+def test_every_key_apply_content_ceiling_adds_is_declared_in_content_markers() -> None:
+    """THE REVERSE GATE: a new marker key cannot escape ``CONTENT_MARKERS``.
+
+    The existing coverage runs one way — deleting an entry from the tuple goes
+    red. Nothing forced the other direction, so a NEW key added to
+    :func:`apply_content_ceiling` and forgotten here would survive
+    :func:`strip_content_markers` and ride out on a *confidential* ``brain_show``
+    payload, implying a body was produced, with the whole suite green.
+
+    Exhaustive over the branch space rather than over hand-picked cases: all
+    four ``(summary_only, has_summary)`` combinations crossed with a body over
+    and under the cap — eight calls, which is every path through the function.
+    ``==`` (not ``<=``) makes this bidirectional, so it also fails a marker that
+    is declared but no branch can ever emit.
+    """
+    base = {"id": "x", "content": "z" * 4000, "summary": "s"}
+    small = {**base, "content": "z" * 8}
+
+    added: set[str] = set()
+    truncating_arms = 0
+    for summary_only in (False, True):
+        for has_summary in (False, True):
+            for payload, max_tokens in ((base, 10), (small, 10_000)):
+                out = apply_content_ceiling(
+                    payload,
+                    summary_only=summary_only,
+                    has_summary=has_summary,
+                    max_tokens=max_tokens,
+                    cost=_cost,
+                )
+                new_keys = set(out) - set(payload)
+                added |= new_keys
+                truncating_arms += "content_truncated" in new_keys
+
+    # Guard the guard, two ways. Without these, a function that returned its
+    # input unchanged — or one whose truncation branch had become unreachable —
+    # would satisfy the assertion below by emitting nothing at all.
+    assert added, "no branch added any key; the arms below assert nothing"
+    assert truncating_arms, "no arm truncated; the truncation markers are untested"
+
+    assert added == set(CONTENT_MARKERS), (
+        "apply_content_ceiling emits keys CONTENT_MARKERS does not declare "
+        f"(undeclared: {sorted(added - set(CONTENT_MARKERS))}); a confidential "
+        "brain_show would leak them past strip_content_markers. Declared but "
+        f"never emitted: {sorted(set(CONTENT_MARKERS) - added)}"
+    )
+
+
 def test_strip_content_markers_removes_every_marker_and_nothing_else() -> None:
     payload = {"id": "x", "content": None, **dict.fromkeys(CONTENT_MARKERS, True)}
     assert strip_content_markers(payload) == {"id": "x", "content": None}

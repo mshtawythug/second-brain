@@ -250,8 +250,9 @@ def test_unknown_arg_rejected(tmp_path: Path) -> None:
 # `diff -rq` FOLLOWS symlinks. A dest entry that is a link to a byte-identical
 # tree therefore compares as "in sync" forever, no matter what the repo does
 # afterwards — a guard that cannot fail. The script detects links explicitly
-# (`bin/brain-skills-sync:75`) ahead of the diff, and a write run replaces the
-# link with a real copy.
+# (the `[[ -L "$dst" ]] || ... find -type l` branch, ahead of the `diff -rq`),
+# and a write run replaces the link with a real copy. Cited by the code it
+# names rather than by line: this file's own edits have moved that line twice.
 #
 # The fixtures below point the link at a *temp mirror* of the repo skill, never
 # at `skills/` itself: byte-identical, so it reproduces the vacuous-diff case
@@ -360,6 +361,78 @@ def test_sync_replaces_a_symlinked_entry_and_leaves_the_target_intact(
 # 13. Guard — the real ~/.claude/skills path never appears in any invocation.
 #     (Defensive: HOME is always sandboxed to tmp_path.)
 # ---------------------------------------------------------------------------
+
+
+def test_a_root_dest_is_refused_before_anything_is_touched(tmp_path: Path) -> None:
+    """``BRAIN_SKILLS_DEST=/`` strips to "" — every $dst would be rooted at /.
+
+    NOTE ON WHAT THIS ASSERTS. An exit-code-only assertion would be **vacuous**:
+    without the guard the script still fails, just later and for an unrelated
+    reason (``mkdir -p ""``). The load-bearing assertion is therefore the one on
+    the message — it is the only thing that distinguishes "refused up front"
+    from "blundered into a different error on the way to the delete".
+    """
+    result = _run([], home=tmp_path, env_overrides={"BRAIN_SKILLS_DEST": "/"})
+
+    assert result.returncode != 0, "a dest of / must be refused"
+    assert "empty path" in result.stderr, result.stderr
+    assert "filesystem root" in result.stderr, result.stderr
+    # Refused before enumeration: no per-skill line was ever printed.
+    assert ": installed" not in result.stdout, result.stdout
+    assert ": updated" not in result.stdout, result.stdout
+
+
+def test_a_root_dest_is_refused_via_the_flag_too(tmp_path: Path) -> None:
+    """``--dest /`` takes the same path as the env var (both hit the strip)."""
+    result = _run(["--dest", "/"], home=tmp_path)
+
+    assert result.returncode != 0
+    assert "empty path" in result.stderr, result.stderr
+
+
+def test_rm_is_refused_when_the_target_escapes_the_dest(tmp_path: Path) -> None:
+    """The prefix guard fires when ``$dst`` resolves outside ``$DEST``.
+
+    Normal operation cannot produce an escaping ``$dst`` — it is always built as
+    ``"$DEST/$name"``. The guard exists for the edit that changes that
+    construction, so this test *performs* that edit on a throwaway copy of the
+    script and proves the guard catches it. Without the guard, the copy below
+    deletes ``outside/<skill>`` and the final assertion goes red.
+    """
+    # A throwaway repo layout, because the script resolves its skills/ dir
+    # relative to its own location. One skill is enough to reach the rm.
+    skill = sorted(_expected_skills())[0]
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "bin").mkdir(parents=True)
+    shutil.copytree(SRC_SKILLS / skill, fake_repo / "skills" / skill)
+
+    mutated = fake_repo / "bin" / "brain-skills-sync"
+    original = SCRIPT.read_text(encoding="utf-8")
+    needle = '  dst="$DEST/$name"\n'
+    assert original.count(needle) == 1, "script no longer builds $dst as expected"
+    mutated.write_text(
+        original.replace(needle, '  dst="${DEST}-escape/$name"\n'), encoding="utf-8"
+    )
+
+    dest = tmp_path / "dest"
+    # A sibling of $DEST — NOT under "$DEST/", which is exactly what the guard
+    # tests for. Populated so a successful `rm -rf` would be observable.
+    outside = tmp_path / "dest-escape" / skill
+    outside.mkdir(parents=True)
+    (outside / "DO-NOT-DELETE.md").write_text("bystander", encoding="utf-8")
+
+    result = subprocess.run(
+        ["bash", str(mutated), "--dest", str(dest)],
+        env={"PATH": SANDBOX_PATH, "HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0, f"an escaping $dst must be refused: {result.stdout}"
+    assert "refusing to remove" in result.stderr, result.stderr
+    assert str(outside) in result.stderr, result.stderr
+    # The bystander tree survived — the guard ran BEFORE the rm, not after.
+    assert (outside / "DO-NOT-DELETE.md").read_text(encoding="utf-8") == "bystander"
 
 
 def test_never_targets_real_home(tmp_path: Path) -> None:

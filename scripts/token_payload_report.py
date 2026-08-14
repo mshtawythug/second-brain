@@ -27,8 +27,9 @@ What it measures, per seeded query:
     projection and nothing else.
 ``recall``
     ``result.to_dict()`` plus ``context_block``, i.e. the dict MCP
-    ``brain_recall`` returns (``mcp_server.py:702-704``) — that surface adds
-    no envelope of its own.
+    ``brain_recall`` returns (``mcp_server.brain_recall``, the assembly that
+    begins ``payload = result.to_dict()``) — that surface adds no envelope of
+    its own.
 
 Tokens come from ``embedder.count_tokens`` — the offline ``tiktoken``
 ``cl100k_base`` count the chunker and the recall budgeter already spend
@@ -137,10 +138,18 @@ _LOCAL_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1", "0.0.0.0"})
 
 #: The F6 trust lens both measure functions apply, matching the surface these
 #: numbers describe. MCP passes ``_confidential_lens(include_confidential)``
-#: on ``brain_search`` (``mcp_server.py:517``) and ``brain_recall``
-#: (``mcp_server.py:682``), which is ``"normal"`` unless the caller opts in.
-#: ``None`` would mean BOTH tiers (``recall.py:254-259`` documents the
-#: division) — a different match set, not just a different payload size.
+#: inside both ``mcp_server.brain_search`` and ``mcp_server.brain_recall``
+#: (grep that call — it appears at each tool's ``hybrid_search`` /``recall``
+#: call site), which is ``"normal"`` unless the caller opts in. ``None`` would
+#: mean BOTH tiers — see :func:`brain.recall.recall`'s docstring paragraph
+#: beginning '``sensitivity`` is forwarded straight to ``hybrid_search``' — a
+#: different match set, not just a different payload size.
+#:
+#: Cited by SYMBOL, not by line. An earlier revision of this file carried five
+#: ``mcp_server.py:NNN`` pointers; a single wave added +263 lines to that file
+#: and invalidated every one of them, and one had been wrong when written. A
+#: pointer that rots silently is worse than no pointer, because it still reads
+#: as evidence.
 AGENT_SENSITIVITY_LENS = "normal"
 
 #: Exit codes. Distinct so a wrapper can tell a refusal from a real failure.
@@ -265,7 +274,8 @@ def measure_search(
     serialization of the frozen seven-key projection. Neither agent-facing
     surface emits exactly these bytes:
 
-    * ``brain search --json`` (``cli_search.py:408``) hands the projection to
+    * ``brain search --json`` (:func:`brain.cli_search.search`, the
+      ``search_results_json(results)`` branch) hands the projection to
       ``format.emit_json``, which calls Rich's ``console.print_json`` — that
       parses the string back and re-serializes it with ``indent=2``. Over a
       5-result list that is ~35 newlines plus leading whitespace, i.e. the CLI
@@ -275,8 +285,9 @@ def measure_search(
       either direction.)
     * MCP ``brain_search`` returns
       ``{"session_id": ..., "results": <this>, **search_meta_json(...)}``
-      (``mcp_server.py:575-581``); the envelope around ``results`` is NOT
-      included here.
+      (``mcp_server.brain_search``'s ``return`` statement — the one whose
+      comment reads "The two original keys come FIRST"); the envelope around
+      ``results`` is NOT included here.
 
     Both are constants on either side of a before/after diff, and the
     projection is what every wave of the plan actually changes.
@@ -322,7 +333,10 @@ def measure_recall(
 
     Measures ``to_dict()`` **plus** ``context_block`` **plus**
     ``payload_tokens`` because that is the dict ``mcp_server.brain_recall``
-    returns (``mcp_server.py:776-783``) — measuring only ``to_dict()`` would
+    returns — its assembly is the four consecutive statements
+    ``payload = result.to_dict()`` → ``payload["context_block"] = …`` →
+    ``payload["payload_tokens"] = …`` → ``return payload``, and this function
+    mirrors all four — measuring only ``to_dict()`` would
     under-report by the size of the block the agent actually pastes. Unlike
     search, recall wraps its result in no envelope, so this is the whole
     payload.
@@ -343,7 +357,8 @@ def measure_recall(
     per query. That gap is the key, not a regression.
 
     ``sensitivity`` defaults to :data:`AGENT_SENSITIVITY_LENS`, matching
-    ``mcp_server.py:682``; ``recall`` forwards it straight to ``hybrid_search``
+    ``mcp_server.brain_recall``'s own ``_confidential_lens(include_confidential)``
+    argument; ``recall`` forwards it straight to ``hybrid_search``
     and its own docstring is explicit that ``None`` means both tiers, which is
     the CLI's lens, not the agent's.
     """

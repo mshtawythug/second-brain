@@ -608,9 +608,11 @@ def test_measure_functions_apply_the_agent_trust_lens(
     MUTATION TEST. Dropping ``sensitivity=`` from either measure function
     makes the default match BOTH tiers, and the strict inequalities below go
     red. This is not a payload-size nicety: MCP applies
-    ``_confidential_lens(include_confidential)`` on both ``brain_search``
-    (``mcp_server.py:517``) and ``brain_recall`` (``mcp_server.py:682``), so
-    measuring without it would size a MATCH SET no agent ever sees.
+    ``_confidential_lens(include_confidential)`` on both
+    ``mcp_server.brain_search`` and ``mcp_server.brain_recall`` (cited by
+    symbol: the line numbers this docstring used to carry were invalidated by
+    the very wave that added this test), so measuring without it would size a
+    MATCH SET no agent ever sees.
     """
     # Arrange
     _seed(test_db, fake_embedder)

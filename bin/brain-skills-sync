@@ -32,6 +32,30 @@ done
 
 DEST="${DEST%/}"
 
+# The trailing-slash strip above is why this check exists: a dest of "/" strips
+# to the EMPTY string, and every "$DEST/$name" below then resolves to "/$name" —
+# a path rooted at / rather than inside the intended tree. Harmless while the
+# script only ever copied; this script now deletes (`rm -rf "$dst"`, twice), and
+# this repo has a standing rule against destructive operations on unvalidated
+# paths. Reject it here, before any skill is enumerated, so neither the copy nor
+# the delete path can be reached with a dest that means "the filesystem root".
+[[ -n "$DEST" ]] || {
+  echo "error: destination resolved to an empty path (was it \"/\"?); refusing to sync skills to the filesystem root" >&2
+  exit 2
+}
+
+# Guard for the destructive verb. `rm -rf "$dst"` is only ever correct on a path
+# genuinely inside $DEST; assert that rather than trusting how $dst was built,
+# because the construction is what a future edit would change. Fails loudly on
+# purpose — silently skipping the delete would leave a stale skill installed and
+# `--check` would then report drift the sync claimed to have fixed.
+assert_under_dest() {
+  [[ "$1" == "$DEST"/* ]] || {
+    echo "error: refusing to remove '$1': not under the destination directory '$DEST'" >&2
+    exit 2
+  }
+}
+
 [[ -d "$SRC_SKILLS" ]] || { echo "error: repo skills dir not found: $SRC_SKILLS" >&2; exit 1; }
 
 # Enumerate the brain-family skills straight from the repo — never a hardcoded
@@ -77,6 +101,7 @@ for name in "${skills[@]}"; do
       echo "  $name: SYMLINK (installed as a link, not a copy — drift is undetectable)"
       stale=1
     else
+      assert_under_dest "$dst"
       rm -rf "$dst"
       cp -R "$src" "$dst"
       echo "  $name: updated (replaced a symlink with a real copy)"
@@ -99,6 +124,7 @@ for name in "${skills[@]}"; do
       stale=1
     else
       # Wholesale replace so repo deletions propagate to the dest.
+      assert_under_dest "$dst"
       rm -rf "$dst"
       cp -R "$src" "$dst"
       echo "  $name: updated"

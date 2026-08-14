@@ -1,7 +1,8 @@
 """Tests for :mod:`brain.snippet_context` — the Wave 4 extraction.
 
 ``_expand_snippet_with_neighbors`` moved out of ``search.py`` (which was over
-the 800-line ceiling and not grandfathered) into ``snippet_context.py``, and
+the 800-line ceiling — see CLAUDE.md, "File-size ceiling") into
+``snippet_context.py``, and
 its inlined ``4 * SNIPPET_LENGTH`` cap became the ``max_chars`` parameter.
 Nothing else changed: the outward walk is byte-for-byte the one that shipped.
 

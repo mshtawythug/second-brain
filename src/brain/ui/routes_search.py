@@ -135,10 +135,24 @@ def _redact(payload: dict[str, Any], redacted: set[str]) -> dict[str, Any]:
     would defeat the whole control. The document still appears in the results
     with its title and metadata: the user should know it matched, just not read
     the matching passage here.
+
+    ``summary`` is dropped for the same reason, and the drop is a **no-op
+    today**: :func:`brain.ui.schemas.search_result_payload` projects seven keys
+    and ``summary`` is not among them. It is here because
+    ``SearchResult.summary`` — new in the agentic-token-reduction wave — is
+    LLM-generated *from the body* and now rides on every result, confidential
+    ones included, and because brief mode makes the summary the *cheap*
+    projection, so adding it to the UI payload is the natural next edit. Without
+    this line that edit would ship a condensed body under a ``withheld: True``
+    flag, with the whole suite green. ``pop`` rather than blanking: the key's
+    absence matches how ``brain_show`` withholds a summary
+    (:mod:`brain.mcp_server`, the F6 confidential branch), so a client sees one
+    vocabulary.
     """
     if payload["id"] not in redacted:
         return payload
     payload["snippet"] = ""
+    payload.pop("summary", None)
     payload["withheld"] = True
     return payload
 

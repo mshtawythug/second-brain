@@ -1,11 +1,12 @@
 """Snippet-context expansion: stitch neighboring chunks around the best match.
 
 Extracted verbatim from :mod:`brain.search` (Wave 4). ``search.py`` was already
-over the repo's 800-line file ceiling before this wave and is **not** on
-CLAUDE.md's grandfathered list (which names only ``cli.py`` and
-``mcp_server.py``), so the snippet-expansion helper moved out rather than
-growing in place. This is the :mod:`brain.format_search` precedent exactly —
-that module exists because ``format.py`` hit 783/800.
+over the repo's 800-line file ceiling before this wave, so the snippet-expansion
+helper moved out rather than growing in place; ``search.py`` is now 793. This is
+the :mod:`brain.format_search` precedent exactly — that module exists because
+``format.py`` hit 783/800. The ceiling, the files already over it, and the rule
+that a file over it may grow only with a written reason are in CLAUDE.md under
+"File-size ceiling"; ``search.py`` is not one of them.
 
 The move was behaviour-preserving: the outward-walk algorithm below is
 byte-for-byte the one that shipped in ``search.py``. The only substantive

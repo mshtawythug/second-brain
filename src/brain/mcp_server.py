@@ -1,7 +1,10 @@
 """MCP server exposing the second brain's tools over stdio.
 
 **Why this already-large file grew again (Wave 3, 2026-08-13).** This module is
-grandfathered past the 800-line ceiling, and the agentic-token-reduction plan
+one of the files already past the 800-line ceiling (CLAUDE.md, "File-size
+ceiling" — which is also where the rule that a file over the ceiling may grow
+only for a reason written down at the point of growth lives; this note is that
+reason). The agentic-token-reduction plan
 allowed a bounded exception to add payload ceilings to six tools with a target
 of **≤ 90 net added lines**. The measured outcome was **+171** — 1.9x over.
 (This note is itself +31, so the file's total Wave-3 diff reads **+202**. Said
