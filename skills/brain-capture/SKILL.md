@@ -106,7 +106,8 @@ without a summary untouched, so an `--auto` pass that clears nothing is a
 normal outcome, not a failure.
 
 After a promote or tag, the item is an ordinary document — reachable through
-`brain search` / `brain show` (see `consult-brain`) and editable through
+`brain search` / `brain recall` / `brain show` (see `consult-brain`, which
+carries the cost-ordered guide to picking between them) and editable through
 `brain-authoring`.
 
 ## Safety rules

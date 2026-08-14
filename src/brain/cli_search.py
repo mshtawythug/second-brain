@@ -35,6 +35,7 @@ from .format_search import (
     facets_renderable,
     search_envelope_json,
     search_meta_line,
+    search_results_brief_json,
     search_results_json,
 )
 from .gaps import record_search_query
@@ -43,6 +44,7 @@ from .queries import PersonMatch
 from .search import SearchDiagnostics, build_tsquery
 from .search_predicate import build_predicate
 from .sensitivity import VALID_SENSITIVITY_LEVELS
+from .token_report import count_results_tokens
 
 # Rich console bound to stderr, for the facet panel. Rich resolves ``file``
 # lazily, so a module-level instance still honours a redirected ``sys.stderr``
@@ -209,6 +211,14 @@ def search(
              "timings, and facets. Without --json this flag is a no-op "
              "(the footer is already on).",
     ),
+    brief: bool = typer.Option(
+        False, "--brief",
+        help="With --json: return each document's ingest-time summary "
+             "instead of its snippet when the summary is smaller, plus a "
+             "snippet_source key naming which one you got. Much cheaper for "
+             "agents; loses the why-this-matched signal on substituted "
+             "results. No-op without --json.",
+    ),
     # — Q1-C metadata filters — same set on `brain explain` below.
     person: str | None = typer.Option(
         None, "--person",
@@ -328,6 +338,7 @@ def search(
             vector_sim_floor=cfg.vector_sim_floor,
             recency_halflife_days=cfg.recency_halflife_days,
             snippet_context_tokens=cfg.snippet_context_tokens,
+            snippet_max_chars=cfg.snippet_max_chars,
             diagnostics=diagnostics,
             total_count=want_total,
             person_keys=person_match.keys if person_match else None,
@@ -371,6 +382,40 @@ def search(
                 tsquery=build_tsquery(conn, query),
             )
             diagnostics.facets_ms = (perf_counter() - t_facets) * 1000.0
+        # Wave 5 — what this call COST the caller, measured, not estimated.
+        #
+        # Only the ``--json`` paths are priced. The human path delivers a Rich
+        # table with 120-char previews, not a payload; counting the JSON a
+        # terminal caller never received would file a counterfactual under a
+        # column that means "measured". It stays NULL, which is what NULL is
+        # for. It also spares that path the tiktoken encode entirely.
+        #
+        # The projection is built ONCE here and reused by the bare-list emit
+        # branch below, so pricing the payload does not re-run the per-result
+        # summary-vs-snippet comparison. The ``--meta`` envelope path is the
+        # exception: it rebuilds through ``search_envelope_json`` on purpose —
+        # that function's "same call" guarantee is what keeps the envelope
+        # from drifting from the bare list, and is worth one extra projection.
+        projected: list[dict[str, Any]] | None = None
+        baseline_tokens: int | None = None
+        if json_output:
+            projected = (
+                search_results_brief_json(results, cost=embedder.count_tokens)
+                if brief
+                else search_results_json(results)
+            )
+            diagnostics.results_tokens = count_results_tokens(
+                projected, cost=embedder.count_tokens
+            )
+            if brief:
+                # The counterfactual, and ONLY when a cheaper mode was really
+                # in effect: what these same results would have cost in the
+                # default projection. A non-brief call had no alternative, so
+                # it gets no baseline — inventing one would make every search
+                # look like a saving.
+                baseline_tokens = count_results_tokens(
+                    search_results_json(results), cost=embedder.count_tokens
+                )
         # Plan 08 — best-effort search-failure logging. ``record_search_query``
         # is the single narrow-catch chokepoint: it swallows a transient
         # ``psycopg.OperationalError`` AND the missing-table
@@ -393,6 +438,8 @@ def search(
             session_id=None,
             source="cli",
             agent_id=resolve_agent_id(agent, cfg),
+            payload_tokens=diagnostics.results_tokens,
+            baseline_tokens=baseline_tokens,
             tenant_id=cfg.graph_tenant_id,
         )
 
@@ -400,12 +447,35 @@ def search(
         # ``--facets`` implies ``--meta`` under ``--json``: facet data has
         # nowhere else to live. Without either flag this is the pre-F5 path,
         # emitting the bare list unchanged.
+        #
+        # ``--brief`` is wired on BOTH json branches, not just the bare list:
+        # an envelope whose ``results`` stayed full-fat while the bare list
+        # went brief would describe the same search two ways — the drift
+        # ``search_envelope_json``'s "same call" guarantee exists to prevent.
+        # ``cost`` is the embedder built above — ``_build_embedder(cfg)`` is
+        # unconditional, so this is never None; under ``BRAIN_EMBEDDER=none``
+        # it is a ``NullEmbedder``, which implements ``count_tokens`` too
+        # (``count_tokens`` is offline ``tiktoken`` and needs no backend). So the
+        # summary-vs-snippet choice is priced in ``cl100k_base`` tokens rather
+        # than characters. On the human table path ``--brief`` is a NO-OP.
         if meta or facets:
             emit_json(
-                search_envelope_json(query, results, diagnostics, facet_data)
+                search_envelope_json(
+                    query,
+                    results,
+                    diagnostics,
+                    facet_data,
+                    brief=brief,
+                    cost=embedder.count_tokens,
+                )
             )
         else:
-            emit_json(search_results_json(results))
+            # ``projected`` is the exact list that was priced above — emitting
+            # a second, independently-built projection would risk reporting a
+            # cost for a payload the caller never got. Non-None on every
+            # ``json_output`` path by construction.
+            assert projected is not None
+            emit_json(projected)
     elif not results:
         typer.echo("(no results)")
     else:
@@ -522,6 +592,7 @@ def explain(
             vector_sim_floor=cfg.vector_sim_floor,
             recency_halflife_days=cfg.recency_halflife_days,
             snippet_context_tokens=cfg.snippet_context_tokens,
+            snippet_max_chars=cfg.snippet_max_chars,
             explain=True,
             person_keys=person_match.keys if person_match else None,
             person_display_name=(

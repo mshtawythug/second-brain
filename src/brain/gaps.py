@@ -100,13 +100,74 @@ _ADDITIVE_COLUMNS: dict[str, str] = {
     "fts_count": "023",
     "duration_ms": "024",
     "agent_id": "027",
+    "payload_tokens": "028",
+    "baseline_tokens": "028",
 }
 
 
 def _missing_additive_column(exc: psycopg.Error) -> str | None:
-    """Return the known additive column named by ``exc``, or ``None``."""
-    message = str(exc)
+    """Return the known additive column named by ``exc``, or ``None``.
+
+    Reads ``diag.message_primary`` — ``column "x" of relation "y" does not
+    exist`` — in preference to ``str(exc)``, which appends PostgreSQL's
+    ``LINE n: ...`` echo of the offending statement.
+
+    That echo is not cosmetic. The INSERT names EVERY additive column, so the
+    full string contains all of them and the scan below returned whichever
+    ``_ADDITIVE_COLUMNS`` happened to iterate first rather than the one that
+    was actually missing. Observed live once 028 landed: dropping
+    ``payload_tokens`` produced a warning naming ``agent_id`` and telling the
+    operator to apply migration 027 — a hint pointing at the wrong migration
+    is worse than no hint, because it sends them to a migration they already
+    have. With three additive columns and an INSERT that named two of them it
+    was merely latent; 028 made the INSERT name all five.
+
+    ``diag`` is populated for every server-side error; ``str(exc)`` remains the
+    fallback for a synthetic exception raised in a test without one.
+    """
+    message = exc.diag.message_primary or str(exc)
     return next((col for col in _ADDITIVE_COLUMNS if col in message), None)
+
+
+def _validate_token_columns(
+    payload_tokens: int | None, baseline_tokens: int | None
+) -> None:
+    """The single Python-boundary gate on migration 028's two columns.
+
+    Migration 028 deliberately carries **no** CHECK constraint — a SQL mirror
+    of a Python bound is the drift migration 024 exists to remember. The gate
+    therefore lives here, and is tested here, and raises rather than warns:
+    both violations below are code bugs, not migration lag, and this function
+    sits on the same side of the line as the unrecognised-``source``
+    CheckViolation that :func:`record_search_query` explicitly does not
+    swallow.
+
+    Two invariants:
+
+    - **Neither count may be negative.** A token count is a measurement of a
+      string; a negative one means the measuring code is broken, and a broken
+      measurement persisted silently is worse than none.
+    - **A baseline may never be logged without a payload.** ``baseline_tokens``
+      is the COUNTERFACTUAL half — what the same call *would* have cost in the
+      default mode — and it is only meaningful as the other end of a
+      subtraction. A row carrying a baseline and no payload contributes a
+      savings figure computed against nothing, which is precisely the
+      fabricated-counterfactual failure this wave exists to prevent. The
+      invariant ``count(*) WHERE baseline_tokens IS NOT NULL AND
+      payload_tokens IS NULL == 0`` is enforced here, at the only write site,
+      rather than asserted after the fact.
+    """
+    for field, value in (
+        ("payload_tokens", payload_tokens),
+        ("baseline_tokens", baseline_tokens),
+    ):
+        if value is not None and value < 0:
+            raise ValueError(f"{field} must be >= 0 (got {value})")
+    if baseline_tokens is not None and payload_tokens is None:
+        raise ValueError(
+            "baseline_tokens requires payload_tokens: a counterfactual with "
+            "nothing to compare against is fabricated, not measured"
+        )
 
 
 @dataclass(frozen=True)
@@ -135,6 +196,8 @@ def record_search_query(
     fts_count: int | None = None,
     duration_ms: int | None = None,
     agent_id: str | None = None,
+    payload_tokens: int | None = None,
+    baseline_tokens: int | None = None,
     tenant_id: str = "default",
 ) -> None:
     """INSERT one row into ``search_queries``. Best-effort on a transient blip.
@@ -158,8 +221,8 @@ def record_search_query(
       failure never poisons or rolls back the caller's transaction.
     - :class:`psycopg.errors.UndefinedColumn` naming one of
       :data:`_ADDITIVE_COLUMNS` (``fts_count`` from migration 023,
-      ``duration_ms`` from 024 — a DB that has the table but not yet the
-      ``agent_id`` from 027 — a DB that has the table but not yet the
+      ``duration_ms`` from 024, ``agent_id`` from 027, ``payload_tokens`` /
+      ``baseline_tokens`` from 028 — a DB that has the table but not yet the
       later additive column) gets the **same swallow-with-hint** treatment,
       for the same daily-driver reason: a binary that writes a new column
       must not break search on a DB that hasn't run ``brain init`` since the
@@ -172,10 +235,20 @@ def record_search_query(
       :class:`psycopg.errors.CheckViolation` from an unrecognised ``source``
       is NOT swallowed: an unknown surface is a code bug, not a migration lag.
 
+    ``payload_tokens`` / ``baseline_tokens`` (migration 028) record the
+    canonical serialized size of what the call produced, and what the same
+    call would have cost in the default
+    mode. Both default to ``None`` — "not measured" — so every existing caller
+    keeps writing exactly the row it wrote before. They are validated by
+    :func:`_validate_token_columns` BEFORE the INSERT is attempted, which is
+    also before the try block: a bad measurement is a code bug and must
+    surface, not be swallowed alongside migration lag.
+
     Privacy (Plan 08 §6 — firm contract): the raw ``query`` string MUST NOT
     appear at INFO level or above. It may only be logged at DEBUG (the blip
     path below) where local-only debugging is the explicit opt-in.
     """
+    _validate_token_columns(payload_tokens, baseline_tokens)
     try:
         # The inner transaction() scopes the best-effort INSERT: a savepoint
         # when the caller is already in a transaction, a plain transaction
@@ -188,8 +261,9 @@ def record_search_query(
                 """
                 INSERT INTO search_queries
                     (tenant_id, query, result_count, fts_count, duration_ms,
-                     session_id, source, agent_id)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                     session_id, source, agent_id, payload_tokens,
+                     baseline_tokens)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     tenant_id,
@@ -200,6 +274,8 @@ def record_search_query(
                     str(session_id) if session_id is not None else None,
                     source,
                     agent_id,
+                    payload_tokens,
+                    baseline_tokens,
                 ),
             )
     except psycopg.errors.UndefinedTable:

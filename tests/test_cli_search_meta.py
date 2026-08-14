@@ -167,6 +167,11 @@ def test_json_meta_envelope_shape(
         "total_documents",
         "returned",
         "fts_count",
+        # Migration 028 / Wave 5 — the measured cost of the ``results`` array
+        # this envelope carries. Additive, and named here deliberately: the
+        # envelope's shape is a contract, so a key may be added but not
+        # silently.
+        "results_tokens",
         "timing_ms",
         "embed_cached",
         "fts_only",

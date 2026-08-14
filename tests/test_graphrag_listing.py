@@ -638,7 +638,14 @@ def test_mcp_entities_sort_name(
 def test_mcp_entities_limit_zero(
     test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """brain_graphrag_entities limit=0 returns all entities."""
+    """brain_graphrag_entities limit=0 returns every seeded entity.
+
+    Wave 3 changed what ``limit=0`` MEANS: it is re-mapped to
+    ``BRAIN_GRAPH_ENTITIES_MAX_LIMIT`` (500) rather than "unbounded". This
+    corpus has 5 entities, so the observable result is unchanged — the
+    re-mapping is pinned by
+    ``tests/test_mcp_payload_ceilings.py::test_graphrag_entities_limit_zero_no_longer_means_all``.
+    """
     # Arrange
     _seed_mixed_entities(test_db)
     _mcp_state(monkeypatch)

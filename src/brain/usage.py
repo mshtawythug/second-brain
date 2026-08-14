@@ -55,6 +55,58 @@ class UsageTotals:
     duration_p50_ms: float | None
     duration_p95_ms: float | None
 
+    #: MEASURED. Canonically-serialized payload tokens summed over every call
+    #: that priced its payload (migration 028) — not the rendered byte count;
+    #: see 028's header. ``None`` when no call in the window measured
+    #: one — distinct from ``0``, which would claim retrieval was free.
+    payload_tokens_total: int | None = None
+    #: COUNTERFACTUAL. What those calls that HAD a cheaper mode would have
+    #: cost in the default projection. Summed ONLY over rows carrying both
+    #: columns, so it is the far end of a valid subtraction.
+    baseline_tokens_total: int | None = None
+    #: Rows with ``payload_tokens NOT NULL`` — the denominator for the
+    #: measured clause.
+    measured_calls: int = 0
+    #: Rows with BOTH columns — the denominator for the counterfactual clause.
+    #: Deliberately a SECOND denominator: blending the two into one percentage
+    #: is the specific dishonesty this wave exists to prevent.
+    counterfactual_calls: int = 0
+    #: MEASURED, but scoped to the counterfactual rows only. Present because
+    #: ``payload_tokens_total`` spans a WIDER row set: subtracting it from
+    #: ``baseline_tokens_total`` would difference two different populations
+    #: and can go negative on any brain where most calls are non-brief.
+    counterfactual_payload_tokens: int | None = None
+
+    @property
+    def counterfactual_savings_tokens(self) -> int | None:
+        """Tokens saved on the calls that HAD a cheaper mode — or None.
+
+        ``None`` when ``counterfactual_calls == 0``. Never 0-as-unknown: a
+        brain where nothing used a cheap mode has no savings figure, which is
+        different from a savings figure of zero.
+
+        Both operands are summed over the SAME rows (those carrying both
+        columns), which is the only way the difference means anything.
+        """
+        if self.counterfactual_calls == 0:
+            return None
+        baseline = self.baseline_tokens_total or 0
+        payload = self.counterfactual_payload_tokens or 0
+        return baseline - payload
+
+    @property
+    def counterfactual_savings_rate(self) -> float | None:
+        """:attr:`counterfactual_savings_tokens` as a share of the baseline.
+
+        ``None`` when there is no counterfactual, and also when the baseline
+        summed to zero — a rate over a zero denominator is undefined, and
+        reporting ``0.0%`` would read as "measured no saving".
+        """
+        savings = self.counterfactual_savings_tokens
+        if savings is None or not self.baseline_tokens_total:
+            return None
+        return savings / self.baseline_tokens_total
+
     @property
     def zero_result_rate(self) -> float:
         """Share of searches that found nothing lexically, in ``[0, 1]``."""
@@ -172,6 +224,22 @@ class UsageReport:
                 "write_events": self.totals.write_events,
                 "duration_p50_ms": self.totals.duration_p50_ms,
                 "duration_p95_ms": self.totals.duration_p95_ms,
+                # Migration 028. Kept as five SEPARATE keys with two distinct
+                # denominators rather than one blended "savings %": the
+                # measured total spans every priced call, while the
+                # counterfactual trio spans only the calls that had a cheaper
+                # mode available. A consumer that wants a percentage has to
+                # pick which population it means.
+                "payload_tokens_total": self.totals.payload_tokens_total,
+                "measured_calls": self.totals.measured_calls,
+                "baseline_tokens_total": self.totals.baseline_tokens_total,
+                "counterfactual_payload_tokens": (
+                    self.totals.counterfactual_payload_tokens
+                ),
+                "counterfactual_calls": self.totals.counterfactual_calls,
+                "counterfactual_savings_tokens": (
+                    self.totals.counterfactual_savings_tokens
+                ),
             },
             "daily": [
                 {
@@ -235,14 +303,39 @@ def _totals(
                percentile_disc(0.50) WITHIN GROUP (ORDER BY duration_ms)
                    FILTER (WHERE duration_ms IS NOT NULL),
                percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)
-                   FILTER (WHERE duration_ms IS NOT NULL)
+                   FILTER (WHERE duration_ms IS NOT NULL),
+               -- Migration 028. The asymmetry between these four is
+               -- deliberate: ``payload_tokens`` sums EVERY measured row,
+               -- because "what did retrieval cost me" is a useful standalone
+               -- number; the other three are scoped to rows carrying BOTH
+               -- columns, so the counterfactual difference is computed over
+               -- one population rather than two.
+               SUM(payload_tokens) FILTER (WHERE payload_tokens IS NOT NULL),
+               SUM(baseline_tokens) FILTER (WHERE baseline_tokens IS NOT NULL
+                                              AND payload_tokens IS NOT NULL),
+               SUM(payload_tokens)  FILTER (WHERE baseline_tokens IS NOT NULL
+                                              AND payload_tokens IS NOT NULL),
+               COUNT(*) FILTER (WHERE payload_tokens IS NOT NULL),
+               COUNT(*) FILTER (WHERE baseline_tokens IS NOT NULL
+                                  AND payload_tokens IS NOT NULL)
         FROM search_queries
         WHERE tenant_id = %s AND at >= NOW() - make_interval(days => %s)
         """,
         (tenant_id, days),
     ).fetchone()
     assert row is not None  # aggregate always yields one row
-    searches, sessions, zero_result, p50, p95 = row
+    (
+        searches,
+        sessions,
+        zero_result,
+        p50,
+        p95,
+        payload_total,
+        baseline_total,
+        counterfactual_payload,
+        measured_calls,
+        counterfactual_calls,
+    ) = row
 
     interactions = conn.execute(
         """
@@ -274,6 +367,18 @@ def _totals(
         zero_result=int(zero_result),
         duration_p50_ms=None if p50 is None else float(p50),
         duration_p95_ms=None if p95 is None else float(p95),
+        # A NULL-safe SUM over zero matching rows is SQL NULL, and it stays
+        # None here rather than becoming 0: "nothing measured" and "measured
+        # zero tokens" are different claims.
+        payload_tokens_total=None if payload_total is None else int(payload_total),
+        baseline_tokens_total=(
+            None if baseline_total is None else int(baseline_total)
+        ),
+        counterfactual_payload_tokens=(
+            None if counterfactual_payload is None else int(counterfactual_payload)
+        ),
+        measured_calls=int(measured_calls),
+        counterfactual_calls=int(counterfactual_calls),
     )
 
 

@@ -191,8 +191,8 @@ brain mark-published <id-prefix>      # documents.draft = FALSE; frontmatter `dr
 ```
 
 Both are idempotent (`<short-id> is already draft` / `is already published`).
-The doc stays in the DB and remains visible to `brain search` / `brain show`
-/ `brain list` — only the wiki's Quartz contentIndex filters drafts out of
+The doc stays in the DB and remains visible to `brain search` / `brain recall`
+/ `brain show` / `brain list` — only the wiki's Quartz contentIndex filters drafts out of
 Explorer / Graph / Search.
 
 Use `mark-draft` when a note is half-finished, a Gmail draft thread shouldn't

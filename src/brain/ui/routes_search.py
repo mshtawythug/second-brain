@@ -73,6 +73,7 @@ async def search(request: Request) -> JSONResponse:
                 vector_sim_floor=ctx.cfg.vector_sim_floor,
                 recency_halflife_days=ctx.cfg.recency_halflife_days,
                 snippet_context_tokens=ctx.cfg.snippet_context_tokens,
+                snippet_max_chars=ctx.cfg.snippet_max_chars,
                 **spec.filter_kwargs(),
             )
             redacted = _confidential_hits(ctx, conn, results)

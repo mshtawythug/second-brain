@@ -265,6 +265,7 @@ def recall(
         query=query,
         limit=_over_fetch(budget_tokens, max_candidates),
         snippet_context_tokens=cfg.recall_passage_tokens,
+        snippet_max_chars=cfg.snippet_max_chars,
         vector_sim_floor=cfg.vector_sim_floor,
         recency_halflife_days=cfg.recency_halflife_days,
         diagnostics=diagnostics,

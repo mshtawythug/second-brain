@@ -135,19 +135,79 @@ brain search "platform migration" --no-meta       # suppress the footer
 brain search "platform migration" --facets        # add a facet panel
 brain search "platform migration" --json          # bare list — UNCHANGED shape
 brain search "platform migration" --json --meta   # envelope with counts + timings
+brain search "platform migration" --json --brief  # cheaper snippets + snippet_source
 ```
 
 The footer (`544 matched · 3 shown · embed 5820ms · sql 214ms`) goes to
 **stderr**, so `--json` stays pipeable and `> file` stays clean. `--meta` moves
-the same numbers into a JSON envelope; **`--json` on its own is still a bare
-list of 7-key objects and always will be**, because the list is consumed
-positionally by skills and shell scripts and there is no deprecation channel
-for a personal tool. `--facets --json` implies `--meta`, since facets have
-nowhere else to live.
+the same numbers into a JSON envelope; **without `--brief`, `--json` on its own
+is still a bare list of 7-key objects and always will be**, because the list is
+consumed positionally by skills and shell scripts and there is no deprecation
+channel for a personal tool. `--facets --json` implies `--meta`, since facets
+have nowhere else to live.
+
+`--brief` is the fourth member of this matrix and the only one that changes the
+**result** shape:
+
+- **JSON-only.** It is a documented **no-op** without `--json` — the human
+  table path ignores it entirely.
+- It composes with `--meta` / `--facets`: brief applies to the envelope's
+  `results` list as well as to the bare list, so the two never describe the
+  same search two different ways.
+- Each result's `snippet` carries the **cheaper of** the document's ingest-time
+  `summary` and its query-conditioned chunk snippet, priced in `cl100k_base`
+  tokens (not characters). The seven key *names* are unchanged; one additive
+  key, `snippet_source` ∈ `{"chunk", "summary"}`, names which artifact won —
+  so brief output is 8 keys, not 7.
+- Documents with no summary (a 7.4% tail on the live corpus) fall back to the
+  chunk snippet with `snippet_source="chunk"`. Brief mode never omits a result.
+
+**The honest tradeoff:** the chunk snippet is query-conditioned and tells you
+*why* this document matched; the summary is a query-independent whole-document
+gist. A result that comes back with `snippet_source="summary"` therefore no
+longer answers "why did this match?". `snippet_source` makes that visible per
+result, and the fix is to re-call the same query **without** `--brief` to get
+the query-conditioned snippet back.
 
 `total_documents` is **lexical-only** by construction: the vector leg may
 surface near-neighbours it does not count. A vector-inclusive total would be
 capped at the candidate limit and therefore meaningless as a "total".
+
+**`results_tokens` — the canonical serialized cost of this call's results.**
+The `--meta` envelope carries one more key, `results_tokens`: the exact
+`cl100k_base` count of the *canonical* serialization
+(`json.dumps(…, ensure_ascii=False)`) of the `results` array this call
+produced. Not an estimate and not
+`chars / 4` — the same counter the chunker and the recall budgeter spend, and
+the same number persisted to `search_queries.payload_tokens`, so `brain usage`
+and an agent reading its own budget can never disagree about one call. It
+counts the **array only**, not the envelope around it: the envelope carries the
+number, so counting the envelope would change what it is counting.
+
+**It is the canonical form, not the rendered one.** `brain search --json`
+prints through Rich's `console.print_json`, which re-serializes with
+`indent=2` — so what lands in your terminal runs roughly **10% larger** than
+this number (re-derived on a 5-result payload: 876 canonical vs 957 emitted).
+That is deliberate: counting the canonical form is what keeps a CLI row, an
+MCP row and the Wave-0 harness (`scripts/token_payload_report.py`) all
+comparable. Read `results_tokens` as "the cost of the payload", not "the byte
+count of your terminal".
+
+It is `null` when nothing was measured. That is the normal state of a *human*
+search: the table path delivers a Rich preview, not a payload, so pricing the
+JSON it never emitted would file a counterfactual under a measured name. Read
+`null` as "not measured", never as zero.
+
+Under `--brief` the call **also** records a `baseline_tokens` — what these same
+results would have cost in the default projection. It is written only when a
+cheaper mode was genuinely in effect; a default search had no alternative and
+gets `NULL` rather than an invented saving. Both columns arrive with migration
+028, so run `brain init` after upgrading; until you do, search keeps working
+and warns once per call.
+
+`--limit` here is **not** bounded by `BRAIN_SEARCH_MAX_LIMIT`. That ceiling
+applies to the MCP `brain_search` tool only — see [MCP payload
+ceilings](#mcp-payload-ceilings--and-why-they-do-not-apply-to-this-cli).
 
 ### Filtering by when a document changed
 
@@ -197,6 +257,36 @@ If the budget cannot hold even the top passage, you get **one truncated
 passage** rather than nothing: an agent asked for context, and silence is a
 worse answer than a shortened excerpt.
 
+## MCP payload ceilings — and why they do not apply to this CLI
+
+Six ceilings bound how much a single response can cost an agent's context
+window (`BRAIN_SEARCH_MAX_LIMIT`, `BRAIN_SHOW_MAX_CONTENT_TOKENS`,
+`BRAIN_RECALL_MAX_BUDGET_TOKENS`, `BRAIN_GRAPH_ENTITIES_MAX_LIMIT`,
+`BRAIN_MCP_ROWS_MAX_LIMIT`, `BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT` — all
+documented in [configuration.md](configuration.md)).
+
+**They are enforced on the MCP tool surface only. No `brain` CLI command is
+capped by them, and that is deliberate**, not an oversight: the ceilings exist
+because an agent cannot see a payload's size before it asks and pays for the
+whole thing in context. You are at a terminal — you can pipe, page, and stop
+reading. Capping the CLI would buy nothing and break scripts.
+
+So the CLI's limit semantics are **unchanged**, and in three places they now
+differ from the MCP twin:
+
+| | CLI | MCP tool |
+|---|---|---|
+| `graphrag entities --limit 0` (and any `limit < 1`) | still means **all entities** | re-mapped to `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` (500) |
+| `graphrag communities` with no `--limit` | still means **all communities** | finite default: `BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT` (25) |
+| `search --limit`, `recall --budget`, `show` body | unbounded | rejected above the ceiling with the ceiling named |
+
+The MCP side never truncates silently. It either raises with the ceiling in the
+message so the agent can re-ask smaller, or returns the cut alongside an
+explicit marker (`truncated` + `limit_applied` on the graph envelopes,
+`more_available` on the last element of the bare-list tools, `content_truncated`
++ `content_tokens` on `brain_show`). If you are comparing a CLI result against
+an MCP one and the counts differ, this table is why.
+
 ## brain usage
 
 ```bash
@@ -221,7 +311,42 @@ A row with no `agent_id` reports as `(unattributed)`, never folded into a
 surface. Every row written before migration 027 is genuinely unattributed, and
 saying so is more useful than guessing.
 
-On a database missing migration 019/023/024/027 the command **fails** with a
+### Token cost — measured and counterfactual, never blended
+
+Since migration 028 the report also answers "what does retrieval cost me?", on
+one line with **two clauses and two denominators**:
+
+```
+tokens served 148,203 (measured, 412 of 517 calls) · counterfactual savings 61,880 over 210 brief calls (−29.4%)
+```
+
+The first clause is a **measurement**: canonically-serialized payload tokens,
+over the calls that really priced a payload. (Canonical, not rendered — see
+`results_tokens` above; a `--json` terminal spend runs ~10% higher.) Calls
+that delivered no payload —
+every human terminal search — are excluded from both the sum and its
+denominator, which is why `412 of 517`.
+
+The second clause is a **counterfactual**, and the word is on the line
+deliberately. It compares the calls that used a cheaper mode against what those
+*same* calls would have cost in the default projection — a call that never
+happened. It is computed over a strictly smaller row set (`210`, not `412`), so
+the two clauses are never merged into one headline "we save N%": a percentage
+over calls that never had an alternative is marketing, not measurement. If
+nothing used a cheaper mode the clause is **absent**, and
+`counterfactual_savings_tokens` is `null` rather than `0` — a brain with no
+savings figure is not a brain with a savings figure of zero. A cheaper mode
+that turned out *dearer* reports a signed increase (`+5.3%`) rather than being
+laundered into a saving.
+
+`--json` carries the parts, not a pre-blended rate: `payload_tokens_total`,
+`measured_calls`, `baseline_tokens_total`, `counterfactual_payload_tokens`,
+`counterfactual_calls` and the derived `counterfactual_savings_tokens`. Note
+the two payload sums are deliberately different populations — the total spans
+every measured call, the counterfactual one only the rows that also carry a
+baseline, which is the only pair a difference may be taken over.
+
+On a database missing migration 019/023/024/027/028 the command **fails** with a
 `brain init` hint rather than reporting confident zeroes — the opposite of the
 telemetry *write* path, which swallows so that search keeps working. A silently
 incomplete report is worse than no report.

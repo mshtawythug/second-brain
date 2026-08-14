@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import filecmp
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -244,7 +245,119 @@ def test_unknown_arg_rejected(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 12. Guard — the real ~/.claude/skills path never appears in any invocation.
+# 12. Symlinked dest entries — the case `diff -rq` cannot see
+#
+# `diff -rq` FOLLOWS symlinks. A dest entry that is a link to a byte-identical
+# tree therefore compares as "in sync" forever, no matter what the repo does
+# afterwards — a guard that cannot fail. The script detects links explicitly
+# (`bin/brain-skills-sync:75`) ahead of the diff, and a write run replaces the
+# link with a real copy.
+#
+# The fixtures below point the link at a *temp mirror* of the repo skill, never
+# at `skills/` itself: byte-identical, so it reproduces the vacuous-diff case
+# exactly, while keeping every deletion the script performs inside `tmp_path`.
+# ---------------------------------------------------------------------------
+
+
+def _installed_dest_with_mirror(tmp_path: Path) -> tuple[Path, Path, str]:
+    """Install into a temp dest and mirror one skill outside it.
+
+    Returns ``(dest, mirror, skill_name)``. The mirror is a byte-identical copy
+    of the repo skill — the link target a real symlinked install would have.
+    """
+    dest = tmp_path / "skills"
+    assert _run(["--dest", str(dest)], home=tmp_path).returncode == 0
+
+    # Control: the clean fixture is in sync. Without this, a later non-zero
+    # exit would not distinguish "the symlink was caught" from "this fixture
+    # was never green".
+    clean = _run(["--check", "--dest", str(dest)], home=tmp_path)
+    assert clean.returncode == 0, clean.stdout + clean.stderr
+    assert "SYMLINK" not in clean.stdout, clean.stdout
+
+    skill = sorted(_expected_skills())[0]
+    mirror = tmp_path / "mirror" / skill
+    shutil.copytree(SRC_SKILLS / skill, mirror)
+    return dest, mirror, skill
+
+
+def test_check_flags_a_directory_level_symlinked_entry(tmp_path: Path) -> None:
+    dest, mirror, skill = _installed_dest_with_mirror(tmp_path)
+
+    shutil.rmtree(dest / skill)
+    (dest / skill).symlink_to(mirror, target_is_directory=True)
+
+    # Premise: the link target is byte-identical to the repo, so `diff -rq`
+    # would report this entry "in sync". Only the explicit link check can
+    # catch it — this is what makes the assertion below non-vacuous.
+    cmp = filecmp.dircmp(SRC_SKILLS / skill, mirror)
+    assert not cmp.left_only and not cmp.right_only and not cmp.diff_files
+
+    result = _run(["--check", "--dest", str(dest)], home=tmp_path)
+
+    assert result.returncode != 0, (
+        f"a symlinked entry must be drift, not 'in sync': {result.stdout}"
+    )
+    assert "SYMLINK" in result.stdout, result.stdout
+    assert skill in result.stdout, result.stdout
+    # --check copies nothing: the link is still a link.
+    assert (dest / skill).is_symlink()
+
+
+def test_check_flags_a_file_level_symlink_inside_a_real_entry(tmp_path: Path) -> None:
+    """The `find -type l` half of the guard — a real dir with a linked file."""
+    dest, mirror, skill = _installed_dest_with_mirror(tmp_path)
+
+    linked_file = dest / skill / "SKILL.md"
+    linked_file.unlink()
+    linked_file.symlink_to(mirror / "SKILL.md")
+
+    # `[[ -L "$dst" ]]` is false here — the entry itself is a real directory.
+    assert not (dest / skill).is_symlink()
+
+    result = _run(["--check", "--dest", str(dest)], home=tmp_path)
+
+    assert result.returncode != 0, (
+        f"a file-level symlink must be drift, not 'in sync': {result.stdout}"
+    )
+    assert "SYMLINK" in result.stdout, result.stdout
+    assert skill in result.stdout, result.stdout
+
+
+def test_sync_replaces_a_symlinked_entry_and_leaves_the_target_intact(
+    tmp_path: Path,
+) -> None:
+    """`rm -rf` on a symlink must remove the LINK, never what it points at."""
+    dest, mirror, skill = _installed_dest_with_mirror(tmp_path)
+    target_bytes = (mirror / "SKILL.md").read_bytes()
+    target_names = sorted(p.name for p in mirror.iterdir())
+
+    shutil.rmtree(dest / skill)
+    (dest / skill).symlink_to(mirror, target_is_directory=True)
+
+    result = _run(["--dest", str(dest)], home=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "replaced a symlink" in result.stdout, result.stdout
+    # The link is gone, replaced by a real copy.
+    assert not (dest / skill).is_symlink(), "entry must no longer be a link"
+    assert (dest / skill).is_dir()
+    assert not (dest / skill / "SKILL.md").is_symlink()
+    assert (dest / skill / "SKILL.md").read_bytes() == (
+        SRC_SKILLS / skill / "SKILL.md"
+    ).read_bytes()
+    # The target survived: `rm -rf <symlink>` unlinks the link, not the tree.
+    assert mirror.is_dir(), "rm -rf on the link destroyed its target"
+    assert (mirror / "SKILL.md").read_bytes() == target_bytes
+    assert sorted(p.name for p in mirror.iterdir()) == target_names
+    # And the repaired install is genuinely in sync.
+    after = _run(["--check", "--dest", str(dest)], home=tmp_path)
+    assert after.returncode == 0, after.stdout + after.stderr
+    assert "SYMLINK" not in after.stdout
+
+
+# ---------------------------------------------------------------------------
+# 13. Guard — the real ~/.claude/skills path never appears in any invocation.
 #     (Defensive: HOME is always sandboxed to tmp_path.)
 # ---------------------------------------------------------------------------
 

@@ -8,6 +8,7 @@ no Ollama / Voyage HTTP.
 import importlib.util
 import json
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -16,7 +17,15 @@ from typing import Any
 import psycopg
 import pytest
 
-SCRIPT_PATH = Path(__file__).resolve().parent.parent / "scripts" / "embedding_smoke.py"
+SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+SCRIPT_PATH = SCRIPTS_DIR / "embedding_smoke.py"
+
+# The script imports its sibling ``scripts/query_files``. Running the script
+# directly puts ``scripts/`` on ``sys.path`` for free; loading it via
+# ``importlib`` does not, so put it there — the pattern
+# ``tests/test_collapse_gmail_threads.py`` established for the same reason.
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
 TEST_DATABASE_URL = os.environ.get(
     "TEST_DATABASE_URL",

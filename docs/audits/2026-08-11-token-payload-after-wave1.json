@@ -1,0 +1,267 @@
+{
+  "budget_tokens": 2000,
+  "config": {
+    "embedder": "arctic",
+    "recall_max_candidates": 25,
+    "recall_passage_tokens": 120,
+    "recency_halflife_days": 180.0,
+    "sensitivity": "normal",
+    "snippet_context_tokens": 200,
+    "vector_sim_floor": 0.25
+  },
+  "limit": 5,
+  "measurements": [
+    {
+      "chars": 9435,
+      "query": "hiring",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2619
+    },
+    {
+      "chars": 3333,
+      "query": "hiring",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 886
+    },
+    {
+      "chars": 15058,
+      "query": "hiring",
+      "results": 4,
+      "surface": "recall",
+      "tokens": 4253
+    },
+    {
+      "chars": 9530,
+      "query": "roadmap",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2375
+    },
+    {
+      "chars": 3804,
+      "query": "roadmap",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 982
+    },
+    {
+      "chars": 18895,
+      "query": "roadmap",
+      "results": 5,
+      "surface": "recall",
+      "tokens": 4724
+    },
+    {
+      "chars": 8155,
+      "query": "retrospective",
+      "results": 5,
+      "surface": "search",
+      "tokens": 1888
+    },
+    {
+      "chars": 4271,
+      "query": "retrospective",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 1132
+    },
+    {
+      "chars": 20013,
+      "query": "retrospective",
+      "results": 6,
+      "surface": "recall",
+      "tokens": 4681
+    },
+    {
+      "chars": 8030,
+      "query": "quarterly planning review",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2363
+    },
+    {
+      "chars": 4478,
+      "query": "quarterly planning review",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 1368
+    },
+    {
+      "chars": 16028,
+      "query": "quarterly planning review",
+      "results": 5,
+      "surface": "recall",
+      "tokens": 4726
+    },
+    {
+      "chars": 9465,
+      "query": "engineering team structure",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2262
+    },
+    {
+      "chars": 3383,
+      "query": "engineering team structure",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 873
+    },
+    {
+      "chars": 18845,
+      "query": "engineering team structure",
+      "results": 5,
+      "surface": "recall",
+      "tokens": 4511
+    },
+    {
+      "chars": 8764,
+      "query": "incident postmortem follow-ups",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2317
+    },
+    {
+      "chars": 2956,
+      "query": "incident postmortem follow-ups",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 752
+    },
+    {
+      "chars": 17546,
+      "query": "incident postmortem follow-ups",
+      "results": 5,
+      "surface": "recall",
+      "tokens": 4662
+    },
+    {
+      "chars": 7788,
+      "query": "onboarding checklist for new engineers",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2003
+    },
+    {
+      "chars": 2821,
+      "query": "onboarding checklist for new engineers",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 734
+    },
+    {
+      "chars": 15580,
+      "query": "onboarding checklist for new engineers",
+      "results": 5,
+      "surface": "recall",
+      "tokens": 4025
+    },
+    {
+      "chars": 9288,
+      "query": "budget forecast versus actuals",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2544
+    },
+    {
+      "chars": 3152,
+      "query": "budget forecast versus actuals",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 903
+    },
+    {
+      "chars": 14894,
+      "query": "budget forecast versus actuals",
+      "results": 4,
+      "surface": "recall",
+      "tokens": 4189
+    },
+    {
+      "chars": 9389,
+      "query": "what were the main themes in last quarter's planning discussions",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2493
+    },
+    {
+      "chars": 4245,
+      "query": "what were the main themes in last quarter's planning discussions",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 1117
+    },
+    {
+      "chars": 14996,
+      "query": "what were the main themes in last quarter's planning discussions",
+      "results": 4,
+      "surface": "recall",
+      "tokens": 4035
+    },
+    {
+      "chars": 8873,
+      "query": "summarize the decisions made about the migration timeline",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2355
+    },
+    {
+      "chars": 3566,
+      "query": "summarize the decisions made about the migration timeline",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 1029
+    },
+    {
+      "chars": 17787,
+      "query": "summarize the decisions made about the migration timeline",
+      "results": 5,
+      "surface": "recall",
+      "tokens": 4711
+    },
+    {
+      "chars": 8164,
+      "query": "which action items are still open from recent meetings",
+      "results": 5,
+      "surface": "search",
+      "tokens": 2310
+    },
+    {
+      "chars": 3901,
+      "query": "which action items are still open from recent meetings",
+      "results": 5,
+      "surface": "search_brief",
+      "tokens": 1108
+    },
+    {
+      "chars": 16308,
+      "query": "which action items are still open from recent meetings",
+      "results": 5,
+      "surface": "recall",
+      "tokens": 4615
+    }
+  ],
+  "queries": 11,
+  "totals": {
+    "recall": {
+      "chars": 185950,
+      "mean_tokens": 4466.545454545455,
+      "queries": 11,
+      "tokens": 49132
+    },
+    "search": {
+      "chars": 96881,
+      "mean_tokens": 2320.818181818182,
+      "queries": 11,
+      "tokens": 25529
+    },
+    "search_brief": {
+      "chars": 39910,
+      "mean_tokens": 989.4545454545455,
+      "queries": 11,
+      "tokens": 10884
+    }
+  }
+}

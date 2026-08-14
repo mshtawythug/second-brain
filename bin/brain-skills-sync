@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # brain-skills-sync — copy-install the brain-family skills into ~/.claude/skills.
 # Copy-based (real files, predictable), idempotent, with a --check drift guard.
+# A dest entry that is a SYMLINK is reported as drift, not "in sync": `diff -rq`
+# follows links, so a symlinked skill would compare the repo against itself and
+# pass the guard unconditionally. A plain run replaces such a link with a copy.
 # Touches ONLY the brain-family skills enumerated from the repo skills/ dir —
 # never the other global skills (e.g. the open-design collection).
 set -euo pipefail
@@ -58,6 +61,26 @@ for name in "${skills[@]}"; do
       cp -R "$src" "$dst"
       echo "  $name: installed"
       n_installed=$((n_installed + 1))
+    fi
+    continue
+  fi
+
+  # A symlinked destination entry — the whole directory, or any file inside
+  # it — defeats the drift check entirely: `diff -rq` FOLLOWS symlinks, so a
+  # dest that points back at the repo compares the repo against itself and
+  # reports "in sync" unconditionally, for every future edit, forever. That is
+  # a guard that cannot fail for the file it most needs to guard. Detect it
+  # explicitly and call it drift; a sync then replaces the link with a real
+  # copy (`rm -rf` on a symlink removes the LINK, never its target).
+  if [[ -L "$dst" ]] || [[ -n "$(find "$dst" -type l -print -quit 2>/dev/null)" ]]; then
+    if [[ "$CHECK" == "1" ]]; then
+      echo "  $name: SYMLINK (installed as a link, not a copy — drift is undetectable)"
+      stale=1
+    else
+      rm -rf "$dst"
+      cp -R "$src" "$dst"
+      echo "  $name: updated (replaced a symlink with a real copy)"
+      n_updated=$((n_updated + 1))
     fi
     continue
   fi

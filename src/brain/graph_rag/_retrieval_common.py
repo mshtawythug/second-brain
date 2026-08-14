@@ -62,6 +62,13 @@ def _build_doc_results(
     for the query, falling back to the leading chunk (lowest ``chunk_index``)
     when the query matches nothing. ``score`` carries the *graph* document score
     (not an RRF score). Document order preserves the graph ranking.
+
+    ``summary`` is populated from ``documents.summary`` exactly as the hybrid
+    path does, so a graph-retrieved hit and a hybrid-retrieved hit for the SAME
+    document are interchangeable to downstream projections (notably
+    ``search_results_brief_json``, which chooses between summary and snippet
+    per result). Leaving it at its ``None`` default would have made that choice
+    depend on which leg retrieved the document under ``--mode fuse``.
     """
     # Late import keeps :mod:`brain.graph_rag` import-cheap and free of any
     # import cycle with the ingest pipeline that :mod:`brain.search` pulls in
@@ -74,7 +81,13 @@ def _build_doc_results(
     scores = dict(ranked)
 
     meta_rows = conn.execute(
-        "SELECT d.id::text, d.title, d.content_type, d.tags, s.kind "
+        # ``d.summary`` is appended LAST (index 5) so the positional indices the
+        # construction site below already depends on keep their meaning. It is
+        # selected here — rather than left to the ``SearchResult`` default —
+        # because ``fuse.py`` picks ONE carrier per document from whichever leg
+        # retrieved it; omitting it would make "does this hit have a summary?"
+        # depend on the retrieval leg instead of on the document.
+        "SELECT d.id::text, d.title, d.content_type, d.tags, s.kind, d.summary "
         "FROM documents d LEFT JOIN sources s ON s.id = d.source_id "
         "WHERE d.id = ANY(%s)",
         (doc_ids,),
@@ -111,6 +124,7 @@ def _build_doc_results(
                 source_kind=row[4],
                 snippet=snippet,
                 score=scores[doc_id],
+                summary=row[5],
             )
         )
     return results
