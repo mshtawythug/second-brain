@@ -47,14 +47,29 @@ run/
 # references). docs/ is private-by-subdir: the publishable reference docs
 # (docs/README.md, docs/cli-reference.md, docs/graphrag.md,
 # docs/vault-and-wiki.md, docs/configuration.md), docs/guides/, docs/assets/,
-# and docs/specs/ stay trackable; everything below is ignored. Add any NEW
-# private subdir/file to this list before it can leak.
+# docs/specs/, and docs/plans/ stay trackable; everything below is ignored. Add
+# any NEW private subdir/file to this list before it can leak.
 #
 # docs/specs/ was un-ignored deliberately: CLAUDE.md rule 11b mandates that all
 # specs live there, so leaving it ignored meant every design doc in the project
 # was one clean checkout from being lost. It was PII-scrubbed first and is now
 # synthetic-only, exactly like tests and fixtures — keep it that way (rule 15).
-docs/plans/
+#
+# docs/plans/ was un-ignored on the same grounds and the same terms: rule 11b
+# mandates that plans live there too, so an ignored plan is one clean checkout
+# from gone. Scanned before landing — no PII values, no real corpus identifiers.
+#
+# docs/audits/ STAYS IGNORED. This is a decision, not an oversight: do NOT
+# "finish the job" by moving it up beside docs/plans/. Its files are clean of
+# PII *values*, so the usual test passes — and that test is the wrong one here.
+# This repository is PUBLIC, and its history still carries real personal data
+# that has never been rewritten (removing it would mean rewriting ~446 commits,
+# which is destructive and has not been authorised). docs/audits/ holds the PII
+# audit, which is a precise index INTO that history: hundreds of findings across
+# dozens of files in dozens of named commit SHAs, each labelled by category.
+# Committing it would turn an expensive scan into a single `git show`. A file
+# that contains no PII can still be a map to PII. The map should keep existing —
+# just not inside the repository it maps.
 docs/audits/
 docs/notes/
 docs/qa/
