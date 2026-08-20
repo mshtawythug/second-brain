@@ -255,6 +255,57 @@ def test_show_ceiling_of_zero_disables_the_cap(
     assert "content_truncated" not in payload
 
 
+def test_show_truncates_an_oversized_summary_and_marks_it(
+    test_db: psycopg.Connection[Any], mcp_state: mcp_server._State
+) -> None:
+    """N7 end-to-end: ``summary_only=true`` is bounded, not just cheap.
+
+    Seeds a summary far longer than the ceiling — which ``OllamaEnricher`` would
+    not produce, but migration 011 permits (``TEXT``, no length constraint) —
+    and asserts the tool caps it and says so. Without the cap, the mode
+    advertised as the cheap one returns the unbounded payload.
+    """
+    doc_id = _seed(
+        test_db,
+        title="Platform Planning",
+        content_hash="w3-show-n7",
+        content=_LONG_BODY,
+        summary=_SUMMARY * 200,
+    )
+    _with_ceiling(mcp_state, 10)
+
+    payload = mcp_server.brain_show(id_prefix=doc_id, summary_only=True)
+
+    assert payload["content"] is None
+    assert payload["summary_truncated"] is True
+    assert len(payload["summary"]) < len(_SUMMARY * 200)
+    assert payload["summary_tokens"] <= 10
+    assert "brain show" in payload["summary_truncated_recovery"]
+
+
+def test_show_leaves_an_ordinary_summary_untouched(
+    test_db: psycopg.Connection[Any], mcp_state: mcp_server._State
+) -> None:
+    """The additive half: a normal-length summary gains no marker.
+
+    Anti-vacuity for the test above — without this, capping every summary to
+    nothing would also pass it.
+    """
+    doc_id = _seed(
+        test_db,
+        title="Platform Planning",
+        content_hash="w3-show-n7b",
+        content=_SHORT_BODY,
+        summary=_SUMMARY,
+    )
+
+    payload = mcp_server.brain_show(id_prefix=doc_id, summary_only=True)
+
+    assert payload["summary"] == _SUMMARY
+    assert "summary_truncated" not in payload
+    assert "summary_tokens" not in payload
+
+
 # ---------------------------------------------------------------------------
 # Ordering: F6 confidentiality wins
 # ---------------------------------------------------------------------------
@@ -288,9 +339,47 @@ def test_confidential_withhold_wins_over_summary_only(
     # (`content_truncated_recovery`) would have silently escaped the check
     # while the test still read as exhaustive. Sourcing the constant means a
     # new marker is covered the moment it is declared.
-    assert len(CONTENT_MARKERS) >= 5, "guard the guard: markers must be non-trivial"
+    # Floor tracks the tuple: 5 Wave-3 markers + the 3 summary-ceiling markers
+    # added when the escape hatch got a ceiling of its own (N7). Re-derive it
+    # from ``mcp_limits.CONTENT_MARKERS``, never from this comment.
+    assert len(CONTENT_MARKERS) >= 8, "guard the guard: markers must be non-trivial"
     for marker in CONTENT_MARKERS:
         assert marker not in payload, f"{marker} leaked onto a withheld payload"
+
+
+def test_confidential_withhold_strips_the_summary_ceiling_markers(
+    test_db: psycopg.Connection[Any], mcp_state: mcp_server._State
+) -> None:
+    """The summary markers must not outlive the summary they describe.
+
+    Names ``summary_truncated`` / ``summary_tokens`` /
+    ``summary_truncated_recovery`` EXPLICITLY rather than looping over
+    ``CONTENT_MARKERS``: the loop in the test above cannot catch a marker
+    deleted from that tuple, because it iterates the tuple. Spelled out here,
+    dropping any of the three from ``CONTENT_MARKERS`` reddens this test by
+    name — the "truncation twin catches it independently" shape the tuple's own
+    docstring describes.
+
+    The failure it forbids is concrete: ``summary_tokens=9`` riding out beside
+    ``"summary" not in payload``, telling the agent a summary was served when
+    the whole point of the withhold is that none was.
+    """
+    doc_id = _seed(
+        test_db,
+        title="Comp Bands",
+        content_hash="w3-show-n7c",
+        content=_LONG_BODY,
+        summary=_SUMMARY * 200,
+        sensitivity="confidential",
+    )
+    _with_ceiling(mcp_state, 10)
+
+    payload = mcp_server.brain_show(id_prefix=doc_id, summary_only=True)
+
+    assert "summary" not in payload
+    assert "summary_truncated" not in payload
+    assert "summary_tokens" not in payload
+    assert "summary_truncated_recovery" not in payload
 
 
 def test_confidential_withhold_wins_over_truncation(

@@ -451,6 +451,24 @@ DEFAULT_RECALL_MAX_CANDIDATES = 25
 # was re-measured directly and is wrong. 67,410 is the number, and it agrees
 # with the independently committed
 # docs/audits/2026-08-11-wave2-routing-counterfactual.md.
+#
+# It bounds ``documents.summary`` as well as the body, and not only under
+# ``summary_only=true``. The summary is a ``TEXT`` column (migration 011) with
+# no length constraint -- short only because ``OllamaEnricher`` writes it that
+# way -- so leaving it out would have made ``summary_only``, the escape hatch
+# FROM this ceiling, the one payload with no ceiling. Consequence stated rather
+# than buried: a payload carrying a truncated body AND a truncated summary is
+# bounded by 2x this value. One knob, one bound, where there was none.
+#
+# Bounding the SUM instead -- so the knob's name promised exactly what it
+# delivered -- was considered and rejected. It makes the two fields COMPETE for
+# one budget, and whichever is measured first wins: a long body would silently
+# starve the summary, or the reverse, depending on evaluation order. That turns
+# a stated cap into an order-dependent one, and the field an agent loses is the
+# one it cannot tell it lost. Per-field is the weaker guarantee and the
+# predictable one, and the asymmetry is written down here rather than
+# discovered. If the 2x ever actually binds, the fix is a second knob for the
+# summary, NOT a shared budget.
 DEFAULT_SHOW_MAX_CONTENT_TOKENS = 25000
 # == ``brain.search.CANDIDATE_LIMIT``: above it a larger ``limit`` cannot
 # produce more documents anyway.

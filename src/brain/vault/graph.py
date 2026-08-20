@@ -160,11 +160,24 @@ class OutgoingLinkRow:
     evidence: dict[str, Any] | None = None
 
 
+def _budget_left(fetch_limit: int | None, taken: int) -> int | None:
+    """Rows the NEXT block may fetch, given ``taken`` already held.
+
+    ``None`` in, ``None`` out — an unbounded fetch stays unbounded through
+    every block. Otherwise the remainder, floored at ``0`` so a caller can
+    treat ``0`` as "skip this block" rather than having to guard a negative.
+    """
+    if fetch_limit is None:
+        return None
+    return max(fetch_limit - taken, 0)
+
+
 def backlinks_for(
     conn: psycopg.Connection[Any],
     document_id: str,
     *,
     include_derived: bool = True,
+    fetch_limit: int | None = None,
 ) -> list[BacklinkRow]:
     """Return every document that links TO ``document_id``.
 
@@ -179,6 +192,27 @@ def backlinks_for(
     spec §6 — a row stored ``(A, B)`` shows up in both ``backlinks_for(A)``
     and ``backlinks_for(B)``. Derived rows sort within their block by
     rule then partner title for deterministic output.
+
+    ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
+    default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
+    is PostgreSQL's documented "no limit", so this stays ONE code path rather
+    than a bounded one and an unbounded one that can drift.
+
+    The guarantee is exact: the result is **the first ``fetch_limit`` rows of
+    the unbounded result**, so ``f(…, fetch_limit=n) == f(…)[:n]`` whenever the
+    unbounded result has at least ``n`` rows, and equals it outright otherwise.
+    Callers that keep only a prefix (the MCP tools, which cap for context cost)
+    pass ``their_cap + 1``; that extra row is what lets
+    :func:`brain.mcp_limits.cap_rows` still detect saturation.
+
+    **The budget is spent ACROSS blocks, not per block**, and that is the whole
+    subtlety. These functions concatenate several independently-ordered blocks
+    (wiki, then derived, then unresolved). Giving each block its own ``LIMIT
+    fetch_limit`` looks equivalent and is not: with a 1-row budget and two
+    non-empty blocks it returns ``[wiki[0], derived[0]]``, whose second element
+    is not ``unbounded[1]``. The rows an agent sees would silently change with
+    the ceiling. So each block is limited to what the budget has LEFT, and a
+    block is skipped entirely once nothing remains.
     """
     rows = conn.execute(
         """
@@ -187,8 +221,9 @@ def backlinks_for(
         JOIN documents d ON d.id = l.src_document_id
         WHERE l.dst_document_id = %s
         ORDER BY LOWER(d.title), l.link_text
+        LIMIT %s
         """,
-        (document_id,),
+        (document_id, fetch_limit),
     ).fetchall()
     out: list[BacklinkRow] = [
         BacklinkRow(
@@ -200,7 +235,8 @@ def backlinks_for(
         )
         for r in rows
     ]
-    if include_derived:
+    derived_budget = _budget_left(fetch_limit, len(out))
+    if include_derived and derived_budget != 0:
         out.extend(
             BacklinkRow(
                 src_document_id=partner.document_id,
@@ -212,7 +248,9 @@ def backlinks_for(
                 weight=row.weight,
                 evidence=row.evidence,
             )
-            for row, partner in _derived_partners(conn, document_id)
+            for row, partner in _derived_partners(
+                conn, document_id, fetch_limit=derived_budget
+            )
         )
     return out
 
@@ -223,6 +261,7 @@ def outgoing_links_for(
     *,
     include_unresolved: bool = False,
     include_derived: bool = True,
+    fetch_limit: int | None = None,
 ) -> list[OutgoingLinkRow]:
     """Return every document ``document_id`` links TO.
 
@@ -241,6 +280,27 @@ def outgoing_links_for(
     in semantics, ``outgoing_links_for(X)`` returns the same partner set
     as ``backlinks_for(X)`` for them — every doc paired with X
     regardless of canonical direction.
+
+    ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
+    default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
+    is PostgreSQL's documented "no limit", so this stays ONE code path rather
+    than a bounded one and an unbounded one that can drift.
+
+    The guarantee is exact: the result is **the first ``fetch_limit`` rows of
+    the unbounded result**, so ``f(…, fetch_limit=n) == f(…)[:n]`` whenever the
+    unbounded result has at least ``n`` rows, and equals it outright otherwise.
+    Callers that keep only a prefix (the MCP tools, which cap for context cost)
+    pass ``their_cap + 1``; that extra row is what lets
+    :func:`brain.mcp_limits.cap_rows` still detect saturation.
+
+    **The budget is spent ACROSS blocks, not per block**, and that is the whole
+    subtlety. These functions concatenate several independently-ordered blocks
+    (wiki, then derived, then unresolved). Giving each block its own ``LIMIT
+    fetch_limit`` looks equivalent and is not: with a 1-row budget and two
+    non-empty blocks it returns ``[wiki[0], derived[0]]``, whose second element
+    is not ``unbounded[1]``. The rows an agent sees would silently change with
+    the ceiling. So each block is limited to what the budget has LEFT, and a
+    block is skipped entirely once nothing remains.
     """
     resolved_rows = conn.execute(
         """
@@ -249,8 +309,9 @@ def outgoing_links_for(
         JOIN documents d ON d.id = l.dst_document_id
         WHERE l.src_document_id = %s
         ORDER BY LOWER(d.title), l.link_text
+        LIMIT %s
         """,
-        (document_id,),
+        (document_id, fetch_limit),
     ).fetchall()
     out: list[OutgoingLinkRow] = [
         OutgoingLinkRow(
@@ -263,7 +324,8 @@ def outgoing_links_for(
         )
         for r in resolved_rows
     ]
-    if include_derived:
+    derived_budget = _budget_left(fetch_limit, len(out))
+    if include_derived and derived_budget != 0:
         out.extend(
             OutgoingLinkRow(
                 dst_document_id=partner.document_id,
@@ -276,17 +338,21 @@ def outgoing_links_for(
                 weight=row.weight,
                 evidence=row.evidence,
             )
-            for row, partner in _derived_partners(conn, document_id)
+            for row, partner in _derived_partners(
+                conn, document_id, fetch_limit=derived_budget
+            )
         )
-    if include_unresolved:
+    unresolved_budget = _budget_left(fetch_limit, len(out))
+    if include_unresolved and unresolved_budget != 0:
         unresolved_rows = conn.execute(
             """
             SELECT link_text, link_kind
             FROM unresolved_links
             WHERE src_document_id = %s
             ORDER BY link_text
+            LIMIT %s
             """,
-            (document_id,),
+            (document_id, unresolved_budget),
         ).fetchall()
         out.extend(
             OutgoingLinkRow(
@@ -306,6 +372,7 @@ def orphans(
     conn: psycopg.Connection[Any],
     *,
     vault_only: bool = True,
+    fetch_limit: int | None = None,
 ) -> list[GraphNode]:
     """Return documents with zero incoming AND zero outgoing links.
 
@@ -326,6 +393,27 @@ def orphans(
 
     Sort: title (case-insensitive) for deterministic output, then id to
     break ties when two notes share a title.
+
+    ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
+    default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
+    is PostgreSQL's documented "no limit", so this stays ONE code path rather
+    than a bounded one and an unbounded one that can drift.
+
+    The guarantee is exact: the result is **the first ``fetch_limit`` rows of
+    the unbounded result**, so ``f(…, fetch_limit=n) == f(…)[:n]`` whenever the
+    unbounded result has at least ``n`` rows, and equals it outright otherwise.
+    Callers that keep only a prefix (the MCP tools, which cap for context cost)
+    pass ``their_cap + 1``; that extra row is what lets
+    :func:`brain.mcp_limits.cap_rows` still detect saturation.
+
+    **The budget is spent ACROSS blocks, not per block**, and that is the whole
+    subtlety. These functions concatenate several independently-ordered blocks
+    (wiki, then derived, then unresolved). Giving each block its own ``LIMIT
+    fetch_limit`` looks equivalent and is not: with a 1-row budget and two
+    non-empty blocks it returns ``[wiki[0], derived[0]]``, whose second element
+    is not ``unbounded[1]``. The rows an agent sees would silently change with
+    the ceiling. So each block is limited to what the budget has LEFT, and a
+    block is skipped entirely once nothing remains.
     """
     where = ["d.id NOT IN (SELECT src_document_id FROM links)"]
     where.append("d.id NOT IN (SELECT dst_document_id FROM links)")
@@ -339,8 +427,12 @@ def orphans(
         FROM documents d
         WHERE {' AND '.join(where)}
         ORDER BY LOWER(d.title), d.id
+        LIMIT %s
     """
-    rows = conn.execute(sql).fetchall()
+    # ``where`` is built from static literals only (no bound parameters), so
+    # this single placeholder is the whole parameter tuple. Re-check that if a
+    # future predicate ever binds a value.
+    rows = conn.execute(sql, (fetch_limit,)).fetchall()
     return [
         GraphNode(document_id=str(r[0]), title=str(r[1]), kind=str(r[2]))
         for r in rows
@@ -504,7 +596,10 @@ class _DerivedRow:
 
 
 def _derived_partners(
-    conn: psycopg.Connection[Any], document_id: str
+    conn: psycopg.Connection[Any],
+    document_id: str,
+    *,
+    fetch_limit: int | None = None,
 ) -> list[tuple[_DerivedRow, GraphNode]]:
     """Return ``(row, partner_node)`` pairs for every derived edge touching ``document_id``.
 
@@ -534,8 +629,9 @@ def _derived_partners(
           END
         WHERE dl.src_document_id = %(doc)s OR dl.dst_document_id = %(doc)s
         ORDER BY dl.rule, LOWER(partner.title), partner.id::text
+        LIMIT %(lim)s
         """,
-        {"doc": document_id},
+        {"doc": document_id, "lim": fetch_limit},
     ).fetchall()
     return [
         (

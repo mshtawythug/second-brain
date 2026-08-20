@@ -162,6 +162,9 @@ CONTENT_MARKERS = (
     "content_truncated_recovery",
     "content_tokens",
     "summary_unavailable",
+    "summary_truncated",
+    "summary_truncated_recovery",
+    "summary_tokens",
 )
 """Keys :func:`apply_content_ceiling` may add. Emitted only on the paths that
 produce them, so an unbounded normal payload stays byte-identical.
@@ -174,8 +177,10 @@ markers shipped.
 confidential-withhold tests fail) — so a key can never quietly stop being
 stripped. Note *which* assertion catches it on each path: the ``summary_only``
 test iterates this tuple, but that loop cannot see a deleted marker the path
-never emits, so there it is the ``len(CONTENT_MARKERS) >= 5`` guard-the-guard
-that fires; the truncation twin catches it independently by name.
+never emits, so there it is the ``len(CONTENT_MARKERS) >= 8`` guard-the-guard
+that fires; the truncation twin catches it independently by name. (That floor
+tracks the tuple's length — re-derive it from the tuple above rather than
+trusting this sentence; it read ``>= 5`` before the summary ceiling landed.)
 
 *Adding* a marker to :func:`apply_content_ceiling` and forgetting it here — the
 direction that would leak a key past the confidential branch with the whole
@@ -206,9 +211,9 @@ def apply_content_ceiling(
     max_tokens: int,
     cost: TokenCost,
 ) -> dict[str, Any]:
-    """Bound a ``brain_show`` payload's ``content``, marking every cut.
+    """Bound a ``brain_show`` payload's ``content`` **and** ``summary``.
 
-    Returns a NEW payload. Two independent reductions, in order:
+    Returns a NEW payload. Three reductions, in order:
 
     1. ``summary_only`` drops the body in favour of the ingest-time summary
        (``content=None`` + ``content_omitted``). When the document has **no**
@@ -219,9 +224,29 @@ def apply_content_ceiling(
        (``content_truncated`` + ``content_tokens`` +
        ``content_truncated_recovery`` when cut — the last names what to do
        next, which Task 3.3 requires of every marker).
+    3. ``summary``, if present, is capped at the SAME ``max_tokens``
+       (``summary_truncated`` + ``summary_tokens`` +
+       ``summary_truncated_recovery``).
 
-    A payload whose body is already under the ceiling comes back unchanged, so
-    the caller's byte-identical guarantee holds.
+    **Why (3) exists.** ``summary_only=true`` is the documented escape hatch
+    *from* the body ceiling, and it used to hand back a field with no ceiling of
+    its own — so the cheap mode had the unbounded payload and the expensive mode
+    did not. The summary is short *in practice* because
+    :class:`brain.enrichment.OllamaEnricher` writes it that way, but migration
+    011 declares it ``TEXT`` with no length constraint, and "only the generator
+    keeps it small, not the schema" is precisely the assumption
+    ``search_results_brief_json`` already refuses to make about blank summaries.
+    A ceiling module whose escape hatch is unbounded does not have a ceiling.
+
+    The bound is applied on EVERY path, not just ``summary_only``: ``brain_show``
+    returns ``summary`` alongside a full body too, so capping it only under the
+    escape hatch would leave the same hole on the default path. The honest
+    consequence, stated rather than buried: a payload carrying both fields is
+    bounded by ``2 * max_tokens``, not ``max_tokens``. That is the price of
+    keeping ONE knob; it is a bound where there was none.
+
+    A payload whose body and summary are both already under the ceiling comes
+    back unchanged, so the caller's byte-identical guarantee holds.
     """
     out = dict(payload)
     if summary_only:
@@ -250,6 +275,27 @@ def apply_content_ceiling(
                 "body truncated to the configured ceiling; re-call "
                 "brain_show with summary_only=true for the gist, or read the "
                 "full document via the CLI (`brain show <id>`)"
+            )
+    # (3) The summary gets the same ceiling — see "Why (3) exists" above. Same
+    # marker discipline as the body: emitted ONLY when a cut happened, so an
+    # ordinary short summary leaves the payload byte-identical.
+    summary = out.get("summary")
+    if isinstance(summary, str):
+        kept_summary, summary_cut, summary_tokens = truncate_content(
+            summary, max_tokens=max_tokens, cost=cost
+        )
+        if summary_cut:
+            out["summary"] = kept_summary
+            out["summary_truncated"] = True
+            out["summary_tokens"] = summary_tokens
+            # Names the recovery path, as Task 3.3 requires of every marker.
+            # The CLI is the only one, deliberately: there is no smaller MCP
+            # mode left to fall back to once the summary itself is over the
+            # ceiling, and pointing at summary_only would be a loop.
+            out["summary_truncated_recovery"] = (
+                "summary truncated to the configured ceiling; read the full "
+                "document via the CLI (`brain show <id>`), or raise "
+                "BRAIN_SHOW_MAX_CONTENT_TOKENS"
             )
     return out
 

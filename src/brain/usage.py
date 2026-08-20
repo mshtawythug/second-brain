@@ -20,6 +20,24 @@ drift, and the two numbers would disagree with no way to tell which was right.
 is rendered ``(unattributed)`` at the display layer. Collapsing it into a
 literal ``'cli'`` in the query would invent an agent that never existed and
 make the honest answer unrepresentable.
+
+**The migration-028 token columns are summed in :func:`_totals` ONLY, and that
+is a decision rather than a stopping point.** The daily, by-surface and
+by-agent rollups deliberately carry no token columns yet, so "which agent is
+expensive" is not answerable from this report. Two reasons, both worth
+outliving this comment. First, the counterfactual pair is only meaningful over
+rows carrying BOTH columns, and once that population is sliced by day or by
+agent it gets small fast: a single ``--brief`` search on a Tuesday would render
+a headline savings percentage computed from one row, which is precisely the
+over-claim the two-denominator design exists to prevent. Second, ``agent_id``
+arrived in migration 027 and every older row is NULL, so a per-agent token
+column today would report most of the corpus as ``(unattributed)`` — true, but
+not yet useful. **The next slice, when it is wanted:** add
+``SUM(payload_tokens) FILTER (WHERE payload_tokens IS NOT NULL)`` and its
+matching ``COUNT`` to :func:`_by_dimension`'s ``search_queries`` aggregate (it
+already groups by ``agent_id``), carry them on :class:`AgentUsage`, and render
+them as a *measured* column only — leaving the counterfactual clause in
+``totals``, where its denominator is large enough to mean something.
 """
 from __future__ import annotations
 
@@ -230,6 +248,22 @@ class UsageReport:
                 # counterfactual trio spans only the calls that had a cheaper
                 # mode available. A consumer that wants a percentage has to
                 # pick which population it means.
+                #
+                # ``counterfactual_savings_rate`` is DELIBERATELY not exported
+                # here, even though ``brain usage``'s human line renders it.
+                # The asymmetry is the decision, not an oversight: the human
+                # line is a rendered summary read by a person who can see both
+                # denominators sitting next to it on the same line, whereas a
+                # JSON key is an input to someone else's arithmetic and would
+                # travel without them — which is how "counterfactual savings on
+                # the 210 calls that had a cheaper mode" becomes "this brain is
+                # 29% cheaper". A consumer that genuinely wants the rate can
+                # reproduce it exactly from the keys below
+                # (``counterfactual_savings_tokens / baseline_tokens_total``,
+                # both of which are summed over the same rows) and has to name
+                # that population to do so. Pinned by
+                # ``test_usage_json_carries_both_totals_separately``, which
+                # asserts no ``savings_rate`` key exists.
                 "payload_tokens_total": self.totals.payload_tokens_total,
                 "measured_calls": self.totals.measured_calls,
                 "baseline_tokens_total": self.totals.baseline_tokens_total,
@@ -310,6 +344,17 @@ def _totals(
                -- number; the other three are scoped to rows carrying BOTH
                -- columns, so the counterfactual difference is computed over
                -- one population rather than two.
+               --
+               -- The first FILTER is redundant AS SQL -- ``SUM`` skips NULL
+               -- and yields NULL over zero matching rows either way -- and is
+               -- kept ON PURPOSE. Every aggregate on this list states the
+               -- population it is summed over, in the same place, in the same
+               -- syntax; this one pairs with the ``COUNT(*) FILTER (WHERE
+               -- payload_tokens IS NOT NULL)`` four lines down, where the
+               -- filter IS load-bearing, so the sum and its denominator are
+               -- visibly the same rows. Dropping it would save nothing at
+               -- runtime and would make the one aggregate whose scope is
+               -- implicit sit among four whose scope is spelled out.
                SUM(payload_tokens) FILTER (WHERE payload_tokens IS NOT NULL),
                SUM(baseline_tokens) FILTER (WHERE baseline_tokens IS NOT NULL
                                               AND payload_tokens IS NOT NULL),

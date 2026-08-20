@@ -1,4 +1,21 @@
-"""brain — second brain CLI."""
+"""brain — second brain CLI.
+
+**Why this already-over-the-ceiling file grew (PR #8 closeout, 2026-08-20).**
+This module is past the 800-line ceiling (CLAUDE.md, "File-size ceiling"), and
+that rule lets such a file grow only for a reason written down at the point of
+growth. The reason is inline at the ``LockNotAvailable`` handler in ``init`` —
+this line exists so it is discoverable from the top of a 9,000-line file
+instead of by ``git blame``.
+
+Growth: **9,019 -> 9,058 (+39)** against base ``f8c76c0``; re-derive with
+``git diff master --numstat -- src/brain/cli.py``, never inherit it. It is the
+file's first growth on this branch. What it buys: migration ``028`` introduced
+``SET LOCAL lock_timeout``, so a contended ``brain init`` now aborts instead of
+stalling every reader — and an abort whose only output is a
+``LockNotAvailable`` traceback trades a mysterious hang for a mysterious crash.
+The handler names what holds the lock, that nothing was applied or recorded,
+and the remedy.
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -578,7 +595,29 @@ def init() -> None:
     search_backfill_report: backfill_search.BackfillReport | None = None
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
-        applied = run_migrations(conn)
+        try:
+            applied = run_migrations(conn)
+        except psycopg.errors.LockNotAvailable as e:
+            # A migration asked for ACCESS EXCLUSIVE and gave up rather than
+            # queueing every reader behind it (028+ set `lock_timeout`). The
+            # raw message -- "canceling statement due to lock timeout" -- says
+            # nothing about what was holding the lock, that nothing was
+            # applied, or what to do. All three are knowable here.
+            typer.secho(
+                "init: a migration could not acquire its table lock within 3s "
+                "— another connection is holding a long transaction on this "
+                "database (brain-mcp, `brain vault sync --watch`, or an open "
+                "psql).\n"
+                "  Nothing was applied and nothing was recorded: the migration "
+                "runs in its own transaction and its schema_migrations row is "
+                "written only after it commits. `brain init` is safe to "
+                "re-run.\n"
+                "  Fix: stop the daemon (`brain-down`), then re-run "
+                "`brain init`.",
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(code=1) from e
         ensure_embedding_column(conn, embedder)
         # GraphRAG (wave G0): provision the Apache AGE extension + the canonical
         # ``brain_graph`` graph idempotently, after relational migrations — but

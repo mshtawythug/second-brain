@@ -276,6 +276,107 @@ def test_render_signs_a_more_expensive_mode_as_an_increase() -> None:
     assert "savings -100" not in line
 
 
+def test_render_uses_the_singular_for_a_single_counterfactual_call() -> None:
+    """"over 1 brief call", not "over 1 brief calls".
+
+    Not cosmetic-only: ``counterfactual_calls == 1`` is the shape of a brand-new
+    brain immediately after its first ``--brief`` search, so the singular is the
+    first token line most people ever read. The plural case is pinned by
+    ``test_usage_render_labels_counterfactual_explicitly`` (210 calls), so the
+    two together bracket the boundary.
+    """
+    line = _tokens_line(
+        _report(
+            _totals(
+                searches=1,
+                payload_tokens_total=400,
+                measured_calls=1,
+                baseline_tokens_total=1_000,
+                counterfactual_payload_tokens=400,
+                counterfactual_calls=1,
+            )
+        )
+    )
+
+    assert line is not None
+    assert "over 1 brief call (" in line
+    assert "brief calls" not in line
+
+
+def test_render_never_signs_a_percentage_that_rounds_to_zero() -> None:
+    """A magnitude of zero has no direction — neither "−0.0%" nor "+0.0%".
+
+    Two ways in, one claim. A saving of exactly 0 means the cheaper mode cost
+    precisely what the default would have; a saving too small to survive
+    rounding to a tenth means it cost very nearly that. In both cases
+    ``format(-0.0, "+.1f")`` is ``"-0.0"``, and the U+2212 swap turns it into a
+    minus sign standing in front of a saving of nothing — which a reader
+    reports as a bug in the measurement rather than in the formatter.
+    """
+    exact = _tokens_line(
+        _report(
+            _totals(
+                searches=1,
+                payload_tokens_total=1_000,
+                measured_calls=1,
+                baseline_tokens_total=1_000,
+                counterfactual_payload_tokens=1_000,
+                counterfactual_calls=1,
+            )
+        )
+    )
+    # 2 tokens off a 1,000,000-token baseline: real, and far below a tenth of
+    # a percent.
+    rounds_to_zero = _tokens_line(
+        _report(
+            _totals(
+                searches=1,
+                payload_tokens_total=999_998,
+                measured_calls=1,
+                baseline_tokens_total=1_000_000,
+                counterfactual_payload_tokens=999_998,
+                counterfactual_calls=1,
+            )
+        )
+    )
+
+    for line in (exact, rounds_to_zero):
+        assert line is not None
+        assert "(0.0%)" in line
+        assert "−0.0" not in line
+        assert "+0.0" not in line
+    # The token counts stay exact — only the PERCENTAGE loses its sign.
+    assert "counterfactual savings 0 over 1 brief call" in exact
+    assert "counterfactual savings 2 over 1 brief call" in rounds_to_zero
+
+
+def test_render_keeps_the_minus_on_a_real_saving() -> None:
+    """The zero-sign rule must not defang a genuine one.
+
+    Guards the over-broad fix: stripping the sign unconditionally would make
+    every cheaper mode read "60.0%" and every dearer one the same, which is
+    the direction-blind headline this whole line is shaped to avoid. The
+    dearer side is pinned by
+    ``test_render_signs_a_more_expensive_mode_as_an_increase``.
+    """
+    line = _tokens_line(
+        _report(
+            _totals(
+                searches=1,
+                payload_tokens_total=400,
+                measured_calls=1,
+                baseline_tokens_total=1_000,
+                counterfactual_payload_tokens=400,
+                counterfactual_calls=1,
+            )
+        )
+    )
+
+    assert line is not None
+    assert "(−60.0%)" in line
+    assert "+60.0" not in line
+
+
 def test_cli_prints_the_token_line(
     test_db: psycopg.Connection[Any],
 ) -> None:

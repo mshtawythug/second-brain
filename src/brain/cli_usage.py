@@ -77,12 +77,16 @@ def _tokens_line(report: UsageReport) -> str | None:
     ]
     savings = t.counterfactual_savings_tokens
     if savings is not None:
+        # "over 1 brief call", not "over 1 brief calls". The singular is
+        # reachable in practice — it is the shape of a brand-new brain, and
+        # the first thing anyone sees after their first --brief search.
+        noun = "call" if t.counterfactual_calls == 1 else "calls"
         clause = (
             # A negative saving is a real outcome — a cheaper mode that turned
             # out dearer — and it keeps the same U+2212 minus the percentage
             # uses, rather than mixing an ASCII hyphen into the same clause.
             f"counterfactual savings {savings:,}".replace("-", "−")
-            + f" over {t.counterfactual_calls:,} brief calls"
+            + f" over {t.counterfactual_calls:,} brief {noun}"
         )
         rate = t.counterfactual_savings_rate
         if rate is not None:
@@ -90,7 +94,19 @@ def _tokens_line(report: UsageReport) -> str | None:
             # "−29.4%" and a mode that turned out more expensive reads
             # "+10.0%" instead of being laundered into a saving. U+2212 for
             # the minus, matching the "·" already emitted on the line above.
-            clause += f" ({-rate * 100:+.1f}%)".replace("-", "−")
+            delta = f"{-rate * 100:+.1f}"
+            # ...but a magnitude that RENDERS as zero has no direction, and
+            # `format(-0.0, "+.1f")` is "-0.0" — which the U+2212 swap below
+            # then turns into "−0.0%", a minus sign in front of a saving of
+            # nothing. A reader reports that as a bug in the measurement, not
+            # in the formatter. Two ways in, both closed here: a saving of
+            # exactly 0 (the counterfactual mode cost precisely what the
+            # default would have), and a real saving too small to survive
+            # rounding to a tenth. The magnitude, not the raw rate, decides —
+            # so "+0.0%" cannot appear either.
+            if float(delta) == 0:
+                delta = "0.0"
+            clause += f" ({delta}%)".replace("-", "−")
         parts.append(clause)
     return " · ".join(parts)
 

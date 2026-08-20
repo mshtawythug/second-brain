@@ -218,7 +218,7 @@ commands.
 | `BRAIN_VECTOR_SIM_FLOOR` | `0.25` | Min cosine similarity for a vector-leg candidate to count. See the note below — it trades recall for precision. |
 | `BRAIN_RECENCY_HALFLIFE_DAYS` | `180` | Half-life of the recency boost applied to search scores. |
 | `BRAIN_BACKUP_DIR` | `$BRAIN_HOME/backups` | Where `brain backup` writes archives and `brain restore` discovers them. Absolute or `~`-relative. Resolved lazily, so relocating the brain home relocates its backups; never created until a backup actually runs. |
-| `BRAIN_SHOW_MAX_CONTENT_TOKENS` | `25000` | MCP `brain_show` body cap. A cut payload gains `content_truncated` + `content_tokens`. **`0` = unlimited** (the only knob in this family that accepts it). |
+| `BRAIN_SHOW_MAX_CONTENT_TOKENS` | `25000` | MCP `brain_show` body **and summary** cap. A cut body gains `content_truncated` + `content_tokens` + `content_truncated_recovery`; a cut summary gains `summary_truncated` + `summary_tokens` + `summary_truncated_recovery`. A payload carrying **both** truncated fields is bounded by **2×** this value — see the note below. **`0` = unlimited** (the only knob in this family that accepts it), and it opts both fields out. |
 | `BRAIN_SEARCH_MAX_LIMIT` | `50` | MCP `brain_search` `limit` ceiling; equals the candidate-chunk limit, above which a larger `limit` cannot surface more documents. |
 | `BRAIN_RECALL_MAX_BUDGET_TOKENS` | `13000` | MCP `brain_recall` `budget_tokens` ceiling. See the note below — this is **not** 32000, and the difference is the point. |
 | `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` | `500` | MCP `brain_graphrag_entities` ceiling. `limit=0` now means *this*, no longer "all". |
@@ -233,6 +233,40 @@ live-corpus percentiles, not derived from anything — which is exactly why they
 are env vars, and why exceeding one raises `INVALID_PARAMS` **naming the
 ceiling** instead of trimming quietly. A ceiling that silently truncates is
 worse than no ceiling: the caller reads a partial answer as a complete one.
+
+### `BRAIN_SHOW_MAX_CONTENT_TOKENS` — one knob, two fields, so the real bound is 2×
+
+`brain_show` can return a body and a `summary`, and this knob now caps **both**,
+at the same value, on **every** path — not only under `summary_only=true`.
+
+**Why the summary is capped at all.** `summary_only=true` is the documented
+escape hatch *from* the body ceiling, and it used to hand back a field with no
+ceiling of its own: the cheap mode carried the unbounded payload while the
+expensive one did not. `documents.summary` is short *in practice* only because
+`OllamaEnricher` writes it that way — migration 011 declares it `TEXT` with no
+length constraint. "Only the generator keeps it small, not the schema" is not a
+bound, and a ceiling module whose escape hatch is unbounded does not have a
+ceiling.
+
+**Why every path, not just the escape hatch.** `brain_show` returns `summary`
+alongside a full body too, so capping it only under `summary_only` would leave
+exactly the same hole on the path an ordinary open takes.
+
+**The consequence, stated rather than implied away: a payload carrying a
+truncated body AND a truncated summary is bounded by `2 ×` this value, not by
+this value.** That is the price of keeping one knob instead of two. It is a
+bound where there was none — but if you are sizing a context window against this
+number, size it against twice this number. The same honesty applies as to
+`payload_tokens` elsewhere in this branch: a knob whose name promises one bound
+and whose behaviour delivers another is a defect, so the doubling is documented
+at the knob, in `apply_content_ceiling`'s docstring, and beside the default in
+`config.py`.
+
+Markers are emitted **only when a cut actually happens**, so an ordinary payload
+whose body and summary both fit comes back byte-identical. `summary_truncated_recovery`
+points at the CLI (`brain show <id>`) deliberately: once the summary itself is
+over the ceiling there is no smaller MCP mode left, and pointing back at
+`summary_only` would be a loop.
 
 ### `BRAIN_RECALL_MAX_BUDGET_TOKENS` — why 13000 and not 32000
 

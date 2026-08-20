@@ -19,9 +19,33 @@
 --                     rows stay comparable with each other and with the
 --                     Wave-0 harness — see the note in
 --                     ``scripts/token_payload_report.py`` ("What the number
---                     is"). One exception, and it is a real one: the default
---                     ``brain recall`` output is plain text via
---                     ``typer.echo``, so there the count IS delivered-exact.
+--                     is").
+--
+--                     Read that comparability claim narrowly: it is exact for
+--                     `search`, where both surfaces price the SAME projection.
+--                     For `recall` it holds WITHIN a surface, not across, and
+--                     the differences are in the artifact, not the encoding.
+--                     Three shapes reach this one column:
+--                       * `brain recall` (text) — `context_block()` counted as
+--                         PLAIN TEXT, no JSON. Delivered-exact (`typer.echo`,
+--                         no Rich), the one genuinely exact row here.
+--                       * `brain recall --json` — canonical `to_dict()`, which
+--                         does NOT carry `context_block`.
+--                       * MCP `brain_recall` — canonical `to_dict()` PLUS
+--                         `context_block`, so every passage is counted twice
+--                         and this row is materially larger than the one above
+--                         for the same query. No ratio is quoted because none
+--                         was measured: the ~2.2x on record (config.py,
+--                         `DEFAULT_RECALL_MAX_BUDGET_TOKENS`) is
+--                         payload-vs-`budget_tokens`, NOT MCP-vs-`--json`.
+--                         Do not repurpose it.
+--                     `brain usage`'s "tokens served" sums all three; that is
+--                     a spend total, and it is honest as one. It is NOT a
+--                     per-surface efficiency comparison, and a cross-surface
+--                     recall ratio computed from it measures the shapes rather
+--                     than the retrieval. Each surface's own test pins its own
+--                     definition against real output (e.g.
+--                     `test_recall_persists_the_delivered_payload_not_used_tokens`).
 --                     NULL when not measured (e.g. a human terminal search,
 --                     which delivers a Rich table and not a payload).
 --   baseline_tokens — COUNTERFACTUAL. What the SAME call would have cost in
@@ -47,6 +71,17 @@
 -- neither ALTER rewrites the table.
 
 BEGIN;
+
+-- Fail fast instead of stalling every reader. Both ALTERs below are
+-- catalog-only, so the ACCESS EXCLUSIVE lock is momentary UNLESS something
+-- (brain-mcp, the vault watcher, a long `brain usage` scan) is already
+-- holding ACCESS SHARE on search_queries. Without a timeout the ALTER queues
+-- behind that transaction and every subsequent reader queues behind the
+-- ALTER -- a table-wide stall from a microsecond change. With it, `brain init`
+-- aborts cleanly, the migration is not recorded (the schema_migrations INSERT
+-- is a separate execute AFTER this file), and re-running once the daemon is
+-- stopped re-applies it -- ADD COLUMN IF NOT EXISTS is idempotent.
+SET LOCAL lock_timeout = '3s';
 
 ALTER TABLE search_queries ADD COLUMN IF NOT EXISTS payload_tokens  INT;
 ALTER TABLE search_queries ADD COLUMN IF NOT EXISTS baseline_tokens INT;

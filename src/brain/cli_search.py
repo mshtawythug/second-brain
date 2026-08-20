@@ -27,7 +27,7 @@ from .agent import resolve_agent_id
 from .config import Config
 from .db import connect
 from .durations import since_window
-from .errors import PersonAmbiguous, PersonNotFound
+from .errors import BrainError, PersonAmbiguous, PersonNotFound
 from .facets import SearchFacets, compute_facets
 from .format import console, emit_json, explain_table, search_table
 from .format_search import (
@@ -67,6 +67,43 @@ def _build_embedder(cfg: Config) -> Embedder:
     from . import cli as _cli
 
     return _cli._build_embedder(cfg)  # type: ignore[attr-defined]
+
+
+def _require_priced_projection(
+    projected: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Return the projection that was priced, or fail loudly if there is none.
+
+    ``search``'s ``--json`` path builds the result projection ONCE, prices it
+    into ``diagnostics.results_tokens``, and emits that same object — so the
+    token count persisted to ``search_queries.payload_tokens`` describes the
+    bytes the caller actually got. ``projected`` is therefore non-``None`` on
+    every ``json_output`` path by construction.
+
+    This was a bare ``assert``. ``python -O`` strips ``assert`` outright, so
+    under an optimized interpreter the invariant was unguarded exactly where it
+    matters: the failure mode is not a crash but ``emit_json(None)`` — a
+    ``null`` on stdout for a search that found results, alongside a
+    ``payload_tokens`` row claiming a payload was served. A wrong number that
+    looks measured is the failure this wave exists to prevent, so the check has
+    to survive ``-O``.
+
+    Raises:
+        BrainError: ``projected`` is ``None`` — a caller bug (the pricing block
+            above was skipped or reordered), not user input. Plain
+            :class:`BrainError` for the same reason
+            :func:`brain.db.bootstrap_age` raises a plain one for its
+            autocommit precondition: a caller-bug guard that still has to reach
+            the user as a clean red error and exit 1, not a traceback.
+    """
+    if projected is None:
+        raise BrainError(
+            "internal: --json emit reached without a priced projection; "
+            "the projection is built and priced together so that "
+            "search_queries.payload_tokens describes the bytes actually "
+            "emitted. Refusing to emit an unpriced payload."
+        )
+    return projected
 
 
 def _validate_sensitivity_choice(level: str | None) -> str | None:
@@ -474,8 +511,7 @@ def search(
             # a second, independently-built projection would risk reporting a
             # cost for a payload the caller never got. Non-None on every
             # ``json_output`` path by construction.
-            assert projected is not None
-            emit_json(projected)
+            emit_json(_require_priced_projection(projected))
     elif not results:
         typer.echo("(no results)")
     else:

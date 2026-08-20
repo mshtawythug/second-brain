@@ -6,10 +6,38 @@ ceiling" — which is also where the rule that a file over the ceiling may grow
 only for a reason written down at the point of growth lives; this note is that
 reason). The agentic-token-reduction plan
 allowed a bounded exception to add payload ceilings to six tools with a target
-of **≤ 90 net added lines**. The measured outcome was **+171** — 1.9x over.
-(This note is itself +31, so the file's total Wave-3 diff reads **+202**. Said
-plainly rather than quoting only the flattering number: a disclosure that hides
-its own cost is the thing it exists to prevent.)
+of **≤ 90 net added lines**. The measured outcome was **+171** — 1.9x over,
+which with the 31 lines this note occupied when it was written the plan records
+as a **+202** wave total. Said plainly rather than quoting only the flattering
+number: a disclosure that hides its own cost is the thing it exists to prevent.
+
+**Where those two numbers come from, because git will not give them to you.**
+The branch landed as ONE squashed commit, so there is no Wave-2→Wave-3 boundary
+to diff. ``+171`` and ``+202`` are Wave-3-only figures measured against the
+Wave-2 tree at the time; the coordinator ruling that accepted them, with its
+three independent measurements, is recorded in
+``docs/plans/2026-08-10-agentic-token-reduction.md``. That record is the only
+place they are checkable. What IS derivable is the whole-file net — a larger
+number, because Waves 1, 4 and 5 and the PR-review closeout touched the file
+too::
+
+    git diff master...HEAD --numstat -- src/brain/mcp_server.py
+
+which read **307 / 41 = +266** at ``2c171fb`` and **410 / 51 = +359** at the
+PR-review closeout that follows it (merge base ``f8c76c0`` for both). Two
+figures rather than one because each is bound to the tree it was measured on —
+a single "current" number is what went stale last time. Re-derive it; never
+inherit it. (The closeout's own share is comments, not code: this
+paragraph, the ordering rationale above ``apply_content_ceiling`` in
+``brain_show``, the summary-ceiling clause in its docstring, and the three
+``LIMIT n + 1`` notes on the link tools. Recorded here because the ceiling rule
+asks for a reason at the point of growth, and "comments" is not automatically
+one.)
+
+And note what this note no longer claims: it used to say "this note is itself
++31", and the very next commit edited the note to +34 and left the +31
+standing. A hand-maintained comment that measures itself is stale the first time
+someone improves it, so the self-count is gone and the command is here instead.
 
 That was reviewed and **explicitly accepted**, not absorbed silently. The
 reasoning, so you do not have to reconstruct it:
@@ -224,11 +252,28 @@ _state: _State | None = None
 
 
 def _get_state() -> _State:
-    """Return the initialized server state.
+    """Return the initialized server state, or fail loudly if there is none.
 
-    Raises ``AssertionError`` if called before :func:`main` has run (or before
-    a test has explicitly populated ``_state``)."""
-    assert _state is not None, "mcp_server not initialized — call main() first"
+    Every tool handler in this module reaches its config, connection and
+    embedder through here, so ``_state`` being ``None`` means ``main()`` never
+    ran — a caller bug, not user input.
+
+    This was a bare ``assert``. ``python -O`` strips ``assert`` outright, so
+    under an optimized interpreter the guard vanished and ``None`` flowed on to
+    42 call sites, turning a named "not initialized" failure into an
+    ``AttributeError`` somewhere downstream. The docstring promised
+    ``AssertionError`` and ``test_get_state_without_init_raises`` pinned it —
+    both false under ``-O``, which is a documented contract that does not hold
+    in one of the interpreters it can run under.
+
+    Raises:
+        BrainError: ``_state`` is ``None``. Plain :class:`BrainError` for the
+            same reason :func:`brain.cli_search._require_priced_projection`
+            raises a plain one: a caller-bug guard that still has to reach the
+            user as a clean error rather than a traceback.
+    """
+    if _state is None:
+        raise BrainError("mcp_server not initialized — call main() first")
     return _state
 
 
@@ -685,8 +730,12 @@ def brain_search(
     except EmbedError as e:
         raise _wrap_embed_error(e) from e
     # The two original keys come FIRST and are built exactly as before; the F5
-    # metadata is merged in as additional named keys. ``search_results_json``
-    # is the shared projection the CLI uses, so the two surfaces cannot drift.
+    # metadata is merged in as additional named keys. The projection above is
+    # the shared one the CLI uses — ``search_results_json`` at ``brief=false``
+    # and ``search_results_brief_json`` at ``brief=true`` — so the two surfaces
+    # cannot drift on EITHER setting. Naming both matters: after Wave 1 there
+    # are two projections, and a comment naming only the default would read as
+    # a promise that brief mode does not make.
     return {
         "session_id": session_id,
         # The priced object itself, not a rebuild of it — see above.
@@ -948,8 +997,12 @@ def brain_show(
     ingest-time ``summary`` and ``content=null`` plus ``content_omitted``; when
     the document has no summary it falls back to the body under the normal
     ceiling and sets ``summary_unavailable=true``, because an empty answer to a
-    well-formed request is the worse failure. All of these keys appear ONLY on
-    the paths that produce them, so a normal full-body payload is unchanged.
+    well-formed request is the worse failure. **``summary`` is bounded by the
+    same ceiling** (``summary_truncated`` + ``summary_tokens`` +
+    ``summary_truncated_recovery``) — it is a ``TEXT`` column with no length
+    constraint, so the mode advertised as the cheap one would otherwise be the
+    one with no bound at all. All of these keys appear ONLY on the paths that
+    produce them, so a normal full-body payload is unchanged.
     Confidential withholding runs last and wins over both.
 
     F6 confidentiality: a document marked ``sensitivity='confidential'``
@@ -1075,7 +1128,34 @@ def brain_show(
     # we explicitly do NOT change the brain_search return shape this wave.
     if doc.summary is not None:
         payload["summary"] = doc.summary
-    # Wave 3 — bound the body (summary_only, then the token ceiling).
+    # Wave 3 — bound the body (summary_only, then the token ceiling), and the
+    # summary with it.
+    #
+    # This runs BEFORE the confidential branch below, and that ordering is
+    # deliberate — reviewed and KEPT, not overlooked. The cost is real and was
+    # measured: on the largest live document (266,888 chars / 67,410 tokens) a
+    # confidential open pays a full tiktoken encode plus the binary search
+    # inside ``truncate_to_token_budget`` for a body the confidential branch
+    # below discards outright. Moving the withhold first, or passing
+    # ``max_tokens=0`` when withholding, would save all of it.
+    #
+    # It is not taken because of what it would cost instead. "Withholding wins
+    # over every Wave-3 marker" is currently an ENFORCED invariant: the markers
+    # really are produced, and a stripping step really does remove them, so
+    # deleting ``strip_content_markers`` turns THREE tests in
+    # ``tests/test_mcp_show_ceiling.py`` red, each at the marker it names:
+    # ``…_wins_over_summary_only``, ``…_wins_over_truncation`` and
+    # ``…_strips_the_summary_ceiling_markers`` (re-verified by mutation
+    # 2026-08-20, not inherited from the earlier run). Skip the ceiling
+    # on this path and the invariant becomes STRUCTURAL — true because nothing
+    # generates the markers — which no mutation can redden and no future edit
+    # is warned about. This repo has a long list of guards that did nothing;
+    # trading a proven one for CPU on the rarest path is how that list grows.
+    #
+    # The trade if it is ever revisited: it is CPU-on-confidential-opens versus
+    # mutation coverage of a confidentiality invariant. If confidential opens
+    # ever become hot, move the withhold first AND replace the mutation
+    # coverage — do not just drop it.
     payload = apply_content_ceiling(
         payload,
         summary_only=summary_only,
@@ -1876,7 +1956,15 @@ def brain_backlinks(
     try:
         with _mcp_conn(state) as conn:
             doc_id = _resolve_id(conn, id_prefix)
-            rows = backlinks_for(conn, doc_id)
+            # LOW-3: bound the FETCH, not just the payload. ``+ 1`` is
+            # exactly what ``cap_rows`` needs to still see saturation, and each
+            # block keeps its own ORDER BY with no re-sort afterwards, so the
+            # rows returned are the same prefix an unbounded fetch would give.
+            # Brings these three tools in line with the two graph tools, which
+            # already push ``LIMIT n + 1`` into SQL — a reader who sees the
+            # ceiling applied one way here and another way there will
+            # reasonably assume the DB side is bounded when it is not.
+            rows = backlinks_for(conn, doc_id, fetch_limit=row_limit + 1)
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     capped, saturated = cap_rows(rows, limit=row_limit)
@@ -1921,8 +2009,12 @@ def brain_links(
     try:
         with _mcp_conn(state) as conn:
             doc_id = _resolve_id(conn, id_prefix)
+            # LOW-3 — see ``brain_backlinks``.
             rows = outgoing_links_for(
-                conn, doc_id, include_unresolved=include_unresolved
+                conn,
+                doc_id,
+                include_unresolved=include_unresolved,
+                fetch_limit=row_limit + 1,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -1963,7 +2055,8 @@ def brain_orphans(
     row_limit = _resolve_limit(limit, default=state.cfg.mcp_rows_max_limit)
     try:
         with _mcp_conn(state) as conn:
-            rows = orphans(conn, vault_only=vault_only)
+            # LOW-3 — see ``brain_backlinks``.
+            rows = orphans(conn, vault_only=vault_only, fetch_limit=row_limit + 1)
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     capped, saturated = cap_rows(rows, limit=row_limit)

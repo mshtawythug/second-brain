@@ -385,7 +385,71 @@ dependencies = [
 # UPPER BOUND against a named MEASURED_COVERAGE_CEILING constant (parsed, not
 # substring-matched, unlike the version it replaced) and its failure message
 # states how to re-measure. Move this bound and that constant must move with it.
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.16", "pytest-mock>=3.14", "ruff>=0.7", "mypy>=1.13", "reportlab>=4.0", "types-PyYAML>=6.0"]
+# ---------------------------------------------------------------------------
+# ruff<0.17 / mypy<2.4 — MEASURED 2026-08-20 on feat/agentic-token-reduction.
+#
+# WHY THESE GAINED BOUNDS. Both were unbounded (`ruff>=0.7`, `mypy>=1.13`), and
+# the pre-commit gate in scripts/hooks/pre-commit resolved whichever copy `$PATH`
+# found first. On this machine that was Homebrew's `/opt/homebrew/bin/ruff` for
+# ruff and — because mypy had no global install — NOTHING for mypy, so the local
+# type gate silently skipped on every commit for the life of the branch. The two
+# halves of that bug were hiding each other: ruff's skew never fired because the
+# versions coincidentally matched, and mypy's skew never fired because mypy never
+# ran. The hook now resolves the repo `.venv` first, which fixes the resolution.
+# These bounds fix the other half — that "whichever version" was unconstrained in
+# the first place.
+#
+# WHAT WAS MEASURED, and it is not the version this repo's .venv happens to hold.
+# A fresh `pip install -e ".[dev]"` into a scratch 3.11.15 venv — the exact
+# command ci.yml runs — resolved **ruff 0.16.4** and **mypy 2.3.1**, while the
+# repo .venv held **ruff 0.16.3** and **mypy 2.3.0**. That divergence is not
+# hypothetical or future: it exists right now, and it is what an unbounded `>=`
+# buys. Both pairs were then run against this tree back to back:
+#
+#   ruff 0.16.4  `ruff check` -> exit 0, "All checks passed!"
+#   ruff 0.16.3  `ruff check` -> exit 0, output byte-identical (diff empty)
+#   mypy 2.3.1   `mypy src/`  -> exit 0, "no issues found in 214 source files"
+#   mypy 2.3.0   `mypy src/`  -> exit 0, output byte-identical (diff empty)
+#
+# Same tree, same second, only the version differing — so "green" here is a
+# controlled comparison, not two absolute runs that might have measured two
+# different trees. 0.16.4 and 2.3.1 are the newest releases on PyPI as of
+# 2026-08-20 (`pip index versions`), so the caps are the next unreleased minor
+# above the newest MEASURED release, the same rule the `coverage<7.16` block
+# above states. Not a claim that 0.17 or 2.4 breaks — a requirement that the
+# next minor be measured before it silently becomes the local gate. For ruff,
+# 0.x minors ARE its breaking-change unit (new rules and rule-behaviour changes
+# land there), so 0.17 is the right granularity rather than a patch cap.
+#
+# THE FLOORS ARE LEFT ALONE, AND THAT IS A GAP, NOT A JUDGEMENT. `mypy>=1.13`
+# admits a version TWO MAJORS below the 2.3.1 that is actually resolved; the
+# floor never noticed 1.x -> 2.x happening. Whether this tree still type-checks
+# under 1.13 is UNMEASURED — nobody has run it, and this block will not pretend
+# otherwise. What would settle it: install 1.13 in a scratch venv, run
+# `mypy src/`, and either raise the floor to the oldest version that passes or
+# record what it fails on. Same for `ruff>=0.7`.
+#
+# WHAT THIS DOES NOT FIX — read before treating the divergence as closed. CI
+# still runs a fresh `pip install -e ".[dev]"` (ci.yml, the `lint` job) and
+# therefore resolves at run time, while a developer's `.venv` holds whatever was
+# installed when it was last built. A bound NARROWS that window to within one
+# minor; it does NOT eliminate it. The measurement above is the proof that the
+# window is real: 0.16.3 vs 0.16.4 on the same day, from the same specifier.
+# Only a lockfile closes it completely, and that is a larger change than the PR
+# introducing these bounds should carry. REVISIT IF: a lint or type failure ever
+# reproduces in CI but not locally (or vice versa) on an unchanged tree — that is
+# the symptom a lockfile would prevent and a bound only narrows.
+#
+# NOT CAPPED HERE, recorded so the omission reads as scope rather than oversight:
+# `pytest`, `pytest-cov`, `pytest-mock`, `reportlab` and `types-PyYAML` are also
+# unbounded. They were not measured in this pass and are not capped on a guess —
+# this pin closes the gate-tool gap that the pre-commit bug exposed. Capping them
+# needs its own measurement and its own evidence block.
+#
+# Self-enforced by tests/test_dev_dependency_pins.py against the named constants
+# MEASURED_RUFF_CEILING / MEASURED_MYPY_CEILING, parsed from the specifier rather
+# than substring-matched. Move a bound here and that constant must move with it.
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.16", "pytest-mock>=3.14", "ruff>=0.7,<0.17", "mypy>=1.13,<2.4", "reportlab>=4.0", "types-PyYAML>=6.0"]
 
 [project.scripts]
 brain = "brain.cli:app"

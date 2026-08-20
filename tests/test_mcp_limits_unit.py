@@ -237,11 +237,12 @@ def test_every_key_apply_content_ceiling_adds_is_declared_in_content_markers() -
     ``==`` (not ``<=``) makes this bidirectional, so it also fails a marker that
     is declared but no branch can ever emit.
     """
-    base = {"id": "x", "content": "z" * 4000, "summary": "s"}
-    small = {**base, "content": "z" * 8}
+    base = {"id": "x", "content": "z" * 4000, "summary": "s" * 4000}
+    small = {**base, "content": "z" * 8, "summary": "s" * 8}
 
     added: set[str] = set()
     truncating_arms = 0
+    summary_truncating_arms = 0
     for summary_only in (False, True):
         for has_summary in (False, True):
             for payload, max_tokens in ((base, 10), (small, 10_000)):
@@ -255,12 +256,20 @@ def test_every_key_apply_content_ceiling_adds_is_declared_in_content_markers() -
                 new_keys = set(out) - set(payload)
                 added |= new_keys
                 truncating_arms += "content_truncated" in new_keys
+                summary_truncating_arms += "summary_truncated" in new_keys
 
-    # Guard the guard, two ways. Without these, a function that returned its
+    # Guard the guard, three ways. Without these, a function that returned its
     # input unchanged — or one whose truncation branch had become unreachable —
-    # would satisfy the assertion below by emitting nothing at all.
+    # would satisfy the assertion below by emitting nothing at all. The summary
+    # arm is counted separately because a long ``summary`` is what makes the
+    # summary-ceiling markers reachable at all; if that fixture were ever
+    # shortened back to ``"s"``, the ``==`` below would start failing for the
+    # confusing reason ("declared but never emitted") rather than this clear one.
     assert added, "no branch added any key; the arms below assert nothing"
     assert truncating_arms, "no arm truncated; the truncation markers are untested"
+    assert summary_truncating_arms, (
+        "no arm truncated a summary; the summary-ceiling markers are untested"
+    )
 
     assert added == set(CONTENT_MARKERS), (
         "apply_content_ceiling emits keys CONTENT_MARKERS does not declare "
@@ -268,6 +277,58 @@ def test_every_key_apply_content_ceiling_adds_is_declared_in_content_markers() -
         "brain_show would leak them past strip_content_markers. Declared but "
         f"never emitted: {sorted(set(CONTENT_MARKERS) - added)}"
     )
+
+
+def test_apply_content_ceiling_bounds_the_summary_under_summary_only() -> None:
+    """N7: the escape hatch FROM the body ceiling must have a ceiling itself.
+
+    ``summary_only=true`` is the cheap mode. Before this, it returned
+    ``documents.summary`` verbatim — a ``TEXT`` column with no length
+    constraint in migration 011 — so the cheap mode was the one with the
+    unbounded payload.
+    """
+    payload = {"content": "b" * 4000, "summary": "s" * 4000}
+
+    out = apply_content_ceiling(
+        payload, summary_only=True, has_summary=True, max_tokens=10, cost=_cost
+    )
+
+    assert out["content"] is None
+    assert out["summary_truncated"] is True
+    assert len(out["summary"]) < len(payload["summary"])
+    # The count describes the string RETURNED, matching ``truncate_content``'s
+    # contract — a caller reporting it is reporting what it actually got.
+    assert out["summary_tokens"] == _cost(out["summary"])
+    assert "brain show" in out["summary_truncated_recovery"]
+
+
+def test_apply_content_ceiling_bounds_the_summary_on_the_default_path_too() -> None:
+    """Not only under ``summary_only``: ``brain_show`` returns both fields.
+
+    Capping the summary only under the escape hatch would leave the identical
+    hole on the path every ordinary open takes.
+    """
+    payload = {"content": "b" * 8, "summary": "s" * 4000}
+
+    out = apply_content_ceiling(
+        payload, summary_only=False, has_summary=True, max_tokens=10, cost=_cost
+    )
+
+    assert out["content"] == "b" * 8, "the body was under the ceiling; leave it alone"
+    assert out["summary_truncated"] is True
+    assert out["summary_tokens"] == _cost(out["summary"])
+
+
+def test_a_short_summary_is_left_byte_identical() -> None:
+    """The additive guarantee: no marker rides out when nothing was cut."""
+    payload = {"id": "x", "content": "short", "summary": "also short"}
+
+    out = apply_content_ceiling(
+        payload, summary_only=False, has_summary=True, max_tokens=10_000, cost=_cost
+    )
+
+    assert out == payload
+    assert not (set(out) & set(CONTENT_MARKERS))
 
 
 def test_strip_content_markers_removes_every_marker_and_nothing_else() -> None:
