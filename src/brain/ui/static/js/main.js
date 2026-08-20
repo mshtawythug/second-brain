@@ -132,7 +132,8 @@ function onPopState() {
   if (state.selectedId) openNote(state.selectedId);
   /* UNCONDITIONAL, and the missing `if (state.q)` was a real bug caught in
      review. runSearch() already clears the ledger and returns to `idle` when
-     the query is empty (results.js:128), so calling it covers Back to a state
+     the query is empty (results.js, `runSearch`'s first line: an empty `state.q`
+     dispatches `results: []` and returns), so calling it covers Back to a state
      with no query too. Guarding it here left the PREVIOUS result list on screen
      under an empty search box and an id-less URL — a ledger describing a search
      the address bar no longer says was made, which is worse than a stale note

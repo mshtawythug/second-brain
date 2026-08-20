@@ -738,12 +738,18 @@ def test_summary_html_escapes_angle_bracketed_email() -> None:
         "expected the unescaped form `<summary>...<email>...</summary>` "
         "to be absent (browser would strip the email as a fake HTML tag)"
     )
-    # The latest message is rendered as a plain H2 — markdown
-    # auto-linking handles the angle-bracketed email there, so the
-    # H2 form intentionally keeps the unescaped shape.
+    # The latest message is rendered as a plain H2, and it is escaped the SAME
+    # way. This assertion previously required the opposite — "the H2 form
+    # intentionally keeps the unescaped shape ... for markdown autolink" — and
+    # that rationale was wrong on its own terms: the autolink does not render
+    # the address, it replaces it, dropping the angle brackets and emitting a
+    # `mailto:` anchor, so one document spelled one address two ways (#57).
+    # Measured with `render_markdown` before the change:
+    #     <summary>… Pat Morgan &lt;pat@example.test&gt;</summary>
+    #     <h2>… Pat Morgan <a href="mailto:pat@example.test">pat@example.test</a></h2>
     assert (
-        "## 2026-02-25 00:33 — Bob <bob@example.com>" in doc.content
-    ), "latest H2 should keep the unescaped form for markdown autolink"
+        "## 2026-02-25 00:33 — Bob &lt;bob@example.com&gt;" in doc.content
+    ), "the newest message's H2 must escape the address exactly as <summary> does"
 
 
 def test_to_extracted_thread_all_draft_assembles_with_flag() -> None:
@@ -787,3 +793,71 @@ def test_to_extracted_thread_all_draft_assembles_with_flag() -> None:
     # Both draft bodies appear in the assembled content.
     assert "draft body 1" in doc.content
     assert "draft body 2" in doc.content
+
+
+def test_the_newest_h2_spells_the_address_the_way_the_summary_does() -> None:
+    """Defect #57: one address, one document, two spellings.
+
+    ``_format_thread_section`` escaped the ``<summary>`` heading and left the
+    newest message's ``## H2`` heading raw, so a thread in which the same person
+    sent both an older and the newest message carried that person's address in
+    two different forms in a single body. Rendered (measured through
+    ``brain.ui.render.render_markdown``) the divergence is visible rather than
+    cosmetic: the summary shows ``Pat Morgan <pat@example.test>`` as text, while
+    CommonMark reads the raw ``<pat@example.test>`` as an email autolink and the
+    H2 shows a ``mailto:`` anchor with the brackets gone.
+
+    The fix escapes BOTH headings. This test pins the property that matters —
+    the two headings agree — rather than either spelling on its own, because an
+    assertion on one heading alone goes green for the wrong reason the moment
+    the other one moves.
+    """
+    sender = "Pat Morgan <pat@example.test>"
+    msgs = [
+        _make_message(
+            msg_id="m1",
+            internal_date="1000",
+            headers={
+                "Subject": "x",
+                "From": sender,
+                "Date": "Tue, 24 Feb 2026 17:11:00 -0500",
+            },
+            body_text="OLDER body",
+        ),
+        _make_message(
+            msg_id="m2",
+            internal_date="2000",
+            headers={
+                "Subject": "Re: x",
+                "From": sender,
+                "Date": "Tue, 24 Feb 2026 19:33:00 -0500",
+            },
+            body_text="LATEST body",
+        ),
+    ]
+    doc = to_extracted_thread(msgs)
+
+    summary_lines = [
+        line for line in doc.content.splitlines() if line.startswith("<summary>")
+    ]
+    h2_lines = [line for line in doc.content.splitlines() if line.startswith("## ")]
+    # Anti-vacuity: a fixture that stopped producing one of the two shapes would
+    # make the comparison below trivially true over an empty pair.
+    assert len(summary_lines) == 1, f"expected one <summary>, got {summary_lines}"
+    assert len(h2_lines) == 1, f"expected one H2, got {h2_lines}"
+
+    escaped = "Pat Morgan &lt;pat@example.test&gt;"
+    assert escaped in summary_lines[0], (
+        f"the summary stopped escaping the address: {summary_lines[0]!r}"
+    )
+    assert escaped in h2_lines[0], (
+        "the newest message's H2 spells the sender differently from the "
+        f"<summary> that carries the SAME address: {h2_lines[0]!r} — CommonMark "
+        "reads the raw form as an email autolink, so one document renders one "
+        "address two ways (defect #57)"
+    )
+    assert sender not in doc.content, (
+        "the raw `Name <addr>` form survives somewhere in the assembled thread; "
+        "under a raw-HTML-passthrough renderer that is an injection vector, and "
+        "under CommonMark it is an autolink"
+    )

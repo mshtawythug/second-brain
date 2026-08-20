@@ -175,6 +175,11 @@ kbd.hint {
    in layout.css. What follows is only what goes INSIDE it. */
 
 .empty, .error-state { color: var(--ink-muted); font-style: italic; }
+/* The end-of-ranked-results note (#27). Shares the muted voice of the
+   empty state — it is an explanation, not a result — but keeps its own
+   selector so it can gain a rule (a top border, say) without dragging
+   the empty and error states along with it. */
+.ledger-note { color: var(--ink-muted); font-style: italic; padding: var(--space-3, 0.75rem) 0; }
 .note-title { font-size: var(--t-h1); font-family: var(--font-read); line-height: 1.15; }
 .note-bar {
   display: flex; align-items: center; gap: var(--s-3);

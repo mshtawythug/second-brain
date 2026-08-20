@@ -10,8 +10,11 @@ inherited):
 
 * ``search.py:155 CANDIDATE_LIMIT = 50`` bounds **both** ranking legs'
   candidate pools. Neither leg's ``LIMIT`` mentions the caller's ``limit``.
-* ``search.py:761 return results[:effective_limit]`` is the only place
+* ``search.py:764 return results[:effective_limit]`` is the only place
   ``limit`` is applied — a truncation of the fully-sorted list, last.
+  (Re-derived 2026-08-20: this said 761, which was three lines stale. The
+  citation is kept because the exact statement is the claim; it is checked by
+  re-deriving it, never by inheriting it.)
 
 So ``search(limit=o+n)[o:]`` returns the same rows, in the same order, that a
 real ``OFFSET o LIMIT n`` would. The assertions below are relative comparisons
@@ -232,3 +235,108 @@ def test_the_offset_ceiling_is_derived_from_the_candidate_pool(
     from brain.ui import schemas
 
     assert schemas.MAX_OFFSET == 2 * CANDIDATE_LIMIT
+
+
+def test_an_empty_page_past_the_ranked_ceiling_reports_ceiling_not_exhaustion(
+    client: TestClient, ranked_corpus: list[str]
+) -> None:
+    """Defect #27, end to end against a real ranking.
+
+    ``SEEDED_DOCS`` documents match ``TERM`` and the FTS leg's candidate pool is
+    bounded at ``CANDIDATE_LIMIT`` chunks, so the ranked set is strictly smaller
+    than the match total. A page starting past the ranked set is empty — and
+    before this key, an empty page carrying ``total_documents`` in the sixties
+    was the ONLY thing a client got. The ledger rendered it as "No notes
+    matched", which is false in the one direction that matters: it tells a
+    reader whose query matched everything to go and broaden it.
+
+    Run ``fts_only`` so the assertion is about the ceiling and not about
+    whichever near-neighbours a vector leg happened to add.
+    """
+    deep = _page(client, limit=PAGE, offset=2 * PAGE)
+
+    # Anti-vacuity, in the order the claims depend on each other. Without the
+    # first two, "status == ceiling" could be true of a corpus that never
+    # overflowed anything.
+    assert deep["total_documents"] == SEEDED_DOCS, (
+        f"the seed changed: {deep['total_documents']} documents match {TERM!r}, "
+        f"expected {SEEDED_DOCS}"
+    )
+    ranked = deep["ranking"]["ranked_documents"]
+    assert ranked < deep["total_documents"], (
+        f"the ranked set ({ranked}) covers every match ({deep['total_documents']}), "
+        "so there is no ceiling here and this test proves nothing — seed more "
+        "documents than CANDIDATE_LIMIT can rank"
+    )
+    assert deep["results"] == [], (
+        f"expected an empty page at offset {2 * PAGE} over a ranked set of "
+        f"{ranked}; got {len(deep['results'])} rows"
+    )
+
+    assert deep["ranking"]["status"] == "ceiling", (
+        "an empty page past the ranked ceiling reported "
+        f"{deep['ranking']['status']!r} — 'exhausted' here tells the reader "
+        f"they have seen all {deep['total_documents']} matches when they have "
+        f"seen at most {ranked}"
+    )
+    assert deep["ranking"]["max_ranked_documents"] == 2 * CANDIDATE_LIMIT
+
+    # ``ranked_documents`` IS A FACT ABOUT THE RANKER, NOT ABOUT THIS SLICE, and
+    # this assertion is here because a mutation proved the rest of the test
+    # could not tell the difference. Wiring it to ``len(page)`` instead of
+    # ``len(results)`` left every assertion above green: on this page the slice
+    # is empty, and 0 is still "fewer than the ranked set" and still "fewer than
+    # the total", so the status came out ``ceiling`` for the wrong reason.
+    # The page is EMPTY and the ranked count must still be positive.
+    assert ranked > 0, (
+        f"the page is empty yet `ranked_documents` is {ranked} — the count is "
+        "reporting the size of this slice rather than the size of the ranking, "
+        "so the ledger would tell the reader 0 of "
+        f"{deep['total_documents']} were ranked"
+    )
+
+
+def test_a_middle_page_with_ranked_rows_after_it_reports_more(
+    client: TestClient, ranked_corpus: list[str]
+) -> None:
+    """The third state, and the second half of the mutation that got away.
+
+    Page 2 of a ranking that runs past it is ``more`` — there are further ranked
+    rows, the ceiling has nothing to do with this page. Reading the count off
+    the SLICE rather than off the ranking flips this to ``ceiling``, because a
+    25-row slice is smaller than a 50-row over-fetch, and the ledger would then
+    print an end-of-results note in the middle of a result set.
+    """
+    middle = _page(client, limit=PAGE, offset=PAGE)
+
+    assert len(middle["results"]) == PAGE, (
+        "page 2 did not fill; there is no 'middle' here and the claim below is "
+        "not the one being tested"
+    )
+    assert middle["ranking"]["status"] == "more", (
+        f"page 2 reported {middle['ranking']['status']!r} while returning a "
+        "full page of rows"
+    )
+    assert middle["ranking"]["ranked_documents"] == 2 * PAGE, (
+        "the over-fetch for page 2 is offset+limit rows and it filled, so the "
+        "ranked count is that whole over-fetch — not the "
+        f"{len(middle['results'])} rows this page shows"
+    )
+
+
+def test_a_first_page_that_fills_its_over_fetch_reports_more(
+    client: TestClient, ranked_corpus: list[str]
+) -> None:
+    """The other side of the gate, so 'ceiling' is not simply what this route
+    always says.
+
+    A boolean that only ever takes one value is indistinguishable from a
+    constant, and a constant explains nothing.
+    """
+    first = _page(client, limit=PAGE, offset=0)
+
+    assert len(first["results"]) == PAGE, (
+        "the first page did not fill, so 'more' is not the state under test"
+    )
+    assert first["ranking"]["status"] == "more"
+    assert first["ranking"]["ranked_documents"] == PAGE

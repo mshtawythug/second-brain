@@ -407,8 +407,10 @@ def _format_thread_section(msg: dict[str, Any], *, collapsed: bool) -> str:
     modern browser.
 
     Date format is ``YYYY-MM-DD HH:MM`` in UTC. The ``from`` value is the
-    raw header (``"Name <email>"``) for fidelity. Each message body passes
-    through :func:`strip_boilerplate` first.
+    header as sent (``"Name <email>"``) for fidelity, HTML-escaped on BOTH
+    paths — see the comment on ``escaped_heading`` for why the H2 is not the
+    exception it used to be. Each message body passes through
+    :func:`strip_boilerplate` first.
     """
     payload = msg.get("payload") or {}
     headers = _headers_to_dict(payload.get("headers") or [])
@@ -424,26 +426,42 @@ def _format_thread_section(msg: dict[str, Any], *, collapsed: bool) -> str:
 
     body = strip_boilerplate(_extract_body(payload).strip())
     heading = f"{date_label} — {raw_from}"
+    # ONE ESCAPE, BOTH HEADINGS — and the "both" is defect #57's fix.
+    #
+    # Gmail headers routinely carry the From in `Name <email@addr>` form.
+    #
+    # For the ``<summary>`` (P4.4): markdown processors treat a raw HTML block
+    # like ``<details>...</details>`` as opaque pass-through, so the BROWSER
+    # parses the inner ``<summary>Name <email@addr></summary>`` and treats
+    # ``<email@addr>`` as an unknown tag, silently dropping it from the rendered
+    # text. That also broke the "Show only my replies" filter, which reads
+    # ``summary.textContent`` and matches it against the owner's address.
+    #
+    # For the ``## H2``: this used to be emitted RAW, on the stated grounds that
+    # "markdown auto-linking handles the angle-bracketed email there". Measured
+    # through ``brain.ui.render.render_markdown``, that is not what autolinking
+    # does — it REPLACES the address with ``<a href="mailto:…">addr</a>`` and
+    # the brackets are gone. So a thread in which the same person sent both an
+    # older and the newest message rendered that one address two ways in one
+    # document: bracketed text in the summary, a bare mailto anchor in the H2.
+    # Under a raw-HTML-passthrough renderer the same rawness is an injection
+    # seam rather than a cosmetic one, which is why the raw path is the defect
+    # and the escaped path is not "also broken".
+    #
+    # Hoisted above the branch rather than duplicated inside it: two call sites
+    # applying the same escape is exactly how the two drifted apart in the first
+    # place.
+    #
+    # ``quote=False`` because neither heading is ever placed inside a
+    # quote-delimited attribute — ``<summary>`` and ``## `` are both content
+    # positions.
+    #
+    # The anchor id ``brain.ui.render`` mints is UNCHANGED by this, measured on
+    # both forms: the slugger drops the punctuation the two spellings differ in,
+    # so the TOC keeps pointing at the same id (defect S4 stays fixed).
+    escaped_heading = html.escape(heading, quote=False)
 
     if collapsed:
-        # P4.4 fix: HTML-escape the summary content. Gmail headers
-        # routinely carry the From in `Name <email@addr>` form, and
-        # markdown processors (Quartz / CommonMark) treat raw HTML
-        # blocks like ``<details>...</details>`` as opaque pass-
-        # through. The browser then parses the inner ``<summary>Name
-        # <email@addr></summary>`` and treats ``<email@addr>`` as an
-        # unknown HTML tag — silently stripping it from the rendered
-        # text. Escaping ``<`` / ``>`` / ``&`` keeps the address
-        # visible in the rendered summary AND keeps the email
-        # substring available to the P4.4 "Show only my replies"
-        # JS filter (which reads ``summary.textContent`` and matches
-        # against ``window.BRAIN_USER_EMAIL``). Without the escape,
-        # the user's own historical replies inside ``<details>``
-        # mismatch the filter and stay visible when the toggle is on.
-        # Apply ``quote=False`` so single/double quotes pass through
-        # — the surrounding HTML uses no quote-delimited attributes
-        # on ``<summary>``.
-        escaped_heading = html.escape(heading, quote=False)
         # Blank lines around the body are required for markdown processors
         # (and Quartz) to render the inner content as markdown rather than
         # a single HTML block.
@@ -455,7 +473,7 @@ def _format_thread_section(msg: dict[str, Any], *, collapsed: bool) -> str:
             f"\n"
             f"</details>"
         )
-    return f"## {heading}\n\n{body}"
+    return f"## {escaped_heading}\n\n{body}"
 
 
 def to_extracted_thread(messages: list[dict[str, Any]]) -> ExtractedDoc:

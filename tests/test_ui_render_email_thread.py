@@ -38,23 +38,32 @@ from brain.ui.render import extract_headings, render_markdown
 pytestmark = pytest.mark.nodb
 
 #: Exactly the shape ``ingest/gmail.py::_format_thread_section`` emits, including
-#: its ``html.escape(heading, quote=False)`` on the summary — which is why the
-#: addresses below appear as ``&lt;…&gt;`` in the source. Reproduced rather than
-#: imported because a test that calls the producer cannot notice the producer
-#: changing shape; this is the contract as it exists on disk today.
+#: its ``html.escape(heading, quote=False)`` — which is why the addresses below
+#: appear as ``&lt;…&gt;`` in the source. That escape now covers BOTH headings:
+#: the ``<summary>`` of every collapsed message AND the newest message's ``## H2``
+#: (defect #57, fixed; the H2 was raw, so CommonMark autolinked it and one
+#: document spelled one address two ways). Reproduced rather than imported
+#: because a test that calls the producer cannot notice the producer changing
+#: shape; this is the contract as it exists on disk today.
 #: OLDEST FIRST, NEWEST LAST — and that order was CORRECTED after being
 #: VERIFIED BY RUNNING THE PRODUCER, not by reading it and not by trusting the
 #: Quartz overlay.
 #:
 #: `to_extracted_thread` sorts ascending by `internalDate` and passes
-#: `collapsed=(idx != last_idx)` (gmail.py:546-549), so the plain `## H2` is the
-#: LAST section, after every `<details>`. An earlier revision of this fixture
-#: put the H2 first while its docstring claimed to be "the contract as it exists
-#: on disk today"; it was not. `quartz/static/emailThread.js:24` makes the same
-#: claim — "a leading `<h2>`" — and two independent sources agreeing is exactly
-#: how a false belief becomes credible. The overlay survives it by scanning to
-#: end-of-article; a FIXTURE cannot, because any order-dependent assertion on it
-#: would be asserting against a shape the corpus never produces.
+#: `collapsed=(idx != last_idx)` (the `sections = [...]` comprehension in
+#: `gmail.py`; cited by name because the line number has already moved once),
+#: so the plain `## H2` is the LAST section, after every `<details>`. An earlier
+#: revision of this fixture put the H2 first while its docstring claimed to be
+#: "the contract as it exists on disk today"; it was not.
+#: `quartz/static/emailThread.js` used to make the same claim in its header —
+#: "a leading `<h2>`" — and two independent sources agreeing is exactly how a
+#: false belief becomes credible. That comment has since been corrected at the
+#: source, and the ordering is now held by an executable assertion
+#: (`tests/test_gmail_thread.py::test_most_recent_message_not_collapsed`,
+#: `last_h2 > last_details`) rather than by any prose. The overlay survived the
+#: error by scanning to end-of-article; a FIXTURE cannot, because any
+#: order-dependent assertion on it would be asserting against a shape the corpus
+#: never produces.
 #:
 #: Established by calling `to_extracted_thread` on three synthetic messages and
 #: reading the marker lines out of the result:
@@ -73,7 +82,7 @@ An earlier message, collapsed by default.
 
 </details>
 
-## 2026-03-09 12:00 — Dana Vendor <dana@example.test>
+## 2026-03-09 12:00 — Dana Vendor &lt;dana@example.test&gt;
 
 The latest reply, always expanded.
 """
@@ -249,18 +258,25 @@ def test_the_newest_message_stays_a_heading_and_stays_in_the_toc() -> None:
     (The plan's acceptance line says "newest is `open`". Taken literally that
     describes a state the corpus cannot produce; see the task notes.)
 
-    THE ANGLE BRACKETS ARE DELIBERATELY NOT ASSERTED, and that is a correction
-    rather than a weakening. ``gmail.py`` escapes the summary heading of
-    collapsed messages (:446) but emits the newest message's H2 UNESCAPED
-    (:458), so CommonMark reads ``<dana@example.test>`` as an email autolink and
-    the brackets are gone from both the rendered heading and
-    ``extract_headings``. That is defect #57 — a producer asymmetry in which the
-    same address renders two ways in one document — and it PREDATES this task:
-    measured by rendering an H2-only fixture containing no ``<details>`` at all,
-    where this rule cannot fire, and getting the identical bracket-free text.
-    Asserting the bracketed form here would encode a producer bug as the
-    expected result and would go green only when #57 is fixed in a file T18 was
-    explicitly ruled out of touching.
+    THE ANGLE BRACKETS ARE STILL NOT ASSERTED HERE, and the reason has changed.
+    They used to be absent because ``gmail.py`` emitted the newest message's H2
+    UNESCAPED, so CommonMark read ``<dana@example.test>`` as an email autolink
+    and stripped the brackets from both the rendered heading and
+    ``extract_headings`` — defect #57, a producer asymmetry in which the same
+    address rendered two ways in one document. #57 is now FIXED: the producer
+    escapes both headings, the fixture above carries ``&lt;…&gt;``, and the
+    brackets survive into ``extract_headings``.
+
+    They stay unasserted because this test is about T5 non-disturbance — one
+    heading, in the TOC, with an anchor — and the bracket form is
+    :mod:`tests.test_gmail_thread`'s contract to hold, at the producer, where a
+    regression would actually originate. Asserting it in two places would mean
+    two places to update and only one of them named in the failure.
+
+    The anchor id is unchanged by the escape, which was MEASURED rather than
+    assumed: both the raw and the escaped heading slug to
+    ``2026-03-09-12-00-dana-vendor-dana-example-test``, because the slugger
+    drops the punctuation that the two forms differ in.
     """
     html = render_markdown(THREAD)
     headings = extract_headings(THREAD)

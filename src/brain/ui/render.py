@@ -532,8 +532,11 @@ def _thread_html_rule(state: Any, start_line: int, end_line: int, silent: bool) 
             open_token.block = True
 
             # EXACTLY ONE LEVEL OF ESCAPING, and getting this wrong is visible.
-            # The assembler already escaped the heading (gmail.py:446) so the
-            # `Name <addr>` form would survive Quartz's pass-through. Emitting
+            # The assembler already escaped the heading (`gmail.py`'s
+            # `_format_thread_section`, the `escaped_heading` binding — named
+            # rather than cited by line, because that line has already moved
+            # once) so the `Name <addr>` form would survive Quartz's
+            # pass-through. Emitting
             # that text unchanged through the renderer's own escaper yields
             # `&amp;lt;` and the reader sees the entity spelled out. So it is
             # unescaped once here and escaped once on the way out.

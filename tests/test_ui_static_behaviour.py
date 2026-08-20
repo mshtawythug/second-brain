@@ -197,7 +197,7 @@ ALL_CSS = "\n".join(CSS[name] for name in CSS_ORDER)
 #: Until then: a new module MUST be added to this tuple in the same change that
 #: creates it.
 JS_ORDER = (
-    "dom.js", "api.js", "store.js",
+    "dom.js", "api.js", "store.js", "ledger_status.js",
     "inspector.js", "tree.js", "results.js", "keys.js",
     "palette.js", "marginalia.js", "discovery.js",
     "thread.js", "main.js",

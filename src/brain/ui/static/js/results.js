@@ -4,6 +4,7 @@ import { api } from "/static/js/api.js";
 import { $, el } from "/static/js/dom.js";
 import { dispatch, state } from "/static/js/store.js";
 import { openNote } from "/static/js/inspector.js";
+import { ceilingNote, emptyLedgerMessage } from "/static/js/ledger_status.js";
 
 /* The source vocabulary, PORTED from `quartz/util/sourceIcons.ts` rather than
    invented here. Four overlay components already share that table (Search,
@@ -50,7 +51,13 @@ export function renderResults() {
   $("meta-sub").textContent = parts.join(" · ");
 
   if (state.results.length === 0) {
-    host.appendChild(el("li", "empty", "No notes matched. Try fewer filters."));
+    /* WHICH empty page this is (#27). Both ranking legs cap their candidate
+       pools independently of the caller's limit, so a page can be empty because
+       the ranker stopped looking rather than because nothing matched — and the
+       hardcoded sentence that used to live here told the second reader to go
+       and broaden a query that was already over-matching. The server says which
+       ending happened; `ledger_status.js` only picks the words. */
+    host.appendChild(el("li", "empty", emptyLedgerMessage(meta)));
     return;
   }
 
@@ -114,6 +121,14 @@ export function renderResults() {
     item.appendChild(row);
     host.appendChild(item);
   }
+
+  /* The ceiling is also reachable on a PARTIALLY filled last page — 87 ranked,
+     a page starting at 75, twelve rows and no more to come. That page is not
+     empty, so the branch above never sees it, and without this line it would
+     read as an ordinary end of list. Empty string when there is nothing to
+     say, so an ordinary result set gains no row. */
+  const note = ceilingNote(meta);
+  if (note) host.appendChild(el("li", "ledger-note", note));
 }
 
 let searchTimer = null;

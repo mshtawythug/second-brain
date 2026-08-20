@@ -29,7 +29,7 @@ from ..sensitivity import DEFAULT_SENSITIVITY
 from . import telemetry
 from ._http import context_of, db_guard, ok
 from .errors import UiBadRequest, UiUnavailable
-from .schemas import parse_search_params, search_result_payload
+from .schemas import parse_search_params, ranking_payload, search_result_payload
 
 
 async def search(request: Request) -> JSONResponse:
@@ -113,6 +113,22 @@ async def search(request: Request) -> JSONResponse:
             # next page can exist at all.
             "offset": spec.offset,
             "limit": spec.limit,
+            # WHY THIS PAGE ENDED (#27). ``total_documents`` alone cannot say:
+            # both ranking legs bound their candidate pools at
+            # ``CANDIDATE_LIMIT`` regardless of the caller's ``limit``, so a
+            # query matching 544 documents still ranks at most
+            # ``2 * CANDIDATE_LIMIT`` of them and every page past that is empty
+            # — indistinguishable, until this key, from having read them all.
+            #
+            # Computed over ``results`` (the whole over-fetch) and NOT over
+            # ``page``. ``page`` is a slice, so its length is a fact about the
+            # caller's offset; the ranked set's length is the fact about the
+            # ranker, and it is the ranker's ceiling being reported.
+            "ranking": ranking_payload(
+                ranked=len(results),
+                fetch_limit=spec.fetch_limit,
+                total_documents=diagnostics.total_documents,
+            ),
             **meta,
             "results": [
                 _redact(search_result_payload(r), redacted) for r in page

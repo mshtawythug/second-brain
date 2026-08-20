@@ -8,10 +8,14 @@
  *
  * WHAT IS LEFT IS THE ASYMMETRY. The newest message is a plain `## H2`
  * (gmail.py's `collapsed=(idx != last_idx)` over an ascending sort, so it is the
- * LAST section, not the first — the Quartz overlay's comment calls it "leading"
- * and is wrong about that). It therefore has no summary bar, no twisty, and
+ * LAST section, not the first). It therefore has no summary bar, no twisty, and
  * cannot be collapsed, while every older message can. This module wraps it in a
  * synthetic `<details open>` so all messages share one shape and one hook.
+ *
+ * The Quartz overlay's `emailThread.js` used to call that H2 "leading" in its
+ * header comment; that has been corrected there, and the ordering fact is held
+ * by `tests/test_gmail_thread.py::test_most_recent_message_not_collapsed`
+ * (`last_h2 > last_details`) rather than by either comment.
  *
  * THE WRAP HAPPENS IN THE DOM, NEVER IN render.py, AND THAT IS LOAD-BEARING.
  * `extract_headings` walks the MARKDOWN server-side to build the TOC and mint

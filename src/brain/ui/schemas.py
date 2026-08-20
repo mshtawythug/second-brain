@@ -63,8 +63,96 @@ DEFAULT_LIMIT = 25
 #: two-sources-of-truth failure ``tests/conftest.py`` records for the Ollama
 #: port guard, where only one of the two was redirected and the guard went on
 #: guarding a port nothing dialled.
-MAX_OFFSET = 2 * CANDIDATE_LIMIT
+MAX_RANKED_DOCUMENTS = 2 * CANDIDATE_LIMIT
+MAX_OFFSET = MAX_RANKED_DOCUMENTS
 DEFAULT_OFFSET = 0
+
+#: The four states a search page can end in. ONE enum rather than a pair of
+#: booleans (``has_more`` + ``ceiling_reached``): two booleans admit a
+#: combination that cannot happen and oblige every reader to learn which one
+#: wins: this has exactly four states and no invalid one.
+RANKING_MORE = "more"
+RANKING_EXHAUSTED = "exhausted"
+RANKING_CEILING = "ceiling"
+RANKING_UNKNOWN = "unknown"
+
+
+def ranking_status(
+    *, ranked: int, fetch_limit: int, total_documents: int | None
+) -> str:
+    """Why this page ended, in one word.
+
+    ``ranked`` is the size of the list ``hybrid_search`` returned BEFORE
+    :meth:`SearchQuery.page_of` sliced it, and ``fetch_limit`` is what was asked
+    for. ``hybrid_search`` applies ``limit`` exactly once, last, as
+    ``results[:effective_limit]``, so ``ranked < fetch_limit`` is not a heuristic:
+    it means the ranker had nothing more to give.
+
+    * :data:`RANKING_MORE` — the over-fetch came back full. Honest limit: this
+      says the ranked set did not end *within this request*, not that the next
+      page is non-empty. A ranked set of exactly ``fetch_limit`` reports
+      ``more`` and the following request then reports the real reason. The
+      overshoot is one page and it is self-correcting, which is why the page
+      size is not inflated by one to remove it — doing that would change
+      :attr:`SearchQuery.fetch_limit`, the one arithmetic the paging tests
+      exist to pin.
+    * :data:`RANKING_UNKNOWN` — the ranker ran dry but ``total_documents`` is
+      ``None``, so the two endings cannot be told apart. ``SearchDiagnostics``
+      requires a caller that asked for the total and got ``None`` to render it
+      as unknown, "never as zero"; folding it into ``exhausted`` would
+      reintroduce this defect through the error path.
+    * :data:`RANKING_CEILING` — the ranker ran dry with matches left behind.
+      ``total_documents`` is an exact, uncapped ``count(DISTINCT document_id)``
+      over the same lexical predicate, so ``total_documents - ranked`` is a
+      real count of documents that match and were never ranked.
+    * :data:`RANKING_EXHAUSTED` — the ranker ran dry and nothing lexical is
+      left behind it.
+
+    LEXICAL-ONLY, inherited from ``total_documents`` and stated rather than
+    hidden. The vector leg may surface near-neighbours the count does not
+    include, so a ranked set larger than the lexical total is ordinary and
+    reports ``exhausted``; a ranked set truncated purely on the vector side is
+    the one case this under-reports. Leg-saturation was the alternative and is
+    worse: ``SearchDiagnostics`` records that the vector leg "always returns
+    nearest neighbours", so it is saturated on nearly every query and a signal
+    keyed on that would fire nearly always.
+    """
+    if ranked >= fetch_limit:
+        return RANKING_MORE
+    if total_documents is None:
+        return RANKING_UNKNOWN
+    if total_documents > ranked:
+        return RANKING_CEILING
+    return RANKING_EXHAUSTED
+
+
+def ranking_payload(
+    *, ranked: int, fetch_limit: int, total_documents: int | None
+) -> dict[str, Any]:
+    """The additive ``ranking`` object a search response carries.
+
+    Grouped under one key rather than flattened into three, so a consumer that
+    enumerates top-level keys sees a single addition.
+
+    ``max_ranked_documents`` is emitted even though it is a constant: without
+    it the ledger would have to hardcode the ceiling in JavaScript to explain
+    it, which is the second copy of ``CANDIDATE_LIMIT`` that
+    :data:`MAX_RANKED_DOCUMENTS` exists to avoid.
+
+    Deliberately NOT added to ``brain.format_search.search_meta_json``. That
+    projection is shared with MCP ``brain_search`` and ``brain search --json
+    --meta``; neither pages, both are under active payload-size pressure, and a
+    paging concern is not theirs to carry.
+    """
+    return {
+        "status": ranking_status(
+            ranked=ranked,
+            fetch_limit=fetch_limit,
+            total_documents=total_documents,
+        ),
+        "ranked_documents": ranked,
+        "max_ranked_documents": MAX_RANKED_DOCUMENTS,
+    }
 
 
 def _require_str(value: Any, field: str) -> str:
