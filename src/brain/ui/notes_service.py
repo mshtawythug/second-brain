@@ -221,8 +221,16 @@ def read_note(
     # ``extract_headings`` deliberately strips nothing itself, so the decision
     # exists in exactly one place; do not move it in there.
     rendered = strip_redundant_title_heading(body, row.title)
+    # ``content_type`` is passed for ONE reason: the email-thread <details>
+    # rules in render.py fire only for the type the gmail assembler stamps.
+    # Without it every document containing a `<details><summary>` block — a
+    # hand-authored vault note included — was re-emitted with the
+    # `thread-message` class and grew an email-only "Only my replies" control.
+    # ``row.content_type`` is the document's own type, not a guess from its body.
     payload["html"] = render_markdown(
-        rendered, resolver=lambda t: resolved.get(t.lower())
+        rendered,
+        resolver=lambda t: resolved.get(t.lower()),
+        content_type=row.content_type,
     )
     # Placed AFTER the withheld early-return above, and it must stay there:
     # headings are derived from the body, so a TOC beside a withheld body would
@@ -533,11 +541,11 @@ def _update_ingested_note(
     # the mirror is regenerated FROM the committed row it picks up the new tags
     # either way. Only the skip is dangerous.)
     # No `vault_path is not None` guard: `Config.vault_path` is a `Path` with a
-    # `default_factory` (`config.py:769`), never optional, so such a check would
-    # always be True — and would falsely advertise that the vault is optional
-    # here. `update_document`'s own `vault_root is not None` test is a different
-    # question: that parameter IS `Path | None`, and passing None is how this
-    # function suppresses the mirror write above.
+    # `default_factory` of `_default_vault_path`, never optional, so such a
+    # check would always be True — and would falsely advertise that the vault
+    # is optional here. `update_document`'s own `vault_root is not None` test
+    # is a different question: that parameter IS `Path | None`, and passing
+    # None is how this function suppresses the mirror write above.
     if mirror_is_stale(fields_changed=changed, rechunked=result.rechunked):
         write_vault_mirror(conn, document_id, vault_root=ctx.cfg.vault_path)
 
@@ -610,14 +618,15 @@ def move_note(
             conn, embedder=ctx.embedder, vault_path=ctx.cfg.vault_path, op=op
         )
     # NO `except VaultPathEscape` arm here, deliberately. It was reachable —
-    # `plan_rename:199` guards a destination built with `with_name(slug)`, and
-    # `assert_within_vault` RESOLVES SYMLINKS, so a legal stored path can still
-    # yield a destination that resolves outside the vault when a symlink sits
-    # at the new name. But it was REDUNDANT: `app.py:169` registers a global
-    # `VaultPathEscape` handler returning the same 400 and the same
-    # `folder_escapes_vault` code, so deleting the arm changes exactly one
-    # field — `message` — which here was `str(exc)`, leaking the ABSOLUTE vault
-    # path that `app.py:76-78` exists to withhold.
+    # `plan_rename`'s `assert_within_vault(new_abs, vault_path)` guards a
+    # destination built with `with_name(slug)`, and `assert_within_vault`
+    # RESOLVES SYMLINKS, so a legal stored path can still yield a destination
+    # that resolves outside the vault when a symlink sits at the new name. But
+    # it was REDUNDANT: `create_app`'s `exception_handlers` maps
+    # `VaultPathEscape` to `_traversal_handler` globally, returning the same 400
+    # and the same `folder_escapes_vault` code, so deleting the arm changes
+    # exactly one field — `message` — which here was `str(exc)`, leaking the
+    # ABSOLUTE vault path that `_traversal_handler` exists to withhold.
     #
     # The enforcement is `assert_within_vault`, not this translator; the escape
     # still raises and still refuses the write. Verified by execution that the

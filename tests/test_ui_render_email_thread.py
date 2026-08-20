@@ -30,12 +30,33 @@ here is ``@example.test`` (RFC 6761 reserved) and every name is invented.
 """
 from __future__ import annotations
 
+import base64
+from datetime import datetime
+
 import pytest
 
-from brain.ui.render import extract_headings, render_markdown
+from brain.ingest.gmail import to_extracted_thread
+from brain.ui.render import (
+    EMAIL_THREAD_CONTENT_TYPE,
+    extract_headings,
+    render_markdown,
+)
 
 #: Opens no database connection — this module renders strings.
 pytestmark = pytest.mark.nodb
+
+
+def render_thread(text: str) -> str:
+    """Render ``text`` as the body of a document the gmail assembler produced.
+
+    Every assertion in this module is about the thread construct, so every one
+    of them has to declare the marker that switches the construct on. Declared
+    once, here, rather than repeated at ~10 call sites: the point of the marker
+    is that recognition is a property of the DOCUMENT, and a helper named for
+    the document type says that where a keyword argument repeated ten times
+    would just be noise.
+    """
+    return render_markdown(text, content_type=EMAIL_THREAD_CONTENT_TYPE)
 
 #: Exactly the shape ``ingest/gmail.py::_format_thread_section`` emits, including
 #: its ``html.escape(heading, quote=False)`` — which is why the addresses below
@@ -111,7 +132,7 @@ def test_a_thread_renders_details_elements_not_escaped_text() -> None:
     construct entirely. Neither failure mode is hypothetical: "escape it" and
     "delete it" are the two obvious wrong fixes.
     """
-    html = render_markdown(THREAD)
+    html = render_thread(THREAD)
 
     assert html.count("<details") == COLLAPSED_SECTIONS, (
         f"expected {COLLAPSED_SECTIONS} <details> elements, found "
@@ -134,7 +155,7 @@ def test_the_summary_keeps_the_address_the_reply_filter_matches_on() -> None:
     would take the address off the page and break the filter at the same time,
     and the filter's own test could not see the cause.
     """
-    html = render_markdown(THREAD)
+    html = render_thread(THREAD)
 
     assert "sam@example.test" in html
     assert "Sam Buyer" in html
@@ -153,7 +174,7 @@ def test_the_body_inside_a_section_is_rendered_as_markdown() -> None:
     section would collapse open onto an unformatted paragraph and nobody would
     notice until a message contained a list.
     """
-    html = render_markdown(
+    html = render_thread(
         "<details>\n<summary>S</summary>\n\n"
         "A paragraph.\n\n- one\n- two\n\n</details>\n"
     )
@@ -173,7 +194,7 @@ def test_a_script_inside_a_section_body_renders_inert() -> None:
     claim: the ``<details>`` wrapper is re-emitted, and a ``<script>`` sitting
     inside it is still escaped by the ordinary ``html=False`` pipeline.
     """
-    html = render_markdown(
+    html = render_thread(
         "<details>\n<summary>S</summary>\n\n"
         "<script>alert(1)</script>\n\n</details>\n"
     )
@@ -194,7 +215,7 @@ def test_a_script_inside_the_summary_renders_inert() -> None:
     independently. Asserting only the body case would leave the half we
     hand-wrote unproven.
     """
-    html = render_markdown(
+    html = render_thread(
         "<details>\n<summary><script>alert(1)</script></summary>\n\n"
         "body\n\n</details>\n"
     )
@@ -212,7 +233,7 @@ def test_an_attribute_cannot_be_broken_out_of_via_the_summary() -> None:
     routinely carry them — so this is a correctness case as much as a security
     one.
     """
-    html = render_markdown(
+    html = render_thread(
         '<details>\n<summary>a" onclick="alert(1)</summary>\n\nbody\n\n</details>\n'
     )
 
@@ -278,7 +299,7 @@ def test_the_newest_message_stays_a_heading_and_stays_in_the_toc() -> None:
     ``2026-03-09-12-00-dana-vendor-dana-example-test``, because the slugger
     drops the punctuation that the two forms differ in.
     """
-    html = render_markdown(THREAD)
+    html = render_thread(THREAD)
     headings = extract_headings(THREAD)
 
     assert "<h2" in html
@@ -297,7 +318,7 @@ def test_the_newest_message_stays_a_heading_and_stays_in_the_toc() -> None:
 
 def test_older_sections_are_closed() -> None:
     """Collapsed by default is the feature; an `open` attribute would defeat it."""
-    html = render_markdown(THREAD)
+    html = render_thread(THREAD)
 
     assert "<details open" not in html
     assert html.count("<details") == COLLAPSED_SECTIONS
@@ -314,7 +335,7 @@ def test_an_unterminated_details_degrades_to_text_rather_than_swallowing_the_pag
     unterminated construct declines and renders literally, because swallowing
     the remainder of the note is a far worse failure than showing a stray tag.
     """
-    html = render_markdown("<details>\n<summary>S</summary>\n\nbody\n\nAfter.\n")
+    html = render_thread("<details>\n<summary>S</summary>\n\nbody\n\nAfter.\n")
 
     assert "After." in html
     assert "<details" not in html, (
@@ -326,7 +347,7 @@ def test_an_unterminated_details_degrades_to_text_rather_than_swallowing_the_pag
 def test_a_details_without_a_summary_declines() -> None:
     """No summary means no section label, and an unlabelled collapsed block
     hides content behind a control that says nothing about what it hides."""
-    html = render_markdown("<details>\n\nbody\n\n</details>\n")
+    html = render_thread("<details>\n\nbody\n\n</details>\n")
 
     assert "<details" not in html, (
         "a summary-less <details> was consumed into an element, so its content "
@@ -344,3 +365,140 @@ def test_a_details_without_a_summary_declines() -> None:
         "the declined marker is not visible as escaped text; silently removing "
         "it hides from the reader that the document contains it"
     )
+
+
+# ---------------------------------------------- whose markup is this, though --
+#
+# The rule above recognises a construct. Nothing in it used to ask WHOSE
+# construct it was, so ANY document containing `<details>` + `<summary>` on
+# their own lines got the thread treatment — including a hand-authored vault
+# note, on which `js/thread.js` then mounted the email-specific "Only my
+# replies" checkbox (it fires on `details.thread-message` alone; the
+# `THREAD_HEADING_RE` gate beside it only covers the *newest-message* wrap).
+#
+# The marker is `documents.content_type == "email_thread"`, which
+# `to_extracted_thread` stamps and nothing a user types can produce. The
+# alternative — keying on the `YYYY-MM-DD HH:MM — sender` summary shape — is a
+# shape a person can type, so it would narrow the false-positive rather than
+# remove it.
+
+
+def _thread_messages() -> list[dict[str, object]]:
+    """Two synthetic Gmail messages in one thread.
+
+    Built for the producer rather than for the renderer: the point of the test
+    below is to render what ``to_extracted_thread`` ACTUALLY emits, so the
+    marker cannot be verified against an assumption about the producer's shape.
+
+    No PII — ``@example.test`` is RFC 6761 reserved and both names are invented.
+    """
+    def message(msg_id: str, when: str, sender: str, body: str) -> dict[str, object]:
+        return {
+            "id": msg_id,
+            "threadId": "thread-synthetic",
+            "internalDate": str(int(datetime.fromisoformat(when).timestamp() * 1000)),
+            "labelIds": [],
+            "payload": {
+                "mimeType": "text/plain",
+                "headers": [
+                    {"name": "Subject", "value": "quarterly widget order"},
+                    {"name": "From", "value": sender},
+                    {"name": "To", "value": "Sam Buyer <sam@example.test>"},
+                    {"name": "Date", "value": when},
+                ],
+                "body": {
+                    "data": base64.urlsafe_b64encode(body.encode()).decode().rstrip("=")
+                },
+            },
+        }
+
+    return [
+        message("m1", "2026-03-07 08:00:00+00:00",
+                "Dana Vendor <dana@example.test>", "The oldest message."),
+        message("m2", "2026-03-09 12:00:00+00:00",
+                "Sam Buyer <sam@example.test>", "The latest reply."),
+    ]
+
+
+def test_the_marker_is_the_one_the_gmail_assembler_actually_stamps() -> None:
+    """Drift guard across the producer/renderer boundary.
+
+    ``EMAIL_THREAD_CONTENT_TYPE`` is a second spelling of a value that
+    originates in ``ingest/gmail.py``. If the producer ever stamps something
+    else, the renderer would silently stop recognising every real thread — the
+    failure would be a corpus-wide rendering regression with no red test, which
+    is exactly the class of defect the narrowing is supposed to prevent, not to
+    introduce.
+    """
+    doc = to_extracted_thread(_thread_messages())
+
+    assert doc.content_type == EMAIL_THREAD_CONTENT_TYPE, (
+        "brain.ui.render.EMAIL_THREAD_CONTENT_TYPE no longer matches what "
+        "brain.ingest.gmail.to_extracted_thread stamps, so no real email "
+        "thread will be recognised by the renderer any more"
+    )
+
+
+def test_a_real_assembled_thread_still_renders_as_sections() -> None:
+    """DIRECTION 1 — the narrowing must not break what it was protecting.
+
+    Renders the producer's own output, not the hand-written ``THREAD`` fixture,
+    so "real Gmail threads keep working" is checked against ``gmail.py`` as it
+    exists on disk rather than against this module's copy of its shape.
+    """
+    doc = to_extracted_thread(_thread_messages())
+    assert "<details>" in doc.content, (
+        "the fixture stopped producing a collapsed section, so the assertions "
+        "below would pass over markup that contains nothing to recognise"
+    )
+
+    html = render_markdown(doc.content, content_type=doc.content_type)
+
+    assert "<details class=\"thread-message\">" in html, (
+        "a thread straight out of to_extracted_thread no longer renders as a "
+        "section — the narrowing broke the case it exists to serve"
+    )
+    assert "&lt;details&gt;" not in html
+
+
+def test_a_hand_authored_note_in_the_same_shape_gets_no_thread_markup() -> None:
+    """DIRECTION 2 — the defect itself.
+
+    Byte-identical markup to :data:`THREAD`, differing ONLY in the document's
+    ``content_type``. Any recognition rule that reads the body alone passes
+    direction 1 and fails here, which is why one test could never have covered
+    both.
+
+    ``thread-message`` is the specific class asserted rather than ``<details``,
+    because that class is what ``js/thread.js`` queries to decide whether to
+    mount the email-only "Only my replies" control. Asserting the element alone
+    would still pass if the class were emitted on a vault note.
+    """
+    html = render_markdown(THREAD, content_type="note")
+
+    assert "thread-message" not in html, (
+        "a hand-authored note was given the email-thread class, so the UI "
+        "mounts an email-only reply filter on ordinary vault content"
+    )
+    # ABSENCE NEEDS PRESENCE. Without this, a renderer that returned "" — or
+    # dropped the construct — satisfies the assertion above while destroying
+    # the note. Declining must leave the document INTACT and visible, which is
+    # the same standard `test_a_details_without_a_summary_declines` holds.
+    assert "&lt;details&gt;" in html, (
+        "the unrecognised marker vanished instead of rendering as text — the "
+        "user's own markup was silently deleted"
+    )
+    assert "The oldest message in the thread." in html
+    assert "<h2" in html, "the note's ordinary heading did not survive"
+
+
+def test_an_unmarked_document_is_the_default() -> None:
+    """Fail-closed: a caller that says nothing gets no thread recognition.
+
+    ``notes_service`` is the only production caller and it always passes the
+    row's ``content_type``. The default still matters: the next caller added
+    without reading this file gets the SAFE behaviour, and a marker that had to
+    be remembered in order to be respected is the roster failure this project
+    has paid for repeatedly.
+    """
+    assert "thread-message" not in render_markdown(THREAD)

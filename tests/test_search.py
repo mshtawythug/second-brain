@@ -490,8 +490,10 @@ def test_the_recency_boost_multiplies_rrf_by_the_decay_it_promises(
     """B5, part 3 — the boost branch itself, which parts 1 and 2 never enter.
 
     ``test_ranking_is_pinned_on_a_fixed_corpus`` above runs with
-    ``recency_halflife_days=None``, so ``search.py:675``'s condition is False
-    and lines 676-678 never execute. It pins pure RRF — real regression value,
+    ``recency_halflife_days=None``, so the recency-boost condition in
+    ``hybrid_search`` — ``if recency_halflife_days is not None and recency_ts
+    is not None`` — is False and its three-line body never executes. It pins
+    pure RRF — real regression value,
     but RRF is not what the collapse touched. The claim "the equivalence is
     MEASURED" exceeded that oracle, which is the same defect it was written to
     catch, one level up.
@@ -596,7 +598,7 @@ class _NullRecencyConn:
     """A REAL connection whose ``recency_ts`` column comes back ``NULL``.
 
     Sibling of :class:`_NaiveRecencyConn`, and it exists for the same reason:
-    ``search.py:675``'s condition has TWO arms —
+    ``hybrid_search``'s recency-boost condition has TWO arms —
     ``recency_halflife_days is not None and recency_ts is not None`` — and the
     second cannot fire against this schema, because ``recency_ts`` is
     ``coalesce(sent_at, ingested_at)`` and ``documents.ingested_at`` is
@@ -636,7 +638,8 @@ def test_a_null_recency_timestamp_skips_the_boost_instead_of_crashing(
 ):
     """The second arm of the collapsed condition, with the boost ENABLED.
 
-    Deleting ``and recency_ts is not None`` from ``search.py:675`` passes every
+    Deleting ``and recency_ts is not None`` from ``hybrid_search``'s
+    recency-boost condition passes every
     other test in this file — verified by mutation. With the boost on and no
     timestamp, the mutated code reaches ``now - None`` and raises ``TypeError``,
     so this is the only oracle that can tell the collapsed condition from a

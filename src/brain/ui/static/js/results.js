@@ -5,6 +5,7 @@ import { $, el } from "/static/js/dom.js";
 import { dispatch, state } from "/static/js/store.js";
 import { openNote } from "/static/js/inspector.js";
 import { ceilingNote, emptyLedgerMessage } from "/static/js/ledger_status.js";
+import { pagerModel } from "/static/js/pager.js";
 
 /* The source vocabulary, PORTED from `quartz/util/sourceIcons.ts` rather than
    invented here. Four overlay components already share that table (Search,
@@ -27,13 +28,25 @@ export function renderResults() {
   const host = $("results");
   host.textContent = "";
 
+  /* THE PAGER IS LEFT ALONE WHILE LOADING, and that is not an oversight.
+     Clicking Next dispatches `loading` before the request resolves; hiding or
+     disabling the buttons on that render would destroy the focus of the very
+     click that started it, on every page turn. The list below it is cleared
+     either way, so a live pager over a "searching…" ledger is momentary. */
   if (state.searchStatus === "loading") { $("meta").textContent = "searching…"; return; }
   if (state.searchStatus === "error") {
     $("meta").textContent = "";
     host.appendChild(el("li", "error-state", state.searchError || "search failed"));
+    /* No payload means no page to be on. Offering Next beside an error would
+       advertise navigation through results that were never returned. */
+    renderPager(null);
     return;
   }
-  if (state.searchStatus === "idle") { $("meta").textContent = ""; $("meta-sub").textContent = ""; return; }
+  if (state.searchStatus === "idle") {
+    $("meta").textContent = ""; $("meta-sub").textContent = "";
+    renderPager(null);
+    return;
+  }
 
   const meta = state.meta || {};
   const timing = meta.timing_ms || {};
@@ -129,6 +142,53 @@ export function renderResults() {
      say, so an ordinary result set gains no row. */
   const note = ceilingNote(meta);
   if (note) host.appendChild(el("li", "ledger-note", note));
+
+  renderPager(meta);
+}
+
+
+/* ------------------------------------------------------------- paging --- */
+
+/* The control's STATE only — `js/pager.js` makes every decision and
+   `static/index.html` owns the elements. Nothing here is created or destroyed,
+   which is what lets focus survive a page turn (see the markup's comment). */
+function renderPager(meta) {
+  const model = pagerModel(meta);
+  const prev = $("pager-prev");
+  const next = $("pager-next");
+  const focused = document.activeElement;
+
+  $("pager").hidden = !model.visible;
+  prev.disabled = !model.canPrev;
+  next.disabled = !model.canNext;
+  /* The range and the reason, in that order, with the separator dropped when
+     either is absent — `join` over a filtered pair rather than a template with
+     a dangling "·" on the first page. */
+  $("pager-status").textContent =
+    [model.rangeLabel, model.boundary].filter(Boolean).join(" · ");
+
+  /* A disabled button is not focusable, so paging to the last page would take
+     the keyboard user's focus with it and drop them at <body> — the top of the
+     document, several tab stops from where they were working. Hand focus to
+     the sibling that is still live; when neither is, the pager is hidden
+     anyway and there is nothing here to hold it. */
+  if (focused === prev && prev.disabled && !next.disabled) next.focus();
+  if (focused === next && next.disabled && !prev.disabled) prev.focus();
+}
+
+/* Wired once, from boot(). The elements are static, so unlike the result rows
+   these listeners are attached a single time and survive every render. */
+export function wirePager() {
+  $("pager-prev").addEventListener("click", () => goToPage(pagerModel(state.meta).prevOffset));
+  $("pager-next").addEventListener("click", () => goToPage(pagerModel(state.meta).nextOffset));
+}
+
+/* The ONLY thing that moves the ledger off page one. The model is recomputed
+   from `state.meta` at CLICK time rather than closed over at render time, so a
+   handler can never act on the page before last. */
+function goToPage(offset) {
+  state.offset = offset;
+  runSearch();
 }
 
 let searchTimer = null;
@@ -139,8 +199,17 @@ export function scheduleSearch() {
   searchTimer = setTimeout(runSearch, 180);
 }
 
+/* The query+filters of the last search that was actually issued. Used ONLY to
+   decide whether `state.offset` still refers to the ranking it was chosen in;
+   see runSearch. */
+let lastSearchKey = null;
+
 export async function runSearch() {
-  if (!state.q.trim()) { dispatch({ results: [], meta: null, searchStatus: "idle" }); return; }
+  if (!state.q.trim()) {
+    state.offset = 0;
+    dispatch({ results: [], meta: null, searchStatus: "idle" });
+    return;
+  }
 
   /* Every in-flight request is cancelled by the next keystroke, so a slow
      query can never overwrite a newer result. With a multi-second embed on a
@@ -150,6 +219,33 @@ export async function runSearch() {
 
   const params = new URLSearchParams({ q: state.q });
   for (const [key, value] of Object.entries(state.filters)) if (value) params.set(key, value);
+
+  /* PAGE ONE WHENEVER THE SEARCH ITSELF CHANGED — derived from what actually
+     changed, never announced by the caller. An offset is a position inside one
+     ranking; carry it into a different query and the reader lands on page 4 of
+     something they have not seen page 1 of, or on an empty page for a query
+     with three matches.
+
+     The alternative was `state.offset = 0` in the query handler and in each
+     filter handler in main.js. That is the hand-maintained roster again: the
+     next control that narrows a search is added by someone who has not read
+     this comment, and it silently keeps the stale offset. store.js makes the
+     same argument for deriving `isNavigation` from the URL diff rather than
+     from a flag passed by the caller.
+
+     Compared BEFORE the offset is appended, so paging — which changes nothing
+     but the offset — leaves the key equal and the offset intact. */
+  const searchKey = params.toString();
+  if (searchKey !== lastSearchKey) {
+    state.offset = 0;
+    lastSearchKey = searchKey;
+  }
+  /* Omitted at zero rather than sent as `offset=0`. `_parse_offset` reads an
+     absent offset as `DEFAULT_OFFSET`, so the two are identical to the server,
+     and keeping a first-page request byte-identical to the one the ledger sent
+     before paging existed means this change cannot perturb a cache, a log line
+     or a telemetry row for any search that never pages. */
+  if (state.offset > 0) params.set("offset", String(state.offset));
 
   dispatch({ searchStatus: "loading" });
   try {

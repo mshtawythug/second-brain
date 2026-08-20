@@ -17,6 +17,16 @@
 
 export const state = {
   q: "", filters: { source: "", type: "", tag: "", after: "", before: "" },
+  /* WHICH PAGE OF THE RANKING IS SHOWING. Deliberately NOT in the URL, unlike
+     `q`, the filters and `id`. A shareable link denotes a SEARCH; an offset
+     denotes a position inside one particular ranking of it, and the ranking is
+     recomputed on every request — `SearchQuery.fetch_limit` records that a page
+     re-pays the whole rank leg, measured at ~5.9 s for 545 matches. So a
+     "page 4" link would be a slow link to a page whose contents depend on when
+     it is opened. `readUrl()` resets it for the same reason: whatever the
+     address bar says, it says page one, and the view must not disagree with it.
+     Which page you are on is recovered by paging, not by history. */
+  offset: 0,
   results: [], meta: null, searchStatus: "idle",
   selectedId: null, note: null, editing: false,
   saveStatus: "saved", draftBody: "",
@@ -131,4 +141,12 @@ export function readUrl() {
   state.q = params.get("q") || "";
   for (const key of Object.keys(state.filters)) state.filters[key] = params.get(key) || "";
   state.selectedId = params.get("id");
+  /* The URL carries no offset, so reading it means page one. Without this a
+     Back out of a search — which re-reads the URL and re-runs the search —
+     would ask for the offset the user had paged to under a URL that never
+     mentioned it, and the ledger would show page 4 of a search the address bar
+     describes as page 1. Resetting HERE rather than at the two call sites is
+     the same rule `NAVIGATIONAL_PARAMS` follows: derived from what the URL
+     actually says, so a third caller cannot forget it. */
+  state.offset = 0;
 }

@@ -1348,3 +1348,82 @@ def test_a_symlinked_DIRECTORY_destination_is_refused_at_library_level(
     assert isinstance(raised, VaultPathEscape), (
         f"expected VaultPathEscape, got {raised!r}"
     )
+
+
+# ------------------------------------------ the email-thread marker, wired --
+#
+# `render_markdown` only emits thread sections for a document whose
+# content_type is the one the gmail assembler stamps, and `read_note` is the
+# only production caller that supplies it. The pure tests in
+# tests/test_ui_render_email_thread.py hold the RULE; these two hold the WIRE.
+# Without them, deleting `content_type=row.content_type` from that call leaves
+# every pure test green and un-renders every email thread in the corpus.
+
+#: The assembler's markup, minus its per-message content. Kept to the two
+#: marker lines and a body so the assertions are about recognition, not about
+#: the fixture. No PII: `@example.test` is RFC 6761 reserved.
+_THREAD_BODY = (
+    "<details>\n"
+    "<summary>2026-03-07 08:00 — Dana Vendor &lt;dana@example.test&gt;</summary>\n"
+    "\n"
+    "The older message.\n"
+    "\n"
+    "</details>\n"
+    "\n"
+    "## 2026-03-09 12:00 — Sam Buyer &lt;sam@example.test&gt;\n"
+    "\n"
+    "The latest reply.\n"
+)
+
+
+def _seed_typed_doc(
+    conn: psycopg.Connection, *, content_type: str, content_hash: str
+) -> str:
+    """One ingested document whose ONLY variable is its ``content_type``."""
+    row = conn.execute(
+        "INSERT INTO documents (title, content, content_type, kind, content_hash) "
+        "VALUES ('Widget Order', %s, %s, 'ingested', %s) RETURNING id::text",
+        (_THREAD_BODY, content_type, content_hash),
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_an_email_thread_document_renders_thread_sections_through_the_route(
+    client: TestClient, test_db: psycopg.Connection
+) -> None:
+    """DIRECTION 1 at the wire: the marker reaches the renderer."""
+    doc_id = _seed_typed_doc(
+        test_db, content_type="email_thread", content_hash="hash-thread-wired"
+    )
+
+    payload = client.get(f"/api/notes/{doc_id}").json()
+
+    assert 'class="thread-message"' in payload["html"], (
+        "an email_thread document came back without thread sections — "
+        "read_note is no longer passing the document's content_type to "
+        "render_markdown, so every ingested thread renders as escaped tag text"
+    )
+
+
+def test_a_note_with_the_same_body_gets_no_thread_sections_through_the_route(
+    client: TestClient, test_db: psycopg.Connection
+) -> None:
+    """DIRECTION 2 at the wire: a non-thread document is left alone.
+
+    Byte-identical body to the test above. Only ``content_type`` differs, so a
+    wiring that hardcoded the marker — or dropped the argument and defaulted
+    the rule back ON — passes direction 1 and fails here.
+    """
+    doc_id = _seed_typed_doc(
+        test_db, content_type="note", content_hash="hash-note-not-a-thread"
+    )
+
+    payload = client.get(f"/api/notes/{doc_id}").json()
+
+    assert "thread-message" not in payload["html"], (
+        "a plain note was served with the email-thread class, so the UI mounts "
+        "an email-only reply filter on it"
+    )
+    # Absence needs presence: declining must leave the document readable.
+    assert "The older message." in payload["html"]

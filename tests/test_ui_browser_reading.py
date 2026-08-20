@@ -61,7 +61,8 @@ import threading
 from collections.abc import Iterator
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -687,18 +688,53 @@ def test_a_note_with_no_backlinks_renders_no_rail(page: Any) -> None:
 
 
 def _real_health_payload(*, user_email: str | None) -> dict[str, Any]:
-    """Call the REAL ``routes_meta.health`` and return its JSON."""
+    """Call the REAL ``routes_meta.health`` and return its JSON.
+
+    THE CONTEXT IS A REAL ``UiContext``, not a hand-built stand-in, and that is
+    the load-bearing part rather than a style preference. This helper used to
+    pass a ``SimpleNamespace`` carrying exactly the four attributes ``health``
+    read at the time. When ``serve_confidential_titles`` was added to
+    ``UiContext`` and read by the handler, the stand-in had no such attribute
+    and all four thread tests died at setup with ``AttributeError`` — a break
+    caused by a field that ``UiContext`` itself declares with a default, so a
+    real context would have absorbed it silently.
+
+    A real context cannot fail that way: every field added to the dataclass so
+    far carries a default, deliberately (see the ``serve_confidential_titles``
+    docstring — the default is the fail-closed one precisely so a fixture that
+    does not care need not name it). The 13 other UI test modules already
+    construct the real dataclass; this was the only module that did not.
+
+    ``cfg`` stays duck-typed, matching those modules: ``Config`` is a large
+    object built from the environment, and ``health`` reads exactly two fields
+    off it. ``conn_factory``/``embedder``/``search_fn`` are required by the
+    dataclass but unreachable here — ``health`` touches no database, which is
+    the property that lets it answer when Postgres is down.
+    """
     import asyncio
-    from types import SimpleNamespace
 
     from brain.ui import routes_meta
+    from brain.ui.context import UiContext
 
-    ctx = SimpleNamespace(
+    class _Cfg:
+        vault_path = "/vault"
+        user_email: str | None = None
+
+    cfg = _Cfg()
+    cfg.user_email = user_email
+
+    def _unused_conn_factory() -> Any:  # pragma: no cover — health opens no connection
+        raise AssertionError("routes_meta.health must not open a database connection")
+
+    ctx = UiContext(
+        cfg=cast(Any, cfg),
+        conn_factory=_unused_conn_factory,
+        embedder=cast(Any, object()),
+        search_fn=lambda *a, **k: [],
         read_only=False,
         logging_enabled=False,
         serve_confidential_bodies=False,
-        notices=[],
-        cfg=SimpleNamespace(vault_path="/vault", user_email=user_email),
+        notices=(),
     )
     request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ui=ctx)))
     response = asyncio.run(routes_meta.health(request))  # type: ignore[arg-type]
@@ -739,13 +775,19 @@ def thread_page(static_origin: str, request: Any) -> Iterator[Any]:
     configured" — which is a genuinely different state from "configured but
     matching nothing".
     """
-    from brain.ui.render import render_markdown
+    from brain.ui.render import EMAIL_THREAD_CONTENT_TYPE, render_markdown
 
     sync_api = pytest.importorskip("playwright.sync_api", reason="Playwright not installed")
     owner = getattr(request, "param", OWNER_EMAIL)
     health = _real_health_payload(user_email=owner)
+    # `content_type` is REQUIRED for the thread rules to fire: `render_markdown`
+    # defaults to no thread recognition, so omitting it here yields a body with
+    # zero server-emitted `details.thread-message` and only the one section
+    # `js/thread.js` synthesizes for the newest message — which is what these
+    # three tests were asserting against when they read `1 == 3`.
     note = {**NOTE_PAYLOAD, "id": "n-thread", "title": "Q3 numbers",
-            "headings": [], "html": render_markdown(THREAD_SOURCE)}
+            "headings": [],
+            "html": render_markdown(THREAD_SOURCE, content_type=EMAIL_THREAD_CONTENT_TYPE)}
 
     def route_api(route: Any) -> None:
         path = "/" + route.request.url.split("127.0.0.1:")[-1].split("/", 1)[-1]

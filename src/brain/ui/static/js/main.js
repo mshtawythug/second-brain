@@ -23,7 +23,7 @@ import { dispatch, readUrl, state, subscribe, syncUrl } from "/static/js/store.j
 import {
   loadTree, onTreeKeydown, renderTree, wireIngestedToggle,
 } from "/static/js/tree.js";
-import { renderResults, runSearch, scheduleSearch } from "/static/js/results.js";
+import { renderResults, runSearch, scheduleSearch, wirePager } from "/static/js/results.js";
 import { openNote, renderInspector } from "/static/js/inspector.js";
 import { wireKeys } from "/static/js/keys.js";
 /* palette.js registers its OWN ⌘P listener and builds its own <dialog>, so this
@@ -177,19 +177,26 @@ async function boot() {
      and completely unreachable. No ordering pin is added for it: pinning an
      order that is not real is a change-detector, the shape the guard file
      exists to refuse. */
-  wireTabs(); wireKeys(); wireControls(); wirePalette(); wireIngestedToggle();
+  /* wirePager() is ORDER-FREE for the same reason wireIngestedToggle() is: it
+     attaches two listeners to STATIC elements in index.html and subscribes to
+     nothing, so no renderer can wipe it. renderResults — which is what drives
+     the control — is subscribed on the line below like every other renderer. */
+  wireTabs(); wireKeys(); wireControls(); wirePalette(); wireIngestedToggle(); wirePager();
   /* wireMarginalia() IS LAST ON THIS LINE AND MAY NOT MOVE LEFT OF
      subscribe(renderInspector). store.js's dispatch() runs listeners in
      REGISTRATION order, and renderInspector opens with `host.textContent = ""`
      — so a marginalia subscriber registered first is drawn and then wiped on
      the same dispatch, every dispatch. The failure is SILENT: no error, no
      console warning, the page boots normally, the block simply never appears.
-     The browser suite barely sees it — measured, relocating this call leaves
-     tests/test_ui_browser_reading.py at 2 failed / 11 passed, and NEITHER
-     failure is one of the marginalia's own T13 tests (they each call
-     wireMarginalia() from page.evaluate, and the backlinks rail re-creates the
-     element asynchronously outside the dispatch that wiped it). So the position
-     is pinned by
+     The browser suite barely sees it, and the reason is STRUCTURAL rather than
+     a matter of how many tests happen to be red: the marginalia's own T13 tests
+     each call wireMarginalia() themselves from page.evaluate, so they mount the
+     block regardless of whether boot() ever did, and the backlinks rail
+     re-creates the element asynchronously outside the dispatch that wiped it.
+     A pass/fail tally was cited here and is deliberately gone — it was counted
+     against a version of that file which no longer exists, and a number nobody
+     can reproduce reads as evidence while proving nothing. The claim above is
+     checkable from the two sources instead. So the position is pinned by
      check_the_marginalia_is_wired_after_the_inspector, whose
      `marginalia-wired-after-the-inspector` entry relocates this call to the
      head of the line to prove the pin can fail. It is on the SAME line as the

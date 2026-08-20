@@ -163,7 +163,10 @@ CSS_ORDER = (
 CSS = {name: (STATIC / "css" / name).read_text(encoding="utf-8") for name in CSS_ORDER}
 ALL_CSS = "\n".join(CSS[name] for name in CSS_ORDER)
 
-#: The ten ES modules. The order is fixed and arbitrary — NOT a dependency
+#: Every ES module the app loads. NO COUNT IS STATED — this tuple said "ten"
+#: while listing thirteen, and a roster whose own header miscounts it is the
+#: hand-maintained-list failure in miniature. The order is fixed and arbitrary
+#: — NOT a dependency
 #: order, because none exists: ``tree.js`` imports ``openNote`` from
 #: ``inspector.js`` while ``inspector.js`` imports ``loadTree`` from
 #: ``tree.js``, so the graph has a cycle and cannot be topologically sorted.
@@ -197,7 +200,7 @@ ALL_CSS = "\n".join(CSS[name] for name in CSS_ORDER)
 #: Until then: a new module MUST be added to this tuple in the same change that
 #: creates it.
 JS_ORDER = (
-    "dom.js", "api.js", "store.js", "ledger_status.js",
+    "dom.js", "api.js", "store.js", "ledger_status.js", "pager.js",
     "inspector.js", "tree.js", "results.js", "keys.js",
     "palette.js", "marginalia.js", "discovery.js",
     "thread.js", "main.js",
@@ -720,6 +723,50 @@ def check_ink_faint_defined_in_all_scopes(css: str) -> None:
             "the token — this fix only repointed the rules that used it for "
             "text, so it must remain defined in all three scopes."
         )
+
+
+def check_every_var_reference_is_defined(css: str) -> None:
+    """Every ``var(--x)`` names a custom property some stylesheet defines.
+
+    THIS DEFECT IS INVISIBLE BY CONSTRUCTION, which is the reason for a guard
+    rather than a review habit. ``components.css`` shipped
+    ``var(--space-3, 0.75rem)`` against a scale whose real token is ``--s-3``.
+    Nothing looked wrong at any point: the fallback is used when the name does
+    not resolve, and this fallback was ``0.75rem`` — the exact current value of
+    ``--s-3``. So the rendered padding was correct, and would have stayed
+    correct right up until someone retuned the spacing scale and found one rule
+    silently refusing to follow it. There is no screenshot, no contrast
+    measurement, and no browser test that can fail on this; the only place the
+    mistake exists is the name.
+
+    CROSS-FILE ON PURPOSE, and registered against ``css/*`` for that reason.
+    The definitions live in ``tokens.css`` and the uses are spread across every
+    other sheet, so no single-file scope can express the property — the same
+    genuine cross-file justification ``check_ink_faint_used_once`` carries. It
+    is not a third scope added for convenience.
+
+    NO EXEMPTION LIST, and that is a measured claim rather than an oversight.
+    Sweeping the whole ``css/`` tree at the time this was written, exactly one
+    name was referenced and never defined (``--space-3``, the defect). Every
+    other referenced token — including ``--level``, which reads like a
+    JS-injected value — is defined in a stylesheet: ``marginalia.css`` sets it
+    on six ``[data-level="N"]`` rules. So the guard needs no allowlist, and
+    adding one later should be treated as suspicious rather than routine.
+
+    Comments are stripped before matching, for the same reason
+    ``check_ink_faint_used_once`` strips them: a token named in prose is
+    documentation, not a reference, and a guard that cannot tell the difference
+    fails on its own explanation.
+    """
+    visible = re.sub(r"/\*.*?\*/", "", css, flags=re.DOTALL)
+    defined = set(re.findall(r"(--[A-Za-z0-9_-]+)\s*:", visible))
+    used = set(re.findall(r"var\(\s*(--[A-Za-z0-9_-]+)", visible))
+    undefined = sorted(used - defined)
+    assert not undefined, (
+        f"var() references a custom property no stylesheet defines: {undefined}. "
+        "A fallback makes this render correctly today and silently stop "
+        "tracking the token it was supposed to follow."
+    )
 
 
 def check_quiet_text_uses_muted(css: str) -> None:
@@ -1311,6 +1358,14 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
      '    --ink-muted:    oklch(70.0% 0.010 80);\n'
      '    --ink-faint:    oklch(54.0% 0.008 80);',
      '    --ink-muted:    oklch(70.0% 0.010 80);', 1),
+    # Repoints a REAL token at a name nothing defines, which is exactly the
+    # defect this guard exists for: `--space-3` shipped in components.css
+    # against a `--s-3` scale, rendered correctly on its fallback, and was
+    # invisible for that reason. The mutation targets the spacing scale's
+    # definition line rather than a use site, so it proves the guard notices a
+    # whole family of uses going undefined at once.
+    ("var-reference-undefined", check_every_var_reference_is_defined, "css/*",
+     "--s-3: 0.75rem;", "--spacing-3: 0.75rem;", 1),
 ]
 
 #: ``check_*`` functions deliberately absent from :data:`GUARDS`, each with the

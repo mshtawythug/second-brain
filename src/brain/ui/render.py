@@ -434,6 +434,37 @@ _THREAD_OPEN_RE = re.compile(r"^<details>[ \t]*$")
 _THREAD_CLOSE_RE = re.compile(r"^</details>[ \t]*$")
 _THREAD_SUMMARY_RE = re.compile(r"^<summary>(?P<text>.*)</summary>[ \t]*$")
 
+#: The ``documents.content_type`` that ``ingest/gmail.py::to_extracted_thread``
+#: stamps on an assembled thread, and the ONLY thing that switches the rules
+#: below on.
+#:
+#: WHY A CONTENT TYPE AND NOT A SHAPE. The three patterns above describe markup
+#: any person can type: ``<details>`` and ``<summary>`` are ordinary HTML and a
+#: hand-authored vault note written that way was, until this marker existed,
+#: re-emitted as ``details.thread-message`` — the class ``js/thread.js`` queries
+#: to decide whether to mount the email-only "Only my replies" checkbox. So a
+#: note about anything at all grew a control offering to filter it by the
+#: reader's own email address.
+#:
+#: Narrowing the *shape* instead — requiring the ``YYYY-MM-DD HH:MM — sender``
+#: summary the assembler emits, which is what ``js/thread.js``'s
+#: ``THREAD_HEADING_RE`` does for the newest-message wrap — would have made the
+#: false positive rarer without making it impossible: that is still a shape a
+#: person can type, and a recognition rule that a user can trip by writing
+#: prose is the defect, not the frequency of it.
+#:
+#: ``content_type`` is not that. It is stamped by the ingest pipeline from the
+#: assembler's own ``ExtractedDoc``; no editor surface writes it as a side
+#: effect of typing a body. ``tests/test_ui_render_email_thread.py`` asserts
+#: this constant against ``to_extracted_thread``'s real output, so a producer
+#: rename is a red test rather than a corpus-wide silent un-rendering.
+EMAIL_THREAD_CONTENT_TYPE = "email_thread"
+
+#: Where the per-render answer to "is this document an email thread?" is
+#: carried. On the parser env, beside :data:`_THREAD_DEPTH`, because that is the
+#: only channel a markdown-it block rule has to its caller.
+_THREAD_ENABLED = "thread_sections_enabled"
+
 #: Where the open/close balance is tracked, per render, on the parser env.
 _THREAD_DEPTH = "thread_details_depth"
 
@@ -497,6 +528,14 @@ def _thread_html_rule(state: Any, start_line: int, end_line: int, silent: bool) 
     leaves the stray marker to be escaped as ordinary text, which is both safe
     and honest about what the document contains.
     """
+    # WHOSE MARKUP IS THIS. Asked FIRST, before a single pattern is matched,
+    # so an unmarked document costs one dict lookup and takes the ordinary
+    # `html=False` path — its `<details>` escapes to visible text like any
+    # other tag it contains. See EMAIL_THREAD_CONTENT_TYPE for why the question
+    # is about the document rather than about the line.
+    if not state.env.get(_THREAD_ENABLED):
+        return False
+
     line_start = state.bMarks[start_line] + state.tShift[start_line]
     line = state.src[line_start:state.eMarks[start_line]]
 
@@ -643,12 +682,29 @@ def build_renderer() -> MarkdownIt:
     return md
 
 
-def render_markdown(text: str | None, *, resolver: Resolver | None = None) -> str:
+def render_markdown(
+    text: str | None,
+    *,
+    resolver: Resolver | None = None,
+    content_type: str | None = None,
+) -> str:
     """Render ``text`` to sanitized HTML.
 
     ``resolver`` maps a wiki-link target to a document id; when it is ``None``
     every wiki link renders unresolved, which is the correct degradation for a
     caller with no database handy (the pure tests).
+
+    ``content_type`` is the DOCUMENT's type — ``documents.content_type``, the
+    value the ingest pipeline stamped — and it gates exactly one thing: the
+    email-thread ``<details>``/``<summary>`` rules, which fire only for
+    :data:`EMAIL_THREAD_CONTENT_TYPE`. Every other rule is content-agnostic and
+    stays that way.
+
+    The default is ``None``, which means NO thread recognition, and that
+    direction is deliberate. A caller that forgets the argument gets a document
+    rendered as ordinary markup — the outcome that is merely less pretty —
+    rather than a vault note dressed up as somebody's inbox. ``notes_service``
+    is the only production caller and it passes the row's type.
 
     An empty or ``None`` body returns ``""`` rather than raising — a
     freshly-created note legitimately has no content yet.
@@ -656,7 +712,10 @@ def render_markdown(text: str | None, *, resolver: Resolver | None = None) -> st
     if not text:
         return ""
     md = build_renderer()
-    env: dict[str, Any] = {"wikilink_resolver": resolver}
+    env: dict[str, Any] = {
+        "wikilink_resolver": resolver,
+        _THREAD_ENABLED: content_type == EMAIL_THREAD_CONTENT_TYPE,
+    }
     return str(md.render(text, env))
 
 

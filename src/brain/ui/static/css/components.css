@@ -179,7 +179,30 @@ kbd.hint {
    empty state — it is an explanation, not a result — but keeps its own
    selector so it can gain a rule (a top border, say) without dragging
    the empty and error states along with it. */
-.ledger-note { color: var(--ink-muted); font-style: italic; padding: var(--space-3, 0.75rem) 0; }
+.ledger-note { color: var(--ink-muted); font-style: italic; padding: var(--s-3) 0; }
+
+/* The pagination control. Sits below .results inside the .ledger column, and is
+   the ledger's LAST row rather than a sticky bar: the ledger scrolls as one
+   column, and a bar pinned over it would cover a result on every short
+   viewport. */
+.pager {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4) var(--s-4);
+  border-top: var(--hair);
+}
+/* THE `[hidden]` TRAP, fourth instance in this codebase — see `.field[hidden]`
+   below and `.shell[hidden]` in layout.css. `.pager { display: flex }` is
+   (0,1,0) and the UA's bare `[hidden]` is (0,1,0) too, so the author rule wins
+   on cascade order and js/results.js setting the attribute would hide NOTHING.
+   The control would sit under every idle ledger with both buttons dead. */
+.pager[hidden] { display: none; }
+/* Centred between the two buttons and allowed to shrink, so a long boundary
+   phrase wraps rather than pushing Next off the column on a narrow ledger. */
+.pager-status {
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  color: var(--ink-muted); text-align: center; min-width: 0;
+}
 .note-title { font-size: var(--t-h1); font-family: var(--font-read); line-height: 1.15; }
 .note-bar {
   display: flex; align-items: center; gap: var(--s-3);

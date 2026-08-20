@@ -121,6 +121,23 @@
          js/discovery.js, so there is no markup to keep in sync with it. -->
     <section id="discovery" aria-label="Recent captures and tags" hidden></section>
     <ol class="results" id="results"></ol>
+    <!-- PAGING. `GET /api/search` has taken an `offset` since T6 and the front
+         end never sent one, so every row past the first page was unreachable
+         from the UI while `ranking.status` explained the boundary of a page
+         nobody could reach.
+
+         THE BUTTONS ARE STATIC RATHER THAN BUILT PER RENDER, and that is the
+         reason this markup exists at all instead of an empty container like
+         #discovery. js/results.js clears #results wholesale on every render;
+         if these were rebuilt with it, clicking Next would destroy the element
+         holding focus and drop the caret to <body> on every page turn. Only
+         `disabled` and the status text change, so focus survives the turn.
+         js/pager.js decides all three; this file only holds them. -->
+    <nav class="pager" id="pager" aria-label="Result pages" hidden>
+      <button class="ghost-btn" id="pager-prev" type="button" disabled>‹ Previous</button>
+      <span class="pager-status" id="pager-status"></span>
+      <button class="ghost-btn" id="pager-next" type="button" disabled>Next ›</button>
+    </nav>
   </section>
 
   <article class="inspector" id="inspector" aria-label="Note">
