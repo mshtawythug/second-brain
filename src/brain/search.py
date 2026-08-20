@@ -139,6 +139,15 @@ class SearchResult:
     score: float
     content_type: str
     tags: list[str]
+    #: The document's own date — ``coalesce(sent_at, ingested_at)``, the same
+    #: expression the recency boost decays over, so a hit's displayed date and
+    #: its ranking date can never disagree. ``None`` only when the ranking leg
+    #: did not fetch it — the graph legs in :mod:`brain.graph_rag` shape their
+    #: own ``SearchResult``s and leave it unset. A row carrying NEITHER
+    #: timestamp is unreachable: ``documents.ingested_at`` is
+    #: ``TIMESTAMPTZ NOT NULL DEFAULT NOW()`` (``001_init.sql:23``), so the
+    #: coalesce always resolves.
+    recency_ts: datetime | None = None
     explain: SearchExplanation | None = None  # opt-in; populated only when explain=True
 
 
@@ -316,6 +325,7 @@ def hybrid_search(
     query: str,
     limit: int = 5,
     source_kind: str | None = None,
+    source_missing: bool = False,
     tag: str | None = None,
     since_days: int | None = None,
     fts_only: bool = False,
@@ -443,6 +453,7 @@ def hybrid_search(
     # same object, so they cannot drift apart.
     predicate = build_predicate(
         source_kind=source_kind,
+        source_missing=source_missing,
         tag=tag,
         since_days=since_days,
         person_keys=person_keys,
@@ -653,16 +664,20 @@ def hybrid_search(
         recency_age_days: float | None = None
         recency_boost_factor = 1.0
 
+        # ``coalesce(sent_at, ingested_at)``. Read unconditionally — it is both
+        # the recency-boost input and the date every read surface displays, and
+        # reading it only inside the boost branch is what previously made it
+        # invisible to callers that leave ``recency_halflife_days`` at None.
+        recency_ts = meta[5]
+        # Make the timestamp tz-aware if the DB returned a naive value.
+        if recency_ts is not None and recency_ts.tzinfo is None:
+            recency_ts = recency_ts.replace(tzinfo=UTC)
+
         # Recency boost: multiplicative decay over coalesce(sent_at, ingested_at).
-        if recency_halflife_days is not None:
-            recency_ts = meta[5]
-            if recency_ts is not None:
-                # Make the timestamp tz-aware if the DB returned a naive value.
-                if recency_ts.tzinfo is None:
-                    recency_ts = recency_ts.replace(tzinfo=UTC)
-                recency_age_days = max(0.0, (now - recency_ts).total_seconds() / 86400.0)
-                recency_boost_factor = 0.5 ** (recency_age_days / recency_halflife_days)
-                score = rrf_score * recency_boost_factor
+        if recency_halflife_days is not None and recency_ts is not None:
+            recency_age_days = max(0.0, (now - recency_ts).total_seconds() / 86400.0)
+            recency_boost_factor = 0.5 ** (recency_age_days / recency_halflife_days)
+            score = rrf_score * recency_boost_factor
 
         # Snippet context expansion: pull neighboring chunks from the same doc.
         if snippet_context_tokens > 0:
@@ -734,6 +749,7 @@ def hybrid_search(
                 source_kind=meta[4],
                 snippet=snippet,
                 score=score,
+                recency_ts=recency_ts,
                 explain=explain_obj,
             )
         )

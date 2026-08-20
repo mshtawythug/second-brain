@@ -81,6 +81,27 @@ github_pat_EXAMPLE_NOT_A_REAL_TOKEN_0000
 glpat-EXAMPLE-NOT-REAL-0000
 AIzaEXAMPLENOTAREALGOOGLEAPIKEY00000000
 
+# --- Synthetic credential illustrations in the F4-F6 secret-guard spec ---
+# docs/specs/2026-07-25-sections/F4-F6-ingest-secret-guard.md is a spec ABOUT
+# the ingest secret guard, so it must quote credential-SHAPED strings to explain
+# what the guard matches. Both values below are degenerate by construction —
+# they carry the pattern's fixed prefix followed by filler in exactly the
+# positions where a genuine credential carries its secret bytes, so neither can
+# authenticate against anything:
+#   - the AWS-shaped one is the `AKIA` prefix + 16 identical letters
+#   - the Stripe-shaped one is the `sk_live_` prefix + the alphabet in sequence
+# The spec itself (§7 risk table) states that fixtures like these belong here.
+AKIAAAAAAAAAAAAAAAAA
+sk_live_ABCDEFGHIJKLMNOPQRSTUV
+
+# --- Invented persona names used in spec examples ------------------------
+# Minted for spec prose/fixtures during the docs/specs PII scrub; they refer to
+# no real person, and their example addresses use the RFC 2606 example.com
+# domain. Listed here so the semantic pass — whose prompt names only a fixed
+# cast of placeholders — recognises them as synthetic.
+Jordan Vale
+Rowan Pike
+
 # --- Public / generic terms confirmed safe (not the user's PII) ----------
 # Known false positives that surfaced from the corpus as generic public terms.
 NFPA

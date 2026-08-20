@@ -1,7 +1,7 @@
 """CLI integration tests for ``brain people`` (Phase C, 2026-05-07 plan).
 
 The command surfaces the People Hub aggregation in the terminal — it
-reuses :func:`brain.wiki.build_people.aggregate_people` directly, so
+reuses :func:`brain.people.aggregate_people` directly, so
 the data layer is already covered by ``test_build_people.py``. The
 tests below pin the CLI surface: roster vs detail view, ``--json``
 output shape, threshold filtering, owner filtering, name disambiguation,

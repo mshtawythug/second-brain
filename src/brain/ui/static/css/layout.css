@@ -1,0 +1,61 @@
+/* layout — the app shell, the three panes, and the inspector's grid.
+ *
+ * Structure only: what boxes exist, how they are sized, and how they scroll.
+ * Nothing in this file gives anything a colour it does not need in order to
+ * separate one pane from the next.
+ *
+ * Loads third. The responsive overrides for these rules deliberately do NOT
+ * live here — see the note at the end of components.css.
+ */
+
+/* ---------------------------------------------------------------- shell --- */
+
+.shell {
+  display: grid;
+  grid-template-columns: var(--rail-w) var(--ledger-w) 1fr;
+  height: calc(100vh - 2.75rem);
+  min-height: 0;
+}
+/* `[hidden]` alone loses to `.shell { display: grid }` — a bare attribute
+   selector is (0,1,0) and so is a class, and this rule would come second.
+   Hence the explicit (0,2,0) pair. The tab panes are `class="shell
+   deferred-tab" hidden`, so this is what actually hides them. */
+.shell[hidden] { display: none; }
+
+.rail, .ledger, .inspector { min-height: 0; overflow-y: auto; }
+.rail   { border-right: var(--hair); background: var(--paper); }
+.ledger { border-right: var(--hair); background: var(--paper-sunk); }  /* a well  */
+.inspector { background: var(--paper-raised); }                        /* a sheet */
+
+/* ------------------------------------------------------------ inspector --- */
+
+/* GRID, not flex, and the choice is load-bearing rather than stylistic.
+   `.note-head` wraps everything above the body so there are exactly two rows —
+   header, then the body/editor on `1fr`, which fills the pane.
+   Grid over flex because an explicit `height` DEFEATS grid's `stretch` but is
+   only a flex BASE size under `flex-grow`: measured in a browser, a drag to
+   180px left a flex child at 456px and moved a grid child to exactly 180px.
+   That is what makes `resize: vertical` on .editor mean anything at all. */
+.inspector { padding: var(--s-6) var(--s-7); display: grid; grid-template-rows: auto 1fr; }
+
+/* STRETCHING IS OPT-IN. The 1fr track hands its full height to whichever child
+   lands on it, and only .editor wants that. `.withheld` was measured at 404px
+   in a 600px pane — a one-line notice rendered as a full-height sunk block,
+   because it carries a background and a left border where .note-body does not.
+   Defaulting every child to `start` means the NEXT child added here is safe
+   without anyone remembering this; the one that needs to fill says so.
+
+   These two rules and the `.inspector` rule above must stay in ONE file. They
+   are read as a unit by a test, and separating them would put a cascade
+   question between them for no gain — `.inspector > *` (0,2,0) and
+   `.inspector > .editor` (0,2,0) are the same specificity, so only their order
+   makes the opt-in work. */
+.inspector > * { align-self: start; }
+.inspector > .editor { align-self: stretch; }
+/* CONSEQUENCE, measured, so nobody rediscovers it: `.note-body` no longer fills
+   the pane either (436px -> 191px on a short note). Every glyph stays at the
+   same coordinate and long notes scroll identically — but the whitespace below
+   a short note now hit-tests to .inspector rather than to .note-body. Nothing
+   is bound to .note-body today, so this is inert. If anything ever binds a
+   click, hover or drop target to it and expects the full remaining pane, it
+   must opt into `stretch` here. */

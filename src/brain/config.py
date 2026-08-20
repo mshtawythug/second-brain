@@ -254,6 +254,20 @@ DEFAULT_GRAPH_COMMUNITY_LIMIT = 5  # global retrieval community count (== theme 
 # ``BRAIN_GRAPH_MAX_ENTITIES_PER_DOC``.
 DEFAULT_GRAPH_COMMUNITY_MAX: int | None = None
 
+# `brain ui` -- whether the UNPROMPTED listing surfaces (the vault tree, the
+# recent rail, the tag index) may name a ``sensitivity='confidential'``
+# document. Read from ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES``, tri-state parsed
+# like the graph flags above.
+#
+# DEFAULT FALSE, and separate from ``UiContext.serve_confidential_bodies`` by
+# ruling. The bodies flag is named for bodies and is computed as
+# ``loopback or include_confidential``; reusing it to gate a list of TITLES the
+# user never asked for is a category error, because "this session is trusted to
+# read a confidential note it opened" and "this session wants every
+# confidential title painted on load" are different questions. Off by default
+# because the tree paints unprompted on first load.
+DEFAULT_UI_SERVE_CONFIDENTIAL_TITLES = False
+
 # Tacit-knowledge elicitation knobs (feat/tacit-knowledge-elicitation).
 #
 # ``DEFAULT_ELICIT_MIN_EVIDENCE_DOCS`` — minimum number of evidence documents
@@ -882,7 +896,7 @@ class Config:
     # Phase 1 data-quality remediation (2026-05-23). Extra automated-sender
     # denylist entries (substrings or full addresses) layered on top of the
     # always-on generic heuristic (no-reply / notifications / mailer / …) used by
-    # :func:`brain.wiki._person_name.is_automated_sender`. Loaded from
+    # :func:`brain.person_name.is_automated_sender`. Loaded from
     # ``BRAIN_GRAPH_SENDER_DENYLIST`` (comma-separated); entries are trimmed,
     # lowercased, and de-duplicated at load time. Empty frozenset (default) means
     # only the generic heuristic runs. Threaded into both the People Hub
@@ -985,6 +999,10 @@ class Config:
     # :func:`_default_backup_dir` so a directly-constructed Config honors
     # ``BRAIN_BACKUP_DIR`` identically to ``Config.load()``.
     backup_dir: Path = field(default_factory=_default_backup_dir)
+    # `brain ui` -- gate on the unprompted listing surfaces. See
+    # :data:`DEFAULT_UI_SERVE_CONFIDENTIAL_TITLES` for why this is not
+    # ``UiContext.serve_confidential_bodies``.
+    ui_serve_confidential_titles: bool = DEFAULT_UI_SERVE_CONFIDENTIAL_TITLES
 
     @classmethod
     def load(cls) -> "Config":
@@ -1474,6 +1492,26 @@ class Config:
                     "BRAIN_GRAPH_CONCEPTS must be one of "
                     "1/true/yes/on or 0/false/no/off "
                     f"(got {graph_concepts_raw!r})"
+                )
+
+        # `brain ui` confidential-TITLE gate. Tri-state like the graph flags:
+        # unset/blank -> default (False); a recognised token -> that value;
+        # anything else -> ConfigError at startup, so a typo can never read as
+        # "hide" when the operator meant "show" or, worse, the reverse.
+        ui_titles_raw = os.environ.get("BRAIN_UI_SERVE_CONFIDENTIAL_TITLES")
+        if ui_titles_raw is None or ui_titles_raw.strip() == "":
+            ui_serve_confidential_titles = DEFAULT_UI_SERVE_CONFIDENTIAL_TITLES
+        else:
+            token = ui_titles_raw.strip().lower()
+            if token in _GRAPH_ENABLED_TRUTHY:
+                ui_serve_confidential_titles = True
+            elif token in _GRAPH_ENABLED_FALSY:
+                ui_serve_confidential_titles = False
+            else:
+                raise ConfigError(
+                    "BRAIN_UI_SERVE_CONFIDENTIAL_TITLES must be one of "
+                    "1/true/yes/on or 0/false/no/off "
+                    f"(got {ui_titles_raw!r})"
                 )
 
         graph_extract_model_raw = os.environ.get("BRAIN_GRAPH_EXTRACT_MODEL")
@@ -2247,4 +2285,5 @@ class Config:
             "recall_max_candidates": recall_max_candidates,
             "agent_id": agent_id,
             "backup_dir": backup_dir,
+            "ui_serve_confidential_titles": ui_serve_confidential_titles,
         }

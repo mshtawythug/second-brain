@@ -285,7 +285,7 @@ def _fetch_recent_docs(
       pipeline re-stamps the home note's ``ingested_at`` on every derived-page
       regeneration it would otherwise sit permanently at the top.
     - ``vault_path NOT LIKE 'people/%%'`` — the People-Hub auto-page namespace.
-      ``brain.wiki.build_people.emit_people_pages`` writes EVERY page it emits
+      ``brain.people.emit_people_pages`` writes EVERY page it emits
       under ``<vault>/people/`` (the per-person ``people/<slug>.md`` roster
       pages + ``people/index.md``); those are machine-generated derived pages,
       re-stamped ``ingested_at = now()`` on each People-Hub regeneration, so

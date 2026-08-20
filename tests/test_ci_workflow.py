@@ -7,12 +7,21 @@ flag, still shows a green badge; only a test can notice.
 """
 from __future__ import annotations
 
+import fnmatch
 import re
+import shlex
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
+
+# Every test here reads files and nothing else — as the docstring above says.
+# Without this marker the module still took the machine-wide test-database lock
+# and serialised behind every other agent's run for a schema it never touches;
+# with it, a selection of only this file needs no Postgres at all. Adding a test
+# that does touch the database is not silent: the connection fails loudly.
+pytestmark = pytest.mark.nodb
 
 REPO_ROOT = Path(__file__).parent.parent
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
@@ -32,6 +41,22 @@ BADGE_URL_RE = re.compile(r"actions/workflows/(?P<workflow>[A-Za-z0-9_.-]+)/badg
 # module's own contract, and this test still pins the latter.
 LIVE_DB_MARKER_RE = re.compile(r"pytest\.mark\.live_db")
 GATED_MARKER_RE = re.compile(r"@pytest\.mark\.(eval|benchmark)\b")
+
+# The CI job that gates the browser harness, and the oracle for "which modules
+# must it cover".
+#
+# The oracle is the MARKER, read out of each module's source — deliberately not
+# the filename. A filename oracle (`test_ui_browser*.py`) agrees with the
+# workflow's own glob, so the two would confirm each other and both go blind
+# together the moment a new module is named something else. Reading the marker
+# means a module that carries it is required to be in the selection whatever it
+# is called, which is the property actually worth pinning.
+#
+# Escaped dots keep this pattern from matching its own source line; this module
+# is skipped explicitly as well, so prose here mentioning the marker by name
+# cannot make the guard demand that this file join the browser selection.
+BROWSER_JOB = "browser"
+BROWSER_MARKER_RE = re.compile(r"pytest\.mark\.browser\b")
 
 
 def load_workflow(name: str) -> dict[str, object]:
@@ -201,12 +226,38 @@ def test_ci_test_job_fetches_tags() -> None:
 
 
 def test_ci_pytest_does_not_disable_coverage() -> None:
-    """CI must inherit pyproject.toml's coverage floor, never override it."""
-    for command in _run_commands(load_workflow("ci.yml")):
-        assert "--no-cov" not in command, f"ci.yml disables coverage: {command!r}"
-        assert (
-            "--cov-fail-under" not in command
-        ), f"ci.yml overrides the coverage floor instead of inheriting it: {command!r}"
+    """CI must inherit pyproject.toml's coverage floor, never override it.
+
+    ONE carve-out, and it is deliberately narrow. The `browser` job runs a
+    PATH-RESTRICTED selection of the browser harness, which cannot meet a
+    whole-package 85% floor and would fail on coverage instead of on browser
+    behaviour. That job may therefore pass ``--no-cov`` — but only on a command
+    that names a path under ``tests/``. A bare suite run with ``--no-cov`` is
+    still rejected there, so the carve-out cannot grow into "the browser job
+    may switch coverage off for everything".
+
+    ``--cov-fail-under`` is rejected everywhere with no exception: overriding
+    the floor is never the same act as declining to measure a slice of it.
+    """
+    for job_name, job in _jobs(load_workflow("ci.yml")).items():
+        for step in job.get("steps", []):
+            if not isinstance(step, dict) or "run" not in step:
+                continue
+            command = str(step["run"])
+            assert "--cov-fail-under" not in command, (
+                f"ci.yml job {job_name!r} overrides the coverage floor instead of "
+                f"inheriting it: {command!r}"
+            )
+            if "--no-cov" not in command:
+                continue
+            selects_paths = any(
+                token.startswith("tests/") for token in shlex.split(command)
+            )
+            assert job_name == BROWSER_JOB and selects_paths, (
+                f"ci.yml job {job_name!r} disables coverage: {command!r}. Only the "
+                f"{BROWSER_JOB!r} job may, and only on a selection that names a "
+                "path under tests/ — the coverage floor is the point of the gate."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -424,4 +475,186 @@ def test_the_hermeticity_escape_hatch_test_carries_only_live_ollama() -> None:
     assert "live_db" not in tail, (
         "test_live_ollama_marker_lifts_the_guard gained a live_db marker, which "
         "the default suite deselects — it would silently leave the gate."
+    )
+
+
+# ---------------------------------------------------------------------------
+# The browser harness gate
+#
+# `addopts` deselects the `browser` marker from the default suite, so the
+# `test` job above runs NONE of the browser harness. A dedicated job does, and
+# these tests pin the two ways that job can look healthy while gating nothing:
+# it can disappear, and — far more likely — it can keep running while a newly
+# added browser module sits outside its selection.
+# ---------------------------------------------------------------------------
+
+
+def _browser_pytest_command(workflow: dict[str, object]) -> str:
+    """The single pytest invocation in the `browser` job."""
+    job = _jobs(workflow).get(BROWSER_JOB)
+    assert isinstance(job, dict), (
+        f"ci.yml has no {BROWSER_JOB!r} job — the browser harness is deselected "
+        "from the default suite by `addopts`, so without this job those tests "
+        "run in NO workflow at all."
+    )
+    commands = [
+        str(step["run"])
+        for step in job.get("steps", [])
+        if isinstance(step, dict) and "run" in step and re.search(r"\bpytest\b", str(step["run"]))
+    ]
+    assert len(commands) == 1, (
+        f"expected exactly one pytest invocation in the {BROWSER_JOB!r} job, "
+        f"found {len(commands)}: {commands!r}. More than one makes 'what does "
+        "this job actually select' ambiguous, and these guards read only one."
+    )
+    return commands[0]
+
+
+def _selection_patterns(command: str) -> list[str]:
+    """The `tests/...` path arguments of a pytest command."""
+    return [token for token in shlex.split(command) if token.startswith("tests/")]
+
+
+def _modules_carrying_the_browser_marker() -> list[Path]:
+    """Every tests/ module whose source applies the `browser` marker."""
+    return sorted(
+        path
+        for path in TESTS_DIR.glob("test_*.py")
+        if path.name != Path(__file__).name
+        and BROWSER_MARKER_RE.search(path.read_text(encoding="utf-8"))
+    )
+
+
+def test_ci_gates_the_browser_harness() -> None:
+    """The browser job exists and actually selects the browser marker."""
+    command = _browser_pytest_command(load_workflow("ci.yml"))
+
+    assert "-m browser" in command, (
+        f"the {BROWSER_JOB!r} job's pytest run does not select the `browser` "
+        f"marker: {command!r}"
+    )
+    assert _selection_patterns(command), (
+        f"the {BROWSER_JOB!r} job names no path under tests/: {command!r}. A bare "
+        "`-m browser` collects the WHOLE suite before markers are applied, and "
+        "tests/test_restore_gate.py and tests/test_restore_swap.py open a "
+        "database connection at import time — so it would need a Postgres this "
+        "job deliberately does not start."
+    )
+
+
+def test_ci_browser_selection_covers_every_browser_module() -> None:
+    """Every module carrying the `browser` marker must be inside the selection.
+
+    This is the guard against the failure the named-file selection would have
+    caused: three new browser suites land, the workflow keeps running the one
+    file it names, and CI stays green having executed none of them. A gate that
+    certifies nothing while looking like it certifies everything.
+
+    The module list is discovered from the MARKER rather than from the filename
+    glob, so a module named outside the `test_ui_browser*` convention is caught
+    too — a filename oracle would agree with the workflow's glob by construction
+    and both would miss it together.
+    """
+    command = _browser_pytest_command(load_workflow("ci.yml"))
+    patterns = _selection_patterns(command)
+    modules = _modules_carrying_the_browser_marker()
+
+    # Without this the test passes vacuously the day the marker is renamed or
+    # the discovery regex stops matching — the exact shape of dead guard this
+    # module exists to prevent.
+    assert modules, (
+        "no tests/ module applies the `browser` marker, so this guard just "
+        "checked nothing. Either the harness was deleted (then delete the "
+        f"{BROWSER_JOB!r} job too) or BROWSER_MARKER_RE no longer matches how "
+        "the marker is written."
+    )
+
+    uncovered = [
+        f"tests/{module.name}"
+        for module in modules
+        if not any(fnmatch.fnmatch(f"tests/{module.name}", pattern) for pattern in patterns)
+    ]
+    assert not uncovered, (
+        f"these modules carry the `browser` marker but no CI job runs them: "
+        f"{uncovered}. The {BROWSER_JOB!r} job selects {patterns} — widen that "
+        f"selection in .github/workflows/ci.yml, or those tests are dead weight "
+        "that CI never executes."
+    )
+
+
+def test_ci_browser_selection_is_order_deterministic() -> None:
+    """The selection must not be a glob, and its order must be stated.
+
+    WHAT THIS PINS, AND WHY IT IS NOT THE COVERAGE GUARD ABOVE. That one asks
+    "is every browser module inside the selection" — a set question, which a
+    glob answers perfectly. This asks "will these modules run in the same ORDER
+    everywhere", which a glob cannot answer at all, because the SHELL expands it
+    using the ambient locale and pytest honours argument order.
+
+    MEASURED. Under macOS's default ``en_US.UTF-8``, ICU weights ``_`` against
+    ``.`` differently from byte order, so ``tests/test_ui_browser*.py`` expands
+    with ``test_ui_browser.py`` LAST; under a POSIX-locale runner it expands
+    FIRST. The same command therefore ran these six modules in two different
+    orders on two machines. An order-dependent interaction that only bites when
+    a module runs first is invisible to local reproduction *by construction*,
+    and "it passes locally" stops being evidence about CI. That is the concrete
+    defect this test exists to prevent recurring, not a tidiness rule.
+
+    ``LC_ALL=C pytest …`` IS NOT AN ACCEPTABLE FIX and the no-metacharacter
+    assertion below deliberately rejects it. A variable-assignment PREFIX sets
+    the environment of the command being run; the surrounding shell has already
+    expanded the glob by then, so the prefix changes nothing about the order.
+    Exporting the locale on an earlier line does work — and makes correctness
+    depend on two lines staying in sequence, which a later editor can collapse
+    back into a prefix with no visible symptom. Explicit paths have no
+    expansion left to vary.
+
+    THE ORDER IS BYTE ORDER, and that choice is conservative rather than
+    arbitrary: it is exactly what the old glob produced on the POSIX-locale
+    runner, so pinning it changes CI's behaviour by nothing at all. It does
+    constrain a future author who wants a deliberate non-alphabetical order
+    (slowest first, say). That is a real cost, accepted: if someone wants that,
+    they should change this assertion and say why in the same commit, which is
+    precisely the conversation a silent locale dependency prevented.
+    """
+    command = _browser_pytest_command(load_workflow("ci.yml"))
+    patterns = _selection_patterns(command)
+
+    globbed = [p for p in patterns if any(ch in p for ch in "*?[")]
+    assert not globbed, (
+        f"the {BROWSER_JOB!r} job selects with glob patterns {globbed}. The "
+        "shell expands those using the ambient locale, so this job runs the "
+        "modules in one order here and a different one on a developer's macOS "
+        "box — measured: test_ui_browser.py expands LAST under en_US.UTF-8 and "
+        "FIRST under LC_ALL=C. List the paths explicitly instead. An "
+        "`LC_ALL=C` prefix does NOT fix this: the glob is expanded before that "
+        "variable reaches anything."
+    )
+
+    expected = [f"tests/{module.name}" for module in _modules_carrying_the_browser_marker()]
+    assert patterns == expected, (
+        f"the {BROWSER_JOB!r} job selects {patterns}, expected {expected} — "
+        "every module carrying the `browser` marker, in byte order. Byte order "
+        "is what the previous glob produced on the POSIX-locale runner, so this "
+        "is the existing behaviour written down rather than a new one."
+    )
+
+
+def test_ci_browser_job_starts_no_database() -> None:
+    """The browser job's "needs no Postgres" claim, pinned.
+
+    The harness stubs the API at the network layer, so this job starts no
+    container and defines no DATABASE_URL. If that stops being true the job has
+    quietly become a second, slower copy of the `test` job.
+    """
+    job = _jobs(load_workflow("ci.yml"))[BROWSER_JOB]
+
+    assert "services" not in job, (
+        f"the {BROWSER_JOB!r} job declares `services:` — the browser harness is "
+        "hermetic and needs no database"
+    )
+    env_keys = [key for key in (job.get("env") or {})]
+    assert not env_keys, (
+        f"the {BROWSER_JOB!r} job declares env {env_keys} — it needs no "
+        "DATABASE_URL, and one here would point the harness at a real database"
     )

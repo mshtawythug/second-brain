@@ -171,7 +171,7 @@ def test_overlap_does_not_exceed_ceiling() -> None:
 def test_playwright_tree_fixture_respects_budget() -> None:
     """Regression: Playwright accessibility-tree-style fixture must split below ceiling.
 
-    Models the original failure mode (`raw-nfpa25-ch11.md`): one paragraph,
+    Models the original failure mode (`raw-example-standard-ch11.md`): one paragraph,
     thousands of lines, zero `.!?` terminators.
     """
     fixture = Path(__file__).parent / "fixtures" / "playwright_tree.txt"

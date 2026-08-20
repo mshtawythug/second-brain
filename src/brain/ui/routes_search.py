@@ -75,13 +75,19 @@ async def search(request: Request) -> JSONResponse:
                 snippet_context_tokens=ctx.cfg.snippet_context_tokens,
                 **spec.filter_kwargs(),
             )
-            redacted = _confidential_hits(ctx, conn, results)
+            # Paging (T6). ``filter_kwargs`` asked for ``offset + limit`` rows;
+            # everything from here down works on the PAGE, never on the
+            # over-fetch. Redacting or counting the rows the caller will not
+            # see would make the confidential lookup do work for nothing and —
+            # worse — would report a `returned` that no response body matches.
+            page = spec.page_of(results)
+            redacted = _confidential_hits(ctx, conn, page)
             facets = _facets_for(conn, spec, sensitivity=sensitivity_filter)
             telemetry.record_ui_search(
                 conn,
                 enabled=ctx.logging_enabled,
                 query=spec.query,
-                result_count=len(results),
+                result_count=len(page),
                 session_id=session_id,
                 fts_count=diagnostics.fts_count,
                 duration_ms=int((perf_counter() - started) * 1000),
@@ -96,14 +102,20 @@ async def search(request: Request) -> JSONResponse:
     except psycopg.Error as exc:
         raise db_guard(exc) from exc
 
-    meta = search_meta_json(diagnostics, returned=len(results), facets=facets)
+    meta = search_meta_json(diagnostics, returned=len(page), facets=facets)
     return ok(
         {
             "session_id": str(session_id),
             "query": spec.query,
+            # Echoed so the ledger can build the next request without having to
+            # remember what it asked for. ``total_documents`` (inside ``meta``)
+            # is the lexical match total and is what tells a client whether a
+            # next page can exist at all.
+            "offset": spec.offset,
+            "limit": spec.limit,
             **meta,
             "results": [
-                _redact(search_result_payload(r), redacted) for r in results
+                _redact(search_result_payload(r), redacted) for r in page
             ],
         }
     )
@@ -156,6 +168,10 @@ def _facets_for(
     try:
         predicate = build_predicate(
             source_kind=spec.source_kind,
+            # T7. Omitting this would let ``?source=none`` annotate its results
+            # with counts computed over a DIFFERENT match set — the one thing
+            # this function's whole existence is supposed to make impossible.
+            source_missing=spec.source_missing,
             tag=spec.tag,
             content_type=spec.content_type,
             after=spec.after,

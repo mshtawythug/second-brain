@@ -93,7 +93,7 @@ def _retrieve_themes(
     mirroring the local no-seed path. ``PersonNotFound`` / ``PersonAmbiguous``
     from the resolver are *not* swallowed (the CLI/MCP map them in G2-h/i).
     """
-    # Late import: brain.queries → wiki.build_people pulls a heavier subtree;
+    # Late import: brain.queries → brain.people pulls a heavier subtree;
     # resolving lazily keeps brain.graph_rag import-cheap (mirrors the
     # brain.search late import in _build_doc_results).
     from ..queries import resolve_person_to_keys

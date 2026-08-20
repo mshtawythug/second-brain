@@ -48,6 +48,9 @@ def _context(tmp_path: Path, **overrides: Any) -> UiContext:
         recency_halflife_days = 180.0
         snippet_context_tokens = 0
         owner_participants: frozenset[str] = frozenset()
+        # Read by ``routes_meta.health``; ``None`` is the real default
+        # (``Config.user_email``, unset ``BRAIN_USER_EMAIL``).
+        user_email: str | None = None
 
     @contextlib.contextmanager
     def conn_factory() -> Any:

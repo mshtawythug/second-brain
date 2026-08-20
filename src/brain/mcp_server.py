@@ -45,7 +45,7 @@ from .errors import (
     VaultNoteSyncError,
     VaultPathEscape,
 )
-from .facets import SearchFacets, compute_facets
+from .facets import SOURCE_NONE_BUCKET, SearchFacets, compute_facets
 from .format import (
     alias_result_json,
     community_record_json,
@@ -485,12 +485,19 @@ def brain_search(
             # signal `brain gaps` keys off (the vector leg always returns
             # filler).
             diagnostics = SearchDiagnostics()
+            # ONE split, consumed by BOTH the ranked query below and the facet
+            # predicate further down. Splitting twice would be two chances to
+            # diverge, and a facet panel describing a different match set than
+            # the rows beside it is the exact defect the ``none`` bucket exists
+            # to fix.
+            source_kind, source_missing = _split_source_filter(source)
             results = hybrid_search(
                 conn,
                 embedder=state.embedder,
                 query=query,
                 limit=limit,
-                source_kind=source,
+                source_kind=source_kind,
+                source_missing=source_missing,
                 tag=effective_tag,
                 since_days=since_days,
                 fts_only=fts_only,
@@ -526,7 +533,8 @@ def brain_search(
                 facet_data = compute_facets(
                     conn,
                     predicate=build_predicate(
-                        source_kind=source,
+                        source_kind=source_kind,
+                        source_missing=source_missing,
                         tag=effective_tag,
                         since_days=since_days,
                         person_keys=person_match.keys if person_match else None,
@@ -582,6 +590,30 @@ def brain_search(
 
 
 @mcp_app.tool()
+def _split_source_filter(source: str | None) -> tuple[str | None, bool]:
+    """Split an MCP ``source`` value into ``(source_kind, source_missing)``.
+
+    ``source_kind`` alone cannot express "no source at all":
+    ``d.source_id IN (SELECT id FROM sources WHERE kind=%s)`` is false for a
+    NULL ``source_id`` under EVERY value of ``kind``, so source-less documents
+    are unreachable from the filter in all of its settings. On the live corpus
+    that is 877 of 1393 documents.
+
+    ``brain.ui.schemas.parse_search_params`` performs exactly this split for the
+    web UI. Doing it here too is what keeps the two agent-facing tools and the
+    UI answering the same question for the same input, rather than ``none``
+    meaning "documents with no source" in one surface and "a ``sources`` row
+    whose kind is the literal string none", i.e. nothing at all, in another.
+
+    The value comes from :data:`brain.facets.SOURCE_NONE_BUCKET` — the same
+    constant the facet panel labels the bucket with — so a caller can feed a
+    facet value straight back in as a filter.
+    """
+    if source == SOURCE_NONE_BUCKET:
+        return None, True
+    return source, False
+
+
 def brain_recall(
     query: str,
     budget_tokens: int | None = None,
@@ -658,6 +690,7 @@ def brain_recall(
                     person_match = resolve_person_to_keys(conn, person)
                 except (PersonNotFound, PersonAmbiguous) as e:
                     raise _mcp_error(INVALID_PARAMS, str(e)) from e
+            source_kind, source_missing = _split_source_filter(source)
             result = recall(
                 conn,
                 state.cfg,
@@ -665,7 +698,8 @@ def brain_recall(
                 query=query,
                 budget_tokens=effective_budget,
                 max_candidates=effective_candidates,
-                source_kind=source,
+                source_kind=source_kind,
+                source_missing=source_missing,
                 tag=tag,
                 since_days=since_days,
                 fts_only=fts_only,

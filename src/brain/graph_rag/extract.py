@@ -480,7 +480,7 @@ class OllamaExtractor:
 
         # Late import keeps :mod:`brain.graph_rag` import-cheap and avoids pulling
         # the heavy :mod:`brain.ingest` package in at module load (mirrors
-        # ``reconcile.py``'s late import of ``brain.wiki.build_people``).
+        # ``reconcile.py``'s late import of ``brain.people``).
         from ..ingest.chunker import chunk_text
 
         chunks = chunk_text(

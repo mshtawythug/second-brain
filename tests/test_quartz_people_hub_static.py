@@ -88,13 +88,13 @@ def test_people_hub_scss_partial_targets_kind_people_pages() -> None:
     """``_people_hub.scss`` exists and targets the right slug prefixes.
 
     The partial drives the page-kind styling. Frontmatter ``kind:
-    people`` is a marker we set in ``build_people.py``, but Quartz
+    people`` is a marker we set in ``people.py``, but Quartz
     doesn't expose arbitrary frontmatter as ``data-*`` attributes, so
     the partial keys off the slug-prefix instead. Pin the selector
     shape so a refactor that, say, renames the directory from
     ``people/`` to ``contacts/`` triggers test breakage that points
     the reader to the corresponding rename in
-    ``src/brain/wiki/build_people.py``.
+    ``src/brain/people.py``.
     """
     text = _people_hub_scss_text()
     # Per-person pages — slug prefix selector.
@@ -130,4 +130,4 @@ def test_people_hub_scss_documents_emit_contract_dependency() -> None:
     contract knows to update the partial too.
     """
     text = _people_hub_scss_text()
-    assert "build_people.py" in text
+    assert "people.py" in text

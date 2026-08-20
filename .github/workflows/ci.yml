@@ -10,16 +10,21 @@
 #
 # Design decisions:
 #
-#   * TWO JOBS, one workflow. `lint` needs no Docker and finishes in well under
-#     a minute, so a formatting or typing mistake fails fast and cheap instead
-#     of after a container bring-up plus the full suite. Both live here so a
-#     single `ci.yml` badge covers the union.
+#   * THREE JOBS, one workflow. `lint` needs no Docker and finishes in well
+#     under a minute, so a formatting or typing mistake fails fast and cheap
+#     instead of after a container bring-up plus the full suite. `browser`
+#     needs neither Docker nor Postgres. All three live here so a single
+#     `ci.yml` badge covers the union.
 #
-#   * BARE `pytest`, no extra flags. pyproject.toml's `addopts` already carries
-#     `--cov=brain --cov-fail-under=85` and already deselects the five gated
-#     markers, so CI runs exactly what a contributor runs locally. Do NOT add
-#     `--no-cov` (as eval.yml/benchmark.yml deliberately do) — the coverage
-#     floor is the entire point of this workflow.
+#   * BARE `pytest`, no extra flags — in the `test` job. pyproject.toml's
+#     `addopts` already carries `--cov=brain --cov-fail-under=85` and already
+#     deselects the six gated markers, so CI runs exactly what a contributor
+#     runs locally. Do NOT add `--no-cov` there (as eval.yml/benchmark.yml
+#     deliberately do) — the coverage floor is the entire point of that job.
+#     The `browser` job is the one deliberate exception, and it is narrow: it
+#     names an EXPLICIT LIST OF MODULES rather than running the suite, so it
+#     can neither dilute nor satisfy a whole-package coverage floor. See that job's own
+#     comment for the full argument.
 #
 #     Marker exclusions inherited from pyproject.toml, and why each stays out:
 #       - `e2e`       needs a Node toolchain + the live ~/brain-vault/.quartz/
@@ -34,6 +39,12 @@
 #                     be in that corpus, so it reported machine conditions
 #                     rather than code. Run it deliberately:
 #                     `pytest -m live_db --no-cov`.
+#       - `browser`   needs the `browser` extra and a cached chromium, so in
+#                     THIS job it would skip — and a skip reads exactly like a
+#                     pass. It stays deselected here and is gated instead by
+#                     the separate `browser` job below, which installs both.
+#                     That job is additive: `addopts` is unchanged, so the
+#                     default local suite still excludes the marker.
 #
 #     `integration` is intentionally NOT excluded: it needs only the port-5434
 #     container this job starts. Nor is `live_ollama` — it does double duty,
@@ -196,3 +207,155 @@ jobs:
       - name: Tear down the AGE test instance
         if: always()
         run: docker compose -f docker-compose.age-test.yml down -v
+
+  # ---------------------------------------------------------------------------
+  # The `brain ui` front end, executed in a real browser.
+  #
+  # WHY A SEPARATE JOB rather than a step in `test`. Every
+  # `tests/test_ui_browser*.py` module carries the `browser` marker, which
+  # `addopts` deselects — so before this job existed those tests ran in NO
+  # workflow. (Deliberately no count: it read "33" when one module existed and
+  # is several times that now. A number in prose rots on the next module added,
+  # and the roster is discovered by MARKER in tests/test_ci_workflow.py.) The
+  # first of them holds the
+  # regression test for an editor that reported "Saved" while silently
+  # discarding the user's keystrokes; leaving it ungated meant the worst
+  # recent defect in this project had a test that CI never executed.
+  #
+  # WHY THE FLAGS, one at a time — this is the workflow whose header says not
+  # to add flags, so each is argued rather than assumed:
+  #
+  #   * THE PATH IS LOAD-BEARING, not decoration. Marker deselection happens
+  #     AFTER collection, and tests/test_restore_gate.py and
+  #     tests/test_restore_swap.py open a database connection at IMPORT time.
+  #     A bare `pytest -m browser` therefore dies with 2 collection errors
+  #     against an unreachable database. Naming the modules explicitly is
+  #     precisely what makes the "needs no Postgres" claim below true — which is why this job
+  #     starts no container and defines no DATABASE_URL. Widening this to a
+  #     bare `-m browser` would silently reintroduce that dependency.
+  #
+  #   * `--no-cov` IS REQUIRED, and does not weaken the gate that the header
+  #     bullet protects. `addopts` carries `--cov-fail-under=85`, which a
+  #     browser-only selection cannot meet — without it this job fails
+  #     on coverage, not on browser behaviour. The whole-package floor is
+  #     still enforced, unchanged, by the `test` job's bare `pytest`; this job
+  #     is additive and cannot lower it.
+  #
+  #   * NO POSTGRES, NO OLLAMA, NO DOCKER. The harness stubs the API at the
+  #     network layer and drives the REAL index.html, css/ and js/ off disk.
+  #     conftest's two session-scoped autouse DB fixtures consult
+  #     `_session_touches_the_database` and skip when every collected item
+  #     carries the `browser` marker, so this selection also declines the
+  #     machine-wide advisory lock.
+  #
+  # ON CACHING: upstream (playwright docs, ci.md) does NOT recommend caching
+  # browser binaries — restore time is comparable to download. It is cached
+  # here anyway because this repo's own measurement (pyproject.toml, `browser`
+  # extra) is that the binaries already live outside the venv and get reused.
+  # Two consequences of following upstream's caveat rather than ignoring it:
+  # the key is pinned to the RESOLVED playwright version (a stale browser
+  # against a new client is the failure mode caching invites), and Linux
+  # system deps are NOT cacheable — so `install-deps` runs on a cache hit too,
+  # instead of assuming a restored directory is a complete install.
+  # ---------------------------------------------------------------------------
+  browser:
+    name: UI browser harness (playwright chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install package (dev + browser extras)
+        # `browser` stays an OPT-IN extra rather than moving into `dev`: it is
+        # named explicitly here so the gate gets playwright, while a
+        # contributor's `pip install -e ".[dev]"` keeps not pulling a browser
+        # harness it does not need. Naming both extras is what makes this job
+        # additive instead of a change to everyone's dev install.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,browser]"
+
+      - name: Resolve the installed playwright version (for the cache key)
+        id: playwright-version
+        # Read from the INSTALLED distribution, not from pyproject's `>=1.40`
+        # floor: the floor is a range, and keying a cache on a range pins the
+        # first version that ever filled it.
+        run: |
+          version="$(python -c 'from importlib.metadata import version; print(version("playwright"))')"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "playwright ${version}"
+
+      - name: Cache the chromium download
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          # Linux path. macOS uses ~/Library/Caches/ms-playwright; this job is
+          # pinned to ubuntu-latest, so the single path is correct here.
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-ms-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install chromium and its system dependencies
+        # System deps are apt packages OUTSIDE ~/.cache/ms-playwright and so
+        # are never restored by the cache above. On a hit the binaries are
+        # already present and only the deps are (re-)installed; on a miss both
+        # are. Skipping the hit branch entirely is the standard way this cache
+        # produces a green install and a chromium that will not launch.
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = "true" ]; then
+            python -m playwright install-deps chromium
+          else
+            python -m playwright install --with-deps chromium
+          fi
+
+      - name: Run the browser harness
+        # EXPLICIT PATHS, IN BYTE ORDER. This is NOT a narrowing of the gate —
+        # it names every module the previous `tests/test_ui_browser*.py` glob
+        # matched, and `tests/test_ci_workflow.py` still discovers the roster by
+        # MARKER, so a new browser suite that is not listed here turns the suite
+        # RED instead of being silently skipped. Same coverage, stated instead
+        # of derived.
+        #
+        # WHY THE GLOB HAD TO GO — measured, not theorised. The SHELL expands a
+        # glob, and it sorts using the ambient locale. Under macOS's default
+        # en_US.UTF-8, ICU weights `_` against `.` differently from byte order,
+        # so `test_ui_browser.py` expands LAST; under a POSIX-locale runner it
+        # expands FIRST. pytest honours argument order, so the same command ran
+        # these modules in a DIFFERENT ORDER locally than it does here. An
+        # order-dependent interaction that only bites when a module runs first
+        # is invisible to local reproduction by construction, and a developer's
+        # "cannot reproduce, it passes locally" proves nothing about this job.
+        # That is not hypothetical: it is what an investigation into a
+        # browser-job failure ran into (task #53/#63).
+        #
+        # AND `LC_ALL=C pytest …` DOES NOT FIX IT — verified, because it is the
+        # obvious fix and it is decoration. A variable assignment PREFIX sets
+        # the environment of the command; the glob has already been expanded by
+        # the surrounding shell before that command exists. Only exporting the
+        # locale on an earlier line would work, which makes correctness depend
+        # on two lines staying in order — a future editor collapsing them back
+        # into a prefix would silently restore the divergence. Explicit paths
+        # cannot regress that way: there is no expansion left to vary.
+        #
+        # Still NOT a bare `-m browser`: that collects the whole suite before
+        # markers are applied, and test_restore_{gate,swap}.py open a database
+        # connection at import time. Naming paths is what keeps "no Postgres"
+        # true.
+        run: >
+          pytest
+          tests/test_ui_browser.py
+          tests/test_ui_browser_api.py
+          tests/test_ui_browser_discovery.py
+          tests/test_ui_browser_history.py
+          tests/test_ui_browser_lede.py
+          tests/test_ui_browser_nav.py
+          tests/test_ui_browser_reading.py
+          -m browser --no-cov

@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 data/
 .DS_Store
@@ -42,15 +43,19 @@ run/
 # Brainstorm artifacts (kept local-only — can contain PII / personal references)
 .superpowers/
 
-# Plans / specs / audits / QA — local-only working docs (may contain personal
+# Plans / audits / QA — local-only working docs (may contain personal
 # references). docs/ is private-by-subdir: the publishable reference docs
 # (docs/README.md, docs/cli-reference.md, docs/graphrag.md,
-# docs/vault-and-wiki.md, docs/configuration.md), docs/guides/, and docs/assets/
-# stay trackable; everything below is ignored. Add any NEW private subdir/file
-# to this list before it can leak.
+# docs/vault-and-wiki.md, docs/configuration.md), docs/guides/, docs/assets/,
+# and docs/specs/ stay trackable; everything below is ignored. Add any NEW
+# private subdir/file to this list before it can leak.
+#
+# docs/specs/ was un-ignored deliberately: CLAUDE.md rule 11b mandates that all
+# specs live there, so leaving it ignored meant every design doc in the project
+# was one clean checkout from being lost. It was PII-scrubbed first and is now
+# synthetic-only, exactly like tests and fixtures — keep it that way (rule 15).
 docs/plans/
 docs/audits/
-docs/specs/
 docs/notes/
 docs/qa/
 docs/summaries/

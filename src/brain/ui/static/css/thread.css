@@ -1,0 +1,86 @@
+/* thread.css — email threads as a stack of collapsible messages.
+ *
+ * LOADED LAST, after components.css, like every other feature sheet.
+ * `check_every_stylesheet_is_linked_in_order` asserts `links == list(CSS_ORDER)`
+ * — an EXACT match, not a superset — so this file, that tuple in
+ * tests/test_ui_static_behaviour.py, and index.html's <link> block are one fact
+ * in three places and must land together.
+ *
+ * NO `--ink-faint` ANYWHERE, and that is deliberate rather than incidental.
+ * `check_ink_faint_used_once` allows that token exactly once, on `.search-glyph`,
+ * because it fails WCAG AA as text on every ground in both themes (2.69-3.03:1
+ * light, 3.34-3.84:1 dark). A summary bar carries the sender and the date —
+ * text a reader reads — so it uses `--ink-muted` (5.66-7.27:1). This sheet was
+ * checked against that guard BEFORE being offered for CSS_ORDER, because a
+ * stylesheet outside the roster is invisible to it (see task #42, where exactly
+ * that gap hid a live contrast defect).
+ */
+
+.thread-message {
+  border-top: var(--hair);
+  padding: var(--s-3) 0;
+}
+
+/* The newest message is the one already open; it reads as the current state of
+   the conversation rather than as one more archived entry, so it gets the
+   accent rule and no top border stacking against the message above it. */
+.thread-message.thread-newest {
+  border-top: none;
+  border-left: 2px solid var(--accent);
+  padding-left: var(--s-3);
+}
+
+.thread-message > summary {
+  cursor: pointer;
+  color: var(--ink-muted);
+  font-family: var(--font-ui);
+  font-size: var(--t-ui);
+  line-height: var(--lead-dense);
+  /* The marker stays: it is the only affordance saying this row expands, and
+     `list-style: none` on a summary is a common way to accidentally remove it. */
+  list-style-position: outside;
+}
+
+.thread-message > summary:hover {
+  color: var(--ink);
+}
+
+.thread-message > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The newest message's summary holds the real `<h2>` — moved there by
+   thread.js so its TOC anchor survives — so the heading is reset to sit inline
+   on the summary bar rather than opening a new block at heading scale. */
+.thread-message.thread-newest > summary > h2 {
+  display: inline;
+  margin: 0;
+  font-size: var(--t-title);
+  color: var(--ink);
+}
+
+/* An open section's body is indented under its summary so the thread reads as a
+   stack of messages rather than as one continuous document. */
+.thread-message[open] > :not(summary) {
+  margin-left: var(--s-3);
+}
+
+.thread-filter {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+  color: var(--ink-muted);
+  font-family: var(--font-ui);
+  font-size: var(--t-ui);
+  cursor: pointer;
+}
+
+/* `hidden` is set by the filter. The explicit rule is required rather than
+   tidy: `details` carries `display: block` from the UA sheet, and a bare
+   attribute selector (0,1,0) loses to it, so the filtered-out messages would
+   stay visible. */
+.thread-message[hidden] {
+  display: none;
+}

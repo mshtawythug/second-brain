@@ -37,18 +37,18 @@ from typing import Any
 
 import psycopg
 
+from brain.person_name import (
+    expand_owner_keys,
+    humanize_person_name,
+    is_automated_sender,
+    normalize_person_name,
+)
 from brain.vault._atomic import atomic_write_text
 from brain.vault.derived_links.directory import _score_directory_rows
 from brain.vault.derived_links.participants import extract_gmail_addresses
 from brain.vault.frontmatter import dump_frontmatter
 from brain.vault.paths import safe_wikilink_alias, strip_md_extension
 from brain.vault.slug import slugify
-from brain.wiki._person_name import (
-    expand_owner_keys,
-    humanize_person_name,
-    is_automated_sender,
-    normalize_person_name,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ class _DirectoryIndex:
     resolution is dictionary lookups rather than repeated SQL.
 
     Every view is keyed on the **canonical key** produced by
-    :func:`brain.wiki._person_name.normalize_person_name` — the lowercase,
+    :func:`brain.person_name.normalize_person_name` — the lowercase,
     separator-collapsed merge identity. Two directory rows whose raw
     ``display_name`` differs only by separators / mailing-list decoration /
     ``Last, First`` ordering (``Jane.Doe`` vs ``Jane Doe``) therefore collapse
@@ -160,9 +160,9 @@ def _build_directory_index(
     resolver needs. See :class:`_DirectoryIndex` for what each index represents.
 
     Each raw ``display_name`` is run through
-    :func:`brain.wiki._person_name.normalize_person_name` to derive its
+    :func:`brain.person_name.normalize_person_name` to derive its
     canonical key, and each ``(display_name, email)`` row is dropped when
-    :func:`brain.wiki._person_name.is_automated_sender` flags it as a non-human
+    :func:`brain.person_name.is_automated_sender` flags it as a non-human
     / org sender. ``sender_denylist`` (``BRAIN_GRAPH_SENDER_DENYLIST``) adds
     corpus-specific entries to the always-on generic heuristic.
     """
@@ -277,7 +277,7 @@ def _resolve_key_to_person(
     Emails resolve via ``canonical_key_by_email``; an email with no directory
     match returns ``None`` (long-tail one-off senders are dropped, not
     surfaced). Names are normalized via
-    :func:`brain.wiki._person_name.normalize_person_name` and resolve only when
+    :func:`brain.person_name.normalize_person_name` and resolve only when
     their canonical key appears in ``known_keys`` — so a handle-style key like
     ``Jane.Doe`` matches the directory's ``jane doe`` entry, while a one-off
     Krisp speaker label with no directory entry is silently dropped.
@@ -403,7 +403,7 @@ def aggregate_people(
         conn: Live Postgres connection. Read-only — no writes performed.
         owner_keys: Identifiers (emails AND/OR display names) that count as the
             corpus owner. Expanded via
-            :func:`brain.wiki._person_name.expand_owner_keys` to also cover
+            :func:`brain.person_name.expand_owner_keys` to also cover
             first-name-only and email-local-part variants, then stripped from
             every doc's participant key set so the owner doesn't appear in
             *every* doc list. Persons whose canonical identity (canonical key
@@ -559,7 +559,7 @@ def humanize_display_name(display_name: str) -> str:
     the rule. Keep the internal alias below for backwards compat
     inside this module — every call site already routes through it.
 
-    Delegates to :func:`brain.wiki._person_name.humanize_person_name` so the
+    Delegates to :func:`brain.person_name.humanize_person_name` so the
     People Hub, the graph reconcile resolver, and the CLI share one
     presentation transform.
     """

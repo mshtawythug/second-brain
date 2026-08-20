@@ -36,8 +36,8 @@ from ..activity import (
 )
 from ..config import Config
 from ..enrichment import OllamaEnricher
+from ..people import _doc_participant_keys
 from ..todo import TodoRow, iter_action_item_docs
-from ..wiki.build_people import _doc_participant_keys
 
 # Top entity names / representative doc titles attached per graph theme block.
 _THEME_ENTITY_CAP = 3
@@ -357,7 +357,7 @@ def _key_people(
 ) -> list[str]:
     """Tally participant keys across the activity docs; return the top ``cap``.
 
-    Reuses :func:`brain.wiki.build_people._doc_participant_keys` (imported, not
+    Reuses :func:`brain.people._doc_participant_keys` (imported, not
     copy-pasted) to extract each doc's raw participant keys from its
     ``metadata`` + joined ``sources.kind``. Keys are tallied by frequency
     (ties broken alphabetically) and de-duplicated.

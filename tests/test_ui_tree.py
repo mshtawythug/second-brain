@@ -98,3 +98,88 @@ def test_dates_serialize_as_iso8601() -> None:
 def test_null_date_is_none_not_a_crash() -> None:
     root = build_tree([("1", "A", "a.md", "vault", False, None)])
     assert root.to_payload()["notes"][0]["date"] is None
+
+
+# ------------------------------------------------------------------ counts --
+
+
+def _three_level() -> dict:
+    """A grandparent whose leaves live at three different depths.
+
+    ``top`` holds one direct note, one note a level down, and one two levels
+    down — so a fold that counts only direct children reports 1 where the
+    answer is 3.
+    """
+    return build_tree(
+        [
+            _row("1", "Deep", "top/mid/deep/a.md"),
+            _row("2", "Middle", "top/mid/b.md"),
+            _row("3", "Shallow", "top/c.md", kind="ingested"),
+            _row("4", "Elsewhere", "other/d.md"),
+        ]
+    ).to_payload()
+
+
+def _child(payload: dict, name: str) -> dict:
+    for child in payload["children"]:
+        if child["name"] == name:
+            return child
+    raise AssertionError(f"no folder named {name!r} in {payload['path']!r}")
+
+
+def test_folder_note_count_is_recursive_over_every_descendant() -> None:
+    """A collapsed subtree still contributes to its ancestors' counts.
+
+    The rail renders folders closed, so a count that stopped at direct children
+    would report 1 for a folder holding three notes — the number the user is
+    reading it to learn.
+    """
+    payload = _three_level()
+    top = _child(payload, "top")
+    mid = _child(top, "mid")
+    deep = _child(mid, "deep")
+
+    assert deep["note_count"] == 1
+    assert mid["note_count"] == 2, "the deepest leaf stopped contributing"
+    assert top["note_count"] == 3, (
+        "the grandparent counted only its direct children; a collapsed "
+        "subtree must still contribute"
+    )
+    # Stated as the sum it is meant to be, not just as a literal.
+    assert top["note_count"] == len(top["notes"]) + sum(
+        c["note_count"] for c in top["children"]
+    )
+
+
+def test_root_note_count_covers_the_whole_tree() -> None:
+    payload = _three_level()
+    assert payload["note_count"] == 4
+
+
+def test_counts_split_by_tier_so_the_toggle_needs_no_refetch() -> None:
+    """Hiding ingested notes must recount client-side, from this payload."""
+    payload = _three_level()
+    top = _child(payload, "top")
+
+    assert top["ingested_count"] == 1
+    assert top["vault_count"] == 2
+    assert top["vault_count"] + top["ingested_count"] == top["note_count"]
+    assert payload["ingested_count"] == 1
+    assert payload["vault_count"] == 3
+
+
+def test_tier_split_is_recursive_not_local() -> None:
+    """An ingested leaf deep in a subtree must reach every ancestor."""
+    payload = build_tree(
+        [_row("1", "Mail", "top/mid/deep/x.md", kind="ingested")]
+    ).to_payload()
+    top = _child(payload, "top")
+    assert top["ingested_count"] == 1
+    assert top["vault_count"] == 0
+
+
+def test_empty_root_counts_zero_rather_than_omitting_the_keys() -> None:
+    payload = build_tree([]).to_payload()
+    assert payload["note_count"] == 0
+    assert payload["vault_count"] == 0
+    assert payload["ingested_count"] == 0

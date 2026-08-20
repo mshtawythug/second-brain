@@ -1,149 +1,12 @@
-/* brain ui — "Archival Terminal"
+/* components — everything with a name: chrome, rail, ledger, inspector
+ * contents, buttons, modals, toast, the deferred tabs. Then, LAST, the
+ * responsive overrides and the motion block.
  *
- * A research-library card catalog rendered by someone who lives in a terminal.
- * Dense and typeset rather than minimal. Three deliberate moves:
- *
- *   1. The middle column is a LEDGER, not a card grid: each result is a narrow
- *      monospace metadata gutter hard-left, then title / snippet / tag chips,
- *      separated by hairline rules rather than gaps and shadows.
- *   2. The right column is a READING ROOM: serif, capped at 68ch, generous
- *      leading. The density contrast between the two columns IS the hierarchy;
- *      no boxes are needed to say "this one matters".
- *   3. Depth comes from hairlines and sunken/raised grounds, not drop shadows.
- *      Total shadow usage in the app: the two modals.
- *
- * Typography carries meaning: mono for machine-shaped things (paths, ids,
- * dates, latency, chips), serif for the note body only, sans for chrome.
- * Reading the interface tells you what kind of thing you are looking at.
- *
- * Fonts are system stacks only — zero downloads, works fully offline.
+ * Loads fourth and last. Two sections at the end of this file depend on that
+ * position and are commented where they sit. Internal order matches the
+ * original single-file stylesheet, because several of these rules are
+ * same-specificity neighbours whose order is the only thing separating them.
  */
-
-/* ---------------------------------------------------------------- tokens -- */
-
-:root {
-  /* Light — "Foolscap": warm paper, warm ink. Not white, not gray. */
-  --paper:        oklch(97.5% 0.008 85);
-  --paper-sunk:   oklch(95.0% 0.010 85);
-  --paper-raised: oklch(99.0% 0.004 85);
-  --ink:          oklch(22.0% 0.012 60);
-  --ink-muted:    oklch(48.0% 0.010 60);
-  --ink-faint:    oklch(66.0% 0.008 60);
-  --rule:         oklch(88.0% 0.010 75);
-  --accent:       oklch(52.0% 0.090 178);   /* verdigris */
-  --accent-soft:  oklch(93.0% 0.030 178);
-  --flag-draft:   oklch(64.0% 0.130 68);    /* amber  — draft / unsaved      */
-  --flag-danger:  oklch(52.0% 0.170 25);    /* oxide  — destructive only     */
-  --flag-ok:      oklch(52.0% 0.090 155);   /* green  — saved                */
-
-  --font-ui:   ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-               "Helvetica Neue", Arial, sans-serif;
-  --font-read: ui-serif, Georgia, "Iowan Old Style", "Palatino Linotype",
-               "Times New Roman", serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
-               "Liberation Mono", monospace;
-
-  --t-meta:  0.6875rem;
-  --t-chip:  0.75rem;
-  --t-ui:    0.8125rem;
-  --t-title: 0.9375rem;
-  --t-body:  clamp(1rem, 0.94rem + 0.28vw, 1.125rem);
-  --t-h1:    clamp(1.5rem, 1.2rem + 1.4vw, 2.25rem);
-  --measure: 68ch;
-  --lead-dense: 1.35;
-  --lead-read:  1.66;
-
-  --s-1: 0.25rem; --s-2: 0.5rem; --s-3: 0.75rem; --s-4: 1rem;
-  --s-5: 1.5rem;  --s-6: 2rem;   --s-7: 3rem;
-
-  --rail-w:   clamp(15rem, 18vw, 20rem);
-  --ledger-w: clamp(21rem, 27vw, 30rem);
-  --gutter-w: 5.5rem;
-  --radius: 3px;            /* near-square: index card, not pill */
-  --radius-chip: 2px;
-  --hair: 1px solid var(--rule);
-  --dur-fast: 120ms; --dur: 180ms;
-  --ease: cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-/* Dark — "Lamplight". Deliberately NOT an inversion: a warm charcoal desk
-   under a lamp. The accent lightens 52% -> 72% because verdigris at 52% fails
-   contrast on a dark ground; danger shifts up and desaturates for the same
-   reason. Both themes were chosen, not derived. */
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --paper:        oklch(19.0% 0.012 65);
-    --paper-sunk:   oklch(16.0% 0.012 65);
-    --paper-raised: oklch(23.0% 0.013 65);
-    --ink:          oklch(91.0% 0.012 85);
-    --ink-muted:    oklch(70.0% 0.010 80);
-    --ink-faint:    oklch(54.0% 0.008 80);
-    --rule:         oklch(30.0% 0.012 70);
-    --accent:       oklch(72.0% 0.100 178);
-    --accent-soft:  oklch(28.0% 0.040 178);
-    --flag-draft:   oklch(76.0% 0.120 72);
-    --flag-danger:  oklch(66.0% 0.150 27);
-    --flag-ok:      oklch(70.0% 0.090 155);
-  }
-}
-:root[data-theme="dark"] {
-  --paper:        oklch(19.0% 0.012 65);
-  --paper-sunk:   oklch(16.0% 0.012 65);
-  --paper-raised: oklch(23.0% 0.013 65);
-  --ink:          oklch(91.0% 0.012 85);
-  --ink-muted:    oklch(70.0% 0.010 80);
-  --ink-faint:    oklch(54.0% 0.008 80);
-  --rule:         oklch(30.0% 0.012 70);
-  --accent:       oklch(72.0% 0.100 178);
-  --accent-soft:  oklch(28.0% 0.040 178);
-  --flag-draft:   oklch(76.0% 0.120 72);
-  --flag-danger:  oklch(66.0% 0.150 27);
-  --flag-ok:      oklch(70.0% 0.090 155);
-}
-
-/* ------------------------------------------------------------------ base -- */
-
-*, *::before, *::after { box-sizing: border-box; }
-
-html, body { height: 100%; }
-
-body {
-  margin: 0;
-  font-family: var(--font-ui);
-  font-size: var(--t-ui);
-  line-height: var(--lead-dense);
-  color: var(--ink);
-  background: var(--paper);
-  -webkit-font-smoothing: antialiased;
-}
-
-/* ~2% grain so large flat areas don't read as flat digital template. Inline
-   SVG in a data: URI — zero network bytes, which is why img-src allows data:. */
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 1;
-  opacity: 0.022;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
-}
-@media (prefers-reduced-transparency: reduce) {
-  body::before { display: none; }
-}
-
-h1, h2, h3 { margin: 0; font-weight: 600; }
-p { margin: 0; }
-button, input, select, textarea { font: inherit; color: inherit; }
-
-/* One focus treatment everywhere. Never outline:none. */
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-  border-radius: var(--radius);
-}
-
-.mono, .meta-line, .gutter, kbd { font-variant-numeric: tabular-nums; }
 
 /* --------------------------------------------------------------- topbar --- */
 
@@ -199,21 +62,6 @@ button, input, select, textarea { font: inherit; color: inherit; }
   border-radius: var(--radius-chip); padding: 1px var(--s-2);
 }
 
-/* ---------------------------------------------------------------- shell --- */
-
-.shell {
-  display: grid;
-  grid-template-columns: var(--rail-w) var(--ledger-w) 1fr;
-  height: calc(100vh - 2.75rem);
-  min-height: 0;
-}
-.shell[hidden] { display: none; }
-
-.rail, .ledger, .inspector { min-height: 0; overflow-y: auto; }
-.rail   { border-right: var(--hair); background: var(--paper); }
-.ledger { border-right: var(--hair); background: var(--paper-sunk); }  /* a well  */
-.inspector { background: var(--paper-raised); }                        /* a sheet */
-
 /* ----------------------------------------------------------------- rail --- */
 
 .rail-head {
@@ -237,7 +85,17 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .tree-label:hover { background: var(--paper-sunk); color: var(--ink); }
 .tree-note.is-selected > .tree-label,
 .tree-label.is-selected { background: var(--accent-soft); color: var(--ink); }
-.twisty { width: 0.8em; display: inline-block; color: var(--ink-faint); }
+/* --ink-faint is TEXT-UNSAFE on every ground in BOTH themes — measured against
+   the three paper tokens: 2.69-3.03:1 light, 3.34-3.84:1 dark. Every rule below
+   that renders READING MATTER therefore points at --ink-muted, which is
+   5.66-7.27:1 across the same six pairings. The token itself is left alone: it
+   is one tier of a three-tier ink scale a later redesign re-cuts, and darkening
+   it enough to pass AA would collapse it into --ink-muted. Its one surviving
+   use is .search-glyph, aria-hidden decoration and therefore exempt.
+   .twisty is a UI glyph judged at 3:1, not 4.5:1 — but at 2.90:1 on the rail's
+   --paper it failed even that, so this is a repair, not a tidy-up.
+   The token DEFINITIONS live in tokens.css; only the uses are here. */
+.twisty { width: 0.8em; display: inline-block; color: var(--ink-muted); }
 .tree-note .tree-label { padding-left: var(--s-5); }
 .dot-draft { color: var(--flag-draft); font-size: 0.7em; }
 
@@ -257,10 +115,10 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .search-box:focus-within { border-color: var(--accent); }
 .search-glyph { color: var(--ink-faint); }
 #q { flex: 1; border: 0; background: none; outline: none; min-width: 0; }
-#q::placeholder { color: var(--ink-faint); }
+#q::placeholder { color: var(--ink-muted); }
 kbd.hint {
   font-family: var(--font-mono); font-size: var(--t-meta);
-  color: var(--ink-faint); border: var(--hair);
+  color: var(--ink-muted); border: var(--hair);
   border-radius: var(--radius-chip); padding: 0 var(--s-1);
 }
 .filters {
@@ -280,7 +138,7 @@ kbd.hint {
 }
 .meta-sub {
   font-family: var(--font-mono); font-size: var(--t-meta);
-  color: var(--ink-faint);
+  color: var(--ink-muted);
 }
 
 .results { list-style: none; margin: 0; padding: 0; }
@@ -296,7 +154,7 @@ kbd.hint {
 .result.is-selected { background: var(--accent-soft); }
 .gutter {
   font-family: var(--font-mono); font-size: var(--t-meta);
-  color: var(--ink-faint); line-height: 1.5;
+  color: var(--ink-muted); line-height: 1.5;
 }
 .result-title { font-size: var(--t-title); font-weight: 600; }
 .result-snippet {
@@ -311,10 +169,12 @@ kbd.hint {
   padding: 0 var(--s-1); color: var(--ink-muted);
 }
 
-/* ------------------------------------------------------------ inspector --- */
+/* ---------------------------------------------------- inspector contents --- */
 
-.inspector { padding: var(--s-6) var(--s-7); }
-.empty, .error-state { color: var(--ink-faint); font-style: italic; }
+/* The pane itself — its grid, and the opt-in stretch that grid requires — is
+   in layout.css. What follows is only what goes INSIDE it. */
+
+.empty, .error-state { color: var(--ink-muted); font-style: italic; }
 .note-title { font-size: var(--t-h1); font-family: var(--font-read); line-height: 1.15; }
 .note-bar {
   display: flex; align-items: center; gap: var(--s-3);
@@ -349,9 +209,146 @@ kbd.hint {
 }
 .note-body code { font-family: var(--font-mono); font-size: 0.9em; }
 .note-body a { color: var(--accent); }
-.wikilink--unresolved { color: var(--ink-faint); text-decoration: line-through; cursor: help; }
+
+/* Phase 1: tables. The parser gained `table` in render.py; without these the
+   466 documents that use one render as unstyled rows with no cell boundaries,
+   which fails the "renders correctly" bar as surely as not parsing them.
+
+   `display: block; overflow-x: auto` is the load-bearing part. The reading
+   column is capped at `--measure` (48ch) for line length, and a data table is
+   routinely wider than that — a 6-column meeting grid does not fit and never
+   will. Letting the table scroll INSIDE its own box keeps the wide content
+   reachable without the page itself scrolling sideways, which would move the
+   whole reading column and is the failure this avoids. `max-width: 100%` stops
+   it widening its parent in the first place. */
+.note-body table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 var(--s-4);
+  font-size: var(--t-ui);
+  font-family: var(--font-ui);
+}
+.note-body th, .note-body td {
+  border: var(--hair);
+  padding: var(--s-1) var(--s-2);
+  text-align: left;
+  vertical-align: top;
+}
+.note-body thead th {
+  background: var(--paper-sunk);
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* Column alignment from `:---:` / `---:` delimiter rows. markdown-it emits this
+   as `style="text-align:..."`, which the CSP (`style-src 'self'`, no
+   `unsafe-inline`) makes the browser DROP — so `render.py` rewrites those
+   inline styles into these classes. Styling the raw `style` attribute here, or
+   an `align` attribute the parser never emits, would look correct in the
+   stylesheet and do nothing in the page. */
+.note-body .cell--center { text-align: center; }
+.note-body .cell--right  { text-align: right; }
+.note-body .cell--left   { text-align: left; }
+
+/* Phase 1: task lists (180 documents, 6,745 items). The plugin emits
+   `<ul class="contains-task-list">` with `<input type="checkbox" disabled>`,
+   class-based and with no inline styles — verified before this was written.
+
+   The bullet has to go. A task list is still a `<ul>`, so without
+   `list-style: none` every row renders as "• ☐ text" — two markers competing
+   for the same job. The negative indent pulls the checkbox back into the space
+   the bullet vacated so the text edge stays aligned with surrounding prose.
+
+   The checkboxes are `disabled` by design (see render.py): this is a read
+   surface and nothing persists a click. `cursor: default` and full opacity
+   keep them from reading as *broken* rather than as *informational* — the
+   browser default greys a disabled control, which here would wrongly suggest
+   the item itself is inactive. */
+.note-body .contains-task-list {
+  list-style: none;
+  padding-left: var(--s-4);
+}
+.note-body .task-list-item { margin-left: calc(var(--s-4) * -1); }
+.note-body .task-list-item-checkbox {
+  margin-right: var(--s-2);
+  cursor: default;
+  opacity: 1;
+  vertical-align: baseline;
+}
+
+/* Phase 1: syntax highlighting (212 documents with a language-tagged fence).
+   Pygments tokenises into CLASSES — `noclasses=True` would emit inline styles
+   that `style-src 'self'` drops silently, so `render.py` pins the class-based
+   formatter and the test asserts no `style=` survives.
+
+   DELIBERATELY MINIMAL AND NEUTRAL. Phase 3 owns the token system and its
+   contrast work is already measured; picking a Pygments colour scheme here
+   would mean re-doing it there. So this uses only existing tokens and only the
+   distinctions that carry meaning at a glance — comments recede, keywords and
+   strings separate from identifiers. Everything else inherits, which is why
+   there is no rule for `.n`, `.p`, `.w` and the rest: unstyled is the correct
+   state for them until phase 3 decides otherwise, not an omission.
+
+   Class names are Pygments' short forms: c=comment, k=keyword, s=string,
+   m=number, o=operator, nf=function name, nc=class name, err=error token. */
+.note-body pre code .c, .note-body pre code .c1, .note-body pre code .cm,
+.note-body pre code .cs, .note-body pre code .cp {
+  color: var(--ink-muted);
+  font-style: italic;
+}
+.note-body pre code .k, .note-body pre code .kd, .note-body pre code .kn,
+.note-body pre code .kt, .note-body pre code .kc, .note-body pre code .kr {
+  font-weight: 600;
+}
+.note-body pre code .s, .note-body pre code .s1, .note-body pre code .s2,
+.note-body pre code .sb, .note-body pre code .sd, .note-body pre code .se,
+.note-body pre code .sh, .note-body pre code .si, .note-body pre code .sx,
+.note-body pre code .sr, .note-body pre code .ss {
+  color: var(--accent);
+}
+.note-body pre code .m, .note-body pre code .mi, .note-body pre code .mf,
+.note-body pre code .mh, .note-body pre code .mo, .note-body pre code .il {
+  color: var(--accent);
+}
+.note-body pre code .nf, .note-body pre code .nc { font-weight: 600; }
+/* An unlexable token. Marked rather than hidden: silently rendering it as
+   ordinary text is how a broken lexer looks like working code. */
+.note-body pre code .err { text-decoration: underline wavy var(--flag-danger); }
+
+/* Phase 1: strikethrough (31 documents). markdown-it emits `<s>`.
+   Set explicitly rather than left to the browser default so the struck text
+   recedes with the rest of this UI's de-emphasised matter.
+
+   HONEST LIMITATION, because the first version of this comment claimed the
+   opposite. It said the unresolved-link treatment "stays distinguishable by
+   colour". It does not: `.wikilink--unresolved` immediately below resolves to
+   exactly `color: var(--ink-muted); text-decoration: line-through` — the same
+   two declarations, and `--ink-muted` is one token with one value per theme. At
+   rest the two are PIXEL-IDENTICAL. They are separated only by `cursor: help`
+   on hover and by context (one sits in prose, one is a link).
+
+   Left as-is deliberately: phase 3 owns the token system and its contrast work
+   is already measured, so inventing a third ink here would be pre-empting a
+   decision that belongs there. **Recorded for phase 3:** struck prose and a
+   broken wiki link currently look the same, and if that matters it is a palette
+   decision, not a rule to add here. A stylesheet that claims a visual
+   distinction it does not produce is the same defect class this phase's report
+   catalogues — hence stating it rather than quietly keeping the nicer sentence. */
+.note-body s, .note-body del {
+  color: var(--ink-muted);
+  text-decoration: line-through;
+}
+.wikilink--unresolved { color: var(--ink-muted); text-decoration: line-through; cursor: help; }
 .link--blocked { color: var(--flag-danger); cursor: not-allowed; }
 
+/* Height comes from .inspector's grid — see the note in layout.css; it is the
+   ONLY account of this mechanism on purpose. `min-height` is just a
+   short-viewport floor, and `resize: vertical` works because grid honours an
+   explicit height.
+   (This block previously carried a second, contradictory explanation citing a
+   flex column and a `flex: 0 0 auto` handoff in app.js that never existed.
+   Two accounts of one mechanism drift; one is maintainable.) */
 .editor {
   width: 100%; min-height: 26rem;
   font-family: var(--font-mono); font-size: var(--t-ui); line-height: 1.6;
@@ -408,10 +405,26 @@ button[disabled] { cursor: not-allowed; opacity: 0.5; }
   font-size: var(--t-ui); z-index: 10;
 }
 .toast[hidden] { display: none; }
+/* Same trap as `.shell[hidden]` in layout.css, third instance: a bare `[hidden]`
+   (0,1,0) LOSES to `.field { display: grid }` (0,1,0 — but later in the
+   cascade), so setting the attribute from JS hides nothing. A7's overwrite
+   dialog reuses the delete dialog and hides its typed-title field; without this
+   the field stayed visible with delete's caption above it, on a dialog that
+   never wanted it. Caught by a browser test asserting the field was NOT
+   visible — the attribute was set correctly and had no effect. */
+.field[hidden] { display: none; }
 .toast[data-kind="error"] { background: var(--flag-danger); color: var(--paper); }
 
 /* ------------------------------------------------------------- deferred --- */
 
+/* ORDER-DEPENDENT — must stay after `.shell` in layout.css.
+   A tab pane is `class="shell deferred-tab"`, so `.deferred-tab { display:
+   block }` (0,1,0) and `.shell { display: grid }` (0,1,0) are the SAME
+   specificity and only document order decides. layout.css loads before this
+   file, so `block` wins once the pane is unhidden — which is the intent.
+   Move `.deferred-tab` above `.shell` and the tab panes silently render as a
+   three-column grid instead of a prose column. (While `hidden` is present,
+   `.shell[hidden]` at (0,2,0) beats both, so hiding is unaffected either way.) */
 .deferred-tab { display: block; overflow-y: auto; }
 .deferred { max-width: var(--measure); padding: var(--s-7); display: grid; gap: var(--s-4); }
 .deferred h2 { font-family: var(--font-read); font-size: var(--t-h1); }
@@ -423,6 +436,17 @@ button[disabled] { cursor: not-allowed; opacity: 0.5; }
 }
 
 /* ----------------------------------------------------------- responsive --- */
+
+/* ORDER-DEPENDENT — this section must be LAST in the last stylesheet.
+   It overrides rules from BOTH layout.css (`.shell`, `.rail`, `.ledger`,
+   `.inspector`) and this file (`.topbar`, `.filters select`), and a media
+   query adds NO specificity. `@media (max-width: 780px) { .filters select {
+   max-width: 7rem } }` is (0,1,1) and so is the base `.filters select` rule
+   above — so if this block were moved into layout.css, the base rule would
+   load afterwards and quietly win, and the filters would stay 9rem wide on a
+   phone with the override sitting right there looking correct.
+   That is the whole reason the responsive rules are not in the layout file
+   despite being layout. Keep them here, at the bottom. */
 
 /* Both of these are hidden at desktop width and revealed by the breakpoints
    below. Every keyboard shortcut needs a visible, clickable equivalent — a
@@ -449,6 +473,11 @@ button[disabled] { cursor: not-allowed; opacity: 0.5; }
   body[data-view="note"] .ledger { display: none; }
   body[data-view="list"] .inspector { display: none; }
   .inspector { padding: var(--s-5) var(--s-4); }
+  /* No align-self needed: .back-btn sits inside .note-head, an ordinary block
+     container, so it shrink-wraps. It was briefly full-bleed when .inspector
+     was a flex column and this button was a direct child with nothing capping
+     its width — the grid + .note-head structure removes the cause rather than
+     counteracting it. Measured at 77px with the wrapper in place. */
   .back-btn { display: inline-block; margin-bottom: var(--s-4); }
   /* Tighten the chrome so the tab strip needs as little scrolling as possible. */
   .topbar { gap: var(--s-3); padding: 0 var(--s-2); }

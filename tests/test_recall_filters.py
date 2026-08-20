@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import psycopg
+import pytest
 
 from brain.config import Config
 from brain.recall import recall
@@ -378,3 +379,150 @@ def test_person_keys_are_forwarded_not_resolved_here(
 
     assert "person_keys" in params
     assert params["person_keys"].default is None
+
+
+# ---------------------------------------------------------------------------
+# source_missing — the filter the structural guard above could only notice
+# was ABSENT, not that it works.
+# ---------------------------------------------------------------------------
+
+#: Rare enough that only this fixture's rows match it.
+_SOURCELESS_TERM = "quokkaphone"
+
+
+@pytest.fixture
+def mixed_source_corpus(test_db: psycopg.Connection[Any]) -> dict[str, str]:
+    """One recallable document with a ``sources`` row, one with none.
+
+    Both carry ``_SOURCELESS_TERM``, so both are in the match set and only the
+    source filter can tell them apart. Written through raw SQL because every
+    ingest path calls ``_upsert_source`` and so cannot produce a NULL
+    ``source_id`` — the row shape is real (877 of 1393 on the live corpus,
+    written by the vault sync path) but unreachable from ``_ingest`` above.
+
+    ``chunks.tsv`` is a GENERATED column (migration 009) and ``embedding`` is
+    nullable, so a bare content insert is lexically findable; the recalls below
+    pass ``fts_only=True``, keeping the vector leg out of it entirely.
+
+    All values are synthetic.
+    """
+    ids: dict[str, str] = {}
+    source_id = test_db.execute(
+        "INSERT INTO sources (kind, external_id) VALUES (%s, %s) RETURNING id",
+        ("gmail", "recall-source-missing"),
+    ).fetchone()[0]
+
+    for label, src in [("with_source", source_id), ("sourceless", None)]:
+        body = f"A synthetic note about {_SOURCELESS_TERM} and nothing else."
+        doc_id = test_db.execute(
+            "INSERT INTO documents (source_id, title, content, content_hash, "
+            "content_type) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (src, f"Recall {label}", body, f"recall-sm-{label}", "note"),
+        ).fetchone()[0]
+        test_db.execute(
+            "INSERT INTO chunks (document_id, chunk_index, content) "
+            "VALUES (%s, %s, %s)",
+            (doc_id, 0, body),
+        )
+        ids[label] = str(doc_id)
+    return ids
+
+
+def _recalled_ids(
+    conn: psycopg.Connection[Any], embedder: Any, **kwargs: Any
+) -> set[str]:
+    result = recall(
+        conn,
+        _cfg(),
+        embedder=embedder,
+        query=_SOURCELESS_TERM,
+        budget_tokens=4000,
+        max_candidates=25,
+        fts_only=True,
+        **kwargs,
+    )
+    return {p.document_id for p in result.passages}
+
+
+def test_recall_source_missing_selects_the_documents_no_kind_can(
+    test_db: psycopg.Connection[Any],
+    fake_embedder: Any,
+    mixed_source_corpus: dict[str, str],
+) -> None:
+    """``source_missing=True`` reaches the ranker AND filters there.
+
+    Both halves are load-bearing, and the second is the point. That the
+    source-less document comes back proves the kwarg reached ``hybrid_search``;
+    that the sourced one does NOT proves it filtered, rather than being
+    accepted by the signature and dropped on the floor. The structural guard
+    above compares signatures only, so it would stay green against a ``recall``
+    that took the argument and ignored it — which is precisely the shape this
+    repo has shipped before.
+
+    MUTATION, MEASURED 2026-08-20 — BOTH DIRECTIONS, on
+    ``recall``'s ``source_missing=source_missing`` forwarding line, this file
+    alone (14 tests):
+
+    - ``source_missing=False`` (accepted, then DROPPED) -> **1 failed, 13
+      passed**: this test, alone.
+    - ``source_missing=True`` (stuck ON) -> **9 failed, 5 passed**:
+      ``…default_does_not_filter…`` and ``…source_kind_still_selects…`` below,
+      plus seven pre-existing filter tests whose fixtures all ingest WITH a
+      source. This test stayed green, correctly — it asks for the flag it got.
+
+    Disjoint sets, so neither direction rides on the other's assertions.
+
+    THE FIRST DIRECTION IS THE ONE THAT MATTERS, and it recorded something
+    worth writing down: under it,
+    ``test_recall_forwards_every_search_filter_it_should`` **stayed green**.
+    That guard introspects signatures, so a parameter that is declared and then
+    silently discarded is invisible to it BY CONSTRUCTION. It proves the filter
+    is reachable, never that it works. This test is the one that catches the
+    drop, which is the whole reason it exists rather than the signature guard
+    being deemed sufficient.
+    """
+    returned = _recalled_ids(test_db, fake_embedder, source_missing=True)
+
+    assert returned == {mixed_source_corpus["sourceless"]}, (
+        "recall(source_missing=True) did not return exactly the source-less "
+        "document — the kwarg is either not reaching hybrid_search or not "
+        "filtering there"
+    )
+
+
+def test_recall_default_does_not_filter_by_source_at_all(
+    test_db: psycopg.Connection[Any],
+    fake_embedder: Any,
+    mixed_source_corpus: dict[str, str],
+) -> None:
+    """The counterfactual: the default must leave BOTH documents reachable.
+
+    Without this, the assertion above would hold just as well against a recall
+    that had quietly become unable to return the sourced document for any
+    reason — a fixture that never inserted it, a match-set bug, an over-eager
+    predicate. Asserting the default returns both is what makes the exclusion
+    above mean "the filter did it".
+    """
+    returned = _recalled_ids(test_db, fake_embedder)
+
+    assert returned == {
+        mixed_source_corpus["sourceless"],
+        mixed_source_corpus["with_source"],
+    }
+
+
+def test_recall_source_kind_still_selects_only_that_kind(
+    test_db: psycopg.Connection[Any],
+    fake_embedder: Any,
+    mixed_source_corpus: dict[str, str],
+) -> None:
+    """The other branch: ``source_kind`` must not have been widened by this.
+
+    ``source_kind`` and ``source_missing`` are contradictory when combined
+    (``source_id`` cannot be both NULL and a match), so the risk of adding one
+    beside the other is that a wiring slip makes the kind filter permissive.
+    Pinned separately so that failure is attributable.
+    """
+    returned = _recalled_ids(test_db, fake_embedder, source_kind="gmail")
+
+    assert returned == {mixed_source_corpus["with_source"]}

@@ -34,7 +34,7 @@ def _score_directory_rows(
 
     Shared scoring core for the directory layer — used by both
     :meth:`DirectoryStore.resolve_name_to_email` (name → email) and the
-    per-person index built by :func:`brain.wiki.build_people.aggregate_people`
+    per-person index built by :func:`brain.people.aggregate_people`
     (name → primary email *and* email → canonical name). One helper keeps
     the precedence rules from drifting between surfaces.
 

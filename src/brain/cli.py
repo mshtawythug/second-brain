@@ -168,6 +168,12 @@ from .ingest import (
     update_document,
 )
 from .interactions import record_interaction
+from .people import (
+    PersonRecord,
+    aggregate_people,
+    emit_people_pages,
+    humanize_display_name,
+)
 from .queries import (
     MirrorDriftSummary,
     analyze_tables,
@@ -231,12 +237,6 @@ from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.sync_summaries import sync_summaries
 from .vault.templates import list_template_names
 from .vault.watch import WatchConfig, run_watcher
-from .wiki.build_people import (
-    PersonRecord,
-    aggregate_people,
-    emit_people_pages,
-    humanize_display_name,
-)
 from .wiki.install import WikiInstallError
 from .wiki.install import wiki_install as _wiki_install
 
@@ -8094,7 +8094,7 @@ def people_cmd(
 ) -> None:
     """Browse the People Hub aggregation.
 
-    Reuses :func:`brain.wiki.build_people.aggregate_people` so the
+    Reuses :func:`brain.people.aggregate_people` so the
     terminal view, the rendered ``<vault>/people/`` pages, and the
     derived-link participant filter all derive from the same canonical
     set. Read-only — no DB writes.

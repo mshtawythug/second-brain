@@ -26,9 +26,9 @@ import psycopg
 
 from .config import Config
 from .errors import ConnectError
+from .related import _avg_embedding, _eligible_source_docs
 from .vault._atomic import atomic_write_text
 from .vault.paths import safe_wikilink_alias, strip_md_extension
-from .wiki.build_related import _avg_embedding, _eligible_source_docs
 
 _logger = logging.getLogger(__name__)
 
@@ -251,7 +251,7 @@ def embedding_affinity(
     """Return ``{target_doc_id: best_cosine}`` for one source doc, rank-ordered.
 
     The source doc's average chunk embedding is the query vector (reusing
-    :func:`brain.wiki.build_related._avg_embedding`); each candidate doc's score
+    :func:`brain.related._avg_embedding`); each candidate doc's score
     is its best per-chunk cosine similarity, floored at ``vector_sim_floor``
     (the same floor runtime ``brain search`` uses). Dict insertion order is the
     cosine-descending rank order (ties broken by target-doc id). Empty when the
@@ -544,7 +544,7 @@ def refresh_suggestions(
     """Recompute candidate suggestions and upsert the survivors.
 
     For each eligible source doc (non-draft, vault-backed, ≥1 embedded chunk —
-    the same predicate as ``build_related``), blend the graph + embedding legs
+    the same predicate as ``brain.related``), blend the graph + embedding legs
     via RRF, drop pairs already linked or scoring below ``cfg.connect_min_score``,
     keep the top ``cfg.connect_max_per_doc``, and upsert into
     ``link_suggestions``. Suggestions are UNDIRECTED (migration 022): exactly one

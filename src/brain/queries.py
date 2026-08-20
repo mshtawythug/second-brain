@@ -183,7 +183,7 @@ def _expand_keys_with_directory_variants(
 ) -> list[str]:
     """Expand person keys across every RAW directory display-name variant.
 
-    :func:`brain.wiki.build_people.aggregate_people` collapses separator /
+    :func:`brain.people.aggregate_people` collapses separator /
     ordering variants of one person (``jane.doe`` vs ``Jane Doe``) into a
     single canonical record, so the resolver only ever sees the canonical
     display name. Docs, however, store ``participants`` under whichever RAW
@@ -193,7 +193,7 @@ def _expand_keys_with_directory_variants(
     raw variants (linked by shared email or identical canonical key) and union
     the expansion over all of them.
     """
-    from .wiki._person_name import normalize_person_name
+    from .person_name import normalize_person_name
 
     keys: set[str] = set(_expand_person_keys(display_name, emails))
     base = normalize_person_name(display_name)
@@ -228,7 +228,7 @@ def resolve_person_to_keys(
        tiebreak when multiple records match.
 
     Per plan §3.b D16, the resolver calls
-    :func:`brain.wiki.build_people.aggregate_people` with
+    :func:`brain.people.aggregate_people` with
     ``min_docs=0`` and ``owner_keys=frozenset()`` so query-time
     ``--person`` filters see every known person — including the corpus
     owner and curated-but-low-doc-count entries that the People Hub UI
@@ -241,9 +241,9 @@ def resolve_person_to_keys(
             for caller-side disambiguation messages.
         PersonNotFound: No match at any step.
     """
-    # Late import: avoid a top-level dependency on the wiki package so
-    # ``brain.queries`` stays import-cheap for non-search code paths.
-    from .wiki.build_people import aggregate_people, humanize_display_name
+    # Late import: keeps ``brain.queries`` import-cheap for non-search
+    # code paths (the aggregation layer pulls in the vault subtree).
+    from .people import aggregate_people, humanize_display_name
 
     needle = name_or_email.strip().casefold()
     if not needle:

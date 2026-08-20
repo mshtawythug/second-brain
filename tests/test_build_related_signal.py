@@ -29,15 +29,15 @@ from typing import Any
 import psycopg
 
 from brain.queries import sync_chunk_search_metadata
-from brain.wiki.build_related import (
+from brain.related import (
     _MIN_RRF_SCORE,
     DEFAULT_RELATED_LIMIT,
     _build_self_tsquery,
     _corpus_common_lexemes,
     _iter_hybrid_neighbors,
     _neighbors_for_source,
-    regenerate_related_json,
 )
+from brain.wiki.build_related import regenerate_related_json
 
 VECTOR_DIM = 4096
 
@@ -242,11 +242,11 @@ def test_self_tsquery_long_title_matches_partial_overlap(
     partial-overlap neighbors.
 
     Pre-fix: ``_build_self_tsquery`` returned a 7-way AND
-    (``'30' & 'min' & 'meet' & 'person-b' & 'topic-b' & 'pat' & 'sarki'``)
+    (``'30' & 'min' & 'meet' & 'person-b' & 'topic-b' & 'pat' & 'morgan'``)
     so a candidate body that contained only ``person-x`` was rejected and
-    the FTS leg returned zero candidates. The doc 3508c63e in the live
-    corpus exhibited this exact failure: its only person-x-mentioning
-    relative (a Example Group gmail thread) never surfaced.
+    the FTS leg returned zero candidates. A document in the live corpus
+    exhibited this exact failure: its only person-x-mentioning relative
+    (a Example Group gmail thread) never surfaced.
 
     Post-fix: the title-only path returns ``(AND-form) | <per-token OR>``,
     so a body containing even one distinctive title token matches.
@@ -988,7 +988,7 @@ def test_min_rrf_score_excludes_weak_neighbors(
         chunk_vectors=[far_vec],
     )
 
-    from brain.wiki.build_related import _SourceDoc
+    from brain.related import _SourceDoc
 
     source = _SourceDoc(
         id=test_db.execute(
@@ -1071,7 +1071,7 @@ def test_min_rrf_score_does_not_prune_strong_neighbors(
 
     corpus_common = _corpus_common_lexemes(test_db)
 
-    from brain.wiki.build_related import _SourceDoc
+    from brain.related import _SourceDoc
 
     source_id_row = test_db.execute(
         "SELECT id::text FROM documents WHERE vault_path = 'src-strong.md'"

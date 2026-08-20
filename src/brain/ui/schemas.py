@@ -13,6 +13,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from ..search import CANDIDATE_LIMIT
 from ..tags import normalize_tags
 from .errors import UiBadRequest
 
@@ -25,6 +26,24 @@ from .errors import UiBadRequest
 #: locations on failure, so drift is a red test rather than a silent divergence.
 VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack"})
 
+#: The fifth value the Source dropdown offers: documents with **no** ``sources``
+#: row at all (T7).
+#:
+#: Deliberately NOT a member of :data:`VALID_SOURCE_KINDS`. That set mirrors
+#: ``cli._VALID_SOURCE_KINDS`` and ``tests/test_ui_schemas.py`` asserts the two
+#: are equal, so adding a pseudo-kind to it would either break that guard or —
+#: worse — push a value into ``sources.kind`` territory that no ingest path can
+#: ever write. It is a *view* over the corpus, not a kind of source, and it maps
+#: to ``build_predicate(source_missing=True)`` rather than to ``source_kind``.
+#:
+#: ``d.source_id IN (SELECT id FROM sources WHERE kind=%s)`` is false for a NULL
+#: ``source_id`` under every one of the four real kinds, so without this value
+#: those documents are unreachable from the filter in all of its settings.
+SOURCE_NONE = "none"
+
+#: Everything the ``source`` query parameter accepts.
+SOURCE_FILTER_VALUES: frozenset[str] = VALID_SOURCE_KINDS | {SOURCE_NONE}
+
 #: Matches MCP's ``_MAX_NOTE_BODY_BYTES`` so the two write surfaces cannot
 #: disagree about what is too large.
 MAX_BODY_BYTES = 256 * 1024
@@ -33,6 +52,19 @@ MAX_QUERY_CHARS = 512
 MIN_LIMIT = 1
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 25
+
+#: The largest ``offset`` a search may ask for.
+#:
+#: DERIVED from ``brain.search.CANDIDATE_LIMIT``, never hardcoded. Both ranking
+#: legs bound their candidate pools at that many chunks, so at most
+#: ``2 * CANDIDATE_LIMIT`` distinct documents can ever reach the RRF merge and
+#: an offset past that can only ever return an empty page. A copied literal here
+#: would go on advertising the OLD bound the day that constant moves — the same
+#: two-sources-of-truth failure ``tests/conftest.py`` records for the Ollama
+#: port guard, where only one of the two was redirected and the guard went on
+#: guarding a port nothing dialled.
+MAX_OFFSET = 2 * CANDIDATE_LIMIT
+DEFAULT_OFFSET = 0
 
 
 def _require_str(value: Any, field: str) -> str:
@@ -76,9 +108,11 @@ class SearchQuery:
         "content_type",
         "fts_only",
         "limit",
+        "offset",
         "query",
         "session_id",
         "source_kind",
+        "source_missing",
         "tag",
     )
 
@@ -87,7 +121,9 @@ class SearchQuery:
         *,
         query: str,
         limit: int,
+        offset: int,
         source_kind: str | None,
+        source_missing: bool,
         tag: str | None,
         content_type: str | None,
         after: datetime | None,
@@ -97,13 +133,54 @@ class SearchQuery:
     ) -> None:
         self.query = query
         self.limit = limit
+        self.offset = offset
         self.source_kind = source_kind
+        self.source_missing = source_missing
         self.tag = tag
         self.content_type = content_type
         self.after = after
         self.before = before
         self.fts_only = fts_only
         self.session_id = session_id
+
+    @property
+    def fetch_limit(self) -> int:
+        """How many rows to ask ``hybrid_search`` for: this page and every
+        page before it.
+
+        ``hybrid_search`` has no ``offset`` / ``cursor`` parameter, and adding
+        one would move an **eval-gated** module. So a page is taken by
+        over-fetching and slicing (:meth:`page_of`), which is EXACT rather than
+        an approximation, for two reasons that are properties of
+        :mod:`brain.search` and not of this module:
+
+        * both ranking legs bound their candidate pools by the module constant
+          ``CANDIDATE_LIMIT`` — neither ``LIMIT`` mentions the caller's
+          ``limit``, so raising it cannot pull a different set of candidates
+          into the RRF merge; and
+        * ``limit`` is applied exactly once, last, as a truncation of the
+          fully-sorted result list.
+
+        Together those make ``search(limit=o + n)[o:]`` the same rows, in the
+        same order, that a real ``OFFSET o LIMIT n`` would return.
+
+        **The cost is accepted, not unnoticed:** every page re-pays the whole
+        rank leg, measured at ~5.9 s for 545 matches in the phase-0 pass, so
+        page 4 is four times that work in total. Paging is bounded at
+        :data:`MAX_OFFSET` for the separate reason that nothing beyond it can
+        exist.
+        """
+        return self.offset + self.limit
+
+    def page_of(self, results: list[Any]) -> list[Any]:
+        """The slice of an over-fetched ranking that this page shows.
+
+        Deliberately open-ended on the right: the caller asked for exactly
+        :attr:`fetch_limit` rows, so everything from ``offset`` on is already
+        at most ``limit`` long, and a second bound would be a second place for
+        the arithmetic to be wrong.
+        """
+        return results[self.offset :]
 
     def filter_kwargs(self) -> dict[str, Any]:
         """The filter kwargs to splat into ``hybrid_search``.
@@ -112,10 +189,21 @@ class SearchQuery:
         config-sourced tuning kwargs (``vector_sim_floor`` and friends) are
         added by the route from ``cfg``, so this object never needs to know
         configuration exists.
+
+        ``limit`` is :attr:`fetch_limit`, not :attr:`limit` — see there.
+
+        ``source_missing`` is emitted **only when it is on**. Every filter above
+        is passed unconditionally because ``hybrid_search`` has accepted it
+        since before this module existed; this one is the opt-in view added by
+        T7, and omitting it when off keeps the call byte-identical for every
+        search that did not ask for it. That is the same shape as the predicate
+        default it feeds: not passing it is indistinguishable from passing its
+        default, and the smaller call site is the one that cannot regress an
+        eval-gated ranker by accident.
         """
-        return {
+        kwargs: dict[str, Any] = {
             "query": self.query,
-            "limit": self.limit,
+            "limit": self.fetch_limit,
             "source_kind": self.source_kind,
             "tag": self.tag,
             "content_type": self.content_type,
@@ -123,6 +211,34 @@ class SearchQuery:
             "before": self.before,
             "fts_only": self.fts_only,
         }
+        if self.source_missing:
+            kwargs["source_missing"] = True
+        return kwargs
+
+
+def _parse_offset(raw: Any) -> int:
+    """Validate the ``offset`` query parameter.
+
+    Absent or empty means :data:`DEFAULT_OFFSET` — the ledger shipped before
+    paging existed and its requests carry no ``offset``, so any other default
+    would silently move every existing caller's first page.
+
+    Out of range is a 400 rather than a clamp, per this module's fail-closed
+    contract: a clamped offset is indistinguishable from a working one, so a
+    client paging past the end would be handed page 1 forever and read that as
+    "no more results".
+    """
+    if raw in (None, ""):
+        return DEFAULT_OFFSET
+    try:
+        offset = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise UiBadRequest("offset must be an integer", code="invalid_offset") from exc
+    if not 0 <= offset <= MAX_OFFSET:
+        raise UiBadRequest(
+            f"offset must be between 0 and {MAX_OFFSET}", code="invalid_offset"
+        )
+    return offset
 
 
 def parse_search_params(params: Any) -> SearchQuery:
@@ -157,13 +273,22 @@ def parse_search_params(params: Any) -> SearchQuery:
                 code="invalid_limit",
             )
 
+    offset = _parse_offset(params.get("offset"))
+
     source = (params.get("source") or "").strip() or None
-    if source is not None and source not in VALID_SOURCE_KINDS:
+    if source is not None and source not in SOURCE_FILTER_VALUES:
         raise UiBadRequest(
             f"unknown source {source!r} "
-            f"(expected: {'|'.join(sorted(VALID_SOURCE_KINDS))})",
+            f"(expected: {'|'.join(sorted(SOURCE_FILTER_VALUES))})",
             code="invalid_source",
         )
+    # ``none`` is a view, not a kind: it must reach ``build_predicate`` as
+    # ``source_missing=True``, never as ``source_kind="none"`` — the latter
+    # would look up a ``sources`` row whose kind no ingest path can write and
+    # silently return an empty result set.
+    source_missing = source == SOURCE_NONE
+    if source_missing:
+        source = None
 
     tag = (params.get("tag") or "").strip() or None
     if tag is not None:
@@ -181,7 +306,9 @@ def parse_search_params(params: Any) -> SearchQuery:
     return SearchQuery(
         query=query,
         limit=limit,
+        offset=offset,
         source_kind=source,
+        source_missing=source_missing,
         tag=tag,
         content_type=content_type,
         after=after,
@@ -358,12 +485,41 @@ def require_confirm(payload: Any) -> None:
         )
 
 
+def result_date(result: Any) -> str | None:
+    """The ``YYYY-MM-DD`` a ledger row shows, or ``None`` when there is none.
+
+    ``SearchResult.recency_ts`` is ``coalesce(sent_at, ingested_at)`` — the same
+    value the recency boost ranks on — so the date a row displays is the date it
+    was ranked by. Only the calendar day is emitted: the gutter is 5.5rem wide,
+    and a document's *time* of ingest is noise the reader cannot act on.
+
+    ``None`` is returned rather than a placeholder string. The empty case is the
+    ledger's to render (it already prints ``—`` for a missing source kind), and
+    a server-side ``"—"`` would be indistinguishable from a real value to any
+    other consumer of this payload.
+    """
+    # Direct attribute access, NOT getattr with a default: a rename of
+    # SearchResult.recency_ts must break loudly here rather than silently make
+    # every ledger row render "-" forever.
+    #
+    # The local annotation is load-bearing. ``result`` is ``Any``, so without it
+    # the expression below is Any too and mypy rejects returning it as
+    # ``str | None``. The previous ``str(...)`` wrapper silenced that — it looked
+    # redundant (``isoformat`` returns ``str``) but was doing real work. Naming
+    # the expected type is the honest version of the same fix.
+    stamp: datetime | None = result.recency_ts
+    if stamp is None:
+        return None
+    return stamp.date().isoformat()
+
+
 def search_result_payload(result: Any) -> dict[str, Any]:
     """Project one ``SearchResult`` for the ledger."""
     return {
         "id": result.document_id,
         "title": result.title,
         "source_kind": result.source_kind,
+        "date": result_date(result),
         "snippet": result.snippet,
         "score": round(float(result.score), 6),
         "content_type": result.content_type,

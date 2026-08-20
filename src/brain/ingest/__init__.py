@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -1870,6 +1871,59 @@ _MIRROR_FRONTMATTER_FIELDS = frozenset(
 )
 
 
+def mirror_is_stale(*, fields_changed: Sequence[str], rechunked: bool) -> bool:
+    """True when an edit requires the vault mirror to be rewritten.
+
+    Shared by :func:`update_document` and by callers that defer the mirror
+    write themselves (see :func:`write_vault_mirror`), so the two paths cannot
+    drift on WHICH edits need a rewrite.
+
+    A body change obviously needs one; so does any change to a field the
+    mirror's frontmatter is built from, because a metadata-only edit leaves the
+    body — and therefore the body-hash skip inside the writer — untouched.
+    """
+    return rechunked or any(f in _MIRROR_FRONTMATTER_FIELDS for f in fields_changed)
+
+
+def write_vault_mirror(
+    conn: psycopg.Connection, document_id: str, *, vault_root: Path
+) -> None:
+    """Regenerate one ingested document's vault mirror. Never raises ``OSError``.
+
+    **Ordering contract — read this before calling.** The mirror is a FILE, so
+    it is not covered by any database transaction: a rollback cannot unwrite
+    it. This must therefore run only when the document's row is already
+    committed.
+
+    :func:`update_document` calls it after its own transaction closes, which is
+    correct **only while it owns the outermost transaction**. A caller that
+    wraps ``update_document`` in a transaction of its own inverts that: the
+    inner block becomes a SAVEPOINT, nothing is committed on exit, and a mirror
+    written there survives a rollback as an orphan file that the database never
+    recorded and nothing will ever clean up. Such a caller must pass
+    ``vault_root=None`` to :func:`update_document` and call this itself after
+    its outer transaction commits —
+    :func:`brain.ui.notes_service._update_ingested_note` is the worked example.
+
+    A filesystem failure is logged and swallowed on purpose: the DB write has
+    already committed by this point, and the mirror is recoverable with
+    ``brain vault export``.
+    """
+    try:
+        # ``force=True``: a frontmatter-only edit leaves the body unchanged, so
+        # the writer's body-hash skip would otherwise silently drop the rewrite
+        # and leave stale frontmatter on disk. The full-corpus ``export_vault``
+        # keeps ``force=False`` so re-runs of that path stay cheap.
+        regenerate_vault_file(conn, document_id, vault_path=vault_root, force=True)
+    except OSError as exc:
+        _logger.warning(
+            "vault mirror write failed for document %s: %s; "
+            "DB update succeeded — recover via `brain vault export`",
+            document_id,
+            exc,
+        )
+
+
 def update_document(
     conn: psycopg.Connection,
     *,
@@ -1928,6 +1982,18 @@ def update_document(
     :meth:`brain.graph_rag.sync.GraphSyncer.reconcile` (reusing ``conn``,
     OUTSIDE the transaction). Best-effort / never-raises; a ``None`` syncer or a
     no-op edit skips it.
+
+    **"post-commit" holds only when no OUTER transaction is open.** The block
+    below is ``with conn.transaction()``, which psycopg nests as a SAVEPOINT
+    when the caller already has a transaction open — so this function's exit
+    commits nothing and the reconcile runs inside the caller's transaction, on
+    state not yet committed. :func:`brain.ui.notes_service._update_ingested_note`
+    is such a caller by design: it wraps this call and ``apply_tags`` together so
+    a failing tag write cannot leave a half-applied edit committed. Under that
+    caller the reconcile still reuses the same connection object — verified at
+    runtime, not inferred — so its writes roll back with everything else, which
+    is arguably MORE correct than the default path, where a rolled-back edit can
+    still leave graph edges reconciled for it.
 
     F4 secret guard: applies to ``new_content`` only (a title / tag / metadata
     edit never re-inspects the stored body). Runs before the content hash and
@@ -2200,30 +2266,18 @@ def update_document(
     # ValueError — pre-checking ``kind`` from the DB is more robust than
     # catching a ``ValueError`` and string-matching its message, since the
     # upstream message can be rephrased without notice.
-    needs_mirror = rechunked or any(
-        f in _MIRROR_FRONTMATTER_FIELDS for f in fields_changed
-    )
-    if vault_root is not None and cur_kind != "vault" and needs_mirror:
-        try:
-            # ``force=True`` because we've already gated on
-            # ``rechunked or any(... in _MIRROR_FRONTMATTER_FIELDS ...)`` —
-            # a frontmatter-only edit (tags / metadata / content_type) leaves
-            # the body unchanged, so the body-hash skip in ``_write_doc_file``
-            # would silently drop the rewrite and leave stale frontmatter on
-            # disk. The full-corpus ``export_vault`` keeps the default
-            # ``force=False`` so re-runs of that path stay cheap.
-            regenerate_vault_file(
-                conn, document_id, vault_path=vault_root, force=True
-            )
-        except OSError as exc:
-            # Only OSError is reachable: ``no document with id`` is impossible
-            # (we just SELECTed it), and ``kind='vault'`` is gated above.
-            _logger.warning(
-                "vault mirror write failed for document %s: %s; "
-                "DB update succeeded — recover via `brain vault export`",
-                document_id,
-                exc,
-            )
+    #
+    # A caller that opens its OWN transaction around this function must pass
+    # ``vault_root=None`` and call :func:`write_vault_mirror` itself after that
+    # transaction commits — otherwise the write below lands while the DB work
+    # is still uncommitted and a rollback leaves an orphan file behind. See
+    # :func:`write_vault_mirror` for the full ordering contract.
+    if (
+        vault_root is not None
+        and cur_kind != "vault"
+        and mirror_is_stale(fields_changed=fields_changed, rechunked=rechunked)
+    ):
+        write_vault_mirror(conn, document_id, vault_root=vault_root)
 
     # Wave G1-c — people-aspect graph sync after an in-place edit. Runs
     # post-commit (reusing ``conn``) whenever any field actually changed; a

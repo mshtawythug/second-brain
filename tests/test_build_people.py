@@ -1,4 +1,4 @@
-"""Tests for ``brain.wiki.build_people`` — aggregation + page emission.
+"""Tests for ``brain.people`` — aggregation + People Hub page emission.
 
 Phase A: ``aggregate_people`` (real-Postgres SELECT against seeded
 ``sources`` / ``documents`` / ``directory_entries`` rows; no chunker /
@@ -17,9 +17,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from brain.vault.derived_links.directory import DirectoryStore
-from brain.vault.frontmatter import parse_frontmatter
-from brain.wiki.build_people import (
+from brain.people import (
     DocRef,
     EmitReport,
     PersonRecord,
@@ -28,6 +26,8 @@ from brain.wiki.build_people import (
     render_index_md,
     render_person_md,
 )
+from brain.vault.derived_links.directory import DirectoryStore
+from brain.vault.frontmatter import parse_frontmatter
 
 # --------------------------------------------------------------------------
 # Helpers — direct SQL seeding mirrors tests/derived_links/test_pass_runner.py
@@ -1563,11 +1563,11 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
         _seed_curated_with_docs(
             test_db, name="bad write", email="bw@example.com", n_gmail_docs=1,
         )
-        # Mock atomic_write_text in the build_people module so only the
+        # Mock atomic_write_text in the brain.people module so only the
         # first call (per-person page) raises; the second (index) succeeds.
         target = tmp_path / "people" / "bad-write.md"
         original_atomic = __import__(
-            "brain.wiki.build_people", fromlist=["atomic_write_text"]
+            "brain.people", fromlist=["atomic_write_text"]
         ).atomic_write_text
 
         def fake_atomic(path: Path, text: str) -> None:
@@ -1575,7 +1575,7 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
                 raise PermissionError("synthetic write")
             original_atomic(path, text)
 
-        mocker.patch("brain.wiki.build_people.atomic_write_text", fake_atomic)
+        mocker.patch("brain.people.atomic_write_text", fake_atomic)
 
         import logging
         with caplog.at_level(logging.WARNING):
@@ -1601,7 +1601,7 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
         # Force only the index write to raise.
         index_target = tmp_path / "people" / "index.md"
         original_atomic = __import__(
-            "brain.wiki.build_people", fromlist=["atomic_write_text"]
+            "brain.people", fromlist=["atomic_write_text"]
         ).atomic_write_text
 
         def fake_atomic(path: Path, text: str) -> None:
@@ -1609,7 +1609,7 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
                 raise PermissionError("synthetic index write")
             original_atomic(path, text)
 
-        mocker.patch("brain.wiki.build_people.atomic_write_text", fake_atomic)
+        mocker.patch("brain.people.atomic_write_text", fake_atomic)
 
         import logging
         with caplog.at_level(logging.WARNING):

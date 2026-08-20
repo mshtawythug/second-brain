@@ -229,8 +229,60 @@ def _force_test_database_url() -> Iterator[None]:
             os.environ["DATABASE_URL"] = original
 
 
+#: Markers whose tests provably open no database connection.
+#:
+#: ``browser`` stubs the API at the network layer and drives the real assets in
+#: chromium; ``nodb`` reads files, parses ASTs and shells out to node. Neither
+#: reads the schema, so neither needs the reset — or the lock.
+_DATABASE_FREE_MARKERS = ("browser", "nodb")
+
+
+def _session_touches_the_database(session: pytest.Session) -> bool:
+    """False only when EVERY collected test is marked ``browser`` or ``nodb``.
+
+    The two session-scoped fixtures below are autouse, so they fire for ANY
+    selection — including ``-m browser``, whose tests stub the API at the
+    network layer and never open a connection. That made
+    ``tests/test_ui_browser.py``'s "no Postgres, and no contention for the
+    machine-wide test-database lock" false as written: pointed at an unreachable
+    database every browser test ERRORed in setup, and while another suite held
+    the advisory lock the session refused to start at all.
+
+    The claim is worth making true rather than softening. It is the harness the
+    CI gate would run, and "needs a live Postgres" and "needs a cached chromium"
+    are very different costs to ask approval for.
+
+    Deliberately conservative in both directions:
+
+    * an EMPTY item list returns True. Collection failed or has not run, and
+      guessing "no database needed" from the absence of evidence is how a suite
+      silently skips its own schema reset.
+    * a MIXED selection returns True. ONE database-touching test is enough to
+      need the real thing, so the opt-out cannot be triggered by adding a marked
+      file to a broader run.
+
+    Extended beyond ``browser`` after the cost was paid rather than predicted:
+    four file-only suites — ``test_ui_static_assets``, ``test_ui_static_behaviour``,
+    ``test_ui_heading_strip`` and ``test_ui_tree_nav`` — took the MACHINE-WIDE
+    advisory lock for a schema they never read, and one unrelated full-suite run
+    blocked this worktree for over fifteen minutes while every test in it was
+    pure filesystem work.
+
+    Adding a database-touching test to a marked module is not silent: the
+    connection fails loudly. Removing the marker is the visible act that says
+    "this module now needs the DB".
+    """
+    items = getattr(session, "items", None)
+    if not items:
+        return True
+    return not all(
+        any(item.get_closest_marker(marker) for marker in _DATABASE_FREE_MARKERS)
+        for item in items
+    )
+
+
 @pytest.fixture(autouse=True, scope="session")
-def _exclusive_test_database() -> Iterator[None]:
+def _exclusive_test_database(request: pytest.FixtureRequest) -> Iterator[None]:
     """Refuse to run when another pytest session already owns the test DB.
 
     Every ``test_db`` consumer resets state by ``TRUNCATE``-ing the shared
@@ -250,7 +302,15 @@ def _exclusive_test_database() -> Iterator[None]:
     The lock is a Postgres *session*-level advisory lock, so it is released
     automatically when this process exits — a crashed or killed run never
     leaves the database wedged.
+
+    Skipped entirely for a browser-only selection: taking a machine-wide lock on
+    behalf of tests that never open a connection blocks every other suite on the
+    box for no reason. See :func:`_session_touches_the_database`.
     """
+    if not _session_touches_the_database(request.session):
+        yield
+        return
+
     conn = psycopg.connect(TEST_DATABASE_URL, connect_timeout=5)
     with conn.cursor() as cur:
         if not try_acquire_suite_lock(cur):
@@ -530,7 +590,9 @@ def _reset_schema_and_migrate(conn: psycopg.Connection) -> None:
 
 @pytest.fixture(autouse=True, scope="session")
 def _ensure_test_db_initialized(
-    _force_test_database_url: None, _exclusive_test_database: None
+    request: pytest.FixtureRequest,
+    _force_test_database_url: None,
+    _exclusive_test_database: None,
 ) -> Iterator[None]:
     """Reset the test DB to a known migrated state at session start.
 
@@ -551,7 +613,15 @@ def _ensure_test_db_initialized(
     connection and every test errored in setup. Requesting the lock here makes
     pytest resolve it first, so a second suite exits cleanly before touching
     anything.
+
+    Skipped entirely for a browser-only selection — nothing collected reads the
+    schema, so resetting it is pure cost and a hard dependency on a live
+    Postgres. See :func:`_session_touches_the_database`.
     """
+    if not _session_touches_the_database(request.session):
+        yield
+        return
+
     with connect(TEST_DATABASE_URL) as conn:
         conn.autocommit = True
         _reset_schema_and_migrate(conn)

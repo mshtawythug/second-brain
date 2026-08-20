@@ -30,7 +30,7 @@ import { createHash } from "node:crypto"
 import { readFileSync } from "node:fs"
 import { createInterface } from "node:readline"
 
-const FINGERPRINT_VERSION = 1
+const FINGERPRINT_VERSION = 2
 
 // ---------------------------------------------------------------------------
 // Canonical blob encoding (must match _u32be / _encodeSection in TS file)
