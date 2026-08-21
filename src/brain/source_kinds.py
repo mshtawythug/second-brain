@@ -14,10 +14,14 @@ accept a caller-supplied kind live in different files —
 and ``cli_ingest`` cannot import from ``cli`` where the set previously lived:
 ``cli`` imports ``cli_ingest``, so the dependency only runs one way.
 
-``brain.ui.schemas.VALID_SOURCE_KINDS`` deliberately keeps its own copy; its
-docstring explains why (importing the Typer CLI into every HTTP handler), and
-``tests/test_ui_schemas.py`` asserts the two are equal, so that copy is guarded
-rather than merely duplicated.
+``brain.ui.schemas.VALID_SOURCE_KINDS`` **re-exports the set defined here** — it
+is the same object, not a copy of it. The import cost that once justified a
+second literal was the Typer CLI, and this module is not it: importing
+``brain.source_kinds`` does not load ``typer``. ``tests/test_ui_schemas.py``
+asserts **identity** (``is``), not equality: once the UI became a re-export an
+equality guard could not fail, and the failure mode that remains — someone
+restating the literal there — yields an equal-but-separate object that ``==``
+passes and ``is`` catches.
 """
 
 from __future__ import annotations
@@ -29,9 +33,13 @@ class InvalidSourceKind(BrainError):
     """An ingest entry point was handed a ``source`` outside the closed set."""
 
 
-#: The four kinds the ingest paths may write to ``sources.kind``.
-#: Mirrors :data:`brain.vault.links._SOURCE_KINDS` and
-#: :data:`brain.ui.schemas.VALID_SOURCE_KINDS`.
+#: The four kinds the ingest paths may write to ``sources.kind``. **This is the
+#: canonical definition** — :data:`brain.ui.schemas.VALID_SOURCE_KINDS` and
+#: :data:`brain.cli._VALID_SOURCE_KINDS` are re-exports *of this object*, so the
+#: mirroring runs toward them, not from them. (The direction was stated backwards
+#: here until 2026-08-21, which matters: a reader treating this as the mirror
+#: edits one of the re-exports and expects the enum to change.)
+#: :data:`brain.vault.links._SOURCE_KINDS` is a genuine separate copy.
 VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack"})
 
 
