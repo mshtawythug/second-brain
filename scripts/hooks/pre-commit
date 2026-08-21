@@ -161,6 +161,60 @@ if [ -n "${emails}" ]; then
   fail "real-looking email address(es): $(printf '%s' "${emails}" | tr '\n' ' ')"
 fi
 
+# Absolute HOME paths — a real developer's machine layout, and with it a real
+# account name.
+#
+# Why this exists: 13 occurrences of the repo owner's actual home path reached
+# tracked files, and NEITHER stage could have stopped them. Stage 1 had no
+# home-path pattern at all; stage 2's prompt enumerates names, emails, phones,
+# addresses, employers, codenames, credentials and transcript bodies — machine
+# layout was not a category it was ever asked about, so it was a CONCEPT absent,
+# not a string absent. What landed after the cleanup was a re-derive command in
+# .gitignore, which documents the class without gating it. This is the gate.
+#
+# It matches the SHAPE, never a value. That is deliberate and load-bearing: the
+# name this check exists to keep out of history must not itself be written into
+# a tracked file to block it (rule 15 — a denylist entry for a real username IS
+# the disclosure). The gitignored .pii-denylist.local.txt remains the place for
+# real values; this stage needs no such entry, because anything that is not a
+# known-synthetic segment is blocked by default.
+#
+# The extraction stops at the next `/`, so only the FIRST segment — the account
+# name — is compared: `/Users/you/workspace/x` yields `/Users/you`. Deeper path
+# structure is not sensitive on its own and would otherwise defeat the anchors.
+#
+# Self-avoidance: the two lines below contain no substring matching the pattern
+# they define (`/Users` is followed by `|` or `)`, never `/`), so this hook does
+# not block its own commit. Comments here use only allowlisted placeholders for
+# the same reason.
+_HOME_PATH_RE='(/Users|/home)/[A-Za-z0-9._-]+'
+# The placeholders the repo deliberately uses: /Users/you, /Users/example,
+# /home/user, and /home/runner — the last being the GitHub Actions runner home,
+# which is public infrastructure, not a person. Measured at `4740f03`: 56
+# occurrences spread over 53 tracked lines, and NO fifth segment. Mind the unit
+# — the command below counts occurrences, whereas `git grep -c` counts matching
+# LINES, which is how the same census yields both 56 and 53. Re-derive the real
+# list before editing this, and check whether a fifth segment has appeared:
+#   git grep -hoIE '(/Users|/home)/[A-Za-z0-9._-]+' | sort | uniq -c | sort -rn
+_SYNTHETIC_HOME_RE='^(/Users|/home)/(you|example|user|runner)$'
+
+home_hits="$(grep -oEi "${_HOME_PATH_RE}" <<<"${added}" \
+  | grep -viE "${_SYNTHETIC_HOME_RE}" || true)"
+
+# Subtracted the same exact-line, fixed-string way as the secret stage, so a new
+# synthetic placeholder can be admitted via .pii-allowlist.txt without widening
+# the regex. Exact-line matching is what stops a short entry from allowing a
+# longer real path that merely contains it.
+if [ -n "${home_hits}" ] && [ -f "${allowlist}" ]; then
+  allow_paths="$(grep -vE '^[[:space:]]*(#|$)' "${allowlist}" || true)"
+  if [ -n "${allow_paths}" ]; then
+    home_hits="$(grep -vixF -- "${allow_paths}" <<<"${home_hits}" || true)"
+  fi
+fi
+if [ -n "${home_hits}" ]; then
+  fail "absolute home path(s) revealing a real machine account: $(printf '%s' "${home_hits}" | sort -u | tr '\n' ' ')"
+fi
+
 # Real sensitive terms from the gitignored denylist — always block (case-insensitive
 # substring). `|| [ -n "$term" ]` handles a final line with no trailing newline.
 if [ -f "${denylist}" ]; then
@@ -190,9 +244,12 @@ prompt="You are a PII/secret gate for a git commit in a PERSONAL knowledge-base 
 policy is SYNTHETIC-ONLY test and doc data. Review ONLY the STAGED DIFF added lines below. \
 Print exactly 'OK' if clean, or 'BLOCK: <short reason>' if they contain REAL personal data \
 (real person names, emails, phone numbers, postal addresses), real customer/employer/company \
-names, internal project codenames, secrets/credentials, or real meeting-transcript / \
-email-body content. Tokens in ALLOWLIST and obvious synthetic placeholders (Acme, Contoso, \
-Jane/John Doe, Northwind, Sidekick) are SAFE — never flag them. Output EXACTLY ONE line, \
+names, internal project codenames, secrets/credentials, real meeting-transcript / \
+email-body content, or a REAL MACHINE's filesystem layout — an absolute home directory such \
+as /Users/<name> or /home/<name> whose account segment is a real person's username rather \
+than a placeholder. Tokens in ALLOWLIST and obvious synthetic placeholders (Acme, Contoso, \
+Jane/John Doe, Northwind, Sidekick, and the path stand-ins /Users/you, /Users/example, \
+/home/user, /home/runner) are SAFE — never flag them. Output EXACTLY ONE line, \
 nothing else."
 
 # Capture stdout and exit status SEPARATELY (an `|| echo` fallback could let a
