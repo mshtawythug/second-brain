@@ -58,6 +58,33 @@ def test_duplicate_heading_text_gets_distinct_resolvable_ids() -> None:
 
     This is the mutation target: drop the duplicate suffix and both headings
     collide, so one id resolves twice and the count assertion fails.
+
+    MUTATION, RUN 2026-08-21 — the line above named this target and nothing had
+    ever recorded running it, so "mutation target" was a claim rather than a
+    measurement. *Drop the duplicate suffix* in ``_SlugMinter.slug`` at
+    ``src/brain/ui/render.py:145-149``: replace
+
+        candidate = base if suffix == 0 else f"{base}-{suffix}"
+        while candidate in self._used:
+            suffix += 1
+            candidate = f"{base}-{suffix}"
+
+    with ``candidate = base``, leaving the ``_counts`` bookkeeping in place.
+
+        .venv/bin/python -m pytest tests/test_ui_render_toc.py --no-cov
+        -> 4 failed, 8 passed (baseline 12 passed)
+
+    NOT inert. THIS test failed at the assertion the paragraph names —
+    ``assert ids.count(heading.id) == 1`` inside
+    :func:`_assert_toc_targets_resolve` — with an AssertionError rather than a
+    crash, which is what says the mutation was CAUGHT and not merely survived.
+
+    Three siblings fell with it: ``…three_way_duplicate_ids…``,
+    ``…generated_suffix_cannot_collide…`` and
+    ``…slugifies_to_nothing_still_gets_unique_ids``. That is expected, not
+    noise — they assert the same uniqueness property over different inputs. The
+    other 8 stayed green, so the mutation is contained to uniqueness and does
+    not simply break rendering.
     """
     source = "## Notes\n\ntext\n\n## Notes\n\nmore\n"
 

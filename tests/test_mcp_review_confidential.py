@@ -208,7 +208,14 @@ def test_review_scan_include_confidential_opts_back_in(
     review_state: mcp_server._State,  # noqa: ARG001 — installs the state
     test_db: psycopg.Connection,
 ) -> None:
-    """The permissive direction. Without it the bridge could be inverted."""
+    """The permissive direction. Without it the bridge could be inverted.
+
+    A control pairs with an ASSERTION, not with a test. The strict test above
+    makes TWO withholding claims over one blob — the title and the sealed
+    document's id — and they travel by different routes: the title through
+    ``rationale``, the id through ``evidence_ids``. One ``in`` assertion cannot
+    be evidence for both, so there are two here.
+    """
     ids = _seed_stale_pair_with_confidential_superseder(test_db)
     _scan_fixture_is_not_vacuous(test_db, ids)
 
@@ -219,6 +226,11 @@ def test_review_scan_include_confidential_opts_back_in(
     )
 
     assert CONF_TITLE in blob
+    # Pins the second claim of ``…never_names_a_confidential_superseder``. The
+    # id reaches the payload by exactly one route — the ``evidence_ids`` list
+    # serialized out of ``brain_review_scan`` — so without this the strict
+    # ``ids["sealed"] not in blob`` beside it would pass on an empty route.
+    assert ids["sealed"] in blob
 
 
 def test_review_scan_skips_a_confidential_candidate(
@@ -231,6 +243,20 @@ def test_review_scan_skips_a_confidential_candidate(
     payload through a different field than the superseder's title does. Asserted
     separately because the candidate query and the superseder query are two
     different SELECTs and gating one does not gate the other.
+
+    **The id claim is the evidence here; the title claim below is inert.** In
+    THIS fixture the confidential document is the candidate, and a scan finding
+    carries only ``kind``/``target_type``/``target_id``/``score``/``rationale``/
+    ``evidence_ids`` — the candidate's own title is in none of them, and
+    ``rationale`` names the SUPERSEDER, which here is the ordinary
+    ``NEW_TITLE``. Measured 2026-08-21 against the permissive payload: the id
+    is present, ``CONF_TITLE`` is NOT, so ``CONF_TITLE not in blob`` cannot
+    fail whatever the gate does and no control can pin it. It is kept as a
+    forward guard against a future payload that starts carrying candidate
+    titles — labelled so nobody counts it as evidence. The title route is
+    covered for real by
+    ``test_review_scan_rationale_never_names_a_confidential_superseder``, whose
+    fixture makes the confidential document the superseder.
     """
     old = _insert_doc(
         conn := test_db,
@@ -257,6 +283,7 @@ def test_review_scan_skips_a_confidential_candidate(
     blob = _blob(mcp_server.brain_review_scan(scan_type="stale", dry_run=True))
 
     assert old not in blob
+    # Inert by construction — see the docstring. Not evidence; a forward guard.
     assert CONF_TITLE not in blob
 
 
@@ -371,10 +398,21 @@ def test_findings_list_still_returns_the_wholly_normal_finding(
 def test_findings_list_include_confidential_opts_back_in(
     test_db: psycopg.Connection, queued_findings: dict[str, str]
 ) -> None:
-    """The permissive direction."""
+    """The permissive direction.
+
+    Two ``in`` assertions for the two withholding claims the strict test makes
+    over one blob. ``len(...) == 2`` establishes that the sealed finding's ROW
+    survives; it says nothing about whether the sealed document's ID string
+    reaches the serialized payload, which is the second claim.
+    """
     _queue_fixture_is_not_vacuous(test_db, queued_findings)
 
     payload = mcp_server.brain_review_findings_list(include_confidential=True)
+    blob = _blob(payload)
 
     assert len(payload["findings"]) == 2
-    assert CONF_TITLE in _blob(payload)
+    assert CONF_TITLE in blob
+    # Pins the second claim of ``…hides_a_finding_whose_evidence_is_confidential``.
+    # The sealed id reaches the payload only through the withheld finding's
+    # ``evidence_ids``; the surviving normal finding does not reference it.
+    assert queued_findings["sealed"] in blob

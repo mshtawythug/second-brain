@@ -379,12 +379,24 @@ def test_brief_still_returns_the_normal_document(
 def test_brief_include_confidential_opts_back_in(
     test_db: psycopg.Connection[Any], brief_corpus: dict[str, str]
 ) -> None:
-    """The permissive direction, for all three sections."""
+    """The permissive direction, for all three sections.
+
+    This controls BOTH claims of
+    ``test_brief_hides_a_confidential_capture_pin_and_todo`` (title and
+    ``BODY_MARKER``) plus the separate ``CONF_TODO_TEXT`` test — but the
+    ``BODY_MARKER`` half only TRANSITIVELY, because ``CONF_TODO_TEXT`` is built
+    by interpolating the marker. Asserted explicitly below so the pairing does
+    not quietly lapse if the constants are ever decoupled.
+    """
     _brief_fixture_is_not_vacuous(test_db, brief_corpus)
 
     blob = _blob(mcp_server.brain_brief(no_enrich=True, include_confidential=True))
 
     assert CONF_TITLE in blob
+    assert BODY_MARKER in CONF_TODO_TEXT, (
+        "the containment this control relies on has been broken — BODY_MARKER "
+        "now needs its own assertion below"
+    )
     assert CONF_TODO_TEXT in blob
 
 
@@ -475,7 +487,20 @@ def test_review_weekly_still_returns_the_normal_document(
 def test_review_weekly_include_confidential_opts_back_in(
     test_db: psycopg.Connection[Any], weekly_corpus: dict[str, Any]
 ) -> None:
-    """The permissive direction."""
+    """The permissive direction — for the BODY claim as well as the title.
+
+    ``…_hides_confidential_activity_and_loops`` denies three strings over one
+    blob: the title, the action-item text, and the body marker. Only the title
+    was controlled, so the two body-derived claims rested on nothing — the same
+    shape ``test_timeline_include_confidential_opts_back_in`` documents one
+    section below, on a different tool.
+
+    Two ``in`` assertions cover all three claims, and only because
+    ``CONF_TODO_TEXT`` is built from ``BODY_MARKER`` — asserting the longer
+    string present necessarily proves the marker reached the payload too. That
+    containment is load-bearing, not incidental: decouple the two constants and
+    this control silently stops pinning ``BODY_MARKER``.
+    """
     _weekly_fixture_is_not_vacuous(test_db, weekly_corpus)
 
     blob = _blob(
@@ -485,6 +510,11 @@ def test_review_weekly_include_confidential_opts_back_in(
     )
 
     assert CONF_TITLE in blob
+    assert BODY_MARKER in CONF_TODO_TEXT, (
+        "the containment this control relies on has been broken — BODY_MARKER "
+        "now needs its own assertion below"
+    )
+    assert CONF_TODO_TEXT in blob
 
 
 # ---------------------------------------------------------------------------

@@ -62,6 +62,26 @@ BODY_MARKER = "quokkavolt"
 CONF_TITLE = "Confidential Wind-Down Memo"
 
 
+def _blob(payload: object) -> str:
+    """Serialize a whole response for substring assertions.
+
+    ``ensure_ascii=False`` is load-bearing, not tidiness. The default escapes
+    every non-ASCII character, so a title containing an em-dash serializes as
+    ``Wind\\u2014Down`` and a substring check for the title silently fails to
+    match. On a ``not in`` assertion that is worse than a bug: it PASSES,
+    reporting "no leak" about a payload that contains the string in escaped
+    form.
+
+    This module's markers are ASCII TODAY, so every bare ``json.dumps`` here was
+    correct at the moment it was written — which is exactly why the hazard is
+    worth removing rather than arguing about. A sibling file's ``CONF_TITLE``
+    already carries an em-dash; one copied constant, and every withholding
+    assertion in this file turns green-forever with no test failing to say so.
+    Centralising the flag means that copy cannot silently disarm them.
+    """
+    return json.dumps(payload, default=str, ensure_ascii=False)
+
+
 @pytest.fixture
 def graph_state(
     monkeypatch: pytest.MonkeyPatch,
@@ -207,7 +227,7 @@ def test_graphrag_search_response_contains_no_confidential_body_anywhere(
 
     payload = mcp_server.brain_graphrag_search(query="bob", mode="local")
 
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER not in blob
 
 
@@ -268,7 +288,7 @@ def test_graphrag_search_include_confidential_carries_body_into_the_payload(
 
     So the rule this closes is the stronger one: **the presence check must sit
     at the SAME LAYER the absence is asserted over.** Hence the same call, the
-    same ``json.dumps(..., default=str).lower()`` blob, and the opposite
+    same ``_blob(...).lower()`` blob, and the opposite
     assertion — the exact mirror of the test at the top of this section.
 
     This is the same failure shape as the ``ensure_ascii`` defect fixed
@@ -287,7 +307,7 @@ def test_graphrag_search_include_confidential_carries_body_into_the_payload(
         query="bob", mode="local", include_confidential=True
     )
 
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER in blob, (
         "the graph payload carried no body text at all, so every "
         "'BODY_MARKER not in blob' assertion in this file is vacuous"
@@ -302,7 +322,7 @@ def test_graphrag_entity_response_contains_no_confidential_body(
 
     payload = mcp_server.brain_graphrag_entity(name="bob")
 
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER not in blob
 
 
@@ -380,7 +400,7 @@ def test_brain_orphans_omits_confidential_title_by_default(
 
     payload = mcp_server.brain_orphans()
 
-    blob = json.dumps(payload, default=str)
+    blob = _blob(payload)
     assert "Public Loose Note" in blob, "must not break the normal listing"
     assert CONF_TITLE not in blob
 
@@ -393,7 +413,7 @@ def test_brain_orphans_include_confidential_opts_back_in(
 
     payload = mcp_server.brain_orphans(include_confidential=True)
 
-    assert CONF_TITLE in json.dumps(payload, default=str)
+    assert CONF_TITLE in _blob(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +437,7 @@ def test_graphrag_fuse_hybrid_leg_does_not_reintroduce_confidential(
 
     payload = mcp_server.brain_graphrag_search(query="wind-down", mode="fuse")
 
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER not in blob
     assert CONF_TITLE not in [d["title"] for d in payload["docs"]]
 
@@ -455,7 +475,7 @@ def test_graphrag_fuse_graph_leg_stays_gated(
 
     payload = mcp_server.brain_graphrag_search(query="bob", mode="fuse")
 
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER not in blob
     assert CONF_TITLE not in [d["title"] for d in payload["docs"]]
 
@@ -492,7 +512,7 @@ def test_graphrag_themes_response_contains_no_confidential_body(
 
     payload = mcp_server.brain_graphrag_themes(person="bob")
 
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER not in blob
     assert CONF_TITLE not in [d["title"] for d in payload["docs"]]
 
@@ -555,6 +575,45 @@ def test_graphrag_themes_doc_ids_exclude_the_confidential_document(
 
     enumerated = {i for t in payload["themes"] for i in t["doc_ids"]}
     assert confidential_graph not in enumerated
+
+
+def test_graphrag_themes_doc_ids_opt_back_in(
+    test_db: psycopg.Connection[Any],
+    confidential_graph: str,
+) -> None:
+    """POSITIVE CONTROL for the themes ``doc_ids`` gate above.
+
+    The comment block heading this section enumerates THREE residual membership
+    paths. Two of them grew a control; this one did not, and the asymmetry was
+    invisible because the file reads as though the section were finished. The
+    community sibling — :func:`test_graphrag_global_community_doc_ids_opt_back_in`
+    — spells the rule out, and this is that rule applied to the themes branch it
+    was never applied to.
+
+    ``…_exclude_the_confidential_document`` reads a set built by flattening
+    ``themes[].doc_ids``. Nothing pinned that the list is populated at all, so
+    blanking ``doc_ids`` in :func:`brain.format._theme_json` — the line directly
+    above the ``_community_json`` one the sibling names — left that gate green.
+
+    :func:`test_the_confidential_fixture_is_not_vacuous` does not cover this: it
+    guards that the document is confidential and reachable, which is one field
+    short of the ``doc_ids`` list the absence is asserted over. Same
+    one-boundary-short shape, different branch.
+
+    Verified two-sided rather than argued: replacing ``list(theme.doc_ids)``
+    with ``[]`` in ``_theme_json`` reddens THIS test at its own line, while
+    ``test_graphrag_themes_doc_ids_exclude_the_confidential_document`` still
+    passes.
+    """
+    _fixture_is_not_vacuous(test_db, confidential_graph)
+
+    payload = mcp_server.brain_graphrag_themes(person="bob", include_confidential=True)
+
+    enumerated = {i for t in payload["themes"] for i in t["doc_ids"]}
+    assert confidential_graph in enumerated, (
+        "no theme enumerated ANY document id, so the withholding assertion "
+        f"beside this one is vacuous: enumerated={enumerated}"
+    )
 
 
 # --- residual 2: ThemeGroup.summary — confidential TITLES reach the prompt ---

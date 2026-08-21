@@ -218,8 +218,19 @@ def test_the_id_is_withheld_with_the_title(
     Shipping the node with the title stripped would still hand a client the
     document id — and ``GET /api/notes/{id}`` is a different surface with a
     different gate, so the tree would have become a directory of things to try.
+
+    The ordinary id is asserted PRESENT in the same breath, for the reason
+    :func:`test_a_confidential_title_is_not_in_the_tree` states one test above
+    and this one did not apply: an absence-only assertion holds against a tree
+    that carries no ids at all. Ids and titles are separate fields, so that
+    test's ``OPEN_TITLE in titles`` is not evidence here — a payload could name
+    every title and emit no id, and only this line would notice.
     """
     payload = _tree(hiding)
+    assert corpus["open"] in str(payload), (
+        "the tree carries no document ids at all, so the absence below would "
+        "hold even if sensitivity were ignored entirely"
+    )
     assert corpus["sealed"] not in str(payload)
 
 
