@@ -1091,6 +1091,15 @@ def test_graph_data_include_ingested_honours_the_class_edge_invariant(
     )
 
     node_ids = {n.document_id for n in snapshot.nodes}
+    # ``assert not dangling`` passes trivially on an empty edge list, so the
+    # claim below is only evidence while there is something to be dangling.
+    # The ``hub -> leaf`` edge survives the gate in this fixture today; this
+    # line is what will notice if that stops being true, instead of the test
+    # quietly turning green-because-empty.
+    assert snapshot.edges, (
+        "no edges survived the gate — the dangling-edge check below would "
+        "pass vacuously"
+    )
     dangling = [
         (e.src_document_id, e.dst_document_id)
         for e in snapshot.edges
