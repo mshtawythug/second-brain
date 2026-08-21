@@ -155,18 +155,31 @@ those two**; their fixtures drop the AGE graph and poison later tests.
   by `tests/test_build_related_signal.py`. Do it before the next addition there.
   Nothing detected this — a human re-derived the row set. Until the CI check
   exists, that is the only control.
-- **`ui/schemas.py` and `ui/__init__.py`** cite a "9,800-line Typer CLI"; actual
-  is ~9,035. Reads as inherited from an older tree.
-- **`vault/graph.py:268` / `:346`** document a hole that does not exist
-  (`brain_backlinks`/`brain_links` *do* have the parameter and bridge correctly).
-  Repo contradicts itself — the discovery gate lists both as gated.
+- **`ui/schemas.py` and `ui/__init__.py`** cite a "9,800-line Typer CLI." No
+  commit on this branch has held that figure:
+  `git show "833a395:src/brain/cli.py" | wc -l` gives **9,038** at the commit
+  that wrote this bullet. Reads as inherited from an older tree. Re-derive the
+  live figure with `wc -l src/brain/cli.py` — and do not copy one back into the
+  citation; a line count in prose is the thing that rots. *(This bullet said
+  "actual is ~9,035" until 2026-08-21 — unbound to any commit, and already three
+  short at `833a395`.)*
 - **Two INERT withholding labels** rest on payload shapes measured 2026-08-21.
   One expires **loudly** (key-set pinned); the other has no pin.
-- **`CLAUDE.md`** grows ~40 lines per repair round (6 rounds, now 495). Almost all
-  *correction archaeology*. Load-bearing until a CI gate exists, then it belongs
-  in `docs/audits/`.
-- **`vault/graph.py` is 792 lines** — 8 from the ceiling. Next growth needs an
-  extraction.
+- **`CLAUDE.md`** grows ~40 lines per repair round (six rounds through
+  `833a395`). Almost all *correction archaeology*. Load-bearing until a CI gate
+  exists, then it belongs in `docs/audits/`. Count it with `wc -l CLAUDE.md`; no
+  figure is carried here. *(This bullet said "now 495" until 2026-08-21.
+  `git show "833a395:CLAUDE.md" | wc -l` gives **505** — so 495 was not stale, it
+  was **false on arrival**: it never matched the commit that shipped it, nor
+  `b7fd0e8` below it. Substituting today's count for yesterday's would only
+  restart the rot, which is why there is a command here instead.)*
+- **`vault/graph.py` sits just under the ceiling.**
+  `git show "aa39159:src/brain/vault/graph.py" | wc -l` gives **792** — eight
+  lines of headroom at that commit, and the docstring repair that followed spent
+  most of them. This digit is SHA-bound rather than replaced by a command because
+  the *number itself* carries the argument: headroom is the claim. Re-derive the
+  live figure with `wc -l src/brain/vault/graph.py` before adding anything. The
+  next addition needs an extraction, not another line.
 
 ---
 
@@ -203,6 +216,28 @@ Full detail is in project memory (`feedback_prove_the_check_can_fail`,
   payload first — a control added to an inert claim proves nothing.
 - **No digit in any position a write can invalidate.** SHA-bound hops are safe
   (`git show <sha>:path | wc -l` is forever); live head figures are not.
+- **A commit message can describe work that is not in that commit.** `d99ca34`
+  ("docs(ceiling): give six ceiling records a terminating form") states
+  *"mcp_server.py additionally regains a missing hop."* `d99ca34` touches six
+  files and `src/brain/mcp_server.py` is not one of them; the hop — `4,356
+  (ec6afb6)` in that file's module docstring — is absent at `d99ca34` and
+  present at `b7fd0e8`, its direct child. Verify with `git show --stat d99ca34`
+  and
+  `for s in d99ca34 b7fd0e8; do git show "${s}:src/brain/mcp_server.py" | grep -c '4,356'; done`.
+  History is **not** being rewritten to fix this; the correction lives here, and
+  a message is evidence about intent, never about content. *(Recorded
+  2026-08-21.)*
+- **A comment can be false in the very commit that writes it** — staleness is not
+  the only failure mode, and a fresh commit date is not a warrant. `2ed2d83`
+  ("fix(security): exclude confidential documents from ungated surfaces") added
+  the `exclude_confidential=not include_confidential` bridges to
+  `brain_backlinks` / `brain_links` **and**, in the same commit, added a note to
+  `vault/graph.py` at two sites saying those tools "do not pass this and have no
+  `include_confidential` parameter." It closed the gap and documented it as open
+  in one write. The repo then disagreed with itself in three places for a day,
+  because CLAUDE.md's `mcp_server.py` row and the discovery gate both said
+  *gated*. Both sites corrected 2026-08-21 to describe the bridge and its
+  inversion instead. *(Recorded 2026-08-21.)*
 
 **Concurrency**
 - The test-DB advisory lock is **per-database, not machine-wide**. Export

@@ -265,9 +265,12 @@ def backlinks_for(
     for any UI route that names a confidential document regardless of which
     query it used — so the protection does not rest on this default.
 
-    Note for the MCP server: ``brain_backlinks`` / ``brain_links`` do not pass
-    this and have no ``include_confidential`` parameter, unlike every other F6
-    retrieval surface there. Flagged, not changed — see ``_confidential_lens``.
+    Note for the MCP server: ``brain_backlinks`` / ``brain_links`` bridge to this
+    parameter as ``exclude_confidential=not include_confidential``. The polarity
+    inverts at that boundary — their default EXCLUDES confidential neighbours
+    while this function's default includes them — and dropping the ``not`` fails
+    OPEN, only ever adding rows. That is why ``tests/test_mcp_links_confidential.py``
+    asserts each direction separately. See :func:`brain.mcp_server._confidential_lens`.
     """
     rows = conn.execute(
         _BACKLINKS_SQL if exclude_confidential else _BACKLINKS_SQL_ANY,
@@ -343,9 +346,12 @@ def outgoing_links_for(
     for any UI route that names a confidential document regardless of which
     query it used — so the protection does not rest on this default.
 
-    Note for the MCP server: ``brain_backlinks`` / ``brain_links`` do not pass
-    this and have no ``include_confidential`` parameter, unlike every other F6
-    retrieval surface there. Flagged, not changed — see ``_confidential_lens``.
+    Note for the MCP server: ``brain_backlinks`` / ``brain_links`` bridge to this
+    parameter as ``exclude_confidential=not include_confidential``. The polarity
+    inverts at that boundary — their default EXCLUDES confidential neighbours
+    while this function's default includes them — and dropping the ``not`` fails
+    OPEN, only ever adding rows. That is why ``tests/test_mcp_links_confidential.py``
+    asserts each direction separately. See :func:`brain.mcp_server._confidential_lens`.
     """
     resolved_rows = conn.execute(
         _OUTGOING_SQL if exclude_confidential else _OUTGOING_SQL_ANY,
