@@ -1639,6 +1639,20 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
 # against an empty one: the same fixture is aggregated with
 # ``exclude_confidential=False`` first to show the row is reachable, and only
 # then with the gate on.
+#
+# THE HOLE WAS CONFIRMED BEFORE IT WAS CLOSED. Against the source at
+# `833a395` this fixture emitted `<vault>/people/dana.md` containing:
+#
+#   ---
+#   ...
+#   doc_count: 2                      <- counted the withheld doc
+#   ---                               <- and NO `sensitivity` key, which is
+#                                        why `RemoveConfidential` published it
+#   ## Documents (2)
+#   ### 2026-04-02 - [[...compensation-review|Compensation review notes]] (krisp)
+#   ### 2026-04-01 - [[...q3-roadmap-sync|Q3 roadmap sync]] (krisp)
+#
+# Both `###` lines are ToC entries. The gated source emits only the second.
 # --------------------------------------------------------------------------
 
 _HUB_NORMAL_TITLE = "Q3 roadmap sync"
@@ -1699,7 +1713,10 @@ class TestConfidentialDocsAreWithheldFromTheHub:
         dana = _record_by_name(records, "dana")
         titles = [d.title for d in dana.docs]
         assert _HUB_NORMAL_TITLE in titles
-        assert _HUB_CONFIDENTIAL_TITLE in titles
+        assert _HUB_CONFIDENTIAL_TITLE in titles, (
+            "the permissive payload does not contain the confidential doc — "
+            "every absence claim in this class would then be inert"
+        )
         assert len(dana.docs) == 2
 
     def test_strict_variant_withholds_the_confidential_doc(
@@ -1717,8 +1734,41 @@ class TestConfidentialDocsAreWithheldFromTheHub:
 
         dana = _record_by_name(records, "dana")
         titles = [d.title for d in dana.docs]
-        assert _HUB_NORMAL_TITLE in titles
+        assert _HUB_NORMAL_TITLE in titles, (
+            "control doc missing — the roster is empty, so the assertion "
+            "below would be vacuous"
+        )
         assert _HUB_CONFIDENTIAL_TITLE not in titles
+
+    def test_gate_is_wired_to_the_sql(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        """Flipping ONE keyword brings the confidential doc back.
+
+        Copied from
+        ``test_build_related_signal.test_eligible_source_docs_gate_is_wired_to_the_sql``:
+        ``gated`` and ``opened`` measured on the SAME fixture inside the SAME
+        test. This is what makes the absence claims in this class meaningful —
+        without it the confidential doc could be missing for any reason (a bad
+        fixture, an unresolved participant key, a directory miss) and the gate
+        would still look green. Observing the row RETURN under
+        ``exclude_confidential=False`` proves the parameter reaches the SQL
+        rather than being accepted and ignored.
+        """
+        _seed_hub_pair(test_db)
+
+        def titles(**kwargs: Any) -> set[str]:
+            records = aggregate_people(
+                test_db, owner_keys=frozenset(), min_docs=1, **kwargs
+            )
+            return {d.title for d in _record_by_name(records, "dana").docs}
+
+        gated = titles(exclude_confidential=True)
+        opened = titles(exclude_confidential=False)
+
+        assert _HUB_CONFIDENTIAL_TITLE not in gated
+        assert _HUB_CONFIDENTIAL_TITLE in opened
+        assert _HUB_NORMAL_TITLE in gated and _HUB_NORMAL_TITLE in opened
 
     def test_doc_count_drops_to_match_what_is_rendered(
         self, test_db: psycopg.Connection[Any]

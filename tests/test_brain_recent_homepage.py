@@ -839,6 +839,18 @@ def test_build_and_swap_calls_refresh_homepage(
 # asserts nothing. The control is the strongest available form: the identical
 # document, re-read after ``sensitivity`` alone is flipped back to
 # ``'normal'``.
+#
+# THE HOLE WAS CONFIRMED BEFORE IT WAS CLOSED, not inferred from reading the
+# SQL. Against the source at `833a395` (byte-identical to that commit, checked
+# out and diffed) this fixture put the confidential title into the published
+# `<vault>/index.md` fence as a live wiki-link:
+#
+#   <!-- BRAIN_RECENT_START -->
+#   - [[_ingested/manual/comp-planning-scratch|Comp planning scratch]] ...
+#   - [[_ingested/manual/sprint-retro-notes|Sprint retro notes]] ...
+#   <!-- BRAIN_RECENT_END -->
+#
+# The same fixture against the gated source emits only the second line.
 # --------------------------------------------------------------------------
 
 _CONFIDENTIAL_TITLE = "Comp planning scratch"
@@ -876,34 +888,49 @@ def test_fetch_recent_docs_excludes_confidential(
 
     titles = [d.title for d in _fetch_recent_docs(test_db, limit=10)]
 
-    # Positive control FIRST: the query reaches manual docs with a vault_path
-    # at all. Without this line the assertion below would also pass against an
-    # empty result set, a broken join, or a typo'd predicate.
-    assert _NORMAL_TITLE in titles
-    # The claim.
+    # Positive control FIRST, in the shape
+    # ``test_build_related_signal`` uses: the query reaches manual docs with a
+    # vault_path at all. Without this line the assertion below would also pass
+    # against an empty result set, a broken join, or a typo'd predicate.
+    assert _NORMAL_TITLE in titles, (
+        "control doc missing — the query returned nothing eligible, so the "
+        "confidential assertion below would be vacuous"
+    )
     assert _CONFIDENTIAL_TITLE not in titles
 
 
-def test_fetch_recent_docs_returns_the_same_row_once_downgraded(
+def test_fetch_recent_docs_gate_is_wired_to_the_sql(
     test_db: psycopg.Connection, seed_doc: Callable[..., str]
 ) -> None:
-    """The absence above is caused by the gate, not by an ineligible fixture.
+    """Flipping ONE column brings the withheld row back.
 
-    Same row, same query, same limit — only ``sensitivity`` changes. If the
-    title appears here it was always eligible, which is what makes the
-    absence in the sibling test evidence of the gate rather than of the seed.
+    The wiring proof, in the shape of
+    ``test_build_related_signal.test_eligible_source_docs_gate_is_wired_to_the_sql``
+    — ``gated`` and ``opened`` measured on the SAME fixture in the SAME test,
+    so the absence is attributable to the predicate and to nothing else.
+
+    That sibling flips a keyword argument. This gate has none by design (it is
+    hard-wired: one private caller, whose only output is a published file), so
+    the permissive payload is reached the only other way — by flipping the
+    column the predicate reads. Same row, same query, same limit; only
+    ``sensitivity`` differs between the two measurements below.
     """
     confidential_id = _seed_rail_pair(test_db, seed_doc)
-    before = [d.title for d in _fetch_recent_docs(test_db, limit=10)]
-    assert _CONFIDENTIAL_TITLE not in before
+
+    gated = [d.title for d in _fetch_recent_docs(test_db, limit=10)]
 
     test_db.execute(
         "UPDATE documents SET sensitivity = 'normal' WHERE id = %s",
         (confidential_id,),
     )
+    opened = [d.title for d in _fetch_recent_docs(test_db, limit=10)]
 
-    after = [d.title for d in _fetch_recent_docs(test_db, limit=10)]
-    assert _CONFIDENTIAL_TITLE in after
+    assert _CONFIDENTIAL_TITLE not in gated
+    assert _CONFIDENTIAL_TITLE in opened, (
+        "the row never came back — its absence from `gated` is evidence "
+        "about the fixture, not about the gate"
+    )
+    assert _NORMAL_TITLE in gated and _NORMAL_TITLE in opened
 
 
 def test_refresh_homepage_keeps_confidential_title_out_of_index_and_partial(
@@ -935,9 +962,18 @@ def test_refresh_homepage_keeps_confidential_title_out_of_index_and_partial(
         (vault / "index.md").read_text(encoding="utf-8")
     )
 
-    # Controls: the rail rendered real content on both surfaces.
-    assert _NORMAL_TITLE in partial
-    assert _NORMAL_TITLE in body
+    # Controls: the rail rendered real content on both surfaces. Measured
+    # against the permissive payload by construction — the pre-fix source
+    # emitted BOTH titles here (see the module note above), so an empty rail
+    # would be a fixture failure, not a passing gate.
+    assert _NORMAL_TITLE in partial, (
+        "control title missing from the partial — nothing was rendered, so "
+        "the claims below would be vacuous"
+    )
+    assert _NORMAL_TITLE in body, (
+        "control title missing from index.md — the fence was not rewritten, "
+        "so the claims below would be vacuous"
+    )
     # Claims.
     assert _CONFIDENTIAL_TITLE not in partial
     assert _CONFIDENTIAL_TITLE not in body
