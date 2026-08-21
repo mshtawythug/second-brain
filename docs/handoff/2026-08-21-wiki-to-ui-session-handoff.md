@@ -6,15 +6,26 @@ by a **different session — never write to it.**
 
 ---
 
-## 1. STATE AT HANDOFF
+## 1. STATE AT `833a395`
+
+**This section describes one commit, named, and does not claim to describe the
+branch tip.** The first draft asserted `HEAD = b71c923` and "working tree NOT
+clean"; both were false the instant the file was committed, because `833a395`
+already sat two commits above `b71c923`. §7 says it: *no digit in any position a
+write can invalidate.* "HEAD" and "currently" are such positions — every commit
+after this one invalidates them, silently, and a reader has no way to notice.
+So the row below names a SHA and the reader derives the rest:
+
+    git log --oneline f8c76c0..        # everything on the branch, tip included
 
 | | |
 |---|---|
 | Branch | `feat/wiki-to-ui-consolidation` |
-| HEAD | `b71c923` (18 commits from base `f8c76c0`) |
-| Pushed | **No.** No upstream set. Remote is **`second-brain`**, not `origin`. |
-| Working tree | **NOT clean** — substantial uncommitted work from ~6 agents, interleaved |
-| Prod Postgres | **DOWN** — `second-brain-postgres` exited (255) |
+| Base | `f8c76c0` |
+| Described commit | `833a395` — 21 commits from base (`git rev-list --count f8c76c0..833a395`). `b71c923` is 3 below it and was 18. |
+| Pushed | **No** as of `833a395`. No upstream set. Remote is **`second-brain`**, not `origin`. Re-check before assuming; nothing mechanical enforces it (below). |
+| Working tree at `833a395` | **Clean.** The interleaved ~6-agent work that earlier drafts described as uncommitted landed in `b7fd0e8` (egress fix) and `d99ca34` (ceiling rework). |
+| Prod Postgres | **DOWN** — `second-brain-postgres` exited (255). Left down deliberately. |
 
 **Verify absence on the remote UNPIPED and against the right remote name:**
 `git ls-remote --exit-code second-brain 'refs/heads/feat/wiki-to-ui-consolidation'`
@@ -28,14 +39,26 @@ authenticated. **Only instruction has kept this branch local.**
 
 ---
 
-## 2. IMMEDIATE NEXT STEP
+## 2. NEXT STEP
 
-**The uncommitted tree needs a coordinated read, then a commit.** Several agents'
-work is interleaved. Nothing is lost, but no single agent has seen the whole
-diff. Do this before anything else.
+The coordinated read this section used to demand **has happened.** The
+interleaved tree was read and committed: `b7fd0e8` (the §4 egress fix) and
+`d99ca34` (the ceiling rework). There is no uncommitted backlog to reconcile at
+`833a395`.
 
-Then: **iteration 5 of the rule-14 loop** (fresh reviewer + fresh auditor, run
-independently, do not reuse a previous pair).
+What remains is the **rule-14 loop**: a fresh reviewer + fresh auditor each
+round, run independently, never reusing a previous pair. §5 records iterations
+1–4. Iteration 5 ran against `833a395` and produced two HIGH findings, both
+pre-existing egress holes of the same shape as §4 (a published surface Quartz's
+`RemoveConfidential` cannot reach, because it is not a page):
+`wiki/build_homepage._fetch_recent_docs` (the home-page "Recently captured"
+rail, rewritten inline inside `<vault>/index.md`) and `people.aggregate_people`
+(the People Hub roster pages).
+
+**Derive the state of that work rather than reading it here** — this file cannot
+describe commits made after it:
+
+    git log --oneline 833a395..        # empty = nothing landed since
 
 ---
 
@@ -71,7 +94,7 @@ independently, do not reuse a previous pair).
 
 ---
 
-## 4. THE HEADLINE SECURITY FINDING (fixed, uncommitted)
+## 4. THE HEADLINE SECURITY FINDING (fixed in `b7fd0e8`)
 
 **`<vault>/static/` is published and bypasses the confidentiality filter.**
 
@@ -87,7 +110,7 @@ independently, do not reuse a previous pair).
 - **Nothing leaks today only because nothing is marked confidential** (unverified
   — see §3.6). The first `mark-confidential` arms it silently.
 
-**Fixed (uncommitted):** fail-closed gates on **both** legs — the candidate query
+**Fixed in `b7fd0e8`:** fail-closed gates on **both** legs — the candidate query
 *and* `_eligible_source_docs`. Mutations proved **half a fix is half a fix**:
 closing candidates alone still publishes the confidential doc's own file; closing
 the source alone still leaks its snippets into neighbours' payloads.
@@ -120,7 +143,11 @@ those two**; their fixtures drop the AGE graph and poison later tests.
   wrong by omission. Needs a build change, deliberately not implemented.
   **This already fired.** `src/brain/related.py` was described here, in CLAUDE.md,
   and in its own module docstring as sitting just *under* the ceiling while the
-  uncommitted F6 gate had already taken it from 726 to 828 — over. All three
+  F6 gate had already taken it from **726 (`7b5579e`) to 851 (`b7fd0e8`)** —
+  over. (`828` is what this line said until 2026-08-21. It was bound to nothing
+  and matched no commit: `git show "${sha}:src/brain/related.py" | wc -l` gives
+  726 at `7b5579e` and 851 at `b7fd0e8`, with no boundary between. An unbound
+  digit inside the bullet about unbound digits.) All three
   statements were corrected at commit time and the file now has a table row.
   It is over the ceiling **knowingly**, which the rule permits only with a written
   reason; "extract rather than grow past" was not honoured and the extraction is

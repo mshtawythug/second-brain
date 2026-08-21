@@ -391,9 +391,13 @@ _TAG_COUNTS_SQL_ANY = """
     ORDER BY t
 """
 
-#: The strict variant. ``/api/facets`` issues it on every request -- but NOT by
-#: default: :func:`tag_counts` defaults ``exclude_confidential=False`` and so
-#: selects the ``_ANY`` variant above unless a caller says otherwise.
+#: The strict variant. ``/api/facets`` issues it on every NON-LOOPBACK request
+#: -- and not by default: :func:`tag_counts` defaults
+#: ``exclude_confidential=False`` and so selects the ``_ANY`` variant above
+#: unless a caller says otherwise. ("on every request" is what this line said
+#: until 2026-08-21, which the next two sentences immediately contradicted:
+#: they say a loopback bind issues the permissive variant. Both could not be
+#: true, and the wrong half was the one a reader meets first.)
 #: ``routes_meta.facets`` reaches this SQL only because it passes
 #: ``exclude_confidential=strict`` explicitly, and ``strict`` is itself
 #: ``not ctx.serve_confidential_titles`` -- so on a loopback bind this route
