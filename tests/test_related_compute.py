@@ -28,6 +28,7 @@ import pytest
 
 from brain.queries import sync_chunk_search_metadata
 from brain.related import DEFAULT_RELATED_LIMIT, compute_related
+from brain.sensitivity import CONFIDENTIAL
 
 VECTOR_DIM = 4096
 
@@ -331,3 +332,61 @@ def test_compute_related_empty_corpus_returns_empty(
     )
 
     assert compute_related(test_db, solo_id, vector_sim_floor=0.0) == []
+
+
+# ---------------------------------------------------------------------------
+# F6 — confidential candidates
+# ---------------------------------------------------------------------------
+
+
+def _mark_confidential(conn: psycopg.Connection[Any], doc_id: str) -> None:
+    conn.execute(
+        "UPDATE documents SET sensitivity = %s WHERE id = %s::uuid",
+        (CONFIDENTIAL, doc_id),
+    )
+
+
+def test_compute_related_excludes_confidential_candidates_by_default(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """The gate, on the default path — and ``C`` proves it is not vacuous.
+
+    ``RelatedDoc.snippet`` is a raw slice of the candidate's chunk content, so
+    a confidential neighbor surfacing here is body egress, not just a named
+    title. Asserting ``B`` is gone would pass just as well if the fixture
+    produced no neighbors at all, so ``C`` — the non-confidential neighbor
+    seeded identically on the vector leg — is asserted present in the same
+    call. Only the sensitivity column differs between them.
+    """
+    a_id, b_id, c_id = _seed_a_b_c(test_db)
+    _mark_confidential(test_db, b_id)
+
+    ids = [doc.id for doc in compute_related(test_db, a_id, vector_sim_floor=0.0)]
+
+    assert b_id not in ids
+    assert c_id in ids
+
+
+def test_compute_related_opts_back_in_to_confidential_candidates(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """The same fixture with the gate opened — this is what makes the test
+    above meaningful.
+
+    Without this, ``B`` could be absent for any reason (an RRF cut, a bad
+    fixture) and the guard would still look green. Flipping ONE keyword and
+    watching ``B`` come back proves the sensitivity predicate is what removed
+    it, and that the parameter is actually wired to the SQL rather than
+    accepted and ignored.
+    """
+    a_id, b_id, _c_id = _seed_a_b_c(test_db)
+    _mark_confidential(test_db, b_id)
+
+    ids = [
+        doc.id
+        for doc in compute_related(
+            test_db, a_id, vector_sim_floor=0.0, exclude_confidential=False
+        )
+    ]
+
+    assert b_id in ids

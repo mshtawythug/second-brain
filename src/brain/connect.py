@@ -19,7 +19,21 @@ for this file asserted ``925 -> 925`` for a full day *after* the growth below
 had landed, so a reader auditing compliance was told there was nothing to
 audit. Re-derive with ``wc -l src/brain/connect.py``. What does not rot is the
 base and the trail: 925 (``f8c76c0``, branch base) -> 925 (``3b16527``, touched
-but no net change) -> 952 (``ec6afb6``).
+but no net change) -> 952 (``ec6afb6``) -> 972 (``56cc984``, the commit that
+wrote this very record -- its +20 lines ARE the ceiling record) -> **the commit
+that added this paragraph**, named descriptively and with no delta.
+
+WHY THE LAST HOP HAS NO NUMBER AND NO SHA. A record of a file's size is
+invalidated by the act of writing the record: the hash does not exist until
+after the write, and any delta stated is falsified by the same edit that states
+it. So no hop can ever name its own commit, and a trail that tries is stale on
+arrival -- which is how this record stopped one hop short twice running while
+each time believing it had just been fixed. The terminating form is the one
+here: SHA-bound historical hops, which are facts about frozen commits and cannot
+rot; a descriptive final hop for the in-flight change; and a command for the
+present. Read the trail as authoritative only THROUGH THE LAST SHA IT NAMES, and
+get everything after it from ``wc -l`` above plus
+``git log --oneline f8c76c0..HEAD -- src/brain/connect.py``.
 
 The one growth is the F6 confidential gate on :func:`iter_suggestions`, reasoned
 inline on that function. The non-obvious half, and the reason to open it: a
@@ -590,7 +604,14 @@ def refresh_suggestions(
             f"connect_min_score must be in (0.0, 1.0] (got {cfg.connect_min_score})"
         )
 
-    sources = _eligible_source_docs(conn)
+    # ``exclude_confidential=False`` DELIBERATELY. The helper is fail-closed by
+    # default because its other caller (the related-docs precompute) publishes
+    # a file per source doc. This surface does not: it SCORES suggestions, and
+    # its egress gate lives downstream at :func:`iter_suggestions`, which drops
+    # a suggestion when EITHER endpoint is confidential. Gating here too would
+    # stop confidential docs being scored at all -- a behaviour change to a
+    # surface that is already correctly gated where it actually emits.
+    sources = _eligible_source_docs(conn, exclude_confidential=False)
     if doc_prefix is not None:
         # Resolve the prefix lazily here (kept out of the import surface) so a
         # bad prefix surfaces the same IdPrefix* errors the rest of the CLI uses.

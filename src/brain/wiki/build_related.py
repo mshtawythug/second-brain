@@ -3,9 +3,23 @@
 Phase F of ``docs/plans/2026-05-06-related-docs-rebuild.md``. For each
 browseable, non-draft document with at least one embedded chunk, write
 ``<vault>/static/related/<slug>.json`` containing the top-K most-related
-documents. Quartz's stock Static emitter copies the vault ``static/`` tree
-into the build output, making the files fetchable as
-``/static/related/<slug>.json``.
+documents, fetchable from the built site as ``/static/related/<slug>.json``.
+
+**These files are PUBLISHED, and by ``Plugin.Assets()`` -- not
+``Plugin.Static()``.** This docstring said Static; that was wrong and the
+error mattered, because it is why the surface read as safe. Stock
+``static.ts`` copies ``joinSegments(QUARTZ, "static")`` -- the Quartz
+workspace's own ``quartz/static`` -- and never looks at the vault. What
+actually publishes these is ``Plugin.Assets()``, which globs every
+non-``.md`` file under the build's content directory (the vault itself), and
+``static`` is not in ``ignorePatterns``.
+
+**That route bypasses the F6 sensitivity boundary.** Confidential notes are
+kept off the published site by ``RemoveConfidential`` at Quartz's
+``shouldPublish``, which gates CONTENT vfiles; asset files never pass through
+a filter. So a confidential body excerpt written here would be published even
+though the note itself is not. This is why the rows below are read with
+``exclude_confidential=True`` rather than relying on the Quartz filter.
 
 The ranking itself — the hybrid FTS + vector RRF signal that decides *which*
 documents are related — lives in :mod:`brain.related` so it can be reused
@@ -133,7 +147,12 @@ def regenerate_related_json(
 
     grouped: dict[str, list[RelatedEntry]] = defaultdict(list)
     source_slugs: set[str] = set()
-    for row in _iter_hybrid_neighbors(conn, k=k, vector_sim_floor=vector_sim_floor):
+    # Explicit at the boundary even though the default is now fail-closed:
+    # this is the call that turns rows into published files, so the gate is
+    # stated where the egress happens rather than inherited silently.
+    for row in _iter_hybrid_neighbors(
+        conn, k=k, vector_sim_floor=vector_sim_floor, exclude_confidential=True
+    ):
         source_vault_path = row[0]
         if not isinstance(source_vault_path, str):
             continue

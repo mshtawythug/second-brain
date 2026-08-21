@@ -23,6 +23,35 @@ trail::
     4,043  3b16527
     4,055  c62e3de
     4,191  2ed2d83
+    4,356  ec6afb6
+           the commit that added these last two paragraphs -- named
+           descriptively, with no digit, for the reason below
+
+(``0473b5f`` touched this file at net zero and is correctly absent from a GROWTH
+trail. The ``ec6afb6`` hop, however, was simply MISSING until now: the prose
+below already described that commit's listing-gate work, so the two halves of
+this record disagreed -- the same one-hop-short defect ``connect.py`` and
+``timeline.py`` carried.
+
+WHY THE LAST HOP CARRIES NEITHER A DIGIT NOR A SHA. A record of a file's size is
+invalidated by the act of writing the record: the hash does not exist until
+after the write, and any delta stated is falsified by the same edit that states
+it. So no hop can name its own commit, and a trail that tries is stale on
+arrival -- which is exactly how this file's record, and two others, stopped one
+hop short while each fix believed it had closed the gap. The terminating form is
+the one used here and it is why this docstring has never carried a live count:
+SHA-bound historical hops, which are facts about frozen commits and cannot rot;
+a descriptive final hop for the in-flight change; and a command for the present.
+Read the trail as authoritative only THROUGH THE LAST SHA IT NAMES, and get
+everything after it -- uncommitted work included -- from ``wc -l`` above plus::
+
+    git log --oneline f8c76c0..HEAD -- src/brain/mcp_server.py
+
+The growth after ``ec6afb6`` is DOCUMENTATION ONLY -- no new code path, no new
+tool, no behaviour change: the F6 exemption reasoning for
+``brain_graphrag_entities`` was moved to live on the exempted tool instead of
+only inside ``brain_graphrag_communities``' docstring, where an auditor opening
+the exemption would never find it.)
 
 Five growths, each reasoned inline where it landed: (1) ``_split_source_filter``,
 so ``source="none"`` selects the same documents here as in the web UI and the
@@ -3773,6 +3802,36 @@ def brain_graphrag_entities(
     - ``sort``: ``"docs"`` (doc_count DESC, default) or ``"name"`` (name ASC).
     - ``limit``: max entities to return (default 50; 0 = all).
     - ``tenant``: tenant to list (default ``BRAIN_GRAPH_TENANT``).
+
+    **F6: deliberately EXEMPT — no ``include_confidential`` parameter, and the
+    reason lives here rather than only next to the tools that are gated.** Every
+    other document-naming MCP surface takes the flag; an auditor who opens the
+    one exemption and finds nothing has to assume it was missed.
+
+    The exemption rests on the projection, not on a judgement about entities.
+    This tool returns ``entity_type``, ``name``, ``canonical_key``,
+    ``doc_count`` and ``description`` — no document id, no document title, and
+    no text derived from a document body. ``description`` is the only field that
+    could carry derived text and it is **always NULL**: migration 012 declares
+    it ``TEXT`` with no DEFAULT, and all three ``INSERT INTO graph_entities``
+    sites (``graph_rag/concepts.py``, ``graph_rag/aliases/__init__.py``,
+    ``graph_rag/reconcile.py``) write only ``(tenant_id, entity_type, name,
+    canonical_key)``. Nothing in ``src/`` ever writes the column; every
+    reference to it is a SELECT. So there is no confidential-derived value to
+    withhold.
+
+    ``doc_count`` is a count over the whole corpus and is NOT treated as an
+    oracle here: an entity's existence and volume are corpus-level facts, not
+    document text, and this tool cannot be used to test a hypothesis about one
+    document's contents the way a search hit can.
+
+    **The exemption ends the moment ``description`` is written.** Populating it
+    from document text — the obvious way to fill it — makes this tool a body
+    egress and it must then take the flag like every other. Contrast
+    :func:`brain_graphrag_communities`, which projects only ``summary`` and
+    looks like the same shape but is NOT exempt, because its ``summary`` is
+    generated from document TITLES fed in by
+    ``communities_summary._representative_doc_titles``.
     """
     from .graph_rag.relational import list_entities
     from .graph_rag.tenancy import resolve_tenant

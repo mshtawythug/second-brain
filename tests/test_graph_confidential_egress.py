@@ -30,6 +30,7 @@ All fixture data is synthetic.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 from typing import Any
 
@@ -824,3 +825,384 @@ def test_graphrag_global_community_doc_ids_opt_back_in(
         "assertion beside this one is vacuous: "
         f"enumerated={enumerated}"
     )
+
+
+# ---------------------------------------------------------------------------
+# graph_data — the FOURTH read, and the two bugs that came with its parameter
+# ---------------------------------------------------------------------------
+#
+# ``graph_data`` grew ``exclude_confidential`` last. Gating only the document
+# fetch left two defects that share one root cause: ``keep`` (from
+# ``_bfs_frontier``) and ``all_edges`` are BOTH derived from the ungated edge
+# set, so the gate on ``all_docs`` never reaches them.
+#
+#   A. rooted + excluded -> ``KeyError``. ``sorted()`` evaluates its key over
+#      EVERY element before the comprehension's trailing ``if`` runs, so
+#      ``all_docs[d]`` raises on the first withheld id in the frontier. The
+#      ``if`` guard pre-dated the parameter and was never reachable while
+#      ``all_docs`` was every document.
+#   B. ``include_ingested=True`` + excluded -> no edge filtering AT ALL. That
+#      branch sets ``node_filter = None`` and does ``kept_edges =
+#      list(all_edges)``. A withheld document still ships its edges, carrying
+#      its UUID and — for wiki edges — its title verbatim in ``link_text``.
+#
+# The two are not independent findings to fix separately: a repair that only
+# stops the crash (a ``try/except`` around the sort, or keeping the trailing
+# ``if`` and moving on) leaves B standing, because the rooted branch filters
+# ``kept_edges`` on ``keep`` rather than on ``all_docs``.
+#
+# C. Every one of the 19 ``graph_data(`` call sites in the tree — 18 in
+#    ``tests/test_graph_queries.py``, one in ``cli.py`` — omits the parameter,
+#    which is why the suite stayed green through both. So the withholding
+#    assertions below are paired with POSITIVE CONTROLS on the same call with
+#    the flag flipped: absence proves nothing unless presence is proven at the
+#    same layer.
+
+#: Title of the confidential note in the link fixture. Wiki edges store the
+#: link target text verbatim in ``links.link_text``, so this exact string is
+#: what a leaked edge carries — a membership oracle plus the title.
+LINK_CONF_TITLE = "Confidential Wind-Down Memo"
+
+
+def _insert_linkable(
+    conn: psycopg.Connection[Any],
+    title: str,
+    *,
+    kind: str = "vault",
+    sensitivity: str = "normal",
+) -> str:
+    row = conn.execute(
+        "INSERT INTO documents "
+        "(title, content, content_hash, content_type, kind, vault_path, sensitivity) "
+        "VALUES (%s, %s, %s, 'note', %s, %s, %s) RETURNING id::text",
+        (
+            title,
+            f"body of {title}",
+            f"linkhash-{title}",
+            kind,
+            f"{title}.md" if kind == "vault" else None,
+            sensitivity,
+        ),
+    ).fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def _wiki_edge(
+    conn: psycopg.Connection[Any], src: str, dst: str, link_text: str
+) -> None:
+    conn.execute(
+        "INSERT INTO links (src_document_id, dst_document_id, link_text, link_kind) "
+        "VALUES (%s, %s, %s, 'wiki')",
+        (src, dst, link_text),
+    )
+
+
+@pytest.fixture
+def link_graph(test_db: psycopg.Connection[Any]) -> dict[str, str]:
+    """A link graph whose ONLY route to part of itself runs through a secret.
+
+    ``hub -> conf -> beyond`` plus ``hub -> leaf``, and a derived edge pairing
+    ``conf`` with ``leaf`` so the derived leg is exercised too, not just wiki.
+
+    Two properties are deliberate. ``hub`` also reaches ``leaf`` directly, so an
+    empty-ish result cannot be mistaken for "the traversal found nothing".
+    ``beyond`` is INGESTED-tier and hangs off ``conf`` alone, which makes it the
+    probe for traversal-through-a-withheld-node: if the frontier is computed
+    over ungated edges, ``beyond`` arrives in the node set with no edge to
+    explain it — an isolated node in a rooted view is itself a disclosure that
+    something withheld connects it to the root.
+    """
+    ids = {
+        "hub": _insert_linkable(test_db, "Public Hub Note"),
+        "conf": _insert_linkable(
+            test_db, LINK_CONF_TITLE, sensitivity="confidential"
+        ),
+        "leaf": _insert_linkable(test_db, "Public Leaf Note"),
+        "beyond": _insert_linkable(test_db, "Beyond The Memo", kind="ingested"),
+    }
+    _wiki_edge(test_db, ids["hub"], ids["conf"], LINK_CONF_TITLE)
+    _wiki_edge(test_db, ids["hub"], ids["leaf"], "Public Leaf Note")
+    _wiki_edge(test_db, ids["conf"], ids["beyond"], "Beyond The Memo")
+    src, dst = sorted((ids["conf"], ids["leaf"]))
+    test_db.execute(
+        "INSERT INTO derived_links (src_document_id, dst_document_id, rule, weight) "
+        "VALUES (%s, %s, 'shared_participant', 0.5)",
+        (src, dst),
+    )
+    return ids
+
+
+def _snapshot_blob(snapshot: object) -> str:
+    """Serialize a whole ``GraphData`` for substring assertions.
+
+    ``asdict`` rather than field-picking for the same reason :func:`_blob`
+    serializes whole MCP responses: a field-by-field assertion only covers the
+    leaks someone already imagined, and the leak here lives in ``link_text`` —
+    a field nobody auditing "the node set is gated" would think to check.
+    """
+    return _blob(dataclasses.asdict(snapshot))  # type: ignore[call-overload]
+
+
+def _link_fixture_is_not_vacuous(
+    conn: psycopg.Connection[Any], ids: dict[str, str]
+) -> None:
+    """Guard: the fixture really is confidential and really is wired up.
+
+    A withholding assertion over a snapshot that was never going to contain the
+    document passes for the wrong reason and reads as coverage.
+    """
+    row = conn.execute(
+        "SELECT sensitivity, title FROM documents WHERE id = %s", (ids["conf"],)
+    ).fetchone()
+    assert row is not None
+    assert row[0] == "confidential", "fixture must be confidential"
+    assert row[1] == LINK_CONF_TITLE, "fixture must carry the marked title"
+    edges = conn.execute(
+        "SELECT count(*) FROM links WHERE src_document_id = %s OR dst_document_id = %s",
+        (ids["conf"], ids["conf"]),
+    ).fetchone()
+    assert edges is not None and edges[0] == 2, (
+        "the confidential note must sit on BOTH an inbound and an outbound wiki "
+        f"edge, or the edge assertions are vacuous: got {edges}"
+    )
+
+
+def test_the_link_graph_fixture_is_not_vacuous(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """The premise, asserted on its own, outside every other test's body."""
+    _link_fixture_is_not_vacuous(test_db, link_graph)
+
+
+# --- path 1 of 3: rooted -----------------------------------------------------
+
+
+def test_graph_data_rooted_excludes_confidential_without_crashing(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """Rooted + excluded raised ``KeyError`` before it could withhold anything.
+
+    Reaching the assertions at all is half of what this pins: the call itself
+    was the failure. The other half is that it withholds — a repair that only
+    stops the raising would satisfy the first half and leave the second open.
+    """
+    from brain.vault.graph import graph_data
+
+    _link_fixture_is_not_vacuous(test_db, link_graph)
+
+    snapshot = graph_data(
+        test_db, root=link_graph["hub"], depth=None, exclude_confidential=True
+    )
+
+    blob = _snapshot_blob(snapshot)
+    assert "Public Leaf Note" in blob, "must not break the normal traversal"
+    assert LINK_CONF_TITLE not in blob
+    assert link_graph["conf"] not in blob
+
+
+def test_graph_data_rooted_does_not_traverse_through_a_withheld_node(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """``beyond`` is reachable ONLY via ``conf``, so it must not arrive either.
+
+    Distinct from the test above, and not redundant with it: filtering the
+    frontier against ``all_docs`` after the BFS stops ``conf`` from appearing
+    while still letting ``beyond`` ride in on a path that runs through it,
+    landing in the snapshot as an edgeless node. That artifact is the oracle —
+    it says "something you cannot see joins the root to this" without naming it.
+    """
+    from brain.vault.graph import graph_data
+
+    _link_fixture_is_not_vacuous(test_db, link_graph)
+
+    snapshot = graph_data(
+        test_db, root=link_graph["hub"], depth=None, exclude_confidential=True
+    )
+
+    assert link_graph["beyond"] not in _snapshot_blob(snapshot)
+
+
+def test_graph_data_rooted_includes_confidential_by_default(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """POSITIVE CONTROL for the two rooted tests above.
+
+    Same function, same root, flag flipped, assertion flipped. Without this the
+    withholding pair passes on any snapshot that happens not to reach the
+    document — including an empty one — and ``vault.graph``'s include-by-default
+    convention goes unpinned on the one function that was added to it last.
+    """
+    from brain.vault.graph import graph_data
+
+    snapshot = graph_data(test_db, root=link_graph["hub"], depth=None)
+
+    blob = _snapshot_blob(snapshot)
+    assert LINK_CONF_TITLE in blob, (
+        "the default traversal never reached the confidential note, so the "
+        "withholding assertions beside this one prove nothing"
+    )
+    assert link_graph["conf"] in blob
+    assert link_graph["beyond"] in blob
+
+
+# --- path 2 of 3: include_ingested=True (node_filter is None) ----------------
+
+
+def test_graph_data_include_ingested_excludes_confidential_edges(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """The branch that filtered NO edges at all.
+
+    ``include_ingested=True`` sets ``node_filter = None`` and takes
+    ``kept_edges = list(all_edges)`` — the ungated fetch. The node set was
+    correctly gated, which is precisely what made this hard to see: the
+    document is absent from ``nodes`` and present, twice, in ``edges``.
+    """
+    from brain.vault.graph import graph_data
+
+    _link_fixture_is_not_vacuous(test_db, link_graph)
+
+    snapshot = graph_data(
+        test_db, include_ingested=True, exclude_confidential=True
+    )
+
+    blob = _snapshot_blob(snapshot)
+    assert "Public Leaf Note" in blob, "must not break the normal listing"
+    assert LINK_CONF_TITLE not in blob, "wiki link_text carries the title verbatim"
+    assert link_graph["conf"] not in blob, "edge endpoints carry the UUID"
+
+
+def test_graph_data_include_ingested_honours_the_class_edge_invariant(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """``GraphData`` documents this invariant; this branch violated it.
+
+    The class docstring says "an edge always has both endpoints in ``nodes`` (we
+    never emit an edge that points at a node not in the snapshot)". Asserting it
+    structurally, rather than by substring, catches the same defect through the
+    contract the type already claims — so a future leak of some other withheld
+    field still fails here even if it carries no marker string.
+    """
+    from brain.vault.graph import graph_data
+
+    snapshot = graph_data(
+        test_db, include_ingested=True, exclude_confidential=True
+    )
+
+    node_ids = {n.document_id for n in snapshot.nodes}
+    dangling = [
+        (e.src_document_id, e.dst_document_id)
+        for e in snapshot.edges
+        if e.src_document_id not in node_ids or e.dst_document_id not in node_ids
+    ]
+    assert not dangling, f"edges point at nodes absent from the snapshot: {dangling}"
+
+
+def test_graph_data_include_ingested_includes_confidential_by_default(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """POSITIVE CONTROL for the ``include_ingested`` pair above."""
+    from brain.vault.graph import graph_data
+
+    snapshot = graph_data(test_db, include_ingested=True)
+
+    blob = _snapshot_blob(snapshot)
+    assert LINK_CONF_TITLE in blob, (
+        "the default snapshot never carried the confidential note, so the "
+        "withholding assertions beside this one prove nothing"
+    )
+    assert link_graph["conf"] in blob
+
+
+# --- path 3 of 3: the default whole-graph path (node_filter is a set) --------
+
+
+def test_graph_data_default_path_excludes_confidential(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """Stated plainly: this path was ALREADY correct, and is pinned anyway.
+
+    ``node_filter`` is derived from ``all_docs``, which is gated, and
+    ``kept_edges`` is filtered on ``node_filter`` — so the default path withheld
+    correctly before any fix. It is covered because it was equally uncovered:
+    not one of the 19 call sites passed the parameter, so "correct" here was
+    unverified rather than known, and the fix below moves the edge gate upstream
+    of this branch. Without a pin, a later simplification that folds these three
+    branches together could reopen it silently.
+    """
+    from brain.vault.graph import graph_data
+
+    _link_fixture_is_not_vacuous(test_db, link_graph)
+
+    snapshot = graph_data(test_db, exclude_confidential=True)
+
+    blob = _snapshot_blob(snapshot)
+    assert "Public Leaf Note" in blob, "must not break the normal listing"
+    assert LINK_CONF_TITLE not in blob
+    assert link_graph["conf"] not in blob
+
+
+def test_graph_data_default_path_drops_an_ingested_doc_orphaned_by_the_gate(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """``beyond`` is ingested and connected ONLY to ``conf``.
+
+    With ``conf`` withheld it has no visible edge, which makes it an
+    ingested-tier orphan — the category this path drops as noise by spec. Before
+    the edge gate moved upstream, ``_connected_node_set`` was computed over the
+    ungated edge set, so ``beyond`` counted as connected and shipped as an
+    edgeless node: the same unexplained-node oracle as the rooted path, reached
+    by a different route.
+    """
+    from brain.vault.graph import graph_data
+
+    snapshot = graph_data(test_db, exclude_confidential=True)
+
+    assert link_graph["beyond"] not in _snapshot_blob(snapshot)
+
+
+def test_graph_data_default_path_includes_confidential_by_default(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """POSITIVE CONTROL for the default-path pair above."""
+    from brain.vault.graph import graph_data
+
+    snapshot = graph_data(test_db)
+
+    blob = _snapshot_blob(snapshot)
+    assert LINK_CONF_TITLE in blob, (
+        "the default snapshot never carried the confidential note, so the "
+        "withholding assertions beside this one prove nothing"
+    )
+    assert link_graph["conf"] in blob
+    assert link_graph["beyond"] in blob, (
+        "``beyond`` must be present by default, or the orphan-drop assertion "
+        "beside this one passes because it was never included at all"
+    )
+
+
+def test_graph_data_rooted_at_a_confidential_document_returns_nothing(
+    test_db: psycopg.Connection[Any], link_graph: dict[str, str]
+) -> None:
+    """Rooting AT the withheld document — the case the edge gate alone misses.
+
+    Gating the edge set upstream stops the frontier from REACHING a confidential
+    node, which is most of the fix; it cannot help when the caller hands one in
+    as ``root``. ``_bfs_frontier`` seeds ``visited`` with ``root``
+    unconditionally, so the withheld id is in the frontier no matter what the
+    edges say, and the intersection against ``all_docs`` is what keeps it out of
+    the result. Without that intersection this is a ``KeyError`` again — the
+    same crash as the rooted bug, reached by the one route the upstream gate
+    does not cover.
+    """
+    from brain.vault.graph import graph_data
+
+    _link_fixture_is_not_vacuous(test_db, link_graph)
+
+    snapshot = graph_data(
+        test_db, root=link_graph["conf"], depth=None, exclude_confidential=True
+    )
+
+    assert snapshot.nodes == []
+    assert snapshot.edges == []

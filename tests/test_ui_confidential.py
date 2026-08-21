@@ -20,7 +20,16 @@ Path                                 Covered by
                                      ``test_headings_are_produced_at_all_for_this_body``,
                                      which asserts the premise so the guard
                                      test cannot pass vacuously
-``GET /api/search`` → ``snippet``    ``test_search_snippet_is_redacted``
+``GET /api/search`` → ``snippet``    ``test_confidential_document_is_excluded_from_search``
+                                     — the row is dropped from the match set,
+                                     so there is no snippet to redact.
+                                     ``test_snippet_redaction_survives_as_defence_in_depth``
+                                     proves the second layer separately, by
+                                     calling ``_redact`` on a search that
+                                     deliberately skips the exclusion.
+                                     ``test_facet_counts_do_not_reveal_excluded_documents``
+                                     closes the same oracle through the facet
+                                     counts
 ``PUT /api/notes``                   ``test_withheld_note_cannot_be_edited``
 titles / tree / metadata             ``test_title_and_tier_stay_visible`` —
                                      deliberately NOT withheld

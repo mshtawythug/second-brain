@@ -75,9 +75,10 @@ IMPORTANT:
 ### File-size ceiling — 800 lines
 
 The global rules set an **800-line ceiling** per file (200–400 typical). It binds
-**new modules and new growth**, not a retroactive split mandate: this repo has
-**16 files in `src/` already over it**, and splitting a 9,000-line CLI to satisfy
-a number is how you turn a working module into six broken ones.
+**new modules and new growth**, not a retroactive split mandate: this repo keeps
+**a standing list of files already over it** (the table below — re-derive the
+list, never count it from memory), and splitting a 9,000-line CLI to satisfy a
+number is how you turn a working module into six broken ones.
 
 The rule as it actually applies here:
 
@@ -97,12 +98,39 @@ The rule as it actually applies here:
   "It was already over" is not a reason.
 
 **Files over the ceiling** (`find src -name '*.py' | xargs wc -l | sort -rn` —
-re-derive, never inherit; every row below re-derived on
-`feat/wiki-to-ui-consolidation` at **2026-08-21**, base `f8c76c0`, head
-`4740f03`. The clock time on the previous pass was not decoration and neither is
-this one: a second agent was editing `src/brain/ui/` in this worktree
-throughout, so a date alone would not tell you whether a number predates the
-change you are reading.
+re-derive, never inherit.)
+
+**No row below carries a head count any more.** Each row's **Lines** cell holds
+the command that measures the file; each **Why** cell opens with a **Trail** of
+SHA-bound counts, which are frozen —
+`git show 3b16527:src/brain/cli.py | wc -l` returns the same digit forever.
+Every trail starts at `f8c76c0`, this branch's base. A trail is authoritative
+only *through the last SHA it names*; enumerate anything after it with
+`git log --oneline f8c76c0..HEAD -- <path>`, and take the present count from the
+Lines cell.
+
+The head counts are **deleted rather than refreshed**, and that is the whole
+fix: **a live digit is invalidated by the write that states it** — and so is a
+delta. Five successive repairs of this table each corrected a stale number and
+shipped a fresh one; the most recent was titled *"stop asserting no-growth for
+two files that grew"* and grew both files by writing their own pointers. The
+rule that terminates the regress is not a better number, and not a timestamp
+proving when a number was true: it is **no digit in any position that a write
+can invalidate.** Earlier passes recorded dates and clock times precisely
+because a live digit needs an as-of; a frozen digit needs none, which is how you
+can tell the form is right.
+
+**There is deliberately no "head" SHA here any more, and there cannot be one.**
+The slot used to read `head 4740f03`; before that, other values. It was wrong
+every time, and not through carelessness — a header cannot name the commit that
+writes it, because that commit has no hash until after the write. Every value
+ever typed there was the author's *starting* commit, i.e. stale on arrival. So
+the slot has been replaced with a claim that stays true: `b71c923` is not
+asserted to be head, only to be the commit the trails below were enumerated at
+— which is why three rows can say "no commit **through `b71c923`** touched it"
+without that going stale. It is a fact about a frozen commit and cannot rot. For
+the present head, run `git rev-parse --short HEAD`; to see what moved since,
+`git diff --stat b71c923..HEAD -- src`.
 
 **Two rows of this table were false when you last read them, and they were false
 in the specific way that hides itself.** `connect.py` and `timeline.py` both
@@ -116,35 +144,43 @@ requirement (2) always owed and that neither had. Requirement (1) — inline
 reasoning at the growth site — was satisfied for both all along; it was only
 ever the discoverable half that was missing.
 
-**Read the "head" column as: code growth PLUS the ceiling record that justifies
-it.** Writing the required docstring record into a file makes that file longer,
-which is a small, honest irony rather than a measurement error: of `search.py`'s
-+30, sixteen lines are the `recency_ts` work and fourteen are the record saying
-why. Where the split matters, `git diff f8c76c0..HEAD -- <path>` shows the code
-delta alone.)
+**Read every trail as: code growth PLUS the ceiling record that justifies it.**
+Writing the required docstring record into a file makes that file longer, which
+is a small, honest irony rather than a measurement error: of the +30 `search.py`
+gained between `f8c76c0` and `0473b5f`, sixteen lines are the `recency_ts` work
+and fourteen are the record saying why. That delta is safe to state only because
+**both** of its endpoints are commits — it is a fact about two frozen trees, not
+a claim about the working one. Where the split matters,
+`git diff f8c76c0..<sha> -- <path>` shows the code delta alone.
 
-| File | Base → head | Why it is not being split |
+| File | Lines | Why it is not being split |
 |---|---|---|
-| `cli.py` | 9,019 → 9,035 (+16) | One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and deferred deliberately. **No longer unchanged:** `_VALID_SOURCE_KINDS` became a re-export of `brain.source_kinds` so the ingest *write* boundaries could enforce it — `cli` imports `cli_ingest`, so the set could not have stayed here. Net *less* duplication. **Recorded** inline + in the docstring. |
+| `cli.py` | **re-derive: `wc -l src/brain/cli.py`** | Trail: 9,019 (`f8c76c0`) → 9,019 (`3b16527`, touched, no net change) → 9,035 (`c62e3de`). One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and deferred deliberately. **No longer unchanged:** `_VALID_SOURCE_KINDS` became a re-export of `brain.source_kinds` so the ingest *write* boundaries could enforce it — `cli` imports `cli_ingest`, so the set could not have stayed here. Net *less* duplication. **Recorded** inline + in the docstring. |
 | `mcp_server.py` | **re-derive: `wc -l src/brain/mcp_server.py`** | Same shape — one MCP tool registry. **This cell deliberately holds no digit, because the digit has now been wrong three times.** It read `→ 4,137 (+128)` (a value the file never held, wrong *when written* in `0473b5f`); it was corrected to `4,191` on 2026-08-21; and `4,191` was stale within the hour, because the F6 listing-gate work landed in the same file that same afternoon. A live count in a checked-in table is a measurement of a tree that stops existing at the next commit, and this is the one row in this table whose subject is also actively edited by whoever reads it. What does not rot is the base and the per-commit trail: 4,009 (`f8c76c0`, branch base) → 4,043 (`3b16527`) → 4,055 (`c62e3de`) → 4,191 (`2ed2d83`) → 4,356 (`ec6afb6`). (The trail stopped at `2ed2d83` until 2026-08-21: the prose already described the `ec6afb6` listing-gate work, but the *numeric* trail — the half this cell calls rot-proof — was missing its last hop, so the two halves of the same row disagreed. `0473b5f` touched the file at net zero and is correctly absent from a **growth** trail.) Five growths, each reasoned inline where it landed and summarized in the module docstring: `_split_source_filter` (so `source="none"` means the same thing here as in the UI); `source` validation at the `brain_ingest_stdin` write boundary; the F6 confidential lens on `brain_list`; the same lens on `brain_backlinks`/`brain_links`, whose polarity **inverts** across the `vault.graph` boundary; and the same lens on the four UNPROMPTED listing tools — `brain_brief`, `brain_review_weekly`, `brain_timeline`, `brain_connect_list` — which took no document id and no query at all, so every document they named was one the caller had not asked for. Two of those (`brain_brief`, `brain_review_weekly`) were BODY egress, not title egress: `todo.iter_action_item_docs` selects `documents.content` and parses action-item text out of it. The docstring also carries the decorator hazard that cost `brain_recall` its registration. **The disclosure the rule requires is *what grew and why*, which is above; the measurement belongs in the command, which is in the Lines cell.** |
-| `ingest/__init__.py` | 2,298 → 2,366 (+68) | Dispatcher + both pipelines; the extractors are already separate modules. Growth is the extraction of `mirror_is_stale` / `write_vault_mirror` so a caller owning the outer transaction can defer the mirror write past its own commit. Near-zero net-new logic. **Now recorded.** |
-| `config.py` | 2,250 → 2,303 (+53) | Knobs belong beside the other knobs. Growth is one knob (`BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`) plus its tri-state parse and the ruling for why it is not `serve_confidential_bodies`. **Now recorded** — and the docstring names the real next move: the *prose* is what makes this file large, so split the rationale out, not the knobs. |
-| `vault/sync.py` | 1,747 → 1,817 (+70) | One reconciliation algorithm; the walk and the per-file upsert only make sense together. Growth is `_source_from_frontmatter` validating a file's `source:` against `brain.source_kinds` — the **third and last** unvalidated write boundary into `sources.kind` (`cli_ingest` and `mcp_server` closed the other two, and 2-of-3 was a worse resting state than 0-of-3). Most of the +70 is the ruling on the FAILURE MODE — dropped and warned, never rejected and never substituted — which is the non-obvious part and the reason a reviewer opens this function at all. **Recorded** inline + in the docstring. |
-| `queries.py` | 1,642 → 1,642 | Flat read-helper collection — cohesive, low coupling; splitting buys nothing. |
-| `setup.py` | 1,356 → 1,356 | One linear install script with three profile branches. |
-| `wiki/build_watcher.py` | 1,073 → 1,073 | |
-| `vault/watch.py` | 1,070 → 1,070 | |
-| `people.py` | 934 → 934 | **Not growth.** `wiki/build_people.py` renamed to `brain/people.py`; the only content change is rewriting `brain.wiki._person_name` imports/references to `brain.person_name`. Verified by diff — same line count, no new logic. |
-| `connect.py` | **re-derive: `wc -l src/brain/connect.py`** | One scoring algorithm plus the `## See Also` writeback primitives its two callers (CLI, MCP) share. **This row read `925 → 925` while the file was 952** — asserting no-growth for a day after `ec6afb6` landed, which is worse than a stale digit because it tells a compliance reader to skip the file. No digit here now; base and trail: 925 (`f8c76c0`, branch base) → 925 (`3b16527`, touched, no net change) → 952 (`ec6afb6`). The growth is the F6 confidential gate on `iter_suggestions`, which gates **both** joins — a suggestion names two documents, so a source-only filter would still publish every confidential doc that was somebody's suggested *target*. **Now recorded** inline + in the docstring. |
-| `graph_rag/extract.py` | 885 → 885 | |
-| `search.py` | 837 → 867 (+30) | Already over at base. Growth is `SearchResult.recency_ts` (its read hoisted out of the boost branch so a hit's shown date and its ranking date cannot disagree) plus `source_missing` threading. **Ranking unchanged — no eval re-baseline implied.** The inline comments were always there; the missing half was the docstring pointer, **now written**. |
-| `timeline.py` | **re-derive: `wc -l src/brain/timeline.py`** | One temporal-bucketing algorithm; the three query helpers exist only to share its WHERE-clause composition. **This row read `844 → 844` while the file was 877** — the same self-hiding no-growth assertion as `connect.py`, from the same commit. No digit here now; base and trail: 844 (`f8c76c0`, branch base) → 877 (`ec6afb6`). The growth is the F6 confidential gate threaded through `_compose_doc_filter` out to `build_timeline`, applied in the **predicate, not the projection**, so one clause drops the document from `doc_ids`, `doc_titles`, the co-topic tally, the count arithmetic, the auto-granularity probe and the synthesis bundle at once — none separately gated. Withholding only `doc_titles` would still publish the ids. **Now recorded** inline + in the docstring. |
-| `cli_ingest.py` | 844 → 867 (+23) | Over the ceiling the day it was extracted from `cli.py`. Growth is `--source` validation at the top of `ingest_stdin`: `sources.kind` is bare `TEXT NOT NULL` with no CHECK, so this guard is all that stood between a typo and a permanently mis-bucketed row. **Recorded.** |
-| `enrichment.py` | 808 → 808 | |
+| `ingest/__init__.py` | **re-derive: `wc -l src/brain/ingest/__init__.py`** | Trail: 2,298 (`f8c76c0`) → 2,352 (`3b16527`) → 2,366 (`0473b5f`). Dispatcher + both pipelines; the extractors are already separate modules. Growth is the extraction of `mirror_is_stale` / `write_vault_mirror` so a caller owning the outer transaction can defer the mirror write past its own commit. Near-zero net-new logic. **Now recorded.** |
+| `config.py` | **re-derive: `wc -l src/brain/config.py`** | Trail: 2,250 (`f8c76c0`) → 2,289 (`3b16527`) → 2,303 (`0473b5f`). Knobs belong beside the other knobs. Growth is one knob (`BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`) plus its tri-state parse and the ruling for why it is not `serve_confidential_bodies`. **Now recorded** — and the docstring names the real next move: the *prose* is what makes this file large, so split the rationale out, not the knobs. |
+| `vault/sync.py` | **re-derive: `wc -l src/brain/vault/sync.py`** | Trail: 1,747 (`f8c76c0`) → 1,817 (`c62e3de`). One reconciliation algorithm; the walk and the per-file upsert only make sense together. Growth is `_source_from_frontmatter` validating a file's `source:` against `brain.source_kinds` — the **third and last** unvalidated write boundary into `sources.kind` (`cli_ingest` and `mcp_server` closed the other two, and 2-of-3 was a worse resting state than 0-of-3). Most of the +70 is the ruling on the FAILURE MODE — dropped and warned, never rejected and never substituted — which is the non-obvious part and the reason a reviewer opens this function at all. **Recorded** inline + in the docstring. |
+| `queries.py` | **re-derive: `wc -l src/brain/queries.py`** | Trail: 1,642 (`f8c76c0`) → 1,642 (`3b16527`, touched, no net change). Flat read-helper collection — cohesive, low coupling; splitting buys nothing. |
+| `setup.py` | **re-derive: `wc -l src/brain/setup.py`** | Trail: 1,356 (`f8c76c0`); no commit through `b71c923` touched it. One linear install script with three profile branches. |
+| `wiki/build_watcher.py` | **re-derive: `wc -l src/brain/wiki/build_watcher.py`** | Trail: 1,073 (`f8c76c0`); no commit through `b71c923` touched it. |
+| `vault/watch.py` | **re-derive: `wc -l src/brain/vault/watch.py`** | Trail: 1,070 (`f8c76c0`); no commit through `b71c923` touched it. |
+| `people.py` | **re-derive: `wc -l src/brain/people.py`** | Trail: did not exist at `f8c76c0` → 934 (`3b16527`). **Not growth.** `wiki/build_people.py` renamed to `brain/people.py`; the only content change is rewriting `brain.wiki._person_name` imports/references to `brain.person_name`. Verified by diff — same line count, no new logic. |
+| `connect.py` | **re-derive: `wc -l src/brain/connect.py`** | One scoring algorithm plus the `## See Also` writeback primitives its two callers (CLI, MCP) share. **This row read `925 → 925` while the file was 952** — asserting no-growth for a day after `ec6afb6` landed, which is worse than a stale digit because it tells a compliance reader to skip the file. No digit here now; base and trail: 925 (`f8c76c0`, branch base) → 925 (`3b16527`, touched, no net change) → 952 (`ec6afb6`) → 972 (`56cc984` — the commit that wrote this very row, whose +20 lines *are* the ceiling record) → **the commit that added this clause** — named descriptively and carrying *no delta*, because a hop cannot know its own SHA and a delta would be invalidated by the same write that states it. **A record of a file's size is invalidated by the act of writing the record**, so no hop can name its own commit: the hash does not exist until after the write. That, not carelessness, is why this trail and `timeline.py`'s each stopped one hop short twice running — and why the fix is not a better digit but a *terminating form*: SHA-bound historical hops (frozen, cannot rot), a descriptive last hop for the in-flight change, and `wc -l` for the present. Read it as authoritative only **through the last SHA it names**; enumerate the rest with `git log --oneline f8c76c0..HEAD -- src/brain/connect.py`. The growth is the F6 confidential gate on `iter_suggestions`, which gates **both** joins — a suggestion names two documents, so a source-only filter would still publish every confidential doc that was somebody's suggested *target*. **Now recorded** inline + in the docstring. |
+| `graph_rag/extract.py` | **re-derive: `wc -l src/brain/graph_rag/extract.py`** | Trail: 885 (`f8c76c0`) → 885 (`3b16527`, touched, no net change). |
+| `search.py` | **re-derive: `wc -l src/brain/search.py`** | Trail: 837 (`f8c76c0`) → 853 (`3b16527`) → 867 (`0473b5f`). Already over at base. Growth is `SearchResult.recency_ts` (its read hoisted out of the boost branch so a hit's shown date and its ranking date cannot disagree) plus `source_missing` threading. **Ranking unchanged — no eval re-baseline implied.** The inline comments were always there; the missing half was the docstring pointer, **now written**. |
+| `timeline.py` | **re-derive: `wc -l src/brain/timeline.py`** | One temporal-bucketing algorithm; the three query helpers exist only to share its WHERE-clause composition. **This row read `844 → 844` while the file was 877** — the same self-hiding no-growth assertion as `connect.py`, from the same commit. No digit here now; base and trail: 844 (`f8c76c0`, branch base) → 877 (`ec6afb6`) → 900 (`56cc984` — the commit that wrote this very row, whose +23 lines *are* the ceiling record) → **the commit that added this clause**, named descriptively and with no delta, for the reason the `connect.py` row gives. See the `connect.py` row for the general form; use `git log --oneline f8c76c0..HEAD -- src/brain/timeline.py` for anything after the last SHA named. The growth is the F6 confidential gate threaded through `_compose_doc_filter` out to `build_timeline`, applied in the **predicate, not the projection**, so one clause drops the document from `doc_ids`, `doc_titles`, the co-topic tally, the count arithmetic, the auto-granularity probe and the synthesis bundle at once — none separately gated. Withholding only `doc_titles` would still publish the ids. **Now recorded** inline + in the docstring. |
+| `cli_ingest.py` | **re-derive: `wc -l src/brain/cli_ingest.py`** | Trail: 844 (`f8c76c0`) → 867 (`c62e3de`). Over the ceiling the day it was extracted from `cli.py`. Growth is `--source` validation at the top of `ingest_stdin`: `sources.kind` is bare `TEXT NOT NULL` with no CHECK, so this guard is all that stood between a typo and a permanently mis-bucketed row. **Recorded.** |
+| `related.py` | **re-derive: `wc -l src/brain/related.py`** | Trail: 714 (`3b16527`, where the wiki/ui split created this module) → 720 (`0473b5f`) → 726 (`7b5579e`) → **the commit that added this row**, descriptive and with no delta. **This file CROSSED the ceiling rather than staying under it, and that is a rule violation, not a deferral.** The rule above says an existing file under 800 must “extract rather than grow past”; the F6 confidential gate on `compute_related` / `_eligible_source_docs` grew it past instead. It is here, over, on purpose: the alternative was to ship the security fix with a docstring claiming the file was still under — which is what the first draft did. The extraction is not folded into the same commit because a 250-line module move inside a body-egress fix makes both harder to review; the seam (the lexeme/tsquery tail, already covered by `tests/test_build_related_signal.py`) is named in the module docstring. **Recorded** inline at the gate + in the docstring. |
+| `enrichment.py` | **re-derive: `wc -l src/brain/enrichment.py`** | Trail: 808 (`f8c76c0`); no commit through `b71c923` touched it. |
 
 `backup/restore.py` is deliberately **absent**: it crossed the ceiling on this
-branch (745 → 806) and was brought back under by the `db_names.py` extraction
-(now 755). `wiki/build_related.py` is a different case and **is not gone**: it was
+branch and was brought back under by the `db_names.py` extraction. Trail:
+745 (`f8c76c0`) → 806 (`f056c08`) → 755 (`0473b5f`); present count via
+`wc -l src/brain/backup/restore.py`. Its absence is conditional on it being
+**under** the ceiling, which is a live condition and not a settled one — if a
+later commit pushes it back over, it needs a row.
+
+`wiki/build_related.py` is a different case and **is not gone**: it was
 **split, not renamed**. The scoring half moved to `brain/related.py`; the file
 itself survives as the thin emitter §9.2d(2) requires, because
 `wiki/build_swap.py` and `wiki/build_watcher.py` still call `refresh_related`.
@@ -201,6 +237,34 @@ rule — *how much a file grew* is a number, *what grew in it* is a review.
 
 There is **no automated gate** on this — the ceiling is a review checkpoint, not
 CI. If you add a file to this table, add the row in the same edit.
+
+**The residue — this table can be rot-proof in every digit and still be wrong by
+omission.** Deleting the live head counts closes one failure mode: a row stating
+a size the next commit falsifies. It does not touch the other, which is larger.
+**Nothing detects a file that newly crosses 800 and never gets a row.** A stale
+digit at least has a cell you can check; a missing row has nothing to check, so
+it cannot be caught by reading this table more carefully — the *row set itself*
+is a live claim, and the only thing re-deriving it is a human remembering to.
+
+**It is not hypothetical, and it is no longer even a prediction: it happened in
+the same change set that wrote this paragraph.** This text used to say
+`src/brain/related.py` "currently sits a handful of lines under the ceiling", so
+the next feature to touch it would open the gap. In fact the feature had already
+landed — the F6 confidential gate had taken that file from 726 to 828 — so the
+sentence predicting the gap was itself written across it, and the file's own
+docstring claimed "under 800" at the same time. Three separate documents
+asserted a state the tree contradicted, and every digit in this table was
+rot-proof throughout. That is the by-omission failure, demonstrated rather than
+described: **rot-proofing the digits does not detect a missing row.** `related.py`
+now has one.
+
+Closing it is a **build change, not a docs change**: a CI step that runs
+`find src -name '*.py' -exec wc -l {} + | sort -rn`, diffs the over-800 set
+against the rows here, and fails when a file is in one and not the other. That
+check is deliberately **not implemented** — it needs its own review, its own
+tests, and a decision about where the row set gets parsed from, none of which
+belong in a docs pass. Until it exists this paragraph is the gate: when you
+audit this section, **re-derive the row set, not just the digits.**
 
 > **Merge note.** `feat/agentic-token-reduction` carries its own version of this
 > section, with the same heading and at the same position, holding *that*

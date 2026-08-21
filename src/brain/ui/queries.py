@@ -391,7 +391,17 @@ _TAG_COUNTS_SQL_ANY = """
     ORDER BY t
 """
 
-#: The strict variant, and the one ``/api/facets`` issues by default.
+#: The strict variant. ``/api/facets`` issues it on every request -- but NOT by
+#: default: :func:`tag_counts` defaults ``exclude_confidential=False`` and so
+#: selects the ``_ANY`` variant above unless a caller says otherwise.
+#: ``routes_meta.facets`` reaches this SQL only because it passes
+#: ``exclude_confidential=strict`` explicitly, and ``strict`` is itself
+#: ``not ctx.serve_confidential_titles`` -- so on a loopback bind this route
+#: issues the permissive variant instead. Saying "by default" here named the
+#: wrong mechanism twice over and made the permissive default look like a
+#: protection; the default is argued at length on :func:`tag_counts`, and
+#: ``tests/test_ui_queries_confidential_defaults.py`` pins both it and the
+#: explicit call site.
 #:
 #: CORPUS-WIDE MINUS CONFIDENTIAL — a third scope, deliberately neither of the
 #: other two. It keeps the drafts and the ``people/`` pages that

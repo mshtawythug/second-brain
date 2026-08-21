@@ -82,6 +82,17 @@ def not_confidential_sql(alias: str = "d") -> str:
     catching. Raises :class:`ValueError` on anything that is not a plain
     identifier.
 
+    **This predicate FAILS OPEN on a future third level, and its counterpart
+    fails closed.** ``<> 'confidential'`` is a denylist: add a ``secret`` tier
+    (which the module header above explicitly designs for -- the column is TEXT
+    so a third level is a named-CHECK swap) and every ``secret`` row starts
+    passing this gate and flowing out of every SQL boundary that uses it.
+    :func:`brain.mcp_server._confidential_lens` expresses the same policy as an
+    allowlist, ``= 'normal'``, and would exclude the new tier automatically.
+    The divergence is invisible today because two levels make the two forms
+    equivalent; adding a third makes them opposites, so a third level is a
+    change to THIS function as much as to the migration.
+
     Callers pass ``exclude_confidential`` down from their own boundary rather
     than deciding locally; see :func:`brain.mcp_server._confidential_lens` for
     which layer owns the policy and which way the bridge inverts.

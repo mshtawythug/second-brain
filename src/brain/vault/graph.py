@@ -508,8 +508,10 @@ def graph_data(
     depth 2 instead of looping. Self-loops never appear.
 
     ``exclude_confidential`` (F6) omits confidential documents from the node set,
-    and with them every edge that touches one — see the document fetch below for
-    why dropping the node is sufficient to drop the edge.
+    and an explicit predicate below drops every edge that touches one. Dropping
+    the node is NOT sufficient on its own, and this said it was — see the
+    reconciliation after the document fetch for the two paths on which the
+    document was withheld while its edges shipped.
 
     This is the FOURTH read in this module to get the parameter, and it was the
     one left short. :func:`backlinks_for`, :func:`outgoing_links_for` and
@@ -572,12 +574,9 @@ def graph_data(
     # Personal-corpus scale (low thousands) — one fetch is cheaper than
     # repeated round-trips and keeps the SQL trivially auditable.
     #
-    # F6: gating HERE gates the whole snapshot. Every node in the result is
-    # looked up in ``all_docs`` and every edge is kept only when BOTH endpoints
-    # resolve to a node, so a document withheld from this fetch takes its edges
-    # with it — no separate edge predicate is needed, and adding one would be
-    # dead code. (This is the same "drop the row and the rest follows" structure
-    # ``_build_doc_results`` relies on.)
+    # F6: this fetch is the ONLY sensitivity predicate in the function, so
+    # everything downstream has to be reconciled against it — see the edge gate
+    # immediately after ``all_docs``.
     doc_where = "" if not exclude_confidential else (
         f"WHERE {not_confidential_sql('documents')} "
     )
@@ -592,8 +591,46 @@ def graph_data(
         for r in doc_rows
     }
 
+    # F6: reconcile the edge set against the gated document set, HERE, before
+    # anything downstream derives from it. This is the separate edge predicate a
+    # comment in this spot used to call dead code; it was not, and the claim was
+    # true on exactly one of the three paths below.
+    #
+    # The gate on ``all_docs`` cannot reach ``all_edges`` or the BFS frontier,
+    # because both are built from the ungated fetch above. Two consequences, one
+    # root cause:
+    #
+    #   * ``include_ingested=True`` sets ``node_filter = None`` and took
+    #     ``kept_edges = list(all_edges)`` verbatim — no edge filtering at all.
+    #     A withheld document still shipped its edges, carrying its UUID and,
+    #     in ``link_text``, its title.
+    #   * Rooted mode filtered ``kept_edges`` on ``keep``, not on ``all_docs``,
+    #     so withholding a node there would not have withheld its edges either.
+    #
+    # Doing it once, up here, also fixes what a downstream repair could not: the
+    # BFS no longer TRAVERSES a withheld document, so a node reachable only
+    # through one stops arriving as an edgeless node — an unexplained node in a
+    # rooted view discloses that something hidden joins it to the root.
+    #
+    # Unconditional rather than gated on ``exclude_confidential``: ``links`` and
+    # ``derived_links`` both declare ``REFERENCES documents(id) ON DELETE
+    # CASCADE`` (migrations 003 and 005), so with the flag off ``all_docs`` is
+    # every document and this is a no-op. One code path, and the invariant
+    # :class:`GraphData` already documents — "an edge always has both endpoints
+    # in ``nodes``" — becomes true on every path instead of on the default one.
+    all_edges = [
+        e
+        for e in all_edges
+        if e.src_document_id in all_docs and e.dst_document_id in all_docs
+    ]
+
     if root is not None:
-        keep = _bfs_frontier(root, all_edges, depth=depth)
+        # Intersect BEFORE sorting, not with a trailing ``if``: ``sorted()``
+        # evaluates its key over EVERY element before a comprehension's filter
+        # runs, so ``all_docs[d]`` raised ``KeyError`` on the first withheld id.
+        # The old guard pre-dated ``exclude_confidential`` and was unreachable
+        # while ``all_docs`` was every document.
+        keep = _bfs_frontier(root, all_edges, depth=depth) & all_docs.keys()
         # Filter edges to those entirely within the frontier.
         kept_edges = [
             e
@@ -605,7 +642,6 @@ def graph_data(
             for doc_id in sorted(
                 keep, key=lambda d: (all_docs[d].title.lower(), d)
             )
-            if doc_id in all_docs
         ]
         return GraphData(nodes=kept_nodes, edges=kept_edges)
 

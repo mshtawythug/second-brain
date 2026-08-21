@@ -34,9 +34,11 @@ from brain.related import (
     DEFAULT_RELATED_LIMIT,
     _build_self_tsquery,
     _corpus_common_lexemes,
+    _eligible_source_docs,
     _iter_hybrid_neighbors,
     _neighbors_for_source,
 )
+from brain.sensitivity import CONFIDENTIAL
 from brain.wiki.build_related import regenerate_related_json
 
 VECTOR_DIM = 4096
@@ -1117,3 +1119,234 @@ def test_min_rrf_score_does_not_prune_strong_neighbors(
         f"Dual-leg rank-0 score must equal 2/(RRF_K+1)={expected_dual_leg_score!r}; "
         f"got {candidate.score!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# F6 — confidential content must not reach the PUBLISHED related-docs JSON.
+#
+# These files are published: ``Plugin.Assets()`` copies every non-``.md`` file
+# under the vault into the built site, and ``static`` is not in
+# ``ignorePatterns``. Quartz's ``RemoveConfidential`` filter cannot help --
+# it runs at ``shouldPublish``, which gates content vfiles, and asset files
+# never pass through a filter. So the gate has to hold HERE, in the emitter.
+#
+# Two independent leaks, hence two independent gates and two tests:
+#   (1) a confidential doc as a NEIGHBOUR publishes its body as ``snippet``;
+#   (2) a confidential doc as a SOURCE publishes its own ``<slug>.json``,
+#       disclosing the note's existence plus its neighbours -- an inference
+#       channel about a note Quartz deliberately did not publish.
+# Closing (1) alone leaves (2) open, which is why both are asserted.
+# ---------------------------------------------------------------------------
+
+
+def _mark_confidential(conn: psycopg.Connection[Any], doc_id: str) -> None:
+    conn.execute(
+        "UPDATE documents SET sensitivity = %s WHERE id = %s::uuid",
+        (CONFIDENTIAL, doc_id),
+    )
+
+
+def _seed_confidential_corpus(
+    conn: psycopg.Connection[Any],
+) -> tuple[str, str, str]:
+    """Three mutually-related docs on one shared vector + lexeme.
+
+    ``secret.md`` is marked confidential; ``plain.md`` is its identically
+    seeded control. Only the sensitivity column differs between them, so any
+    assertion that ``secret`` is gone is non-vacuous exactly when ``plain``
+    is still there.
+    """
+    shared = _vector(1.0, 0.0)
+    source_id = _insert_doc(
+        conn,
+        title="SHAREDLEX source",
+        vault_path="src.md",
+        chunk_contents=["SHAREDLEX source body paragraph."],
+        chunk_vectors=[shared],
+    )
+    secret_id = _insert_doc(
+        conn,
+        title="SHAREDLEX secret",
+        vault_path="secret.md",
+        chunk_contents=["SHAREDLEX confidential body paragraph."],
+        chunk_vectors=[shared],
+    )
+    plain_id = _insert_doc(
+        conn,
+        title="SHAREDLEX plain",
+        vault_path="plain.md",
+        chunk_contents=["SHAREDLEX ordinary body paragraph."],
+        chunk_vectors=[shared],
+    )
+    _mark_confidential(conn, secret_id)
+    return source_id, secret_id, plain_id
+
+
+def _emitted(root: Path) -> dict[str, Any]:
+    """Map ``<slug>.json`` → parsed payload for every emitted file."""
+    related_root = root / "static" / "related"
+    if not related_root.is_dir():
+        return {}
+    return {
+        path.name: json.loads(path.read_text(encoding="utf-8"))
+        for path in related_root.rglob("*.json")
+    }
+
+
+def test_regenerate_related_json_omits_confidential_neighbor_bodies(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    """Leak (1): a confidential NEIGHBOUR must not reach the published JSON.
+
+    Asserted on the emitted artifact rather than on the ranking rows, because
+    the artifact is what ships. ``plain.md`` is seeded identically to
+    ``secret.md`` and asserted PRESENT in the same payload -- without that
+    control the test would pass just as well on an empty fixture.
+
+    The body string is asserted absent across EVERY emitted file, not just
+    the source's: ``snippet`` is a raw slice of chunk content, so a leak that
+    landed in some other doc's payload would still be published.
+    """
+    _seed_confidential_corpus(test_db)
+
+    summary = regenerate_related_json(
+        test_db, vault_path=tmp_path, k=10, vector_sim_floor=0.0
+    )
+    assert summary.errors == []
+
+    payloads = _emitted(tmp_path)
+    assert "src.json" in payloads
+
+    slugs = {entry["slug"] for entry in payloads["src.json"]}
+    assert "plain" in slugs, (
+        "control neighbour missing — the fixture produced no neighbours at "
+        "all, so the confidential assertion below would be vacuous"
+    )
+    assert "secret" not in slugs
+
+    blob = json.dumps(payloads)
+    assert "confidential body paragraph" not in blob
+    assert "SHAREDLEX secret" not in blob
+
+
+def test_regenerate_related_json_writes_no_file_for_confidential_source(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    """Leak (2): a confidential SOURCE must not get its own published file.
+
+    Separate from the neighbour gate and not closed by it. The file's mere
+    existence at ``/static/related/secret.json`` discloses that the note
+    exists at that slug, and its contents name the note's nearest neighbours
+    -- an inference channel about a document Quartz did not publish.
+
+    ``plain.json`` is asserted present as the non-vacuous control.
+    """
+    _seed_confidential_corpus(test_db)
+
+    regenerate_related_json(
+        test_db, vault_path=tmp_path, k=10, vector_sim_floor=0.0
+    )
+
+    payloads = _emitted(tmp_path)
+    assert "plain.json" in payloads, (
+        "control source file missing — emission produced nothing, so the "
+        "assertion below would be vacuous"
+    )
+    assert "secret.json" not in payloads
+
+
+def test_eligible_source_docs_gate_is_wired_to_the_sql(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Flipping ONE keyword brings the confidential source back.
+
+    This is what makes the two tests above meaningful. Without it, ``secret``
+    could be absent for any reason — a bad fixture, an RRF cut — and the gate
+    would still look green. Observing the row return under
+    ``exclude_confidential=False`` proves the parameter reaches the SQL rather
+    than being accepted and ignored.
+    """
+    _seed_confidential_corpus(test_db)
+
+    gated = {doc.vault_path for doc in _eligible_source_docs(test_db)}
+    opened = {
+        doc.vault_path
+        for doc in _eligible_source_docs(test_db, exclude_confidential=False)
+    }
+
+    assert "secret.md" not in gated
+    assert "secret.md" in opened
+    assert "plain.md" in gated and "plain.md" in opened
+
+
+def test_iter_hybrid_neighbors_gate_is_wired_to_the_sql(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """The same wiring proof for the candidate legs.
+
+    ``_iter_hybrid_neighbors`` gates candidates through a different pair of
+    queries than ``_eligible_source_docs`` gates sources, so each needs its
+    own opt-back-in check; one passing does not imply the other.
+    """
+    _seed_confidential_corpus(test_db)
+
+    def neighbours(**kwargs: Any) -> set[str]:
+        return {
+            str(row[1])
+            for row in _iter_hybrid_neighbors(
+                test_db, k=10, vector_sim_floor=0.0, **kwargs
+            )
+            if str(row[0]) == "src.md"
+        }
+
+    gated = neighbours()
+    opened = neighbours(exclude_confidential=False)
+
+    assert "secret.md" not in gated
+    assert "plain.md" in gated
+    assert "secret.md" in opened
+
+
+def test_gate_is_a_no_op_while_no_document_is_confidential(
+    test_db: psycopg.Connection[Any], tmp_path: Path
+) -> None:
+    """The claim that justified fixing this immediately, made testable.
+
+    The gate was deferred once on the stated cost that "flipping the default
+    silently rewrites every generated JSON file". That cost is real only once
+    a document IS confidential. While none is, the predicate excludes nothing,
+    so the gated and ungated row sets must be IDENTICAL -- and since the
+    emitter is a pure function of those rows, so is every emitted byte. That
+    is what makes the fix free to apply now and expensive to apply later.
+
+    Comparing rows rather than two output trees is deliberate: the emitter
+    hard-codes the gate on (that is the fix), so there is no supported way to
+    emit an ungated tree, and reaching around the emitter to fake one would
+    test the fake. Row equality is the same claim one layer up, and the
+    emitted files are asserted non-empty so the equality is not vacuous.
+    """
+    shared = _vector(1.0, 0.0)
+    for index in range(3):
+        _insert_doc(
+            test_db,
+            title=f"SHAREDLEX doc {index}",
+            vault_path=f"doc-{index}.md",
+            chunk_contents=[f"SHAREDLEX body paragraph {index}."],
+            chunk_vectors=[shared],
+        )
+
+    gated = _iter_hybrid_neighbors(test_db, k=10, vector_sim_floor=0.0)
+    ungated = _iter_hybrid_neighbors(
+        test_db, k=10, vector_sim_floor=0.0, exclude_confidential=False
+    )
+
+    assert gated, "fixture produced no rows — the equality below would be vacuous"
+    assert gated == ungated
+
+    # And the emitter really does write something for this corpus, so the
+    # "no bytes change" conclusion is about a non-empty output tree.
+    summary = regenerate_related_json(
+        test_db, vault_path=tmp_path, k=10, vector_sim_floor=0.0
+    )
+    assert summary.written > 0
+    assert _emitted(tmp_path)

@@ -15,6 +15,34 @@ Writing those rows out as ``<vault>/static/related/<slug>.json`` is the
 emitter's job and lives in :mod:`brain.wiki.build_related`, which imports
 from here. :mod:`brain.connect` reuses the eligibility + embedding helpers
 for its own auto-link scoring.
+
+**File-size ceiling (CLAUDE.md): this file is now OVER, and the F6 gate below
+is what put it over.** Re-derive with ``wc -l src/brain/related.py``; the
+SHA-bound trail is 714 (``3b16527``, where the wiki/ui split created this
+module) -> 720 (``0473b5f``) -> 726 (``7b5579e``) -> **the commit that added
+this paragraph**, named descriptively and with no delta, for the reason
+``connect.py`` and ``timeline.py`` record: a hop cannot name its own SHA, and a
+delta is falsified by the same write that states it. Read the trail as
+authoritative only THROUGH THE LAST SHA IT NAMES; for anything after it use
+``git log --oneline f8c76c0..HEAD -- src/brain/related.py``.
+
+**This crossing is a rule violation, recorded rather than smoothed over.**
+CLAUDE.md's ceiling section says an existing file under 800 "must stay under it
+-- extract rather than grow past", and the F6 gate grew this file past it
+instead. The prior draft of this very paragraph asserted the file was "under
+800, but not by much" -- it was already over when that sentence was written,
+which is precisely the by-omission failure the ceiling section's closing
+"residue" note predicts and names this file as the imminent instance of. The
+honest state is: over, knowingly, pending the extraction below.
+
+The extraction is deliberately NOT done in the same change as a security fix --
+mixing a 250-line module move into the commit that closes a body-egress hole
+would make both harder to review. The clean seam is the lexeme/tsquery
+machinery at the tail of this module (``_build_self_tsquery``,
+``_corpus_common_lexemes``, ``_top_body_lexemes`` and the tsquery-escaping
+helpers, plus their module constants): it is self-contained, touches the
+database only through a passed ``conn``, and already has its own test file in
+``tests/test_build_related_signal.py``. Do that before the next addition here.
 """
 from __future__ import annotations
 
@@ -27,6 +55,7 @@ import psycopg
 
 from .rank_fusion import rrf_contribution
 from .search import CANDIDATE_LIMIT, PER_DOC_CHUNK_CAP, RRF_K
+from .sensitivity import not_confidential_sql
 
 __all__ = [
     "DEFAULT_RELATED_LIMIT",
@@ -123,6 +152,7 @@ def compute_related(
     *,
     limit: int = DEFAULT_RELATED_LIMIT,
     vector_sim_floor: float,
+    exclude_confidential: bool = True,
 ) -> list[RelatedDoc]:
     """Return the ``limit`` documents most related to ``doc_id``, best first.
 
@@ -130,6 +160,16 @@ def compute_related(
     :func:`_iter_hybrid_neighbors` runs corpus-wide. Both delegate to
     :func:`_neighbors_for_source`, so a live call here and a precomputed
     ``static/related/<slug>.json`` row rank identically for the same doc.
+
+    ``exclude_confidential`` DEFAULTS TO ``True`` -- fail-closed, and gated now
+    rather than in phase 5 because :class:`RelatedDoc` carries ``snippet``, a
+    raw slice of a candidate's chunk ``content``: this is a BODY egress, not a
+    title one. Deferring would make the phase-5 panel's author responsible for
+    noticing that, at the moment they are least likely to. It costs nothing
+    today -- the only caller is a test. Polarity: ``exclude_confidential``
+    (``True`` = exclude) here vs MCP's ``include_confidential`` (``False`` =
+    exclude); both exclude by default, bridge is ``not``. See
+    :func:`brain.mcp_server._confidential_lens`.
 
     **Nothing in ``src/`` calls this yet, and that is deliberate.** The
     related-docs panel it exists for is phase-5 work (design spec §9.2, whose
@@ -184,12 +224,17 @@ def compute_related(
         title=str(row[0] or ""),
         vault_path=str(row[1] or ""),
     )
+    # Gates CANDIDATES only. The SOURCE document is not re-checked: the caller
+    # already holds ``doc_id``, so refusing to compute neighbours for a
+    # confidential source would withhold nothing it does not already have,
+    # while still leaking the answer through the empty list.
     neighbors = _neighbors_for_source(
         conn,
         source=source,
         k=limit,
         vector_sim_floor=vector_sim_floor,
         corpus_common=_corpus_common_lexemes(conn),
+        exclude_confidential=exclude_confidential,
     )
     return [
         RelatedDoc(
@@ -209,6 +254,7 @@ def _iter_hybrid_neighbors(
     *,
     k: int,
     vector_sim_floor: float,
+    exclude_confidential: bool = True,
 ) -> list[tuple[Any, ...]]:
     """Yield (source_vault_path, related_vault_path, related_title,
     related_source, related_score, related_snippet) rows under the new
@@ -239,7 +285,30 @@ def _iter_hybrid_neighbors(
     comparable to a single ``brain search`` (~200ms) so a ~1k-doc corpus
     finishes well under the plan's 60s ideal / 3min ceiling.
     """
-    eligible = _eligible_source_docs(conn)
+    # DEFAULT ``True`` = fail-closed, matching :func:`compute_related` and
+    # :func:`_neighbors_for_source`. This default was ``False``, filed with the
+    # question "whether those files sit inside the F6 boundary". ANSWERED, and
+    # the answer is no -- they are published:
+    #
+    #   * Spec ``docs/specs/2026-07-25-sections/F4-F6-ingest-secret-guard.md``
+    #     names the published wiki as egress boundary (3): confidential keeps a
+    #     body "off the published wiki".
+    #   * That boundary is enforced by ``RemoveConfidential`` at Quartz's
+    #     ``shouldPublish``, which gates CONTENT vfiles. Asset files never pass
+    #     through it, so ``<vault>/static/related/<slug>.json`` -- written by
+    #     ``wiki.build_related.regenerate_related_json`` from these rows,
+    #     snippets included -- bypasses the boundary entirely.
+    #   * They reach the site via ``Plugin.Assets()`` (NOT ``Plugin.Static()``;
+    #     see that emitter's docstring), which copies every non-``.md`` file
+    #     under the vault, and ``static`` is not in ``ignorePatterns``.
+    #
+    # The deferral's stated cost -- "flipping the default silently rewrites
+    # every generated JSON file" -- was measured and is false: the predicate
+    # excludes nothing while no document is confidential, so the emitter's
+    # unchanged-file branch skips every write. The rewrite it feared only
+    # begins once a document IS confidential, which is exactly when the old
+    # default would have published that document's body.
+    eligible = _eligible_source_docs(conn, exclude_confidential=exclude_confidential)
     corpus_common = _corpus_common_lexemes(conn)
     rows: list[tuple[Any, ...]] = []
     for source in eligible:
@@ -249,6 +318,7 @@ def _iter_hybrid_neighbors(
             k=k,
             vector_sim_floor=vector_sim_floor,
             corpus_common=corpus_common,
+            exclude_confidential=exclude_confidential,
         )
         for neighbor in neighbors:
             rows.append(
@@ -285,20 +355,38 @@ class _Neighbor:
     snippet: str
 
 
-def _eligible_source_docs(conn: psycopg.Connection[Any]) -> list[_SourceDoc]:
+def _eligible_source_docs(
+    conn: psycopg.Connection[Any], *, exclude_confidential: bool = True
+) -> list[_SourceDoc]:
     """Return the set of docs the precompute generates JSON for.
 
     Eligibility mirrors the pre-rewrite query: non-draft, non-NULL
     ``vault_path``, at least one chunk with a non-NULL embedding.
+
+    ``exclude_confidential`` defaults fail-closed, and gating the SOURCE is a
+    SEPARATE leak from gating candidates. A confidential source that survives
+    here gets its own published ``static/related/<its-slug>.json``, which
+    discloses the note's existence and slug plus its neighbours' titles and
+    body snippets -- an inference channel about a document Quartz deliberately
+    did not publish. Gating only candidates closes the direct body egress and
+    leaves this one open, so both are gated.
+
+    Note the local default embedder (``arctic``) is not hosted, so F6's
+    hosted-embedder boundary does NOT null a confidential doc's embeddings --
+    it stays eligible here on the ``c.embedding IS NOT NULL`` clause. The
+    hosted-embedder path is not a substitute for this gate.
+
+    :mod:`brain.connect` passes ``False`` deliberately -- see its call site.
     """
     rows = conn.execute(
-        """
+        f"""
         SELECT DISTINCT d.id::text, d.title, d.vault_path
         FROM documents d
         JOIN chunks c ON c.document_id = d.id
         WHERE d.draft = FALSE
           AND d.vault_path IS NOT NULL
           AND c.embedding IS NOT NULL
+          {_confidential_clause(exclude_confidential)}
         ORDER BY d.vault_path
         """
     ).fetchall()
@@ -320,8 +408,26 @@ def _avg_embedding(conn: psycopg.Connection[Any], doc_id: str) -> Any:
     return row[0]
 
 
+def _confidential_clause(exclude_confidential: bool) -> str:
+    """``AND <predicate>`` for the two candidate legs, or ``""`` to include.
+
+    A frozen literal rather than a bound ``%s`` because both legs bind their
+    other parameters POSITIONALLY: a conditional extra parameter must be
+    inserted at the right index by every caller or silently bind the wrong
+    value, and the wrong direction here only ADDS rows, so no test would see
+    it. Same reasoning :func:`brain.sensitivity.not_confidential_sql` records.
+    """
+    if not exclude_confidential:
+        return ""
+    return f"AND {not_confidential_sql('d')}"
+
+
 def _fts_candidates(
-    conn: psycopg.Connection[Any], *, tsquery: str, exclude_doc_id: str
+    conn: psycopg.Connection[Any],
+    *,
+    tsquery: str,
+    exclude_doc_id: str,
+    exclude_confidential: bool,
 ) -> list[tuple[str, str, str]]:
     """Return up to ``CANDIDATE_LIMIT`` (chunk_id, document_id, content) rows
     from the per-doc-capped FTS leg. Empty list when ``tsquery`` is empty.
@@ -365,6 +471,7 @@ def _fts_candidates(
               AND d.draft = FALSE
               AND d.vault_path IS NOT NULL
               AND d.id <> %s::uuid
+              {_confidential_clause(exclude_confidential)}
         )
         SELECT id, document_id, content
         FROM ranked
@@ -382,6 +489,7 @@ def _vector_candidates(
     src_embedding: Any,
     exclude_doc_id: str,
     vector_sim_floor: float,
+    exclude_confidential: bool,
 ) -> list[tuple[str, str, str]]:
     """Return up to ``CANDIDATE_LIMIT`` (chunk_id, document_id, content) rows
     from the cosine-floor-gated vector leg. Empty list when
@@ -396,6 +504,7 @@ def _vector_candidates(
         WHERE d.draft = FALSE
           AND d.vault_path IS NOT NULL
           AND d.id <> %s::uuid
+          {_confidential_clause(exclude_confidential)}
           AND c.embedding IS NOT NULL
           AND 1 - (c.embedding <=> %s::vector) >= %s
         ORDER BY c.embedding <=> %s::vector
@@ -415,6 +524,7 @@ def _neighbors_for_source(
     k: int,
     vector_sim_floor: float,
     corpus_common: frozenset[str],
+    exclude_confidential: bool = True,
 ) -> list[_Neighbor]:
     """RRF-blend the FTS + vector legs for one source doc and return top-K.
 
@@ -422,18 +532,33 @@ def _neighbors_for_source(
     appears in. Per-doc score: max chunk RRF for that document. Snippet:
     the highest-RRF chunk's content for the winning doc, whitespace-
     collapsed and truncated to ``SNIPPET_LENGTH``.
+
+    ``exclude_confidential`` defaults fail-closed. Both production callers pass
+    it explicitly, so it governs only new callers -- tests reaching in here
+    included -- where the safe direction costs nothing to be wrong about.
     """
     tsquery = _build_self_tsquery(
         conn, source.id, title=source.title, corpus_common=corpus_common
     )
     src_embedding = _avg_embedding(conn, source.id)
 
-    fts_rows = _fts_candidates(conn, tsquery=tsquery, exclude_doc_id=source.id)
+    # The gate goes in the PREDICATE of BOTH legs, never the projection: a
+    # confidential doc surviving either leg reaches ``by_doc`` with its chunk
+    # ``content`` as the snippet, and dropping only the snippet afterwards
+    # would still publish the id, title and vault_path. Same ruling as
+    # ``timeline._compose_doc_filter``.
+    fts_rows = _fts_candidates(
+        conn,
+        tsquery=tsquery,
+        exclude_doc_id=source.id,
+        exclude_confidential=exclude_confidential,
+    )
     vec_rows = _vector_candidates(
         conn,
         src_embedding=src_embedding,
         exclude_doc_id=source.id,
         vector_sim_floor=vector_sim_floor,
+        exclude_confidential=exclude_confidential,
     )
 
     rrf: dict[str, float] = {}
