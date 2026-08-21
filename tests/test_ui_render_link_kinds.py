@@ -71,9 +71,32 @@ def test_prefix_matching_is_case_insensitive() -> None:
 def test_tag_wins_over_external_for_an_absolute_tag_url() -> None:
     """The ORDER, pinned: reorder the classifier and this is what breaks.
 
-    ``https://…/tags/x`` is both an external URL and a tag URL by prefix. The
-    overlay resolves that by testing ``tag`` first, and the stylesheet's tag
-    treatment depends on it.
+    ``https://…/tags/x`` is both an external URL and a tag URL — the latter by
+    INFIX, not by prefix. That distinction is the whole reason this test can
+    exist: prefix matching is exactly what fails to see the tag here, and while
+    the classifier was prefix-only the two sets were disjoint, so the ordering
+    was inert and no test could have defended it. The overlay resolves the
+    genuine overlap by testing ``tag`` first, and the stylesheet's tag treatment
+    depends on it.
+
+    MUTATION (Appendix C-1's prescribed substitute, run 2026-08-20 — the row had
+    carried the substitute test but no observed run):
+    ``render.py:181`` ``return lowered.startswith(_TAG_PREFIXES) or _TAG_INFIX in
+    lowered`` -> ``return lowered.startswith(_TAG_PREFIXES)``
+    -> **2 failed, 24 passed** (baseline: 26 passed).
+
+    TWO, where C-1 predicted one — and the second is the more useful half.
+    Alongside this test, ``test_classify_link_kind_buckets[/tags/retro-tag]``
+    reddens, because ``_TAG_PREFIXES`` deliberately omits the leading-slash
+    ``/tags/`` that the overlay's ``TAG_PREFIXES`` lists: ``_TAG_INFIX`` *is*
+    that string and matches it at offset 0. So the infix constant carries the
+    absolute host-qualified form AND the leading-slash form, and deleting it
+    breaks a case that looks like plain prefix matching.
+
+    Scope, measured on the same run rather than assumed: widened to
+    ``test_ui_render.py`` and ``test_ui_render_toc.py`` the mutation reads
+    **2 failed, 88 passed** (baseline: 90 passed) — the same two tests and
+    nothing else. No other render behaviour depends on the constant.
     """
     assert classify_link_kind("https://example.invalid/tags/retro") == "tag"
 

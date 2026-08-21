@@ -23,6 +23,20 @@ combiner (see `docs/plans/2026-05-06-search-ranking-fix.md`):
    ``tests/test_search_floor_default_excludes_known_bad.py``.
 
 The fts_only path bypasses (3) entirely.
+
+**File-size ceiling (CLAUDE.md): already over, and it grew.** 837 -> 867 lines
+on `feat/wiki-to-ui-consolidation`. Two changes, both reasoned inline at the
+point of growth: :attr:`SearchResult.recency_ts`, whose read was hoisted OUT of
+the recency-boost branch so a hit's displayed date and its ranking date cannot
+disagree; and the `source_missing` parameter threaded through to
+:func:`build_predicate`, without which no filter setting can reach a document
+that has no ``sources`` row. **Ranking is unchanged** by both -- the hoist moves
+a read, not a score -- so no eval re-baseline is implied.
+
+Extract before growing this file again. The precedent on this branch is
+`backup/restore.py` (745 -> 755): it would have crossed the ceiling, and its
+identifier-budget guard was moved out to `backup/db_names.py` (75 lines) rather
+than left over the line.
 """
 import logging
 import re

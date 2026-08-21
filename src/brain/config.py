@@ -1,4 +1,18 @@
-"""Configuration loading from environment / .env."""
+"""Configuration loading from environment / .env.
+
+**File-size ceiling (CLAUDE.md): already over, and it grew.** 2,250 -> 2,303
+lines on `feat/wiki-to-ui-consolidation`. The growth is ONE knob --
+``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`` -- plus its tri-state parse and the
+ruling, recorded inline at the default, for why it is deliberately NOT
+``UiContext.serve_confidential_bodies``: "trusted to read a confidential note it
+opened" and "wants every confidential title painted on load" are different
+questions, and the unprompted listing surfaces ask the second one.
+
+Knobs belong beside the other knobs, so the knob itself is not the problem. The
+PROSE is: this file is mostly measurement blocks and rationale. Splitting the
+rationale into a companion doc, leaving the knobs here, is the next move if it
+grows again.
+"""
 import os
 import re
 from dataclasses import dataclass, field

@@ -34,6 +34,36 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 #: Files that live under the package but are build artefacts, not shipped data.
 _IGNORED_PARTS = {"__pycache__"}
 
+#: The three ways a shipped module names another file, all of which must resolve.
+#:
+#: THREE PATTERNS, NOT ONE, and the second and third are not hypothetical
+#: completeness. The ``from``-bearing form was the only one matched, so
+#: ``js/marginalia.js``'s ``await import("/static/js/inspector.js")`` — a real,
+#: shipped, LAZY import — was invisible to the resolver. That is the worst
+#: variant to miss: a static-import typo blanks the page on load and is noticed
+#: immediately, while a dynamic one resolves long after the note paints and
+#: breaks only the surface that awaited it.
+#:
+#: ``import "x"`` (side-effect, no bindings) is included for the same reason
+#: even though nothing ships one today — it is one line away, and the cost of
+#: covering it now is a regex alternation.
+_IMPORT_FROM_RE = re.compile(
+    r"""(?:^|\s)(?:import|export)\b[^;]*?from\s+["']([^"']+)["']"""
+)
+_IMPORT_SIDE_EFFECT_RE = re.compile(r"""(?:^|\s)import\s+["']([^"']+)["']""")
+_IMPORT_DYNAMIC_RE = re.compile(r"""\bimport\s*\(\s*["']([^"']+)["']\s*\)""")
+_IMPORT_PATTERNS = (_IMPORT_FROM_RE, _IMPORT_SIDE_EFFECT_RE, _IMPORT_DYNAMIC_RE)
+
+
+def _import_specifiers(source: str) -> list[str]:
+    """Every module specifier ``source`` names, in any of the three forms."""
+    return [
+        specifier
+        for pattern in _IMPORT_PATTERNS
+        for specifier in pattern.findall(source)
+    ]
+
+
 #: Suffixes whose bytes are not text and cannot be decoded as UTF-8.
 #:
 #: Used ONLY to skip the source-scanning tests below — never to filter
@@ -197,14 +227,14 @@ def test_every_es_module_import_resolves_to_a_file() -> None:
     while the wheel still builds, the ``static/*.js`` glob still matches, and
     every other test still passes.
 
-    This resolves each specifier to a real file instead.
+    This resolves each specifier to a real file instead — in all three import
+    forms, static, side-effect and dynamic. See :data:`_IMPORT_PATTERNS`.
     """
-    pattern = re.compile(r"""(?:^|\s)(?:import|export)\b[^;]*?from\s+["']([^"']+)["']""")
     checked = 0
     for path in _shipped_files():
         if path.suffix != ".js":
             continue
-        for specifier in pattern.findall(path.read_text(encoding="utf-8")):
+        for specifier in _import_specifiers(path.read_text(encoding="utf-8")):
             assert specifier.startswith("/static/"), (
                 f"{path.name} imports {specifier!r}, which is not a same-origin "
                 f"/static/ path — the CSP forbids anything else"
@@ -222,17 +252,31 @@ def test_every_es_module_import_resolves_to_a_file() -> None:
 
 
 def test_the_import_resolver_would_catch_a_typo() -> None:
-    """Guard the guard: the regex must actually match a real import statement."""
-    pattern = re.compile(r"""(?:^|\s)(?:import|export)\b[^;]*?from\s+["']([^"']+)["']""")
-    sample = 'import {\n  flattenVisible, rovingIndex,\n} from "/static/tree_nav.js";'
-    assert pattern.findall(sample) == ["/static/tree_nav.js"], (
+    """Guard the guard: one positive per import form, and one shared negative.
+
+    One case per form, because the forms fail independently — the ``from``
+    pattern matched a real dynamic import zero times while looking entirely
+    healthy against the static ones.
+    """
+    multiline = 'import {\n  flattenVisible, rovingIndex,\n} from "/static/tree_nav.js";'
+    assert _import_specifiers(multiline) == ["/static/tree_nav.js"], (
         "the specifier regex does not match a multi-line import, so it would "
         "silently check nothing"
+    )
+    side_effect = 'import "/static/js/ledger_status.js";'
+    assert _import_specifiers(side_effect) == ["/static/js/ledger_status.js"], (
+        "a side-effect import names a file like any other; missing it means an "
+        "unresolvable specifier ships unchecked"
+    )
+    dynamic = 'const inspector = await import("/static/js/inspector.js");'
+    assert _import_specifiers(dynamic) == ["/static/js/inspector.js"], (
+        "a dynamic import is not matched — js/marginalia.js ships one, and a "
+        "typo there breaks the marginalia panel only, long after the note paints"
     )
     # The negative sample must CONTAIN the keyword, or any regex requiring
     # `import` returns [] and this proves nothing. Here `import` appears inside
     # a string literal that is not an import statement.
-    assert pattern.findall('const doc = "import x from \\"/static/ghost.js\\"";') == [], (
+    assert _import_specifiers('const doc = "import x from \\"/static/ghost.js\\"";') == [], (
         "the regex matches an import-shaped string literal, so it would report "
         "a phantom dependency that does not exist"
     )

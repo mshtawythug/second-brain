@@ -20,7 +20,10 @@ import yaml
 # Without this marker the module still took the machine-wide test-database lock
 # and serialised behind every other agent's run for a schema it never touches;
 # with it, a selection of only this file needs no Postgres at all. Adding a test
-# that does touch the database is not silent: the connection fails loudly.
+# that does touch the database is not silent — but the mechanism is the suite-lock
+# gate in tests/conftest.py, NOT "the connection fails": with the test Postgres up
+# it succeeds, and this module's marker had the session skip the lock before the
+# TRUNCATE. `_require_suite_lock` raises there instead.
 pytestmark = pytest.mark.nodb
 
 REPO_ROOT = Path(__file__).parent.parent
@@ -515,12 +518,30 @@ def _selection_patterns(command: str) -> list[str]:
     return [token for token in shlex.split(command) if token.startswith("tests/")]
 
 
-def _modules_carrying_the_browser_marker() -> list[Path]:
-    """Every tests/ module whose source applies the `browser` marker."""
+def _modules_carrying_the_browser_marker(root: Path | None = None) -> list[Path]:
+    """Every tests/ module whose source applies the `browser` marker.
+
+    ``rglob``, not ``glob``. The non-recursive form saw 436 of the 461 modules
+    under ``tests/``, leaving the 25 in ``tests/wiki/``, ``tests/graphrag/`` and
+    ``tests/derived_links/`` invisible — so the caller's "every module carrying
+    the marker is inside the selection" was false for a quarter of the tree, and
+    its anti-vacuity check could not notice because the top-level modules kept
+    the list non-empty.
+
+    Returns paths RELATIVE to the search root, so a subpackage module reads as
+    ``wiki/test_x.py`` rather than collapsing to ``test_x.py`` and matching a
+    top-level selection pattern it is not actually covered by.
+
+    ``root`` is injectable so the guard can be pointed at a planted tree and
+    shown to see a subpackage marker — see
+    :func:`test_browser_module_discovery_descends_into_subpackages`.
+    """
+    base = TESTS_DIR if root is None else root
+    this_module = Path(__file__).resolve()
     return sorted(
-        path
-        for path in TESTS_DIR.glob("test_*.py")
-        if path.name != Path(__file__).name
+        path.relative_to(base)
+        for path in base.rglob("test_*.py")
+        if path.resolve() != this_module
         and BROWSER_MARKER_RE.search(path.read_text(encoding="utf-8"))
     )
 
@@ -570,9 +591,9 @@ def test_ci_browser_selection_covers_every_browser_module() -> None:
     )
 
     uncovered = [
-        f"tests/{module.name}"
+        f"tests/{module.as_posix()}"
         for module in modules
-        if not any(fnmatch.fnmatch(f"tests/{module.name}", pattern) for pattern in patterns)
+        if not any(fnmatch.fnmatch(f"tests/{module.as_posix()}", pattern) for pattern in patterns)
     ]
     assert not uncovered, (
         f"these modules carry the `browser` marker but no CI job runs them: "
@@ -580,6 +601,43 @@ def test_ci_browser_selection_covers_every_browser_module() -> None:
         f"selection in .github/workflows/ci.yml, or those tests are dead weight "
         "that CI never executes."
     )
+
+
+def test_browser_module_discovery_descends_into_subpackages(tmp_path: Path) -> None:
+    """The discovery above must see a marked module inside a ``tests/`` subpackage.
+
+    Guarding the guard, on a planted tree rather than on a count. The
+    non-recursive ``glob`` this replaced returned only the top-level module, and
+    the caller's anti-vacuity ``assert modules`` could not tell the difference —
+    a non-empty list looks identical whether or not the subpackages were read.
+    So the assertion is on the SUBPACKAGE entry specifically, and on its path
+    keeping the subdirectory: a marked ``wiki/test_x.py`` reported as
+    ``test_x.py`` would silently match a top-level selection pattern that does
+    not cover it.
+
+    ``tests/wiki``, ``tests/graphrag`` and ``tests/derived_links`` are real
+    subpackages of this tree; the planted names are not, so this cannot pass by
+    accidentally reading the repository instead of ``tmp_path``.
+    """
+    # Arrange — one marked module at the top level, one nested, one unmarked
+    # sibling of each so the filter still has to do work.
+    marked = "import pytest\n\npytestmark = pytest.mark.browser\n"
+    unmarked = "def test_nothing() -> None:\n    pass\n"
+    (tmp_path / "test_top_marked.py").write_text(marked)
+    (tmp_path / "test_top_plain.py").write_text(unmarked)
+    nested = tmp_path / "subpkg"
+    nested.mkdir()
+    (nested / "test_nested_marked.py").write_text(marked)
+    (nested / "test_nested_plain.py").write_text(unmarked)
+
+    # Act
+    found = _modules_carrying_the_browser_marker(root=tmp_path)
+
+    # Assert
+    assert [module.as_posix() for module in found] == [
+        "subpkg/test_nested_marked.py",
+        "test_top_marked.py",
+    ], f"discovery missed a subpackage module or mangled its path: {found}"
 
 
 def test_ci_browser_selection_is_order_deterministic() -> None:
@@ -632,7 +690,7 @@ def test_ci_browser_selection_is_order_deterministic() -> None:
         "variable reaches anything."
     )
 
-    expected = [f"tests/{module.name}" for module in _modules_carrying_the_browser_marker()]
+    expected = [f"tests/{module.as_posix()}" for module in _modules_carrying_the_browser_marker()]
     assert patterns == expected, (
         f"the {BROWSER_JOB!r} job selects {patterns}, expected {expected} — "
         "every module carrying the `browser` marker, in byte order. Byte order "

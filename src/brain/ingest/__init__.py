@@ -1,4 +1,18 @@
-"""Ingest pipeline: extract → chunk → embed → store."""
+"""Ingest pipeline: extract → chunk → embed → store.
+
+**File-size ceiling (CLAUDE.md): already over, and it grew.** 2,298 -> 2,366
+lines on `feat/wiki-to-ui-consolidation`. The growth is the extraction of
+:func:`mirror_is_stale` and :func:`write_vault_mirror` out of the tail of
+:func:`update_document`, so a caller that owns the OUTER transaction can defer
+the vault-mirror write until after its own commit
+(:func:`brain.ui.notes_service._update_ingested_note` is the worked example).
+The mirror is a file, so no rollback can unwrite it; that ordering contract is
+documented on :func:`write_vault_mirror` itself, and the reason for the split is
+inline at the call site it replaced.
+
+Net-new logic is near zero -- most of the delta is the moved block plus the
+contract that makes it safe to call from outside.
+"""
 from __future__ import annotations
 
 import hashlib

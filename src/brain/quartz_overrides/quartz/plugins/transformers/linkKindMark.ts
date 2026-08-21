@@ -122,8 +122,9 @@ const TAG_PREFIXES = ["tags/", "/tags/", "./tags/"]
 // `https://host/tags/retro` classified as `external`. The Python port
 // `src/brain/ui/render.py` (`_TAG_INFIX`, `_is_tag_url`) had already
 // taken the DOCUMENTED reading and pinned it with a test
-// (`tests/test_ui_render_link_kinds.py`, "an absolute tag URL is a
-// tag"), so the two implementations of one classifier disagreed. Two
+// (`tests/test_ui_render_link_kinds.py`,
+// `test_tag_wins_over_external_for_an_absolute_tag_url`), so the two
+// implementations of one classifier disagreed. Two
 // reasons the documented reading is the correct one, not merely the
 // louder one: (1) a host-qualified link to this site's own tag page IS
 // a tag link, and prefix-only silently mislabels it; (2) under

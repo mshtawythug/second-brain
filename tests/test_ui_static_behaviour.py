@@ -55,10 +55,16 @@ behaviour does not get to exempt its own prose.)
 split ADDED rather than kept: a SET of files can be half-loaded where one
 could not.
 
-WHAT LEFT WITH THE JS SPLIT, AND WHY THAT LIST IS LONG. ``app.js`` became eight
-modules under ``static/js/``, so every guard that read ``APP_JS`` as one string
-lost its subject. None of them were re-anchored at a new address: a
-source-substring assertion whose only oracle is the implementation it reads is a
+WHAT LEFT WITH THE JS SPLIT, AND WHY THAT LIST IS LONG. ``app.js`` became a
+directory of modules under ``static/js/``, so every guard that read ``APP_JS``
+as one string lost its subject. (The count is deliberately not written down.
+It said "eight" while the directory held fourteen, in the file whose own
+premise is that claims must not drift from behaviour — and nothing here needs
+the number. ``tests/test_ui_static_assets.py`` enumerates the modules against
+the wheel's package data, which is where a count has an oracle.)
+
+None of those guards were re-anchored at a new address: a source-substring
+assertion whose only oracle is the implementation it reads is a
 change-detector, and quietly re-pointing one at ``js/tree.js`` would have
 preserved the *appearance* of coverage while proving nothing new. Each was
 instead asked what a user would notice, and ELEVEN tests at the end of

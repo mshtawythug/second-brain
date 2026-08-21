@@ -220,21 +220,14 @@ def test_a_bad_offset_is_a_400_not_a_silent_clamp(
     assert response.json()["error"]["code"] == code
 
 
-def test_the_offset_ceiling_is_derived_from_the_candidate_pool(
-    client: TestClient,
-) -> None:
-    """The ceiling must track ``CANDIDATE_LIMIT``, never a copied literal.
-
-    Both ranking legs cap their candidate pools at ``CANDIDATE_LIMIT`` chunks,
-    so at most ``2 * CANDIDATE_LIMIT`` distinct documents can ever be ranked
-    and an offset past that can only ever return an empty page. A hardcoded
-    ceiling would go on advertising the OLD bound the day that constant moves
-    — the exact failure shape ``tests/conftest.py`` records for the Ollama
-    port guard.
-    """
-    from brain.ui import schemas
-
-    assert schemas.MAX_OFFSET == 2 * CANDIDATE_LIMIT
+# ``MAX_OFFSET == 2 * CANDIDATE_LIMIT`` is NOT asserted here, deliberately.
+# ``tests/test_ui_search_ceiling.py`` already pins it — as two named steps
+# (``MAX_RANKED_DOCUMENTS == 2 * CANDIDATE_LIMIT`` and
+# ``MAX_OFFSET == MAX_RANKED_DOCUMENTS``), which says more than the collapsed
+# form did. The copy that stood here took the DB-backed ``client`` fixture and
+# never used it, so a pure-arithmetic check over three integers pulled the
+# MACHINE-WIDE advisory lock and the schema reset in behind it. The ceiling
+# module is ``nodb``-marked and needs neither.
 
 
 def test_an_empty_page_past_the_ranked_ceiling_reports_ceiling_not_exhaustion(

@@ -459,6 +459,36 @@ def _format_thread_section(msg: dict[str, Any], *, collapsed: bool) -> str:
     # The anchor id ``brain.ui.render`` mints is UNCHANGED by this, measured on
     # both forms: the slugger drops the punctuation the two spellings differ in,
     # so the TOC keeps pointing at the same id (defect S4 stays fixed).
+    #
+    # NEW THREADS ONLY, UNTIL SOMEONE SWEEPS. This runs at INGEST time and
+    # rewrites ``documents.content``; it does not reach a row already stored.
+    # Every thread ingested before this change keeps the raw ``Name <addr>``
+    # heading, so on that part of the corpus the H2 and the ``<summary>`` stay
+    # spelled two different ways and "Show only my replies" keeps missing the
+    # H2 — exactly the inconsistency the escape exists to remove.
+    #
+    # THE SWEEP IS A PLAIN RE-PULL — there is no ``--force`` on
+    # ``brain ingest-gmail`` and none is needed. Gmail threads take the
+    # "sourced stdin" path in ``ingest_document``: the doc is resolved by
+    # ``(source_kind, source_external_id)`` = ``('gmail', thread_id)``, and the
+    # escape changes the body, so the recomputed ``content_hash`` differs and
+    # the existing row is UPDATEd in place (``body_changed=True``) rather than
+    # skipped or duplicated. Re-pull the same scope the threads came from, e.g.
+    # ``brain ingest-gmail --label <label> --since <date> --max <n>``.
+    #
+    # SIZE OF THE UN-SWEPT SET — cited, NOT re-derived: the prod container was
+    # down at 2026-08-20 21:46 EDT, so this is ``docs/audits/
+    # 2026-08-13-phase2-recon.md`` as of 2026-08-13, and it counts the
+    # ``<details>``/``<summary>`` extension rather than the H2 directly: 58
+    # documents, of which 57 are ``email_thread`` (89.1% of the 64 there) and 1
+    # is ``markdown``. Treat that as a floor for the H2, not a measurement of
+    # it — the H2 is emitted for the newest message of every multi-message
+    # thread, whether or not the older ones collapsed. Re-derive before acting:
+    #
+    #   SELECT content_type,
+    #          count(*) FILTER (WHERE content ~ '(?m)^## [^<]*<[^ >]+@') AS raw,
+    #          count(*) FILTER (WHERE content ~ '(?m)^## .*&lt;')        AS escaped
+    #     FROM documents GROUP BY 1;
     escaped_heading = html.escape(heading, quote=False)
 
     if collapsed:

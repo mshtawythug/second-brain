@@ -141,6 +141,44 @@ def test_compute_related_ranks_title_overlap_first(
     The assertion is deliberately about ORDER, not about row count: a
     reversed RRF sort key in ``_neighbors_for_source`` still returns two
     rows, so ``len(...) == 2`` alone would survive that defect.
+
+    MUTATION (run 2026-08-20 — the reasoning above had never been run):
+    ``related.py:498`` ``key=lambda n: (-n.score, n.title, n.document_id)``
+    -> ``key=lambda n: (n.score, n.title, n.document_id)``
+    -> **5 failed, 5 passed** (baseline: 10 passed).
+
+    The row-count reasoning holds — both rows come back, in the wrong order —
+    and the margin it protects is narrower than it looks: the observed scores
+    were ``0.03278688`` (B) and ``0.03225806`` (C), differing in the fourth
+    significant figure. ``>`` on that pair is doing real work.
+
+    FIVE, though, not this test alone, and **three of the five go red for a
+    reason that has nothing to do with what they are named for**:
+
+    * ``test_compute_related_returns_populated_rows`` — asserts ``top.id ==
+      b_id`` on the way to checking field population.
+    * ``test_compute_related_honours_limit`` — ``limit=1`` truncates to the
+      *wrong* document, so a truncation test fails on ranking.
+    * ``test_compute_related_excludes_draft_candidates`` — asserts the full
+      ``[b_id, c_id]`` order while its subject is draft exclusion.
+    * ``test_compute_related_malformed_id_does_not_poison_transaction`` — its
+      recovery probe is ``compute_related(...)[0].id == b_id``, so a *ranking*
+      defect reddens a *transaction-isolation* test.
+
+    That coupling is worth knowing before diagnosing a future failure here: a
+    single sort-key regression presents as five unrelated-looking breakages,
+    and the two named last would send a reader looking at draft filtering and
+    transaction state. It is not itself a defect — asserting identity rather
+    than a bare count is what makes each of those tests honest — but the
+    diagnosis hazard should not have to be rediscovered under time pressure.
+
+    Blast radius, measured on the same mutation rather than assumed: across
+    ``test_related_compute``, ``test_build_related_signal``,
+    ``test_build_related`` and ``test_build_related_idempotence`` it reads
+    **6 failed, 41 passed** (baseline: 47 passed) — these five plus
+    ``test_build_related.py::test_regenerate_related_json_caps_at_k_and_skips_drafts``,
+    which is the emitter making the same ``[:k]`` truncation off the same sort.
+    Restored byte-identically (``shasum``); both suites green afterwards.
     """
     a_id, b_id, c_id = _seed_a_b_c(test_db)
 

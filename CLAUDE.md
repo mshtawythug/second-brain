@@ -72,6 +72,104 @@ IMPORTANT:
 - **Every external HTTP/DB client MUST have explicit timeouts.** Voyage SDK retries handled in `embeddings.py`; Postgres connections set `connect_timeout`.
 - **No bare `except:`** — always catch specific exceptions (`psycopg.OperationalError`, `voyageai.error.RateLimitError`, etc.).
 
+### File-size ceiling — 800 lines
+
+The global rules set an **800-line ceiling** per file (200–400 typical). It binds
+**new modules and new growth**, not a retroactive split mandate: this repo has
+**16 files in `src/` already over it**, and splitting a 9,000-line CLI to satisfy
+a number is how you turn a working module into six broken ones.
+
+The rule as it actually applies here:
+
+- A **new** module lands under 800. No exceptions.
+- An **existing** file under 800 must stay under it — extract rather than grow
+  past. This is why `brain/backup/db_names.py` exists: `backup/restore.py` was
+  745 before the identifier byte-budget guard (`f056c08`) and 806 after, so the
+  guard was moved out rather than left over the line.
+- A file **already over** may grow only for a written reason, recorded in **two
+  complementary places — not either/or**: (1) an inline comment **at the point of
+  growth**, for the reviewer reading the diff, and (2) a one-line pointer **in the
+  module docstring**, for the person who opens a 4,000-line file and asks why it
+  is allowed to be this big. They read the top; they do not `git blame` line 583.
+  Without (2) the justification exists but is undiscoverable, and a rule whose
+  evidence cannot be found is not auditable.
+
+  "It was already over" is not a reason.
+
+**Files over the ceiling** (`find src -name '*.py' | xargs wc -l | sort -rn` —
+re-derive, never inherit; re-measured on `feat/wiki-to-ui-consolidation` at
+**2026-08-20 23:14 EDT**, base `f8c76c0`, after the four unrecorded growths were
+recorded. The clock time is not decoration: a second agent was editing
+`src/brain/ui/` in this worktree throughout, so a date alone would not tell you
+whether a number predates the change you are reading — and these numbers moved
+twice in one evening.
+
+**Read the "head" column as: code growth PLUS the ceiling record that justifies
+it.** Writing the required docstring record into a file makes that file longer,
+which is a small, honest irony rather than a measurement error: of `search.py`'s
++30, sixteen lines are the `recency_ts` work and fourteen are the record saying
+why. Where the split matters, `git diff f8c76c0..HEAD -- <path>` shows the code
+delta alone.)
+
+| File | Base → head | Why it is not being split |
+|---|---|---|
+| `cli.py` | 9,019 → 9,035 (+16) | One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and deferred deliberately. **No longer unchanged:** `_VALID_SOURCE_KINDS` became a re-export of `brain.source_kinds` so the ingest *write* boundaries could enforce it — `cli` imports `cli_ingest`, so the set could not have stayed here. Net *less* duplication. **Recorded** inline + in the docstring. |
+| `mcp_server.py` | 4,009 → 4,137 (+128) | Same shape — one MCP tool registry. Four growths: `_split_source_filter` (so `source="none"` means the same thing here as in the UI), `source` validation at the `brain_ingest_stdin` write boundary, and the F6 confidential lens on `brain_list` and on `brain_backlinks`/`brain_links`. **Now recorded** in both required places — the docstring also carries the decorator hazard that cost `brain_recall` its registration (see below), and the polarity inversion at the `vault.graph` boundary. |
+| `ingest/__init__.py` | 2,298 → 2,366 (+68) | Dispatcher + both pipelines; the extractors are already separate modules. Growth is the extraction of `mirror_is_stale` / `write_vault_mirror` so a caller owning the outer transaction can defer the mirror write past its own commit. Near-zero net-new logic. **Now recorded.** |
+| `config.py` | 2,250 → 2,303 (+53) | Knobs belong beside the other knobs. Growth is one knob (`BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`) plus its tri-state parse and the ruling for why it is not `serve_confidential_bodies`. **Now recorded** — and the docstring names the real next move: the *prose* is what makes this file large, so split the rationale out, not the knobs. |
+| `vault/sync.py` | 1,747 → 1,817 (+70) | One reconciliation algorithm; the walk and the per-file upsert only make sense together. Growth is `_source_from_frontmatter` validating a file's `source:` against `brain.source_kinds` — the **third and last** unvalidated write boundary into `sources.kind` (`cli_ingest` and `mcp_server` closed the other two, and 2-of-3 was a worse resting state than 0-of-3). Most of the +70 is the ruling on the FAILURE MODE — dropped and warned, never rejected and never substituted — which is the non-obvious part and the reason a reviewer opens this function at all. **Recorded** inline + in the docstring. |
+| `queries.py` | 1,642 → 1,642 | Flat read-helper collection — cohesive, low coupling; splitting buys nothing. |
+| `setup.py` | 1,356 → 1,356 | One linear install script with three profile branches. |
+| `wiki/build_watcher.py` | 1,073 → 1,073 | |
+| `vault/watch.py` | 1,070 → 1,070 | |
+| `people.py` | 934 → 934 | **Not growth.** `wiki/build_people.py` renamed to `brain/people.py`; the only content change is rewriting `brain.wiki._person_name` imports/references to `brain.person_name`. Verified by diff — same line count, no new logic. |
+| `connect.py` | 925 → 925 | |
+| `graph_rag/extract.py` | 885 → 885 | |
+| `search.py` | 837 → 867 (+30) | Already over at base. Growth is `SearchResult.recency_ts` (its read hoisted out of the boost branch so a hit's shown date and its ranking date cannot disagree) plus `source_missing` threading. **Ranking unchanged — no eval re-baseline implied.** The inline comments were always there; the missing half was the docstring pointer, **now written**. |
+| `timeline.py` | 844 → 844 | |
+| `cli_ingest.py` | 844 → 867 (+23) | Over the ceiling the day it was extracted from `cli.py`. Growth is `--source` validation at the top of `ingest_stdin`: `sources.kind` is bare `TEXT NOT NULL` with no CHECK, so this guard is all that stood between a typo and a permanently mis-bucketed row. **Recorded.** |
+| `enrichment.py` | 808 → 808 | |
+
+`backup/restore.py` is deliberately **absent**: it crossed the ceiling on this
+branch (745 → 806) and was brought back under by the `db_names.py` extraction
+(now 755). `wiki/build_related.py` (815) is also gone — renamed to
+`brain/related.py` and *shrunk* to 714 in the process.
+
+`source_kinds.py` (54 lines) is **new on this branch and deliberately not in the
+table** — a new module lands under 800, and this one exists precisely so a
+constant could stop being copied: it is now the single definition behind
+`cli._VALID_SOURCE_KINDS`, with `ui/schemas.py` keeping its own guarded copy for
+the documented reason (it must not import the Typer CLI).
+
+**Closed 2026-08-20 — the four unrecorded growths now carry records.**
+`mcp_server.py`, `ingest/__init__.py`, `config.py` and `search.py` each grew on
+this branch without the two-place record. Every one now has a module-docstring
+pointer, and each already had (or has been given) the inline comment at the
+point of growth. Two files were added to the list while closing it: `cli.py` and
+`cli_ingest.py`, both of which *this* work grew, and both recorded in the same
+edit rather than left for the next pass — which is the only way the rule holds.
+
+**One thing the ceiling audit found that the ceiling is not about.** Reading
+*what* had grown in `mcp_server.py` — rather than only *how much* — surfaced a
+shipped regression in `3b16527`: `_split_source_filter` was inserted between an
+`@mcp_app.tool()` decorator and `def brain_recall`, so the decorator bound to the
+helper. `brain_recall` was silently dropped from the MCP surface and a private
+helper was published in its place. Nothing failed: not import, not mypy, not the
+suite. Fixed, and guarded from both directions by
+`tests/test_mcp_tool_registration.py`. The lesson is about the audit, not the
+rule — *how much a file grew* is a number, *what grew in it* is a review.
+
+There is **no automated gate** on this — the ceiling is a review checkpoint, not
+CI. If you add a file to this table, add the row in the same edit.
+
+> **Merge note.** `feat/agentic-token-reduction` carries its own version of this
+> section, with the same heading and at the same position, holding *that*
+> branch's measurements. That is deliberate: two same-titled sections at one
+> anchor make git conflict here and force a human to reconcile the two tables.
+> Filing this under a different heading or elsewhere in the file would merge
+> clean and leave the repo with two contradictory ceiling tables, which is the
+> worse outcome. Resolve by re-deriving the counts on the merged tree.
+
 ### Linting — Ruff + mypy
 Run after every change: `ruff check` (lint) or `ruff check --fix` (auto-fix), then `mypy src/`. Config in `pyproject.toml` under `[tool.ruff]` and `[tool.mypy]`.
 

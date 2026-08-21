@@ -67,10 +67,17 @@ LINK_KIND_ATTR = "data-brain-link-kind"
 
 #: Prefixes, ported from ``linkKindMark.ts``. Both the relative and the
 #: leading-slash forms appear in real bodies depending on how the link was
-#: written, so each list carries every shape.
+#: written, so between them the prefix list and :data:`_TAG_INFIX` cover every
+#: shape.
+#:
+#: ``_TAG_PREFIXES`` deliberately omits the leading-slash ``/tags/`` that
+#: ``linkKindMark.ts``'s ``TAG_PREFIXES`` carries: :data:`_TAG_INFIX` is exactly
+#: that string, and a leading-slash URL matches it at offset 0. Listing it in
+#: both places would be a branch no input can reach on its own.
 _TAG_PREFIXES: tuple[str, ...] = ("tags/", "./tags/")
-#: An absolute tag URL carries the tag segment mid-string, so the prefix test
-#: alone would miss it — see :func:`_is_tag_url`.
+#: A host-qualified tag URL carries the tag segment mid-string, so the prefix
+#: test alone would miss it — see :func:`_is_tag_url`. Doubles as the
+#: leading-slash case, per the note above.
 _TAG_INFIX = "/tags/"
 _EXTERNAL_PREFIXES: tuple[str, ...] = ("http://", "https://", "mailto:")
 _INGESTED_PREFIXES: tuple[str, ...] = ("_ingested/", "/_ingested/", "./_ingested/")
@@ -154,15 +161,21 @@ def _starts_with_any(url: str, prefixes: tuple[str, ...]) -> bool:
 def _is_tag_url(url: str) -> bool:
     """True for ``tags/x``, ``./tags/x``, ``/tags/x`` and ``https://h/tags/x``.
 
-    **Ported from ``linkKindMark.ts``'s stated contract, not its code.** That
-    file's header says a tag URL "starts with ``tags/`` (relative) **or contains
-    ``/tags/`` (absolute / slug-prefixed)", but its ``TAG_PREFIXES`` list only
-    ever prefix-matches — so an absolute tag URL is classified ``external``
-    there, contradicting the comment two screens above it. The infix reading is
-    the one taken here for two reasons: it is what the contract promises, and
-    under the prefix-only reading the tag/external precedence is **inert** (the
-    two prefix sets are disjoint, so no reordering could change any answer) —
-    an ordering nothing can observe is an ordering no test can defend.
+    Mirrors ``linkKindMark.ts``'s ``isTagUrl`` — prefix OR infix — so one
+    classifier has one meaning on both sides of the port.
+
+    That agreement is recent and the port is the half that was right. This
+    module took the infix reading from the overlay's *stated contract* ("starts
+    with ``tags/`` … or CONTAINS ``/tags/``") while the overlay's own
+    ``classifyLink`` still only prefix-matched, so ``https://host/tags/retro``
+    was a ``tag`` here and an ``external`` there. ``35fc486`` closed that by
+    adding ``TAG_INFIX``/``isTagUrl`` to the TypeScript, for the two reasons
+    this port had already banked on: a host-qualified link to this site's own
+    tag page IS a tag link, and under prefix-only the tag/external precedence is
+    **inert** — the two prefix sets are disjoint, so no reordering could change
+    any answer, and an ordering nothing can observe is an ordering no test can
+    defend. The accepted cost, on both sides, is that a genuinely external
+    ``https://elsewhere/tags/x`` is labelled ``tag``.
     """
     lowered = url.lower()
     return lowered.startswith(_TAG_PREFIXES) or _TAG_INFIX in lowered

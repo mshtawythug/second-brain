@@ -389,6 +389,39 @@ of its own.
 | 3 | `<cwd>/.env` | Walk-up from the current directory. Only works while you stand in the right place. Drop it with `BRAIN_IGNORE_CWD_DOTENV=1`. |
 | 4 | `$BRAIN_HOME/.env` | The canonical location. Honors `$BRAIN_HOME`; defaults to `~/.brain`. |
 
+### `<vault>/.brain-fastpath-ignore` — the one config file that is not `.env`
+
+Not an environment variable, and the only per-vault config file `brain` reads,
+which is why it is easy to miss.
+
+Body-only edits normally take the per-file fastpath (~2s to the UI). Whether an
+edit qualifies is decided by a fingerprint over the document's *structural*
+frontmatter keys; every other key has to be classified first. A key `brain`
+does not recognise **fails closed** — the edit is forced down the full-build
+path, which is correct but slow. Generic keys ship in the package. Keys
+specific to your own vault do not, deliberately: they used to, and shipping one
+vault's namespaced identifiers inside a public PyPI wheel served nobody else.
+
+So a vault with its own frontmatter conventions silently loses the fastpath
+until its owner declares those keys. Add a `.brain-fastpath-ignore` file at the
+**vault root** — not in `.quartz/`, which `brain wiki install --force` deletes:
+
+```
+# one frontmatter key per line; '#' starts a comment
+acme_ledger_id          # a literal key
+acme_sweep_*            # a glob covers a whole namespaced family
+```
+
+Globs (`*`, `?`, `[...]`) match case-sensitively. The file **adds to** the
+shipped defaults and never replaces them. An absent file is the documented
+zero-config state, not an error; a present-but-unreadable one forces a full
+build rather than trusting a stale fingerprint. Only list keys that genuinely
+cannot change rendered HTML — that is the promise the fastpath is keeping on
+your behalf.
+
+Implementation: `src/brain/wiki/ignored_fields.py`. Design rationale:
+`docs/specs/2026-05-09-fastpath-fingerprint.md`.
+
 ### `BRAIN_IGNORE_CWD_DOTENV`
 
 The cwd walk-up climbs to the filesystem root, so a process started in an

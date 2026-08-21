@@ -123,9 +123,15 @@ def compute_related(
     The per-document entry point into the same signal
     :func:`_iter_hybrid_neighbors` runs corpus-wide. Both delegate to
     :func:`_neighbors_for_source`, so a live call here and a precomputed
-    ``static/related/<slug>.json`` row rank identically for the same doc —
-    which is the point: ``brain ui``'s related-docs panel computes this on
-    demand instead of reading the emitter's JSON.
+    ``static/related/<slug>.json`` row rank identically for the same doc.
+
+    **Nothing in ``src/`` calls this yet, and that is deliberate.** The
+    related-docs panel it exists for is phase-5 work (design spec §9.2, whose
+    verified block records this function as new code authored ahead of its
+    consumer rather than moved from the emitter); the ``brain ui`` routes carry
+    no such panel today, and only ``tests/test_related_compute.py`` exercises
+    it. It is a deposit, not a live caller — do not delete it as dead code, and
+    do not read the paragraph above as describing a panel that ships.
 
     ``vector_sim_floor`` is required, with no default, for the reason
     :func:`brain.wiki.build_related.regenerate_related_json` states: the

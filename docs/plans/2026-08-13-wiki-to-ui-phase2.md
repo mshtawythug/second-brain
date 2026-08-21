@@ -143,7 +143,7 @@ Sizing unit: **1 P4U = one phase-4 item ≈ 0.3 agent-days** (phase 4 = 5 items 
 | # | Task | Files | Test | Mutation | Size |
 |---|---|---|---|---|---|
 | **T4** | **All phase-2 SQL, one file.** `recent_documents()` (port the 5 predicates from `build_homepage.py:270-333`, return ids), `documents_for_tag()`, `tag_counts()` (note: `queries.list_existing_tags:517-522` **already computes counts and throws them away** — `/api/facets` ships `count: null` for tags today; free fix). | `ui/queries.py`, new `tests/test_ui_queries_discovery.py` | Seed a `people/x.md` doc, an `index.md`, and a draft; assert `recent_documents()` returns none of them and orders by `coalesce(doc_date, ingested_at)`. | Drop `NOT LIKE 'people/%'` → the seeded people page appears in the list → fails. Each predicate gets its own mutation entry (clause (e)). | 1.5 |
-| **T5** | **`render.py`: heading anchors + TOC extraction + link-kind stamping.** Add a `heading_open` rule minting deterministic ids; export `extract_headings(text) -> list[Heading]` walking the **same stripped body** (S4); port `linkKindMark.classifyLink`'s 5-way order onto `link_open`/`wikilink`. **Anchors need no github-slugger parity** — nothing outside `brain ui` consumes them, so `wiki/_github_slugger.py` (used only by `fastpath_manifest.py`) does **not** need rescuing. | `ui/render.py`, new `tests/test_ui_render_toc.py`, `tests/test_ui_render_link_kinds.py` | (a) Two headings with the same text get distinct ids and the TOC's `href` **resolves to an id present in the HTML**. (b) A `[[wiki]]`, an `http://`, a `tags/x`, an `_ingested/…` link each get the right `data-brain-link-kind`. (c) A3 XSS test on the new attribute path. | (a) Remove the duplicate-suffix → both ids collide → the "TOC target exists and is unique" assertion fails. **Assert the target resolves, not that a `<a href="#…">` exists** — the latter survives the bug. ~~(b) Reorder `classifyLink` so `external` precedes `tag` → a `tags/` link misclassifies.~~ [⚠ **INERT AS WRITTEN — Appendix C-1.** Under `linkKindMark.ts`'s *code* the tag and external prefix sets are **disjoint**, so no reordering changes any answer. The mutation only lands once the **documented infix** semantics are ported, which they now are (`render.py:74` `_TAG_INFIX`). **Substitute:** classify `https://host/tags/retro` and assert `tag`; then delete `_TAG_INFIX` from the check at `render.py:165` and it reddens.] | 2.5 |
+| **T5** | **`render.py`: heading anchors + TOC extraction + link-kind stamping.** Add a `heading_open` rule minting deterministic ids; export `extract_headings(text) -> list[Heading]` walking the **same stripped body** (S4); port `linkKindMark.classifyLink`'s 5-way order onto `link_open`/`wikilink`. **Anchors need no github-slugger parity** — nothing outside `brain ui` consumes them, so `wiki/_github_slugger.py` (used only by `fastpath_manifest.py`) does **not** need rescuing. | `ui/render.py`, new `tests/test_ui_render_toc.py`, `tests/test_ui_render_link_kinds.py` | (a) Two headings with the same text get distinct ids and the TOC's `href` **resolves to an id present in the HTML**. (b) A `[[wiki]]`, an `http://`, a `tags/x`, an `_ingested/…` link each get the right `data-brain-link-kind`. (c) A3 XSS test on the new attribute path. | (a) Remove the duplicate-suffix → both ids collide → the "TOC target exists and is unique" assertion fails. **Assert the target resolves, not that a `<a href="#…">` exists** — the latter survives the bug. ~~(b) Reorder `classifyLink` so `external` precedes `tag` → a `tags/` link misclassifies.~~ [⚠ **INERT AS WRITTEN — Appendix C-1.** Under `linkKindMark.ts`'s *code* the tag and external prefix sets are **disjoint**, so no reordering changes any answer. The mutation only lands once the **documented infix** semantics are ported, which they now are (`render.py:74` `_TAG_INFIX`). **Substitute:** classify `https://host/tags/retro` and assert `tag`; then delete `_TAG_INFIX` from the check at `render.py:181` and it reddens. **RUN 2026-08-20: 2 failed, 24 passed** (baseline 26) — two, not one; C-1 has the detail and the record is in the test's docstring.] | 2.5 |
 | **T6** | **Pagination (B1 — ruled: over-fetch, option b).** The perf caveat is accepted, not unnoticed — page 4 re-pays a 5,854 ms rank leg. | `ui/schemas.py`, `ui/routes_search.py` | Seed 60 matching docs; assert page 2 returns rows 26–50 and that **no id appears on both pages** and **the union equals the unpaginated top-50**. | Off-by-one the slice → overlap assertion fails. (A "returns 25 rows" assertion survives an off-by-one — do not write that one.) | 1.5 |
 | **T7** | **Unreachable sources (B2 — ruled: additive `source_missing` kwarg + byte-identical-SQL pin).** | ~~`search_predicate.py`, `ui/schemas.py`, `ui/routes_meta.py`~~ **+ `src/brain/search.py`** [⚠ **Appendix C-5.** Without it the feature is undeliverable as specified: `hybrid_search` calls `build_predicate` with explicitly named kwargs and does **not** splat, so a filter added only to the predicate is unreachable from the UI. Delivered at `search.py:328` and `:456`.] | (a) With the flag **off**, the generated SQL is byte-identical to the pre-change string (pin it). (b) With it on, a seeded `source_id IS NULL` doc is returned and is returned by no other value. | (a) Add a stray clause to the default branch → byte-equality fails → proves the eval-neutrality claim is checked, not asserted. (b) Change the new clause to `IS NOT NULL` → the doc vanishes. | 1.5 |
 | **T8** | **Note-payload defects (R-2 §4.5).** `editable` must be `False` when `ctx.read_only` (`notes_service.py:161` currently ignores it — and `keys.js:19` Cmd+E checks **only** `state.note.editable`, so the keyboard path enters edit mode on a read-only server today, confirmed). Drop `body` from the payload when it can never be used (570 KB → ~287 KB on the largest doc). | `ui/notes_service.py`, `tests/test_ui_routes.py` (+~40 lines) | (a) `GET /api/notes/{id}` on a `--read-only` app → `editable is False`. (b) On a read-only app the payload has **no `body` key** and `html` is still non-empty. | (a) Restore the ungated expression → `editable` is `True` → fails. (b) Re-add `body` → the key-absence assertion fails. [⚠ **BOTH WERE ONLY EVER A PRESCRIPTION. Run 2026-08-20**, and the evidence now lives where a reader of the test will meet it: the two mutation records are in the docstrings of `test_read_only_server_reports_the_note_as_not_editable` and `test_read_only_payload_omits_the_body_but_still_renders` (`tests/test_ui_routes.py`). Each reddens its own test alone — **1 failed / 40 passed** on `pytest tests/test_ui_routes.py --no-cov`, at `notes_service.py:172` and `:211` respectively. A row that names a mutation nobody records running is a prescription, not coverage.] | 1.0 |
@@ -531,11 +531,40 @@ under the infix reading, so this comment is not commentary on the code — it is
 dependency of the test suite**.
 
 **Substitute mutation:** classify `https://host/tags/retro`, assert `tag`; then remove `_TAG_INFIX`
-from the check at `render.py:165` and it reddens.
+from the check at `render.py:181` (was `:165`; re-derive rather than inherit) and it reddens.
 
-**FLAGGED, NOT FIXED — belongs to the owner of `src/brain/ui/**`.** Reconciling
-`linkKindMark.ts`'s comment and code is a code change. It cannot be closed by editing the comment
-down to the code, because the comment is what the test suite depends on.
+> ✅ **CLOSED 2026-08-20, both halves — and the substitute is now RUN, not merely prescribed.**
+>
+> **The code half**, as C-1 required and in the direction it required.** `35fc486` added `TAG_INFIX`
+> and `isTagUrl()` to `linkKindMark.ts` and wired `classifyLink` to call it ahead of the `external`
+> test — verified on disk, not from the commit message: `linkKindMark.ts:155-158` defines
+> `isTagUrl`, `:183` is `if (isTagUrl(url)) return "tag"`, `:184` the `external` test. So the
+> overlay was edited up to its comment rather than the comment down to the code, and the precedence
+> the mutation assumes is now load-bearing on both sides of the port.
+>
+> **The mutation half**, which this row had never carried. Run against the current tree:
+>
+> ```
+> render.py:181  return lowered.startswith(_TAG_PREFIXES) or _TAG_INFIX in lowered
+>             -> return lowered.startswith(_TAG_PREFIXES)
+>
+> .venv/bin/python -m pytest tests/test_ui_render_link_kinds.py --no-cov -q
+> -> 2 failed, 24 passed        (baseline: 26 passed)
+> ```
+>
+> **Two, where this appendix predicted one**, and the extra one is the more informative:
+> `test_classify_link_kind_buckets[/tags/retro-tag]` reddens alongside the substitute test, because
+> the port's `_TAG_PREFIXES` deliberately omits the leading-slash `/tags/` that the overlay's
+> `TAG_PREFIXES` lists — `_TAG_INFIX` *is* that string and matches it at offset 0. The constant
+> therefore carries the leading-slash form as well as the host-qualified one.
+>
+> Blast radius measured rather than assumed: widened to `test_ui_render.py` and
+> `test_ui_render_toc.py` the same mutation reads **2 failed, 88 passed** (baseline: 90 passed) —
+> the same two tests and nothing else. Restored byte-identically (`shasum` verified); suite green.
+>
+> The record itself lives in the test's docstring
+> (`tests/test_ui_render_link_kinds.py::test_tag_wins_over_external_for_an_absolute_tag_url`),
+> which is where this branch's other mutation records live.
 
 ### C-2 · T15 — the summary mutation reddens the wrong assertion
 

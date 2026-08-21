@@ -618,7 +618,6 @@ def brain_search(
     }
 
 
-@mcp_app.tool()
 def _split_source_filter(source: str | None) -> tuple[str | None, bool]:
     """Split an MCP ``source`` value into ``(source_kind, source_missing)``.
 
@@ -643,6 +642,7 @@ def _split_source_filter(source: str | None) -> tuple[str | None, bool]:
     return source, False
 
 
+@mcp_app.tool()
 def brain_recall(
     query: str,
     budget_tokens: int | None = None,
