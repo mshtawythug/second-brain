@@ -391,21 +391,31 @@ _TAG_COUNTS_SQL_ANY = """
     ORDER BY t
 """
 
-#: The strict variant. ``/api/facets`` issues it on every NON-LOOPBACK request
-#: -- and not by default: :func:`tag_counts` defaults
-#: ``exclude_confidential=False`` and so selects the ``_ANY`` variant above
-#: unless a caller says otherwise. ("on every request" is what this line said
-#: until 2026-08-21, which the next two sentences immediately contradicted:
-#: they say a loopback bind issues the permissive variant. Both could not be
-#: true, and the wrong half was the one a reader meets first.)
+#: The strict variant. ``/api/facets`` issues it on EVERY request under the
+#: default knob, loopback included -- and not by default in the *function*
+#: sense: :func:`tag_counts` defaults ``exclude_confidential=False`` and so
+#: selects the ``_ANY`` variant above unless a caller says otherwise.
 #: ``routes_meta.facets`` reaches this SQL only because it passes
-#: ``exclude_confidential=strict`` explicitly, and ``strict`` is itself
-#: ``not ctx.serve_confidential_titles`` -- so on a loopback bind this route
-#: issues the permissive variant instead. Saying "by default" here named the
-#: wrong mechanism twice over and made the permissive default look like a
-#: protection; the default is argued at length on :func:`tag_counts`, and
-#: ``tests/test_ui_queries_confidential_defaults.py`` pins both it and the
-#: explicit call site.
+#: ``exclude_confidential=strict`` explicitly, and ``strict`` is
+#: ``not ctx.serve_confidential_titles`` -- a CONFIG-ONLY knob
+#: (``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES``, default False) that
+#: ``ui/server.build_context`` sets from config alone and, in its own words,
+#: "deliberately NOT ``or``-ed with ``loopback`` or ``include_confidential``".
+#: The bind address does not enter this decision at all. Saying "by default"
+#: here named the wrong mechanism; the default is argued at length on
+#: :func:`tag_counts`, and ``tests/test_ui_queries_confidential_defaults.py``
+#: pins both it and the explicit call site.
+#:
+#: (Correction archaeology, 2026-08-21. This line read "on every request" while
+#: the sentences under it said a loopback bind issues the permissive variant.
+#: Both could not be true. ``95ece7f`` resolved the contradiction by weakening
+#: the header to "NON-LOOPBACK" -- and picked the WRONG HALF. The loopback
+#: sentence was the false one, so the repair propagated the error into the
+#: sentence a reader meets first instead of deleting it. ``loopback`` governs
+#: ``serve_confidential_bodies``, a DIFFERENT field on the same context object;
+#: conflating the two is the whole of this defect. Resolving a self-contradiction
+#: requires deciding which half is true, which is a measurement, not a choice of
+#: which sentence to edit.)
 #:
 #: CORPUS-WIDE MINUS CONFIDENTIAL — a third scope, deliberately neither of the
 #: other two. It keeps the drafts and the ``people/`` pages that

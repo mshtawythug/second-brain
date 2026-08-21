@@ -164,7 +164,7 @@ a claim about the working one. Where the split matters,
 | `setup.py` | **re-derive: `wc -l src/brain/setup.py`** | Trail: 1,356 (`f8c76c0`); no commit through `b71c923` touched it. One linear install script with three profile branches. |
 | `wiki/build_watcher.py` | **re-derive: `wc -l src/brain/wiki/build_watcher.py`** | Trail: 1,073 (`f8c76c0`); no commit through `b71c923` touched it. |
 | `vault/watch.py` | **re-derive: `wc -l src/brain/vault/watch.py`** | Trail: 1,070 (`f8c76c0`); no commit through `b71c923` touched it. |
-| `people.py` | **re-derive: `wc -l src/brain/people.py`** | Trail: did not exist at `f8c76c0` → 934 (`3b16527`). **Not growth.** `wiki/build_people.py` renamed to `brain/people.py`; the only content change is rewriting `brain.wiki._person_name` imports/references to `brain.person_name`. Verified by diff — same line count, no new logic. **Now it IS growth:** 934 (`3b16527`) → 1,019 (`7f4d859`, +85), the F6 gate on `aggregate_people` — two frozen SQL variants plus the argument for a **fail-closed default**, this codebase's only one outside `ui/queries.tree_rows`. The default is the load-bearing part and the reason the prose is long: a hub page renders each document as an `###` heading and publishes, because its frontmatter carries no `sensitivity` key for `RemoveConfidential` to read. Recorded inline at the SQL variants, at the parameter, at all three call sites, and in the module docstring. |
+| `people.py` | **re-derive: `wc -l src/brain/people.py`** | Trail: did not exist at `f8c76c0` → 934 (`3b16527`). **Not growth.** `wiki/build_people.py` renamed to `brain/people.py`; the only content change is rewriting `brain.wiki._person_name` imports/references to `brain.person_name`. Verified by diff — same line count, no new logic. **Now it IS growth:** 934 (`3b16527`) → 1,019 (`7f4d859`, +85), the F6 gate on `aggregate_people` — two frozen SQL variants plus the argument for a **fail-closed default** — which is the house pattern for surfaces that EMIT, not the exception this row used to claim. *(It read "this codebase's only one outside `ui/queries.tree_rows`" until 2026-08-21. Two errors in one clause. **Not the only one:** `grep -rn 'exclude_confidential: bool = True' src/` returns **nine** hits, eight of them elsewhere — four in `related.py` (`compute_related`, `_iter_hybrid_neighbors`, `_eligible_source_docs`, `_neighbors_for_source`, the `related.json` publish path) and four in `ui/queries.py`. **And the symbol does not exist:** it is `iter_tree_rows`. `aa39159` mirrored the sentence here from `people.py`, so one false claim became two — which is the cost of mirroring prose instead of pointing at it. The `people.py` docstring is corrected too; re-derive with the grep above, never from this row.)* The default is the load-bearing part and the reason the prose is long: a hub page renders each document as an `###` heading and publishes, because its frontmatter carries no `sensitivity` key for `RemoveConfidential` to read. Recorded inline at the SQL variants, at the parameter, at all three call sites, and in the module docstring. |
 | `connect.py` | **re-derive: `wc -l src/brain/connect.py`** | One scoring algorithm plus the `## See Also` writeback primitives its two callers (CLI, MCP) share. **This row read `925 → 925` while the file was 952** — asserting no-growth for a day after `ec6afb6` landed, which is worse than a stale digit because it tells a compliance reader to skip the file. No digit here now; base and trail: 925 (`f8c76c0`, branch base) → 925 (`3b16527`, touched, no net change) → 952 (`ec6afb6`) → 972 (`56cc984` — the commit that wrote this very row, whose +20 lines *are* the ceiling record) → **the commit that added this clause** — named descriptively and carrying *no delta*, because a hop cannot know its own SHA and a delta would be invalidated by the same write that states it. **A record of a file's size is invalidated by the act of writing the record**, so no hop can name its own commit: the hash does not exist until after the write. That, not carelessness, is why this trail and `timeline.py`'s each stopped one hop short twice running — and why the fix is not a better digit but a *terminating form*: SHA-bound historical hops (frozen, cannot rot), a descriptive last hop for the in-flight change, and `wc -l` for the present. Read it as authoritative only **through the last SHA it names**; enumerate the rest with `git log --oneline f8c76c0..HEAD -- src/brain/connect.py`. The growth is the F6 confidential gate on `iter_suggestions`, which gates **both** joins — a suggestion names two documents, so a source-only filter would still publish every confidential doc that was somebody's suggested *target*. **Now recorded** inline + in the docstring. |
 | `graph_rag/extract.py` | **re-derive: `wc -l src/brain/graph_rag/extract.py`** | Trail: 885 (`f8c76c0`) → 885 (`3b16527`, touched, no net change). |
 | `search.py` | **re-derive: `wc -l src/brain/search.py`** | Trail: 837 (`f8c76c0`) → 853 (`3b16527`) → 867 (`0473b5f`). Already over at base. Growth is `SearchResult.recency_ts` (its read hoisted out of the boost branch so a hit's shown date and its ranking date cannot disagree) plus `source_missing` threading. **Ranking unchanged — no eval re-baseline implied.** The inline comments were always there; the missing half was the docstring pointer, **now written**. |
@@ -271,11 +271,29 @@ Three outcomes are legitimate and only the third is a defect:
 
 **Known residue at `7f4d859`, judged not a hole:** `related.py`'s
 `_corpus_common_lexemes` (two statements) scans every non-draft title including
-confidential ones. It is safe *and* gating it would be wrong — a lexeme
-qualifies only by appearing in more than `_CORPUS_FREQ_THRESHOLD` of the corpus,
-so no member is distinctive to any document; the set is consumed purely
-subtractively (`_build_self_tsquery` only ever `continue`s past a member);
-nothing from it reaches an emitted artifact. Excluding confidential titles from
+confidential ones. It is safe *and* gating it would be wrong — but on **two**
+load-bearing legs, not the three this paragraph asserted until 2026-08-21:
+
+1. ~~"A lexeme qualifies only by appearing in more than `_CORPUS_FREQ_THRESHOLD`
+   of the corpus, so no member is distinctive to any document."~~ **False on a
+   small corpus, and it was stated with no corpus-size qualifier.**
+   `_CORPUS_FREQ_THRESHOLD = 0.025` and the filter is `ndoc > total * 0.025`
+   over non-draft titled docs, so at **`total <= 39`** the threshold falls below
+   1 and a lexeme appearing in exactly **one** document — possibly a
+   confidential one — qualifies as "common". A demo sandbox or a fresh corpus is
+   squarely in that range. Re-derive with
+   `grep -n '_CORPUS_FREQ_THRESHOLD\|threshold_ndoc' src/brain/related.py`.
+2. **The set is consumed purely subtractively.** `_build_self_tsquery` only ever
+   `continue`s past a member, so membership can *remove* a token from a query
+   and can never add one.
+3. **Nothing from it reaches an emitted artifact.** It filters query terms; it
+   is never a value that gets rendered.
+
+**The conclusion is unchanged** — legs 2 and 3 hold at every corpus size and are
+each independently sufficient, which is why leg 1 being false does not open a
+hole. It is corrected rather than deleted because it was presented as
+load-bearing, and a reader who checks one leg should not find it is the one that
+does not hold. Excluding confidential titles from
 the *denominator* would change the ranking of the non-confidential corpus for
 users who have no confidential document at all. Recorded here rather than in
 `related.py` on purpose: that module is over the ceiling and its own docstring

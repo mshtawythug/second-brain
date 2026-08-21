@@ -465,10 +465,10 @@ def aggregate_people(
             addresses forwarded to the automated-sender filter on top of the
             always-on generic heuristic. Default empty.
         exclude_confidential: Omit ``sensitivity = 'confidential'`` documents
-            from every roster (F6). **Defaults True — fail-closed**, and it is
-            the only F6 flag in the codebase that does, apart from
-            :func:`brain.ui.queries.tree_rows`. The reasoning is the asymmetry
-            of getting it wrong, not a house style:
+            from every roster (F6). **Defaults True — fail-closed**, the house
+            pattern for surfaces that EMIT: four more gates in ``related.py``
+            (the ``related.json`` publish path) and four in ``ui/queries.py``
+            default the same way. The reasoning is the asymmetry, not style:
 
             * Default False and a future caller that PUBLISHES forgets it →
               confidential Krisp/Gmail titles are rendered as ``###`` headings
