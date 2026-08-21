@@ -60,8 +60,12 @@ def test_init_maps_lock_timeout_to_an_actionable_message(
     # Fact 1 — what is holding the lock. Naming the usual suspects is the
     # difference between "something" and a thing the operator can go stop.
     assert "brain-mcp" in out and "vault sync --watch" in out, out
-    # Fact 2 — nothing was applied AND nothing was recorded. Without this the
-    # operator cannot know whether re-running is safe.
-    assert "Nothing was applied" in out and "safe to " in out, out
+    # Fact 2 — the FAILING migration was not applied and not recorded. Scoped
+    # to the failing one, not "nothing": earlier pending migrations commit and
+    # record individually, so a run that got partway through keeps that
+    # progress. Without this fact the operator cannot know whether re-running
+    # is safe.
+    assert "failing migration was not applied and not recorded" in out, out
+    assert "safe to " in out, out
     # Fact 3 — the remedy.
     assert "brain-down" in out, out

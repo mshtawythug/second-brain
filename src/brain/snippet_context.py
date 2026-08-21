@@ -38,9 +38,14 @@ What the measurement found:
   byte comparison of the two arms).
 * Cause: only **3 of 55** results admitted *any* neighbour at all. The live
   median chunk is ~2,281 chars / ~570 tokens against a default
-  ``snippet_context_tokens`` budget of **200** — only 5.2% of chunks in the
-  corpus are small enough to fit. There is usually no neighbour set to select
-  from.
+  ``snippet_context_tokens`` budget of **200** — **676 of 13,114 chunks
+  (5.2%)** in the corpus were small enough to fit when measured (2026-08-13,
+  live corpus; a corpus-wide CHUNK statistic, coincidentally close to but
+  DISTINCT from the 3/55 = 5.45% of *results* above — do not conflate them).
+  Unlike every other figure in this note, no committed artifact carries the
+  676/13,114; it survives only here and in the uncommitted Wave-4 report, so
+  re-derive it (``SELECT count(*) FILTER (WHERE …)`` over chunk token counts)
+  before relying on it. There is usually no neighbour set to select from.
 * And on **47 of 55** results (85.5%) the **matched chunk alone** already
   exceeded ``max_chars``, so the cap truncates the matched chunk itself,
   before neighbour admission is ever consulted. Across all 55, the expansion

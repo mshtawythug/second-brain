@@ -12,6 +12,12 @@ was scoped to a corpus when it is really scoped to a BUDGET, and
 ``BRAIN_SHOW_MAX_CONTENT_TOKENS``' "2x" read as a payload guarantee when it
 bounds the two FIELDS. Both blocks now carry the arithmetic. Corrections, not
 features.
+
+**And again (2026-08-21, final PR-#8 review round):** the ceiling>=tool-default
+cross-checks and the two ``MCP_*_DEFAULT_LIMIT`` constants they compare
+against — closing for ``brain_search`` / ``brain_graphrag_entities`` the same
+operator-misconfig failure the recall cross-check already closed. Reason
+inline at both the constants and the checks.
 """
 import os
 import re
@@ -583,6 +589,19 @@ DEFAULT_MCP_ROWS_MAX_LIMIT = 200
 # theme selection in :mod:`brain.graph_rag.global_` -- overloading it would
 # couple an admin view to a ranking knob.
 DEFAULT_GRAPH_COMMUNITIES_LIST_LIMIT = 25
+
+# The two MCP tools whose ``limit`` SIGNATURE default is a fixed constant
+# rather than a config knob (`brain_search` and `brain_graphrag_entities`).
+# Owned HERE, and consumed by ``mcp_server``'s signatures, so that
+# ``Config.load`` can enforce ceiling >= default at startup -- the same
+# failure class the recall cross-check below closes for
+# BRAIN_RECALL_BUDGET_TOKENS. Without the check, an operator setting
+# BRAIN_SEARCH_MAX_LIMIT below 5 (or BRAIN_GRAPH_ENTITIES_MAX_LIMIT below 50)
+# turned EVERY default call into INVALID_PARAMS blaming the agent.
+# ``tests/test_config_mcp_ceilings.py`` pins the signatures to these constants
+# so the mirror cannot drift.
+MCP_SEARCH_DEFAULT_LIMIT = 5
+MCP_GRAPH_ENTITIES_DEFAULT_LIMIT = 50
 
 # F10 -- the agent-id grammar: one alphanumeric leading character followed by up
 # to 63 more alphanumerics / dot / underscore / colon / hyphen (64 chars total).
@@ -2386,6 +2405,24 @@ class Config:
                 f"({recall_budget_tokens}) must be <= "
                 f"BRAIN_RECALL_MAX_BUDGET_TOKENS ({recall_max_budget_tokens}); "
                 "the default recall budget cannot exceed its own ceiling"
+            )
+        # Same failure class, for the two tools whose ``limit`` default is a
+        # signature constant (see MCP_SEARCH_DEFAULT_LIMIT above) rather than
+        # a config knob: a ceiling below the tool's own default fails every
+        # call that omits ``limit``, with an error telling the agent to re-ask
+        # smaller for what is the operator's misconfiguration.
+        if search_max_limit < MCP_SEARCH_DEFAULT_LIMIT:
+            raise ConfigError(
+                f"BRAIN_SEARCH_MAX_LIMIT ({search_max_limit}) must be >= "
+                f"{MCP_SEARCH_DEFAULT_LIMIT}, the MCP brain_search tool's "
+                "default limit; a lower ceiling would reject every default call"
+            )
+        if graph_entities_max_limit < MCP_GRAPH_ENTITIES_DEFAULT_LIMIT:
+            raise ConfigError(
+                f"BRAIN_GRAPH_ENTITIES_MAX_LIMIT ({graph_entities_max_limit}) "
+                f"must be >= {MCP_GRAPH_ENTITIES_DEFAULT_LIMIT}, the MCP "
+                "brain_graphrag_entities tool's default limit; a lower ceiling "
+                "would reject every default call"
             )
 
         # Validated against the inlined :data:`AGENT_ID_PATTERN` -- NOT by

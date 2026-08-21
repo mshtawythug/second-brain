@@ -223,15 +223,18 @@ def test_recall_ceiling_is_derived_from_the_measured_overshoot(
 def test_positive_ceiling_accepts_an_override(
     monkeypatch: pytest.MonkeyPatch, isolated_dotenv: Path, env_var: str, field: str
 ) -> None:
-    # Explicit, not a mystery guest: 7 is below the 2000 default recall budget,
-    # and the budget<=ceiling cross-validation would (correctly) reject that
-    # pair for the BRAIN_RECALL_MAX_BUDGET_TOKENS row. Lowering the budget
-    # keeps every row testing the one thing it means to test — that the knob
-    # is read — instead of the pair rule, which has its own tests below.
+    # Explicit, not a mystery guest: 77 is below the 2000 default recall
+    # budget, and the budget<=ceiling cross-validation would (correctly)
+    # reject that pair for the BRAIN_RECALL_MAX_BUDGET_TOKENS row. Lowering
+    # the budget keeps every row testing the one thing it means to test —
+    # that the knob is read — instead of the pair rules, which have their own
+    # tests below. (77, not 7: the ceiling>=tool-default cross-checks would
+    # correctly reject 7 for BRAIN_GRAPH_ENTITIES_MAX_LIMIT, whose tool
+    # default is 50.)
     monkeypatch.setenv("BRAIN_RECALL_BUDGET_TOKENS", "1")
-    monkeypatch.setenv(env_var, "7")
+    monkeypatch.setenv(env_var, "77")
 
-    assert getattr(Config.load(), field) == 7
+    assert getattr(Config.load(), field) == 77
 
 
 @pytest.mark.parametrize(("env_var", "field"), _POSITIVE_ONLY)
@@ -360,3 +363,96 @@ def test_raising_both_recall_knobs_together_is_accepted(
     cfg = Config.load()
     assert cfg.recall_budget_tokens == 20000
     assert cfg.recall_max_budget_tokens == 30000
+
+
+# ---------------------------------------------------------------------------
+# Ceiling >= tool default — the same failure class, for the two tools whose
+# ``limit`` default is a signature constant rather than a config knob
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("env_var", "below", "default_name"),
+    [
+        ("BRAIN_SEARCH_MAX_LIMIT", "4", "MCP_SEARCH_DEFAULT_LIMIT"),
+        ("BRAIN_GRAPH_ENTITIES_MAX_LIMIT", "49", "MCP_GRAPH_ENTITIES_DEFAULT_LIMIT"),
+    ],
+)
+def test_ceiling_below_the_tool_default_is_a_config_error(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: Path,
+    env_var: str,
+    below: str,
+    default_name: str,
+) -> None:
+    """A ceiling below the tool's own signature default fails at load.
+
+    Without this, an operator setting the ceiling below the hardcoded default
+    turned every ``brain_search`` / ``brain_graphrag_entities`` call that
+    omits ``limit`` into ``INVALID_PARAMS`` telling the *agent* to re-ask
+    smaller — blaming the caller for the operator's misconfiguration, the
+    exact failure the recall cross-check above already closes for
+    ``BRAIN_RECALL_BUDGET_TOKENS``.
+
+    MUTATION: neuter either guard in ``Config.load`` (e.g. compare against
+    ``0`` instead of the constant) and its row here reddens at
+    ``pytest.raises`` — no ConfigError is raised.
+    """
+    monkeypatch.setenv(env_var, below)
+
+    with pytest.raises(ConfigError) as excinfo:
+        Config.load()
+    message = str(excinfo.value)
+    assert env_var in message
+    assert below in message
+    assert str(getattr(config_module, default_name)) in message
+
+
+@pytest.mark.parametrize(
+    ("env_var", "field", "default_name"),
+    [
+        ("BRAIN_SEARCH_MAX_LIMIT", "search_max_limit", "MCP_SEARCH_DEFAULT_LIMIT"),
+        (
+            "BRAIN_GRAPH_ENTITIES_MAX_LIMIT",
+            "graph_entities_max_limit",
+            "MCP_GRAPH_ENTITIES_DEFAULT_LIMIT",
+        ),
+    ],
+)
+def test_ceiling_equal_to_the_tool_default_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+    isolated_dotenv: Path,
+    env_var: str,
+    field: str,
+    default_name: str,
+) -> None:
+    """The boundary is inclusive — ceiling == default is a coherent config."""
+    default = getattr(config_module, default_name)
+    monkeypatch.setenv(env_var, str(default))
+
+    assert getattr(Config.load(), field) == default
+
+
+def test_mcp_tool_signature_defaults_match_the_config_constants() -> None:
+    """The cross-checks guard the SIGNATURE defaults; pin the mirror.
+
+    ``Config.load`` compares each ceiling against a constant in
+    ``brain.config``; the tools' signatures consume the same constants. If a
+    signature default ever drifts back to a literal, the cross-check would
+    silently guard a number the tool no longer uses — this is the test that
+    makes that drift loud.
+    """
+    import inspect
+
+    from brain import mcp_server
+
+    assert (
+        inspect.signature(mcp_server.brain_search).parameters["limit"].default
+        is config_module.MCP_SEARCH_DEFAULT_LIMIT
+    )
+    assert (
+        inspect.signature(mcp_server.brain_graphrag_entities)
+        .parameters["limit"]
+        .default
+        is config_module.MCP_GRAPH_ENTITIES_DEFAULT_LIMIT
+    )

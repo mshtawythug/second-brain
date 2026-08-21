@@ -41,6 +41,16 @@ ties. The added lines are the corrected claim at that call site and the scoping
 of ``brain_recall``'s delivered-token range to the budget it was measured at.
 Both were wrong-as-written, so this is a correction rather than a feature.
 
+**And once more, 2026-08-21 (final PR-#8 review round).** Two small growths,
+each with its inline reason at the point of growth: ``brain_show`` now
+blank-rejects ``documents.summary`` when deciding ``has_summary`` (a blank
+summary under ``summary_only=true`` returned an empty payload wearing an
+honest marker — the comment at the ``apply_content_ceiling`` call has the
+whole story), and the ``limit`` signature defaults of ``brain_search`` /
+``brain_graphrag_entities`` now come from :mod:`brain.config` constants so
+``Config.load`` can enforce ceiling >= default at startup. Per this note's own
+rule: re-derive the net with ``git diff --numstat``, never inherit it.
+
 And note what this note no longer claims: it used to say "this note is itself
 +31", and the very next commit edited the note to +34 and left the +31
 standing. A hand-maintained comment that measures itself is stale the first time
@@ -89,7 +99,11 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from . import capture as capture_mod
 from . import connect as connect_mod
 from .agent import resolve_agent_id
-from .config import Config
+from .config import (
+    MCP_GRAPH_ENTITIES_DEFAULT_LIMIT,
+    MCP_SEARCH_DEFAULT_LIMIT,
+    Config,
+)
 from .db import PersistentConnection, age_extension_available, connect, connect_age
 from .embeddings import make_embedder
 from .enrichment import ContradictionVerdict, OllamaEnricher, make_enricher
@@ -466,7 +480,9 @@ def _parse_iso_datetime(value: str, *, field: str) -> datetime:
 @mcp_app.tool()
 def brain_search(
     query: str,
-    limit: int = 5,
+    # The constant lives in ``brain.config`` so ``Config.load`` can enforce
+    # BRAIN_SEARCH_MAX_LIMIT >= this default at startup (still 5).
+    limit: int = MCP_SEARCH_DEFAULT_LIMIT,
     source: str | None = None,
     tag: str | None = None,
     since_days: int | None = None,
@@ -1169,7 +1185,15 @@ def brain_show(
     payload = apply_content_ceiling(
         payload,
         summary_only=summary_only,
-        has_summary=doc.summary is not None,
+        # Blank-reject, NOT ``is not None`` — the same rule, for the same
+        # reason, as ``search_results_brief_json``: migration 011 puts no CHECK
+        # on ``documents.summary``, so ``''`` is a legal stored value, and
+        # treating it as "has a summary" made ``summary_only=true`` return
+        # ``content=None, summary=''`` — an empty answer whose
+        # ``content_omitted`` marker claimed a summary was substituted. A blank
+        # summary now degrades exactly like a NULL one (body under the ceiling
+        # + ``summary_unavailable``).
+        has_summary=bool(doc.summary and doc.summary.strip()),
         max_tokens=effective_max_content,
         cost=state.embedder.count_tokens,
     )
@@ -3778,7 +3802,9 @@ def brain_graphrag_aliases_apply(
 def brain_graphrag_entities(
     entity_type: str | None = None,
     sort: str = "docs",
-    limit: int = 50,
+    # From ``brain.config`` so ``Config.load`` can enforce
+    # BRAIN_GRAPH_ENTITIES_MAX_LIMIT >= this default at startup (still 50).
+    limit: int = MCP_GRAPH_ENTITIES_DEFAULT_LIMIT,
     tenant: str | None = None,
 ) -> dict[str, Any]:
     """ENUMERATE the entities in the graph — "what's in my brain" (admin view).

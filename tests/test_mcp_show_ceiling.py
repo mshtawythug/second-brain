@@ -165,6 +165,38 @@ def test_show_summary_only_falls_back_when_summary_is_null(
     assert "content_omitted" not in payload
 
 
+@pytest.mark.parametrize("blank", ["", "   \n\t"], ids=["empty", "whitespace"])
+def test_show_summary_only_falls_back_when_summary_is_blank(
+    test_db: psycopg.Connection[Any], mcp_state: mcp_server._State, blank: str
+) -> None:
+    """The blank-but-non-NULL twin of the NULL fallback above.
+
+    Migration 011 puts no CHECK on ``documents.summary`` — only the enricher
+    keeps blanks out — so ``''`` and whitespace are legal stored values. A
+    ``doc.summary is not None`` gate treated them as "has a summary" and
+    returned ``content=None, summary=<blank>`` plus a ``content_omitted``
+    marker claiming a summary was substituted: an empty answer wearing an
+    honest marker, the exact failure the NULL fallback exists to prevent.
+    ``search_results_brief_json`` already blank-rejects on the same argument;
+    this pins ``brain_show`` to the same rule.
+
+    MUTATION: revert ``has_summary`` in ``brain_show`` to
+    ``doc.summary is not None`` and both parametrizations redden at the
+    ``payload["content"]`` assertion (content comes back ``None``).
+    """
+    doc_id = _seed(
+        test_db, title="Blank Summary", content_hash="w3-show-blank", summary=blank
+    )
+
+    payload = mcp_server.brain_show(id_prefix=doc_id, summary_only=True)
+
+    assert payload["content"] == _SHORT_BODY, (
+        f"a blank summary ({blank!r}) must degrade to the body, not to nothing"
+    )
+    assert payload["summary_unavailable"] is True
+    assert "content_omitted" not in payload
+
+
 # ---------------------------------------------------------------------------
 # max_content_tokens / the configured ceiling
 # ---------------------------------------------------------------------------

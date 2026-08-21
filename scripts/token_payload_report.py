@@ -118,7 +118,7 @@ from brain.errors import BrainError
 from brain.format_search import search_results_brief_json, search_results_json
 from brain.ingest import Embedder
 from brain.recall import recall
-from brain.search import SearchResult, _build_tsquery, hybrid_search
+from brain.search import SearchResult, build_tsquery, hybrid_search
 from brain.snippet_context import NEIGHBOR_WINDOW, expand_snippet_with_neighbors
 from brain.token_budget import TokenCost
 from brain.token_report import count_payload_tokens, serialize_payload
@@ -663,7 +663,7 @@ def measure_snippet_constraints(
         explain=True,
         sensitivity=sensitivity,
     )
-    tsquery = _build_tsquery(conn, query)
+    tsquery = build_tsquery(conn, query)
     cap = cfg.snippet_max_chars
     out: list[SnippetConstraint] = []
     for result in results:

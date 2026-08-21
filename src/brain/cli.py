@@ -8,8 +8,11 @@ this line exists so it is discoverable from the top of a 9,000-line file
 instead of by ``git blame``.
 
 Growth: **9,019 -> 9,058 (+39)** against base ``f8c76c0``; re-derive with
-``git diff master --numstat -- src/brain/cli.py``, never inherit it. It is the
-file's first growth on this branch. What it buys: migration ``028`` introduced
+``git diff master --numstat -- src/brain/cli.py``, never inherit it. It was the
+file's first growth on this branch; the final review round then grew the same
+handler a few lines more, scoping "nothing was applied" to the FAILING
+migration (earlier pending migrations commit individually and stay applied) —
+reason inline at the handler. What it buys: migration ``028`` introduced
 ``SET LOCAL lock_timeout``, so a contended ``brain init`` now aborts instead of
 stalling every reader — and an abort whose only output is a
 ``LockNotAvailable`` traceback trades a mysterious hang for a mysterious crash.
@@ -601,17 +604,24 @@ def init() -> None:
             # A migration asked for ACCESS EXCLUSIVE and gave up rather than
             # queueing every reader behind it (028+ set `lock_timeout`). The
             # raw message -- "canceling statement due to lock timeout" -- says
-            # nothing about what was holding the lock, that nothing was
-            # applied, or what to do. All three are knowable here.
+            # nothing about what was holding the lock, that the failing
+            # migration was not applied, or what to do. All three are knowable
+            # here. ("Failing migration", not "nothing": each file commits and
+            # records individually, so pending migrations that ran BEFORE the
+            # one that timed out stay applied -- which is fine, and re-running
+            # picks up exactly where this stopped. The literal "3s" mirrors
+            # 028's `lock_timeout`; kept as prose deliberately -- parsing the
+            # SQL to avoid a two-token drift would cost more than the drift.)
             typer.secho(
                 "init: a migration could not acquire its table lock within 3s "
                 "— another connection is holding a long transaction on this "
                 "database (brain-mcp, `brain vault sync --watch`, or an open "
                 "psql).\n"
-                "  Nothing was applied and nothing was recorded: the migration "
-                "runs in its own transaction and its schema_migrations row is "
-                "written only after it commits. `brain init` is safe to "
-                "re-run.\n"
+                "  The failing migration was not applied and not recorded "
+                "(each migration commits in its own transaction, and its "
+                "schema_migrations row is written only after it commits), so "
+                "`brain init` is safe to re-run and resumes exactly where "
+                "this stopped.\n"
                 "  Fix: stop the daemon (`brain-down`), then re-run "
                 "`brain init`.",
                 fg="red",

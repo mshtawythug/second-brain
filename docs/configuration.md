@@ -219,9 +219,9 @@ commands.
 | `BRAIN_RECENCY_HALFLIFE_DAYS` | `180` | Half-life of the recency boost applied to search scores. |
 | `BRAIN_BACKUP_DIR` | `$BRAIN_HOME/backups` | Where `brain backup` writes archives and `brain restore` discovers them. Absolute or `~`-relative. Resolved lazily, so relocating the brain home relocates its backups; never created until a backup actually runs. |
 | `BRAIN_SHOW_MAX_CONTENT_TOKENS` | `25000` | MCP `brain_show` body **and summary** cap. A cut body gains `content_truncated` + `content_tokens` + `content_truncated_recovery`; a cut summary gains `summary_truncated` + `summary_tokens` + `summary_truncated_recovery`. `content` and `summary` are **each** bounded by this value, so the two fields together total at most **2×** it (the serialized payload is larger — fixed metadata; see the note below). **`0` = unlimited** (the only knob in this family that accepts it), and it opts both fields out. |
-| `BRAIN_SEARCH_MAX_LIMIT` | `50` | MCP `brain_search` `limit` ceiling; equals the candidate-chunk limit, above which a larger `limit` cannot surface more documents. |
+| `BRAIN_SEARCH_MAX_LIMIT` | `50` | MCP `brain_search` `limit` ceiling; equals the candidate-chunk limit, above which a larger `limit` cannot surface more documents. Must be **≥ 5**, the tool's own default `limit` (cross-validated at startup, so a lower ceiling cannot fail every default call). |
 | `BRAIN_RECALL_MAX_BUDGET_TOKENS` | `13000` | MCP `brain_recall` `budget_tokens` ceiling. See the note below — this is **not** 32000, and the difference is the point. |
-| `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` | `500` | MCP `brain_graphrag_entities` ceiling. `limit=0` now means *this*, no longer "all". |
+| `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` | `500` | MCP `brain_graphrag_entities` ceiling. `limit=0` now means *this*, no longer "all". Must be **≥ 50**, the tool's own default `limit` (cross-validated at startup). |
 | `BRAIN_MCP_ROWS_MAX_LIMIT` | `200` | Row cap for the bare-list MCP tools (`brain_backlinks` / `brain_links` / `brain_orphans`). A cut list flags `more_available` on its last element. |
 | `BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT` | `25` | MCP `brain_graphrag_communities` listing cap (was "all"). Distinct from `BRAIN_GRAPH_COMMUNITY_LIMIT`, which governs retrieval-time global theme selection. |
 
