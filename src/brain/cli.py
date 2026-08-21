@@ -1,7 +1,10 @@
 """brain — second brain CLI.
 
-**File-size ceiling (CLAUDE.md): already over, and it grew.** 9,019 -> 9,035
-lines -- the first growth of `feat/wiki-to-ui-consolidation`, and a net
+**File-size ceiling (CLAUDE.md): already over, and it grew.** This pointer
+carries no live line count on purpose -- re-derive with
+``wc -l src/brain/cli.py``. What cannot rot is the trail: 9,019 (``f8c76c0``, branch
+base) -> 9,019 (``3b16527``, touched but no net change) -> 9,035 (``c62e3de``).
+It was the first growth of `feat/wiki-to-ui-consolidation`, and a net
 reduction in duplication rather than an addition of logic:
 ``_VALID_SOURCE_KINDS`` became a re-export of
 :data:`brain.source_kinds.VALID_SOURCE_KINDS` so the ingest WRITE boundaries

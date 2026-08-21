@@ -24,8 +24,11 @@ combiner (see `docs/plans/2026-05-06-search-ranking-fix.md`):
 
 The fts_only path bypasses (3) entirely.
 
-**File-size ceiling (CLAUDE.md): already over, and it grew.** 837 -> 867 lines
-on `feat/wiki-to-ui-consolidation`. Two changes, both reasoned inline at the
+**File-size ceiling (CLAUDE.md): already over, and it grew.** This pointer
+carries no live line count on purpose -- re-derive with
+``wc -l src/brain/search.py``. What cannot rot is the trail: 837 (``f8c76c0``,
+branch base) -> 853 (``3b16527``) -> 867 (``0473b5f``).
+Two changes, both reasoned inline at the
 point of growth: :attr:`SearchResult.recency_ts`, whose read was hoisted OUT of
 the recency-boost branch so a hit's displayed date and its ranking date cannot
 disagree; and the `source_missing` parameter threaded through to
@@ -34,9 +37,9 @@ that has no ``sources`` row. **Ranking is unchanged** by both -- the hoist moves
 a read, not a score -- so no eval re-baseline is implied.
 
 Extract before growing this file again. The precedent on this branch is
-`backup/restore.py` (745 -> 755): it would have crossed the ceiling, and its
-identifier-budget guard was moved out to `backup/db_names.py` (75 lines) rather
-than left over the line.
+`backup/restore.py`, whose trail is 745 (``f8c76c0``) -> 806 (``f056c08``) ->
+755 (``0473b5f``): it crossed the ceiling, and its identifier-budget guard was
+moved out to `backup/db_names.py` rather than left over the line.
 """
 import logging
 import re

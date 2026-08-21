@@ -13,8 +13,11 @@ additionally keeps ``monkeypatch.setattr("brain.cli.<name>", ...)`` — the patc
 point the existing test suite uses — effective for these commands. Same pattern
 as :mod:`brain._capture_command`.
 
-**File-size ceiling (CLAUDE.md): over at creation, and it grew.** 844 -> 867
-lines on `feat/wiki-to-ui-consolidation`. The growth is ``--source`` validation
+**File-size ceiling (CLAUDE.md): over at creation, and it grew.** This pointer
+carries no live line count on purpose -- re-derive with
+``wc -l src/brain/cli_ingest.py``. What cannot rot is the trail: 844
+(``f8c76c0``, branch base) -> 867 (``c62e3de``).
+The growth is ``--source`` validation
 at the top of :func:`ingest_stdin`, reasoned inline at the guard:
 ``sources.kind`` is bare ``TEXT NOT NULL`` with no CHECK constraint, so this
 guard was the only thing standing between a typo and a permanently mis-bucketed

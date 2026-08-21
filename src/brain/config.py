@@ -1,7 +1,10 @@
 """Configuration loading from environment / .env.
 
-**File-size ceiling (CLAUDE.md): already over, and it grew.** 2,250 -> 2,303
-lines on `feat/wiki-to-ui-consolidation`. The growth is ONE knob --
+**File-size ceiling (CLAUDE.md): already over, and it grew.** This pointer
+carries no live line count on purpose -- re-derive with
+``wc -l src/brain/config.py``. What cannot rot is the trail: 2,250 (``f8c76c0``,
+branch base) -> 2,289 (``3b16527``) -> 2,303 (``0473b5f``).
+The growth is ONE knob --
 ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`` -- plus its tri-state parse and the
 ruling, recorded inline at the default, for why it is deliberately NOT
 ``UiContext.serve_confidential_bodies``: "trusted to read a confidential note it

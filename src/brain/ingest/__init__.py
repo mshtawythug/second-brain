@@ -1,7 +1,10 @@
 """Ingest pipeline: extract → chunk → embed → store.
 
-**File-size ceiling (CLAUDE.md): already over, and it grew.** 2,298 -> 2,366
-lines on `feat/wiki-to-ui-consolidation`. The growth is the extraction of
+**File-size ceiling (CLAUDE.md): already over, and it grew.** This pointer
+carries no live line count on purpose -- re-derive with
+``wc -l src/brain/ingest/__init__.py``. What cannot rot is the trail: 2,298
+(``f8c76c0``, branch base) -> 2,352 (``3b16527``) -> 2,366 (``0473b5f``).
+The growth is the extraction of
 :func:`mirror_is_stale` and :func:`write_vault_mirror` out of the tail of
 :func:`update_document`, so a caller that owns the OUTER transaction can defer
 the vault-mirror write until after its own commit

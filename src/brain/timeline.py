@@ -22,7 +22,20 @@ This pointer carries no live line count on purpose — the ceiling table's entry
 for this file asserted ``844 -> 844`` for a full day *after* the growth below
 had landed, so a reader auditing compliance was told there was nothing to
 audit. Re-derive with ``wc -l src/brain/timeline.py``. What does not rot is the
-base and the trail: 844 (``f8c76c0``, branch base) -> 877 (``ec6afb6``).
+base and the trail: 844 (``f8c76c0``, branch base) -> 877 (``ec6afb6``) -> 900
+(``56cc984``, the commit that wrote this very record -- its +23 lines ARE the
+ceiling record) -> **the commit that added this paragraph**, named
+descriptively and with no delta.
+
+WHY THE LAST HOP HAS NO NUMBER AND NO SHA. A record of a file's size is
+invalidated by writing the record -- the hash does not exist until after the
+write, and any delta is falsified by the same edit that states it -- so a trail
+that tries to name its own commit is stale on arrival. That, not oversight, is
+why this record stopped one hop short twice running. SHA-bound hops are facts
+about frozen commits and cannot rot; the final hop is descriptive; the present
+comes from ``wc -l`` above plus
+``git log --oneline f8c76c0..HEAD -- src/brain/timeline.py``. Read the trail as
+authoritative only THROUGH THE LAST SHA IT NAMES.
 
 The one growth is the F6 confidential gate, threaded through
 :func:`_compose_doc_filter` and out to :func:`build_timeline`, and reasoned
