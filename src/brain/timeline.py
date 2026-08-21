@@ -35,6 +35,7 @@ from .config import (
 )
 from .graph_rag.tenancy import resolve_tenant
 from .queries import resolve_person_to_keys
+from .sensitivity import not_confidential_sql
 from .token_budget import pack_greedy
 
 if TYPE_CHECKING:
@@ -390,6 +391,7 @@ def _compose_doc_filter(
     since: datetime | None,
     until: datetime | None,
     doc_scope: list[str] | None,
+    exclude_confidential: bool = False,
 ) -> tuple[list[str], list[Any]]:
     """Build the shared parameterized WHERE clauses for the bucketing queries.
 
@@ -398,8 +400,21 @@ def _compose_doc_filter(
     ``graph_entity_mentions``↔``documents`` join the same way, so the clause +
     bound-param composition lives here once (DRY). ``date_expr`` is an internal
     whitelist literal; everything else is bound as ``%s`` parameters.
+
+    ``exclude_confidential`` (F6) is applied HERE rather than at the projection
+    for the reason :func:`brain.mcp_server._confidential_lens` gives: the gate
+    must remove the document from the match set, not blank a field. Both
+    consumers of this predicate join ``documents d``, so one clause here drops
+    the confidential doc out of ``doc_ids``, ``doc_titles``, the co-topic tally,
+    the ``doc_count`` / ``mention_count`` arithmetic, the auto-granularity probe,
+    AND the synthesis bundle in one move — none of which are separately gated,
+    and all of which would otherwise leak a different shadow of the same
+    document. Withholding only ``doc_titles`` would still publish the ids, and
+    an id is enough to fetch the document.
     """
     where = ["gem.entity_id = ANY(%s)", "gem.tenant_id = %s"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
     params: list[Any] = [entity_ids, tenant_id]
     if since is not None:
         where.append(f"{date_expr} >= %s")
@@ -422,6 +437,7 @@ def _distinct_doc_dates(
     since: datetime | None,
     until: datetime | None,
     doc_scope: list[str] | None,
+    exclude_confidential: bool = False,
 ) -> list[datetime]:
     """Distinct document date-anchors for the matched set (auto-granularity probe).
 
@@ -438,6 +454,7 @@ def _distinct_doc_dates(
         since=since,
         until=until,
         doc_scope=doc_scope,
+        exclude_confidential=exclude_confidential,
     )
     sql = (
         f"SELECT DISTINCT {date_expr} AS d "
@@ -459,6 +476,7 @@ def _query_buckets(
     since: datetime | None,
     until: datetime | None,
     doc_scope: list[str] | None,
+    exclude_confidential: bool = False,
 ) -> list[_RawBucket]:
     """Run the temporal bucketing query (spec §3e).
 
@@ -477,6 +495,7 @@ def _query_buckets(
         since=since,
         until=until,
         doc_scope=doc_scope,
+        exclude_confidential=exclude_confidential,
     )
     sql = (
         f"SELECT date_trunc(%s, {date_expr}) AS bucket_start, "
@@ -689,6 +708,7 @@ def build_timeline(
     synthesize: bool = False,
     enricher: OllamaEnricher | None = None,
     tenant: str | None = None,
+    exclude_confidential: bool = False,
 ) -> TimelineContext:
     """Build the temporal timeline for ``query`` (spec §3f — the orchestrator).
 
@@ -706,6 +726,17 @@ def build_timeline(
     a bad ``granularity`` / ``since`` / ``until`` raises ``ValueError``; an
     unknown / ambiguous ``person`` propagates ``PersonNotFound`` /
     ``PersonAmbiguous`` (mapped to clean CLI/MCP errors by the caller).
+
+    ``exclude_confidential`` (F6) drops confidential documents from the matched
+    set before any bucket is formed — see :func:`_compose_doc_filter` for why the
+    gate belongs in the predicate rather than in the projection. It DEFAULTS
+    FALSE (include), matching :mod:`brain.vault.graph` and
+    :mod:`brain.graph_rag._retrieval_common` rather than the MCP layer's
+    ``include_confidential``: ``brain timeline`` at a terminal is the owner
+    reading their own corpus, while :func:`brain.mcp_server.brain_timeline` is
+    the boundary and passes ``exclude_confidential=not include_confidential``.
+    Opposite name AND opposite default, so an inverted bridge leaves every
+    one-directional test green — both directions are pinned.
     """
     requested = _validate_granularity(granularity or cfg.timeline_granularity)
     auto = requested == "auto"
@@ -766,6 +797,7 @@ def build_timeline(
             since=since_dt,
             until=until_dt,
             doc_scope=doc_scope,
+            exclude_confidential=exclude_confidential,
         )
         gran = _resolve_auto_granularity(dates)
     else:
@@ -780,6 +812,7 @@ def build_timeline(
         since=since_dt,
         until=until_dt,
         doc_scope=doc_scope,
+        exclude_confidential=exclude_confidential,
     )
     if not raw_buckets:
         return TimelineContext(

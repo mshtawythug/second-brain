@@ -27,6 +27,7 @@ import psycopg
 from .config import Config
 from .errors import ConnectError
 from .related import _avg_embedding, _eligible_source_docs
+from .sensitivity import not_confidential_sql
 from .vault._atomic import atomic_write_text
 from .vault.paths import safe_wikilink_alias, strip_md_extension
 
@@ -724,21 +725,47 @@ def iter_suggestions(
     *,
     status: str | None = "pending",
     limit: int = 20,
+    exclude_confidential: bool = False,
 ) -> list[SuggestionRow]:
     """Return suggestions joined to their source/target titles.
 
     ``status=None`` returns every row (the ``--all`` view); otherwise filters to
     one status. Ordered by score descending. ``limit`` caps the result.
+
+    ``exclude_confidential`` (F6) drops any suggestion where EITHER endpoint is
+    confidential. Both joins are gated, not just the source: a suggestion names
+    two documents and either title is a full disclosure, so filtering ``sd``
+    alone would still publish every confidential document that happens to be
+    somebody's suggested target. ``tests/test_mcp_listing_confidential.py`` makes
+    the confidential document the TARGET precisely so a source-only fix fails.
+
+    Why this read needed a gate at all: :func:`brain.mcp_server.brain_connect_list`
+    takes no document id and no query. Every title it returns is a document the
+    caller never named, which is the enumeration the F6 ruling is about — the
+    same argument that closed ``/api/notes/{id}/links`` and ``brain_orphans``.
+
+    It DEFAULTS FALSE — include — matching :mod:`brain.vault.graph` rather than
+    the MCP layer's ``include_confidential``. ``brain connect list`` at a
+    terminal is the owner reading their own corpus and offers no flag to turn a
+    hidden row back on; the MCP server is the boundary and passes
+    ``exclude_confidential=not include_confidential``. Opposite name AND opposite
+    default: inverting that bridge flips the gate while every one-directional
+    test stays green, because the permissive direction only ever ADDS rows. Both
+    directions are pinned.
     """
+    where = ["(%(status)s::text IS NULL OR ls.status = %(status)s)"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("sd"))
+        where.append(not_confidential_sql("td"))
     rows = conn.execute(
-        """
+        f"""
         SELECT ls.id::text, ls.source_doc_id::text, ls.target_doc_id::text,
                sd.title, td.title, ls.score, ls.graph_score, ls.embed_score,
                ls.status, ls.suggested_at
         FROM link_suggestions ls
         JOIN documents sd ON sd.id = ls.source_doc_id
         JOIN documents td ON td.id = ls.target_doc_id
-        WHERE (%(status)s::text IS NULL OR ls.status = %(status)s)
+        WHERE {' AND '.join(where)}
         ORDER BY ls.score DESC, ls.id
         LIMIT %(limit)s
         """,

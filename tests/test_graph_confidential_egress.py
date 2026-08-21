@@ -38,7 +38,15 @@ import pytest
 
 from brain import mcp_server
 from tests.test_mcp_graphrag import (
+    _add_chunk as _add_plain_chunk,
+)
+from tests.test_mcp_graphrag import (
+    _add_mention,
     _build,
+    _community_state,
+    _FakeCommunityEnricher,
+    _insert_document,
+    _insert_entity,
     _make_state,
     _seed_directory,
     _seed_gmail_doc,
@@ -155,6 +163,35 @@ def _fixture_is_not_vacuous(conn: psycopg.Connection[Any], doc_id: str) -> None:
         "fixture must have a NON-EMPTY chunk containing the body marker, "
         "or the snippet assertions pass vacuously"
     )
+
+
+def test_the_confidential_fixture_is_not_vacuous(
+    test_db: psycopg.Connection[Any], confidential_graph: str
+) -> None:
+    """The premise itself, asserted OUTSIDE any ``xfail`` body.
+
+    Every other test here calls :func:`_fixture_is_not_vacuous` inline, which is
+    correct for the plain ones — a broken premise turns them red. It is NOT
+    correct inside an ``xfail(strict=True)`` body, and that was the defect this
+    test exists to close: ``xfail`` records a failure from ANYWHERE in the body
+    as expected, so the vacuity guard firing was indistinguishable from the leak
+    persisting. Verified by execution before the fix, not reasoned about: with
+    ``_mark_confidential`` stubbed to a no-op — nothing in the fixture
+    confidential at all — the strict-xfail pin that used to sit below this
+    still reported ``1 xfailed`` and exit 0. (That pin is now an ordinary
+    assertion; the marker came off when the leak was closed. This guard is kept
+    because the body/marker interaction recurs the next time anyone pins
+    anything here, and because a premise worth asserting is worth asserting
+    whether or not a marker is currently present.)
+
+    The hole was one-way and worth stating precisely, because over-discounting
+    the marker would be its own error: strict ``xfail`` still reddens correctly
+    when someone CLOSES a gap with a healthy fixture, which is what it was
+    chosen for. What it could not do is tell a broken premise from an open leak.
+    Hoisting the check into a test with no marker on it restores that: a broken
+    fixture now fails HERE, unambiguously, where nothing can absorb it.
+    """
+    _fixture_is_not_vacuous(test_db, confidential_graph)
 
 
 # ---------------------------------------------------------------------------
@@ -428,38 +465,217 @@ def test_graphrag_themes_include_confidential_opts_back_in(
 
 
 # ---------------------------------------------------------------------------
-# KNOWN UNFIXED RESIDUAL — themes membership, recorded as executable xfail
+# THE THREE MEMBERSHIP PATHS — pinned as residuals, then CLOSED
 # ---------------------------------------------------------------------------
 #
-# The gate above closed ``GraphContext.docs`` for every mode. It did NOT close
-# two other paths that themes/global populate from separate queries:
+# The gate on ``GraphContext.docs`` did not by itself close three sibling paths
+# that themes/global populate from separate queries:
 #
-#   * ``ThemeGroup.doc_ids`` — built in ``_populate_theme_docs`` from
-#     ``_docs_by_entity``, which has no sensitivity predicate.
-#   * ``ThemeGroup.summary`` under ``synthesize=true`` — built from
-#     ``themes._fetch_doc_titles`` (themes.py), also unfiltered, so confidential
-#     TITLES feed the synthesis prompt.
+#   * ``ThemeGroup.doc_ids`` — ``_populate_theme_docs`` via ``_docs_by_entity``.
+#   * ``ThemeGroup.summary`` under ``synthesize=true`` — ``_fetch_doc_titles``,
+#     whose output goes into a PROMPT, so a leak there is unrecoverable: the
+#     titles have left the machine before the summary comes back.
+#   * ``CommunityGroup.doc_ids`` in ``global_`` — ``_community_doc_scores``.
 #
-# ``CommunityGroup.doc_ids`` in ``global_`` has the same shape.
+# All three were pinned here as STRICT xfail rather than left as prose, on the
+# argument that a prose remainder gets lost between passes — and this exact
+# class, a gate stopping one query short of a sibling path, is what produced
+# the finding in the first place.
 #
-# These are pinned as STRICT xfail rather than described in a handoff note: a
-# prose remainder gets lost between passes, and this exact class — a gate that
-# stopped one query short of a sibling path — is what produced this finding in
-# the first place. Strict means that whoever closes the gap gets a RED test
-# telling them to delete the marker, so the record cannot silently rot.
+# The pins then did precisely what strict xfail is for. Each path grew an
+# ``exclude_confidential`` predicate, every pin flipped to XPASS, and the suite
+# went RED until the markers came off — which is how these three became
+# ordinary assertions instead of a handoff note nobody read. They are kept as
+# POSITIVE gate tests: the paths are closed, and these are what keep them shut.
+#
+# Each still has a separate UNMARKED non-vacuity sibling. That separation is
+# not vestigial. It was the second defect fixed here: the vacuity guard used to
+# be called INSIDE an xfail body, where a broken premise and a live leak were
+# indistinguishable — both recorded as green.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="KNOWN GAP: ThemeGroup.doc_ids bypasses _build_doc_results; "
-    "confidential document ids are still enumerated to the caller.",
-)
-def test_graphrag_themes_doc_ids_still_leak_membership(
-    test_db: psycopg.Connection[Any], confidential_graph: str
+def test_graphrag_themes_doc_ids_exclude_the_confidential_document(
+    confidential_graph: str,
 ) -> None:
-    _fixture_is_not_vacuous(test_db, confidential_graph)
+    """``ThemeGroup.doc_ids`` must not enumerate a confidential document.
 
+    Membership is itself derived from the content: an id in this list tells the
+    caller the document exists and matched, which is the disclosure even when
+    no body or title travels with it.
+
+    Premise guarded by :func:`test_the_confidential_fixture_is_not_vacuous`,
+    which carries no marker. Asserting it inline here would put the guard back
+    inside a body that once swallowed it.
+    """
     payload = mcp_server.brain_graphrag_themes(person="bob")
 
-    leaked = {i for t in payload["themes"] for i in t["doc_ids"]}
-    assert confidential_graph not in leaked
+    enumerated = {i for t in payload["themes"] for i in t["doc_ids"]}
+    assert confidential_graph not in enumerated
+
+
+# --- residual 2: ThemeGroup.summary — confidential TITLES reach the prompt ---
+
+
+class _RecordingEnricher:
+    """Captures the ``doc_titles`` handed to the group-synthesis prompt.
+
+    The leak is what CROSSES the boundary to the model, so the assertion is
+    made on the prompt input rather than on the returned summary: a real
+    summarizer might or might not echo a title it was given, and that choice is
+    the model's, not the gate's. Recording the argument removes the ambiguity —
+    and removes any need for a live Ollama.
+    """
+
+    model = "fake-model:1b"
+
+    def __init__(self) -> None:
+        self.doc_titles: list[str] = []
+
+    def summarize_group(
+        self, *, person: str | None, entity_names: list[str], doc_titles: list[str]
+    ) -> str | None:
+        self.doc_titles.extend(doc_titles)
+        return "synthetic summary"
+
+
+@pytest.fixture
+def synthesis_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_embedder: object,
+    confidential_graph: str,  # noqa: ARG001 — seeds the graph, then we re-install
+) -> _RecordingEnricher:
+    """Re-install the MCP state with a recording enricher.
+
+    Depends on ``confidential_graph`` (rather than sitting beside it) so the
+    ordering is a data dependency instead of an assumption about fixture
+    resolution order: the graph is seeded under ``graph_state``, and only then
+    is ``_state`` replaced with one that carries an enricher.
+    """
+    recorder = _RecordingEnricher()
+    monkeypatch.setattr(
+        mcp_server, "_state", _make_state(fake_embedder, enricher=recorder)
+    )
+    return recorder
+
+
+def test_themes_synthesis_prompt_is_reached_and_carries_titles(
+    synthesis_recorder: _RecordingEnricher,
+) -> None:
+    """Non-vacuity for the pin below, and UNMARKED so it cannot be absorbed.
+
+    ``synthesize=True`` degrades silently to ``summary=None`` when the enricher
+    is missing or raises — by design. So a pin asserting "no confidential title
+    in the prompt" would pass perfectly for the wrong reason if the prompt were
+    never built at all. This asserts the path actually executes and really does
+    carry document titles, using the non-confidential one as the witness.
+    """
+    mcp_server.brain_graphrag_themes(person="bob", synthesize=True)
+
+    assert synthesis_recorder.doc_titles, (
+        "the synthesis prompt was never built — themes(synthesize=True) "
+        "degraded, so the pin below would pass vacuously"
+    )
+    assert "Public Scheduling Note" in synthesis_recorder.doc_titles
+
+
+def test_graphrag_themes_summary_prompt_excludes_confidential_titles(
+    synthesis_recorder: _RecordingEnricher,
+) -> None:
+    """No confidential TITLE may reach the group-synthesis prompt.
+
+    Asserted on what crosses the boundary — the argument handed to
+    ``summarize_group`` — rather than on the returned summary. Whether a model
+    echoes a title it was given is the model's choice; whether it was given the
+    title at all is the gate's. Premise guarded by the test above.
+    """
+    mcp_server.brain_graphrag_themes(person="bob", synthesize=True)
+
+    assert CONF_TITLE not in synthesis_recorder.doc_titles
+
+
+# --- residual 3: CommunityGroup.doc_ids in global_ --------------------------
+
+
+def _relate(conn: psycopg.Connection[Any], a: str, b: str, weight: float) -> None:
+    """One ``co_occurs`` edge, endpoints ordered as the schema expects."""
+    src_id, dst_id = sorted((a, b))
+    conn.execute(
+        "INSERT INTO graph_relationships "
+        "(tenant_id, src_id, dst_id, rel_type, weight, co_count, doc_count) "
+        "VALUES ('default', %s, %s, 'co_occurs', %s, 1, 1)",
+        (src_id, dst_id, weight),
+    )
+
+
+@pytest.fixture
+def confidential_communities(
+    test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
+) -> str:
+    """Two triangles + a weak bridge, ONE community's document confidential.
+
+    ``confidential_graph`` cannot serve this pin: its three people form a path
+    (alice-bob, bob-carol), and community detection needs denser structure to
+    resolve stable groups, so a global assertion over it would rest on whether
+    Louvain happened to emit anything. This mirrors the shape
+    ``test_mcp_graphrag._seed_communities_corpus`` already uses for the global
+    mode — two clean triangles, deterministic — and marks one cluster's
+    document confidential. Returns that document's id.
+    """
+    _community_state(monkeypatch, _FakeCommunityEnricher())
+    cluster_one = [
+        _insert_entity(test_db, "default", f"P-{i}", f"p-{i}") for i in range(3)
+    ]
+    cluster_two = [
+        _insert_entity(test_db, "default", f"Q-{i}", f"q-{i}") for i in range(3)
+    ]
+    for a, b in [(0, 1), (0, 2), (1, 2)]:
+        _relate(test_db, cluster_one[a], cluster_one[b], 0.8)
+        _relate(test_db, cluster_two[a], cluster_two[b], 0.8)
+    _relate(test_db, cluster_one[2], cluster_two[0], 0.05)  # weak bridge
+
+    conf_id = _insert_document(test_db, CONF_TITLE)
+    normal_id = _insert_document(test_db, "Cluster Two Doc")
+    for entity in cluster_one:
+        _add_mention(test_db, "default", entity, conf_id)
+    for entity in cluster_two:
+        _add_mention(test_db, "default", entity, normal_id)
+    _add_plain_chunk(test_db, conf_id, f"Cluster one body filed under {BODY_MARKER}.")
+    _add_plain_chunk(test_db, normal_id, "Cluster two discussion body.")
+    _mark_confidential(test_db, conf_id)
+
+    mcp_server.brain_graphrag_communities_build()
+    return conf_id
+
+
+def test_the_confidential_community_fixture_is_not_vacuous(
+    test_db: psycopg.Connection[Any], confidential_communities: str
+) -> None:
+    """Premise for the gate below: confidential AND really clustered.
+
+    Two things can make that gate vacuous, and neither was visible from inside
+    the ``xfail`` body it used to be asserted in: the document not being
+    confidential, and community detection emitting nothing at all (an empty
+    ``communities`` list enumerates no ids and would read as the gate working).
+    """
+    _fixture_is_not_vacuous(test_db, confidential_communities)
+
+    payload = mcp_server.brain_graphrag_search(query="Cluster", mode="global")
+    assert payload["communities"], (
+        "no communities materialized — the gate below would pass vacuously"
+    )
+
+
+def test_graphrag_global_community_doc_ids_exclude_the_confidential_document(
+    confidential_communities: str,
+) -> None:
+    """``CommunityGroup.doc_ids`` must not enumerate a confidential document.
+
+    The third dispatch branch, with its own doc-assembly query
+    (``_community_doc_scores``) — a predicate threaded through themes and not
+    through global would be invisible to every themes test above. Premise
+    guarded by the test above.
+    """
+    payload = mcp_server.brain_graphrag_search(query="Cluster", mode="global")
+
+    enumerated = {doc_id for c in payload["communities"] for doc_id in c["doc_ids"]}
+    assert confidential_communities not in enumerated

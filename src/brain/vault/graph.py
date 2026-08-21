@@ -38,7 +38,7 @@ from typing import Any
 
 import psycopg
 
-from ..sensitivity import CONFIDENTIAL
+from ..sensitivity import CONFIDENTIAL, not_confidential_sql
 
 #: Two frozen variants per title-bearing read, selected by
 #: ``exclude_confidential`` — the pattern :mod:`brain.ui.queries` uses, and for
@@ -475,6 +475,7 @@ def graph_data(
     depth: int | None = None,
     include_ingested: bool = False,
     include_derived: bool = True,
+    exclude_confidential: bool = False,
 ) -> GraphData:
     """Build a :class:`GraphData` snapshot for export.
 
@@ -505,6 +506,22 @@ def graph_data(
 
     Cycle safety: BFS uses a visited set, so ``A → B → A`` terminates at
     depth 2 instead of looping. Self-loops never appear.
+
+    ``exclude_confidential`` (F6) omits confidential documents from the node set,
+    and with them every edge that touches one — see the document fetch below for
+    why dropping the node is sufficient to drop the edge.
+
+    This is the FOURTH read in this module to get the parameter, and it was the
+    one left short. :func:`backlinks_for`, :func:`outgoing_links_for` and
+    :func:`orphans` all take it; this did not, which is the same one-short shape
+    that produced the original finding — the flag was added to exactly the
+    functions someone had enumerated. Its only caller today is ``cli.py``, inside
+    the trust boundary, so nothing was leaking in practice; it is closed so that
+    a future non-CLI caller (an MCP tool, a UI route) inherits a gateable
+    function rather than discovering it cannot gate this one.
+
+    DEFAULTS FALSE (include), matching this module's three siblings rather than
+    the MCP layer's ``include_confidential``.
     """
     # Single fetch of every link, plus a filter on the document set —
     # cheaper at personal-corpus scale than per-node SELECTs even when
@@ -554,8 +571,19 @@ def graph_data(
     # Pull every document so we can filter / look up titles in Python.
     # Personal-corpus scale (low thousands) — one fetch is cheaper than
     # repeated round-trips and keeps the SQL trivially auditable.
+    #
+    # F6: gating HERE gates the whole snapshot. Every node in the result is
+    # looked up in ``all_docs`` and every edge is kept only when BOTH endpoints
+    # resolve to a node, so a document withheld from this fetch takes its edges
+    # with it — no separate edge predicate is needed, and adding one would be
+    # dead code. (This is the same "drop the row and the rest follows" structure
+    # ``_build_doc_results`` relies on.)
+    doc_where = "" if not exclude_confidential else (
+        f"WHERE {not_confidential_sql('documents')} "
+    )
     doc_rows = conn.execute(
-        "SELECT id::text, title, kind FROM documents ORDER BY LOWER(title), id"
+        f"SELECT id::text, title, kind FROM documents {doc_where}"
+        "ORDER BY LOWER(title), id"
     ).fetchall()
     all_docs: dict[str, GraphNode] = {
         str(r[0]): GraphNode(

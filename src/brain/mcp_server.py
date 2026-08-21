@@ -1,20 +1,49 @@
 """MCP server exposing the second brain's tools over stdio.
 
-**File-size ceiling (CLAUDE.md): already over, and it grew.** 4,009 -> 4,137
-lines on `feat/wiki-to-ui-consolidation`. Four growths, each reasoned inline
-where it landed: (1) ``_split_source_filter``, so ``source="none"`` selects the
-same documents here as in the web UI and the facet panel rather than silently
-selecting none; (2) validation of ``source`` at the ``brain_ingest_stdin``
-WRITE boundary -- ``sources.kind`` has no CHECK constraint and this is the entry
-point where that value is chosen by a model rather than typed by a person;
-(3) the F6 confidential lens on ``brain_list``, which was listing confidential
-TITLES to a hosted model while ``brain_resurface`` thirty lines below it was
-not -- the argument already existed on ``queries.list_documents`` and this call
-site simply never passed it; (4) the same lens on ``brain_backlinks`` and
-``brain_links``, whose parameter INVERTS across the ``vault.graph`` boundary
-(``exclude_confidential=not include_confidential``) and therefore carries a
-docstring warning at each call site, because dropping that ``not`` fails open
-while every "the neighbour is present" assertion stays green.
+**File-size ceiling (CLAUDE.md): already over, and it grew.**
+
+THE CURRENT COUNT IS DELIBERATELY NOT WRITTEN HERE. Re-derive it::
+
+    wc -l src/brain/mcp_server.py
+
+A figure in this docstring has now been wrong TWICE, both times for the same
+reason: it was typed by whoever last grew the file, describing a tree that
+stopped existing at the next commit. The most recent was ``4,009 -> 4,137``,
+which matched no commit in the range -- written in ``0473b5f``, *after* the
+growth it claimed to narrate, under a CLAUDE.md header whose own instruction is
+to re-derive rather than inherit. What that row is FOR is disclosure -- that this
+file is over the ceiling and why it is allowed to be -- and the reasons below are
+what discharge that duty. The count is a measurement, and a measurement belongs
+in the command that takes it.
+
+What is safe to record, because commits do not change, is the base and the
+trail::
+
+    4,009  f8c76c0  branch base
+    4,043  3b16527
+    4,055  c62e3de
+    4,191  2ed2d83
+
+Five growths, each reasoned inline where it landed: (1) ``_split_source_filter``,
+so ``source="none"`` selects the same documents here as in the web UI and the
+facet panel rather than silently selecting none; (2) validation of ``source`` at
+the ``brain_ingest_stdin`` WRITE boundary -- ``sources.kind`` has no CHECK
+constraint and this is the entry point where that value is chosen by a model
+rather than typed by a person; (3) the F6 confidential lens on ``brain_list``,
+which was listing confidential TITLES to a hosted model while ``brain_resurface``
+thirty lines below it was not -- the argument already existed on
+``queries.list_documents`` and this call site simply never passed it; (4) the same
+lens on ``brain_backlinks`` and ``brain_links``, whose parameter INVERTS across
+the ``vault.graph`` boundary (``exclude_confidential=not include_confidential``)
+and therefore carries a docstring warning at each call site, because dropping
+that ``not`` fails open while every "the neighbour is present" assertion stays
+green; (5) the same lens on the four UNPROMPTED listing tools -- ``brain_brief``,
+``brain_review_weekly``, ``brain_timeline`` and ``brain_connect_list`` -- which
+took no document id and no query at all, so every document they named was one the
+caller had not asked for. Two of them (``brain_brief``, ``brain_review_weekly``)
+were BODY egress rather than title egress: ``todo.iter_action_item_docs`` selects
+``documents.content`` and parses action-item text out of it, and ``brain_brief``
+forwarded that text to a hosted model in its suggestion prompt.
 
 A split into per-domain tool modules stays deferred alongside ``cli.py``'s:
 this is one MCP tool registry over one shared error-mapping layer.
@@ -2144,6 +2173,7 @@ def brain_review_weekly(
     week: str | None = None,
     no_graph: bool = False,
     emit: bool = True,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Synthesize the prior week's activity into a weekly review.
 
@@ -2152,6 +2182,21 @@ def brain_review_weekly(
     communities. When ``emit`` is true (default) the dated page is written to
     ``<vault>/reviews/<week>.md``. Returns the machine-readable sections plus
     the relative ``vault_path`` slug (mirrors ``brain review weekly --json``).
+
+    F6 confidentiality: confidential documents are excluded from every section —
+    activity, ingested, open loops, theme docs and the derived key-people tally —
+    unless ``include_confidential=true``. A weekly retrospective names documents
+    the caller never asked for by construction, and its open-loops section
+    republishes BODY text (``todo.iter_action_item_docs`` parses items out of
+    ``documents.content``), so this is body egress and not merely a title
+    listing. Bridge: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
+
+    NOTE the emitted page follows the same gate. With the default
+    ``include_confidential=false`` the file written to the vault omits
+    confidential documents; a reader who wants the complete retrospective on disk
+    should use ``brain review weekly`` at the terminal, which is inside the trust
+    boundary and includes both tiers.
     """
     from .activity import current_iso_week
     from .review import build_weekly_report, emit_weekly_page, render_weekly_json
@@ -2170,6 +2215,7 @@ def brain_review_weekly(
                 generated_on=date_cls.today(),
                 no_graph=no_graph,
                 enricher=enricher,
+                exclude_confidential=not include_confidential,
             )
     except ValueError as e:
         raise _mcp_error(
@@ -2233,8 +2279,26 @@ def brain_review_scan(
     scan_type: str = "all",
     dry_run: bool = False,
     limit: int = 20,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Run a contradiction / staleness scan, surfacing findings into the queue.
+
+    F6 confidentiality: confidential documents are excluded from the scan INPUT —
+    candidates, superseding docs, and the summaries fed to the LLM — unless
+    ``include_confidential=true``.
+
+    The gate is on the input rather than the output, and that is not a stylistic
+    choice. This tool returns the findings the scan ITSELF just produced, from the
+    scan's own return value and not from ``list_review_queue``, so an output
+    filter on the queue never sees them. Gating the input additionally means an
+    MCP-triggered scan never WRITES a confidential-derived ``rationale`` into
+    ``elicitation_gaps`` — which matters because a read-side gate can only decline
+    to serve such a row, never un-write it.
+
+    ``brain review scan`` at a terminal is inside the trust boundary and still
+    scans both tiers; ``list_review_queue`` carries its own gate for exactly that
+    reason. Bridge: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
 
     ``scan_type`` is ``"conflicts"`` | ``"stale"`` | ``"all"``. The conflict leg
     is gated on ``BRAIN_ELICIT_CONTRADICTION_ENABLED`` + a wired Ollama enricher;
@@ -2274,6 +2338,7 @@ def brain_review_scan(
                         tenant_id=tenant,
                         min_docs=cfg.elicit_contradiction_min_docs,
                         limit=cfg.review_conflict_limit,
+                        exclude_confidential=not include_confidential,
                     )
                 )
                 if cfg.elicit_contradiction_enabled and counter is not None:
@@ -2286,6 +2351,7 @@ def brain_review_scan(
                                 cfg,
                                 tenant_id=tenant,
                                 dry_run=dry_run,
+                                exclude_confidential=not include_confidential,
                             )
                         )
                     except ReviewError as exc:
@@ -2297,11 +2363,17 @@ def brain_review_scan(
                         tenant_id=tenant,
                         stale_age_days=cfg.review_stale_age_days,
                         limit=cfg.review_stale_limit,
+                        exclude_confidential=not include_confidential,
                     )
                 )
                 findings.extend(
                     run_staleness_scan(
-                        conn, state.embedder, cfg, tenant_id=tenant, dry_run=dry_run
+                        conn,
+                        state.embedder,
+                        cfg,
+                        tenant_id=tenant,
+                        dry_run=dry_run,
+                        exclude_confidential=not include_confidential,
                     )
                 )
     except psycopg.Error as e:
@@ -2318,8 +2390,21 @@ def brain_review_scan(
 def brain_review_findings_list(
     kind: str = "all",
     limit: int = 20,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Read the current review queue without scanning.
+
+    F6 confidentiality: a finding is **withheld whole** — id, rationale and
+    evidence together — when any of its ``evidence_ids`` names a
+    ``sensitivity='confidential'`` document, unless ``include_confidential=true``.
+
+    Two fields make this a document-naming surface rather than a metadata one.
+    ``evidence_ids`` IS a list of document ids, so a finding is an enumeration of
+    documents the caller never asked for. And ``rationale`` is body-derived: a
+    ``stale`` rationale interpolates the superseding document's TITLE verbatim,
+    and a ``contradiction`` rationale is an LLM's output over two documents'
+    SUMMARIES. Bridge: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
 
     ``kind`` is ``"all"`` | ``"conflicts"`` | ``"stale"``. Returns
     ``{findings: [...]}`` where each finding is
@@ -2341,6 +2426,7 @@ def brain_review_findings_list(
                 tenant_id=state.cfg.graph_tenant_id,
                 signal_kinds=_REVIEW_LIST_KINDS[kind],
                 limit=limit,
+                exclude_confidential=not include_confidential,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -2367,6 +2453,7 @@ def brain_brief(
     since_hours: int | None = None,
     todo_since_days: int | None = None,
     no_enrich: bool = False,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Proactive daily digest: recent captures, open todos, pins, next steps.
 
@@ -2376,13 +2463,29 @@ def brain_brief(
     unless overridden) so the tool honors config exactly like ``brain brief
     --json``. Best-effort LLM next-step suggestions are included unless
     ``no_enrich`` is true or Ollama is unavailable (then ``suggestions`` is
-    empty). Surfaces titles + todo texts only — never document bodies.
+    empty).
+
+    F6 confidentiality: confidential documents are excluded from all three
+    sections — captures, open todos and pins — unless
+    ``include_confidential=true``. Bridge: ``exclude_confidential=not
+    include_confidential``. See :func:`_confidential_lens`.
+
+    A CORRECTION TO WHAT THIS DOCSTRING USED TO CLAIM. It read "surfaces titles +
+    todo texts only — never document bodies", and that sentence is what made the
+    missing gate look defensible: a payload of titles reads as metadata. But a
+    todo text is not metadata. ``todo.iter_action_item_docs`` selects
+    ``documents.content`` and :func:`brain.todo.parse_action_items` lifts item
+    text straight out of it, so ``open_todos[].text`` IS body text, and
+    :func:`brain.brief.suggest_next_steps` forwards it to a hosted model. The
+    accurate statement is: this tool surfaces titles plus body-derived action-item
+    text, and the F6 gate is what keeps the confidential tier out of both.
     """
     from dataclasses import replace
 
     from .brief import assemble_brief, suggest_next_steps
 
     state = _get_state()
+    logger.debug("brain_brief: include_confidential=%s", include_confidential)
     resolved_since_hours = (
         since_hours if since_hours is not None else state.cfg.brief_since_hours
     )
@@ -2399,6 +2502,7 @@ def brain_brief(
                 since_hours=resolved_since_hours,
                 todo_since_days=resolved_todo_since_days,
                 on_date=date_cls.today(),
+                exclude_confidential=not include_confidential,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -3032,6 +3136,7 @@ def brain_timeline(
     limit: int = 20,
     synthesize: bool = False,
     tenant: str | None = None,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """How a theme or entity evolved over TIME — temporal bucketing (Plan 05).
 
@@ -3067,6 +3172,19 @@ def brain_timeline(
     - ``synthesize``: attach a best-effort local-Ollama summary to the densest
       buckets (opt-in; a missing/failed Ollama yields ``synthesis=None``).
     - ``tenant``: tenant to query (default ``BRAIN_GRAPH_TENANT``).
+    - ``include_confidential``: opt back in to ``sensitivity='confidential'``
+      documents (default ``false`` = excluded).
+
+    F6 confidentiality: confidential documents are dropped from the matched set
+    BEFORE bucketing, so they contribute to no ``doc_ids``, no ``doc_titles``, no
+    ``cotopics``, no ``doc_count`` / ``mention_count``, and no ``synthesis``.
+    Like ``brain_connect_list`` this tool names documents the caller never asked
+    for — a bucket IS an enumeration — and unlike ``brain_search`` it has no
+    "the caller asked for that document" defence. ``--synthesize`` additionally
+    feeds the bucket's document SUMMARIES to a model, which is body-derived text,
+    so a title-only gate here would not have been enough. Same bridge as every
+    other F6 surface: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
 
     Requires the graph layer (``BRAIN_GRAPH_ENABLED`` + ``brain graphrag
     build``); when disabled, raises ``INVALID_PARAMS``. An unknown entity returns
@@ -3101,6 +3219,7 @@ def brain_timeline(
                 synthesize=synthesize,
                 enricher=enricher,
                 tenant=tenant,
+                exclude_confidential=not include_confidential,
             )
     except (PersonNotFound, PersonAmbiguous, GraphTenantError) as exc:
         raise _mcp_error(INVALID_PARAMS, f"timeline: {exc}") from exc
@@ -3456,6 +3575,7 @@ def brain_graphrag_communities_refresh(
 def brain_graphrag_communities(
     tenant: str | None = None,
     limit: int | None = None,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """List the tenant's materialized community clusters (spec §17c Q3).
 
@@ -3477,6 +3597,20 @@ def brain_graphrag_communities(
 
     - ``tenant``: tenant to list (default ``BRAIN_GRAPH_TENANT``).
     - ``limit``: max communities to return (default all).
+    - ``include_confidential``: opt back in to clusters whose members are
+      mentioned by confidential documents (default ``false`` = excluded).
+
+    F6 confidentiality: a community is withheld WHOLE when any of its member
+    entities is mentioned by a ``sensitivity='confidential'`` document.
+
+    This one was judged rather than assumed, because it projects no document id
+    and no document title — only ``summary`` — which reads like the entity tier
+    that ``brain_graphrag_entities`` is exempted on. It is not: ``summary`` is
+    generated by a prompt that ``communities_summary._representative_doc_titles``
+    feeds document TITLES into, so it is built FROM confidential titles in
+    exactly the way ``ThemeGroup.summary`` was. Same shape, same standard.
+    Bridge: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
     """
     from .graph_rag.communities import list_communities
     from .graph_rag.tenancy import resolve_tenant
@@ -3488,7 +3622,12 @@ def brain_graphrag_communities(
         with connect_age(state.cfg.database_url) as conn:
             conn.autocommit = True
             _require_age_or_mcp_error(conn)
-            records = list_communities(conn, tenant_id, limit=limit)
+            records = list_communities(
+                conn,
+                tenant_id,
+                limit=limit,
+                exclude_confidential=not include_confidential,
+            )
     except GraphTenantError as exc:
         raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
     except psycopg.Error as exc:
@@ -3995,6 +4134,7 @@ def _resolve_suggestion(conn: psycopg.Connection[Any], prefix: str) -> str:
 def brain_connect_list(
     limit: int = 20,
     status: str = "pending",
+    include_confidential: bool = False,
 ) -> list[dict[str, Any]]:
     """List proactive auto-link suggestions (Plan 07 `brain connect`).
 
@@ -4007,9 +4147,31 @@ def brain_connect_list(
     blended score descending. ``graph_score`` / ``embed_score`` are the raw
     per-leg signals (``null`` when the pair came from only one leg); ``score``
     is the RRF blend.
+
+    F6 confidentiality: a suggestion is **omitted entirely** when EITHER of its
+    two documents is marked ``sensitivity='confidential'``, unless
+    ``include_confidential=true``.
+
+    This tool is the strongest case for the gate on the whole server, not the
+    weakest. It takes no document id and no query, so it cannot be defended as
+    "the caller asked for that document" the way ``brain_show`` can — every one
+    of the ``source_title`` / ``target_title`` pairs it returns is a document the
+    caller never named, which is exactly the enumeration F6 forbids. And each row
+    carries TWO titles, so the gate gates both joins in
+    :func:`brain.connect.iter_suggestions`, not just the source.
+
+    Same bridge as ``brain_orphans`` / ``brain_backlinks`` / ``brain_links``:
+    this layer says ``include_confidential`` (default False = exclude),
+    ``brain.connect`` says ``exclude_confidential`` (default False = include), so
+    the call inverts. See :func:`_confidential_lens`.
     """
     state = _get_state()
-    logger.debug("brain_connect_list: status=%s limit=%d", status, limit)
+    logger.debug(
+        "brain_connect_list: status=%s limit=%d include_confidential=%s",
+        status,
+        limit,
+        include_confidential,
+    )
     if status not in ("pending", "accepted", "rejected", "all"):
         # Reject typos loudly — a silent empty list reads as "queue is empty"
         # rather than "you passed a bad status" (Codex R1 #3).
@@ -4022,7 +4184,10 @@ def brain_connect_list(
     try:
         with _mcp_conn(state) as conn:
             rows = connect_mod.iter_suggestions(
-                conn, status=effective_status, limit=limit
+                conn,
+                status=effective_status,
+                limit=limit,
+                exclude_confidential=not include_confidential,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e

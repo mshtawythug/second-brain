@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import psycopg
 
+from ..sensitivity import not_confidential_sql
 from ._retrieval_common import _build_doc_results, _fetch_entities
 from .grouping import group_themes
 from .router import THEMES_MODE
@@ -173,7 +174,13 @@ def _retrieve_themes(
 
     # 8. Optional best-effort group synthesis (never required for retrieval).
     if synthesize:
-        groups = _synthesize_groups(conn, groups, person_display, enricher)
+        groups = _synthesize_groups(
+            conn,
+            groups,
+            person_display,
+            enricher,
+            exclude_confidential=exclude_confidential,
+        )
 
     explanation = GraphExplanation(
         mode=THEMES_MODE,
@@ -380,13 +387,40 @@ def _docs_by_entity(
     tenant_id: str,
     doc_ids: list[str],
     entity_ids: list[str],
+    *,
+    exclude_confidential: bool = False,
 ) -> dict[str, set[str]]:
-    """Map each entity id → the set of X-docs (in ``doc_ids``) mentioning it."""
+    """Map each entity id → the set of X-docs (in ``doc_ids``) mentioning it.
+
+    ``exclude_confidential`` (F6) joins ``documents`` solely to apply the
+    sensitivity predicate. THIS is the gate that closes ``ThemeGroup.doc_ids``.
+
+    The previous pass gated :func:`._retrieval_common._build_doc_results`, the
+    funnel for the context-level ``docs`` list — and stopped there.
+    ``ThemeGroup.doc_ids`` is built in :func:`_populate_theme_docs` from THIS
+    query, a different one, so confidential ids were still enumerated on every
+    theme block sitting right beside the filtered ``docs`` list.
+
+    Gating here rather than filtering ``doc_ids`` afterwards also fixes the
+    group's ranking, which is computed from these sets: a post-filter would leave
+    each group ordered by a tally that counted documents the caller may not see,
+    so the ORDER would still be derived from confidential data even once the ids
+    were gone.
+    """
     if not doc_ids or not entity_ids:
         return {}
+    join = (
+        "JOIN documents d ON d.id = gem.document_id " if exclude_confidential else ""
+    )
+    where = (
+        "gem.tenant_id = %s AND gem.document_id = ANY(%s) "
+        "AND gem.entity_id = ANY(%s)"
+    )
+    if exclude_confidential:
+        where += f" AND {not_confidential_sql('d')}"
     rows = conn.execute(
-        "SELECT entity_id::text, document_id::text FROM graph_entity_mentions "
-        "WHERE tenant_id = %s AND document_id = ANY(%s) AND entity_id = ANY(%s)",
+        "SELECT gem.entity_id::text, gem.document_id::text "
+        f"FROM graph_entity_mentions gem {join}WHERE {where}",
         (tenant_id, doc_ids, entity_ids),
     ).fetchall()
     out: dict[str, set[str]] = {}
@@ -416,7 +450,13 @@ def _populate_theme_docs(
     if not groups:
         return [], []
     member_ids = sorted({entity.id for group in groups for entity in group.entities})
-    docs_by_entity = _docs_by_entity(conn, tenant_id, scope_doc_ids, member_ids)
+    docs_by_entity = _docs_by_entity(
+        conn,
+        tenant_id,
+        scope_doc_ids,
+        member_ids,
+        exclude_confidential=exclude_confidential,
+    )
 
     populated: list[ThemeGroup] = []
     global_doc_score: dict[str, float] = {}
@@ -443,6 +483,8 @@ def _synthesize_groups(
     groups: list[ThemeGroup],
     person_display: str,
     enricher: _GroupSummarizer | None,
+    *,
+    exclude_confidential: bool = False,
 ) -> list[ThemeGroup]:
     """Attach a best-effort Ollama summary to each group (spec §17b decision 7).
 
@@ -459,7 +501,9 @@ def _synthesize_groups(
         )
         return groups
     all_doc_ids = sorted({doc_id for group in groups for doc_id in group.doc_ids})
-    title_by_doc = _fetch_doc_titles(conn, all_doc_ids)
+    title_by_doc = _fetch_doc_titles(
+        conn, all_doc_ids, exclude_confidential=exclude_confidential
+    )
     summarized: list[ThemeGroup] = []
     for group in groups:
         titles = [
@@ -488,13 +532,35 @@ def _synthesize_groups(
 
 
 def _fetch_doc_titles(
-    conn: psycopg.Connection[Any], doc_ids: list[str]
+    conn: psycopg.Connection[Any],
+    doc_ids: list[str],
+    *,
+    exclude_confidential: bool = False,
 ) -> dict[str, str]:
-    """Map document id → title for the group-synthesis prompt (no body content)."""
+    """Map document id → title for the group-synthesis prompt (no body content).
+
+    ``exclude_confidential`` (F6) is DEFENCE IN DEPTH, kept even though
+    :func:`_docs_by_entity` already gates which ids can reach here.
+
+    The titles this returns do not merely land in a payload — they land in a
+    PROMPT, and ``summarize_group`` sends that prompt to a model. A leak on this
+    path is therefore not recoverable by filtering the response: by the time the
+    summary comes back, the confidential titles have already left the machine.
+    That asymmetry is why this query carries its own predicate instead of
+    trusting its caller. It is deliberately NOT the primary gate — closing only
+    this one would still leave ``ThemeGroup.doc_ids`` enumerating the same
+    documents to the same caller.
+
+    The "no body content" note above stays true and was never the issue: the
+    finding is that a TITLE is not nothing.
+    """
     if not doc_ids:
         return {}
+    where = "id = ANY(%s)"
+    if exclude_confidential:
+        where += f" AND {not_confidential_sql('documents')}"
     rows = conn.execute(
-        "SELECT id::text, title FROM documents WHERE id = ANY(%s)",
+        f"SELECT id::text, title FROM documents WHERE {where}",
         (doc_ids,),
     ).fetchall()
     return {str(row[0]): str(row[1]) for row in rows}

@@ -60,6 +60,37 @@ SENSITIVITY_CHECK_CONSTRAINT = "documents_sensitivity_check"
 SENSITIVITY_INDEX = "idx_documents_sensitivity"
 
 
+def not_confidential_sql(alias: str = "d") -> str:
+    """The bare SQL predicate excluding confidential rows for table ``alias``.
+
+    Returns ``"<alias>.sensitivity <> 'confidential'"`` — no leading ``AND``, so
+    it composes into a ``where`` list joined with ``' AND '`` (the idiom
+    :func:`brain.vault.graph.orphans` uses) without emitting ``AND AND``.
+
+    **Why a frozen literal rather than a bound ``%s``.** These gates are appended
+    conditionally to statements whose other parameters are positional. Threading
+    an extra parameter through only on the excluded path means every call site
+    must bind it first, in order, or silently bind the wrong value — and the
+    failure is invisible, because the permissive direction only ever ADDS rows.
+    :data:`CONFIDENTIAL` is a module constant that never touches caller input, so
+    there is nothing here to inject.
+
+    **Why the alias is validated anyway.** It is internal today — every caller
+    passes a literal. The guard costs one comparison and means this function
+    cannot become an injection vector if a future caller ever computes an alias,
+    which is the sort of drift a security helper should not depend on reviewers
+    catching. Raises :class:`ValueError` on anything that is not a plain
+    identifier.
+
+    Callers pass ``exclude_confidential`` down from their own boundary rather
+    than deciding locally; see :func:`brain.mcp_server._confidential_lens` for
+    which layer owns the policy and which way the bridge inverts.
+    """
+    if not alias.isidentifier():
+        raise ValueError(f"table alias must be a plain identifier (got {alias!r})")
+    return f"{alias}.sensitivity <> '{CONFIDENTIAL}'"
+
+
 def is_confidential(level: str | None) -> bool:
     """True iff ``level`` engages the egress boundaries.
 
