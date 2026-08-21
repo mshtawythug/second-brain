@@ -94,6 +94,11 @@ Recorded because a spec that silently absorbs a wrong premise propagates it.
 - **`brain wiki` is a one-command sub-app** — only `install` (`cli.py:8415`). Its help string,
   "Wiki workspace management (Quartz install, Caddyfile rendering)" (`cli.py:351`), is where
   Caddy enters. The retirement surface is overwhelmingly `wiki/` + `quartz_overrides/`, not CLI.
+  [⚠ **Appendix B-24 (S5) — applies to every bare `quartz_overrides/` in this document, not just
+  this one.** There is no top-level `quartz_overrides/`; the path is **`src/brain/quartz_overrides/`**
+  throughout. §0's file-count line is the only site that already spells it correctly. Rather than a count that
+  rots as sites are edited, the rule: **read every bare `quartz_overrides/` as `src/brain/`-prefixed.**
+  Re-derive the sites with `grep -n 'quartz_overrides' <this file>`.]
 - **~~The `brain.wiki` coupling is deeper than reported.~~ — THIS CORRECTION WAS ITSELF WRONG.**
   It claimed `graph_rag/build.py:236`, `vault/derived_links/directory.py:37`, `config.py:885`,
   `graph_rag/cross_type.py:165`, and `graph_rag/extract.py:483` all "reach into `brain.wiki`". A
@@ -287,7 +292,7 @@ Found by the §3.0 `cfg` walk. **None appeared anywhere in the previous 1,237 li
 
 | Wiki capability | Implementation | Src | Disposition | Notes |
 |---|---|---|---|---|
-| **Table of contents** | `Plugin.TableOfContents()` (`quartz.config.ts:227`) + `Component.DesktopOnly(Component.TableOfContents())` (`quartz.layout.ts:285`) | `cfg` | **PORT** | **A right-sidebar TOC on every page is a first-order reading affordance**, and losing it silently at R3 is exactly the R-6 regression this document is structured to prevent. `brain ui` has nothing. Natural home: §7.1.5's marginalia column, beside backlinks. Server-side: headings are already parsed by `render.py`, so this is a token walk, not a new dependency. |
+| **Table of contents** | `Plugin.TableOfContents()` (`quartz.config.ts:227`) + `Component.DesktopOnly(Component.TableOfContents())` (`quartz.layout.ts:285`) | `cfg` | **PORT** | **A right-sidebar TOC on every page is a first-order reading affordance**, and losing it silently at R3 is exactly the R-6 regression this document is structured to prevent. `brain ui` has nothing. Natural home: §7.1.5's marginalia column, beside backlinks. Server-side: ~~headings are already parsed by `render.py`, so this is a token walk, not a new dependency.~~ [⚠ **Appendix B-22 (S4).** Half true, and the sizing half is the wrong half. "Not a new dependency" held — no package was added. "A token walk" did not: `render.py` emitted **no heading `id`s**, so anchors had to be minted and a heading list exported, and the walk had to run over the *stripped* body or link into headings the HTML does not contain. T5 landed all of it. Re-derive by looking for `extract_headings`, `_render_heading_open` and the slugger's `slug()` in `src/brain/ui/render.py`.] |
 | **Folder index pages** | `Plugin.FolderPage()` (`quartz.config.ts:276`) | `cfg` | **PORT-LATER** | §3.2 listed `TagPage` but not this. Clicking a folder in the wiki yields a real page listing its contents; in `brain ui` a folder is a tree node that only expands. Cheap given `ui/tree.py` already has the data. |
 | **Alias redirects** | `Plugin.AliasRedirects()` (`quartz.config.ts:273`); frontmatter `aliases` parsed at `vault/sync.py:667` into `metadata['aliases']` (`:1057`) | `cfg` + `py` | **DROP — measured** | **Corpus count: 0.** Read-only query — `SELECT count(*) FROM documents WHERE metadata ? 'aliases'` returns **zero**. The machinery is wired end-to-end but **no document in the corpus uses it**, so nothing redirects today and **no link breaks at retirement**. The parsing in `sync.py` survives regardless (it is vault-tier, not Quartz). |
 
@@ -303,12 +308,12 @@ this document would have caught it.
 | Syntax highlighting | `Plugin.SyntaxHighlighting()` (`quartz.config.ts:125`) | `cfg` | **PORT** | §5. |
 | **Auto-summary TL;DR lede** | `SummaryLede.tsx`, `Component.SummaryLede` | `cfg` | **PORT** | `documents.summary` already populated; pure presentation. |
 | **Link-kind visual system** — 5 treatments (wiki / external / tag / ingested / derived) | `Plugin.LinkKindMark()` (`quartz.config.ts:149`) + `_links.scss` | `cfg` | **PORT** | Explicitly fixed the "every link looks identical" complaint. `render.py:48-49` has only `wikilink` / `wikilink--unresolved`. |
-| **Email-thread reading mode** — newest open, older collapsible, "show only my replies" | `Plugin.EmailThreadReader()` (`quartz.config.ts:213`) | `cfg` | **PORT — and simplify** | Bakes `BRAIN_USER_EMAIL` in at **build time** because Quartz has no per-request identity. A live server reads config per request. **The port removes a hack.** |
+| **Email-thread reading mode** — newest open, older collapsible, "show only my replies" | `Plugin.EmailThreadReader()` (`quartz.config.ts:213`) | `cfg` | ~~**PORT — and simplify**~~ **NOT A PORT** | Bakes `BRAIN_USER_EMAIL` in at **build time** because Quartz has no per-request identity. A live server reads config per request. **The port removes a hack.** [⚠ **Appendix B-21 (S2).** The identity half of this cell is right and survives. The **classification** is wrong: there was nothing to port. This row also sat on an unrecorded *live rendering defect* — `ingest/gmail.py` emits raw `<details>`/`<summary>`, `render.py` parses with `html=False`, so every thread rendered its markup as escaped text. Phase 1 exited with that open. Both are now closed by T18 option (a) — structural recognise-and-re-emit, `html=False` untouched — not by a port.] |
 | **Backlinks as marginalia** (Tufte side-notes ≥1280px) | `Component.Backlinks` (`quartz.layout.ts`) | `cfg` + `py` | **PORT** | Backend exists: `vault/graph.py:163` `backlinks_for`. §6.2. |
 | **Related-docs panel** — precomputed hybrid FTS+vector RRF per page, lazy-fetched, fails closed | `Component.RelatedDocs` + `wiki/build_related.py` | `cfg` + `py` | **PORT — and simplify** | Static site must **precompute** into `static/related/<slug>.json`. A live server computes on request. §9.2 moves the scoring logic to `src/brain/related.py`. ⚠ **Scoring landed; the panel did not** — Appendix B-7/B-17, deferred to phase 5. |
 | **Home "Recently captured" rail** — 12 most-recent ingested, absolute date baked server-side, relative text recomputed client-side so it never decays | `build_homepage.py` + `Plugin.RelativeDate()` (`quartz.config.ts:178`) | `cfg` + `py` | **PORT** | The never-decays trick is a *static-site workaround*; a live server can just send fresh data. Keep the affordance, drop the mechanism. |
 | **Tag listing pages** | `Plugin.TagPage()` (`quartz.config.ts:277`) + `pages/TagContent.tsx` | `cfg` | **PORT** | `brain ui` has a tag *filter* but no tag *index*. |
-| **People Hub pages** | `wiki/build_people.py` emit tail | `py` | **SURVIVES AS-IS + additive live view** | The emitter writes **into the vault** (`cli.py:6944`): **51 live `kind='vault'` documents, 51 inbound and 537 outbound `links` rows**. It is not Quartz output. It moves with the aggregation half (§9.2); `ui/routes_people.py` is an *additional* way to read the same data. |
+| **People Hub pages** | `wiki/build_people.py` emit tail | `py` | **SURVIVES AS-IS + additive live view** | The emitter writes **into the vault** (`cli.py:6944`): **51 live `kind='vault'` documents, 51 inbound and 537 outbound `links` rows**. It is not Quartz output. It moves with the aggregation half (§9.2); `ui/routes_people.py` is an *additional* way to read the same data. [⚠ **Appendix B-25 (S6).** Accurate, and that is exactly why the live view was **cut from phase 2**: those 51 pages are `kind='vault'` documents, so the generic tree/search surface already renders them today. A `routes_people.py` is a nicer view, not parity — and it does not exist (`ls src/brain/ui/routes_*.py`). §11's phase-2 row still lists "people view" as a PORT row; that listing is the stale part, not this cell.] |
 | Source iconography — gmail 📧, krisp 🎙️, slack 💬, manual ✍️, vault 🌱 | `util/sourceIcons.ts` | `ovl` | **PORT** | Trivial; `brain ui` has none. High recognition value. |
 | SVG paper-grain overlay | both surfaces | `ovl` | **EXISTS** | Independently implemented on both; `security.py:66` already allows `data:` for it. |
 
@@ -1508,10 +1513,17 @@ gets its related-docs panel — computed live, not read from precomputed
 > `brain ui` related-docs panel). **Phase 6 does not need it: `brain connect` only requires
 > `_avg_embedding` and `_eligible_source_docs` to survive.**
 >
-> **PII hazard at migration time.** The tuning comment at `build_related.py:76-83` contains real
+> **PII hazard at migration time.** ~~The tuning comment at `build_related.py:76-83` contains real
 > corpus lexemes derived from live personal data (one is already partially redacted in place). It
 > **must be scrubbed if any of that comment migrates into `src/brain/related.py`** — CLAUDE.md
-> rule 15. The value is deliberately not reproduced here.
+> rule 15. The value is deliberately not reproduced here.~~
+>
+> [⚠ **STRUCK — Appendix B-20 (S10), re-derived 2026-08-21.** The migration happened and the
+> comment **was** scrubbed on the way across; the hazard is closed. The citation is struck rather
+> than merely annotated because **a live-PII claim pointing at a line range that has none is worse
+> than no claim**: `build_related.py:76-83` is today the middle of `refresh_related`'s docstring,
+> so the next PII audit that works this list lands on innocent prose, finds nothing, and learns to
+> distrust the list. B-20 records what closed it and what would reopen it.]
 
 ### 9.2b Requirement A12 — the deletion that breaks `import brain.cli`
 
@@ -1924,8 +1936,8 @@ phase until the user says otherwise.
 |---|---|---|---|
 | **0** | **Rescue, measure, repair** | **A4** commit the orphan logo into `src/brain/ui/static/` (one file, nothing else from `dist/`). **R-1** instrument and measure real search latency; populate `search_queries.duration_ms`. **R-2** run `brain ui` against the production corpus and record findings. **A1** split `app.js`/`app.css`; extend `package-data` + `test_ui_static_assets`. | Logo committed. A measured latency distribution exists. `brain ui` has been exercised at real scale. `bin/brain-ci` green, no behaviour change. |
 | **1** | **Rendering parity** | §5: tables, strikethrough, task lists, footnotes, callouts, syntax highlighting, block-math LaTeX (**A5** — inline `$` stays off, with its own test). Each with a mutation-verified XSS test (**A3**). | Every markdown construct the corpus contains renders correctly. `render.py` coverage ≥95%. |
-| **2** | **Navigation + content parity** | §3.1/§3.2/**§3.1a** **PORT** rows: command palette, **table of contents**, explorer counts + ingested toggle + month grouping, backlinks marginalia (`vault/graph.py:163`), ~~related-docs (after the §9.2 move)~~ [⚠ **STRUCK — Appendix B-1 (S1), re-derived 2026-08-20.** The *scoring* move landed in phase 2; the **panel does not**. Its HTTP endpoint does not exist (`grep -c related src/brain/ui/app.py` → **0**, still) and is gated on the open decision in B-4. **Phase 5 owns it** — see that row and §9.2d(d).], summary lede, link-kind system, email-thread mode (simplified), recently-captured rail, tag index, people view, source icons, breadcrumbs. **R-12** `pushState` navigation. | Every **PORT** row demonstrably works. |
-| **3** | **Identity + defect repair** | **A13 first — inline the token block, or phase 3 has no verifiable exit criterion.** §7.1's "Instrument & Page" token system; §7.4 logo + favicon; **A11 fixes D1–D8**; **Q14** font delivery; **Q15** date in the search payload; **Q16** server-side snippet rendering; R-1's perceived-performance work (skeleton + FTS-first paint); **Q18** extend the offline test to CSS `url()`. | Logo renders in both themes and ships in the wheel. D1–D8 closed. Every text token clears AA on every permitted ground; selection carries wash **plus** marker rail. |
+| **2** | **Navigation + content parity** | §3.1/§3.2/**§3.1a** **PORT** rows: command palette, **table of contents**, explorer counts + ingested toggle + month grouping, backlinks marginalia (`vault/graph.py:163`), ~~related-docs (after the §9.2 move)~~ [⚠ **STRUCK — Appendix B-1 (S1), re-derived 2026-08-20.** The *scoring* move landed in phase 2; the **panel does not**. Its HTTP endpoint does not exist (`grep -c related src/brain/ui/app.py` → **0**, still) and is gated on the open decision in B-4. **Phase 5 owns it** — see that row and §9.2d(d).], summary lede, link-kind system, email-thread mode (simplified) [⚠ **Appendix B-21 (S2)** — not a PORT; new design over a live rendering defect, closed by T18(a)], recently-captured rail, tag index, ~~people view~~ [⚠ **STRUCK — Appendix B-25 (S6).** Cut from phase 2: the 51 People Hub pages are `kind='vault'` documents and already render on the generic surface. `routes_people.py` does not exist and is not owed here.], source icons, breadcrumbs. **R-12** `pushState` navigation. | Every **PORT** row demonstrably works. |
+| **3** | **Identity + defect repair** | **A13 first — inline the token block, or phase 3 has no verifiable exit criterion.** §7.1's "Instrument & Page" token system; §7.4 logo + favicon; **A11 fixes D1–D8**; **Q14** font delivery; ~~**Q15** date in the search payload~~ [⚠ **STRUCK — Appendix B-23 (S3).** Already shipped; `schemas.py` projects `"date"` via `result_date()`. Zero budget.]; **Q16** server-side snippet rendering; R-1's perceived-performance work (skeleton + FTS-first paint); **Q18** extend the offline test to CSS `url()`. | Logo renders in both themes and ships in the wheel. D1–D8 closed. Every text token clears AA on every permitted ground; selection carries wash **plus** marker rail. |
 | **4** | **Write-path hardening** | **A7** draft buffer (blocks R1). **A8** `_ingested/` invariant + test. **A9** watcher dependency + doctor check. C3 focus-refetch. **Q4** external-editor decision. | C1–C7 each covered by a test. |
 | **5** | **Graph** — *and the related-docs panel* | §6, after **Q2** and **Q3**. Sidebar local graph first. **Plus the related-docs panel struck from phase 2** (§9.2d(d) already schedules its authoring here): a route module, an `app.py` registration, a client consumer — and **the B-4 ruling first**. `compute_related` itself is already written and tested (Appendix B-17); only its consumer is absent. | Reads materialized state only; honest degraded state when unbuilt. **Related-docs:** the panel answers over HTTP, or the row is not exited. |
 | **6** | ⚠ *(Appendix B-3 / S9, **re-derived 2026-08-20:** **all three** of the moves this row names have already landed in phase 2 — not "three of four", a fourth was never specified; §9.2 numbers exactly three. `person_name.py`, `people.py` and `related.py` all exist, every importer already points at them, and `wiki/build_related.py` is down to 248 lines as the thin emitter §9.2d(2) requires. **The move budget for this phase is zero.** Only "No deletion in this phase" is still load-bearing.)* **Move, do not delete** | §9.2: `_person_name.py` → `person_name.py`; `build_people.py` aggregation → `people.py`; `build_related.py` scoring → `related.py`. Repoint every verified importer. **No deletion in this phase.** | Full suite green with `wiki/` still present but no longer imported by non-wiki code. |
@@ -1949,6 +1961,12 @@ phase until the user says otherwise.
 7 → 8 → 9 is strictly ordered.** Per CLAUDE.md rule 14, each phase ends with the code-review +
 completion-audit loop until both pass clean.
 
+> ⚠ **The reorder permission was exercised — see Appendix B-26 (S7).** "May reorder" is still
+> true, but it reads as an open option and it is not one any more: phase 3's token work was
+> ruled **first**, narrowed to `tokens.css`/`components.css`, so that phase 2's ~10 new visual
+> surfaces would be built against settled tokens instead of restyled after. Both files exist
+> (`ls src/brain/ui/static/css/`). B-26 records the ruling and its scope.
+
 ---
 
 ## 12. Open questions requiring the user's decision
@@ -1969,7 +1987,7 @@ completion-audit loop until both pass clean.
 | **Q12** | **Deletion trigger** (§11 phase 9): a fixed dormancy period, or purely on your word? And what is your answer to **RA-8** (keep the wiki as an availability fallback)? | **On your word.** No timer deletes your reading surface. |
 | **Q13** | **`docs/specs/` is gitignored** (`.gitignore:53`) and **zero specs are tracked**, while CLAUDE.md rule 11b mandates specs live there. Track them, relocate them, or accept that every design document is local-only? **Repository-wide, not wiki-specific.** | **Track them** — un-ignore `docs/specs/` and commit the existing specs. A plan the phasing depends on should not be one checkout from gone. |
 | **Q14** | **T1 — CSP change for self-hosted fonts** (§7.3). Add `font-src 'self'` and ship ≈115 KB of woff2, or keep system stacks? Without the CSP line, `default-src 'none'` blocks every `@font-face` **silently**. | **Add it.** No `unsafe-inline`, no nonce, no external origin. (Judge the 115 KB on its own — the old "vs 296 KB of logo PNGs" comparison was withdrawn: those PNGs live in `quartz_overrides/`, which R3 deletes.) **If refused, set `--measure: 34rem` and the direction survives, weaker.** |
-| **Q15** | **T2 — `/api/search` must project a date** (`schemas.py:361-371` returns no date key; `doc_date` exists per migration 021 but appears nowhere in `ui/`). The redesigned ledger row is not implementable without it. | **Add `doc_date` to the payload.** Small, additive, unblocks D6. |
+| **Q15** | ~~**T2 — `/api/search` must project a date** (`schemas.py:361-371` returns no date key; `doc_date` exists per migration 021 but appears nowhere in `ui/`). The redesigned ledger row is not implementable without it.~~ [⚠ **ANSWERED AND SHIPPED — Appendix B-23 (S3).** The payload projects a date and has since before this question was re-read: `result_date()` and its `"date"` key both exist in `schemas.py` (`grep -n 'result_date' src/brain/ui/schemas.py`). **Do not budget it**, and note the cited range moved — the symbol, not `:361-371`, is the durable handle. §11's phase-3 row still lists Q15 as pending work; that listing is stale too.] | **Add `doc_date` to the payload.** Small, additive, unblocks D6. |
 | **Q16** | **T3 — snippet rendering.** Markdown-stripped, `<mark>`-highlighted snippets must be **server-side**; doing it client-side means `innerHTML` on untrusted text. | **Server-side**, in `render.py`'s hardened path, with its own A3 XSS test. Client-side `innerHTML` on snippet text is not acceptable. |
 | **Q17** | **T4 — retire the tab strip?** (§7.1.5) Three of four tabs are apologies; moving them to ⌘K plus a status footer is **a product decision, not a visual one**. | *No default — your call.* Interacts with Q10 (Publish tab). |
 | **Q18** | **T5 — offline-test gap.** `test_every_referenced_asset_exists_on_disk` (`tests/test_ui_static_assets.py:112`) parses **only `index.html`** via a `(?:href\|src)="` regex, so font paths referenced from `app.css` are unchecked — a typo'd `@font-face` URL would ship silently. | **Extend it to parse `url()` in CSS.** Verified as a real gap; the fix is a few lines and prevents a blank-font failure mode identical to the wheel-packaging one. |
@@ -2027,7 +2045,11 @@ or the body reconstructed from another source — the body arrives annotated wit
 a section that is not there.** A pointer outliving its target is worse than no pointer: it
 reads as a correction the reader cannot find, and the natural inference is that they have
 missed it rather than that it is absent. Anyone restoring this document from anything other
-than a whole-file copy should confirm Appendix B came with it, or strip the four pointers.
+than a whole-file copy should confirm Appendix B came with it, or strip the pointers —
+`grep -n 'Appendix B-' <this file>` finds them. *(This sentence said "the four pointers" until
+2026-08-21, two paragraphs after the one above declaring that a pointer count would not be
+stated because it rots. It had rotted: the count was wrong before B-20 … B-26 were added, and
+adding them made it wronger.)*
 
 **Every claim here was re-derived against the tree on 2026-08-14 before being written**,
 not inherited from the task that raised it. Several of these findings passed through two
@@ -2036,7 +2058,14 @@ after further measurement (B-11). Where a re-derivation *disagreed* with the rai
 task, this record follows the measurement and says so.
 
 **On the numbering.** S1–S10 are defined in the phase-2 plan's own defect table
-(`docs/plans/2026-08-13-wiki-to-ui-phase2.md`, rows 53–57 and the summary at 330–339).
+(`docs/plans/2026-08-13-wiki-to-ui-phase2.md` — find both the table and the consolidated summary
+with `grep -n '^| \*\*S[0-9]\|^- \*\*S[0-9]\|^## Spec defects' <that file>`; S6 and S7 are prose
+bullets under the table, not rows in it, which is part of why they were the easiest to lose).
+*Line ranges previously cited here — "rows 53–57 and the summary at 330–339" — pointed at the
+table's header and at the budget arithmetic respectively, and are replaced with the grep for the
+reason this appendix keeps re-learning: a line range into a living document is not a citation.*
+**S2, S3, S4, S5, S6, S7 and S10 are recorded below as B-20 … B-26**, added 2026-08-21; until
+then T21 had recorded three of the ten it claimed.
 S13, S16, S17, S18 and S19 were allocated later, on the task list, as implementers found
 them. **S14 and S15 are recorded below as B-13 and B-14.** An earlier revision of this
 appendix stated they "could not be resolved from the tree". That was wrong, and the error
@@ -2468,6 +2497,197 @@ clicking the facet selects precisely the documents it counted. **This is the con
 `source_missing` kwarg whose missing plumbing is B-5 (S16)** — the two entries are one feature seen
 from its two ends, and the panel could not have been made honest without the `search.py` line B-5
 had to add.
+
+---
+
+## The seven that were never written down — B-20 … B-26, added 2026-08-21
+
+**T21 was marked done having recorded three of ten.** S1, S8 and S9 became B-1, B-2 and B-3;
+**S2, S3, S4, S5, S6, S7 and S10 were never recorded at all**, and the body passage each one
+corrects still stood unannotated. That is a different failure from the "recorded, not repaired"
+convention this appendix runs on — under that convention the body is left wrong *on purpose*,
+with a pointer to the entry that corrects it. Here there was no entry, so the opening promise of
+this appendix — *"every body passage this appendix contradicts carries a pointer to the entry
+that contradicts it"* — was false for seven of them. Pointers are now placed at each.
+
+**S10 leads the block rather than sorting last**, because it is the only one with a live safety
+cost: a PII claim aimed at a line range that no longer holds PII.
+
+Every claim below was re-derived against the tree at `0473b5f` on 2026-08-21. Where the
+re-derivation disagreed with the raising task or with the brief that scheduled this work, it
+follows the measurement and says so.
+
+### B-20 · S10 — the PII citation now points at innocent prose
+
+*Raised on the phase-2 plan's defect table, where it is already marked **CLOSED** ("substance
+clean, r15 satisfied"). It was never carried into the spec, and §9.2d's hazard block still
+asserted it.*
+
+**The claim (§9.2d):** "The tuning comment at `build_related.py:76-83` contains real corpus
+lexemes derived from live personal data … must be scrubbed if any of that comment migrates."
+
+**What is true.** The claim was accurate when written and is now inverted in both halves:
+
+* **The cited range holds no comment.** `src/brain/wiki/build_related.py:76-83` is inside
+  `refresh_related`'s docstring — prose about cosine-floor reuse and why a DB blip is logged
+  rather than raised. `refresh_related` begins at `:73`.
+* **The migration happened, and the scrub happened with it.** The comment moved to
+  `src/brain/related.py` in `3b16527`. The offending lexemes were replaced with a prose
+  description of their *character* ("recurring person-name and meeting-boilerplate stems"), and
+  the substitution is declared in place: *"The original comment named the actual offending
+  lexemes from the live corpus. They were real personal-data derivatives and are deliberately
+  not reproduced here (CLAUDE.md rule 15)."* The tuning rationale survived; the data did not.
+
+**What closed it:** the migration in `3b16527` did at migration time exactly what §9.2d
+demanded — which is why the requirement reads as unmet only because its citation rotted.
+
+**What would reopen it:** re-deriving `_CORPUS_FREQ_THRESHOLD` against the live corpus and
+pasting the observed lexemes back in as evidence. That is the natural next edit to this comment
+and it is the one to refuse — the threshold's justification does not require naming the tokens.
+Note also that the **unscrubbed text remains reachable in history** (`git show
+f8c76c0:src/brain/wiki/build_related.py`); this entry closes the working tree, not the history,
+and that history is already the subject of the standing decision to keep `docs/audits/` ignored.
+
+**Why this one leads.** A stale *correctness* citation wastes a reader's time. A stale *PII*
+citation trains an auditor to distrust the register: they open `build_related.py:76-83`, find a
+docstring about Postgres restarts, and conclude the PII list is noise — at which point the
+entries that are still live stop being read. Re-derive with `sed -n '73,95p'
+src/brain/related.py`.
+
+### B-21 · S2 — email-thread mode is classified as a port, and sat on an unrecorded live defect
+
+*§3.2's row and §11's phase-2 row.*
+
+**The claim:** email-thread reading mode is a **"PORT — and simplify"**.
+
+**What is true — two findings, and the second is the one nobody had written down.**
+
+1. **It was not a port.** The Quartz original bakes `BRAIN_USER_EMAIL` in at build time; a live
+   server reads config per request. That much §3.2 says, and it is right — but it makes the
+   feature *new design*, not a simplification of something being carried across.
+2. **It sat on a live rendering defect that phase 1 exited without recording.**
+   `brain.ingest.gmail._format_thread_section` wraps every message but the newest in raw
+   `<details><summary>` — correct for Quartz and CommonMark, which pass raw HTML through.
+   `ui/render.py` parses with `html=False`, which does not. So every Gmail thread in `brain ui`
+   rendered its markup as literal escaped text: **58 corpus documents, 89.1% of `email_thread`**
+   (`docs/audits/2026-08-13-phase2-recon.md`). §5's rendering-parity pass counted markdown
+   constructs only and never looked for raw HTML, so phase 1's exit criterion could be met with
+   this wide open.
+
+**Status: closed, by T18 option (a).** `render.py` now recognises the two tags and **generates**
+its own elements — no attributes, ever, and `html=False` untouched, so the A3 boundary between
+"generated" and "passed through" holds. `<details onclick=…>` still escapes like any other tag.
+The fix is not a port either, which is the finding standing up rather than being withdrawn.
+
+**What would reopen it:** setting `html=True` to "simplify" the thread path — the change this
+row's original wording invites, and an XSS hole plus a §2.5/A3 violation.
+
+### B-22 · S4 — the TOC was sized as a token walk
+
+*§3.1a's PORT row.*
+
+**The claim:** "headings are already parsed by `render.py`, so this is a token walk, not a new
+dependency."
+
+**What is true.** The dependency half held — nothing was added to `pyproject.toml`. The sizing
+half did not, and it is the half a planner budgets from. `render.py` emitted **no heading `id`
+attributes**, so a TOC needed anchors minted *and* a heading list exported, and it needed one
+more thing the row does not hint at: `notes_service.py` renders through
+`strip_redundant_title_heading`, so a TOC walking the unstripped body links at an H1 that is
+absent from the HTML it points into.
+
+T5 landed all three: `class Heading`, a slugger with a `slug()` method, `_render_heading_open`
+registered via `md.add_render_rule("heading_open", …)`, and `extract_headings`. Re-derive with
+`grep -n 'heading_open\|extract_headings\|def slug' src/brain/ui/render.py` — the symbols are
+the durable handle; their line numbers are not.
+
+**Recorded rather than repaired**, because the row is a *sizing* claim and the interesting thing
+about it is that it under-sized the work — which a silent correction would erase.
+
+### B-23 · S3 — Q15 asks for a projection that already ships
+
+*§12's Q15, and §11's phase-3 row which budgets it.*
+
+**The claim:** "`schemas.py:361-371` returns no date key … The redesigned ledger row is not
+implementable without it."
+
+**What is true.** `src/brain/ui/schemas.py` defines `result_date()` and emits `"date":
+result_date(result)` in the search payload. The ledger row is implementable and was already
+unblocked. **Budget zero for it.**
+
+**Two things worth keeping**, since the substance is merely stale:
+
+* **The cited range drifted badly** — the symbol has moved several hundred lines from
+  `:361-371`. A line-range citation into a file under active edit is a citation with a
+  short shelf life; `grep -n 'result_date' src/brain/ui/schemas.py` does not rot.
+* **The answer and the implementation disagree on the key name.** Q15's ruling says "Add
+  `doc_date` to the payload"; what shipped is a `"date"` key computed by `result_date()`, while
+  `doc_date` survives only as the underlying column (`ui/queries.py`, inside `_DISCOVERY_DATE`).
+  Anyone reading the answer literally and grepping the payload for `doc_date` will find nothing
+  and reasonably conclude the work is outstanding. It is not.
+
+### B-24 · S5 — `quartz_overrides/` is not a top-level directory
+
+*Path references throughout the document.*
+
+**The claim:** the overlay lives at `quartz_overrides/`.
+
+**What is true.** It is **`src/brain/quartz_overrides/`**. There is no top-level
+`quartz_overrides/` in this worktree (`ls -d quartz_overrides src/brain/quartz_overrides` —
+the first is absent, the second is not). §0's file-count line is the only site that already
+spells it correctly; every other mention is bare.
+
+Cosmetic in substance, and real in cost: an executor following any of them `ls`es a path that
+does not exist, and the natural inference — that the tree has already been deleted — is exactly
+wrong at the point in the phasing where R3 has *not* yet run.
+
+**Deliberately not stated as a count.** An earlier framing of this finding counted the bare
+sites; that number changes the moment any one of them is edited, including by this appendix
+adding a pointer to one. The durable form is the rule — **every bare `quartz_overrides/` in this
+document means `src/brain/quartz_overrides/`** — plus `grep -n 'quartz_overrides'` to enumerate
+them on demand. One pointer is placed at the first bare occurrence and scoped to all of them,
+rather than nine pointers that would have to be maintained as a set.
+
+### B-25 · S6 — the People Hub "additive live view" is a nicety, and it was cut
+
+*§3.2's row and §11's phase-2 row.*
+
+**The claim:** People Hub pages "SURVIVE AS-IS + additive live view", with `ui/routes_people.py`
+as an additional way to read the same data — and §11 lists "people view" among phase 2's PORT
+rows, whose exit criterion is that *every* PORT row demonstrably works.
+
+**What is true.** §3.2's own cell is accurate and this entry does not dispute it: the emitter
+writes 51 `kind='vault'` documents into the vault, and those are served by the generic tree and
+search surfaces today, with no route of their own. Precisely *because* that is true, a
+`routes_people.py` is a nicer view rather than parity, and **it was cut from phase 2**.
+`src/brain/ui/` contains no `routes_people.py` (`ls src/brain/ui/routes_*.py`).
+
+**The stale passage is §11's, not §3.2's.** Leaving "people view" in a PORT list whose exit
+criterion is "every PORT row demonstrably works" makes phase 2 un-exitable on paper by a
+deliverable that was deliberately dropped. §11's row is struck; §3.2's cell carries a pointer
+and stands.
+
+### B-26 · S7 — the phase-ordering ruling was made and never written into the spec
+
+*§11's closing paragraph.*
+
+**The claim:** "Phases 1–5 may reorder." — which is true, and is the problem: it is written as
+a standing permission, and a reader meets it as an open option.
+
+**What is true.** The option was exercised. The ordering question was live and material —
+phase 3 owns the "Instrument & Page" token system, phase 2 lands roughly ten new visual
+surfaces, and every one of them gets restyled in phase 3 — and it was **ruled: phase 3's token
+work goes first, narrowed to `tokens.css` and `components.css` only**, so phase 2 builds against
+settled tokens rather than being restyled after. Both files exist under
+`src/brain/ui/static/css/`.
+
+**This entry is a different species from the six above and is marked as one.** S2–S6 and S10 are
+factual drift: the document says something the tree contradicts. S7 is a **decision that was
+taken and never recorded**. Nothing in §11 is false; what is missing is that the sentence no
+longer describes a choice anyone still has. Recorded here because the phasing table is exactly
+where the next planner will go looking for it, and an unrecorded ruling is re-litigated by
+whoever arrives next — the same "a message is not a record" failure this appendix already
+documents for S14 and S15.
 
 ---
 

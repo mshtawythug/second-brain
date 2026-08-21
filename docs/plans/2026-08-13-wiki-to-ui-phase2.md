@@ -127,7 +127,8 @@ Sizing unit: **1 P4U = one phase-4 item ≈ 0.3 agent-days** (phase 4 = 5 items 
 >
 > ⚠ **RE-DERIVED 2026-08-20 — THE MECHANISM INVERTED; THE CONCLUSION SURVIVED. Appendix C-7.**
 > **There is no glob any more.** `ci.yml` now names every browser module as an **explicit path in byte
-> order** (`ci.yml:354-360`, seven modules), because a shell glob sorts by ambient locale and expanded
+> order** (in the `-m browser --no-cov` step; re-derive the list with
+> `grep -n 'tests/test_ui_browser' .github/workflows/ci.yml`), because a shell glob sorts by ambient locale and expanded
 > `test_ui_browser.py` last under macOS and first under a POSIX-locale runner — an order-dependent
 > interaction invisible to local reproduction by construction. **So a conforming *filename* no longer
 > buys inclusion: a new module must be ADDED TO THE LIST.** The marker-based guard at
@@ -135,6 +136,12 @@ Sizing unit: **1 P4U = one phase-4 item ≈ 0.3 agent-days** (phase 4 = 5 items 
 > conclusion holds and only its mechanism is wrong — but an implementer following the rule as written
 > would name the file correctly, believe it covered, and be surprised by the red. Both proposed
 > modules now exist and **are** listed.
+>
+> *(Corrected 2026-08-21: both sites of this note said ~~"seven modules" at `ci.yml:354-360`~~. It is
+> **eight**, at `:354-361`. The count is not restated in its place because nothing in the argument
+> needs it — the rule is "a new module must be ADDED TO THE LIST", which holds at any count, and a
+> figure that must be re-edited every time someone adds a browser test is a figure that will be
+> wrong again. The grep above answers it on demand.)*
 
 > **T3 as re-baselined:** the move itself landed at 18:17 on 2026-08-13. `related.py` (613 lines) holds all 15 symbols + 8 constants; `wiki/build_related.py` is 248 lines importing `DEFAULT_RELATED_LIMIT, _iter_hybrid_neighbors`; `connect.py:29` is repointed; no duplication. **`compute_related` still exists nowhere.** The PII sub-task is struck — see resolution 4. **T3 is BLOCKED ON ATTRIBUTION** until `phase6-mover-2` declares `related.py` finished, not merely theirs.
 
@@ -174,7 +181,7 @@ Sizing unit: **1 P4U = one phase-4 item ≈ 0.3 agent-days** (phase 4 = 5 items 
 |---|---|---|
 | **T19** | Extend `check_every_stylesheet_is_linked_in_order` + its five-clause harness entry for every new stylesheet; keep `components.css` under 800. | 0.5 |
 | **T20** | Rule-14 loop: `superpowers:code-reviewer` + completion auditor, repeat to clean. | 1.0 |
-| **T21** | Update `docs/specs/` corrections (S1–S10) **in the spec itself**, per this project's convention of recording rather than quietly fixing. | 0.5 |
+| **T21** | Update `docs/specs/` corrections (S1–S10) **in the spec itself**, per this project's convention of recording rather than quietly fixing. [⚠ **Was marked done having recorded three of ten** — S1, S8 and S9 (spec Appendix B-1/B-2/B-3). S2, S3, S4, S5, S6, S7 and S10 had no entry anywhere and the body passage each corrects stood unannotated, so the appendix's own invariant — *every body passage it contradicts carries a pointer* — was false for seven of them. **Completed 2026-08-21** as spec Appendix **B-20 … B-26**, S10 first because it was the one with a live cost: a PII citation aimed at a line range that no longer holds PII. Note the convention was never the problem — "recorded, not repaired" was kept for all seven.] | 0.5 |
 
 **Parallelism:** W0 serial → W1 has 7 tasks across 7 disjoint files (T4/T5/T6/T7/T8/T9/T10 concurrent; the integrator lands `app.py` once at the end of the wave) → W2 has 6, with **T13+T14 serialised on `js/marginalia.js`** and **T15 split by file** → T18 serialised against T5 on `render.py`.
 
@@ -334,7 +341,7 @@ Verified at 18:37 on 2026-08-13.
 
 The earlier "≈31" and "≈29" were roundings of the same 32.5 recount. **The drift is arithmetic, not scope.**
 
-**Phase 6's budget drops, not phase 2's** — three of its four moves are done early. §11 does not reflect that.
+**Phase 6's budget drops, not phase 2's** — ~~three of its four moves are done early~~ **all three of its moves are done early; there was never a fourth.** §11 numbers exactly three (`_person_name`, `build_people`, `build_related`) and all three have landed, so the phase-6 move budget is not mostly spent but **entirely** spent. §11 does not reflect that. *(Corrected 2026-08-21 to match spec Appendix B-3, which caught the same invented denominator on 2026-08-20; this second site was missed then.)*
 
 ## Spec defects — consolidated
 
@@ -349,7 +356,16 @@ The earlier "≈31" and "≈29" were roundings of the same 32.5 recount. **The d
 | **S7** | Phase ordering — phase 3 tokens not done, phase 2 lands ~10 surfaces | **ruled: phase 3 token work first**, `tokens.css`/`components.css` only |
 | **S8** | **§9.2c's "authoritative importer list" is now stale** — every row naming `wiki.build_people` / `wiki._person_name` points at module paths that no longer exist | **new** |
 | **S9** | **§11's phase 6 row describes work already done** — three of four moves landed; only "No deletion in this phase" is still load-bearing | **new** |
-| **S10** | §9.2's PII citation `build_related.py:76-83` is wrong (docstring) | **CLOSED** — substance clean, r15 satisfied |
+| **S10** | §9.2's PII citation `build_related.py:76-83` is wrong (docstring) | **CLOSED** — substance clean, r15 satisfied. *Closed **in the code**, not in the spec: §9.2d went on asserting the hazard at that range until 2026-08-21. See spec Appendix B-20 for what closed it and what would reopen it.* |
+
+> **Where each of these is recorded in the spec** (T21's actual deliverable):
+> S1 → **B-1**, S8 → **B-2**, S9 → **B-3** (landed 2026-08-14/20);
+> S10 → **B-20**, S2 → **B-21**, S4 → **B-22**, S3 → **B-23**, S5 → **B-24**, S6 → **B-25**,
+> S7 → **B-26** (landed 2026-08-21). The second block is ordered by urgency, not by S-number —
+> S10 leads because it was the only one carrying a live PII cost. Re-derive rather than trusting
+> this line: `grep -n '^### B-2[0-6] ·' docs/specs/2026-08-10-wiki-to-ui-consolidation-design.md`.
+> S9's row above still says "three of four moves"; the denominator is **three** — corrected at the
+> phase-6 budget note earlier in this document and in spec B-3.
 
 ## Blocked on attribution — exactly one task
 
@@ -710,8 +726,8 @@ decision is the user's**, and it is why the related-docs HTTP endpoint still doe
 
 ### C-7 · T2's standing rule — the mechanism inverted, the conclusion survived
 
-Covered inline at the rule itself. In short: **the glob is gone.** `ci.yml` now names all seven
-browser modules as explicit paths in byte order (`ci.yml:354-360`) because a shell glob sorts by
+Covered inline at the rule itself. In short: **the glob is gone.** `ci.yml` now names every
+browser module as an explicit path in byte order because a shell glob sorts by
 ambient locale, expanding `test_ui_browser.py` last under macOS and first under a POSIX-locale
 runner. A conforming **filename** therefore no longer buys inclusion — **a new module must be added
 to the list.** The marker-based guard at `tests/test_ci_workflow.py:545` is unchanged and still
@@ -729,7 +745,7 @@ they were told the naming convention prevented.
 |---|---|---|
 | **"THIS FILE IS NOT SAFE YET — `docs/plans/` is gitignored"** | **STILL TRUE, unchanged.** `docs/specs/` is now tracked; `docs/plans/` and `docs/audits/` are not. The warning at the head of this document is a week old and has not been acted on. | `git check-ignore -v` → `.gitignore:57` (`docs/plans/`), `:58` (`docs/audits/`); `docs/specs` → not ignored |
 | **The half-staged migration — "highest-severity item in this report"** | **STILL LIVE, unchanged, seven days on.** The four-way split is exactly as described. **A commit taken now still captures the two renames and leaves the `build_related` half on the floor** — a self-concealing breakage where `import brain.cli` passes locally and fails for everyone else. | `related.py` `??`; `wiki/build_related.py` ` M`; `connect.py` ` M`; `people.py` / `person_name.py` staged renames |
-| **T3 "BLOCKED ON ATTRIBUTION"** | **RESOLVED — unblock it.** `compute_related` exists at `related.py:114` with **10 tests** in `tests/test_related_compute.py`. The file is quiet and no longer in flight. | `related.py` is **714 lines**, not the 613 this plan records — it grew when `compute_related` was added |
+| **T3 "BLOCKED ON ATTRIBUTION"** | **RESOLVED — unblock it.** `compute_related` exists at `related.py:114` with **10 tests** in `tests/test_related_compute.py`. The file is quiet and no longer in flight. | `related.py` outgrew the 613 lines this plan records when `compute_related` was added — re-derive with `wc -l src/brain/related.py`, and do not inherit the figure that stood here (~~714~~, already stale at HEAD: `0473b5f` took it past that) |
 | **The A12 caveat: "a green import at one instant… re-run after the write freeze"** | **RE-RUN, and the answer changed.** `import brain.cli` now loads **5** wiki/quartz modules, not the spec's 8. The three that dropped out are exactly the three that moved. **The blast radius shrank because the work was done, not because the earlier probe was sloppy.** | `sys.modules` diff, Python 3.11.15, worktree `.venv`: `vault.quartz_overlay`, `wiki`, `wiki.build_swap`, `wiki.errors`, `wiki.install` |
 | **S1** (defect table: "recorded, UNRESOLVED in the spec") | **NOW RULED.** The scoring landed in phase 2; the **panel is deliberately deferred to phase 5**. The spec's §11 phase-2 row is struck in place and its phase-5 row now owns the panel. | spec Appendix B-1 and the 2026-08-20 re-derivation there |
 | **S8** (§9.2c stale) | **CONFIRMED AND WIDENED.** The section's own grep now returns **6** statements against its **12** rows, and a **third** site declares it authoritative. Sharpest edge: `cli.py:234` no longer imports `wiki.build_people`, it imports `vault.quartz_overlay` — **the line survived and changed meaning**, so a line-number audit lands on a real, plausible import and edits the wrong statement. | spec §9.2c now carries a re-derived list |

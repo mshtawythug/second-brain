@@ -32,6 +32,12 @@ __all__ = [
     "DEFAULT_RELATED_LIMIT",
     "SNIPPET_LENGTH",
     "RelatedDoc",
+    # Underscore-prefixed but deliberately exported: brain.wiki.build_related
+    # imports it across the module boundary. Listing it here is the difference
+    # between a documented cross-module contract and a private name somebody
+    # reached into — the name is kept (renaming it would churn every call site)
+    # and the export is made explicit instead.
+    "_iter_hybrid_neighbors",
     "compute_related",
 ]
 

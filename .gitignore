@@ -122,6 +122,23 @@ docs/HOW-TO-TEST-elicit.md
 
 # Real PII-gate denylist (real names/customers/codenames) — keep local (rule 15).
 # The checked-in file is .pii-denylist.local.txt.example (synthetic).
+#
+# What the gate's EMAIL check actually permits, because it is narrower than the
+# repo has claimed elsewhere: `scripts/hooks/pre-commit` allows an address only
+# if its host ends in one of a hardcoded alternation — re-derive it with
+# `grep -n 'emails=' -A2 scripts/hooks/pre-commit`. That set is NOT "the RFC 2606
+# reserved names", which is how at least one commit message describes it. RFC 2606
+# reserves the `.test/.example/.invalid/.localhost` TLDs and `example.{com,net,org}`
+# — and nothing else. The alternation also admits `acme`, `contoso` and `northwind`
+# under `.com/.org/.net`, plus `test.` and `invalid.` under them. Those are
+# conventional synthetic-company placeholders, not reserved names, and `acme.com`,
+# `contoso.com` and `northwind.com` are real registered domains.
+#
+# This is deliberate and worth keeping — the placeholders are what the fixtures
+# actually use — but it should be described accurately, because "only reserved
+# names" is the kind of claim someone leans on when deciding a fixture is safe.
+# The gate scans the STAGED DIFF, not the tree, so existing tracked uses are
+# grandfathered and a green commit is not evidence the tree is clean.
 /.pii-denylist.local.txt
 
 # Generated audio-overview artifacts (brain audio) — real content, never commit

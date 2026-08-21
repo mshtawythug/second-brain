@@ -114,7 +114,7 @@ delta alone.)
 | File | Base → head | Why it is not being split |
 |---|---|---|
 | `cli.py` | 9,019 → 9,035 (+16) | One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and deferred deliberately. **No longer unchanged:** `_VALID_SOURCE_KINDS` became a re-export of `brain.source_kinds` so the ingest *write* boundaries could enforce it — `cli` imports `cli_ingest`, so the set could not have stayed here. Net *less* duplication. **Recorded** inline + in the docstring. |
-| `mcp_server.py` | 4,009 → 4,137 (+128) | Same shape — one MCP tool registry. Four growths: `_split_source_filter` (so `source="none"` means the same thing here as in the UI), `source` validation at the `brain_ingest_stdin` write boundary, and the F6 confidential lens on `brain_list` and on `brain_backlinks`/`brain_links`. **Now recorded** in both required places — the docstring also carries the decorator hazard that cost `brain_recall` its registration (see below), and the polarity inversion at the `vault.graph` boundary. |
+| `mcp_server.py` | **re-derive: `wc -l src/brain/mcp_server.py`** | Same shape — one MCP tool registry. **This cell deliberately holds no digit, because the digit has now been wrong three times.** It read `→ 4,137 (+128)` (a value the file never held, wrong *when written* in `0473b5f`); it was corrected to `4,191` on 2026-08-21; and `4,191` was stale within the hour, because the F6 listing-gate work landed in the same file that same afternoon. A live count in a checked-in table is a measurement of a tree that stops existing at the next commit, and this is the one row in this table whose subject is also actively edited by whoever reads it. What does not rot is the base and the per-commit trail: 4,009 (`f8c76c0`, branch base) → 4,043 (`3b16527`) → 4,055 (`c62e3de`) → 4,191 (`2ed2d83`). Five growths, each reasoned inline where it landed and summarized in the module docstring: `_split_source_filter` (so `source="none"` means the same thing here as in the UI); `source` validation at the `brain_ingest_stdin` write boundary; the F6 confidential lens on `brain_list`; the same lens on `brain_backlinks`/`brain_links`, whose polarity **inverts** across the `vault.graph` boundary; and the same lens on the four UNPROMPTED listing tools — `brain_brief`, `brain_review_weekly`, `brain_timeline`, `brain_connect_list` — which took no document id and no query at all, so every document they named was one the caller had not asked for. Two of those (`brain_brief`, `brain_review_weekly`) were BODY egress, not title egress: `todo.iter_action_item_docs` selects `documents.content` and parses action-item text out of it. The docstring also carries the decorator hazard that cost `brain_recall` its registration. **The disclosure the rule requires is *what grew and why*, which is above; the measurement belongs in the command, which is in the Lines cell.** |
 | `ingest/__init__.py` | 2,298 → 2,366 (+68) | Dispatcher + both pipelines; the extractors are already separate modules. Growth is the extraction of `mirror_is_stale` / `write_vault_mirror` so a caller owning the outer transaction can defer the mirror write past its own commit. Near-zero net-new logic. **Now recorded.** |
 | `config.py` | 2,250 → 2,303 (+53) | Knobs belong beside the other knobs. Growth is one knob (`BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`) plus its tri-state parse and the ruling for why it is not `serve_confidential_bodies`. **Now recorded** — and the docstring names the real next move: the *prose* is what makes this file large, so split the rationale out, not the knobs. |
 | `vault/sync.py` | 1,747 → 1,817 (+70) | One reconciliation algorithm; the walk and the per-file upsert only make sense together. Growth is `_source_from_frontmatter` validating a file's `source:` against `brain.source_kinds` — the **third and last** unvalidated write boundary into `sources.kind` (`cli_ingest` and `mcp_server` closed the other two, and 2-of-3 was a worse resting state than 0-of-3). Most of the +70 is the ruling on the FAILURE MODE — dropped and warned, never rejected and never substituted — which is the non-obvious part and the reason a reviewer opens this function at all. **Recorded** inline + in the docstring. |
@@ -132,14 +132,42 @@ delta alone.)
 
 `backup/restore.py` is deliberately **absent**: it crossed the ceiling on this
 branch (745 → 806) and was brought back under by the `db_names.py` extraction
-(now 755). `wiki/build_related.py` (815) is also gone — renamed to
-`brain/related.py` and *shrunk* to 714 in the process.
+(now 755). `wiki/build_related.py` is a different case and **is not gone**: it was
+**split, not renamed**. The scoring half moved to `brain/related.py`; the file
+itself survives as the thin emitter §9.2d(2) requires, because
+`wiki/build_swap.py` and `wiki/build_watcher.py` still call `refresh_related`.
+Both files exist at HEAD — re-derive with
+`wc -l src/brain/wiki/build_related.py src/brain/related.py`, and note the split
+**added** lines overall rather than shrinking anything.
 
-`source_kinds.py` (54 lines) is **new on this branch and deliberately not in the
-table** — a new module lands under 800, and this one exists precisely so a
-constant could stop being copied: it is now the single definition behind
-`cli._VALID_SOURCE_KINDS`, with `ui/schemas.py` keeping its own guarded copy for
-the documented reason (it must not import the Typer CLI).
+*(Corrected 2026-08-21. This paragraph read: "`wiki/build_related.py` (815) is
+also gone — renamed to `brain/related.py` and *shrunk* to 714 in the process."
+Three claims, three wrong: the file exists, it was a split rather than a rename,
+and the "shrunk to 714" figure was stale in the very commit that wrote it —
+`0473b5f` is the commit that took `related.py` past 714. Contrast the `people.py`
+row above, which says "renamed" and **is correct**: `wiki/build_people.py` really
+is gone. Two adjacent moves of the same shape, one a rename and one a split, is
+exactly the pair that invites a reader to assume the second from the first.)*
+
+`source_kinds.py` is **new on this branch and deliberately not in the table** — a
+new module lands under 800, and this one exists precisely so a constant could
+stop being copied: it is now the single definition behind both
+`cli._VALID_SOURCE_KINDS` and `ui.schemas.VALID_SOURCE_KINDS`.
+
+**`ui/schemas.py` does not keep its own copy.** It re-exports the canonical
+object (`VALID_SOURCE_KINDS = _CANONICAL_SOURCE_KINDS`), so there is one
+frozenset and both names bind it — the drift risk is *deleted*, not guarded. The
+old justification for a second literal (reaching the set meant importing the
+Typer CLI into every HTTP handler) is satisfied by the extraction itself:
+`brain.source_kinds` does not import `typer`. `tests/test_ui_schemas.py` asserts
+**identity** (`is`), not equality, because the surviving failure mode is someone
+restating the literal — which produces an equal-but-separate object that `==`
+would wave through.
+
+*(Corrected 2026-08-21; the same false claim was in `src/brain/source_kinds.py`'s
+own docstring and is fixed there too. The line count this paragraph used to cite
+is dropped rather than refreshed — nothing here needs it, and it was one more
+number to rot.)*
 
 **Closed 2026-08-20 — the four unrecorded growths now carry records.**
 `mcp_server.py`, `ingest/__init__.py`, `config.py` and `search.py` each grew on
