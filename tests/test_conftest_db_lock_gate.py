@@ -17,21 +17,56 @@ regression test for a data-loss bug must not be able to cause the data loss.
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 
-from tests.conftest import UnlockedTestDatabaseError, _require_suite_lock
+from tests.conftest import (
+    TEST_DATABASE_URL,
+    UnlockedTestDatabaseError,
+    _require_suite_lock,
+)
 
 pytestmark = pytest.mark.nodb
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+
+def _unreachable(dsn: str) -> str:
+    """Return ``dsn`` with its network location moved to a port that refuses.
+
+    Everything that identifies the DATABASE — scheme, credentials, name — is
+    carried over from the resolved ``TEST_DATABASE_URL``; only the host/port is
+    replaced. Port 1 is in the reserved range and nothing binds it, so a
+    connection attempt is refused immediately rather than hanging.
+    """
+    parts = urlsplit(dsn)
+    userinfo = ""
+    if parts.username:
+        userinfo = parts.username
+        if parts.password:
+            userinfo = f"{userinfo}:{parts.password}"
+        userinfo = f"{userinfo}@"
+    return urlunsplit(
+        (parts.scheme, f"{userinfo}127.0.0.1:1", parts.path, parts.query, parts.fragment)
+    )
+
+
 #: Syntactically valid, deliberately unreachable, and not prod-shaped.
 #:
-#: Port 1 refuses instantly, so a regressed gate fails on the connection rather
-#: than on a ``TRUNCATE``. The ``*_test`` database name keeps the import-time
-#: prod guard in ``tests/conftest.py`` satisfied.
-UNREACHABLE_TEST_DB_URL = "postgresql://brain:brain@127.0.0.1:1/second_brain_test"
+#: DERIVED from :data:`tests.conftest.TEST_DATABASE_URL` rather than written out
+#: as a literal, for two reasons that pull the same way:
+#:
+#: * ``test_database_url_isolation`` forbids a pinned DSN literal in any test
+#:   module, and the exemption list is keyed by MODULE NAME — carving this file
+#:   out would blind that sweep to every future pin added here, which is a real
+#:   loss of coverage for a guard whose whole subject is divergence.
+#: * The unreachability this module depends on is a property of the ADDRESS, not
+#:   of the database identity. Deriving keeps the nested session pointed at the
+#:   same database the fixture would use while forcing the address somewhere it
+#:   can never reach, so a regressed gate still fails on the connection rather
+#:   than on a ``TRUNCATE`` — under an override as much as under the default.
+UNREACHABLE_TEST_DB_URL = _unreachable(TEST_DATABASE_URL)
 
 _MODULE_TAKING_TEST_DB = '''
 {marker}
