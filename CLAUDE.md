@@ -238,6 +238,50 @@ rule — *how much a file grew* is a number, *what grew in it* is a review.
 There is **no automated gate** on this — the ceiling is a review checkpoint, not
 CI. If you add a file to this table, add the row in the same edit.
 
+### The F6 draft/sensitivity residue audit — a review checkpoint, re-derived
+
+Same shape as the ceiling table, same failure mode, so the same discipline: a
+standing audit that **carries no row set**, because a row set here rots exactly
+like a Lines cell. Every `documents` read that filters `draft` is a read of the
+browseable corpus; almost every such read is also a place a *confidential* row
+could travel. **Re-derive the set — never inherit it, including from this
+paragraph or from a reviewer's brief:**
+
+```
+grep -rn "draft = FALSE\|draft=FALSE\|draft IS FALSE\|NOT d.draft" src/brain/
+```
+
+For each hit, the question is per-STATEMENT, not per-file: does *this* statement
+either carry a sensitivity predicate, or carry a written reason it does not? A
+file-level answer is not an answer — `connect.py` and `related.py` each contain
+both gated and deliberately-ungated statements.
+
+Three outcomes are legitimate and only the third is a defect:
+
+1. **Gated** — a `sensitivity` sibling in the same statement.
+2. **Ungated with a recorded reason**, because the gate belongs at a different
+   layer or would be wrong here. Two live examples, both verified 2026-08-21:
+   `connect.py`'s three scoring queries (the gate is at the read boundary,
+   `iter_suggestions`, which gates BOTH endpoints — reasoned at its call site);
+   and `ui/queries.py`'s `_DISCOVERABLE_ANY_SENSITIVITY`, the deliberate
+   permissive half of a frozen pair.
+3. **Ungated with no reason recorded** — the defect. It reads identically to (2)
+   from the outside, which is the whole problem: the reviewer cannot tell a
+   considered omission from an oversight without re-deriving the data flow.
+
+**Known residue at `7f4d859`, judged not a hole:** `related.py`'s
+`_corpus_common_lexemes` (two statements) scans every non-draft title including
+confidential ones. It is safe *and* gating it would be wrong — a lexeme
+qualifies only by appearing in more than `_CORPUS_FREQ_THRESHOLD` of the corpus,
+so no member is distinctive to any document; the set is consumed purely
+subtractively (`_build_self_tsquery` only ever `continue`s past a member);
+nothing from it reaches an emitted artifact. Excluding confidential titles from
+the *denominator* would change the ranking of the non-confidential corpus for
+users who have no confidential document at all. Recorded here rather than in
+`related.py` on purpose: that module is over the ceiling and its own docstring
+says extract before the next addition, so the note that would have gone there
+lives here until the extraction lands.
+
 **The residue — this table can be rot-proof in every digit and still be wrong by
 omission.** Deleting the live head counts closes one failure mode: a row stating
 a size the next commit falsifies. It does not touch the other, which is larger.
