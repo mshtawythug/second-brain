@@ -614,12 +614,40 @@ def test_timeline_still_buckets_the_normal_document(
 def test_timeline_include_confidential_opts_back_in(
     test_db: psycopg.Connection[Any], confidential_graph: str
 ) -> None:
-    """The permissive direction."""
+    """The permissive direction — for BOTH enumerations, not just the title.
+
+    The subtlest of the vacuity gaps found on this branch, because this test
+    already existed and the pairing LOOKED complete. Its withholding sibling
+    asserts two separate claims over one blob — no confidential title, and no
+    confidential id — while this control asserted only the title. So the id
+    half was uncontrolled inside a test that passes every "does it have an
+    opt-back-in sibling?" check anyone would think to run.
+
+    Dropping ``doc_ids`` from the timeline bucket shape
+    (:func:`brain.format` bucket serialization) therefore made
+    "no confidential id is enumerated" vacuous while this test stayed green on
+    the title — measured: every test in this module and in
+    ``test_timeline.py`` passed with the field deleted.
+
+    That mattered more here than in the other three, because the sibling's
+    docstring argues the id is a disclosure INDEPENDENT of the title — "a
+    bucket that names an id the caller can then feed to ``brain_show`` is a
+    membership oracle even with the title withheld". A documented claim resting
+    on an assertion that cannot fail is worse than an undocumented gap: it
+    reads as settled.
+
+    One control per claim, at the same layer the claim is denied over.
+    """
     _graph_fixture_is_not_vacuous(test_db, confidential_graph)
 
     blob = _blob(mcp_server.brain_timeline(query="bob", include_confidential=True))
 
     assert CONF_TITLE in blob
+    assert confidential_graph in blob, (
+        "the timeline payload enumerates no document ids at all, so the "
+        "'confidential_graph not in blob' half of the withholding test above "
+        "is vacuous"
+    )
 
 
 # -- residual 1: ThemeGroup.doc_ids / .summary ------------------------------
@@ -704,6 +732,18 @@ def test_graphrag_global_community_doc_ids_hide_confidential_membership(
 
     Same shape as the themes residual: the context-level docs were filtered by
     ``_build_doc_results`` while the per-community id list beside them was not.
+
+    SUBSCRIPTED, not ``.get(…, [])`` — deliberately, and not to be "hardened"
+    back. Both keys are unconditional in the wire shape
+    (:func:`brain.format.graph_context_json` always emits ``communities``;
+    :func:`brain.format._community_json` always emits ``doc_ids``), so a
+    tolerant read buys no robustness and costs the only thing that matters
+    here: with ``.get(…, [])`` this assertion CANNOT TELL "the gate withheld
+    the document" from "the field no longer exists". Measured, not asserted —
+    deleting the ``doc_ids`` key from ``_community_json`` left this test green.
+    A ``KeyError`` is the correct outcome for a vanished contract field; a
+    silent empty set is a test that reports success at the moment it stops
+    being able to see anything.
     """
     _graph_fixture_is_not_vacuous(test_db, confidential_graph)
     # One community holding every seeded entity. The claim is about the doc-id
@@ -731,10 +771,39 @@ def test_graphrag_global_community_doc_ids_hide_confidential_membership(
 
     payload = mcp_server.brain_graphrag_search(query="wind-down", mode="global")
 
-    leaked = {
-        i for c in payload.get("communities", []) for i in c.get("doc_ids", [])
-    }
+    leaked = {i for c in payload["communities"] for i in c["doc_ids"]}
     assert confidential_graph not in leaked
+
+
+def test_graphrag_global_community_doc_ids_opt_back_in(
+    test_db: psycopg.Connection[Any], confidential_graph: str
+) -> None:
+    """The permissive direction for the same field — the missing control.
+
+    Mirrors :func:`test_graphrag_themes_group_doc_ids_opt_back_in` above,
+    because the withholding assertion beside this one had the same hole its
+    themes neighbour was already protected against: ``doc_ids = []`` satisfies
+    "the confidential id is not enumerated" perfectly, so the gate looks
+    applied while actually being a truncation. Verified two-sided — blanking
+    ``list(community.doc_ids)`` in ``_community_json`` reddens THIS test and
+    leaves the assertion above green.
+
+    Same call, same flattening expression, ``include_confidential`` flipped and
+    the assertion flipped: the presence check has to sit at the SAME LAYER the
+    absence is asserted over, or it proves something about a different tier.
+    """
+    _graph_fixture_is_not_vacuous(test_db, confidential_graph)
+    _seed_community(test_db, "Wind-down planning and scheduling for the team")
+
+    payload = mcp_server.brain_graphrag_search(
+        query="wind-down", mode="global", include_confidential=True
+    )
+
+    leaked = {i for c in payload["communities"] for i in c["doc_ids"]}
+    assert confidential_graph in leaked, (
+        "no community enumerated ANY document id, so the withholding "
+        f"assertion above is vacuous: leaked={leaked}"
+    )
 
 
 # -- residual 3: the community admin listing --------------------------------

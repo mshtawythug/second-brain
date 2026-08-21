@@ -250,6 +250,50 @@ def test_graphrag_search_include_confidential_opts_back_in(
     assert CONF_TITLE in [d["title"] for d in payload["docs"]]
 
 
+def test_graphrag_search_include_confidential_carries_body_into_the_payload(
+    test_db: psycopg.Connection[Any], confidential_graph: str
+) -> None:
+    """POSITIVE CONTROL for every ``BODY_MARKER not in blob`` assertion here.
+
+    Those five assertions (local / entity / both fuse legs / themes) read a
+    SERIALIZED payload, and the only thing that puts body text into one is
+    ``docs[].snippet`` via :func:`brain.format._graph_doc_json`. Nothing else
+    in this file pinned that the field exists at all.
+
+    :func:`_fixture_is_not_vacuous` is the near miss, and the reason "absence
+    needs presence" is not yet the whole rule: it reads the ``chunks`` ROW, so
+    it proves the marker is in the DATABASE, not that the database reaches the
+    wire. Drop ``snippet`` from the wire shape and the fixture guard stays
+    green while all five withholding assertions pass forever proving nothing.
+
+    So the rule this closes is the stronger one: **the presence check must sit
+    at the SAME LAYER the absence is asserted over.** Hence the same call, the
+    same ``json.dumps(..., default=str).lower()`` blob, and the opposite
+    assertion — the exact mirror of the test at the top of this section.
+
+    This is the same failure shape as the ``ensure_ascii`` defect fixed
+    alongside it, arriving from the other side: that one made a withholding
+    assertion blind to content that WAS present; this one would make it blind
+    to the absence of a content path. Both report "no leak" truthfully and
+    meaninglessly.
+
+    Verified two-sided rather than argued: deleting the ``"snippet"`` key from
+    ``_graph_doc_json`` reddens THIS test and leaves all five
+    ``BODY_MARKER not in blob`` assertions green.
+    """
+    _fixture_is_not_vacuous(test_db, confidential_graph)
+
+    payload = mcp_server.brain_graphrag_search(
+        query="bob", mode="local", include_confidential=True
+    )
+
+    blob = json.dumps(payload, default=str).lower()
+    assert BODY_MARKER in blob, (
+        "the graph payload carried no body text at all, so every "
+        "'BODY_MARKER not in blob' assertion in this file is vacuous"
+    )
+
+
 def test_graphrag_entity_response_contains_no_confidential_body(
     test_db: psycopg.Connection[Any], confidential_graph: str
 ) -> None:
@@ -679,3 +723,45 @@ def test_graphrag_global_community_doc_ids_exclude_the_confidential_document(
 
     enumerated = {doc_id for c in payload["communities"] for doc_id in c["doc_ids"]}
     assert confidential_communities not in enumerated
+
+
+def test_graphrag_global_community_doc_ids_opt_back_in(
+    test_db: psycopg.Connection[Any], confidential_communities: str
+) -> None:
+    """POSITIVE CONTROL for the community ``doc_ids`` gate above.
+
+    That gate reads a set built by flattening ``communities[].doc_ids``. Nothing
+    pinned that the list is populated at all, so blanking ``doc_ids`` in
+    :func:`brain.format._community_json` left the gate green — and left it green
+    across BOTH files that assert on it.
+
+    The near miss is the reason this needs saying, because it looks like
+    coverage: :func:`test_the_confidential_community_fixture_is_not_vacuous`
+    guards the premise, but it asserts ``payload["communities"]`` is non-empty,
+    which is one FIELD short. Non-empty communities each carrying an empty
+    ``doc_ids`` satisfies that guard while ``enumerated`` is empty and the gate
+    below proves nothing. A guard one boundary short of the thing it guards is
+    the recurring shape on this branch, not a one-off.
+
+    So this is the same rule the body-snippet control states, applied to the
+    membership tier: the presence check must sit at the SAME LAYER the absence
+    is asserted over — here, the same call, the same flattening expression, the
+    flag flipped and the assertion flipped.
+
+    Verified two-sided rather than argued: replacing ``list(community.doc_ids)``
+    with ``[]`` in ``_community_json`` reddens THIS test, while
+    ``test_graphrag_global_community_doc_ids_exclude_the_confidential_document``
+    still passes.
+    """
+    _fixture_is_not_vacuous(test_db, confidential_communities)
+
+    payload = mcp_server.brain_graphrag_search(
+        query="Cluster", mode="global", include_confidential=True
+    )
+
+    enumerated = {doc_id for c in payload["communities"] for doc_id in c["doc_ids"]}
+    assert confidential_communities in enumerated, (
+        "no community enumerated ANY document id, so the withholding "
+        "assertion beside this one is vacuous: "
+        f"enumerated={enumerated}"
+    )
