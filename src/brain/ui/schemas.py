@@ -14,27 +14,48 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..search import CANDIDATE_LIMIT
+from ..source_kinds import VALID_SOURCE_KINDS as _CANONICAL_SOURCE_KINDS
 from ..tags import normalize_tags
 from .errors import UiBadRequest
 
-#: The four source kinds `brain ingest` recognises. This mirrors
-#: ``brain.cli._VALID_SOURCE_KINDS`` and is duplicated **only** because
-#: importing it would drag a 9,800-line Typer module into every HTTP handler.
-#: (Spec §2.1 called for extracting it to ``brain/source_kinds.py``; that never
-#: landed and ``cli.py`` is not this feature's file to edit.)
-#: ``tests/test_ui_schemas.py`` asserts the two sets are equal and names both
-#: locations on failure, so drift is a red test rather than a silent divergence.
-VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack"})
+#: The four source kinds `brain ingest` recognises — **the canonical object**,
+#: re-exported from :data:`brain.source_kinds.VALID_SOURCE_KINDS`, not a copy of
+#: it. Spec §2.1 requires exactly this ("have `cli.py` import it"; the review
+#: rule rejects copying what can be extracted), and ``brain.cli`` already
+#: complies via ``_VALID_SOURCE_KINDS``.
+#:
+#: This was a second literal until now, justified by import cost: reaching the
+#: set meant importing the 9,800-line Typer CLI into every HTTP handler. The
+#: extraction to ``brain.source_kinds`` removed that cost, measured here under
+#: fresh 3.11 interpreters (re-derive; do not inherit these numbers):
+#:
+#: * ``import brain.source_kinds`` cold — 28 modules, of which 3 are ``brain.*``
+#:   (``brain``, ``brain.errors``, itself); ``typer`` NOT loaded; 18.1 ms.
+#: * ``import brain.cli`` cold — 615 modules; ``typer`` loaded; 306.7 ms. That
+#:   is the cost the old justification was about, and it is not this import.
+#: * **Incremental** cost of this line, the number that actually applies: this
+#:   module already loads ``brain`` and ``brain.errors`` via ``..search``, so
+#:   adding the import loads **1** further module in **0.18 ms**. For scale,
+#:   ``brain.ui.schemas`` itself costs 340 modules / 101.6 ms.
+#:
+#: Re-exporting *deletes* the drift risk rather than guarding it: there is one
+#: frozenset and both names bind it, so the two cannot disagree. What remains
+#: possible is a future edit restating the literal here, which
+#: ``tests/test_ui_schemas.py`` catches by asserting **identity** — ``is``, not
+#: ``==``, because two equal frozenset literals are distinct objects and an
+#: equality guard stays green against precisely that regression (verified).
+VALID_SOURCE_KINDS: frozenset[str] = _CANONICAL_SOURCE_KINDS
 
 #: The fifth value the Source dropdown offers: documents with **no** ``sources``
 #: row at all (T7).
 #:
-#: Deliberately NOT a member of :data:`VALID_SOURCE_KINDS`. That set mirrors
-#: ``cli._VALID_SOURCE_KINDS`` and ``tests/test_ui_schemas.py`` asserts the two
-#: are equal, so adding a pseudo-kind to it would either break that guard or —
-#: worse — push a value into ``sources.kind`` territory that no ingest path can
-#: ever write. It is a *view* over the corpus, not a kind of source, and it maps
-#: to ``build_predicate(source_missing=True)`` rather than to ``source_kind``.
+#: Deliberately NOT a member of :data:`VALID_SOURCE_KINDS`. That name now *is*
+#: :data:`brain.source_kinds.VALID_SOURCE_KINDS` — the same object, not a mirror
+#: of it — so adding a pseudo-kind here would widen the enum the ingest write
+#: boundaries validate against, pushing a value into ``sources.kind`` territory
+#: that no ingest path can ever write. It is a *view* over the corpus, not a
+#: kind of source, and it maps to ``build_predicate(source_missing=True)``
+#: rather than to ``source_kind``.
 #:
 #: ``d.source_id IN (SELECT id FROM sources WHERE kind=%s)`` is false for a NULL
 #: ``source_id`` under every one of the four real kinds, so without this value
@@ -315,6 +336,18 @@ def _parse_offset(raw: Any) -> int:
     contract: a clamped offset is indistinguishable from a working one, so a
     client paging past the end would be handed page 1 forever and read that as
     "no more results".
+
+    The bound is INCLUSIVE of :data:`MAX_OFFSET`, and that is not an
+    off-by-one. ``offset == MAX_OFFSET`` can only ever return an empty page —
+    at most ``MAX_RANKED_DOCUMENTS`` documents are rankable and
+    :meth:`SearchQuery.page_of` slices from there — but an empty page is a
+    *supported terminal answer* here, not a failure: it carries
+    :data:`RANKING_CEILING`, which tells the reader they hit the ranked ceiling
+    rather than exhausted the matches (defect #27, pinned by
+    ``test_an_empty_page_past_the_ranked_ceiling_reports_ceiling_not_exhaustion``).
+    A client stepping forward by ``limit`` lands exactly on ``MAX_OFFSET``
+    whenever ``limit`` divides it, so rejecting that offset would replace the
+    one informative terminal state with a 400 on the last legal step.
     """
     if raw in (None, ""):
         return DEFAULT_OFFSET

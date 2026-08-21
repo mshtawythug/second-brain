@@ -87,6 +87,7 @@ from .resurface import resurface_docs
 from .search import SearchDiagnostics, build_tsquery, hybrid_search
 from .search_predicate import build_predicate
 from .sensitivity import is_confidential
+from .source_kinds import InvalidSourceKind, validate_source_kind
 from .tags import normalize_tags
 
 if TYPE_CHECKING:
@@ -1114,6 +1115,17 @@ def brain_ingest_stdin(
     """
     if not content.strip():
         raise _mcp_error(INVALID_PARAMS, "content is empty")
+    # `sources.kind` has no CHECK constraint, and this is the entry point where
+    # the value is chosen by a model rather than typed by a person -- so it is
+    # the likeliest source of a plausible-but-wrong kind ("email", "meeting",
+    # "none"). An unvalidated kind is COUNTED by the facet panel and then not
+    # RETURNED when that facet is clicked, so it corrupts the read surfaces
+    # instead of failing visibly. Rejected here with the same message the CLI
+    # gives, so the agent can retry with a real kind.
+    try:
+        validate_source_kind(source)
+    except InvalidSourceKind as e:
+        raise _mcp_error(INVALID_PARAMS, str(e)) from e
     state = _get_state()
     user_tags = list(tags or [])
     # Set-union with the auto tag, then back to a list for storage. Sorted so

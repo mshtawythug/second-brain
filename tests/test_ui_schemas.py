@@ -19,26 +19,31 @@ from brain.ui.schemas import (
 )
 
 
-def test_source_kinds_match_the_cli_exactly() -> None:
-    """The drift guard for a knowingly duplicated constant.
+def test_source_kinds_is_the_canonical_object_not_a_copy() -> None:
+    """The UI must re-export the canonical source-kind set, never restate it.
 
-    ``brain.ui.schemas.VALID_SOURCE_KINDS`` duplicates
-    ``brain.cli._VALID_SOURCE_KINDS`` because importing the 9,800-line Typer
-    module into an HTTP handler is unacceptable startup cost, and the extraction
-    to ``brain/source_kinds.py`` that the design called for was never landed.
+    This replaces a guard that asserted ``schemas.VALID_SOURCE_KINDS ==
+    cli._VALID_SOURCE_KINDS``. Once ``schemas.py`` became a re-export, both
+    names bound one frozenset and that equality could not fail — a tautology,
+    which is worse than no test because it reads as coverage.
 
-    Duplication is only safe if divergence is loud. This test is what makes it
-    loud.
+    Identity is the assertion that still binds. The surviving failure mode is
+    someone restating the literal here (the status quo this replaced), and that
+    produces an **equal but separate** object: ``==`` stays green, ``is`` goes
+    red. Both halves were verified against a live single-point mutation, not
+    assumed — under a re-introduced literal copy the old equality guard passed
+    and this one failed.
     """
-    from brain.cli import _VALID_SOURCE_KINDS
+    from brain.source_kinds import VALID_SOURCE_KINDS as CANONICAL
 
-    assert VALID_SOURCE_KINDS == _VALID_SOURCE_KINDS, (
-        "source-kind vocabularies have diverged.\n"
-        "  brain/ui/schemas.py::VALID_SOURCE_KINDS = "
-        f"{sorted(VALID_SOURCE_KINDS)}\n"
-        "  brain/cli.py::_VALID_SOURCE_KINDS        = "
-        f"{sorted(_VALID_SOURCE_KINDS)}\n"
-        "Update BOTH, or land the brain/source_kinds.py extraction."
+    assert VALID_SOURCE_KINDS is CANONICAL, (
+        "brain/ui/schemas.py::VALID_SOURCE_KINDS is no longer the canonical "
+        "frozenset — it is an equal-but-separate object, i.e. a copy that can "
+        "drift.\n"
+        f"  brain/ui/schemas.py  = {sorted(VALID_SOURCE_KINDS)}\n"
+        f"  brain/source_kinds.py = {sorted(CANONICAL)}\n"
+        "Re-export it (`VALID_SOURCE_KINDS = _CANONICAL_SOURCE_KINDS`) instead "
+        "of restating the literal."
     )
 
 

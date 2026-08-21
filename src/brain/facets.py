@@ -25,10 +25,40 @@ DEFAULT_TOP_TAGS = 8
 #: ``'none'`` rather than a dropped row, so the bucket is *clickable*: it is the
 #: exact value :data:`brain.ui.schemas.SOURCE_NONE` carries, which
 #: ``parse_search_spec`` turns into ``build_predicate(source_missing=True)``.
-#: Clicking the facet therefore selects precisely the documents it counted.
-#: Omitting the row instead would have fixed ``manual`` while making
-#: source-less documents invisible in the panel, which is the same information
-#: loss in a quieter form.
+#: Clicking the facet therefore selects the documents it counted — with one
+#: known exception, stated rather than claimed away. Omitting the row instead
+#: would have fixed ``manual`` while making source-less documents invisible in
+#: the panel, which is the same information loss in a quieter form.
+#:
+#: **THE EXCEPTION: a source whose kind is literally ``'none'``.** Such a
+#: document has a ``source_id``, so ``coalesce(s.kind, 'none')`` COUNTS it in
+#: this bucket while the click — ``source_missing=True`` →
+#: ``d.source_id IS NULL`` — does NOT return it. Count and click disagree by
+#: exactly those rows.
+#:
+#: **No supported path can create one any more, and this paragraph is kept for
+#: what remains rather than for what was fixed.** The prescription it used to
+#: carry — close ``--source`` over the known kind set — was right but named one
+#: boundary of three. All three are now closed against
+#: :data:`brain.source_kinds.VALID_SOURCE_KINDS`:
+#: ``cli_ingest.ingest_stdin`` and ``mcp_server.brain_ingest_stdin`` raise
+#: (``typer.BadParameter`` / ``INVALID_PARAMS``), and ``vault.sync`` — reached
+#: from hand-authored frontmatter rather than an argument — warns and indexes
+#: the document with no ``sources`` row, so a metadata typo costs the user a
+#: facet, not the document.
+#:
+#: What is NOT closed, and why this stays: the column is still bare
+#: ``TEXT NOT NULL`` with no CHECK (migration 001), so the guarantee is an
+#: application-layer one. Rows written before those boundaries closed, and
+#: anything written by direct SQL, can still land here. Re-derive the boundary
+#: set before trusting this note — ``grep -rn 'INSERT INTO sources' src/`` finds
+#: the two sinks, and ``grep -rn validate_source_kind src/`` finds the guards. A
+#: fourth writer that skips them reopens the divergence.
+#:
+#: Still not fixed on the read side, for the original reason: papering over it
+#: in the facet SQL would hide a write-boundary problem behind a read-side
+#: special case, and no sentinel string is safe while any string is an
+#: accepted kind.
 #:
 #: Defined HERE and mirrored by ``brain.ui.schemas.SOURCE_NONE`` rather than
 #: imported from it: ``brain.facets`` is core and backs ``brain search`` on the

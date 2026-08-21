@@ -1,4 +1,17 @@
-"""brain — second brain CLI."""
+"""brain — second brain CLI.
+
+**File-size ceiling (CLAUDE.md): already over, and it grew.** 9,019 -> 9,035
+lines -- the first growth of `feat/wiki-to-ui-consolidation`, and a net
+reduction in duplication rather than an addition of logic:
+``_VALID_SOURCE_KINDS`` became a re-export of
+:data:`brain.source_kinds.VALID_SOURCE_KINDS` so the ingest WRITE boundaries
+could enforce the set too. It had to move OUT of here to be reachable:
+``cli`` imports ``cli_ingest``, so ``cli_ingest`` could never have imported the
+name back out of this module. Reason inline at the constant.
+
+The long-deferred split into per-domain command modules is unchanged by this;
+``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
+"""
 from __future__ import annotations
 
 import dataclasses
@@ -204,6 +217,7 @@ from .queries import resolve_person_to_keys as resolve_person_to_keys
 from .resurface import resurface_docs
 from .search import hybrid_search as hybrid_search
 from .setup import ProfileName  # lightweight StrEnum for `brain setup --profile` (no networkx)
+from .source_kinds import VALID_SOURCE_KINDS
 from .tags import normalize_tag, normalize_tags
 from .vault import init_vault
 from .vault.daily_index import regenerate_daily_index
@@ -3777,11 +3791,13 @@ def enrich(
 
 
 # Canonical ingest source kinds (``documents.source_kind`` via ``sources.kind``).
-# A genuinely closed enum — only ever written by the ingest paths. Mirrors
-# :data:`brain.vault.links._SOURCE_KINDS`; duplicated here (not imported) so the
-# CLI's ``--source`` validation surface stays stable independent of any internal
-# refactor of that module-private set (same pattern as _DIRECTORY_VALID_SOURCES).
-_VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack"})
+# A genuinely closed enum — only ever written by the ingest paths. Re-exported
+# from :mod:`brain.source_kinds`, which is where the set now lives so that the
+# ingest WRITE boundaries can enforce it too: `cli` imports `cli_ingest`, so
+# `cli_ingest` could not have imported this name back out of here. Kept under
+# its original private name because `tests/test_ui_schemas.py` asserts parity
+# against it by that name.
+_VALID_SOURCE_KINDS: frozenset[str] = VALID_SOURCE_KINDS
 
 
 def _validate_source_choice(source: str | None) -> str | None:
