@@ -16,6 +16,29 @@ anchor is ``COALESCE(documents.sent_at, documents.ingested_at)`` (event time
 when known — emails / Krisp — else ingest time), computed inline; when the
 optional migration-021 generated ``doc_date`` column is present it is used
 instead (auto-detected via ``information_schema``).
+
+**File-size ceiling (CLAUDE.md): already over at the branch base, and it grew.**
+This pointer carries no live line count on purpose — the ceiling table's entry
+for this file asserted ``844 -> 844`` for a full day *after* the growth below
+had landed, so a reader auditing compliance was told there was nothing to
+audit. Re-derive with ``wc -l src/brain/timeline.py``. What does not rot is the
+base and the trail: 844 (``f8c76c0``, branch base) -> 877 (``ec6afb6``).
+
+The one growth is the F6 confidential gate, threaded through
+:func:`_compose_doc_filter` and out to :func:`build_timeline`, and reasoned
+inline on both. The non-obvious half, and the reason to open them: the gate is
+applied in the PREDICATE, not the projection, so the confidential document
+leaves the match set entirely. One clause in ``_compose_doc_filter`` drops it
+from ``doc_ids``, ``doc_titles``, the co-topic tally, the ``doc_count`` /
+``mention_count`` arithmetic, the auto-granularity probe AND the synthesis
+bundle at once — none of which are separately gated, and each of which would
+otherwise leak a different shadow of the same document. Withholding only
+``doc_titles`` would still publish the ids, and an id is enough to fetch the
+document.
+
+Splitting is not indicated: this is one bucketing algorithm, and the three query
+helpers exist only to share its WHERE-clause composition. Extract before growing
+it again.
 """
 from __future__ import annotations
 

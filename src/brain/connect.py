@@ -12,6 +12,26 @@ MCP server (so neither layer duplicates the SQL or the file logic).
 It deliberately carries no Typer / MCP imports: the CLI (``cli_connect.py``)
 and the MCP server map the plain :mod:`brain.errors` exceptions raised here to
 their own frameworks.
+
+**File-size ceiling (CLAUDE.md): already over at the branch base, and it grew.**
+This pointer carries no live line count on purpose — the ceiling table's entry
+for this file asserted ``925 -> 925`` for a full day *after* the growth below
+had landed, so a reader auditing compliance was told there was nothing to
+audit. Re-derive with ``wc -l src/brain/connect.py``. What does not rot is the
+base and the trail: 925 (``f8c76c0``, branch base) -> 925 (``3b16527``, touched
+but no net change) -> 952 (``ec6afb6``).
+
+The one growth is the F6 confidential gate on :func:`iter_suggestions`, reasoned
+inline on that function. The non-obvious half, and the reason to open it: a
+suggestion names TWO documents, so the gate gates BOTH joins — filtering the
+source alone would still publish every confidential document that happened to be
+somebody's suggested *target*. It also defaults to include, the opposite name
+AND opposite default from the MCP layer's ``include_confidential``, because the
+permissive direction only ever adds rows and a one-directional test cannot see
+an inverted bridge.
+
+Splitting is not indicated: this is one scoring algorithm plus the writeback
+primitives its two callers share. Extract before growing it again.
 """
 from __future__ import annotations
 
