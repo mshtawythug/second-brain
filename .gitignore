@@ -47,8 +47,45 @@ run/
 # references). docs/ is private-by-subdir: the publishable reference docs
 # (docs/README.md, docs/cli-reference.md, docs/graphrag.md,
 # docs/vault-and-wiki.md, docs/configuration.md), docs/guides/, docs/assets/,
-# docs/specs/, and docs/plans/ stay trackable; everything below is ignored. Add
-# any NEW private subdir/file to this list before it can leak.
+# docs/specs/, docs/plans/, and docs/handoff/ stay trackable; everything below
+# is ignored. Add any NEW private subdir/file to this list before it can leak.
+#
+# docs/handoff/ is SANCTIONED here rather than newly admitted — the enumeration
+# above was simply incomplete. Six of its seven files have been tracked since
+# `e084c79` (v0.3.0) and `71fa590`; only 2026-08-13-wiki-to-ui-session-handoff.md
+# is new, landing in `3b16527`. So the list, not the directory, was the thing out
+# of step. Rule 11b names docs/plans/ and docs/specs/ because those are what it
+# governs; a session handoff is neither a plan nor a spec, and forcing it into
+# one of those directories would misfile it to satisfy a rule that never
+# addressed it.
+#
+# The terms are the same as docs/plans/: PII-scrubbed, synthetic-only, scanned
+# before landing. The caveat this note used to carry — that
+# 2026-08-13-wiki-to-ui-session-handoff.md was clean of PII *values* but carried
+# absolute local worktree paths and another session's operational detail — was
+# ACTED ON 2026-08-20, not merely re-recorded: that file now uses <worktree> /
+# <main-checkout> placeholders and states in its own header what was changed and
+# what was deliberately left (the branch name, which is not machine layout and is
+# named in tracked CLAUDE.md anyway).
+#
+# The CLASS is closed in the working tree as of 2026-08-20: no tracked file
+# contains the owner's real home-directory path. Closed by scrubbing the five
+# files that still held one — AGENTS.md, both docs/plans/wiki-to-ui files, and
+# two tests/test_quartz_* files — to the placeholders the rest of the docs
+# already use. What would REOPEN it: any new absolute path pasted out of a real
+# shell session.
+#
+# Re-derive rather than trusting this line, and SCOPE the scan — `/Users/` alone
+# is the wrong pattern and never produced the count this note used to cite. Most
+# hits are deliberate placeholders (`/Users/you`, `/Users/example`,
+# `/Users/<you>`), which are documentation, not exposure:
+#
+#     git grep -c "/Users/$(basename "$HOME")" -- .    # expect: no output
+#
+# Note the `-- .` : that scans the WORKING TREE. `git grep … HEAD` answers a
+# different question — the committed tree — and keeps reporting the pre-scrub
+# state until the scrub is committed. Same reasoning as the docs/audits/ note
+# below: a file with no PII can still be a map to something.
 #
 # docs/specs/ was un-ignored deliberately: CLAUDE.md rule 11b mandates that all
 # specs live there, so leaving it ignored meant every design doc in the project

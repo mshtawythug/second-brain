@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use team-driven-development to implement this plan task-by-task.
 
-*Planner: `phase2-planner-2`. Written 2026-08-13. Tree: `/Users/mshtawythug/workspace/second-brain-wiki-ui` @ `f8c76c0`, branch `feat/wiki-to-ui-consolidation`. Contract: `docs/specs/2026-08-10-wiki-to-ui-consolidation-design.md` (1,968 lines).*
+*Planner: `phase2-planner-2`. Written 2026-08-13. Tree: `<worktree>` @ `f8c76c0`, branch `feat/wiki-to-ui-consolidation`. Contract: `docs/specs/2026-08-10-wiki-to-ui-consolidation-design.md` (1,968 lines).*
 
 ## Reading order
 
@@ -44,7 +44,7 @@
 
 # Phase 2 plan — navigation + content parity
 
-Read-only pass. Nothing written. Everything below is anchored to source I read in `/Users/mshtawythug/workspace/second-brain-wiki-ui`.
+Read-only pass. Nothing written. Everything below is anchored to source I read in `<worktree>`.
 
 ---
 
@@ -236,16 +236,16 @@ The phase-0 handoff's §8 environment list still applies verbatim — machine-wi
 
 # REPORT 2 — message `4c42d4c3` (provenance verification and corrections)
 
-*Context: the coordinator challenged whether my evidence came from the correct checkout, because this session's shell defaulted to `/Users/mshtawythug/workspace/second-brain` on `feat/agentic-token-reduction`. Retained because the verification method is reusable and because it records a real error of mine.*
+*Context: the coordinator challenged whether my evidence came from the correct checkout, because this session's shell defaulted to `<main-checkout>` on `feat/agentic-token-reduction`. Retained because the verification method is reusable and because it records a real error of mine.*
 
 ## Provenance — all evidence came from the correct tree
 
 ```
-pwd                        → /Users/mshtawythug/workspace/second-brain
+pwd                        → <main-checkout>
 git rev-parse --abbrev-ref → feat/agentic-token-reduction
 ```
 
-The pane shell **was** in the wrong tree. The analysis was not: every Bash call was prefixed `cd /Users/mshtawythug/workspace/second-brain-wiki-ui &&`, and every `Read` used an absolute path under that root.
+The pane shell **was** in the wrong tree. The analysis was not: every Bash call was prefixed `cd <worktree> &&`, and every `Read` used an absolute path under that root.
 
 **The hazard was real and specific — a stale copy of the spec exists in the wrong tree:**
 
@@ -382,7 +382,7 @@ mtimes for every file the plan touches. Only seven modified today (18:17–18:32
 
 ## Closing state
 
-**As of 2026-08-13 18:37, tree `/Users/mshtawythug/workspace/second-brain-wiki-ui` @ `f8c76c0`:**
+**As of 2026-08-13 18:37, tree `<worktree>` @ `f8c76c0`:**
 
 - Phase 2 is **30.0 P4U ≈ 9 agent-days**, 21 tasks, T2 deleted.
 - **T1 (recon) is the first task** and gates T18's (a)/(b)/(c) choice. Provisional recommendation is **(a) structural re-emission**, because it preserves `html=False` — the property A3 and §2.5 rest on — whereas **(b)** rewrites document bodies and therefore moves `content_hash`, dedup, chunking, embeddings and `body_hash` together, which is a corpus migration wearing the costume of a rendering fix.

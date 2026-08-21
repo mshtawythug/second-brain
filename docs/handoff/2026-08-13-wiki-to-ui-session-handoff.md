@@ -4,21 +4,62 @@
 re-deriving it. Figures here were measured at the time stated, not inherited — where a
 number is stale-able, the measurement time is given.
 
+> **Scrubbed 2026-08-20 for public-repo safety.** This file is tracked, and this repository
+> is PUBLIC. It contained no PII and still contains none — that gate passed then and passes
+> now, and it is the wrong instrument here. What it did carry was **absolute local worktree
+> paths** (`/Users/<user>/…`), another live session's **internal nickname**, and that
+> session's **operational detail** (a database-maintenance authorisation, and a post-mortem
+> of time it lost). None of that is personal data; all of it is a map of someone's machine
+> and of work that is not this branch's to publish — the same shape of miss the
+> `docs/audits/` note in `.gitignore` describes, where a file clean of PII is still a map to
+> something.
+>
+> **What changed:** absolute paths became the placeholders `<worktree>` (this branch's
+> checkout) and `<main-checkout>` (the sibling checkout of the same repo); the other
+> session's nickname was dropped; its DB-maintenance authorisation was generalised to the
+> constraint a successor actually needs (*the 5434 test database is shared and may be
+> recreated under you*); and its post-mortem was reduced to the two reusable lessons,
+> without the attribution.
+>
+> **What deliberately did NOT change:** the branch name `feat/agentic-token-reduction`. It
+> is a branch of *this* repo, it is already named in tracked `CLAUDE.md` (the ceiling
+> section's merge note depends on naming it) and in two `docs/plans/` files, and it is not
+> machine layout. Removing it from one file of three would cost real coordination value and
+> buy no privacy. Branch names are not the exposure; `/Users/<user>/…` is.
+>
+> **The class this file could not close is now closed (2026-08-20).** When the scrub above
+> was written, the same absolute paths remained in `AGENTS.md`, both `docs/plans/wiki-to-ui`
+> files, and two `tests/test_quartz_*` files — none of them this file's to edit, so scrubbing
+> this one file did not close the class. Those five have since been scrubbed to the same
+> placeholders, and no tracked file now contains a real home-directory path.
+>
+> Verify rather than trusting that sentence, and **scope the scan**: `/Users/` alone is the
+> wrong pattern, because most hits across the docs are deliberate placeholders
+> (`/Users/you`, `/Users/example`) that are documentation, not exposure.
+>
+> ```
+> git grep -c "/Users/$(basename "$HOME")" -- .    # expect: no output
+> ```
+>
+> The `-- .` matters — that scans the working tree. A `HEAD`-scoped scan answers a different
+> question and reports the pre-scrub state until the work is committed. What would reopen the
+> class: any new absolute path pasted out of a real shell session.
+
 ---
 
 ## 1. Where you are
 
 ```
-worktree   /Users/mshtawythug/workspace/second-brain-wiki-ui
+worktree   <worktree>          # this branch's checkout
 branch     feat/wiki-to-ui-consolidation
 last commit f8c76c0 (2026-08-10)
 uncommitted 62 entries (measured 2026-08-13, was 37 earlier the same day)
 ```
 
 **The session was moved into this worktree with `EnterWorktree(path=…)`.** Before that it
-ran from `/Users/mshtawythug/workspace/second-brain` on `feat/agentic-token-reduction` —
-a *different* checkout owned by a *different* live Claude session. **Do not exit the
-worktree, and do not write to that other checkout.**
+ran from `<main-checkout>` on `feat/agentic-token-reduction` — a *different* checkout of
+this repo, owned by a *different* live Claude session. **Do not exit the worktree, and do
+not write to that other checkout.**
 
 ### Phase status
 
@@ -298,20 +339,22 @@ path's `body_hash` at once: a corpus migration wearing a rendering fix's costume
 **Pair it with a count of documents containing ANY raw HTML block** — `<details>` may not be
 the only construct `html=False` is silently escaping, and nobody has looked.
 
-**Cross-session coordination is live and working.** The other session
-(`second-brain-fd`, owns `/Users/mshtawythug/workspace/second-brain` on
-`feat/agentic-token-reduction`) has been given an **all-clear to DROP and recreate
-`second_brain_test` on 5434** — 121,538 orphaned relation files against 351 live relations.
-Confirmed: **nothing of ours leaked into their tree.** They are changing `SearchResult`
-additively (`summary` appended last, `d.summary` as index 6, `meta[5]` still `recency_ts`,
-`hybrid_search` signature unchanged) — **our over-fetch pagination avoids the collision
-entirely.** Coordinate before ever adding an `offset`.
+**Cross-session coordination is live and working.** A concurrent session works
+`feat/agentic-token-reduction` in `<main-checkout>`. Confirmed: **nothing of ours leaked
+into their tree.** Two consequences for you:
 
-**Two traps inherited from them, both paid for:**
+- **The test database on 5434 is shared and may be recreated out from under you.** Treat
+  it as a resource you do not own; never assume a schema or fixture survives between runs.
+- They are changing `SearchResult` **additively** (`summary` appended last, `d.summary` as
+  index 6, `meta[5]` still `recency_ts`, `hybrid_search` signature unchanged) — **our
+  over-fetch pagination avoids the collision entirely.** Coordinate before ever adding an
+  `offset`.
+
+**Two traps already paid for elsewhere — inherit the lesson, not the bill:**
 - **`bin/brain-ci` re-execs itself** — a parent/child pair with identical argv is **one**
-  run. Check `ppid` before killing anything; they lost ~30 minutes to that misread.
-- **A piped background command's notification reports the PIPE's exit status.** They were
-  handed "exit code 0" for a run that had failed. Write `$?` to a separate `.exit` file.
+  run. Check `ppid` before killing anything.
+- **A piped background command's notification reports the PIPE's exit status**, so a failed
+  run can be reported as "exit code 0". Write `$?` to a separate `.exit` file.
 
 ## 8b. POST-COMPACTION — resolved, and the one thing that got worse
 
@@ -498,8 +541,8 @@ committed before 2026-06-03 has never been machine-scanned.**
 It would NOT have caught the corpus doc ID in leak #3, and does not cover the canary IDs. A
 green check here cannot mean "no PII", and must not be labelled as if it does.
 
-**Fragility:** `core.hooksPath` for this worktree points at
-`/Users/mshtawythug/workspace/second-brain/scripts/hooks` — the **sibling checkout**.
+**Fragility:** `core.hooksPath` for this worktree points at `<main-checkout>/scripts/hooks`
+— the **sibling checkout**.
 Byte-identical today (verified), but this repo's gate lives in another repo and would change
 or stop silently if that one is edited, moved, or deleted.
 

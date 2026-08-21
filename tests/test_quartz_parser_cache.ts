@@ -1,7 +1,7 @@
 // Unit tests for src/brain/quartz_overrides/quartz/processors/parser_cache.ts
 //
 // Run with:
-//   /Users/mshtawythug/brain-vault/.quartz/node_modules/.bin/tsx --test \
+//   ~/brain-vault/.quartz/node_modules/.bin/tsx --test \
 //     tests/test_quartz_parser_cache.ts
 //
 // The module under test uses only Node.js built-ins (node:crypto, node:fs,

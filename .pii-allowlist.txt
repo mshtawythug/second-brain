@@ -32,6 +32,18 @@ Sidekick
 Jane Doe
 John Doe
 
+# --- Scrubbed spec-owner persona (docs/specs/) ---------------------------
+# The stand-in the PII scrub substituted for the real document owner. It is a
+# synthetic name and resolves to nobody. Listed because docs/specs/ became
+# tracked (see the .gitignore note on rule 11b) and the persona appears there
+# ten times — five as the `**Owner:**` / `**Author:**` header of a design doc,
+# five inside 2026-04-29-metadata-aware-linker-design.md's worked examples,
+# where it stands in for the corpus owner beside the already-redacted
+# redacted@example.com. Its synthetic siblings (Jane Doe, the demo cast) were
+# allowlisted; this one was left out, so the gate treats identical scrub output
+# two different ways depending on which placeholder the scrub happened to pick.
+Pat Morgan
+
 # --- `brain demo` synthetic cast + companies (invented — see src/brain/demo) --
 # The zero-Ollama demo corpus is 100% fictional. These names/companies are
 # invented for the demo world and must never be confused with real PII.

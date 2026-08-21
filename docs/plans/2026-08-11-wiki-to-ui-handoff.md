@@ -2,7 +2,7 @@
 
 **Rewritten:** 2026-08-11 17:50 (the previous version described a state ~6 hours stale)
 **Contract:** `docs/specs/2026-08-10-wiki-to-ui-consolidation-design.md` — now **1,921 lines** (was 1,333; sixteen corrections written in)
-**Branch:** `feat/wiki-to-ui-consolidation` — worktree at `/Users/mshtawythug/workspace/second-brain-wiki-ui`
+**Branch:** `feat/wiki-to-ui-consolidation` — worktree at `<worktree>`
 **HEAD:** `f8c76c0`. **NOTHING COMMITTED.** **32 files uncommitted.**
 
 > ## THE HEADLINE: phase 0 is CLOSED. Phase 1 has STARTED. **Phases 2–9 have not.**
@@ -31,7 +31,7 @@ Three levels of the same shape, each found only by execution, none by review. **
 ## 0. Read this first — unchanged and still binding
 
 - **Never commit or push without the user's explicit permission.** Asked repeatedly, never granted. Work accumulates in the worktree.
-- **Never touch `/Users/mshtawythug/workspace/second-brain`.** That is the shared main checkout; another agent (`feat/agentic-token-reduction`) works in it. It was clobbered once by a mid-task clean.
+- **Never touch `<main-checkout>`.** That is the shared main checkout; another agent (`feat/agentic-token-reduction`) works in it. It was clobbered once by a mid-task clean.
 - **Every teammate dispatch uses `isolation: "worktree"`.** Not doing this created the hazard above.
 - **The coordinator delegates.** Route verification to teammates rather than doing it inline.
 - **No destructive DB or Docker ops. Ever.** No `DROP`, `TRUNCATE`, unbounded `DELETE`, `compose down -v`, `rm -rf data/postgres/`.
