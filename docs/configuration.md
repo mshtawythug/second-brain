@@ -218,7 +218,7 @@ commands.
 | `BRAIN_VECTOR_SIM_FLOOR` | `0.25` | Min cosine similarity for a vector-leg candidate to count. See the note below — it trades recall for precision. |
 | `BRAIN_RECENCY_HALFLIFE_DAYS` | `180` | Half-life of the recency boost applied to search scores. |
 | `BRAIN_BACKUP_DIR` | `$BRAIN_HOME/backups` | Where `brain backup` writes archives and `brain restore` discovers them. Absolute or `~`-relative. Resolved lazily, so relocating the brain home relocates its backups; never created until a backup actually runs. |
-| `BRAIN_SHOW_MAX_CONTENT_TOKENS` | `25000` | MCP `brain_show` body **and summary** cap. A cut body gains `content_truncated` + `content_tokens` + `content_truncated_recovery`; a cut summary gains `summary_truncated` + `summary_tokens` + `summary_truncated_recovery`. A payload carrying **both** truncated fields is bounded by **2×** this value — see the note below. **`0` = unlimited** (the only knob in this family that accepts it), and it opts both fields out. |
+| `BRAIN_SHOW_MAX_CONTENT_TOKENS` | `25000` | MCP `brain_show` body **and summary** cap. A cut body gains `content_truncated` + `content_tokens` + `content_truncated_recovery`; a cut summary gains `summary_truncated` + `summary_tokens` + `summary_truncated_recovery`. `content` and `summary` are **each** bounded by this value, so the two fields together total at most **2×** it (the serialized payload is larger — fixed metadata; see the note below). **`0` = unlimited** (the only knob in this family that accepts it), and it opts both fields out. |
 | `BRAIN_SEARCH_MAX_LIMIT` | `50` | MCP `brain_search` `limit` ceiling; equals the candidate-chunk limit, above which a larger `limit` cannot surface more documents. |
 | `BRAIN_RECALL_MAX_BUDGET_TOKENS` | `13000` | MCP `brain_recall` `budget_tokens` ceiling. See the note below — this is **not** 32000, and the difference is the point. |
 | `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` | `500` | MCP `brain_graphrag_entities` ceiling. `limit=0` now means *this*, no longer "all". |
@@ -234,7 +234,7 @@ are env vars, and why exceeding one raises `INVALID_PARAMS` **naming the
 ceiling** instead of trimming quietly. A ceiling that silently truncates is
 worse than no ceiling: the caller reads a partial answer as a complete one.
 
-### `BRAIN_SHOW_MAX_CONTENT_TOKENS` — one knob, two fields, so the real bound is 2×
+### `BRAIN_SHOW_MAX_CONTENT_TOKENS` — one knob, two fields, each bounded
 
 `brain_show` can return a body and a `summary`, and this knob now caps **both**,
 at the same value, on **every** path — not only under `summary_only=true`.
@@ -252,15 +252,32 @@ ceiling.
 alongside a full body too, so capping it only under `summary_only` would leave
 exactly the same hole on the path an ordinary open takes.
 
-**The consequence, stated rather than implied away: a payload carrying a
-truncated body AND a truncated summary is bounded by `2 ×` this value, not by
-this value.** That is the price of keeping one knob instead of two. It is a
+**The consequence, stated rather than implied away: `content` and `summary` are
+*each* bounded by this value, so the two fields together total at most `2 ×`
+it — not `1 ×`.** That is the price of keeping one knob instead of two. It is a
 bound where there was none — but if you are sizing a context window against this
 number, size it against twice this number. The same honesty applies as to
 `payload_tokens` elsewhere in this branch: a knob whose name promises one bound
 and whose behaviour delivers another is a defect, so the doubling is documented
 at the knob, in `apply_content_ceiling`'s docstring, and beside the default in
 `config.py`.
+
+**The bound is on the two fields, not on the serialized payload.** The response
+also carries `title`, `tags`, `source_path`, the ids, and — only when a cut
+happened — the recovery-marker prose. Measured end-to-end at
+`max_content_tokens=500` (2026-08-20):
+
+| | tokens |
+|---|---|
+| `content` | 500 |
+| `summary` | 500 |
+| **both fields** | **1,000** (= `2 ×` the cap, exactly on the bound) |
+| whole serialized payload | **1,226** |
+| fixed overhead | ~226 |
+
+That overhead is roughly constant, so it is a *larger* share at smaller caps and
+a negligible one at the 25,000 default. An agent sizing purely against
+`2 × BRAIN_SHOW_MAX_CONTENT_TOKENS` under-counts by it.
 
 Markers are emitted **only when a cut actually happens**, so an ordinary payload
 whose body and summary both fit comes back byte-identical. `summary_truncated_recovery`
@@ -273,7 +290,9 @@ over the ceiling there is no smaller MCP mode left, and pointing back at
 `brain_recall`'s MCP response ships every passage **twice**: once structured in
 `passages[].text`, and again rendered inside `context_block`. Measured across
 11 live queries at `budget_tokens=2000`, the delivered payload cost 4,025–4,726
-tokens — **2.01×–2.36× the budget requested**.
+tokens — **2.01×–2.36× the budget requested**. That range is scoped to *that
+budget*; see "the ratio is a function of the budget" below before quoting it at
+another one.
 
 So `budget_tokens` sizes the content *selected*, not the response *returned*. A
 ceiling of 32000 would deliver ~70–76k tokens, larger than the `brain_show`
@@ -295,6 +314,28 @@ live corpus): every query came in exactly **+8 tokens** — the additive
 **2.3670**, a hair above the 2.36 the ceiling is derived from. The bound still
 holds with margin: `13000 × 2.3670 = 30,771 ≤ 32,000`. It stops holding only if
 a future measurement exceeds `32000 ÷ 13000 = 2.4615`.
+
+**The ratio is a function of the budget, so the range is scoped to one.** End-to-end
+QA (2026-08-20) measured **2.44×** — 1,466 delivered tokens at `budget_tokens=600`
+on short synthetic passages — and read it as the documented range being wrong. It
+is not: delivered ≈ `2 × used + overhead`, so the *ratio* is `2 + overhead ÷ budget`
+and climbs as the budget shrinks. Same code, same mechanism: `r = 2.3670` at 2000,
+`r = 2.4433` at 600.
+
+The ceiling holds either way you do the arithmetic:
+
+| check | value | verdict |
+|---|---|---|
+| substitute QA's ratio | `13000 × 2.4433 = 31,763` | ≤ 32,000 ✔ |
+| adopt it as the divisor | `32000 ÷ 2.4433 = 13,097` | ≥ 13,000 ✔ |
+| against the break point | `2.4433 < 2.4615` | ✔ |
+
+The first row's margin looks thin (237 tokens, 0.7%) but it is the wrong sum:
+applying a 600-budget ratio at a 13,000 budget over-states the fixed-overhead
+term by 21.7×. **The range was scoped, not widened** — widening it to 2.44×
+would imply that figure was measured under the same conditions and would move
+the input the divisor is derived from for nothing. Re-derive only from a
+measurement taken *at* the ceiling.
 
 **It was measured at 2000 and is applied at 13000 — 6.5× away.** That
 extrapolation errs safe: the overshoot is ~2× structural duplication plus a

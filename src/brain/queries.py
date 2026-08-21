@@ -3,6 +3,13 @@
 This module exists to avoid duplicating identical SELECTs and prefix-resolution
 logic across two callers. The helpers raise plain :mod:`brain.errors`
 exceptions so each caller can map them to its own framework's error type.
+
+Over the 800-line ceiling (CLAUDE.md). It is a flat collection of read helpers,
+cohesive and low-coupling, so splitting it buys nothing. **Why it grew again
+(2026-08-20, +16 vs e6d6e47):** ``list_documents``' ORDER BY was not a total order, so a
+bounded fetch was not a prefix of the unbounded one; the added lines are the
+tiebreaker plus the comment explaining why it is load-bearing. Reason recorded
+here and at the point of growth, as the ceiling rule requires.
 """
 import re
 from collections.abc import Iterator
@@ -537,6 +544,9 @@ def list_documents(
 ) -> list[DocumentRow]:
     """Return up to ``limit`` documents (most-recently-ingested first).
 
+    Ties on ``ingested_at`` break on ``id`` so the ordering is total and a
+    smaller ``limit`` always yields a prefix of a larger one.
+
     Optional ``source``, ``tag``, and ``sensitivity`` filters mirror
     ``brain list``. The returned rows omit the document body (``content``) and
     ``source_path`` to keep the projection cheap.
@@ -568,7 +578,13 @@ def list_documents(
         FROM documents d
         LEFT JOIN sources s ON s.id = d.source_id
         WHERE {" AND ".join(where)}
-        ORDER BY d.ingested_at DESC
+        -- ``d.id`` makes this sort TOTAL. ``ingested_at`` alone ties freely:
+        -- a directory ingest writes many rows inside one transaction and
+        -- ``now()`` is the transaction timestamp, so a whole batch shares one
+        -- value. Under a tie PostgreSQL may order a bounded (top-N) plan
+        -- differently from the unbounded one, so paging with different
+        -- ``limit`` values could show the same doc twice or skip one.
+        ORDER BY d.ingested_at DESC, d.id
         LIMIT %s
     """
     params.append(limit)

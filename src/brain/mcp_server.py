@@ -34,6 +34,13 @@ paragraph, the ordering rationale above ``apply_content_ceiling`` in
 asks for a reason at the point of growth, and "comments" is not automatically
 one.)
 
+**And again, 2026-08-20 (+22 vs e6d6e47, all comments).** End-to-end QA falsified the
+``LIMIT n + 1`` prefix claim in ``brain_backlinks``: the SQL behind it was not
+a TOTAL order, and "no re-sort afterwards" is not sufficient when the sort
+ties. The added lines are the corrected claim at that call site and the scoping
+of ``brain_recall``'s delivered-token range to the budget it was measured at.
+Both were wrong-as-written, so this is a correction rather than a feature.
+
 And note what this note no longer claims: it used to say "this note is itself
 +31", and the very next commit edited the note to +34 and left the +31
 standing. A hand-maintained comment that measures itself is stale the first time
@@ -796,9 +803,12 @@ def brain_recall(
     RETURNED.** Every passage ships twice — structured in ``passages[].text``
     and again rendered inside ``context_block`` — so the delivered payload runs
     at roughly 2.2x ``budget_tokens`` (measured 2.01x-2.36x over 11 live
-    queries). Budget accordingly. The additive ``payload_tokens`` key reports
-    the true cost of the serialized response, so the overshoot is observable
-    rather than a surprise.
+    queries **at** ``budget_tokens=2000``). That range is scoped to that
+    budget, not universal: delivered ~= 2x the content selected PLUS overhead
+    that does not shrink with the budget, so the RATIO rises as the budget
+    falls -- 2.4433x was measured at ``budget_tokens=600``. Budget against
+    ``payload_tokens``, which reports the true serialized cost of the response
+    you actually got, rather than against any ratio.
 
     Budgets default to the configured ``BRAIN_RECALL_*`` values, and
     ``budget_tokens`` is capped at ``BRAIN_RECALL_MAX_BUDGET_TOKENS``
@@ -1960,6 +1970,18 @@ def brain_backlinks(
             # exactly what ``cap_rows`` needs to still see saturation, and each
             # block keeps its own ORDER BY with no re-sort afterwards, so the
             # rows returned are the same prefix an unbounded fetch would give.
+            #
+            # That last clause was ASPIRATIONAL until 2026-08-20 and is now
+            # load-bearing on something specific: every ORDER BY behind these
+            # tools ends in a UNIQUE column, so each sort is TOTAL. "No re-sort
+            # afterwards" is necessary but NOT sufficient — with a tied sort
+            # PostgreSQL genuinely orders a bounded plan (Limit over a top-N
+            # heapsort) differently from the unbounded one, and end-to-end QA
+            # caught exactly that on ``brain_backlinks`` when two source
+            # documents shared both title and link text. If you add or reorder
+            # a query in ``brain.vault.graph``, keep the unique final key or
+            # this comment becomes false again.
+            #
             # Brings these three tools in line with the two graph tools, which
             # already push ``LIMIT n + 1`` into SQL — a reader who sees the
             # ceiling applied one way here and another way there will

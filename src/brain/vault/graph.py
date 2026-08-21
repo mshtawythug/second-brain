@@ -183,7 +183,9 @@ def backlinks_for(
 
     Wiki/embed rows come from a JOIN of ``links`` against ``documents``
     (one round-trip, no N+1) and are sorted by source title
-    (case-insensitive) then by ``link_text`` to break ties.
+    (case-insensitive), then ``link_text``, then the link row's own ``id``.
+    That last key is what makes the sort TOTAL — see the comment on the query
+    itself; title+link_text alone tie, and a tied sort has no prefix property.
 
     With ``include_derived=True`` (the default), derived edges are
     appended after the wiki block: every ``derived_links`` row whose src
@@ -191,7 +193,8 @@ def backlinks_for(
     *partner* document. This treats derived storage as undirected per
     spec §6 — a row stored ``(A, B)`` shows up in both ``backlinks_for(A)``
     and ``backlinks_for(B)``. Derived rows sort within their block by
-    rule then partner title for deterministic output.
+    rule, then partner title, then partner id, then the derived row's own
+    ``id`` — total, for the same reason.
 
     ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
     default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
@@ -220,7 +223,16 @@ def backlinks_for(
         FROM links l
         JOIN documents d ON d.id = l.src_document_id
         WHERE l.dst_document_id = %s
-        ORDER BY LOWER(d.title), l.link_text
+        -- ``l.id`` is the UNIQUE tiebreaker that makes this sort TOTAL, and it
+        -- is load-bearing, not cosmetic. Without it two distinct source
+        -- documents that share both title and link text are fully tied, and
+        -- PostgreSQL is then free to order them differently for a bounded plan
+        -- (Limit over a top-N heapsort) than for the unbounded one (plain
+        -- sort) -- which it genuinely does. That breaks the prefix guarantee
+        -- this function documents above. ``d.id`` would NOT be enough: links
+        -- is UNIQUE on (src, dst, link_text, link_kind), so one source can
+        -- carry a wiki AND an embed row with the same text to the same target.
+        ORDER BY LOWER(d.title), l.link_text, l.id
         LIMIT %s
         """,
         (document_id, fetch_limit),
@@ -308,7 +320,9 @@ def outgoing_links_for(
         FROM links l
         JOIN documents d ON d.id = l.dst_document_id
         WHERE l.src_document_id = %s
-        ORDER BY LOWER(d.title), l.link_text
+        -- Unique tiebreaker; see the note in ``backlinks_for``. Same shape,
+        -- same failure mode with the join side flipped.
+        ORDER BY LOWER(d.title), l.link_text, l.id
         LIMIT %s
         """,
         (document_id, fetch_limit),
@@ -349,7 +363,10 @@ def outgoing_links_for(
             SELECT link_text, link_kind
             FROM unresolved_links
             WHERE src_document_id = %s
-            ORDER BY link_text
+            -- ``link_text`` alone ties: unresolved_links is UNIQUE on
+            -- (src, link_text, link_kind), so one source can hold a wiki and
+            -- an embed row for the same text. ``id`` makes the sort total.
+            ORDER BY link_text, link_kind, id
             LIMIT %s
             """,
             (document_id, unresolved_budget),
@@ -610,7 +627,10 @@ def _derived_partners(
     JOIN, mirroring :func:`backlinks_for`'s anti-N+1 style.
 
     Sort order: rule, then partner title (case-insensitive), then partner
-    id. Stable across calls so callers can pin output bytes in tests.
+    id, then ``dl.id``. Stable across calls so callers can pin output bytes
+    in tests -- and total, so a bounded fetch is a prefix of the unbounded
+    one. The first three keys are NOT total on their own; see the comment on
+    the query.
     """
     rows = conn.execute(
         """
@@ -628,7 +648,11 @@ def _derived_partners(
               ELSE dl.src_document_id
           END
         WHERE dl.src_document_id = %(doc)s OR dl.dst_document_id = %(doc)s
-        ORDER BY dl.rule, LOWER(partner.title), partner.id::text
+        -- ``dl.id`` completes the sort. (partner.id, rule) is NOT unique
+        -- here: derived_links is UNIQUE on (src, dst, rule), and this WHERE
+        -- matches BOTH directions, so rows (doc, X, r) and (X, doc, r) both
+        -- resolve to partner X under rule r and tie on every other key.
+        ORDER BY dl.rule, LOWER(partner.title), partner.id::text, dl.id
         LIMIT %(lim)s
         """,
         {"doc": document_id, "lim": fetch_limit},

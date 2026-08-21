@@ -241,9 +241,17 @@ def apply_content_ceiling(
     The bound is applied on EVERY path, not just ``summary_only``: ``brain_show``
     returns ``summary`` alongside a full body too, so capping it only under the
     escape hatch would leave the same hole on the default path. The honest
-    consequence, stated rather than buried: a payload carrying both fields is
-    bounded by ``2 * max_tokens``, not ``max_tokens``. That is the price of
-    keeping ONE knob; it is a bound where there was none.
+    consequence, stated rather than buried: ``content`` and ``summary`` are
+    EACH bounded by ``max_tokens``, so a payload carrying both fields carries
+    at most ``2 * max_tokens`` of THEM. That is the price of keeping ONE knob;
+    it is a bound where there was none.
+
+    The bound is on the two FIELDS, not on the serialized response. The
+    response also carries title, tags, source_path, ids, and -- only when a cut
+    happened -- the recovery-marker prose. Measured at ``max_tokens=500``: the
+    fields totalled exactly 1,000 tokens and the whole payload was 1,226 (~226
+    tokens of overhead, a larger share at smaller caps). A caller budgeting
+    against ``2 * max_tokens`` alone under-counts by that overhead.
 
     A payload whose body and summary are both already under the ceiling comes
     back unchanged, so the caller's byte-identical guarantee holds.

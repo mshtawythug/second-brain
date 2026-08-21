@@ -1,4 +1,18 @@
-"""Configuration loading from environment / .env."""
+"""Configuration loading from environment / .env.
+
+Over the 800-line ceiling (CLAUDE.md): one env-loading surface, and each
+knob carries the measurement block that justifies its default in prose.
+Those evidence blocks are the bulk of the file and the reason to split it
+next -- into ``config.py`` plus a measurements/rationale doc -- not a
+reason to scatter the knobs.
+
+**Why it grew again (2026-08-20, +43 vs e6d6e47, all comments):** two documented bounds
+were imprecise as written -- ``BRAIN_RECALL_MAX_BUDGET_TOKENS``' ratio range
+was scoped to a corpus when it is really scoped to a BUDGET, and
+``BRAIN_SHOW_MAX_CONTENT_TOKENS``' "2x" read as a payload guarantee when it
+bounds the two FIELDS. Both blocks now carry the arithmetic. Corrections, not
+features.
+"""
 import os
 import re
 from dataclasses import dataclass, field
@@ -457,8 +471,17 @@ DEFAULT_RECALL_MAX_CANDIDATES = 25
 # no length constraint -- short only because ``OllamaEnricher`` writes it that
 # way -- so leaving it out would have made ``summary_only``, the escape hatch
 # FROM this ceiling, the one payload with no ceiling. Consequence stated rather
-# than buried: a payload carrying a truncated body AND a truncated summary is
-# bounded by 2x this value. One knob, one bound, where there was none.
+# than buried: ``content`` and ``summary`` are EACH bounded by this value, so
+# the two FIELDS together total at most 2x it. One knob, one bound, where there
+# was none.
+#
+# THE FIELDS, NOT THE PAYLOAD (corrected 2026-08-20; QA read the old wording as
+# a payload guarantee, which it was not). The serialized response also carries
+# title, tags, source_path, ids and -- when a cut happened -- the recovery-marker
+# prose. Measured at ``max_content_tokens=500``: the two fields totalled exactly
+# 1,000 tokens and the whole payload was 1,226, i.e. ~226 tokens of fixed
+# overhead, proportionally larger at smaller caps. Size a context window against
+# 2x this value PLUS that overhead, not against 2x alone.
 #
 # Bounding the SUM instead -- so the knob's name promised exactly what it
 # delivered -- was considered and rejected. It makes the two fields COMPETE for
@@ -504,6 +527,26 @@ DEFAULT_SEARCH_MAX_LIMIT = 50
 #     32000 / 2.3670 = 13,519  >= 13,000   (this constant)
 # -- so 13000 stands. If a future re-measurement pushes the worst case past
 # 2.4615 (= 32000/13000), it does NOT and this constant must come down.
+#
+# THE RANGE IS SCOPED TO ITS MEASUREMENT, AND THE SCOPE IS THE BUDGET, NOT JUST
+# THE CORPUS (added 2026-08-20 after end-to-end QA measured 2.44x and read it
+# as the range being wrong). 2.01x-2.36x is what 11 live queries cost AT
+# ``budget_tokens=2000``. QA measured 1,466 delivered tokens at
+# ``budget_tokens=600`` -- 2.4433x -- on short synthetic passages. Both are
+# right, and the gap is the mechanism this block already describes: delivered
+# ~= 2 x used + overhead, so the RATIO is 2 + overhead/budget and rises as the
+# budget FALLS. Same code, r = 2.3670 at 2000 and 2.4433 at 600.
+#
+# The ceiling still holds, two ways:
+#     13000 x 2.4433 = 31,763  <= 32,000   (substituting QA's ratio directly)
+#     32000 / 2.4433 = 13,097  >= 13,000   (adopting it as the divisor)
+# and 2.4433 is still under the 2.4615 break point above. The margin is thin
+# (237 tokens, 0.7%) ONLY under the direct substitution, which is the wrong
+# arithmetic: applying a 600-budget ratio at a 13,000 budget over-states the
+# overshoot by 21.7x on the fixed-overhead term. Do not widen the range to
+# absorb 2.44 -- that would imply 2.44 was measured under the same conditions,
+# and would move the input the divisor is derived from for no reason. Re-derive
+# only from a measurement taken AT the ceiling.
 #
 # SCALE CAVEAT -- the ratio is MEASURED at 2000 and APPLIED at 13000, 6.5x
 # away. That extrapolation errs safe, and here is why: the overshoot is ~2x

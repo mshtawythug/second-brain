@@ -878,3 +878,45 @@ def test_mirror_scan_on_vault_without_ingested_tier(
     assert summary.rows_with_null_vault_path == 0
     assert summary.ghost_rows == 0
     assert summary.orphan_files == 0
+
+
+# ---------------------------------------------------------------------------
+# ``list_documents`` ordering must be TOTAL (sibling of the F-1 link-tool bug,
+# e2e QA 2026-08-20).
+#
+# ``ORDER BY d.ingested_at DESC`` alone ties freely: a directory ingest writes
+# every row inside ONE transaction and ``now()`` is the transaction timestamp,
+# so a whole batch shares a single value. Under a tie PostgreSQL is free to
+# order a bounded (top-N) plan differently from the unbounded one, so paging
+# ``brain list`` / ``brain_list`` with different limits could repeat or skip a
+# document. ``d.id`` is the unique tiebreaker; drop it and this goes red.
+# ---------------------------------------------------------------------------
+_TIED_DOCS = 60
+
+
+def test_list_documents_limit_is_a_prefix_when_ingested_at_ties(
+    test_db: psycopg.Connection,
+) -> None:
+    """A smaller ``limit`` is always a prefix of a larger one."""
+    # Arrange — one batch, one shared timestamp, distinct ids.
+    test_db.execute(
+        """
+        INSERT INTO documents
+          (title, content, content_hash, content_type, kind, ingested_at)
+        SELECT 'Batch note ' || g, 'body ' || g, 'hash-tie-' || g, 'note',
+               'vault', TIMESTAMPTZ '2026-01-02 03:04:05+00'
+        FROM generate_series(1, %s) g
+        """,
+        (_TIED_DOCS,),
+    )
+
+    full = list_documents(test_db, limit=_TIED_DOCS)
+
+    assert len(full) == _TIED_DOCS
+    assert len({r.ingested_at for r in full}) == 1, (
+        "fixture must be fully TIED on ingested_at or it proves nothing"
+    )
+    for cap in (1, 2, 3, _TIED_DOCS // 2, _TIED_DOCS - 1):
+        bounded = list_documents(test_db, limit=cap)
+        assert len(bounded) == cap, f"right COUNT at limit={cap}"
+        assert bounded == full[:cap], f"right ROWS at limit={cap}"
