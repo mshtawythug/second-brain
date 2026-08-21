@@ -19,6 +19,23 @@ explicitly, because that function's default became fail-closed for the
 all of them the argument for why the local surface opts out; reason inline at
 the call.
 
+It grew a THIRD time, and this is the largest of the three: 9,053
+(``4e471ad``, branch HEAD before this change) -> 9,159, +106 net. (The trail
+above stops at ``c62e3de``/9,035; the People Hub commit ``7f4d859`` itself
+landed at 9,053 and never recorded it, and ``aa39159``/``c49fc46``/``4e471ad``
+did not touch this file. All re-derived with
+``git show "<sha>:src/brain/cli.py" | wc -l`` -- brace the SHA or zsh eats
+``:src/...`` as a history modifier and you count the patch instead.) The growth
+is the F6 gate on the two commands that BUILD a report for the terminal and
+then PUBLISH it to the vault -- ``review weekly`` and ``brief --wiki``. Both
+were inheriting ``exclude_confidential=False``, which is right for the terminal
+and wrong for a file Quartz serves. Each now builds a second, gated payload for
+its vault write and keeps the permissive one for the operator's own eyes; most
+of the added lines are the argument for why that split lives at the CALL SITES
+here rather than inside the report builders, which is the one thing a reader of
+this diff cannot recover from the code. Reasons inline at both call sites and
+at both ``Wrote`` lines.
+
 The long-deferred split into per-domain command modules is unchanged by this;
 ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -4327,6 +4344,29 @@ def review_weekly(
     # enricher lazily there (Ollama is contacted only if a community lacks a
     # stored summary, and summarize_group never raises if it is down).
     enricher = _build_enricher(cfg) if not no_graph else None
+    # F6 — this ONE invocation serves TWO audiences, and they do not get the
+    # same payload. ``report`` is the operator's own terminal (and ``--json``),
+    # inside the trust boundary, so it is built permissively — exactly as
+    # ``build_weekly_report``'s ``exclude_confidential=False`` default intends.
+    # ``published`` is the file written into ``cfg.vault_path``, which Quartz
+    # PUBLISHES: ``render_weekly_md`` emits no ``sensitivity`` frontmatter key
+    # for ``RemoveConfidential`` to read, and ``reviews/`` is not in
+    # ``ignorePatterns``. So the page is an egress boundary and is built gated.
+    #
+    # A SECOND BUILD, not a filter of the first: the row types the report
+    # carries (``ActivityDoc`` / ``IngestedDoc`` / ``TodoRow`` /
+    # ``ThemeBlock``) do not carry ``sensitivity``, so the permissive report
+    # cannot be narrowed after the fact without inventing a second filtering
+    # mechanism beside the audited SQL gate. This costs a repeat of the week's
+    # four reads (and, on the graph path, a re-check of each community's stored
+    # summary) on a command run about once a week -- the cheaper shape would be
+    # the one that has to be re-audited.
+    #
+    # Precedent: ``7f4d859`` drew this same line for ``brain people`` (local,
+    # permissive) vs ``emit_people_pages`` (publishes, gated). There the two
+    # audiences were two functions; here they are one command, so the split has
+    # to happen at the call sites instead.
+    will_emit = not (no_emit or json_output)
     try:
         with connect(cfg.database_url) as conn:
             report = build_weekly_report(
@@ -4336,6 +4376,20 @@ def review_weekly(
                 generated_on=date_cls.today(),
                 no_graph=no_graph,
                 enricher=enricher,
+                exclude_confidential=False,
+            )
+            published = (
+                build_weekly_report(
+                    conn,
+                    cfg,
+                    week=target_week,
+                    generated_on=date_cls.today(),
+                    no_graph=no_graph,
+                    enricher=enricher,
+                    exclude_confidential=True,
+                )
+                if will_emit
+                else None
             )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--week") from exc
@@ -4356,9 +4410,19 @@ def review_weekly(
         typer.echo(render_weekly_rich(report))
     # Default behaviour emits the page regardless of how sparse the week was
     # (the renderer handles empty sections), matching the MCP tool's emit path.
-    if not no_emit:
-        path = emit_weekly_page(cfg.vault_path, report)
-        typer.echo(f"Wrote {path}")
+    # Branching on ``published is not None`` rather than re-testing ``no_emit``
+    # keeps "we built a gated payload" and "we write a page" as ONE condition:
+    # there is no arrangement of the flags that reaches the write with the
+    # permissive ``report`` in hand.
+    if published is not None:
+        path = emit_weekly_page(cfg.vault_path, published)
+        # Said unconditionally rather than only when something was actually
+        # dropped. Comparing the two reports to detect that would be a second,
+        # LLM-sensitive mechanism (theme synthesis text is not stable between
+        # builds) reporting on the first; stating the POLICY is both accurate
+        # every time and the thing the operator needs to know -- the page they
+        # just published is not the week they just saw.
+        typer.echo(f"Wrote {path} (confidential documents excluded)")
 
 
 _REVIEW_KIND_MAP: dict[str, tuple[str, ...]] = {
@@ -4753,6 +4817,15 @@ def brief(
     else:
         on_date = date_cls.today()
 
+    # F6 — same two-audience split as ``brain review weekly`` above, and for the
+    # same reason: ``data`` is the operator's terminal (and ``--json``), built
+    # permissively per ``assemble_brief``'s documented default; ``published`` is
+    # the ``<vault>/daily/<YYYY>/<date>-brief.md`` page, which carries no
+    # ``sensitivity`` frontmatter key (``brief.write_brief_to_vault``) and sits
+    # in a ``daily/`` folder absent from Quartz's ``ignorePatterns``, so Quartz
+    # publishes it. Built as a second gated payload rather than a filter of the
+    # first because ``DocumentRow`` / ``TodoRow`` / ``PinnedDoc`` do not carry
+    # ``sensitivity`` -- see the fuller note at ``review_weekly``.
     with connect(cfg.database_url) as conn:
         data = assemble_brief(
             conn,
@@ -4760,17 +4833,48 @@ def brief(
             since_hours=since_hours,
             todo_since_days=todo_since_days,
             on_date=on_date,
+            exclude_confidential=False,
         )
+        published = (
+            assemble_brief(
+                conn,
+                cfg,
+                since_hours=since_hours,
+                todo_since_days=todo_since_days,
+                on_date=on_date,
+                exclude_confidential=True,
+            )
+            if wiki
+            else None
+        )
+    # Compared while BOTH still carry ``suggestions=[]``, so this is a straight
+    # question about the assembled rows. It decides only whether the published
+    # page needs its OWN LLM round-trip: ``suggest_next_steps`` feeds action-item
+    # BODY text into the prompt, so suggestions derived from the permissive
+    # payload are confidential-derived and must never be written to the page.
+    # When the two payloads are equal there is nothing to re-derive from, and
+    # reusing the one call is exact rather than an approximation. Being wrong
+    # here can only cost a second Ollama call, never a disclosure.
+    withheld = published is not None and published != data
     if not no_enrich:
         suggestions = suggest_next_steps(data, cfg)
         if suggestions:
             data = replace(data, suggestions=suggestions)
+        if published is not None:
+            published = replace(
+                published,
+                suggestions=(
+                    suggest_next_steps(published, cfg) if withheld else suggestions
+                ),
+            )
 
     # --wiki is independent of the output format: write the vault page whether
     # the terminal output is Rich or JSON (the write happens before the --json
     # early-return so `--json --wiki` doesn't silently drop the page).
     written_path = (
-        write_brief_to_vault(cfg.vault_path, on_date, data) if wiki else None
+        write_brief_to_vault(cfg.vault_path, on_date, published)
+        if published is not None
+        else None
     )
 
     if json_output:
@@ -4779,7 +4883,9 @@ def brief(
 
     _print_brief(data)
     if written_path is not None:
-        typer.echo(f"\nWrote {written_path}")
+        # See ``review_weekly``: the policy is stated unconditionally, because
+        # the page the operator just published is not the brief they just read.
+        typer.echo(f"\nWrote {written_path} (confidential documents excluded)")
 
 
 def _build_chat(cfg: Config) -> ChatJson:
