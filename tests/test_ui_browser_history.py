@@ -35,29 +35,80 @@ INDEPENDENT CLAIMS, one test each, one mutation each. Neither of the first two
 implies the other: an implementation that pushes everything passes (1) and fails
 (2); one that pushes nothing fails (1) and passes (2).
 
-MUTATION RESULTS — MEASURED, and written down only after they had been run.
-Every one restored byte-exact, sha256 verified both ways; no `git checkout --`
-(these files are untracked, so it could not have restored them anyway).
+MUTATION RESULTS — RE-MEASURED 2026-08-20. Every number below comes from that
+run, not from the authoring one, because two of them did not survive it.
 
-  A. store.js — the navigation branch, `pushState` -> `replaceState`.
-     -> 2 failed, 2 passed. `test_back_...` at "Back left None in the
-        inspector" (the page had gone to about:blank — there was no in-document
-        entry to return to), and `test_forward_...` at the window-probe
-        assertion. The typing test was untouched, as it must be.
-  B. store.js — the debounced branch, `replaceState` -> `pushState`.
+INVOCATION, stated because a count without one is not reproducible:
+
+    .venv/bin/python -m pytest tests/test_ui_browser_history.py -m browser --no-cov
+
+Baseline on that invocation: 4 passed. Every mutant was syntax-checked first —
+`node --check` on a `.mjs` copy, because `.js` parses as CommonJS and would let a
+broken ES module through — so "the run exited 1" can never stand in for "the
+assertion I aimed at failed". Every file restored byte-exact, sha256 verified
+both ways.
+
+  A. store.js:128 — the navigation branch, `pushState` -> `replaceState`.
+     -> 3 failed, 1 passed.
+        * `test_back_...` at "Back left None in the inspector": with every write
+          a replace the page holds only its boot entry, so Back leaves the
+          document for about:blank.
+        * `test_forward_...` at the window-probe assertion.
+        * `test_back_to_a_query_less_state_...` — and NOT at its own Back
+          assertion. On about:blank the two assertions above it hold vacuously
+          (no `q=` in the URL, no result rows in a document that has none), and
+          the test dies on the third, `document.getElementById("q").value`,
+          with "Cannot read properties of null". Red for a reason unrelated to
+          the stale ledger it exists to catch — which is why the failing
+          ASSERTION is recorded here and not merely the failing test.
+        The typing test was untouched, as it must be.
+  B. store.js:135 — the debounced branch, `replaceState` -> `pushState`.
      -> 1 failed, 3 passed. `test_typing_...` at "one Back left id='n-first' in
         the URL". Both navigation tests stayed green.
-  C. main.js — the `popstate` listener registration deleted.
-     -> 1 failed, 3 passed. `test_back_...`, at the same assertion as A but
-        with a different observed value ('Budget Review' still on screen, rather
-        than about:blank). Recorded because it is why that assertion's message
-        names two possible causes and asserts neither.
-  D. main.js — `runSearch()` re-guarded with `if (state.q)`, the original bug.
-     -> 1 failed, 3 passed. `test_back_to_a_query_less_state_...` at "Back left
-        1 result row(s) in the ledger".
+  C. main.js:161 — the `popstate` listener registration deleted.
+     -> 2 failed, 2 passed.
+        * `test_back_...` at the same assertion as A but with a different
+          observed value ('Budget Review' still on screen, rather than
+          about:blank). Recorded because it is why that assertion's message
+          names two possible causes and asserts neither.
+        * `test_back_to_a_query_less_state_...` at its own assertion, "Back left
+          1 result row(s) in the ledger": the app never reacts to Back, so the
+          ledger keeps the row renderResults last drew.
+        `test_forward_...` stays GREEN under C, and that is containment rather
+        than an escape: with popstate unwired, Back and Forward move the URL and
+        change nothing on screen, so the second note is still rendered when
+        Forward returns to it and the same-document probe survives. The Back
+        test above is the one that notices.
+  D. main.js:142 — `runSearch()` re-guarded with `if (state.q)`, the original
+     bug. -> 1 failed, 3 passed. `test_back_to_a_query_less_state_...` at "Back
+     left 1 result row(s) in the ledger".
 
-A and B redden disjoint sets, which is the evidence that claims (1) and (2) are
-independent rather than two spellings of one property.
+THE STRUCTURAL CLAIM SURVIVED THE RE-RUN; THE ARITHMETIC DID NOT. A and B still
+redden DISJOINT sets — A reddens {back, forward, query-less}, B reddens {typing}
+— so claims (1) and (2) are still independent rather than two spellings of one
+property. A pushes-nothing implementation fails the navigation tests and passes
+the typing test; a pushes-everything one does the reverse. Only the counts were
+wrong.
+
+WHY THEY WERE WRONG — AND IT IS NOT DRIFT, WHICH MATTERS. A and C were recorded
+as 2F/2P and 1F/3P, both omitting `test_back_to_a_query_less_state_...`. Nothing
+that changed since can explain that. This file has exactly one commit (3b16527)
+and is byte-identical to it, so those runs saw the text above. And the omission
+is unreachable under ANY version of the app: under A every history write is a
+replace, so the page holds one entry and Back leaves the document — a property of
+the browser and the mutation, independent of results.js, of pagination, of
+everything the two later commits touched. Under C the app never reacts to Back at
+all, and record D's own observed message ("Back left 1 result row(s) in the
+ledger") proves that same assertion was reachable and falsifiable when these
+records were written. So A and C were never re-run after this fourth test joined
+the file. The failure is a number written once and never re-derived, not a tree
+that moved underneath it.
+
+ONE FURTHER CLAIM IN THIS BLOCK HAD EXPIRED and is corrected rather than dropped:
+it read "no `git checkout --` (these files are untracked, so it could not have
+restored them anyway)". They ARE tracked now — `git ls-files --error-unmatch
+src/brain/ui/static/js/store.js` succeeds. The byte-exact copy + sha256 method is
+kept because it is the stronger restore, not because git cannot do it.
 """
 from __future__ import annotations
 

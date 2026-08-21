@@ -230,6 +230,22 @@ def test_read_only_server_reports_the_note_as_not_editable(
     Cmd+E on ``state.note.editable`` ALONE, so an ``editable: true`` payload
     from a read-only server drops the user into an editor whose every save the
     middleware will refuse with a 403.
+
+    MUTATION, RUN 2026-08-20 — the T8 row prescribed this one and nothing had
+    ever recorded running it. *Restore the ungated expression* at
+    ``src/brain/ui/notes_service.py:172``: drop ``and not ctx.read_only`` from
+    ``"editable": (tier == "vault" or bool(vault_path)) and not ctx.read_only``.
+
+        .venv/bin/python -m pytest tests/test_ui_routes.py --no-cov
+        -> 1 failed, 40 passed (baseline 41 passed)
+
+    THIS test alone, at ``assert payload["editable"] is False`` — observed
+    ``assert True is False``. ``movable`` carries the same ``not ctx.read_only``
+    clause and stayed green, which is what says the two flags are gated
+    independently rather than by one shared expression: the mutation is
+    contained to the field it names. Its sibling below reddens on the other
+    mutation and not on this one, so the pair covers two properties rather than
+    one property twice.
     """
     doc_id = seeded["Q3 Planning Sync"]
     # The premise, asserted rather than assumed: this note IS editable on a
@@ -250,6 +266,20 @@ def test_read_only_payload_omits_the_body_but_still_renders(
     ``html`` on the largest document in the corpus — so shipping it to a client
     that can never open an editor is pure waste. ``html`` must survive: reading
     is the entire point of a read-only server.
+
+    MUTATION, RUN 2026-08-20 — the other half of T8's prescribed pair, likewise
+    never previously recorded as run. *Re-add ``body``* at
+    ``src/brain/ui/notes_service.py:211``: drop the ``if not ctx.read_only:``
+    guard so ``payload["body"] = body`` executes unconditionally.
+
+        .venv/bin/python -m pytest tests/test_ui_routes.py --no-cov
+        -> 1 failed, 40 passed (baseline 41 passed)
+
+    THIS test alone, at ``assert "body" not in payload`` — "the raw body is
+    still on the wire for a client that cannot edit". The ``html`` assertions
+    below it stayed green, which is the half that matters: the mutation puts a
+    field back rather than breaking rendering, so a run that merely went red
+    would not have told them apart.
     """
     payload = read_only_client.get(f"/api/notes/{seeded['Q3 Planning Sync']}").json()
 

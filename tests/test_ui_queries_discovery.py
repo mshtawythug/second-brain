@@ -212,11 +212,30 @@ def test_recent_documents_INCLUDES_confidential_when_the_session_may_see_them(
     entirely would still satisfy whichever branch matched the hard-coded
     behaviour, and the parameter would look tested while carrying nothing.
 
-    TWO MUTATIONS, MEASURED, AND THEY REDDEN OPPOSITE TESTS — which is what
-    proves the flag is consulted rather than the behaviour hardcoded either way.
-    Gate stuck CLOSED (`sql = _RECENT_SQL`) -> **1 failed, 42 passed**, THIS
-    test. Gate stuck OPEN (`sql = _RECENT_SQL_ANY`) -> **1 failed, 42 passed**,
-    ``test_recent_documents_excludes_confidential_documents`` instead.
+    TWO MUTATIONS, AND THEY REDDEN OPPOSITE TESTS — which is what proves the
+    flag is consulted rather than the behaviour hardcoded either way. Both
+    re-run 2026-08-20, both at ``ui/queries.py:460``.
+
+        .venv/bin/python -m pytest tests/test_ui_queries_discovery.py --no-cov
+        (baseline: 29 passed)
+
+        gate stuck CLOSED (`sql = _RECENT_SQL`)      -> 1 failed, 28 passed
+                                                        — THIS test
+        gate stuck OPEN   (`sql = _RECENT_SQL_ANY`)  -> 1 failed, 28 passed
+                                                        — the strict twin,
+                                                        ``test_recent_documents_excludes_confidential_documents``
+
+    THE INVOCATION IS PART OF THE RECORD, and it is the reason these numbers
+    changed. They read **1 failed, 42 passed** until 2026-08-20 — a denominator
+    of 43, which is not this file (29) but this file run alongside
+    ``tests/test_ui_routes_discovery.py`` (14). Nothing was wrong with the
+    measurement; what was missing was the command that produced it, so a reader
+    re-running "the same" mutation against "the same" file got a different total
+    and had no way to tell a drifted count from a different selection. The
+    containment claim — opposite tests, one each — is what the mutations are for
+    and is unchanged in either invocation. (``test_ui_routes_discovery.py``
+    re-derived its own copy of this figure the same day and recorded the same
+    cause.)
     """
     ordinary = _export(
         test_db, seed_doc(title="Ordinary", content="o"), "notes/ordinary.md",

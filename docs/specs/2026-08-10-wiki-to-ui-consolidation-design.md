@@ -1492,9 +1492,14 @@ gets its related-docs panel — computed live, not read from precomputed
 > live reading surface through R1/R2 dormancy*. **Correct shape:** `wiki/build_related.py` becomes
 > a thin emitter that imports its scoring from `brain.related`. It dies with the rest of `wiki/`.
 >
-> ⚠ **Appendix B-1 (S1)** — this row places related-docs in a different phase from
-> §11's two. **Appendix B-7 (S18)** — the HTTP endpoint it implies is owned by no task
-> row and does not exist.
+> ⚠ **Appendix B-1 (S1) — RESOLVED 2026-08-20; this pointer is updated rather than removed.**
+> It used to read "this row places related-docs in a different phase from §11's two." §11 no
+> longer has two: its phase-2 row is struck in place and **phase 5 owns the panel**, which is the
+> same phase (d) below already names. All three statements now agree, so the row above is no
+> longer in conflict with anything — what it describes is the *scoring* move, which landed.
+> **Appendix B-7 (S18)** — the HTTP endpoint it implies still does not exist
+> (`grep -c related src/brain/ui/app.py` → **0**, re-derived 2026-08-20) and is now owned:
+> phase 5, gated on the open `vector_sim_floor` decision in B-4.
 >
 > **(d) `compute_related(doc_id, limit)` is NEW CODE, NOT A MOVE — do not budget it as
 > migration.** No per-document entry point exists anywhere in the file. The closest thing,
@@ -1923,7 +1928,7 @@ phase until the user says otherwise.
 | **3** | **Identity + defect repair** | **A13 first — inline the token block, or phase 3 has no verifiable exit criterion.** §7.1's "Instrument & Page" token system; §7.4 logo + favicon; **A11 fixes D1–D8**; **Q14** font delivery; **Q15** date in the search payload; **Q16** server-side snippet rendering; R-1's perceived-performance work (skeleton + FTS-first paint); **Q18** extend the offline test to CSS `url()`. | Logo renders in both themes and ships in the wheel. D1–D8 closed. Every text token clears AA on every permitted ground; selection carries wash **plus** marker rail. |
 | **4** | **Write-path hardening** | **A7** draft buffer (blocks R1). **A8** `_ingested/` invariant + test. **A9** watcher dependency + doctor check. C3 focus-refetch. **Q4** external-editor decision. | C1–C7 each covered by a test. |
 | **5** | **Graph** — *and the related-docs panel* | §6, after **Q2** and **Q3**. Sidebar local graph first. **Plus the related-docs panel struck from phase 2** (§9.2d(d) already schedules its authoring here): a route module, an `app.py` registration, a client consumer — and **the B-4 ruling first**. `compute_related` itself is already written and tested (Appendix B-17); only its consumer is absent. | Reads materialized state only; honest degraded state when unbuilt. **Related-docs:** the panel answers over HTTP, or the row is not exited. |
-| **6** | ⚠ *(Appendix B-3 / S9: three of these four moves already landed in phase 2; this row overstates the phase-6 budget. Only "No deletion in this phase" is still load-bearing.)* **Move, do not delete** | §9.2: `_person_name.py` → `person_name.py`; `build_people.py` aggregation → `people.py`; `build_related.py` scoring → `related.py`. Repoint every verified importer. **No deletion in this phase.** | Full suite green with `wiki/` still present but no longer imported by non-wiki code. |
+| **6** | ⚠ *(Appendix B-3 / S9, **re-derived 2026-08-20:** **all three** of the moves this row names have already landed in phase 2 — not "three of four", a fourth was never specified; §9.2 numbers exactly three. `person_name.py`, `people.py` and `related.py` all exist, every importer already points at them, and `wiki/build_related.py` is down to 248 lines as the thin emitter §9.2d(2) requires. **The move budget for this phase is zero.** Only "No deletion in this phase" is still load-bearing.)* **Move, do not delete** | §9.2: `_person_name.py` → `person_name.py`; `build_people.py` aggregation → `people.py`; `build_related.py` scoring → `related.py`. Repoint every verified importer. **No deletion in this phase.** | Full suite green with `wiki/` still present but no longer imported by non-wiki code. |
 | **7** | **R1 — Demote** | Stop pointing the daily loop at the wiki. Nothing deleted. **Gate: A7 has landed.** | User reads in `brain ui` by default. |
 | **8** | **R2 — Dormant** | **A10** re-form the `wiki` stage into a `mirror` stage; delete only the two Quartz steps. Uninstall `com.brain.build`; keep `com.brain.watcher`/`com.brain.brief`. **Q8** launchd gate. **Q10** Publish tab. | No Quartz build runs unless requested. Mirror maintenance still runs. Suite green. |
 | **9** | **R3 — Delete** | **A12 first: `python -c "import brain.cli"` must pass after every commit.** §9.2c importer list worked top-down; §9.5 surface changes including `brain vault render` and `cli.py:228`; §9.3 traps observed; source **and** tests in the same commits. | **Gate: explicit user confirmation they have stopped reaching for the wiki**, and an explicit decision on RA-8. Then `bin/brain-ci` green, no orphaned imports, docs + auto-memory updated. |
@@ -2075,6 +2080,15 @@ Three of phase 6's four moves landed during phase 2 (`build_related`→`related`
 `build_people`→`people`, `_person_name`→`person_name`). §11 still describes them as
 future work, so **the phase-6 budget is overstated**. The row's only still-load-bearing
 clause is its "No deletion in this phase" gate.
+**Corrected 2026-08-20: "four" is wrong — there are three.** §9.2 numbers exactly three moves
+(`_person_name`, `build_people`, `build_related`) and §11's phase-6 cell lists exactly those
+three; no fourth is specified anywhere, and this entry invented the denominator. The correction
+makes the finding **stronger**, not weaker: the phase-6 move budget is not mostly spent but
+**entirely** spent. Re-derived — all three modules exist at their new paths, no importer points
+at the old ones (the §9.2c grep returns 6 statements, none of them to a moved module), and
+`wiki/build_related.py` is the 248-line thin emitter §9.2d(2) requires rather than the 815-line
+original. A count that nothing in the document supports is exactly what this appendix's standing
+rule forbids, committed by the appendix.
 
 ### B-4 · S13 — the documented `compute_related` signature cannot run, and is wrong twice
 *Task #17 (open user decision). Spec §9.2:1459 and §9.2d:1487 both write
@@ -2117,6 +2131,21 @@ inert**, a test that cannot fail, prescribed by the plan. Ported the documented 
 which makes precedence load-bearing and the mutation land.
 *Follow-up, unowned:* reconcile the overlay's comment and code. The overlay is arguably
 the buggy half.
+**CLOSED 2026-08-20 — the overlay was the buggy half, and the CODE was changed, not the comment.**
+`linkKindMark.ts` now carries `TAG_INFIX = "/tags/"` and an `isTagUrl()` that tests prefix **or**
+infix, mirroring `render.py`'s `_is_tag_url`. Two reasons the documented reading won, and neither
+is "the comment said so": a host-qualified link to this site's own tag page **is** a tag link and
+prefix-only silently files it as `external`; and under prefix-only the tag/external precedence is
+**inert**, because the two prefix sets are disjoint — an ordering nothing can observe is an ordering
+no test can defend. **Verified by executing the patched transformer**, not by reading it: the file
+was type-stripped (`node --experimental-strip-types`), its `LinkKindMark` plugin invoked on
+synthetic mdast link nodes, and nine URL shapes checked against the kinds `render.py` assigns —
+all agree, including `https://…/tags/retro` → `tag`. **The check was proved able to fail:** with
+`isTagUrl` reverted to `startsWithAny(url, TAG_PREFIXES)` in the scratch copy, the same harness
+reports `MISMATCH https://example.invalid/tags/retro: got external, want tag` and exits 1.
+*(A plain `node --check` on the file, with or without `--experimental-strip-types`, exits 0 even
+on a deliberately broken copy — it is not a check at all for `.ts`/`.mts`, and it was the control
+run that revealed that rather than any reading of the docs.)*
 
 ### B-7 · S18 — the related-docs endpoint exists in no task's scope
 *Task #37. Re-derived: `grep -c related src/brain/ui/app.py` → **0**. Still absent.*
@@ -2143,6 +2172,16 @@ empty aside" is trivially satisfied. The mutation that reddens the named asserti
 dropping the **emptiness guard**.
 An implementer following the row literally would have seen red and recorded the absence
 assertions as proven when they had never fired.
+**BOTH MUTATIONS RE-RUN 2026-08-20 — the finding is confirmed and sharpened in one direction the
+entry understates.** On `pytest tests/test_ui_browser_lede.py -m browser --no-cov` (baseline **13
+passed**): forcing `summary` empty at `js/inspector.js:241` gives **3 failed / 10 passed**, not
+one — `:411` (presence), `:422` (lede-above-body) and `:469` (lede parented to `.note-head`) — and
+**both absence assertions, `:512` and `:523`, stay green**, exactly as recorded. Dropping the
+emptiness guard at `:242` gives **2 failed / 11 passed**: `:512` and `:523` and nothing else, with
+the presence test green. So the two mutations redden **disjoint** sets, which is the property that
+makes the substitute the right one rather than merely a different one. The count matters to the
+entry's own argument: a row saying "reddens the presence assertions" invites an implementer to
+expect one red test and stop looking at three.
 
 ### B-9 · (no S-number) — T17's declared mutation is unimplementable
 *Task #58.* The row says: *drop the client-side draft guard **and** T4's SQL guard
@@ -2239,6 +2278,19 @@ blocked awaiting that evaluate. Deadlock.
 declared mutation is unusable in any Playwright + route-stub harness. The substitute — route
 the request through an *async* XHR, which never touches the page's patched `window.fetch` and
 so sails past the test's gate — isolates the same property at **1 failed / 12 passed**.
+**RE-RUN 2026-08-20 — THIS DOES NOT REPRODUCE AGAINST THE CURRENT TREE, and the entry is kept
+rather than withdrawn.** The synchronous form was performed again exactly as described (`open(…,
+false)` + `send()`, rail appended inline, restored byte-exact) and produced **1 failed / 16
+passed in 8.86 s** on `pytest tests/test_ui_browser_reading.py -m browser --no-cov` — no
+deadlock, one red test, on the assertion the row targets. B-15's *mechanism* is exact and that is
+why it fails to fire: it needs the sync XHR to run inside a `page.evaluate` Playwright is
+awaiting, and `attachBacklinks` is now reached from an ordinary subscriber render while the
+harness gates `/links` **inside the page** rather than in a route handler, so there is no
+driver-side handler to deadlock against. The file total moved too — B-15 counts **13** tests
+where there are now **17**. Kept because the reasoning becomes true again the moment a harness
+stubs that route driver-side; and the async substitute remains the better mutation either way,
+since it isolates laziness instead of incidentally defeating the gate. The identical note is on
+the plan's Appendix C-3, which carries the same claim.
 
 ### B-16 · (no S-number) — a test-side import guard must tolerate a legitimate RED phase
 *Task #40 — calibration, not a defect.*
@@ -2441,9 +2493,24 @@ never-inherit-a-line-number failure the entries above document, committed by the
 B-6) and three were **located more precisely** (B-5, B-8, and B-1's ruling). That is a good outcome
 for the entries and a **poor** one for the two documents they describe: every defect recorded here
 in phase 2 is still present in the phase-2 plan's own rows, because this appendix's convention is to
-record rather than repair, and the **plan** has no appendix. The spec now carries pointers at every
-misleading passage; **`docs/plans/2026-08-13-wiki-to-ui-phase2.md` carries none**, and its T7 and
-T15 rows would still mislead an implementer who read them today.
+record rather than repair, and the **plan** has no appendix.
+
+> ⚠ **THE PARAGRAPH ABOVE ENDED WITH A CLAIM ABOUT THE PLAN THAT IS NO LONGER TRUE, and it is
+> struck rather than deleted because it dates this section.** It read: *"The spec now carries
+> pointers at every misleading passage; `docs/plans/2026-08-13-wiki-to-ui-phase2.md` carries none,
+> and its T7 and T15 rows would still mislead an implementer who read them today."* **Re-derived
+> 2026-08-20:** the plan now has an **Appendix C**, a read-this-first banner at its head, and
+> inline ⚠ annotations on the rows themselves — **T7's file list is struck and `+ src/brain/search.py`
+> added** (Appendix C-5), and **T15's mutation is struck with the emptiness-guard substitute in its
+> place** (Appendix C-2). Both were repaired in the plan after this table was written.
+>
+> **Two entries in the table above went stale the same way and are corrected here, not silently:**
+> **B-5**'s status cell says T7's row *"still lists only"* three files — it no longer does; and
+> **B-8**'s says the T15 row *"still reads"* the defective mutation — it no longer does either.
+> The measurements both cells report are unchanged and still correct; only the "still" is wrong.
+> **This is the appendix's own standing hazard arriving on schedule:** a status cell that describes
+> another document is a claim about a moving target, and it decays faster than the finding it
+> annotates. The finding is durable, the "still" is not.
 
 ---
 

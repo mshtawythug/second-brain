@@ -104,11 +104,37 @@ const INGESTED_PREFIXES = ["_ingested/", "/_ingested/", "./_ingested/"]
 
 // brain: tag-link URL patterns. Quartz emits tag links with URL
 // `tags/<slug>` (relative, default `markdownLinkResolution: "shortest"`)
-// or `/tags/<slug>` (absolute) depending on render context. The check
-// matches both forms; a `tags/` prefix on a non-tag doc is unlikely
-// (the slug `tags` is reserved by Quartz's TagPage emitter) so we
-// don't over-constrain.
+// or `/tags/<slug>` (absolute) depending on render context. A `tags/`
+// prefix on a non-tag doc is unlikely (the slug `tags` is reserved by
+// Quartz's TagPage emitter) so we don't over-constrain.
 const TAG_PREFIXES = ["tags/", "/tags/", "./tags/"]
+
+// brain: the INFIX form, and it is not redundant with the list above.
+// A tag URL rendered host-qualified — `https://<host>/tags/<slug>`,
+// which is what a site served under a real origin emits — carries the
+// tag segment mid-string, so no prefix in TAG_PREFIXES can reach it.
+// This constant is what makes the header's stated contract ("starts
+// with `tags/` ... or CONTAINS `/tags/`") true of the code.
+//
+// FIXED 2026-08-20, and the code was the wrong half. Until this line
+// existed the header two screens above documented the infix reading
+// while `classifyLink` only ever prefix-matched, so
+// `https://host/tags/retro` classified as `external`. The Python port
+// `src/brain/ui/render.py` (`_TAG_INFIX`, `_is_tag_url`) had already
+// taken the DOCUMENTED reading and pinned it with a test
+// (`tests/test_ui_render_link_kinds.py`, "an absolute tag URL is a
+// tag"), so the two implementations of one classifier disagreed. Two
+// reasons the documented reading is the correct one, not merely the
+// louder one: (1) a host-qualified link to this site's own tag page IS
+// a tag link, and prefix-only silently mislabels it; (2) under
+// prefix-only the tag/external precedence below is INERT — the two
+// prefix sets are disjoint, so no reordering of those two lines can
+// change any answer, and an ordering nothing can observe is an
+// ordering no test can defend. The cost is the mirror case, a genuinely
+// external `https://elsewhere/tags/x`, which is now labelled `tag`;
+// that is the trade the header already declared with "we don't
+// over-constrain".
+const TAG_INFIX = "/tags/"
 
 // brain: case-insensitive prefix match. URLs SHOULD be lowercase but
 // hand-edited markdown can carry mixed-case `MailTo:` / `HTTPS://`,
@@ -121,6 +147,15 @@ function startsWithAny(url: string, prefixes: readonly string[]): boolean {
   return false
 }
 
+// brain: the tag test, as the header states it — prefix OR infix. Kept
+// as its own function rather than folded into `classifyLink` so the
+// contract has one name on both sides of the port: `render.py`'s
+// `_is_tag_url` is this function.
+function isTagUrl(url: string): boolean {
+  if (startsWithAny(url, TAG_PREFIXES)) return true
+  return url.toLowerCase().includes(TAG_INFIX)
+}
+
 // brain: classify a single mdast Link node into one of the five
 // kinds. Returns a string from the `LinkKind` union. The classifier
 // is pure (no mutation, no I/O) so it can be unit-tested in isolation
@@ -130,10 +165,13 @@ function startsWithAny(url: string, prefixes: readonly string[]): boolean {
 // other kind because a link inside a Phase D fence is conceptually
 // "an evidence edge to a related doc," not "a wiki link to that
 // doc." The italic-dashed styling in `_links.scss` reflects that
-// distinction. After `derived`, `tag` and `external` are mutually
-// exclusive with the others by URL shape; `ingested` is a refinement
-// of `wiki` (both are vault-internal) so the ingested check runs
-// before the wiki fallback.
+// distinction. After `derived`, `tag` MUST precede `external`: an
+// absolute `https://<host>/tags/<slug>` satisfies both tests, and
+// testing `tag` first is what keeps it a tag. (That precedence became
+// load-bearing only when `TAG_INFIX` landed — see its note above for
+// why it was inert, and therefore untestable, before.) `ingested` is a
+// refinement of `wiki` (both are vault-internal) so the ingested check
+// runs before the wiki fallback.
 function classifyLink(link: Link): LinkKind {
   const data = link.data as Record<string, unknown> | undefined
   const props = data?.hProperties as Record<string, unknown> | undefined
@@ -141,7 +179,7 @@ function classifyLink(link: Link): LinkKind {
     return "derived"
   }
   const url = link.url ?? ""
-  if (startsWithAny(url, TAG_PREFIXES)) return "tag"
+  if (isTagUrl(url)) return "tag"
   if (startsWithAny(url, EXTERNAL_PREFIXES)) return "external"
   if (startsWithAny(url, INGESTED_PREFIXES)) return "ingested"
   return "wiki"

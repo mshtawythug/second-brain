@@ -261,12 +261,38 @@ def test_arrow_keys_then_enter_open_the_note_the_user_landed_on(page: Any) -> No
     reflectively, so the rendered title is evidence of which id was actually
     requested.
 
-    MUTATION THAT MUST GO RED (measured, not assumed): in ``js/palette.js``,
-    change ``setHighlight(highlight + delta)`` to ``setHighlight(0)`` — the
-    arrow keys stop moving the index and Enter opens ``EXPECTED_ORDER[0]``
-    (``Deep Note``) instead of ``EXPECTED_ORDER[2]`` (``Root Note``). Both the
-    negative assertion and the positive one below fail, and a "the dialog is
-    visible" test would still pass.
+    MUTATION THAT MUST GO RED — RE-MEASURED 2026-08-20, and the earlier record
+    of it was wrong. In ``js/palette.js:168``, change
+    ``setHighlight(highlight + delta)`` to ``setHighlight(0)``: the arrow keys
+    stop moving the index and Enter opens ``EXPECTED_ORDER[0]`` (``Deep Note``)
+    instead of ``EXPECTED_ORDER[2]`` (``Root Note``).
+
+        .venv/bin/python -m pytest tests/test_ui_browser_nav.py -m browser --no-cov
+        -> 2 failed, 4 passed (baseline 6 passed)
+
+    WHAT FAILS, precisely. **The positive assertion below fails and the negative
+    one does not.** This record used to claim both did, and that claim could
+    never have been true: ``ranked[0] != TARGET`` is a SEED-DISCRIMINATION
+    PREMISE, not a property of the palette — it asks whether the fixture still
+    distinguishes an implementation that ignores ArrowDown from one that
+    honours it. A client-side highlight mutation cannot touch the ranking the
+    seed produces, so it cannot redden that line. Its passing is not inferred
+    either: execution reached the assertion below it, which is only possible if
+    it held. The observed failure is
+    ``AssertionError: Enter opened 'Deep Note'; two ArrowDowns from the top of
+    ['n-deep', 'n-beta', 'n-root', 'n-alpha', 'n-buried'] must land on 'Root
+    Note'``.
+
+    THE MUTATION ALSO REDDENS A SECOND TEST this record never mentioned:
+    ``test_the_highlight_is_announced_via_aria_activedescendant``, at
+    "aria-activedescendant did not follow ArrowDown". That is correct and
+    welcome — the a11y contract is a separate claim about the same index — but
+    a mutation record that names one of two reddened tests understates what the
+    mutation is evidence for.
+
+    The mutation is sound and this test is sound; only the evidence sentence
+    was false. A "the dialog is visible" test would still pass, which is the
+    point of asserting the opened note's identity.
     """
     _mount_palette(page)
     ranked = _open_palette(page, QUERY)
