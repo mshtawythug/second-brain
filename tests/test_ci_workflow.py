@@ -594,11 +594,12 @@ def test_ci_browser_selection_is_order_deterministic() -> None:
     MEASURED. Under macOS's default ``en_US.UTF-8``, ICU weights ``_`` against
     ``.`` differently from byte order, so ``tests/test_ui_browser*.py`` expands
     with ``test_ui_browser.py`` LAST; under a POSIX-locale runner it expands
-    FIRST. The same command therefore ran these six modules in two different
-    orders on two machines. An order-dependent interaction that only bites when
-    a module runs first is invisible to local reproduction *by construction*,
-    and "it passes locally" stops being evidence about CI. That is the concrete
-    defect this test exists to prevent recurring, not a tidiness rule.
+    FIRST. The same command therefore ran the selected modules in two
+    different orders on two machines. An order-dependent interaction that only
+    bites when a module runs first is invisible to local reproduction *by
+    construction*, and "it passes locally" stops being evidence about CI. That
+    is the concrete defect this test exists to prevent recurring, not a
+    tidiness rule.
 
     ``LC_ALL=C pytest …`` IS NOT AN ACCEPTABLE FIX and the no-metacharacter
     assertion below deliberately rejects it. A variable-assignment PREFIX sets

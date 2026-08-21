@@ -122,8 +122,11 @@ class _Slugger:
     is what makes the guarantee hold against authored text that happens to
     collide with a generated suffix.
 
-    One instance per document; both the render pass and :func:`extract_headings`
-    walk the same heading sequence in the same order, so both mint the same ids.
+    One instance per document. The render pass and :func:`extract_headings` mint
+    the same ids only while they walk the same heading sequence — which is no
+    longer something the two share by construction, since they parse with
+    different envs. See :func:`extract_headings` for why it holds and for the
+    test that holds it.
     """
 
     def __init__(self) -> None:
@@ -729,9 +732,39 @@ def extract_headings(text: str | None) -> list[Heading]:
     caller owns that decision, and owning it in one place is what keeps the two
     walks in agreement.
 
-    Both walks see the same ``heading_open`` tokens in the same order and mint
-    ids from a fresh :class:`_Slugger`, so the ids agree by construction rather
-    than by a shared cache that could go stale.
+    **The two walks no longer parse with the same env, and this used to claim
+    they did.** :func:`render_markdown` builds an env whose
+    ``thread_sections_enabled`` comes from the document's ``content_type``;
+    this function parses with a hardcoded ``{}``. For an
+    :data:`EMAIL_THREAD_CONTENT_TYPE` document that means the render walk has
+    the ``<details>``/``<summary>`` rules ON and this one has them OFF. Passing
+    the same STRING to both — S4's guard, above — no longer makes them see the
+    same tokens; it only makes them see the same INPUT.
+
+    The ids agree anyway, for two reasons, and it is worth separating them
+    because only the first is a property of the rule as written:
+
+    1. ``_thread_html_rule`` matches three line shapes — ``<details>``,
+       ``</details>``, ``<summary>…</summary>`` — and emits elements of its own.
+       It never consumes a heading line and never produces one.
+    2. Even if it did, it would not get the chance: ``build_renderer``
+       registers it ``before("paragraph", …)``, and markdown-it's block ruler
+       runs ``heading`` and ``lheading`` several rules EARLIER, so an ATX or
+       setext heading is already claimed before ``thread_html`` is consulted.
+       (Verified by reading the ruler back off the built parser, after a
+       mutation that added a heading-consuming branch turned out to be inert.)
+
+    Neither is guaranteed by anything structural, so the agreement is held by
+    an executable assertion rather than by this paragraph:
+    ``tests/test_ui_render_email_thread.py::
+    test_the_render_walk_and_the_toc_walk_agree_on_a_thread_document`` renders a
+    thread carrying headings inside its collapsed sections and compares the
+    ``id`` attributes in the HTML against the ids minted here. It is the only
+    test in the render suites that fails when the two walks diverge — measured,
+    against both a rule that eats a heading and one that emits a heading.
+
+    Within one walk the ids are minted from a fresh :class:`_Slugger` in
+    document order, so they need no shared cache that could go stale.
     """
     if not text:
         return []

@@ -31,6 +31,7 @@ here is ``@example.test`` (RFC 6761 reserved) and every name is invented.
 from __future__ import annotations
 
 import base64
+import re
 from datetime import datetime
 
 import pytest
@@ -314,6 +315,104 @@ def test_the_newest_message_stays_a_heading_and_stays_in_the_toc() -> None:
         "the sender address left the TOC entry entirely"
     )
     assert headings[0].id, "the heading lost its anchor"
+
+
+#: A thread whose headings sit exactly where a divergence between the two walks
+#: would first show: one INSIDE each collapsed section, both with the same text
+#: so the slugger's dedup counter has to stay in step across the boundary, and
+#: an `###` under the newest message's `## H2`.
+#:
+#: SEPARATE FROM `THREAD` on purpose. That fixture reproduces what
+#: `_format_thread_section` actually emits and its docstring says so; a
+#: collapsed message with an `## H2` in the body is a shape the assembler can
+#: produce from a real reply but does not produce here, and editing THREAD to
+#: carry one would make its "the contract as it exists on disk" claim false —
+#: the exact error a previous revision of that fixture shipped.
+THREAD_WITH_HEADINGS = """<details>
+<summary>2026-03-07 08:00 — Dana Vendor &lt;dana@example.test&gt;</summary>
+
+## Quoted agenda
+
+The oldest message in the thread.
+
+</details>
+
+<details>
+<summary>2026-03-08 09:15 — Sam Buyer &lt;sam@example.test&gt;</summary>
+
+## Quoted agenda
+
+An earlier message, collapsed by default.
+
+</details>
+
+## 2026-03-09 12:00 — Dana Vendor &lt;dana@example.test&gt;
+
+### Next steps
+
+The latest reply, always expanded.
+"""
+
+_HEADING_ID = re.compile(r'<h[1-6][^>]*\bid="([^"]*)"')
+
+
+def test_the_render_walk_and_the_toc_walk_agree_on_a_thread_document() -> None:
+    """The two walks no longer hold the same parser state. Pin the consequence.
+
+    ``render_markdown`` builds an env carrying ``thread_sections_enabled`` from
+    the document's ``content_type``; ``extract_headings`` parses with a
+    hardcoded ``{}``. So for an ``email_thread`` the render walk has thread
+    recognition ON and the TOC walk has it OFF, and ``notes_service`` passing the
+    same STRING to both — defect S4's guard — can no longer make them agree by
+    itself.
+
+    It agrees today, and this is why: the thread rule only ever consumes
+    ``<details>``, ``</details>`` and ``<summary>`` lines, and only ever emits
+    elements of its own. A heading line falls through it to the ordinary block
+    pipeline in both walks. That is a property of the RULE, not of the design —
+    a fourth pattern that swallowed or emitted a heading would break it silently,
+    the TOC would point at anchors the HTML does not carry, and no existing test
+    would notice: the thread suite asserts one heading survives, and the TOC
+    suite renders without a ``content_type`` at all, so neither has ever
+    compared the two walks with thread mode on.
+
+    Written after running it. The two id lists are identical, in order, dedup
+    suffix included — ``quoted-agenda`` then ``quoted-agenda-1``, which is the
+    part that would drift first if one walk stopped seeing a heading the other
+    still counted.
+    """
+    # THE FIXTURE'S ADEQUACY, asserted against the SOURCE rather than the render.
+    # Asserting it against the HTML would make this fire first under exactly the
+    # mutation the test exists to catch — a thread rule that eats the heading —
+    # and the failure would read as a broken fixture instead of a broken
+    # invariant.
+    collapsed = THREAD_WITH_HEADINGS.split("</details>")[0]
+    assert "\n## " in collapsed, (
+        "the fixture no longer puts a heading inside a collapsed section, so "
+        "the comparison below cannot see a thread rule consuming one"
+    )
+
+    html = render_thread(THREAD_WITH_HEADINGS)
+    assert '<details class="thread-message">' in html, (
+        "the render walk did not recognise the thread, so both walks ran with "
+        "thread rules OFF and the agreement below is vacuous"
+    )
+
+    in_toc = [heading.id for heading in extract_headings(THREAD_WITH_HEADINGS)]
+    assert len(in_toc) == 4, (
+        f"expected the fixture's four headings, got {in_toc} — the TOC walk "
+        "itself changed, and the comparison below would be pinning the wrong "
+        "pair of lists"
+    )
+
+    assert _HEADING_ID.findall(html) == in_toc, (
+        "the rendered headings and the TOC disagree. The two walks parse with "
+        "DIFFERENT envs — render_markdown enables the email-thread rules from "
+        "content_type, extract_headings passes {} — so a thread rule that "
+        "consumes or emits a heading line changes one walk and not the other. "
+        "Every TOC entry would then point at an anchor the document does not "
+        "contain."
+    )
 
 
 def test_older_sections_are_closed() -> None:

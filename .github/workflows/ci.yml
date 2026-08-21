@@ -357,5 +357,6 @@ jobs:
           tests/test_ui_browser_history.py
           tests/test_ui_browser_lede.py
           tests/test_ui_browser_nav.py
+          tests/test_ui_browser_pager.py
           tests/test_ui_browser_reading.py
           -m browser --no-cov

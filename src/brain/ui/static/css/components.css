@@ -192,9 +192,12 @@ kbd.hint {
   border-top: var(--hair);
 }
 /* THE `[hidden]` TRAP, fourth instance in this codebase — see `.field[hidden]`
-   below and `.shell[hidden]` in layout.css. `.pager { display: flex }` is
-   (0,1,0) and the UA's bare `[hidden]` is (0,1,0) too, so the author rule wins
-   on cascade order and js/results.js setting the attribute would hide NOTHING.
+   below and `.shell[hidden]` in layout.css, which carries the full explanation.
+   `.pager { display: flex }` is an AUTHOR declaration and the UA sheet's
+   `[hidden] { display: none }` is not, so the author rule wins on cascade
+   ORIGIN and js/results.js setting the attribute would hide NOTHING. The equal
+   (0,1,0) specificity this comment used to cite is real and irrelevant: origin
+   is sorted first, so the comparison never happens.
    The control would sit under every idle ledger with both buttons dead. */
 .pager[hidden] { display: none; }
 /* Centred between the two buttons and allowed to shrink, so a long boundary
@@ -433,9 +436,12 @@ button[disabled] { cursor: not-allowed; opacity: 0.5; }
   font-size: var(--t-ui); z-index: 10;
 }
 .toast[hidden] { display: none; }
-/* Same trap as `.shell[hidden]` in layout.css, third instance: a bare `[hidden]`
-   (0,1,0) LOSES to `.field { display: grid }` (0,1,0 — but later in the
-   cascade), so setting the attribute from JS hides nothing. A7's overwrite
+/* Same trap as `.shell[hidden]` in layout.css, third instance: the UA sheet's
+   bare `[hidden]` LOSES to `.field { display: grid }` because the author origin
+   outranks the UA one — not, as this comment used to say, because the two tie
+   at (0,1,0) and the author rule sits later. They do tie, and it is later, and
+   neither fact is what decides. So setting the attribute from JS hides nothing.
+   A7's overwrite
    dialog reuses the delete dialog and hides its typed-title field; without this
    the field stayed visible with delete's caption above it, on a dialog that
    never wanted it. Caught by a browser test asserting the field was NOT

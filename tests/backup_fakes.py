@@ -53,6 +53,80 @@ class SandboxEscape(AssertionError):
     """A test double tried to write inside the checkout instead of ``tmp_path``."""
 
 
+class SuiteDatabaseNameTooLong(AssertionError):
+    """The suite database name leaves no room for a restore's derived names.
+
+    Named, and raised instead of a bare ``AssertionError``, so the two restore
+    modules can catch exactly this and turn it into a module-level skip. When
+    it was bare, it escaped a module-level call during COLLECTION and pytest
+    exited 2 for the whole repo — 8,445 tests, including every ``-m browser``
+    one, taken down by two modules' configuration.
+    """
+
+
+#: Postgres truncates identifiers at 63 bytes (``NAMEDATALEN - 1``), SILENTLY.
+PG_IDENTIFIER_MAX_BYTES = 63
+
+#: The longest name production derives from a live database during a restore.
+#: ``restore._restore_database`` builds BOTH ``{live}_restore_{stamp}`` (+24)
+#: and ``{live}_replaced_{stamp}`` (+25) from a ``TIMESTAMP_FORMAT``
+#: (``%Y%m%d-%H%M%S``) stamp with its dash swapped for an underscore, so it is
+#: 15 bytes; ``_replaced_`` is the binding one. Spelled as an expression rather
+#: than a literal 25 so it re-derives if either part moves.
+RESTORE_DERIVED_SUFFIX_BYTES = len("_replaced_") + len("20260725_181500")
+
+#: This harness's own decoration on the suite database name. Unlike the two
+#: above it is NOT a production constraint — it is the only part of the budget
+#: the tests control, so it is where headroom has to come from. It was
+#: ``_restore_sandbox`` (16 bytes), which left suite names 22 bytes; the
+#: convention here is ``second_brain_test_<worktree-slug>``, and the fixed
+#: prefix alone is 18, so any slug past 4 characters overflowed. Five databases
+#: on the shared test server were already over that line. At 4 bytes the budget
+#: is 34, which fits every one of them with room for a 16-character slug.
+#: Deliberately does NOT start with ``_restore``: ``drop_restore_artifacts``
+#: sweeps ``{live}_restore_%``, and the old name collided with that pattern.
+SANDBOX_SUFFIX = "_sbx"
+
+#: Longest suite database name that can still survive a restore swap.
+MAX_SUITE_DB_NAME_BYTES = (
+    PG_IDENTIFIER_MAX_BYTES - RESTORE_DERIVED_SUFFIX_BYTES - len(SANDBOX_SUFFIX)
+)
+
+
+def sandbox_database_name(live: str) -> str:
+    """The sandbox database name for suite database ``live``, budget-checked.
+
+    Pure: no connection, no DDL, no cache. Split out of
+    :func:`restore_sandbox_dsn` so the budget can be regression-tested without
+    creating a database, which is the only reason the old inline check went
+    unexercised.
+
+    ``_validated_db_name`` in ``brain.backup.restore`` checks the character
+    class and NOT the length, so an overflow is not refused anywhere in
+    production: it surfaces as ``database "..." does not exist`` from a name
+    Postgres truncated server-side but Python did not, with nothing pointing at
+    the cause.
+    """
+    sandbox = f"{live}{SANDBOX_SUFFIX}"
+    # Bytes, not characters: the limit is NAMEDATALEN-1 BYTES. Suite names are
+    # ASCII in practice, but len() would understate a non-ASCII one and hand
+    # back exactly the silent truncation this guard exists to prevent.
+    if len(sandbox.encode("utf-8")) + RESTORE_DERIVED_SUFFIX_BYTES > (
+        PG_IDENTIFIER_MAX_BYTES
+    ):
+        raise SuiteDatabaseNameTooLong(
+            f"suite database name {live!r} is too long: the restore sandbox "
+            f"({sandbox!r}) plus the '_replaced_<stamp>' suffix a restore "
+            f"derives ({RESTORE_DERIVED_SUFFIX_BYTES} bytes) exceeds "
+            f"Postgres' {PG_IDENTIFIER_MAX_BYTES}-byte identifier limit, "
+            f"which truncates SILENTLY. Keep the "
+            f"'second_brain_test_<worktree-slug>' convention and shorten the "
+            f"SLUG: at most {MAX_SUITE_DB_NAME_BYTES} bytes total "
+            f"(this one is {len(live.encode('utf-8'))})."
+        )
+    return sandbox
+
+
 def assert_write_is_sandboxed(path: Path) -> None:
     """Refuse a host write that would land inside the checkout.
 
@@ -253,12 +327,18 @@ def drop_restore_artifacts(base_dsn: str) -> list[str]:
     # connections — and terminating them crash-restarts the instance.
     #
     # Guarding only the parked branch would leave the leftovers sweep below
-    # unguarded, and that sweep's `{live}_restore_%` pattern MATCHES the
-    # sandbox database `restore_sandbox_dsn` creates (`{live}_restore_sandbox`)
-    # — so a caller passing the suite DSN with no parked database lying around
-    # would silently destroy the sandbox mid-session instead of being refused.
+    # unguarded, and that sweep drops EVERY `{live}_restore_%` database — so a
+    # caller passing the suite DSN with no parked database lying around would
+    # sail past a parked-branch-only guard and still destroy databases.
     # Refuse loudly and unconditionally: a named failure in one module beats a
     # destroyed database and ~670 downstream errors indicting innocent tests.
+    #
+    # This guard used to be justified by a second, sharper hazard: the sandbox
+    # was named `{live}_restore_sandbox`, which that sweep pattern MATCHED, so
+    # the suite DSN reached it and deleted the session's own sandbox. The
+    # sandbox is now `{live}_sbx` (see SANDBOX_SUFFIX) and no longer collides.
+    # The guard stays anyway — the sweep is still unconditionally destructive,
+    # and the collision was the symptom, not the reason.
     _assert_not_the_running_suite_database(live)
 
     params["dbname"] = "postgres"
@@ -645,23 +725,9 @@ def restore_sandbox_dsn(suite_dsn: str) -> str:
     ):
         raise ProdDsnLeak(f"refusing to build a restore sandbox on prod: {live!r}")
 
-    sandbox = f"{live}_restore_sandbox"
-    # Postgres truncates identifiers at 63 BYTES, silently. `_restore_database`
-    # then appends `_replaced_<15-char stamp>` (25 more) to this name, and
-    # `_validated_db_name` checks the character class, NOT the length — so an
-    # overflow shows up as `database "..." does not exist` from a connection
-    # whose name was truncated on the server but not in Python, with nothing
-    # pointing at the cause. The sandbox suffix consumed the headroom that used
-    # to exist; parallel-worktree databases already on this server
-    # (`second_brain_test_review_a`, 26 chars) are over the line.
-    if len(sandbox) + 25 > 63:
-        raise AssertionError(
-            f"suite database name {live!r} is too long: the restore sandbox "
-            f"({sandbox!r}) plus the generated '_replaced_<stamp>' suffix "
-            f"exceeds Postgres' 63-byte identifier limit, which truncates "
-            f"SILENTLY. Use a suite database name of at most "
-            f"{63 - 25 - len('_restore_sandbox')} characters."
-        )
+    # Raises SuiteDatabaseNameTooLong. Deliberately BEFORE the CREATE below, so
+    # an over-budget name never reaches DDL.
+    sandbox = sandbox_database_name(live)
     admin = dict(params, dbname="postgres")
     with psycopg.connect(psycopg.conninfo.make_conninfo(**admin)) as conn:
         conn.autocommit = True

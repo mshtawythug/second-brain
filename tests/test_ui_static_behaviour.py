@@ -111,6 +111,7 @@ import re
 import sys
 import traceback
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -1009,6 +1010,669 @@ def check_stretch_is_opt_in(css: str) -> None:
     )
 
 
+# ------------------------------------ the static bundle, and a CSS reader --
+#
+# The two guards below assert properties that NO SINGLE FILE holds. "the JS
+# toggles an element the stylesheet cannot hide" spans js/ and css/; "one
+# selector is declared in two sheets and only load order decides" is, by
+# definition, about which sheet a rule came from — and `ALL_CSS` is a bare
+# concatenation, so a guard reading it cannot tell. Hence one more `_SOURCES`
+# scope: every shipped part, each behind a marker the guard splits back apart.
+#
+# `_SOURCES`' header calls another "*"-scoped entry a smell and asks for the
+# narrowest file that can express the property. This is that: the narrowest
+# expression of a cross-file property is the set of files it crosses. The
+# mutation harness is unaffected — a bundle is still one string, and an anchor
+# inside any part is still replaceable.
+
+#: Separates the bundle's parts. Asserted absent from every part, so a file
+#: cannot smuggle a second boundary in and split itself in two.
+_PART_MARK = "@@@brain-bundle-part@@@"
+
+
+def _build_bundle() -> str:
+    parts: list[tuple[str, str]] = [("index.html", INDEX_HTML)]
+    parts += [(f"css/{name}", CSS[name]) for name in CSS_ORDER]
+    parts += [(f"js/{name}", JS[name]) for name in JS_ORDER]
+    for path, text in parts:
+        assert _PART_MARK not in text, (
+            f"{path} contains the bundle separator {_PART_MARK!r}, so splitting "
+            f"the bundle would cut it into pieces the guards then read as "
+            f"separate files. Change the separator."
+        )
+    return "".join(f"\n{_PART_MARK} {path}\n{text}" for path, text in parts)
+
+
+STATIC_BUNDLE = _build_bundle()
+
+_PART_SPLIT = re.compile(rf"\n{re.escape(_PART_MARK)} (\S+)\n")
+
+
+def _parts(bundle: str) -> dict[str, str]:
+    """Split the bundle back into ``{path: text}``."""
+    chunks = _PART_SPLIT.split(bundle)
+    assert chunks[0] == "", (
+        "the bundle does not begin with a part marker; it was not produced by "
+        "_build_bundle, or a mutation removed the first marker"
+    )
+    names, texts = chunks[1::2], chunks[2::2]
+    assert len(names) == len(texts), "a bundle part marker has no body"
+    return dict(zip(names, texts, strict=True))
+
+
+class _Decl(NamedTuple):
+    """One CSS declaration, with everything the cascade needs to rank it."""
+
+    sheet: str
+    context: tuple[str, ...]
+    selector: str
+    prop: str
+    value: str
+    important: bool
+    order: int
+
+
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def _split_top(text: str, sep: str) -> list[str]:
+    """Split on ``sep`` at bracket depth 0, so ``var(--a, b)`` stays whole."""
+    out: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        if ch == sep and depth == 0:
+            out.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+    out.append("".join(buf))
+    return out
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_css(sheet: str, css: str, start: int) -> list[_Decl]:
+    """Every declaration in one stylesheet, with its at-rule context.
+
+    COMMENTS ARE STRIPPED FIRST, and that is load-bearing rather than tidy:
+    ``components.css``'s own prose about this defect class contains the literal
+    text ``.pager { display: flex }``, braces and all. A brace-counting walk
+    over the raw file parses that sentence as a rule and reports a declaration
+    no browser will ever apply — the same "the prose contains what the rule
+    forbids" trap that has blinded three guards in this project.
+
+    ``@keyframes`` bodies are skipped: their preludes are ``from``/``to``/``40%``,
+    which are not selectors and would be compared against real ones.
+    """
+    css = _CSS_COMMENT.sub("", css)
+    out: list[_Decl] = []
+    stack: list[str] = []
+    buf: list[str] = []
+    i, n = 0, len(css)
+    while i < n:
+        ch = css[i]
+        if ch == "{":
+            prelude = _norm("".join(buf))
+            buf = []
+            if prelude.startswith("@"):
+                stack.append(prelude)
+                i += 1
+                continue
+            depth, j = 1, i + 1
+            while j < n and depth:
+                if css[j] == "{":
+                    depth += 1
+                elif css[j] == "}":
+                    depth -= 1
+                j += 1
+            body, context = css[i + 1 : j - 1], tuple(stack)
+            if not any(c.startswith(("@keyframes", "@-webkit-keyframes")) for c in context):
+                for selector in (_norm(s) for s in _split_top(prelude, ",")):
+                    if not selector:
+                        continue
+                    for decl in (d.strip() for d in _split_top(body, ";")):
+                        if not decl or ":" not in decl:
+                            continue
+                        prop, _, value = decl.partition(":")
+                        prop, value = _norm(prop).lower(), _norm(value)
+                        important = value.lower().endswith("!important")
+                        if important:
+                            value = _norm(value[: -len("!important")])
+                        if prop.startswith("--"):
+                            continue
+                        out.append(_Decl(sheet, context, selector, prop, value,
+                                         important, start + len(out)))
+            i = j
+            continue
+        if ch == "}":
+            buf = []
+            if stack:
+                stack.pop()
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    return out
+
+
+_LINK = re.compile(r'<link rel="stylesheet" href="/static/css/([^"]+)">')
+
+
+def _stylesheet_declarations(parts: dict[str, str]) -> list[_Decl]:
+    """Every declaration in the LINKED sheets, in the order the browser reads them.
+
+    The order comes from ``index.html``, not from :data:`CSS_ORDER`. That is
+    where the cascade order actually lives, and it is a string inside the
+    bundle — so a mutation can swap two <link> tags and the guards below see the
+    winner change. A module-level tuple could not be reached by this file's
+    harness at all.
+    """
+    out: list[_Decl] = []
+    for name in _LINK.findall(parts["index.html"]):
+        css = parts.get(f"css/{name}")
+        if css is not None:
+            out.extend(_parse_css(name, css, len(out)))
+    return out
+
+
+_SPEC_TOKEN = re.compile(r"#[\w-]+|\.[\w-]+|\[[^\]]*\]|::?[\w-]+|[\w-]+|\*")
+
+
+def _specificity(selector: str) -> tuple[int, int, int]:
+    """(id, class/attribute/pseudo-class, type) for a compound selector."""
+    ids = classes = types = 0
+    for token in _SPEC_TOKEN.findall(selector):
+        if token.startswith("#"):
+            ids += 1
+        elif token.startswith((".", "[")) or (
+            token.startswith(":") and not token.startswith("::")
+        ):
+            classes += 1
+        elif token != "*":
+            types += 1
+    return ids, classes, types
+
+
+def _simple_parts(selector: str) -> frozenset[str] | None:
+    """The simple selectors of a COMPOUND selector; ``None`` if it is complex.
+
+    ``details.thread-message`` -> ``{details, .thread-message}``.
+    ``.thread-message[open] > :not(summary)`` -> ``None``: matching a descendant
+    combinator needs a DOM, and a guard that guessed would be worse than one
+    that declines.
+    """
+    selector = selector.strip()
+    if re.search(r"[ >+~]", selector):
+        return None
+    tokens = _SPEC_TOKEN.findall(selector)
+    if "".join(tokens) != selector:
+        return None
+    return frozenset(tokens)
+
+
+_MAX_WIDTH = re.compile(r"^@media \((?:max|min)-width: \d+px\)$")
+_FEATURE = re.compile(r"^@media \(([a-z-]+): ([a-z-]+)\)$")
+
+
+def _can_co_apply(one: tuple[str, ...], other: tuple[str, ...]) -> bool:
+    """Can both at-rule contexts be active at the same moment?
+
+    THE @MEDIA CLAUSE, and the reason the prototype scan this replaces got it
+    wrong. Two rules under ``(prefers-reduced-motion: reduce)`` and
+    ``(no-preference)`` can never both apply, so they are not a conflict however
+    identical their selectors. Two ``max-width`` rules CAN both apply — every
+    viewport at or below the smaller bound satisfies both — so they are, and
+    that is exactly the pair the ``.shell`` overlap is made of.
+
+    Discrete ``prefers-*`` features are compared by value; width bounds always
+    share their small end. An at-rule this does not model is a hard error rather
+    than a default answer: guessing would silently re-group real conflicts.
+    """
+    def features(context: tuple[str, ...]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for entry in context:
+            if _MAX_WIDTH.match(entry):
+                continue
+            match = _FEATURE.match(entry)
+            assert match is not None, (
+                f"unmodelled at-rule {entry!r}. _can_co_apply decides whether "
+                f"two rules can be active together; an at-rule it cannot read "
+                f"must extend the model, not fall through to a default that "
+                f"would silently split or merge real conflicts."
+            )
+            out[match.group(1)] = match.group(2)
+        return out
+
+    mine, theirs = features(one), features(other)
+    return all(theirs.get(k, v) == v for k, v in mine.items())
+
+
+def _cascade_rank(decl: _Decl) -> tuple[bool, tuple[int, int, int], int]:
+    """How the cascade ranks one declaration against another that also matches."""
+    return decl.important, _specificity(decl.selector), decl.order
+
+
+# ------------------------------------------- the `[hidden]` cascade trap --
+#
+# `.pager[hidden] { display: none; }` is not tidiness. `.pager { display: flex }`
+# is an AUTHOR rule and the UA sheet's bare `[hidden]` is not, so the author
+# rule wins and `js/results.js` setting the attribute hides nothing — the pager
+# sits under every idle ledger with both buttons dead. That defect class has
+# been hit and fixed four times in this stylesheet (`.shell`, `#discovery`,
+# `.field`, `.pager`), and every one of them is covered ONLY by a
+# browser-marked test. `addopts` carries `-m '... and not browser'`, so a
+# default `pytest` deselects the lot: delete the CSS line and nothing here
+# would say a word.
+
+_JS_COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
+_HIDDEN_ASSIGN = re.compile(r"\.hidden\s*=(?!=)")
+_IDENT_TAIL = re.compile(r"[\w$]+$")
+_BY_ID = re.compile(r'^\$\(\s*"([^"]+)"\s*\)$')
+_BY_ID_TEMPLATE = re.compile(r"^\$\(\s*`([^`]*)`\s*\)$")
+_QUERY_SELECTOR = re.compile(r'\.querySelectorAll?\(\s*"([^"]+)"\s*\)')
+_CLOSEST = re.compile(r'\.closest\(\s*"([^"]+)"\s*\)')
+_STRING_ARRAY = re.compile(r'^\[\s*"[^"]*"(?:\s*,\s*"[^"]*")*\s*\]$')
+_BINDING = re.compile(r"\b(?:const|let|var)\s+([\w$]+)\s*=\s*")
+_FOR_OF = re.compile(r"\bfor\s*\(\s*(?:const|let|var)\s+([\w$]+)\s+of\s+")
+
+
+def _receiver_before(js: str, at: int) -> str:
+    """The expression immediately left of a ``.hidden =`` match."""
+    if at > 0 and js[at - 1] == ")":
+        depth, i = 0, at - 1
+        while i >= 0:
+            if js[i] == ")":
+                depth += 1
+            elif js[i] == "(":
+                depth -= 1
+                if depth == 0:
+                    break
+            i -= 1
+        head = _IDENT_TAIL.search(js[:i])
+        return (head.group(0) if head else "") + js[i:at]
+    head = _IDENT_TAIL.search(js[:at])
+    return head.group(0) if head else ""
+
+
+def _expression_after(js: str, start: int) -> str:
+    """The expression at ``start``, to ``;``/newline or an unbalanced closer."""
+    depth, i = 0, start
+    while i < len(js):
+        ch = js[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and ch in ";\n":
+            break
+        i += 1
+    return js[start:i].strip()
+
+
+def _bindings_before(js: str, pos: int) -> dict[str, str]:
+    """NEAREST PRECEDING binding of each name — a cheap stand-in for scope.
+
+    ``dom.js`` binds ``node`` twice: ``document.createElement(tag)`` in ``el()``
+    and ``$("toast")`` in ``toast()``. Taking the first match resolved the toast
+    toggle to the element factory and reported it unresolvable; nearest-
+    preceding picks the binding in the same function, which is what a reader
+    would do.
+    """
+    out: dict[str, str] = {}
+    for pattern in (_BINDING, _FOR_OF):
+        for match in pattern.finditer(js):
+            if match.start() < pos:
+                out[match.group(1)] = _expression_after(js, match.end())
+    return out
+
+
+def _expand_template(template: str, bindings: dict[str, str]) -> set[str] | None:
+    """``` `tab-${name}` ``` over ``["notes", ...]`` -> ``{#tab-notes, ...}``."""
+    pieces = re.split(r"\$\{([\w$]+)\}", template)
+    out = {""}
+    for index, piece in enumerate(pieces):
+        if index % 2 == 0:
+            out = {prefix + piece for prefix in out}
+            continue
+        expression = bindings.get(piece, "").strip()
+        if not _STRING_ARRAY.match(expression):
+            return None
+        out = {p + v for p in out for v in re.findall(r'"([^"]*)"', expression)}
+    return {"#" + name for name in out}
+
+
+def _resolve_receiver(receiver: str, bindings: dict[str, str]) -> set[str] | None:
+    """Selectors a ``.hidden =`` receiver can denote, or ``None`` if unknown."""
+    seen: set[str] = set()
+    while True:
+        receiver = receiver.strip()
+        by_id = _BY_ID.match(receiver)
+        if by_id:
+            return {"#" + by_id.group(1)}
+        templated = _BY_ID_TEMPLATE.match(receiver)
+        if templated:
+            return _expand_template(templated.group(1), bindings)
+        for pattern in (_CLOSEST, _QUERY_SELECTOR):
+            found = pattern.search(receiver)
+            if found:
+                return {found.group(1)}
+        if receiver in bindings and receiver not in seen:
+            seen.add(receiver)
+            receiver = bindings[receiver]
+            continue
+        return None
+
+
+def _hidden_toggle_sites(parts: dict[str, str]) -> list[tuple[str, str, set[str] | None]]:
+    """Every ``<element>.hidden = …`` in ``js/``, with the selectors it denotes.
+
+    DISCOVERED, NOT ROSTERED, and that is the whole design. A hand-written list
+    of hideable selectors is another roster, and this file's own header records
+    two modules and one stylesheet that sat outside a roster while every guard
+    over it stayed green. The site scan is syntactic and therefore complete: a
+    new ``.hidden =`` anywhere in ``js/`` is found whether or not its author
+    knew this guard existed, and if its receiver does not resolve the guard
+    fails rather than skipping it.
+    """
+    sites: list[tuple[str, str, set[str] | None]] = []
+    for path, text in sorted(parts.items()):
+        if not path.startswith("js/"):
+            continue
+        js = _JS_COMMENT.sub("", text)
+        for match in _HIDDEN_ASSIGN.finditer(js):
+            receiver = _receiver_before(js, match.start())
+            sites.append((path, receiver,
+                          _resolve_receiver(receiver, _bindings_before(js, match.start()))))
+    return sites
+
+
+_TAG = re.compile(r"<([a-z][\w-]*)\b([^>]*)>", re.I)
+
+
+def _element_simple_selectors(selector: str, html: str) -> frozenset[str] | None:
+    """Every simple selector that can match what ``selector`` denotes.
+
+    An id resolves through ``index.html`` to the element's tag and classes, so
+    ``#pager`` is also reachable as ``.pager`` and as ``nav`` — which is what
+    lets the guard see that ``.pager { display: flex }`` competes with it.
+    """
+    if not selector.startswith("#"):
+        return _simple_parts(selector)
+    wanted = selector[1:]
+    markup = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+    for match in _TAG.finditer(markup):
+        found = re.search(r'\bid="([^"]*)"', match.group(2))
+        if not found or found.group(1) != wanted:
+            continue
+        keys = {selector, match.group(1).lower()}
+        classes = re.search(r'\bclass="([^"]*)"', match.group(2))
+        if classes:
+            keys |= {"." + name for name in classes.group(1).split()}
+        return frozenset(keys)
+    return None
+
+
+def _winning_display(keys: frozenset[str], declarations: list[_Decl]) -> _Decl | None:
+    """The ``display`` an element with ``hidden`` set actually gets, or ``None``.
+
+    ``None`` means no author rule matches at all, which is the SAFE state: the
+    UA sheet's own ``[hidden]`` rule is then unopposed and the element hides.
+    The trap is an author ``display`` winning over it, and the only way to beat
+    that is another author rule — hence "what wins" rather than "does a rule
+    exist".
+
+    Media context is deliberately ignored when ranking: a competing rule inside
+    ``@media (max-width: 780px)`` still has a viewport where it applies, and an
+    override that loses there is an override that does not work.
+    """
+    matching = [
+        decl for decl in declarations
+        if decl.prop == "display"
+        and (parts := _simple_parts(decl.selector)) is not None
+        and parts <= (keys | {"[hidden]"})
+    ]
+    return max(matching, key=_cascade_rank) if matching else None
+
+
+def check_hidden_toggles_survive_the_cascade(bundle: str) -> None:
+    """Anything the JS hides must actually be hidden by the stylesheet.
+
+    Written after running it. The scan finds ten ``.hidden =`` sites across six
+    modules and resolves every one; four of the resolved elements have a
+    competing author ``display`` and are saved by an explicit ``[hidden]`` rule
+    (``.shell``, ``#discovery``, ``.field``, ``.pager``), two have none and are
+    left to the UA sheet (``#mode-badge``, ``#new-note``), and two carry a
+    defensive ``[hidden]`` rule with nothing to compete against
+    (``.toast``, ``.thread-message``). The guard does not demand the last pair —
+    requiring a rule that changes no pixel would be the roster habit in a new
+    costume — it demands only that the winner is ``none`` wherever a winner
+    exists at all.
+    """
+    parts = _parts(bundle)
+    sites = _hidden_toggle_sites(parts)
+    assert sites, (
+        "no `.hidden =` assignment was found in any js/ module. Either the "
+        "front end stopped hiding anything through the attribute — in which "
+        "case delete this guard — or the scan stopped matching, in which case "
+        "it is passing by finding nothing, which is the failure mode this "
+        "whole file exists to prevent."
+    )
+
+    unresolved = [f"  {path}: {receiver!r}" for path, receiver, found in sites if not found]
+    assert not unresolved, (
+        "these `.hidden =` receivers could not be resolved to a selector, so "
+        "the guard cannot tell whether the stylesheet can hide them:\n"
+        + "\n".join(unresolved)
+        + "\n\nResolve the element from a literal — `$(\"id\")`, "
+        "`.closest(\".sel\")`, `.querySelectorAll(\".sel\")`, or a binding of "
+        "one — or teach _resolve_receiver the new shape. An unresolvable site "
+        "must fail here rather than be skipped: a skipped site is a hideable "
+        "element with no guard on it, which is exactly the gap this closes."
+    )
+
+    declarations = _stylesheet_declarations(parts)
+    defeated: list[str] = []
+    for path, _receiver, found in sites:
+        for selector in sorted(found or ()):
+            keys = _element_simple_selectors(selector, parts["index.html"])
+            if keys is None:
+                continue
+            winner = _winning_display(keys, declarations)
+            if winner is not None and winner.value != "none":
+                defeated.append(
+                    f"  {path} hides {selector}, but `{winner.selector}` in "
+                    f"{winner.sheet} wins with `display: {winner.value}`"
+                )
+    assert not defeated, (
+        "setting the `hidden` attribute on these elements hides NOTHING — an "
+        "author `display` rule outranks the UA sheet's `[hidden]`:\n"
+        + "\n".join(defeated)
+        + "\n\nAdd `<selector>[hidden] { display: none; }` beside the rule that "
+        "wins. This is the fourth instance of the trap in this stylesheet and "
+        "the first one a default `pytest` can see: every earlier one was "
+        "caught, if at all, by a browser-marked test that `addopts` deselects."
+    )
+
+
+# --------------------------------------------- the cross-sheet cascade class --
+
+#: Selectors declared in more than one LINKED stylesheet where the declarations
+#: can both apply, mapped to the sheet and value the cascade actually hands the
+#: browser.
+#:
+#: THE GENERAL FORM OF A GUARD THAT COVERED ONE PAIR. `check_layout_precedes_
+#: components` pins `.shell`/`.ledger`/`.inspector` by asserting the <link>
+#: order, and says in its own docstring that the general rule is unasserted,
+#: that four overlaps exist, and that a real check needs a parser because the
+#: prototype scan got `@media` wrong. This is that check, and it is a parser.
+#:
+#: RE-DERIVED, NOT INHERITED, and the two counts measure different things —
+#: which is worth saying because inheriting either number would have been
+#: wrong. That docstring counts SELECTORS: four (`.shell`, `.ledger`,
+#: `.inspector`, `.rail`), the last inert. This roster counts FIGHTS: six.
+#: Five are one selector redeclared in a second sheet — `.rail` contributes two,
+#: `background` and `border-right` — and the sixth is the other shape entirely,
+#: two different selectors at equal specificity landing on one element. Every
+#: one of the six is layout.css against components.css; no other pair of sheets
+#: overlaps at all.
+#:
+#: EXACT, NOT A FLOOR. A new duplicate that nobody rostered fails the first
+#: assertion, and an entry whose subject was deleted fails it too. That is the
+#: property a single-pair guard cannot have: a seventh could land beside it in
+#: silence, which is how the `.rail-head` pair went unnoticed until an audit
+#: went looking.
+CROSS_SHEET_OVERLAPS: dict[str, tuple[str, str]] = {
+    # `.shell`'s three declarations — layout.css's base plus the 1100px and
+    # 780px overrides — collapse to ONE entry, because the key is the fight and
+    # not the pairing. The 780px rule is last and wins wherever it applies.
+    ".shell {grid-template-columns}": ("components.css", "1fr"),
+    ".inspector {padding}": ("components.css", "var(--s-5) var(--s-4)"),
+    ".ledger {border-right}": ("components.css", "0"),
+    # INERT TODAY, rostered anyway: components.css restates layout.css's values
+    # unchanged, so the order decides nothing — until somebody edits one of the
+    # two, which is the edit the recorded value catches.
+    ".rail {background}": ("components.css", "var(--paper)"),
+    ".rail {border-right}": ("components.css", "var(--hair)"),
+    # The second shape: DIFFERENT selectors, equal specificity, one element.
+    # `class="shell deferred-tab"` gets `display: block` because components.css
+    # is linked after layout.css, and components.css says so in prose two lines
+    # above the rule. This is that sentence, executable.
+    ".deferred-tab vs .shell {display}": ("components.css", "block"),
+}
+
+
+def _element_key_sets(html: str) -> list[frozenset[str]]:
+    """Every element in the static shell, as the simple selectors that match it.
+
+    ``<section class="shell deferred-tab" id="tab-ingest">`` becomes
+    ``{section, .shell, .deferred-tab, #tab-ingest}``, which is what lets the
+    scan below notice that ``.shell`` and ``.deferred-tab`` — two DIFFERENT
+    selectors, in two sheets, at the same specificity — are fighting over one
+    element's ``display``.
+
+    ONLY THE STATIC SHELL, and that is a real limit rather than an oversight.
+    Elements built in ``js/`` (``.disc-panel``, ``.palette-box``, the note body)
+    never appear here, so a same-specificity collision confined to them is not
+    covered. Reaching those needs a DOM, which is what the browser harness is
+    for; this covers what can be read off disk.
+    """
+    out: list[frozenset[str]] = []
+    markup = re.sub(r"<!--.*?-->", "", html, flags=re.DOTALL)
+    for match in _TAG.finditer(markup):
+        keys = {match.group(1).lower()}
+        found = re.search(r'\bid="([^"]*)"', match.group(2))
+        if found:
+            keys.add("#" + found.group(1))
+        classes = re.search(r'\bclass="([^"]*)"', match.group(2))
+        if classes:
+            keys |= {"." + name for name in classes.group(1).split()}
+        out.append(frozenset(keys))
+    return out
+
+
+def _cross_sheet_overlaps(parts: dict[str, str]) -> dict[str, _Decl]:
+    """Every cross-sheet, equal-specificity fight over one property, with its winner.
+
+    TWO SHAPES, one roster. The first is the same selector declared in two
+    sheets. The second is two different selectors of equal specificity that both
+    match one element of the static shell — the shape ``.shell { display: grid }``
+    and ``.deferred-tab { display: block }`` have, which ``components.css``
+    documents in prose and nothing asserted.
+    """
+    declarations = _stylesheet_declarations(parts)
+    out: dict[str, _Decl] = {}
+
+    grouped: dict[tuple[str, str], list[_Decl]] = {}
+    for decl in declarations:
+        grouped.setdefault((decl.selector, decl.prop), []).append(decl)
+    for (selector, prop), group in grouped.items():
+        if any(one.sheet != other.sheet and _can_co_apply(one.context, other.context)
+               for i, one in enumerate(group) for other in group[i + 1:]):
+            out[f"{selector} {{{prop}}}"] = max(group, key=_cascade_rank)
+
+    elements = _element_key_sets(parts["index.html"])
+    by_prop: dict[str, list[_Decl]] = {}
+    for decl in declarations:
+        by_prop.setdefault(decl.prop, []).append(decl)
+    for prop, group in by_prop.items():
+        for index, one in enumerate(group):
+            for other in group[index + 1:]:
+                if one.sheet == other.sheet or one.selector == other.selector:
+                    continue
+                if _specificity(one.selector) != _specificity(other.selector):
+                    continue
+                if not _can_co_apply(one.context, other.context):
+                    continue
+                mine, theirs = _simple_parts(one.selector), _simple_parts(other.selector)
+                if mine is None or theirs is None:
+                    continue
+                if not any(mine <= keys and theirs <= keys for keys in elements):
+                    continue
+                pair = " vs ".join(sorted((one.selector, other.selector)))
+                out[f"{pair} {{{prop}}}"] = max(one, other, key=_cascade_rank)
+    return out
+
+
+def check_cross_sheet_overlaps_are_rostered(bundle: str) -> None:
+    """No selector may be redeclared in a second sheet without a recorded winner.
+
+    Written after running it. Six overlaps exist, every one of them layout.css
+    against components.css. Four decide something, because the two declarations
+    differ: ``.shell {grid-template-columns}`` (three declarations — the base
+    grid plus the 1100px and 780px overrides), ``.inspector {padding}``,
+    ``.ledger {border-right}``, and ``.shell`` vs ``.deferred-tab`` over
+    ``display``. Two decide nothing: ``.rail`` restates ``background`` and
+    ``border-right`` at the same values, so reordering the sheets would change
+    no pixel.
+
+    THE INERT PAIR IS ROSTERED TOO, and that is the point rather than
+    completeness for its own sake. "This one is inert" is a claim about the
+    current text of two files, not a property of the selector: it stops being
+    true the moment somebody edits either value, and the recorded value is what
+    turns that edit into a failure instead of a silent change of winner.
+    ``check_layout_precedes_components`` reasons about ``.rail-head`` exactly
+    this way — same selector, two sheets, disjoint declarations, therefore no
+    guard — and it is right today for the same reason and by the same accident.
+    """
+    parts = _parts(bundle)
+    found = _cross_sheet_overlaps(parts)
+
+    assert set(found) == set(CROSS_SHEET_OVERLAPS), (
+        "the set of cross-sheet selector overlaps changed.\n"
+        f"  new, unrostered: {sorted(set(found) - set(CROSS_SHEET_OVERLAPS))}\n"
+        f"  rostered, gone:  {sorted(set(CROSS_SHEET_OVERLAPS) - set(found))}\n"
+        "A selector declared in two sheets is settled by <link> order alone, "
+        "which no browser test can see and no diff shows. Record it in "
+        "CROSS_SHEET_OVERLAPS with the sheet and value the cascade gives it, or "
+        "move the declaration so there is only one."
+    )
+
+    wrong = [
+        f"  {key}: rostered {CROSS_SHEET_OVERLAPS[key]}, actual "
+        f"{(winner.sheet, winner.value)}"
+        for key, winner in sorted(found.items())
+        if CROSS_SHEET_OVERLAPS[key] != (winner.sheet, winner.value)
+    ]
+    assert not wrong, (
+        "the cascade no longer hands these overlaps the recorded winner:\n"
+        + "\n".join(wrong)
+        + "\n\nEither a <link> was reordered — which silently flips every "
+        "same-specificity pair, and index.html is where that order lives — or "
+        "one of the two declarations changed value. Both are real changes to "
+        "what the browser renders; neither shows up in a screenshot diff of the "
+        "desktop layout."
+    )
+
+
 #: Every guard, paired with a defect that must make it fail, and the number of
 #: times its anchor is expected to occur.
 #:
@@ -1366,6 +2030,48 @@ GUARDS: list[tuple[str, object, str, str, str, int]] = [
     # whole family of uses going undefined at once.
     ("var-reference-undefined", check_every_var_reference_is_defined, "css/*",
      "--s-3: 0.75rem;", "--spacing-3: 0.75rem;", 1),
+    # ------------------------------------------------- the [hidden] trap --
+    # ANTI-VACUITY, and it is the assertion this guard most needs. Every other
+    # clause here reports on what the scan FOUND; if the scan finds nothing the
+    # guard is green while looking at an empty list. Renaming the property at
+    # all ten sites is the shape that produces that.
+    ("hidden-toggle-scan-finds-nothing", check_hidden_toggles_survive_the_cascade,
+     "static/*", ".hidden =", ".hiddenFlag =", 10),
+    # The DISCOVERY clause. `toast()`'s element stops being resolvable, the site
+    # count is unchanged so the first assertion stays green, and only
+    # "cannot tell what this hides" can fire. A guard that skipped the site
+    # instead would pass here — silently dropping an element from its coverage,
+    # which is the roster failure this scan exists to avoid.
+    ("hidden-toggle-receiver-unresolvable", check_hidden_toggles_survive_the_cascade,
+     "static/*", 'const node = $("toast");', "const node = pickToastNode();", 1),
+    # THE DEFECT ITSELF: delete the CSS line and `js/results.js` setting the
+    # attribute hides nothing, because `.pager { display: flex }` outranks the
+    # UA sheet's `[hidden]`. Covered until now only by
+    # `test_a_single_page_search_has_no_pager_at_all`, which is browser-marked
+    # and therefore deselected from every default run.
+    ("hidden-rule-deleted-leaves-the-pager-visible",
+     check_hidden_toggles_survive_the_cascade, "static/*",
+     ".pager[hidden] { display: none; }", "", 1),
+    # ---------------------------------------------- the cross-sheet class --
+    # A NEW duplicate: explorer.css starts declaring a property components.css
+    # already declares for `.rail-head`, so which padding the header gets
+    # depends on <link> order and nothing says so. The unrostered-overlap
+    # assertion is the first in the guard, so only it can fire.
+    ("cross-sheet-overlap-unrostered", check_cross_sheet_overlaps_are_rostered,
+     "static/*",
+     ".rail-head { flex-wrap: wrap; row-gap: var(--s-2); }",
+     ".rail-head { flex-wrap: wrap; row-gap: var(--s-2); padding: 0; }", 1),
+    # The WINNER, not the set. Swapping two <link> tags leaves every overlap key
+    # unchanged — a fight is the same fight whoever wins it — so the first
+    # assertion stays green and only the recorded-winner one can fire. This is
+    # the mutation `check_layout_precedes_components` makes for one pair,
+    # generalised to all six.
+    ("cross-sheet-winner-flipped-by-link-order",
+     check_cross_sheet_overlaps_are_rostered, "static/*",
+     '<link rel="stylesheet" href="/static/css/layout.css">\n'
+     '<link rel="stylesheet" href="/static/css/components.css">',
+     '<link rel="stylesheet" href="/static/css/components.css">\n'
+     '<link rel="stylesheet" href="/static/css/layout.css">', 1),
 ]
 
 #: ``check_*`` functions deliberately absent from :data:`GUARDS`, each with the
@@ -1391,6 +2097,10 @@ _SOURCES = {
     "index.html": INDEX_HTML,
     "css/*": ALL_CSS,
     "js/*": JS_ALL,
+    # Every shipped part, each behind a marker — the only scope in which
+    # "the JS hides an element the stylesheet cannot hide" and "this selector
+    # is declared in two sheets" are expressible at all. See _build_bundle.
+    "static/*": STATIC_BUNDLE,
     **{f"css/{name}": text for name, text in CSS.items()},
     **{f"js/{name}": text for name, text in JS.items()},
 }
@@ -1859,6 +2569,61 @@ def test_the_chain_exemptions_premise_still_holds() -> None:
         "exemption must be DELETED, and clause (e) will then require one entry "
         "per member. Re-pointing this guard at the new order without redoing "
         "that analysis restores the amnesty the exemption was written to avoid."
+    )
+
+
+def _synthetic_bundle(sheets: dict[str, str], html: str) -> str:
+    """A bundle made of made-up sheets, for exercising the scan itself."""
+    parts = [("index.html", html)] + [(f"css/{n}", css) for n, css in sheets.items()]
+    return "".join(f"\n{_PART_MARK} {path}\n{text}" for path, text in parts)
+
+
+def _synthetic_html(names: list[str]) -> str:
+    links = "\n".join(
+        f'<link rel="stylesheet" href="/static/css/{name}">' for name in names
+    )
+    return f"<!doctype html>\n{links}\n<body><p class=\"x\"></p></body>\n"
+
+
+def test_two_rules_under_exclusive_media_queries_are_not_an_overlap() -> None:
+    """The ``@media`` clause of the cross-sheet scan, proven both ways.
+
+    The prototype this replaced got exactly this wrong, and the guard's own
+    docstring in ``check_layout_precedes_components`` says so — which is why the
+    general check was deferred rather than shipped on a regex.
+
+    Two claims, and they must be proven TOGETHER or neither means anything.
+    A scan that reported every co-declaration regardless of media would pass the
+    second claim and fail the first; a scan that dropped every media-scoped rule
+    would pass the first and fail the second. Only holding both pins the
+    behaviour to "can these two rules ever be live at the same moment?".
+    """
+    exclusive = _synthetic_bundle(
+        {
+            "one.css": "@media (prefers-reduced-motion: reduce) { .x { color: red; } }",
+            "two.css":
+                "@media (prefers-reduced-motion: no-preference) { .x { color: blue; } }",
+        },
+        _synthetic_html(["one.css", "two.css"]),
+    )
+    assert _cross_sheet_overlaps(_parts(exclusive)) == {}, (
+        "`(prefers-reduced-motion: reduce)` and `(no-preference)` can never "
+        "both be live, so two rules under them cannot fight — reporting them "
+        "would bury the real overlaps in noise the roster then has to carry"
+    )
+
+    nested = _synthetic_bundle(
+        {
+            "one.css": "@media (max-width: 1100px) { .x { color: red; } }",
+            "two.css": "@media (max-width: 780px) { .x { color: blue; } }",
+        },
+        _synthetic_html(["one.css", "two.css"]),
+    )
+    assert ".x {color}" in _cross_sheet_overlaps(_parts(nested)), (
+        "two `max-width` queries are NOT exclusive — every viewport at or below "
+        "the smaller bound satisfies both, so the later sheet wins there. This "
+        "is the shape `.shell {grid-template-columns}` actually has, and a scan "
+        "that treated 'different media query' as 'different rule' would miss it"
     )
 
 

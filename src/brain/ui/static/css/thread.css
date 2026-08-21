@@ -77,10 +77,19 @@
   cursor: pointer;
 }
 
-/* `hidden` is set by the filter. The explicit rule is required rather than
-   tidy: `details` carries `display: block` from the UA sheet, and a bare
-   attribute selector (0,1,0) loses to it, so the filtered-out messages would
-   stay visible. */
+/* `hidden` is set by the filter. This rule is DEFENCE, not load-bearing — the
+   older comment here claimed it was "required rather than tidy" because
+   `details` carries `display: block` from the UA sheet and "a bare attribute
+   selector (0,1,0) loses to it". That is backwards twice over. Both rules are
+   UA-origin, so specificity does decide between them — and `[hidden]` at
+   (0,1,0) OUTRANKS the type selector `details` at (0,0,1). A `<details hidden>`
+   with no author `display` computes to `none` unaided (checked in Chromium,
+   Firefox and WebKit); delete this rule and the filter still works.
+   It is kept deliberately, because that only holds while nothing here sets a
+   `display` on `.thread-message`. The moment something does, it wins on ORIGIN
+   (author beats UA regardless of specificity — see `.shell[hidden]` in
+   layout.css) and the filter silently stops hiding anything. This rule is the
+   standing insurance against that edit, not a fix for today. */
 .thread-message[hidden] {
   display: none;
 }

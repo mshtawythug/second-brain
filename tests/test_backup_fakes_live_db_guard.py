@@ -214,12 +214,17 @@ def test_guard_also_covers_the_no_parked_database_path(
     :func:`drop_restore_artifacts` has two destructive branches. The one that
     reclaims a parked database is the obvious one. The other — the sweep that
     drops everything matching ``{live}_restore_%`` — is reached even when no
-    parked database exists, and that pattern MATCHES the sandbox database
-    :func:`restore_sandbox_dsn` creates (``{live}_restore_sandbox``). With the
-    guard sitting inside the parked branch, a caller passing the suite's own
-    DSN on a clean server would sail past it and delete the sandbox mid-session,
-    and the sibling wiring test would not notice: it always creates a parked
-    database first, so it only ever exercises the guarded branch.
+    parked database exists. With the guard sitting inside the parked branch, a
+    caller passing the suite's own DSN on a clean server would sail past it and
+    into that unconditional drop, and the sibling wiring test would not notice:
+    it always creates a parked database first, so it only ever exercises the
+    guarded branch.
+
+    Historically the sweep pattern also MATCHED the sandbox database itself,
+    then named ``{live}_restore_sandbox``, so the miss deleted the session's
+    sandbox mid-run. The sandbox is now ``{live}_sbx``
+    (:data:`tests.backup_fakes.SANDBOX_SUFFIX`) and no longer collides; this
+    test asserts the guard, which is what actually prevents the drop.
 
     Takes NO fixture, so no ``_replaced_`` database exists — which is exactly
     the state that used to slip through.

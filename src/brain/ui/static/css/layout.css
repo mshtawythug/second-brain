@@ -16,10 +16,21 @@
   height: calc(100vh - 2.75rem);
   min-height: 0;
 }
-/* `[hidden]` alone loses to `.shell { display: grid }` — a bare attribute
-   selector is (0,1,0) and so is a class, and this rule would come second.
-   Hence the explicit (0,2,0) pair. The tab panes are `class="shell
-   deferred-tab" hidden`, so this is what actually hides them. */
+/* `[hidden]` alone loses to `.shell { display: grid }`, but NOT on specificity
+   — the reason this file gave for years, and the wrong one. The cascade sorts
+   by ORIGIN before it ever compares specificity, so any normal author `display`
+   beats the UA sheet's `[hidden] { display: none }` however the two selectors
+   score. Verified rather than assumed: an author `details { display: block }`
+   at (0,0,1) still beats UA `[hidden]` at (0,1,0) in Chromium, Firefox and
+   WebKit. Reason from origin here; specificity is a red herring across origins
+   and gives the right answer only by luck.
+   Two separate things are therefore needed, in this order. (1) An AUTHOR rule
+   that re-hides, because no UA rule can outrank `.shell`. (2) That rule at
+   (0,2,0), because it now competes with author siblings where specificity DOES
+   apply: `.deferred-tab { display: block }` (0,1,0) lives in components.css,
+   which loads after this file, so an equal-specificity rule here would lose on
+   source order. The tab panes are `class="shell deferred-tab" hidden`, so this
+   is what actually hides them. */
 .shell[hidden] { display: none; }
 
 .rail, .ledger, .inspector { min-height: 0; overflow-y: auto; }
