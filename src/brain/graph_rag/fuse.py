@@ -114,6 +114,7 @@ def _retrieve_fuse(
     limit: int,
     embedder: Embedder | None = None,
     session_id: str | None = None,
+    exclude_confidential: bool = False,
 ) -> GraphContext:
     """Run fuse (graph ⊕ hybrid) retrieval + assemble its ``GraphContext``.
 
@@ -174,12 +175,18 @@ def _retrieve_fuse(
         min_edge_weight=min_edge_weight,
         limit=limit,
         session_id=resolved_session,
+        exclude_confidential=exclude_confidential,
     )
     graph_docs = graph_ctx.docs
 
     # HYBRID leg (additive, best-effort): FTS + vector via hybrid_search.
     hybrid_docs, hybrid_vector_arm = _run_hybrid_leg(
-        conn, cfg, query, limit=limit, embedder=embedder
+        conn,
+        cfg,
+        query,
+        limit=limit,
+        embedder=embedder,
+        exclude_confidential=exclude_confidential,
     )
 
     # RRF-merge the two document-id rankings.
@@ -307,8 +314,16 @@ def _run_hybrid_leg(
     *,
     limit: int,
     embedder: Embedder | None,
+    exclude_confidential: bool = False,
 ) -> tuple[list[SearchResult], bool]:
     """Run the FTS + vector hybrid leg for fuse (spec §17d Q1; never-raise).
+
+    ``exclude_confidential`` maps onto ``hybrid_search``'s OWN F6 lens
+    (``sensitivity='normal'``), which fuse was not passing. Gating only the
+    graph leg would have left this one wide open: fuse returns the RRF UNION of
+    the two legs, so a confidential document the graph leg correctly dropped
+    came straight back through the hybrid leg with its snippet intact — the
+    same document, the same body, a different code path.
 
     Returns ``(docs, vector_arm_used)``:
 
@@ -343,6 +358,7 @@ def _run_hybrid_leg(
                 vector_sim_floor=cfg.vector_sim_floor,
                 recency_halflife_days=cfg.recency_halflife_days,
                 snippet_context_tokens=cfg.snippet_context_tokens,
+                sensitivity="normal" if exclude_confidential else None,
             )
             return docs, True
         except Exception as exc:  # noqa: BLE001 — never-raise: degrade to FTS-only
@@ -362,6 +378,7 @@ def _run_hybrid_leg(
             limit=limit,
             fts_only=True,
             snippet_context_tokens=0,
+            sensitivity="normal" if exclude_confidential else None,
         )
     except Exception as exc:  # noqa: BLE001 — hybrid fully dead → graph-only
         _logger.warning(

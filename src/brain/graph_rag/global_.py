@@ -86,6 +86,7 @@ def _retrieve_global(
     limit: int | None = None,
     embedder: Embedder | None = None,
     session_id: str | None = None,
+    exclude_confidential: bool = False,
 ) -> GraphContext:
     """Run global (community-based) retrieval + assemble its ``GraphContext``.
 
@@ -117,7 +118,14 @@ def _retrieve_global(
     fused = _fuse_rrf(fts_keys, vector_keys)
     top = fused[:resolved_limit] if resolved_limit > 0 else []
 
-    communities, docs = _build_communities(conn, tenant, query, top, resolved_limit)
+    communities, docs = _build_communities(
+        conn,
+        tenant,
+        query,
+        top,
+        resolved_limit,
+        exclude_confidential=exclude_confidential,
+    )
     entities = _dedupe_entities(communities)
 
     explanation = GraphExplanation(
@@ -272,6 +280,7 @@ def _build_communities(
     query: str,
     ranked: list[tuple[str, float]],
     limit: int,
+    exclude_confidential: bool = False,
 ) -> tuple[list[CommunityGroup], list[SearchResult]]:
     """Assemble ranked :class:`CommunityGroup`s + the context-level docs.
 
@@ -316,7 +325,9 @@ def _build_communities(
     context_ranked = sorted(
         context_doc_score.items(), key=lambda kv: (-kv[1], kv[0])
     )[:limit]
-    return communities, _build_doc_results(conn, query, context_ranked)
+    return communities, _build_doc_results(
+        conn, query, context_ranked, exclude_confidential=exclude_confidential
+    )
 
 
 def _community_metadata(

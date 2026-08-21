@@ -135,6 +135,7 @@ def graph_rag_search(
     synthesize: bool = False,
     enricher: _GroupSummarizer | None = None,
     embedder: Embedder | None = None,
+    exclude_confidential: bool = False,
 ) -> GraphContext:
     """Graph retrieval (spec §6; ``local`` G2-d, ``themes`` G2-f, router G2-g).
 
@@ -245,6 +246,7 @@ def graph_rag_search(
             limit=limit,
             embedder=embedder,
             session_id=resolved_session,
+            exclude_confidential=exclude_confidential,
         )
 
     # Fuse (graph ⊕ hybrid doc-leg RRF) path (spec §17d Q1; wave G4-c). Honored
@@ -266,6 +268,7 @@ def graph_rag_search(
             limit=resolved_limit,
             embedder=embedder,
             session_id=resolved_session,
+            exclude_confidential=exclude_confidential,
         )
 
     if decision.executed_mode == THEMES_MODE:
@@ -296,6 +299,7 @@ def graph_rag_search(
             session_id=resolved_session,
             synthesize=synthesize,
             enricher=enricher,
+            exclude_confidential=exclude_confidential,
         )
 
     # Local path (explicit ``local`` OR the auto non-thematic branch). After the
@@ -312,6 +316,7 @@ def graph_rag_search(
         min_edge_weight=resolved_min_weight,
         limit=resolved_limit,
         session_id=resolved_session,
+        exclude_confidential=exclude_confidential,
     )
 
 
@@ -329,6 +334,7 @@ def _retrieve_local(
     min_edge_weight: float,
     limit: int,
     session_id: str,
+    exclude_confidential: bool = False,
 ) -> GraphContext:
     """Run the resolved local retrieval and assemble its ``GraphContext``.
 
@@ -373,7 +379,9 @@ def _retrieve_local(
     for entity_uuid, affinity in reached.items():
         weights.setdefault(entity_uuid, affinity)
     ranked = _rank_documents(conn, tenant_id, weights, limit)
-    docs = _build_doc_results(conn, query, ranked)
+    docs = _build_doc_results(
+        conn, query, ranked, exclude_confidential=exclude_confidential
+    )
 
     explanation = GraphExplanation(
         mode=LOCAL_MODE,

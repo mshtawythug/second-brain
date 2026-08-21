@@ -15,6 +15,17 @@ route needs already exist as ``backlinks_for`` / ``outgoing_links_for``.
 Titles and ids only. Nothing here carries document content, which is what keeps
 "lazy" true over time and keeps a confidential body out of a rail that the note
 route itself may have withheld.
+
+AND A TITLE IS NOT NOTHING. The paragraph above was the whole confidentiality
+argument here, and it reasoned about *bodies* only: because the payload carries
+none, the rail read as safe. It named every document linking to the open note,
+confidential ones included, on a rail the reader did not ask for. The route now
+gates on ``serve_confidential_titles`` like the other listing surfaces — see
+``brain.ui.queries``' tree/discovery pairs for the same ruling, and
+``brain.vault.graph`` for the two frozen SQL variants this needs.
+
+Lower-severity than the unprompted rails only because reaching it takes opening
+a note; it is the same disclosure once you are there.
 """
 from __future__ import annotations
 
@@ -74,14 +85,30 @@ async def note_links(request: Request) -> JSONResponse:
     derived-link rules and can be arbitrarily large; the rail needs the rule
     name and the weight, and nothing that reads this payload has a use for the
     rest.
+
+    ``strict`` is passed to BOTH reads, and through them to the derived-partner
+    query behind each — three statements, one flag. ``counts`` is then taken
+    from the filtered lists rather than from a second unfiltered read, so it
+    cannot report how many neighbours were withheld.
     """
     ctx = context_of(request)
+    strict = not ctx.serve_confidential_titles
     prefix = request.path_params["id_prefix"]
     try:
         with ctx.connect() as conn:
             document_id = notes_service.resolve_id(conn, prefix)
-            backlinks = [_backlink_payload(row) for row in backlinks_for(conn, document_id)]
-            outgoing = [_outgoing_payload(row) for row in outgoing_links_for(conn, document_id)]
+            backlinks = [
+                _backlink_payload(row)
+                for row in backlinks_for(
+                    conn, document_id, exclude_confidential=strict
+                )
+            ]
+            outgoing = [
+                _outgoing_payload(row)
+                for row in outgoing_links_for(
+                    conn, document_id, exclude_confidential=strict
+                )
+            ]
     except psycopg.Error as exc:
         raise db_guard(exc) from exc
 

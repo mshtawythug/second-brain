@@ -376,11 +376,34 @@ _TAG_DOCS_SQL_ANY = (
     f"AND %s = ANY(d.tags) {_DISCOVERY_ORDER}"
 )
 
-#: ``queries.list_existing_tags`` runs this exact aggregate and then throws the
-#: count away, which is why ``/api/facets`` ships ``count: null`` for tags.
-_TAG_COUNTS_SQL = """
+#: The aggregate ``queries.list_existing_tags`` runs and then throws the count
+#: away. ``/api/facets`` keeps it (T4).
+#:
+#: The PERMISSIVE variant: every document, whatever its sensitivity. Named
+#: ``_ANY`` like the four pairs above, and paired with the strict one below for
+#: the same reason — a positional parameter inside a shared fragment is a defect
+#: nobody can see in a diff.
+_TAG_COUNTS_SQL_ANY = """
     SELECT t, count(*)
     FROM documents, unnest(tags) AS t
+    GROUP BY t
+    HAVING count(*) >= %s
+    ORDER BY t
+"""
+
+#: The strict variant, and the one ``/api/facets`` issues by default.
+#:
+#: CORPUS-WIDE MINUS CONFIDENTIAL — a third scope, deliberately neither of the
+#: other two. It keeps the drafts and the ``people/`` pages that
+#: :data:`_BROWSEABLE_TAG_COUNTS_SQL` drops, because the recorded justification
+#: for this route's scope is about those and only those; it drops confidential
+#: documents, which that justification never mentioned. Narrowing the facet
+#: count all the way to ``_DISCOVERABLE`` would silently decide the drafts
+#: question too, and that question was already answered the other way.
+_TAG_COUNTS_SQL = f"""
+    SELECT t, count(*)
+    FROM documents d, unnest(d.tags) AS t
+    WHERE d.sensitivity <> '{CONFIDENTIAL}'
     GROUP BY t
     HAVING count(*) >= %s
     ORDER BY t
@@ -495,7 +518,10 @@ def documents_for_tag(
 
 
 def tag_counts(
-    conn: psycopg.Connection[Any], *, min_doc_count: int = 1
+    conn: psycopg.Connection[Any],
+    *,
+    min_doc_count: int = 1,
+    exclude_confidential: bool = False,
 ) -> list[dict[str, Any]]:
     """``tag`` → document count, alpha-sorted, in the facet bucket shape.
 
@@ -534,10 +560,45 @@ def tag_counts(
     WANTS. :func:`browseable_tag_counts` is the second function this docstring
     anticipated; ``/api/tags`` uses it, ``/api/facets`` uses this one. The two
     exist because there are two questions, not because one is a bug.
+
+    ``exclude_confidential`` IS A THIRD SCOPE, AND EVERYTHING ABOVE IS ABOUT
+    DRAFTS. Re-read the four paragraphs above with sensitivity in mind and none
+    of them mention it: every one argues that a *browse-filtered* count would
+    understate a result set containing drafts and ``people/`` pages. That
+    argument is sound and is untouched. It simply never covered confidential
+    documents, and the scope it justified was silently doing two things.
+
+    A TAG NAME IS CONTENT — the same ruling :func:`browseable_tag_counts`
+    records, reached here by a different route. ``/api/facets`` is fetched by
+    ``main.js``'s ``boot()`` with **no user action**, and the Tag dropdown
+    renders ``name (count)``. So a tag carried only by confidential documents
+    was named, with its volume, on first paint — beside a rail that hid exactly
+    those tags.
+
+    AND THE "IT ANNOTATES SEARCH" DEFENCE DOES NOT REACH THIS CASE. It is true
+    that search returns confidential documents (titles kept, snippets redacted),
+    so a count including them describes *search's* result set correctly. But
+    these values populate the controls **before a query runs**, and once one has
+    run the UI replaces them with ``compute_facets``' match-scoped numbers. The
+    corpus-wide count is therefore only ever on screen when there is no result
+    set for it to agree with — which is precisely the unprompted moment the
+    titles flag governs. See ``routes_meta.facets``.
+
+    THE DEFAULT IS PERMISSIVE, WHICH IS NOT THE HOUSE STYLE, AND IS DELIBERATE.
+    Its four siblings default ``exclude_confidential=True`` (fail-closed);
+    this one defaults ``False`` so that an unflagged call means what it has
+    always meant. That keeps ``tag_counts``' recorded search-scoped contract —
+    and the test that pins it — true, and confines the behaviour change to the
+    one caller that asked for it. The protection does not rest on the default:
+    ``routes_meta.facets`` passes the flag on every request, and
+    ``tests/test_ui_confidential_titles_gate.py`` fails for **any** route that
+    names a confidential title or tag, whichever query it reached for. A default
+    guards one function; that test guards the class.
     """
+    sql = _TAG_COUNTS_SQL if exclude_confidential else _TAG_COUNTS_SQL_ANY
     return [
         {"value": str(tag), "count": int(count)}
-        for tag, count in conn.execute(_TAG_COUNTS_SQL, (min_doc_count,)).fetchall()
+        for tag, count in conn.execute(sql, (min_doc_count,)).fetchall()
     ]
 
 

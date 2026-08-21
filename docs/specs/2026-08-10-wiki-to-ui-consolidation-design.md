@@ -2377,18 +2377,51 @@ Body-withholding answers "may this reader read it"; title-withholding answers "m
 reader never asked for mention that it exists". A surface can honour the first and violate the
 second, which is exactly what happened.
 
-**One flag, four routes, three browse surfaces** — and the two counts are both correct, which is
-why they must be given together:
+**One flag, six routes** — corrected 2026-08-20, having previously read "four routes, three browse
+surfaces". Both numbers were wrong, and the sentence that made them wrong is preserved below because
+the way it was wrong is the point:
+
+Line numbers below were re-derived with
+`grep -n 'strict = not ctx.serve_confidential_titles' src/brain/ui/routes_*.py` **after** the last
+edit of this change, not carried from the previous table — four of the six had already moved by a
+few lines because the same commit rewrote docstrings above them. Re-run the grep rather than trusting
+the column:
 
 | Route | Gating site | Surface |
 |---|---|---|
 | `/api/tree` | `ui/routes_tree.py:28` | vault tree |
-| `/api/recent` | `ui/routes_discovery.py:56` | home rail |
-| `/api/tags` | `ui/routes_discovery.py:84` | tag index |
-| `/api/tags/{tag}` | `ui/routes_discovery.py:107` | tag index |
+| `/api/recent` | `ui/routes_discovery.py:65` | home rail |
+| `/api/tags` | `ui/routes_discovery.py:101` | tag index |
+| `/api/tags/{tag}` | `ui/routes_discovery.py:124` | tag index |
+| `/api/facets` | `ui/routes_meta.py:128` | filter dropdowns |
+| `/api/notes/{id}/links` | `ui/routes_links.py:95` | marginalia rail |
 
-Each site reads `strict = not ctx.serve_confidential_titles`. `ui/routes_meta.py:32` *reports* the
-flag to the client but gates no listing, so it is not a fifth.
+Each site reads `strict = not ctx.serve_confidential_titles`.
+
+**THE FALSE CLEARANCE, and it is this entry's own.** The previous version closed: *"`ui/routes_meta.py:32`
+reports the flag to the client but gates no listing, so it is not a fifth."* Line 32 is inside
+`health()`, and the claim about `health()` is true. But `facets()`, in the same module, was calling
+`ui_queries.tag_counts` — a statement with no sensitivity predicate and, at the time, no strict
+variant — and shipping tag NAMES with COUNTS. `main.js`'s `boot()` fetches `/api/facets`
+unconditionally and the dropdown renders `` `${bucket.value} (${bucket.count})` ``, so a tag carried
+only by confidential documents was published, with its volume, on first paint — next to `/api/tags`,
+which hid exactly those tags on the same screen. The module was cleared on the strength of the one
+function in it that a reader had checked.
+
+`/api/notes/{id}/links` was missed the same way from the other direction: `routes_links.py`'s module
+docstring shows the author *did* reason about confidentiality and concluded the rail was safe because
+it carries no bodies. It carried titles.
+
+**A written re-derivation that is wrong is worse than none**, because it reads as already-checked —
+which is exactly how this entry's "not a fifth" survived. So the count above is no longer the
+control. `tests/test_ui_confidential_titles_gate.py` now **discovers** the surface set from the
+running route table: it requests every GET route, asks whether the response names a confidential
+document (a marker the caller itself put in the URL does not count), exempts two prompted routes by
+written ruling, and fails on anything else that leaks — including routes added after this was
+written. Both escape hatches are self-guarding, and that was measured, not assumed: exempting a known
+surface fails the floor assertion, and growing the exemption list fails a size pin.
+
+**Read the table as history; read the test for the answer.**
 
 **The defect the flag exists to close is a cross-module one**, and worth restating because no
 single-module test could have caught it: the tree named every confidential title while the rail
@@ -2397,13 +2430,15 @@ surfaces, and it lives in the gap between two green modules —
 `tests/test_ui_confidential_titles_gate.py` exists to assert the surfaces against each other and to
 pin the flag's route from `BRAIN_UI_SERVE_CONFIDENTIAL_TITLES` through to `UiContext`.
 
-**Do not inherit either number from prose, including this entry's.** The producing code's own
-docstrings disagree with themselves: `routes_discovery.py` says the flag applies "identically across
-all **three** routes" (its own three) and then, four lines later, calls the same set "these **two**"
-rails and the total "the **three** unprompted listing surfaces". Both readings are defensible —
-three *surfaces*, four *routes*, because the tag index is served by two routes — but a reader who
-takes one sentence and not the other will audit the wrong number of call sites. **Flagged, not
-fixed: the drifting prose is in `.py` files and is a code change** (docs-only scope).
+**Do not inherit either number from prose, including this entry's.** This warning was already here,
+and it was not enough — the entry carrying it still shipped two wrong numbers and a false clearance,
+because it warned against inheriting counts while itself counting by reading. The drifting
+`routes_discovery.py` prose it flagged ("identically across all **three** routes", then "these
+**two**" rails, then "the **three** unprompted listing surfaces") has since been corrected in code,
+along with a `tags()` docstring claiming `/api/facets` ships `count: null` — false since T4 — and a
+sentence calling the `/api/tags` vs `/api/facets` split "a confidentiality boundary", which is
+precisely the distinction that stopped being true when `/api/facets` was gated. What separates those
+two routes now is drafts and generated pages, nothing more.
 
 ### B-19 · (no S-number) — the facet panel's `none` bucket, and the 63% it was hiding
 

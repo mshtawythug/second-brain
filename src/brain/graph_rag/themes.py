@@ -80,6 +80,7 @@ def _retrieve_themes(
     session_id: str,
     synthesize: bool,
     enricher: _GroupSummarizer | None,
+    exclude_confidential: bool = False,
 ) -> GraphContext:
     """Run scope-first "themes with X" retrieval + assemble its ``GraphContext``.
 
@@ -161,7 +162,13 @@ def _retrieve_themes(
 
     # 7. Representative X-docs + snippets per group (and the context-level docs).
     groups, doc_results = _populate_theme_docs(
-        conn, tenant_id, query, groups, scope_doc_ids, limit
+        conn,
+        tenant_id,
+        query,
+        groups,
+        scope_doc_ids,
+        limit,
+        exclude_confidential=exclude_confidential,
     )
 
     # 8. Optional best-effort group synthesis (never required for retrieval).
@@ -395,6 +402,7 @@ def _populate_theme_docs(
     groups: list[ThemeGroup],
     scope_doc_ids: list[str],
     limit: int,
+    exclude_confidential: bool = False,
 ) -> tuple[list[ThemeGroup], list[SearchResult]]:
     """Attach representative X-docs to each group + build the context docs.
 
@@ -425,7 +433,9 @@ def _populate_theme_docs(
     global_ranked = sorted(
         global_doc_score.items(), key=lambda kv: (-kv[1], kv[0])
     )[:limit]
-    return populated, _build_doc_results(conn, query, global_ranked)
+    return populated, _build_doc_results(
+        conn, query, global_ranked, exclude_confidential=exclude_confidential
+    )
 
 
 def _synthesize_groups(

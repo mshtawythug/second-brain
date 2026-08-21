@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 
+from ..sensitivity import CONFIDENTIAL
 from .schema import GraphEntity
 
 if TYPE_CHECKING:
@@ -48,10 +49,21 @@ def _row_to_entity(row: tuple[Any, ...], tenant_id: str) -> GraphEntity:
     )
 
 
+#: Appended to the metadata predicate when the caller is outside the trust
+#: boundary. Frozen into the string rather than bound as a ``%s`` parameter for
+#: the reason :mod:`brain.vault.graph` gives: the fragment sits in a statement
+#: whose only positional parameter is the id array, and threading a second one
+#: through conditionally is how the wrong value gets bound. ``CONFIDENTIAL`` is
+#: a module constant, never caller input, so there is nothing to inject.
+_NOT_CONFIDENTIAL = f"AND d.sensitivity <> '{CONFIDENTIAL}'"
+
+
 def _build_doc_results(
     conn: psycopg.Connection[Any],
     query: str,
     ranked: list[tuple[str, float]],
+    *,
+    exclude_confidential: bool = False,
 ) -> list[SearchResult]:
     """Shape ranked documents into ``SearchResult``s, reusing the snippet path.
 
@@ -62,6 +74,26 @@ def _build_doc_results(
     for the query, falling back to the leading chunk (lowest ``chunk_index``)
     when the query matches nothing. ``score`` carries the *graph* document score
     (not an RRF score). Document order preserves the graph ranking.
+
+    ``exclude_confidential`` is the F6 egress gate for the WHOLE graph surface.
+    This function is the single funnel through which all three graph modes
+    (local / themes / global, and fuse's graph leg) turn ranked ids into
+    ``SearchResult``s, and ``snippet`` is raw ``chunks.content`` — so before
+    this parameter existed, ``brain_graphrag_search`` handed a hosted model the
+    confidential BODY TEXT that ``brain_search`` had been carefully filtering
+    for. The gate EXCLUDES the row rather than blanking its snippet: a redacted
+    hit still proves the document exists and matched, which reconstructs the
+    body a query at a time (the membership oracle ``_confidential_lens``
+    describes).
+
+    It DEFAULTS FALSE — include — matching :mod:`brain.vault.graph` rather than
+    the MCP layer's ``include_confidential``. The CLI sits inside the trust
+    boundary and must keep seeing its own documents; the MCP layer is the
+    boundary and passes ``exclude_confidential=not include_confidential``.
+    Opposite name AND opposite default: inverting that bridge flips the gate
+    while every test still passes, because the permissive direction only ever
+    ADDS rows. Both directions are pinned in
+    ``tests/test_graph_confidential_egress.py``.
     """
     # Late import keeps :mod:`brain.graph_rag` import-cheap and free of any
     # import cycle with the ingest pipeline that :mod:`brain.search` pulls in
@@ -76,7 +108,8 @@ def _build_doc_results(
     meta_rows = conn.execute(
         "SELECT d.id::text, d.title, d.content_type, d.tags, s.kind "
         "FROM documents d LEFT JOIN sources s ON s.id = d.source_id "
-        "WHERE d.id = ANY(%s)",
+        "WHERE d.id = ANY(%s) "
+        f"{_NOT_CONFIDENTIAL if exclude_confidential else ''}",
         (doc_ids,),
     ).fetchall()
     meta = {str(row[0]): row for row in meta_rows}
@@ -98,8 +131,15 @@ def _build_doc_results(
     for doc_id in doc_ids:  # preserve graph ranking order
         row = meta.get(doc_id)
         if row is None:
-            # A mention referenced a document with no surviving ``documents`` row.
-            # Defensive: ``ON DELETE CASCADE`` normally clears mentions first.
+            # Two ways to land here, and the gate depends on the second:
+            #  1. A mention referenced a document with no surviving
+            #     ``documents`` row. Defensive — ``ON DELETE CASCADE``
+            #     normally clears mentions first.
+            #  2. ``exclude_confidential`` filtered the row out of ``meta``
+            #     above. Dropping it HERE is what makes the gate an exclusion
+            #     rather than a redaction: the document never enters ``results``
+            #     at all, so neither its snippet nor the fact that it matched
+            #     reaches the caller.
             continue
         snippet = snippet_by_doc.get(doc_id, "")[:SNIPPET_LENGTH]
         results.append(

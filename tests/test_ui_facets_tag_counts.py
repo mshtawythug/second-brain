@@ -25,6 +25,7 @@ from starlette.testclient import TestClient
 
 from brain.config import Config
 from brain.search import hybrid_search
+from brain.sensitivity import CONFIDENTIAL
 from brain.ui.app import create_app
 from brain.ui.context import UiContext
 from brain.vault import init_vault
@@ -118,3 +119,126 @@ def test_no_tag_facet_ships_a_null_count(
 def payload_tags(client: TestClient) -> list[dict[str, Any]]:
     """The ``tags`` buckets from ``/api/facets``."""
     return list(client.get("/api/facets").json()["tags"])
+
+
+# ------------------------------------------------ the confidentiality gate --
+
+#: A tag no other document in this module's corpus carries, held by a single
+#: confidential note. Its NAME is the disclosure under test.
+SEALED_TAG = "zorbtag-sealed"
+
+#: A tag carried by one ordinary note AND one confidential note. Its name leaks
+#: nothing — the ordinary note publishes it anyway — so what is under test here
+#: is the COUNT, i.e. how many confidential documents exist behind it.
+SHARED_TAG = "zorbtag-shared"
+
+
+def _confidential(conn: psycopg.Connection[Any], doc_id: str) -> str:
+    conn.execute(
+        "UPDATE documents SET sensitivity = %s WHERE id = %s", (CONFIDENTIAL, doc_id)
+    )
+    return doc_id
+
+
+def _facet_client(
+    test_db: psycopg.Connection,
+    ui_cfg: Config,
+    fake_embedder: Any,
+    *,
+    serve_confidential_titles: bool,
+) -> TestClient:
+    @contextlib.contextmanager
+    def conn_factory() -> Any:
+        yield test_db
+
+    return TestClient(
+        create_app(
+            UiContext(
+                cfg=ui_cfg,
+                conn_factory=conn_factory,
+                embedder=fake_embedder,
+                search_fn=hybrid_search,
+                allowed_origin=ORIGIN,
+                logging_enabled=False,
+                serve_confidential_titles=serve_confidential_titles,
+            )
+        ),
+        base_url=ORIGIN,
+    )
+
+
+@pytest.fixture
+def sealed_corpus(test_db: psycopg.Connection, seed_doc: Any) -> None:
+    seed_doc(title="Open note", content="Synthetic open body.", tags=[SHARED_TAG])
+    _confidential(
+        test_db,
+        seed_doc(
+            title="Sealed note",
+            content="Synthetic sealed body.",
+            tags=[SEALED_TAG, SHARED_TAG],
+        ),
+    )
+
+
+def _tag_counts(client: TestClient) -> dict[str, Any]:
+    response = client.get("/api/facets")
+    assert response.status_code == 200, response.text
+    return {row["value"]: row["count"] for row in response.json()["tags"]}
+
+
+def test_the_facet_dropdown_does_not_name_a_confidential_only_tag(
+    test_db: psycopg.Connection,
+    ui_cfg: Config,
+    fake_embedder: Any,
+    sealed_corpus: None,
+) -> None:
+    counts = _tag_counts(
+        _facet_client(
+            test_db, ui_cfg, fake_embedder, serve_confidential_titles=False
+        )
+    )
+
+    assert SEALED_TAG not in counts, (
+        f"/api/facets named a tag carried only by a confidential document: "
+        f"{SEALED_TAG!r}"
+    )
+    assert counts.get(SHARED_TAG) == 1, (
+        "anti-vacuity: the dropdown must still be populated — an empty facet "
+        f"panel would satisfy the assertion above for the wrong reason: {counts}"
+    )
+
+
+def test_an_opted_in_session_still_gets_the_confidential_tag(
+    test_db: psycopg.Connection,
+    ui_cfg: Config,
+    fake_embedder: Any,
+    sealed_corpus: None,
+) -> None:
+    counts = _tag_counts(
+        _facet_client(test_db, ui_cfg, fake_embedder, serve_confidential_titles=True)
+    )
+
+    assert SEALED_TAG in counts, (
+        "an opted-in session lost a tag it is entitled to see; a route that "
+        "hard-coded 'always hide' would look correct in the strict test alone"
+    )
+    assert counts.get(SHARED_TAG) == 2, counts
+
+
+def test_the_facet_count_excludes_confidential_documents(
+    test_db: psycopg.Connection,
+    ui_cfg: Config,
+    fake_embedder: Any,
+    sealed_corpus: None,
+) -> None:
+    strict = _tag_counts(
+        _facet_client(
+            test_db, ui_cfg, fake_embedder, serve_confidential_titles=False
+        )
+    )
+    permissive = _tag_counts(
+        _facet_client(test_db, ui_cfg, fake_embedder, serve_confidential_titles=True)
+    )
+
+    assert strict[SHARED_TAG] == 1, strict
+    assert permissive[SHARED_TAG] == 2, permissive

@@ -15,12 +15,21 @@ rails are fetched on load, and a browse surface that grew a body per row would
 turn one page open into a corpus download.
 
 **Confidentiality is gated on ``serve_confidential_titles``**, not on
-``serve_confidential_bodies``, and identically across all three routes. These
-rails are *unprompted* — "fetched on load", above — so what they may name is
-the title question, not the body question. The vault tree
-(``routes_tree.tree``) is gated on the same flag, which is the point: the three
-unprompted listing surfaces now agree, where previously the tree filtered
-nothing while these two filtered on a flag named for something else.
+``serve_confidential_bodies``, and identically across all three routes here.
+These rails are *unprompted* — "fetched on load", above — so what they may name
+is the title question, not the body question.
+
+The same flag gates the vault tree (``routes_tree.tree``), the facet dropdown
+(``routes_meta.facets``) and the links rail (``routes_links.note_links``), which
+is the point: the unprompted listing surfaces agree, where previously the tree
+filtered nothing while these two filtered on a flag named for something else.
+
+**Do not take a count of those surfaces from this docstring.** An earlier
+version of it said "the three unprompted listing surfaces" while the module
+next door served a fourth, and the spec's Appendix B-18 inherited the number.
+``tests/test_ui_confidential_titles_gate.py`` discovers the set from the route
+table at run time instead of counting it in prose; that is the answer, and it
+cannot go stale.
 """
 from __future__ import annotations
 
@@ -67,18 +76,26 @@ async def recent(request: Request) -> JSONResponse:
 async def tags(request: Request) -> JSONResponse:
     """Every BROWSEABLE tag with the number of documents carrying it.
 
-    ``/api/facets`` answers the *dropdown's* question and ships ``count: null``;
-    this answers the index's, where the count is the whole point — it is what
-    tells the reader which tags are load-bearing and which were used once.
+    ``/api/facets`` answers the *dropdown's* question; this answers the index's,
+    where the count is the whole point — it is what tells the reader which tags
+    are load-bearing and which were used once. (Both ship real counts. This
+    paragraph said ``/api/facets`` ships ``count: null`` for tags until T4 made
+    that false and did not come back for the sentence.)
 
     ``browseable_tag_counts``, NOT ``tag_counts``, and the difference is a
-    confidentiality boundary rather than a preference. This route feeds the idle
-    rail, which paints before the reader has asked for anything; the corpus-wide
-    count would name a tag carried only by confidential documents, and the tag
-    page below would then return nothing for it. ``/api/facets`` keeps the
-    corpus-wide count because it annotates SEARCH, which legitimately returns
-    those documents — two consumers, two correct answers. See
+    BROWSE boundary. This route's count and the tag page below describe the same
+    corpus, so the number means what a reader takes it to mean; ``/api/facets``
+    keeps drafts and ``people/`` pages because it annotates SEARCH, which
+    returns them — two consumers, two correct answers. See
     ``queries.browseable_tag_counts``.
+
+    IT USED TO BE A CONFIDENTIALITY BOUNDARY TOO, and that is no longer what
+    separates the two routes: ``/api/facets`` now excludes confidential
+    documents as well, on the same flag, because it also paints unprompted. What
+    remains between them is drafts and generated pages. Corrected here rather
+    than left standing — a stale distinction that names the right boundary for
+    the wrong reason is how the next reader concludes ``/api/facets`` is
+    deliberately ungated.
     """
     ctx = context_of(request)
     strict = not ctx.serve_confidential_titles

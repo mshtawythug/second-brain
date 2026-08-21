@@ -431,3 +431,68 @@ def test_resurface_include_confidential_opts_back_in(
 
     titles = [i["title"] for i in payload["items"]]
     assert "Confidential Comp Doc" in titles
+
+
+# ---------------------------------------------------------------------------
+# brain_list — the fifth surface, and the one the enumeration walked past
+# ---------------------------------------------------------------------------
+#
+# `brain_list` sits thirty lines above `brain_resurface` in `mcp_server.py`.
+# Resurface applies `_confidential_lens`; list did not — it called
+# `queries.list_documents` with no `sensitivity` argument at all, even though
+# that function has accepted one since F6. So the gap was never a missing
+# capability, only an un-passed argument, on the single most listing-shaped
+# tool in the module: no query required, "show me the corpus".
+#
+# The CLI's `brain list` is deliberately unfiltered and stays that way --
+# `list_documents`'s own docstring says a tier you cannot see is a tier you
+# forget you set, and the CLI sits INSIDE the trust boundary. MCP does not.
+
+
+def test_list_does_not_name_a_confidential_document(
+    test_db: psycopg.Connection[Any], confidential_doc: str
+) -> None:
+    """The unprompted listing surface must not name a confidential doc.
+
+    No query is involved, so there is no "the caller asked for it" defence
+    available here: this is the corpus painting itself for a hosted model.
+    """
+    _fixture_is_not_vacuous(test_db, confidential_doc)
+
+    rows = mcp_server.brain_list(limit=50)
+
+    titles = [r["title"] for r in rows]
+    assert "Public Comp Overview" in titles, (
+        "non-vacuity: the decoy must be listed, or an empty result would pass "
+        "this test while listing nothing at all"
+    )
+    assert "Confidential Comp Doc" not in titles
+
+
+def test_list_response_contains_no_confidential_text_anywhere(
+    test_db: psycopg.Connection[Any], confidential_doc: str
+) -> None:
+    """Serialize the whole response, not the fields we happened to think of."""
+    _fixture_is_not_vacuous(test_db, confidential_doc)
+
+    blob = json.dumps(mcp_server.brain_list(limit=50), default=str)
+
+    assert BODY_MARKER not in blob
+    assert SECRET_SUMMARY not in blob
+    assert "Confidential Comp Doc" not in blob
+
+
+def test_list_opt_in_still_returns_the_confidential_document(
+    test_db: psycopg.Connection[Any], confidential_doc: str
+) -> None:
+    """The gate must be a gate, not a deletion.
+
+    This is the assertion that keeps the two above honest: without it, a
+    `brain_list` that returned nothing at all would satisfy them both.
+    """
+    _fixture_is_not_vacuous(test_db, confidential_doc)
+
+    titles = [r["title"] for r in mcp_server.brain_list(limit=50, include_confidential=True)]
+
+    assert "Confidential Comp Doc" in titles
+    assert "Public Comp Overview" in titles

@@ -38,6 +38,75 @@ from typing import Any
 
 import psycopg
 
+from ..sensitivity import CONFIDENTIAL
+
+#: Two frozen variants per title-bearing read, selected by
+#: ``exclude_confidential`` — the pattern :mod:`brain.ui.queries` uses, and for
+#: the same reason: a ``%s`` placeholder for the level would put a positional
+#: parameter inside a fragment three statements share, so every one of them
+#: would have to bind it first, in order, or silently bind the wrong thing.
+#:
+#: WHY THESE READS NEEDED A GATE AT ALL. They return document TITLES. The
+#: ``/api/notes/{id}/links`` rail names every document linking to the note on
+#: screen, and ``routes_links``' own module docstring shows the author reasoned
+#: about confidentiality and scoped it to *bodies* ("keeps a confidential body
+#: out of a rail that the note route itself may have withheld") — the payload
+#: carries no bodies, and so the rail looked safe. Titles were not considered.
+_NOT_CONFIDENTIAL = f"AND d.sensitivity <> '{CONFIDENTIAL}'"
+
+_BACKLINKS_SELECT = """
+        SELECT d.id::text, d.title, d.kind, l.link_text, l.link_kind
+        FROM links l
+        JOIN documents d ON d.id = l.src_document_id
+        WHERE l.dst_document_id = %s
+"""
+_BACKLINKS_ORDER = "        ORDER BY LOWER(d.title), l.link_text\n        "
+
+_BACKLINKS_SQL_ANY = _BACKLINKS_SELECT + _BACKLINKS_ORDER
+_BACKLINKS_SQL = f"{_BACKLINKS_SELECT}          {_NOT_CONFIDENTIAL}\n{_BACKLINKS_ORDER}"
+
+_OUTGOING_SELECT = """
+        SELECT d.id::text, d.title, d.kind, l.link_text, l.link_kind
+        FROM links l
+        JOIN documents d ON d.id = l.dst_document_id
+        WHERE l.src_document_id = %s
+"""
+_OUTGOING_ORDER = _BACKLINKS_ORDER
+
+_OUTGOING_SQL_ANY = _OUTGOING_SELECT + _OUTGOING_ORDER
+_OUTGOING_SQL = f"{_OUTGOING_SELECT}          {_NOT_CONFIDENTIAL}\n{_OUTGOING_ORDER}"
+
+#: The derived-partner read aliases the joined document ``partner``, not ``d``,
+#: so it cannot share :data:`_NOT_CONFIDENTIAL`. Spelled out rather than
+#: aliased-to-fit: renaming the alias to reuse one constant would make the
+#: CASE expression below read as if it filtered the edge rather than the
+#: partner document.
+_DERIVED_SELECT = """
+        SELECT
+            dl.rule,
+            dl.weight,
+            dl.evidence,
+            partner.id::text,
+            partner.title,
+            partner.kind
+        FROM derived_links dl
+        JOIN documents partner
+          ON partner.id = CASE
+              WHEN dl.src_document_id = %(doc)s THEN dl.dst_document_id
+              ELSE dl.src_document_id
+          END
+        WHERE (dl.src_document_id = %(doc)s OR dl.dst_document_id = %(doc)s)
+"""
+_DERIVED_ORDER = (
+    "        ORDER BY dl.rule, LOWER(partner.title), partner.id::text\n        "
+)
+
+_DERIVED_SQL_ANY = _DERIVED_SELECT + _DERIVED_ORDER
+_DERIVED_SQL = (
+    f"{_DERIVED_SELECT}          AND partner.sensitivity <> '{CONFIDENTIAL}'\n"
+    f"{_DERIVED_ORDER}"
+)
+
 
 @dataclass(frozen=True)
 class GraphNode:
@@ -165,6 +234,7 @@ def backlinks_for(
     document_id: str,
     *,
     include_derived: bool = True,
+    exclude_confidential: bool = False,
 ) -> list[BacklinkRow]:
     """Return every document that links TO ``document_id``.
 
@@ -179,15 +249,28 @@ def backlinks_for(
     spec §6 — a row stored ``(A, B)`` shows up in both ``backlinks_for(A)``
     and ``backlinks_for(B)``. Derived rows sort within their block by
     rule then partner title for deterministic output.
+   
+
+    ``exclude_confidential`` DEFAULTS FALSE, which is not the fail-closed
+    convention :mod:`brain.ui.queries` uses, and the difference is the caller
+    set. That module serves one surface; this one is shared by ``brain
+    backlinks`` at a terminal, the MCP server, and ``brain.ui``. The first two
+    are the owner reading their own corpus locally — the loopback case the
+    ``browseable_tag_counts`` ruling already treats as entitled — and the CLI
+    offers no ``--include-confidential`` to turn a hidden neighbour back on, so
+    a fail-closed default here would remove a row the owner has no way to ask
+    for. The gate therefore lives at the boundary that has a policy:
+    ``ui/routes_links.note_links`` passes ``not ctx.serve_confidential_titles``
+    on every request, and ``tests/test_ui_confidential_titles_gate.py`` fails
+    for any UI route that names a confidential document regardless of which
+    query it used — so the protection does not rest on this default.
+
+    Note for the MCP server: ``brain_backlinks`` / ``brain_links`` do not pass
+    this and have no ``include_confidential`` parameter, unlike every other F6
+    retrieval surface there. Flagged, not changed — see ``_confidential_lens``.
     """
     rows = conn.execute(
-        """
-        SELECT d.id::text, d.title, d.kind, l.link_text, l.link_kind
-        FROM links l
-        JOIN documents d ON d.id = l.src_document_id
-        WHERE l.dst_document_id = %s
-        ORDER BY LOWER(d.title), l.link_text
-        """,
+        _BACKLINKS_SQL if exclude_confidential else _BACKLINKS_SQL_ANY,
         (document_id,),
     ).fetchall()
     out: list[BacklinkRow] = [
@@ -212,7 +295,9 @@ def backlinks_for(
                 weight=row.weight,
                 evidence=row.evidence,
             )
-            for row, partner in _derived_partners(conn, document_id)
+            for row, partner in _derived_partners(
+                conn, document_id, exclude_confidential=exclude_confidential
+            )
         )
     return out
 
@@ -223,6 +308,7 @@ def outgoing_links_for(
     *,
     include_unresolved: bool = False,
     include_derived: bool = True,
+    exclude_confidential: bool = False,
 ) -> list[OutgoingLinkRow]:
     """Return every document ``document_id`` links TO.
 
@@ -241,15 +327,28 @@ def outgoing_links_for(
     in semantics, ``outgoing_links_for(X)`` returns the same partner set
     as ``backlinks_for(X)`` for them — every doc paired with X
     regardless of canonical direction.
+   
+
+    ``exclude_confidential`` DEFAULTS FALSE, which is not the fail-closed
+    convention :mod:`brain.ui.queries` uses, and the difference is the caller
+    set. That module serves one surface; this one is shared by ``brain
+    backlinks`` at a terminal, the MCP server, and ``brain.ui``. The first two
+    are the owner reading their own corpus locally — the loopback case the
+    ``browseable_tag_counts`` ruling already treats as entitled — and the CLI
+    offers no ``--include-confidential`` to turn a hidden neighbour back on, so
+    a fail-closed default here would remove a row the owner has no way to ask
+    for. The gate therefore lives at the boundary that has a policy:
+    ``ui/routes_links.note_links`` passes ``not ctx.serve_confidential_titles``
+    on every request, and ``tests/test_ui_confidential_titles_gate.py`` fails
+    for any UI route that names a confidential document regardless of which
+    query it used — so the protection does not rest on this default.
+
+    Note for the MCP server: ``brain_backlinks`` / ``brain_links`` do not pass
+    this and have no ``include_confidential`` parameter, unlike every other F6
+    retrieval surface there. Flagged, not changed — see ``_confidential_lens``.
     """
     resolved_rows = conn.execute(
-        """
-        SELECT d.id::text, d.title, d.kind, l.link_text, l.link_kind
-        FROM links l
-        JOIN documents d ON d.id = l.dst_document_id
-        WHERE l.src_document_id = %s
-        ORDER BY LOWER(d.title), l.link_text
-        """,
+        _OUTGOING_SQL if exclude_confidential else _OUTGOING_SQL_ANY,
         (document_id,),
     ).fetchall()
     out: list[OutgoingLinkRow] = [
@@ -276,7 +375,9 @@ def outgoing_links_for(
                 weight=row.weight,
                 evidence=row.evidence,
             )
-            for row, partner in _derived_partners(conn, document_id)
+            for row, partner in _derived_partners(
+                conn, document_id, exclude_confidential=exclude_confidential
+            )
         )
     if include_unresolved:
         unresolved_rows = conn.execute(
@@ -306,6 +407,7 @@ def orphans(
     conn: psycopg.Connection[Any],
     *,
     vault_only: bool = True,
+    exclude_confidential: bool = False,
 ) -> list[GraphNode]:
     """Return documents with zero incoming AND zero outgoing links.
 
@@ -326,6 +428,23 @@ def orphans(
 
     Sort: title (case-insensitive) for deterministic output, then id to
     break ties when two notes share a title.
+
+    ``exclude_confidential`` mirrors :func:`backlinks_for` / :func:`outgoing_links_for`
+    — same name, same FALSE default (include), because the CLI sits inside the
+    trust boundary. It is NEW here, and its absence is the whole reason this
+    function is being touched: when the F6 gate was added to those two link
+    reads, it was added to *exactly the two functions someone had named*. This
+    one returns document TITLES from the same module, feeds ``brain_orphans``
+    on the MCP surface, and could not be gated even in principle because the
+    parameter did not exist. The enumeration miss did not stop at the MCP
+    layer; it propagated down into the graph layer itself.
+
+    Unlike the two link reads this cannot use the frozen ``_NOT_CONFIDENTIAL``
+    fragment: that constant carries a leading ``AND`` for statements that
+    interpolate it directly, while this query joins a ``where`` LIST with
+    ``' AND '``. Appending the fragment verbatim would emit ``AND AND``. The
+    bare predicate is appended instead — still parameterless, still built from
+    the ``CONFIDENTIAL`` module constant rather than caller input.
     """
     where = ["d.id NOT IN (SELECT src_document_id FROM links)"]
     where.append("d.id NOT IN (SELECT dst_document_id FROM links)")
@@ -334,6 +453,8 @@ def orphans(
     where.append("d.id NOT IN (SELECT dst_document_id FROM derived_links)")
     if vault_only:
         where.append("d.kind = 'vault'")
+    if exclude_confidential:
+        where.append(f"d.sensitivity <> '{CONFIDENTIAL}'")
     sql = f"""
         SELECT d.id::text, d.title, d.kind
         FROM documents d
@@ -504,7 +625,10 @@ class _DerivedRow:
 
 
 def _derived_partners(
-    conn: psycopg.Connection[Any], document_id: str
+    conn: psycopg.Connection[Any],
+    document_id: str,
+    *,
+    exclude_confidential: bool = False,
 ) -> list[tuple[_DerivedRow, GraphNode]]:
     """Return ``(row, partner_node)`` pairs for every derived edge touching ``document_id``.
 
@@ -518,23 +642,7 @@ def _derived_partners(
     id. Stable across calls so callers can pin output bytes in tests.
     """
     rows = conn.execute(
-        """
-        SELECT
-            dl.rule,
-            dl.weight,
-            dl.evidence,
-            partner.id::text,
-            partner.title,
-            partner.kind
-        FROM derived_links dl
-        JOIN documents partner
-          ON partner.id = CASE
-              WHEN dl.src_document_id = %(doc)s THEN dl.dst_document_id
-              ELSE dl.src_document_id
-          END
-        WHERE dl.src_document_id = %(doc)s OR dl.dst_document_id = %(doc)s
-        ORDER BY dl.rule, LOWER(partner.title), partner.id::text
-        """,
+        _DERIVED_SQL if exclude_confidential else _DERIVED_SQL_ANY,
         {"doc": document_id},
     ).fetchall()
     return [

@@ -184,9 +184,22 @@ def test_brain_ask_limit_defaults_to_config(
 
     real_retrieve = ask_mod._retrieve_hybrid
 
-    def _spy_retrieve(conn, cfg, *, embedder, query, limit):  # type: ignore[no-untyped-def]
+    def _spy_retrieve(  # type: ignore[no-untyped-def]
+        conn, cfg, *, embedder, query, limit, exclude_confidential=False
+    ):
         captured["limit"] = limit
-        return real_retrieve(conn, cfg, embedder=embedder, query=query, limit=limit)
+        # FORWARDS ``exclude_confidential`` rather than merely accepting it.
+        # A spy that swallowed the flag would silently disable the F6 gate on
+        # every path it wraps while staying green — the failure mode this
+        # wrapper shape invites.
+        return real_retrieve(
+            conn,
+            cfg,
+            embedder=embedder,
+            query=query,
+            limit=limit,
+            exclude_confidential=exclude_confidential,
+        )
 
     monkeypatch.setattr(ask_mod, "_retrieve_hybrid", _spy_retrieve)
 

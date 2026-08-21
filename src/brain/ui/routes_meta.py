@@ -106,8 +106,30 @@ async def facets(request: Request) -> JSONResponse:
     match-scoped counts on the search response itself, and the UI prefers those
     — a dropdown showing corpus totals next to a filtered result set would be
     actively misleading.
+
+    GATED ON ``serve_confidential_titles``, because this IS a listing surface.
+    The spec's Appendix B-18 concluded it was not — "``ui/routes_meta.py:32``
+    reports the flag to the client but gates no listing, so it is not a fifth"
+    — which is true of :func:`health`, at that line, and was read as clearing
+    the module. This route, three functions down, served tag NAMES with COUNTS
+    from an ungated query. ``main.js``'s ``boot()`` fetches it with no user
+    action and the dropdown renders ``name (count)``, so a tag carried only by
+    confidential documents was published, with its volume, on first paint —
+    beside ``/api/tags``, which hid exactly those tags on the same screen. B-18
+    has been corrected.
+
+    ONLY THE TAG VOCABULARY IS GATED, and the other two are a judgement, not an
+    oversight. ``sources`` and ``content_types`` draw from fixed vocabularies
+    (``VALID_SOURCE_KINDS``; the ``content_type`` values the ingest pipeline
+    assigns), so no value in either is text a user wrote — nothing there is a
+    NAME the way a tag is. Their counts still move with the confidential corpus,
+    which is a volume signal over a small closed alphabet. Recorded as the known
+    narrower residue rather than fixed here, because widening the change to
+    counts-over-fixed-vocabularies is a different ruling from the one the
+    finding makes, and it belongs to whoever makes it deliberately.
     """
     ctx = context_of(request)
+    strict = not ctx.serve_confidential_titles
     try:
         with ctx.connect() as conn:
             sources = _source_values(
@@ -115,7 +137,9 @@ async def facets(request: Request) -> JSONResponse:
                 sourceless=ui_queries.sourceless_document_count(conn),
             )
             content_types = ui_queries.content_type_buckets(conn)
-            tags = ui_queries.tag_counts(conn, min_doc_count=1)
+            tags = ui_queries.tag_counts(
+                conn, min_doc_count=1, exclude_confidential=strict
+            )
     except psycopg.Error as exc:
         raise db_guard(exc) from exc
 
@@ -128,15 +152,22 @@ async def facets(request: Request) -> JSONResponse:
             # ``count: null`` for tags while every other facet carried a number.
             #
             # DELIBERATE INCONSISTENCY, recorded so nobody "fixes" it blind:
-            # ``tag_counts`` counts the WHOLE corpus — drafts and ``people/``
-            # pages included — mirroring the ``list_existing_tags`` behaviour it
-            # replaces, whereas T4's ``documents_for_tag`` applies browse
-            # predicates. A facet count can therefore legitimately exceed the
-            # rows a tag click surfaces. That is correct HERE: ``/api/facets``
-            # annotates *search*, which returns drafts and hub pages, so a
-            # browse-filtered count would understate its own result set. The tag
-            # INDEX surface needs browse-consistent counts; that is T17's, not
-            # this route's.
+            # ``tag_counts`` still counts drafts and ``people/`` pages, which
+            # T4's ``documents_for_tag`` excludes. A facet count can therefore
+            # legitimately exceed the rows a tag click surfaces. That is correct
+            # HERE: ``/api/facets`` annotates *search*, which returns drafts and
+            # hub pages, so a browse-filtered count would understate its own
+            # result set. The tag INDEX surface needs browse-consistent counts;
+            # that is T17's, not this route's.
+            #
+            # CONFIDENTIAL DOCUMENTS ARE THE EXCEPTION, and they are excluded
+            # by ``exclude_confidential=strict`` above. The paragraph over this
+            # one is entirely about drafts, and it used to justify a scope that
+            # was quietly doing two things — a tag name is content, and this
+            # route paints unprompted. Keeping the drafts and dropping the
+            # confidential rows is why ``tag_counts`` grew a flag rather than
+            # being repointed at ``browseable_tag_counts``: that would have
+            # silently decided the drafts question too, the other way.
             #
             # Note the direction of travel: T4 removed a ``count: null`` here,
             # T7 added one back for the ``none`` source value, and the
