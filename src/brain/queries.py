@@ -3,6 +3,16 @@
 This module exists to avoid duplicating identical SELECTs and prefix-resolution
 logic across two callers. The helpers raise plain :mod:`brain.errors`
 exceptions so each caller can map them to its own framework's error type.
+
+**File-size ceiling (CLAUDE.md): already over, and it grew.** No live count
+here on purpose -- re-derive with ``wc -l src/brain/queries.py``. The growth is
+nine lines inside :func:`resolve_person_to_keys`, all comment: it now passes
+``exclude_confidential=False`` to :func:`brain.people.aggregate_people`, whose
+default turned fail-closed for the published People Hub. The flag is inert for
+this caller (identities come from ``directory_entries``, not from the doc
+scan), and the comment exists to say so -- an inherited fail-closed default in
+a query-filter resolver would be a policy decision nobody made. Reason inline
+at the call.
 """
 import re
 from collections.abc import Iterator
@@ -249,8 +259,17 @@ def resolve_person_to_keys(
     if not needle:
         raise PersonNotFound(name_or_email)
 
+    # ``exclude_confidential=False`` for the same reason as ``min_docs=0``
+    # and the empty ``owner_keys``: this resolver maps a ``--person`` argument
+    # onto an IDENTITY, and identities come from ``directory_entries``, not
+    # from the doc scan. Narrowing the scan cannot narrow the answer here
+    # (every record is built from a directory key regardless of its doc
+    # count), so the flag is inert — but it is passed explicitly rather than
+    # inherited, because inheriting a fail-closed default into a filter
+    # resolver would be a silent policy decision the day that stops being
+    # true. Display rules must not gate a query filter.
     records = aggregate_people(
-        conn, owner_keys=frozenset(), min_docs=0
+        conn, owner_keys=frozenset(), min_docs=0, exclude_confidential=False
     )
 
     # Step 1 — exact email match.

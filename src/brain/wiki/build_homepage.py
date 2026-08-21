@@ -43,6 +43,7 @@ import psycopg
 
 from ..config import Config
 from ..db import connect
+from ..sensitivity import not_confidential_sql
 from ..vault._atomic import atomic_write_text
 from ..vault.frontmatter import dump_frontmatter, parse_frontmatter
 from ..vault.paths import safe_wikilink_alias, strip_md_extension
@@ -53,6 +54,17 @@ from ..vault.paths import safe_wikilink_alias, strip_md_extension
 # state. Mirrors :data:`brain.vault.derived_links.fence.FENCE_START_MARKER`
 # pattern but in its own namespace so tweaking one surface doesn't tug the
 # other.
+#: The F6 egress predicate for the recent-rail query, frozen at import.
+#:
+#: A module constant rather than an inline call so the SQL below can be an
+#: f-string whose only interpolation is this one name: ``not_confidential_sql``
+#: binds NO parameter (see its docstring — a frozen literal, deliberately, so a
+#: positional ``%s`` cannot drift out of order), so interpolating it does not
+#: disturb the ``(limit,)`` tuple the statement already passes. The doubled
+#: ``%%`` in the ``LIKE`` pattern is untouched by f-string formatting and still
+#: reaches psycopg as the literal ``%`` it needs.
+_NOT_CONFIDENTIAL: str = not_confidential_sql("d")
+
 FENCE_START_MARKER: str = "<!-- BRAIN_RECENT_START -->"
 FENCE_END_MARKER: str = "<!-- BRAIN_RECENT_END -->"
 
@@ -284,6 +296,27 @@ def _fetch_recent_docs(
       rail would list itself (the rail lives inside index.md), and because the
       pipeline re-stamps the home note's ``ingested_at`` on every derived-page
       regeneration it would otherwise sit permanently at the top.
+    - ``sensitivity <> 'confidential'`` (F6) — **the gate this rail could not
+      inherit from anywhere else.** Every other published surface is gated by
+      Quartz's ``RemoveConfidential`` plugin, which reads
+      ``vfile.data.frontmatter.sensitivity`` at ``shouldPublish`` and drops the
+      whole *page*. This rail is not a page: it is a fence rewritten INLINE
+      inside ``<vault>/index.md``, a vfile whose own frontmatter carries no
+      ``sensitivity`` key. So the plugin publishes index.md — correctly, the
+      home note is not confidential — and carries the confidential titles
+      embedded in its body out with it. Marking a document confidential removed
+      its page from the site while leaving its title on the site's front page.
+
+      **Hard-wired, not a parameter.** :mod:`brain.vault.graph` takes an
+      ``exclude_confidential`` argument defaulting False because its readers
+      are shared with local CLI siblings that have always shown everything.
+      This function has no such sibling: it is private, has exactly one caller
+      (:func:`refresh_homepage`), and that caller's only output is a published
+      file. There is no reader for whom the permissive variant would be
+      correct, so offering one would only create the chance of selecting it.
+      Same shape, and the same reasoning, as
+      ``brain.wiki.build_related``'s hard-wired ``exclude_confidential=True``.
+
     - ``vault_path NOT LIKE 'people/%%'`` — the People-Hub auto-page namespace.
       ``brain.people.emit_people_pages`` writes EVERY page it emits
       under ``<vault>/people/`` (the per-person ``people/<slug>.md`` roster
@@ -305,12 +338,13 @@ def _fetch_recent_docs(
     autocommit-or-not context.
     """
     rows = conn.execute(
-        """
+        f"""
         SELECT d.title, s.kind, COALESCE(d.doc_date, d.ingested_at) AS display_date,
                d.vault_path
         FROM documents d
         LEFT JOIN sources s ON s.id = d.source_id
         WHERE d.draft = FALSE
+          AND {_NOT_CONFIDENTIAL}
           AND d.vault_path IS NOT NULL
           AND d.ingested_at IS NOT NULL
           AND d.vault_path <> 'index.md'

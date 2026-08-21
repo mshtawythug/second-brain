@@ -405,3 +405,46 @@ def test_people_detail_json_emits_single_object(
     assert payload["display_name"] == "Person-X Last-A"
     assert payload["doc_count"] == 1
     assert isinstance(payload["docs"], list)
+
+
+# ---------------------------------------------------------------------------
+# F6 — the terminal is NOT an egress boundary.
+#
+# ``aggregate_people`` defaults ``exclude_confidential=True`` because its
+# other caller writes published vault pages. ``brain people`` passes False
+# explicitly: this is the operator's own machine, and ``brain search`` already
+# returns confidential bodies in full on an unfiltered local read. A roster
+# that silently dropped the same documents would disagree with search and
+# offers no flag to turn them back on.
+# ---------------------------------------------------------------------------
+
+
+def test_people_detail_still_lists_confidential_docs_locally(
+    test_db: psycopg.Connection,
+    fake_embedder: Any,
+    patch_embedder: Any,
+) -> None:
+    """A confidential doc stays visible in the terminal roster.
+
+    Both docs share one participant and differ only in ``sensitivity``, so
+    the normal title is the positive control: if it renders and the
+    confidential one does not, the gate — not the fixture — is the cause.
+    """
+    patch_embedder(fake_embedder)
+    _seed_gmail(
+        test_db, fake_embedder, external_id="m1", title="Open agenda", body="a"
+    )
+    secret_id = _seed_gmail(
+        test_db, fake_embedder, external_id="m2", title="Sealed agenda", body="b"
+    )
+    test_db.execute(
+        "UPDATE documents SET sensitivity = 'confidential' WHERE id = %s",
+        (secret_id,),
+    )
+
+    result = CliRunner().invoke(app, ["people", "Person-X"])
+    assert result.exit_code == 0, result.stdout
+    out = result.stdout
+    assert "Open agenda" in out
+    assert "Sealed agenda" in out
+    assert "2 doc" in out

@@ -823,3 +823,121 @@ def test_build_and_swap_calls_refresh_homepage(
     assert len(refresh_calls) == 1
     # The cfg passed to refresh has vault_path == the resolved CLI vault.
     assert refresh_calls[0].vault_path == vault.resolve()
+
+
+# --------------------------------------------------------------------------
+# F6 — the recent rail is an egress boundary Quartz cannot cover.
+#
+# ``RemoveConfidential`` gates whole PAGES on
+# ``vfile.data.frontmatter.sensitivity``. The rail is not a page: it is a
+# fence rewritten inline inside ``<vault>/index.md``, whose own frontmatter
+# has no ``sensitivity`` key. So index.md publishes — correctly — and would
+# carry any confidential title embedded in its body out with it.
+#
+# Every absence claim below is paired with a positive control on the SAME
+# row, because an absence measured against a payload that was empty anyway
+# asserts nothing. The control is the strongest available form: the identical
+# document, re-read after ``sensitivity`` alone is flipped back to
+# ``'normal'``.
+# --------------------------------------------------------------------------
+
+_CONFIDENTIAL_TITLE = "Comp planning scratch"
+_NORMAL_TITLE = "Sprint retro notes"
+
+
+def _seed_rail_pair(
+    test_db: psycopg.Connection, seed_doc: Callable[..., str]
+) -> str:
+    """Seed one normal + one confidential doc, both otherwise rail-eligible.
+
+    Returns the confidential document's id. Both rows get a ``vault_path``
+    outside ``people/`` and are non-draft, so the ONLY predicate that can
+    separate them is the sensitivity gate.
+    """
+    seed_doc(title=_NORMAL_TITLE, content="retro_body")
+    confidential_id = seed_doc(title=_CONFIDENTIAL_TITLE, content="comp_body")
+    test_db.execute(
+        "UPDATE documents SET vault_path = '_ingested/manual/' || "
+        "regexp_replace(lower(title), '[^a-z0-9]+', '-', 'g') || '.md' "
+        "WHERE vault_path IS NULL"
+    )
+    test_db.execute(
+        "UPDATE documents SET sensitivity = 'confidential' WHERE id = %s",
+        (confidential_id,),
+    )
+    return confidential_id
+
+
+def test_fetch_recent_docs_excludes_confidential(
+    test_db: psycopg.Connection, seed_doc: Callable[..., str]
+) -> None:
+    """A confidential doc is withheld; an otherwise-identical normal one is not."""
+    _seed_rail_pair(test_db, seed_doc)
+
+    titles = [d.title for d in _fetch_recent_docs(test_db, limit=10)]
+
+    # Positive control FIRST: the query reaches manual docs with a vault_path
+    # at all. Without this line the assertion below would also pass against an
+    # empty result set, a broken join, or a typo'd predicate.
+    assert _NORMAL_TITLE in titles
+    # The claim.
+    assert _CONFIDENTIAL_TITLE not in titles
+
+
+def test_fetch_recent_docs_returns_the_same_row_once_downgraded(
+    test_db: psycopg.Connection, seed_doc: Callable[..., str]
+) -> None:
+    """The absence above is caused by the gate, not by an ineligible fixture.
+
+    Same row, same query, same limit — only ``sensitivity`` changes. If the
+    title appears here it was always eligible, which is what makes the
+    absence in the sibling test evidence of the gate rather than of the seed.
+    """
+    confidential_id = _seed_rail_pair(test_db, seed_doc)
+    before = [d.title for d in _fetch_recent_docs(test_db, limit=10)]
+    assert _CONFIDENTIAL_TITLE not in before
+
+    test_db.execute(
+        "UPDATE documents SET sensitivity = 'normal' WHERE id = %s",
+        (confidential_id,),
+    )
+
+    after = [d.title for d in _fetch_recent_docs(test_db, limit=10)]
+    assert _CONFIDENTIAL_TITLE in after
+
+
+def test_refresh_homepage_keeps_confidential_title_out_of_index_and_partial(
+    test_db: psycopg.Connection,
+    seed_doc: Callable[..., str],
+    tmp_path: Path,
+) -> None:
+    """End-to-end egress: neither published surface names the confidential doc.
+
+    ``index.md`` is the one that matters — it is what Quartz publishes and
+    what ``RemoveConfidential`` will not inspect. ``_partials/recent.md`` is
+    asserted too because it is written from the same row set and a future
+    change to ``ignorePatterns`` would expose it.
+    """
+    _seed_rail_pair(test_db, seed_doc)
+
+    vault = tmp_path / "vault"
+    _make_index(vault, with_fence=True)
+
+    from brain.config import Config
+    from tests.conftest import TEST_DATABASE_URL
+
+    cfg = Config(database_url=TEST_DATABASE_URL, vault_path=vault)
+    partial_changed, fence_changed = refresh_homepage(cfg)
+    assert (partial_changed, fence_changed) == (True, True)
+
+    partial = (vault / "_partials" / "recent.md").read_text(encoding="utf-8")
+    _fields, body = parse_frontmatter(
+        (vault / "index.md").read_text(encoding="utf-8")
+    )
+
+    # Controls: the rail rendered real content on both surfaces.
+    assert _NORMAL_TITLE in partial
+    assert _NORMAL_TITLE in body
+    # Claims.
+    assert _CONFIDENTIAL_TITLE not in partial
+    assert _CONFIDENTIAL_TITLE not in body

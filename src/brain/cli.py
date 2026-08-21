@@ -12,6 +12,13 @@ could enforce the set too. It had to move OUT of here to be reachable:
 ``cli`` imports ``cli_ingest``, so ``cli_ingest`` could never have imported the
 name back out of this module. Reason inline at the constant.
 
+It grew a second time for the F6 People Hub gate: ``brain people`` now passes
+``exclude_confidential=False`` to :func:`brain.people.aggregate_people`
+explicitly, because that function's default became fail-closed for the
+*published* hub pages and the terminal is not an egress boundary. Eight lines,
+all of them the argument for why the local surface opts out; reason inline at
+the call.
+
 The long-deferred split into per-domain command modules is unchanged by this;
 ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
@@ -8126,11 +8133,19 @@ def people_cmd(
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
+        # ``exclude_confidential=False`` — this is the operator's own
+        # terminal, not an egress boundary. ``brain search`` already returns
+        # confidential bodies in full on an unfiltered local read (see
+        # ``brain.search``); a roster that silently dropped the same documents
+        # would disagree with it and offers no flag to turn them back on.
+        # ``aggregate_people`` defaults the other way, for the published
+        # People Hub pages — so this call must say so out loud.
         records = aggregate_people(
             conn,
             owner_keys=cfg.owner_participants,
             min_docs=cfg.people_hub_min_docs,
             sender_denylist=cfg.graph_sender_denylist,
+            exclude_confidential=False,
         )
 
     if name is None:
