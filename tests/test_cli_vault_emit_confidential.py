@@ -223,3 +223,120 @@ def test_brief_terminal_stays_permissive_while_page_does_not(
     page = _brief_page(tmp_path)
     assert CONF_TITLE not in page
     assert CONF_ITEM not in page
+
+
+# ---------------------------------------------------------------------------
+# HIGH-2b — the suggestion RE-DERIVATION, which had no coverage at all
+# ---------------------------------------------------------------------------
+#
+# Every other CLI ``brief`` invocation in this suite passes ``--no-enrich``, so
+# the ``if not no_enrich:`` block above ``write_brief_to_vault`` — the branch that
+# decides WHICH payload the published suggestions are derived from — was never
+# entered from the CLI by any test, and ``withheld`` was asserted nowhere. That
+# branch is the one place where an LLM's output, computed from confidential
+# action-item BODY text, could be written onto a published page while every
+# title/body assertion in this module stayed green: the leak would ride in on a
+# *suggestion string*, not on a row. A regression there would be silent.
+#
+# ``suggest_next_steps`` is replaced with a test double that ECHOES the payload
+# it was handed, which is what makes provenance observable at all. The real
+# function returns model prose with no stable relationship to its input, so a
+# test using it could only assert that some suggestions exist — never which
+# payload produced them, which is the entire question.
+
+#: Marker prefix so a suggestion line is unmistakably the double's output.
+SUGGESTION_PREFIX = "NEXT-FROM"
+
+
+def _echoing_suggester(calls: list[str]) -> Callable[..., list[str]]:
+    """A ``suggest_next_steps`` double that echoes what it was fed.
+
+    Returns one suggestion per capture title and per todo text, so the published
+    page's suggestion lines name exactly the documents that reached the prompt.
+    Appends to ``calls`` so the number of LLM round-trips is observable too.
+    """
+
+    def _suggest(brief: object, cfg: object) -> list[str]:  # noqa: ARG001
+        seen = [doc.title for doc in brief.captures]  # type: ignore[attr-defined]
+        seen += [row.text for row in brief.open_todos]  # type: ignore[attr-defined]
+        calls.append("|".join(seen))
+        return [f"{SUGGESTION_PREFIX} {item}" for item in seen]
+
+    return _suggest
+
+
+def test_brief_page_suggestions_are_derived_from_the_gated_payload(
+    seeded: None,  # noqa: ARG001 — seeds the DB
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """LLM output computed from confidential text must not reach the page.
+
+    ``--json`` here is the CONTROL, not decoration: it proves the double DID
+    produce a confidential-derived suggestion on this run. Without it, "no
+    confidential suggestion on the page" could be satisfied by a double that
+    produced no suggestions at all, or by the enrich block never running.
+    """
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    calls: list[str] = []
+    monkeypatch.setattr("brain.brief.suggest_next_steps", _echoing_suggester(calls))
+
+    result = runner.invoke(
+        cli.app, ["brief", "--wiki", "--json", "--date", BRIEF_DATE]
+    )
+
+    assert result.exit_code == 0, result.stdout
+
+    # CONTROL — the terminal payload's suggestions are confidential-derived.
+    terminal = json.loads(result.stdout)["suggestions"]
+    assert f"{SUGGESTION_PREFIX} {CONF_TITLE}" in terminal
+    assert f"{SUGGESTION_PREFIX} {CONF_ITEM}" in terminal
+
+    page = _brief_page(tmp_path)
+    # Non-vacuity: the page HAS a suggestions section, from the normal rows.
+    assert f"{SUGGESTION_PREFIX} {NORMAL_TITLE}" in page
+    assert f"{SUGGESTION_PREFIX} {NORMAL_ITEM}" in page
+    # The leak this branch exists to prevent. Asserted BEFORE the call count
+    # below, deliberately: a mutation that reinstates the pre-fix behaviour
+    # changes both, and if the count assertion ran first it would short-circuit
+    # the leak assertion out of the failure, leaving the harness unable to say
+    # the test catches the DISCLOSURE rather than a detail about call counts.
+    assert f"{SUGGESTION_PREFIX} {CONF_TITLE}" not in page
+    assert f"{SUGGESTION_PREFIX} {CONF_ITEM}" not in page
+
+    # Two calls: the permissive one for the terminal, a SECOND for the page.
+    # Supporting evidence, not the claim — it distinguishes "re-derived" from
+    # "reused" when the two payloads happen to render the same strings.
+    assert len(calls) == 2, calls
+
+
+def test_brief_reuses_the_one_suggestion_call_when_nothing_is_withheld(
+    test_db: psycopg.Connection,
+    seed_doc: Callable[..., str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``withheld=False`` must REUSE the single call, not pay for a second.
+
+    The other half of the branch, and the reason ``withheld`` is computed while
+    both payloads still carry ``suggestions=[]``. With no confidential document
+    the two payloads are equal, so the permissive suggestions are exactly the
+    gated ones and a second Ollama round-trip would buy nothing. Asserting the
+    call COUNT is the only way to tell reuse from a coincidentally-equal
+    re-derivation.
+    """
+    normal = seed_doc(title=NORMAL_TITLE, content="normal body")
+    _interact_now(test_db, normal)
+    _action_items_doc(test_db, NORMAL_TITLE, NORMAL_ITEM)
+
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    calls: list[str] = []
+    monkeypatch.setattr("brain.brief.suggest_next_steps", _echoing_suggester(calls))
+
+    result = runner.invoke(cli.app, ["brief", "--wiki", "--date", BRIEF_DATE])
+
+    assert result.exit_code == 0, result.stdout
+    assert len(calls) == 1, calls
+    page = _brief_page(tmp_path)
+    assert f"{SUGGESTION_PREFIX} {NORMAL_TITLE}" in page
+    assert f"{SUGGESTION_PREFIX} {NORMAL_ITEM}" in page
