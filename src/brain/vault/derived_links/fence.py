@@ -321,6 +321,56 @@ def _parse_metadata_date(metadata: dict[str, Any]) -> datetime.date | None:
     return parsed.date()
 
 
+def refresh_fences_naming(
+    conn: psycopg.Connection[Any], doc_id: str, *, vault_path: Path
+) -> int:
+    """Re-render every fence that could NAME ``doc_id``, plus ``doc_id``'s own.
+
+    Call this after a document's ``sensitivity`` changes. The F6 gate in
+    :func:`render_fenced_section` decides what a fence may name *at render
+    time*, which does nothing for fences rendered EARLIER: marking a document
+    confidential left its title and slug sitting in every partner's
+    already-published page until somebody happened to run a full
+    ``brain vault relink-derived``. So ``brain mark-confidential`` reported
+    success -- and on the published site the document was not confidential, for
+    an unbounded stretch of time, with nothing to indicate it. The gate is the
+    policy; this is what makes the policy retroactive.
+
+    Symmetric on purpose: ``brain mark-normal`` runs it too, so a document
+    returned to the normal tier reappears in its partners' fences instead of
+    staying invisible until the next relink. One function, both directions --
+    a one-way refresh would fix the alarming case and leave the quiet one.
+
+    **This query is deliberately NOT sensitivity-gated, which inside an F6 fix
+    deserves a sentence.** It selects the ids whose files must be REWRITTEN, not
+    content to emit. A partner that is itself confidential still needs its fence
+    re-rendered (the host leg in :func:`rewrite_derived_fences` strips it), and
+    gating here would skip exactly those files. Nothing this query returns
+    reaches a page: every id it yields goes back through the renderer, which is
+    where the gate lives.
+
+    Scoped to :data:`FENCE_RULES` because only those rules are rendered -- and
+    it reads the same constant the renderer does, so the two cannot drift into
+    disagreeing about which edges can put a title on a page. Returns the number
+    of files actually written (``rewrite_derived_fences``' own count, so a
+    no-op change costs no mtime bump).
+    """
+    rows = conn.execute(
+        """
+        SELECT CASE WHEN dl.src_document_id = %s::uuid
+                    THEN dl.dst_document_id::text
+                    ELSE dl.src_document_id::text
+               END
+        FROM derived_links dl
+        WHERE (dl.src_document_id = %s::uuid OR dl.dst_document_id = %s::uuid)
+          AND dl.rule = ANY(%s)
+        """,
+        (doc_id, doc_id, doc_id, list(FENCE_RULES)),
+    ).fetchall()
+    affected = {doc_id} | {str(r[0]) for r in rows}
+    return rewrite_derived_fences(conn, affected, vault_path=vault_path)
+
+
 def rewrite_derived_fences(
     conn: psycopg.Connection[Any],
     doc_ids: set[str],

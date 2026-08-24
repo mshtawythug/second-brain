@@ -41,6 +41,7 @@ from .vault.delete import (
     describe_delete_target,
     unlink_vault_mirror,
 )
+from .vault.derived_links.fence import refresh_fences_naming
 from .vault.export import regenerate_vault_file
 from .vault.frontmatter import rewrite_sensitivity
 
@@ -356,6 +357,30 @@ def _set_sensitivity(id_prefix: str, *, level: str) -> None:
                     doc_id,
                     exc,
                 )
+        # The tier change is not complete until the pages that NAME this
+        # document agree with it. The F6 gate in ``render_fenced_section``
+        # decides what a fence may name at RENDER time and is silent about
+        # fences rendered earlier, so without this the command printed
+        # "marked ... as confidential" while every partner's published page
+        # still carried this document's title and slug — for an unbounded
+        # stretch, until somebody happened to run a full relink. Runs for BOTH
+        # directions: ``mark-normal`` puts the document back into its partners'
+        # fences rather than leaving it invisible until the next relink.
+        #
+        # Best-effort, and deliberately AFTER the DB commit and the mirror
+        # write: a fence-refresh failure must not lose either. It is warned,
+        # not raised, with the same recovery guidance as the mirror path —
+        # `brain vault relink-derived` rebuilds every fence from scratch.
+        try:
+            refresh_fences_naming(conn, doc_id, vault_path=cfg.vault_path)
+        except (OSError, psycopg.Error) as exc:
+            typer.secho(
+                f"warning: could not refresh derived-link fences after marking "
+                f"{label} as {level}: {exc}. Other documents' published pages "
+                f"may still name it — run `brain vault relink-derived`.",
+                fg="yellow",
+                err=True,
+            )
     typer.echo(f"marked {label} as {level}")
 
 

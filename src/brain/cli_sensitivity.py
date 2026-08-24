@@ -5,6 +5,7 @@ import json as _json
 from dataclasses import dataclass, field
 from typing import Any
 
+import psycopg
 import typer
 
 from .config import Config
@@ -17,6 +18,7 @@ from .queries import (
     set_document_sensitivity,
 )
 from .sensitivity import CONFIDENTIAL
+from .vault.derived_links.fence import refresh_fences_naming
 
 # ---------------------------------------------------------------------------
 # Why this lives in its own module rather than in cli.py.
@@ -70,16 +72,31 @@ def _finding_json(finding: SecretFinding) -> dict[str, Any]:
 
 
 def _apply_mark_confidential(
-    conn: Any, doc: ScannableDocument, result: _SweepResult
+    conn: Any, doc: ScannableDocument, result: _SweepResult, *, cfg: Config
 ) -> None:
     """Flip a hit document to ``confidential``; count only real changes.
 
     ``set_document_sensitivity`` returns ``False`` when the row was already at
     the target level, so re-running the sweep over a corpus it has already
     marked reports ``0 written`` rather than re-counting every previous hit.
+
+    The fence refresh is inside that ``if`` for the same reason the counter is:
+    on a re-run over an already-marked corpus nothing changed, so there is
+    nothing to propagate and no reason to rewrite N files. It takes ``cfg`` for
+    the vault path — the second of the two ``set_document_sensitivity`` callers,
+    fixed alongside ``mark-confidential`` rather than after it, because "the
+    other caller" is precisely how a gate ends up true of one surface and
+    silently not of another.
     """
     if set_document_sensitivity(conn, document_id=doc.id, level=CONFIDENTIAL):
         result.written += 1
+        try:
+            refresh_fences_naming(conn, doc.id, vault_path=cfg.vault_path)
+        except (OSError, psycopg.Error) as exc:
+            # Recorded per-document rather than raised: one unwritable mirror
+            # must not abort a sweep over the whole corpus, exactly as
+            # ``_apply_redact`` treats its own per-document failures.
+            result.errors.append((doc.id, f"fence refresh failed: {exc}"))
 
 
 def _apply_redact(
@@ -212,7 +229,7 @@ def scan_secrets_cmd(
             if not writing:
                 continue
             if action == "mark-confidential":
-                _apply_mark_confidential(conn, doc, result)
+                _apply_mark_confidential(conn, doc, result, cfg=cfg)
             else:
                 _apply_redact(conn, doc, result, cfg=cfg)
 
