@@ -74,6 +74,22 @@ were BODY egress rather than title egress: ``todo.iter_action_item_docs`` select
 ``documents.content`` and parses action-item text out of it, and ``brain_brief``
 forwarded that text to a hosted model in its suggestion prompt.
 
+A SIXTH growth, and it is a correction rather than a new lens: the F6 gate on
+``brain_review_weekly``'s EMIT path. Growths (3)-(5) above all gate what a tool
+RETURNS, and that is the whole story for every tool but this one -- it also
+WRITES a page into the vault, and it was handing that write the caller's
+permissively built report. ``include_confidential`` is a read lens for the
+caller; the page is served by Quartz to someone else. So the write now takes a
+second, gated payload (built only when the caller's lens is permissive; on the
+default path the returned report already IS the gated one) while the return
+value keeps answering the caller. This follows ``2b2b321``, which drew the same
+line for ``brain review weekly`` / ``brain brief --wiki`` in ``cli.py`` -- and
+corrects that commit's message, which asserted the MCP twins already gated
+correctly. They did, on the surface it was looking at. Reason inline at the
+call, cover in ``tests/test_mcp_vault_emit_confidential.py``. ``brain_brief`` is
+NOT affected: it has no vault write, asserted rather than assumed in that
+module.
+
 A split into per-domain tool modules stays deferred alongside ``cli.py``'s:
 this is one MCP tool registry over one shared error-mapping layer.
 
@@ -2221,11 +2237,22 @@ def brain_review_weekly(
     listing. Bridge: ``exclude_confidential=not include_confidential``. See
     :func:`_confidential_lens`.
 
-    NOTE the emitted page follows the same gate. With the default
-    ``include_confidential=false`` the file written to the vault omits
-    confidential documents; a reader who wants the complete retrospective on disk
-    should use ``brain review weekly`` at the terminal, which is inside the trust
-    boundary and includes both tiers.
+    NOTE the emitted page is ALWAYS gated, whatever ``include_confidential``
+    says. That flag is a READ lens for the caller, not a publish lens: the page
+    at ``<vault>/reviews/<week>.md`` is served by Quartz to a different audience
+    than the one making this call. So ``include_confidential=true`` returns the
+    complete retrospective to the caller and still writes a confidential-free
+    page. There is no argument to this tool that publishes the confidential
+    tier; a complete retrospective on disk has to be produced by a surface whose
+    output stays inside the trust boundary.
+
+    This docstring used to claim the opposite -- "the emitted page follows the
+    same gate" -- and the code matched it, handing the caller's permissively
+    built report straight to ``emit_weekly_page``. ``2b2b321`` fixed exactly that
+    two-audience conflation on the CLI and its message asserted the MCP twins
+    already gated correctly; that was true of this tool's return value and false
+    of its emit path. Regression cover:
+    ``tests/test_mcp_vault_emit_confidential.py``.
     """
     from .activity import current_iso_week
     from .review import build_weekly_report, emit_weekly_page, render_weekly_json
@@ -2235,6 +2262,30 @@ def brain_review_weekly(
     # Theme synthesis matters only on the graph path; reuse the long-lived
     # enricher built in main(). summarize_group never raises if Ollama is down.
     enricher = state.enricher if not no_graph else None
+    # F6 -- ONE call, TWO audiences, and they do not get the same payload.
+    # ``report`` answers the CALLER and honours their ``include_confidential``
+    # lens; ``published`` is the file written into ``state.cfg.vault_path``,
+    # which Quartz serves (``render_weekly_md`` emits no ``sensitivity``
+    # frontmatter key for ``RemoveConfidential`` to read, and ``reviews/`` is in
+    # neither Quartz config's ``ignorePatterns``). Following ``2b2b321``'s split
+    # on the CLI -- a SECOND, gated build for the vault write, the permissive one
+    # kept for the reader -- rather than refusing to emit under
+    # ``include_confidential=true``: a refusal would make a read flag change
+    # whether a WRITE happens, so the same call that used to publish a page would
+    # now silently publish none, and an agent that passes the flag habitually
+    # would stop maintaining the vault without ever seeing an error. Splitting
+    # the payloads keeps each audience's contract intact.
+    #
+    # The second build is CONDITIONAL, which is where this diverges from the CLI:
+    # there ``report`` was permissive unconditionally, so a second build was
+    # always required. Here ``report`` is already built with
+    # ``exclude_confidential=True`` whenever ``include_confidential`` is false,
+    # so on the default path aliasing it is exact rather than an approximation --
+    # and it avoids a second pass over the week's reads plus, on the graph path,
+    # a second round of theme synthesis. ``report_is_gated`` is derived from the
+    # SAME expression that builds ``report`` so the two cannot drift: every value
+    # ``published`` can take was built with the exclusion on.
+    report_is_gated = not include_confidential
     try:
         with _mcp_conn(state) as conn:
             report = build_weekly_report(
@@ -2244,8 +2295,23 @@ def brain_review_weekly(
                 generated_on=date_cls.today(),
                 no_graph=no_graph,
                 enricher=enricher,
-                exclude_confidential=not include_confidential,
+                exclude_confidential=report_is_gated,
             )
+            published = None
+            if emit:
+                published = (
+                    report
+                    if report_is_gated
+                    else build_weekly_report(
+                        conn,
+                        state.cfg,
+                        week=target_week,
+                        generated_on=date_cls.today(),
+                        no_graph=no_graph,
+                        enricher=enricher,
+                        exclude_confidential=True,
+                    )
+                )
     except ValueError as e:
         raise _mcp_error(
             INVALID_PARAMS, f"week must be YYYY-Www (e.g. 2026-W23): {e}"
@@ -2253,9 +2319,13 @@ def brain_review_weekly(
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
 
-    if emit:
+    # Branching on ``published is not None`` rather than re-testing ``emit``
+    # keeps "we built a gated payload" and "we write a page" as ONE condition,
+    # exactly as ``review_weekly`` does in ``cli.py``: there is no arrangement of
+    # the arguments that reaches this write holding the permissive ``report``.
+    if published is not None:
         try:
-            emit_weekly_page(state.cfg.vault_path, report)
+            emit_weekly_page(state.cfg.vault_path, published)
         except OSError as e:
             raise _mcp_error(
                 INTERNAL_ERROR, f"could not write review page: {e}"

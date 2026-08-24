@@ -227,6 +227,20 @@ Full detail is in project memory (`feedback_prove_the_check_can_fail`,
   History is **not** being rewritten to fix this; the correction lives here, and
   a message is evidence about intent, never about content. *(Recorded
   2026-08-21.)*
+
+  **Second instance, same trap, one commit later.** `2b2b321`
+  ("fix(security): stop `review weekly` / `brief --wiki` publishing confidential
+  docs") asserts *"The MCP twins of both functions gate correctly; the CLI was
+  the outlier."* That is true of what those tools RETURN and false of what one of
+  them WRITES: `brain_review_weekly` passed its permissively built report
+  straight to `emit_weekly_page`, so a single MCP call with
+  `include_confidential=true` published the page the CLI had just been stopped
+  from publishing. Note the shape — the claim was not careless, it was *scoped to
+  the surface the author was looking at* and stated as if scoped to the tool.
+  Verify with
+  `git show "2b2b321:src/brain/mcp_server.py" | grep -n 'emit_weekly_page(state.cfg.vault_path, report)'`.
+  The correction lives here, in that tool's docstring, and in `CLAUDE.md`'s
+  `mcp_server.py` ceiling row. *(Recorded 2026-08-24.)*
 - **A comment can be false in the very commit that writes it** — staleness is not
   the only failure mode, and a fresh commit date is not a warrant. `2ed2d83`
   ("fix(security): exclude confidential documents from ungated surfaces") added
