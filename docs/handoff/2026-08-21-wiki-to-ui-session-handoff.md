@@ -269,6 +269,26 @@ Full detail is in project memory (`feedback_prove_the_check_can_fail`,
   **"true of WHICH surface, and does this component have another one?"** A
   component that both RETURNS and WRITES has two, and a gate on one is silent
   about the other. *(Recorded 2026-08-24.)*
+- **A measurement taken mid-commit and reported as that commit's outcome.** A
+  variant of the self-invalidating-record problem the ceiling rows already
+  describe, and it caught the author who was extending those very rows.
+  `f4d914d`'s message states *"`connect.py` 993 -> 1071, `mcp_server.py`
+  4,485 -> 4,493"*. The parent figures are right; **both post-figures are
+  wrong** — the real values at `f4d914d` are **1,091** and **4,502**. Nothing
+  was miscounted: `wc -l` was run, and *then* the module-docstring ceiling
+  paragraphs were written, which is the edit that made the numbers stale. The
+  record was invalidated by the act of finishing the work it records. Verify:
+  `for f in connect mcp_server; do git show "f4d914d:src/brain/$f.py" | wc -l; done`
+  History is not rewritten; the correction lives here.
+
+  **The lesson is not "measure again at the end"** — that is the advice that
+  produced this, because there is always one more edit. It is that a commit
+  message is the *worst* place for a post-figure at all: frozen prose about a
+  tree the same commit is still changing. The ceiling ROWS get this right
+  already (`wc -l` in the cell, SHA-bound hops in the trail, a descriptive last
+  hop for the in-flight change) and this message ignored the form its own diff
+  was extending. State the PARENT figure — a fact about a frozen tree — and let
+  the trail carry the rest. *(Recorded 2026-08-24.)*
 - **A comment can be false in the very commit that writes it** — staleness is not
   the only failure mode, and a fresh commit date is not a warrant. `2ed2d83`
   ("fix(security): exclude confidential documents from ungated surfaces") added
