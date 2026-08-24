@@ -90,6 +90,15 @@ call, cover in ``tests/test_mcp_vault_emit_confidential.py``. ``brain_brief`` is
 NOT affected: it has no vault write, asserted rather than assumed in that
 module.
 
+A SEVENTH growth, eight lines, and the smallest of them: ``brain_connect_accept``
+now runs ``connect.assert_see_also_publishable`` before its ``## See Also``
+write. Same shape as the sixth -- a tool whose RETURN was gated while its WRITE
+was not -- and same correction of a record that was true of the surface its
+author was looking at: ``iter_suggestions`` is F6-gated, but neither accept path
+goes through it. The policy lives in :mod:`brain.connect` so the CLI twin cannot
+drift from it; what is here is the eight lines that map its ``ConnectError`` to
+``INVALID_PARAMS``. Reason inline at the call.
+
 A split into per-domain tool modules stays deferred alongside ``cli.py``'s:
 this is one MCP tool registry over one shared error-mapping layer.
 
@@ -4380,6 +4389,14 @@ def _connect_write_wikilink(cfg: Config, action: connect_mod.ActionResult) -> bo
     ``INVALID_PARAMS`` when the source/target vault path (or the on-disk file)
     is missing, so the link cannot be located.
     """
+    # F6 — see ``connect.assert_see_also_publishable``. Checked BEFORE the path
+    # checks so a blocked write reports what actually blocked it rather than a
+    # true-but-useless "no vault path". Mapped to INVALID_PARAMS like the other
+    # refusals here: the call named a document this tool will not publish.
+    try:
+        connect_mod.assert_see_also_publishable(action)
+    except ConnectError as e:
+        raise _mcp_error(INVALID_PARAMS, str(e)) from e
     if action.source_vault_path is None:
         raise _mcp_error(
             INVALID_PARAMS, "cannot write wikilink: source doc has no vault file"

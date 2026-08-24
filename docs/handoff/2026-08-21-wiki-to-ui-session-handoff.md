@@ -252,6 +252,23 @@ Full detail is in project memory (`feedback_prove_the_check_can_fail`,
   `git show "2b2b321:src/brain/mcp_server.py" | grep -n 'emit_weekly_page(state.cfg.vault_path, report)'`.
   The correction lives here, in that tool's docstring, and in `CLAUDE.md`'s
   `mcp_server.py` ceiling row. *(Recorded 2026-08-24.)*
+
+  **Third instance — it is a pattern now, not two incidents.** `connect.py`'s
+  `iter_suggestions` was recorded, in its own docstring and in `CLAUDE.md`, as
+  the F6 gate for auto-link suggestions. It is — for the LIST. **Neither accept
+  path goes through it:** `cli_connect._write_wikilink` and
+  `mcp_server._connect_write_wikilink` both reach `load_action_context`, which
+  had no sensitivity predicate, so `connect accept --write` published a
+  confidential target's title and slug into a page Quartz serves. Verify with
+  `grep -n "iter_suggestions\|load_action_context" src/brain/cli_connect.py src/brain/mcp_server.py`.
+
+  **The shared shape, worth naming because it is what to look for.** In all
+  three the claim was accurate about the surface its author had open — a return
+  value, a list query — and was written in a form that reads as being about the
+  whole tool. None was careless. The detector is not "is this claim true?" but
+  **"true of WHICH surface, and does this component have another one?"** A
+  component that both RETURNS and WRITES has two, and a gate on one is silent
+  about the other. *(Recorded 2026-08-24.)*
 - **A comment can be false in the very commit that writes it** — staleness is not
   the only failure mode, and a fresh commit date is not a warrant. `2ed2d83`
   ("fix(security): exclude confidential documents from ungated surfaces") added
