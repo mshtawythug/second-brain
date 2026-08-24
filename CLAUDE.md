@@ -120,6 +120,26 @@ can invalidate.** Earlier passes recorded dates and clock times precisely
 because a live digit needs an as-of; a frozen digit needs none, which is how you
 can tell the form is right.
 
+**A descriptive last hop must be PROMOTED to a SHA-bound one by the next edit
+that touches the file.** The terminating form ends every trail with a
+descriptive hop — *"the commit that added this clause"*, carrying no delta —
+because a commit cannot name its own hash. That hop is correct when written and
+becomes *lossy* the moment it is written: it is a fact whose SHA now exists and
+which only the next author is in a position to record. So the maintenance the
+form actually requires is: **on touching a file in this table, first replace its
+trailing descriptive hop with the real SHA and count (`git log --oneline
+f8c76c0..HEAD -- <path>` names the commit; `git show "${sha}:<path>" | wc -l`
+gives the digit — brace the SHA or zsh eats `:<path>` as a history modifier),
+then add a fresh descriptive hop for your own change.**
+
+This is not a refinement of style. Skipping the promotion is *precisely* why
+`connect.py`'s and `timeline.py`'s trails each arrived one hop short twice
+running while every author believed they had just fixed them: each wrote a
+correct descriptive hop and none promoted the previous one, so the trail
+accumulated exactly one permanent blind spot that travelled forward with it. The
+frozen half of the record only grows if somebody grows it. *(Added 2026-08-24,
+after `connect.py`'s trail gained its missing `b7fd0e8` hop this way.)*
+
 **There is deliberately no "head" SHA here any more, and there cannot be one.**
 The slot used to read `head 4740f03`; before that, other values. It was wrong
 every time, and not through carelessness — a header cannot name the commit that
