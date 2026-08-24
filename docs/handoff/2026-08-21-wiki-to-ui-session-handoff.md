@@ -117,7 +117,7 @@ the source alone still leaks its snippets into neighbours' payloads.
 
 ---
 
-## 5. RULE-14 LOOP — four iterations, not converged
+## 5. RULE-14 LOOP — not converged
 
 | Iter | Reviewer | Auditor |
 |---|---|---|
@@ -126,8 +126,19 @@ the source alone still leaks its snippets into neighbours' payloads.
 | 3 | 6 findings | NOT PASSED — ceiling rows asserting a false state |
 | 4 | 10 findings (2 HIGH) | NOT PASSED — 1 LOW |
 
+**This table is authoritative only through `833a395`, the commit that wrote it,
+and further rounds have run since without being added to it.** Enumerate them
+with `git log --oneline 833a395..HEAD` — the review/audit-fix commits are the
+rounds. The heading deliberately carries no iteration count now: it read *"four
+iterations"* while the table it heads was already short, which is the §7 trap
+about unbound digits appearing inside the document that catalogues it. A count
+in a heading is invalidated by the next round; a table row is added by it, and a
+`git log` range cannot go stale at all. *(Corrected 2026-08-24.)*
+
 **Every round surfaced defects the previous missed entirely.** Iteration 4's HIGH
-findings were latent bugs three rounds had walked past.
+findings were latent bugs three rounds had walked past — and the rounds after
+this table stops kept doing it: `2b2b321` fixed the CLI's publish gate and its
+message asserted the MCP twins were clean, which `cd7dbfa` then had to correct.
 
 Last full suite (at `4740f03`): **8,402 passed, coverage 93.28%** (gate 85).
 23 errors are `test_restore_gate.py` / `test_restore_swap.py` — **pre-existing**,
