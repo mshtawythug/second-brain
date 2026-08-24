@@ -1,0 +1,93 @@
+{
+  "budget_tokens": 4000,
+  "config": {
+    "embedder": "arctic",
+    "recall_max_candidates": 25,
+    "recall_passage_tokens": 120,
+    "recency_halflife_days": 180.0,
+    "sensitivity": null,
+    "snippet_context_tokens": 200,
+    "vector_sim_floor": 0.25
+  },
+  "corpus": {
+    "documents": {
+      "largest_doc_tokens": 67410,
+      "max_chars": 266888,
+      "mean_chars": 18218.4,
+      "n": 1393
+    },
+    "transcripts": {
+      "max_tokens": 33570,
+      "mean_tokens": 7870.3,
+      "n": 261,
+      "p50_tokens": 7414,
+      "p90_tokens": 15278
+    }
+  },
+  "how": "see the reproduction command in the sibling .md",
+  "limit": 20,
+  "measured_at": "2026-08-11",
+  "measurements": [
+    {
+      "new_brief_tokens": 3772,
+      "new_recall_tokens": 5027,
+      "new_total_tokens": 8799,
+      "old_search_tokens": 10946,
+      "old_show_tokens": 203319,
+      "old_total_tokens": 214265,
+      "query": "pricing conversations",
+      "results": 20
+    },
+    {
+      "new_brief_tokens": 3936,
+      "new_recall_tokens": 5187,
+      "new_total_tokens": 9123,
+      "old_search_tokens": 10125,
+      "old_show_tokens": 140168,
+      "old_total_tokens": 150293,
+      "query": "hiring and team growth",
+      "results": 20
+    },
+    {
+      "new_brief_tokens": 3692,
+      "new_recall_tokens": 5194,
+      "new_total_tokens": 8886,
+      "old_search_tokens": 10142,
+      "old_show_tokens": 247847,
+      "old_total_tokens": 257989,
+      "query": "platform migration planning",
+      "results": 20
+    },
+    {
+      "new_brief_tokens": 3903,
+      "new_recall_tokens": 5249,
+      "new_total_tokens": 9152,
+      "old_search_tokens": 9486,
+      "old_show_tokens": 136594,
+      "old_total_tokens": 146080,
+      "query": "customer onboarding process",
+      "results": 20
+    },
+    {
+      "new_brief_tokens": 3911,
+      "new_recall_tokens": 5122,
+      "new_total_tokens": 9033,
+      "old_search_tokens": 9432,
+      "old_show_tokens": 141643,
+      "old_total_tokens": 151075,
+      "query": "engineering roadmap priorities",
+      "results": 20
+    }
+  ],
+  "plan": "docs/plans/2026-08-10-agentic-token-reduction.md",
+  "queries": 5,
+  "totals": {
+    "delta_pct": -95.10787189763641,
+    "new_mean_tokens": 8998.6,
+    "new_tokens": 44993,
+    "old_mean_tokens": 183940.4,
+    "old_tokens": 919702
+  },
+  "wave": 2,
+  "what": "Counterfactual cost of the two retrieval procedures skills/consult-brain documents. OLD = `brain search --limit 20 --json` then `brain show <id> --json` for each of the 20 results. NEW = `brain search --limit 20 --json --brief` then one `brain recall --budget 4000 --json`. Token counts are the CLI's own stdout bytes, counted with offline tiktoken cl100k_base. This compares two DOCUMENTED PROCEDURES; it does not measure whether an agent follows either."
+}

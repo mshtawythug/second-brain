@@ -115,8 +115,12 @@ A codified gap produces:
 - The `elicitation_gaps` row updated to `status='resolved'` — the gap will not
   resurface.
 
-Read the new note with `brain show <id-prefix>`. Search future sessions with
-`brain search "<topic>" --tag tacit`.
+Read the new note with `brain show <id-prefix>` — it is one document you just
+wrote, so the body is bounded and known. Search future sessions with
+`brain search "<topic>" --tag tacit --json --brief`; to read across several
+tacit notes at once, `brain recall "<topic>" --tag tacit --budget 2000 --json`
+keeps the read under a token ceiling. See `consult-brain` for the full
+cost-ordered table.
 
 ## Config knobs
 

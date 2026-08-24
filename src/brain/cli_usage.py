@@ -44,6 +44,73 @@ def _totals_line(report: UsageReport) -> str:
     return "  ·  ".join(parts)
 
 
+def _tokens_line(report: UsageReport) -> str | None:
+    """The token-cost line, or ``None`` when nothing in the window was priced.
+
+    Rendered as::
+
+        tokens served 148,203 (measured, 412 of 517 calls) · counterfactual
+        savings 61,880 over 210 brief calls (−29.4%)
+
+    **Two clauses, two denominators, and the word "counterfactual" on the
+    second one.** That wording is the deliverable, not decoration. The first
+    clause is a measurement: canonically-serialized payload tokens, over the
+    calls that really priced them (canonical, not rendered — migration 028's
+    header has the why). The second is a comparison against a call
+    that never happened — what those same calls would have cost in the default
+    projection — and it is computed over a strictly smaller set of rows.
+    Blending them into one headline "we save N%" would be the exact claim this
+    wave was built to make impossible: a percentage over calls that never had
+    an alternative is marketing, not measurement.
+
+    Returns ``None`` when ``measured_calls`` is 0 — a window with no priced
+    call has nothing to say, and "tokens served 0" would read as "retrieval
+    was free".
+    """
+    t = report.totals
+    if t.measured_calls == 0:
+        return None
+    served = t.payload_tokens_total or 0
+    parts = [
+        f"tokens served {served:,} "
+        f"(measured, {t.measured_calls:,} of {t.searches:,} calls)"
+    ]
+    savings = t.counterfactual_savings_tokens
+    if savings is not None:
+        # "over 1 brief call", not "over 1 brief calls". The singular is
+        # reachable in practice — it is the shape of a brand-new brain, and
+        # the first thing anyone sees after their first --brief search.
+        noun = "call" if t.counterfactual_calls == 1 else "calls"
+        clause = (
+            # A negative saving is a real outcome — a cheaper mode that turned
+            # out dearer — and it keeps the same U+2212 minus the percentage
+            # uses, rather than mixing an ASCII hyphen into the same clause.
+            f"counterfactual savings {savings:,}".replace("-", "−")
+            + f" over {t.counterfactual_calls:,} brief {noun}"
+        )
+        rate = t.counterfactual_savings_rate
+        if rate is not None:
+            # Signed as a DELTA against the baseline, so a cheaper mode reads
+            # "−29.4%" and a mode that turned out more expensive reads
+            # "+10.0%" instead of being laundered into a saving. U+2212 for
+            # the minus, matching the "·" already emitted on the line above.
+            delta = f"{-rate * 100:+.1f}"
+            # ...but a magnitude that RENDERS as zero has no direction, and
+            # `format(-0.0, "+.1f")` is "-0.0" — which the U+2212 swap below
+            # then turns into "−0.0%", a minus sign in front of a saving of
+            # nothing. A reader reports that as a bug in the measurement, not
+            # in the formatter. Two ways in, both closed here: a saving of
+            # exactly 0 (the counterfactual mode cost precisely what the
+            # default would have), and a real saving too small to survive
+            # rounding to a tenth. The magnitude, not the raw rate, decides —
+            # so "+0.0%" cannot appear either.
+            if float(delta) == 0:
+                delta = "0.0"
+            clause += f" ({delta}%)".replace("-", "−")
+        parts.append(clause)
+    return " · ".join(parts)
+
+
 def _daily_table(report: UsageReport) -> Table:
     table = Table(
         title=f"Activity by day (last {_DAILY_ROWS_SHOWN} shown)",
@@ -159,6 +226,9 @@ def usage(
 
     typer.echo(f"Brain usage — last {days} day(s)")
     typer.echo(f"  {_totals_line(report)}")
+    tokens_line = _tokens_line(report)
+    if tokens_line is not None:
+        typer.echo(f"  {tokens_line}")
     typer.echo("")
     for build in (
         _daily_table,

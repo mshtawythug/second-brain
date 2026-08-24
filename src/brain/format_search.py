@@ -18,6 +18,7 @@ from rich.table import Table
 
 from .facets import SearchFacets
 from .search import SearchDiagnostics, SearchResult
+from .token_budget import TokenCost
 
 #: Printed instead of the facet panel when nothing matched.
 NO_FACETS_MESSAGE = "no facets (0 documents matched)"
@@ -44,6 +45,72 @@ def search_results_json(results: list[SearchResult]) -> list[dict[str, Any]]:
         }
         for r in results
     ]
+
+
+def search_results_brief_json(
+    results: list[SearchResult],
+    *,
+    cost: TokenCost = len,
+) -> list[dict[str, Any]]:
+    """Project results in brief mode: the cheaper of summary vs chunk snippet.
+
+    Built ON TOP of :func:`search_results_json` rather than beside it, so the
+    two cannot drift: that function stays the single construction site for the
+    frozen seven keys, and this one only *chooses* what lands in ``snippet``.
+    The shape is therefore the same seven keys in the same order, plus ONE
+    additive key, ``snippet_source`` ∈ ``{"chunk", "summary"}``, appended last
+    to name which artifact won. Brief mode is not a structurally different
+    payload — a consumer never has to branch on the mode to read a result.
+
+    ``snippet`` carries whichever of the two is cheaper *for that result*,
+    measured with ``cost``. The choice is per-result and NEVER global: on the
+    live corpus one hit's stitched snippet measured 899 characters against a
+    375-character summary while another's ran the other way, so a single
+    global decision would inflate the payload for half the hits. A tie keeps
+    the chunk snippet — strict ``<`` — because the query-conditioned artifact
+    is the more informative of two equally priced ones.
+
+    A missing summary — ``None`` (the 7.4% of documents with no ingest-time
+    summary) *or* an empty / whitespace-only string — always falls back to the
+    chunk snippet, so brief mode can never return *less* than the default
+    projection. The blank case is guarded in code rather than assumed away:
+    ``documents.summary`` has no CHECK constraint (migration 011), so only the
+    enricher, not the schema, keeps blanks out.
+
+    ``cost`` is injected: production passes ``embedder.count_tokens`` for an
+    exact ``cl100k_base`` count, while tests and any caller without an embedder
+    get the ``len`` default and stay dependency-free. Character length is a
+    monotone proxy for token count, so the default still picks the smaller
+    artifact in all but pathological cases.
+
+    **What brief mode trades away, plainly:** a result whose ``snippet_source``
+    is ``"summary"`` no longer tells the agent *why the document matched* — the
+    summary describes the document as a whole and is not conditioned on the
+    query. Re-call the same search without ``brief`` to get the matching
+    passage back.
+    """
+    base = search_results_json(results)
+    for entry, result in zip(base, results, strict=True):
+        # In-place mutation is safe and preserves key order: the dicts above are
+        # freshly built by ``search_results_json`` on every call, so nothing
+        # aliases them and no caller's data is touched.
+        summary = result.summary
+        # Blank-reject, NOT a bare ``is not None``: an empty or whitespace-only
+        # summary costs 0 and would win the comparison, blanking the snippet
+        # while labelling it ``"summary"`` — the exact opposite of the
+        # guarantee above. ``OllamaEnricher.summarize`` rejects blanks today,
+        # but migration 011 carries no CHECK constraint, so nothing in the
+        # SCHEMA enforces it. Costs no extra ``cost`` call — ``strip`` short-
+        # circuits ahead of both.
+        use_summary = (
+            summary is not None
+            and bool(summary.strip())
+            and cost(summary) < cost(entry["snippet"])
+        )
+        if use_summary:
+            entry["snippet"] = summary
+        entry["snippet_source"] = "summary" if use_summary else "chunk"
+    return base
 
 
 def _is_fts_only(diag: SearchDiagnostics) -> bool:
@@ -151,11 +218,22 @@ def search_meta_json(
     when not requested or when the count query failed — never silently ``0``.
     ``fts_count`` keeps its long-standing capped semantics (only its zero case
     is exact) and is NOT a total.
+
+    ``results_tokens`` is the measured ``cl100k_base`` cost of the CANONICAL
+    serialization of the ``results`` array this call produced — the same
+    number persisted to ``search_queries.payload_tokens``, so an agent can
+    read its own budget without a second query. It is not the byte count of
+    what any surface prints: both the CLI (Rich) and the MCP text block
+    re-serialize at ``indent=2``, ~10% larger. ``null`` when the surface
+    produced no payload to price. It counts the array ONLY, not this
+    envelope: the envelope carries
+    the number, so counting it would be self-referential.
     """
     return {
         "total_documents": diag.total_documents,
         "returned": returned,
         "fts_count": diag.fts_count,
+        "results_tokens": diag.results_tokens,
         "timing_ms": {
             "embed": _round_ms(diag.embed_ms),
             "sql": _round_ms(diag.sql_ms),
@@ -173,15 +251,36 @@ def search_envelope_json(
     results: list[SearchResult],
     diag: SearchDiagnostics,
     facets: SearchFacets | None,
+    *,
+    brief: bool = False,
+    cost: TokenCost = len,
 ) -> dict[str, Any]:
     """Build the opt-in ``brain search --json --meta`` envelope.
 
     ``results`` is produced by :func:`search_results_json` — the same call the
     default bare-list path makes — so opting into the envelope cannot change a
     single result object.
+
+    ``brief`` switches that to :func:`search_results_brief_json`, again the
+    same call the bare-list path makes under ``--brief``. Without it the
+    envelope and the bare list would describe the same search differently the
+    moment a user combined ``--brief`` with ``--meta`` — precisely the drift
+    this function's "same call" guarantee exists to prevent. Both parameters
+    are keyword-only with defaults, so every existing caller emits a
+    byte-identical envelope.
+
+    ``cost`` is threaded for the same reason and NOT left at its default when
+    ``brief`` is set by a caller that has an embedder: the summary-vs-snippet
+    choice is made by comparing two ``cost`` readings, so an envelope measured
+    in characters could pick a different artifact than a bare list measured in
+    ``cl100k_base`` tokens — the same drift, one level down.
     """
     return {
         "query": query,
         **search_meta_json(diag, returned=len(results), facets=facets),
-        "results": search_results_json(results),
+        "results": (
+            search_results_brief_json(results, cost=cost)
+            if brief
+            else search_results_json(results)
+        ),
     }

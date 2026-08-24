@@ -27,6 +27,7 @@ from .gaps import record_search_query
 from .ingest import Embedder
 from .queries import PersonMatch
 from .recall import recall as recall_core
+from .token_report import count_payload_tokens
 
 
 def _build_embedder(cfg: Config) -> Embedder:
@@ -140,9 +141,39 @@ def recall(
             thread_id=thread,
             without_tag=without_tag,
         )
+        # Wave 5 — price the artifact this invocation actually emits, which
+        # differs by output mode: ``--json`` delivers the serialized dict,
+        # the default delivers the context block as plain text. Unlike
+        # ``brain search``'s human path (a Rich table, not a payload) BOTH
+        # recall outputs are payloads — the context block is the pasteable
+        # artifact, and its whole purpose is to land in a context window — so
+        # both are measured rather than one being left NULL.
+        #
+        # Deliberately NOT ``result.used_tokens``: that is what was SELECTED
+        # into the budget, and the emitted payload runs ~2.2x larger because
+        # every passage ships twice. The column holds the CANONICAL
+        # serialization of the artifact, which is what this prices.
+        #
+        # Note the asymmetry, honestly: the plain-text branch below IS
+        # delivered-exact (``typer.echo``, no Rich), while the ``--json``
+        # branch is canonical-not-delivered — ``format.emit_json`` re-prints
+        # it through Rich at ``indent=2``, roughly 10% more than counted here.
+        # That is deliberate: see migration 028's header.
+        rendered = None if json_output else result.context_block()
+        payload_tokens = (
+            count_payload_tokens(result.to_dict(), cost=embedder.count_tokens)
+            if rendered is None
+            # A plain-text artifact, so counted directly — wrapping it in
+            # ``json.dumps`` would price quoting and escapes the caller never
+            # gets.
+            else embedder.count_tokens(rendered)
+        )
         # session_id=None: a recall's result IS the content, so no follow-up
         # open will ever arrive and the no_click detector must not mine it as
         # a failure. The fts_count=0 lexical-miss signal stays live.
+        #
+        # ``baseline_tokens`` is left NULL: recall has no cheaper mode, so any
+        # baseline here would be invented rather than measured.
         record_search_query(
             conn,
             query=query,
@@ -151,15 +182,16 @@ def recall(
             session_id=None,
             source="cli",
             agent_id=resolved_agent,
+            payload_tokens=payload_tokens,
             tenant_id=cfg.graph_tenant_id,
         )
 
-    if json_output:
+    if rendered is None:
         emit_json(result.to_dict())
         return
 
     # Plain echo, never console.print — Rich would read ``[1]`` as a style tag.
-    typer.echo(result.context_block())
+    typer.echo(rendered)
 
 
 def register(app: typer.Typer) -> None:

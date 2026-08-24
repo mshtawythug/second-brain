@@ -19,7 +19,7 @@ Eleven skills ship in `skills/`. Each is one directory containing a single
 
 | Skill | Commands it covers | Use a sibling instead when… |
 |---|---|---|
-| [`consult-brain`](../skills/consult-brain/SKILL.md) | `search`, `show`, `explain`, `rate`, `ask`, `audio` | the ask is about themes or connections → `brain-graph` |
+| [`consult-brain`](../skills/consult-brain/SKILL.md) | `search`, `recall`, `show`, `explain`, `rate`, `ask`, `audio` | the ask is about themes or connections → `brain-graph` |
 | [`brain-ask`](../skills/brain-ask/SKILL.md) | `ask`, `audio` | you want ranked documents to read yourself rather than one synthesized answer → `consult-brain` |
 | [`brain-graph`](../skills/brain-graph/SKILL.md) | `graphrag search/themes/entity/entities/stats/communities`, `owner` | it's a single-doc lookup or a quote → `consult-brain` |
 | [`brain-proactivity`](../skills/brain-proactivity/SKILL.md) | `brief`, `resurface`, `review`, `timeline`, `connect`, `gaps`, `capture` | the user asked a specific question → `consult-brain` |
@@ -30,6 +30,48 @@ Eleven skills ship in `skills/`. Each is one directory containing a single
 | [`brain-todo`](../skills/brain-todo/SKILL.md) | `todo`, `enrich --krisp-action-items` | — |
 | [`ingest-brain`](../skills/ingest-brain/SKILL.md) | `ingest`, `ingest-dir`, `ingest-stdin`, `ingest-gmail` | the thought has no source document yet → `brain-proactivity` (`capture`) |
 | [`elicit-brain`](../skills/elicit-brain/SKILL.md) | `elicit`, `elicit list` | the gap is a *failed search* rather than unwritten knowledge → `brain-proactivity` (`gaps`) |
+
+## Token cost is part of routing
+
+A skill does not only decide *which* command an agent runs — it decides how
+much text lands in the agent's context. Two commands can answer the same
+question at a 20× difference in cost, so the retrieval skills carry an explicit
+cost ordering rather than leaving the choice to taste.
+
+The canonical version lives in one place: the **"Choosing a retrieval command
+(cost-ordered, cheapest first)"** table in
+[`consult-brain`](../skills/consult-brain/SKILL.md). Sibling skills reference
+it; they do not restate its numbers. If the costs change, that table and the
+summary below are the only two places to edit — and
+`tests/test_skills_token_routing.py::test_measured_ceiling_lives_in_exactly_two_files`
+fails if a third file starts carrying the figure.
+
+Two rules it encodes, both measured against the live corpus:
+
+- **`brain recall --budget N` is the only retrieval surface with a hard token
+  ceiling.** Every retrieval skill names it. `brain search` is for deciding
+  *which* documents matter; `recall` is for reading them without an open-ended
+  bill.
+- **Never loop `brain show` over a search's results.** Measured over five
+  representative 20-result questions, the search-then-show-each procedure costs
+  a mean of **183,940 tokens** per question (worst: 257,989). The same five
+  questions cost a mean of **8,998 tokens** via `search --brief` to triage plus
+  one `recall --budget 4000` — a −95.1% difference in what the documented
+  procedure asks an agent to read.
+
+Both figures are reproducible, not asserted: the five questions, the
+per-question OLD/NEW token counts, the corpus statistics behind the
+18,218-char mean body, and the exact command that produced them are committed
+as [`docs/audits/2026-08-11-wave2-routing-counterfactual.md`](audits/2026-08-11-wave2-routing-counterfactual.md)
+with the raw numbers alongside it in `…-counterfactual.json`.
+
+This is a **counterfactual comparison of two documented procedures**, not an
+observed production saving. Nothing in this repo measures whether an agent
+actually follows a skill; the claim is about what the documentation instructs,
+and that is all it is. `tests/test_skills_token_routing.py` holds the routing
+honest — it fails if a retrieval skill stops naming `brain recall` (including
+the packaged cheat-sheet `pipx` users get), or if any skill reacquires a
+per-result `brain show` loop.
 
 Routing between skills is carried in each file's frontmatter `description`,
 which ends in a `MANDATORY TRIGGERS:` list of natural-language phrases and names
@@ -63,6 +105,16 @@ upgrades, but means an edit to a repo skill does not reach your agent until you
 re-run the script. After pulling, `--check` will exit non-zero until you do —
 that is the intended signal, not a bug.
 
+That is a claim about the *script*, and an install can still contain a
+hand-made symlink the script never created — which used to be invisible,
+because `diff -rq` follows symlinks and so compared the repo against itself and
+reported `in sync` unconditionally, forever, for that skill. `--check` now
+reports a symlinked entry (the directory, or any file inside it) as
+`SYMLINK … drift is undetectable` and exits non-zero; a plain sync replaces the
+link with a real copy. If you deliberately symlinked a skill to live-follow
+your checkout, that is the trade-off being named: you gain instant edits and
+lose the drift guard for that skill.
+
 ### `brain claude install-skill` — one packaged cheat-sheet
 
 A different thing entirely. It reads a **single** file from package data
@@ -81,7 +133,7 @@ brain claude install-skill --uninstall  # remove it
 | | `bin/brain-skills-sync` | `brain claude install-skill` |
 |---|---|---|
 | Source | the repo's `skills/` directory | one file in package data |
-| Installs | all eight skills, under their own names | one file at `~/.claude/skills/brain/` |
+| Installs | all eleven skills, under their own names | one file at `~/.claude/skills/brain/` |
 | Needs | a repo checkout | nothing beyond the installed CLI |
 | Audience | contributors and source installs | `pipx` / `uvx` users |
 
@@ -112,7 +164,7 @@ description: >
 ```
 
 Checklist for a new skill — these mirror what the house format already enforces
-across all eight:
+across all eleven:
 
 - [ ] `name:` matches the directory name exactly.
 - [ ] `description:` is a folded `>` block ending in a `MANDATORY TRIGGERS:` sentence.
@@ -123,6 +175,8 @@ across all eight:
 - [ ] It closes with a `## Safety rules` or `## Operational notes` section for anything destructive.
 - [ ] Length lands in the 100–300 line house band.
 - [ ] Every flag shown has been checked against the command's real `--help`.
+- [ ] If it retrieves, it names `brain recall` and never shows a per-result
+      `brain show` loop — see "Token cost is part of routing" above.
 - [ ] Examples use synthetic names and `example.com` addresses only — never real personal data.
 
 The last two are not stylistic. A skill that documents a flag which does not

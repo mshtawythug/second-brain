@@ -343,6 +343,7 @@ def _run_hybrid_leg(
                 vector_sim_floor=cfg.vector_sim_floor,
                 recency_halflife_days=cfg.recency_halflife_days,
                 snippet_context_tokens=cfg.snippet_context_tokens,
+                snippet_max_chars=cfg.snippet_max_chars,
             )
             return docs, True
         except Exception as exc:  # noqa: BLE001 — never-raise: degrade to FTS-only

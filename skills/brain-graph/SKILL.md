@@ -44,7 +44,7 @@ user between sessions; this one queries the entity graph built from the
 
 | The user wants… | Reach for |
 |---|---|
-| "Find docs about X" / a quote / a fact from one doc | `consult-brain` → `brain search` |
+| "Find docs about X" / a quote / a fact from one doc | `consult-brain` → `brain search --brief` (then `brain recall` to read) |
 | **Themes/patterns in conversations with a person** | `brain graphrag themes --person "X"` |
 | **Overall themes/clusters across the whole brain** | `brain graphrag search "<q>" --mode global` or `brain graphrag communities` |
 | A single entity's neighbourhood ("what links to X") | `brain graphrag entity "X"` (or `--mode local`) |
@@ -193,12 +193,18 @@ commands/tools.**
 - Use the graph result to organize the answer **by theme / cluster / entity**,
   not as a flat list — that's the whole point of the graph leg.
 - For each theme, name the key entities and cite the representative docs by
-  title (id-prefix when useful). Read full text with `brain show <id> --json`
-  (see `consult-brain`) before quoting.
+  title (id-prefix when useful). To read the supporting material, prefer
+  `brain recall "<theme>" --budget 2000 --json` — it packs passages to a hard
+  token ceiling. Reserve `brain show <id> --json` for the 1–2 documents you
+  need verbatim; a graph result can name a dozen docs, and showing each is
+  unbounded — the whole body every time. For what that costs, and the
+  cheapest command for each intent, see the cost-ordered table in
+  `consult-brain`.
 - For `entities` / `stats`, present an actual inventory — group by type, lead
   with the highest `doc_count` entities, and report the totals plainly.
 - Stay grounded. Don't invent relationships the graph didn't surface. If the
-  graph is thin for the topic, say so and offer a plain `brain search` instead.
+  graph is thin for the topic, say so and offer a plain
+  `brain search --brief` instead.
 - Graph retrieval surfaces deliberately do **not** auto-log feedback the way
   `brain search` does — if the user reacts to a specific doc, you can still
   `brain rate <id-prefix> useful|irrelevant`.

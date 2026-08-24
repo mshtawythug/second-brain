@@ -1,0 +1,28 @@
+# Token-payload measurement queries. One per line; blank lines and
+# #-comments ignored. Mirrors scripts/smoke_queries.txt.
+#
+# NO PII IN THIS FILE. It is committed, so it must never name a real person,
+# employer, customer, deal, or internal project. Keep the queries generic and
+# topical — they exist to produce a STABLE, comparable payload size across
+# runs, not to test retrieval quality (that is scripts/embedding_smoke.py).
+# For a measurement that needs a real personal query, pass it at runtime:
+#
+#     python scripts/token_payload_report.py --query "..."
+
+# Short queries — the cheap end of the range
+hiring
+roadmap
+retrospective
+
+# Ordinary multi-word queries — the common case
+quarterly planning review
+engineering team structure
+incident postmortem follow-ups
+onboarding checklist for new engineers
+budget forecast versus actuals
+
+# Long / conversational queries — the expensive end, and what agents
+# actually send
+what were the main themes in last quarter's planning discussions
+summarize the decisions made about the migration timeline
+which action items are still open from recent meetings

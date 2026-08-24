@@ -7,8 +7,10 @@ comments are ignored), runs each through :func:`brain.search.hybrid_search`,
 and prints the top-K results for visual inspection.
 
 Standalone script (not a ``brain`` subcommand) — kept off the user-facing
-CLI surface deliberately. Import shape matches any other ``brain.*``
-consumer; no special hooks.
+CLI surface deliberately. It imports ``brain.*`` like any other consumer, plus
+one sibling under ``scripts/`` (``query_files``), which resolves because
+running a script puts its own directory on ``sys.path``; a test loading this
+module inserts ``scripts/`` itself, per ``tests/test_collapse_gmail_threads``.
 """
 import argparse
 import json
@@ -16,6 +18,7 @@ import sys
 from pathlib import Path
 
 import psycopg
+from query_files import load_query_lines
 
 from brain.config import Config, ConfigError
 from brain.db import connect
@@ -26,21 +29,6 @@ from brain.search import SearchResult, hybrid_search
 
 DEFAULT_QUERIES_FILE = Path(__file__).resolve().parent / "smoke_queries.txt"
 SNIPPET_PREVIEW_CHARS = 160
-
-
-def _load_queries(path: Path) -> list[str]:
-    """Return non-blank, non-comment lines from ``path`` in order.
-
-    Lines whose stripped form is empty or starts with ``#`` are dropped;
-    everything else is returned with surrounding whitespace stripped.
-    """
-    queries: list[str] = []
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        stripped = raw.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        queries.append(stripped)
-    return queries
 
 
 def _result_to_dict(r: SearchResult) -> dict[str, object]:
@@ -117,7 +105,7 @@ def main(
     if not queries_file.is_file():
         print(f"queries file not found: {queries_file}", file=sys.stderr)
         return 1
-    queries = _load_queries(queries_file)
+    queries = load_query_lines(queries_file)
     if not queries:
         print(f"no queries in {queries_file}")
         return 0

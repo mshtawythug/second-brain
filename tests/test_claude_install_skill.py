@@ -142,6 +142,7 @@ def test_installed_skill_has_required_frontmatter_keys(tmp_path: Path) -> None:
     # refresh doesn't silently drop one.
     for command in [
         "brain search",
+        "brain recall",
         "brain explain",
         "brain show",
         "brain people",

@@ -44,11 +44,22 @@ Before answering anything about the user's own history, work, or prior
 decisions, search first:
 
 ```bash
-brain search "<2-4 keywords>" --limit 5 --json
+brain search "<2-4 keywords>" --limit 5 --json --brief
 ```
 
-Retrieval mechanics — filters, `brain show`, `brain ask`, voice writing — live
-in `consult-brain`. Do not restate them here; hand off.
+`--brief` returns each hit's ingest-time summary instead of its chunk snippet
+when the summary is cheaper — enough to tell you *whether* the brain already
+knows something, which is all this pass needs.
+
+If the search says yes and you now need the material itself, read it under a
+ceiling: `brain recall "<keywords>" --budget 2000 --json`. Never loop
+`brain show` over the hits — that returns every body in full, is unbounded,
+and this skill's read half never needs it. The measured cost is in
+`consult-brain`'s cost-ordered table.
+
+Retrieval mechanics — filters, `brain recall`, `brain show`, `brain ask`, voice
+writing — live in `consult-brain`, including the cost-ordered command table. Do
+not restate them here; hand off.
 
 ## The write half
 
@@ -109,7 +120,7 @@ than writing nothing.
 Never write without checking first:
 
 ```bash
-brain search "<the claim in 3-5 words>" --limit 5 --json
+brain search "<the claim in 3-5 words>" --limit 5 --json --brief
 ```
 
 Then:

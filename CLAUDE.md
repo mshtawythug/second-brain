@@ -72,6 +72,69 @@ IMPORTANT:
 - **Every external HTTP/DB client MUST have explicit timeouts.** Voyage SDK retries handled in `embeddings.py`; Postgres connections set `connect_timeout`.
 - **No bare `except:`** — always catch specific exceptions (`psycopg.OperationalError`, `voyageai.error.RateLimitError`, etc.).
 
+### File-size ceiling — 800 lines
+
+The global rules set a **800-line ceiling** per file (200–400 typical). It binds
+**new modules and new growth**, not a retroactive split mandate: this repo has
+**16 files in `src/` already over it**, and splitting a 9,000-line CLI to satisfy
+a number is how you turn a working module into six broken ones.
+
+The rule as it actually applies here:
+
+- A **new** module lands under 800. No exceptions.
+- An **existing** file under 800 must stay under it — extract rather than grow
+  past. This is why `brain/format_search.py` exists (`format.py` was at 783/800)
+  and why `brain/snippet_context.py` exists (`search.py` is now 793).
+- A file **already over** may grow only for a written reason, recorded in **two
+  complementary places — not either/or**. The wording this replaced named both
+  in one breath ("at the point of growth, in its module docstring"), which reads
+  as alternatives; they are different lines and both are required, for different
+  readers:
+  1. **At the point of growth** — an inline comment where the code was added,
+     saying why. This is for the reviewer reading the diff.
+  2. **A one-line pointer in the module docstring** — see `mcp_server.py`'s and
+     `cli.py`'s headers. This is for the person who opens a 9,000-line file and
+     asks why it is allowed to be this big. They read the top; they do not run
+     `git blame` on line 583 to find out. Without it the justification exists
+     but is undiscoverable, and a rule whose evidence cannot be found is not
+     auditable.
+
+  "It was already over" is not a reason. *(Clarified 2026-08-20, in the same PR
+  that introduced this section — the ambiguity was ours and had not yet shipped.
+  Caught when `cli.py`'s first growth of the branch satisfied (1) and not (2).)*
+
+**Files over the ceiling** (`find src -name '*.py' | xargs wc -l | sort -rn` —
+re-derive, never inherit; these were measured on `feat/agentic-token-reduction`,
+**2026-08-21 16:59**, after the final PR-#8 review-fix round. The clock time is
+not decoration: two rows drifted within one afternoon while three agents edited
+`src/`, and the previous stamp here ("2026-08-20 18:11, after the last src/
+edit") was itself falsified the next day when a QA-closeout commit grew three
+tabled files after it — a date alone would not tell you whether a number
+predates the change you are looking at, and neither will this one once the
+next commit lands):
+
+| File | Lines | Why it is not being split |
+|---|---|---|
+| `cli.py` | 9,068 | One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and **deferred** deliberately. **Grew this branch: 9,019 → 9,068 (+49)** — 39 lines mapping migration 028's new `LockNotAvailable` to an actionable message, plus 10 in the final review round scoping that message to the *failing* migration. Reasons recorded in both places the ceiling rule requires — inline at the handler in `init`, and in the module docstring. |
+| `mcp_server.py` | 4,416 | Same shape — one MCP tool registry. **Grew this branch: 4,009 → 4,416 (+407)** — the largest growth of any file in this table, ahead of `config.py`'s +291. The Wave-3 growth is disclosed and justified in its own docstring, which is what the rule requires of a file already over; the review-round growths (blank-summary guard, signature-default constants) are appended there too. Split deferred alongside `cli.py`. |
+| `config.py` | 2,541 | **Grew this branch: 2,250 → 2,541 (+291).** It grew in the same PR that split `search.py` citing the ceiling — which is the point, and it stands on its own without the superlative this row used to carry. (It read "the largest file over the ceiling"; that was false when written and is still false — `cli.py` (9,068) and `mcp_server.py` (4,416) are both larger, and `mcp_server.py` also grew more (+407 vs +291). Corrected 2026-08-20.) Stated rather than smoothed over: the additions are the six MCP-ceiling knobs, the snippet knob, and the review round's two `MCP_*_DEFAULT_LIMIT` constants + ceiling>=default cross-checks, each carrying its rationale in prose. The knobs belong beside the other knobs; the *evidence blocks* are the growth and they are the reason to split this file next, into `config.py` + a measurements/rationale doc. |
+| `ingest/__init__.py` | 2,298 | Dispatcher + both pipelines; the extractors are already separate modules. |
+| `vault/sync.py` | 1,747 | One reconciliation algorithm. |
+| `queries.py` | 1,658 | Flat read-helper collection — cohesive, low coupling; splitting buys nothing. **Grew this branch: 1,642 → 1,658 (+16)** — the `list_documents` total-order tiebreaker; reason in its module docstring. |
+| `setup.py` | 1,356 | One linear install script with three profile branches. |
+| `wiki/build_watcher.py` | 1,073 | |
+| `vault/watch.py` | 1,070 | |
+| `wiki/build_people.py` | 934 | |
+| `connect.py` | 925 | |
+| `graph_rag/extract.py` | 885 | |
+| `timeline.py` | 844 | |
+| `cli_ingest.py` | 844 | |
+| `wiki/build_related.py` | 815 | |
+| `enrichment.py` | 808 | |
+
+There is **no automated gate** on this — the ceiling is a review checkpoint, not
+CI. If you add a file to this table, add the row in the same edit.
+
 ### Linting — Ruff + mypy
 Run after every change: `ruff check` (lint) or `ruff check --fix` (auto-fix), then `mypy src/`. Config in `pyproject.toml` under `[tool.ruff]` and `[tool.mypy]`.
 

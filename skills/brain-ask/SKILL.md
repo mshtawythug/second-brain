@@ -30,7 +30,8 @@ user's own corpus, and both require a local Ollama.
 
 | Deliverable | Command | Skill |
 |---|---|---|
-| A ranked list of documents you read yourself | `brain search` | `consult-brain` |
+| A ranked list of documents you read yourself | `brain search --brief` | `consult-brain` |
+| Passages to read, capped at a token budget | `brain recall --budget N` | `consult-brain` |
 | One composed answer with inline `[N]` citations | `brain ask` | this one |
 | Themes, patterns, who-connects-to-what | `brain graphrag …` | `brain-graph` |
 | A listenable two-host overview | `brain audio` | this one |
@@ -39,6 +40,24 @@ Reach for the manual search-then-read loop in `consult-brain` when you need
 raw documents *in your context* — voice mimicry, verbatim quoting, drafting.
 Reach for `brain ask` when the deliverable is the answer itself and the user
 wants to see where each claim came from.
+
+### `recall` vs `ask` — who does the reading
+
+Both are bounded; they differ in *where the reading happens*.
+
+- **`brain ask`** does the reading on local Ollama and returns one composed
+  answer (~1–2k tokens). The source text never enters your context. Choose it
+  when the answer *is* the deliverable and you don't need the raw prose.
+- **`brain recall --budget N`** puts the passages themselves in your context,
+  packed to fit within N tokens with `[N]` citations. Choose it when you must
+  reason over, quote, or write from the actual wording — `ask`'s synthesis
+  would have already thrown that away.
+
+Rule of thumb: if you would have followed `ask` with "now show me the source",
+you wanted `recall`. If Ollama is down, `ask` exits non-zero — `recall` does
+not depend on it and is the fallback, not an unbounded `brain show` loop.
+`brain recall` shares every filter with `brain search`; the full cost-ordered
+table lives in `consult-brain`, which is the one place it is maintained.
 
 `consult-brain` also documents these two commands as part of its own workflow;
 that is deliberate overlap, not a conflict. Use this skill when synthesis is

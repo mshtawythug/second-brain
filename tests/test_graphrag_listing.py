@@ -638,7 +638,14 @@ def test_mcp_entities_sort_name(
 def test_mcp_entities_limit_zero(
     test_db: psycopg.Connection[Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """brain_graphrag_entities limit=0 returns all entities."""
+    """brain_graphrag_entities limit=0 returns every seeded entity.
+
+    Wave 3 changed what ``limit=0`` MEANS: it is re-mapped to
+    ``BRAIN_GRAPH_ENTITIES_MAX_LIMIT`` (500) rather than "unbounded". This
+    corpus has 5 entities, so the observable result is unchanged — the
+    re-mapping is pinned by
+    ``tests/test_mcp_payload_ceilings.py::test_graphrag_entities_limit_zero_no_longer_means_all``.
+    """
     # Arrange
     _seed_mixed_entities(test_db)
     _mcp_state(monkeypatch)
@@ -826,3 +833,63 @@ def test_parity_stats_cli_vs_mcp(
     ):
         assert mcp_payload[key] == cli_payload[key], f"mismatch on {key!r}"
     assert mcp_payload["top_entities"] == cli_payload["top_entities"]
+
+
+# --------------------------------------------------------------------------- #
+# Total-order regression (sibling of F-1, e2e QA 2026-08-20)
+#
+# ``brain_graphrag_entities`` over-fetches ``limit + 1`` and prefix-slices with
+# ``cap_rows`` — the same LOW-3 shape as the link tools. That only works if the
+# SQL order is TOTAL. ``name`` is not unique (graph_entities is UNIQUE on
+# tenant_id + entity_type + canonical_key), so two entities can share a display
+# name and, under a tie, PostgreSQL may order the bounded top-N plan differently
+# from the unbounded one. The order clause therefore ends in the rest of that
+# unique key. Mutation check: drop ``entity_type ASC, canonical_key ASC`` from
+# ``list_entities`` and these go red.
+# --------------------------------------------------------------------------- #
+_TIED_ENTITIES = 60
+
+
+def _seed_tied_entities(
+    conn: psycopg.Connection[Any], tenant: str = "default"
+) -> None:
+    """Many entities sharing BOTH ``doc_count`` and ``name``."""
+    for i in range(_TIED_ENTITIES):
+        _insert_entity(
+            conn,
+            tenant,
+            "person" if i % 2 else "org",
+            "Same Name",  # identical on purpose
+            f"same-name-{i:03d}",
+            doc_count=7,  # identical on purpose
+        )
+
+
+@pytest.mark.parametrize("sort", ["docs", "name"])
+def test_list_entities_limit_is_a_prefix_when_names_tie(
+    test_db: psycopg.Connection[Any], sort: str
+) -> None:
+    """``list_entities(limit=n)`` is the first ``n`` rows of the unbounded list."""
+    _seed_tied_entities(test_db)
+
+    full = list_entities(test_db, "default", sort=sort, limit=0)
+
+    assert len(full) == _TIED_ENTITIES
+    assert len({r.name for r in full}) == 1, "fixture sanity — names all tie"
+    assert len({r.doc_count for r in full}) == 1, "fixture sanity — counts all tie"
+    for cap in (1, 2, 3, _TIED_ENTITIES // 2, _TIED_ENTITIES - 1):
+        bounded = list_entities(test_db, "default", sort=sort, limit=cap)
+        assert len(bounded) == cap, f"right COUNT at limit={cap} sort={sort}"
+        assert bounded == full[:cap], f"right ROWS at limit={cap} sort={sort}"
+
+
+def test_graph_stats_top_entities_is_the_list_entities_prefix_when_names_tie(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """``graph_stats`` documents its top-10 as the ``list_entities`` slice."""
+    _seed_tied_entities(test_db)
+
+    stats = graph_stats(test_db, "default")
+    expected = list_entities(test_db, "default", sort="docs", limit=10)
+
+    assert list(stats.top_entities) == expected

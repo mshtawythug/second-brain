@@ -15,6 +15,11 @@ Path                                 Covered by
                                      FROM the body
 ``GET /api/notes`` → ``body_hash``   ``test_body_hash_is_not_emitted``
 ``GET /api/search`` → ``snippet``    ``test_search_snippet_is_redacted``
+``GET /api/search`` → ``summary``    ``test_redaction_drops_a_summary_key_…``
+                                     — a *forward* guard: the projection has no
+                                     ``summary`` key yet, and the companion
+                                     ``…_is_a_no_op_against_todays_projection``
+                                     is what will tell you when that changes
 ``PUT /api/notes``                   ``test_withheld_note_cannot_be_edited``
 titles / tree / metadata             ``test_title_and_tier_stay_visible`` —
                                      deliberately NOT withheld
@@ -225,6 +230,67 @@ def test_snippet_redaction_survives_as_defence_in_depth(
     redacted = _redact(payload, {confidential_id})
     assert redacted["snippet"] == ""
     assert redacted["withheld"] is True
+
+
+def test_redaction_drops_a_summary_key_if_the_projection_ever_adds_one() -> None:
+    """The forward-looking half of the redactor: a body-derived *summary*.
+
+    ``search_result_payload`` does not emit ``summary`` today, so this cannot be
+    driven through the endpoint — which is precisely the point. The payload is
+    injected directly, standing in for the one-line projection change that would
+    otherwise ship an LLM-written condensation of the body under
+    ``withheld: True``. Delete the ``payload.pop("summary", None)`` line and this
+    goes red at the ``"summary" not in`` assertion.
+
+    Its companion below pins the no-op claim: today's real projection has no
+    ``summary`` key, so if that ever changes, one of these two tests speaks up.
+    """
+    from brain.ui.routes_search import _redact
+
+    payload = {
+        "id": "confidential-doc",
+        "snippet": SECRET_PHRASE,
+        "summary": f"A précis mentioning {SECRET_PHRASE}.",
+    }
+
+    redacted = _redact(payload, {"confidential-doc"})
+
+    assert "summary" not in redacted, (
+        "a body-derived summary shipped alongside withheld: True"
+    )
+    assert SECRET_PHRASE not in repr(redacted), redacted
+    assert redacted["withheld"] is True
+
+
+def test_a_non_confidential_hit_keeps_its_summary_untouched() -> None:
+    """The drop is scoped to redacted ids — it must not blank normal results."""
+    from brain.ui.routes_search import _redact
+
+    payload = {"id": "not-confidential", "snippet": "s", "summary": "keep me"}
+
+    assert _redact(payload, {"some-other-id"})["summary"] == "keep me"
+
+
+def test_the_summary_drop_is_a_no_op_against_todays_projection() -> None:
+    """Pins *why* the drop is currently unobservable through the endpoint.
+
+    If ``search_result_payload`` gains a ``summary`` key this goes red, which is
+    the signal to convert the test above from an injected payload into a real
+    end-to-end assertion rather than to relax this one.
+    """
+    from brain.ui.schemas import search_result_payload
+
+    class _Result:
+        document_id = "d"
+        title = "t"
+        source_kind = "manual"
+        snippet = "s"
+        score = 1.0
+        content_type = "note"
+        tags: list[str] = []
+        summary = "a body-derived précis"
+
+    assert "summary" not in search_result_payload(_Result())
 
 
 def test_withheld_note_cannot_be_edited(

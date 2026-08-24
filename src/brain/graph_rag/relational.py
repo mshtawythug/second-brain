@@ -247,7 +247,8 @@ def list_entities(
     Returns :class:`~brain.graph_rag.schema.EntitySummary` rows from
     ``graph_entities``, filtered to ``entity_type`` when given, ordered by
     ``sort`` (``"docs"`` → ``doc_count DESC, name ASC``; ``"name"`` →
-    ``name ASC``), and capped at ``limit`` rows (``limit <= 0`` returns all).
+    ``name ASC``) with ``entity_type, canonical_key`` appended to both so the
+    sort is TOTAL, and capped at ``limit`` rows (``limit <= 0`` returns all).
     Read-only; no raw Cypher or AGE traversal. The raw ``embedding`` column is
     not selected (a storage handle, not a wire value).
 
@@ -271,8 +272,18 @@ def list_entities(
         where_clause += " AND entity_type = %s"
         params.append(entity_type)
 
+    # ``name`` is NOT unique: graph_entities is UNIQUE on
+    # (tenant_id, entity_type, canonical_key), so two entities can share a
+    # display name across types (or across canonical keys after alias
+    # normalization). Appending the rest of the unique key makes both sorts
+    # TOTAL, which is what lets the MCP caller's ``LIMIT n`` be a genuine
+    # prefix of the unbounded listing -- PostgreSQL orders ties differently
+    # under a bounded top-N plan than under a full sort.
+    tiebreak = ", entity_type ASC, canonical_key ASC"
     order_clause = (
-        "ORDER BY doc_count DESC, name ASC" if sort == "docs" else "ORDER BY name ASC"
+        "ORDER BY doc_count DESC, name ASC" + tiebreak
+        if sort == "docs"
+        else "ORDER BY name ASC" + tiebreak
     )
 
     sql = (
@@ -331,7 +342,10 @@ def graph_stats(
     top_rows = conn.execute(
         "SELECT entity_type, name, canonical_key, doc_count, description "
         "FROM graph_entities WHERE tenant_id = %s "
-        "ORDER BY doc_count DESC, name ASC LIMIT 10",
+        # Total sort -- same tiebreak as list_entities, so the "top 10"
+        # is a stable slice rather than an arbitrary one among ties.
+        "ORDER BY doc_count DESC, name ASC, entity_type ASC, canonical_key ASC "
+        "LIMIT 10",
         (tenant_id,),
     ).fetchall()
     top_entities = tuple(

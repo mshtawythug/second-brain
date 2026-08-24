@@ -6,6 +6,8 @@ JSON-RPC round-trip is exercised separately by the protocol integration test.
 """
 import logging
 import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -16,6 +18,7 @@ import pytest
 from brain import mcp_server
 from brain.config import Config
 from brain.embeddings import OllamaEmbedError
+from brain.errors import BrainError
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.mcp_compat import MCPError
 from brain.vault.frontmatter import parse_frontmatter
@@ -1082,10 +1085,52 @@ def test_brain_edit_propagates_value_errors(
 def test_get_state_without_init_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A tool call before main() runs is a programmer error, not a user error."""
+    """A tool call before main() runs is a programmer error, not a user error.
+
+    CONTRACT CHANGE (2026-08-20): was ``pytest.raises(AssertionError)``. The
+    guard was a bare ``assert``, which ``python -O`` strips — so this test
+    asserted a behaviour that did not exist under an optimized interpreter, and
+    would itself have FAILED there. It now pins ``BrainError``, which survives
+    ``-O``; ``test_get_state_guard_survives_python_dash_O`` below proves it.
+    """
     monkeypatch.setattr(mcp_server, "_state", None)
-    with pytest.raises(AssertionError):
+    with pytest.raises(BrainError) as excinfo:
         mcp_server._get_state()
+
+    # Name the invariant, not just "internal error" — the reader's first
+    # question is *what* was not initialized.
+    assert "not initialized" in str(excinfo.value)
+
+
+def test_get_state_guard_survives_python_dash_O() -> None:
+    """The reason the ``assert`` had to go.
+
+    Runs a fresh interpreter with ``-O`` (assertions stripped) and asserts the
+    guard still raises. Mutating the ``raise`` in :func:`mcp_server._get_state`
+    back into a bare ``assert`` reddens THIS test and no other, because it is
+    the only one here that runs with assertions disabled.
+    """
+    program = (
+        "import brain.mcp_server as m\n"
+        "from brain.errors import BrainError\n"
+        # Prove -O is actually in effect, so this cannot pass vacuously if the
+        # flag is ever dropped from the argv below.
+        "assert False, 'assertions are enabled: -O did not take effect'\n"
+        "m._state = None\n"
+        "try:\n"
+        "    m._get_state()\n"
+        "except BrainError:\n"
+        "    print('RAISED')\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-O", "-c", program],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "RAISED", proc.stdout
 
 
 def test_configure_logging_sets_known_level(

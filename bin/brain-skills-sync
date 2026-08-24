@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # brain-skills-sync — copy-install the brain-family skills into ~/.claude/skills.
 # Copy-based (real files, predictable), idempotent, with a --check drift guard.
+# A dest entry that is a SYMLINK is reported as drift, not "in sync": `diff -rq`
+# follows links, so a symlinked skill would compare the repo against itself and
+# pass the guard unconditionally. A plain run replaces such a link with a copy.
 # Touches ONLY the brain-family skills enumerated from the repo skills/ dir —
 # never the other global skills (e.g. the open-design collection).
 set -euo pipefail
@@ -27,7 +30,69 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-DEST="${DEST%/}"
+# --- Destination normalisation + root guard --------------------------------
+# Every "$DEST/$name" below is fed to `rm -rf` and `cp -R`, so $DEST itself has
+# to be validated before a single skill is enumerated. The first version of this
+# guard stripped exactly ONE trailing slash and rejected the empty result, which
+# let `--dest //` and `--dest ///` walk straight through it: "//" strips to "/",
+# which is non-empty, so every $dst read "//<skill>" — and a leading run of
+# slashes IS the filesystem root, so that is `rm -rf /<skill>` followed by
+# `cp -R` into /, once per skill. "It fails on permissions for a non-root user"
+# is not the guard working; under sudo or in a root container nothing stops it.
+#
+# One shape does not generalise to the next, so there are three normalisations,
+# and each has its own test in tests/test_brain_skills_sync.py:
+#   1. strip ALL trailing slashes, then reject an empty result — "/", "//",
+#      "///", and an explicitly empty --dest all collapse to "".
+#   2. reject "." and ".." path components. "/.." IS the root, "$HOME/../.."
+#      climbs above the tree while looking nested, and a bare "." / ".." cannot
+#      be judged by inspection at all.
+#   3. reject a dest that PHYSICALLY resolves to "/". A symlink pointing at the
+#      root is invisible to any amount of string inspection, and no amount of
+#      normalising the string above would ever catch it.
+while [[ "$DEST" == */ ]]; do DEST="${DEST%/}"; done
+
+[[ -n "$DEST" ]] || {
+  echo "error: destination resolved to an empty path (was it \"/\" or \"//\"?); refusing to sync skills to the filesystem root" >&2
+  exit 2
+}
+
+case "/$DEST/" in
+  */../*|*/./*)
+    echo "error: refusing a destination with a \".\" or \"..\" path component: '$DEST'; pass a path that names the directory directly" >&2
+    exit 2
+    ;;
+esac
+
+# Fail CLOSED: a dest that exists but cannot be resolved (not a directory, or
+# unreadable) is a dest we cannot prove is safe, and an unprovable dest is not
+# one we may `rm -rf` inside. A dest that does not exist yet is fine — it is
+# created by `mkdir -p` below, and clauses 1-2 already guarantee it is neither
+# root nor a climb out of the tree.
+if [[ -e "$DEST" ]]; then
+  dest_real="$(CDPATH= cd -P -- "$DEST" 2>/dev/null && pwd -P)" || {
+    echo "error: destination exists but could not be resolved (not a directory, or unreadable): '$DEST'" >&2
+    exit 2
+  }
+  [[ "$dest_real" != "/" ]] || {
+    echo "error: destination '$DEST' resolves to the filesystem root ('$dest_real'); refusing to sync skills there" >&2
+    exit 2
+  }
+fi
+
+# Guard for the write verbs. `rm -rf "$dst"` and `cp -R … "$dst"` are only ever
+# correct on a path genuinely inside $DEST; assert that rather than trusting how
+# $dst was built, because the construction is what a future edit would change.
+# Called at all three write sites — both deletes AND the fresh-install copy, so
+# a mis-built $dst cannot plant a tree outside the dest either. Fails loudly on
+# purpose — silently skipping the delete would leave a stale skill installed and
+# `--check` would then report drift the sync claimed to have fixed.
+assert_under_dest() {
+  [[ "$1" == "$DEST"/* ]] || {
+    echo "error: refusing to modify '$1': not under the destination directory '$DEST'" >&2
+    exit 2
+  }
+}
 
 [[ -d "$SRC_SKILLS" ]] || { echo "error: repo skills dir not found: $SRC_SKILLS" >&2; exit 1; }
 
@@ -54,10 +119,32 @@ for name in "${skills[@]}"; do
       echo "  $name: MISSING (not installed)"
       stale=1
     else
-      mkdir -p "$DEST"
-      cp -R "$src" "$dst"
+      assert_under_dest "$dst"
+      mkdir -p -- "$DEST"
+      cp -R -- "$src" "$dst"
       echo "  $name: installed"
       n_installed=$((n_installed + 1))
+    fi
+    continue
+  fi
+
+  # A symlinked destination entry — the whole directory, or any file inside
+  # it — defeats the drift check entirely: `diff -rq` FOLLOWS symlinks, so a
+  # dest that points back at the repo compares the repo against itself and
+  # reports "in sync" unconditionally, for every future edit, forever. That is
+  # a guard that cannot fail for the file it most needs to guard. Detect it
+  # explicitly and call it drift; a sync then replaces the link with a real
+  # copy (`rm -rf` on a symlink removes the LINK, never its target).
+  if [[ -L "$dst" ]] || [[ -n "$(find "$dst" -type l -print -quit 2>/dev/null)" ]]; then
+    if [[ "$CHECK" == "1" ]]; then
+      echo "  $name: SYMLINK (installed as a link, not a copy — drift is undetectable)"
+      stale=1
+    else
+      assert_under_dest "$dst"
+      rm -rf -- "$dst"
+      cp -R -- "$src" "$dst"
+      echo "  $name: updated (replaced a symlink with a real copy)"
+      n_updated=$((n_updated + 1))
     fi
     continue
   fi
@@ -76,8 +163,9 @@ for name in "${skills[@]}"; do
       stale=1
     else
       # Wholesale replace so repo deletions propagate to the dest.
-      rm -rf "$dst"
-      cp -R "$src" "$dst"
+      assert_under_dest "$dst"
+      rm -rf -- "$dst"
+      cp -R -- "$src" "$dst"
       echo "  $name: updated"
       n_updated=$((n_updated + 1))
     fi
