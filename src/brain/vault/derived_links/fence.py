@@ -35,6 +35,7 @@ from typing import Any
 import psycopg
 import yaml
 
+from ...sensitivity import CONFIDENTIAL, not_confidential_sql
 from .._atomic import atomic_write_text
 from ..paths import safe_wikilink_alias
 
@@ -193,9 +194,40 @@ def render_fenced_section(
     bullet list empty (or the rule filter dropped every edge for this
     doc), returns ``None`` (caller should remove the fence rather than
     emit an empty section).
+
+    **F6: confidential partners are excluded, unconditionally.** This function
+    has exactly ONE consumer -- :func:`rewrite_derived_fences`, which writes the
+    result into an ``_ingested/`` mirror -- and that file is an egress boundary:
+    ``_ingested/`` appears in NEITHER Quartz config's ``ignorePatterns``, and a
+    fence bullet on a *normal* host renders as a visible anchor whose text is
+    the partner's TITLE and whose target is the partner's slug. The host's own
+    ``sensitivity: normal`` frontmatter is what keeps that page published, so
+    ``RemoveConfidential`` never looks at the partner named inside it.
+
+    **One predicate, both endpoints.** ``iter_suggestions`` needs two gates
+    because it joins ``sd`` and ``td`` separately; here the ``CASE`` join
+    resolves *the end that is not the host* whichever column it sits in, so a
+    single predicate on ``partner`` covers a confidential document in the
+    ``src`` position and in the ``dst`` position alike. Both directions are
+    pinned by test, because "the symmetric join covers it" is an argument, and
+    an argument is not a measurement.
+
+    **No ``exclude_confidential`` parameter, deliberately** -- a departure from
+    :func:`brain.connect.iter_suggestions`, which has one. That function serves
+    two audiences (a terminal, permissive; the MCP boundary, gated) and needs a
+    knob to tell them apart. This one serves a single audience and that audience
+    publishes, so a permissive direction would have no legitimate caller and
+    would exist only as a flag someone can set wrong. The gate that cannot be
+    turned off cannot be turned off by mistake.
     """
+    partner_not_confidential = not_confidential_sql("partner")
+    # F6 gate, interpolated rather than bound: ``not_confidential_sql`` returns a
+    # frozen literal built from a module constant that never touches caller
+    # input, and every other parameter in this statement is positional -- adding
+    # a bound parameter on a conditional clause is how the sibling call sites
+    # bind the wrong value in the wrong order. See that function's docstring.
     rows = conn.execute(
-        """
+        f"""
         SELECT
             partner.id::text,
             partner.title,
@@ -213,6 +245,7 @@ def render_fenced_section(
         WHERE (dl.src_document_id = %s::uuid
                OR dl.dst_document_id = %s::uuid)
           AND dl.rule = ANY(%s)
+          AND {partner_not_confidential}
         ORDER BY dl.weight DESC,
                  partner.metadata->>'date' DESC NULLS LAST,
                  partner.id ASC
@@ -315,6 +348,28 @@ def rewrite_derived_fences(
       counter cannot lie about disk effect.
     - **Q5=b** + Q2a fence content uses ``[[<filename-stem>|<title>]]
       *(<rule>)*`` (rendered by :func:`render_fenced_section`).
+    - **F6: a confidential host gets its fence STRIPPED, not rendered.**
+      The second of the two legs, and it is weaker than the first -- say so
+      rather than let a reader assume both close measured leaks. The partner
+      gate in :func:`render_fenced_section` closes a disclosure that was
+      *reproduced*: a confidential title inside a published normal page. This
+      leg closes nothing measured, because a confidential host's own mirror
+      carries ``sensitivity: confidential`` and Quartz's ``RemoveConfidential``
+      does read that key. It is here because ``_ingested/`` is in neither
+      Quartz config's ``ignorePatterns``, so that TypeScript filter is the ONLY
+      thing unpublishing the page -- and a SQL-side pipeline should not depend
+      on a downstream filter in another language being correct, which is the
+      same argument that made ``people.aggregate_people`` fail closed. Cost,
+      stated because it is real: derived-link navigation disappears from
+      confidential mirrors in local Obsidian.
+
+      STRIP rather than SKIP so the pipeline converges. Skipping would leave a
+      previously-rendered fence frozen on disk the moment a document is marked
+      confidential; stripping removes it on the next pass. (Neither fixes the
+      *partner*-side staleness -- ``brain mark-confidential`` regenerates only
+      the marked document's own mirror, so its title sits in every partner's
+      published fence until the next relink. That gap is reported, not fixed
+      here.)
 
     Returns the count of files actually written. Docs in ``doc_ids`` that
     map to a vault-tier row, have no ``vault_path`` set, whose mirror
@@ -344,13 +399,13 @@ def rewrite_derived_fences(
     # production scale (~500 ingested docs) the IN-list fits comfortably in
     # one query and saves N round-trips on a full corpus relink.
     rows = conn.execute(
-        "SELECT id::text, kind, vault_path FROM documents "
+        "SELECT id::text, kind, vault_path, sensitivity FROM documents "
         "WHERE id = ANY(%s)",
         (sorted(doc_ids),),
     ).fetchall()
 
     written = 0
-    for doc_id, kind, vp in rows:
+    for doc_id, kind, vp, sensitivity in rows:
         # Q3=a: vault-tier files stay untouched in v1.
         if kind != "ingested":
             continue
@@ -382,7 +437,15 @@ def rewrite_derived_fences(
             )
             continue
 
-        new_fence = render_fenced_section(conn, doc_id)
+        # F6 host leg — see the docstring. ``None`` routes to ``strip_fence``
+        # below, which is the same path an edge-less document takes, so a
+        # confidential mirror converges on "no fence" instead of freezing
+        # whatever was rendered before it was marked.
+        new_fence = (
+            None
+            if sensitivity == CONFIDENTIAL
+            else render_fenced_section(conn, doc_id)
+        )
         new_body = (
             strip_fence(body) if new_fence is None
             else replace_fence(body, new_fence)
