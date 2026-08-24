@@ -159,21 +159,23 @@ def test_the_marked_documents_own_fence_goes_too(
 ) -> None:
     """The marked document's own mirror loses its fence as well.
 
-    **This one does NOT pin the refresh, and the docstring said it did until a
-    mutation proved otherwise.** Removing ``refresh_fences_naming`` from
-    ``cli_docs`` leaves this test green, because ``_set_sensitivity`` already
-    regenerates an ingested-tier mirror wholesale via ``regenerate_vault_file``
-    and a regenerated mirror has no fence. On THIS path the refresh's inclusion
-    of the marked document is redundant.
+    **This docstring has now been wrong twice, in opposite directions, and both
+    times a mutation is what said so.** It first claimed to pin the fence
+    refresh; it did not — ``_set_sensitivity`` regenerated an ingested mirror
+    wholesale, so the fence went whether or not the refresh ran, and removing
+    the refresh left this green. It was relabelled as characterization on that
+    basis. Then the two mechanisms moved behind one call
+    (``propagate_sensitivity_to_vault``), and removing THAT call removes both,
+    so this test reddens again — the relabelling had gone stale within the same
+    branch that wrote it.
 
-    It is kept, relabelled, as a characterization test: the end state is part
-    of the contract even though a different mechanism delivers it here, and if
-    the mirror regeneration is ever narrowed this becomes the thing that
-    notices. Where the refresh IS load-bearing for the marked document's own
-    fence is the sweep path — ``cli_sensitivity`` performs no mirror
-    regeneration at all — and that is asserted in
-    :func:`test_the_sensitivity_sweep_also_scrubs_partner_pages`, where mutation
-    I does redden it.
+    What it pins, stated so it survives the next refactor: **the end state.**
+    After a mark, the marked document's own mirror carries no fence. Which
+    mechanism delivers that — mirror regeneration, the fence refresh, or both —
+    is an implementation detail this test deliberately does not name, because
+    naming it is what went stale twice. Both mechanisms currently live behind
+    the shared propagation call, and either one alone would satisfy this on the
+    ingested path.
     """
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     assert "BRAIN_DERIVED_START" in (tmp_path / _CONF_REL).read_text(encoding="utf-8")
@@ -205,6 +207,16 @@ def test_mark_normal_restores_the_partner_page_without_a_relink(
     page = _host_page(tmp_path)
     assert CONF_TITLE in page
     assert CONF_STEM in page
+    # The marked document's OWN fence is back too — and this assertion is what
+    # pins the STAGE ORDER inside ``propagate_sensitivity_to_vault``. Stage 1
+    # regenerates an ingested mirror wholesale, which produces a file with no
+    # fence; stage 2 renders the fence. Reverse them and stage 1 silently
+    # discards what stage 2 just wrote. Added because a mutation that swapped
+    # the two stages left every other assertion in this module green: the
+    # ordering was argued in a docstring and measured nowhere.
+    assert "BRAIN_DERIVED_START" in (tmp_path / _CONF_REL).read_text(
+        encoding="utf-8"
+    )
 
 
 def test_an_idempotent_remark_is_still_a_no_op(
@@ -339,45 +351,91 @@ def test_the_sensitivity_sweep_also_scrubs_partner_pages(
     ).read_text(encoding="utf-8")
 
 
-def test_the_sweep_leaves_the_mirror_frontmatter_stale_PREEXISTING(
+def test_the_sweep_writes_the_tier_into_the_mirror_frontmatter(
     published: dict[str, str],
     test_db: psycopg.Connection,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CHARACTERIZATION of a SEPARATE, PRE-EXISTING hole this commit does NOT fix.
+    """The sweep must make the document confidential ON DISK, not only in the DB.
 
-    ``brain backfill scan-secrets --action mark-confidential --apply`` flips
-    ``documents.sensitivity`` and never writes the tier into the mirror's
-    frontmatter — ``cli_sensitivity`` has no ``regenerate_vault_file`` or
-    ``rewrite_sensitivity`` call, unlike ``cli_docs._set_sensitivity``. Quartz's
-    ``RemoveConfidential`` reads the FILE, so the marked document's own page
-    keeps publishing.
+    **This test was born as a characterization test asserting the opposite.**
+    ``brain backfill scan-secrets --action mark-confidential --apply`` flipped
+    ``documents.sensitivity`` and never wrote the tier into the mirror, because
+    ``cli_sensitivity`` had no ``regenerate_vault_file`` / ``rewrite_sensitivity``
+    call while ``cli_docs`` did. Quartz's ``RemoveConfidential`` reads the FILE,
+    so the marked document's own page kept publishing: the sweep reported
+    ``N written`` and, on the published site, made nothing confidential. That is
+    the command someone runs *after finding secrets in their corpus*.
 
-    That is a bigger hole than the fence staleness this commit closes, on the
-    same command, and it is deliberately left open here rather than folded in:
-    it is a different mechanism with a different fix. Pinned as a
-    characterization test so it is **recorded and cannot be discovered twice**,
-    and so whoever fixes it gets a failing test telling them where to update
-    this expectation. Flip the assertion when you fix it.
+    Both callers now go through ``propagate_sensitivity_to_vault``, so the DB
+    flip and the disk work cannot drift apart again.
+
+    The DB assertion is the non-vacuity control: without it, "the frontmatter
+    says confidential" could pass on a run where the sweep matched nothing and
+    the fixture happened to start that way.
     """
     monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
     test_db.execute(
         "UPDATE documents SET content = %s WHERE id = %s::uuid",
         ("token AKIAIOSFODNN7EXAMPLE end\n", published["partner"]),
     )
+    # Control: the file starts at ``normal``, so the assertion below is about
+    # the sweep and not about a fixture that was already correct.
+    assert "sensitivity: normal" in (tmp_path / _CONF_REL).read_text(
+        encoding="utf-8"
+    )
 
-    runner.invoke(
+    result = runner.invoke(
         cli.app,
         ["backfill", "scan-secrets", "--action", "mark-confidential", "--apply"],
     )
 
+    assert result.exit_code == 0, result.stdout
     db_tier = test_db.execute(
         "SELECT sensitivity FROM documents WHERE id = %s::uuid",
         (published["partner"],),
     ).fetchone()
-    assert db_tier is not None and db_tier[0] == CONFIDENTIAL
+    assert db_tier is not None and db_tier[0] == CONFIDENTIAL, result.stdout
+
     frontmatter = (tmp_path / _CONF_REL).read_text(encoding="utf-8")
-    # The bug, asserted as it currently behaves.
-    assert "sensitivity: normal" in frontmatter
-    assert "sensitivity: confidential" not in frontmatter
+    # The fix: the file agrees with the database, which is the only thing
+    # ``RemoveConfidential`` can act on.
+    assert "sensitivity: confidential" in frontmatter
+    assert "sensitivity: normal" not in frontmatter
+
+
+def test_the_sweep_marks_a_vault_tier_note_on_disk_too(
+    test_db: psycopg.Connection, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other ``kind`` branch — a vault-tier note is edited, not regenerated.
+
+    ``regenerate_vault_file`` refuses vault-tier rows outright (the file is
+    authoritative there), so an ingested-only fix would leave exactly the notes
+    most likely to hold sensitive material untouched. Worse than untouched:
+    ``sync._sensitivity_from_frontmatter`` reads the tier back off the
+    frontmatter on every pass, so the column would flip and then silently
+    REVERT on the next ``brain vault sync``.
+    """
+    rel = "notes/2026-06-05-authored.md"
+    doc_id = _doc(test_db, title="Authored note (synthetic)", vault_path=rel)
+    test_db.execute(
+        "UPDATE documents SET kind='vault', content=%s WHERE id=%s::uuid",
+        ("token AKIAIOSFODNN7EXAMPLE end\n", doc_id),
+    )
+    _mirror(tmp_path, rel, "Authored note (synthetic)", "normal")
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+
+    result = runner.invoke(
+        cli.app,
+        ["backfill", "scan-secrets", "--action", "mark-confidential", "--apply"],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    db_tier = test_db.execute(
+        "SELECT sensitivity FROM documents WHERE id = %s::uuid", (doc_id,)
+    ).fetchone()
+    assert db_tier is not None and db_tier[0] == CONFIDENTIAL, result.stdout
+    assert "sensitivity: confidential" in (tmp_path / rel).read_text(
+        encoding="utf-8"
+    )

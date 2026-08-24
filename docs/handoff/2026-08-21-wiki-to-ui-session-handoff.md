@@ -289,6 +289,31 @@ Full detail is in project memory (`feedback_prove_the_check_can_fail`,
   hop for the in-flight change) and this message ignored the form its own diff
   was extending. State the PARENT figure — a fact about a frozen tree — and let
   the trail carry the rest. *(Recorded 2026-08-24.)*
+- **A claim can be UNPINNED rather than false — and the two look identical in a
+  green suite.** Every entry above is about a claim that was *wrong*. This one
+  is about a claim that was *right and measured nowhere*, which a passing test
+  run cannot distinguish from a claim that is enforced.
+  `propagate_sensitivity_to_vault`'s docstring argues its two stages must run
+  mirror-then-fences, because stage 1 regenerates a mirror wholesale and would
+  discard what stage 2 wrote. True — and swapping the two stages left **all
+  eight** tests in `test_mark_confidential_fence_refresh.py` green, because the
+  only assertion that could see the difference (the marked document's own fence
+  after `mark-normal`) had not been written. The argument was load-bearing for a
+  reader and inert for the suite.
+
+  **The corollary is a habit, not a check:** every non-obvious ordering,
+  precedence or "must happen before" written in prose is a claim owed a mutation.
+  If swapping it leaves the suite green, the prose is documentation of an
+  intention, not of a behaviour.
+
+  **And a relabelling can go stale inside its own branch.** The same module's
+  `test_the_marked_documents_own_fence_goes_too` was relabelled "does not pin
+  the refresh" after a mutation proved it didn't — accurate when written. Two
+  commits later the two mechanisms moved behind one call, removing that call
+  removes both, and the test reddens again: the note was false by the end of the
+  branch that wrote it. Its docstring now pins the END STATE and deliberately
+  refuses to name which mechanism delivers it, because naming the mechanism is
+  what went stale twice. *(Recorded 2026-08-24.)*
 - **A comment can be false in the very commit that writes it** — staleness is not
   the only failure mode, and a fresh commit date is not a warrant. `2ed2d83`
   ("fix(security): exclude confidential documents from ungated surfaces") added

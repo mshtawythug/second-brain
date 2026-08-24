@@ -5,7 +5,6 @@ import json as _json
 from dataclasses import dataclass, field
 from typing import Any
 
-import psycopg
 import typer
 
 from .config import Config
@@ -18,7 +17,7 @@ from .queries import (
     set_document_sensitivity,
 )
 from .sensitivity import CONFIDENTIAL
-from .vault.derived_links.fence import refresh_fences_naming
+from .vault.sensitivity_propagate import propagate_sensitivity_to_vault
 
 # ---------------------------------------------------------------------------
 # Why this lives in its own module rather than in cli.py.
@@ -90,13 +89,13 @@ def _apply_mark_confidential(
     """
     if set_document_sensitivity(conn, document_id=doc.id, level=CONFIDENTIAL):
         result.written += 1
-        try:
-            refresh_fences_naming(conn, doc.id, vault_path=cfg.vault_path)
-        except (OSError, psycopg.Error) as exc:
+        for failure in propagate_sensitivity_to_vault(
+            conn, doc.id, level=CONFIDENTIAL, vault_root=cfg.vault_path
+        ):
             # Recorded per-document rather than raised: one unwritable mirror
             # must not abort a sweep over the whole corpus, exactly as
             # ``_apply_redact`` treats its own per-document failures.
-            result.errors.append((doc.id, f"fence refresh failed: {exc}"))
+            result.errors.append((doc.id, failure.message))
 
 
 def _apply_redact(
