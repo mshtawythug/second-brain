@@ -66,6 +66,7 @@ from .search_predicate import (  # noqa: F401 — _ensure_utc is a re-export
     _ensure_utc,
     build_predicate,
 )
+from .snippet_context import DEFAULT_SNIPPET_MAX_CHARS, expand_snippet_with_neighbors
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +135,14 @@ class SearchDiagnostics:
     fetch; ``total_ms`` is the wall clock. ``facets_ms`` is written by the
     CALLER after :func:`brain.facets.compute_facets` — the search module
     ranks, the facet module aggregates.
+
+    ``results_tokens`` is likewise written by the CALLER, for the same reason:
+    it is the cost of a *projection* (:func:`brain.token_report.
+    count_results_tokens` over the serialized results array), and which
+    projection a surface emits — default or brief — is the surface's decision,
+    not the ranker's. ``None`` means "not measured", never zero: the human
+    table path delivers no payload, so pricing one would be a counterfactual
+    wearing a measurement's name.
     """
 
     fts_count: int | None = None
@@ -143,6 +152,7 @@ class SearchDiagnostics:
     sql_ms: float | None = None
     total_ms: float | None = None
     facets_ms: float | None = None
+    results_tokens: int | None = None
 
 
 @dataclass
@@ -166,6 +176,17 @@ class SearchResult:
     #: coalesce always resolves.
     recency_ts: datetime | None = None
     explain: SearchExplanation | None = None  # opt-in; populated only when explain=True
+    #: Ingest-time abstractive summary of the whole document (``documents.summary``).
+    #: NULL on the tail of documents ingested before enrichment or where it
+    #: failed — 103 of 1,392 docs (7.4%) on the live corpus — so every consumer
+    #: must have a fallback. Unlike ``snippet`` it is NOT query-conditioned: it
+    #: describes the document, not why it matched.
+    #: **PROTECTED CONTENT — never serialize blindly.** It derives from the
+    #: document BODY, so the confidential-sensitivity controls withhold it
+    #: (``mcp_server`` pops it; ``ui.routes_search`` blanks the snippet). It
+    #: rides on EVERY hit, confidential ones included — any new projection, or
+    #: one ``dataclasses.asdict(result)``, leaks it past those redaction paths.
+    summary: str | None = None
 
 
 RRF_K = 60
@@ -349,6 +370,7 @@ def hybrid_search(
     vector_sim_floor: float = 0.0,
     recency_halflife_days: float | None = None,
     snippet_context_tokens: int = 0,
+    snippet_max_chars: int = DEFAULT_SNIPPET_MAX_CHARS,
     explain: bool = False,
     diagnostics: SearchDiagnostics | None = None,
     total_count: bool = False,
@@ -391,6 +413,13 @@ def hybrid_search(
     pulling neighboring chunks (``chunk_index ± W``) from the same document
     and stitching them together up to the token budget. ``0`` (default)
     returns the single-chunk snippet unchanged.
+
+    ``snippet_max_chars`` is the hard outer character cap on the returned
+    snippet; its default equals ``4 × SNIPPET_LENGTH``, i.e. the constant this
+    argument replaced. It is measured to be the dominant constraint on snippet
+    size on the live corpus — see :mod:`brain.snippet_context`'s module
+    docstring, which records why an adaptive neighbour cut was built, measured
+    and removed rather than shipped.
 
     ``diagnostics`` (optional :class:`SearchDiagnostics`) is populated in place
     with the FTS-leg hit count (``fts_count``) and the latency phase split.
@@ -653,10 +682,20 @@ def hybrid_search(
 
     doc_ids = list(by_doc.keys())
     _t = perf_counter()
+    # ``d.summary`` is appended LAST so the positional indices every reader
+    # already depends on (``meta[5]`` is ``recency_ts``) keep their meaning.
+    # It is fetched unconditionally rather than behind a flag: one nullable
+    # TEXT column on at most 2 × ``CANDIDATE_LIMIT`` rows we are already
+    # fetching (``by_doc`` unions two independently LIMIT-ed legs — the FTS
+    # query and the vector query — so 100 in hybrid mode, 50 under fts-only).
+    # A conditional SQL string would hand Postgres two plans for one query and
+    # fork the single ``SearchResult`` construction site below for no
+    # measurable gain.
     doc_rows = conn.execute(
         """
         SELECT d.id, d.title, d.content_type, d.tags, s.kind,
-               coalesce(d.sent_at, d.ingested_at) AS recency_ts
+               coalesce(d.sent_at, d.ingested_at) AS recency_ts,
+               d.summary
         FROM documents d
         LEFT JOIN sources s ON s.id = d.source_id
         WHERE d.id = ANY(%s)
@@ -698,13 +737,14 @@ def hybrid_search(
 
         # Snippet context expansion: pull neighboring chunks from the same doc.
         if snippet_context_tokens > 0:
-            snippet_content = _expand_snippet_with_neighbors(
+            snippet_content = expand_snippet_with_neighbors(
                 conn,
                 document_id=doc_id,
                 best_chunk_index=best_chunk_idx,
                 best_content=snippet_content,
                 embedder=embedder,
                 budget_tokens=snippet_context_tokens,
+                max_chars=snippet_max_chars,
             )
 
         # Human table shows 120-char preview; JSON/MCP gets the full stitched
@@ -714,9 +754,13 @@ def hybrid_search(
             snippet = snippet_content
         else:
             snippet = snippet_content[:SNIPPET_LENGTH]
-        # Hard cap: 4 × SNIPPET_LENGTH prevents degenerate oversized payloads.
-        if len(snippet) > 4 * SNIPPET_LENGTH:
-            snippet = snippet[: 4 * SNIPPET_LENGTH]
+        # Hard cap: ``snippet_max_chars`` (default 4 × SNIPPET_LENGTH) prevents
+        # degenerate oversized payloads. It reads the SAME value the expansion
+        # helper capped with — two independent caps would let an operator raise
+        # BRAIN_SNIPPET_MAX_CHARS and see nothing change, because this one would
+        # silently re-truncate at the old constant.
+        if len(snippet) > snippet_max_chars:
+            snippet = snippet[:snippet_max_chars]
 
         # Build the optional ranking diagnostic payload.
         explain_obj: SearchExplanation | None = None
@@ -768,6 +812,7 @@ def hybrid_search(
                 score=score,
                 recency_ts=recency_ts,
                 explain=explain_obj,
+                summary=meta[6],
             )
         )
     results.sort(key=lambda r: r.score, reverse=True)
@@ -779,92 +824,3 @@ def hybrid_search(
     effective_limit = max(1, limit)
     _finalize_diagnostics(diagnostics, started_at=t_start, sql_seconds=sql_seconds)
     return results[:effective_limit]
-
-
-# ---------------------------------------------------------------------------
-# Snippet-context expansion helper
-# ---------------------------------------------------------------------------
-
-# Maximum number of neighbors on each side to fetch per finalist.
-_NEIGHBOR_WINDOW = 2
-
-
-def _expand_snippet_with_neighbors(
-    conn: psycopg.Connection,
-    *,
-    document_id: str,
-    best_chunk_index: int,
-    best_content: str,
-    embedder: Embedder,
-    budget_tokens: int,
-) -> str:
-    """Expand a snippet by stitching neighboring chunks around the best match.
-
-    Fetches up to :data:`_NEIGHBOR_WINDOW` chunks on each side of
-    ``best_chunk_index`` within the same ``document_id``. Walks outward
-    from the matched chunk, prepending the preceding neighbor and appending
-    the following neighbor alternately, stopping when adding the next whole
-    neighbor would exceed ``base_tokens + budget_tokens``. A neighbor is
-    either included in full or not at all (no mid-chunk slicing).
-
-    Returns the stitched string. The caller applies any final display
-    truncation (e.g. 120-char table preview). A hard outer cap of
-    ``4 × SNIPPET_LENGTH`` chars guards against a degenerate token-counter.
-    """
-    lo = max(0, best_chunk_index - _NEIGHBOR_WINDOW)
-    hi = best_chunk_index + _NEIGHBOR_WINDOW
-    neighbor_rows = conn.execute(
-        """
-        SELECT chunk_index, content
-        FROM chunks
-        WHERE document_id = %s
-          AND chunk_index BETWEEN %s AND %s
-        ORDER BY chunk_index
-        """,
-        (document_id, lo, hi),
-    ).fetchall()
-
-    # Index the fetched rows by chunk_index for O(1) lookup.
-    by_idx: dict[int, str] = {int(r[0]): r[1] for r in neighbor_rows}
-
-    # The matched chunk is always included in full.
-    matched = by_idx.get(best_chunk_index, best_content)
-
-    before: list[str] = []  # chunks with index < best, in ascending order
-    after: list[str] = []   # chunks with index > best, in ascending order
-    budget_used = 0
-
-    # Walk outward alternately, consuming the token budget.
-    prev_idx = best_chunk_index - 1
-    next_idx = best_chunk_index + 1
-    while budget_used < budget_tokens:
-        added = False
-        if prev_idx >= lo and prev_idx in by_idx:
-            chunk = by_idx[prev_idx]
-            cost = embedder.count_tokens(chunk)
-            if budget_used + cost <= budget_tokens:
-                before.insert(0, chunk)
-                budget_used += cost
-                prev_idx -= 1
-                added = True
-            else:
-                prev_idx = -1  # stop prepending — budget exhausted
-        if next_idx <= hi and next_idx in by_idx:
-            chunk = by_idx[next_idx]
-            cost = embedder.count_tokens(chunk)
-            if budget_used + cost <= budget_tokens:
-                after.append(chunk)
-                budget_used += cost
-                next_idx += 1
-                added = True
-            else:
-                next_idx = hi + 1  # stop appending — budget exhausted
-        if not added:
-            break  # no more neighbors in range or budget fully spent
-
-    parts = before + [matched] + after
-    stitched = "\n\n".join(parts)
-
-    # Hard outer cap.
-    cap = 4 * SNIPPET_LENGTH
-    return stitched[:cap] if len(stitched) > cap else stitched

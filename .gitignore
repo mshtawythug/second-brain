@@ -43,6 +43,13 @@ run/
 # Brainstorm artifacts (kept local-only — can contain PII / personal references)
 .superpowers/
 
+# Agent working reports (implementer reports, code reviews, completion audits,
+# CI gate logs). Local-only: they quote raw search output and side-by-side
+# retrieval comparisons, which on this corpus contain real names and addresses.
+# Untracked-and-unignored is the dangerous state — a single `git add -A` sweeps
+# them into a commit. Same failure mode the root-PNG and `docs/audits/*` blocks
+# already guard against.
+scratchpad/
 # Plans / audits / QA — local-only working docs (may contain personal
 # references). docs/ is private-by-subdir: the publishable reference docs
 # (docs/README.md, docs/cli-reference.md, docs/graphrag.md,
@@ -107,7 +114,87 @@ run/
 # Committing it would turn an expensive scan into a single `git show`. A file
 # that contains no PII can still be a map to PII. The map should keep existing —
 # just not inside the repository it maps.
-docs/audits/
+#
+# MERGE NOTE (2026-09-02, merging master's PR #8 into this branch): the tree is
+# ignored as `docs/audits/*`, not `docs/audits/`, and seven named measurement
+# artifacts are allowlisted below. That does not soften the decision above — it
+# narrows it. `dir/` makes git refuse to descend, which makes any later
+# `!dir/file` unreachable; `dir/*` keeps the same default-deny while leaving one
+# escape hatch that must be used ONE FILE AT A TIME, each vetted and each
+# carrying its own reason inline. The PII audit is NOT on that list and must
+# never be added to it — the paragraph above is why.
+# docs/audits/ uses `dir/*` rather than `dir/` so a NAMED file can be
+# allowlisted below: git never descends into a directory excluded as `dir/`,
+# which makes a later `!dir/file` unreachable. Subdirectories still match `*`,
+# so they and their contents stay ignored. Mirrors the
+# `tests/eval/baselines/.gitignore` precedent — allowlist explicitly named,
+# vetted files ONE AT A TIME; never blanket-unignore this tree.
+docs/audits/*
+# Wave 0 of the agentic-token-reduction plan: the committed before/after
+# payload baseline every later wave diffs against. Synthetic/topical queries
+# only, PII-free by construction (see scripts/token_payload_queries.txt).
+!docs/audits/2026-08-10-token-payload-baseline.json
+# Wave 1 of the same plan: the "after" measurement the −57.4% `search_brief`
+# saving is computed from, diffed against the Wave-0 baseline above. Same
+# construction, same synthetic query set, so PII-free on the same grounds —
+# it carries only counts, the retrieval config block, and the query strings.
+!docs/audits/2026-08-11-token-payload-after-wave1.json
+# Wave 2 of the same plan: the provenance behind the 183,940 / 8,998 / −95.1%
+# routing figures published in skills/consult-brain and docs/agent-skills.md,
+# plus the corpus statistics behind the 18,218-char mean body and the Krisp
+# transcript distribution. PII-free by construction on the same grounds as the
+# two above — five generic topical queries, and otherwise only counts, the
+# retrieval config, and the command that produced them. No titles, no bodies,
+# no participants.
+!docs/audits/2026-08-11-wave2-routing-counterfactual.md
+!docs/audits/2026-08-11-wave2-routing-counterfactual.json
+# Wave 3 of the same plan: the delivered-payload measurement the ceilings are
+# proved against — the plan's "How we prove it worked" steps 3 and 6 refuse to
+# accept a ceiling number with no measurement beside it. Same synthetic query
+# set and same construction as the three above, so PII-free on the same
+# grounds. Read-only run against prod (the script is read-only by construction
+# and sets a server-enforced read-only transaction).
+#
+# NOTE when diffing this against the Wave-0/1 files: its `recall` rows are
+# 8 tokens/query higher BY DESIGN — Wave 3 added the additive `payload_tokens`
+# key to the recall payload and `measure_recall` mirrors it. That +88 total is
+# the key, not a regression. `search` and `search_brief` are TOKEN-identical to
+# Wave 1 (0 delta on all 11 queries) — not byte-identical: their `chars` move
+# -2..+2 per query. With BRAIN_RECENCY_HALFLIFE_DAYS set, each `score` carries
+# a now()-derived decay term, so runs days apart legitimately serialize
+# different bytes at identical token counts (see `measure_search`'s docstring).
+!docs/audits/2026-08-13-token-payload-after-wave3.json
+# Wave 4 — the adaptive snippet cut's ENGAGEMENT measurement, produced by
+# `scripts/token_payload_report.py --adaptive-stats --json` against the live
+# corpus (read-only). Committed because it is the evidence the wave is judged
+# on, and it does NOT support the wave: the Otsu path engages on 41/55 results
+# (74.5%, comfortably above the plan's ~20% revert trigger) yet the DELIVERED
+# token delta is 0 on all 55, because only 3/55 results admit any neighbour at
+# the shipped 200-token budget and 47/55 have a matched chunk that alone reaches
+# the 1600-char cap. The measured "3 of 5 pinned at the cap" defect is caused
+# by the MATCHED CHUNK, which neighbour admission cannot address.
+#
+# CAUTION when reading this artifact: its `results_matched_chunk_fills_cap`
+# reads 55, under the SUPERSEDED definition of that key (it counted rows whose
+# matched-only tokens equalled the delivered tokens — "the expansion added
+# nothing" — which is indeed 55/55). It is NOT the 47/55 stated above; this
+# same artifact records that correctly as `legacy_pinned`/`adaptive_pinned: 47`.
+# The successor artifact reuses the key name under the literal definition
+# (`len(matched_chunk) >= cap`) and reports 47. Cite the 47.
+#
+# Deliberately NOT named `*token-payload*.json`: that glob is the derivation
+# set for `DEFAULT_RECALL_MAX_BUDGET_TOKENS` in
+# `tests/test_config_mcp_ceilings.py`, and neither artifact has `recall` rows.
+!docs/audits/2026-08-13-adaptive-snippet-engagement.json
+# The successor measurement, from `--snippet-constraints`. The artifact above
+# is the historical record of the rejected mechanism and is NO LONGER
+# REPRODUCIBLE (the mechanism it measured was removed); this one IS, and it
+# measures the two constraints that were found to actually bind: the walk
+# budget (3/55 results admit any neighbour) and the char cap (47/55 have a
+# matched chunk at or over it, and 11,514 of 30,727 produced tokens are
+# discarded unread). Both are kept: the first is the evidence for the decision,
+# the second is what a future wave would re-run.
+!docs/audits/2026-08-13-snippet-constraints.json
 docs/notes/
 docs/qa/
 docs/summaries/

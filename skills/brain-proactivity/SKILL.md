@@ -188,7 +188,7 @@ brain timeline "pricing" --json
 Requires the graph layer (`BRAIN_GRAPH_ENABLED` + `brain graphrag
 build`). An unknown entity prints a friendly note and **exits 0** — that
 is not a failure, so do not retry it with variations. Report "nothing in
-the graph under that name" and offer `brain search` instead.
+the graph under that name" and offer `brain search --brief` instead.
 
 ## Auto-link suggestions — `brain connect`
 
@@ -269,8 +269,13 @@ If a command errors outright rather than degrading, route to
   default.** Use `--no-emit` (or `--json`, which implies it) when the
   user only wants to read the synthesis.
 - **`brain brief` prints titles and todo texts, never bodies.** Never
-  paste a document body the command did not print — fetch it explicitly
-  with `brain show` via `consult-brain` if the user asks for it.
+  paste a document body the command did not print. If the user asks for
+  one, fetch it explicitly — `brain recall "<topic>" --budget 2000 --json`
+  when they want the substance, `brain show <id> --json` for a single
+  named document. Never `brain show` every item the brief listed; that is
+  unbounded — one whole body per item, with no ceiling. See the
+  cost-ordered table
+  in `consult-brain`.
 - **Exit 0 with an empty result is a valid answer.** An empty brief,
   zero resurfaced docs, or an unresolved timeline entity means "nothing
   to surface" — say so rather than broadening until something appears.

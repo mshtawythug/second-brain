@@ -42,6 +42,12 @@ _INTENTIONALLY_NOT_FORWARDED = {
     "updated_after": "F9 edit-range filters; not in F2's documented surface",
     "updated_before": "F9 edit-range filters; not in F2's documented surface",
     "sensitivity": "F6 lens; recall inherits the default (both tiers)",
+    # Wave 4 — the snippet character cap. Same shape as vector_sim_floor /
+    # recency_halflife_days above: retrieval TUNING, not a caller-chosen
+    # filter, so recall reads it from cfg exactly as it does the passage
+    # budget. Forwarding it would let a caller resize snippets per-call on a
+    # surface whose whole contract is a token budget.
+    "snippet_max_chars": "taken from cfg",
 }
 
 

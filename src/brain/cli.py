@@ -1,43 +1,57 @@
 """brain — second brain CLI.
 
-**File-size ceiling (CLAUDE.md): already over, and it grew.** This pointer
-carries no live line count on purpose -- re-derive with
-``wc -l src/brain/cli.py``. What cannot rot is the trail: 9,019 (``f8c76c0``, branch
-base) -> 9,019 (``3b16527``, touched but no net change) -> 9,035 (``c62e3de``).
-It was the first growth of `feat/wiki-to-ui-consolidation`, and a net
-reduction in duplication rather than an addition of logic:
-``_VALID_SOURCE_KINDS`` became a re-export of
-:data:`brain.source_kinds.VALID_SOURCE_KINDS` so the ingest WRITE boundaries
-could enforce the set too. It had to move OUT of here to be reachable:
-``cli`` imports ``cli_ingest``, so ``cli_ingest`` could never have imported the
-name back out of this module. Reason inline at the constant.
-
-It grew a second time for the F6 People Hub gate: ``brain people`` now passes
-``exclude_confidential=False`` to :func:`brain.people.aggregate_people`
-explicitly, because that function's default became fail-closed for the
-*published* hub pages and the terminal is not an egress boundary. Eight lines,
-all of them the argument for why the local surface opts out; reason inline at
-the call.
-
-It grew a THIRD time, and this is the largest of the three: 9,053
-(``4e471ad``, branch HEAD before this change) -> 9,159, +106 net. (The trail
-above stops at ``c62e3de``/9,035; the People Hub commit ``7f4d859`` itself
-landed at 9,053 and never recorded it, and ``aa39159``/``c49fc46``/``4e471ad``
-did not touch this file. All re-derived with
+**File-size ceiling (CLAUDE.md): already over, and it grew — on BOTH sides of
+the 2026-09-02 master merge.** This pointer carries no live line count on
+purpose -- re-derive with ``wc -l src/brain/cli.py``. What cannot rot is the
+trail of hops. Re-derive any hop with
 ``git show "<sha>:src/brain/cli.py" | wc -l`` -- brace the SHA or zsh eats
-``:src/...`` as a history modifier and you count the patch instead.) The growth
-is the F6 gate on the two commands that BUILD a report for the terminal and
-then PUBLISH it to the vault -- ``review weekly`` and ``brief --wiki``. Both
-were inheriting ``exclude_confidential=False``, which is right for the terminal
-and wrong for a file Quartz serves. Each now builds a second, gated payload for
-its vault write and keeps the permissive one for the operator's own eyes; most
-of the added lines are the argument for why that split lives at the CALL SITES
-here rather than inside the report builders, which is the one thing a reader of
-this diff cannot recover from the code. Reasons inline at both call sites and
-at both ``Wrote`` lines.
+``:src/...`` as a history modifier and you count the patch instead.
 
-The long-deferred split into per-domain command modules is unchanged by this;
-``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
+**On ``feat/wiki-to-ui-consolidation``:**
+
+1. 9,019 (``f8c76c0``, branch base) -> 9,019 (``3b16527``, touched but no net
+   change) -> 9,035 (``c62e3de``). A net reduction in duplication rather than
+   an addition of logic: ``_VALID_SOURCE_KINDS`` became a re-export of
+   :data:`brain.source_kinds.VALID_SOURCE_KINDS` so the ingest WRITE boundaries
+   could enforce the set too. It had to move OUT of here to be reachable:
+   ``cli`` imports ``cli_ingest``, so ``cli_ingest`` could never have imported
+   the name back out of this module. Reason inline at the constant.
+2. The F6 People Hub gate: ``brain people`` now passes
+   ``exclude_confidential=False`` to :func:`brain.people.aggregate_people`
+   explicitly, because that function's default became fail-closed for the
+   *published* hub pages and the terminal is not an egress boundary. Eight
+   lines, all of them the argument for why the local surface opts out; reason
+   inline at the call. (``7f4d859`` landed at 9,053 and never recorded it.)
+3. The largest of the three: 9,053 (``4e471ad``) -> 9,159, +106 net. The F6
+   gate on the two commands that BUILD a report for the terminal and then
+   PUBLISH it to the vault -- ``review weekly`` and ``brief --wiki``. Both were
+   inheriting ``exclude_confidential=False``, which is right for the terminal
+   and wrong for a file Quartz serves. Each now builds a second, gated payload
+   for its vault write and keeps the permissive one for the operator's own
+   eyes; most of the added lines are the argument for why that split lives at
+   the CALL SITES here rather than inside the report builders, which is the one
+   thing a reader of this diff cannot recover from the code. Reasons inline at
+   both call sites and at both ``Wrote`` lines.
+
+**On ``master`` (PR #8 closeout, 2026-08-20):** 9,019 -> 9,058 (+39) against
+the same base. The reason is inline at the ``LockNotAvailable`` handler in
+``init``; this line exists so it is discoverable from the top of a 9,000-line
+file instead of by ``git blame``. The final review round then grew the same
+handler a few lines more, scoping "nothing was applied" to the FAILING
+migration (earlier pending migrations commit individually and stay applied).
+What it buys: migration ``028`` introduced ``SET LOCAL lock_timeout``, so a
+contended ``brain init`` now aborts instead of stalling every reader -- and an
+abort whose only output is a ``LockNotAvailable`` traceback trades a mysterious
+hang for a mysterious crash. The handler names what holds the lock, that
+nothing was applied or recorded, and the remedy.
+
+**The merge itself (2026-09-02) adds no logic.** The two growths above are
+disjoint -- the F6 egress gates and the ``LockNotAvailable`` handler touch
+different commands -- so the merged file is their union and the merged count is
+the sum less the shared base. Re-derive it; do not add the two numbers.
+
+The long-deferred split into per-domain command modules is unchanged by any of
+this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
 from __future__ import annotations
 
@@ -619,7 +633,36 @@ def init() -> None:
     search_backfill_report: backfill_search.BackfillReport | None = None
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
-        applied = run_migrations(conn)
+        try:
+            applied = run_migrations(conn)
+        except psycopg.errors.LockNotAvailable as e:
+            # A migration asked for ACCESS EXCLUSIVE and gave up rather than
+            # queueing every reader behind it (028+ set `lock_timeout`). The
+            # raw message -- "canceling statement due to lock timeout" -- says
+            # nothing about what was holding the lock, that the failing
+            # migration was not applied, or what to do. All three are knowable
+            # here. ("Failing migration", not "nothing": each file commits and
+            # records individually, so pending migrations that ran BEFORE the
+            # one that timed out stay applied -- which is fine, and re-running
+            # picks up exactly where this stopped. The literal "3s" mirrors
+            # 028's `lock_timeout`; kept as prose deliberately -- parsing the
+            # SQL to avoid a two-token drift would cost more than the drift.)
+            typer.secho(
+                "init: a migration could not acquire its table lock within 3s "
+                "— another connection is holding a long transaction on this "
+                "database (brain-mcp, `brain vault sync --watch`, or an open "
+                "psql).\n"
+                "  The failing migration was not applied and not recorded "
+                "(each migration commits in its own transaction, and its "
+                "schema_migrations row is written only after it commits), so "
+                "`brain init` is safe to re-run and resumes exactly where "
+                "this stopped.\n"
+                "  Fix: stop the daemon (`brain-down`), then re-run "
+                "`brain init`.",
+                fg="red",
+                err=True,
+            )
+            raise typer.Exit(code=1) from e
         ensure_embedding_column(conn, embedder)
         # GraphRAG (wave G0): provision the Apache AGE extension + the canonical
         # ``brain_graph`` graph idempotently, after relational migrations — but

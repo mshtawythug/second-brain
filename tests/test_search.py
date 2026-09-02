@@ -145,6 +145,44 @@ def test_search_no_matches_returns_empty(test_db, fake_embedder):
     assert results == []
 
 
+def test_search_hit_carries_document_summary(test_db, fake_embedder):
+    """``SearchResult.summary`` is read off ``documents.summary``, not a neighbour.
+
+    The per-document metadata SELECT returns
+    ``(id, title, content_type, tags, source_kind, recency_ts, summary)`` and the
+    construction site indexes it positionally. Nothing else in the suite reads
+    ``.summary`` off a hit, so an off-by-one (``meta[5]``, the ``recency_ts``
+    timestamp) would type-check, pass every existing test, and only surface as a
+    ``datetime`` in a ``str | None`` field downstream. This test pins the exact
+    string, which no other column can accidentally satisfy.
+
+    The summary is written with a parameterized ``UPDATE`` — the enricher's
+    Ollama call is a separate unit's concern and would make this test a network
+    test. Synthetic text only.
+    """
+    # Arrange
+    _seed(test_db, fake_embedder, [
+        ("Summarized", "company-id shared keyword", [], "manual"),
+        ("Unsummarized", "company-id shared keyword", [], "manual"),
+    ])
+    summary_text = "Synthetic one-line abstract that appears in no chunk body."
+    test_db.execute(
+        "UPDATE documents SET summary = %s WHERE title = %s",
+        (summary_text, "Summarized"),
+    )
+
+    # Act
+    results = hybrid_search(
+        test_db, embedder=fake_embedder, query="company-id shared keyword", limit=5
+    )
+
+    # Assert
+    by_title = {r.title: r for r in results}
+    assert {"Summarized", "Unsummarized"} <= by_title.keys()
+    assert by_title["Summarized"].summary == summary_text
+    assert by_title["Unsummarized"].summary is None
+
+
 class _MidSearchDeleteConn:
     """Connection test-double that lands a concurrent DELETE in a precise window.
 

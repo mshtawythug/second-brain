@@ -141,14 +141,54 @@ def _start_watcher(
     return thread, result_q
 
 
-def _wait_for_observer(timeout: float = 1.0) -> _FakeObserver:
-    """Block until the watcher has registered its FakeObserver."""
+def _wait_for_observer(
+    timeout: float = 10.0,
+    result_q: "queue.Queue[Any] | None" = None,
+) -> _FakeObserver:
+    """Block until the watcher has registered its FakeObserver.
+
+    ``timeout`` is a BACKSTOP against a hung watcher, NOT a latency
+    assertion — do not "optimise" it back down. The work it covers is two
+    real psycopg connects plus a startup ``sync_vault``; measured at
+    0.03-0.06s idle on 2026-08-21, but with no lower bound under load
+    (0.44s observed with a second pytest suite competing for the same
+    Postgres container). The previous 1.0s default produced a
+    ~1-in-8000 red on a loaded machine. A genuinely hung watcher now
+    costs 10s before failing instead of 1s; that is the correct trade
+    for a backstop.
+
+    Pass ``result_q`` (from ``_start_watcher``) so a watcher thread that
+    DIED during startup is reported immediately with its real exception
+    chained, instead of spinning to the deadline and emitting the same
+    misleading "did not start observer" message a machine hiccup
+    produces. Without it, a real regression and a scheduler stall are
+    indistinguishable from the failure output.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _FakeObserver.instances and _FakeObserver.instances[0].started:
             return _FakeObserver.instances[0]
+        if result_q is not None:
+            try:
+                item = result_q.get_nowait()
+            except queue.Empty:
+                pass
+            else:
+                if isinstance(item, tuple) and len(item) == 2 and item[0] == "err":
+                    exc = item[1]
+                    raise AssertionError(
+                        "watcher thread died during startup, before it started "
+                        f"the observer: {type(exc).__name__}: {exc}"
+                    ) from exc
+                # Not an error payload — hand it back untouched and stop
+                # watching the queue; it belongs to the test's own asserts.
+                result_q.put(item)
+                result_q = None
         time.sleep(0.01)
-    raise AssertionError("watcher did not start observer in time")
+    raise AssertionError(
+        f"watcher did not start observer within {timeout}s "
+        "(backstop, not a latency assertion)"
+    )
 
 
 def _wait_for(predicate: Any, timeout: float = 2.0) -> None:
@@ -310,7 +350,7 @@ def test_single_create_event_triggers_one_sync(
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     # Recreate the file then inject a created event for it.
     _write(note, {"id": note_id, "title": "Hello"}, "world\n")
@@ -359,12 +399,12 @@ def test_burst_of_modifies_collapses_to_one_sync(
         on_event=lambda action, path: events.append((action, path)),
     )
 
-    thread, _result_q = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     # Inject 5 modifies in rapid succession — each one resets the timer,
     # so only the LAST should actually fire.
@@ -399,12 +439,12 @@ def test_multi_path_bursts_yield_one_sync_per_path(
         on_event=lambda action, path: events.append((action, path)),
     )
 
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     for _ in range(3):
         observer.inject(FileModifiedEvent(str(a)))
@@ -439,12 +479,12 @@ def test_watcher_ignores_template_events(
         on_event=lambda a, p: events.append((a, p)),
     )
 
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     observer.inject(FileModifiedEvent(str(template)))
     time.sleep(0.1)
@@ -471,12 +511,12 @@ def test_watcher_ignores_non_md_files(
         on_event=lambda a, p: events.append((a, p)),
     )
 
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     observer.inject(FileModifiedEvent(str(swap)))
     time.sleep(0.1)
@@ -504,12 +544,12 @@ def test_delete_event_removes_row(
         on_event=lambda a, p: events.append((a, p)),
     )
 
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     # Confirm startup sync inserted the row.
     _wait_for(
@@ -567,12 +607,12 @@ def test_stale_delete_event_preserves_existing_file(
         on_event=lambda a, p: events.append((a, p)),
     )
 
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     # Confirm startup sync inserted the row.
     _wait_for(
@@ -644,12 +684,12 @@ def test_stale_upsert_event_for_vanished_file(
         on_event=lambda a, p: events.append((a, p)),
     )
 
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     # Snapshot processed counter BEFORE we inject — startup sync may have
     # incremented it for the (empty) initial scan, and we want a delta.
@@ -726,7 +766,7 @@ def test_graceful_shutdown_drains_pending(
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     # Update the file body, fire one event — debounce won't fire for 10s.
     _write(note, {"id": note_id, "title": "Drain"}, "v2-updated\n")
@@ -799,7 +839,7 @@ def test_signal_handlers_are_restored_on_exit(
     thread = threading.Thread(target=_target, daemon=True)
     thread.start()
 
-    observer = _wait_for_observer(timeout=2.0)
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
 
     # The handler was installed (we don't directly send a signal — the
@@ -840,12 +880,12 @@ def test_overflow_triggers_full_sync(
         on_event=lambda a, p: events.append((a, p)),
     )
 
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     # Fire 3 modifies on 3 different paths → overflow at the third.
     for i in range(3):
@@ -884,12 +924,12 @@ def test_worker_swallows_per_file_errors(
         on_event=lambda a, p: events.append((a, p)),
     )
 
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     observer.inject(FileModifiedEvent(str(bad)))
     _wait_for(lambda: len(events) >= 1, timeout=2.0)
@@ -922,12 +962,12 @@ def test_on_any_event_swallows_classify_errors(
     vault.mkdir()
     config = WatchConfig(vault_path=vault, debounce_ms=10)
 
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     # Build a sentinel event whose ``event_type`` access throws.
     class _Boom:
@@ -1049,12 +1089,12 @@ def test_on_event_hook_exceptions_are_swallowed(
     _write(note, {"id": note_id, "title": "N"}, "x\n")
 
     config = WatchConfig(vault_path=vault, debounce_ms=10, on_event=_bad_hook)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     from watchdog.events import FileModifiedEvent  # noqa: PLC0415
 
@@ -1099,12 +1139,12 @@ def test_worker_logs_and_continues_on_sync_exception(
     mocker.patch("brain.vault.watch.sync_one_file", _flaky)
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     from watchdog.events import FileModifiedEvent  # noqa: PLC0415
 
@@ -1145,12 +1185,12 @@ def test_overflow_full_sync_is_dispatched_to_worker(
     mocker.patch("brain.vault.watch.sync_vault", _spy)
 
     config = WatchConfig(vault_path=vault, debounce_ms=10_000)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     # Each modified path adds a pending timer; second one overflows.
     from watchdog.events import FileModifiedEvent  # noqa: PLC0415
 
@@ -1196,7 +1236,7 @@ def test_run_watcher_install_signal_handlers_real_path(
         embedder=fake_embedder,
         config=config,
     )
-    _wait_for_observer()  # ensures the watcher has fully started up
+    _wait_for_observer(result_q=result_q)  # ensures the watcher has fully started up
     # Two install calls (SIGINT, SIGTERM), each capturing the closure.
     _wait_for(lambda: len(captured_handlers) >= 2, timeout=2.0)
 
@@ -1318,7 +1358,7 @@ def test_worker_join_timeout_skips_close_when_alive(
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     assert len(fake_workers) == 1, "expected one fake worker thread to be created"
 
@@ -1425,7 +1465,7 @@ def test_run_watcher_handles_already_closed_connection(
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     state.stop_event.set()
     thread.join(timeout=5.0)
@@ -1468,7 +1508,7 @@ def test_startup_sync_runs_before_observer_starts(
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     # By the time the observer is running, the startup sync has finished.
     row = test_db.execute(
         "SELECT title FROM documents WHERE id = %s", (note_id,)
@@ -1551,12 +1591,12 @@ def test_fence_only_write_skips_resync(
     _write(note, {"id": note_id, "title": "Fenced"}, body_v1)
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     # Seed the cache as if a successful sync had just observed body_v1 —
     # this is exactly the post-condition ``_refresh_body_cache`` would
@@ -1604,12 +1644,12 @@ def test_real_body_change_with_fence_triggers_resync(
     _write(note, {"id": note_id, "title": "Changed"}, body_v1)
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     state.body_cache[note] = strip_fence(note.read_text())
 
@@ -1645,12 +1685,12 @@ def test_real_body_change_without_fence_triggers_resync(
     _write(note, {"id": note_id, "title": "Plain"}, "v1\n")
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     state.body_cache[note] = strip_fence(note.read_text())
 
@@ -1683,12 +1723,12 @@ def test_cold_start_first_sight_triggers_resync(
     _write(note, {"id": note_id, "title": "Fresh"}, "hello\n")
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     # Explicitly assert no cache entry exists (cold start).
     assert note not in state.body_cache
@@ -1725,12 +1765,12 @@ def test_delete_invalidates_cache_recreate_resyncs(
     _write(note, {"id": note_id, "title": "Rebirth"}, body)
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     # Pre-populate cache as if a sync had recently observed the body.
     state.body_cache[note] = strip_fence(note.read_text())
@@ -1771,12 +1811,12 @@ def test_cache_refreshed_after_real_sync(
     _write(note, {"id": note_id, "title": "Refresh"}, "before\n")
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     assert note not in state.body_cache  # cold start
 
@@ -1813,12 +1853,12 @@ def test_overflow_full_sync_clears_body_cache(
     mocker.patch("brain.vault.watch._MAX_PENDING", 1)
 
     config = WatchConfig(vault_path=vault, debounce_ms=10_000)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     # Seed a stale entry — overflow recovery must flush it.
     bogus = vault / "stale.md"
@@ -1869,12 +1909,12 @@ def test_vanished_file_with_cached_body_is_noop(
         debounce_ms=10,
         on_event=lambda a, p: events.append((a, p)),
     )
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
     state.body_cache[note] = strip_fence(note.read_text())
     processed_before = state.processed
@@ -2143,12 +2183,12 @@ def test_move_within_vault_preserves_backlinks_end_to_end(
     _write(vault / "b.md", {"id": b_id, "title": "B"}, "see [[A]]\n")
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     _wait_for(
         lambda: test_db.execute(
             "SELECT count(*) FROM links "
@@ -2202,12 +2242,12 @@ def test_move_out_of_vault_still_deletes(
     _write(vault / "leaving.md", {"id": note_id, "title": "Leaving"}, "x\n")
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     _wait_for(
         lambda: test_db.execute(
@@ -2315,12 +2355,12 @@ def test_new_top_level_dir_created_after_start_is_watched_and_synced(
     (vault / "notes").mkdir()
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=fake_embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
 
     # A brand-new top-level directory appears with a note already inside it —
     # the note predates any watch on the new directory.
@@ -2423,12 +2463,12 @@ def test_racing_edit_during_sync_is_not_masked_by_body_cache(
     embedder = _EditDuringEmbed(fake_embedder, note, raced_text)
 
     config = WatchConfig(vault_path=vault, debounce_ms=10)
-    thread, _ = _start_watcher(
+    thread, result_q = _start_watcher(
         conn_factory=_conn_factory(test_db),
         embedder=embedder,
         config=config,
     )
-    observer = _wait_for_observer()
+    observer = _wait_for_observer(result_q=result_q)
     state = observer.handler._state
 
     # First save: body_indexed on disk. The event triggers sync, whose embed
@@ -2458,3 +2498,77 @@ def test_racing_edit_during_sync_is_not_masked_by_body_cache(
 
     state.stop_event.set()
     thread.join(timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Test-harness regression — _wait_for_observer must surface a dead watcher.
+# ---------------------------------------------------------------------------
+
+
+class _StartupBoom(RuntimeError):
+    """Synthetic startup failure, raised by the conn_factory below."""
+
+
+def test_wait_for_observer_reports_dead_watcher_thread(
+    fake_embedder: Any, tmp_path: Path
+) -> None:
+    """A watcher thread that DIES during startup must be reported as such.
+
+    Regression test (2026-08-21). ``_start_watcher`` captures the watcher
+    thread's exception as ``("err", exc)`` on ``result_q``, but
+    ``_wait_for_observer`` used to ignore that queue entirely: a genuine
+    crash and a loaded-machine scheduler stall both spun to the deadline
+    and emitted the byte-identical message "watcher did not start observer
+    in time". That cost a full investigation. The helper must now fail fast
+    and chain the real exception.
+    """
+    vault = tmp_path / "vault"
+    vault.mkdir()
+
+    def _exploding_conn_factory() -> Any:
+        raise _StartupBoom("synthetic startup failure")
+
+    thread, result_q = _start_watcher(
+        conn_factory=_exploding_conn_factory,
+        embedder=fake_embedder,
+        config=WatchConfig(vault_path=vault, debounce_ms=10),
+    )
+
+    started = time.monotonic()
+    with pytest.raises(AssertionError) as excinfo:
+        _wait_for_observer(result_q=result_q)
+    elapsed = time.monotonic() - started
+
+    message = str(excinfo.value)
+    # The watcher's real exception is chained, not swallowed.
+    assert isinstance(excinfo.value.__cause__, _StartupBoom)
+    assert "_StartupBoom" in message
+    assert "synthetic startup failure" in message
+    # ...and the report is NOT the misleading timeout message.
+    assert "did not start observer" not in message
+    # Fast, rather than a spin to the 10s backstop. Deliberately generous
+    # (2x under the backstop, ~500x over the real work) so this stays a
+    # discriminator between the two failure modes, not a latency assertion.
+    assert elapsed < 5.0
+
+    thread.join(timeout=5.0)
+    assert not thread.is_alive()
+
+
+def test_wait_for_observer_timeout_default_is_a_backstop() -> None:
+    """Pin the backstop default so it cannot be quietly tuned back down.
+
+    Companion to the test above (2026-08-21). The old 1.0s default was a
+    wall-clock deadline covering two real psycopg connects plus a startup
+    ``sync_vault`` — measured at 0.03-0.06s idle but 0.44s with a second
+    pytest suite competing, i.e. a ~2.3x margin. It is a backstop against a
+    hung watcher, not a latency assertion; anything under 5s reintroduces
+    the flake this replaced.
+    """
+    import inspect  # noqa: PLC0415
+
+    default = inspect.signature(_wait_for_observer).parameters["timeout"].default
+    assert default >= 5.0, (
+        f"_wait_for_observer's timeout backstop was lowered to {default}s; "
+        "see its docstring — this is not a latency assertion"
+    )

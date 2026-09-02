@@ -54,20 +54,44 @@ built.
 If the question is a generic technical/coding/news question, defer — that's
 not what the brain is for.
 
+## Choosing a retrieval command (cost-ordered, cheapest first)
+
+| You want | Use | Typical cost |
+|---|---|---|
+| One synthesized answer with citations | `brain ask "<q>" --json` | ~1–2k tokens; the reading happens on local Ollama |
+| To triage WHICH documents matter | `brain search "<q>" --json --brief --limit 5` | a few hundred tokens per result |
+| To READ material, sized to fit | `brain recall "<q>" --budget 2000 --json` | the passage block stays under the budget — a ceiling, not an exact fill (measured 1,811 tokens on a 2,000 budget); the `--json` envelope prints ~1.25–1.3× the budget (`--budget 2000` → ~2,500 tokens) |
+| Why a specific document matched | `brain search "<q>" --json --limit 5` (no --brief) | ~1.6k chars per result |
+| One document's full text | `brain show <id> --json` | the whole body — up to ~67k tokens on the largest doc |
+
+Rules:
+- NEVER loop `brain show` over a search's results — that recipe is unbounded. Five representative
+  20-result questions cost a mean **183,940 tokens** (worst: 257,989), twice the ~91,000 tokens
+  arithmetic predicts, because documents ranking top-20 run longer than the corpus mean. The same
+  five cost **8,998** via triage-then-recall (−95.1%). Both endpoints are measured; the −95.1%
+  between them is a **counterfactual comparison of two documented procedures, not an observed
+  saving** — nothing measures whether an agent follows a skill. Source:
+  `docs/audits/2026-08-11-wave2-routing-counterfactual.md`. Use `brain recall` or `brain ask`.
+- Reach for `brain show` for ONE document whose body you need — ideally after
+  `--brief` named it.
+- `--brief` swaps each result's snippet for the document's ingest-time summary
+  when the summary is smaller, naming which you got via `snippet_source`.
+  Cheaper, but it does NOT tell you why the doc matched — drop it when that matters.
+
 ## How to consult the brain
 
-The manual loop below (search → show → synthesize) is the default and is right
-for most questions. Reach for it when you need the raw documents in context —
-voice mimicry, verbatim quoting, drafting. **If the deliverable is instead one
-composed answer with inline citations, do not hand-roll it: hand off to
-`brain-ask`.**
+The manual loop below (search → read → synthesize) is the default and right for
+most questions — reach for it when you need raw documents in context (voice
+mimicry, verbatim quoting, drafting). **If the deliverable is instead one cited
+answer, do not hand-roll it: hand off to `brain-ask`.**
 
 ### Step 1 — Distill the question into search terms
 
-Pick 1–3 specific search queries. Always pass `--json` so output parses cleanly.
+Pick 1–3 specific search queries. Always pass `--json` so output parses cleanly,
+and `--brief` unless you need to see *why* each document matched.
 
 ```bash
-brain search "<query>" --limit 10 --json
+brain search "<query>" --limit 10 --json --brief
 ```
 
 Use filters to sharpen. Most useful flags:
@@ -83,7 +107,8 @@ Use filters to sharpen. Most useful flags:
 | `--kind <content-type>` | `transcript`, `email`, `krisp_action_items`, `note`, `markdown`, `pdf`, … (this is `documents.content_type`, NOT the tier enum) |
 | `--thread <gmail_thread_id>` | Pull every doc in one Gmail thread |
 | `--draft / --no-draft` | Tri-state; default both. `--no-draft` excludes quarantined docs |
-| `--limit/-n N` | Default 5; bump to 10–20 for synthesis |
+| `--limit/-n N` | Default 5; bump to 10–20 for synthesis — pair with `--brief`, which is what keeps a 20-result triage affordable |
+| `--brief` | `--json` only. Substitutes the doc's ingest-time summary for the chunk snippet when the summary is cheaper, and adds `snippet_source` ∈ `chunk`/`summary`. Measured −57.4% tokens over an 11-query sample. Ranking is untouched. No-op without `--json` |
 | `--fts-only` | Keyword-only fallback when vector retrieval feels off |
 
 Query-shape tips:
@@ -102,9 +127,31 @@ Query-shape tips:
 know yet, run `brain people "<name>"` first to confirm the canonical display
 name + primary email + recent docs. Then pivot into `brain search --person`.
 
-### Step 2 — Read full text on the most relevant hits
+### Step 2 — Read the material, sized to your context
 
-`brain search` returns short snippets. For real synthesis, fetch the full doc:
+`brain search` returns short snippets. Don't synthesize from snippets alone —
+but don't reach straight for full documents either. Two ways to read, in cost
+order:
+
+**Default — `brain recall`.** Returns the passages themselves, packed to an
+explicit token budget, one per document so sources stay diverse, with inline
+`[N]` citations:
+
+```bash
+brain recall "<query>" --budget 2000 --json
+```
+
+Same filters as `brain search` (`--person`, `--after`/`--before`, `--kind`,
+`--tag`, `--source`, `--thread`, `--without-tag`, `--fts-only`), so most tuned
+searches port straight over — `--draft`, `--has-tag`, `--sensitivity` and
+`--updated-*` are search-only. Raise `--budget` for a broad question (4000 for
+multi-source synthesis). **`--budget` bounds the passage block, not the
+`--json` payload**: `--json` adds per-passage metadata around the same text,
+measured at ~1.25–1.3× the budget (`--budget 2000` prints ~2,500 tokens,
+`--budget 4000` ~5,150). Still the only retrieval surface with a ceiling.
+
+**Single document — `brain show`.** When you know *which* document you need
+the body of, and you need it verbatim:
 
 ```bash
 brain show <id-prefix> --json
@@ -112,9 +159,11 @@ brain show <id-prefix> --json
 
 ID prefixes are 6+ hex chars from the search result. The JSON includes a
 `summary` field when the doc has been auto-summarized — for fast Q&A where the
-summary already answers cleanly, you can stop there. For voice mimicry,
-quoting, or synthesis across multiple docs, read the full `content`. Don't
-synthesize from snippets alone.
+summary already answers cleanly, you can stop there.
+
+**The ceiling.** `brain show` returns the *whole* body — a mean of 18,218
+chars, up to ~67k tokens on the largest document. Once is fine; per search
+result is the no-loop rule above. Cap yourself at 2–3 calls per question.
 
 ### Step 3 — Synthesize, grounded
 
@@ -140,20 +189,18 @@ brain rate <id-prefix> useful        # answer drew on this doc and helped
 brain rate <id-prefix> irrelevant    # this doc was a false positive
 ```
 
-This appends to the `interactions` table; future ranking iterations use it.
-Don't ask for permission — log silently when the user reacts positively to a
-specific cited doc, or when they tell you a doc was off-base.
+This appends to the `interactions` table; future ranking uses it. Don't ask
+permission — log silently when the user reacts to a specific cited doc.
 
 ## Cited synthesis and audio overviews — hand off to `brain-ask`
 
 The manual loop above returns a ranked list you read and synthesize yourself.
 When the user instead wants **one** composed answer carrying inline citations
-back to their own documents, or a two-host audio overview of a person or topic,
-that is `brain-ask`'s territory — hand off rather than stitching several
-`brain show` calls together by hand.
-
-Rule of thumb: reading documents to write something yourself → stay here; the
-deliverable *is* a cited answer or a narrated overview → `brain-ask`.
+back to their own documents, or a two-host audio overview, that is
+`brain-ask`'s territory — hand off rather than stitching several `brain show`
+calls together by hand. Rule of thumb: reading documents to write something
+yourself → stay here; the deliverable *is* a cited answer or a narrated
+overview → `brain-ask`.
 
 ## Debugging weird results — `brain explain`
 
@@ -192,8 +239,8 @@ boost, best-chunk index, and matched filters. Two things to look for:
 
 ```bash
 brain people "<person>"                                          # confirm canonical name
-brain search "<topic>" --person "<person>" --limit 5 --json
-brain show <top-id> --json
+brain search "<topic>" --person "<person>" --limit 5 --json --brief   # triage
+brain show <top-id> --json                                       # ONE doc, the top hit
 ```
 
 Answer: "From your YYYY-MM-DD Krisp call (`<id>`), you framed it around three
@@ -203,13 +250,15 @@ things: …" Surface sources. If the user nods, `brain rate <id> useful`.
 > User: "Help me write a LinkedIn post about engineering hiring."
 
 ```bash
-brain search "engineering hiring" --kind note --limit 5 --json
-brain show <top-id> --json
-brain show <second-id> --json
+brain search "engineering hiring" --kind note --limit 5 --json --brief
+brain show <top-id> --json          # voice mimicry needs verbatim prose …
+brain show <second-id> --json       # … two docs is the ceiling here
 ```
 
-Write the post mirroring the retrieved phrasing density and tone. Cite at
-bottom.
+Voice mimicry is the one case that genuinely wants full bodies — you are
+copying sentence rhythm, not extracting facts. Two documents is enough; a
+third rarely changes the voice and doubles the cost. Write the post mirroring
+the retrieved phrasing density and tone. Cite at bottom.
 
 **C — Summary across many sources**
 > User: "Summarize every conversation I had about pricing this quarter."
@@ -219,13 +268,25 @@ bottom.
 # Resolve the quarter start before running the search — e.g., Q1 → YYYY-01-01,
 # Q2 → YYYY-04-01, Q3 → YYYY-07-01, Q4 → YYYY-10-01. Do NOT substitute "today − 90d";
 # mid-quarter that pulls last quarter's data into a "this quarter" query.
-brain search "pricing" --after <quarter-start-YYYY-MM-DD> --limit 20 --json
-# group by source/title; for each top doc:
-brain show <id> --json
+
+# 1. Triage — which documents are in scope, and how do they group?
+brain search "pricing" --after <quarter-start-YYYY-MM-DD> --limit 20 --json --brief
+
+# 2. Read — ONE bounded call, not one call per document.
+brain recall "pricing" --after <quarter-start-YYYY-MM-DD> --budget 4000 --json
 ```
 
 For a bounded quarter (e.g., "Q1 2026 pricing conversations"), pass both:
-`--after 2026-01-01 --before 2026-04-01` (exclusive upper).
+`--after 2026-01-01 --before 2026-04-01` (exclusive upper). Both commands take
+these filters, so step 2 reuses step 1's (search-only exceptions above).
+
+If the user wants the summary *written for them* rather than read by you,
+`brain ask "summarize my pricing conversations this quarter" --json` does the
+whole thing in one call — see `brain-ask`.
+
+**Hard ceiling on `brain show` here.** A 20-result search invites a `brain
+show` per hit — priced in the cost table above, and never the right move. Show
+**at most 2–3 documents**: the ones `--brief` and `recall` already flagged.
 
 Synthesize a 4–6 paragraph thematic summary (not chronological), grouped by
 counterparty when relevant. Cite each theme with the supporting docs.

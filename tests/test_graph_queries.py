@@ -676,3 +676,289 @@ def test_graph_data_derived_edges_render_in_whole_graph_view(
     derived = [e for e in snapshot.edges if e.link_kind == "derived"]
     assert len(derived) == 1
     assert derived[0].rule == "shared_thread"
+
+
+# ---------------------------------------------------------------------------
+# ``fetch_limit`` — bounding the FETCH, not just the payload (security LOW-3)
+#
+# The MCP link tools cap rows in Python for context cost; ``fetch_limit`` is
+# what stops the DATABASE handing over the whole corpus first. The contract it
+# has to keep is exact: ``f(..., fetch_limit=n) == f(...)[:n]``.
+#
+# TWO assertions per test, and the LENGTH one is the sharper. A first
+# implementation of this spent the budget PER BLOCK rather than across blocks,
+# and returned ``wiki[:n] ++ derived[:n]`` — still a prefix of nothing wrong,
+# just too long. Prefix equality alone stays GREEN on that bug (measured); only
+# the count catches it.
+# ---------------------------------------------------------------------------
+
+
+def _fan_in(
+    test_db: psycopg.Connection[Any], *, wiki: int, derived: int
+) -> str:
+    """A target doc with ``wiki`` inbound links and ``derived`` derived edges.
+
+    Two blocks on purpose: ``backlinks_for`` concatenates the wiki block and
+    the derived block, so a cap that lands INSIDE the second block is the only
+    one that exercises a budget carried across them.
+    """
+    target = _make_doc(
+        test_db,
+        doc_id="aaaaaaaa-0000-0000-0000-000000000000",
+        title="Target",
+        vault_path="target.md",
+    )
+    for i in range(wiki):
+        src = _make_doc(
+            test_db,
+            doc_id=f"bbbbbbbb-0000-0000-0000-{i:012d}",
+            title=f"Wiki source {i}",
+            vault_path=f"w{i}.md",
+        )
+        _link(test_db, src=src, dst=target, text=f"[[Target {i}]]")
+    for i in range(derived):
+        partner = _make_doc(
+            test_db,
+            doc_id=f"cccccccc-0000-0000-0000-{i:012d}",
+            title=f"Derived partner {i}",
+            vault_path=f"d{i}.md",
+        )
+        _derived(test_db, a=target, b=partner, rule="shared_thread")
+    return target
+
+
+def test_backlinks_fetch_limit_returns_the_unbounded_prefix(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """``backlinks_for(..., fetch_limit=n)`` is exactly the first ``n`` rows."""
+    # Arrange — 2 wiki + 3 derived, so a cap of 3 falls inside the second block.
+    target = _fan_in(test_db, wiki=2, derived=3)
+
+    # Act
+    full = backlinks_for(test_db, target)
+    bounded = backlinks_for(test_db, target, fetch_limit=3)
+
+    # Assert
+    assert len(full) > 3, "fixture must exceed the cap or this proves nothing"
+    assert len(bounded) == 3, "right COUNT — a per-block budget returns more"
+    assert bounded == full[:3], "right ROWS, in the unbounded order"
+    # The cap really does straddle the two blocks, or the count assertion above
+    # would be satisfied by the wiki block alone.
+    assert [r.link_kind for r in bounded] == ["wiki", "wiki", "derived"]
+
+
+def test_outgoing_links_fetch_limit_spans_all_three_blocks(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Same contract across resolved → derived → unresolved."""
+    # Arrange — 2 resolved + 3 derived + 2 unresolved = 7 rows.
+    target = _fan_in(test_db, wiki=0, derived=3)
+    for i in range(2):
+        dst = _make_doc(
+            test_db,
+            doc_id=f"dddddddd-0000-0000-0000-{i:012d}",
+            title=f"Outbound {i}",
+            vault_path=f"o{i}.md",
+        )
+        _link(test_db, src=target, dst=dst, text=f"[[Outbound {i}]]")
+    _unresolved(test_db, src=target, text="[[Nowhere A]]")
+    _unresolved(test_db, src=target, text="[[Nowhere B]]")
+
+    full = outgoing_links_for(test_db, target, include_unresolved=True)
+    assert len(full) == 7
+
+    # Act / Assert — a cap inside the THIRD block, and one that stops before it
+    # (the unresolved query must then be skipped, not merely trimmed).
+    for cap in (6, 3):
+        bounded = outgoing_links_for(
+            test_db, target, include_unresolved=True, fetch_limit=cap
+        )
+        assert len(bounded) == cap, f"right COUNT at fetch_limit={cap}"
+        assert bounded == full[:cap], f"right ROWS at fetch_limit={cap}"
+
+
+def test_orphans_fetch_limit_returns_the_unbounded_prefix(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """The single-query case — no blocks to straddle, same contract."""
+    # Arrange — four unlinked vault notes.
+    for i in range(4):
+        _make_doc(
+            test_db,
+            doc_id=f"eeeeeeee-0000-0000-0000-{i:012d}",
+            title=f"Lonely {i}",
+            vault_path=f"l{i}.md",
+        )
+
+    full = orphans(test_db)
+    bounded = orphans(test_db, fetch_limit=2)
+
+    assert len(full) == 4
+    assert len(bounded) == 2
+    assert bounded == full[:2]
+
+
+def test_fetch_limit_none_is_the_uncapped_cli_path(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """The default must stay unbounded — the CLI is uncapped on purpose.
+
+    ``LIMIT NULL`` is PostgreSQL's "no limit", which is what keeps this one
+    code path instead of two; this pins that it really behaves that way rather
+    than quietly truncating at some driver-side default.
+    """
+    target = _fan_in(test_db, wiki=2, derived=3)
+
+    assert backlinks_for(test_db, target, fetch_limit=None) == backlinks_for(
+        test_db, target
+    )
+    assert len(backlinks_for(test_db, target, fetch_limit=None)) == 5
+    assert len(orphans(test_db, fetch_limit=None)) == len(orphans(test_db))
+
+
+# ---------------------------------------------------------------------------
+# The prefix property AT THE TIE — regression for F-1 (e2e QA, 2026-08-20)
+#
+# The block above proves ``f(..., fetch_limit=n) == f(...)[:n]`` on a fixture
+# where every source has a DISTINCT title. That is the one shape where the
+# property cannot fail, because ``LOWER(title)`` alone already orders the rows.
+# The real defect lived one step past it: with ``ORDER BY LOWER(d.title),
+# l.link_text`` and two sources sharing BOTH keys the sort is not total, and
+# PostgreSQL orders a bounded plan (``Limit`` over a top-N heapsort) differently
+# from the unbounded one (plain sort). ``brain_backlinks(limit=1)`` then returned
+# a row that was not ``brain_backlinks()[0]``, so an agent re-calling with a
+# different ``limit`` could see a row twice or never.
+#
+# Fixture size is load-bearing. The bug needs the planner to actually PICK the
+# two different plans, which it does once there are enough tied rows to be worth
+# a top-N heapsort; a 2-3 row fixture can pass on the unfixed code by luck.
+# ``_TIED`` is set well above the observed threshold. If you shrink it, re-run
+# the mutation check (drop the trailing unique key from the ORDER BY and watch
+# these tests go red) — a fixture too small to change the plan tests nothing.
+# ---------------------------------------------------------------------------
+
+_TIED = 60
+
+
+def test_backlinks_prefix_holds_when_title_and_link_text_both_tie(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """F-1: ``backlinks_for`` is a true prefix even when the sort keys tie."""
+    # Arrange — many sources sharing BOTH ordering keys, so only a unique
+    # tiebreaker can separate them.
+    target = _make_doc(
+        test_db,
+        doc_id="a1a1a1a1-0000-0000-0000-000000000000",
+        title="Hub Note",
+        vault_path="hub.md",
+    )
+    for i in range(_TIED):
+        src = _make_doc(
+            test_db,
+            doc_id=f"b1b1b1b1-0000-0000-0000-{i:012d}",
+            title="Same Title",  # identical on purpose
+            vault_path=f"tie{i}.md",
+        )
+        _link(test_db, src=src, dst=target, text="[[Hub Note]]")  # identical too
+
+    # Act
+    full = backlinks_for(test_db, target)
+
+    # Assert — every bounded fetch is the prefix of the unbounded one.
+    assert len(full) == _TIED
+    assert len({r.src_document_id for r in full}) == _TIED, "fixture sanity"
+    assert len({(r.src_title, r.link_text) for r in full}) == 1, (
+        "fixture must be fully TIED on the pre-fix ORDER BY or it proves nothing"
+    )
+    for cap in (1, 2, 3, _TIED // 2, _TIED - 1):
+        bounded = backlinks_for(test_db, target, fetch_limit=cap)
+        assert len(bounded) == cap, f"right COUNT at fetch_limit={cap}"
+        assert bounded == full[:cap], f"right ROWS at fetch_limit={cap}"
+
+
+def test_outgoing_links_prefix_holds_when_title_and_link_text_both_tie(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """Same tie, the other join side — ``outgoing_links_for``'s resolved block."""
+    source = _make_doc(
+        test_db,
+        doc_id="a2a2a2a2-0000-0000-0000-000000000000",
+        title="Fan Out",
+        vault_path="fanout.md",
+    )
+    for i in range(_TIED):
+        dst = _make_doc(
+            test_db,
+            doc_id=f"b2b2b2b2-0000-0000-0000-{i:012d}",
+            title="Same Title",
+            vault_path=f"out{i}.md",
+        )
+        _link(test_db, src=source, dst=dst, text="[[Same Title]]")
+
+    full = outgoing_links_for(test_db, source)
+
+    assert len(full) == _TIED
+    assert len({(r.dst_title, r.link_text) for r in full}) == 1, "fixture sanity"
+    for cap in (1, 2, 3, _TIED // 2, _TIED - 1):
+        bounded = outgoing_links_for(test_db, source, fetch_limit=cap)
+        assert len(bounded) == cap, f"right COUNT at fetch_limit={cap}"
+        assert bounded == full[:cap], f"right ROWS at fetch_limit={cap}"
+
+
+def test_unresolved_links_prefix_holds_when_link_text_ties(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """The third block ties too: ``unresolved_links`` is UNIQUE per (src, text, kind).
+
+    ``ORDER BY link_text`` alone therefore cannot separate a ``wiki`` row from
+    an ``embed`` row carrying the same text. Only two rows can tie per text, so
+    this pins determinism rather than reproducing a plan flip — the guard is
+    that the pair always comes back in the same order.
+    """
+    source = _make_doc(
+        test_db,
+        doc_id="a3a3a3a3-0000-0000-0000-000000000000",
+        title="Dangling",
+        vault_path="dangling.md",
+    )
+    for i in range(_TIED // 2):
+        text = f"[[Nowhere {i:03d}]]"
+        _unresolved(test_db, src=source, text=text, kind="wiki")
+        _unresolved(test_db, src=source, text=text, kind="embed")
+
+    full = outgoing_links_for(test_db, source, include_unresolved=True)
+
+    assert len(full) == _TIED
+    assert all(not r.resolved for r in full), "fixture sanity — all unresolved"
+    for cap in (1, 2, 3, _TIED // 2, _TIED - 1):
+        bounded = outgoing_links_for(
+            test_db, source, include_unresolved=True, fetch_limit=cap
+        )
+        assert len(bounded) == cap, f"right COUNT at fetch_limit={cap}"
+        assert bounded == full[:cap], f"right ROWS at fetch_limit={cap}"
+
+
+def test_orphans_prefix_holds_when_titles_tie(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """``orphans`` already ended its ORDER BY on ``d.id``; pin that it stays.
+
+    This one was NOT broken. It is here so the invariant is asserted rather
+    than assumed the next time someone edits the clause.
+    """
+    for i in range(_TIED):
+        _make_doc(
+            test_db,
+            doc_id=f"a4a4a4a4-0000-0000-0000-{i:012d}",
+            title="Same Title",
+            vault_path=f"orphan{i}.md",
+        )
+
+    full = orphans(test_db)
+
+    assert len(full) == _TIED
+    assert len({n.title for n in full}) == 1, "fixture sanity — all titles tie"
+    for cap in (1, 2, 3, _TIED // 2, _TIED - 1):
+        bounded = orphans(test_db, fetch_limit=cap)
+        assert len(bounded) == cap, f"right COUNT at fetch_limit={cap}"
+        assert bounded == full[:cap], f"right ROWS at fetch_limit={cap}"

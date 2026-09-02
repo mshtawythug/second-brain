@@ -1,20 +1,39 @@
 """Configuration loading from environment / .env.
 
-**File-size ceiling (CLAUDE.md): already over, and it grew.** This pointer
-carries no live line count on purpose -- re-derive with
-``wc -l src/brain/config.py``. What cannot rot is the trail: 2,250 (``f8c76c0``,
-branch base) -> 2,289 (``3b16527``) -> 2,303 (``0473b5f``).
-The growth is ONE knob --
-``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`` -- plus its tri-state parse and the
-ruling, recorded inline at the default, for why it is deliberately NOT
-``UiContext.serve_confidential_bodies``: "trusted to read a confidential note it
-opened" and "wants every confidential title painted on load" are different
-questions, and the unprompted listing surfaces ask the second one.
+Over the 800-line ceiling (CLAUDE.md): one env-loading surface, and each
+knob carries the measurement block that justifies its default in prose.
+Those evidence blocks are the bulk of the file and the reason to split it
+next -- into ``config.py`` plus a measurements/rationale doc -- not a
+reason to scatter the knobs.
 
-Knobs belong beside the other knobs, so the knob itself is not the problem. The
-PROSE is: this file is mostly measurement blocks and rationale. Splitting the
-rationale into a companion doc, leaving the knobs here, is the next move if it
-grows again.
+**No live line count is quoted here on purpose -- re-derive with
+``wc -l src/brain/config.py``.** What cannot rot is the trail of hops:
+
+* ``f8c76c0`` (branch base) -> ``3b16527`` -> ``0473b5f``: ONE knob,
+  ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES``, plus its tri-state parse and the
+  ruling -- recorded inline at the default -- for why it is deliberately NOT
+  ``UiContext.serve_confidential_bodies``: "trusted to read a confidential note
+  it opened" and "wants every confidential title painted on load" are different
+  questions, and the unprompted listing surfaces ask the second one.
+* master, PR #8 (+43, all comments): two documented bounds were imprecise as
+  written -- ``BRAIN_RECALL_MAX_BUDGET_TOKENS``' ratio range was scoped to a
+  corpus when it is really scoped to a BUDGET, and
+  ``BRAIN_SHOW_MAX_CONTENT_TOKENS``' "2x" read as a payload guarantee when it
+  bounds the two FIELDS. Both blocks now carry the arithmetic. Corrections, not
+  features.
+* master, PR #8 final review round: the ceiling>=tool-default cross-checks and
+  the two ``MCP_*_DEFAULT_LIMIT`` constants they compare against -- closing for
+  ``brain_search`` / ``brain_graphrag_entities`` the same operator-misconfig
+  failure the recall cross-check already closed. Reason inline at both the
+  constants and the checks.
+* 2026-09-02, merging master into this branch: no new knob and no new prose of
+  its own. The merged file is the UNION of the two sets of knobs above -- the
+  six MCP payload ceilings and ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`` are
+  orthogonal and neither replaced the other.
+
+Knobs belong beside the other knobs, so the knobs are not the problem. The
+PROSE is. Splitting the rationale into a companion doc, leaving the knobs here,
+is the next move if it grows again.
 """
 import os
 import re
@@ -105,6 +124,22 @@ DEFAULT_RECENCY_HALFLIFE_DAYS = 180.0
 # stitched around it to give Claude / the user richer reading context. Set to
 # 0 to disable expansion. Override via ``BRAIN_SNIPPET_CONTEXT_TOKENS``.
 DEFAULT_SNIPPET_CONTEXT_TOKENS = 200
+
+# Wave 4 (agentic token reduction) -- the hard outer character cap on a
+# stitched search snippet, previously the inlined constant
+# ``4 x brain.search.SNIPPET_LENGTH``. 1600 is exactly that value, so the
+# default is numerically unchanged.
+#
+# This is the ONLY knob Wave 4 left behind, and deliberately so. The wave's
+# actual subject -- an Otsu cut over neighbour relevance, behind
+# ``BRAIN_SNIPPET_ADAPTIVE`` / ``BRAIN_SNIPPET_SCORE_FLOOR`` -- was built,
+# measured on the live corpus, and REMOVED: it engaged on 74.5% of results and
+# changed zero bytes of the delivered payload on 55 of 55, because this cap
+# (against a ~2,281-char median chunk) truncates the matched chunk itself on
+# 47 of 55 results, long before neighbour selection gets a say. Making the
+# binding constraint configurable is the durable half of that finding. Full
+# write-up in :mod:`brain.snippet_context`'s module docstring.
+DEFAULT_SNIPPET_MAX_CHARS = 1600
 
 # Default vault location -- clean, no implicit cloud sync. Users who want iCloud
 # can either symlink ``~/brain-vault`` to an iCloud Drive folder or set
@@ -447,6 +482,157 @@ DEFAULT_RECALL_BUDGET_TOKENS = 2000
 DEFAULT_RECALL_PASSAGE_TOKENS = 120
 DEFAULT_RECALL_MAX_CANDIDATES = 25
 
+# Wave 3 (agentic token reduction) -- MCP payload ceilings. Each bounds a
+# single MCP response so no one tool call can eat a large fraction of an
+# agent's context window. Enforced in :mod:`brain.mcp_limits`, which raises
+# with the ceiling named rather than truncating silently.
+#
+# EVERY default here is a judgement call sized off live-corpus percentiles, not
+# a law. That is why each is an env var.
+#
+# ``BRAIN_SHOW_MAX_CONTENT_TOKENS`` -- 0 = unlimited (the operator opt-out; it
+# uses :func:`_parse_non_negative_int_env`). The live corpus p95 body is
+# ~58,900 chars (~14.7k tokens), so 25000 leaves the typical bad case untouched
+# while capping the tail -- the largest live document MEASURED (2026-08-13,
+# read-only on prod) at 67,410 tokens / 266,888 chars, so the ceiling cuts the
+# worst case by ~63%.
+#
+# Do not "correct" this to 74,258. A completion audit asserted that figure; it
+# was re-measured directly and is wrong. 67,410 is the number, and it agrees
+# with the independently committed
+# docs/audits/2026-08-11-wave2-routing-counterfactual.md.
+#
+# It bounds ``documents.summary`` as well as the body, and not only under
+# ``summary_only=true``. The summary is a ``TEXT`` column (migration 011) with
+# no length constraint -- short only because ``OllamaEnricher`` writes it that
+# way -- so leaving it out would have made ``summary_only``, the escape hatch
+# FROM this ceiling, the one payload with no ceiling. Consequence stated rather
+# than buried: ``content`` and ``summary`` are EACH bounded by this value, so
+# the two FIELDS together total at most 2x it. One knob, one bound, where there
+# was none.
+#
+# THE FIELDS, NOT THE PAYLOAD (corrected 2026-08-20; QA read the old wording as
+# a payload guarantee, which it was not). The serialized response also carries
+# title, tags, source_path, ids and -- when a cut happened -- the recovery-marker
+# prose. Measured at ``max_content_tokens=500``: the two fields totalled exactly
+# 1,000 tokens and the whole payload was 1,226, i.e. ~226 tokens of fixed
+# overhead, proportionally larger at smaller caps. Size a context window against
+# 2x this value PLUS that overhead, not against 2x alone.
+#
+# Bounding the SUM instead -- so the knob's name promised exactly what it
+# delivered -- was considered and rejected. It makes the two fields COMPETE for
+# one budget, and whichever is measured first wins: a long body would silently
+# starve the summary, or the reverse, depending on evaluation order. That turns
+# a stated cap into an order-dependent one, and the field an agent loses is the
+# one it cannot tell it lost. Per-field is the weaker guarantee and the
+# predictable one, and the asymmetry is written down here rather than
+# discovered. If the 2x ever actually binds, the fix is a second knob for the
+# summary, NOT a shared budget.
+DEFAULT_SHOW_MAX_CONTENT_TOKENS = 25000
+# == ``brain.search.CANDIDATE_LIMIT``: above it a larger ``limit`` cannot
+# produce more documents anyway.
+DEFAULT_SEARCH_MAX_LIMIT = 50
+# `brain_recall` delivers roughly 2.2x its ``budget_tokens`` because the MCP
+# payload ships every passage TWICE -- once structured in ``passages[].text``
+# and again rendered inside ``context_block``. Measured on 11 live queries at
+# ``budget_tokens=2000``: 4,025-4,726 delivered tokens (2.01x-2.36x, mean
+# 2.23x). The intended bound is ~32000 DELIVERED tokens (~16% of a 200k
+# window), so the accepted budget is 32000 / 2.36 (the measured worst case)
+# ~= 13,500 -> 13000.
+#
+# THE 2.36 DIVISOR IS AN EMPIRICAL CONSTANT FROM AN 11-QUERY SAMPLE, NOT A LAW.
+# Re-derive it -- or delete it and restore 32000 -- the moment the
+# double-render is removed; a stale divisor would then under-bound by half.
+#
+# PROVENANCE, so the next reader can get back to the measurement:
+#   artifact  docs/audits/2026-08-10-token-payload-baseline.json
+#   harness   scripts/token_payload_report.py (`measure_recall`, which builds
+#             `to_dict()` + `context_block` exactly as `mcp_server.brain_recall`
+#             does) over scripts/token_payload_queries.txt, embedder=arctic
+#   sample    11 queries, all at ``budget_tokens=2000``: 4,025-4,726 delivered
+#             tokens, i.e. 2.01x-2.36x, mean 2.23x
+#
+# RE-MEASURED 2026-08-13 against the same 11 queries on the live corpus, after
+# this wave landed -- docs/audits/2026-08-13-token-payload-after-wave3.json.
+# Every query came in EXACTLY +8 tokens (total 49,132 -> 49,220, +0.18%), which
+# is the additive `payload_tokens` key this wave added and nothing else. The
+# worst case therefore moved 2.3630 -> 2.3670, a hair ABOVE the 2.36 this
+# constant is derived from. Stated plainly because it is the kind of drift that
+# gets rounded away: the bound still holds with margin --
+#     13000 x 2.3670 = 30,771  <= 32,000   (the intended delivered bound)
+#     32000 / 2.3670 = 13,519  >= 13,000   (this constant)
+# -- so 13000 stands. If a future re-measurement pushes the worst case past
+# 2.4615 (= 32000/13000), it does NOT and this constant must come down.
+#
+# THE RANGE IS SCOPED TO ITS MEASUREMENT, AND THE SCOPE IS THE BUDGET, NOT JUST
+# THE CORPUS (added 2026-08-20 after end-to-end QA measured 2.44x and read it
+# as the range being wrong). 2.01x-2.36x is what 11 live queries cost AT
+# ``budget_tokens=2000``. QA measured 1,466 delivered tokens at
+# ``budget_tokens=600`` -- 2.4433x -- on short synthetic passages. Both are
+# right, and the gap is the mechanism this block already describes: delivered
+# ~= 2 x used + overhead, so the RATIO is 2 + overhead/budget and rises as the
+# budget FALLS. Same code, r = 2.3670 at 2000 and 2.4433 at 600.
+#
+# The ceiling still holds, two ways:
+#     13000 x 2.4433 = 31,763  <= 32,000   (substituting QA's ratio directly)
+#     32000 / 2.4433 = 13,097  >= 13,000   (adopting it as the divisor)
+# and 2.4433 is still under the 2.4615 break point above. The margin is thin
+# (237 tokens, 0.7%) ONLY under the direct substitution, which is the wrong
+# arithmetic: applying a 600-budget ratio at a 13,000 budget over-states the
+# overshoot by 21.7x on the fixed-overhead term. Do not widen the range to
+# absorb 2.44 -- that would imply 2.44 was measured under the same conditions,
+# and would move the input the divisor is derived from for no reason. Re-derive
+# only from a measurement taken AT the ceiling.
+#
+# SCALE CAVEAT -- the ratio is MEASURED at 2000 and APPLIED at 13000, 6.5x
+# away. That extrapolation errs safe, and here is why: the overshoot is ~2x
+# structural duplication (every passage ships in `passages[].text` AND again
+# inside `context_block`) plus a roughly FIXED JSON envelope. The envelope is a
+# larger fraction of a small payload, so the ratio should FALL toward the ~2.0
+# duplication floor as the budget rises -- 2.36 is a worst case that gets more
+# conservative, not less, at 13000. It was not re-measured at 13000; if the
+# duplication is ever removed or a passage's rendering changes, re-run the
+# harness at the ceiling itself rather than trusting this reasoning.
+DEFAULT_RECALL_MAX_BUDGET_TOKENS = 13000
+# MEASURED, not estimated: the plan's "500 x ~10 tokens/entity ~= 5k" is wrong.
+# The live graph serializes at ~37 tokens/entity (entities carry `description`),
+# so all 6,589 cost 246,724 tokens and 500 cost 17,672 (re-measured
+# read-only on prod 2026-08-13; the plan's "~66k" was off by 3.7x). 500 is kept anyway --
+# it bounds a deliberate opt-in ask (the DEFAULT `limit` is 50, ~1.8k tokens)
+# and still cuts the worst case by 92.8%. Lower it if 17.7k is too much for one
+# admin call; that is what the env var is for.
+#
+# HOW TO REPRODUCE, because one digit of these depends on it: cl100k_base over
+# ``json.dumps(entities, ensure_ascii=False)`` -- the house convention (see
+# `payload_tokens` in mcp_server.py and scripts/token_payload_report.py) and
+# what the MCP wire actually ships. json.dumps' ASCII-escaping DEFAULT gives
+# 247,070 / 17,711 instead, because non-ASCII in entity names and descriptions
+# escapes to a 6-char \uXXXX. Both are "measured"; only one is the payload.
+# Do not "correct" 246,724 to 247,070 without also changing the serialization
+# named here. (50 entities cost 1,750 either way -- a sample that agrees under
+# both is not evidence the method matches.)
+DEFAULT_GRAPH_ENTITIES_MAX_LIMIT = 500
+# Covers the live maximum outgoing-link count (166) without special-casing.
+DEFAULT_MCP_ROWS_MAX_LIMIT = 200
+# Admin listing of materialized communities. Deliberately NOT
+# ``DEFAULT_GRAPH_COMMUNITY_LIMIT`` (5), which governs retrieval-time global
+# theme selection in :mod:`brain.graph_rag.global_` -- overloading it would
+# couple an admin view to a ranking knob.
+DEFAULT_GRAPH_COMMUNITIES_LIST_LIMIT = 25
+
+# The two MCP tools whose ``limit`` SIGNATURE default is a fixed constant
+# rather than a config knob (`brain_search` and `brain_graphrag_entities`).
+# Owned HERE, and consumed by ``mcp_server``'s signatures, so that
+# ``Config.load`` can enforce ceiling >= default at startup -- the same
+# failure class the recall cross-check below closes for
+# BRAIN_RECALL_BUDGET_TOKENS. Without the check, an operator setting
+# BRAIN_SEARCH_MAX_LIMIT below 5 (or BRAIN_GRAPH_ENTITIES_MAX_LIMIT below 50)
+# turned EVERY default call into INVALID_PARAMS blaming the agent.
+# ``tests/test_config_mcp_ceilings.py`` pins the signatures to these constants
+# so the mirror cannot drift.
+MCP_SEARCH_DEFAULT_LIMIT = 5
+MCP_GRAPH_ENTITIES_DEFAULT_LIMIT = 50
+
 # F10 -- the agent-id grammar: one alphanumeric leading character followed by up
 # to 63 more alphanumerics / dot / underscore / colon / hyphen (64 chars total).
 # Leading punctuation is rejected so an id can never be confused with a CLI flag.
@@ -711,6 +897,29 @@ def _parse_positive_int_env(env_var: str, default: int) -> int:
     return value
 
 
+def _parse_non_negative_int_env(env_var: str, default: int) -> int:
+    """Parse ``env_var`` as an integer ``>= 0``, falling back to ``default``.
+
+    The sibling of :func:`_parse_positive_int_env` for the handful of knobs
+    whose ``0`` is a meaningful operator opt-out ("no ceiling") rather than a
+    typo. Deliberately a separate function: loosening
+    :func:`_parse_positive_int_env` would silently admit ``0`` for the 20+
+    knobs that depend on it rejecting it.
+    """
+    raw = os.environ.get(env_var)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(
+            f"{env_var} must be an integer >= 0 (got {raw!r})"
+        ) from exc
+    if value < 0:
+        raise ConfigError(f"{env_var} must be an integer >= 0 (got {raw!r})")
+    return value
+
+
 def _parse_unit_interval_env(env_var: str, default: float) -> float:
     """Parse ``env_var`` as a float in ``[0.0, 1.0]``, falling back to ``default``.
 
@@ -846,6 +1055,10 @@ class Config:
     # context are stitched around it. 0 = disabled. Loaded from
     # ``BRAIN_SNIPPET_CONTEXT_TOKENS``; must be a non-negative integer.
     snippet_context_tokens: int = DEFAULT_SNIPPET_CONTEXT_TOKENS
+    # Wave 4 -- hard outer character cap on a stitched snippet. Positive int
+    # from ``BRAIN_SNIPPET_MAX_CHARS``; see the DEFAULT_* block for why this is
+    # the one knob that wave left behind.
+    snippet_max_chars: int = DEFAULT_SNIPPET_MAX_CHARS
     # Plan 02 -- spaced-repetition resurfacing knobs (`brain resurface`). All
     # four feed :func:`brain.resurface.resurface_docs`; grouped together and
     # validated the same way as the other int/float env knobs. ``limit`` >= 1,
@@ -1008,6 +1221,15 @@ class Config:
     recall_budget_tokens: int = DEFAULT_RECALL_BUDGET_TOKENS
     recall_passage_tokens: int = DEFAULT_RECALL_PASSAGE_TOKENS
     recall_max_candidates: int = DEFAULT_RECALL_MAX_CANDIDATES
+    # Wave 3 -- MCP payload ceilings (see the DEFAULT_* block for rationale).
+    # All eager-validated at load time. ``show_max_content_tokens`` is the only
+    # one accepting 0 (= unlimited); the rest are >= 1.
+    show_max_content_tokens: int = DEFAULT_SHOW_MAX_CONTENT_TOKENS
+    search_max_limit: int = DEFAULT_SEARCH_MAX_LIMIT
+    recall_max_budget_tokens: int = DEFAULT_RECALL_MAX_BUDGET_TOKENS
+    graph_entities_max_limit: int = DEFAULT_GRAPH_ENTITIES_MAX_LIMIT
+    mcp_rows_max_limit: int = DEFAULT_MCP_ROWS_MAX_LIMIT
+    graph_communities_list_limit: int = DEFAULT_GRAPH_COMMUNITIES_LIST_LIMIT
     # F10 -- optional agent identity attributed to writes. Unset / blank stays
     # ``None`` (attribution disabled); a set value must match
     # :data:`AGENT_ID_PATTERN` or load fails.
@@ -1253,6 +1475,12 @@ class Config:
                     f"BRAIN_SNIPPET_CONTEXT_TOKENS must be a non-negative integer "
                     f"(got {snippet_context_tokens!r})"
                 )
+        # Wave 4 -- the snippet character cap. ``0`` is rejected rather than
+        # treated as "no cap": it would blank every snippet in every payload,
+        # which is indistinguishable from a working search that found nothing.
+        snippet_max_chars = _parse_positive_int_env(
+            "BRAIN_SNIPPET_MAX_CHARS", DEFAULT_SNIPPET_MAX_CHARS
+        )
         # Plan 02 -- resurface env vars. Same eager-validation idiom as the
         # snippet-context / recency-halflife knobs above: unset/blank ->
         # default; non-parseable / out-of-range -> ConfigError at startup so a
@@ -2196,6 +2424,61 @@ class Config:
             "BRAIN_RECALL_MAX_CANDIDATES", DEFAULT_RECALL_MAX_CANDIDATES
         )
 
+        # Wave 3 -- MCP payload ceilings.
+        show_max_content_tokens = _parse_non_negative_int_env(
+            "BRAIN_SHOW_MAX_CONTENT_TOKENS", DEFAULT_SHOW_MAX_CONTENT_TOKENS
+        )
+        search_max_limit = _parse_positive_int_env(
+            "BRAIN_SEARCH_MAX_LIMIT", DEFAULT_SEARCH_MAX_LIMIT
+        )
+        recall_max_budget_tokens = _parse_positive_int_env(
+            "BRAIN_RECALL_MAX_BUDGET_TOKENS", DEFAULT_RECALL_MAX_BUDGET_TOKENS
+        )
+        graph_entities_max_limit = _parse_positive_int_env(
+            "BRAIN_GRAPH_ENTITIES_MAX_LIMIT", DEFAULT_GRAPH_ENTITIES_MAX_LIMIT
+        )
+        mcp_rows_max_limit = _parse_positive_int_env(
+            "BRAIN_MCP_ROWS_MAX_LIMIT", DEFAULT_MCP_ROWS_MAX_LIMIT
+        )
+        graph_communities_list_limit = _parse_positive_int_env(
+            "BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT",
+            DEFAULT_GRAPH_COMMUNITIES_LIST_LIMIT,
+        )
+        # The default budget must fit under its own ceiling. Without this, an
+        # operator who raises BRAIN_RECALL_BUDGET_TOKENS past the max breaks
+        # EVERY default `brain_recall` call: the omitted `budget_tokens` falls
+        # back to the configured default, which then trips the ceiling and
+        # returns INVALID_PARAMS telling the *agent* to re-ask smaller — an
+        # error that blames the caller for the operator's misconfiguration, on
+        # a tool that is dead until someone reads the source. Eager ConfigError
+        # at load is this module's idiom (it is why _parse_positive_int_env
+        # exists); name both vars so the fix is unambiguous.
+        if recall_budget_tokens > recall_max_budget_tokens:
+            raise ConfigError(
+                "BRAIN_RECALL_BUDGET_TOKENS "
+                f"({recall_budget_tokens}) must be <= "
+                f"BRAIN_RECALL_MAX_BUDGET_TOKENS ({recall_max_budget_tokens}); "
+                "the default recall budget cannot exceed its own ceiling"
+            )
+        # Same failure class, for the two tools whose ``limit`` default is a
+        # signature constant (see MCP_SEARCH_DEFAULT_LIMIT above) rather than
+        # a config knob: a ceiling below the tool's own default fails every
+        # call that omits ``limit``, with an error telling the agent to re-ask
+        # smaller for what is the operator's misconfiguration.
+        if search_max_limit < MCP_SEARCH_DEFAULT_LIMIT:
+            raise ConfigError(
+                f"BRAIN_SEARCH_MAX_LIMIT ({search_max_limit}) must be >= "
+                f"{MCP_SEARCH_DEFAULT_LIMIT}, the MCP brain_search tool's "
+                "default limit; a lower ceiling would reject every default call"
+            )
+        if graph_entities_max_limit < MCP_GRAPH_ENTITIES_DEFAULT_LIMIT:
+            raise ConfigError(
+                f"BRAIN_GRAPH_ENTITIES_MAX_LIMIT ({graph_entities_max_limit}) "
+                f"must be >= {MCP_GRAPH_ENTITIES_DEFAULT_LIMIT}, the MCP "
+                "brain_graphrag_entities tool's default limit; a lower ceiling "
+                "would reject every default call"
+            )
+
         # Validated against the inlined :data:`AGENT_ID_PATTERN` -- NOT by
         # importing ``brain.agent.normalize_agent_id``, which does not exist
         # until Wave 4 (see the constant's comment above).
@@ -2236,6 +2519,7 @@ class Config:
             "brief_pin_limit": brief_pin_limit,
             "recency_halflife_days": recency_halflife_days,
             "snippet_context_tokens": snippet_context_tokens,
+            "snippet_max_chars": snippet_max_chars,
             "resurface_limit": resurface_limit,
             "resurface_min_age_days": resurface_min_age_days,
             "resurface_age_halflife_days": resurface_age_halflife_days,
@@ -2300,6 +2584,12 @@ class Config:
             "recall_budget_tokens": recall_budget_tokens,
             "recall_passage_tokens": recall_passage_tokens,
             "recall_max_candidates": recall_max_candidates,
+            "show_max_content_tokens": show_max_content_tokens,
+            "search_max_limit": search_max_limit,
+            "recall_max_budget_tokens": recall_max_budget_tokens,
+            "graph_entities_max_limit": graph_entities_max_limit,
+            "mcp_rows_max_limit": mcp_rows_max_limit,
+            "graph_communities_list_limit": graph_communities_list_limit,
             "agent_id": agent_id,
             "backup_dir": backup_dir,
             "ui_serve_confidential_titles": ui_serve_confidential_titles,

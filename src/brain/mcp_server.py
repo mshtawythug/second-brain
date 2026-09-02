@@ -102,6 +102,104 @@ drift from it; what is here is the eight lines that map its ``ConnectError`` to
 A split into per-domain tool modules stays deferred alongside ``cli.py``'s:
 this is one MCP tool registry over one shared error-mapping layer.
 
+
+--------------------------------------------------------------------------
+The record above is this branch's. The record below is ``master``'s, brought in
+by the 2026-09-02 merge. Both are kept in full because they narrate DISJOINT
+growth: the branch's seven growths are F6 confidential-egress gates, master's
+are the Wave-3 payload ceilings. Neither supersedes the other, and the merged
+file contains both sets of changes. The merged count is not the sum of the two
+trails -- they share the base ``f8c76c0`` -- so re-derive it with the ``wc -l``
+above rather than adding.
+--------------------------------------------------------------------------
+
+**Why this already-large file grew again (Wave 3, 2026-08-13).** This module is
+one of the files already past the 800-line ceiling (CLAUDE.md, "File-size
+ceiling" — which is also where the rule that a file over the ceiling may grow
+only for a reason written down at the point of growth lives; this note is that
+reason). The agentic-token-reduction plan
+allowed a bounded exception to add payload ceilings to six tools with a target
+of **≤ 90 net added lines**. The measured outcome was **+171** — 1.9x over,
+which with the 31 lines this note occupied when it was written the plan records
+as a **+202** wave total. Said plainly rather than quoting only the flattering
+number: a disclosure that hides its own cost is the thing it exists to prevent.
+
+**Where those two numbers come from, because git will not give them to you.**
+The branch landed as ONE squashed commit, so there is no Wave-2→Wave-3 boundary
+to diff. ``+171`` and ``+202`` are Wave-3-only figures measured against the
+Wave-2 tree at the time; the coordinator ruling that accepted them, with its
+three independent measurements, is recorded in
+``docs/plans/2026-08-10-agentic-token-reduction.md``. That record is the only
+place they are checkable. What IS derivable is the whole-file net — a larger
+number, because Waves 1, 4 and 5 and the PR-review closeout touched the file
+too::
+
+    git diff master...HEAD --numstat -- src/brain/mcp_server.py
+
+which read **307 / 41 = +266** at ``2c171fb`` and **410 / 51 = +359** at the
+PR-review closeout that follows it (merge base ``f8c76c0`` for both). Two
+figures rather than one because each is bound to the tree it was measured on —
+a single "current" number is what went stale last time. Re-derive it; never
+inherit it. (The closeout's own share is comments, not code: this
+paragraph, the ordering rationale above ``apply_content_ceiling`` in
+``brain_show``, the summary-ceiling clause in its docstring, and the three
+``LIMIT n + 1`` notes on the link tools. Recorded here because the ceiling rule
+asks for a reason at the point of growth, and "comments" is not automatically
+one.)
+
+**And again, 2026-08-20 (+22 vs e6d6e47, all comments).** End-to-end QA falsified the
+``LIMIT n + 1`` prefix claim in ``brain_backlinks``: the SQL behind it was not
+a TOTAL order, and "no re-sort afterwards" is not sufficient when the sort
+ties. The added lines are the corrected claim at that call site and the scoping
+of ``brain_recall``'s delivered-token range to the budget it was measured at.
+Both were wrong-as-written, so this is a correction rather than a feature.
+
+**And once more, 2026-08-21 (final PR-#8 review round).** Two small growths,
+each with its inline reason at the point of growth: ``brain_show`` now
+blank-rejects ``documents.summary`` when deciding ``has_summary`` (a blank
+summary under ``summary_only=true`` returned an empty payload wearing an
+honest marker — the comment at the ``apply_content_ceiling`` call has the
+whole story), and the ``limit`` signature defaults of ``brain_search`` /
+``brain_graphrag_entities`` now come from :mod:`brain.config` constants so
+``Config.load`` can enforce ceiling >= default at startup. Per this note's own
+rule: re-derive the net with ``git diff --numstat``, never inherit it.
+
+And note what this note no longer claims: it used to say "this note is itself
++31", and the very next commit edited the note to +34 and left the +31
+standing. A hand-maintained comment that measures itself is stale the first time
+someone improves it, so the self-count is gone and the command is here instead.
+
+That was reviewed and **explicitly accepted**, not absorbed silently. The
+reasoning, so you do not have to reconstruct it:
+
+- **All the policy lives in :mod:`brain.mcp_limits`**, which is the part that
+  mattered. What is here is, per tool, one parameter, one docstring paragraph
+  and one call — roughly 26 lines each across six tools.
+- **The docstrings are the largest bucket and the least movable.** On an MCP
+  surface the docstring *is* the contract the agent reads; it is the only place
+  a caller learns that ``brain_graphrag_entities(limit=0)`` no longer means
+  "all", or that a truncated ``brain_show`` body says so. Trimming them to hit
+  a line target would trade the wave's own goal (no invisible cuts) for its
+  budget.
+- ``_ceiling`` / ``_resolve_limit`` cannot move: they exist precisely because
+  ``mcp_limits`` must stay framework-free, so they are the
+  ``PayloadCeilingExceeded`` -> ``INVALID_PARAMS`` bridge and need
+  :func:`_mcp_error`.
+
+**The ≤ 90 boundary still stands for future waves** — this is a one-time,
+argued accept and not a precedent. The recorded fallback, if this file's growth
+is revisited, is extracting the six link/graph tools into a new ``mcp_links.py``
+registered from here. That remains out of scope and deliberately un-started.
+
+**The merge itself (2026-09-02) adds no tool and no code path.** Its only
+growth in this file is this bridging note and the union of the two records
+above. Every conflict it resolved kept BOTH sides: the ``limit`` signature
+defaults still come from :mod:`brain.config` constants, ``brain_show`` still
+blank-rejects a whitespace ``summary``, the six payload ceilings are still
+enforced -- and every F6 lens the branch added is still passed at every call
+site it was added to. Per the rule at the top of this docstring: re-derive the
+net, never inherit it.
+
 **Hazard this file has already been bitten by.** Every tool is a bare ``def``
 under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
 and the function it was written for silently moves the registration onto the
@@ -131,7 +229,11 @@ from mcp.types import INTERNAL_ERROR, INVALID_PARAMS
 from . import capture as capture_mod
 from . import connect as connect_mod
 from .agent import resolve_agent_id
-from .config import Config
+from .config import (
+    MCP_GRAPH_ENTITIES_DEFAULT_LIMIT,
+    MCP_SEARCH_DEFAULT_LIMIT,
+    Config,
+)
 from .db import PersistentConnection, age_extension_available, connect, connect_age
 from .embeddings import make_embedder
 from .enrichment import ContradictionVerdict, OllamaEnricher, make_enricher
@@ -165,7 +267,11 @@ from .format import (
     graph_stats_json,
     timeline_context_json,
 )
-from .format_search import search_meta_json, search_results_json
+from .format_search import (
+    search_meta_json,
+    search_results_brief_json,
+    search_results_json,
+)
 from .gaps import (
     SearchFailureDetector,
     record_search_query,
@@ -185,6 +291,15 @@ from .interactions import (
     record_interaction,
 )
 from .mcp_compat import MCPServerProtocol, make_server, mcp_error
+from .mcp_limits import (
+    PayloadCeilingExceeded,
+    apply_content_ceiling,
+    cap_rows,
+    check_ceiling,
+    resolve_content_ceiling,
+    saturation_notice,
+    strip_content_markers,
+)
 from .queries import (
     fetch_document,
     iter_all_document_ids,
@@ -200,6 +315,7 @@ from .search_predicate import build_predicate
 from .sensitivity import is_confidential
 from .source_kinds import InvalidSourceKind, validate_source_kind
 from .tags import normalize_tags
+from .token_report import count_payload_tokens, count_results_tokens
 
 if TYPE_CHECKING:
     from .ask import AskResult
@@ -288,11 +404,28 @@ _state: _State | None = None
 
 
 def _get_state() -> _State:
-    """Return the initialized server state.
+    """Return the initialized server state, or fail loudly if there is none.
 
-    Raises ``AssertionError`` if called before :func:`main` has run (or before
-    a test has explicitly populated ``_state``)."""
-    assert _state is not None, "mcp_server not initialized — call main() first"
+    Every tool handler in this module reaches its config, connection and
+    embedder through here, so ``_state`` being ``None`` means ``main()`` never
+    ran — a caller bug, not user input.
+
+    This was a bare ``assert``. ``python -O`` strips ``assert`` outright, so
+    under an optimized interpreter the guard vanished and ``None`` flowed on to
+    42 call sites, turning a named "not initialized" failure into an
+    ``AttributeError`` somewhere downstream. The docstring promised
+    ``AssertionError`` and ``test_get_state_without_init_raises`` pinned it —
+    both false under ``-O``, which is a documented contract that does not hold
+    in one of the interpreters it can run under.
+
+    Raises:
+        BrainError: ``_state`` is ``None``. Plain :class:`BrainError` for the
+            same reason :func:`brain.cli_search._require_priced_projection`
+            raises a plain one: a caller-bug guard that still has to reach the
+            user as a clean error rather than a traceback.
+    """
+    if _state is None:
+        raise BrainError("mcp_server not initialized — call main() first")
     return _state
 
 
@@ -306,6 +439,27 @@ def _mcp_error(code: int, message: str) -> Exception:
     a statically-known class; every use is ``raise``, which needs no more.
     """
     return mcp_error(code, message)
+
+
+def _ceiling(value: int, *, ceiling: int, param: str) -> int:
+    """Apply an :mod:`brain.mcp_limits` ceiling, mapped to ``INVALID_PARAMS``.
+
+    Keeps ``mcp_limits`` framework-free (it must not import this module).
+    """
+    try:
+        return check_ceiling(value, ceiling=ceiling, param=param)
+    except PayloadCeilingExceeded as exc:
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
+
+
+def _resolve_limit(limit: int | None, *, default: int) -> int:
+    """Resolve an optional row cap: ``None`` → ``default``, else lower-only
+    (``default`` doubles as the ceiling)."""
+    if limit is None:
+        return default
+    if limit < 1:
+        raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
+    return _ceiling(limit, ceiling=default, param="limit")
 
 
 def _wrap_db_error(e: psycopg.Error) -> Exception:
@@ -457,7 +611,9 @@ def _parse_iso_datetime(value: str, *, field: str) -> datetime:
 @mcp_app.tool()
 def brain_search(
     query: str,
-    limit: int = 5,
+    # The constant lives in ``brain.config`` so ``Config.load`` can enforce
+    # BRAIN_SEARCH_MAX_LIMIT >= this default at startup (still 5).
+    limit: int = MCP_SEARCH_DEFAULT_LIMIT,
     source: str | None = None,
     tag: str | None = None,
     since_days: int | None = None,
@@ -479,6 +635,8 @@ def brain_search(
     agent_id: str | None = None,
     # — F6 confidentiality —
     include_confidential: bool = False,
+    # — Wave-1 brief projection —
+    brief: bool = False,
 ) -> dict[str, Any]:
     """Hybrid search across the second brain.
 
@@ -514,6 +672,18 @@ def brain_search(
     to before; reading named keys off a JSON object is the non-breaking way
     to grow this surface.
 
+    **Additive in this wave (NOT a shape change):** ``brief=true`` switches
+    each result object to eight keys — the same seven, where ``snippet``
+    carries the cheaper of the document's ingest-time summary and its
+    query-conditioned chunk snippet, plus ``snippet_source`` ∈
+    ``{"chunk", "summary"}`` naming which. ``brief=false`` (the default)
+    returns the seven keys byte-identically. Prefer ``brief=true`` when
+    triaging which document to open; call without it when you need to know
+    *why* a document matched. Confidentiality is unchanged: a confidential
+    document is excluded from the match set entirely unless
+    ``include_confidential=true``, so brief mode cannot surface a confidential
+    summary that search would not already have surfaced a snippet for.
+
     ``total_documents`` is the EXACT, uncapped count of documents whose text
     LEXICALLY matches — unlike ``fts_count``, which is the candidate-chunk
     count capped at 50 and meaningful only when it is zero. The vector leg
@@ -543,6 +713,11 @@ def brain_search(
     - ``draft``: ``True`` → drafts only; ``False`` → published only;
       ``None`` (default) → both.
     - ``fts_only``: skip the local Ollama embed call (FTS-only mode).
+
+    ``limit`` is capped at ``BRAIN_SEARCH_MAX_LIMIT`` (default 50, == the
+    candidate-chunk limit): a larger value cannot surface more documents, and
+    an uncapped one could return ~80k tokens. Above it the call is rejected
+    with ``INVALID_PARAMS`` naming the ceiling rather than silently trimmed.
     """
     state = _get_state()
     logger.debug("brain_search: query=%r limit=%d", query, limit)
@@ -551,6 +726,7 @@ def brain_search(
     # ``results[:limit]`` slice silently drops the tail and returns wrong data.
     if limit < 1:
         raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
+    _ceiling(limit, ceiling=state.cfg.search_max_limit, param="limit")
 
     if tag is not None and has_tag is not None and tag != has_tag:
         raise _mcp_error(
@@ -616,6 +792,7 @@ def brain_search(
                 vector_sim_floor=state.cfg.vector_sim_floor,
                 recency_halflife_days=state.cfg.recency_halflife_days,
                 snippet_context_tokens=state.cfg.snippet_context_tokens,
+                snippet_max_chars=state.cfg.snippet_max_chars,
                 diagnostics=diagnostics,
                 # Always on for MCP: the caller is an agent deciding whether
                 # to widen its query, and "5 of 5" vs "5 of 544" is exactly
@@ -661,6 +838,29 @@ def brain_search(
                     tsquery=build_tsquery(conn, query),
                 )
                 diagnostics.facets_ms = (time.perf_counter() - t_facets) * 1000.0
+            # Wave 5 — price the payload BEFORE logging it, and emit the same
+            # object that was priced. ``baseline_tokens`` is the
+            # counterfactual and exists only when ``brief`` really was in
+            # effect; a default call had no cheaper alternative, so it gets
+            # NULL rather than an invented saving.
+            results_json = (
+                search_results_brief_json(
+                    results, cost=state.embedder.count_tokens
+                )
+                if brief
+                else search_results_json(results)
+            )
+            diagnostics.results_tokens = count_results_tokens(
+                results_json, cost=state.embedder.count_tokens
+            )
+            baseline_tokens = (
+                count_results_tokens(
+                    search_results_json(results),
+                    cost=state.embedder.count_tokens,
+                )
+                if brief
+                else None
+            )
             # Plan 08 — best-effort search-failure logging. The minted
             # ``session_uuid`` lets no-click detection join this search against a
             # later ``brain_show`` open in the same session. A transient
@@ -683,6 +883,8 @@ def brain_search(
                 session_id=session_uuid,
                 source="mcp",
                 agent_id=resolve_agent_id(agent_id, state.cfg),
+                payload_tokens=diagnostics.results_tokens,
+                baseline_tokens=baseline_tokens,
                 tenant_id=state.cfg.graph_tenant_id,
             )
     except psycopg.Error as e:
@@ -690,11 +892,16 @@ def brain_search(
     except EmbedError as e:
         raise _wrap_embed_error(e) from e
     # The two original keys come FIRST and are built exactly as before; the F5
-    # metadata is merged in as additional named keys. ``search_results_json``
-    # is the shared projection the CLI uses, so the two surfaces cannot drift.
+    # metadata is merged in as additional named keys. The projection above is
+    # the shared one the CLI uses — ``search_results_json`` at ``brief=false``
+    # and ``search_results_brief_json`` at ``brief=true`` — so the two surfaces
+    # cannot drift on EITHER setting. Naming both matters: after Wave 1 there
+    # are two projections, and a comment naming only the default would read as
+    # a promise that brief mode does not make.
     return {
         "session_id": session_id,
-        "results": search_results_json(results),
+        # The priced object itself, not a rebuild of it — see above.
+        "results": results_json,
         **search_meta_json(
             diagnostics, returned=len(results), facets=facet_data
         ),
@@ -771,7 +978,20 @@ def brain_recall(
     invisible to ``no_click`` while leaving the ``fts_count = 0`` lexical-miss
     signal fully live.
 
-    Budgets default to the configured ``BRAIN_RECALL_*`` values.
+    **``budget_tokens`` sizes the content SELECTED, not the response
+    RETURNED.** Every passage ships twice — structured in ``passages[].text``
+    and again rendered inside ``context_block`` — so the delivered payload runs
+    at roughly 2.2x ``budget_tokens`` (measured 2.01x-2.36x over 11 live
+    queries **at** ``budget_tokens=2000``). That range is scoped to that
+    budget, not universal: delivered ~= 2x the content selected PLUS overhead
+    that does not shrink with the budget, so the RATIO rises as the budget
+    falls -- 2.4433x was measured at ``budget_tokens=600``. Budget against
+    ``payload_tokens``, which reports the true serialized cost of the response
+    you actually got, rather than against any ratio.
+
+    Budgets default to the configured ``BRAIN_RECALL_*`` values, and
+    ``budget_tokens`` is capped at ``BRAIN_RECALL_MAX_BUDGET_TOKENS``
+    (default 13000, chosen so the ~2.2x delivery stays under ~32k tokens).
     """
     state = _get_state()
     logger.debug("brain_recall: query=%r budget=%s", query, budget_tokens)
@@ -786,6 +1006,11 @@ def brain_recall(
     )
     if effective_budget < 1:
         raise _mcp_error(INVALID_PARAMS, "budget_tokens must be >= 1")
+    _ceiling(
+        effective_budget,
+        ceiling=state.cfg.recall_max_budget_tokens,
+        param="budget_tokens",
+    )
     if effective_candidates < 1:
         raise _mcp_error(INVALID_PARAMS, "max_candidates must be >= 1")
 
@@ -827,9 +1052,32 @@ def brain_recall(
                 without_tag=without_tag,
                 sensitivity=_confidential_lens(include_confidential),
             )
+            payload = result.to_dict()
+            payload["context_block"] = result.context_block()
+            # Additive: the true serialized cost of THIS response.
+            # ``budget_tokens`` bounds what was SELECTED; this reports what is
+            # DELIVERED (~2.2x, because passages ship both structured and
+            # rendered). Counted BEFORE the key is added, so the number stays
+            # what it has always been rather than becoming self-referential.
+            payload["payload_tokens"] = count_payload_tokens(
+                payload, cost=state.embedder.count_tokens
+            )
             # session_id=None — see the docstring. Best-effort by
             # ``record_search_query``'s own contract: a telemetry failure must
             # never cost the agent the context it already retrieved.
+            #
+            # ``payload_tokens`` persists the SAME number the response carries,
+            # deliberately NOT ``result.used_tokens``: that measures what was
+            # SELECTED into the budget, and this docstring's own measurement
+            # puts the emitted payload at 2.01x-2.36x of it. Persisting the
+            # smaller number under a column that holds the canonical
+            # serialization of the response would make the DB and the
+            # ``payload_tokens`` key disagree about a value that shares a
+            # name. (Both are the canonical count; the MCP text block itself
+            # re-serializes at ``indent=2`` on the way out, which neither
+            # counts — see migration 028's header.)
+            # ``baseline_tokens=None``: recall has no cheaper mode, so a
+            # counterfactual would be invented.
             record_search_query(
                 conn,
                 query=query,
@@ -838,6 +1086,7 @@ def brain_recall(
                 session_id=None,
                 source="mcp",
                 agent_id=resolved_agent,
+                payload_tokens=payload["payload_tokens"],
                 tenant_id=state.cfg.graph_tenant_id,
             )
     except psycopg.Error as e:
@@ -845,8 +1094,6 @@ def brain_recall(
     except EmbedError as e:
         raise _wrap_embed_error(e) from e
 
-    payload = result.to_dict()
-    payload["context_block"] = result.context_block()
     return payload
 
 
@@ -923,8 +1170,31 @@ def brain_show(
     graph_retrieved: bool = False,
     include_confidential: bool = False,
     agent_id: str | None = None,
+    summary_only: bool = False,
+    max_content_tokens: int | None = None,
 ) -> dict[str, Any]:
     """Return the full body and metadata of a single document by id prefix.
+
+    **Wave-3 payload ceiling (additive).** MEASURED: the largest live document
+    is **67,410 tokens** (266,888 chars), so the body is capped at
+    ``BRAIN_SHOW_MAX_CONTENT_TOKENS``
+    (default 25000; ``0`` disables). When a cut happens the payload gains
+    ``content_truncated=true``, ``content_tokens``, and
+    ``content_truncated_recovery`` — the last spells out what to do next
+    (``summary_only=true``, or the CLI for the whole body), so the cut is never
+    both silent and a dead end.
+    ``max_content_tokens`` lets a caller LOWER that ceiling but never raise it
+    (above it, ``INVALID_PARAMS``). ``summary_only=true`` returns the
+    ingest-time ``summary`` and ``content=null`` plus ``content_omitted``; when
+    the document has no summary it falls back to the body under the normal
+    ceiling and sets ``summary_unavailable=true``, because an empty answer to a
+    well-formed request is the worse failure. **``summary`` is bounded by the
+    same ceiling** (``summary_truncated`` + ``summary_tokens`` +
+    ``summary_truncated_recovery``) — it is a ``TEXT`` column with no length
+    constraint, so the mode advertised as the cheap one would otherwise be the
+    one with no bound at all. All of these keys appear ONLY on the paths that
+    produce them, so a normal full-body payload is unchanged.
+    Confidential withholding runs last and wins over both.
 
     F6 confidentiality: a document marked ``sensitivity='confidential'``
     returns its **body withheld** unless ``include_confidential=true``. Title,
@@ -981,6 +1251,14 @@ def brain_show(
             "produced this session). Pass originating_query alongside, "
             "or omit session_id.",
         )
+
+    # Fail fast, same reason as the session_id parse below.
+    try:
+        effective_max_content = resolve_content_ceiling(
+            max_content_tokens, configured=state.cfg.show_max_content_tokens
+        )
+    except PayloadCeilingExceeded as exc:
+        raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
 
     # Parse session_id eagerly so a bad UUID surfaces as INVALID_PARAMS
     # before we hit the DB. Done outside the connect() block so we don't
@@ -1041,6 +1319,49 @@ def brain_show(
     # we explicitly do NOT change the brain_search return shape this wave.
     if doc.summary is not None:
         payload["summary"] = doc.summary
+    # Wave 3 — bound the body (summary_only, then the token ceiling), and the
+    # summary with it.
+    #
+    # This runs BEFORE the confidential branch below, and that ordering is
+    # deliberate — reviewed and KEPT, not overlooked. The cost is real and was
+    # measured: on the largest live document (266,888 chars / 67,410 tokens) a
+    # confidential open pays a full tiktoken encode plus the binary search
+    # inside ``truncate_to_token_budget`` for a body the confidential branch
+    # below discards outright. Moving the withhold first, or passing
+    # ``max_tokens=0`` when withholding, would save all of it.
+    #
+    # It is not taken because of what it would cost instead. "Withholding wins
+    # over every Wave-3 marker" is currently an ENFORCED invariant: the markers
+    # really are produced, and a stripping step really does remove them, so
+    # deleting ``strip_content_markers`` turns THREE tests in
+    # ``tests/test_mcp_show_ceiling.py`` red, each at the marker it names:
+    # ``…_wins_over_summary_only``, ``…_wins_over_truncation`` and
+    # ``…_strips_the_summary_ceiling_markers`` (re-verified by mutation
+    # 2026-08-20, not inherited from the earlier run). Skip the ceiling
+    # on this path and the invariant becomes STRUCTURAL — true because nothing
+    # generates the markers — which no mutation can redden and no future edit
+    # is warned about. This repo has a long list of guards that did nothing;
+    # trading a proven one for CPU on the rarest path is how that list grows.
+    #
+    # The trade if it is ever revisited: it is CPU-on-confidential-opens versus
+    # mutation coverage of a confidentiality invariant. If confidential opens
+    # ever become hot, move the withhold first AND replace the mutation
+    # coverage — do not just drop it.
+    payload = apply_content_ceiling(
+        payload,
+        summary_only=summary_only,
+        # Blank-reject, NOT ``is not None`` — the same rule, for the same
+        # reason, as ``search_results_brief_json``: migration 011 puts no CHECK
+        # on ``documents.summary``, so ``''`` is a legal stored value, and
+        # treating it as "has a summary" made ``summary_only=true`` return
+        # ``content=None, summary=''`` — an empty answer whose
+        # ``content_omitted`` marker claimed a summary was substituted. A blank
+        # summary now degrades exactly like a NULL one (body under the ceiling
+        # + ``summary_unavailable``).
+        has_summary=bool(doc.summary and doc.summary.strip()),
+        max_tokens=effective_max_content,
+        cost=state.embedder.count_tokens,
+    )
     # F6 — withhold a confidential body unless explicitly asked for. Both new
     # keys are emitted ONLY on the withheld path, so a normal document's
     # payload stays byte-identical for every existing consumer (same additive
@@ -1064,6 +1385,9 @@ def brain_show(
         # document exists and ask the user for it rather than being blind to
         # it. That was the useful half of the handoff's intent.
         payload.pop("summary", None)
+        # Withholding runs LAST and wins: no Wave-3 marker may survive to imply
+        # a body was returned (summary_only + confidential ⇒ neither).
+        payload = strip_content_markers(payload)
         payload["sensitivity"] = doc.sensitivity
         payload["withheld"] = (
             "body and summary withheld: sensitivity=confidential. "
@@ -1840,7 +2164,7 @@ def brain_note_move(
 
 @mcp_app.tool()
 def brain_backlinks(
-    id_prefix: str, include_confidential: bool = False
+    id_prefix: str, include_confidential: bool = False, limit: int | None = None
 ) -> list[dict[str, Any]]:
     """List documents that link TO ``id_prefix`` (a vault or ingested doc).
 
@@ -1867,27 +2191,64 @@ def brain_backlinks(
     and getting it backwards fails OPEN while every "the neighbour is present"
     assertion stays green. See ``tests/test_mcp_links_confidential.py``, which
     asserts both directions separately for that reason.
+
+    ``limit`` caps the rows (default ``BRAIN_MCP_ROWS_MAX_LIMIT`` = 200; may be
+    lowered, not raised). When rows were cut, the LAST returned element carries
+    an additive ``"more_available": true`` — a bare list cannot hold an
+    envelope, and truncation an agent cannot see is the failure this cap exists
+    to prevent. The cap composes with the F6 lens in the safe direction: the
+    sensitivity predicate is inside the statement, so gated rows are gone before
+    ``LIMIT`` counts and a short page never announces that something was
+    withheld.
     """
     state = _get_state()
     logger.debug("brain_backlinks: id_prefix=%s", id_prefix)
+    row_limit = _resolve_limit(limit, default=state.cfg.mcp_rows_max_limit)
     try:
         with _mcp_conn(state) as conn:
             doc_id = _resolve_id(conn, id_prefix)
+            # LOW-3: bound the FETCH, not just the payload. ``+ 1`` is
+            # exactly what ``cap_rows`` needs to still see saturation, and each
+            # block keeps its own ORDER BY with no re-sort afterwards, so the
+            # rows returned are the same prefix an unbounded fetch would give.
+            #
+            # That last clause was ASPIRATIONAL until 2026-08-20 and is now
+            # load-bearing on something specific: every ORDER BY behind these
+            # tools ends in a UNIQUE column, so each sort is TOTAL. "No re-sort
+            # afterwards" is necessary but NOT sufficient — with a tied sort
+            # PostgreSQL genuinely orders a bounded plan (Limit over a top-N
+            # heapsort) differently from the unbounded one, and end-to-end QA
+            # caught exactly that on ``brain_backlinks`` when two source
+            # documents shared both title and link text. If you add or reorder
+            # a query in ``brain.vault.graph``, keep the unique final key or
+            # this comment becomes false again.
+            #
+            # Brings these three tools in line with the two graph tools, which
+            # already push ``LIMIT n + 1`` into SQL — a reader who sees the
+            # ceiling applied one way here and another way there will
+            # reasonably assume the DB side is bounded when it is not.
             rows = backlinks_for(
-                conn, doc_id, exclude_confidential=not include_confidential
+                conn,
+                doc_id,
+                exclude_confidential=not include_confidential,
+                fetch_limit=row_limit + 1,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    return [
-        {
-            "src_document_id": r.src_document_id,
-            "src_title": r.src_title,
-            "src_kind": r.src_kind,
-            "link_text": r.link_text,
-            "link_kind": r.link_kind,
-        }
-        for r in rows
-    ]
+    capped, saturated = cap_rows(rows, limit=row_limit)
+    return saturation_notice(
+        [
+            {
+                "src_document_id": r.src_document_id,
+                "src_title": r.src_title,
+                "src_kind": r.src_kind,
+                "link_text": r.link_text,
+                "link_kind": r.link_kind,
+            }
+            for r in capped
+        ],
+        saturated=saturated,
+    )
 
 
 @mcp_app.tool()
@@ -1895,6 +2256,7 @@ def brain_links(
     id_prefix: str,
     include_unresolved: bool = False,
     include_confidential: bool = False,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """List documents that ``id_prefix`` links TO.
 
@@ -1910,6 +2272,10 @@ def brain_links(
 
     Unresolved rows carry no ``dst_document_id``, so they have no sensitivity to
     gate on and are unaffected either way.
+
+    ``limit`` caps the rows (default ``BRAIN_MCP_ROWS_MAX_LIMIT`` = 200); a cut
+    list carries ``"more_available": true`` on its LAST element. It composes
+    with the F6 lens for the reason ``brain_backlinks`` gives.
     """
     state = _get_state()
     logger.debug(
@@ -1917,33 +2283,42 @@ def brain_links(
         id_prefix,
         include_unresolved,
     )
+    row_limit = _resolve_limit(limit, default=state.cfg.mcp_rows_max_limit)
     try:
         with _mcp_conn(state) as conn:
             doc_id = _resolve_id(conn, id_prefix)
+            # LOW-3 — see ``brain_backlinks``.
             rows = outgoing_links_for(
                 conn,
                 doc_id,
                 include_unresolved=include_unresolved,
                 exclude_confidential=not include_confidential,
+                fetch_limit=row_limit + 1,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    return [
-        {
-            "dst_document_id": r.dst_document_id,
-            "dst_title": r.dst_title,
-            "dst_kind": r.dst_kind,
-            "link_text": r.link_text,
-            "link_kind": r.link_kind,
-            "resolved": r.resolved,
-        }
-        for r in rows
-    ]
+    capped, saturated = cap_rows(rows, limit=row_limit)
+    return saturation_notice(
+        [
+            {
+                "dst_document_id": r.dst_document_id,
+                "dst_title": r.dst_title,
+                "dst_kind": r.dst_kind,
+                "link_text": r.link_text,
+                "link_kind": r.link_kind,
+                "resolved": r.resolved,
+            }
+            for r in capped
+        ],
+        saturated=saturated,
+    )
 
 
 @mcp_app.tool()
 def brain_orphans(
-    vault_only: bool = True, include_confidential: bool = False
+    vault_only: bool = True,
+    include_confidential: bool = False,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """List documents with no incoming and no outgoing links.
 
@@ -1962,6 +2337,11 @@ def brain_orphans(
     exclude), ``vault.graph`` says ``exclude_confidential`` (default False =
     include), so the call inverts (``exclude_confidential=not
     include_confidential``). See :func:`_confidential_lens`.
+
+    ``limit`` caps the rows (default ``BRAIN_MCP_ROWS_MAX_LIMIT`` = 200 — the
+    uncapped live count reaches ~1,400); a cut list carries
+    ``"more_available": true`` on its LAST element. It composes with the F6
+    lens for the reason ``brain_backlinks`` gives.
     """
     state = _get_state()
     logger.debug(
@@ -1969,19 +2349,26 @@ def brain_orphans(
         vault_only,
         include_confidential,
     )
+    row_limit = _resolve_limit(limit, default=state.cfg.mcp_rows_max_limit)
     try:
         with _mcp_conn(state) as conn:
+            # LOW-3 — see ``brain_backlinks``.
             rows = orphans(
                 conn,
                 vault_only=vault_only,
                 exclude_confidential=not include_confidential,
+                fetch_limit=row_limit + 1,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
-    return [
-        {"document_id": n.document_id, "title": n.title, "kind": n.kind}
-        for n in rows
-    ]
+    capped, saturated = cap_rows(rows, limit=row_limit)
+    return saturation_notice(
+        [
+            {"document_id": n.document_id, "title": n.title, "kind": n.kind}
+            for n in capped
+        ],
+        saturated=saturated,
+    )
 
 
 @mcp_app.tool()
@@ -3704,7 +4091,10 @@ def brain_graphrag_communities(
     Params:
 
     - ``tenant``: tenant to list (default ``BRAIN_GRAPH_TENANT``).
-    - ``limit``: max communities to return (default all).
+    - ``limit``: max communities to return. **Changed in Wave 3: the default is
+      now finite** — ``BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT`` (25), not "all". An
+      explicit ``limit`` may lower it but not raise it. Additive keys:
+      ``limit_applied`` and ``truncated``.
     - ``include_confidential``: opt back in to clusters whose members are
       mentioned by confidential documents (default ``false`` = excluded).
 
@@ -3719,12 +4109,19 @@ def brain_graphrag_communities(
     exactly the way ``ThemeGroup.summary`` was. Same shape, same standard.
     Bridge: ``exclude_confidential=not include_confidential``. See
     :func:`_confidential_lens`.
+
+    The two compose in the safe order: ``list_communities`` applies the F6
+    predicate inside the statement, so withheld clusters are gone before
+    ``LIMIT`` counts and ``truncated`` never doubles as a withholding oracle.
     """
     from .graph_rag.communities import list_communities
     from .graph_rag.tenancy import resolve_tenant
 
     state = _get_state()
     logger.debug("brain_graphrag_communities: tenant=%s limit=%s", tenant, limit)
+    effective_limit = _resolve_limit(
+        limit, default=state.cfg.graph_communities_list_limit
+    )
     try:
         tenant_id = resolve_tenant(state.cfg, tenant)
         with connect_age(state.cfg.database_url) as conn:
@@ -3733,17 +4130,22 @@ def brain_graphrag_communities(
             records = list_communities(
                 conn,
                 tenant_id,
-                limit=limit,
+                # ``+ 1`` is exactly what ``cap_rows`` needs to still see
+                # saturation; see the LOW-3 note on ``brain_backlinks``.
+                limit=effective_limit + 1,
                 exclude_confidential=not include_confidential,
             )
     except GraphTenantError as exc:
         raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
     except psycopg.Error as exc:
         raise _wrap_db_error(exc) from exc
+    capped, truncated = cap_rows(records, limit=effective_limit)
     return {
         "tenant_id": tenant_id,
-        "count": len(records),
-        "communities": [community_record_json(r) for r in records],
+        "count": len(capped),
+        "communities": [community_record_json(r) for r in capped],
+        "limit_applied": effective_limit,
+        "truncated": truncated,
     }
 
 
@@ -3858,7 +4260,9 @@ def brain_graphrag_aliases_apply(
 def brain_graphrag_entities(
     entity_type: str | None = None,
     sort: str = "docs",
-    limit: int = 50,
+    # From ``brain.config`` so ``Config.load`` can enforce
+    # BRAIN_GRAPH_ENTITIES_MAX_LIMIT >= this default at startup (still 50).
+    limit: int = MCP_GRAPH_ENTITIES_DEFAULT_LIMIT,
     tenant: str | None = None,
 ) -> dict[str, Any]:
     """ENUMERATE the entities in the graph — "what's in my brain" (admin view).
@@ -3879,7 +4283,20 @@ def brain_graphrag_entities(
     - ``entity_type``: filter to one type — ``org`` / ``project`` / ``tool`` /
       ``topic`` / ``person`` (default all).
     - ``sort``: ``"docs"`` (doc_count DESC, default) or ``"name"`` (name ASC).
-    - ``limit``: max entities to return (default 50; 0 = all).
+    - ``limit``: max entities to return (default 50). **BREAKING in Wave 3:
+      ``limit=0`` NO LONGER MEANS ALL** — it now means
+      ``BRAIN_GRAPH_ENTITIES_MAX_LIMIT`` (default 500). MEASURED, not
+      estimated (re-measured read-only on prod 2026-08-13): the live graph's
+      6,589 entities serialize to **246,724 tokens** (37.4 each — entities
+      carry ``description``), so the old ``limit=0`` was a request no agent
+      makes deliberately. ``limit=500`` costs 17,672; the default 50 costs
+      1,750. A ``limit`` above the ceiling is rejected
+      with ``INVALID_PARAMS``.
+      ANY ``limit < 1`` maps to the ceiling, negatives included — this tool
+      inherits the old ``limit <= 0 == all`` convention and re-points it,
+      rather than rejecting what used to be legal. Note this differs from
+      ``brain_backlinks`` / ``brain_links`` / ``brain_orphans``, which never
+      had that convention and reject ``limit < 1`` with ``INVALID_PARAMS``.
     - ``tenant``: tenant to list (default ``BRAIN_GRAPH_TENANT``).
 
     **F6: deliberately EXEMPT — no ``include_confidential`` parameter, and the
@@ -3911,6 +4328,9 @@ def brain_graphrag_entities(
     looks like the same shape but is NOT exempt, because its ``summary`` is
     generated from document TITLES fed in by
     ``communities_summary._representative_doc_titles``.
+
+    Additive: ``limit_applied`` (the cap actually used) and ``truncated`` (true
+    when more entities matched than were returned).
     """
     from .graph_rag.relational import list_entities
     from .graph_rag.tenancy import resolve_tenant
@@ -3923,13 +4343,26 @@ def brain_graphrag_entities(
         limit,
         tenant,
     )
+    # ``limit <= 0`` used to mean "return everything"; re-mapped to the ceiling.
+    # Over-fetch one row so ``truncated`` distinguishes "exactly full" from "cut".
+    effective_limit = (
+        state.cfg.graph_entities_max_limit
+        if limit < 1
+        else _ceiling(
+            limit, ceiling=state.cfg.graph_entities_max_limit, param="limit"
+        )
+    )
     try:
         tenant_id = resolve_tenant(state.cfg, tenant)
         with connect_age(state.cfg.database_url) as conn:
             conn.autocommit = True
             _require_age_or_mcp_error(conn)
             rows = list_entities(
-                conn, tenant_id, entity_type=entity_type, sort=sort, limit=limit
+                conn,
+                tenant_id,
+                entity_type=entity_type,
+                sort=sort,
+                limit=effective_limit + 1,
             )
     except GraphTenantError as exc:
         raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
@@ -3941,10 +4374,13 @@ def brain_graphrag_entities(
         raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
     except psycopg.Error as exc:
         raise _wrap_db_error(exc) from exc
+    capped, truncated = cap_rows(rows, limit=effective_limit)
     return {
         "tenant_id": tenant_id,
-        "count": len(rows),
-        "entities": [entity_summaries_json(r) for r in rows],
+        "count": len(capped),
+        "entities": [entity_summaries_json(r) for r in capped],
+        "limit_applied": effective_limit,
+        "truncated": truncated,
     }
 
 

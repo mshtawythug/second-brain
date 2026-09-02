@@ -30,6 +30,32 @@ Derived-edge semantics:
   enum extension is a Python-only convention.
 - Wiki-link edges keep ``rule=None``, ``weight=None``,
   ``evidence=None``; derived edges populate all three.
+
+**File-size ceiling (CLAUDE.md): this module CROSSED 800 in the 2026-09-02
+merge, and it now has a row in that table.** No live count here on purpose --
+re-derive with ``wc -l src/brain/vault/graph.py``. What cannot rot is the pair
+of trails, which are siblings from one base rather than a sequence: 620
+(``f8c76c0``, base) -> 728 (``2ed2d83``) -> 756 (``ec6afb6``) -> 792
+(``b7fd0e8``) -> 798 (``c49fc46``) on ``feat/wiki-to-ui-consolidation``, two
+lines UNDER; and 620 (``f8c76c0``) -> 740 (``f495f66``) on ``master``, also
+under. Neither branch needed a row and neither was wrong to omit one. The
+merge is the union of two independent growths in this one file and the union
+is over -- which is the by-omission failure CLAUDE.md's own residue section
+describes, caught by re-deriving the row set instead of inheriting it.
+
+What grew, from each side, with the reason inline at each point of growth:
+PR #9 added the F6 confidential lens (two frozen variants per title-bearing
+read, selected by ``exclude_confidential`` -- reasoned at :data:`_NOT_CONFIDENTIAL`
+and at each ``_*_SQL`` pair); master added ``fetch_limit``, the ``LIMIT``
+prefix bound, and the UNIQUE final sort key that makes every ORDER BY total
+(reasoned at :data:`_BACKLINKS_ORDER` and :data:`_DERIVED_ORDER`). The two
+COMPOSE in the only safe order -- the sensitivity predicate is inside the
+statement, so gated rows are gone before ``LIMIT`` counts and a short page
+never doubles as a withholding oracle. Not split in the same commit as the
+merge on purpose: a module split inside a security merge makes both harder to
+review. The seam, when it is taken, is the three frozen statement pairs plus
+:func:`_derived_partners` moving to a ``graph_sql.py``, leaving the shaping
+and BFS here.
 """
 from collections import deque
 from collections.abc import Iterable
@@ -60,7 +86,24 @@ _BACKLINKS_SELECT = """
         JOIN documents d ON d.id = l.src_document_id
         WHERE l.dst_document_id = %s
 """
-_BACKLINKS_ORDER = "        ORDER BY LOWER(d.title), l.link_text\n        "
+#: ``l.id`` is the UNIQUE tiebreaker that makes this sort TOTAL, and it is
+#: load-bearing, not cosmetic. Without it two distinct source documents that
+#: share both title and link text are fully tied, and PostgreSQL is then free
+#: to order them differently for a bounded plan (Limit over a top-N heapsort)
+#: than for the unbounded one (plain sort) -- which it genuinely does. That
+#: breaks the prefix guarantee ``fetch_limit`` documents on every caller.
+#: ``d.id`` would NOT be enough: ``links`` is UNIQUE on
+#: (src, dst, link_text, link_kind), so one source can carry a wiki AND an
+#: embed row with the same text to the same target.
+#:
+#: ``LIMIT %s`` carries the fetch budget. ``LIMIT NULL`` is PostgreSQL's
+#: documented "no limit", so the unbounded and the bounded read stay ONE
+#: statement rather than two that can drift. :data:`_OUTGOING_ORDER` reuses
+#: this verbatim: same shape, same failure mode with the join side flipped.
+_BACKLINKS_ORDER = (
+    "        ORDER BY LOWER(d.title), l.link_text, l.id\n"
+    "        LIMIT %s\n        "
+)
 
 _BACKLINKS_SQL_ANY = _BACKLINKS_SELECT + _BACKLINKS_ORDER
 _BACKLINKS_SQL = f"{_BACKLINKS_SELECT}          {_NOT_CONFIDENTIAL}\n{_BACKLINKS_ORDER}"
@@ -97,8 +140,15 @@ _DERIVED_SELECT = """
           END
         WHERE (dl.src_document_id = %(doc)s OR dl.dst_document_id = %(doc)s)
 """
+#: ``dl.id`` completes the sort. ``(partner.id, rule)`` is NOT unique here:
+#: ``derived_links`` is UNIQUE on (src, dst, rule) and the WHERE above matches
+#: BOTH directions, so rows ``(doc, X, r)`` and ``(X, doc, r)`` both resolve to
+#: partner X under rule r and tie on every other key. ``LIMIT %(lim)s`` is the
+#: fetch budget, named rather than positional because this statement already
+#: binds ``%(doc)s`` three times.
 _DERIVED_ORDER = (
-    "        ORDER BY dl.rule, LOWER(partner.title), partner.id::text\n        "
+    "        ORDER BY dl.rule, LOWER(partner.title), partner.id::text, dl.id\n"
+    "        LIMIT %(lim)s\n        "
 )
 
 _DERIVED_SQL_ANY = _DERIVED_SELECT + _DERIVED_ORDER
@@ -229,18 +279,33 @@ class OutgoingLinkRow:
     evidence: dict[str, Any] | None = None
 
 
+def _budget_left(fetch_limit: int | None, taken: int) -> int | None:
+    """Rows the NEXT block may fetch, given ``taken`` already held.
+
+    ``None`` in, ``None`` out — an unbounded fetch stays unbounded through
+    every block. Otherwise the remainder, floored at ``0`` so a caller can
+    treat ``0`` as "skip this block" rather than having to guard a negative.
+    """
+    if fetch_limit is None:
+        return None
+    return max(fetch_limit - taken, 0)
+
+
 def backlinks_for(
     conn: psycopg.Connection[Any],
     document_id: str,
     *,
     include_derived: bool = True,
     exclude_confidential: bool = False,
+    fetch_limit: int | None = None,
 ) -> list[BacklinkRow]:
     """Return every document that links TO ``document_id``.
 
     Wiki/embed rows come from a JOIN of ``links`` against ``documents``
     (one round-trip, no N+1) and are sorted by source title
-    (case-insensitive) then by ``link_text`` to break ties.
+    (case-insensitive), then ``link_text``, then the link row's own ``id``.
+    That last key is what makes the sort TOTAL — see the comment on the query
+    itself; title+link_text alone tie, and a tied sort has no prefix property.
 
     With ``include_derived=True`` (the default), derived edges are
     appended after the wiki block: every ``derived_links`` row whose src
@@ -248,8 +313,8 @@ def backlinks_for(
     *partner* document. This treats derived storage as undirected per
     spec §6 — a row stored ``(A, B)`` shows up in both ``backlinks_for(A)``
     and ``backlinks_for(B)``. Derived rows sort within their block by
-    rule then partner title for deterministic output.
-   
+    rule, then partner title, then partner id, then the derived row's own
+    ``id`` — total, for the same reason.
 
     ``exclude_confidential`` DEFAULTS FALSE, which is not the fail-closed
     convention :mod:`brain.ui.queries` uses, and the difference is the caller
@@ -271,10 +336,37 @@ def backlinks_for(
     while this function's default includes them — and dropping the ``not`` fails
     OPEN, only ever adding rows. That is why ``tests/test_mcp_links_confidential.py``
     asserts each direction separately. See :func:`brain.mcp_server._confidential_lens`.
+
+    ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
+    default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
+    is PostgreSQL's documented "no limit", so this stays ONE code path rather
+    than a bounded one and an unbounded one that can drift.
+
+    The guarantee is exact: the result is **the first ``fetch_limit`` rows of
+    the unbounded result**, so ``f(…, fetch_limit=n) == f(…)[:n]`` whenever the
+    unbounded result has at least ``n`` rows, and equals it outright otherwise.
+    Callers that keep only a prefix (the MCP tools, which cap for context cost)
+    pass ``their_cap + 1``; that extra row is what lets
+    :func:`brain.mcp_limits.cap_rows` still detect saturation.
+
+    **The budget is spent ACROSS blocks, not per block**, and that is the whole
+    subtlety. These functions concatenate several independently-ordered blocks
+    (wiki, then derived, then unresolved). Giving each block its own ``LIMIT
+    fetch_limit`` looks equivalent and is not: with a 1-row budget and two
+    non-empty blocks it returns ``[wiki[0], derived[0]]``, whose second element
+    is not ``unbounded[1]``. The rows an agent sees would silently change with
+    the ceiling. So each block is limited to what the budget has LEFT, and a
+    block is skipped entirely once nothing remains.
+
+    ``fetch_limit`` and ``exclude_confidential`` COMPOSE in the only order that
+    is safe: the sensitivity predicate is part of the statement, so excluded
+    rows are gone BEFORE ``LIMIT`` counts. Filtering a bounded fetch afterwards
+    in Python would make the row count itself an oracle -- a short page would
+    announce that something had been withheld.
     """
     rows = conn.execute(
         _BACKLINKS_SQL if exclude_confidential else _BACKLINKS_SQL_ANY,
-        (document_id,),
+        (document_id, fetch_limit),
     ).fetchall()
     out: list[BacklinkRow] = [
         BacklinkRow(
@@ -286,7 +378,8 @@ def backlinks_for(
         )
         for r in rows
     ]
-    if include_derived:
+    derived_budget = _budget_left(fetch_limit, len(out))
+    if include_derived and derived_budget != 0:
         out.extend(
             BacklinkRow(
                 src_document_id=partner.document_id,
@@ -299,7 +392,10 @@ def backlinks_for(
                 evidence=row.evidence,
             )
             for row, partner in _derived_partners(
-                conn, document_id, exclude_confidential=exclude_confidential
+                conn,
+                document_id,
+                exclude_confidential=exclude_confidential,
+                fetch_limit=derived_budget,
             )
         )
     return out
@@ -312,6 +408,7 @@ def outgoing_links_for(
     include_unresolved: bool = False,
     include_derived: bool = True,
     exclude_confidential: bool = False,
+    fetch_limit: int | None = None,
 ) -> list[OutgoingLinkRow]:
     """Return every document ``document_id`` links TO.
 
@@ -330,7 +427,6 @@ def outgoing_links_for(
     in semantics, ``outgoing_links_for(X)`` returns the same partner set
     as ``backlinks_for(X)`` for them — every doc paired with X
     regardless of canonical direction.
-   
 
     ``exclude_confidential`` DEFAULTS FALSE, which is not the fail-closed
     convention :mod:`brain.ui.queries` uses, and the difference is the caller
@@ -352,10 +448,37 @@ def outgoing_links_for(
     while this function's default includes them — and dropping the ``not`` fails
     OPEN, only ever adding rows. That is why ``tests/test_mcp_links_confidential.py``
     asserts each direction separately. See :func:`brain.mcp_server._confidential_lens`.
+
+    ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
+    default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
+    is PostgreSQL's documented "no limit", so this stays ONE code path rather
+    than a bounded one and an unbounded one that can drift.
+
+    The guarantee is exact: the result is **the first ``fetch_limit`` rows of
+    the unbounded result**, so ``f(…, fetch_limit=n) == f(…)[:n]`` whenever the
+    unbounded result has at least ``n`` rows, and equals it outright otherwise.
+    Callers that keep only a prefix (the MCP tools, which cap for context cost)
+    pass ``their_cap + 1``; that extra row is what lets
+    :func:`brain.mcp_limits.cap_rows` still detect saturation.
+
+    **The budget is spent ACROSS blocks, not per block**, and that is the whole
+    subtlety. These functions concatenate several independently-ordered blocks
+    (wiki, then derived, then unresolved). Giving each block its own ``LIMIT
+    fetch_limit`` looks equivalent and is not: with a 1-row budget and two
+    non-empty blocks it returns ``[wiki[0], derived[0]]``, whose second element
+    is not ``unbounded[1]``. The rows an agent sees would silently change with
+    the ceiling. So each block is limited to what the budget has LEFT, and a
+    block is skipped entirely once nothing remains.
+
+    ``fetch_limit`` and ``exclude_confidential`` COMPOSE in the only order that
+    is safe: the sensitivity predicate is part of the statement, so excluded
+    rows are gone BEFORE ``LIMIT`` counts. Filtering a bounded fetch afterwards
+    in Python would make the row count itself an oracle -- a short page would
+    announce that something had been withheld.
     """
     resolved_rows = conn.execute(
         _OUTGOING_SQL if exclude_confidential else _OUTGOING_SQL_ANY,
-        (document_id,),
+        (document_id, fetch_limit),
     ).fetchall()
     out: list[OutgoingLinkRow] = [
         OutgoingLinkRow(
@@ -368,7 +491,8 @@ def outgoing_links_for(
         )
         for r in resolved_rows
     ]
-    if include_derived:
+    derived_budget = _budget_left(fetch_limit, len(out))
+    if include_derived and derived_budget != 0:
         out.extend(
             OutgoingLinkRow(
                 dst_document_id=partner.document_id,
@@ -382,18 +506,26 @@ def outgoing_links_for(
                 evidence=row.evidence,
             )
             for row, partner in _derived_partners(
-                conn, document_id, exclude_confidential=exclude_confidential
+                conn,
+                document_id,
+                exclude_confidential=exclude_confidential,
+                fetch_limit=derived_budget,
             )
         )
-    if include_unresolved:
+    unresolved_budget = _budget_left(fetch_limit, len(out))
+    if include_unresolved and unresolved_budget != 0:
         unresolved_rows = conn.execute(
             """
             SELECT link_text, link_kind
             FROM unresolved_links
             WHERE src_document_id = %s
-            ORDER BY link_text
+            -- ``link_text`` alone ties: unresolved_links is UNIQUE on
+            -- (src, link_text, link_kind), so one source can hold a wiki and
+            -- an embed row for the same text. ``id`` makes the sort total.
+            ORDER BY link_text, link_kind, id
+            LIMIT %s
             """,
-            (document_id,),
+            (document_id, unresolved_budget),
         ).fetchall()
         out.extend(
             OutgoingLinkRow(
@@ -414,6 +546,7 @@ def orphans(
     *,
     vault_only: bool = True,
     exclude_confidential: bool = False,
+    fetch_limit: int | None = None,
 ) -> list[GraphNode]:
     """Return documents with zero incoming AND zero outgoing links.
 
@@ -451,6 +584,22 @@ def orphans(
     ``' AND '``. Appending the fragment verbatim would emit ``AND AND``. The
     bare predicate is appended instead — still parameterless, still built from
     the ``CONFIDENTIAL`` module constant rather than caller input.
+
+    ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
+    default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
+    is PostgreSQL's documented "no limit", so this stays ONE code path rather
+    than a bounded one and an unbounded one that can drift.
+
+    The guarantee is exact: the result is **the first ``fetch_limit`` rows of
+    the unbounded result**, so ``f(…, fetch_limit=n) == f(…)[:n]`` whenever the
+    unbounded result has at least ``n`` rows, and equals it outright otherwise.
+    Callers that keep only a prefix (the MCP tools, which cap for context cost)
+    pass ``their_cap + 1``; that extra row is what lets
+    :func:`brain.mcp_limits.cap_rows` still detect saturation.
+
+    It composes with ``exclude_confidential`` the same way the link reads do:
+    the sensitivity predicate joins the ``where`` list, so excluded rows are
+    gone before ``LIMIT`` counts and the row count never becomes an oracle.
     """
     where = ["d.id NOT IN (SELECT src_document_id FROM links)"]
     where.append("d.id NOT IN (SELECT dst_document_id FROM links)")
@@ -466,8 +615,12 @@ def orphans(
         FROM documents d
         WHERE {' AND '.join(where)}
         ORDER BY LOWER(d.title), d.id
+        LIMIT %s
     """
-    rows = conn.execute(sql).fetchall()
+    # ``where`` is built from static literals only (no bound parameters), so
+    # this single placeholder is the whole parameter tuple. Re-check that if a
+    # future predicate ever binds a value.
+    rows = conn.execute(sql, (fetch_limit,)).fetchall()
     return [
         GraphNode(document_id=str(r[0]), title=str(r[1]), kind=str(r[2]))
         for r in rows
@@ -699,6 +852,7 @@ def _derived_partners(
     document_id: str,
     *,
     exclude_confidential: bool = False,
+    fetch_limit: int | None = None,
 ) -> list[tuple[_DerivedRow, GraphNode]]:
     """Return ``(row, partner_node)`` pairs for every derived edge touching ``document_id``.
 
@@ -709,11 +863,14 @@ def _derived_partners(
     JOIN, mirroring :func:`backlinks_for`'s anti-N+1 style.
 
     Sort order: rule, then partner title (case-insensitive), then partner
-    id. Stable across calls so callers can pin output bytes in tests.
+    id, then ``dl.id``. Stable across calls so callers can pin output bytes
+    in tests -- and total, so a bounded fetch is a prefix of the unbounded
+    one. The first three keys are NOT total on their own; see the comment on
+    the query.
     """
     rows = conn.execute(
         _DERIVED_SQL if exclude_confidential else _DERIVED_SQL_ANY,
-        {"doc": document_id},
+        {"doc": document_id, "lim": fetch_limit},
     ).fetchall()
     return [
         (

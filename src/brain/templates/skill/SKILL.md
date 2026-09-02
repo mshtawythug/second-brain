@@ -11,7 +11,9 @@ past meetings, past Slack threads, past emails, interview prep, or
 specific people / projects they've mentioned.
 
 **Search** — `brain search "..."` returns the top 5 matching documents
-with snippets and IDs. Use `--json` if you need to parse output.
+with snippets and IDs. Use `--json` if you need to parse output. Add
+`--brief` (with `--json`) to triage on the cheaper ingest-time summary
+instead of the chunk snippet.
 Basic filters: `--source krisp|slack|gmail|manual`, `--tag X`,
 `--has-tag X`, `--without-tag X`, `--since N` (days), `--limit N`,
 `--fts-only`.
@@ -28,10 +30,32 @@ signal than the same query unfiltered.
 vector cosine, RRF contributions, and recency boost so you can debug
 why a result ranked where it did. `--verbose` also shows active filters.
 
+**Read, budgeted** — `brain recall "<question>" --budget 2000 --json`
+returns the matching passages themselves, packed to a hard token
+ceiling, one per document, with inline `[N]` citations. It takes the
+same filters as `brain search` (`--person`, `--after`/`--before`,
+`--kind`, `--tag`, `--source`, `--thread`, `--without-tag`,
+`--fts-only`), so those parts of a search you already tuned port over —
+but `--draft`/`--no-draft`, `--has-tag`, `--sensitivity` and
+`--updated-after`/`--updated-before` are search-only, and `brain recall`
+rejects them. **This is the only retrieval surface with a token
+ceiling** — reach for it whenever the next step is reading more than
+one document. (`--budget` bounds the
+passage block; the `--json` payload adds per-passage metadata and
+measures ~1.25–1.3× the budget — `--budget 2000` prints ~2,500 tokens.)
+
+**NEVER loop `brain show` over a search's results.** That recipe is
+unbounded: bodies run to a mean ~18,000 characters and ~67k tokens at
+the largest, so a 20-result read is six figures of tokens. Use `brain
+recall --budget N` for several documents, `brain ask` for one
+synthesized answer, and `brain show` only for a single document you
+have already identified.
+
 **Read full** — `brain show <id-prefix>` (6+ chars). Returns the
-document body. `brain show <id> --json` may also include a `summary`
-field if the document has been auto-summarized; the key is omitted on
-docs that haven't been summarized yet.
+document body — the whole thing, for ONE document. `brain show <id>
+--json` may also include a `summary` field if the document has been
+auto-summarized; the key is omitted on docs that haven't been
+summarized yet.
 
 **Browse people** — `brain people` lists people with at least
 `BRAIN_PEOPLE_HUB_MIN_DOCS` appearances in the corpus (default 3, owner

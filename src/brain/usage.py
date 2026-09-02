@@ -20,6 +20,24 @@ drift, and the two numbers would disagree with no way to tell which was right.
 is rendered ``(unattributed)`` at the display layer. Collapsing it into a
 literal ``'cli'`` in the query would invent an agent that never existed and
 make the honest answer unrepresentable.
+
+**The migration-028 token columns are summed in :func:`_totals` ONLY, and that
+is a decision rather than a stopping point.** The daily, by-surface and
+by-agent rollups deliberately carry no token columns yet, so "which agent is
+expensive" is not answerable from this report. Two reasons, both worth
+outliving this comment. First, the counterfactual pair is only meaningful over
+rows carrying BOTH columns, and once that population is sliced by day or by
+agent it gets small fast: a single ``--brief`` search on a Tuesday would render
+a headline savings percentage computed from one row, which is precisely the
+over-claim the two-denominator design exists to prevent. Second, ``agent_id``
+arrived in migration 027 and every older row is NULL, so a per-agent token
+column today would report most of the corpus as ``(unattributed)`` — true, but
+not yet useful. **The next slice, when it is wanted:** add
+``SUM(payload_tokens) FILTER (WHERE payload_tokens IS NOT NULL)`` and its
+matching ``COUNT`` to :func:`_by_dimension`'s ``search_queries`` aggregate (it
+already groups by ``agent_id``), carry them on :class:`AgentUsage`, and render
+them as a *measured* column only — leaving the counterfactual clause in
+``totals``, where its denominator is large enough to mean something.
 """
 from __future__ import annotations
 
@@ -54,6 +72,58 @@ class UsageTotals:
     zero_result: int
     duration_p50_ms: float | None
     duration_p95_ms: float | None
+
+    #: MEASURED. Canonically-serialized payload tokens summed over every call
+    #: that priced its payload (migration 028) — not the rendered byte count;
+    #: see 028's header. ``None`` when no call in the window measured
+    #: one — distinct from ``0``, which would claim retrieval was free.
+    payload_tokens_total: int | None = None
+    #: COUNTERFACTUAL. What those calls that HAD a cheaper mode would have
+    #: cost in the default projection. Summed ONLY over rows carrying both
+    #: columns, so it is the far end of a valid subtraction.
+    baseline_tokens_total: int | None = None
+    #: Rows with ``payload_tokens NOT NULL`` — the denominator for the
+    #: measured clause.
+    measured_calls: int = 0
+    #: Rows with BOTH columns — the denominator for the counterfactual clause.
+    #: Deliberately a SECOND denominator: blending the two into one percentage
+    #: is the specific dishonesty this wave exists to prevent.
+    counterfactual_calls: int = 0
+    #: MEASURED, but scoped to the counterfactual rows only. Present because
+    #: ``payload_tokens_total`` spans a WIDER row set: subtracting it from
+    #: ``baseline_tokens_total`` would difference two different populations
+    #: and can go negative on any brain where most calls are non-brief.
+    counterfactual_payload_tokens: int | None = None
+
+    @property
+    def counterfactual_savings_tokens(self) -> int | None:
+        """Tokens saved on the calls that HAD a cheaper mode — or None.
+
+        ``None`` when ``counterfactual_calls == 0``. Never 0-as-unknown: a
+        brain where nothing used a cheap mode has no savings figure, which is
+        different from a savings figure of zero.
+
+        Both operands are summed over the SAME rows (those carrying both
+        columns), which is the only way the difference means anything.
+        """
+        if self.counterfactual_calls == 0:
+            return None
+        baseline = self.baseline_tokens_total or 0
+        payload = self.counterfactual_payload_tokens or 0
+        return baseline - payload
+
+    @property
+    def counterfactual_savings_rate(self) -> float | None:
+        """:attr:`counterfactual_savings_tokens` as a share of the baseline.
+
+        ``None`` when there is no counterfactual, and also when the baseline
+        summed to zero — a rate over a zero denominator is undefined, and
+        reporting ``0.0%`` would read as "measured no saving".
+        """
+        savings = self.counterfactual_savings_tokens
+        if savings is None or not self.baseline_tokens_total:
+            return None
+        return savings / self.baseline_tokens_total
 
     @property
     def zero_result_rate(self) -> float:
@@ -172,6 +242,38 @@ class UsageReport:
                 "write_events": self.totals.write_events,
                 "duration_p50_ms": self.totals.duration_p50_ms,
                 "duration_p95_ms": self.totals.duration_p95_ms,
+                # Migration 028. Kept as five SEPARATE keys with two distinct
+                # denominators rather than one blended "savings %": the
+                # measured total spans every priced call, while the
+                # counterfactual trio spans only the calls that had a cheaper
+                # mode available. A consumer that wants a percentage has to
+                # pick which population it means.
+                #
+                # ``counterfactual_savings_rate`` is DELIBERATELY not exported
+                # here, even though ``brain usage``'s human line renders it.
+                # The asymmetry is the decision, not an oversight: the human
+                # line is a rendered summary read by a person who can see both
+                # denominators sitting next to it on the same line, whereas a
+                # JSON key is an input to someone else's arithmetic and would
+                # travel without them — which is how "counterfactual savings on
+                # the 210 calls that had a cheaper mode" becomes "this brain is
+                # 29% cheaper". A consumer that genuinely wants the rate can
+                # reproduce it exactly from the keys below
+                # (``counterfactual_savings_tokens / baseline_tokens_total``,
+                # both of which are summed over the same rows) and has to name
+                # that population to do so. Pinned by
+                # ``test_usage_json_carries_both_totals_separately``, which
+                # asserts no ``savings_rate`` key exists.
+                "payload_tokens_total": self.totals.payload_tokens_total,
+                "measured_calls": self.totals.measured_calls,
+                "baseline_tokens_total": self.totals.baseline_tokens_total,
+                "counterfactual_payload_tokens": (
+                    self.totals.counterfactual_payload_tokens
+                ),
+                "counterfactual_calls": self.totals.counterfactual_calls,
+                "counterfactual_savings_tokens": (
+                    self.totals.counterfactual_savings_tokens
+                ),
             },
             "daily": [
                 {
@@ -235,14 +337,50 @@ def _totals(
                percentile_disc(0.50) WITHIN GROUP (ORDER BY duration_ms)
                    FILTER (WHERE duration_ms IS NOT NULL),
                percentile_disc(0.95) WITHIN GROUP (ORDER BY duration_ms)
-                   FILTER (WHERE duration_ms IS NOT NULL)
+                   FILTER (WHERE duration_ms IS NOT NULL),
+               -- Migration 028. The asymmetry between these four is
+               -- deliberate: ``payload_tokens`` sums EVERY measured row,
+               -- because "what did retrieval cost me" is a useful standalone
+               -- number; the other three are scoped to rows carrying BOTH
+               -- columns, so the counterfactual difference is computed over
+               -- one population rather than two.
+               --
+               -- The first FILTER is redundant AS SQL -- ``SUM`` skips NULL
+               -- and yields NULL over zero matching rows either way -- and is
+               -- kept ON PURPOSE. Every aggregate on this list states the
+               -- population it is summed over, in the same place, in the same
+               -- syntax; this one pairs with the ``COUNT(*) FILTER (WHERE
+               -- payload_tokens IS NOT NULL)`` four lines down, where the
+               -- filter IS load-bearing, so the sum and its denominator are
+               -- visibly the same rows. Dropping it would save nothing at
+               -- runtime and would make the one aggregate whose scope is
+               -- implicit sit among four whose scope is spelled out.
+               SUM(payload_tokens) FILTER (WHERE payload_tokens IS NOT NULL),
+               SUM(baseline_tokens) FILTER (WHERE baseline_tokens IS NOT NULL
+                                              AND payload_tokens IS NOT NULL),
+               SUM(payload_tokens)  FILTER (WHERE baseline_tokens IS NOT NULL
+                                              AND payload_tokens IS NOT NULL),
+               COUNT(*) FILTER (WHERE payload_tokens IS NOT NULL),
+               COUNT(*) FILTER (WHERE baseline_tokens IS NOT NULL
+                                  AND payload_tokens IS NOT NULL)
         FROM search_queries
         WHERE tenant_id = %s AND at >= NOW() - make_interval(days => %s)
         """,
         (tenant_id, days),
     ).fetchone()
     assert row is not None  # aggregate always yields one row
-    searches, sessions, zero_result, p50, p95 = row
+    (
+        searches,
+        sessions,
+        zero_result,
+        p50,
+        p95,
+        payload_total,
+        baseline_total,
+        counterfactual_payload,
+        measured_calls,
+        counterfactual_calls,
+    ) = row
 
     interactions = conn.execute(
         """
@@ -274,6 +412,18 @@ def _totals(
         zero_result=int(zero_result),
         duration_p50_ms=None if p50 is None else float(p50),
         duration_p95_ms=None if p95 is None else float(p95),
+        # A NULL-safe SUM over zero matching rows is SQL NULL, and it stays
+        # None here rather than becoming 0: "nothing measured" and "measured
+        # zero tokens" are different claims.
+        payload_tokens_total=None if payload_total is None else int(payload_total),
+        baseline_tokens_total=(
+            None if baseline_total is None else int(baseline_total)
+        ),
+        counterfactual_payload_tokens=(
+            None if counterfactual_payload is None else int(counterfactual_payload)
+        ),
+        measured_calls=int(measured_calls),
+        counterfactual_calls=int(counterfactual_calls),
     )
 
 

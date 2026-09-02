@@ -597,6 +597,37 @@ def test_doc_without_chunks_has_empty_snippet(
     assert ctx.docs[0].snippet == ""
 
 
+def test_graph_hit_carries_document_summary(
+    test_db: psycopg.Connection[Any],
+) -> None:
+    """A graph-retrieved hit populates ``SearchResult.summary``, like hybrid does.
+
+    Without this the field's value would depend on WHICH LEG retrieved the
+    document: ``fuse`` picks one carrier per id (hybrid first, else graph), so a
+    graph-only hit would silently report "no summary" and the brief projection
+    would be forced onto the chunk snippet for a document that has one.
+    """
+    # Arrange
+    seed = _insert_entity(test_db, name="alpha", canonical_key="alpha")
+    with_summary = _insert_doc(test_db, title="Has summary", content="body one")
+    without_summary = _insert_doc(test_db, title="No summary", content="body two")
+    summary_text = "Synthetic one-line abstract of the first document."
+    test_db.execute(
+        "UPDATE documents SET summary = %s WHERE id = %s",
+        (summary_text, with_summary),
+    )
+    _insert_mention(test_db, entity_id=seed, document_id=with_summary)
+    _insert_mention(test_db, entity_id=seed, document_id=without_summary)
+
+    # Act
+    ctx = graph_rag_search(test_db, _make_cfg(), "alpha", backend=FakeTraversalBackend())
+
+    # Assert
+    by_title = {doc.title: doc for doc in ctx.docs}
+    assert by_title["Has summary"].summary == summary_text
+    assert by_title["No summary"].summary is None
+
+
 # --------------------------------------------------------------------------- #
 # 4. Mode guard + error propagation
 # --------------------------------------------------------------------------- #

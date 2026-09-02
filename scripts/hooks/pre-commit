@@ -56,30 +56,85 @@ denylist="${repo_root}/.pii-denylist.local.txt"
 # A missing tool WARNS rather than blocks: refusing to commit because a dev
 # extra is not installed is hostile, and CI is the hard gate. Mirrors the
 # `claude`-not-found path below.
+#
+# --- WHY `resolve_tool` EXISTS (2026-08-20) --------------------------------
+#
+# This gate used a bare `command -v mypy`, and on `feat/agentic-token-reduction`
+# every commit printed:
+#
+#     ⚠️  pre-commit type gate: 'mypy' not found — skipping type check.
+#
+# while `mypy 2.3.0` was installed and working in this repo's own `.venv`. A git
+# hook inherits the environment of the `git commit` process; an agent shell — or
+# any terminal where `source .venv/bin/activate` was never run — does NOT have
+# `.venv/bin` on PATH. So the lookup failed, the warn-and-skip branch fired, and
+# the local type gate degraded to a no-op that still LOOKED like a gate. That is
+# this repo's single most-repeated failure mode (memory: "prove the check can
+# fail").
+#
+# It degraded ASYMMETRICALLY, which is what made it easy to miss: `ruff` is ALSO
+# installed globally (`/opt/homebrew/bin/ruff`), so the lint half kept running —
+# out of a different installation than `pip install -e '.[dev]'` pins. One half
+# silently off, the other half silently running a binary the repo does not pin,
+# and one warning line naming neither problem.
+#
+# Resolution order, most-canonical first:
+#   1. "${repo_root}/.venv/bin/<tool>" — what `pip install -e '.[dev]'` populates
+#      (Python 3.11, the pinned dev extras). Preferring it also closes the
+#      version-divergence half of the bug.
+#   2. "${VIRTUAL_ENV}/bin/<tool>" — an explicitly activated venv. Worktrees get
+#      their own venv (memory: never share one across worktrees), and a worktree
+#      has no `.venv` of its own, so this is the branch that saves them.
+#   3. PATH — a global/pipx install, last resort.
+# Only when all three miss does warn-and-skip fire, which is now a real
+# statement about the machine rather than an artifact of PATH.
+resolve_tool() {
+  # `local` keeps the helper from clobbering caller scope; the shebang is bash.
+  local tool_name="$1" tool_found="" tool_candidate
+  for tool_candidate in \
+    "${repo_root}/.venv/bin/${tool_name}" \
+    "${VIRTUAL_ENV:-}/bin/${tool_name}"; do
+    # An unset VIRTUAL_ENV would expand to the absolute path "/bin/<tool>";
+    # skip that rather than let a system binary masquerade as a venv one.
+    case "${tool_candidate}" in /bin/*) continue ;; esac
+    if [ -x "${tool_candidate}" ]; then
+      printf '%s\n' "${tool_candidate}"
+      return 0
+    fi
+  done
+  if tool_found="$(command -v "${tool_name}" 2>/dev/null)"; then
+    printf '%s\n' "${tool_found}"
+    return 0
+  fi
+  return 1
+}
+
 if git diff --cached --name-only --diff-filter=ACM | grep -qE '\.py$'; then
-  if command -v ruff >/dev/null 2>&1; then
-    if ! ruff_out="$(cd "${repo_root}" && ruff check 2>&1)"; then
+  if ruff_bin="$(resolve_tool ruff)"; then
+    if ! ruff_out="$(cd "${repo_root}" && "${ruff_bin}" check 2>&1)"; then
       echo "🚫 pre-commit lint gate: ruff check failed" >&2
       printf '%s\n' "${ruff_out}" >&2
-      echo "   Reproduce: ruff check   (auto-fix many: ruff check --fix)" >&2
+      echo "   Reproduce: ${ruff_bin} check   (auto-fix many: ${ruff_bin} check --fix)" >&2
       echo "   Bypass consciously: git commit --no-verify" >&2
       exit 1
     fi
   else
     echo "⚠️  pre-commit lint gate: 'ruff' not found — skipping lint." >&2
+    echo "   Looked in: ${repo_root}/.venv/bin, \$VIRTUAL_ENV/bin, \$PATH." >&2
     echo "   Install dev extras (pip install -e '.[dev]') to gate locally." >&2
   fi
 
-  if command -v mypy >/dev/null 2>&1; then
-    if ! mypy_out="$(cd "${repo_root}" && mypy src/ 2>&1)"; then
+  if mypy_bin="$(resolve_tool mypy)"; then
+    if ! mypy_out="$(cd "${repo_root}" && "${mypy_bin}" src/ 2>&1)"; then
       echo "🚫 pre-commit type gate: mypy src/ failed" >&2
       printf '%s\n' "${mypy_out}" >&2
-      echo "   Reproduce: mypy src/" >&2
+      echo "   Reproduce: ${mypy_bin} src/" >&2
       echo "   Bypass consciously: git commit --no-verify" >&2
       exit 1
     fi
   else
     echo "⚠️  pre-commit type gate: 'mypy' not found — skipping type check." >&2
+    echo "   Looked in: ${repo_root}/.venv/bin, \$VIRTUAL_ENV/bin, \$PATH." >&2
     echo "   Install dev extras (pip install -e '.[dev]') to gate locally." >&2
   fi
 fi

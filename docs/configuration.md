@@ -214,9 +214,136 @@ commands.
 | `BRAIN_RECALL_PASSAGE_TOKENS` | `120` | Context window stitched around each document's best chunk. |
 | `BRAIN_RECALL_MAX_CANDIDATES` | `25` | Upper bound on documents considered before packing. |
 | `BRAIN_SNIPPET_CONTEXT_TOKENS` | `200` | Context tokens stitched around a `brain search` snippet. |
+| `BRAIN_SNIPPET_MAX_CHARS` | `1600` | Hard character cap on a stitched search snippet — currently the **dominant** constraint on snippet size (see the note below). Positive integer; **`0` is rejected** with a `ConfigError` at startup, unlike `BRAIN_SHOW_MAX_CONTENT_TOKENS`. |
 | `BRAIN_VECTOR_SIM_FLOOR` | `0.25` | Min cosine similarity for a vector-leg candidate to count. See the note below — it trades recall for precision. |
 | `BRAIN_RECENCY_HALFLIFE_DAYS` | `180` | Half-life of the recency boost applied to search scores. |
 | `BRAIN_BACKUP_DIR` | `$BRAIN_HOME/backups` | Where `brain backup` writes archives and `brain restore` discovers them. Absolute or `~`-relative. Resolved lazily, so relocating the brain home relocates its backups; never created until a backup actually runs. |
+| `BRAIN_SHOW_MAX_CONTENT_TOKENS` | `25000` | MCP `brain_show` body **and summary** cap. A cut body gains `content_truncated` + `content_tokens` + `content_truncated_recovery`; a cut summary gains `summary_truncated` + `summary_tokens` + `summary_truncated_recovery`. `content` and `summary` are **each** bounded by this value, so the two fields together total at most **2×** it (the serialized payload is larger — fixed metadata; see the note below). **`0` = unlimited** (the only knob in this family that accepts it), and it opts both fields out. |
+| `BRAIN_SEARCH_MAX_LIMIT` | `50` | MCP `brain_search` `limit` ceiling; equals the candidate-chunk limit, above which a larger `limit` cannot surface more documents. Must be **≥ 5**, the tool's own default `limit` (cross-validated at startup, so a lower ceiling cannot fail every default call). |
+| `BRAIN_RECALL_MAX_BUDGET_TOKENS` | `13000` | MCP `brain_recall` `budget_tokens` ceiling. See the note below — this is **not** 32000, and the difference is the point. |
+| `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` | `500` | MCP `brain_graphrag_entities` ceiling. `limit=0` now means *this*, no longer "all". Must be **≥ 50**, the tool's own default `limit` (cross-validated at startup). |
+| `BRAIN_MCP_ROWS_MAX_LIMIT` | `200` | Row cap for the bare-list MCP tools (`brain_backlinks` / `brain_links` / `brain_orphans`). A cut list flags `more_available` on its last element. |
+| `BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT` | `25` | MCP `brain_graphrag_communities` listing cap (was "all"). Distinct from `BRAIN_GRAPH_COMMUNITY_LIMIT`, which governs retrieval-time global theme selection. |
+
+### MCP payload ceilings — every default is a judgement call
+
+The six knobs above bound what a single MCP tool call can return, so no one
+call can eat a large fraction of an agent's context window. They are sized off
+live-corpus percentiles, not derived from anything — which is exactly why they
+are env vars, and why exceeding one raises `INVALID_PARAMS` **naming the
+ceiling** instead of trimming quietly. A ceiling that silently truncates is
+worse than no ceiling: the caller reads a partial answer as a complete one.
+
+### `BRAIN_SHOW_MAX_CONTENT_TOKENS` — one knob, two fields, each bounded
+
+`brain_show` can return a body and a `summary`, and this knob now caps **both**,
+at the same value, on **every** path — not only under `summary_only=true`.
+
+**Why the summary is capped at all.** `summary_only=true` is the documented
+escape hatch *from* the body ceiling, and it used to hand back a field with no
+ceiling of its own: the cheap mode carried the unbounded payload while the
+expensive one did not. `documents.summary` is short *in practice* only because
+`OllamaEnricher` writes it that way — migration 011 declares it `TEXT` with no
+length constraint. "Only the generator keeps it small, not the schema" is not a
+bound, and a ceiling module whose escape hatch is unbounded does not have a
+ceiling.
+
+**Why every path, not just the escape hatch.** `brain_show` returns `summary`
+alongside a full body too, so capping it only under `summary_only` would leave
+exactly the same hole on the path an ordinary open takes.
+
+**The consequence, stated rather than implied away: `content` and `summary` are
+*each* bounded by this value, so the two fields together total at most `2 ×`
+it — not `1 ×`.** That is the price of keeping one knob instead of two. It is a
+bound where there was none — but if you are sizing a context window against this
+number, size it against twice this number. The same honesty applies as to
+`payload_tokens` elsewhere in this branch: a knob whose name promises one bound
+and whose behaviour delivers another is a defect, so the doubling is documented
+at the knob, in `apply_content_ceiling`'s docstring, and beside the default in
+`config.py`.
+
+**The bound is on the two fields, not on the serialized payload.** The response
+also carries `title`, `tags`, `source_path`, the ids, and — only when a cut
+happened — the recovery-marker prose. Measured end-to-end at
+`max_content_tokens=500` (2026-08-20):
+
+| | tokens |
+|---|---|
+| `content` | 500 |
+| `summary` | 500 |
+| **both fields** | **1,000** (= `2 ×` the cap, exactly on the bound) |
+| whole serialized payload | **1,226** |
+| fixed overhead | ~226 |
+
+That overhead is roughly constant, so it is a *larger* share at smaller caps and
+a negligible one at the 25,000 default. An agent sizing purely against
+`2 × BRAIN_SHOW_MAX_CONTENT_TOKENS` under-counts by it.
+
+Markers are emitted **only when a cut actually happens**, so an ordinary payload
+whose body and summary both fit comes back byte-identical. `summary_truncated_recovery`
+points at the CLI (`brain show <id>`) deliberately: once the summary itself is
+over the ceiling there is no smaller MCP mode left, and pointing back at
+`summary_only` would be a loop.
+
+### `BRAIN_RECALL_MAX_BUDGET_TOKENS` — why 13000 and not 32000
+
+`brain_recall`'s MCP response ships every passage **twice**: once structured in
+`passages[].text`, and again rendered inside `context_block`. Measured across
+11 live queries at `budget_tokens=2000`, the delivered payload cost 4,025–4,726
+tokens — **2.01×–2.36× the budget requested**. That range is scoped to *that
+budget*; see "the ratio is a function of the budget" below before quoting it at
+another one.
+
+So `budget_tokens` sizes the content *selected*, not the response *returned*. A
+ceiling of 32000 would deliver ~70–76k tokens, larger than the `brain_show`
+tail these ceilings exist to cap. The intended bound is ~32k **delivered**, so
+the accepted budget is `32000 ÷ 2.36 ≈ 13,500` → `13000`.
+
+**The 2.36 divisor is an empirical constant from an 11-query sample, not a
+law.** It comes from `docs/audits/2026-08-10-token-payload-baseline.json`,
+produced by `scripts/token_payload_report.py` over
+`scripts/token_payload_queries.txt`. The response also now returns
+`payload_tokens` — the true serialized cost — so the overshoot is observable
+rather than a document. When the duplication is removed, re-derive the divisor
+or delete it and restore 32000; a stale divisor would then under-bound by half.
+
+**Re-measured after the ceilings landed** (2026-08-13,
+`docs/audits/2026-08-13-token-payload-after-wave3.json`, same 11 queries, same
+live corpus): every query came in exactly **+8 tokens** — the additive
+`payload_tokens` key and nothing else — moving the worst case from 2.3630 to
+**2.3670**, a hair above the 2.36 the ceiling is derived from. The bound still
+holds with margin: `13000 × 2.3670 = 30,771 ≤ 32,000`. It stops holding only if
+a future measurement exceeds `32000 ÷ 13000 = 2.4615`.
+
+**The ratio is a function of the budget, so the range is scoped to one.** End-to-end
+QA (2026-08-20) measured **2.44×** — 1,466 delivered tokens at `budget_tokens=600`
+on short synthetic passages — and read it as the documented range being wrong. It
+is not: delivered ≈ `2 × used + overhead`, so the *ratio* is `2 + overhead ÷ budget`
+and climbs as the budget shrinks. Same code, same mechanism: `r = 2.3670` at 2000,
+`r = 2.4433` at 600.
+
+The ceiling holds either way you do the arithmetic:
+
+| check | value | verdict |
+|---|---|---|
+| substitute QA's ratio | `13000 × 2.4433 = 31,763` | ≤ 32,000 ✔ |
+| adopt it as the divisor | `32000 ÷ 2.4433 = 13,097` | ≥ 13,000 ✔ |
+| against the break point | `2.4433 < 2.4615` | ✔ |
+
+The first row's margin looks thin (237 tokens, 0.7%) but it is the wrong sum:
+applying a 600-budget ratio at a 13,000 budget over-states the fixed-overhead
+term by 21.7×. **The range was scoped, not widened** — widening it to 2.44×
+would imply that figure was measured under the same conditions and would move
+the input the divisor is derived from for nothing. Re-derive only from a
+measurement taken *at* the ceiling.
+
+**It was measured at 2000 and is applied at 13000 — 6.5× away.** That
+extrapolation errs safe: the overshoot is ~2× structural duplication plus a
+roughly *fixed* JSON envelope, and a fixed envelope is a larger fraction of a
+small payload, so the ratio should fall toward the ~2.0 duplication floor as
+the budget rises. It has not been re-measured at 13000. If you change how a
+passage renders, re-run the harness at the ceiling itself rather than trusting
+that reasoning.
 
 ### `BRAIN_VECTOR_SIM_FLOOR` — why a good semantic match can rank last
 
@@ -237,6 +364,34 @@ If your corpus is mostly short notes and search feels blunt, lower the floor
 too many loosely-related hits. There is no universally right value — it is a
 recall-versus-precision dial, and the default is tuned for a corpus of mostly
 long-form documents.
+
+### `BRAIN_SNIPPET_MAX_CHARS` — the constraint that actually decides snippet size
+
+`BRAIN_SNIPPET_CONTEXT_TOKENS` looks like the knob that controls how much
+snippet you get. On the live corpus it usually is not. Measured 2026-08-13 over
+11 seeded queries x 5 results = 55 results:
+
+- On **47 of 55 results (85.5%)** the **matched chunk alone** already reached
+  `BRAIN_SNIPPET_MAX_CHARS`. The cap truncates the matched chunk itself, before
+  any neighbouring-chunk context is consulted.
+- Only **3 of 55** admitted any neighbour at all: the live median chunk is
+  ~2,281 chars / ~570 tokens against the default 200-token context budget, so
+  there is usually nothing that fits.
+- Across those 55 results the expansion produced **30,727** tokens of snippet
+  and delivered **19,213** — the cap discards **11,514 tokens (37.5%)** unread.
+
+So if snippets feel truncated mid-thought, raise **this** knob first; raising
+`BRAIN_SNIPPET_CONTEXT_TOKENS` alone will usually change nothing. Raising it
+lengthens every snippet in every search result, which is a direct cost to an
+agent's context window — the 37.5% discarded above is the headroom, not free
+space. Lower it to shrink payloads at the cost of reading context.
+
+`0` is **rejected** with a `ConfigError` at startup (it is parsed as a positive
+integer), so unlike `BRAIN_SHOW_MAX_CONTENT_TOKENS` there is no "0 = unlimited"
+opt-out; set a large value instead. `scripts/token_payload_report.py
+--snippet-constraints` re-measures the numbers above on demand, and the full
+write-up — including a removed mechanism that tried to attack the wrong
+constraint — is in `brain.snippet_context`'s module docstring.
 
 ## Search and retrieval trust boundaries
 

@@ -73,9 +73,49 @@ narrowest scope that satisfies the user's ask:
 Always run with `--dry-run` first when the scope might be broader than the
 user expected. Cap with `--max 100` for safety. Note: **drafts are now
 included** (Q1-A change) — they ingest with `documents.draft=TRUE` and are
-hidden from the wiki but visible to `brain search` / `brain show`.
+hidden from the wiki but visible to `brain search` / `brain recall` /
+`brain show`.
 
 The summary line is `N ingested (M draft)` when drafts are present.
+
+## The context cost of the MCP→stdin chain
+
+Read this before running the Krisp or Slack chains below.
+
+Ingest is the **most expensive thing this skill does to your context**, and
+it is expensive in a way the other brain skills are not. In `consult-brain`
+you choose how much text to pull in (`--brief`, `brain recall --budget N`).
+Here you have no such control: the MCP returns the full transcript or thread,
+that text lands in your context, and you echo it straight back out to
+`brain ingest-stdin`. **Every ingested document transits your context twice —
+once inbound from the MCP, once outbound in the `echo`.**
+
+Measured on this corpus, a Krisp transcript is a **mean of ~7,900 tokens**
+(median 7,400; p90 15,300; largest 33,600 — n=261; reproducible from
+`docs/audits/2026-08-11-wave2-routing-counterfactual.md`).
+Doubled by the echo, that is
+~16k tokens of context per meeting. Ten meetings in one pass is ~160k — a
+context window. Consequences to plan around:
+
+- **Batch small.** "Ingest last week's Krisp calls" is 5–15 meetings. Do them
+  a few at a time and report counts as you go, rather than fetching all of
+  them before the first `ingest-stdin`.
+- **Never re-read what you just wrote.** After `ingest-stdin` succeeds, the
+  content is in the brain. Verify with `brain status` / `brain list` (titles
+  and counts), **not** `brain show` on each new document — that would be a
+  third pass over the same text for no new information.
+- **Don't summarize the transcript yourself on the way through.** The
+  post-ingest hook already summarizes on local Ollama, off your context.
+  Pipe the raw body and let it run.
+- **If the user only wants to know what was discussed** — not to store it —
+  ingest is the wrong tool. Ingest once, then query with `consult-brain`
+  (`brain search --brief`, `brain recall --budget N`), where the read is
+  bounded.
+
+Note that no *ingest* command takes `--json`; they report counts, not payloads,
+so there is nothing here to parse and nothing to trim. (The verification
+commands below — `brain list`, `brain show` — do take it.) The cost is entirely
+in the content you carry to reach `ingest-stdin`.
 
 ## Krisp transcripts — MCP→stdin chain
 
@@ -152,8 +192,13 @@ After any non-trivial ingest, sanity-check:
 ```bash
 brain status                                   # totals + breakdown by source
 brain list --source krisp --limit 5            # see the freshest rows
-brain show <id-prefix>                         # verify content + summary
 ```
+
+Those two are titles and counts — cheap, and enough to confirm the rows
+landed. Only if something looks wrong, spot-check **one** document with
+`brain show <id-prefix>`. Do not `brain show` each thing you just ingested:
+you already had that text in context on the way in, and re-reading a batch of
+transcripts costs more than the ingest did.
 
 If `brain doctor` flags an Ollama / Postgres issue, route to `brain-maintenance`.
 
