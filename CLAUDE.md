@@ -115,7 +115,7 @@ next commit lands):
 
 | File | Lines | Why it is not being split |
 |---|---|---|
-| `cli.py` | 9,068 | One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and **deferred** deliberately. **Grew this branch: 9,019 → 9,068 (+49)** — 39 lines mapping migration 028's new `LockNotAvailable` to an actionable message, plus 10 in the final review round scoping that message to the *failing* migration. Reasons recorded in both places the ceiling rule requires — inline at the handler in `init`, and in the module docstring. |
+| `cli.py` | 9,121 | One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and **deferred** deliberately. **Grew this branch: 9,019 → 9,121 (+102)** — 39 lines mapping migration 028's new `LockNotAvailable` to an actionable message, 10 more in the final review round scoping that message to the *failing* migration, then **+53 on 2026-09-02** in `eval_cmd`: naming the changed retrieval-config keys when `--fail-below` exits 3 (a config change and a quality regression are otherwise indistinguishable from the exit code alone), and pointing every exit 3 at `tests/eval/baselines/README.md`. Reasons recorded in both places the ceiling rule requires — inline at each site, and in the module docstring. |
 | `mcp_server.py` | 4,416 | Same shape — one MCP tool registry. **Grew this branch: 4,009 → 4,416 (+407)** — the largest growth of any file in this table, ahead of `config.py`'s +291. The Wave-3 growth is disclosed and justified in its own docstring, which is what the rule requires of a file already over; the review-round growths (blank-summary guard, signature-default constants) are appended there too. Split deferred alongside `cli.py`. |
 | `config.py` | 2,541 | **Grew this branch: 2,250 → 2,541 (+291).** It grew in the same PR that split `search.py` citing the ceiling — which is the point, and it stands on its own without the superlative this row used to carry. (It read "the largest file over the ceiling"; that was false when written and is still false — `cli.py` (9,068) and `mcp_server.py` (4,416) are both larger, and `mcp_server.py` also grew more (+407 vs +291). Corrected 2026-08-20.) Stated rather than smoothed over: the additions are the six MCP-ceiling knobs, the snippet knob, and the review round's two `MCP_*_DEFAULT_LIMIT` constants + ceiling>=default cross-checks, each carrying its rationale in prose. The knobs belong beside the other knobs; the *evidence blocks* are the growth and they are the reason to split this file next, into `config.py` + a measurements/rationale doc. |
 | `ingest/__init__.py` | 2,298 | Dispatcher + both pipelines; the extractors are already separate modules. |
@@ -141,22 +141,34 @@ Run after every change: `ruff check` (lint) or `ruff check --fix` (auto-fix), th
 **Key rules:** Line length 100, target Python 3.11, `from __future__ import annotations` not needed (3.11+ has native PEP 604 union syntax). Sort imports with `ruff check --select I --fix`.
 
 ### Eval gate (CI)
-The eval-marker harness (`tests/test_eval_harness_live.py`) is **excluded from the default pytest invocation** (`pyproject.toml` → `addopts = "... -m 'not eval'"`). Rationale: it requires a live Postgres + Ollama, would slow every local `pytest` run, and the threshold assertions assume the live brain corpus.
+The eval-marker harness (`tests/test_eval_harness_live.py`) is **excluded from the default pytest invocation** (`pyproject.toml` → `addopts = "... -m 'not eval'"`). Rationale: it requires a live Postgres + Ollama and would slow every local `pytest` run. (It no longer carries per-query threshold assertions — see "What CI actually enforces" below.)
 
-**CI enforces it separately.** `.github/workflows/eval.yml` runs on every PR, every push to `main`/`master`, and manual `workflow_dispatch`:
+**What CI actually enforces — read this before assuming the gate gates.** `.github/workflows/eval.yml` runs **harness health only**. The retrieval-quality regression gate is a **LOCAL pre-merge check**, keyed to one machine's document set, and on a GitHub-hosted runner it is structurally unable to run. That is a property of the gate, not a missing chore: scoring retrieval needs four things a hosted runner does not supply — (1) `tests/eval/golden_corpus.yaml`, which is gitignored by design, and whose absence makes `brain eval` exit `1` in `load_corpus` before it opens a DB connection; (2) an initialised schema, since the job never runs `brain init`; (3) populated documents whose UUIDs match the baseline's, which a fresh ingest would not produce; (4) a reachable embedder, and there is no Ollama on a hosted runner. Committing `ci.json` does not change any of the four. The gate step therefore requires **both** `ci.json` and `golden_corpus.yaml`, so it self-arms only on a machine that can genuinely run it.
+
+**The only configuration that would gate real retrieval quality is a self-hosted runner attached to a live brain** — not currently set up, and probably not worth it for a personal project; recorded here so the question stops being re-asked.
+
+`.github/workflows/eval.yml` runs on every PR, every push to `main`/`master`, and manual `workflow_dispatch`:
 
 1. Brings up the pinned Apache AGE test instance via `docker compose -f docker-compose.age-test.yml up -d --build` (PostgreSQL 16 + pgvector 0.8.6 + AGE, port **5434**, db `second_brain_test` — the same instance the local test suite uses). A GitHub Actions `services:` block can't `build:` an image inline, so compose is used instead of a service container; one eval-marked test reaches the AGE-backed graph layer.
 2. Installs the package with `pip install -e ".[dev]"` and waits for `pg_isready` on port 5434.
 3. Runs `pytest -m eval --no-cov -v`. The eval-marked tests SKIP cleanly without a live corpus + Ollama, so in CI this is import/collection regression coverage — it turns red only when the harness itself breaks.
-4. Conditionally runs `brain eval --baseline ci --diff --fail-below`, but only when `tests/eval/baselines/ci.json` exists (dormant otherwise, printing a skip notice — recording that baseline needs a live corpus + Ollama, so it is a coordinator step, not CI's).
+4. Conditionally runs `brain eval --baseline ci --diff --fail-below`, but only when **both** `tests/eval/baselines/ci.json` and `tests/eval/golden_corpus.yaml` exist. On a hosted runner the corpus is always absent, so this is always the skip branch. Locked by `tests/test_eval_workflow_contract.py`.
 5. Tears down the AGE instance with `docker compose -f docker-compose.age-test.yml down -v` (always, even on failure).
 
-**Decision recorded (Wave A.1):** the eval marker stays OFF in the default `pytest` invocation. Gate lives in CI only. Local devs run `pytest -m eval` manually when needed.
+**Decision recorded (Wave A.1, corrected 2026-09-02):** the eval marker stays OFF in the default `pytest` invocation. The original wording said "Gate lives in CI only" — that was wrong in a way that cost real time, because it implied the gate was one recorded baseline away from working. Retrieval-quality gating lives **locally**; CI covers harness health.
+
+#### The committed `ci.json` baseline — three things that will bite you
+
+1. **It is keyed to one machine's brain.** The baseline stores the document UUIDs it ranked. On any other machine — or after a destructive re-ingest here — nothing resolves, every metric scores `0.0`, and `--fail-below` exits `3` reporting a catastrophic regression that is really just a different corpus. **A spurious exit 3 almost always means the corpus moved, not that search got worse.** Check `brain status` document counts before believing the numbers.
+2. **Two `recency` queries are clock-dependent.** They filter on `documents.ingested_at` via `since_days: 40`, chosen so the boundary lands inside a 25-day gap in this brain's ingest history. The matched set is stable only for roughly **2026-08-22 → 2026-09-16**; outside that window those two queries drift and the baseline needs re-recording.
+3. **A config change is indistinguishable from a quality regression in the exit code.** Changing the embedder, `recency_halflife_days`, `vector_sim_floor`, or `snippet_context_tokens` moves every metric. `--fail-below` still exits `3`; the *message* now names the changed keys (see below), but the exit code alone cannot tell you which happened.
+
+**Who re-records it, and when.** Whoever makes the change that invalidates it, in the same PR — the same rule as any other committed fixture. Re-record after: any ingest or deletion that changes the document set, a re-embed or embedder swap, a change to any key in `config_signature`, an edit to `golden_corpus.yaml`, or drift past the recency window above.
 
 **Updating a committed baseline:**
 1. Locally with a populated brain + Ollama: `brain eval --record-baseline ci`
 2. Inspect the diff: `git diff tests/eval/baselines/ci.json`
-3. Commit the new baseline JSON alongside the change that justifies the new numbers.
+3. Commit the new baseline JSON alongside the change that justifies the new numbers, and say in the commit message *which* of the triggers above applied.
 
 The `--fail-below` flag exits with code `3` (distinct from `1` = generic error and `2` = Typer BadParameter) when any mean metric — nDCG@5, MRR, or Recall@20 — regresses by more than `1e-4` (one unit at the baseline's 4-decimal serialization precision). Uniform threshold across all three metrics — no per-metric overrides (kept simple; the one downstream consumer is the CI workflow). `--fail-below` requires `--diff`; passing it alone exits `2` (Typer BadParameter).
 
