@@ -45,7 +45,7 @@
 #          and matches nothing, so every metric scores 0.0 and --fail-below
 #          exits 3.
 #       4. A reachable embedder. There is no Ollama on a hosted runner, so the
-#          vector leg raises OllamaEmbedded and every query degrades to zeros.
+#          vector leg raises OllamaEmbedError and every query degrades to zeros.
 #
 #     The guard below therefore requires the corpus file as well as the
 #     baseline, so the step self-arms only where it can genuinely run — a
