@@ -4021,7 +4021,11 @@ def eval_cmd(
         run_eval,
         save_baseline,
     )
-    from .eval.baseline import _assert_baseline_name, mean_metrics_regressed
+    from .eval.baseline import (
+        _assert_baseline_name,
+        changed_config_keys,
+        mean_metrics_regressed,
+    )
     from .eval.corpus import _DEFAULT_CORPUS_PATH, _VALID_CATEGORIES
     from .eval.errors import EvalBaselineError, EvalCorpusError
 
@@ -4099,10 +4103,46 @@ def eval_cmd(
             emit_json(dataclasses.asdict(diff_result))
         else:
             console.print(eval_diff_table(diff_result))
+
+        # A changed retrieval configuration moves every metric, exactly as a
+        # quality regression does, and produces the SAME exit 3 — so the exit
+        # code alone can never distinguish "search got worse" from "someone
+        # swapped the embedder". Name the changed keys on stderr (stderr, so it
+        # survives `--json`, whose stdout must stay parseable) before the gate
+        # decides. Reporting only; the exit code is deliberately unchanged.
+        config_changes = changed_config_keys(diff_result)
+        if config_changes:
+            typer.secho(
+                "warning: retrieval config changed between baseline and this run — "
+                "metric deltas below are NOT a like-for-like quality comparison:",
+                fg="yellow",
+                err=True,
+            )
+            for key, before, after in config_changes:
+                typer.secho(f"  {key}: {before!r} -> {after!r}", fg="yellow", err=True)
+
         # --fail-below runs in BOTH branches (the report is emitted above first):
         # a mean-metric regression flips the exit code to 3, distinct from
         # 1 (generic error) and 2 (Typer BadParameter).
         if fail_below and mean_metrics_regressed(diff_result):
+            if config_changes:
+                typer.secho(
+                    "exit 3: mean metrics regressed, but the config above changed too "
+                    "— re-record the baseline under the new config before treating "
+                    "this as a quality regression.",
+                    fg="red",
+                    err=True,
+                )
+            # The commonest cause of an exit 3 is not a worse ranker: it is a
+            # baseline recorded against a different document set. Point at the
+            # README rather than leaving the exit code as the only evidence.
+            typer.secho(
+                "exit 3: see tests/eval/baselines/README.md — a baseline recorded "
+                "on a different corpus, or drifted past its recency window, "
+                "regresses every metric without search changing at all.",
+                fg="red",
+                err=True,
+            )
             raise typer.Exit(code=3)
         return
 
