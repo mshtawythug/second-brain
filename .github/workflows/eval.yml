@@ -22,11 +22,36 @@
 #     container.
 #
 #   * The regression gate step (`brain eval --baseline ci --diff --fail-below`)
-#     is CONDITIONAL on a committed baseline: it runs only when
-#     tests/eval/baselines/ci.json exists (allowlisted in that dir's
-#     .gitignore). Until a baseline is recorded from a populated brain + Ollama
-#     the step is dormant and prints a skip notice — recording ci.json is a
-#     coordinator step (needs a live corpus, which CI does not have).
+#     is CONDITIONAL, and on a GitHub-hosted runner the condition is NEVER
+#     satisfiable. This is a property of the gate, not a missing chore.
+#
+#     An earlier revision of this comment said the step was "dormant until a
+#     baseline is recorded", which reads as one commit away from working. It
+#     is not: `ci.json` was recorded and committed, and the gate still cannot
+#     run here, because scoring retrieval needs FOUR things a hosted runner
+#     does not supply, in the order `brain eval` hits them:
+#
+#       1. The golden corpus file. tests/eval/golden_corpus.yaml is gitignored
+#          by design (each developer authors their own against their own
+#          documents), so it is absent on a fresh checkout. `load_corpus()`
+#          runs before Config.load() and before any DB connection, so this
+#          alone exits 1.
+#       2. An initialised schema. This job brings the AGE instance up with
+#          `up -d --build` and never runs `brain init`, so `documents` does
+#          not exist. Resolving an expected-id prefix would raise
+#          UndefinedTable.
+#       3. Populated documents whose UUIDs match the baseline's. The baseline
+#          records the ids it ranked; a freshly ingested corpus gets new UUIDs
+#          and matches nothing, so every metric scores 0.0 and --fail-below
+#          exits 3.
+#       4. A reachable embedder. There is no Ollama on a hosted runner, so the
+#          vector leg raises OllamaEmbedded and every query degrades to zeros.
+#
+#     The guard below therefore requires the corpus file as well as the
+#     baseline, so the step self-arms only where it can genuinely run — a
+#     developer machine, or a self-hosted runner attached to a live brain.
+#     Retrieval-quality regression detection is a LOCAL pre-merge check; this
+#     job's value is harness health (see the first bullet).
 #
 #   * Concurrency: cancel in-progress runs only on PRs (most recent push wins);
 #     master/main keeps a complete audit trail.
@@ -88,16 +113,20 @@ jobs:
       - name: Run the eval harness (skips cleanly without a live corpus/Ollama)
         run: pytest -m eval --no-cov -v
 
-      - name: Eval regression gate (only when a committed baseline exists)
+      - name: Eval regression gate (only where it can genuinely run)
         run: |
-          # Dormant until tests/eval/baselines/ci.json is committed (see that
-          # dir's .gitignore allowlist). Recording the baseline needs a
-          # populated brain + Ollama, so it is a coordinator step, not CI's.
-          if [ -f tests/eval/baselines/ci.json ]; then
-            echo "ci.json present — running the eval regression gate"
+          # Needs BOTH the committed baseline and the local golden corpus. The
+          # corpus is gitignored by design, so on a GitHub-hosted runner this
+          # is always the skip branch — by construction, not by omission. See
+          # the four unmet preconditions in this file's header comment.
+          if [ -f tests/eval/baselines/ci.json ] && [ -f tests/eval/golden_corpus.yaml ]; then
+            echo "baseline + corpus present — running the eval regression gate"
             brain eval --baseline ci --diff --fail-below
+          elif [ -f tests/eval/baselines/ci.json ]; then
+            echo "tests/eval/baselines/ci.json present but tests/eval/golden_corpus.yaml is absent"
+            echo "(gitignored by design) — retrieval regression gate skipped; it is a LOCAL check."
           else
-            echo "tests/eval/baselines/ci.json absent — eval regression gate dormant (skipping)"
+            echo "tests/eval/baselines/ci.json absent — eval regression gate skipped"
           fi
 
       - name: Tear down the AGE test instance

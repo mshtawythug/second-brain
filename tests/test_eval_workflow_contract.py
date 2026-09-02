@@ -56,6 +56,7 @@ import yaml
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _EVAL_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "eval.yml"
 _CI_BASELINE = "tests/eval/baselines/ci.json"
+_GOLDEN_CORPUS = "tests/eval/golden_corpus.yaml"
 _COLLECT_TIMEOUT_SECONDS = 600
 
 # Eval gates that really do reach a live model (chat or embedder). Each MUST
@@ -295,6 +296,54 @@ def test_eval_regression_gate_is_conditional_on_a_committed_baseline() -> None:
     )
     assert script.index(guard) < script.index("--fail-below"), (
         "the ci.json existence check must precede the gate invocation"
+    )
+
+
+def test_eval_regression_gate_also_requires_the_golden_corpus() -> None:
+    """The gate must require the corpus file too, not just the committed baseline.
+
+    Guarding on ``ci.json`` alone was a latent build-breaker: the baseline is
+    committed but ``tests/eval/golden_corpus.yaml`` is gitignored by design, so
+    the moment a baseline landed the gate armed on a runner that has no corpus
+    and ``brain eval`` exited 1 in ``load_corpus`` — before it opened a database
+    connection, so the failure did not even name the real problem.
+
+    Requiring both keeps the step self-arming on a machine that can genuinely
+    run it (a developer box, or a self-hosted runner attached to a live brain)
+    and a no-op everywhere else, which is the honest shape for a check whose
+    ground truth is one machine's document ids.
+    """
+    gate_steps = [
+        str(step.get("run", ""))
+        for step in _eval_workflow_steps()
+        if "--fail-below" in str(step.get("run", ""))
+    ]
+    assert len(gate_steps) == 1
+    script = gate_steps[0]
+    corpus_guard = f"[ -f {_GOLDEN_CORPUS} ]"
+
+    assert corpus_guard in script, (
+        f"the eval regression gate must also be guarded by `{corpus_guard}`; "
+        f"{_CI_BASELINE} alone arms it on a runner that has no corpus, where "
+        "`brain eval` exits 1 in load_corpus"
+    )
+    assert script.index(corpus_guard) < script.index("--fail-below"), (
+        "the corpus existence check must precede the gate invocation"
+    )
+
+
+def test_golden_corpus_stays_gitignored() -> None:
+    """The corpus must remain local-only — it is the premise of the guard above.
+
+    If someone ever commits a ``golden_corpus.yaml``, the gate arms in CI and
+    fails differently (empty database, then non-matching UUIDs, exit 3) rather
+    than skipping. Pin the ignore so that change has to be deliberate.
+    """
+    gitignore = (_REPO_ROOT / "tests" / "eval" / ".gitignore").read_text(encoding="utf-8")
+    lines = [line.strip() for line in gitignore.splitlines() if line.strip()]
+    assert "golden_corpus.yaml" in lines, (
+        "golden_corpus.yaml must stay gitignored; the eval gate's corpus guard "
+        "assumes it is absent on a fresh checkout"
     )
 
 
