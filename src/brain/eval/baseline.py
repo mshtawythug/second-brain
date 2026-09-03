@@ -248,6 +248,29 @@ def diff_reports(baseline: EvalReport, current: EvalReport) -> BaselineDiff:
 _FAIL_BELOW_THRESHOLD: float = -1e-4
 
 
+def changed_config_keys(diff: BaselineDiff) -> list[tuple[str, Any, Any]]:
+    """Return ``(key, baseline_value, current_value)`` for every differing config key.
+
+    ``BaselineDiff.config_signature_changed`` is a bare bool, which is not enough
+    to act on: when ``--fail-below`` exits 3, a reader cannot tell a genuine
+    quality regression from an embedder swap or a changed ``vector_sim_floor``,
+    because BOTH move every metric and BOTH produce exit 3. This names the
+    difference so the exit code stops being the only evidence.
+
+    Keys present in only one signature are reported with ``None`` on the missing
+    side, so a renamed or newly-added knob surfaces instead of being skipped.
+    Sorted by key for deterministic output.
+    """
+    keys = set(diff.baseline_signature) | set(diff.current_signature)
+    changed: list[tuple[str, Any, Any]] = []
+    for key in sorted(keys):
+        before = diff.baseline_signature.get(key)
+        after = diff.current_signature.get(key)
+        if before != after:
+            changed.append((key, before, after))
+    return changed
+
+
 def mean_metrics_regressed(diff: BaselineDiff) -> bool:
     """True iff any mean metric delta regressed past the ``--fail-below`` gate.
 

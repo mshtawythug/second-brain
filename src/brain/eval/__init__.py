@@ -8,6 +8,7 @@ Public surface re-exported from sub-modules:
 - :func:`load_corpus` — parse a golden-corpus YAML file
 - :class:`BaselineDiff` / :class:`QueryDiff` — diff data types
 - :func:`save_baseline` / :func:`load_baseline` / :func:`diff_reports` — baseline I/O
+- :func:`changed_config_keys` — name the config keys behind a metric shift
 - :class:`ConceptF1Report` / :class:`ConceptFixtureDoc` / :func:`concept_set_micro_f1`
   / :func:`normalize_concept_pairs` / :func:`load_concept_fixture` — GraphRAG
   concept-extractor eval gate (wave G2-j)
@@ -36,6 +37,7 @@ from .answer_eval import (
 from .baseline import (
     BaselineDiff,
     QueryDiff,
+    changed_config_keys,
     diff_reports,
     load_baseline,
     mean_metrics_regressed,
@@ -96,6 +98,7 @@ __all__ = [
     "save_baseline",
     "load_baseline",
     "diff_reports",
+    "changed_config_keys",
     "mean_metrics_regressed",
     # GraphRAG concept-extractor eval gate (G2-j)
     "ConceptF1Report",
