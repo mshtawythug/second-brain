@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" role="img" aria-labelledby="title desc">
+  <title id="title">Second Brain aperture logo</title>
+  <desc id="desc">An asymmetric retrieval aperture with connected graph nodes forming an abstract Second Brain mark.</desc>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <g data-mark-part="aperture">
+      <path d="M 70 40 C 96 22 135 25 159 50" stroke="#ffffff" stroke-width="27"/>
+      <path d="M 70 40 C 96 22 135 25 159 50" stroke="#111827" stroke-width="19"/>
+      <path d="M 154 51 C 182 78 185 123 162 155" stroke="#ffffff" stroke-width="27"/>
+      <path d="M 154 51 C 182 78 185 123 162 155" stroke="#111827" stroke-width="19"/>
+      <path d="M 158 155 C 133 182 90 187 59 165" stroke="#ffffff" stroke-width="27"/>
+      <path d="M 158 155 C 133 182 90 187 59 165" stroke="#111827" stroke-width="19"/>
+      <path d="M 59 165 C 40 149 35 119 48 97" stroke="#ffffff" stroke-width="27"/>
+      <path d="M 59 165 C 40 149 35 119 48 97" stroke="#111827" stroke-width="19"/>
+      <path d="M 92 55 C 120 59 144 79 153 106" stroke="#ffffff" stroke-width="19"/>
+      <path d="M 92 55 C 120 59 144 79 153 106" stroke="#4f46e5" stroke-width="11"/>
+      <path d="M 72 145 C 102 156 138 145 156 117" stroke="#ffffff" stroke-width="19"/>
+      <path d="M 72 145 C 102 156 138 145 156 117" stroke="#4f46e5" stroke-width="11"/>
+    </g>
+    <g data-mark-part="graph-link">
+      <path d="M 55 111 L 113 82 L 142 118" stroke="#ffffff" stroke-width="13"/>
+      <path d="M 55 111 L 113 82 L 142 118" stroke="#635bff" stroke-width="6"/>
+      <path d="M 55 111 L 121 135 L 142 118" stroke="#ffffff" stroke-width="13"/>
+      <path d="M 55 111 L 121 135 L 142 118" stroke="#635bff" stroke-width="6"/>
+    </g>
+  </g>
+  <g data-mark-part="anchor-node">
+    <circle cx="55" cy="111" r="19" fill="#ffffff"/>
+    <circle cx="55" cy="111" r="15" fill="#c4602b"/>
+  </g>
+  <g data-mark-part="graph-node">
+    <circle cx="113" cy="82" r="11" fill="#ffffff"/>
+    <circle cx="113" cy="82" r="7.5" fill="#6d68d9"/>
+    <circle cx="142" cy="118" r="11" fill="#ffffff"/>
+    <circle cx="142" cy="118" r="7.5" fill="#6d68d9"/>
+    <circle cx="121" cy="135" r="10" fill="#ffffff"/>
+    <circle cx="121" cy="135" r="6.5" fill="#2a255f"/>
+  </g>
+</svg>

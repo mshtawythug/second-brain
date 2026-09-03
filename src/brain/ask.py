@@ -371,8 +371,17 @@ def _retrieve_hybrid(
     embedder: Embedder,
     query: str,
     limit: int,
+    exclude_confidential: bool = False,
 ) -> list[SearchResult]:
-    """Single hybrid-search pass for one sub-query (config-driven knobs)."""
+    """Single hybrid-search pass for one sub-query (config-driven knobs).
+
+    ``exclude_confidential`` maps onto ``hybrid_search``'s own F6 lens. ``ask``
+    is the highest-consequence retrieval surface here: its citations carry
+    ``snippet`` (raw body), and its ``answer`` is an LLM SYNTHESIS over the
+    retrieved bodies — so a confidential document reaching this leg leaks
+    twice, once verbatim and once paraphrased into prose that no marker-based
+    check downstream could recognise as derived from it.
+    """
     return hybrid_search(
         conn,
         embedder=embedder,
@@ -382,6 +391,7 @@ def _retrieve_hybrid(
         recency_halflife_days=cfg.recency_halflife_days,
         snippet_context_tokens=cfg.snippet_context_tokens,
         snippet_max_chars=cfg.snippet_max_chars,
+        sensitivity="normal" if exclude_confidential else None,
     )
 
 
@@ -394,6 +404,7 @@ def _retrieve(
     limit: int,
     mode: str,
     backend: GraphBackend | None,
+    exclude_confidential: bool = False,
 ) -> tuple[list[SearchResult], str]:
     """Retrieve documents for one sub-query; returns (results, graph_summary).
 
@@ -411,7 +422,12 @@ def _retrieve(
         )
 
     results = _retrieve_hybrid(
-        conn, cfg, embedder=embedder, query=query, limit=limit
+        conn,
+        cfg,
+        embedder=embedder,
+        query=query,
+        limit=limit,
+        exclude_confidential=exclude_confidential,
     )
     if mode == HYBRID_MODE:
         return results, ""
@@ -427,6 +443,7 @@ def _retrieve(
         mode=mode,
         limit=limit,
         embedder=embedder,
+        exclude_confidential=exclude_confidential,
     )
     combined = list(results)
     seen_ids = {r.document_id for r in combined}
@@ -475,6 +492,7 @@ def ask_no_loop(
     mode: str = HYBRID_MODE,
     limit: int = 5,
     backend: GraphBackend | None = None,
+    exclude_confidential: bool = False,
 ) -> AskResult:
     """Single retrieve + synthesize pass (the ``--no-loop`` fast path).
 
@@ -492,6 +510,7 @@ def ask_no_loop(
         limit=limit,
         mode=mode,
         backend=backend,
+        exclude_confidential=exclude_confidential,
     )
     raw_answer = _call_synthesize_step(chat, cfg, question, docs, graph_summary)
     answer = _sanitize_answer(raw_answer, len(docs))
@@ -518,6 +537,7 @@ def ask(
     limit: int = 5,
     max_iterations: int = _DEFAULT_MAX_ITERATIONS,
     backend: GraphBackend | None = None,
+    exclude_confidential: bool = False,
 ) -> AskResult:
     """Agentic plan -> retrieve -> reflect -> synthesize loop over the corpus.
 
@@ -546,6 +566,7 @@ def ask(
             mode=mode,
             limit=limit,
             backend=backend,
+            exclude_confidential=exclude_confidential,
         )
 
     session_id = uuid.uuid4().hex
@@ -575,6 +596,7 @@ def ask(
                 limit=limit,
                 mode=mode,
                 backend=backend,
+                exclude_confidential=exclude_confidential,
             )
             if graph_summary:
                 graph_summaries.append(graph_summary)

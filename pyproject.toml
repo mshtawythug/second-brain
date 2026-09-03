@@ -81,9 +81,13 @@ dependencies = [
   # The extractors here, plus `rich` and `watchdog` further down, are
   # deliberately left unbounded — a conclusion, not an oversight. The resolver
   # has ALREADY carried most of them across at least one major above the
-  # declared floor (pypdf 5 -> 6.15, markdown-it-py 3 -> 4.2, rich 13 -> 15,
-  # watchdog 4 -> 6; python-docx 1.1 -> 1.2 and pdfplumber are still within
-  # their line) and the suite is green on exactly those versions in both venvs.
+  # declared floor (pypdf 5 -> 6.15, rich 13 -> 15, watchdog 4 -> 6;
+  # python-docx 1.1 -> 1.2 and pdfplumber are still within their line) and the
+  # suite is green on exactly those versions in both venvs.
+  # `markdown-it-py` was in this list as "3 -> 4.2" until phase 1 raised its
+  # floor to 4.2 for the `[plugins]` extra — it is no longer an example of the
+  # resolver running ahead of the declared floor, so it was removed rather than
+  # left as a claim the pin below contradicts.
   # They are narrow leaf surfaces — pull text out of a file, draw a table —
   # where a break is a loud ImportError or a visibly failed extraction, not the
   # silently-wrong result that justifies the caps on `pgvector` and `typer`.
@@ -92,7 +96,21 @@ dependencies = [
   "pypdf>=5.0",
   "pdfplumber>=0.11",
   "python-docx>=1.1",
-  "markdown-it-py>=3.0",
+  # The `[plugins]` extra pulls `mdit-py-plugins`, which `brain ui` uses for
+  # ONE thing: GFM task lists (`mdit_py_plugins.tasklists`). §2.1 waiver granted
+  # 2026-08-11 on measured usage — 180 corpus documents carry a task list,
+  # 6,745 items in total (159 ingested / 21 vault), counted with the markdown-it
+  # TOKENIZER rather than a substring scan, because substring counts of this
+  # corpus have been wrong in both directions (strikethrough 38 -> 31, footnotes
+  # 3 -> 0, task lists 145 -> 180).
+  # An EXTRA of an already-declared dependency, not a new top-level one:
+  # markdown-it-py declares `mdit-py-plugins>=0.5.0 ; extra == "plugins"`.
+  # Floor raised 3.0 -> 4.2 for the extra: 4.2.0 is the version measured to
+  # declare it, and asserting `>=3.0` supports `[plugins]` would be a claim
+  # about a release nothing here has checked. Resolved: mdit-py-plugins 0.6.1.
+  # Unbounded above for the reason given for the extractors below — the surface
+  # used is one plugin registration whose failure is a loud ImportError.
+  "markdown-it-py[plugins]>=4.2",
   # Bounded on BOTH sides, and both ends are exercised — see
   # `tests/test_cli_config_error_presentation.py`. Typer renders the entire
   # CLI, so an unbounded pin means the exit codes and help output a user gets
@@ -277,6 +295,20 @@ dependencies = [
   # import-time break if `mcp` ever drops them.
   "starlette>=0.47,<2",
   "uvicorn>=0.30",
+  # Same shape as starlette/uvicorn above: `brain ui`'s markdown renderer
+  # imports pygments directly to tokenise fenced code (212 corpus documents
+  # carry a language-tagged fence, 211 ingested / 1 vault). It resolves
+  # transitively via `rich`, which requires `pygments>=2.13.0,<3.0.0`, so
+  # declaring it adds ZERO new wheels — 2.20.0 is what is already installed and
+  # what the suite is green on. The declaration stops a silent import-time
+  # break if `rich` ever drops it.
+  # Floor is 2.13 because that is `rich`'s own floor: below it the version
+  # actually present is unconstrained by anything in this file. No upper bound
+  # for the reason given for the extractors above — the surface used here is
+  # `get_lexer_by_name` + `HtmlFormatter(nowrap=True)`, two of the oldest and
+  # most stable entry points in the library, and a break is a loud
+  # `ImportError` or visibly untokenised code, not a silently wrong result.
+  "pygments>=2.13",
   "voyageai>=0.3",
   "pyyaml>=6.0",
   "watchdog>=4.0",
@@ -284,6 +316,32 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Browser harness for `brain ui` (opt-in). NOT a runtime dependency and
+# deliberately NOT in `dev`: it exists to execute the DOM and read the
+# accessibility tree, which nothing else in this suite can do.
+#
+# MEASURED 2026-08-11: the pip package is small and Playwright caches its
+# browsers OUTSIDE the venv (~/Library/Caches/ms-playwright, 4.3 GB already
+# present), so a `brain-ci` venv rebuild re-installs the package in seconds
+# and reuses the cached browser — verified by launching chromium after a
+# fresh install with no `playwright install` step.
+#
+# DONE 2026-08-13 — the harness is now GATE-ENFORCED by the `browser` job in
+# .github/workflows/ci.yml, which runs
+# `pytest tests/test_ui_browser.py -m browser --no-cov` on every PR. Before
+# that job existed those 33 tests ran in no workflow at all.
+#
+# ONE DIVERGENCE from the plan sketched here, and it is deliberate: this line
+# did NOT move into `dev`. The job names both extras
+# (`pip install -e ".[dev,browser]"`) instead, so the gate gets playwright
+# while a contributor's plain `.[dev]` install still does not pull a browser
+# harness it does not need — which is what the first paragraph above asks for.
+# Moving it would have made those two paragraphs contradict each other.
+#
+# The CI job did NOT touch `addopts` (the `and not browser` there predates it):
+# the marker is still deselected from the default suite, so the job is purely
+# additive and the gate lives in CI only. A local `pytest` is unaffected.
+browser = ["playwright>=1.40"]
 # NO `click` pin here, deliberately, and it was measured rather than assumed.
 #
 # There IS a real click floor in this suite — click < 8.2's `CliRunner` merges
@@ -513,10 +571,38 @@ where = ["src"]
 #   brain.templates.claude: the session-end capture hook shell script that
 #     `brain claude install-hooks` copies into the user's Claude Code config
 #     directory (Task 1B, F1).
-#   brain.ui: the static assets `brain ui` serves -- HTML/CSS/JS only, no
-#     bytecode, mirroring the explicit-extension rule used above (Task 5A, F14).
+#   brain.ui: the static assets `brain ui` serves -- markup, styles, scripts,
+#     and the branding images (the hand-authored aperture logo plus its
+#     light/dark PNG renders, the app icon and the favicon). Explicit extension
+#     patterns, never "**/*", mirroring the rule used above: the wildcard would
+#     sweep __pycache__/*.pyc into the wheel. An image omitted here ships a
+#     broken <img> with no error at all, so the set is guarded by
+#     tests/test_ui_static_assets.py (Task 5A, F14; images added for A4).
 "brain.templates.claude" = ["*.sh"]
-"brain.ui" = ["static/*.html", "static/*.css", "static/*.js"]
+"brain.ui" = [
+    "static/*.html",
+    "static/*.css",
+    # setuptools resolves these with glob, where `*` STOPS AT `/` -- so
+    # "static/*.css" does NOT match "static/css/tokens.css". The stylesheet was
+    # split into static/css/ and without this second pattern the wheel would
+    # ship index.html with four <link> tags and none of the files they point
+    # at: a blank page, in a build where every local test still passes, because
+    # the tests read the source tree and not the wheel.
+    "static/css/*.css",
+    "static/*.js",
+    # Same trap, second instance: app.js was split into static/js/ (api, store,
+    # tree, results, inspector, keys, main + dom), and "static/*.js" does NOT
+    # match "static/js/main.js" because `*` stops at `/`. index.html loads
+    # main.js as the module ENTRY POINT, so without this pattern the wheel
+    # ships a page whose entire module graph 404s -- a blank page, in a build
+    # where every local test still passes, because the tests read the source
+    # tree and not the wheel. theme.js and tree_nav.js still live at the top
+    # level, so "static/*.js" above stays load-bearing too.
+    "static/js/*.js",
+    "static/*.svg",
+    "static/*.png",
+    "static/*.ico",
+]
 # brain.demo: the synthetic `brain demo` corpus manifest (a plain data subdir
 # under corpus/, no __init__.py) shipped so the zero-Ollama taste test works on
 # pipx/wheel installs. Explicit "corpus/*.json" (not "**/*") avoids bytecode.
@@ -544,7 +630,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval and not benchmark and not e2e and not phase3 and not live_db'"
+addopts = "-ra --strict-markers --cov=brain --cov-report=term-missing --cov-fail-under=85 -m 'not eval and not benchmark and not e2e and not phase3 and not live_db and not browser'"
 markers = [
   # P3.5 — frontend integration harness. Tests under this marker shell
   # out to `npx quartz build` and serve the artifact over HTTP (or rsync the
@@ -626,6 +712,31 @@ markers = [
   # (TRUNCATE-only) test is not poisoned by the leaked schema mutation. INCLUDED
   # in the default suite — it is a routing hint, not an exclusion filter.
   "fresh_schema: needs a full drop+migrate reset (mutates schema, not just data)",
+  # Drives the real `brain ui` assets in a real browser. EXCLUDED from the
+  # default suite: it needs the `browser` extra and a cached chromium, so
+  # in the gate it would skip — and a skip reads exactly like a pass.
+  # Run explicitly: `pytest tests/test_ui_browser.py -m browser --no-cov`.
+  # The PATH is required, not decoration: marker deselection happens AFTER
+  # collection, and `tests/test_restore_{gate,swap}.py` open a DB connection at
+  # import time — so a bare `-m browser` dies with 2 collection errors against
+  # an unreachable database. Naming the file is what makes "needs no Postgres"
+  # true. Same applies to `-m nodb`.
+  "browser: executes the UI in a real browser (needs the `browser` extra)",
+  # Opens NO database connection. Read files, parse ASTs, shell out to node —
+  # nothing more. INCLUDED in the default suite: this is a routing hint, not an
+  # exclusion filter, and it is read by ``conftest._session_touches_the_database``.
+  #
+  # A session in which EVERY collected test carries this marker (or ``browser``)
+  # skips both ``_exclusive_test_database`` and ``_ensure_test_db_initialized``,
+  # so it needs no live Postgres and — the part that matters on this box — does
+  # not take the machine-wide advisory lock. Four file-only suites were
+  # serialising against every other agent's run for a schema they never read;
+  # one such run blocked this worktree for over fifteen minutes.
+  #
+  # Adding a test that touches the database to a marked module is not silent:
+  # the connection fails loudly. Removing the marker is the visible act that
+  # says "this module now needs the DB".
+  "nodb: opens no database connection (skips the DB fixtures and the suite lock)",
 ]
 
 [tool.ruff]
@@ -646,7 +757,12 @@ explicit_package_bases = true
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*", "watchdog.*", "networkx.*"]
+# `pygments.*` joins this list rather than pulling in `types-Pygments`: it ships
+# no stubs, and the alternative is a new dev dependency to describe two call
+# sites (`get_lexer_by_name`, `HtmlFormatter`) whose return values are used only
+# as `str`. `_highlight_code` annotates its own signature, so the typed surface
+# this project owns is unchanged.
+module = ["pgvector.*", "pdfplumber.*", "pypdf.*", "markdown_it.*", "docx.*", "tiktoken.*", "reportlab.*", "voyageai.*", "watchdog.*", "networkx.*", "pygments.*"]
 ignore_missing_imports = true
 
 # numpy (transitive via networkx) ships PEP 695 `type X = ...` aliases in its

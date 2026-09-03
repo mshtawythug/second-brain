@@ -1,0 +1,57 @@
+/* base — resets, element defaults, typography.
+ *
+ * Loads second, after tokens.css: everything here reads custom properties and
+ * nothing here defines one. Only bare element selectors, the universal
+ * selector, and the one focus treatment live in this file — a rule with a
+ * component's name belongs in components.css even if it looks typographic.
+ */
+
+/* ------------------------------------------------------------------ base -- */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font-ui);
+  font-size: var(--t-ui);
+  line-height: var(--lead-dense);
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ~2% grain so large flat areas don't read as flat digital template. Inline
+   SVG in a data: URI — zero network bytes, which is why img-src allows data:. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.022;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+@media (prefers-reduced-transparency: reduce) {
+  body::before { display: none; }
+}
+
+h1, h2, h3 { margin: 0; font-weight: 600; }
+p { margin: 0; }
+button, input, select, textarea { font: inherit; color: inherit; }
+
+/* One focus treatment everywhere. Never outline:none. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius);
+}
+
+/* Tabular figures for everything machine-shaped. This is the one class-bearing
+   rule in the file, and it stays here rather than in components.css because it
+   is a typographic default applied across four unrelated components — none of
+   which owns it. Note for anyone anchoring a test on `.gutter`: this rule
+   mentions the selector but does not style the ledger gutter; `.gutter {` (the
+   real rule) is in components.css. */
+.mono, .meta-line, .gutter, kbd { font-variant-numeric: tabular-nums; }

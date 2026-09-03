@@ -157,8 +157,8 @@ export const defaultContentPageLayout: PageLayout = {
         filterChips: [],
         // brain-extension: looser label cap for the sidebar panel — at
         // depth=1 there are typically only a handful of nodes, so 30
-        // chars fits a full short-thread reply ("Apr 28 — Re: Ali Sarkis
-        // × vendor-ev") without crowding. The fullscreen modal (Graph.tsx
+        // chars fits a full short-thread reply ("Apr 28 — Re: Jane Doe
+        // × acme-co") without crowding. The fullscreen modal (Graph.tsx
         // override) and the global graph (defaulted to 10) both keep
         // the tighter cap since their dense canvases would otherwise
         // wall-of-text.

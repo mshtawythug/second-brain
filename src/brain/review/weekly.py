@@ -36,8 +36,9 @@ from ..activity import (
 )
 from ..config import Config
 from ..enrichment import OllamaEnricher
+from ..people import _doc_participant_keys
+from ..sensitivity import not_confidential_sql
 from ..todo import TodoRow, iter_action_item_docs
-from ..wiki.build_people import _doc_participant_keys
 
 # Top entity names / representative doc titles attached per graph theme block.
 _THEME_ENTITY_CAP = 3
@@ -94,6 +95,7 @@ def build_weekly_report(
     generated_on: date,
     no_graph: bool = False,
     enricher: OllamaEnricher | None = None,
+    exclude_confidential: bool = False,
 ) -> WeeklyReport:
     """Assemble the :class:`WeeklyReport` for ``week`` (``"YYYY-Www"``).
 
@@ -103,6 +105,25 @@ def build_weekly_report(
     best-effort theme synthesis on the graph path; when ``None`` the theme
     blocks carry entity/doc names without a synthesis sentence.
 
+    ``exclude_confidential`` (F6) is threaded to every read that can name a
+    document: the activity window, the ingested window, the open-loop scan and —
+    on the graph path — each community's representative documents. FOUR reads,
+    because they are four separate queries and closing one closes none of the
+    others. Two downstream sections need no gate of their own and must not grow
+    one: ``key_people`` and ``vault_paths`` are derived from the already-filtered
+    ``activity`` / ``ingested`` / ``open_loops`` / ``themes`` lists, so gating
+    them again would be redundant — but that also means a future section that
+    reads ``documents`` directly WILL need its own gate, and this is the sentence
+    that says so.
+
+    The open-loop leg is the severe one: ``iter_action_item_docs`` parses item
+    text out of ``documents.content``, so it republishes BODY text rather than
+    titles.
+
+    DEFAULTS FALSE (include) — ``brain review weekly`` at a terminal is inside
+    the trust boundary; :func:`brain.mcp_server.brain_review_weekly` is the
+    boundary and passes ``exclude_confidential=not include_confidential``.
+
     Raises:
         ValueError: ``week`` is not a valid ``"YYYY-Www"`` string (from
             :func:`brain.activity.week_bounds`).
@@ -110,10 +131,18 @@ def build_weekly_report(
     after, before = week_bounds(week)
 
     activity = iter_activity_docs(
-        conn, after=after, before=before, limit=cfg.review_activity_limit
+        conn,
+        after=after,
+        before=before,
+        limit=cfg.review_activity_limit,
+        exclude_confidential=exclude_confidential,
     )
     ingested = iter_ingested_docs(
-        conn, after=after, before=before, limit=cfg.review_activity_limit
+        conn,
+        after=after,
+        before=before,
+        limit=cfg.review_activity_limit,
+        exclude_confidential=exclude_confidential,
     )
     # Open loops are scoped to the TARGET week, not the last 7 days from NOW():
     # ``iter_action_item_docs(since_days=...)`` is NOW()-relative (todo.py), which
@@ -122,7 +151,11 @@ def build_weekly_report(
     # shows that week's loops.
     open_loops = [
         row
-        for row in iter_action_item_docs(conn, include_closed=False)
+        for row in iter_action_item_docs(
+            conn,
+            include_closed=False,
+            exclude_confidential=exclude_confidential,
+        )
         if row.ingested_at is not None and after <= row.ingested_at <= before
     ][: cfg.review_open_loop_limit]
 
@@ -136,6 +169,7 @@ def build_weekly_report(
             before=before,
             theme_limit=cfg.review_theme_limit,
             enricher=enricher,
+            exclude_confidential=exclude_confidential,
         )
     graph_used = use_graph and bool(themes)
     if not themes:
@@ -219,8 +253,14 @@ def _graph_themes(
     before: datetime,
     theme_limit: int,
     enricher: OllamaEnricher | None,
+    exclude_confidential: bool = False,
 ) -> list[ThemeBlock]:
-    """Build theme blocks from the in-window-active communities (graph path)."""
+    """Build theme blocks from the in-window-active communities (graph path).
+
+    ``exclude_confidential`` reaches :func:`_community_window_docs`, which closes
+    BOTH the ``docs`` list on each block AND the ``doc_titles`` handed to the
+    enricher below — one gate, because the second is built from the first.
+    """
     blocks: list[ThemeBlock] = []
     for community_key, _weight in weekly_active_communities(
         conn,
@@ -238,6 +278,7 @@ def _graph_themes(
             community_key=community_key,
             after=after,
             before=before,
+            exclude_confidential=exclude_confidential,
         )
         synthesis = _community_summary(
             conn, tenant_id=tenant_id, community_key=community_key
@@ -287,21 +328,34 @@ def _community_window_docs(
     community_key: str,
     after: datetime,
     before: datetime,
+    exclude_confidential: bool = False,
 ) -> list[tuple[str, str]]:
-    """Representative ``(id, title)`` docs in-window for a community's entities."""
-    rows = conn.execute(
-        """
-        SELECT d.id::text, d.title
-        FROM   documents d
-        WHERE  d.ingested_at BETWEEN %s AND %s
-          AND  d.id IN (
+    """Representative ``(id, title)`` docs in-window for a community's entities.
+
+    ``exclude_confidential`` (F6) filters the outer ``documents`` scan. The inner
+    ``IN`` subquery is deliberately left alone: it selects mention rows, not
+    documents, so the predicate has nothing to bind to there — and filtering the
+    outer scan is sufficient, since a document dropped here contributes neither
+    an id, a title, nor a synthesis input.
+    """
+    where = ["d.ingested_at BETWEEN %s AND %s"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
+    where.append(
+        """d.id IN (
                 SELECT gem.document_id
                 FROM   graph_entity_mentions gem
                 JOIN   graph_community_members gcm
                          ON gcm.tenant_id = gem.tenant_id
                         AND gcm.entity_id = gem.entity_id
                 WHERE  gcm.tenant_id = %s AND gcm.community_key = %s
-          )
+          )"""
+    )
+    rows = conn.execute(
+        f"""
+        SELECT d.id::text, d.title
+        FROM   documents d
+        WHERE  {' AND '.join(where)}
         ORDER  BY d.ingested_at DESC, d.id
         LIMIT  %s
         """,
@@ -357,7 +411,7 @@ def _key_people(
 ) -> list[str]:
     """Tally participant keys across the activity docs; return the top ``cap``.
 
-    Reuses :func:`brain.wiki.build_people._doc_participant_keys` (imported, not
+    Reuses :func:`brain.people._doc_participant_keys` (imported, not
     copy-pasted) to extract each doc's raw participant keys from its
     ``metadata`` + joined ``sources.kind``. Keys are tallied by frequency
     (ties broken alphabetically) and de-duplicated.

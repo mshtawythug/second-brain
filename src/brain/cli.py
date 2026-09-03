@@ -1,23 +1,57 @@
 """brain — second brain CLI.
 
-**Why this already-over-the-ceiling file grew (PR #8 closeout, 2026-08-20).**
-This module is past the 800-line ceiling (CLAUDE.md, "File-size ceiling"), and
-that rule lets such a file grow only for a reason written down at the point of
-growth. The reason is inline at the ``LockNotAvailable`` handler in ``init`` —
-this line exists so it is discoverable from the top of a 9,000-line file
-instead of by ``git blame``.
+**File-size ceiling (CLAUDE.md): already over, and it grew — on BOTH sides of
+the 2026-09-02 master merge.** This pointer carries no live line count on
+purpose -- re-derive with ``wc -l src/brain/cli.py``. What cannot rot is the
+trail of hops. Re-derive any hop with
+``git show "<sha>:src/brain/cli.py" | wc -l`` -- brace the SHA or zsh eats
+``:src/...`` as a history modifier and you count the patch instead.
 
-Growth: **9,019 -> 9,058 (+39)** against base ``f8c76c0``; re-derive with
-``git diff master --numstat -- src/brain/cli.py``, never inherit it. It was the
-file's first growth on this branch; the final review round then grew the same
+**On ``feat/wiki-to-ui-consolidation``:**
+
+1. 9,019 (``f8c76c0``, branch base) -> 9,019 (``3b16527``, touched but no net
+   change) -> 9,035 (``c62e3de``). A net reduction in duplication rather than
+   an addition of logic: ``_VALID_SOURCE_KINDS`` became a re-export of
+   :data:`brain.source_kinds.VALID_SOURCE_KINDS` so the ingest WRITE boundaries
+   could enforce the set too. It had to move OUT of here to be reachable:
+   ``cli`` imports ``cli_ingest``, so ``cli_ingest`` could never have imported
+   the name back out of this module. Reason inline at the constant.
+2. The F6 People Hub gate: ``brain people`` now passes
+   ``exclude_confidential=False`` to :func:`brain.people.aggregate_people`
+   explicitly, because that function's default became fail-closed for the
+   *published* hub pages and the terminal is not an egress boundary. Eight
+   lines, all of them the argument for why the local surface opts out; reason
+   inline at the call. (``7f4d859`` landed at 9,053 and never recorded it.)
+3. The largest of the three: 9,053 (``4e471ad``) -> 9,159, +106 net. The F6
+   gate on the two commands that BUILD a report for the terminal and then
+   PUBLISH it to the vault -- ``review weekly`` and ``brief --wiki``. Both were
+   inheriting ``exclude_confidential=False``, which is right for the terminal
+   and wrong for a file Quartz serves. Each now builds a second, gated payload
+   for its vault write and keeps the permissive one for the operator's own
+   eyes; most of the added lines are the argument for why that split lives at
+   the CALL SITES here rather than inside the report builders, which is the one
+   thing a reader of this diff cannot recover from the code. Reasons inline at
+   both call sites and at both ``Wrote`` lines.
+
+**On ``master`` (PR #8 closeout, 2026-08-20):** 9,019 -> 9,058 (+39) against
+the same base. The reason is inline at the ``LockNotAvailable`` handler in
+``init``; this line exists so it is discoverable from the top of a 9,000-line
+file instead of by ``git blame``. The final review round then grew the same
 handler a few lines more, scoping "nothing was applied" to the FAILING
-migration (earlier pending migrations commit individually and stay applied) —
-reason inline at the handler. What it buys: migration ``028`` introduced
-``SET LOCAL lock_timeout``, so a contended ``brain init`` now aborts instead of
-stalling every reader — and an abort whose only output is a
-``LockNotAvailable`` traceback trades a mysterious hang for a mysterious crash.
-The handler names what holds the lock, that nothing was applied or recorded,
-and the remedy.
+migration (earlier pending migrations commit individually and stay applied).
+What it buys: migration ``028`` introduced ``SET LOCAL lock_timeout``, so a
+contended ``brain init`` now aborts instead of stalling every reader -- and an
+abort whose only output is a ``LockNotAvailable`` traceback trades a mysterious
+hang for a mysterious crash. The handler names what holds the lock, that
+nothing was applied or recorded, and the remedy.
+
+**The merge itself (2026-09-02) adds no logic.** The two growths above are
+disjoint -- the F6 egress gates and the ``LockNotAvailable`` handler touch
+different commands -- so the merged file is their union and the merged count is
+the sum less the shared base. Re-derive it; do not add the two numbers.
+
+The long-deferred split into per-domain command modules is unchanged by any of
+this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
 from __future__ import annotations
 
@@ -188,6 +222,12 @@ from .ingest import (
     update_document,
 )
 from .interactions import record_interaction
+from .people import (
+    PersonRecord,
+    aggregate_people,
+    emit_people_pages,
+    humanize_display_name,
+)
 from .queries import (
     MirrorDriftSummary,
     analyze_tables,
@@ -218,6 +258,7 @@ from .queries import resolve_person_to_keys as resolve_person_to_keys
 from .resurface import resurface_docs
 from .search import hybrid_search as hybrid_search
 from .setup import ProfileName  # lightweight StrEnum for `brain setup --profile` (no networkx)
+from .source_kinds import VALID_SOURCE_KINDS
 from .tags import normalize_tag, normalize_tags
 from .vault import init_vault
 from .vault.daily_index import regenerate_daily_index
@@ -251,12 +292,6 @@ from .vault.sync import SyncReport, sync_one_file, sync_vault
 from .vault.sync_summaries import sync_summaries
 from .vault.templates import list_template_names
 from .vault.watch import WatchConfig, run_watcher
-from .wiki.build_people import (
-    PersonRecord,
-    aggregate_people,
-    emit_people_pages,
-    humanize_display_name,
-)
 from .wiki.install import WikiInstallError
 from .wiki.install import wiki_install as _wiki_install
 
@@ -3826,11 +3861,13 @@ def enrich(
 
 
 # Canonical ingest source kinds (``documents.source_kind`` via ``sources.kind``).
-# A genuinely closed enum — only ever written by the ingest paths. Mirrors
-# :data:`brain.vault.links._SOURCE_KINDS`; duplicated here (not imported) so the
-# CLI's ``--source`` validation surface stays stable independent of any internal
-# refactor of that module-private set (same pattern as _DIRECTORY_VALID_SOURCES).
-_VALID_SOURCE_KINDS: frozenset[str] = frozenset({"manual", "krisp", "gmail", "slack"})
+# A genuinely closed enum — only ever written by the ingest paths. Re-exported
+# from :mod:`brain.source_kinds`, which is where the set now lives so that the
+# ingest WRITE boundaries can enforce it too: `cli` imports `cli_ingest`, so
+# `cli_ingest` could not have imported this name back out of here. Kept under
+# its original private name because `tests/test_ui_schemas.py` asserts parity
+# against it by that name.
+_VALID_SOURCE_KINDS: frozenset[str] = VALID_SOURCE_KINDS
 
 
 def _validate_source_choice(source: str | None) -> str | None:
@@ -4350,6 +4387,29 @@ def review_weekly(
     # enricher lazily there (Ollama is contacted only if a community lacks a
     # stored summary, and summarize_group never raises if it is down).
     enricher = _build_enricher(cfg) if not no_graph else None
+    # F6 — this ONE invocation serves TWO audiences, and they do not get the
+    # same payload. ``report`` is the operator's own terminal (and ``--json``),
+    # inside the trust boundary, so it is built permissively — exactly as
+    # ``build_weekly_report``'s ``exclude_confidential=False`` default intends.
+    # ``published`` is the file written into ``cfg.vault_path``, which Quartz
+    # PUBLISHES: ``render_weekly_md`` emits no ``sensitivity`` frontmatter key
+    # for ``RemoveConfidential`` to read, and ``reviews/`` is not in
+    # ``ignorePatterns``. So the page is an egress boundary and is built gated.
+    #
+    # A SECOND BUILD, not a filter of the first: the row types the report
+    # carries (``ActivityDoc`` / ``IngestedDoc`` / ``TodoRow`` /
+    # ``ThemeBlock``) do not carry ``sensitivity``, so the permissive report
+    # cannot be narrowed after the fact without inventing a second filtering
+    # mechanism beside the audited SQL gate. This costs a repeat of the week's
+    # four reads (and, on the graph path, a re-check of each community's stored
+    # summary) on a command run about once a week -- the cheaper shape would be
+    # the one that has to be re-audited.
+    #
+    # Precedent: ``7f4d859`` drew this same line for ``brain people`` (local,
+    # permissive) vs ``emit_people_pages`` (publishes, gated). There the two
+    # audiences were two functions; here they are one command, so the split has
+    # to happen at the call sites instead.
+    will_emit = not (no_emit or json_output)
     try:
         with connect(cfg.database_url) as conn:
             report = build_weekly_report(
@@ -4359,6 +4419,20 @@ def review_weekly(
                 generated_on=date_cls.today(),
                 no_graph=no_graph,
                 enricher=enricher,
+                exclude_confidential=False,
+            )
+            published = (
+                build_weekly_report(
+                    conn,
+                    cfg,
+                    week=target_week,
+                    generated_on=date_cls.today(),
+                    no_graph=no_graph,
+                    enricher=enricher,
+                    exclude_confidential=True,
+                )
+                if will_emit
+                else None
             )
     except ValueError as exc:
         raise typer.BadParameter(str(exc), param_hint="--week") from exc
@@ -4379,9 +4453,19 @@ def review_weekly(
         typer.echo(render_weekly_rich(report))
     # Default behaviour emits the page regardless of how sparse the week was
     # (the renderer handles empty sections), matching the MCP tool's emit path.
-    if not no_emit:
-        path = emit_weekly_page(cfg.vault_path, report)
-        typer.echo(f"Wrote {path}")
+    # Branching on ``published is not None`` rather than re-testing ``no_emit``
+    # keeps "we built a gated payload" and "we write a page" as ONE condition:
+    # there is no arrangement of the flags that reaches the write with the
+    # permissive ``report`` in hand.
+    if published is not None:
+        path = emit_weekly_page(cfg.vault_path, published)
+        # Said unconditionally rather than only when something was actually
+        # dropped. Comparing the two reports to detect that would be a second,
+        # LLM-sensitive mechanism (theme synthesis text is not stable between
+        # builds) reporting on the first; stating the POLICY is both accurate
+        # every time and the thing the operator needs to know -- the page they
+        # just published is not the week they just saw.
+        typer.echo(f"Wrote {path} (confidential documents excluded)")
 
 
 _REVIEW_KIND_MAP: dict[str, tuple[str, ...]] = {
@@ -4776,6 +4860,15 @@ def brief(
     else:
         on_date = date_cls.today()
 
+    # F6 — same two-audience split as ``brain review weekly`` above, and for the
+    # same reason: ``data`` is the operator's terminal (and ``--json``), built
+    # permissively per ``assemble_brief``'s documented default; ``published`` is
+    # the ``<vault>/daily/<YYYY>/<date>-brief.md`` page, which carries no
+    # ``sensitivity`` frontmatter key (``brief.write_brief_to_vault``) and sits
+    # in a ``daily/`` folder absent from Quartz's ``ignorePatterns``, so Quartz
+    # publishes it. Built as a second gated payload rather than a filter of the
+    # first because ``DocumentRow`` / ``TodoRow`` / ``PinnedDoc`` do not carry
+    # ``sensitivity`` -- see the fuller note at ``review_weekly``.
     with connect(cfg.database_url) as conn:
         data = assemble_brief(
             conn,
@@ -4783,17 +4876,48 @@ def brief(
             since_hours=since_hours,
             todo_since_days=todo_since_days,
             on_date=on_date,
+            exclude_confidential=False,
         )
+        published = (
+            assemble_brief(
+                conn,
+                cfg,
+                since_hours=since_hours,
+                todo_since_days=todo_since_days,
+                on_date=on_date,
+                exclude_confidential=True,
+            )
+            if wiki
+            else None
+        )
+    # Compared while BOTH still carry ``suggestions=[]``, so this is a straight
+    # question about the assembled rows. It decides only whether the published
+    # page needs its OWN LLM round-trip: ``suggest_next_steps`` feeds action-item
+    # BODY text into the prompt, so suggestions derived from the permissive
+    # payload are confidential-derived and must never be written to the page.
+    # When the two payloads are equal there is nothing to re-derive from, and
+    # reusing the one call is exact rather than an approximation. Being wrong
+    # here can only cost a second Ollama call, never a disclosure.
+    withheld = published is not None and published != data
     if not no_enrich:
         suggestions = suggest_next_steps(data, cfg)
         if suggestions:
             data = replace(data, suggestions=suggestions)
+        if published is not None:
+            published = replace(
+                published,
+                suggestions=(
+                    suggest_next_steps(published, cfg) if withheld else suggestions
+                ),
+            )
 
     # --wiki is independent of the output format: write the vault page whether
     # the terminal output is Rich or JSON (the write happens before the --json
     # early-return so `--json --wiki` doesn't silently drop the page).
     written_path = (
-        write_brief_to_vault(cfg.vault_path, on_date, data) if wiki else None
+        write_brief_to_vault(cfg.vault_path, on_date, published)
+        if published is not None
+        else None
     )
 
     if json_output:
@@ -4802,7 +4926,9 @@ def brief(
 
     _print_brief(data)
     if written_path is not None:
-        typer.echo(f"\nWrote {written_path}")
+        # See ``review_weekly``: the policy is stated unconditionally, because
+        # the page the operator just published is not the brief they just read.
+        typer.echo(f"\nWrote {written_path} (confidential documents excluded)")
 
 
 def _build_chat(cfg: Config) -> ChatJson:
@@ -8143,7 +8269,7 @@ def people_cmd(
 ) -> None:
     """Browse the People Hub aggregation.
 
-    Reuses :func:`brain.wiki.build_people.aggregate_people` so the
+    Reuses :func:`brain.people.aggregate_people` so the
     terminal view, the rendered ``<vault>/people/`` pages, and the
     derived-link participant filter all derive from the same canonical
     set. Read-only — no DB writes.
@@ -8156,11 +8282,19 @@ def people_cmd(
     cfg = Config.load()
     with connect(cfg.database_url) as conn:
         conn.autocommit = True
+        # ``exclude_confidential=False`` — this is the operator's own
+        # terminal, not an egress boundary. ``brain search`` already returns
+        # confidential bodies in full on an unfiltered local read (see
+        # ``brain.search``); a roster that silently dropped the same documents
+        # would disagree with it and offers no flag to turn them back on.
+        # ``aggregate_people`` defaults the other way, for the published
+        # People Hub pages — so this call must say so out loud.
         records = aggregate_people(
             conn,
             owner_keys=cfg.owner_participants,
             min_docs=cfg.people_hub_min_docs,
             sender_denylist=cfg.graph_sender_denylist,
+            exclude_confidential=False,
         )
 
     if name is None:

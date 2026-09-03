@@ -32,6 +32,8 @@ sync this module may call.
 from __future__ import annotations
 
 import logging
+import re
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -43,7 +45,6 @@ from ..errors import (
     IdPrefixNotHex,
     IdPrefixTooShort,
     VaultNoteSyncError,
-    VaultPathEscape,
 )
 from ..queries import fetch_document, resolve_document_prefix
 from ..sensitivity import DEFAULT_SENSITIVITY, is_confidential
@@ -51,10 +52,10 @@ from ..vault._atomic import atomic_write_text
 from ..vault.delete import delete_document
 from ..vault.frontmatter import body_hash, dump_frontmatter, parse_frontmatter
 from ..vault.paths import assert_within_vault
-from ..vault.rename import apply_rename, plan_rename
+from ..vault.rename import RenameError, apply_rename, plan_rename
 from . import queries as ui_queries
 from .errors import UiBadRequest, UiConflict, UiForbidden, UiNotFound
-from .render import render_markdown
+from .render import extract_headings, render_markdown
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
     from .context import UiContext
@@ -158,8 +159,18 @@ def read_note(
         "ingested_at": row.ingested_at.isoformat() if row.ingested_at else None,
         # Only a vault-tier note with a real file behind it can be edited in
         # place; an ingested row without a mirror has no user-authored source.
-        "editable": tier == "vault" or bool(vault_path),
-        "movable": tier == "vault" and bool(vault_path),
+        #
+        # ``read_only`` is part of BOTH answers, and leaving it out was not
+        # cosmetic. These flags mean "can this be done HERE", not "in
+        # principle": ``js/keys.js`` binds Cmd+E on ``state.note.editable``
+        # ALONE, so an ``editable: true`` payload from a ``--read-only`` server
+        # dropped the user into an editor whose every save the security
+        # middleware then refused with a 403 — a dead end reached by keyboard,
+        # invisible to a UI that had correctly hidden its Edit button.
+        # ``movable`` carries the same defect for the same reason: a move is a
+        # mutation, and the middleware refuses it before routing.
+        "editable": (tier == "vault" or bool(vault_path)) and not ctx.read_only,
+        "movable": tier == "vault" and bool(vault_path) and not ctx.read_only,
     }
 
     # The tier is reported whenever it is not the default, in BOTH modes — the
@@ -176,18 +187,56 @@ def read_note(
         # content being protected. `html` and `body_hash` are derived from the
         # body too, so neither is emitted. Search snippets are redacted
         # separately in ``routes_search`` (they come from ``chunks``).
-        payload["body"] = None
+        if not ctx.read_only:
+            payload["body"] = None
         payload["html"] = ""
         payload["withheld"] = _WITHHELD_NOTICE
         return payload
 
     targets = _wikilink_targets(body)
     resolved = ui_queries.resolve_link_targets(conn, targets) if targets else {}
-    payload["body"] = body
+    # ``body`` is the EDITOR's raw source and nothing else — every read surface
+    # renders ``html``. A ``--read-only`` server has no editor (the middleware
+    # refuses every non-safe method before routing, and ``editable`` above is
+    # now False), so the field is unusable there by construction, while being
+    # the largest thing on the wire: 570 KB against ~287 KB of ``html`` on the
+    # largest document in this corpus. The key is OMITTED rather than nulled so
+    # a client cannot mistake "not sent" for "empty note" — and so the
+    # invariant holds for the withheld branch above too: a read-only payload
+    # never carries a ``body`` key.
+    #
+    # ``body_hash`` stays. It is ~70 bytes, it is the optimistic-concurrency
+    # token rather than content, and ``update_note`` reads it off this same
+    # payload.
+    if not ctx.read_only:
+        payload["body"] = body
     payload["body_hash"] = body_hash(body)
+    # ONE local, passed to BOTH walks — this hoist *is* the S4 guard, and it
+    # lives here rather than inside ``extract_headings`` on purpose. Rendering
+    # the stripped body while extracting headings from ``body`` would put an
+    # entry at the top of every TOC pointing at an ``<h1>`` the HTML does not
+    # contain: a link that scrolls nowhere, on essentially the whole vault.
+    # Because both functions receive the same string, they see the same
+    # ``heading_open`` sequence and mint the same ids by construction.
+    # ``extract_headings`` deliberately strips nothing itself, so the decision
+    # exists in exactly one place; do not move it in there.
+    rendered = strip_redundant_title_heading(body, row.title)
+    # ``content_type`` is passed for ONE reason: the email-thread <details>
+    # rules in render.py fire only for the type the gmail assembler stamps.
+    # Without it every document containing a `<details><summary>` block — a
+    # hand-authored vault note included — was re-emitted with the
+    # `thread-message` class and grew an email-only "Only my replies" control.
+    # ``row.content_type`` is the document's own type, not a guess from its body.
     payload["html"] = render_markdown(
-        body, resolver=lambda t: resolved.get(t.lower())
+        rendered,
+        resolver=lambda t: resolved.get(t.lower()),
+        content_type=row.content_type,
     )
+    # Placed AFTER the withheld early-return above, and it must stay there:
+    # headings are derived from the body, so a TOC beside a withheld body would
+    # hand out the confidential document's section titles — the same reasoning
+    # that already withholds `summary`, `html` and `body_hash`.
+    payload["headings"] = [asdict(h) for h in extract_headings(rendered)]
     if row.summary is not None:
         payload["summary"] = row.summary
     return payload
@@ -212,6 +261,69 @@ def _wikilink_targets(body: str) -> list[str]:
             targets.append(target)
         cursor = end + 2
     return targets
+
+
+#: A CommonMark ATX heading: up to three leading spaces, one to six ``#``, then
+#: a space and the heading text. The space is required — ``#Title`` is a
+#: paragraph, not a heading, and must not be stripped.
+_ATX_HEADING = re.compile(r"^ {0,3}(#{1,6})(?:[ \t]+(?P<text>.*))?$")
+
+
+def _normalize_heading(text: str) -> str:
+    """Collapse whitespace and case so ``#  My   Note`` matches ``My Note``."""
+    return " ".join(text.split()).casefold()
+
+
+def _drop_closing_sequence(text: str) -> str:
+    """Remove a CommonMark closing ``###`` run, which is syntax, not content.
+
+    Only a run preceded by whitespace closes a heading, so ``# C#`` keeps its
+    hash and ``# Title ###`` does not.
+    """
+    stripped = text.rstrip()
+    if not stripped.endswith("#"):
+        return stripped
+    trimmed = stripped.rstrip("#")
+    if trimmed and not trimmed.endswith((" ", "\t")):
+        return stripped
+    return trimmed.rstrip()
+
+
+def strip_redundant_title_heading(body: str, title: str | None) -> str:
+    """Drop a leading heading that only repeats ``title``.
+
+    Every note ``brain note new`` and ``brain daily`` produce opens with its own
+    ``# Title`` (``vault.templates.NOTE_TEMPLATE`` / ``DAILY_TEMPLATE``), and
+    every read surface also renders the title as a heading of its own — so the
+    title appeared twice on essentially the whole vault.
+
+    This is a **render-time** transform and nothing more: callers pass the
+    stored body in and put the result into ``html``. ``body``, ``body_hash`` and
+    the file on disk are all untouched, so a round-trip through the editor
+    cannot silently delete the user's heading.
+
+    Deliberately conservative — it fires only when the *first* non-blank line is
+    an ATX heading whose text matches the title. A heading further down, a
+    heading with different text, a setext underline, and a body with no heading
+    at all are all returned verbatim.
+    """
+    if not body or not title:
+        return body
+
+    lines = body.split("\n")
+    index = 0
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index >= len(lines):
+        return body
+
+    match = _ATX_HEADING.match(lines[index])
+    if match is None:
+        return body
+    heading = _drop_closing_sequence(match.group("text") or "")
+    if not heading or _normalize_heading(heading) != _normalize_heading(title):
+        return body
+    return "\n".join(lines[:index] + lines[index + 1 :])
 
 
 def create_note(
@@ -366,27 +478,76 @@ def _update_ingested_note(
     document_id: str,
     patch: NotePatch,
 ) -> dict[str, Any]:
-    """Ingested tier: the row is the source of truth; the mirror follows it."""
-    from ..ingest import apply_tags, update_document
+    """Ingested tier: the row is the source of truth; the mirror follows it.
+
+    Body/title and tags are ONE transaction. The UI runs its connection with
+    ``autocommit = True`` (``server.py``), under which ``update_document``'s own
+    ``with conn.transaction()`` commits the body and title the moment it
+    returns. A failing ``apply_tags`` then left a half-applied edit committed —
+    body and title saved, tags not — behind a 500 that told the user the save
+    had failed. The explicit transaction here makes psycopg nest the inner one
+    as a SAVEPOINT, so there is a single commit at the end and a tag failure
+    rolls the body and title back with it.
+    """
+    from ..ingest import (
+        apply_tags,
+        mirror_is_stale,
+        update_document,
+        write_vault_mirror,
+    )
 
     try:
-        result = update_document(
-            conn,
-            document_id=document_id,
-            embedder=ctx.embedder,
-            new_title=patch.title,
-            new_content=patch.body,
-            new_content_type=patch.content_type,
-            vault_root=ctx.cfg.vault_path,
-            graph_syncer=ctx.graph_syncer,
-        )
+        with conn.transaction():
+            result = update_document(
+                conn,
+                document_id=document_id,
+                embedder=ctx.embedder,
+                new_title=patch.title,
+                new_content=patch.body,
+                new_content_type=patch.content_type,
+                # DELIBERATELY None: the mirror is a FILE, so no rollback can
+                # unwrite it. `update_document` writes it after its own
+                # transaction — correct only while it owns the outermost one.
+                # Under the transaction opened above, its block is a SAVEPOINT
+                # that commits nothing, so a mirror written there would survive
+                # a rollback as an orphan the database never recorded. We take
+                # the write ourselves, below, after this transaction commits.
+                vault_root=None,
+                graph_syncer=ctx.graph_syncer,
+            )
+            changed = list(result.fields_changed)
+            if patch.tags is not None:
+                # NOT folded into ``update_document(new_tags=...)``, which looks
+                # like the obvious way to get atomicity for free. It is not
+                # equivalent: ``apply_tags(add=...)`` UNIONS with the existing
+                # tags, while ``new_tags`` REPLACES the column outright. Swapping
+                # them would silently turn PATCH from "add these tags" into
+                # "replace all tags with these" and drop tags on every edit that
+                # sent a partial list — a behaviour change wearing a bug fix's
+                # clothes.
+                apply_tags(conn, document_id, add=patch.tags)
+                changed.append("tags")
     except ValueError as exc:
         raise UiBadRequest(str(exc), code="invalid_edit") from exc
 
-    changed = list(result.fields_changed)
-    if patch.tags is not None:
-        apply_tags(conn, document_id, add=patch.tags)
-        changed.append("tags")
+    # COMMITTED. Only now is it safe to write a file, because only now can the
+    # edit no longer be rolled back.
+    #
+    # `changed` rather than `result.fields_changed`, and the difference is
+    # load-bearing in exactly one case: a TAGS-ONLY edit. `update_document`
+    # returns before `apply_tags` runs, so its list is empty for that edit and
+    # `mirror_is_stale` would answer False — skipping the write and leaving the
+    # old tags on disk forever. (For any other edit the two agree, and since
+    # the mirror is regenerated FROM the committed row it picks up the new tags
+    # either way. Only the skip is dangerous.)
+    # No `vault_path is not None` guard: `Config.vault_path` is a `Path` with a
+    # `default_factory` of `_default_vault_path`, never optional, so such a
+    # check would always be True — and would falsely advertise that the vault
+    # is optional here. `update_document`'s own `vault_root is not None` test
+    # is a different question: that parameter IS `Path | None`, and passing
+    # None is how this function suppresses the mirror write above.
+    if mirror_is_stale(fields_changed=changed, rechunked=result.rechunked):
+        write_vault_mirror(conn, document_id, vault_root=ctx.cfg.vault_path)
 
     refreshed = read_note(ctx, conn, document_id)
     return {
@@ -456,9 +617,44 @@ def move_note(
         report = apply_rename(
             conn, embedder=ctx.embedder, vault_path=ctx.cfg.vault_path, op=op
         )
-    except VaultPathEscape as exc:
-        raise UiBadRequest(str(exc), code="folder_escapes_vault") from exc
-    except Exception as exc:  # noqa: BLE001 — RenameError and friends → 400
+    # NO `except VaultPathEscape` arm here, deliberately. It was reachable —
+    # `plan_rename`'s `assert_within_vault(new_abs, vault_path)` guards a
+    # destination built with `with_name(slug)`, and `assert_within_vault`
+    # RESOLVES SYMLINKS, so a legal stored path can still yield a destination
+    # that resolves outside the vault when a symlink sits at the new name. But
+    # it was REDUNDANT: `create_app`'s `exception_handlers` maps
+    # `VaultPathEscape` to `_traversal_handler` globally, returning the same 400
+    # and the same `folder_escapes_vault` code, so deleting the arm changes
+    # exactly one field — `message` — which here was `str(exc)`, leaking the
+    # ABSOLUTE vault path that `_traversal_handler` exists to withhold.
+    #
+    # The enforcement is `assert_within_vault`, not this translator; the escape
+    # still raises and still refuses the write. Verified by execution that the
+    # clause below cannot swallow it: `issubclass(VaultPathEscape, OSError)` is
+    # False.
+    except (RenameError, OSError) as exc:
+        # NARROWED from a blanket `except Exception` carrying a BLE001
+        # suppression, which
+        # mapped ANYTHING to a 400 — so a TypeError from signature drift, or any
+        # genuine bug in the rename path, became a tidy user-facing "move
+        # failed" forever, with the `noqa` having already told the linter to
+        # stop mentioning it. Same silent-failure shape as the telemetry
+        # autocommit bug; cf. `test_warm_up_does_not_swallow_a_real_bug`.
+        #
+        # BOTH types are required, and `RenameError` alone would be a
+        # regression. `vault/rename.py` raises exactly one custom type across
+        # eight sites, which makes "narrow to RenameError" look complete — but
+        # `apply_rename`'s contract is snapshot, restore, then RE-RAISE THE
+        # ORIGINAL error, so a filesystem failure leaves as itself. MEASURED,
+        # not inferred: a real write against a read-only file raises
+        # `PermissionError`; `isinstance(exc, RenameError)` is False,
+        # `isinstance(exc, OSError)` is True. Dropping OSError would turn every
+        # disk-full and permission failure from a 400 into a 500.
+        #
+        # `RenameError` is the domain failure (collision, missing file, wrong
+        # tier); `OSError` is the environmental one — genuinely the user's
+        # problem and genuinely not a bug. Everything else now propagates as a
+        # 500, which is the point.
         raise UiBadRequest(str(exc), code="move_failed") from exc
 
     meta = ui_queries.note_meta(conn, document_id)

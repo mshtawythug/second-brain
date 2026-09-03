@@ -1,0 +1,123 @@
+/* The command palette (⌘P). Loaded AFTER components.css.
+ *
+ * Order matters for one rule only, and it is stated here so the <link> order in
+ * index.html is not folklore: `.palette` is a <dialog> and so inherits the
+ * `.modal` family's neighbourhood in components.css. It does NOT carry the
+ * `.modal` class — a palette is not a modal form; it has no footer, no actions
+ * row, and it is anchored near the top of the viewport rather than centred,
+ * because a list that grows downward from a fixed input does not make the whole
+ * overlay jump on every keystroke. Sharing the class and then overriding half
+ * of it would be the version that breaks when a modal rule changes.
+ *
+ * Every colour is a token, so both themes follow from tokens.css without a
+ * second definition here. The two exceptions are the backdrop wash and the drop
+ * shadow, which are copied verbatim from `.modal` in components.css — they are
+ * black at an alpha, not palette values, and tokenising them here alone would
+ * make the two overlays drift apart.
+ *
+ * `--ink-faint` IS DELIBERATELY ABSENT. It fails WCAG AA as text on every
+ * ground in both themes (2.69-3.03:1 light, 3.34-3.84:1 dark), and
+ * `check_ink_faint_used_once` in tests/test_ui_static_behaviour.py pins its one
+ * legitimate use to the decorative `.search-glyph`. The first draft of this file
+ * reached for it three times — placeholder, path column, empty state — all of
+ * them real text. They are `--ink-muted` (5.66-7.27:1) instead.
+ */
+
+.palette {
+  border: var(--hair);
+  border-radius: var(--radius);
+  background: var(--paper-raised);
+  color: var(--ink);
+  padding: 0;
+  width: min(38rem, calc(100vw - 2rem));
+  max-width: none;
+  /* Anchored, not centred: `margin: auto` on a <dialog> centres it vertically
+     and the whole overlay then shifts as rows appear and disappear. */
+  margin: 12vh auto auto;
+  box-shadow: 0 12px 40px oklch(0% 0 0 / 0.28);
+}
+
+.palette::backdrop { background: oklch(0% 0 0 / 0.4); }
+
+.palette-box { display: grid; gap: 0; }
+
+.palette-input {
+  border: 0;
+  border-bottom: var(--hair);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--t-body);
+  padding: var(--s-3) var(--s-4);
+  width: 100%;
+}
+
+/* NO `outline: none` here, and the temptation was real: the input is the only
+   focusable control in the overlay and is focused for the palette's entire
+   lifetime, so its ring looks redundant. base.css states the rule at the one
+   place it belongs — "One focus treatment everywhere. Never outline:none." —
+   and "it looks redundant to me, sighted, on this theme" is exactly the
+   reasoning that removes a ring somebody else navigates by. */
+.palette-input::placeholder { color: var(--ink-muted); }
+
+.palette-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--s-1) 0;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
+/* Two columns, not two lines: the title carries the scan and the path is the
+   disambiguator you only read when two titles collide. Giving the path its own
+   row would double the height of every option for information that is usually
+   redundant. */
+.palette-opt {
+  display: grid;
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-4);
+  cursor: default;
+}
+
+.palette-opt-title {
+  font-size: var(--t-title);
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.palette-opt-path {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  color: var(--ink-muted);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The highlight is a BAND plus an accent edge, not a colour swap on the text:
+   the row must stay legible at the same contrast it had a keystroke ago, and
+   an edge reads at a glance while scrolling a list with the keyboard. */
+.palette-opt.is-active {
+  background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* Keyboard-driven selection moves faster than a transition can follow; a fade
+   on the highlight lags the caret and reads as lag in the app itself. */
+@media (prefers-reduced-motion: no-preference) {
+  .palette-opt { transition: background var(--dur-fast) var(--ease); }
+}
+
+.palette-list:empty::after {
+  content: "No matching notes";
+  display: block;
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--t-ui);
+  color: var(--ink-muted);
+}

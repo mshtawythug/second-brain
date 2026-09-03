@@ -14,7 +14,22 @@ Path                                 Covered by
                                      ``documents.summary`` is LLM-generated
                                      FROM the body
 ``GET /api/notes`` → ``body_hash``   ``test_body_hash_is_not_emitted``
-``GET /api/search`` → ``snippet``    ``test_search_snippet_is_redacted``
+``GET /api/notes`` → ``headings``    ``test_headings_are_withheld`` — section
+                                     titles are body-derived, so a TOC leaks
+                                     the document's structure. Paired with
+                                     ``test_headings_are_produced_at_all_for_this_body``,
+                                     which asserts the premise so the guard
+                                     test cannot pass vacuously
+``GET /api/search`` → ``snippet``    ``test_confidential_document_is_excluded_from_search``
+                                     — the row is dropped from the match set,
+                                     so there is no snippet to redact.
+                                     ``test_snippet_redaction_survives_as_defence_in_depth``
+                                     proves the second layer separately, by
+                                     calling ``_redact`` on a search that
+                                     deliberately skips the exclusion.
+                                     ``test_facet_counts_do_not_reveal_excluded_documents``
+                                     closes the same oracle through the facet
+                                     counts
 ``GET /api/search`` → ``summary``    ``test_redaction_drops_a_summary_key_…``
                                      — a *forward* guard: the projection has no
                                      ``summary`` key yet, and the companion
@@ -53,6 +68,14 @@ ORIGIN = "http://127.0.0.1:8765"
 SECRET_PHRASE = "quarterly severance envelope"
 SUMMARY_TEXT = "A summary derived from the confidential body."
 
+#: Heading TEXT is itself confidential — a table of contents beside a withheld
+#: body hands out the document's structure and its section names. These live in
+#: their own fixture (``confidential_with_headings``) rather than in
+#: ``confidential_id``, whose body has no headings at all: see that fixture's
+#: docstring for why reusing it would make the withholding test vacuous.
+SECRET_HEADING_ONE = "Severance Envelope Schedule"
+SECRET_HEADING_TWO = "Retention Bonus Tiers"
+
 
 @pytest.fixture
 def ui_cfg(tmp_path: Path) -> Config:
@@ -87,6 +110,46 @@ def confidential_id(
     test_db.execute(
         "UPDATE documents SET sensitivity=%s, summary=%s WHERE id=%s",
         (CONFIDENTIAL, SUMMARY_TEXT, doc_id),
+    )
+    return doc_id
+
+
+@pytest.fixture
+def confidential_with_headings(
+    test_db: psycopg.Connection, ui_cfg: Config, fake_embedder: Any
+) -> str:
+    """A confidential note whose body carries REAL headings.
+
+    Deliberately **separate from** ``confidential_id``, and the separation is
+    the whole point. That fixture's body is a single unheaded sentence, so a
+    withholding test written against it would assert ``"headings" not in
+    payload`` on a document that produces **no headings either way** — it would
+    pass whether or not the guard exists, and moving the emission above the
+    early return would not redden it. That is the same vacuity the
+    ``SUMMARY_TEXT`` comment already guards against for ``summary``.
+
+    TWO headings, at different levels, so the paired test also pins the order
+    and depth rather than merely the count. Neither matches ``title``, so
+    ``strip_redundant_title_heading`` leaves both in place — a heading equal to
+    the title would be stripped before rendering and silently reduce this to a
+    one-heading fixture.
+    """
+    doc_id = create_vault_note(
+        test_db,
+        cfg=ui_cfg,
+        vault_path=ui_cfg.vault_path,
+        title="Retention Plan",
+        body=(
+            f"## {SECRET_HEADING_ONE}\n\nPhased over three quarters.\n\n"
+            f"### {SECRET_HEADING_TWO}\n\nBanded by level.\n"
+        ),
+        tags=["hr"],
+        template="note",
+        folder="projects",
+        embedder=fake_embedder,
+    )
+    test_db.execute(
+        "UPDATE documents SET sensitivity=%s WHERE id=%s", (CONFIDENTIAL, doc_id)
     )
     return doc_id
 
@@ -165,6 +228,47 @@ def test_body_hash_is_not_emitted(
     """A hash of withheld content is both useless and a weak oracle."""
     payload = withholding.get(f"/api/notes/{confidential_id}").json()
     assert "body_hash" not in payload
+
+
+def test_headings_are_produced_at_all_for_this_body(
+    serving: TestClient, confidential_with_headings: str
+) -> None:
+    """The PREMISE for ``test_headings_are_withheld``, asserted not assumed.
+
+    Without this, "the withheld payload has no headings" is ambiguous: it reads
+    identically whether the guard works or whether the document simply has no
+    headings to emit. Serving the very same document proves there was something
+    to leak, which is what converts the assertion below into evidence.
+    """
+    payload = serving.get(f"/api/notes/{confidential_with_headings}").json()
+    assert [h["text"] for h in payload["headings"]] == [
+        SECRET_HEADING_ONE,
+        SECRET_HEADING_TWO,
+    ]
+    assert [h["level"] for h in payload["headings"]] == [2, 3]
+
+
+def test_headings_are_withheld(
+    withholding: TestClient, confidential_with_headings: str
+) -> None:
+    """Section titles are derived from the body, so they go with it.
+
+    A table of contents beside a withheld body hands out the confidential
+    document's structure and the names of its sections — the same reasoning
+    that already withholds ``summary``, ``html`` and ``body_hash``. The guard
+    is structural: ``read_note`` returns inside ``if withheld:`` *before*
+    ``payload["headings"]`` is ever assigned.
+
+    Key ABSENCE, not an empty list, matching the invariant ``body`` already
+    holds on this branch: a client must never be able to confuse "not sent"
+    with "this document has no sections".
+    """
+    payload = withholding.get(f"/api/notes/{confidential_with_headings}").json()
+    assert "headings" not in payload
+    # Defence in depth: the key could go while the text leaked through some
+    # other field. Both headings are checked against the WHOLE payload.
+    assert SECRET_HEADING_ONE not in str(payload)
+    assert SECRET_HEADING_TWO not in str(payload)
 
 
 def test_withheld_shape_matches_mcp_vocabulary(
@@ -289,6 +393,20 @@ def test_the_summary_drop_is_a_no_op_against_todays_projection() -> None:
         content_type = "note"
         tags: list[str] = []
         summary = "a body-derived précis"
+        # ``recency_ts`` is required, not optional padding, and it is here
+        # because the 2026-09-02 master merge is what made it required. This
+        # stub was authored on ``master`` against a projection with no ``date``
+        # key; ``feat/wiki-to-ui-consolidation`` added ``"date":
+        # result_date(result)``, and ``result_date`` reads ``recency_ts`` by
+        # DIRECT attribute access on purpose (see its comment) so that a rename
+        # breaks loudly instead of rendering every ledger row as "-". Merging
+        # the two produced master's stub against the branch's projection, and
+        # the test failed on the missing attribute rather than on the claim it
+        # exists to make. ``None`` rather than a datetime: it is the value that
+        # keeps this test about the ``summary`` key, and it exercises
+        # ``result_date``'s documented empty case rather than inventing a date
+        # the assertion below does not look at.
+        recency_ts = None
 
     assert "summary" not in search_result_payload(_Result())
 

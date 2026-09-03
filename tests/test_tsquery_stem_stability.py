@@ -216,7 +216,8 @@ def test_facets_agree_with_the_ranked_leg(
 
 # --- task #20: the wiki Related-Docs leg --------------------------------------
 #
-# `wiki/build_related.py` was the last site. It differs from the search legs in
+# `related.py` (extracted from `wiki/build_related.py`) was the last site. It
+# differs from the search legs in
 # two ways that matter:
 #
 # 1. Its lexemes come from `ts_stat` over `chunks.tsv` — they are already
@@ -237,7 +238,7 @@ def test_lexeme_helper_preserves_an_already_stemmed_lexeme(
     test_db: psycopg.Connection[Any],
 ) -> None:
     """``_lexeme_to_tsquery_text`` must not stem its input a second time."""
-    from brain.wiki.build_related import _lexeme_to_tsquery_text
+    from brain.related import _lexeme_to_tsquery_text
 
     for term in _UNSTABLE_TERMS:
         row = test_db.execute(
@@ -262,7 +263,7 @@ def test_raw_token_helper_still_stems(test_db: psycopg.Connection[Any]) -> None:
     stop matching the stored ``tsv`` — the mirror image of the original bug, and
     invisible without this assertion.
     """
-    from brain.wiki.build_related import _to_tsquery_text
+    from brain.related import _to_tsquery_text
 
     stemmed = _to_tsquery_text(test_db, "provisioning")
     assert stemmed.strip("'") == "provis", (
@@ -281,7 +282,7 @@ def test_lexeme_helper_still_rejects_unsafe_input(
     building a malformed tsquery. The cast-based replacement must reject the
     same inputs, or a stray token produces a query that fails at execution time.
     """
-    from brain.wiki.build_related import _lexeme_to_tsquery_text
+    from brain.related import _lexeme_to_tsquery_text
 
     for bad in ("9leading", "has-hyphen", "two words", "", "UPPER"):
         assert _lexeme_to_tsquery_text(test_db, bad) == "", (
@@ -300,7 +301,7 @@ def test_stop_word_lexeme_is_not_annihilated(
     an EMPTY tsquery, so the term silently vanished from the OR chain rather
     than failing loudly.
     """
-    from brain.wiki.build_related import _lexeme_to_tsquery_text, _to_tsquery_text
+    from brain.related import _lexeme_to_tsquery_text, _to_tsquery_text
 
     assert _to_tsquery_text(test_db, "own") == "", (
         "premise check: the re-parsing helper is expected to annihilate 'own'"
@@ -392,14 +393,14 @@ def test_build_tsquery_output_is_always_a_valid_tsquery_literal(
 
 #: Modules that legitimately call ``to_tsquery`` on RAW TEXT.
 #:
-#: ``build_related.py`` is here permanently, not pending a fix.
+#: ``related.py`` is here permanently, not pending a fix.
 #: ``_to_tsquery_text`` stems raw *title tokens*, which is required — a raw word
 #: must become a lexeme to match the stored ``tsv``. Its sibling
 #: ``_lexeme_to_tsquery_text`` handles the already-stemmed ``ts_stat`` lexemes
 #: by casting instead (task #20). The rule this guard enforces is "never
 #: re-parse an already-stemmed LEXEME", which is narrower than "never call
 #: ``to_tsquery``", and this exemption is where the two differ.
-INTENTIONAL_RAW_TEXT_STEMMERS = {"build_related.py"}
+INTENTIONAL_RAW_TEXT_STEMMERS = {"related.py"}
 
 
 def _modules_calling_to_tsquery() -> set[str]:

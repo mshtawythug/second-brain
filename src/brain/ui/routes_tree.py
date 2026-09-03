@@ -16,11 +16,19 @@ async def tree(request: Request) -> JSONResponse:
     One query, one pure fold. The empty case names ``brain vault sync`` rather
     than rendering a blank panel, because an empty rail on a populated brain
     almost always means "exported nothing yet", not "you have no notes".
+
+    CONFIDENTIAL TITLES ARE GATED HERE, on ``serve_confidential_titles`` and
+    not on ``serve_confidential_bodies``. This rail paints on load, beside the
+    recent rail and the search box that both already filter — so until this
+    gate existed it was the one unprompted surface naming every confidential
+    document in the vault. The flag is computed at the route, like every other
+    context-derived predicate in the package, and the query owns the SQL.
     """
     ctx = context_of(request)
+    strict = not ctx.serve_confidential_titles
     try:
         with ctx.connect() as conn:
-            rows = ui_queries.iter_tree_rows(conn)
+            rows = ui_queries.iter_tree_rows(conn, exclude_confidential=strict)
     except psycopg.Error as exc:
         raise db_guard(exc) from exc
 

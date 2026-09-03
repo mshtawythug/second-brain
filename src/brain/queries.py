@@ -5,11 +5,24 @@ logic across two callers. The helpers raise plain :mod:`brain.errors`
 exceptions so each caller can map them to its own framework's error type.
 
 Over the 800-line ceiling (CLAUDE.md). It is a flat collection of read helpers,
-cohesive and low-coupling, so splitting it buys nothing. **Why it grew again
-(2026-08-20, +16 vs e6d6e47):** ``list_documents``' ORDER BY was not a total order, so a
-bounded fetch was not a prefix of the unbounded one; the added lines are the
-tiebreaker plus the comment explaining why it is load-bearing. Reason recorded
-here and at the point of growth, as the ceiling rule requires.
+cohesive and low-coupling, so splitting it buys nothing. No live count is quoted
+here on purpose -- re-derive with ``wc -l src/brain/queries.py``.
+
+**Why it grew on master (+16 vs e6d6e47):** ``list_documents``' ORDER BY was not
+a total order, so a bounded fetch was not a prefix of the unbounded one; the
+added lines are the tiebreaker plus the comment explaining why it is
+load-bearing.
+
+**Why it grew on the ``brain ui`` branch (+9):** nine lines inside
+:func:`resolve_person_to_keys`, all comment -- it now passes
+``exclude_confidential=False`` to :func:`brain.people.aggregate_people`, whose
+default turned fail-closed for the published People Hub. The flag is inert for
+this caller (identities come from ``directory_entries``, not from the doc scan),
+and the comment exists to say so -- an inherited fail-closed default in a
+query-filter resolver would be a policy decision nobody made.
+
+Both reasons are recorded here and inline at their points of growth, as the
+ceiling rule requires.
 """
 import re
 from collections.abc import Iterator
@@ -190,7 +203,7 @@ def _expand_keys_with_directory_variants(
 ) -> list[str]:
     """Expand person keys across every RAW directory display-name variant.
 
-    :func:`brain.wiki.build_people.aggregate_people` collapses separator /
+    :func:`brain.people.aggregate_people` collapses separator /
     ordering variants of one person (``jane.doe`` vs ``Jane Doe``) into a
     single canonical record, so the resolver only ever sees the canonical
     display name. Docs, however, store ``participants`` under whichever RAW
@@ -200,7 +213,7 @@ def _expand_keys_with_directory_variants(
     raw variants (linked by shared email or identical canonical key) and union
     the expansion over all of them.
     """
-    from .wiki._person_name import normalize_person_name
+    from .person_name import normalize_person_name
 
     keys: set[str] = set(_expand_person_keys(display_name, emails))
     base = normalize_person_name(display_name)
@@ -235,7 +248,7 @@ def resolve_person_to_keys(
        tiebreak when multiple records match.
 
     Per plan §3.b D16, the resolver calls
-    :func:`brain.wiki.build_people.aggregate_people` with
+    :func:`brain.people.aggregate_people` with
     ``min_docs=0`` and ``owner_keys=frozenset()`` so query-time
     ``--person`` filters see every known person — including the corpus
     owner and curated-but-low-doc-count entries that the People Hub UI
@@ -248,16 +261,25 @@ def resolve_person_to_keys(
             for caller-side disambiguation messages.
         PersonNotFound: No match at any step.
     """
-    # Late import: avoid a top-level dependency on the wiki package so
-    # ``brain.queries`` stays import-cheap for non-search code paths.
-    from .wiki.build_people import aggregate_people, humanize_display_name
+    # Late import: keeps ``brain.queries`` import-cheap for non-search
+    # code paths (the aggregation layer pulls in the vault subtree).
+    from .people import aggregate_people, humanize_display_name
 
     needle = name_or_email.strip().casefold()
     if not needle:
         raise PersonNotFound(name_or_email)
 
+    # ``exclude_confidential=False`` for the same reason as ``min_docs=0``
+    # and the empty ``owner_keys``: this resolver maps a ``--person`` argument
+    # onto an IDENTITY, and identities come from ``directory_entries``, not
+    # from the doc scan. Narrowing the scan cannot narrow the answer here
+    # (every record is built from a directory key regardless of its doc
+    # count), so the flag is inert — but it is passed explicitly rather than
+    # inherited, because inheriting a fail-closed default into a filter
+    # resolver would be a silent policy decision the day that stops being
+    # true. Display rules must not gate a query filter.
     records = aggregate_people(
-        conn, owner_keys=frozenset(), min_docs=0
+        conn, owner_keys=frozenset(), min_docs=0, exclude_confidential=False
     )
 
     # Step 1 — exact email match.

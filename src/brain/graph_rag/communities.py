@@ -59,6 +59,7 @@ from networkx.algorithms.community import louvain_communities
 
 from ..config import Config
 from ..errors import GraphTenantError
+from ..sensitivity import not_confidential_sql
 from ..set_similarity import jaccard
 from .schema import CommunityMember, CommunityRecord
 
@@ -372,6 +373,7 @@ def list_communities(
     tenant: str,
     *,
     limit: int | None = None,
+    exclude_confidential: bool = False,
 ) -> list[CommunityRecord]:
     """Read the tenant's materialized communities (the admin-listing read; G3-f).
 
@@ -381,17 +383,62 @@ def list_communities(
     ``limit`` when given. Read-only — the raw ``summary_embedding`` vector is not
     selected (a storage handle, not a wire value). ``tenant`` must be non-empty
     (the caller resolves it via :func:`brain.graph_rag.tenancy.resolve_tenant`).
+
+    ``exclude_confidential`` (F6) withholds a community WHOLE when any of its
+    member entities is mentioned by a confidential document.
+
+    **Why this listing needed a gate, when it projects no title and no id.** It
+    looked like the entity tier — and the entity tier is deliberately ungated
+    here, because an entity is not a document and names none. But ``summary`` is
+    not an entity-tier value: :func:`brain.graph_rag.communities_summary.
+    _representative_doc_titles` feeds document TITLES into the summarization
+    prompt beside the entity names, so a stored summary is generated FROM
+    confidential titles. That is the identical shape as ``ThemeGroup.summary``,
+    which this same pass closed.
+
+    **Why the whole row rather than a blanked ``summary``.** Returning the row
+    with its summary withheld would prove a cluster exists whose contents may not
+    be shown — the membership oracle :func:`brain.mcp_server._confidential_lens`
+    describes, which requires exclusion over redaction.
+
+    **The cost, stated rather than hidden.** On a corpus where confidential
+    documents are spread widely, this can withhold most clusters from the MCP
+    admin view. That is the correct trade at an egress boundary, and it costs the
+    owner nothing at a terminal: ``brain graphrag communities list`` is inside the
+    trust boundary and defaults to including both tiers.
+
+    **This gate does not un-taint summaries already stored.** A summary built
+    before the generation-side gate (see ``_representative_doc_titles``) may
+    already paraphrase a confidential title, and a stored blob carries no
+    per-document provenance to filter on. Excluding by CURRENT membership is what
+    makes that recoverable — the row is withheld on the strength of who its
+    members are now, not on what its text happens to contain.
     """
     if not tenant:
         raise GraphTenantError(
             "list_communities requires a non-empty tenant_id "
             "(resolve via brain.graph_rag.tenancy.resolve_tenant first)"
         )
+    confidential_clause = (
+        ""
+        if not exclude_confidential
+        else (
+            " AND NOT EXISTS ("
+            "  SELECT 1 FROM graph_community_members cm"
+            "  JOIN graph_entity_mentions m"
+            "    ON m.tenant_id = cm.tenant_id AND m.entity_id = cm.entity_id"
+            "  JOIN documents d ON d.id = m.document_id"
+            "  WHERE cm.tenant_id = graph_communities.tenant_id"
+            "    AND cm.community_key = graph_communities.community_key"
+            f"    AND NOT ({not_confidential_sql('d')}))"
+        )
+    )
     base = (
         "SELECT community_key::text, source_graph_hash, members_hash, level, "
         "build_version, member_count, edge_count, total_weight, summary, "
         "summary_model, summary_at "
         "FROM graph_communities WHERE tenant_id = %s "
+        f"{confidential_clause} "
         "ORDER BY member_count DESC, community_key"
     )
     if limit is not None:

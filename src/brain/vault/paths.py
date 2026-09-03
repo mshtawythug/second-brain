@@ -4,7 +4,7 @@ Both helpers are pure (no I/O, no DB) and small. Three rendering surfaces
 hand-rolled the same logic before this module existed:
 
 - :mod:`brain.wiki.build_homepage` — recent-rail bullet renderer
-- :mod:`brain.wiki.build_people` — People Hub per-person + index pages
+- :mod:`brain.people` — People Hub per-person + index pages
 - :mod:`brain.vault.daily_index` — daily-notes index renderer
 
 Centralizing here means a future change (say, switching to ``.markdown``

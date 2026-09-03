@@ -372,7 +372,7 @@ def _old_embedding_affinity(
     same eligibility filters, same per-doc ``MAX`` + floor + ``ORDER BY cosine
     DESC, doc_id LIMIT``. Insertion order is the SQL row order.
     """
-    from brain.wiki.build_related import _avg_embedding
+    from brain.related import _avg_embedding
 
     src = _avg_embedding(conn, source_doc_id)
     if src is None:

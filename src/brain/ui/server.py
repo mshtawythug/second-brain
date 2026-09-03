@@ -13,8 +13,8 @@ import errno
 import logging
 import socket
 import webbrowser
-from collections.abc import Callable
-from contextlib import closing
+from collections.abc import Callable, Iterator
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from typing import Any
 
@@ -120,8 +120,30 @@ def build_context(
     logging_enabled, notices = preflight(cfg)
     loopback = is_loopback(host)
 
-    def conn_factory() -> Any:
-        return connect(cfg.database_url)
+    @contextmanager
+    def conn_factory() -> Iterator[Any]:
+        """Per-request connection, in AUTOCOMMIT — the contract, now implemented.
+
+        ``UiContext`` documents this factory as "yielding an autocommit-capable
+        psycopg connection" and ``gaps.record_search_query`` states "Callers run
+        with ``autocommit=True``". Both were true as prose and false as code:
+        this returned ``connect(...)`` unmodified, so psycopg3's default
+        ``autocommit=False`` left an implicit transaction open, telemetry's
+        ``conn.transaction()`` degraded to a SAVEPOINT inside it, and
+        ``conn.close()`` rolled the lot back.
+
+        Measured before the fix: **zero rows with source='ui' after ~215 real
+        UI searches**, while ``/api/status`` reported ``logging_enabled: true``.
+        Failing closed would have been bad; failing closed while health asserts
+        success is what made it invisible for the whole of phase 0.
+
+        ``connect_raw`` deliberately rolls back its pgvector probe so this flag
+        can be set here (``db.py:43-44``); ``cli_recall.py:114`` is the same
+        line, done right, and was the template.
+        """
+        with connect(cfg.database_url) as conn:
+            conn.autocommit = True
+            yield conn
 
     return UiContext(
         cfg=cfg,
@@ -138,7 +160,48 @@ def build_context(
         # Confidential bodies leave this process only when the server is
         # loopback-bound (CLI-equivalent trust) or the operator said so.
         serve_confidential_bodies=loopback or include_confidential,
+        # Confidential TITLES on the unprompted listing surfaces are a
+        # separate, config-only decision — deliberately NOT ``or``-ed with
+        # ``loopback`` or ``include_confidential``. Both of those say "this
+        # session may READ confidential material it opens"; neither says "paint
+        # confidential titles in a rail nobody asked for". Default False.
+        serve_confidential_titles=cfg.ui_serve_confidential_titles,
     )
+
+
+def warm_embedder(embedder: Any) -> bool:
+    """Pay the embedder's cold-start cost at boot, not on the first search.
+
+    Measured cold vs warm: **5,358 ms vs ~250 ms** — a 12-21x cliff. Ollama's
+    ``keep_alive=-1`` holds the model resident, so the residual exposure is
+    exactly *process restart*, which is what a freshly-started ``brain ui``
+    is. One throwaway embed converts a user-visible 5.4 s stall on the first
+    search into startup time nobody is watching.
+
+    **Never fatal, never noisy.** An FTS-only install (``BRAIN_EMBEDDER=none``)
+    has no vectors to warm and must boot unchanged, so the duck-typed
+    ``produces_embeddings`` flag short-circuits before any network call — the
+    same ``getattr(..., True)`` shape ``search``/``ingest``/``cli_search`` use.
+    A real backend with Ollama *down* must also boot: the failure is logged at
+    debug and swallowed, because the user's next action is a search that will
+    surface the problem properly with its own remediation text. A server that
+    refused to start because a warm-up failed would be a worse product than one
+    whose first search is slow.
+
+    Returns True when a vector was actually fetched — for tests and for the
+    caller's log line, not for control flow.
+    """
+    if embedder is None or not getattr(embedder, "produces_embeddings", True):
+        return False
+    try:
+        embedder.embed(["warm"], input_type="query")
+    except (BrainError, OSError) as exc:
+        # BrainError covers EmbedError/OllamaEmbedError; OSError covers a socket
+        # that dies below the HTTP client. Anything else is a real bug and
+        # should not be hidden by a performance optimization.
+        logger.debug("embedder warm-up skipped: %s", type(exc).__name__)
+        return False
+    return True
 
 
 def serve(
@@ -158,6 +221,11 @@ def serve(
     import uvicorn
 
     from .app import create_app
+
+    # Before the bind, so the cost lands in startup rather than in the first
+    # request — and before the browser opens, so a warm model is ready by the
+    # time anyone can type.
+    warm_embedder(context.embedder)
 
     url = f"http://{host}:{port}/"
     app = create_app(context)

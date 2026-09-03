@@ -74,17 +74,24 @@ IMPORTANT:
 
 ### File-size ceiling — 800 lines
 
-The global rules set a **800-line ceiling** per file (200–400 typical). It binds
-**new modules and new growth**, not a retroactive split mandate: this repo has
-**16 files in `src/` already over it**, and splitting a 9,000-line CLI to satisfy
-a number is how you turn a working module into six broken ones.
+The global rules set an **800-line ceiling** per file (200–400 typical). It binds
+**new modules and new growth**, not a retroactive split mandate: this repo keeps
+**a standing list of files already over it** (the table below — re-derive the
+list, never count it from memory), and splitting a 9,000-line CLI to satisfy a
+number is how you turn a working module into six broken ones.
 
 The rule as it actually applies here:
 
 - A **new** module lands under 800. No exceptions.
 - An **existing** file under 800 must stay under it — extract rather than grow
-  past. This is why `brain/format_search.py` exists (`format.py` was at 783/800)
-  and why `brain/snippet_context.py` exists (`search.py` is now 793).
+  past. Three live examples, one from each branch of the 2026-09-02 merge:
+  `brain/backup/db_names.py` exists because `backup/restore.py` was 745 before
+  the identifier byte-budget guard (`f056c08`) and 806 after, so the guard was
+  moved out rather than left over the line; `brain/format_search.py` exists
+  because `format.py` was at 783/800; and `brain/snippet_context.py` exists
+  because `search.py` was over and the extraction brought it back down. (No
+  live digit for `search.py` here — the merge moved it again. Re-derive with
+  `wc -l src/brain/search.py`; it is still over, and it has a row below.)
 - A file **already over** may grow only for a written reason, recorded in **two
   complementary places — not either/or**. The wording this replaced named both
   in one breath ("at the point of growth, in its module docstring"), which reads
@@ -101,39 +108,318 @@ The rule as it actually applies here:
 
   "It was already over" is not a reason. *(Clarified 2026-08-20, in the same PR
   that introduced this section — the ambiguity was ours and had not yet shipped.
-  Caught when `cli.py`'s first growth of the branch satisfied (1) and not (2).)*
+  Caught when `cli.py`'s first growth of that branch satisfied (1) and not (2).)*
 
 **Files over the ceiling** (`find src -name '*.py' | xargs wc -l | sort -rn` —
-re-derive, never inherit; these were measured on `feat/agentic-token-reduction`,
-**2026-08-21 16:59**, after the final PR-#8 review-fix round. The clock time is
-not decoration: two rows drifted within one afternoon while three agents edited
-`src/`, and the previous stamp here ("2026-08-20 18:11, after the last src/
-edit") was itself falsified the next day when a QA-closeout commit grew three
-tabled files after it — a date alone would not tell you whether a number
-predates the change you are looking at, and neither will this one once the
-next commit lands):
+re-derive, never inherit.)
+
+**Re-derived on the merged tree, 2026-09-02, at the merge of
+`second-brain/master` (`f495f66`, PR #8) into `feat/wiki-to-ui-consolidation`
+(`6a1ba03`, PR #9).** The row set below — not just its digits — was re-derived
+with the command above and is a snapshot of the tree being committed as the
+merge commit, which is the one tree neither parent's table described. It is
+*deliberately* not a fresh set of head counts in the Lines cells: the merge
+changed **six** of the eighteen tabled files relative to PR #9's head
+(`cli.py`, `mcp_server.py`, `config.py`, `vault/graph.py`, `queries.py`,
+`search.py` — re-derive with
+`git diff HEAD -- <path>` at the merge, or `git diff 6a1ba03..<merge> --stat`
+afterwards), so a digit written here would be falsified by the next commit
+exactly as the five previous repairs were. What the
+re-derivation actually produced, and what you should check rather than trust:
+
+- **`vault/graph.py` crossed the ceiling IN THE MERGE and has a new row.** It
+  was 620 at the base `f8c76c0`, 798 on PR #9 (two lines under), 740 on master —
+  *neither parent's table listed it, and each parent was correct for its own
+  tree*. The merge is the union of two independent growths in the same file
+  (PR #9's F6 confidential lens, master's `fetch_limit` prefix bound), and the
+  union is over. This is the by-omission failure described further down,
+  occurring in the very change that re-derives the set — which is why the set is
+  re-derived rather than inherited.
+- **No row was removed.** `search.py` came down on master (the
+  `snippet_context.py` extraction) but is still over on the merged tree.
+- Every trail below is a fact about frozen commits and was re-verified against
+  the merged repository with `git show "${sha}:<path>" | wc -l`.
+
+
+**No row below carries a head count any more.** Each row's **Lines** cell holds
+the command that measures the file; each **Why** cell opens with a **Trail** of
+SHA-bound counts, which are frozen —
+`git show 3b16527:src/brain/cli.py | wc -l` returns the same digit forever.
+Every trail starts at `f8c76c0`, the base BOTH branches share. Since the
+2026-09-02 merge a row may carry **two** trails, one per parent: they are
+siblings from that one base, not a sequence — do not read across them and do
+not add their deltas. A trail is authoritative only *through the last SHA it
+names*; enumerate anything after it with
+`git log --oneline f8c76c0..HEAD -- <path>`, and take the present count from the
+Lines cell.
+
+The head counts are **deleted rather than refreshed**, and that is the whole
+fix: **a live digit is invalidated by the write that states it** — and so is a
+delta. Five successive repairs of this table each corrected a stale number and
+shipped a fresh one; the most recent was titled *"stop asserting no-growth for
+two files that grew"* and grew both files by writing their own pointers. The
+rule that terminates the regress is not a better number, and not a timestamp
+proving when a number was true: it is **no digit in any position that a write
+can invalidate.** Earlier passes recorded dates and clock times precisely
+because a live digit needs an as-of; a frozen digit needs none, which is how you
+can tell the form is right.
+
+**A descriptive last hop must be PROMOTED to a SHA-bound one by the next edit
+that touches the file.** The terminating form ends every trail with a
+descriptive hop — *"the commit that added this clause"*, carrying no delta —
+because a commit cannot name its own hash. That hop is correct when written and
+becomes *lossy* the moment it is written: it is a fact whose SHA now exists and
+which only the next author is in a position to record. So the maintenance the
+form actually requires is: **on touching a file in this table, first replace its
+trailing descriptive hop with the real SHA and count (`git log --oneline
+f8c76c0..HEAD -- <path>` names the commit; `git show "${sha}:<path>" | wc -l`
+gives the digit — brace the SHA or zsh eats `:<path>` as a history modifier),
+then add a fresh descriptive hop for your own change.**
+
+This is not a refinement of style. Skipping the promotion is *precisely* why
+`connect.py`'s and `timeline.py`'s trails each arrived one hop short twice
+running while every author believed they had just fixed them: each wrote a
+correct descriptive hop and none promoted the previous one, so the trail
+accumulated exactly one permanent blind spot that travelled forward with it. The
+frozen half of the record only grows if somebody grows it. *(Added 2026-08-24,
+after `connect.py`'s trail gained its missing `b7fd0e8` hop this way.)*
+
+**There is deliberately no "head" SHA here any more, and there cannot be one.**
+The slot used to read `head 4740f03`; before that, other values. It was wrong
+every time, and not through carelessness — a header cannot name the commit that
+writes it, because that commit has no hash until after the write. Every value
+ever typed there was the author's *starting* commit, i.e. stale on arrival. So
+the slot has been replaced with a claim that stays true: `b71c923` is not
+asserted to be head, only to be the commit the PR-#9 trails below were
+enumerated at — which is why the rows that say "no commit **through
+`b71c923`** touched it" do not go stale (count them with
+`grep -c '^| .*no commit through' CLAUDE.md` rather than trusting a digit here —
+the phrase is what is countable, the number is not. The pattern is anchored on
+the leading `|` of a TABLE ROW precisely so this sentence cannot count itself.
+Two earlier drafts of this line quoted an unanchored pattern and each one
+matched itself, which is the same self-invalidation the head counts had, one
+level down.) Re-verified at the
+2026-09-02 merge and still true, and master (`f495f66`) touched none of those
+five either, so neither leg of their trails moved. It is a fact about a frozen commit and cannot rot. For
+the present head, run `git rev-parse --short HEAD`; to see what moved since,
+`git diff --stat b71c923..HEAD -- src`.
+
+**Two rows of this table were false when you last read them, and they were false
+in the specific way that hides itself.** `connect.py` and `timeline.py` both
+recorded *no growth* (`925 → 925`, `844 → 844`) while on disk they were 952 and
+877 — both grown by `ec6afb6`, both already over the ceiling at base. A row that
+asserts no-growth tells a reader checking compliance that there is nothing to
+check, so the error suppressed its own detection. Both are now carried in the
+`mcp_server.py` row's rot-proof form (no live digit; base plus commit trail plus
+a `wc -l` command), and both files gained the module-docstring pointer that
+requirement (2) always owed and that neither had. Requirement (1) — inline
+reasoning at the growth site — was satisfied for both all along; it was only
+ever the discoverable half that was missing.
+
+**Read every trail as: code growth PLUS the ceiling record that justifies it.**
+Writing the required docstring record into a file makes that file longer, which
+is a small, honest irony rather than a measurement error: of the +30 `search.py`
+gained between `f8c76c0` and `0473b5f`, sixteen lines are the `recency_ts` work
+and fourteen are the record saying why. That delta is safe to state only because
+**both** of its endpoints are commits — it is a fact about two frozen trees, not
+a claim about the working one. Where the split matters,
+`git diff f8c76c0..<sha> -- <path>` shows the code delta alone.
 
 | File | Lines | Why it is not being split |
 |---|---|---|
-| `cli.py` | 9,068 | One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and **deferred** deliberately. **Grew this branch: 9,019 → 9,068 (+49)** — 39 lines mapping migration 028's new `LockNotAvailable` to an actionable message, plus 10 in the final review round scoping that message to the *failing* migration. Reasons recorded in both places the ceiling rule requires — inline at the handler in `init`, and in the module docstring. |
-| `mcp_server.py` | 4,416 | Same shape — one MCP tool registry. **Grew this branch: 4,009 → 4,416 (+407)** — the largest growth of any file in this table, ahead of `config.py`'s +291. The Wave-3 growth is disclosed and justified in its own docstring, which is what the rule requires of a file already over; the review-round growths (blank-summary guard, signature-default constants) are appended there too. Split deferred alongside `cli.py`. |
-| `config.py` | 2,541 | **Grew this branch: 2,250 → 2,541 (+291).** It grew in the same PR that split `search.py` citing the ceiling — which is the point, and it stands on its own without the superlative this row used to carry. (It read "the largest file over the ceiling"; that was false when written and is still false — `cli.py` (9,068) and `mcp_server.py` (4,416) are both larger, and `mcp_server.py` also grew more (+407 vs +291). Corrected 2026-08-20.) Stated rather than smoothed over: the additions are the six MCP-ceiling knobs, the snippet knob, and the review round's two `MCP_*_DEFAULT_LIMIT` constants + ceiling>=default cross-checks, each carrying its rationale in prose. The knobs belong beside the other knobs; the *evidence blocks* are the growth and they are the reason to split this file next, into `config.py` + a measurements/rationale doc. |
-| `ingest/__init__.py` | 2,298 | Dispatcher + both pipelines; the extractors are already separate modules. |
-| `vault/sync.py` | 1,747 | One reconciliation algorithm. |
-| `queries.py` | 1,658 | Flat read-helper collection — cohesive, low coupling; splitting buys nothing. **Grew this branch: 1,642 → 1,658 (+16)** — the `list_documents` total-order tiebreaker; reason in its module docstring. |
-| `setup.py` | 1,356 | One linear install script with three profile branches. |
-| `wiki/build_watcher.py` | 1,073 | |
-| `vault/watch.py` | 1,070 | |
-| `wiki/build_people.py` | 934 | |
-| `connect.py` | 925 | |
-| `graph_rag/extract.py` | 885 | |
-| `timeline.py` | 844 | |
-| `cli_ingest.py` | 844 | |
-| `wiki/build_related.py` | 815 | |
-| `enrichment.py` | 808 | |
+| `cli.py` | **re-derive: `wc -l src/brain/cli.py`** | Trail (PR #9): 9,019 (`f8c76c0`) → 9,019 (`3b16527`, touched, no net change) → 9,035 (`c62e3de`) → 9,038 (`d99ca34`) → 9,053 (`7f4d859`) → 9,159 (`2b2b321`). Trail (master, PR #8): 9,019 (`f8c76c0`) → 9,068 (`f495f66`). The two are SIBLINGS from one base, not a sequence — do not read across them and do not add their deltas. They join at **the merge commit that added this clause**, descriptive and carrying no delta because a commit cannot name its own hash; take the present count from the Lines cell. Authoritative through the last SHA each names; enumerate anything after with `git log --oneline f8c76c0..HEAD -- src/brain/cli.py`. **Master's growth (+49):** 39 lines mapping migration 028's new `LockNotAvailable` to an actionable message, plus 10 in the final review round scoping that message to the *failing* migration — recorded inline at the handler in `init` and in the module docstring, and disjoint from every PR-#9 growth below. One Typer app; every command shares its option decorators and error mapping. A split was scoped during the GraphRAG build (G0–G4) and deferred deliberately. **No longer unchanged:** `_VALID_SOURCE_KINDS` became a re-export of `brain.source_kinds` so the ingest *write* boundaries could enforce it — `cli` imports `cli_ingest`, so the set could not have stayed here. Net *less* duplication. **Second growth (`7f4d859`, +15):** `brain people` now passes `exclude_confidential=False` to `people.aggregate_people` explicitly, because that function's default turned fail-closed for the *published* hub pages while the terminal is not an egress boundary. Almost all of the fifteen lines are that argument. **Third growth (`2b2b321`, +106):** the F6 two-audience split on `review weekly` and `brief --wiki` — each builds a second, *gated* payload for its vault write and keeps the permissive one for the terminal; most of the added lines are the argument for why that split lives at the CALL SITES rather than inside the report builders. **Every growth in the trail above is recorded** inline at the point of change + in the module docstring — stated as a property of the trail rather than as a count, because the count is an unbound digit that goes stale on the next growth and this cell already carried a wrong one (*"Both growths recorded"* survived the third). Verify rather than trust: the docstring's hops must match this trail's. |
+| `mcp_server.py` | **re-derive: `wc -l src/brain/mcp_server.py`** | Same shape — one MCP tool registry. **This cell deliberately holds no digit, because the digit has now been wrong three times.** It read `→ 4,137 (+128)` (a value the file never held, wrong *when written* in `0473b5f`); it was corrected to `4,191` on 2026-08-21; and `4,191` was stale within the hour, because the F6 listing-gate work landed in the same file that same afternoon. A live count in a checked-in table is a measurement of a tree that stops existing at the next commit, and this is the one row in this table whose subject is also actively edited by whoever reads it. What does not rot is the base and the per-commit trail: 4,009 (`f8c76c0`, branch base) → 4,043 (`3b16527`) → 4,055 (`c62e3de`) → 4,191 (`2ed2d83`) → 4,356 (`ec6afb6`) → 4,415 (`b7fd0e8`) → 4,485 (`cd7dbfa`) → 4,502 (`f4d914d`) — the last hop PROMOTED from a descriptive one on 2026-09-02, per the promotion rule above. Trail (master, PR #8): 4,009 (`f8c76c0`) → 4,416 (`f495f66`), whose +407 is the Wave-3 payload ceilings plus the review round's blank-summary guard and signature-default constants, disclosed in this file's own docstring. The two are SIBLINGS from one base, not a sequence — do not read across them and do not add their deltas. They join at **the merge commit that added this clause**, descriptive and carrying no delta because a commit cannot name its own hash; take the present count from the Lines cell. (The trail stopped at `2ed2d83` until 2026-08-21: the prose already described the `ec6afb6` listing-gate work, but the *numeric* trail — the half this cell calls rot-proof — was missing its last hop, so the two halves of the same row disagreed. `0473b5f` touched the file at net zero and is correctly absent from a **growth** trail.) Five growths, each reasoned inline where it landed and summarized in the module docstring: `_split_source_filter` (so `source="none"` means the same thing here as in the UI); `source` validation at the `brain_ingest_stdin` write boundary; the F6 confidential lens on `brain_list`; the same lens on `brain_backlinks`/`brain_links`, whose polarity **inverts** across the `vault.graph` boundary; and the same lens on the four UNPROMPTED listing tools — `brain_brief`, `brain_review_weekly`, `brain_timeline`, `brain_connect_list` — which took no document id and no query at all, so every document they named was one the caller had not asked for. Two of those (`brain_brief`, `brain_review_weekly`) were BODY egress, not title egress: `todo.iter_action_item_docs` selects `documents.content` and parses action-item text out of it. A **sixth** growth, and the only one that is a *correction* rather than a new lens: the F6 gate on `brain_review_weekly`'s **emit** path. The five above all gate what a tool RETURNS, which is the whole story for every tool but this one — it also WRITES `<vault>/reviews/<week>.md`, and it handed that write the caller's permissively built report, so one call with `include_confidential=true` published exactly what `2b2b321` had just stopped the CLI from publishing. `2b2b321`'s message asserted "the MCP twins of both functions gate correctly"; **that was true of this tool's return value and false of its emit path**, and the correction lives here and in `mcp_server.py`'s docstring because history is not rewritten. The write now takes a second, gated payload — built only when the caller's lens is permissive, since on the default path the returned report already IS the gated one. `brain_brief` is unaffected: it has no vault write, *measured* in `tests/test_mcp_vault_emit_confidential.py`, not inherited from the claim. A **seventh** growth, eight lines, is the same shape once more: `brain_connect_accept` gated its return and not its `## See Also` WRITE, because `iter_suggestions` — genuinely F6-gated — is the LIST and neither accept path goes through it. The policy lives in `brain.connect.assert_see_also_publishable` so the CLI twin cannot drift; what is here is the mapping of its `ConnectError` to `INVALID_PARAMS`. The docstring also carries the decorator hazard that cost `brain_recall` its registration. **The disclosure the rule requires is *what grew and why*, which is above; the measurement belongs in the command, which is in the Lines cell.** |
+| `ingest/__init__.py` | **re-derive: `wc -l src/brain/ingest/__init__.py`** | Trail: 2,298 (`f8c76c0`) → 2,352 (`3b16527`) → 2,366 (`0473b5f`) → 2,369 (`d99ca34`). Untouched by master. Dispatcher + both pipelines; the extractors are already separate modules. Growth is the extraction of `mirror_is_stale` / `write_vault_mirror` so a caller owning the outer transaction can defer the mirror write past its own commit. Near-zero net-new logic. **Now recorded.** |
+| `config.py` | **re-derive: `wc -l src/brain/config.py`** | Trail (PR #9): 2,250 (`f8c76c0`) → 2,289 (`3b16527`) → 2,303 (`0473b5f`) → 2,306 (`d99ca34`). Trail (master, PR #8): 2,250 (`f8c76c0`) → 2,541 (`f495f66`) — the six MCP payload ceilings, the snippet knob, and the review round's two `MCP_*_DEFAULT_LIMIT` constants with their ceiling>=default cross-checks, each carrying its rationale in prose. The two are SIBLINGS from one base, not a sequence — do not read across them and do not add their deltas. They join at **the merge commit that added this clause**, descriptive and carrying no delta because a commit cannot name its own hash; take the present count from the Lines cell. Knobs belong beside the other knobs. Growth is one knob (`BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`) plus its tri-state parse and the ruling for why it is not `serve_confidential_bodies`. **Now recorded** — and the docstring names the real next move: the *prose* is what makes this file large, so split the rationale out, not the knobs. |
+| `vault/sync.py` | **re-derive: `wc -l src/brain/vault/sync.py`** | Trail: 1,747 (`f8c76c0`) → 1,817 (`c62e3de`). One reconciliation algorithm; the walk and the per-file upsert only make sense together. Growth is `_source_from_frontmatter` validating a file's `source:` against `brain.source_kinds` — the **third and last** unvalidated write boundary into `sources.kind` (`cli_ingest` and `mcp_server` closed the other two, and 2-of-3 was a worse resting state than 0-of-3). Most of the +70 is the ruling on the FAILURE MODE — dropped and warned, never rejected and never substituted — which is the non-obvious part and the reason a reviewer opens this function at all. **Recorded** inline + in the docstring. |
+| `vault/graph.py` | **re-derive: `wc -l src/brain/vault/graph.py`** | **NEW ROW, added 2026-09-02: this file crossed the ceiling IN THE MERGE, and neither parent was wrong to omit it.** Trail (PR #9): 620 (`f8c76c0`, base) → 728 (`2ed2d83`) → 756 (`ec6afb6`) → 792 (`b7fd0e8`) → 798 (`c49fc46`) — two lines under, and the branch's table correctly had no row. Trail (master, PR #8): 620 (`f8c76c0`) → 740 (`f495f66`) — also under, also correctly unlisted. The two are SIBLINGS from one base, not a sequence — do not read across them and do not add their deltas. They join at **the merge commit that added this clause**, descriptive and carrying no delta because a commit cannot name its own hash; take the present count from the Lines cell. One reconciliation surface for the link graph: `backlinks_for`, `outgoing_links_for`, `orphans`, `graph_data` and `_derived_partners` all compose the same three frozen statements, so the queries and the shaping only make sense together. **What grew, from each side:** PR #9 added the F6 confidential lens — two frozen variants per title-bearing read, selected by `exclude_confidential`, because a `%s` for the level would put a positional parameter inside a fragment three statements share; master added `fetch_limit`, the `LIMIT %s` prefix bound, and the UNIQUE final sort key that makes each ORDER BY total. The merge is their union, and the union is over 800. The two compose in the only safe order — the sensitivity predicate is inside the statement, so gated rows are gone before `LIMIT` counts and a short page never becomes a withholding oracle — which is the non-obvious part and is recorded inline at each of the six SQL constants and in the module docstring. **It is here, over, rather than split in the same commit**, because a module split inside a security merge makes both harder to review; the seam is named in the module docstring. |
+| `queries.py` | **re-derive: `wc -l src/brain/queries.py`** | Trail (PR #9): 1,642 (`f8c76c0`) → 1,642 (`3b16527`, touched, no net change) → 1,661 (`7f4d859`). Trail (master, PR #8): 1,642 (`f8c76c0`) → 1,658 (`f495f66`) — the `list_documents` total-order tiebreaker, without which a bounded top-N was not a prefix of the full sort. The two are SIBLINGS from one base, not a sequence — do not read across them and do not add their deltas. They join at **the merge commit that added this clause**, descriptive and carrying no delta because a commit cannot name its own hash; take the present count from the Lines cell. Flat read-helper collection — cohesive, low coupling; splitting buys nothing. **Grew in `7f4d859` (+19)**, all of it comment: `resolve_person_to_keys` passes `exclude_confidential=False` to `aggregate_people`, where the flag is **inert** (identities come from `directory_entries`, not from the doc scan) — and the comment exists precisely to say so, because inheriting a fail-closed default into a query-filter resolver would be a policy decision nobody made. Recorded inline + in the module docstring. |
+| `setup.py` | **re-derive: `wc -l src/brain/setup.py`** | Trail: 1,356 (`f8c76c0`); no commit through `b71c923` touched it. One linear install script with three profile branches. |
+| `wiki/build_watcher.py` | **re-derive: `wc -l src/brain/wiki/build_watcher.py`** | Trail: 1,073 (`f8c76c0`); no commit through `b71c923` touched it. |
+| `vault/watch.py` | **re-derive: `wc -l src/brain/vault/watch.py`** | Trail: 1,070 (`f8c76c0`); no commit through `b71c923` touched it. |
+| `people.py` | **re-derive: `wc -l src/brain/people.py`** | Trail: did not exist at `f8c76c0` → 934 (`3b16527`); untouched by master. **Not growth.** `wiki/build_people.py` renamed to `brain/people.py`; the only content change is rewriting `brain.wiki._person_name` imports/references to `brain.person_name`. Verified by diff — same line count, no new logic. **Now it IS growth:** 934 (`3b16527`) → 1,019 (`7f4d859`, +85), the F6 gate on `aggregate_people` — two frozen SQL variants plus the argument for a **fail-closed default** — which is the house pattern for surfaces that EMIT, not the exception this row used to claim. *(It read "this codebase's only one outside `ui/queries.tree_rows`" until 2026-08-21. Two errors in one clause. **Not the only one:** `grep -rn 'exclude_confidential: bool = True' src/` returns **nine** hits, eight of them elsewhere — four in `related.py` (`compute_related`, `_iter_hybrid_neighbors`, `_eligible_source_docs`, `_neighbors_for_source`, the `related.json` publish path) and four in `ui/queries.py`. **And the symbol does not exist:** it is `iter_tree_rows`. `aa39159` mirrored the sentence here from `people.py`, so one false claim became two — which is the cost of mirroring prose instead of pointing at it. The `people.py` docstring is corrected too; re-derive with the grep above, never from this row.)* The default is the load-bearing part and the reason the prose is long: a hub page renders each document as an `###` heading and publishes, because its frontmatter carries no `sensitivity` key for `RemoveConfidential` to read. Recorded inline at the SQL variants, at the parameter, at all three call sites, and in the module docstring. |
+| `connect.py` | **re-derive: `wc -l src/brain/connect.py`** | One scoring algorithm plus the `## See Also` writeback primitives its two callers (CLI, MCP) share. **This row read `925 → 925` while the file was 952** — asserting no-growth for a day after `ec6afb6` landed, which is worse than a stale digit because it tells a compliance reader to skip the file. No digit here now; base and trail: 925 (`f8c76c0`, branch base) → 925 (`3b16527`, touched, no net change) → 952 (`ec6afb6`) → 972 (`56cc984` — the commit that wrote this very row, whose +20 lines *are* the ceiling record) → 993 (`b7fd0e8`) → 1,091 (`f4d914d`, PROMOTED from a descriptive hop on 2026-09-02 per the rule above; untouched by master) → **the merge commit that added this clause** — named descriptively and carrying *no delta*, because a hop cannot know its own SHA and a delta would be invalidated by the same write that states it. **A record of a file's size is invalidated by the act of writing the record**, so no hop can name its own commit: the hash does not exist until after the write. That, not carelessness, is why this trail and `timeline.py`'s each stopped one hop short twice running — and why the fix is not a better digit but a *terminating form*: SHA-bound historical hops (frozen, cannot rot), a descriptive last hop for the in-flight change, and `wc -l` for the present. Read it as authoritative only **through the last SHA it names**; enumerate the rest with `git log --oneline f8c76c0..HEAD -- src/brain/connect.py`. The first growth is the F6 confidential gate on `iter_suggestions`, which gates **both** joins — a suggestion names two documents, so a source-only filter would still publish every confidential doc that was somebody's suggested *target*. **Second growth (+78): `assert_see_also_publishable`, and it is a correction of the sentence before it.** `iter_suggestions` is gated and is the LIST; **neither accept path reaches it** — `cli_connect` and `mcp_server` both go through `load_action_context`, which had no predicate — so `accept --write` appended a confidential target's title and slug into a source page that publishes. The recorded status was true of the surface it named and silently not of the write, which is the third instance of that trap on this branch. The gate sits at the WRITE, not on the shared loader, because the loader also backs `reject` and a suggestion touching a confidential document must stay rejectable. Most of the +78 is the argument for refusing here while `review weekly` was fixed by building a second gated payload. **Every growth in the trail above is recorded** inline + in the docstring — stated as a property of the trail rather than as a count, for the reason the `cli.py` row gives. |
+| `graph_rag/extract.py` | **re-derive: `wc -l src/brain/graph_rag/extract.py`** | Trail: 885 (`f8c76c0`) → 885 (`3b16527`, touched, no net change). |
+| `search.py` | **re-derive: `wc -l src/brain/search.py`** | Trail (PR #9): 837 (`f8c76c0`) → 853 (`3b16527`) → 867 (`0473b5f`) → 870 (`d99ca34`). Trail (master, PR #8): 837 (`f8c76c0`) → 793 (`f495f66`) — master went DOWN, by extracting `snippet_context.py`, and is the only descending trail in this table. The two are SIBLINGS from one base, not a sequence — do not read across them and do not add their deltas. They join at **the merge commit that added this clause**, descriptive and carrying no delta because a commit cannot name its own hash; take the present count from the Lines cell. The merged tree is over again; it keeps its row. Already over at base. Growth is `SearchResult.recency_ts` (its read hoisted out of the boost branch so a hit's shown date and its ranking date cannot disagree) plus `source_missing` threading. **Ranking unchanged — no eval re-baseline implied.** The inline comments were always there; the missing half was the docstring pointer, **now written**. |
+| `timeline.py` | **re-derive: `wc -l src/brain/timeline.py`** | One temporal-bucketing algorithm; the three query helpers exist only to share its WHERE-clause composition. **This row read `844 → 844` while the file was 877** — the same self-hiding no-growth assertion as `connect.py`, from the same commit. No digit here now; base and trail: 844 (`f8c76c0`, branch base) → 877 (`ec6afb6`) → 900 (`56cc984` — the commit that wrote this very row, whose +23 lines *are* the ceiling record) → 913 (`d99ca34`, PROMOTED from a descriptive hop on 2026-09-02; untouched by master) → **the merge commit that added this clause**, named descriptively and with no delta, for the reason the `connect.py` row gives. See the `connect.py` row for the general form; use `git log --oneline f8c76c0..HEAD -- src/brain/timeline.py` for anything after the last SHA named. The growth is the F6 confidential gate threaded through `_compose_doc_filter` out to `build_timeline`, applied in the **predicate, not the projection**, so one clause drops the document from `doc_ids`, `doc_titles`, the co-topic tally, the count arithmetic, the auto-granularity probe and the synthesis bundle at once — none separately gated. Withholding only `doc_titles` would still publish the ids. **Now recorded** inline + in the docstring. |
+| `cli_ingest.py` | **re-derive: `wc -l src/brain/cli_ingest.py`** | Trail: 844 (`f8c76c0`) → 867 (`c62e3de`) → 870 (`d99ca34`). Untouched by master. Over the ceiling the day it was extracted from `cli.py`. Growth is `--source` validation at the top of `ingest_stdin`: `sources.kind` is bare `TEXT NOT NULL` with no CHECK, so this guard is all that stood between a typo and a permanently mis-bucketed row. **Recorded.** |
+| `related.py` | **re-derive: `wc -l src/brain/related.py`** | Trail: 714 (`3b16527`, where the wiki/ui split created this module) → 720 (`0473b5f`) → 726 (`7b5579e`) → 851 (`b7fd0e8`, PROMOTED from a descriptive hop on 2026-09-02; untouched by master) → **the merge commit that added this clause**, descriptive and with no delta. **This file CROSSED the ceiling rather than staying under it, and that is a rule violation, not a deferral.** The rule above says an existing file under 800 must “extract rather than grow past”; the F6 confidential gate on `compute_related` / `_eligible_source_docs` grew it past instead. It is here, over, on purpose: the alternative was to ship the security fix with a docstring claiming the file was still under — which is what the first draft did. The extraction is not folded into the same commit because a 250-line module move inside a body-egress fix makes both harder to review; the seam (the lexeme/tsquery tail, already covered by `tests/test_build_related_signal.py`) is named in the module docstring. **Recorded** inline at the gate + in the docstring. |
+| `enrichment.py` | **re-derive: `wc -l src/brain/enrichment.py`** | Trail: 808 (`f8c76c0`); no commit through `b71c923` touched it. |
+
+`backup/restore.py` is deliberately **absent**: it crossed the ceiling on this
+branch and was brought back under by the `db_names.py` extraction. Trail:
+745 (`f8c76c0`) → 806 (`f056c08`) → 755 (`0473b5f`); present count via
+`wc -l src/brain/backup/restore.py`. Its absence is conditional on it being
+**under** the ceiling, which is a live condition and not a settled one — if a
+later commit pushes it back over, it needs a row.
+
+`wiki/build_related.py` is a different case and **is not gone**: it was
+**split, not renamed**. The scoring half moved to `brain/related.py`; the file
+itself survives as the thin emitter §9.2d(2) requires, because
+`wiki/build_swap.py` and `wiki/build_watcher.py` still call `refresh_related`.
+Both files exist at HEAD — re-derive with
+`wc -l src/brain/wiki/build_related.py src/brain/related.py`, and note the split
+**added** lines overall rather than shrinking anything.
+
+*(Corrected 2026-08-21. This paragraph read: "`wiki/build_related.py` (815) is
+also gone — renamed to `brain/related.py` and *shrunk* to 714 in the process."
+Three claims, three wrong: the file exists, it was a split rather than a rename,
+and the "shrunk to 714" figure was stale in the very commit that wrote it —
+`0473b5f` is the commit that took `related.py` past 714. Contrast the `people.py`
+row above, which says "renamed" and **is correct**: `wiki/build_people.py` really
+is gone. Two adjacent moves of the same shape, one a rename and one a split, is
+exactly the pair that invites a reader to assume the second from the first.)*
+
+`source_kinds.py` is **new on this branch and deliberately not in the table** — a
+new module lands under 800, and this one exists precisely so a constant could
+stop being copied: it is now the single definition behind both
+`cli._VALID_SOURCE_KINDS` and `ui.schemas.VALID_SOURCE_KINDS`.
+
+**`ui/schemas.py` does not keep its own copy.** It re-exports the canonical
+object (`VALID_SOURCE_KINDS = _CANONICAL_SOURCE_KINDS`), so there is one
+frozenset and both names bind it — the drift risk is *deleted*, not guarded. The
+old justification for a second literal (reaching the set meant importing the
+Typer CLI into every HTTP handler) is satisfied by the extraction itself:
+`brain.source_kinds` does not import `typer`. `tests/test_ui_schemas.py` asserts
+**identity** (`is`), not equality, because the surviving failure mode is someone
+restating the literal — which produces an equal-but-separate object that `==`
+would wave through.
+
+*(Corrected 2026-08-21; the same false claim was in `src/brain/source_kinds.py`'s
+own docstring and is fixed there too. The line count this paragraph used to cite
+is dropped rather than refreshed — nothing here needs it, and it was one more
+number to rot.)*
+
+**Closed 2026-08-20 — the four unrecorded growths now carry records.**
+`mcp_server.py`, `ingest/__init__.py`, `config.py` and `search.py` each grew on
+this branch without the two-place record. Every one now has a module-docstring
+pointer, and each already had (or has been given) the inline comment at the
+point of growth. Two files were added to the list while closing it: `cli.py` and
+`cli_ingest.py`, both of which *this* work grew, and both recorded in the same
+edit rather than left for the next pass — which is the only way the rule holds.
+
+**One thing the ceiling audit found that the ceiling is not about.** Reading
+*what* had grown in `mcp_server.py` — rather than only *how much* — surfaced a
+shipped regression in `3b16527`: `_split_source_filter` was inserted between an
+`@mcp_app.tool()` decorator and `def brain_recall`, so the decorator bound to the
+helper. `brain_recall` was silently dropped from the MCP surface and a private
+helper was published in its place. Nothing failed: not import, not mypy, not the
+suite. Fixed, and guarded from both directions by
+`tests/test_mcp_tool_registration.py`. The lesson is about the audit, not the
+rule — *how much a file grew* is a number, *what grew in it* is a review.
 
 There is **no automated gate** on this — the ceiling is a review checkpoint, not
 CI. If you add a file to this table, add the row in the same edit.
+
+### The F6 draft/sensitivity residue audit — a review checkpoint, re-derived
+
+Same shape as the ceiling table, same failure mode, so the same discipline: a
+standing audit that **carries no row set**, because a row set here rots exactly
+like a Lines cell. Every `documents` read that filters `draft` is a read of the
+browseable corpus; almost every such read is also a place a *confidential* row
+could travel. **Re-derive the set — never inherit it, including from this
+paragraph or from a reviewer's brief:**
+
+```
+grep -rn "draft = FALSE\|draft=FALSE\|draft IS FALSE\|NOT d.draft" src/brain/
+```
+
+For each hit, the question is per-STATEMENT, not per-file: does *this* statement
+either carry a sensitivity predicate, or carry a written reason it does not? A
+file-level answer is not an answer — `connect.py` and `related.py` each contain
+both gated and deliberately-ungated statements.
+
+Three outcomes are legitimate and only the third is a defect:
+
+1. **Gated** — a `sensitivity` sibling in the same statement.
+2. **Ungated with a recorded reason**, because the gate belongs at a different
+   layer or would be wrong here. Two live examples, both verified 2026-08-21:
+   `connect.py`'s three scoring queries (the gate is at the read boundary,
+   `iter_suggestions`, which gates BOTH endpoints — reasoned at its call site);
+   and `ui/queries.py`'s `_DISCOVERABLE_ANY_SENSITIVITY`, the deliberate
+   permissive half of a frozen pair.
+3. **Ungated with no reason recorded** — the defect. It reads identically to (2)
+   from the outside, which is the whole problem: the reviewer cannot tell a
+   considered omission from an oversight without re-deriving the data flow.
+
+**Known residue at `7f4d859`, judged not a hole:** `related.py`'s
+`_corpus_common_lexemes` (two statements) scans every non-draft title including
+confidential ones. It is safe *and* gating it would be wrong — but on **two**
+load-bearing legs, not the three this paragraph asserted until 2026-08-21:
+
+1. ~~"A lexeme qualifies only by appearing in more than `_CORPUS_FREQ_THRESHOLD`
+   of the corpus, so no member is distinctive to any document."~~ **False on a
+   small corpus, and it was stated with no corpus-size qualifier.**
+   `_CORPUS_FREQ_THRESHOLD = 0.025` and the filter is `ndoc > total * 0.025`
+   over non-draft titled docs, so at **`total <= 39`** the threshold falls below
+   1 and a lexeme appearing in exactly **one** document — possibly a
+   confidential one — qualifies as "common". A demo sandbox or a fresh corpus is
+   squarely in that range. Re-derive with
+   `grep -n '_CORPUS_FREQ_THRESHOLD\|threshold_ndoc' src/brain/related.py`.
+2. **The set is consumed purely subtractively.** `_build_self_tsquery` only ever
+   `continue`s past a member, so membership can *remove* a token from a query
+   and can never add one.
+3. **Nothing from it reaches an emitted artifact.** It filters query terms; it
+   is never a value that gets rendered.
+
+**The conclusion is unchanged** — legs 2 and 3 hold at every corpus size and are
+each independently sufficient, which is why leg 1 being false does not open a
+hole. It is corrected rather than deleted because it was presented as
+load-bearing, and a reader who checks one leg should not find it is the one that
+does not hold. Excluding confidential titles from
+the *denominator* would change the ranking of the non-confidential corpus for
+users who have no confidential document at all. Recorded here rather than in
+`related.py` on purpose: that module is over the ceiling and its own docstring
+says extract before the next addition, so the note that would have gone there
+lives here until the extraction lands.
+
+**The residue — this table can be rot-proof in every digit and still be wrong by
+omission.** Deleting the live head counts closes one failure mode: a row stating
+a size the next commit falsifies. It does not touch the other, which is larger.
+**Nothing detects a file that newly crosses 800 and never gets a row.** A stale
+digit at least has a cell you can check; a missing row has nothing to check, so
+it cannot be caught by reading this table more carefully — the *row set itself*
+is a live claim, and the only thing re-deriving it is a human remembering to.
+
+**It is not hypothetical, and it is no longer even a prediction: it happened in
+the same change set that wrote this paragraph.** This text used to say
+`src/brain/related.py` "currently sits a handful of lines under the ceiling", so
+the next feature to touch it would open the gap. In fact the feature had already
+landed — the F6 confidential gate had taken that file from **726 (`7b5579e`)
+to 851 (`b7fd0e8`)** — so the sentence predicting the gap was itself written
+across it, and the file's own docstring claimed "under 800" at the same time.
+Three separate documents
+asserted a state the tree contradicted, and every digit in this table was
+rot-proof throughout. That is the by-omission failure, demonstrated rather than
+described: **rot-proofing the digits does not detect a missing row.** `related.py`
+now has one.
+
+*(Both SHAs above were added 2026-08-21. The sentence previously read "from 726
+to 828": `726` was bound to `7b5579e` and correct, `828` was bound to nothing
+and matched no commit — `git show "${sha}:src/brain/related.py" | wc -l` returns
+726 at `7b5579e` and 851 at `b7fd0e8`, the commit that landed the gate, with no
+boundary in between. A live digit had survived inside the paragraph that
+abolishes live digits, which is the same by-omission failure one level down.)*
+
+Closing it is a **build change, not a docs change**: a CI step that runs
+`find src -name '*.py' -exec wc -l {} + | sort -rn`, diffs the over-800 set
+against the rows here, and fails when a file is in one and not the other. That
+check is deliberately **not implemented** — it needs its own review, its own
+tests, and a decision about where the row set gets parsed from, none of which
+belong in a docs pass. Until it exists this paragraph is the gate: when you
+audit this section, **re-derive the row set, not just the digits.**
+
+> **Merge note — DISCHARGED 2026-09-02.** This paragraph used to say that
+> `feat/agentic-token-reduction` carried its own version of the ceiling section
+> at the same heading and the same anchor, deliberately, so that git would
+> conflict here and force a human to reconcile the two tables rather than merge
+> clean into a repo holding two contradictory ones. That is exactly what
+> happened: the section conflicted in three hunks when `master` (`f495f66`) was
+> merged into this branch, and the resolution re-derived the row set on the
+> merged tree rather than picking a side — which is how `vault/graph.py` was
+> found to have crossed the ceiling in the merge itself. The design worked;
+> the note is kept because the next merge of this file will need the same
+> treatment, and a discharged note that says so is more use than a deleted one.
 
 ### Linting — Ruff + mypy
 Run after every change: `ruff check` (lint) or `ruff check --fix` (auto-fix), then `mypy src/`. Config in `pyproject.toml` under `[tool.ruff]` and `[tool.mypy]`.

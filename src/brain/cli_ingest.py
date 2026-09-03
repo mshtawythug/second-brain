@@ -12,6 +12,20 @@ module-level import back would be a cycle. Reading the attribute at call time
 additionally keeps ``monkeypatch.setattr("brain.cli.<name>", ...)`` — the patch
 point the existing test suite uses — effective for these commands. Same pattern
 as :mod:`brain._capture_command`.
+
+**File-size ceiling (CLAUDE.md): over at creation, and it grew.** This pointer
+carries no live line count on purpose -- re-derive with
+``wc -l src/brain/cli_ingest.py``. What cannot rot is the trail: 844
+(``f8c76c0``, branch base) -> 867 (``c62e3de``).
+The growth is ``--source`` validation
+at the top of :func:`ingest_stdin`, reasoned inline at the guard:
+``sources.kind`` is bare ``TEXT NOT NULL`` with no CHECK constraint, so this
+guard was the only thing standing between a typo and a permanently mis-bucketed
+row that the facet panel counts but the facet click never returns.
+
+That this module cannot import from ``cli`` -- the cycle described above -- is
+exactly why the kind set now lives in :mod:`brain.source_kinds` rather than in
+either file.
 """
 from __future__ import annotations
 
@@ -45,6 +59,7 @@ from .queries import (
     iter_chunks_missing_embedding,
 )
 from .sensitivity import DEFAULT_SENSITIVITY, normalize_level
+from .source_kinds import InvalidSourceKind, validate_source_kind
 from .vault.derived_links import real_gws_runner
 
 if TYPE_CHECKING:
@@ -383,7 +398,7 @@ def ingest_dir(
 
 def ingest_stdin(
     source: str = typer.Option(
-        ..., "--source", help="Source kind (krisp, slack, gmail, ...)."
+        ..., "--source", help="Source kind: gmail|krisp|manual|slack."
     ),
     external_id: str = typer.Option(
         ..., "--external-id", help="Stable id from the upstream system."
@@ -423,6 +438,17 @@ def ingest_stdin(
     ),
 ) -> None:
     """Ingest content piped on stdin (used by Claude for Krisp/Slack)."""
+    # Validated BEFORE stdin is read: an unknown kind is a caller error that
+    # needs no payload to diagnose, and failing first avoids swallowing a large
+    # piped transcript on the way to rejecting it. `sources.kind` has no CHECK
+    # constraint, so this is the only thing standing between a typo and a row
+    # that every read surface then mis-buckets -- the facet panel counts it,
+    # clicking that facet does not return it, and `--source krisp` silently
+    # stops triggering the directory refresh below.
+    try:
+        validate_source_kind(source)
+    except InvalidSourceKind as e:
+        raise typer.BadParameter(str(e), param_hint="--source") from e
     content = sys.stdin.read()
     if not content.strip():
         typer.secho("stdin was empty", fg="red", err=True)

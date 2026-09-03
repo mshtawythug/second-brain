@@ -1,4 +1,4 @@
-"""Tests for ``brain.wiki.build_people`` — aggregation + page emission.
+"""Tests for ``brain.people`` — aggregation + People Hub page emission.
 
 Phase A: ``aggregate_people`` (real-Postgres SELECT against seeded
 ``sources`` / ``documents`` / ``directory_entries`` rows; no chunker /
@@ -17,9 +17,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from brain.vault.derived_links.directory import DirectoryStore
-from brain.vault.frontmatter import parse_frontmatter
-from brain.wiki.build_people import (
+from brain.people import (
     DocRef,
     EmitReport,
     PersonRecord,
@@ -28,6 +26,8 @@ from brain.wiki.build_people import (
     render_index_md,
     render_person_md,
 )
+from brain.vault.derived_links.directory import DirectoryStore
+from brain.vault.frontmatter import parse_frontmatter
 
 # --------------------------------------------------------------------------
 # Helpers — direct SQL seeding mirrors tests/derived_links/test_pass_runner.py
@@ -46,6 +46,7 @@ def _seed_doc(
     content_type: str = "transcript",
     vault_path: str | None = None,
     draft: bool = False,
+    sensitivity: str = "normal",
 ) -> str:
     """Insert a ``sources`` + ``documents`` pair, return the new document id.
 
@@ -67,8 +68,8 @@ def _seed_doc(
         """
         INSERT INTO documents
             (source_id, title, content, content_hash, content_type,
-             source_path, tags, metadata, vault_path, draft)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+             source_path, tags, metadata, vault_path, draft, sensitivity)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
         RETURNING id::text
         """,
         (
@@ -82,6 +83,7 @@ def _seed_doc(
             json.dumps(metadata),
             vault_path,
             draft,
+            sensitivity,
         ),
     ).fetchone()
     assert doc_row is not None
@@ -1563,11 +1565,11 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
         _seed_curated_with_docs(
             test_db, name="bad write", email="bw@example.com", n_gmail_docs=1,
         )
-        # Mock atomic_write_text in the build_people module so only the
+        # Mock atomic_write_text in the brain.people module so only the
         # first call (per-person page) raises; the second (index) succeeds.
         target = tmp_path / "people" / "bad-write.md"
         original_atomic = __import__(
-            "brain.wiki.build_people", fromlist=["atomic_write_text"]
+            "brain.people", fromlist=["atomic_write_text"]
         ).atomic_write_text
 
         def fake_atomic(path: Path, text: str) -> None:
@@ -1575,7 +1577,7 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
                 raise PermissionError("synthetic write")
             original_atomic(path, text)
 
-        mocker.patch("brain.wiki.build_people.atomic_write_text", fake_atomic)
+        mocker.patch("brain.people.atomic_write_text", fake_atomic)
 
         import logging
         with caplog.at_level(logging.WARNING):
@@ -1601,7 +1603,7 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
         # Force only the index write to raise.
         index_target = tmp_path / "people" / "index.md"
         original_atomic = __import__(
-            "brain.wiki.build_people", fromlist=["atomic_write_text"]
+            "brain.people", fromlist=["atomic_write_text"]
         ).atomic_write_text
 
         def fake_atomic(path: Path, text: str) -> None:
@@ -1609,7 +1611,7 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
                 raise PermissionError("synthetic index write")
             original_atomic(path, text)
 
-        mocker.patch("brain.wiki.build_people.atomic_write_text", fake_atomic)
+        mocker.patch("brain.people.atomic_write_text", fake_atomic)
 
         import logging
         with caplog.at_level(logging.WARNING):
@@ -1621,3 +1623,222 @@ class TestEmitPeoplePagesDefensiveErrorHandling:
         assert any(
             "could not write index" in r.message for r in caplog.records
         )
+
+
+# --------------------------------------------------------------------------
+# F6 — the People Hub is an egress boundary Quartz cannot cover.
+#
+# ``render_person_page``'s frontmatter has no ``sensitivity`` key, so
+# ``RemoveConfidential`` (which gates on
+# ``vfile.data.frontmatter.sensitivity`` at ``shouldPublish``) publishes every
+# hub page. ``_render_doc_line`` emits each document as an ``###`` heading, so
+# a confidential title reaching here lands on the published page AND in
+# Quartz's table of contents, on the page of every participant.
+#
+# Each absence claim below is measured against the PERMISSIVE payload, never
+# against an empty one: the same fixture is aggregated with
+# ``exclude_confidential=False`` first to show the row is reachable, and only
+# then with the gate on.
+#
+# THE HOLE WAS CONFIRMED BEFORE IT WAS CLOSED. Against the source at
+# `833a395` this fixture emitted `<vault>/people/dana.md` containing:
+#
+#   ---
+#   ...
+#   doc_count: 2                      <- counted the withheld doc
+#   ---                               <- and NO `sensitivity` key, which is
+#                                        why `RemoveConfidential` published it
+#   ## Documents (2)
+#   ### 2026-04-02 - [[...compensation-review|Compensation review notes]] (krisp)
+#   ### 2026-04-01 - [[...q3-roadmap-sync|Q3 roadmap sync]] (krisp)
+#
+# Both `###` lines are ToC entries. The gated source emits only the second.
+# --------------------------------------------------------------------------
+
+_HUB_NORMAL_TITLE = "Q3 roadmap sync"
+_HUB_CONFIDENTIAL_TITLE = "Compensation review notes"
+
+
+def _seed_hub_pair(conn: psycopg.Connection[Any]) -> None:
+    """Seed one person with two krisp docs — one normal, one confidential.
+
+    Both docs are non-draft, both carry the same participant key, and both
+    have a ``vault_path``: ``sensitivity`` is the ONLY column that differs,
+    so it is the only predicate that can separate them.
+    """
+    store = DirectoryStore(conn)
+    store.upsert_pair(
+        display_name="Dana", email="dana@example.com", source="people_yml"
+    )
+    _seed_doc(
+        conn,
+        source_kind="krisp",
+        external_id="krisp-normal",
+        title=_HUB_NORMAL_TITLE,
+        metadata={"_participant_keys": ["dana@example.com"], "date": "2026-04-01"},
+        vault_path="_ingested/krisp/2026-04-01-aaaaaaaa-q3-roadmap-sync.md",
+    )
+    _seed_doc(
+        conn,
+        source_kind="krisp",
+        external_id="krisp-confidential",
+        title=_HUB_CONFIDENTIAL_TITLE,
+        metadata={"_participant_keys": ["dana@example.com"], "date": "2026-04-02"},
+        vault_path="_ingested/krisp/2026-04-02-bbbbbbbb-compensation-review.md",
+        sensitivity="confidential",
+    )
+
+
+class TestConfidentialDocsAreWithheldFromTheHub:
+    """F6 gate on ``aggregate_people`` — both directions, and the page."""
+
+    def test_permissive_variant_returns_the_confidential_doc(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        """POSITIVE CONTROL for every absence claim in this class.
+
+        With the gate off, the confidential doc is in Dana's roster and her
+        ``doc_count`` is 2. That is what makes the exclusions below evidence
+        of the gate rather than of a fixture that never produced the row.
+        """
+        _seed_hub_pair(test_db)
+
+        records = aggregate_people(
+            test_db,
+            owner_keys=frozenset(),
+            min_docs=1,
+            exclude_confidential=False,
+        )
+
+        dana = _record_by_name(records, "dana")
+        titles = [d.title for d in dana.docs]
+        assert _HUB_NORMAL_TITLE in titles
+        assert _HUB_CONFIDENTIAL_TITLE in titles, (
+            "the permissive payload does not contain the confidential doc — "
+            "every absence claim in this class would then be inert"
+        )
+        assert len(dana.docs) == 2
+
+    def test_strict_variant_withholds_the_confidential_doc(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        """Gate on: the normal doc survives, the confidential one does not."""
+        _seed_hub_pair(test_db)
+
+        records = aggregate_people(
+            test_db,
+            owner_keys=frozenset(),
+            min_docs=1,
+            exclude_confidential=True,
+        )
+
+        dana = _record_by_name(records, "dana")
+        titles = [d.title for d in dana.docs]
+        assert _HUB_NORMAL_TITLE in titles, (
+            "control doc missing — the roster is empty, so the assertion "
+            "below would be vacuous"
+        )
+        assert _HUB_CONFIDENTIAL_TITLE not in titles
+
+    def test_gate_is_wired_to_the_sql(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        """Flipping ONE keyword brings the confidential doc back.
+
+        Copied from
+        ``test_build_related_signal.test_eligible_source_docs_gate_is_wired_to_the_sql``:
+        ``gated`` and ``opened`` measured on the SAME fixture inside the SAME
+        test. This is what makes the absence claims in this class meaningful —
+        without it the confidential doc could be missing for any reason (a bad
+        fixture, an unresolved participant key, a directory miss) and the gate
+        would still look green. Observing the row RETURN under
+        ``exclude_confidential=False`` proves the parameter reaches the SQL
+        rather than being accepted and ignored.
+        """
+        _seed_hub_pair(test_db)
+
+        def titles(**kwargs: Any) -> set[str]:
+            records = aggregate_people(
+                test_db, owner_keys=frozenset(), min_docs=1, **kwargs
+            )
+            return {d.title for d in _record_by_name(records, "dana").docs}
+
+        gated = titles(exclude_confidential=True)
+        opened = titles(exclude_confidential=False)
+
+        assert _HUB_CONFIDENTIAL_TITLE not in gated
+        assert _HUB_CONFIDENTIAL_TITLE in opened
+        assert _HUB_NORMAL_TITLE in gated and _HUB_NORMAL_TITLE in opened
+
+    def test_doc_count_drops_to_match_what_is_rendered(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        """``doc_count`` is ``len(record.docs)``, so it must fall to 1.
+
+        A page that said "Documents (2)" while listing one would advertise the
+        existence of a document it was withholding — the count itself leaks.
+        """
+        _seed_hub_pair(test_db)
+
+        strict = aggregate_people(
+            test_db, owner_keys=frozenset(), min_docs=1, exclude_confidential=True
+        )
+        permissive = aggregate_people(
+            test_db, owner_keys=frozenset(), min_docs=1, exclude_confidential=False
+        )
+
+        assert len(_record_by_name(permissive, "dana").docs) == 2
+        assert len(_record_by_name(strict, "dana").docs) == 1
+
+    def test_default_is_fail_closed(
+        self, test_db: psycopg.Connection[Any]
+    ) -> None:
+        """Called with no flag at all, the confidential doc stays out.
+
+        Pins the default itself, not just the explicit-True path. A caller
+        that forgets the argument must get the safe variant — that default is
+        the whole reason this function's signature differs from
+        :mod:`brain.vault.graph`'s.
+        """
+        _seed_hub_pair(test_db)
+
+        records = aggregate_people(test_db, owner_keys=frozenset(), min_docs=1)
+
+        dana = _record_by_name(records, "dana")
+        assert [d.title for d in dana.docs] == [_HUB_NORMAL_TITLE]
+
+    def test_emitted_page_never_names_the_confidential_doc(
+        self, test_db: psycopg.Connection[Any], tmp_path: Path
+    ) -> None:
+        """The published artifact: ``<vault>/people/dana.md``.
+
+        This is the assertion that matches the defect — the earlier ones are
+        about the data, this one is about the file Quartz will publish.
+        """
+        _seed_hub_pair(test_db)
+
+        # Control, measured on the permissive payload the emitter could have
+        # rendered: both titles were reachable from this fixture.
+        permissive = aggregate_people(
+            test_db, owner_keys=frozenset(), min_docs=1, exclude_confidential=False
+        )
+        assert len(_record_by_name(permissive, "dana").docs) == 2
+
+        emit_people_pages(
+            test_db,
+            vault_path=tmp_path,
+            owner_keys=frozenset(),
+            min_docs=1,
+        )
+
+        page = (tmp_path / "people" / "dana.md").read_text(encoding="utf-8")
+        _fields, body = parse_frontmatter(page)
+        assert _HUB_NORMAL_TITLE in body
+        assert _HUB_CONFIDENTIAL_TITLE not in body
+        assert "## Documents (1)" in body
+        assert "## Documents (2)" not in body
+
+        # The hub index is published too, and carries per-person counts.
+        index = (tmp_path / "people" / "index.md").read_text(encoding="utf-8")
+        assert "dana" in index.lower()
+        assert _HUB_CONFIDENTIAL_TITLE not in index

@@ -30,6 +30,32 @@ Derived-edge semantics:
   enum extension is a Python-only convention.
 - Wiki-link edges keep ``rule=None``, ``weight=None``,
   ``evidence=None``; derived edges populate all three.
+
+**File-size ceiling (CLAUDE.md): this module CROSSED 800 in the 2026-09-02
+merge, and it now has a row in that table.** No live count here on purpose --
+re-derive with ``wc -l src/brain/vault/graph.py``. What cannot rot is the pair
+of trails, which are siblings from one base rather than a sequence: 620
+(``f8c76c0``, base) -> 728 (``2ed2d83``) -> 756 (``ec6afb6``) -> 792
+(``b7fd0e8``) -> 798 (``c49fc46``) on ``feat/wiki-to-ui-consolidation``, two
+lines UNDER; and 620 (``f8c76c0``) -> 740 (``f495f66``) on ``master``, also
+under. Neither branch needed a row and neither was wrong to omit one. The
+merge is the union of two independent growths in this one file and the union
+is over -- which is the by-omission failure CLAUDE.md's own residue section
+describes, caught by re-deriving the row set instead of inheriting it.
+
+What grew, from each side, with the reason inline at each point of growth:
+PR #9 added the F6 confidential lens (two frozen variants per title-bearing
+read, selected by ``exclude_confidential`` -- reasoned at :data:`_NOT_CONFIDENTIAL`
+and at each ``_*_SQL`` pair); master added ``fetch_limit``, the ``LIMIT``
+prefix bound, and the UNIQUE final sort key that makes every ORDER BY total
+(reasoned at :data:`_BACKLINKS_ORDER` and :data:`_DERIVED_ORDER`). The two
+COMPOSE in the only safe order -- the sensitivity predicate is inside the
+statement, so gated rows are gone before ``LIMIT`` counts and a short page
+never doubles as a withholding oracle. Not split in the same commit as the
+merge on purpose: a module split inside a security merge makes both harder to
+review. The seam, when it is taken, is the three frozen statement pairs plus
+:func:`_derived_partners` moving to a ``graph_sql.py``, leaving the shaping
+and BFS here.
 """
 from collections import deque
 from collections.abc import Iterable
@@ -37,6 +63,99 @@ from dataclasses import dataclass
 from typing import Any
 
 import psycopg
+
+from ..sensitivity import CONFIDENTIAL, not_confidential_sql
+
+#: Two frozen variants per title-bearing read, selected by
+#: ``exclude_confidential`` — the pattern :mod:`brain.ui.queries` uses, and for
+#: the same reason: a ``%s`` placeholder for the level would put a positional
+#: parameter inside a fragment three statements share, so every one of them
+#: would have to bind it first, in order, or silently bind the wrong thing.
+#:
+#: WHY THESE READS NEEDED A GATE AT ALL. They return document TITLES. The
+#: ``/api/notes/{id}/links`` rail names every document linking to the note on
+#: screen, and ``routes_links``' own module docstring shows the author reasoned
+#: about confidentiality and scoped it to *bodies* ("keeps a confidential body
+#: out of a rail that the note route itself may have withheld") — the payload
+#: carries no bodies, and so the rail looked safe. Titles were not considered.
+_NOT_CONFIDENTIAL = f"AND d.sensitivity <> '{CONFIDENTIAL}'"
+
+_BACKLINKS_SELECT = """
+        SELECT d.id::text, d.title, d.kind, l.link_text, l.link_kind
+        FROM links l
+        JOIN documents d ON d.id = l.src_document_id
+        WHERE l.dst_document_id = %s
+"""
+#: ``l.id`` is the UNIQUE tiebreaker that makes this sort TOTAL, and it is
+#: load-bearing, not cosmetic. Without it two distinct source documents that
+#: share both title and link text are fully tied, and PostgreSQL is then free
+#: to order them differently for a bounded plan (Limit over a top-N heapsort)
+#: than for the unbounded one (plain sort) -- which it genuinely does. That
+#: breaks the prefix guarantee ``fetch_limit`` documents on every caller.
+#: ``d.id`` would NOT be enough: ``links`` is UNIQUE on
+#: (src, dst, link_text, link_kind), so one source can carry a wiki AND an
+#: embed row with the same text to the same target.
+#:
+#: ``LIMIT %s`` carries the fetch budget. ``LIMIT NULL`` is PostgreSQL's
+#: documented "no limit", so the unbounded and the bounded read stay ONE
+#: statement rather than two that can drift. :data:`_OUTGOING_ORDER` reuses
+#: this verbatim: same shape, same failure mode with the join side flipped.
+_BACKLINKS_ORDER = (
+    "        ORDER BY LOWER(d.title), l.link_text, l.id\n"
+    "        LIMIT %s\n        "
+)
+
+_BACKLINKS_SQL_ANY = _BACKLINKS_SELECT + _BACKLINKS_ORDER
+_BACKLINKS_SQL = f"{_BACKLINKS_SELECT}          {_NOT_CONFIDENTIAL}\n{_BACKLINKS_ORDER}"
+
+_OUTGOING_SELECT = """
+        SELECT d.id::text, d.title, d.kind, l.link_text, l.link_kind
+        FROM links l
+        JOIN documents d ON d.id = l.dst_document_id
+        WHERE l.src_document_id = %s
+"""
+_OUTGOING_ORDER = _BACKLINKS_ORDER
+
+_OUTGOING_SQL_ANY = _OUTGOING_SELECT + _OUTGOING_ORDER
+_OUTGOING_SQL = f"{_OUTGOING_SELECT}          {_NOT_CONFIDENTIAL}\n{_OUTGOING_ORDER}"
+
+#: The derived-partner read aliases the joined document ``partner``, not ``d``,
+#: so it cannot share :data:`_NOT_CONFIDENTIAL`. Spelled out rather than
+#: aliased-to-fit: renaming the alias to reuse one constant would make the
+#: CASE expression below read as if it filtered the edge rather than the
+#: partner document.
+_DERIVED_SELECT = """
+        SELECT
+            dl.rule,
+            dl.weight,
+            dl.evidence,
+            partner.id::text,
+            partner.title,
+            partner.kind
+        FROM derived_links dl
+        JOIN documents partner
+          ON partner.id = CASE
+              WHEN dl.src_document_id = %(doc)s THEN dl.dst_document_id
+              ELSE dl.src_document_id
+          END
+        WHERE (dl.src_document_id = %(doc)s OR dl.dst_document_id = %(doc)s)
+"""
+#: ``dl.id`` completes the sort. ``(partner.id, rule)`` is NOT unique here:
+#: ``derived_links`` is UNIQUE on (src, dst, rule) and the WHERE above matches
+#: BOTH directions, so rows ``(doc, X, r)`` and ``(X, doc, r)`` both resolve to
+#: partner X under rule r and tie on every other key. ``LIMIT %(lim)s`` is the
+#: fetch budget, named rather than positional because this statement already
+#: binds ``%(doc)s`` three times.
+_DERIVED_ORDER = (
+    "        ORDER BY dl.rule, LOWER(partner.title), partner.id::text, dl.id\n"
+    "        LIMIT %(lim)s\n        "
+)
+
+_DERIVED_SQL_ANY = _DERIVED_SELECT + _DERIVED_ORDER
+_DERIVED_SQL = (
+    f"{_DERIVED_SELECT}          AND partner.sensitivity <> '{CONFIDENTIAL}'\n"
+    f"{_DERIVED_ORDER}"
+)
 
 
 @dataclass(frozen=True)
@@ -177,6 +296,7 @@ def backlinks_for(
     document_id: str,
     *,
     include_derived: bool = True,
+    exclude_confidential: bool = False,
     fetch_limit: int | None = None,
 ) -> list[BacklinkRow]:
     """Return every document that links TO ``document_id``.
@@ -195,6 +315,27 @@ def backlinks_for(
     and ``backlinks_for(B)``. Derived rows sort within their block by
     rule, then partner title, then partner id, then the derived row's own
     ``id`` — total, for the same reason.
+
+    ``exclude_confidential`` DEFAULTS FALSE, which is not the fail-closed
+    convention :mod:`brain.ui.queries` uses, and the difference is the caller
+    set. That module serves one surface; this one is shared by ``brain
+    backlinks`` at a terminal, the MCP server, and ``brain.ui``. The first two
+    are the owner reading their own corpus locally — the loopback case the
+    ``browseable_tag_counts`` ruling already treats as entitled — and the CLI
+    offers no ``--include-confidential`` to turn a hidden neighbour back on, so
+    a fail-closed default here would remove a row the owner has no way to ask
+    for. The gate therefore lives at the boundary that has a policy:
+    ``ui/routes_links.note_links`` passes ``not ctx.serve_confidential_titles``
+    on every request, and ``tests/test_ui_confidential_titles_gate.py`` fails
+    for any UI route that names a confidential document regardless of which
+    query it used — so the protection does not rest on this default.
+
+    Note for the MCP server: ``brain_backlinks`` / ``brain_links`` bridge to this
+    parameter as ``exclude_confidential=not include_confidential``. The polarity
+    inverts at that boundary — their default EXCLUDES confidential neighbours
+    while this function's default includes them — and dropping the ``not`` fails
+    OPEN, only ever adding rows. That is why ``tests/test_mcp_links_confidential.py``
+    asserts each direction separately. See :func:`brain.mcp_server._confidential_lens`.
 
     ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
     default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
@@ -216,25 +357,15 @@ def backlinks_for(
     is not ``unbounded[1]``. The rows an agent sees would silently change with
     the ceiling. So each block is limited to what the budget has LEFT, and a
     block is skipped entirely once nothing remains.
+
+    ``fetch_limit`` and ``exclude_confidential`` COMPOSE in the only order that
+    is safe: the sensitivity predicate is part of the statement, so excluded
+    rows are gone BEFORE ``LIMIT`` counts. Filtering a bounded fetch afterwards
+    in Python would make the row count itself an oracle -- a short page would
+    announce that something had been withheld.
     """
     rows = conn.execute(
-        """
-        SELECT d.id::text, d.title, d.kind, l.link_text, l.link_kind
-        FROM links l
-        JOIN documents d ON d.id = l.src_document_id
-        WHERE l.dst_document_id = %s
-        -- ``l.id`` is the UNIQUE tiebreaker that makes this sort TOTAL, and it
-        -- is load-bearing, not cosmetic. Without it two distinct source
-        -- documents that share both title and link text are fully tied, and
-        -- PostgreSQL is then free to order them differently for a bounded plan
-        -- (Limit over a top-N heapsort) than for the unbounded one (plain
-        -- sort) -- which it genuinely does. That breaks the prefix guarantee
-        -- this function documents above. ``d.id`` would NOT be enough: links
-        -- is UNIQUE on (src, dst, link_text, link_kind), so one source can
-        -- carry a wiki AND an embed row with the same text to the same target.
-        ORDER BY LOWER(d.title), l.link_text, l.id
-        LIMIT %s
-        """,
+        _BACKLINKS_SQL if exclude_confidential else _BACKLINKS_SQL_ANY,
         (document_id, fetch_limit),
     ).fetchall()
     out: list[BacklinkRow] = [
@@ -261,7 +392,10 @@ def backlinks_for(
                 evidence=row.evidence,
             )
             for row, partner in _derived_partners(
-                conn, document_id, fetch_limit=derived_budget
+                conn,
+                document_id,
+                exclude_confidential=exclude_confidential,
+                fetch_limit=derived_budget,
             )
         )
     return out
@@ -273,6 +407,7 @@ def outgoing_links_for(
     *,
     include_unresolved: bool = False,
     include_derived: bool = True,
+    exclude_confidential: bool = False,
     fetch_limit: int | None = None,
 ) -> list[OutgoingLinkRow]:
     """Return every document ``document_id`` links TO.
@@ -292,6 +427,27 @@ def outgoing_links_for(
     in semantics, ``outgoing_links_for(X)`` returns the same partner set
     as ``backlinks_for(X)`` for them — every doc paired with X
     regardless of canonical direction.
+
+    ``exclude_confidential`` DEFAULTS FALSE, which is not the fail-closed
+    convention :mod:`brain.ui.queries` uses, and the difference is the caller
+    set. That module serves one surface; this one is shared by ``brain
+    backlinks`` at a terminal, the MCP server, and ``brain.ui``. The first two
+    are the owner reading their own corpus locally — the loopback case the
+    ``browseable_tag_counts`` ruling already treats as entitled — and the CLI
+    offers no ``--include-confidential`` to turn a hidden neighbour back on, so
+    a fail-closed default here would remove a row the owner has no way to ask
+    for. The gate therefore lives at the boundary that has a policy:
+    ``ui/routes_links.note_links`` passes ``not ctx.serve_confidential_titles``
+    on every request, and ``tests/test_ui_confidential_titles_gate.py`` fails
+    for any UI route that names a confidential document regardless of which
+    query it used — so the protection does not rest on this default.
+
+    Note for the MCP server: ``brain_backlinks`` / ``brain_links`` bridge to this
+    parameter as ``exclude_confidential=not include_confidential``. The polarity
+    inverts at that boundary — their default EXCLUDES confidential neighbours
+    while this function's default includes them — and dropping the ``not`` fails
+    OPEN, only ever adding rows. That is why ``tests/test_mcp_links_confidential.py``
+    asserts each direction separately. See :func:`brain.mcp_server._confidential_lens`.
 
     ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
     default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
@@ -313,18 +469,15 @@ def outgoing_links_for(
     is not ``unbounded[1]``. The rows an agent sees would silently change with
     the ceiling. So each block is limited to what the budget has LEFT, and a
     block is skipped entirely once nothing remains.
+
+    ``fetch_limit`` and ``exclude_confidential`` COMPOSE in the only order that
+    is safe: the sensitivity predicate is part of the statement, so excluded
+    rows are gone BEFORE ``LIMIT`` counts. Filtering a bounded fetch afterwards
+    in Python would make the row count itself an oracle -- a short page would
+    announce that something had been withheld.
     """
     resolved_rows = conn.execute(
-        """
-        SELECT d.id::text, d.title, d.kind, l.link_text, l.link_kind
-        FROM links l
-        JOIN documents d ON d.id = l.dst_document_id
-        WHERE l.src_document_id = %s
-        -- Unique tiebreaker; see the note in ``backlinks_for``. Same shape,
-        -- same failure mode with the join side flipped.
-        ORDER BY LOWER(d.title), l.link_text, l.id
-        LIMIT %s
-        """,
+        _OUTGOING_SQL if exclude_confidential else _OUTGOING_SQL_ANY,
         (document_id, fetch_limit),
     ).fetchall()
     out: list[OutgoingLinkRow] = [
@@ -353,7 +506,10 @@ def outgoing_links_for(
                 evidence=row.evidence,
             )
             for row, partner in _derived_partners(
-                conn, document_id, fetch_limit=derived_budget
+                conn,
+                document_id,
+                exclude_confidential=exclude_confidential,
+                fetch_limit=derived_budget,
             )
         )
     unresolved_budget = _budget_left(fetch_limit, len(out))
@@ -389,6 +545,7 @@ def orphans(
     conn: psycopg.Connection[Any],
     *,
     vault_only: bool = True,
+    exclude_confidential: bool = False,
     fetch_limit: int | None = None,
 ) -> list[GraphNode]:
     """Return documents with zero incoming AND zero outgoing links.
@@ -411,6 +568,23 @@ def orphans(
     Sort: title (case-insensitive) for deterministic output, then id to
     break ties when two notes share a title.
 
+    ``exclude_confidential`` mirrors :func:`backlinks_for` / :func:`outgoing_links_for`
+    — same name, same FALSE default (include), because the CLI sits inside the
+    trust boundary. It is NEW here, and its absence is the whole reason this
+    function is being touched: when the F6 gate was added to those two link
+    reads, it was added to *exactly the two functions someone had named*. This
+    one returns document TITLES from the same module, feeds ``brain_orphans``
+    on the MCP surface, and could not be gated even in principle because the
+    parameter did not exist. The enumeration miss did not stop at the MCP
+    layer; it propagated down into the graph layer itself.
+
+    Unlike the two link reads this cannot use the frozen ``_NOT_CONFIDENTIAL``
+    fragment: that constant carries a leading ``AND`` for statements that
+    interpolate it directly, while this query joins a ``where`` LIST with
+    ``' AND '``. Appending the fragment verbatim would emit ``AND AND``. The
+    bare predicate is appended instead — still parameterless, still built from
+    the ``CONFIDENTIAL`` module constant rather than caller input.
+
     ``fetch_limit`` bounds the rows fetched from the DATABASE. ``None`` — the
     default, and what every CLI caller passes — means no limit: ``LIMIT NULL``
     is PostgreSQL's documented "no limit", so this stays ONE code path rather
@@ -423,14 +597,9 @@ def orphans(
     pass ``their_cap + 1``; that extra row is what lets
     :func:`brain.mcp_limits.cap_rows` still detect saturation.
 
-    **The budget is spent ACROSS blocks, not per block**, and that is the whole
-    subtlety. These functions concatenate several independently-ordered blocks
-    (wiki, then derived, then unresolved). Giving each block its own ``LIMIT
-    fetch_limit`` looks equivalent and is not: with a 1-row budget and two
-    non-empty blocks it returns ``[wiki[0], derived[0]]``, whose second element
-    is not ``unbounded[1]``. The rows an agent sees would silently change with
-    the ceiling. So each block is limited to what the budget has LEFT, and a
-    block is skipped entirely once nothing remains.
+    It composes with ``exclude_confidential`` the same way the link reads do:
+    the sensitivity predicate joins the ``where`` list, so excluded rows are
+    gone before ``LIMIT`` counts and the row count never becomes an oracle.
     """
     where = ["d.id NOT IN (SELECT src_document_id FROM links)"]
     where.append("d.id NOT IN (SELECT dst_document_id FROM links)")
@@ -439,6 +608,8 @@ def orphans(
     where.append("d.id NOT IN (SELECT dst_document_id FROM derived_links)")
     if vault_only:
         where.append("d.kind = 'vault'")
+    if exclude_confidential:
+        where.append(f"d.sensitivity <> '{CONFIDENTIAL}'")
     sql = f"""
         SELECT d.id::text, d.title, d.kind
         FROM documents d
@@ -463,6 +634,7 @@ def graph_data(
     depth: int | None = None,
     include_ingested: bool = False,
     include_derived: bool = True,
+    exclude_confidential: bool = False,
 ) -> GraphData:
     """Build a :class:`GraphData` snapshot for export.
 
@@ -493,6 +665,24 @@ def graph_data(
 
     Cycle safety: BFS uses a visited set, so ``A → B → A`` terminates at
     depth 2 instead of looping. Self-loops never appear.
+
+    ``exclude_confidential`` (F6) omits confidential documents from the node set,
+    and an explicit predicate below drops every edge that touches one. Dropping
+    the node is NOT sufficient on its own, and this said it was — see the
+    reconciliation after the document fetch for the two paths on which the
+    document was withheld while its edges shipped.
+
+    This is the FOURTH read in this module to get the parameter, and it was the
+    one left short. :func:`backlinks_for`, :func:`outgoing_links_for` and
+    :func:`orphans` all take it; this did not, which is the same one-short shape
+    that produced the original finding — the flag was added to exactly the
+    functions someone had enumerated. Its only caller today is ``cli.py``, inside
+    the trust boundary, so nothing was leaking in practice; it is closed so that
+    a future non-CLI caller (an MCP tool, a UI route) inherits a gateable
+    function rather than discovering it cannot gate this one.
+
+    DEFAULTS FALSE (include), matching this module's three siblings rather than
+    the MCP layer's ``include_confidential``.
     """
     # Single fetch of every link, plus a filter on the document set —
     # cheaper at personal-corpus scale than per-node SELECTs even when
@@ -542,8 +732,16 @@ def graph_data(
     # Pull every document so we can filter / look up titles in Python.
     # Personal-corpus scale (low thousands) — one fetch is cheaper than
     # repeated round-trips and keeps the SQL trivially auditable.
+    #
+    # F6: this fetch is the ONLY sensitivity predicate in the function, so
+    # everything downstream has to be reconciled against it — see the edge gate
+    # immediately after ``all_docs``.
+    doc_where = "" if not exclude_confidential else (
+        f"WHERE {not_confidential_sql('documents')} "
+    )
     doc_rows = conn.execute(
-        "SELECT id::text, title, kind FROM documents ORDER BY LOWER(title), id"
+        f"SELECT id::text, title, kind FROM documents {doc_where}"
+        "ORDER BY LOWER(title), id"
     ).fetchall()
     all_docs: dict[str, GraphNode] = {
         str(r[0]): GraphNode(
@@ -552,8 +750,46 @@ def graph_data(
         for r in doc_rows
     }
 
+    # F6: reconcile the edge set against the gated document set, HERE, before
+    # anything downstream derives from it. This is the separate edge predicate a
+    # comment in this spot used to call dead code; it was not, and the claim was
+    # true on exactly one of the three paths below.
+    #
+    # The gate on ``all_docs`` cannot reach ``all_edges`` or the BFS frontier,
+    # because both are built from the ungated fetch above. Two consequences, one
+    # root cause:
+    #
+    #   * ``include_ingested=True`` sets ``node_filter = None`` and took
+    #     ``kept_edges = list(all_edges)`` verbatim — no edge filtering at all.
+    #     A withheld document still shipped its edges, carrying its UUID and,
+    #     in ``link_text``, its title.
+    #   * Rooted mode filtered ``kept_edges`` on ``keep``, not on ``all_docs``,
+    #     so withholding a node there would not have withheld its edges either.
+    #
+    # Doing it once, up here, also fixes what a downstream repair could not: the
+    # BFS no longer TRAVERSES a withheld document, so a node reachable only
+    # through one stops arriving as an edgeless node — an unexplained node in a
+    # rooted view discloses that something hidden joins it to the root.
+    #
+    # Unconditional rather than gated on ``exclude_confidential``: ``links`` and
+    # ``derived_links`` both declare ``REFERENCES documents(id) ON DELETE
+    # CASCADE`` (migrations 003 and 005), so with the flag off ``all_docs`` is
+    # every document and this is a no-op. One code path, and the invariant
+    # :class:`GraphData` already documents — "an edge always has both endpoints
+    # in ``nodes``" — becomes true on every path instead of on the default one.
+    all_edges = [
+        e
+        for e in all_edges
+        if e.src_document_id in all_docs and e.dst_document_id in all_docs
+    ]
+
     if root is not None:
-        keep = _bfs_frontier(root, all_edges, depth=depth)
+        # Intersect BEFORE sorting, not with a trailing ``if``: ``sorted()``
+        # evaluates its key over EVERY element before a comprehension's filter
+        # runs, so ``all_docs[d]`` raised ``KeyError`` on the first withheld id.
+        # The old guard pre-dated ``exclude_confidential`` and was unreachable
+        # while ``all_docs`` was every document.
+        keep = _bfs_frontier(root, all_edges, depth=depth) & all_docs.keys()
         # Filter edges to those entirely within the frontier.
         kept_edges = [
             e
@@ -565,7 +801,6 @@ def graph_data(
             for doc_id in sorted(
                 keep, key=lambda d: (all_docs[d].title.lower(), d)
             )
-            if doc_id in all_docs
         ]
         return GraphData(nodes=kept_nodes, edges=kept_edges)
 
@@ -616,6 +851,7 @@ def _derived_partners(
     conn: psycopg.Connection[Any],
     document_id: str,
     *,
+    exclude_confidential: bool = False,
     fetch_limit: int | None = None,
 ) -> list[tuple[_DerivedRow, GraphNode]]:
     """Return ``(row, partner_node)`` pairs for every derived edge touching ``document_id``.
@@ -633,28 +869,7 @@ def _derived_partners(
     the query.
     """
     rows = conn.execute(
-        """
-        SELECT
-            dl.rule,
-            dl.weight,
-            dl.evidence,
-            partner.id::text,
-            partner.title,
-            partner.kind
-        FROM derived_links dl
-        JOIN documents partner
-          ON partner.id = CASE
-              WHEN dl.src_document_id = %(doc)s THEN dl.dst_document_id
-              ELSE dl.src_document_id
-          END
-        WHERE dl.src_document_id = %(doc)s OR dl.dst_document_id = %(doc)s
-        -- ``dl.id`` completes the sort. (partner.id, rule) is NOT unique
-        -- here: derived_links is UNIQUE on (src, dst, rule), and this WHERE
-        -- matches BOTH directions, so rows (doc, X, r) and (X, doc, r) both
-        -- resolve to partner X under rule r and tie on every other key.
-        ORDER BY dl.rule, LOWER(partner.title), partner.id::text, dl.id
-        LIMIT %(lim)s
-        """,
+        _DERIVED_SQL if exclude_confidential else _DERIVED_SQL_ANY,
         {"doc": document_id, "lim": fetch_limit},
     ).fetchall()
     return [

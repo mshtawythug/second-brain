@@ -1,5 +1,118 @@
 """MCP server exposing the second brain's tools over stdio.
 
+**File-size ceiling (CLAUDE.md): already over, and it grew.**
+
+THE CURRENT COUNT IS DELIBERATELY NOT WRITTEN HERE. Re-derive it::
+
+    wc -l src/brain/mcp_server.py
+
+A figure in this docstring has now been wrong TWICE, both times for the same
+reason: it was typed by whoever last grew the file, describing a tree that
+stopped existing at the next commit. The most recent was ``4,009 -> 4,137``,
+which matched no commit in the range -- written in ``0473b5f``, *after* the
+growth it claimed to narrate, under a CLAUDE.md header whose own instruction is
+to re-derive rather than inherit. What that row is FOR is disclosure -- that this
+file is over the ceiling and why it is allowed to be -- and the reasons below are
+what discharge that duty. The count is a measurement, and a measurement belongs
+in the command that takes it.
+
+What is safe to record, because commits do not change, is the base and the
+trail::
+
+    4,009  f8c76c0  branch base
+    4,043  3b16527
+    4,055  c62e3de
+    4,191  2ed2d83
+    4,356  ec6afb6
+           the commit that added these last two paragraphs -- named
+           descriptively, with no digit, for the reason below
+
+(``0473b5f`` touched this file at net zero and is correctly absent from a GROWTH
+trail. The ``ec6afb6`` hop, however, was simply MISSING until now: the prose
+below already described that commit's listing-gate work, so the two halves of
+this record disagreed -- the same one-hop-short defect ``connect.py`` and
+``timeline.py`` carried.
+
+WHY THE LAST HOP CARRIES NEITHER A DIGIT NOR A SHA. A record of a file's size is
+invalidated by the act of writing the record: the hash does not exist until
+after the write, and any delta stated is falsified by the same edit that states
+it. So no hop can name its own commit, and a trail that tries is stale on
+arrival -- which is exactly how this file's record, and two others, stopped one
+hop short while each fix believed it had closed the gap. The terminating form is
+the one used here and it is why this docstring has never carried a live count:
+SHA-bound historical hops, which are facts about frozen commits and cannot rot;
+a descriptive final hop for the in-flight change; and a command for the present.
+Read the trail as authoritative only THROUGH THE LAST SHA IT NAMES, and get
+everything after it -- uncommitted work included -- from ``wc -l`` above plus::
+
+    git log --oneline f8c76c0..HEAD -- src/brain/mcp_server.py
+
+The growth after ``ec6afb6`` is DOCUMENTATION ONLY -- no new code path, no new
+tool, no behaviour change: the F6 exemption reasoning for
+``brain_graphrag_entities`` was moved to live on the exempted tool instead of
+only inside ``brain_graphrag_communities``' docstring, where an auditor opening
+the exemption would never find it.)
+
+Five growths, each reasoned inline where it landed: (1) ``_split_source_filter``,
+so ``source="none"`` selects the same documents here as in the web UI and the
+facet panel rather than silently selecting none; (2) validation of ``source`` at
+the ``brain_ingest_stdin`` WRITE boundary -- ``sources.kind`` has no CHECK
+constraint and this is the entry point where that value is chosen by a model
+rather than typed by a person; (3) the F6 confidential lens on ``brain_list``,
+which was listing confidential TITLES to a hosted model while ``brain_resurface``
+thirty lines below it was not -- the argument already existed on
+``queries.list_documents`` and this call site simply never passed it; (4) the same
+lens on ``brain_backlinks`` and ``brain_links``, whose parameter INVERTS across
+the ``vault.graph`` boundary (``exclude_confidential=not include_confidential``)
+and therefore carries a docstring warning at each call site, because dropping
+that ``not`` fails open while every "the neighbour is present" assertion stays
+green; (5) the same lens on the four UNPROMPTED listing tools -- ``brain_brief``,
+``brain_review_weekly``, ``brain_timeline`` and ``brain_connect_list`` -- which
+took no document id and no query at all, so every document they named was one the
+caller had not asked for. Two of them (``brain_brief``, ``brain_review_weekly``)
+were BODY egress rather than title egress: ``todo.iter_action_item_docs`` selects
+``documents.content`` and parses action-item text out of it, and ``brain_brief``
+forwarded that text to a hosted model in its suggestion prompt.
+
+A SIXTH growth, and it is a correction rather than a new lens: the F6 gate on
+``brain_review_weekly``'s EMIT path. Growths (3)-(5) above all gate what a tool
+RETURNS, and that is the whole story for every tool but this one -- it also
+WRITES a page into the vault, and it was handing that write the caller's
+permissively built report. ``include_confidential`` is a read lens for the
+caller; the page is served by Quartz to someone else. So the write now takes a
+second, gated payload (built only when the caller's lens is permissive; on the
+default path the returned report already IS the gated one) while the return
+value keeps answering the caller. This follows ``2b2b321``, which drew the same
+line for ``brain review weekly`` / ``brain brief --wiki`` in ``cli.py`` -- and
+corrects that commit's message, which asserted the MCP twins already gated
+correctly. They did, on the surface it was looking at. Reason inline at the
+call, cover in ``tests/test_mcp_vault_emit_confidential.py``. ``brain_brief`` is
+NOT affected: it has no vault write, asserted rather than assumed in that
+module.
+
+A SEVENTH growth, eight lines, and the smallest of them: ``brain_connect_accept``
+now runs ``connect.assert_see_also_publishable`` before its ``## See Also``
+write. Same shape as the sixth -- a tool whose RETURN was gated while its WRITE
+was not -- and same correction of a record that was true of the surface its
+author was looking at: ``iter_suggestions`` is F6-gated, but neither accept path
+goes through it. The policy lives in :mod:`brain.connect` so the CLI twin cannot
+drift from it; what is here is the eight lines that map its ``ConnectError`` to
+``INVALID_PARAMS``. Reason inline at the call.
+
+A split into per-domain tool modules stays deferred alongside ``cli.py``'s:
+this is one MCP tool registry over one shared error-mapping layer.
+
+
+--------------------------------------------------------------------------
+The record above is this branch's. The record below is ``master``'s, brought in
+by the 2026-09-02 merge. Both are kept in full because they narrate DISJOINT
+growth: the branch's seven growths are F6 confidential-egress gates, master's
+are the Wave-3 payload ceilings. Neither supersedes the other, and the merged
+file contains both sets of changes. The merged count is not the sum of the two
+trails -- they share the base ``f8c76c0`` -- so re-derive it with the ``wc -l``
+above rather than adding.
+--------------------------------------------------------------------------
+
 **Why this already-large file grew again (Wave 3, 2026-08-13).** This module is
 one of the files already past the 800-line ceiling (CLAUDE.md, "File-size
 ceiling" — which is also where the rule that a file over the ceiling may grow
@@ -77,6 +190,23 @@ reasoning, so you do not have to reconstruct it:
 argued accept and not a precedent. The recorded fallback, if this file's growth
 is revisited, is extracting the six link/graph tools into a new ``mcp_links.py``
 registered from here. That remains out of scope and deliberately un-started.
+
+**The merge itself (2026-09-02) adds no tool and no code path.** Its only
+growth in this file is this bridging note and the union of the two records
+above. Every conflict it resolved kept BOTH sides: the ``limit`` signature
+defaults still come from :mod:`brain.config` constants, ``brain_show`` still
+blank-rejects a whitespace ``summary``, the six payload ceilings are still
+enforced -- and every F6 lens the branch added is still passed at every call
+site it was added to. Per the rule at the top of this docstring: re-derive the
+net, never inherit it.
+
+**Hazard this file has already been bitten by.** Every tool is a bare ``def``
+under a lone ``@mcp_app.tool()`` line, so inserting a helper between a decorator
+and the function it was written for silently moves the registration onto the
+helper and drops the real tool off the MCP surface -- no import error, no type
+error. That happened to ``brain_recall`` on this branch and shipped in
+``3b16527``. ``tests/test_mcp_tool_registration.py`` now guards both directions.
+Put new helpers ABOVE the decorator block they serve, never between.
 """
 import logging
 import os
@@ -128,7 +258,7 @@ from .errors import (
     VaultNoteSyncError,
     VaultPathEscape,
 )
-from .facets import SearchFacets, compute_facets
+from .facets import SOURCE_NONE_BUCKET, SearchFacets, compute_facets
 from .format import (
     alias_result_json,
     community_record_json,
@@ -183,6 +313,7 @@ from .resurface import resurface_docs
 from .search import SearchDiagnostics, build_tsquery, hybrid_search
 from .search_predicate import build_predicate
 from .sensitivity import is_confidential
+from .source_kinds import InvalidSourceKind, validate_source_kind
 from .tags import normalize_tags
 from .token_report import count_payload_tokens, count_results_tokens
 
@@ -642,12 +773,19 @@ def brain_search(
             # signal `brain gaps` keys off (the vector leg always returns
             # filler).
             diagnostics = SearchDiagnostics()
+            # ONE split, consumed by BOTH the ranked query below and the facet
+            # predicate further down. Splitting twice would be two chances to
+            # diverge, and a facet panel describing a different match set than
+            # the rows beside it is the exact defect the ``none`` bucket exists
+            # to fix.
+            source_kind, source_missing = _split_source_filter(source)
             results = hybrid_search(
                 conn,
                 embedder=state.embedder,
                 query=query,
                 limit=limit,
-                source_kind=source,
+                source_kind=source_kind,
+                source_missing=source_missing,
                 tag=effective_tag,
                 since_days=since_days,
                 fts_only=fts_only,
@@ -684,7 +822,8 @@ def brain_search(
                 facet_data = compute_facets(
                     conn,
                     predicate=build_predicate(
-                        source_kind=source,
+                        source_kind=source_kind,
+                        source_missing=source_missing,
                         tag=effective_tag,
                         since_days=since_days,
                         person_keys=person_match.keys if person_match else None,
@@ -767,6 +906,30 @@ def brain_search(
             diagnostics, returned=len(results), facets=facet_data
         ),
     }
+
+
+def _split_source_filter(source: str | None) -> tuple[str | None, bool]:
+    """Split an MCP ``source`` value into ``(source_kind, source_missing)``.
+
+    ``source_kind`` alone cannot express "no source at all":
+    ``d.source_id IN (SELECT id FROM sources WHERE kind=%s)`` is false for a
+    NULL ``source_id`` under EVERY value of ``kind``, so source-less documents
+    are unreachable from the filter in all of its settings. On the live corpus
+    that is 877 of 1393 documents.
+
+    ``brain.ui.schemas.parse_search_params`` performs exactly this split for the
+    web UI. Doing it here too is what keeps the two agent-facing tools and the
+    UI answering the same question for the same input, rather than ``none``
+    meaning "documents with no source" in one surface and "a ``sources`` row
+    whose kind is the literal string none", i.e. nothing at all, in another.
+
+    The value comes from :data:`brain.facets.SOURCE_NONE_BUCKET` — the same
+    constant the facet panel labels the bucket with — so a caller can feed a
+    facet value straight back in as a filter.
+    """
+    if source == SOURCE_NONE_BUCKET:
+        return None, True
+    return source, False
 
 
 @mcp_app.tool()
@@ -864,6 +1027,7 @@ def brain_recall(
                     person_match = resolve_person_to_keys(conn, person)
                 except (PersonNotFound, PersonAmbiguous) as e:
                     raise _mcp_error(INVALID_PARAMS, str(e)) from e
+            source_kind, source_missing = _split_source_filter(source)
             result = recall(
                 conn,
                 state.cfg,
@@ -871,7 +1035,8 @@ def brain_recall(
                 query=query,
                 budget_tokens=effective_budget,
                 max_candidates=effective_candidates,
-                source_kind=source,
+                source_kind=source_kind,
+                source_missing=source_missing,
                 tag=tag,
                 since_days=since_days,
                 fts_only=fts_only,
@@ -1236,11 +1401,20 @@ def brain_list(
     source: str | None = None,
     tag: str | None = None,
     limit: int = 20,
+    include_confidential: bool = False,
 ) -> list[dict[str, Any]]:
     """List documents in the brain, optionally filtered by source kind and/or tag.
 
-    Returns up to ``limit`` rows ordered most-recently-ingested first. Mirrors
-    the JSON output of ``brain list --json``.
+    Returns up to ``limit`` rows ordered most-recently-ingested first.
+
+    F6 confidentiality: documents marked ``sensitivity='confidential'`` are
+    **excluded from the listing** unless ``include_confidential=true``. This is
+    the one place this tool deliberately does NOT mirror ``brain list --json``:
+    the CLI is unfiltered by design -- ``queries.list_documents`` documents why
+    (a tier you cannot see is a tier you forget you set) -- and the CLI sits
+    inside the trust boundary. MCP serves a hosted model outside it, and this is
+    an UNPROMPTED listing: no query is involved, so there is no "the caller
+    asked for that document" defence. See :func:`_confidential_lens`.
     """
     state = _get_state()
     logger.debug("brain_list: source=%s tag=%s limit=%d", source, tag, limit)
@@ -1250,7 +1424,16 @@ def brain_list(
         raise _mcp_error(INVALID_PARAMS, "limit must be >= 1")
     try:
         with _mcp_conn(state) as conn:
-            rows = list_documents(conn, source=source, tag=tag, limit=limit)
+            rows = list_documents(
+                conn,
+                source=source,
+                tag=tag,
+                limit=limit,
+                # The lens belongs in the PREDICATE, not the projection: a
+                # confidential row withheld from the body but still listed is
+                # the membership oracle `_confidential_lens` describes.
+                sensitivity=_confidential_lens(include_confidential),
+            )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     return [
@@ -1385,6 +1568,17 @@ def brain_ingest_stdin(
     """
     if not content.strip():
         raise _mcp_error(INVALID_PARAMS, "content is empty")
+    # `sources.kind` has no CHECK constraint, and this is the entry point where
+    # the value is chosen by a model rather than typed by a person -- so it is
+    # the likeliest source of a plausible-but-wrong kind ("email", "meeting",
+    # "none"). An unvalidated kind is COUNTED by the facet panel and then not
+    # RETURNED when that facet is clicked, so it corrupts the read surfaces
+    # instead of failing visibly. Rejected here with the same message the CLI
+    # gives, so the agent can retry with a real kind.
+    try:
+        validate_source_kind(source)
+    except InvalidSourceKind as e:
+        raise _mcp_error(INVALID_PARAMS, str(e)) from e
     state = _get_state()
     user_tags = list(tags or [])
     # Set-union with the auto tag, then back to a list for storage. Sorted so
@@ -1970,7 +2164,7 @@ def brain_note_move(
 
 @mcp_app.tool()
 def brain_backlinks(
-    id_prefix: str, limit: int | None = None
+    id_prefix: str, include_confidential: bool = False, limit: int | None = None
 ) -> list[dict[str, Any]]:
     """List documents that link TO ``id_prefix`` (a vault or ingested doc).
 
@@ -1978,11 +2172,34 @@ def brain_backlinks(
     kind, and the literal ``[[link-text]]`` that carried the reference. An
     empty list means the document has no backlinks yet — not an error.
 
+    F6 confidentiality: confidential **neighbours** are omitted unless
+    ``include_confidential=true``. The gate covers the wiki rows and the
+    derived-partner rows alike, because ``backlinks_for`` threads the flag into
+    both of its queries.
+
+    **It gates neighbours, never the subject.** Asking for the backlinks of a
+    confidential document still answers; it just will not name confidential
+    sources. That is deliberate: this tool is reached by id, so the caller
+    already holds the subject's identity, and refusing here would withhold
+    nothing it does not already have while breaking navigation. What it must
+    not do is *enumerate* confidential documents the caller had not named --
+    which is the listing-shaped leak F6 is about.
+
+    **Polarity note — the parameter inverts at this boundary.** MCP says
+    ``include_confidential`` (default False = exclude); ``vault.graph`` says
+    ``exclude_confidential`` (default False = include). The bridge is ``not``,
+    and getting it backwards fails OPEN while every "the neighbour is present"
+    assertion stays green. See ``tests/test_mcp_links_confidential.py``, which
+    asserts both directions separately for that reason.
+
     ``limit`` caps the rows (default ``BRAIN_MCP_ROWS_MAX_LIMIT`` = 200; may be
     lowered, not raised). When rows were cut, the LAST returned element carries
     an additive ``"more_available": true`` — a bare list cannot hold an
     envelope, and truncation an agent cannot see is the failure this cap exists
-    to prevent.
+    to prevent. The cap composes with the F6 lens in the safe direction: the
+    sensitivity predicate is inside the statement, so gated rows are gone before
+    ``LIMIT`` counts and a short page never announces that something was
+    withheld.
     """
     state = _get_state()
     logger.debug("brain_backlinks: id_prefix=%s", id_prefix)
@@ -2010,7 +2227,12 @@ def brain_backlinks(
             # already push ``LIMIT n + 1`` into SQL — a reader who sees the
             # ceiling applied one way here and another way there will
             # reasonably assume the DB side is bounded when it is not.
-            rows = backlinks_for(conn, doc_id, fetch_limit=row_limit + 1)
+            rows = backlinks_for(
+                conn,
+                doc_id,
+                exclude_confidential=not include_confidential,
+                fetch_limit=row_limit + 1,
+            )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     capped, saturated = cap_rows(rows, limit=row_limit)
@@ -2033,6 +2255,7 @@ def brain_backlinks(
 def brain_links(
     id_prefix: str,
     include_unresolved: bool = False,
+    include_confidential: bool = False,
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """List documents that ``id_prefix`` links TO.
@@ -2042,8 +2265,17 @@ def brain_links(
     ``dst_document_id=null`` / ``dst_title=null`` / ``dst_kind=null`` and
     ``resolved=false``. Resolved rows always come first.
 
+    F6 confidentiality: as for :func:`brain_backlinks` — confidential
+    **targets** are omitted unless ``include_confidential=true``, the subject is
+    never gated, and the parameter inverts across the boundary
+    (``exclude_confidential=not include_confidential``).
+
+    Unresolved rows carry no ``dst_document_id``, so they have no sensitivity to
+    gate on and are unaffected either way.
+
     ``limit`` caps the rows (default ``BRAIN_MCP_ROWS_MAX_LIMIT`` = 200); a cut
-    list carries ``"more_available": true`` on its LAST element.
+    list carries ``"more_available": true`` on its LAST element. It composes
+    with the F6 lens for the reason ``brain_backlinks`` gives.
     """
     state = _get_state()
     logger.debug(
@@ -2060,6 +2292,7 @@ def brain_links(
                 conn,
                 doc_id,
                 include_unresolved=include_unresolved,
+                exclude_confidential=not include_confidential,
                 fetch_limit=row_limit + 1,
             )
     except psycopg.Error as e:
@@ -2083,7 +2316,9 @@ def brain_links(
 
 @mcp_app.tool()
 def brain_orphans(
-    vault_only: bool = True, limit: int | None = None
+    vault_only: bool = True,
+    include_confidential: bool = False,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """List documents with no incoming and no outgoing links.
 
@@ -2092,17 +2327,38 @@ def brain_orphans(
     Gmail mirrors), which are usually noise — most ingested artifacts
     carry no ``[[refs]]`` yet.
 
+    F6 confidentiality: a document marked ``sensitivity='confidential'`` is
+    **omitted from the listing** unless ``include_confidential=true``. The
+    payload carries no bodies, which is exactly why this was missed — but it
+    carries TITLES, and an orphan listing is a complete enumeration of the
+    documents nothing links to, so the titles are the whole payload rather
+    than incidental to it. Same bridge as ``brain_backlinks`` /
+    ``brain_links``: this layer says ``include_confidential`` (default False =
+    exclude), ``vault.graph`` says ``exclude_confidential`` (default False =
+    include), so the call inverts (``exclude_confidential=not
+    include_confidential``). See :func:`_confidential_lens`.
+
     ``limit`` caps the rows (default ``BRAIN_MCP_ROWS_MAX_LIMIT`` = 200 — the
     uncapped live count reaches ~1,400); a cut list carries
-    ``"more_available": true`` on its LAST element.
+    ``"more_available": true`` on its LAST element. It composes with the F6
+    lens for the reason ``brain_backlinks`` gives.
     """
     state = _get_state()
-    logger.debug("brain_orphans: vault_only=%s", vault_only)
+    logger.debug(
+        "brain_orphans: vault_only=%s include_confidential=%s",
+        vault_only,
+        include_confidential,
+    )
     row_limit = _resolve_limit(limit, default=state.cfg.mcp_rows_max_limit)
     try:
         with _mcp_conn(state) as conn:
             # LOW-3 — see ``brain_backlinks``.
-            rows = orphans(conn, vault_only=vault_only, fetch_limit=row_limit + 1)
+            rows = orphans(
+                conn,
+                vault_only=vault_only,
+                exclude_confidential=not include_confidential,
+                fetch_limit=row_limit + 1,
+            )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
     capped, saturated = cap_rows(rows, limit=row_limit)
@@ -2358,6 +2614,7 @@ def brain_review_weekly(
     week: str | None = None,
     no_graph: bool = False,
     emit: bool = True,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Synthesize the prior week's activity into a weekly review.
 
@@ -2366,6 +2623,32 @@ def brain_review_weekly(
     communities. When ``emit`` is true (default) the dated page is written to
     ``<vault>/reviews/<week>.md``. Returns the machine-readable sections plus
     the relative ``vault_path`` slug (mirrors ``brain review weekly --json``).
+
+    F6 confidentiality: confidential documents are excluded from every section —
+    activity, ingested, open loops, theme docs and the derived key-people tally —
+    unless ``include_confidential=true``. A weekly retrospective names documents
+    the caller never asked for by construction, and its open-loops section
+    republishes BODY text (``todo.iter_action_item_docs`` parses items out of
+    ``documents.content``), so this is body egress and not merely a title
+    listing. Bridge: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
+
+    NOTE the emitted page is ALWAYS gated, whatever ``include_confidential``
+    says. That flag is a READ lens for the caller, not a publish lens: the page
+    at ``<vault>/reviews/<week>.md`` is served by Quartz to a different audience
+    than the one making this call. So ``include_confidential=true`` returns the
+    complete retrospective to the caller and still writes a confidential-free
+    page. There is no argument to this tool that publishes the confidential
+    tier; a complete retrospective on disk has to be produced by a surface whose
+    output stays inside the trust boundary.
+
+    This docstring used to claim the opposite -- "the emitted page follows the
+    same gate" -- and the code matched it, handing the caller's permissively
+    built report straight to ``emit_weekly_page``. ``2b2b321`` fixed exactly that
+    two-audience conflation on the CLI and its message asserted the MCP twins
+    already gated correctly; that was true of this tool's return value and false
+    of its emit path. Regression cover:
+    ``tests/test_mcp_vault_emit_confidential.py``.
     """
     from .activity import current_iso_week
     from .review import build_weekly_report, emit_weekly_page, render_weekly_json
@@ -2375,6 +2658,30 @@ def brain_review_weekly(
     # Theme synthesis matters only on the graph path; reuse the long-lived
     # enricher built in main(). summarize_group never raises if Ollama is down.
     enricher = state.enricher if not no_graph else None
+    # F6 -- ONE call, TWO audiences, and they do not get the same payload.
+    # ``report`` answers the CALLER and honours their ``include_confidential``
+    # lens; ``published`` is the file written into ``state.cfg.vault_path``,
+    # which Quartz serves (``render_weekly_md`` emits no ``sensitivity``
+    # frontmatter key for ``RemoveConfidential`` to read, and ``reviews/`` is in
+    # neither Quartz config's ``ignorePatterns``). Following ``2b2b321``'s split
+    # on the CLI -- a SECOND, gated build for the vault write, the permissive one
+    # kept for the reader -- rather than refusing to emit under
+    # ``include_confidential=true``: a refusal would make a read flag change
+    # whether a WRITE happens, so the same call that used to publish a page would
+    # now silently publish none, and an agent that passes the flag habitually
+    # would stop maintaining the vault without ever seeing an error. Splitting
+    # the payloads keeps each audience's contract intact.
+    #
+    # The second build is CONDITIONAL, which is where this diverges from the CLI:
+    # there ``report`` was permissive unconditionally, so a second build was
+    # always required. Here ``report`` is already built with
+    # ``exclude_confidential=True`` whenever ``include_confidential`` is false,
+    # so on the default path aliasing it is exact rather than an approximation --
+    # and it avoids a second pass over the week's reads plus, on the graph path,
+    # a second round of theme synthesis. ``report_is_gated`` is derived from the
+    # SAME expression that builds ``report`` so the two cannot drift: every value
+    # ``published`` can take was built with the exclusion on.
+    report_is_gated = not include_confidential
     try:
         with _mcp_conn(state) as conn:
             report = build_weekly_report(
@@ -2384,7 +2691,23 @@ def brain_review_weekly(
                 generated_on=date_cls.today(),
                 no_graph=no_graph,
                 enricher=enricher,
+                exclude_confidential=report_is_gated,
             )
+            published = None
+            if emit:
+                published = (
+                    report
+                    if report_is_gated
+                    else build_weekly_report(
+                        conn,
+                        state.cfg,
+                        week=target_week,
+                        generated_on=date_cls.today(),
+                        no_graph=no_graph,
+                        enricher=enricher,
+                        exclude_confidential=True,
+                    )
+                )
     except ValueError as e:
         raise _mcp_error(
             INVALID_PARAMS, f"week must be YYYY-Www (e.g. 2026-W23): {e}"
@@ -2392,9 +2715,13 @@ def brain_review_weekly(
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
 
-    if emit:
+    # Branching on ``published is not None`` rather than re-testing ``emit``
+    # keeps "we built a gated payload" and "we write a page" as ONE condition,
+    # exactly as ``review_weekly`` does in ``cli.py``: there is no arrangement of
+    # the arguments that reaches this write holding the permissive ``report``.
+    if published is not None:
         try:
-            emit_weekly_page(state.cfg.vault_path, report)
+            emit_weekly_page(state.cfg.vault_path, published)
         except OSError as e:
             raise _mcp_error(
                 INTERNAL_ERROR, f"could not write review page: {e}"
@@ -2447,8 +2774,26 @@ def brain_review_scan(
     scan_type: str = "all",
     dry_run: bool = False,
     limit: int = 20,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Run a contradiction / staleness scan, surfacing findings into the queue.
+
+    F6 confidentiality: confidential documents are excluded from the scan INPUT —
+    candidates, superseding docs, and the summaries fed to the LLM — unless
+    ``include_confidential=true``.
+
+    The gate is on the input rather than the output, and that is not a stylistic
+    choice. This tool returns the findings the scan ITSELF just produced, from the
+    scan's own return value and not from ``list_review_queue``, so an output
+    filter on the queue never sees them. Gating the input additionally means an
+    MCP-triggered scan never WRITES a confidential-derived ``rationale`` into
+    ``elicitation_gaps`` — which matters because a read-side gate can only decline
+    to serve such a row, never un-write it.
+
+    ``brain review scan`` at a terminal is inside the trust boundary and still
+    scans both tiers; ``list_review_queue`` carries its own gate for exactly that
+    reason. Bridge: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
 
     ``scan_type`` is ``"conflicts"`` | ``"stale"`` | ``"all"``. The conflict leg
     is gated on ``BRAIN_ELICIT_CONTRADICTION_ENABLED`` + a wired Ollama enricher;
@@ -2488,6 +2833,7 @@ def brain_review_scan(
                         tenant_id=tenant,
                         min_docs=cfg.elicit_contradiction_min_docs,
                         limit=cfg.review_conflict_limit,
+                        exclude_confidential=not include_confidential,
                     )
                 )
                 if cfg.elicit_contradiction_enabled and counter is not None:
@@ -2500,6 +2846,7 @@ def brain_review_scan(
                                 cfg,
                                 tenant_id=tenant,
                                 dry_run=dry_run,
+                                exclude_confidential=not include_confidential,
                             )
                         )
                     except ReviewError as exc:
@@ -2511,11 +2858,17 @@ def brain_review_scan(
                         tenant_id=tenant,
                         stale_age_days=cfg.review_stale_age_days,
                         limit=cfg.review_stale_limit,
+                        exclude_confidential=not include_confidential,
                     )
                 )
                 findings.extend(
                     run_staleness_scan(
-                        conn, state.embedder, cfg, tenant_id=tenant, dry_run=dry_run
+                        conn,
+                        state.embedder,
+                        cfg,
+                        tenant_id=tenant,
+                        dry_run=dry_run,
+                        exclude_confidential=not include_confidential,
                     )
                 )
     except psycopg.Error as e:
@@ -2532,8 +2885,21 @@ def brain_review_scan(
 def brain_review_findings_list(
     kind: str = "all",
     limit: int = 20,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Read the current review queue without scanning.
+
+    F6 confidentiality: a finding is **withheld whole** — id, rationale and
+    evidence together — when any of its ``evidence_ids`` names a
+    ``sensitivity='confidential'`` document, unless ``include_confidential=true``.
+
+    Two fields make this a document-naming surface rather than a metadata one.
+    ``evidence_ids`` IS a list of document ids, so a finding is an enumeration of
+    documents the caller never asked for. And ``rationale`` is body-derived: a
+    ``stale`` rationale interpolates the superseding document's TITLE verbatim,
+    and a ``contradiction`` rationale is an LLM's output over two documents'
+    SUMMARIES. Bridge: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
 
     ``kind`` is ``"all"`` | ``"conflicts"`` | ``"stale"``. Returns
     ``{findings: [...]}`` where each finding is
@@ -2555,6 +2921,7 @@ def brain_review_findings_list(
                 tenant_id=state.cfg.graph_tenant_id,
                 signal_kinds=_REVIEW_LIST_KINDS[kind],
                 limit=limit,
+                exclude_confidential=not include_confidential,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -2581,6 +2948,7 @@ def brain_brief(
     since_hours: int | None = None,
     todo_since_days: int | None = None,
     no_enrich: bool = False,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Proactive daily digest: recent captures, open todos, pins, next steps.
 
@@ -2590,13 +2958,29 @@ def brain_brief(
     unless overridden) so the tool honors config exactly like ``brain brief
     --json``. Best-effort LLM next-step suggestions are included unless
     ``no_enrich`` is true or Ollama is unavailable (then ``suggestions`` is
-    empty). Surfaces titles + todo texts only — never document bodies.
+    empty).
+
+    F6 confidentiality: confidential documents are excluded from all three
+    sections — captures, open todos and pins — unless
+    ``include_confidential=true``. Bridge: ``exclude_confidential=not
+    include_confidential``. See :func:`_confidential_lens`.
+
+    A CORRECTION TO WHAT THIS DOCSTRING USED TO CLAIM. It read "surfaces titles +
+    todo texts only — never document bodies", and that sentence is what made the
+    missing gate look defensible: a payload of titles reads as metadata. But a
+    todo text is not metadata. ``todo.iter_action_item_docs`` selects
+    ``documents.content`` and :func:`brain.todo.parse_action_items` lifts item
+    text straight out of it, so ``open_todos[].text`` IS body text, and
+    :func:`brain.brief.suggest_next_steps` forwards it to a hosted model. The
+    accurate statement is: this tool surfaces titles plus body-derived action-item
+    text, and the F6 gate is what keeps the confidential tier out of both.
     """
     from dataclasses import replace
 
     from .brief import assemble_brief, suggest_next_steps
 
     state = _get_state()
+    logger.debug("brain_brief: include_confidential=%s", include_confidential)
     resolved_since_hours = (
         since_hours if since_hours is not None else state.cfg.brief_since_hours
     )
@@ -2613,6 +2997,7 @@ def brain_brief(
                 since_hours=resolved_since_hours,
                 todo_since_days=resolved_todo_since_days,
                 on_date=date_cls.today(),
+                exclude_confidential=not include_confidential,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -2658,6 +3043,7 @@ def brain_ask(
     no_loop: bool = False,
     limit: int | None = None,
     max_iterations: int | None = None,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Agentic multi-hop cited answer synthesis over the second brain.
 
@@ -2677,8 +3063,20 @@ def brain_ask(
     Returns ``{answer, citations[], iterations_used, sub_queries[],
     fallback_used, session_id}``. Requires a local Ollama for the LLM steps; an
     unavailable Ollama surfaces as ``INTERNAL_ERROR`` (start it and retry). A
-    bad ``mode`` is ``INVALID_PARAMS``. Document snippets only reach the LLM —
-    never full bodies.
+    bad ``mode`` is ``INVALID_PARAMS``.
+
+    F6 confidentiality: documents marked ``sensitivity='confidential'`` are
+    **excluded from retrieval** — from BOTH the hybrid leg and (for the graph
+    modes) the graph leg — unless ``include_confidential=true``.
+
+    This tool leaks harder than any other retrieval surface when ungated, and
+    the line that used to sit here ("Document snippets only reach the LLM —
+    never full bodies") is why it went unnoticed: it reads as a safety
+    property, but a snippet IS body text, just less of it. Worse, ``answer`` is
+    an LLM synthesis OVER those snippets, so a confidential document reaching
+    the retriever escapes twice — once verbatim in ``citations[].snippet``, and
+    once paraphrased into prose that no marker-based check could recognise as
+    derived from it.
     """
     from .ask import ASK_MODES, HYBRID_MODE
     from .ask import ask as run_ask
@@ -2717,6 +3115,7 @@ def brain_ask(
                     no_loop=no_loop,
                     limit=resolved_limit,
                     max_iterations=resolved_max_iter,
+                    exclude_confidential=not include_confidential,
                 )
                 _log_ask_interactions_mcp(conn, result)
         else:
@@ -2738,6 +3137,7 @@ def brain_ask(
                     limit=resolved_limit,
                     max_iterations=resolved_max_iter,
                     backend=backend,
+                    exclude_confidential=not include_confidential,
                 )
                 _log_ask_interactions_mcp(conn, result)
     except OllamaUnavailable as exc:
@@ -2939,6 +3339,7 @@ def _graphrag_search_or_mcp_error(
     synthesize: bool,
     enricher: OllamaEnricher | None,
     embedder: Embedder | None = None,
+    include_confidential: bool = False,
 ) -> "GraphContext":
     """Open an AGE connection, run :func:`graph_rag_search`, map core errors.
 
@@ -2993,6 +3394,10 @@ def _graphrag_search_or_mcp_error(
                 synthesize=synthesize,
                 enricher=enricher,
                 embedder=embedder,
+                # F6 egress gate for the ENTIRE graph surface. Inverted at this
+                # single seam so all three graphrag retrieval tools inherit it
+                # and none can be gated by accident or forgotten individually.
+                exclude_confidential=not include_confidential,
             )
     except (PersonNotFound, PersonAmbiguous) as exc:
         raise _mcp_error(INVALID_PARAMS, str(exc)) from exc
@@ -3019,6 +3424,7 @@ def brain_graphrag_search(
     limit: int | None = None,
     tenant: str | None = None,
     synthesize: bool = False,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """Graph retrieval — THEMES, PATTERNS, and CONNECTIONS across interactions.
 
@@ -3079,6 +3485,13 @@ def brain_graphrag_search(
     - ``synthesize``: attach a best-effort local-Ollama summary to each theme
       group (opt-in; never required for retrieval — a missing/failed Ollama
       yields ``summary=None``).
+
+    F6 confidentiality: documents marked ``sensitivity='confidential'`` are
+    **excluded from the returned ``docs``** — body snippet AND row — unless
+    ``include_confidential=true``. Graph retrieval reuses the ``SearchResult``
+    shape, whose ``snippet`` is raw chunk text, so this surface returned
+    confidential BODY TEXT to a hosted model while the ``brain_search`` gate
+    beside it was working correctly. See :func:`_confidential_lens`.
     """
     state = _get_state()
     logger.debug(
@@ -3097,6 +3510,7 @@ def brain_graphrag_search(
         limit=limit,
         synthesize=synthesize,
         enricher=state.enricher if synthesize else None,
+        include_confidential=include_confidential,
         # The global (community) path's vector leg embeds the query via this
         # embedder (spec §17c Q9 — local/themes never use it). Passes the
         # long-lived server embedder built in :func:`main` directly — no
@@ -3113,6 +3527,7 @@ def brain_graphrag_themes(
     limit: int | None = None,
     tenant: str | None = None,
     synthesize: bool = False,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """THE HEADLINE — "themes in my conversations with X" (spec §6b).
 
@@ -3151,6 +3566,7 @@ def brain_graphrag_themes(
         limit=limit,
         synthesize=synthesize,
         enricher=state.enricher if synthesize else None,
+        include_confidential=include_confidential,
     )
     return graph_context_json(ctx)
 
@@ -3161,6 +3577,7 @@ def brain_graphrag_entity(
     depth: int | None = None,
     limit: int | None = None,
     tenant: str | None = None,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """One entity's neighbourhood — "what connects to X" (spec §9).
 
@@ -3199,6 +3616,7 @@ def brain_graphrag_entity(
         limit=limit,
         synthesize=False,
         enricher=None,
+        include_confidential=include_confidential,
     )
     return graph_context_json(ctx)
 
@@ -3213,6 +3631,7 @@ def brain_timeline(
     limit: int = 20,
     synthesize: bool = False,
     tenant: str | None = None,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """How a theme or entity evolved over TIME — temporal bucketing (Plan 05).
 
@@ -3248,6 +3667,19 @@ def brain_timeline(
     - ``synthesize``: attach a best-effort local-Ollama summary to the densest
       buckets (opt-in; a missing/failed Ollama yields ``synthesis=None``).
     - ``tenant``: tenant to query (default ``BRAIN_GRAPH_TENANT``).
+    - ``include_confidential``: opt back in to ``sensitivity='confidential'``
+      documents (default ``false`` = excluded).
+
+    F6 confidentiality: confidential documents are dropped from the matched set
+    BEFORE bucketing, so they contribute to no ``doc_ids``, no ``doc_titles``, no
+    ``cotopics``, no ``doc_count`` / ``mention_count``, and no ``synthesis``.
+    Like ``brain_connect_list`` this tool names documents the caller never asked
+    for — a bucket IS an enumeration — and unlike ``brain_search`` it has no
+    "the caller asked for that document" defence. ``--synthesize`` additionally
+    feeds the bucket's document SUMMARIES to a model, which is body-derived text,
+    so a title-only gate here would not have been enough. Same bridge as every
+    other F6 surface: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
 
     Requires the graph layer (``BRAIN_GRAPH_ENABLED`` + ``brain graphrag
     build``); when disabled, raises ``INVALID_PARAMS``. An unknown entity returns
@@ -3282,6 +3714,7 @@ def brain_timeline(
                 synthesize=synthesize,
                 enricher=enricher,
                 tenant=tenant,
+                exclude_confidential=not include_confidential,
             )
     except (PersonNotFound, PersonAmbiguous, GraphTenantError) as exc:
         raise _mcp_error(INVALID_PARAMS, f"timeline: {exc}") from exc
@@ -3637,6 +4070,7 @@ def brain_graphrag_communities_refresh(
 def brain_graphrag_communities(
     tenant: str | None = None,
     limit: int | None = None,
+    include_confidential: bool = False,
 ) -> dict[str, Any]:
     """List the tenant's materialized community clusters (spec §17c Q3).
 
@@ -3659,9 +4093,26 @@ def brain_graphrag_communities(
     - ``tenant``: tenant to list (default ``BRAIN_GRAPH_TENANT``).
     - ``limit``: max communities to return. **Changed in Wave 3: the default is
       now finite** — ``BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT`` (25), not "all". An
-      explicit ``limit`` may lower it but not raise it.
+      explicit ``limit`` may lower it but not raise it. Additive keys:
+      ``limit_applied`` and ``truncated``.
+    - ``include_confidential``: opt back in to clusters whose members are
+      mentioned by confidential documents (default ``false`` = excluded).
 
-    Additive: ``limit_applied`` and ``truncated``.
+    F6 confidentiality: a community is withheld WHOLE when any of its member
+    entities is mentioned by a ``sensitivity='confidential'`` document.
+
+    This one was judged rather than assumed, because it projects no document id
+    and no document title — only ``summary`` — which reads like the entity tier
+    that ``brain_graphrag_entities`` is exempted on. It is not: ``summary`` is
+    generated by a prompt that ``communities_summary._representative_doc_titles``
+    feeds document TITLES into, so it is built FROM confidential titles in
+    exactly the way ``ThemeGroup.summary`` was. Same shape, same standard.
+    Bridge: ``exclude_confidential=not include_confidential``. See
+    :func:`_confidential_lens`.
+
+    The two compose in the safe order: ``list_communities`` applies the F6
+    predicate inside the statement, so withheld clusters are gone before
+    ``LIMIT`` counts and ``truncated`` never doubles as a withholding oracle.
     """
     from .graph_rag.communities import list_communities
     from .graph_rag.tenancy import resolve_tenant
@@ -3676,7 +4127,14 @@ def brain_graphrag_communities(
         with connect_age(state.cfg.database_url) as conn:
             conn.autocommit = True
             _require_age_or_mcp_error(conn)
-            records = list_communities(conn, tenant_id, limit=effective_limit + 1)
+            records = list_communities(
+                conn,
+                tenant_id,
+                # ``+ 1`` is exactly what ``cap_rows`` needs to still see
+                # saturation; see the LOW-3 note on ``brain_backlinks``.
+                limit=effective_limit + 1,
+                exclude_confidential=not include_confidential,
+            )
     except GraphTenantError as exc:
         raise _mcp_error(INTERNAL_ERROR, str(exc)) from exc
     except psycopg.Error as exc:
@@ -3840,6 +4298,36 @@ def brain_graphrag_entities(
       ``brain_backlinks`` / ``brain_links`` / ``brain_orphans``, which never
       had that convention and reject ``limit < 1`` with ``INVALID_PARAMS``.
     - ``tenant``: tenant to list (default ``BRAIN_GRAPH_TENANT``).
+
+    **F6: deliberately EXEMPT — no ``include_confidential`` parameter, and the
+    reason lives here rather than only next to the tools that are gated.** Every
+    other document-naming MCP surface takes the flag; an auditor who opens the
+    one exemption and finds nothing has to assume it was missed.
+
+    The exemption rests on the projection, not on a judgement about entities.
+    This tool returns ``entity_type``, ``name``, ``canonical_key``,
+    ``doc_count`` and ``description`` — no document id, no document title, and
+    no text derived from a document body. ``description`` is the only field that
+    could carry derived text and it is **always NULL**: migration 012 declares
+    it ``TEXT`` with no DEFAULT, and all three ``INSERT INTO graph_entities``
+    sites (``graph_rag/concepts.py``, ``graph_rag/aliases/__init__.py``,
+    ``graph_rag/reconcile.py``) write only ``(tenant_id, entity_type, name,
+    canonical_key)``. Nothing in ``src/`` ever writes the column; every
+    reference to it is a SELECT. So there is no confidential-derived value to
+    withhold.
+
+    ``doc_count`` is a count over the whole corpus and is NOT treated as an
+    oracle here: an entity's existence and volume are corpus-level facts, not
+    document text, and this tool cannot be used to test a hypothesis about one
+    document's contents the way a search hit can.
+
+    **The exemption ends the moment ``description`` is written.** Populating it
+    from document text — the obvious way to fill it — makes this tool a body
+    egress and it must then take the flag like every other. Contrast
+    :func:`brain_graphrag_communities`, which projects only ``summary`` and
+    looks like the same shape but is NOT exempt, because its ``summary`` is
+    generated from document TITLES fed in by
+    ``communities_summary._representative_doc_titles``.
 
     Additive: ``limit_applied`` (the cap actually used) and ``truncated`` (true
     when more entities matched than were returned).
@@ -4220,6 +4708,7 @@ def _resolve_suggestion(conn: psycopg.Connection[Any], prefix: str) -> str:
 def brain_connect_list(
     limit: int = 20,
     status: str = "pending",
+    include_confidential: bool = False,
 ) -> list[dict[str, Any]]:
     """List proactive auto-link suggestions (Plan 07 `brain connect`).
 
@@ -4232,9 +4721,31 @@ def brain_connect_list(
     blended score descending. ``graph_score`` / ``embed_score`` are the raw
     per-leg signals (``null`` when the pair came from only one leg); ``score``
     is the RRF blend.
+
+    F6 confidentiality: a suggestion is **omitted entirely** when EITHER of its
+    two documents is marked ``sensitivity='confidential'``, unless
+    ``include_confidential=true``.
+
+    This tool is the strongest case for the gate on the whole server, not the
+    weakest. It takes no document id and no query, so it cannot be defended as
+    "the caller asked for that document" the way ``brain_show`` can — every one
+    of the ``source_title`` / ``target_title`` pairs it returns is a document the
+    caller never named, which is exactly the enumeration F6 forbids. And each row
+    carries TWO titles, so the gate gates both joins in
+    :func:`brain.connect.iter_suggestions`, not just the source.
+
+    Same bridge as ``brain_orphans`` / ``brain_backlinks`` / ``brain_links``:
+    this layer says ``include_confidential`` (default False = exclude),
+    ``brain.connect`` says ``exclude_confidential`` (default False = include), so
+    the call inverts. See :func:`_confidential_lens`.
     """
     state = _get_state()
-    logger.debug("brain_connect_list: status=%s limit=%d", status, limit)
+    logger.debug(
+        "brain_connect_list: status=%s limit=%d include_confidential=%s",
+        status,
+        limit,
+        include_confidential,
+    )
     if status not in ("pending", "accepted", "rejected", "all"):
         # Reject typos loudly — a silent empty list reads as "queue is empty"
         # rather than "you passed a bad status" (Codex R1 #3).
@@ -4247,7 +4758,10 @@ def brain_connect_list(
     try:
         with _mcp_conn(state) as conn:
             rows = connect_mod.iter_suggestions(
-                conn, status=effective_status, limit=limit
+                conn,
+                status=effective_status,
+                limit=limit,
+                exclude_confidential=not include_confidential,
             )
     except psycopg.Error as e:
         raise _wrap_db_error(e) from e
@@ -4311,6 +4825,14 @@ def _connect_write_wikilink(cfg: Config, action: connect_mod.ActionResult) -> bo
     ``INVALID_PARAMS`` when the source/target vault path (or the on-disk file)
     is missing, so the link cannot be located.
     """
+    # F6 — see ``connect.assert_see_also_publishable``. Checked BEFORE the path
+    # checks so a blocked write reports what actually blocked it rather than a
+    # true-but-useless "no vault path". Mapped to INVALID_PARAMS like the other
+    # refusals here: the call named a document this tool will not publish.
+    try:
+        connect_mod.assert_see_also_publishable(action)
+    except ConnectError as e:
+        raise _mcp_error(INVALID_PARAMS, str(e)) from e
     if action.source_vault_path is None:
         raise _mcp_error(
             INVALID_PARAMS, "cannot write wikilink: source doc has no vault file"

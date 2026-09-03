@@ -25,6 +25,7 @@ from brain.wiki.fastpath_manifest import (
     compute_fingerprint,
     read_manifest,
 )
+from brain.wiki.ignored_fields import IgnoreRules, IgnoreRulesError, load_ignore_rules
 from brain.wiki.slug import slugify_source_path
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,7 @@ def classify_edit(
     fastpath_dir: Path,
     source_path: Path,
     vault_root: Path,
+    ignore_rules: IgnoreRules | None = None,
 ) -> ClassificationResult:
     """Classify a single vault file edit as trivial or non-trivial.
 
@@ -80,6 +82,9 @@ def classify_edit(
           collision is spurious (e.g. "a b.md" and "a-b.md" both slugify to
           ``a-b``); force non-trivial so the full build reconciles the rename.
       6. Read file bytes; OS error → non-trivial.
+      6a. Resolve the ignore rules (``ignore_rules`` argument, else the
+          vault's own ignore file); a present-but-unreadable file →
+          non-trivial.
       7. After step 5a verifies the current vault-relative path equals
          ``entry.source_path``, compute the new fingerprint using the manifest's
          recorded ``source_path`` / ``output_path`` (sanity guard against
@@ -90,6 +95,9 @@ def classify_edit(
         fastpath_dir: Path to ``<vault>/.quartz/.cache/fastpath/``.
         source_path: Absolute path to the edited file.
         vault_root: Absolute path to the vault root directory.
+        ignore_rules: Frontmatter-ignore rules to fingerprint under. Defaults
+            to those loaded from ``vault_root`` (see
+            :func:`brain.wiki.ignored_fields.load_ignore_rules`).
 
     Returns:
         :class:`ClassificationResult` with all fields populated.
@@ -180,6 +188,20 @@ def classify_edit(
             new_fingerprint=None,
         )
 
+    # Step 6a — resolve ignore rules; a broken ignore file must not be guessed
+    # past, because guessing would fingerprint under the wrong rule set.
+    if ignore_rules is None:
+        try:
+            ignore_rules = load_ignore_rules(vault_root)
+        except IgnoreRulesError as exc:
+            return ClassificationResult(
+                classification=EditClassification.NON_TRIVIAL,
+                reason=f"ignore rules unreadable: {exc}",
+                slug=slug,
+                old_fingerprint=entry.fingerprint,
+                new_fingerprint=None,
+            )
+
     # Step 7 — compute new fingerprint using manifest's recorded paths.
     try:
         new_fp = compute_fingerprint(
@@ -187,6 +209,7 @@ def classify_edit(
             slug=slug,
             source_path=entry.source_path,
             output_path=entry.output_path,
+            ignore_rules=ignore_rules,
         )
     except ManifestError as exc:
         return ClassificationResult(

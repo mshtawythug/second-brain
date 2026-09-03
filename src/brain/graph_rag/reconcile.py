@@ -31,7 +31,7 @@ Two entry points, both tenant-aware and idempotent:
 **Person source-of-truth (spec §3 reuse map).** Person entities are derived for
 free from the existing people pipeline — ``directory_entries`` +
 ``documents.metadata`` participant keys — via the same internal helpers
-:mod:`brain.wiki.build_people` uses (``_build_directory_index`` /
+:mod:`brain.people` uses (``_build_directory_index`` /
 ``_doc_participant_keys`` / ``_resolve_key_to_person`` / ``humanize_display_name``),
 so a doc's graph people roster can never drift from its People-Hub roster. Each
 resolved person becomes a ``graph_entities`` row keyed on
@@ -169,7 +169,7 @@ PEOPLE_ASPECT = "people"
 # derived from participants), so this is the derivation-logic version.
 #
 # people-v2 (2026-05-23, Phase 1 data-quality remediation): the shared
-# person-name normalizer (:mod:`brain.wiki._person_name`) now drives canonical
+# person-name normalizer (:mod:`brain.person_name`) now drives canonical
 # keys — mailing-list "via X" decoration stripped, ``Last, First`` flipped,
 # separators collapsed (so ``Jane.Doe`` / ``Jane Doe`` merge), email-as-name
 # humanized from the local part, automated / org senders dropped, and owner
@@ -203,7 +203,7 @@ class ReconcileConfig:
     generic_df_ratio: float = DEFAULT_GENERIC_DF
     owner_keys: frozenset[str] = frozenset()
     # Extra automated-sender denylist entries (``BRAIN_GRAPH_SENDER_DENYLIST``)
-    # threaded to the person resolver's :func:`brain.wiki._person_name
+    # threaded to the person resolver's :func:`brain.person_name
     # .is_automated_sender` filter, on top of the always-on generic heuristic
     # (no-reply / notifications / mailer / …). Consumed only by the resolver
     # (``reconcile_document``); ``remove_document`` ignores it.

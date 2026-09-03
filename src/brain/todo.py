@@ -14,6 +14,8 @@ from typing import Any, Literal
 
 import psycopg
 
+from .sensitivity import not_confidential_sql
+
 # Match leading whitespace, ``-`` or ``*``, whitespace, ``[ ]`` or ``[x]``
 # (case-insensitive), whitespace, rest-of-line. Anchored with ``^`` +
 # ``re.MULTILINE`` so we walk every body line in one pass.
@@ -76,6 +78,7 @@ def iter_action_item_docs(
     source_kind: str | None = None,
     since_days: int | None = None,
     include_closed: bool = False,
+    exclude_confidential: bool = False,
 ) -> Iterator[TodoRow]:
     """Yield one :class:`TodoRow` per parsed item across the corpus.
 
@@ -92,12 +95,30 @@ def iter_action_item_docs(
     - ``since_days`` — restricts to docs ingested in the last N days.
     - ``include_closed`` — when False (default), drop ``[x]`` items from
       the stream; when True, both states are returned.
+    - ``exclude_confidential`` (F6) — drop documents marked
+      ``sensitivity='confidential'`` entirely.
+
+    THE CONFIDENTIALITY GATE HERE IS A BODY GATE, NOT A TITLE GATE, and that is
+    the whole reason it matters. This query selects ``d.content`` and
+    :func:`parse_action_items` lifts item text straight out of it into
+    ``TodoRow.text``. So a confidential document does not merely have its name
+    disclosed through this reader — its BODY TEXT is republished, one action item
+    at a time. :func:`brain.brief.suggest_next_steps` then forwards exactly that
+    text to a hosted model in its prompt. That is the precise egress F6 exists to
+    prevent, reachable from ``brain_brief`` and ``brain_review_weekly`` with no
+    parameters at all.
+
+    It DEFAULTS FALSE — include — because ``brain todo`` at a terminal is inside
+    the trust boundary; the MCP layer passes ``exclude_confidential=not
+    include_confidential``. See :func:`brain.mcp_server._confidential_lens`.
     """
     sql = (
         "SELECT d.id::text, d.title, d.content, d.ingested_at, s.kind "
         "FROM documents d LEFT JOIN sources s ON s.id = d.source_id "
         "WHERE d.content_type = 'krisp_action_items'"
     )
+    if exclude_confidential:
+        sql += f" AND {not_confidential_sql('d')}"
     params: list[Any] = []
     if source_kind is not None:
         sql += " AND s.kind = %s"

@@ -93,6 +93,26 @@ class UiContext:
     #: always reported, so the UI can label the note either way; only the body
     #: is withheld. Set by ``server.build_context``.
     serve_confidential_bodies: bool = True
+    #: Whether the UNPROMPTED listing surfaces — the vault tree, the recent
+    #: rail, the tag index — may name a ``sensitivity='confidential'``
+    #: document. **Separate from** :attr:`serve_confidential_bodies` and
+    #: defaulting the other way, by ruling.
+    #:
+    #: The bodies flag answers "may this session read a confidential note it
+    #: asked for", and is true on loopback. This one answers "may a list the
+    #: user never requested paint confidential titles on load", which is a
+    #: different question with a different safe answer: the tree renders in the
+    #: same viewport, on the same paint, as everything else, so a confidential
+    #: title arrives before any intent to see it does. Reusing the bodies flag
+    #: here would gate an unprompted title list on a name that says bodies.
+    #:
+    #: The three surfaces are gated on THIS flag identically. Explicitly
+    #: requested surfaces — a direct note fetch, a typed search query — keep
+    #: using :attr:`serve_confidential_bodies`. Set from
+    #: ``cfg.ui_serve_confidential_titles`` by ``server.build_context``; the
+    #: dataclass default is the fail-closed one so a context built without it
+    #: (every test fixture that does not care) hides rather than leaks.
+    serve_confidential_titles: bool = False
 
     def connect(self) -> AbstractContextManager[psycopg.Connection[Any]]:
         """Open a per-request connection. Always used as a ``with`` block."""

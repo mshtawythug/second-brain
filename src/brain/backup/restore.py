@@ -1,8 +1,16 @@
-"""`brain restore` — preflight, gate, staging-database swap, vault swap."""
+"""`brain restore` — preflight, gate, staging-database swap, vault swap.
+
+Database-name validation and the identifier byte budget live in
+:mod:`brain.backup.db_names`. They were extracted rather than added here: this
+module was 745 lines before the budget guard and 806 after, and the ceiling rule
+is that a file UNDER 800 stays under it by extracting instead of growing past.
+The three byte constants are re-exported under their original names because
+``tests/test_restore_db_name_budget.py`` and
+``tests/test_restore_sandbox_name_budget.py`` import them from here.
+"""
 from __future__ import annotations
 
 import contextlib
-import re
 import shutil
 import subprocess
 import tarfile
@@ -39,6 +47,13 @@ from .archive import (
     verify_sidecar,
 )
 from .create import TIMESTAMP_FORMAT, create_backup, dsn_parts, run_tool
+from .db_names import (  # noqa: F401 — re-exported for the two byte-budget test modules
+    MAX_RESTORABLE_DB_NAME_BYTES,
+    PG_IDENTIFIER_MAX_BYTES,
+    RESTORE_DERIVED_SUFFIX_BYTES,
+    _validated_db_name,
+    _validated_restorable_db_name,
+)
 from .manifest import BackupManifest
 from .pgtool import (
     RESTORE_TIMEOUT_S,
@@ -53,11 +68,6 @@ from .pgtool import (
 #: The phrase a user must type when the target is not empty. No flag can supply
 #: it — see §5.9 and `uninstall.py:103-109`, which exists for the same reason.
 RESTORE_PHRASE = "restore and overwrite my brain"
-
-#: Generated database names are additionally regex-checked before being wrapped
-#: in `sql.Identifier` — belt and braces, mirroring how `brain analyze`
-#: validates against `list_public_tables` before quoting.
-_DB_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 #: Peak disk: the staging database, the parked database, and the extracted dump
 #: all coexist, so the dump counts three times and the vault twice.
@@ -123,15 +133,6 @@ class RestoreReport:
     documents: int
     chunks: int
     follow_up: tuple[str, ...]
-
-
-def _validated_db_name(name: str) -> str:
-    if not _DB_NAME_RE.match(name):
-        raise BackupError(
-            f"refusing to use {name!r} as a database name: expected only "
-            "lowercase letters, digits and underscores"
-        )
-    return name
 
 
 def _count_vault_files(vault_path: Path) -> int:
@@ -590,7 +591,7 @@ def _restore_database(
     """Restore into a staging DB, verify it, then swap it in. Returns counts + parked."""
     manifest = state.manifest
     parts = dsn_parts(cfg.database_url)
-    live_db = _validated_db_name(parts.get("dbname", ""))
+    live_db = _validated_restorable_db_name(parts.get("dbname", ""))
     suffix = stamp.replace("-", "_")
     staging_db = _validated_db_name(f"{live_db}_restore_{suffix}")
     parked_db = _validated_db_name(f"{live_db}_replaced_{suffix}")
@@ -673,6 +674,15 @@ def restore_backup(
     now = clock() if clock is not None else datetime.now(UTC)
     report = on_step if on_step is not None else (lambda _message: None)
     stamp = now.strftime(TIMESTAMP_FORMAT)
+
+    # Length-check the live database name BEFORE the pre-restore backup below,
+    # not just where the derived names are built. `_restore_database` validates
+    # it too — that is the enforcement point for a direct caller — but by the
+    # time it runs, a full pg_dump has already been taken. An over-budget name
+    # cannot be restored at all, so making the user wait for a backup first
+    # buys nothing.
+    if db_leg:
+        _validated_restorable_db_name(dsn_parts(cfg.database_url).get("dbname", ""))
 
     state = (
         prepared

@@ -23,6 +23,19 @@ write that stamps an assigned ``id`` back into the file's frontmatter is
 deferred until after the DB transaction commits, so a DB crash mid-sync
 leaves the file untouched (the prior write-first-then-DB ordering could
 leave a file id-stamped on disk with no DB row to back it).
+
+**Why this file is allowed over the 800-line ceiling, and why it grew.** It is
+one reconciliation algorithm; splitting it would separate the walk from the
+per-file upsert that only makes sense inside it. The growth on this branch is
+:func:`_source_from_frontmatter`, which now validates a file's ``source:``
+against :data:`brain.source_kinds.VALID_SOURCE_KINDS` — the third and last write
+boundary at which an unvalidated string could reach ``sources.kind`` (a column
+with no CHECK constraint, read everywhere as a closed enum). Most of those lines
+are the ruling on the FAILURE MODE, which is the non-obvious part: an unknown
+kind is dropped to ``None`` and warned, never rejected and never substituted,
+because a sync that fails a file over a metadata typo is worse than the defect
+it prevents. The reasoning lives on the function; this pointer exists so it can
+be found from the top.
 """
 from __future__ import annotations
 
@@ -45,6 +58,7 @@ from ..ingest.guard import apply_guard
 from ..ingest.sub_tokens import extract_sub_tokens
 from ..queries import sync_chunk_search_metadata
 from ..sensitivity import DEFAULT_SENSITIVITY, normalize_level
+from ..source_kinds import VALID_SOURCE_KINDS, source_kinds_hint
 from ..tags import normalize_tags
 from .derived_links import DirectoryStore, rebuild_derived_for
 from .derived_links.fence import rewrite_derived_fences, strip_fence
@@ -770,7 +784,9 @@ def _sync_one(
                     metadata=metadata,
                     kind=classification,
                     vault_path=walked.relative_posix,
-                    source=_source_from_frontmatter(frontmatter, classification),
+                    source=_source_from_frontmatter(
+                        frontmatter, classification, path=walked.relative_posix
+                    ),
                     external_id=_external_id_from_frontmatter(
                         frontmatter, classification
                     ),
@@ -1250,24 +1266,78 @@ def _coerce_alias_list(value: Any) -> list[str]:
 
 
 def _source_from_frontmatter(
-    frontmatter: dict[str, Any], tier: str
+    frontmatter: dict[str, Any], tier: str, *, path: str
 ) -> str | None:
     """Extract the ``source`` field for ingested-tier files.
 
-    Vault-tier files don't have a source, so we return ``None`` regardless
-    of what the YAML says. For ingested-tier we trust the file's
-    ``source:`` (krisp / slack / gmail / manual / ...). Returns ``None`` if
-    the field is missing or not a string — the resulting row will have
-    ``source_id=NULL`` which still lets ``brain show`` and ``brain search``
-    work; only ``[[<source>:<external_id>]]`` resolution would miss it,
-    which is a soft degradation rather than a failure.
+    Vault-tier files don't have a source, so we return ``None`` regardless of
+    what the YAML says. For ingested-tier the file names its own source, and
+    the value is checked against :data:`brain.source_kinds.VALID_SOURCE_KINDS`.
+    Missing, non-string, and UNRECOGNIZED all return ``None``: the row gets
+    ``source_id=NULL``, which still lets ``brain show`` and ``brain search``
+    work; only ``[[<source>:<external_id>]]`` resolution misses it.
+
+    **This docstring used to advertise an open set** ("krisp / slack / gmail /
+    manual / ..."). The ellipsis was aspirational, not a contract — nothing
+    depended on it, and it could not have worked:
+    :data:`brain.vault.links._SOURCE_KINDS` parses ``[[<kind>:<id>]]`` against
+    the same closed four, so a fifth kind produced a ``sources`` row that no
+    wiki-link could ever address — while the sole documented purpose of writing
+    that row (see :func:`_insert_document`) is to make exactly that link
+    resolve. The row was unreachable by construction.
+
+    **Why an unknown kind is DROPPED rather than rejected or substituted.**
+    Three routes were available and two are worse:
+
+    * *Reject the file* (raise ``_SyncError``) puts it in ``report.errors`` —
+      which ``mcp_server`` escalates to ``INTERNAL_ERROR`` and ``cli_note`` to
+      exit 1. One mistyped ``source:`` would then fail a note whose body
+      indexed perfectly, and across a whole-tree ``vault sync --watch`` pass it
+      makes every affected note's content unsearchable over a metadata typo.
+    * *Fall back to* ``manual`` fabricates provenance the user never wrote, and
+      files the document under a real kind — the precise shape of the bug
+      :data:`brain.facets.SOURCE_NONE_BUCKET` documents, where
+      ``coalesce(s.kind, 'manual')`` produced "a wrong answer that looked
+      right".
+    * *Drop to* ``None`` collapses into the degradation this function already
+      performs for a missing ``source:``, and it is one-way by construction: it
+      can cost a source link the user intended, but can never invent an
+      association they did not write.
+
+    That is the same ruling, for the same reason, as
+    :func:`_sensitivity_from_frontmatter` a few functions below — coerce, warn,
+    never abort the walk — on a field whose blast radius is strictly larger.
+
+    What it costs, stated rather than claimed away: the write is only consulted
+    on INSERT (see the call site), so fixing the typo later does not
+    retroactively create the source row. That limitation is pre-existing and
+    identical for a ``source:`` line that was simply absent at creation; it is
+    not introduced here.
     """
     if tier != "ingested":
         return None
     raw = frontmatter.get("source")
-    if isinstance(raw, str) and raw.strip():
-        return raw.strip()
-    return None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    source = raw.strip()
+    if source not in VALID_SOURCE_KINDS:
+        # CEILING RECORD (1 of 2 — see the module docstring for the pointer):
+        # this function is the growth, in a file already over 800 lines.
+        # ``sources.kind`` is bare ``TEXT NOT NULL`` with no CHECK, and this was
+        # the last of three write boundaries where an unvalidated string reached
+        # it. The other two (``cli_ingest.ingest_stdin``,
+        # ``mcp_server.brain_ingest_stdin``) are already closed, and 2-of-3 is a
+        # worse resting state than 0-of-3: a reader who checks either closed path
+        # concludes the whole class is handled.
+        logger.warning(
+            "vault sync: %s declares source %r, which is not one of %s — "
+            "indexing the document with no source row",
+            path,
+            source,
+            source_kinds_hint(),
+        )
+        return None
+    return source
 
 
 def _external_id_from_frontmatter(
