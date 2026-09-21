@@ -53,10 +53,14 @@ async def _list_tools_via_stdio() -> dict[str, dict[str, object]]:
         },
     )
     with anyio.fail_after(15):
-        async with stdio_client(params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.list_tools()
+        # One statement, two contexts: ruff 0.16.8 (CI) flags the nested form
+        # as SIM117; 0.16.4 (the pinned floor most local venvs carry) does not.
+        async with (
+            stdio_client(params) as (read, write),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            result = await session.list_tools()
     # `Tool.inputSchema` (mcp 1.x) was renamed to `Tool.input_schema` in mcp
     # 2.0, where `inputSchema` survives only as the pydantic *alias* — i.e. it
     # round-trips on the wire but is no longer reachable by attribute access.
