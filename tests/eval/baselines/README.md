@@ -19,11 +19,25 @@ all-zero metrics is the signature. Confirm with `brain status` — if the docume
 count is not the one the baseline was recorded against, that is your answer.
 
 **2. Two `recency` queries are clock-dependent.** They filter on
-`documents.ingested_at` via `since_days: 40`. The window was chosen so its
-boundary falls inside a 25-day gap in this brain's ingest history, which makes
-the matched set stable only from roughly **2026-08-22 to 2026-09-16**. Outside
-that range those two queries drift on their own and the baseline needs
-re-recording. Nothing about search changed.
+`documents.ingested_at` via `since_days: 40`, so the matched set is stable only
+while `today - 40 days` stays inside one gap in this brain's ingest history.
+The baseline was re-recorded on **2026-09-21**, when that boundary sat inside a
+16-day gap (last ingest 2026-08-11, next 2026-08-27), which makes it stable
+from roughly **2026-09-20 to 2026-10-05**. Outside that range one or both of
+those queries drift on their own and the baseline needs re-recording. Nothing
+about search changed. *(The first recording, 2026-09-02, sat in a different
+gap and drifted on 2026-09-20 exactly as this paragraph predicted — one query,
+`-0.15` nDCG@5, every other row unchanged to four decimals.)* Re-derive the
+window before you re-record; it is a property of the corpus, not of the code:
+
+```sql
+WITH b AS (SELECT now() - interval '40 days' AS cut)
+SELECT max(ingested_at) FILTER (WHERE ingested_at <  cut) AS last_before,
+       min(ingested_at) FILTER (WHERE ingested_at >= cut) AS first_after
+FROM documents, b;
+```
+
+The baseline is stable from `last_before + 40 days` to `first_after + 40 days`.
 
 **3. The retrieval config moved.** Changing the embedder,
 `recency_halflife_days`, `vector_sim_floor`, or `snippet_context_tokens` shifts

@@ -5,10 +5,10 @@
     "snippet_context_tokens": 200,
     "vector_sim_floor": 0.25
   },
-  "generated_at": "2026-09-02T15:46:03.139128Z",
+  "generated_at": "2026-09-21T21:03:47.351941Z",
   "mean_mrr": 0.5835,
-  "mean_ndcg_at_5": 0.4881,
-  "mean_recall_at_20": 0.7336,
+  "mean_ndcg_at_5": 0.4834,
+  "mean_recall_at_20": 0.7267,
   "per_category": {
     "email": {
       "category": "email",
@@ -42,8 +42,8 @@
       "category": "recency",
       "count": 2,
       "mean_mrr": 1.0,
-      "mean_ndcg_at_5": 1.0,
-      "mean_recall_at_20": 0.8571
+      "mean_ndcg_at_5": 0.927,
+      "mean_recall_at_20": 0.75
     },
     "semantic": {
       "category": "semantic",
@@ -984,23 +984,19 @@
         "e559388e-aa7e-46b4-85e5-cd4100338247",
         "7e1837ee-f042-44f6-9903-db80611b3142",
         "ef2bcbc7-02de-4302-a9ce-1e112bb54d23",
+        "05d2e581-b6d4-4288-9b61-b10c331aceea",
         "e71cd373-c7e1-461c-ac49-dbbf0fe8212d",
         "f9cd4010-e435-42c8-8cff-4b8c74ffa013",
         "26576289-ecdc-4580-9e98-2f8396680143",
         "e1e4e39e-13b9-4a24-bcf6-79711fd2a9f6",
         "7fe4119a-fdf8-41be-8f28-018ea14c71e6",
         "752fb7ee-c005-4f14-8476-a3cfaa131d5d",
+        "ad996490-8887-4d8c-9865-b22a522b9891",
         "be4accfa-76f2-4675-9dbc-9a791941ec76",
         "e1908d8e-567a-457b-9a87-a4a76c64183f",
-        "12bc9814-7a7c-41b8-89da-f76b29b72f96",
-        "dfd804be-cc67-4c7a-836b-ea4eceef8835",
-        "87c2f4b6-e90d-47bf-8615-19b21c040fa7",
-        "283ea8c2-3415-4bd0-b062-25baa228ab5b",
-        "fba144c1-fd4c-4bae-bceb-56f9db9f125a",
         "7d20773b-01b1-4c67-8faa-99268810c765",
-        "5da0a4ef-c998-4cd1-b0fe-32edf6847ae5",
         "1948663e-e1d7-44f0-9935-3160d83eaac8",
-        "ea63f2dc-3557-4458-9e62-ecfdcf6a86c2"
+        "0798727a-4d18-4490-ab1e-6ff8e9b98a9c"
       ],
       "category": "recency",
       "expected_doc_ids": [
@@ -1034,9 +1030,9 @@
         "1948663e-e1d7-44f0-9935-3160d83eaac8"
       ],
       "mrr": 1.0,
-      "ndcg_at_5": 1.0,
+      "ndcg_at_5": 0.8539,
       "query": "daily brief digest of recent captures and action items",
-      "recall_at_20": 0.7143
+      "recall_at_20": 0.5
     },
     {
       "actual_doc_ids": [
@@ -1045,13 +1041,10 @@
         "66e522b4-0069-44e2-98d7-f38747514d46",
         "3a6a68ee-aa43-4924-8fa8-c7baf4ad9e54",
         "833455b9-23e9-47b1-b261-c6d67d10e4db",
-        "0798727a-4d18-4490-ab1e-6ff8e9b98a9c",
         "ad996490-8887-4d8c-9865-b22a522b9891",
+        "0798727a-4d18-4490-ab1e-6ff8e9b98a9c",
         "be4accfa-76f2-4675-9dbc-9a791941ec76",
-        "752fb7ee-c005-4f14-8476-a3cfaa131d5d",
-        "d1c649d6-0574-4abb-8fe7-0e5d45b2bdd6",
-        "5fe3e9fe-d620-449a-b3c2-ed44985c9a44",
-        "2ad00465-bdee-40d5-990d-7fdbf64f8e88"
+        "752fb7ee-c005-4f14-8476-a3cfaa131d5d"
       ],
       "category": "recency",
       "expected_doc_ids": [
