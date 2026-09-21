@@ -50,6 +50,19 @@ disjoint -- the F6 egress gates and the ``LockNotAvailable`` handler touch
 different commands -- so the merged file is their union and the merged count is
 the sum less the shared base. Re-derive it; do not add the two numbers.
 
+**Third growth (eval baseline closeout, 2026-09-02, PR #11).** ``+53`` in
+``eval_cmd``'s ``--diff`` branch, measured on pre-PR-#9 master as
+``9,068 -> 9,121``; the merged file is larger and the figure is not additive
+across the trails above -- re-derive with ``wc -l``, never inherit it. Reasons
+inline in two places. What they buy: (a) a changed retrieval config (embedder
+swap, ``vector_sim_floor``, ``recency_halflife_days``,
+``snippet_context_tokens``) moves every metric exactly as a quality regression
+does, and ``--fail-below`` returns the SAME exit 3 for both, so the changed keys
+are now named on stderr; (b) every exit 3 points at
+``tests/eval/baselines/README.md``, because the commonest cause is a baseline
+recorded against a different document set, not a worse ranker. Exit codes are
+unchanged by design -- this is reporting, not policy.
+
 The long-deferred split into per-domain command modules is unchanged by any of
 this; ``cli_ingest`` / ``cli_search`` / ``cli_recall`` are how it is proceeding.
 """
