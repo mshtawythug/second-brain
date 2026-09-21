@@ -19,7 +19,14 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from ..errors import VaultPathEscape
-from . import routes_meta, routes_notes, routes_search, routes_tree
+from . import (
+    routes_discovery,
+    routes_links,
+    routes_meta,
+    routes_notes,
+    routes_search,
+    routes_tree,
+)
 from .context import UiContext
 from .errors import UiError, UiNotFound
 from .security import build_middleware
@@ -132,11 +139,23 @@ def create_app(context: UiContext) -> Starlette:
         Route("/api/facets", routes_meta.facets, methods=["GET"]),
         Route("/api/tree", routes_tree.tree, methods=["GET"]),
         Route("/api/search", routes_search.search, methods=["GET"]),
+        Route("/api/recent", routes_discovery.recent, methods=["GET"]),
+        Route("/api/tags", routes_discovery.tags, methods=["GET"]),
+        Route("/api/tags/{tag}", routes_discovery.tag_documents, methods=["GET"]),
         Route("/api/notes", routes_notes.create_note, methods=["POST"]),
         Route(
             "/api/notes/{id_prefix}/draft", routes_notes.set_draft, methods=["POST"]
         ),
         Route("/api/notes/{id_prefix}/move", routes_notes.move_note, methods=["POST"]),
+        # Declared before the bare `/api/notes/{id_prefix}` only for reading
+        # order — it is NOT a precedence fix and must not be read as one.
+        # Starlette's default `str` path convertor compiles to `[^/]+`, so a path
+        # parameter can never match a "/"; `/api/notes/{id_prefix}` cannot swallow
+        # `/api/notes/<id>/links` at any declaration order. The two patterns are
+        # disjoint.
+        Route(
+            "/api/notes/{id_prefix}/links", routes_links.note_links, methods=["GET"]
+        ),
         Route(
             "/api/notes/{id_prefix}",
             routes_notes.get_note,

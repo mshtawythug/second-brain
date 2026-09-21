@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 
 if TYPE_CHECKING:
-    from ..wiki.build_people import _DirectoryIndex
+    from ..people import _DirectoryIndex
     from .reconcile import PersonResolver
 
 __all__ = [
@@ -54,9 +54,9 @@ def default_person_resolver(
 ) -> list[ResolvedPerson]:
     """Derive a document's person set from the existing People-Hub pipeline.
 
-    Reuses :mod:`brain.wiki.build_people`'s directory index + per-doc participant
+    Reuses :mod:`brain.people`'s directory index + per-doc participant
     extraction + key resolution (and the shared
-    :mod:`brain.wiki._person_name` normalizer) so the graph's person roster for
+    :mod:`brain.person_name` normalizer) so the graph's person roster for
     a document is identical to its People-Hub roster (spec §3 reuse map). Owner
     keys are expanded (first-name-only + email-local-part variants) then
     stripped both before resolution (raw participant key) and after (resolved
@@ -67,7 +67,7 @@ def default_person_resolver(
     determinism.
 
     ``directory`` (perf Fix B, 2026-05-24) is an optional prebuilt
-    :class:`brain.wiki.build_people._DirectoryIndex`. The directory is
+    :class:`brain.people._DirectoryIndex`. The directory is
     corpus-wide and does NOT change mid-build, so the batch
     :func:`brain.graph_rag.build.build_graph` builds it ONCE and passes it in
     (via :func:`prebuilt_directory_resolver`) instead of paying the ~1.2k-row
@@ -82,15 +82,15 @@ def default_person_resolver(
     Returns an empty list when the document does not exist or has no resolvable
     participants (e.g. a manual note, or a Gmail header with no directory match).
     """
-    # Late import keeps :mod:`brain.graph_rag` import-cheap and avoids a cycle
-    # with the wiki package, mirroring ``queries.resolve_person_to_keys``.
-    from ..wiki._person_name import expand_owner_keys
-    from ..wiki.build_people import (
+    # Late import keeps :mod:`brain.graph_rag` import-cheap, mirroring
+    # ``queries.resolve_person_to_keys``.
+    from ..people import (
         _build_directory_index,
         _doc_participant_keys,
         _resolve_key_to_person,
         humanize_display_name,
     )
+    from ..person_name import expand_owner_keys
 
     row = conn.execute(
         "SELECT s.kind, d.metadata FROM documents d "

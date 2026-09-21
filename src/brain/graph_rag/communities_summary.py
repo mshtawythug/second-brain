@@ -71,6 +71,7 @@ from ..config import Config
 from ..db import ensure_embedding_column
 from ..errors import GraphTenantError
 from ..ingest import Embedder
+from ..sensitivity import not_confidential_sql
 
 __all__ = [
     "CommunitySummaryResult",
@@ -347,7 +348,11 @@ def _representative_entities(
 
 
 def _representative_doc_titles(
-    conn: psycopg.Connection[Any], *, tenant: str, key: str
+    conn: psycopg.Connection[Any],
+    *,
+    tenant: str,
+    key: str,
+    exclude_confidential: bool = False,
 ) -> list[str]:
     """Titles of the documents that most mention the community's entities.
 
@@ -357,13 +362,24 @@ def _representative_doc_titles(
     deterministic tie-break). Capped at :data:`_SUMMARY_DOC_LIMIT`. No document
     BODY is read — only titles feed the prompt (mirrors
     :func:`brain.graph_rag.themes._fetch_doc_titles`).
+
+    "Only titles" was the sentence that made this look safe, and it is the exact
+    claim F6 rejects: a TITLE is not nothing, and these titles are interpolated
+    into a prompt whose output is STORED as ``graph_communities.summary`` and
+    later served over MCP. ``exclude_confidential`` keeps confidential titles out
+    of newly-built summaries. It cannot repair summaries already stored — see
+    :func:`brain.graph_rag.communities.list_communities`, which gates the read on
+    current membership for that reason.
     """
+    where = ["cm.tenant_id = %s", "cm.community_key = %s"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
     rows = conn.execute(
         "SELECT d.title, COUNT(*) AS n FROM graph_community_members cm "
         "JOIN graph_entity_mentions m "
         "  ON m.tenant_id = cm.tenant_id AND m.entity_id = cm.entity_id "
         "JOIN documents d ON d.id = m.document_id "
-        "WHERE cm.tenant_id = %s AND cm.community_key = %s "
+        f"WHERE {' AND '.join(where)} "
         "GROUP BY d.id, d.title "
         "ORDER BY n DESC, d.title ASC "
         "LIMIT %s",

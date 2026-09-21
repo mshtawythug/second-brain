@@ -29,7 +29,7 @@ from ..sensitivity import DEFAULT_SENSITIVITY
 from . import telemetry
 from ._http import context_of, db_guard, ok
 from .errors import UiBadRequest, UiUnavailable
-from .schemas import parse_search_params, search_result_payload
+from .schemas import parse_search_params, ranking_payload, search_result_payload
 
 
 async def search(request: Request) -> JSONResponse:
@@ -76,13 +76,19 @@ async def search(request: Request) -> JSONResponse:
                 snippet_max_chars=ctx.cfg.snippet_max_chars,
                 **spec.filter_kwargs(),
             )
-            redacted = _confidential_hits(ctx, conn, results)
+            # Paging (T6). ``filter_kwargs`` asked for ``offset + limit`` rows;
+            # everything from here down works on the PAGE, never on the
+            # over-fetch. Redacting or counting the rows the caller will not
+            # see would make the confidential lookup do work for nothing and —
+            # worse — would report a `returned` that no response body matches.
+            page = spec.page_of(results)
+            redacted = _confidential_hits(ctx, conn, page)
             facets = _facets_for(conn, spec, sensitivity=sensitivity_filter)
             telemetry.record_ui_search(
                 conn,
                 enabled=ctx.logging_enabled,
                 query=spec.query,
-                result_count=len(results),
+                result_count=len(page),
                 session_id=session_id,
                 fts_count=diagnostics.fts_count,
                 duration_ms=int((perf_counter() - started) * 1000),
@@ -97,14 +103,36 @@ async def search(request: Request) -> JSONResponse:
     except psycopg.Error as exc:
         raise db_guard(exc) from exc
 
-    meta = search_meta_json(diagnostics, returned=len(results), facets=facets)
+    meta = search_meta_json(diagnostics, returned=len(page), facets=facets)
     return ok(
         {
             "session_id": str(session_id),
             "query": spec.query,
+            # Echoed so the ledger can build the next request without having to
+            # remember what it asked for. ``total_documents`` (inside ``meta``)
+            # is the lexical match total and is what tells a client whether a
+            # next page can exist at all.
+            "offset": spec.offset,
+            "limit": spec.limit,
+            # WHY THIS PAGE ENDED (#27). ``total_documents`` alone cannot say:
+            # both ranking legs bound their candidate pools at
+            # ``CANDIDATE_LIMIT`` regardless of the caller's ``limit``, so a
+            # query matching 544 documents still ranks at most
+            # ``2 * CANDIDATE_LIMIT`` of them and every page past that is empty
+            # — indistinguishable, until this key, from having read them all.
+            #
+            # Computed over ``results`` (the whole over-fetch) and NOT over
+            # ``page``. ``page`` is a slice, so its length is a fact about the
+            # caller's offset; the ranked set's length is the fact about the
+            # ranker, and it is the ranker's ceiling being reported.
+            "ranking": ranking_payload(
+                ranked=len(results),
+                fetch_limit=spec.fetch_limit,
+                total_documents=diagnostics.total_documents,
+            ),
             **meta,
             "results": [
-                _redact(search_result_payload(r), redacted) for r in results
+                _redact(search_result_payload(r), redacted) for r in page
             ],
         }
     )
@@ -171,6 +199,10 @@ def _facets_for(
     try:
         predicate = build_predicate(
             source_kind=spec.source_kind,
+            # T7. Omitting this would let ``?source=none`` annotate its results
+            # with counts computed over a DIFFERENT match set — the one thing
+            # this function's whole existence is supposed to make impossible.
+            source_missing=spec.source_missing,
             tag=spec.tag,
             content_type=spec.content_type,
             after=spec.after,

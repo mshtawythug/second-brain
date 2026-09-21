@@ -1,0 +1,82 @@
+/* explorer — the vault rail's T16 additions: the ingested toggle, per-folder
+ * counts, and the month/day grouping in the note list.
+ *
+ * WHY A SHEET EXISTS AT ALL. T16 shipped these four classes with no CSS,
+ * deliberately: every one of its assertions is structural, so the suite was
+ * green while the surface was wrong. That is survivable for `.folder-count` and
+ * the month grouping, which degrade to plain text. It stopped being survivable
+ * the moment `wireIngestedToggle()` was wired into `boot()` — before that the
+ * control was never injected, so its absence of styling was invisible along
+ * with the control itself. Making it reachable is what made it visible, and an
+ * unstyled `<label><input type=checkbox>` dropped into a `space-between` flex
+ * header does not read as a control; it reads as a mistake.
+ *
+ * --ink-faint APPEARS NOWHERE HERE, and that is not incidental. It fails WCAG
+ * AA as text on every ground in both themes (2.69-3.03:1 light, 3.34-3.84:1
+ * dark, measured against the three paper tokens); --ink-muted is 5.66-7.27:1
+ * over the same six pairings. Every rule below renders reading matter, so every
+ * one of them points at --ink-muted. `check_ink_faint_used_once` enforces this
+ * across the whole roster — but only for sheets IN the roster, which is exactly
+ * how a live contrast defect shipped in another feature sheet earlier today.
+ *
+ * AND BEING IN `CSS_ORDER` IS NOT A CONTRAST GUARANTEE. Roster membership buys
+ * exactly one policy: "--ink-faint is used once, on .search-glyph". The suite's
+ * actual contrast rule, `check_quiet_text_uses_muted`, is a fixed list of six
+ * selectors in components.css and does not see this file at all. Reintroducing
+ * the identical defect here as a raw colour literal instead of the token was
+ * measured to pass every guard. So the AA claim above rests on the ratios, not
+ * on the test suite noticing — do not read "it is rostered" as "it is checked".
+ */
+
+/* The rail header is `display: flex; justify-content: space-between` with two
+   children. The toggle is a THIRD, and dropping it in would spread all three
+   across the row. Wrapping it onto its own line keeps the title/button pair
+   reading as the pair it is. Overridden from this per-feature sheet rather than
+   edited into components.css: the shared tier should not have to know that a
+   later feature added a control. */
+.rail-head { flex-wrap: wrap; row-gap: var(--s-2); }
+
+.show-ingested {
+  flex-basis: 100%;
+  display: flex; align-items: center; gap: var(--s-2);
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  color: var(--ink-muted);
+  /* The whole label is the hit target, not just the 13px box — the checkbox is
+     the smallest control in the app and the text beside it is free area. */
+  cursor: pointer;
+}
+
+/* NO `accent-color` and NO restyled box. A native checkbox already follows the
+   `color-scheme` the theme sets (tokens.css), so it repaints itself in dark
+   mode for free; replacing it with a styled span would mean re-implementing
+   focus, the indeterminate state and the screen-reader semantics that
+   tree.js's comment says it chose a real checkbox to get. */
+
+.folder-count {
+  /* `margin-left: auto` pushes the count to the trailing edge of the flex
+     `.tree-label` without a fixed width, so a three-digit count in a deep
+     folder cannot collide with the name. */
+  margin-left: auto; padding-left: var(--s-2);
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Month separators inside the note list. `list-style: none` because they are
+   <li> elements in the same <ul> as the notes — a marker would make them read
+   as entries you can open. */
+.month-header {
+  list-style: none;
+  padding: var(--s-3) var(--s-4) var(--s-1);
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--ink-muted);
+}
+
+/* The day prefix on a note row. Tabular figures so the day numbers form a
+   column instead of shifting each title by a fraction of a character. */
+.note-day {
+  font-family: var(--font-mono);
+  color: var(--ink-muted);
+  font-variant-numeric: tabular-nums;
+}

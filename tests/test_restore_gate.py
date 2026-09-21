@@ -23,6 +23,7 @@ from tests.backup_fakes import (
     RecordingRunner,
     StubAndRestoreRunner,
     StubDumpRunner,
+    SuiteDatabaseNameTooLong,
     drop_restore_artifacts,
     dsn_database,
     live_document_count,
@@ -43,7 +44,15 @@ from tests.test_backup_manifest import EMBEDDER_NAME, EMBEDDING_DIM
 # dedicated throwaway on the same server. Every derived name below
 # (TEST_DB_NAME, PARKED_DB, MAINTENANCE_DSN) follows from it automatically.
 
-TEST_DATABASE_URL = _restore_sandbox_dsn(_SUITE_DATABASE_URL)
+try:
+    TEST_DATABASE_URL = _restore_sandbox_dsn(_SUITE_DATABASE_URL)
+except SuiteDatabaseNameTooLong as exc:
+    # Skip THIS module, do not abort collection. This call runs at import time,
+    # so a raise here is a COLLECTION error: pytest reports "Interrupted: N
+    # errors during collection" and exits 2 for the entire repo, deselection
+    # never runs, and every other suite goes unexercised while looking merely
+    # unselected. One module's database name must not be able to do that.
+    pytest.skip(str(exc), allow_module_level=True)
 
 NOW = datetime(2026, 7, 25, 18, 15, 0, tzinfo=UTC)
 PROD_DSN = "postgresql://brain:brain@localhost:55432/second_brain"

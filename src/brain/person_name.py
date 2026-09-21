@@ -14,7 +14,7 @@ It also owns the two deterministic *filters* that gate person extraction:
 and :func:`expand_owner_keys` (widen the corpus-owner key set so the owner can
 never leak in under a first-name-only or email-local-part variant).
 
-Both the People-Hub aggregator (:mod:`brain.wiki.build_people`) and the graph
+Both the People-Hub aggregator (:mod:`brain.people`) and the graph
 person reconcile (:mod:`brain.graph_rag.reconcile`) route through here, so the
 graph's person entities and the rendered ``<vault>/people/`` roster derive from
 exactly the same cleaned identity — they can never drift.

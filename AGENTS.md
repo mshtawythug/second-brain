@@ -173,12 +173,12 @@ Wave A.1 source: audit `docs/audits/2026-05-14-q1-codex-cumulative-review.md`, p
 Codex memory is separate from Claude memory. Codex agents must use the Codex-owned project memory under:
 
 ```text
-/Users/mshtawythug/.codex/memories/second-brain/
+~/.codex/memories/second-brain/
 ```
 
-Claude memory under `/Users/mshtawythug/.claude/projects/-Users-mshtawythug-workspace-second-brain/memory/` is Claude-owned. Do not read or update Claude memory as the target for a Codex memory update unless the user explicitly asks to inspect Claude memory.
+Claude memory under `~/.claude/projects/<claude-project-slug-for-this-repo>/memory/` is Claude-owned. Do not read or update Claude memory as the target for a Codex memory update unless the user explicitly asks to inspect Claude memory.
 
-When a task changes CLI commands, database schema, Python value types, extractors, search behavior, vault/wiki behavior, or operating rules, update the corresponding Codex memory file and `/Users/mshtawythug/.codex/memories/second-brain/MEMORY.md` index. When asked to "update memory", audit the Codex memory files against the current codebase and update drifted content plus the Codex memory index.
+When a task changes CLI commands, database schema, Python value types, extractors, search behavior, vault/wiki behavior, or operating rules, update the corresponding Codex memory file and `~/.codex/memories/second-brain/MEMORY.md` index. When asked to "update memory", audit the Codex memory files against the current codebase and update drifted content plus the Codex memory index.
 
 Topic → file map (Codex memory):
 

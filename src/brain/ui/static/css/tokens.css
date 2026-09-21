@@ -1,0 +1,159 @@
+/* brain ui — "Archival Terminal"
+ *
+ * A research-library card catalog rendered by someone who lives in a terminal.
+ * Dense and typeset rather than minimal. Three deliberate moves:
+ *
+ *   1. The middle column is a LEDGER, not a card grid: each result is a narrow
+ *      monospace metadata gutter hard-left, then title / snippet / tag chips,
+ *      separated by hairline rules rather than gaps and shadows.
+ *   2. The right column is a READING ROOM: serif, capped at 48ch, generous
+ *      leading. The density contrast between the two columns IS the hierarchy;
+ *      no boxes are needed to say "this one matters".
+ *   3. Depth comes from hairlines and sunken/raised grounds, not drop shadows.
+ *      Total shadow usage in the app: the two modals.
+ *
+ * Typography carries meaning: mono for machine-shaped things (paths, ids,
+ * dates, latency, chips), serif for the note body only, sans for chrome.
+ * Reading the interface tells you what kind of thing you are looking at.
+ *
+ * Fonts are system stacks only — zero downloads, works fully offline.
+ *
+ * ---------------------------------------------------------------------------
+ * THE STYLESHEET IS FOUR FILES, AND THE ORDER THEY LOAD IN IS LOAD-BEARING.
+ *
+ *   tokens.css  <- you are here    custom properties and theme blocks only
+ *   base.css                       resets, element defaults, typography
+ *   layout.css                     the app shell, the panes, the inspector grid
+ *   components.css                 everything with a name, then responsive
+ *
+ * `index.html` links all four, in that order, as four separate <link> tags —
+ * NOT as `@import` from a barrel file. `@import` is discovered only after the
+ * importing sheet has been fetched and parsed, so it serialises what the
+ * preload scanner would otherwise fetch in parallel, and delays first paint by
+ * a round trip for no benefit.
+ *
+ * Two same-specificity pairs depend on that order and will break silently if a
+ * rule is moved between files. Both are documented where they live:
+ *   * `.deferred-tab` must come after `.shell`   (components.css, deferred)
+ *   * `components.css` must come after `layout.css` (components.css, responsive)
+ *
+ * THE SECOND RULE USED TO READ "the responsive overrides must come last", and
+ * that was FALSE — components.css is 4th of 10 sheets and six load after it. It
+ * was also inert, which is why it survived: no later sheet declares `.shell`,
+ * `.ledger`, `.inspector` or `.deferred-tab` at all (the two later mentions are
+ * prose in comments). The rule it was reaching for is the real and narrower
+ * one now stated: components.css's `@media` blocks are same-specificity with
+ * layout.css's base rules and win only by loading later.
+ *
+ * The `layout.css` -> `components.css` half is now ENFORCED, by
+ * `check_layout_precedes_components` in tests/test_ui_static_behaviour.py,
+ * because a consistent reorder of both index.html and CSS_ORDER keeps every
+ * other guard green while the narrow-viewport layout silently breaks.
+ * The other half is NOT enforced: nothing stops a future sheet from
+ * redeclaring those four selectors after components.css and defeating the
+ * overrides from the other side. That general rule — no sheet may redefine a
+ * property already declared for the same selector by an earlier sheet without
+ * an explicit pin — needs a real CSS parser and is tracked separately. Do not
+ * read the one guard as covering the class.
+ *
+ * Splitting a file further, or reordering the links, means re-checking those.
+ */
+
+/* ---------------------------------------------------------------- tokens -- */
+
+:root {
+  /* Declared, not inferred. The theme toggle can put a DARK palette on a
+     machine whose OS is LIGHT, and the user agent paints scrollbars (.rail,
+     .ledger and .inspector all scroll), <select> popups, the date pickers and
+     the text caret from THIS property — not from the tokens below. Without it
+     a manually-darkened page gets light native furniture. Overridden in both
+     dark blocks. */
+  color-scheme: light;
+
+  /* Light — "Foolscap": warm paper, warm ink. Not white, not gray. */
+  --paper:        oklch(97.5% 0.008 85);
+  --paper-sunk:   oklch(95.0% 0.010 85);
+  --paper-raised: oklch(99.0% 0.004 85);
+  --ink:          oklch(22.0% 0.012 60);
+  --ink-muted:    oklch(48.0% 0.010 60);
+  --ink-faint:    oklch(66.0% 0.008 60);
+  --rule:         oklch(88.0% 0.010 75);
+  --accent:       oklch(52.0% 0.090 178);   /* verdigris */
+  --accent-soft:  oklch(93.0% 0.030 178);
+  --flag-draft:   oklch(64.0% 0.130 68);    /* amber  — draft / unsaved      */
+  --flag-danger:  oklch(52.0% 0.170 25);    /* oxide  — destructive only     */
+  --flag-ok:      oklch(52.0% 0.090 155);   /* green  — saved                */
+
+  --font-ui:   ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, sans-serif;
+  --font-read: ui-serif, Georgia, "Iowan Old Style", "Palatino Linotype",
+               "Times New Roman", serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+
+  --t-meta:  0.6875rem;
+  --t-chip:  0.75rem;
+  --t-ui:    0.8125rem;
+  --t-title: 0.9375rem;
+  --t-body:  clamp(1rem, 0.94rem + 0.28vw, 1.125rem);
+  --t-h1:    clamp(1.5rem, 1.2rem + 1.4vw, 2.25rem);
+  /* 48, not 68. `ch` is the advance of "0" — about 0.6em in every family in
+     --font-read — while running prose averages 0.40-0.45em, so an `Nch` cap
+     admits roughly 1.37N characters. At 68ch the reading column measured 92-101
+     characters; the classical band is 45-75. Measured at 48ch: New York 71,
+     Georgia 65, Iowan Old Style 59, Times New Roman 59. The unit stays `ch` on
+     purpose — it tracks --t-body, so the measure survives a type-scale change
+     that a rem value would silently invalidate. */
+  --measure: 48ch;
+  --lead-dense: 1.35;
+  --lead-read:  1.66;
+
+  --s-1: 0.25rem; --s-2: 0.5rem; --s-3: 0.75rem; --s-4: 1rem;
+  --s-5: 1.5rem;  --s-6: 2rem;   --s-7: 3rem;
+
+  --rail-w:   clamp(15rem, 18vw, 20rem);
+  --ledger-w: clamp(21rem, 27vw, 30rem);
+  --gutter-w: 5.5rem;
+  --radius: 3px;            /* near-square: index card, not pill */
+  --radius-chip: 2px;
+  --hair: 1px solid var(--rule);
+  --dur-fast: 120ms; --dur: 180ms;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Dark — "Lamplight". Deliberately NOT an inversion: a warm charcoal desk
+   under a lamp. The accent lightens 52% -> 72% because verdigris at 52% fails
+   contrast on a dark ground; danger shifts up and desaturates for the same
+   reason. Both themes were chosen, not derived. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --paper:        oklch(19.0% 0.012 65);
+    --paper-sunk:   oklch(16.0% 0.012 65);
+    --paper-raised: oklch(23.0% 0.013 65);
+    --ink:          oklch(91.0% 0.012 85);
+    --ink-muted:    oklch(70.0% 0.010 80);
+    --ink-faint:    oklch(54.0% 0.008 80);
+    --rule:         oklch(30.0% 0.012 70);
+    --accent:       oklch(72.0% 0.100 178);
+    --accent-soft:  oklch(28.0% 0.040 178);
+    --flag-draft:   oklch(76.0% 0.120 72);
+    --flag-danger:  oklch(66.0% 0.150 27);
+    --flag-ok:      oklch(70.0% 0.090 155);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper:        oklch(19.0% 0.012 65);
+  --paper-sunk:   oklch(16.0% 0.012 65);
+  --paper-raised: oklch(23.0% 0.013 65);
+  --ink:          oklch(91.0% 0.012 85);
+  --ink-muted:    oklch(70.0% 0.010 80);
+  --ink-faint:    oklch(54.0% 0.008 80);
+  --rule:         oklch(30.0% 0.012 70);
+  --accent:       oklch(72.0% 0.100 178);
+  --accent-soft:  oklch(28.0% 0.040 178);
+  --flag-draft:   oklch(76.0% 0.120 72);
+  --flag-danger:  oklch(66.0% 0.150 27);
+  --flag-ok:      oklch(70.0% 0.090 155);
+}

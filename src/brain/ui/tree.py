@@ -61,20 +61,50 @@ class TreeNode:
         depend on the SQL row order. Two folders with the same name at
         different depths cannot collide because each node is keyed inside its
         own parent's ``children`` dict, never in a flat registry.
+
+        **Counts are RECURSIVE**, over every leaf in the subtree rather than
+        over direct children only. The rail renders folders collapsed, so the
+        number beside a closed folder is precisely the thing the user opened it
+        to learn; a direct-children count would report 1 for a folder holding
+        three notes and be wrong exactly when it is most load-bearing.
+
+        The counts are also split by tier — ``vault_count`` +
+        ``ingested_count`` == ``note_count`` at every node, by construction.
+        That split is what lets the client's "show ingested" toggle recompute
+        every folder's number from the payload it already has, instead of
+        refetching the whole tree on a checkbox.
+
+        The total is named ``note_count`` and not ``count`` deliberately:
+        ``routes_tree`` writes its own ``count`` (the row count) onto the ROOT
+        payload after this returns, so a key named ``count`` here would be
+        silently clobbered at the root and survive everywhere else — the worst
+        of both, and invisible until a client trusted it.
         """
+        children = [
+            child.to_payload()
+            for _, child in sorted(
+                self.children.items(), key=lambda kv: kv[0].casefold()
+            )
+        ]
+        note_count = len(self.notes) + sum(c["note_count"] for c in children)
+        # Anything not explicitly ``ingested`` counts as vault: ``build_tree``
+        # already defaults a null ``kind`` to ``"vault"``, and an unexpected
+        # tier landing in the vault bucket keeps the two halves summing to the
+        # total rather than quietly losing a leaf from both.
+        ingested_count = sum(
+            1 for note in self.notes if note.tier == "ingested"
+        ) + sum(c["ingested_count"] for c in children)
         return {
             "name": self.name,
             "path": self.path,
-            "children": [
-                child.to_payload()
-                for _, child in sorted(
-                    self.children.items(), key=lambda kv: kv[0].casefold()
-                )
-            ],
+            "children": children,
             "notes": [
                 note.to_payload()
                 for note in sorted(self.notes, key=lambda n: n.title.casefold())
             ],
+            "note_count": note_count,
+            "vault_count": note_count - ingested_count,
+            "ingested_count": ingested_count,
         }
 
 

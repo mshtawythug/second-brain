@@ -20,7 +20,7 @@
 //   frontmatter fields. We key off the slug prefix instead — every
 //   people-hub page lives under `people/...` (per the
 //   `<vault>/people/<slug>.md` emit contract in
-//   `src/brain/wiki/build_people.py`), so `body[data-slug^="people/"]`
+//   `src/brain/people.py`), so `body[data-slug^="people/"]`
 //   selects the entire hub. The index page gets an additional rule
 //   keyed off `body[data-slug="people/index"]` for landing-page treatment.
 //

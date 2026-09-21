@@ -76,7 +76,19 @@ async def _list_tools_via_stdio() -> dict[str, dict[str, object]]:
     reason="python interpreter not on PATH",
 )
 def test_brain_mcp_tools_list_advertises_all_tools() -> None:
-    """`brain-mcp` responds to tools/list with all core tools and schemas."""
+    """`brain-mcp` responds to tools/list with the core tools and their schemas.
+
+    NOT "all tools", despite what this docstring said until 2026-08-20:
+    ``EXPECTED_TOOLS`` is a hardcoded roster of 8 names and the check is a
+    SUBSET test, so it stays green while any of the other 30-odd tools silently
+    disappears -- which is exactly what happened to ``brain_recall`` on this
+    branch. What this test does cover, and the reason to keep it, is the real
+    stdio round trip and the SHAPE of the advertised schemas.
+
+    Completeness is covered separately by
+    ``tests/test_mcp_tool_registration.py``, which derives the expected roster
+    from the module instead of hardcoding one.
+    """
     tools = anyio.run(_list_tools_via_stdio)
 
     advertised = set(tools.keys())

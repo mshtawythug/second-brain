@@ -231,9 +231,9 @@ def build_graph(
     # (~30-80 ms/doc). The incremental ingest hook (``sync.py``) keeps using the
     # default resolver, which builds its own single-document index, so the
     # one-doc path is unchanged. Late import keeps this module import-cheap
-    # (``build_people`` pulls in the wiki package), mirroring person_resolver's
-    # own late import of the same helper.
-    from ..wiki.build_people import _build_directory_index
+    # (the aggregation layer pulls in the vault subtree), mirroring
+    # person_resolver's own late import of the same helper.
+    from ..people import _build_directory_index
 
     directory = _build_directory_index(conn, sender_denylist=config.sender_denylist)
     resolver = prebuilt_directory_resolver(directory)

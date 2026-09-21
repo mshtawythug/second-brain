@@ -1,0 +1,405 @@
+# Fast-path fingerprint canonical-blob spec
+
+> **Companion to:** `docs/plans/2026-05-09-plan-b-per-file-emit.md` (Plan B v3).
+
+The fast-path classifier compares a structural **fingerprint** of the
+edited file against a fingerprint stored in the previous full-build's
+manifest. If they match, the edit is **trivial** (fast path eligible).
+If they differ, **non-trivial** (full build).
+
+To keep classification fast and cross-language, the fingerprint is
+computed from a deterministic byte sequence ("canonical blob"). Two
+implementations exist — TypeScript at full-build time
+(`quartz_overrides/quartz/util/fastpath_manifest.ts`) and Python at
+classifier time (`src/brain/wiki/fastpath_manifest.py`). They MUST
+produce byte-identical canonical blobs and therefore identical hashes.
+A parity test in `tests/wiki/test_fastpath_fingerprint_parity.py` runs
+both implementations against the same inputs and asserts equal hashes.
+
+## Hash
+
+```
+fingerprint = sha256(canonical_blob).hex()
+```
+
+Lowercase hex, no prefix, 64 chars.
+
+## Canonical blob byte format
+
+The blob is a concatenation of length-prefixed sections. Every length
+is a 4-byte big-endian unsigned integer (`u32be`). Every string section
+is UTF-8. Sections appear in this exact order:
+
+```
+SECTION_VERSION           u32be(FINGERPRINT_VERSION)
+SECTION_SLUG              u32be(len_bytes(slug)) || slug_bytes
+SECTION_SOURCE_PATH       u32be(len_bytes(source_path)) || source_path_bytes
+SECTION_OUTPUT_PATH       u32be(len_bytes(output_path)) || output_path_bytes
+SECTION_FRONTMATTER       u32be(len_bytes(frontmatter_blob)) || frontmatter_blob
+SECTION_TAGS              u32be(len_bytes(tags_blob)) || tags_blob
+SECTION_WIKILINKS         u32be(len_bytes(wikilinks_blob)) || wikilinks_blob
+SECTION_TRANSCLUSIONS     u32be(len_bytes(transclusions_blob)) || transclusions_blob
+SECTION_BLOCK_REFS        u32be(len_bytes(block_refs_blob)) || block_refs_blob
+SECTION_HEADING_ANCHORS   u32be(len_bytes(headings_blob)) || headings_blob
+```
+
+`FINGERPRINT_VERSION = 2`. Bumping it invalidates every previously stored
+fingerprint and forces a full rebuild on the next event. Bump whenever
+the canonical-blob shape changes.
+
+Version 2 accompanied the move of the ignored-field list out of the
+shipped package (Appendix A). That move could not change any fingerprint
+*value* — the ignore set is never encoded into the blob — so the bump is
+a deliberate clean version boundary rather than a correctness fix. See
+the comment on `FINGERPRINT_VERSION` in `brain/wiki/fastpath_manifest.py`.
+
+### Path normalisation
+
+`slug`, `source_path`, `output_path` are normalised before encoding to
+EXACTLY mirror what Quartz produces (parity with
+`quartz/util/path.ts:slugifyFilePath()` is mandatory — diverging case
+or separator rules will break the parity test):
+
+- POSIX separators (`/`), never backslash.
+- No leading `./`.
+- No trailing `/`.
+- **Case preserved.** Quartz `sluggify()` lowercases nothing — it only
+  normalises spaces (`\s` → `-`), `&` → `-and-`, `%` → `-percent`, drops
+  `?` + `#`, and joins by `/`. Vault slugs like
+  `Acme/AI-adoption-at-acme` keep their casing. The Python classifier
+  must reproduce this byte-for-byte; the parity test enforces it.
+- `_index` → `index` rewrite at end-of-segment (Quartz does this).
+- File extension stripped for `.md`/`.html`/no-extension; preserved
+  otherwise.
+
+### Frontmatter blob — structural-list + ignored-list + unknown-forces-full
+
+The real vault has 100+ distinct frontmatter fields across machine-
+ingested docs, manual notes, daily logs, etc. Most of them are opaque
+metadata that does NOT affect rendered output. The fingerprint
+distinguishes three classes:
+
+**Structural fields** (changes affect rendered output → fingerprinted):
+
+```json
+{
+  "title": <string|null>,
+  "draft": <bool|null>,
+  "publish": <bool|null>,
+  "tags": <sorted-string-array>,        // YAML-frontmatter tags only;
+                                         // body inline #tags handled
+                                         // separately in SECTION_TAGS
+  "aliases": <sorted-string-array>,
+  "permalink": <string|null>,
+  "slug": <string|null>,                // explicit slug override
+  "lang": <string|null>,
+  "cssclasses": <sorted-string-array>,
+  "socialImage": <string|null>,
+  "enableToc": <bool|null>,
+  "comments": <bool|null>,
+  "kind": <string|null>,                // brain-specific; affects layout
+  "description": <string|null>,         // SEO meta
+  "socialDescription": <string|null>,   // SEO meta
+  "date": <iso8601-string|null>,        // affects ordering rails
+  "created": <iso8601-string|null>,
+  "modified": <iso8601-string|null>,
+  "updated": <iso8601-string|null>,     // brain-specific alias for modified
+  "published": <iso8601-string|null>
+}
+```
+
+**Ignored fields** (changes do NOT affect rendering — fast path safe):
+
+```
+id, external_id, vault_path, source, source_path, source_template_id,
+source_template_name, content_type, organization_id, organization_name,
+ai_assisted, autogenerated, last_reviewed, owner, collected_by, hits,
+canonical, sidebar_position, automation_*, insights_sweep_*, billing_vendor_*,
+hours_saved_*, daily_breakdown, ...
+```
+
+(See `docs/specs/2026-05-09-fastpath-fingerprint.md` Appendix A for
+the canonical ignore-list. The list is generated from a vault-wide
+grep of frontmatter keys observed in `~/brain-vault/_ingested/`,
+deduplicated, and reviewed for "does changing this field change the
+HTML?". Fields added/removed from the ignore-list bump
+FINGERPRINT_VERSION.)
+
+**Unknown fields** (not in either list above) → **force non-trivial.**
+This is the "fingerprint never silently absorbs unknown fields" rule.
+When the user adds a new frontmatter shape, the first edit forces a
+full build. After deciding whether the new field is structural or
+ignored, the spec is updated and FINGERPRINT_VERSION bumped.
+
+JSON encoding rules:
+- Keys appear in the order above (deterministic; not sorted
+  alphabetically — renaming a key without intent stays caught).
+- No whitespace.
+- UTF-8.
+- `null` literal for missing values.
+- Arrays sorted lexicographically (UTF-8 byte order).
+
+### Tags blob
+
+The **post-OFM-transform** tag set (combines YAML frontmatter `tags:`
+PLUS body inline `#tag`s). Sorted, deduplicated, **case preserved**
+(Quartz `slugTag()` does not lowercase — see
+`quartz/util/path.ts:225+`; mirroring its behaviour exactly is
+required for parity), joined by single LF (`\n`):
+
+```
+tag1\ntag2\ntag3
+```
+
+(No trailing LF.) Empty list encodes as zero-length section.
+
+The OFM transformer at full-build time materialises this set into
+`file.data.frontmatter.tags`. The Python classifier must reproduce this
+by parsing both YAML frontmatter and body inline `#tag`s with the same
+regex Quartz uses.
+
+### Wikilinks blob
+
+The set of wikilink targets in the document, sorted, deduplicated,
+joined by LF. Each entry is the **raw normalized target text** (the
+substring between `[[` and `]]` or `|`, trimmed of whitespace), NOT
+the resolved slug. Resolving wikilinks would require Python to
+reproduce Quartz's `transformLink` + alias + permalink logic + the
+full `allSlugs` table — too brittle for parity. Raw-normalised
+target sets get parity for free.
+
+Examples:
+- `[[my-doc]]` → `my-doc`
+- `[[my-doc|display text]]` → `my-doc` (alias dropped)
+- `[[folder/my-doc]]` → `folder/my-doc`
+- `[[my-doc#some-heading]]` → `my-doc#some-heading` (anchor preserved
+  because changing the anchor changes which heading is linked to)
+- `![[my-doc]]` → handled by SECTION_TRANSCLUSIONS, not here.
+
+Parity test corpus (T1's parity test) MUST include:
+- Same basename in two different folders
+- Wikilink with alias
+- Wikilink to a doc that uses `permalink:` frontmatter (raw target,
+  not the resolved permalink — Quartz resolves at render time, but
+  the fingerprint cares whether the LINK CHANGED, not whether the
+  resolution changed)
+- Wikilink with anchor
+
+### Transclusions blob
+
+The set of transclusion targets (`![[target]]`) including any block-ref
+suffixes (e.g., `![[target#^block]]`, `![[target#Heading]]`). Sorted,
+deduplicated, joined by LF.
+
+**Important runtime rule (post-T0):** the metadata-only contentmap.json
+does NOT carry `htmlAst` for unchanged files (only the changed file
+has `htmlAst` rebuilt at fast-path time). Block transclusions
+(`![[target#^blockid]]`) work because Quartz resolves them via
+`allFiles[target].data.blocks[blockId]` — and `blocks` IS persisted
+per-file in metadata. **Page-level and heading-level transclusions
+(`![[target]]`, `![[target#Heading]]`) need `target.data.htmlAst`,
+which is absent in metadata-only contentmap.**
+
+Therefore: if the **changed file** contains any non-block
+transclusion, the classifier MUST return `non-trivial`
+("non-block transclusion present"). The classifier inspects the
+changed file's body for `![[...]]` patterns; entries WITHOUT a
+`#^...` block-ref suffix force full build.
+
+The Transclusions blob in the fingerprint still records ALL
+transclusion targets (block and non-block) for change detection. The
+forced-full rule is a separate runtime check on top of fingerprint
+match — the file may have a stable fingerprint but still need a full
+build because non-block transclusion semantics are unsupported in
+metadata-only mode.
+
+### Block-refs blob
+
+The set of block-ref ids defined IN this document (`text ^block-id`).
+Sorted, deduplicated, joined by LF.
+
+### Heading anchors blob
+
+The list of heading anchor strings as Quartz would emit them, **in
+document order** (NOT sorted — order matters for TOC). Each entry is
+the heading anchor as `github-slugger` would produce it (Quartz uses
+github-slugger for heading slugification — see
+`quartz/plugins/transformers/gfm.ts`). Joined by LF.
+
+`github-slugger` semantics that the Python implementation MUST match:
+- Lowercase the heading text.
+- Strip non-alphanumeric except `-` and `_`.
+- Replace whitespace runs with `-`.
+- **Disambiguate duplicates with numeric suffix.** Two `## Foo`
+  headings in the same doc become `foo` and `foo-1`. The third would
+  be `foo-2`. The Python implementation reproduces github-slugger's
+  state-tracking — a parity test corpus case (`Headings: A / A / B`)
+  pins this.
+
+Use the `python-slugify` library plus a counter shim, OR vendor a tiny
+github-slugger reimplementation in `src/brain/wiki/_github_slugger.py`.
+T1 picks one; the parity test catches divergence.
+
+## Errors → non-trivial
+
+The Python classifier returns `non-trivial` (with a reason string) on
+ANY of:
+- File unreadable.
+- YAML frontmatter parse error.
+- Markdown body parse error.
+- Unknown frontmatter field present (not in the structural-list above
+  AND not in Appendix A's ignored-list).
+- Slug computation error.
+- Manifest entry missing for this slug.
+- Manifest entry's `FINGERPRINT_VERSION` differs from the running code's.
+- Computed fingerprint differs from stored fingerprint.
+
+There is no "best-effort" path. The classifier is paranoid by design.
+
+## Acceptance for this spec
+
+A test in `tests/wiki/test_fastpath_fingerprint_parity.py` asserts that
+the TS implementation and the Python implementation produce
+byte-identical canonical blobs (and therefore identical hashes) for a
+golden corpus of inputs. The corpus must include at least:
+
+- Empty frontmatter, empty body
+- All allow-listed frontmatter fields populated
+- Tags from frontmatter only
+- Tags from body inline only
+- Tags from both (overlap should dedupe)
+- Wikilink with alias
+- Transclusion with block-ref suffix
+- Multiple block-refs in body
+- Heading hierarchy 1→2→3→2 (out-of-tree-ordering pinned to document order)
+- Unicode in slug and tag (NFC vs NFD pinned to NFC)
+- Ten-doc set with intentionally identical post-normalisation content
+  (identical fingerprints expected)
+
+## Appendix A — Canonical ignored frontmatter fields
+
+**Superseded as of FINGERPRINT_VERSION 2.** This appendix described a
+single hardcoded list living in the fastpath manifest module. That list
+was generated from a vault-wide grep of one real corpus, so it named
+frontmatter keys specific to that vault — including product and vendor
+identifiers — inside a package published to PyPI. It has been split.
+
+The ignore set now has two layers, both in
+`brain/wiki/ignored_fields.py`:
+
+1. `DEFAULT_IGNORED_FIELDS` — 52 generic keys that ship in the package:
+   brain's own identity/provenance keys, ingest metadata, and ordinary
+   free-form note fields. This is the entire ignore set for a user who
+   configures nothing.
+2. A per-vault `.brain-fastpath-ignore` file at the vault root, holding
+   one frontmatter key or glob per line (`#` starts a comment). Its
+   entries are unioned onto the default; they never replace it. The
+   twenty-three corpus-specific keys this appendix used to carry belong
+   here, and a namespaced family collapses to a single glob line.
+
+The classifier's contract is unchanged: any frontmatter key that is
+neither structural nor ignored → **force non-trivial**. Unknown keys
+still fail closed, and the `ManifestError` names the file to add the key
+to.
+
+Changing the ignore set cannot change a fingerprint value — the set is
+consulted only by the unknown-key guard and never enters the canonical
+blob — so edits to it do not, by themselves, require a version bump.
+
+The illustrative key names below are retained for shape only.
+
+```
+# Identity / dedup metadata
+id
+external_id
+content_type
+source
+source_path
+source_template_id
+source_template_name
+vault_path
+canonical
+hash
+
+# Ingest provenance
+ai_assisted
+autogenerated
+last_reviewed
+collected_by
+owner
+organization_id
+organization_name
+
+# Brain workflow tracking (no rendering effect)
+automation_a
+automation_b
+automation_c
+automation_d
+automation_sweep_a
+automation_sweep_b
+automation_sweep_c
+automation_sweep_d
+automation_sweep_e
+automation_sweep_f
+automation_sweep_g
+automation_sweep_h
+automation_sweep_i
+automation_sweep_j
+billing_vendor
+billing_vendor_auto_sync
+check_grace_period
+hits
+hours_saved_by_workflow
+hours_saved_today
+hours_saved_totals
+insights_sweep_a
+insights_sweep_b
+insights_sweep_c
+insights_sweep_d
+insights_sweep_e
+insights_sweep_f
+insights_sweep_g
+mandate
+proposal_expiration
+proposal_follow_up_reminders
+quota
+report_usage
+reset_ai_quotas
+sidebar_position
+status
+trial_expiration_check
+
+# Krisp/Slack/Gmail metadata
+participants
+duration_min
+thread_id
+channel
+attendees
+to
+from
+subject
+schedule
+
+# Free-form metadata not rendered
+context
+keywords
+notes
+predecessor
+principle
+purview
+render
+seo
+sweep
+where
+with
+wrote
+```
+
+**Process:** when an unknown frontmatter field surfaces during
+classification, the classifier takes the unknown-field-forces-full path
+(correct default) and raises a `ManifestError` naming the field and the
+vault's `.brain-fastpath-ignore` file. If changing that field cannot
+change rendered HTML, add it (or a glob covering it) to that file — no
+spec change and no version bump. If it *does* affect rendering it is
+structural, which changes the canonical blob, and that is what bumps
+`FINGERPRINT_VERSION`.

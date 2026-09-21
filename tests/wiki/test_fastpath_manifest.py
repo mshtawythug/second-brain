@@ -408,6 +408,6 @@ def test_extract_inline_tags_excludes_headings() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fingerprint_version_is_one() -> None:
-    """FINGERPRINT_VERSION is 1 (the initial version)."""
-    assert FINGERPRINT_VERSION == 1
+def test_fingerprint_version_is_two() -> None:
+    """FINGERPRINT_VERSION is 2."""
+    assert FINGERPRINT_VERSION == 2

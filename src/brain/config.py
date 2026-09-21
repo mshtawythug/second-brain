@@ -6,18 +6,34 @@ Those evidence blocks are the bulk of the file and the reason to split it
 next -- into ``config.py`` plus a measurements/rationale doc -- not a
 reason to scatter the knobs.
 
-**Why it grew again (2026-08-20, +43 vs e6d6e47, all comments):** two documented bounds
-were imprecise as written -- ``BRAIN_RECALL_MAX_BUDGET_TOKENS``' ratio range
-was scoped to a corpus when it is really scoped to a BUDGET, and
-``BRAIN_SHOW_MAX_CONTENT_TOKENS``' "2x" read as a payload guarantee when it
-bounds the two FIELDS. Both blocks now carry the arithmetic. Corrections, not
-features.
+**No live line count is quoted here on purpose -- re-derive with
+``wc -l src/brain/config.py``.** What cannot rot is the trail of hops:
 
-**And again (2026-08-21, final PR-#8 review round):** the ceiling>=tool-default
-cross-checks and the two ``MCP_*_DEFAULT_LIMIT`` constants they compare
-against — closing for ``brain_search`` / ``brain_graphrag_entities`` the same
-operator-misconfig failure the recall cross-check already closed. Reason
-inline at both the constants and the checks.
+* ``f8c76c0`` (branch base) -> ``3b16527`` -> ``0473b5f``: ONE knob,
+  ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES``, plus its tri-state parse and the
+  ruling -- recorded inline at the default -- for why it is deliberately NOT
+  ``UiContext.serve_confidential_bodies``: "trusted to read a confidential note
+  it opened" and "wants every confidential title painted on load" are different
+  questions, and the unprompted listing surfaces ask the second one.
+* master, PR #8 (+43, all comments): two documented bounds were imprecise as
+  written -- ``BRAIN_RECALL_MAX_BUDGET_TOKENS``' ratio range was scoped to a
+  corpus when it is really scoped to a BUDGET, and
+  ``BRAIN_SHOW_MAX_CONTENT_TOKENS``' "2x" read as a payload guarantee when it
+  bounds the two FIELDS. Both blocks now carry the arithmetic. Corrections, not
+  features.
+* master, PR #8 final review round: the ceiling>=tool-default cross-checks and
+  the two ``MCP_*_DEFAULT_LIMIT`` constants they compare against -- closing for
+  ``brain_search`` / ``brain_graphrag_entities`` the same operator-misconfig
+  failure the recall cross-check already closed. Reason inline at both the
+  constants and the checks.
+* 2026-09-02, merging master into this branch: no new knob and no new prose of
+  its own. The merged file is the UNION of the two sets of knobs above -- the
+  six MCP payload ceilings and ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES`` are
+  orthogonal and neither replaced the other.
+
+Knobs belong beside the other knobs, so the knobs are not the problem. The
+PROSE is. Splitting the rationale into a companion doc, leaving the knobs here,
+is the next move if it grows again.
 """
 import os
 import re
@@ -289,6 +305,20 @@ DEFAULT_GRAPH_COMMUNITY_LIMIT = 5  # global retrieval community count (== theme 
 # unlimited so the default is behavior-neutral; mirrors the int|none idiom of
 # ``BRAIN_GRAPH_MAX_ENTITIES_PER_DOC``.
 DEFAULT_GRAPH_COMMUNITY_MAX: int | None = None
+
+# `brain ui` -- whether the UNPROMPTED listing surfaces (the vault tree, the
+# recent rail, the tag index) may name a ``sensitivity='confidential'``
+# document. Read from ``BRAIN_UI_SERVE_CONFIDENTIAL_TITLES``, tri-state parsed
+# like the graph flags above.
+#
+# DEFAULT FALSE, and separate from ``UiContext.serve_confidential_bodies`` by
+# ruling. The bodies flag is named for bodies and is computed as
+# ``loopback or include_confidential``; reusing it to gate a list of TITLES the
+# user never asked for is a category error, because "this session is trusted to
+# read a confidential note it opened" and "this session wants every
+# confidential title painted on load" are different questions. Off by default
+# because the tree paints unprompted on first load.
+DEFAULT_UI_SERVE_CONFIDENTIAL_TITLES = False
 
 # Tacit-knowledge elicitation knobs (feat/tacit-knowledge-elicitation).
 #
@@ -1096,7 +1126,7 @@ class Config:
     # Phase 1 data-quality remediation (2026-05-23). Extra automated-sender
     # denylist entries (substrings or full addresses) layered on top of the
     # always-on generic heuristic (no-reply / notifications / mailer / …) used by
-    # :func:`brain.wiki._person_name.is_automated_sender`. Loaded from
+    # :func:`brain.person_name.is_automated_sender`. Loaded from
     # ``BRAIN_GRAPH_SENDER_DENYLIST`` (comma-separated); entries are trimmed,
     # lowercased, and de-duplicated at load time. Empty frozenset (default) means
     # only the generic heuristic runs. Threaded into both the People Hub
@@ -1208,6 +1238,10 @@ class Config:
     # :func:`_default_backup_dir` so a directly-constructed Config honors
     # ``BRAIN_BACKUP_DIR`` identically to ``Config.load()``.
     backup_dir: Path = field(default_factory=_default_backup_dir)
+    # `brain ui` -- gate on the unprompted listing surfaces. See
+    # :data:`DEFAULT_UI_SERVE_CONFIDENTIAL_TITLES` for why this is not
+    # ``UiContext.serve_confidential_bodies``.
+    ui_serve_confidential_titles: bool = DEFAULT_UI_SERVE_CONFIDENTIAL_TITLES
 
     @classmethod
     def load(cls) -> "Config":
@@ -1703,6 +1737,26 @@ class Config:
                     "BRAIN_GRAPH_CONCEPTS must be one of "
                     "1/true/yes/on or 0/false/no/off "
                     f"(got {graph_concepts_raw!r})"
+                )
+
+        # `brain ui` confidential-TITLE gate. Tri-state like the graph flags:
+        # unset/blank -> default (False); a recognised token -> that value;
+        # anything else -> ConfigError at startup, so a typo can never read as
+        # "hide" when the operator meant "show" or, worse, the reverse.
+        ui_titles_raw = os.environ.get("BRAIN_UI_SERVE_CONFIDENTIAL_TITLES")
+        if ui_titles_raw is None or ui_titles_raw.strip() == "":
+            ui_serve_confidential_titles = DEFAULT_UI_SERVE_CONFIDENTIAL_TITLES
+        else:
+            token = ui_titles_raw.strip().lower()
+            if token in _GRAPH_ENABLED_TRUTHY:
+                ui_serve_confidential_titles = True
+            elif token in _GRAPH_ENABLED_FALSY:
+                ui_serve_confidential_titles = False
+            else:
+                raise ConfigError(
+                    "BRAIN_UI_SERVE_CONFIDENTIAL_TITLES must be one of "
+                    "1/true/yes/on or 0/false/no/off "
+                    f"(got {ui_titles_raw!r})"
                 )
 
         graph_extract_model_raw = os.environ.get("BRAIN_GRAPH_EXTRACT_MODEL")
@@ -2538,4 +2592,5 @@ class Config:
             "graph_communities_list_limit": graph_communities_list_limit,
             "agent_id": agent_id,
             "backup_dir": backup_dir,
+            "ui_serve_confidential_titles": ui_serve_confidential_titles,
         }

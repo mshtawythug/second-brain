@@ -5,7 +5,7 @@ assertions), following the pattern in test_quartz_parser_cache_static.py.
 
 Covered contracts:
 - File exists at the expected overlay path.
-- Exports ``FINGERPRINT_VERSION`` as a numeric constant equal to 1.
+- Exports ``FINGERPRINT_VERSION`` as a numeric constant equal to 2.
 - Exports ``computeFingerprint``, ``writeManifest``, ``readManifest``.
 - ``computeFingerprint`` body calls ``createHash("sha256")``.
 - ``writeManifest`` body calls ``renameSync`` (atomic write guarantee).
@@ -55,24 +55,24 @@ def test_fastpath_manifest_ts_exists() -> None:
 
 
 def test_fingerprint_version_is_numeric_export(manifest_ts_source: str) -> None:
-    """``FINGERPRINT_VERSION`` is exported as a numeric constant equal to 1."""
+    """``FINGERPRINT_VERSION`` is exported as a numeric constant equal to 2."""
     assert re.search(
-        r"export const FINGERPRINT_VERSION\s*:\s*number\s*=\s*1",
+        r"export const FINGERPRINT_VERSION\s*:\s*number\s*=\s*2",
         manifest_ts_source,
     ), (
-        "expected `export const FINGERPRINT_VERSION: number = 1` "
+        "expected `export const FINGERPRINT_VERSION: number = 2` "
         "in fastpath_manifest.ts"
     )
 
 
-def test_fingerprint_version_equals_one(manifest_ts_source: str) -> None:
-    """``FINGERPRINT_VERSION`` is set to ``1`` (the initial version)."""
+def test_fingerprint_version_equals_two(manifest_ts_source: str) -> None:
+    """``FINGERPRINT_VERSION`` is set to ``2``."""
     # Explicit value check — a later bump would trip this test so maintainers
     # remember to also bump the Python constant and update memory files.
     match = re.search(r"export const FINGERPRINT_VERSION\s*[=:][^=].*?(\d+)", manifest_ts_source)
     assert match, "could not find FINGERPRINT_VERSION assignment in fastpath_manifest.ts"
-    assert match.group(1) == "1", (
-        f"FINGERPRINT_VERSION must be 1, got {match.group(1)!r} — "
+    assert match.group(1) == "2", (
+        f"FINGERPRINT_VERSION must be 2, got {match.group(1)!r} — "
         "if you bumped the version, update this test intentionally"
     )
 
@@ -206,8 +206,8 @@ def test_parity_runner_exists() -> None:
 def test_parity_runner_has_matching_version(manifest_ts_source: str) -> None:
     """Parity runner ``FINGERPRINT_VERSION`` matches the TS overlay file."""
     runner_source = PARITY_RUNNER.read_text(encoding="utf-8")
-    assert "FINGERPRINT_VERSION = 1" in runner_source, (
-        "parity runner must declare FINGERPRINT_VERSION = 1 to match the TS overlay"
+    assert "FINGERPRINT_VERSION = 2" in runner_source, (
+        "parity runner must declare FINGERPRINT_VERSION = 2 to match the TS overlay"
     )
 
 

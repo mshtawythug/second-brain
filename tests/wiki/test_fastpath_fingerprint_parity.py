@@ -21,6 +21,7 @@ for this input (the test case is marked xfail-on-parity-for-unknown-field).
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import struct
 import subprocess
@@ -30,6 +31,7 @@ from pathlib import Path
 import pytest
 
 from brain.wiki.fastpath_manifest import (
+    FINGERPRINT_VERSION,
     ManifestError,
     compute_fingerprint,
     compute_fingerprint_with_blob,
@@ -419,7 +421,7 @@ def test_parity_tags_mixed_case_preserved() -> None:
         source_path="note-case-tags.md",
         output_path="note-case-tags.html",
         source_text=_src(
-            "title: Case Tags\ntags:\n  - Work\n  - KomplyIQ\n",
+            "title: Case Tags\ntags:\n  - Work\n  - MixedCase\n",
             "Body with #UpperTag.",
         ),
     )
@@ -625,4 +627,32 @@ def test_parity_midnight_datetime_truncated_to_date_only() -> None:
         source_text=_src(
             "title: Midnight Datetime\ncreated: 2024-01-10T00:00:00\n", "Body."
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Cross-language FINGERPRINT_VERSION lockstep
+# ---------------------------------------------------------------------------
+
+
+def test_python_and_ts_fingerprint_version_match() -> None:
+    """Python ``FINGERPRINT_VERSION`` equals the TS overlay's declared value.
+
+    ``tests/test_quartz_fastpath_manifest_static.py`` already pins TS against
+    the ``.mjs`` parity runner, but nothing pinned *Python* against either.  A
+    half-applied bump leaves the TS full build stamping manifests the Python
+    reader rejects, which fails closed (every edit becomes a full build) and so
+    shows up as a silent performance cliff rather than a test failure.
+    """
+    ts_source = (
+        Path(__file__).resolve().parents[2]
+        / "src/brain/quartz_overrides/quartz/util/fastpath_manifest.ts"
+    ).read_text(encoding="utf-8")
+    match = re.search(
+        r"export const FINGERPRINT_VERSION\s*:\s*number\s*=\s*(\d+)", ts_source
+    )
+    assert match, "FINGERPRINT_VERSION not found in fastpath_manifest.ts"
+    assert int(match.group(1)) == FINGERPRINT_VERSION, (
+        f"FINGERPRINT_VERSION mismatch: Python={FINGERPRINT_VERSION} "
+        f"TS={match.group(1)} — bump both together"
     )

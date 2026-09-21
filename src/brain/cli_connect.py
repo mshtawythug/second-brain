@@ -222,6 +222,15 @@ def _write_wikilink(cfg: Config, action: connect_mod.ActionResult) -> bool:
     present. Exits non-zero when the source/target vault paths are missing
     (the link can't be located) so the user gets clear feedback.
     """
+    # F6 — checked BEFORE the path checks so a blocked write reports the reason
+    # that actually blocked it. The two failures are independent and a
+    # confidential document with no mirror would otherwise be reported as a
+    # missing file, which is true and useless.
+    try:
+        connect_mod.assert_see_also_publishable(action)
+    except ConnectError as exc:
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(code=1) from exc
     if action.source_vault_path is None:
         typer.secho(
             "cannot write wikilink: source doc has no vault file",

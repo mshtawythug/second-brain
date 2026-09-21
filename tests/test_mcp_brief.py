@@ -69,7 +69,7 @@ def test_brain_brief_resolves_windows_from_config(
 ) -> None:
     # Omitted MCP params must resolve from cfg (not the old hard-coded 24/7),
     # so config overrides propagate — mirroring `brain brief --json`.
-    captured: dict[str, int] = {}
+    captured: dict[str, object] = {}
 
     def _spy(
         conn: object,
@@ -78,9 +78,14 @@ def test_brain_brief_resolves_windows_from_config(
         since_hours: int,
         todo_since_days: int,
         on_date: object,
+        exclude_confidential: bool,
     ) -> object:
         captured["since_hours"] = since_hours
         captured["todo_since_days"] = todo_since_days
+        # F6: captured, not merely absorbed by a **kwargs. A spy that swallowed
+        # this would keep passing if the bridge were deleted, and this is the
+        # only test that observes what ``brain_brief`` actually forwards.
+        captured["exclude_confidential"] = exclude_confidential
         return BriefData(
             date=on_date,  # type: ignore[arg-type]
             captures=[],
@@ -102,4 +107,12 @@ def test_brain_brief_resolves_windows_from_config(
     monkeypatch.setattr("brain.brief.assemble_brief", _spy)
 
     mcp_server.brain_brief(no_enrich=True)
-    assert captured == {"since_hours": 72, "todo_since_days": 30}
+    # The default call excludes: ``include_confidential`` defaults False and the
+    # bridge inverts it. Asserted in the same dict as the windows so a deleted
+    # or inverted bridge fails HERE, at the layer that owns the policy, and not
+    # only in the end-to-end egress tests.
+    assert captured == {
+        "since_hours": 72,
+        "todo_since_days": 30,
+        "exclude_confidential": True,
+    }

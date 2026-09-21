@@ -221,7 +221,17 @@ def test_json_findings_never_contain_the_raw_secret(
     assert _FAKE_SLACK_TOKEN not in result.output
     payload = json.loads(result.output)
     findings = payload["documents"][0]["findings"]
-    assert findings, "the seeded body carries two credential shapes"
+    # A control per SHAPE, not per test. This test denies two different
+    # credentials over two different containers, and ``assert findings`` pins
+    # only that SOME finding exists — so a scanner that detected the AWS key and
+    # missed the Slack token entirely would satisfy every ``not in`` below while
+    # the token sat unredacted in the corpus. Naming both kinds is what makes
+    # the Slack half of each claim an assertion about a string that is really
+    # there to be leaked.
+    assert {f["kind"] for f in findings} == {"aws_access_key_id", "slack_token"}, (
+        f"both seeded credential shapes must be DETECTED, or the Slack "
+        f"assertions below pass vacuously: {findings}"
+    )
     for finding in findings:
         assert _FAKE_AWS_KEY not in finding["preview"]
         assert _FAKE_SLACK_TOKEN not in finding["preview"]

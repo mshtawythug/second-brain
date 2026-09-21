@@ -226,15 +226,21 @@ class TestTrivialScenarios:
         result = classify_edit(fastpath_dir=fdir, source_path=src, vault_root=vault)
         _assert_trivial(result)
 
-    def test_trivial_06_ignored_frontmatter_autopilot_field(self, tmp_path: Path) -> None:
-        """Changing `autopilot_sweep_workload` (ignored) — fingerprint unchanged."""
+    def test_trivial_06_ignored_transcript_metadata_field(self, tmp_path: Path) -> None:
+        """Changing `duration_min` (ignored) — fingerprint unchanged.
+
+        Covers the transcript-metadata category of the built-in ignore set,
+        which test 05's `external_id` (identity category) does not reach.
+        The vault-supplied rule path is covered separately in
+        ``tests/wiki/test_ignored_fields.py``.
+        """
         slug = "trivial-06"
         orig = _make_source(
-            frontmatter="title: Note\nautopilot_sweep_workload: false",
+            frontmatter="title: Note\nduration_min: 30",
             body="Content here.",
         )
         mod = _make_source(
-            frontmatter="title: Note\nautopilot_sweep_workload: true",
+            frontmatter="title: Note\nduration_min: 45",
             body="Content here.",
         )
         vault, fdir, src = _trivial_setup(tmp_path, slug, orig, mod)

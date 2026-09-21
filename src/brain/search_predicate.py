@@ -49,6 +49,7 @@ class SearchPredicate:
 def build_predicate(
     *,
     source_kind: str | None = None,
+    source_missing: bool = False,
     tag: str | None = None,
     since_days: int | None = None,
     person_keys: list[str] | None = None,
@@ -70,6 +71,30 @@ def build_predicate(
     All thirteen filters bind their value as a ``%s`` parameter; not one caller
     value is ever concatenated into ``where_sql``.
 
+    ``source_missing`` (T7) is the only NON-``None``-defaulted filter, and the
+    only one that binds no parameter — it is a flag, not a value, so its clause
+    is a module-level literal (``d.source_id IS NULL``) with nothing to bind.
+
+    It exists because ``source_kind`` cannot express "no source at all".
+    ``d.source_id IN (SELECT id FROM sources WHERE kind=%s)`` is false for a NULL
+    ``source_id`` under **every** value of ``kind``, so a document with no
+    ``sources`` row — 876 of them in the reference corpus — is unreachable from
+    the source filter in all four of its settings. That is a hole in the filter,
+    not a property of the corpus, and this closes it additively.
+
+    ``False`` (the default) appends nothing, so ``where_sql`` is byte-identical
+    to what it was before this filter existed and the no-filter fast path below
+    is bit-for-bit unchanged — the same argument F6 makes, and the reason no
+    ``tests/eval/baselines/ci.json`` re-record is implied.
+    ``tests/test_search_predicate_source_missing.py`` PINS that byte-identity
+    against a captured pre-change table rather than asserting it in prose.
+
+    Passing ``source_missing=True`` together with ``source_kind`` is a
+    contradiction (``source_id`` cannot be both NULL and a match) and is
+    deliberately not special-cased: this function builds a conjunction and every
+    filter minds only its own clause. The UI surfaces the two as one dropdown,
+    so the combination is unreachable there.
+
     ``sensitivity`` (F6) is deliberately OPT-IN and defaults to ``None``, meaning
     "both tiers" — the pre-026 behaviour. That default is the whole reason F6 can
     add a filter here without a ``tests/eval/baselines/ci.json`` re-record: with
@@ -87,6 +112,8 @@ def build_predicate(
     if source_kind:
         where_clauses.append("d.source_id IN (SELECT id FROM sources WHERE kind=%s)")
         where_params.append(source_kind)
+    if source_missing:
+        where_clauses.append("d.source_id IS NULL")
     if tag:
         where_clauses.append("%s = ANY(d.tags)")
         where_params.append(tag)

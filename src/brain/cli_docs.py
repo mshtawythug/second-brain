@@ -28,7 +28,6 @@ from typing import TYPE_CHECKING, Any
 
 import psycopg
 import typer
-import yaml
 
 from .config import Config
 from .db import connect
@@ -41,8 +40,7 @@ from .vault.delete import (
     describe_delete_target,
     unlink_vault_mirror,
 )
-from .vault.export import regenerate_vault_file
-from .vault.frontmatter import rewrite_sensitivity
+from .vault.sensitivity_propagate import propagate_sensitivity_to_vault
 
 if TYPE_CHECKING:
     from .graph_rag.sync import GraphSyncer
@@ -315,47 +313,26 @@ def _set_sensitivity(id_prefix: str, *, level: str) -> None:
         conn.autocommit = True
         doc_id = _resolve_id(conn, id_prefix)
         label = doc_id[:8]
-        row = conn.execute(
-            "SELECT kind, vault_path FROM documents WHERE id=%s", (doc_id,)
-        ).fetchone()
-        assert row is not None  # _resolve_id confirmed the row exists
-        kind, vault_path_rel = row
         changed = set_document_sensitivity(
             conn, document_id=doc_id, level=level
         )
         if not changed:
             typer.echo(f"{label} is already {level}")
             return
-        if kind == "vault":
-            if vault_path_rel:
-                try:
-                    rewrite_sensitivity(cfg.vault_path / vault_path_rel, level)
-                except (OSError, ValueError, yaml.YAMLError) as exc:
-                    # The DB change already committed. Surface loudly: on a
-                    # vault-tier note the on-disk value is authoritative, so a
-                    # failed write means the next sync WILL revert the tier.
-                    typer.secho(
-                        f"warning: could not write sensitivity into "
-                        f"{vault_path_rel}: {exc}. The next `brain vault sync` "
-                        f"will revert {label} to the frontmatter's value — fix "
-                        f"the file and re-run.",
-                        fg="yellow",
-                        err=True,
-                    )
-        else:
-            try:
-                regenerate_vault_file(
-                    conn, doc_id, vault_path=cfg.vault_path, force=True
-                )
-            except OSError as exc:
-                # The DB change already committed; a mirror write failure must
-                # not lose it. Mirrors update_document's recovery guidance.
-                logger.warning(
-                    "vault mirror write failed for document %s: %s; "
-                    "DB update succeeded — recover via `brain vault export`",
-                    doc_id,
-                    exc,
-                )
+        # Everything the tier change implies on disk — the document's own file
+        # AND every fence that names it — now lives behind one call, shared with
+        # the `backfill scan-secrets` sweep. It looks `kind`/`vault_path` up
+        # itself, which is why the SELECT that used to sit here is gone: the
+        # sweep's `ScannableDocument` carries neither, and a signature demanding
+        # them is what forced that caller to grow its own half of this and
+        # diverge.
+        for failure in propagate_sensitivity_to_vault(
+            conn, doc_id, level=level, vault_root=cfg.vault_path
+        ):
+            # Warned, never raised: the DB change is already committed and a
+            # transient disk error must not lose it. Each message carries its
+            # own recovery instruction.
+            typer.secho(f"warning: {failure.message}", fg="yellow", err=True)
     typer.echo(f"marked {label} as {level}")
 
 

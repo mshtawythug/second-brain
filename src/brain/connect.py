@@ -12,6 +12,60 @@ MCP server (so neither layer duplicates the SQL or the file logic).
 It deliberately carries no Typer / MCP imports: the CLI (``cli_connect.py``)
 and the MCP server map the plain :mod:`brain.errors` exceptions raised here to
 their own frameworks.
+
+**File-size ceiling (CLAUDE.md): already over at the branch base, and it grew.**
+This pointer carries no live line count on purpose — the ceiling table's entry
+for this file asserted ``925 -> 925`` for a full day *after* the growth below
+had landed, so a reader auditing compliance was told there was nothing to
+audit. Re-derive with ``wc -l src/brain/connect.py``. What does not rot is the
+base and the trail: 925 (``f8c76c0``, branch base) -> 925 (``3b16527``, touched
+but no net change) -> 952 (``ec6afb6``) -> 972 (``56cc984``, the commit that
+wrote this very record -- its +20 lines ARE the ceiling record) -> 993
+(``b7fd0e8``) -> **the commit that added this paragraph**, named descriptively
+and with no delta. (The ``b7fd0e8`` hop is written in now that it HAS a SHA: the
+previous descriptive last hop was that commit, and a descriptive hop is
+promotable to a SHA-bound one the moment a later edit can see it. That is the
+maintenance the terminating form actually requires, and skipping it is how a
+trail keeps arriving one hop short while each author believes they just fixed
+it.)
+
+WHY THE LAST HOP HAS NO NUMBER AND NO SHA. A record of a file's size is
+invalidated by the act of writing the record: the hash does not exist until
+after the write, and any delta stated is falsified by the same edit that states
+it. So no hop can ever name its own commit, and a trail that tries is stale on
+arrival -- which is how this record stopped one hop short twice running while
+each time believing it had just been fixed. The terminating form is the one
+here: SHA-bound historical hops, which are facts about frozen commits and cannot
+rot; a descriptive final hop for the in-flight change; and a command for the
+present. Read the trail as authoritative only THROUGH THE LAST SHA IT NAMES, and
+get everything after it from ``wc -l`` above plus
+``git log --oneline f8c76c0..HEAD -- src/brain/connect.py``.
+
+It grew AGAIN for :func:`assert_see_also_publishable`, the F6 gate on the
+``## See Also`` WRITE -- and that growth is a correction of the record below,
+not a new surface. ``iter_suggestions`` was recorded as F6-gated and is; it is
+the LIST. Neither accept path reaches it: ``cli_connect`` and ``mcp_server``
+both go through :func:`load_action_context`, which had no predicate, so
+``accept --write`` appended a confidential target's title and slug into a
+source page that publishes. The gate lands at the WRITE rather than on the
+shared loader because the loader also backs ``reject``, and a suggestion
+touching a confidential document must stay rejectable. Most of the added lines
+are the argument for refusing here while ``review weekly`` was fixed by building
+a second gated payload -- there a gated answer existed; here the wikilink's
+entire content IS the confidential document. Reason inline on that function;
+cover in ``tests/test_connect_see_also_confidential.py``.
+
+The first growth is the F6 confidential gate on :func:`iter_suggestions`,
+reasoned inline on that function. The non-obvious half, and the reason to open it: a
+suggestion names TWO documents, so the gate gates BOTH joins — filtering the
+source alone would still publish every confidential document that happened to be
+somebody's suggested *target*. It also defaults to include, the opposite name
+AND opposite default from the MCP layer's ``include_confidential``, because the
+permissive direction only ever adds rows and a one-directional test cannot see
+an inverted bridge.
+
+Splitting is not indicated: this is one scoring algorithm plus the writeback
+primitives its two callers share. Extract before growing it again.
 """
 from __future__ import annotations
 
@@ -26,9 +80,10 @@ import psycopg
 
 from .config import Config
 from .errors import ConnectError
+from .related import _avg_embedding, _eligible_source_docs
+from .sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY, not_confidential_sql
 from .vault._atomic import atomic_write_text
 from .vault.paths import safe_wikilink_alias, strip_md_extension
-from .wiki.build_related import _avg_embedding, _eligible_source_docs
 
 _logger = logging.getLogger(__name__)
 
@@ -103,6 +158,12 @@ class ActionResult:
     metadata the caller needs to build + insert the ``## See Also`` wikilink
     for ``accept --write`` without a second round-trip. ``wikilink_written`` is
     populated by the caller after it performs (or skips) the file write.
+
+    ``source_sensitivity`` / ``target_sensitivity`` exist so
+    :func:`assert_see_also_publishable` can answer the F6 question from the row
+    the caller already fetched. They are carried on the value object rather than
+    re-queried at the write, because a second read is a second chance for the
+    two to disagree about the document being acted on.
     """
 
     suggestion_id: str
@@ -112,6 +173,8 @@ class ActionResult:
     source_vault_path: str | None
     target_vault_path: str | None
     target_title: str
+    source_sensitivity: str = DEFAULT_SENSITIVITY
+    target_sensitivity: str = DEFAULT_SENSITIVITY
     wikilink_written: bool = False
 
 
@@ -251,7 +314,7 @@ def embedding_affinity(
     """Return ``{target_doc_id: best_cosine}`` for one source doc, rank-ordered.
 
     The source doc's average chunk embedding is the query vector (reusing
-    :func:`brain.wiki.build_related._avg_embedding`); each candidate doc's score
+    :func:`brain.related._avg_embedding`); each candidate doc's score
     is its best per-chunk cosine similarity, floored at ``vector_sim_floor``
     (the same floor runtime ``brain search`` uses). Dict insertion order is the
     cosine-descending rank order (ties broken by target-doc id). Empty when the
@@ -544,7 +607,7 @@ def refresh_suggestions(
     """Recompute candidate suggestions and upsert the survivors.
 
     For each eligible source doc (non-draft, vault-backed, ≥1 embedded chunk —
-    the same predicate as ``build_related``), blend the graph + embedding legs
+    the same predicate as ``brain.related``), blend the graph + embedding legs
     via RRF, drop pairs already linked or scoring below ``cfg.connect_min_score``,
     keep the top ``cfg.connect_max_per_doc``, and upsert into
     ``link_suggestions``. Suggestions are UNDIRECTED (migration 022): exactly one
@@ -569,7 +632,14 @@ def refresh_suggestions(
             f"connect_min_score must be in (0.0, 1.0] (got {cfg.connect_min_score})"
         )
 
-    sources = _eligible_source_docs(conn)
+    # ``exclude_confidential=False`` DELIBERATELY. The helper is fail-closed by
+    # default because its other caller (the related-docs precompute) publishes
+    # a file per source doc. This surface does not: it SCORES suggestions, and
+    # its egress gate lives downstream at :func:`iter_suggestions`, which drops
+    # a suggestion when EITHER endpoint is confidential. Gating here too would
+    # stop confidential docs being scored at all -- a behaviour change to a
+    # surface that is already correctly gated where it actually emits.
+    sources = _eligible_source_docs(conn, exclude_confidential=False)
     if doc_prefix is not None:
         # Resolve the prefix lazily here (kept out of the import surface) so a
         # bad prefix surfaces the same IdPrefix* errors the rest of the CLI uses.
@@ -724,21 +794,47 @@ def iter_suggestions(
     *,
     status: str | None = "pending",
     limit: int = 20,
+    exclude_confidential: bool = False,
 ) -> list[SuggestionRow]:
     """Return suggestions joined to their source/target titles.
 
     ``status=None`` returns every row (the ``--all`` view); otherwise filters to
     one status. Ordered by score descending. ``limit`` caps the result.
+
+    ``exclude_confidential`` (F6) drops any suggestion where EITHER endpoint is
+    confidential. Both joins are gated, not just the source: a suggestion names
+    two documents and either title is a full disclosure, so filtering ``sd``
+    alone would still publish every confidential document that happens to be
+    somebody's suggested target. ``tests/test_mcp_listing_confidential.py`` makes
+    the confidential document the TARGET precisely so a source-only fix fails.
+
+    Why this read needed a gate at all: :func:`brain.mcp_server.brain_connect_list`
+    takes no document id and no query. Every title it returns is a document the
+    caller never named, which is the enumeration the F6 ruling is about — the
+    same argument that closed ``/api/notes/{id}/links`` and ``brain_orphans``.
+
+    It DEFAULTS FALSE — include — matching :mod:`brain.vault.graph` rather than
+    the MCP layer's ``include_confidential``. ``brain connect list`` at a
+    terminal is the owner reading their own corpus and offers no flag to turn a
+    hidden row back on; the MCP server is the boundary and passes
+    ``exclude_confidential=not include_confidential``. Opposite name AND opposite
+    default: inverting that bridge flips the gate while every one-directional
+    test stays green, because the permissive direction only ever ADDS rows. Both
+    directions are pinned.
     """
+    where = ["(%(status)s::text IS NULL OR ls.status = %(status)s)"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("sd"))
+        where.append(not_confidential_sql("td"))
     rows = conn.execute(
-        """
+        f"""
         SELECT ls.id::text, ls.source_doc_id::text, ls.target_doc_id::text,
                sd.title, td.title, ls.score, ls.graph_score, ls.embed_score,
                ls.status, ls.suggested_at
         FROM link_suggestions ls
         JOIN documents sd ON sd.id = ls.source_doc_id
         JOIN documents td ON td.id = ls.target_doc_id
-        WHERE (%(status)s::text IS NULL OR ls.status = %(status)s)
+        WHERE {' AND '.join(where)}
         ORDER BY ls.score DESC, ls.id
         LIMIT %(limit)s
         """,
@@ -811,11 +907,20 @@ def load_action_context(
     write failure never leaves the row frozen ``accepted`` with no wikilink
     (Codex R1 #1). ``status`` is the row's current status. Raises
     :class:`ConnectError` for a missing suggestion id.
+
+    **This function is deliberately NOT gated, and that is not an oversight.**
+    It backs ``reject`` as well as ``accept``, and a suggestion touching a
+    confidential document is one an operator must be able to reject — a gate
+    here would make the offending row unactionable and permanently pending. The
+    F6 decision belongs at the WRITE, which is the only step that leaves the
+    trust boundary; see :func:`assert_see_also_publishable`. It selects both
+    tiers so that function has them without a second read.
     """
     row = conn.execute(
         """
         SELECT ls.status, ls.source_doc_id::text, ls.target_doc_id::text,
-               sd.vault_path, td.vault_path, td.title
+               sd.vault_path, td.vault_path, td.title,
+               sd.sensitivity, td.sensitivity
         FROM link_suggestions ls
         JOIN documents sd ON sd.id = ls.source_doc_id
         JOIN documents td ON td.id = ls.target_doc_id
@@ -833,6 +938,8 @@ def load_action_context(
         source_vault_path=row[3],
         target_vault_path=row[4],
         target_title=str(row[5] or ""),
+        source_sensitivity=str(row[6]),
+        target_sensitivity=str(row[7]),
     )
 
 
@@ -861,6 +968,65 @@ def set_suggestion_status(
 # --------------------------------------------------------------------------- #
 # Vault writeback primitives (Typer-free; shared by CLI + MCP).
 # --------------------------------------------------------------------------- #
+
+
+def assert_see_also_publishable(action: ActionResult) -> None:
+    """F6 gate on the ``## See Also`` WRITE. Raises :class:`ConnectError` if blocked.
+
+    ``brain connect accept <id>`` and ``brain_connect_accept`` serve two
+    audiences from one invocation, the shape ``2b2b321`` named: flipping the
+    row's status is local DB state inside the trust boundary, while ``--write``
+    /``write=True`` appends a bullet to a file in ``cfg.vault_path`` that Quartz
+    PUBLISHES (``_ingested/`` is in neither Quartz config's ``ignorePatterns``).
+    So the status flip stays ungated and the write is gated -- the split lands
+    between the two steps of one command, exactly as it landed at the CLI call
+    sites for ``review weekly``.
+
+    **Why a REFUSAL here, when ``review weekly`` was fixed with a second gated
+    payload instead.** There the gated answer existed: the same report minus the
+    confidential rows, still a useful week. Refusing would have thrown away an
+    available correct answer and made a read flag silently decide whether a page
+    got maintained. Here there is no gated variant to write -- the wikilink's
+    entire content IS the confidential document, its title and its slug. The
+    choice is publish it or do not, so this refuses, and refuses LOUDLY: the
+    caller gets an error naming the reason, not a silent no-op. The status flip
+    is unaffected, so the suggestion stays actionable and can be rejected.
+
+    **Which gate the writeback was missing.** ``iter_suggestions`` was recorded
+    as F6-gated and is; it is the LIST. Neither accept path goes through it --
+    both reach :func:`load_action_context`, which had no predicate -- so the
+    recorded status was true of the surface it named and silently not of the
+    write. That is the third instance on this branch of a claim scoped to what
+    its author was looking at being read as scoped to the whole tool; see the
+    handoff's SS7 trap catalogue.
+
+    **Both endpoints, with honestly unequal arguments.**
+
+    * A confidential TARGET is a reproduced disclosure: its title becomes the
+      anchor text and its vault path the link target, inside a source page that
+      publishes because the SOURCE's frontmatter says ``normal``.
+    * A confidential SOURCE closes nothing measured -- that file carries
+      ``sensitivity: confidential`` and Quartz's ``RemoveConfidential`` does read
+      it. It is refused for the reason the fence's host leg is stripped: that
+      TypeScript filter is the only thing unpublishing the page, and a Python
+      gate should not be correct only for as long as a filter in another
+      language is. The cost is real and worth stating -- an operator cannot use
+      this command to link out FROM a confidential note.
+    """
+    if action.target_sensitivity == CONFIDENTIAL:
+        raise ConnectError(
+            "refusing to write the wikilink: the target document is "
+            "confidential, and the ## See Also section is published. The "
+            "suggestion's status is unchanged — reject it, or run "
+            "`brain mark-normal` on the target if it should not be confidential."
+        )
+    if action.source_sensitivity == CONFIDENTIAL:
+        raise ConnectError(
+            "refusing to write the wikilink: the source document is "
+            "confidential. Its vault file is kept off the published site only "
+            "by Quartz's frontmatter filter, so the brain does not write "
+            "derived links into it. The suggestion's status is unchanged."
+        )
 
 
 def build_see_also_wikilink(target_vault_path: str, target_title: str) -> str:

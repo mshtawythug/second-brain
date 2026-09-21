@@ -4,6 +4,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .coverage
+.coverage.*
 htmlcov/
 data/
 .DS_Store
@@ -49,14 +50,79 @@ run/
 # them into a commit. Same failure mode the root-PNG and `docs/audits/*` blocks
 # already guard against.
 scratchpad/
-
-# Plans / specs / audits / QA — local-only working docs (may contain personal
+# Plans / audits / QA — local-only working docs (may contain personal
 # references). docs/ is private-by-subdir: the publishable reference docs
 # (docs/README.md, docs/cli-reference.md, docs/graphrag.md,
-# docs/vault-and-wiki.md, docs/configuration.md), docs/guides/, and docs/assets/
-# stay trackable; everything below is ignored. Add any NEW private subdir/file
-# to this list before it can leak.
-docs/plans/
+# docs/vault-and-wiki.md, docs/configuration.md), docs/guides/, docs/assets/,
+# docs/specs/, docs/plans/, and docs/handoff/ stay trackable; everything below
+# is ignored. Add any NEW private subdir/file to this list before it can leak.
+#
+# docs/handoff/ is SANCTIONED here rather than newly admitted — the enumeration
+# above was simply incomplete. Six of its seven files have been tracked since
+# `e084c79` (v0.3.0) and `71fa590`; only 2026-08-13-wiki-to-ui-session-handoff.md
+# is new, landing in `3b16527`. So the list, not the directory, was the thing out
+# of step. Rule 11b names docs/plans/ and docs/specs/ because those are what it
+# governs; a session handoff is neither a plan nor a spec, and forcing it into
+# one of those directories would misfile it to satisfy a rule that never
+# addressed it.
+#
+# The terms are the same as docs/plans/: PII-scrubbed, synthetic-only, scanned
+# before landing. The caveat this note used to carry — that
+# 2026-08-13-wiki-to-ui-session-handoff.md was clean of PII *values* but carried
+# absolute local worktree paths and another session's operational detail — was
+# ACTED ON 2026-08-20, not merely re-recorded: that file now uses <worktree> /
+# <main-checkout> placeholders and states in its own header what was changed and
+# what was deliberately left (the branch name, which is not machine layout and is
+# named in tracked CLAUDE.md anyway).
+#
+# The CLASS is closed in the working tree as of 2026-08-20: no tracked file
+# contains the owner's real home-directory path. Closed by scrubbing the five
+# files that still held one — AGENTS.md, both docs/plans/wiki-to-ui files, and
+# two tests/test_quartz_* files — to the placeholders the rest of the docs
+# already use. What would REOPEN it: any new absolute path pasted out of a real
+# shell session.
+#
+# Re-derive rather than trusting this line, and SCOPE the scan — `/Users/` alone
+# is the wrong pattern and never produced the count this note used to cite. Most
+# hits are deliberate placeholders (`/Users/you`, `/Users/example`,
+# `/Users/<you>`), which are documentation, not exposure:
+#
+#     git grep -c "/Users/$(basename "$HOME")" -- .    # expect: no output
+#
+# Note the `-- .` : that scans the WORKING TREE. `git grep … HEAD` answers a
+# different question — the committed tree — and keeps reporting the pre-scrub
+# state until the scrub is committed. Same reasoning as the docs/audits/ note
+# below: a file with no PII can still be a map to something.
+#
+# docs/specs/ was un-ignored deliberately: CLAUDE.md rule 11b mandates that all
+# specs live there, so leaving it ignored meant every design doc in the project
+# was one clean checkout from being lost. It was PII-scrubbed first and is now
+# synthetic-only, exactly like tests and fixtures — keep it that way (rule 15).
+#
+# docs/plans/ was un-ignored on the same grounds and the same terms: rule 11b
+# mandates that plans live there too, so an ignored plan is one clean checkout
+# from gone. Scanned before landing — no PII values, no real corpus identifiers.
+#
+# docs/audits/ STAYS IGNORED. This is a decision, not an oversight: do NOT
+# "finish the job" by moving it up beside docs/plans/. Its files are clean of
+# PII *values*, so the usual test passes — and that test is the wrong one here.
+# This repository is PUBLIC, and its history still carries real personal data
+# that has never been rewritten (removing it would mean rewriting ~446 commits,
+# which is destructive and has not been authorised). docs/audits/ holds the PII
+# audit, which is a precise index INTO that history: hundreds of findings across
+# dozens of files in dozens of named commit SHAs, each labelled by category.
+# Committing it would turn an expensive scan into a single `git show`. A file
+# that contains no PII can still be a map to PII. The map should keep existing —
+# just not inside the repository it maps.
+#
+# MERGE NOTE (2026-09-02, merging master's PR #8 into this branch): the tree is
+# ignored as `docs/audits/*`, not `docs/audits/`, and seven named measurement
+# artifacts are allowlisted below. That does not soften the decision above — it
+# narrows it. `dir/` makes git refuse to descend, which makes any later
+# `!dir/file` unreachable; `dir/*` keeps the same default-deny while leaving one
+# escape hatch that must be used ONE FILE AT A TIME, each vetted and each
+# carrying its own reason inline. The PII audit is NOT on that list and must
+# never be added to it — the paragraph above is why.
 # docs/audits/ uses `dir/*` rather than `dir/` so a NAMED file can be
 # allowlisted below: git never descends into a directory excluded as `dir/`,
 # which makes a later `!dir/file` unreachable. Subdirectories still match `*`,
@@ -129,7 +195,6 @@ docs/audits/*
 # discarded unread). Both are kept: the first is the evidence for the decision,
 # the second is what a future wave would re-run.
 !docs/audits/2026-08-13-snippet-constraints.json
-docs/specs/
 docs/notes/
 docs/qa/
 docs/summaries/
@@ -144,6 +209,23 @@ docs/HOW-TO-TEST-elicit.md
 
 # Real PII-gate denylist (real names/customers/codenames) — keep local (rule 15).
 # The checked-in file is .pii-denylist.local.txt.example (synthetic).
+#
+# What the gate's EMAIL check actually permits, because it is narrower than the
+# repo has claimed elsewhere: `scripts/hooks/pre-commit` allows an address only
+# if its host ends in one of a hardcoded alternation — re-derive it with
+# `grep -n 'emails=' -A2 scripts/hooks/pre-commit`. That set is NOT "the RFC 2606
+# reserved names", which is how at least one commit message describes it. RFC 2606
+# reserves the `.test/.example/.invalid/.localhost` TLDs and `example.{com,net,org}`
+# — and nothing else. The alternation also admits `acme`, `contoso` and `northwind`
+# under `.com/.org/.net`, plus `test.` and `invalid.` under them. Those are
+# conventional synthetic-company placeholders, not reserved names, and `acme.com`,
+# `contoso.com` and `northwind.com` are real registered domains.
+#
+# This is deliberate and worth keeping — the placeholders are what the fixtures
+# actually use — but it should be described accurately, because "only reserved
+# names" is the kind of claim someone leans on when deciding a fixture is safe.
+# The gate scans the STAGED DIFF, not the tree, so existing tracked uses are
+# grandfathered and a green commit is not evidence the tree is clean.
 /.pii-denylist.local.txt
 
 # Generated audio-overview artifacts (brain audio) — real content, never commit

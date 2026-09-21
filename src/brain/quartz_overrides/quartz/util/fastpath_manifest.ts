@@ -44,7 +44,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import type { ProcessedContent } from "../plugins/vfile"
 
-export const FINGERPRINT_VERSION: number = 1
+export const FINGERPRINT_VERSION: number = 2
 
 // ---------------------------------------------------------------------------
 // Public types

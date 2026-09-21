@@ -1,0 +1,184 @@
+/* The ledger's idle state — the recent rail and the tag index.
+ *
+ * A per-feature sheet layered on the shared component tier, so it is linked
+ * AFTER components.css. Every value here is an existing token.
+ *
+ * NO `overflow-y` HERE, deliberately. `.ledger` already carries
+ * `min-height: 0; overflow-y: auto` (layout.css:25) as one of the three scroll
+ * panes; adding a second scroll context inside it produces nested scrollbars —
+ * the block scrolls to its own end while the column it sits in has not moved,
+ * which reads as a page that will not scroll.
+ *
+ * `--ink-faint` IS NOT USED, and the omission is deliberate rather than
+ * incidental: it fails AA as text on every ground in both themes, exactly one
+ * decorative use is permitted in the whole front end (components.css's
+ * `.search-glyph`), and `check_ink_faint_used_once` polices that across every
+ * sheet in CSS_ORDER. Quiet text here is `--ink-muted`, which measures
+ * 5.66-7.27:1 over the same six pairings. Naming the token in prose without
+ * `var(` keeps this comment from satisfying that guard's substring search — the
+ * trap that has now blinded three guards in this project.
+ */
+
+#discovery {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-6);
+  padding: var(--s-4) var(--s-4) var(--s-6);
+}
+
+#discovery[hidden] { display: none; }
+
+.disc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+/* Sits below the search head, so it must not compete with it. Small, spaced
+   and quiet — a label for the block, not a second page title. */
+.disc-head {
+  font-family: var(--font-ui);
+  font-size: var(--t-meta);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  margin: 0;
+}
+
+.disc-note {
+  font-family: var(--font-ui);
+  font-size: var(--t-meta);
+  color: var(--ink-muted);
+  margin: 0;
+  max-width: var(--measure);
+}
+
+.disc-empty {
+  font-family: var(--font-ui);
+  font-size: var(--t-body);
+  color: var(--ink-muted);
+  font-style: italic;
+  margin: 0;
+}
+
+.disc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Two columns, but NOT the ledger's two. `.result` spends `--gutter-w` (5.5rem)
+   on a gutter carrying the source WORD above the date; these rows are a browse
+   list, not a result list, so they spend a glyph's width on the source and put
+   the date under the title. Reusing `--gutter-w` here would reserve 5.5rem to
+   centre one emoji in. `auto` takes exactly what the glyph needs. */
+.disc-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-2);
+  border-radius: var(--radius);
+  text-decoration: none;
+  color: inherit;
+  border-bottom: var(--hair);
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.disc-row:last-child { border-bottom: 0; }
+
+.disc-row:hover { background: var(--paper-raised); }
+
+.disc-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  background: var(--paper-raised);
+}
+
+.disc-icon { font-size: var(--t-body); }
+
+.disc-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  min-width: 0;
+}
+
+.disc-title {
+  font-family: var(--font-read);
+  font-size: var(--t-body);
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+
+.disc-meta {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  color: var(--ink-muted);
+}
+
+/* The tag index. A wrapped field of chips rather than a list: the reader is
+   scanning for a name, not reading in order, and a vertical list of every tag
+   in the corpus is a scrollbar where a paragraph would do. */
+.disc-tags {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.disc-tag {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  font-family: var(--font-ui);
+  font-size: var(--t-chip);
+  color: var(--ink);
+  background: var(--paper-sunk);
+  border: var(--hair);
+  border-radius: var(--radius-chip);
+  padding: var(--s-1) var(--s-3);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease),
+              border-color var(--dur-fast) var(--ease);
+}
+
+.disc-tag:hover {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.disc-tag:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* The count is subordinate to the name it annotates — same size, quieter ink,
+   monospaced so a field of them stays comparable at a glance. */
+.disc-tag-count {
+  font-family: var(--font-mono);
+  color: var(--ink-muted);
+}
+
+.disc-back {
+  align-self: flex-start;
+  font-family: var(--font-ui);
+  font-size: var(--t-meta);
+  color: var(--ink-muted);
+  background: none;
+  border: 0;
+  padding: var(--s-1) 0;
+  cursor: pointer;
+}
+
+.disc-back:hover { color: var(--ink); }
+
+.disc-back:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

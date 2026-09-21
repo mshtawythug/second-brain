@@ -1,0 +1,147 @@
+/* marginalia.css — the breadcrumb trail and table of contents beside a note.
+ *
+ * LOADED LAST, after components.css, for the same reason palette.css is: this
+ * is a feature sheet layered on the shared component tier, not a new tier of
+ * its own. `check_every_stylesheet_is_linked_in_order` asserts
+ * `links == list(CSS_ORDER)` — an EXACT match, not a superset — so this file,
+ * that tuple in tests/test_ui_static_behaviour.py, and index.html's <link>
+ * block are one fact stored in three places and must agree. See the task's
+ * integration note.
+ *
+ * WHAT THIS IS NOT (yet). The plan calls for a marginalia COLUMN. `.shell` is a
+ * three-column grid declared in layout.css and index.html, both integrator-
+ * owned for phase 2, so promoting this block to a fourth track is their change,
+ * not this file's. What ships here is the same content — breadcrumbs, TOC —
+ * rendered as a bordered block at the foot of the inspector, styled so that
+ * promotion is a change of placement rather than a rewrite: every rule below is
+ * scoped to `.marginalia` and none of them assume where it sits.
+ */
+
+.marginalia {
+  /* The block is a quiet aside, not a second column of content: it sits on the
+     raised sheet the inspector already provides, separated by a rule rather
+     than by a fill, so it reads as an annotation to the note above it. */
+  margin-top: var(--s-6);
+  padding-top: var(--s-4);
+  border-top: var(--hair);
+  font-family: var(--font-ui);
+  font-size: var(--t-ui);
+  color: var(--ink-muted);
+}
+
+/* ---------------------------------------------------------- breadcrumbs --- */
+
+.marginalia .breadcrumbs ol {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* --ink-muted, NOT --ink-faint, and this is an accessibility fix rather than a
+   preference. A path segment is text the reader is expected to READ, and
+   --ink-faint measures 2.69-3.03:1 in light and 3.34-3.84:1 in dark against the
+   grounds this block sits on — below WCAG AA for text on every one of them.
+   --ink-muted is 5.66-7.27:1 over the same pairings. `check_ink_faint_used_once`
+   enforces exactly this, allowing --ink-faint only on `.search-glyph`, which is
+   decorative. The rule could not see this file until marginalia.css entered
+   CSS_ORDER, which is how the defect shipped in the first place. */
+.marginalia .breadcrumbs li {
+  font-family: var(--font-mono);
+  font-size: var(--t-meta);
+  color: var(--ink-muted);
+}
+
+/* The separator is generated content, so it is never selected when the reader
+   copies the path, and never read aloud as a word by a screen reader. */
+.marginalia .breadcrumbs li + li::before {
+  content: "/";
+  margin-right: var(--s-1);
+  color: var(--rule);
+}
+
+/* The leaf is the note itself — the only segment naming this document rather
+   than one of its folders, so it is the one the eye should land on.
+
+   THE DISTINCTION IS WEIGHT, NOT COLOUR, and that is a consequence of the fix
+   above. This rule used to lift the leaf from --ink-faint to --ink-muted; once
+   every segment is correctly --ink-muted, a colour-based rule here would be a
+   no-op duplicate carrying a comment that claims a difference it no longer
+   makes. Reaching for a *fainter* colour on the other segments to restore the
+   contrast is what the WCAG rule forbids, so the hierarchy moves to a channel
+   that costs no contrast at all. */
+.marginalia .breadcrumbs li:last-child {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* ----------------------------------------------------------------- TOC --- */
+
+.marginalia .toc {
+  margin-top: var(--s-4);
+}
+
+.marginalia .toc ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.marginalia .toc li {
+  /* Indentation encodes heading depth. Levels are read off `data-level` rather
+     than nested <ol>s because markdown levels may skip (h2 -> h4), and building
+     real nesting from a flat, possibly-skipping sequence invents a hierarchy
+     the author never wrote. `calc` from the level keeps one rule for all six
+     instead of six near-identical ones. */
+  padding-left: calc((var(--level, 2) - 2) * var(--s-3));
+}
+
+.marginalia .toc li[data-level="1"] { --level: 1; }
+.marginalia .toc li[data-level="2"] { --level: 2; }
+.marginalia .toc li[data-level="3"] { --level: 3; }
+.marginalia .toc li[data-level="4"] { --level: 4; }
+.marginalia .toc li[data-level="5"] { --level: 5; }
+.marginalia .toc li[data-level="6"] { --level: 6; }
+
+.marginalia .toc a {
+  display: block;
+  padding: var(--s-1) var(--s-2);
+  /* A hairline the active entry recolours. Reserving the border on EVERY entry
+     means marking one current shifts nothing sideways — a 2px border appearing
+     on click would nudge the whole rail and read as a layout bug. */
+  border-left: 2px solid transparent;
+  color: var(--ink-muted);
+  text-decoration: none;
+  line-height: var(--lead-dense);
+  transition: color var(--dur-fast) var(--ease),
+              border-color var(--dur-fast) var(--ease);
+}
+
+.marginalia .toc a:hover {
+  color: var(--ink);
+  border-left-color: var(--rule);
+}
+
+/* Focus is NOT folded into :hover. Keyboard users get the ring; the ring is
+   what tells them where they are, and a hover-only treatment would leave the
+   rail navigable but unreadable by keyboard. */
+.marginalia .toc a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  color: var(--ink);
+}
+
+/* Keyed off the ARIA attribute rather than a parallel class, so the visual
+   state and the announced state cannot drift apart: there is only one flag. */
+.marginalia .toc a[aria-current="location"] {
+  color: var(--ink);
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .marginalia .toc a { transition: none; }
+}

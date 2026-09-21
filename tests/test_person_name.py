@@ -1,4 +1,4 @@
-"""Unit tests for ``brain.wiki._person_name`` — the shared person-name normalizer.
+"""Unit tests for ``brain.person_name`` — the shared person-name normalizer.
 
 Pure-function tests (no DB) covering every Phase-1 data-quality pattern:
 mailing-list ``via X`` decoration, ``Last, First (Org`` flipping, separator
@@ -6,7 +6,7 @@ collapse (so handle-style and spaced forms merge to one canonical key),
 email-as-name humanization, automated/org-sender detection, and owner-variant
 expansion. All names are synthetic (Jane Doe / John Smith / Acme Corp); no PII.
 """
-from brain.wiki._person_name import (
+from brain.person_name import (
     NormalizedName,
     expand_owner_keys,
     humanize_person_name,

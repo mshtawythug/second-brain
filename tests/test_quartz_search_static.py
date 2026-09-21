@@ -398,7 +398,7 @@ def test_search_scss_pins_search_bar_layout(search_scss_source: str) -> None:
     regression silently.
 
     User-visible regression report:
-    ``/Users/mshtawythug/Desktop/Screenshot 2026-05-04 at 9.31.42 PM.png``.
+    ``~/Desktop/Screenshot 2026-05-04 at 9.31.42 PM.png``.
     """
     # Selector pins the rule scope so a refactor that drops the
     # `.search-space > .search-bar` chain trips the test.

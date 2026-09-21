@@ -48,6 +48,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 
 from ..rank_fusion import rrf_contribution
+from ..sensitivity import not_confidential_sql
 from ._retrieval_common import _build_doc_results, _row_to_entity
 from .router import GLOBAL_MODE
 from .schema import CommunityGroup, GraphContext, GraphEntity, GraphExplanation
@@ -86,6 +87,7 @@ def _retrieve_global(
     limit: int | None = None,
     embedder: Embedder | None = None,
     session_id: str | None = None,
+    exclude_confidential: bool = False,
 ) -> GraphContext:
     """Run global (community-based) retrieval + assemble its ``GraphContext``.
 
@@ -117,7 +119,14 @@ def _retrieve_global(
     fused = _fuse_rrf(fts_keys, vector_keys)
     top = fused[:resolved_limit] if resolved_limit > 0 else []
 
-    communities, docs = _build_communities(conn, tenant, query, top, resolved_limit)
+    communities, docs = _build_communities(
+        conn,
+        tenant,
+        query,
+        top,
+        resolved_limit,
+        exclude_confidential=exclude_confidential,
+    )
     entities = _dedupe_entities(communities)
 
     explanation = GraphExplanation(
@@ -272,6 +281,7 @@ def _build_communities(
     query: str,
     ranked: list[tuple[str, float]],
     limit: int,
+    exclude_confidential: bool = False,
 ) -> tuple[list[CommunityGroup], list[SearchResult]]:
     """Assemble ranked :class:`CommunityGroup`s + the context-level docs.
 
@@ -291,7 +301,9 @@ def _build_communities(
 
     meta_by_key = _community_metadata(conn, tenant, keys)
     entities_by_key = _community_entities(conn, tenant, keys)
-    docs_by_key = _community_doc_scores(conn, tenant, keys)
+    docs_by_key = _community_doc_scores(
+        conn, tenant, keys, exclude_confidential=exclude_confidential
+    )
 
     communities: list[CommunityGroup] = []
     context_doc_score: dict[str, float] = {}
@@ -316,7 +328,9 @@ def _build_communities(
     context_ranked = sorted(
         context_doc_score.items(), key=lambda kv: (-kv[1], kv[0])
     )[:limit]
-    return communities, _build_doc_results(conn, query, context_ranked)
+    return communities, _build_doc_results(
+        conn, query, context_ranked, exclude_confidential=exclude_confidential
+    )
 
 
 def _community_metadata(
@@ -369,7 +383,11 @@ def _community_entities(
 
 
 def _community_doc_scores(
-    conn: psycopg.Connection[Any], tenant: str, keys: list[str]
+    conn: psycopg.Connection[Any],
+    tenant: str,
+    keys: list[str],
+    *,
+    exclude_confidential: bool = False,
 ) -> dict[str, list[tuple[str, float]]]:
     """Batch-load each community's representative documents + mention scores.
 
@@ -380,15 +398,32 @@ def _community_doc_scores(
     document ranking in :func:`brain.graph_rag.communities_summary.
     _representative_doc_titles` (count of community entities present), but keyed
     by document id for the per-community ``doc_ids`` + the context-level fusion.
+
+    ``exclude_confidential`` (F6) closes ``CommunityGroup.doc_ids``. Identical in
+    shape to the themes residual: :func:`._retrieval_common._build_doc_results`
+    gated the context-level ``docs`` while the per-community id list built from
+    THIS query — sitting in the same response — was not gated at all.
+
+    The gate joins ``documents`` and applies the predicate here rather than
+    filtering the returned lists, because these counts also feed
+    ``context_doc_score`` in :func:`_build_communities`. Filtering afterwards
+    would leave the context-level FUSION weighted by documents the caller may not
+    see, so the surviving documents would be RANKED using confidential data even
+    though none of them is confidential.
     """
     if not keys:
         return {}
+    join = "JOIN documents d ON d.id = m.document_id " if exclude_confidential else ""
+    where = "cm.tenant_id = %s AND cm.community_key::text = ANY(%s)"
+    if exclude_confidential:
+        where += f" AND {not_confidential_sql('d')}"
     rows = conn.execute(
         "SELECT cm.community_key::text, m.document_id::text, COUNT(*) AS n "
         "FROM graph_community_members cm "
         "JOIN graph_entity_mentions m "
         "  ON m.tenant_id = cm.tenant_id AND m.entity_id = cm.entity_id "
-        "WHERE cm.tenant_id = %s AND cm.community_key::text = ANY(%s) "
+        f"{join}"
+        f"WHERE {where} "
         "GROUP BY cm.community_key, m.document_id "
         "ORDER BY cm.community_key, n DESC, m.document_id ASC",
         (tenant, keys),

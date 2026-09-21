@@ -21,6 +21,7 @@ from typing import Any
 import psycopg
 
 from .queries import DocumentRow
+from .sensitivity import not_confidential_sql
 
 # Strict ``YYYY-Www`` shape (e.g. ``2026-W23``). Anchored so a stray suffix or a
 # bare year is rejected before reaching ``datetime.fromisocalendar`` (which
@@ -98,6 +99,7 @@ def iter_activity_docs(
     after: datetime,
     before: datetime,
     limit: int = 20,
+    exclude_confidential: bool = False,
 ) -> list[ActivityDoc]:
     """Return documents interacted with in ``[after, before]``, busiest first.
 
@@ -105,16 +107,22 @@ def iter_activity_docs(
     interactions per doc, and orders by interaction count (then recency, then
     id) for a deterministic result. Graph-target interaction rows
     (``document_id IS NULL``) are excluded. Returns ``[]`` for an empty window.
+
+    ``exclude_confidential`` (F6) drops confidential documents from the window.
+    See :func:`recent_captures` for why this reader needed a gate and which way
+    the default points.
     """
+    where = ["i.at BETWEEN %s AND %s", "i.document_id IS NOT NULL"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
     rows = conn.execute(
-        """
+        f"""
         SELECT d.id::text, d.title, d.tags,
                COUNT(*) AS interaction_count,
                MAX(i.at) AS last_at
         FROM   interactions i
         JOIN   documents d ON d.id = i.document_id
-        WHERE  i.at BETWEEN %s AND %s
-          AND  i.document_id IS NOT NULL
+        WHERE  {' AND '.join(where)}
         GROUP  BY d.id, d.title, d.tags
         ORDER  BY interaction_count DESC, last_at DESC, d.id
         LIMIT  %s
@@ -139,19 +147,26 @@ def iter_ingested_docs(
     after: datetime,
     before: datetime,
     limit: int = 10,
+    exclude_confidential: bool = False,
 ) -> list[IngestedDoc]:
     """Return documents ingested in ``[after, before]``, newest first.
 
     Left-joins ``sources`` so ``source_kind`` is populated (``None`` for manual
     docs without a source row). Ordered by ingest time then id for determinism.
     Returns ``[]`` for an empty window.
+
+    ``exclude_confidential`` (F6) drops confidential documents from the window.
+    See :func:`recent_captures` for the rationale and the default's direction.
     """
+    where = ["d.ingested_at BETWEEN %s AND %s"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
     rows = conn.execute(
-        """
+        f"""
         SELECT d.id::text, d.title, d.ingested_at, d.tags, s.kind
         FROM   documents d
         LEFT JOIN sources s ON s.id = d.source_id
-        WHERE  d.ingested_at BETWEEN %s AND %s
+        WHERE  {' AND '.join(where)}
         ORDER  BY d.ingested_at DESC, d.id
         LIMIT  %s
         """,
@@ -174,6 +189,7 @@ def recent_captures(
     *,
     since_hours: int,
     limit: int,
+    exclude_confidential: bool = False,
 ) -> list[DocumentRow]:
     """Return docs ingested in the last ``since_hours`` hours, newest first.
 
@@ -181,13 +197,34 @@ def recent_captures(
     :class:`brain.queries.DocumentRow` projection (no body / summary), mirroring
     :func:`brain.queries.list_documents`. The window is computed in SQL relative
     to ``NOW()`` so the caller need not pass a timestamp.
+
+    ``exclude_confidential`` (F6) drops confidential documents from the window.
+
+    WHY THIS READER NEEDED A GATE. The projection carries no body, which is
+    exactly why it was missed — but a time window is an ENUMERATION: the caller
+    named no document, so every title returned is one it did not ask for. That is
+    the ruling that closed ``brain_orphans`` and ``/api/notes/{id}/links``, and
+    :func:`brain.mcp_server.brain_brief` reaches this function with no parameters
+    at all.
+
+    It DEFAULTS FALSE — include — because ``brain brief`` at a terminal is the
+    owner reading their own corpus and offers no flag to turn a hidden row back
+    on. The gate lives at the boundary that has a policy: the MCP layer passes
+    ``exclude_confidential=not include_confidential``. Opposite name AND opposite
+    default from that layer's ``include_confidential``, so inverting the bridge
+    flips the gate while every one-directional test stays green — the permissive
+    direction only ever ADDS rows. Both directions are pinned in
+    ``tests/test_mcp_listing_confidential.py``.
     """
+    where = ["d.ingested_at >= NOW() - (%s * INTERVAL '1 hour')"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
     rows = conn.execute(
-        """
+        f"""
         SELECT d.id::text, d.title, d.content_type, d.tags, s.kind, d.ingested_at
         FROM   documents d
         LEFT JOIN sources s ON s.id = d.source_id
-        WHERE  d.ingested_at >= NOW() - (%s * INTERVAL '1 hour')
+        WHERE  {' AND '.join(where)}
         ORDER  BY d.ingested_at DESC, d.id
         LIMIT  %s
         """,

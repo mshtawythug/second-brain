@@ -13,6 +13,7 @@ import json
 import re
 
 from brain.demo import load_corpus
+from brain.source_kinds import VALID_SOURCE_KINDS
 
 # The complete invented cast (CLAUDE.md PII rule). Every person named in a
 # structured ``participants`` field must be one of these — nobody real.
@@ -28,7 +29,16 @@ CAST = frozenset(
 )
 
 # The four ingest source kinds the demo must showcase.
-EXPECTED_SOURCES = frozenset({"manual", "krisp", "slack", "gmail"})
+#
+# The canonical object, not a restatement of its four members. As a hardcoded
+# literal this guard was an unguarded copy: ``brain.source_kinds`` is the single
+# definition every write boundary validates against, and a fifth kind added
+# there would leave this set silently stale — the demo would stop covering the
+# real enum while the test kept reporting that it did. ``ui/schemas.py`` takes
+# the same re-export route and is pinned by identity in
+# ``tests/test_ui_schemas.py``; there is no reason for the demo guard to be the
+# one copy that can drift.
+EXPECTED_SOURCES = VALID_SOURCE_KINDS
 
 # Real-provider email domains that must NEVER appear (generic provider domains,
 # not PII — safe to name). All demo emails are ``…@…​.example.com``.

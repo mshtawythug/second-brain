@@ -116,6 +116,7 @@ def run_conflict_scan(
     *,
     tenant_id: str,
     dry_run: bool = False,
+    exclude_confidential: bool = False,
 ) -> list[ReviewFinding]:
     """Detect entities whose document summaries express contradictory positions.
 
@@ -141,6 +142,7 @@ def run_conflict_scan(
         tenant_id=tenant_id,
         min_docs=cfg.elicit_contradiction_min_docs,
         limit=cfg.review_conflict_limit,
+        exclude_confidential=exclude_confidential,
     )
     existing = queries.existing_finding_statuses(
         conn, tenant_id=tenant_id, signal_kind="contradiction"
@@ -163,7 +165,11 @@ def run_conflict_scan(
             max_pairs=cfg.review_conflict_pairs_per_entity,
         )
         if pairs:
-            summaries = queries.fetch_doc_summaries(conn, document_ids=docs)
+            summaries = queries.fetch_doc_summaries(
+                conn,
+                document_ids=docs,
+                exclude_confidential=exclude_confidential,
+            )
             _logger.info(
                 "conflict scan: adjudicating entity %r (%d candidate pair(s))",
                 cand.name,
@@ -254,6 +260,7 @@ def run_staleness_scan(
     *,
     tenant_id: str,
     dry_run: bool = False,
+    exclude_confidential: bool = False,
 ) -> list[ReviewFinding]:
     """Flag aged docs superseded by a newer doc sharing an entity (no LLM calls).
 
@@ -273,6 +280,7 @@ def run_staleness_scan(
         tenant_id=tenant_id,
         stale_age_days=cfg.review_stale_age_days,
         limit=cfg.review_stale_limit,
+        exclude_confidential=exclude_confidential,
     )
     existing = queries.existing_finding_statuses(
         conn, tenant_id=tenant_id, signal_kind="stale"
@@ -286,6 +294,7 @@ def run_staleness_scan(
             tenant_id=tenant_id,
             doc_id=cand.doc_id,
             window_days=cfg.review_stale_supersede_window_days,
+            exclude_confidential=exclude_confidential,
         )
         if not newer:
             continue

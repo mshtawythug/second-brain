@@ -1,0 +1,129 @@
+/* The reading surfaces — the summary lede, the source glyph, and the four
+ * link kinds. T15.
+ *
+ * A per-feature sheet, layered on the shared component tier exactly like
+ * palette.css and marginalia.css, so it must be linked AFTER components.css.
+ *
+ * LINKED AND ROSTERED. `index.html` and `CSS_ORDER` in
+ * tests/test_ui_static_behaviour.py are one fact stored twice —
+ * `check_every_stylesheet_is_linked_in_order` asserts they match as SEQUENCES,
+ * exact and not a superset — so the <link> and the roster entry are a single
+ * change. THIS PARAGRAPH USED TO SAY "NOT YET LINKED"; the pair landed
+ * atomically and the claim was corrected rather than left to rot, because a
+ * false comment about wiring is what sends the next reader looking for a
+ * missing <link> that is already there.
+ *
+ * The reason it went in cleanly, and the constraint that keeps it in: this
+ * file reaches for no new colour at all. Every value below is an existing
+ * token, and `--ink-faint` — the one token that fails AA as text on every
+ * ground in both themes, and the one `check_ink_faint_used_once` polices — is
+ * not used here. Being in the roster means that guard NOW sweeps this file, so
+ * a future `var(--ink-faint)` added below reddens the suite twice over: once
+ * there, and once in `test_reading_css_never_uses_the_failing_ink_token`,
+ * which reads this file off disk and therefore does not depend on the roster
+ * membership continuing to exist. Use `--ink-muted` (5.66-7.27:1 over the same
+ * six pairings) for quiet text.
+ */
+
+/* ------------------------------------------------------------- the lede --- */
+
+/* Rendered ONLY when documents.summary has content — see the guard in
+   inspector.js. There is deliberately no `:empty` rule here: hiding an empty
+   aside with CSS would leave the element in the accessibility tree and would
+   put the invariant in a file the JS test cannot see. The element's absence is
+   the guarantee; this rule only paints it when it exists. */
+.lede {
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3) 0 var(--s-3) var(--s-4);
+  border-left: 2px solid var(--accent);
+  color: var(--ink-muted);
+  font-size: var(--t-body);
+  font-style: italic;
+  line-height: var(--lead-read);
+  max-width: var(--measure);
+}
+
+/* ----------------------------------------------------- the source glyph --- */
+
+/* The gutter is a fixed-width column, so the glyph and its word share one row
+   and the word wraps under itself rather than under the glyph. */
+.source-cell {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35em;
+}
+
+/* Emoji ignore `color`, so this is size and rhythm only. Sized DOWN from the
+   gutter's own scale: at full size the glyph outweighs the title it sits
+   beside, which inverts the row's hierarchy. */
+.source-icon {
+  flex: none;
+  font-size: 0.95em;
+  line-height: 1;
+}
+
+/* --------------------------------------------------------- link kinds ----- */
+
+/* FOUR kinds, and four is the complete set. `brain.ui.render.classify_link_kind`
+   emits tag / external / ingested / wiki and nothing else. The Quartz overlay
+   has a fifth, `derived` — a link inside a Phase D evidence fence — and it is
+   ABSENT HERE ON PURPOSE, not forgotten: `vault.sync` strips that fence out of
+   documents.content before anything reaches the renderer, so no derived link
+   exists on this path and a rule for one could never be exercised. Pinned by
+   `test_reading_css_styles_exactly_the_four_emitted_kinds`, which strips
+   comments before looking so this very paragraph cannot satisfy it.
+   If the fence is ever surfaced in the inspector, a rule belongs here and a
+   branch belongs in classify_link_kind, in the same change.
+   The attribute selectors are qualified by `.note-body` so they outrank
+   `components.css`'s `.note-body a` regardless of which sheet loads first —
+   the treatments must not depend on link order the way a bare `a[…]` would. */
+
+.note-body a[data-brain-link-kind="wiki"] {
+  color: var(--accent);
+  text-decoration: underline solid;
+  text-underline-offset: 2px;
+}
+
+/* Dotted, and muted rather than accented: an ingested mirror is a machine's
+   copy of something that arrived from elsewhere. It is still navigable, so it
+   is still underlined — the dots say "provenance differs", not "inert". */
+.note-body a[data-brain-link-kind="ingested"] {
+  color: var(--ink-muted);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
+/* A tag is a label, not a sentence, so it is set as a chip and loses the
+   underline entirely — the ground is what marks it as a target. */
+.note-body a[data-brain-link-kind="tag"] {
+  color: var(--ink-muted);
+  background: var(--paper-sunk);
+  border-radius: var(--radius-chip);
+  padding: 0 0.3em;
+  text-decoration: none;
+  font-size: 0.92em;
+  letter-spacing: 0.02em;
+}
+
+.note-body a[data-brain-link-kind="tag"]:hover,
+.note-body a[data-brain-link-kind="tag"]:focus-visible {
+  color: var(--ink);
+  background: var(--accent-soft);
+}
+
+/* Shares wiki's colour and underline, and is told apart by the trailing mark —
+   which is the honest encoding, because the difference is not "another kind of
+   link" but "this one leaves the app". The glyph is generated content and so is
+   already invisible to assistive tech; a screen reader gets the href. */
+.note-body a[data-brain-link-kind="external"] {
+  color: var(--accent);
+  text-decoration: underline solid;
+  text-underline-offset: 2px;
+}
+
+.note-body a[data-brain-link-kind="external"]::after {
+  content: "↗";
+  margin-inline-start: 0.15em;
+  font-size: 0.85em;
+  vertical-align: baseline;
+}

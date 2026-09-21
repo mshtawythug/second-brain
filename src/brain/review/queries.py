@@ -13,6 +13,8 @@ from typing import Any
 
 import psycopg
 
+from ..sensitivity import not_confidential_sql
+
 # Review-finding signal kinds owned by this surface. ``brain review list`` /
 # ``dismiss`` only ever touch these two; the other ``elicitation_gaps`` kinds
 # (delta / orphan / contradiction-from-elicit / user_flagged) belong to
@@ -73,6 +75,7 @@ def iter_entities_for_conflict_scan(
     tenant_id: str,
     min_docs: int,
     limit: int,
+    exclude_confidential: bool = False,
 ) -> list[EntityCandidate]:
     """Graph prefilter: entities mentioned in >= ``min_docs`` summarized docs.
 
@@ -80,18 +83,29 @@ def iter_entities_for_conflict_scan(
     threshold (the summary is the evidence text fed to the LLM). Ordered by
     distinct-doc count DESC and capped at ``limit`` so the LLM-call budget is
     bounded. Pure SQL — no LLM, no embedder.
+
+    ``exclude_confidential`` (F6) drops confidential documents from the tally AND
+    from the returned ``doc_ids``. Both matter: ``doc_ids`` is what
+    :func:`fetch_doc_summaries` is later asked for, so a confidential document
+    left here becomes LLM evidence downstream, and the resulting ``rationale``
+    is body-derived text that a hosted model receives.
     """
+    where = [
+        "gem.tenant_id = %s",
+        "d.summary IS NOT NULL",
+        "d.draft IS NOT TRUE",
+    ]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
     rows = conn.execute(
-        """
+        f"""
         SELECT ge.canonical_key, ge.name, ge.entity_type,
                array_agg(DISTINCT gem.document_id::text) AS doc_ids
         FROM graph_entity_mentions gem
         JOIN graph_entities ge
           ON ge.id = gem.entity_id AND ge.tenant_id = gem.tenant_id
         JOIN documents d ON d.id = gem.document_id
-        WHERE gem.tenant_id = %s
-          AND d.summary IS NOT NULL
-          AND d.draft IS NOT TRUE
+        WHERE {' AND '.join(where)}
         GROUP BY ge.id, ge.canonical_key, ge.name, ge.entity_type
         HAVING count(DISTINCT gem.document_id) >= %s
         ORDER BY count(DISTINCT gem.document_id) DESC
@@ -139,6 +153,7 @@ def iter_docs_for_staleness_scan(
     tenant_id: str,
     stale_age_days: int,
     limit: int,
+    exclude_confidential: bool = False,
 ) -> list[StaleCandidate]:
     """Age candidates: non-draft, summarized, non-transcript docs older than N days.
 
@@ -148,21 +163,31 @@ def iter_docs_for_staleness_scan(
     ever yield a finding — the superseding-doc lookup (Step 2) requires a
     tenant-shared entity — so the ``EXISTS`` both enforces tenant isolation and
     skips docs that can never supersede. Oldest first; capped at ``limit``.
+
+    ``exclude_confidential`` (F6) removes confidential documents from the
+    candidate set, so no finding is ever generated ABOUT one. This is the half
+    that keeps a confidential ``target_id`` out of the payload;
+    :func:`fetch_superseding_docs` is the other half, keeping a confidential
+    TITLE out of the ``rationale``. Neither gates the other — they are two
+    different SELECTs feeding two different fields of the same finding.
     """
+    where = [
+        "d.ingested_at < now() - make_interval(days => %s)",
+        "d.content_type <> ALL(%s)",
+        "d.draft IS NOT TRUE",
+        "d.summary IS NOT NULL",
+        "EXISTS (SELECT 1 FROM graph_entity_mentions gem "
+        "WHERE gem.document_id = d.id AND gem.tenant_id = %s)",
+    ]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
     rows = conn.execute(
-        """
+        f"""
         SELECT d.id::text, d.title,
                (now()::date - d.ingested_at::date) AS age_days,
                d.content_type
         FROM documents d
-        WHERE d.ingested_at < now() - make_interval(days => %s)
-          AND d.content_type <> ALL(%s)
-          AND d.draft IS NOT TRUE
-          AND d.summary IS NOT NULL
-          AND EXISTS (
-              SELECT 1 FROM graph_entity_mentions gem
-              WHERE gem.document_id = d.id AND gem.tenant_id = %s
-          )
+        WHERE {' AND '.join(where)}
         ORDER BY d.ingested_at ASC
         LIMIT %s
         """,
@@ -313,25 +338,39 @@ def fetch_superseding_docs(
     tenant_id: str,
     doc_id: str,
     window_days: int,
+    exclude_confidential: bool = False,
 ) -> list[SupersedingDoc]:
     """Newer non-draft docs sharing >= 1 entity with ``doc_id``, ingested recently.
 
     A superseding candidate must (a) share at least one graph entity with the
     stale doc, (b) be ingested within ``window_days`` of now, and (c) not be the
     stale doc itself. Tenant-scoped via ``graph_entity_mentions``.
+
+    ``exclude_confidential`` (F6) is the gate that keeps a confidential TITLE out
+    of a ``stale`` finding's ``rationale``. ``review.scans`` builds that string as
+    ``f"Age: {n} days. Superseded by: '{superseding.title}' …"`` — the title is
+    interpolated verbatim, which is why a field that reads like computed metadata
+    is in fact a disclosure. Excluding the row here is what makes it an exclusion
+    rather than a redaction: with no superseder the finding is not generated at
+    all, so nothing reveals that a newer confidential document exists.
     """
+    where = [
+        "m1.tenant_id = %s",
+        "m1.document_id = %s",
+        "m2.document_id <> %s",
+        "d2.ingested_at >= now() - make_interval(days => %s)",
+        "d2.draft IS NOT TRUE",
+    ]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d2"))
     rows = conn.execute(
-        """
+        f"""
         SELECT DISTINCT d2.id::text, d2.title
         FROM graph_entity_mentions m1
         JOIN graph_entity_mentions m2
           ON m2.tenant_id = m1.tenant_id AND m2.entity_id = m1.entity_id
         JOIN documents d2 ON d2.id = m2.document_id
-        WHERE m1.tenant_id = %s
-          AND m1.document_id = %s
-          AND m2.document_id <> %s
-          AND d2.ingested_at >= now() - make_interval(days => %s)
-          AND d2.draft IS NOT TRUE
+        WHERE {' AND '.join(where)}
         """,
         (tenant_id, doc_id, doc_id, window_days),
     ).fetchall()
@@ -372,20 +411,34 @@ def fetch_best_chunk_embeddings(
 
 
 def fetch_doc_summaries(
-    conn: psycopg.Connection[Any], *, document_ids: Sequence[str]
+    conn: psycopg.Connection[Any],
+    *,
+    document_ids: Sequence[str],
+    exclude_confidential: bool = False,
 ) -> dict[str, str]:
     """Map each document id to its non-null ``summary`` text.
 
     Documents with a NULL summary are omitted, so a caller can treat "absent"
     and "no summary" identically. Used to assemble the LLM evidence pair.
+
+    ``exclude_confidential`` (F6) is DEFENCE IN DEPTH behind
+    :func:`iter_entities_for_conflict_scan`, which already withholds confidential
+    ids from the candidate ``doc_ids`` this is called with. It is kept anyway for
+    the reason :func:`brain.graph_rag.themes._fetch_doc_titles` is: what this
+    returns goes into a PROMPT. Once a summary has been sent to a model, no
+    downstream filter can recall it — so this query does not rely on its caller
+    having filtered, even though today's caller does.
     """
     if not document_ids:
         return {}
+    where = ["id = ANY(%s::uuid[])", "summary IS NOT NULL"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("documents"))
     rows = conn.execute(
-        """
+        f"""
         SELECT id::text, summary
         FROM documents
-        WHERE id = ANY(%s::uuid[]) AND summary IS NOT NULL
+        WHERE {' AND '.join(where)}
         """,
         (list(document_ids),),
     ).fetchall()
@@ -466,6 +519,7 @@ def list_review_queue(
     signal_kinds: Sequence[str],
     limit: int,
     include_snoozed: bool = False,
+    exclude_confidential: bool = False,
 ) -> list[QueueRow]:
     """Read the open review queue (surfaced / snoozed) for the given kinds.
 
@@ -484,9 +538,41 @@ def list_review_queue(
     hatch; snoozes additionally self-heal on expiry. A third verb would earn its
     keep only if someone asks for it — recorded here so the absence reads as a
     decision rather than an oversight.
+
+    ``exclude_confidential`` (F6) withholds a finding WHOLE when any of its
+    ``evidence_ids`` names a confidential document.
+
+    **Why the whole row and not just the sensitive field.** A finding whose
+    ``rationale`` were blanked but whose row still appeared would prove that a
+    confidential document exists, is stale or contradicted, and is linked to the
+    named target — the membership oracle :func:`brain.mcp_server._confidential_lens`
+    describes. Both leaking fields also derive from the same documents, so there
+    is no version of this row that is safe to show once one of its sources is
+    withheld.
+
+    **Why ``evidence_ids`` is the right key.** It is the only field that always
+    holds document ids: for a ``stale`` finding ``target_id`` is a document and is
+    also its first evidence id, while for a ``contradiction`` finding
+    ``target_id`` is an ENTITY canonical key and the documents appear only here.
+    Keying on ``target_id`` would therefore miss every contradiction finding.
+
+    **This gate is not redundant with the scan-input gates.** Those stop an
+    MCP-triggered scan from generating a confidential-derived finding; this one
+    covers findings already in the table, written by ``brain review scan`` at a
+    terminal — inside the trust boundary, where scanning confidential documents
+    is correct. A read gate cannot un-write those, only decline to serve them.
     """
     snooze_clause = (
         "" if include_snoozed else "AND (snoozed_until IS NULL OR snoozed_until < now())"
+    )
+    confidential_clause = (
+        ""
+        if not exclude_confidential
+        else (
+            "AND NOT EXISTS (SELECT 1 FROM documents d "
+            "WHERE d.id::text = ANY(elicitation_gaps.evidence_ids) "
+            f"AND NOT ({not_confidential_sql('d')}))"
+        )
     )
     rows = conn.execute(
         f"""
@@ -497,9 +583,10 @@ def list_review_queue(
           AND signal_kind = ANY(%s)
           AND status IN ('surfaced', 'snoozed')
           {snooze_clause}
+          {confidential_clause}
         ORDER BY score DESC
         LIMIT %s
-        """,  # noqa: S608 — snooze_clause is a module constant, never user input
+        """,  # noqa: S608 — both clauses are module-literal, never user input
         (tenant_id, list(signal_kinds), limit),
     ).fetchall()
     return [

@@ -16,6 +16,42 @@ anchor is ``COALESCE(documents.sent_at, documents.ingested_at)`` (event time
 when known — emails / Krisp — else ingest time), computed inline; when the
 optional migration-021 generated ``doc_date`` column is present it is used
 instead (auto-detected via ``information_schema``).
+
+**File-size ceiling (CLAUDE.md): already over at the branch base, and it grew.**
+This pointer carries no live line count on purpose — the ceiling table's entry
+for this file asserted ``844 -> 844`` for a full day *after* the growth below
+had landed, so a reader auditing compliance was told there was nothing to
+audit. Re-derive with ``wc -l src/brain/timeline.py``. What does not rot is the
+base and the trail: 844 (``f8c76c0``, branch base) -> 877 (``ec6afb6``) -> 900
+(``56cc984``, the commit that wrote this very record -- its +23 lines ARE the
+ceiling record) -> **the commit that added this paragraph**, named
+descriptively and with no delta.
+
+WHY THE LAST HOP HAS NO NUMBER AND NO SHA. A record of a file's size is
+invalidated by writing the record -- the hash does not exist until after the
+write, and any delta is falsified by the same edit that states it -- so a trail
+that tries to name its own commit is stale on arrival. That, not oversight, is
+why this record stopped one hop short twice running. SHA-bound hops are facts
+about frozen commits and cannot rot; the final hop is descriptive; the present
+comes from ``wc -l`` above plus
+``git log --oneline f8c76c0..HEAD -- src/brain/timeline.py``. Read the trail as
+authoritative only THROUGH THE LAST SHA IT NAMES.
+
+The one growth is the F6 confidential gate, threaded through
+:func:`_compose_doc_filter` and out to :func:`build_timeline`, and reasoned
+inline on both. The non-obvious half, and the reason to open them: the gate is
+applied in the PREDICATE, not the projection, so the confidential document
+leaves the match set entirely. One clause in ``_compose_doc_filter`` drops it
+from ``doc_ids``, ``doc_titles``, the co-topic tally, the ``doc_count`` /
+``mention_count`` arithmetic, the auto-granularity probe AND the synthesis
+bundle at once — none of which are separately gated, and each of which would
+otherwise leak a different shadow of the same document. Withholding only
+``doc_titles`` would still publish the ids, and an id is enough to fetch the
+document.
+
+Splitting is not indicated: this is one bucketing algorithm, and the three query
+helpers exist only to share its WHERE-clause composition. Extract before growing
+it again.
 """
 from __future__ import annotations
 
@@ -35,6 +71,7 @@ from .config import (
 )
 from .graph_rag.tenancy import resolve_tenant
 from .queries import resolve_person_to_keys
+from .sensitivity import not_confidential_sql
 from .token_budget import pack_greedy
 
 if TYPE_CHECKING:
@@ -390,6 +427,7 @@ def _compose_doc_filter(
     since: datetime | None,
     until: datetime | None,
     doc_scope: list[str] | None,
+    exclude_confidential: bool = False,
 ) -> tuple[list[str], list[Any]]:
     """Build the shared parameterized WHERE clauses for the bucketing queries.
 
@@ -398,8 +436,21 @@ def _compose_doc_filter(
     ``graph_entity_mentions``↔``documents`` join the same way, so the clause +
     bound-param composition lives here once (DRY). ``date_expr`` is an internal
     whitelist literal; everything else is bound as ``%s`` parameters.
+
+    ``exclude_confidential`` (F6) is applied HERE rather than at the projection
+    for the reason :func:`brain.mcp_server._confidential_lens` gives: the gate
+    must remove the document from the match set, not blank a field. Both
+    consumers of this predicate join ``documents d``, so one clause here drops
+    the confidential doc out of ``doc_ids``, ``doc_titles``, the co-topic tally,
+    the ``doc_count`` / ``mention_count`` arithmetic, the auto-granularity probe,
+    AND the synthesis bundle in one move — none of which are separately gated,
+    and all of which would otherwise leak a different shadow of the same
+    document. Withholding only ``doc_titles`` would still publish the ids, and
+    an id is enough to fetch the document.
     """
     where = ["gem.entity_id = ANY(%s)", "gem.tenant_id = %s"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
     params: list[Any] = [entity_ids, tenant_id]
     if since is not None:
         where.append(f"{date_expr} >= %s")
@@ -422,6 +473,7 @@ def _distinct_doc_dates(
     since: datetime | None,
     until: datetime | None,
     doc_scope: list[str] | None,
+    exclude_confidential: bool = False,
 ) -> list[datetime]:
     """Distinct document date-anchors for the matched set (auto-granularity probe).
 
@@ -438,6 +490,7 @@ def _distinct_doc_dates(
         since=since,
         until=until,
         doc_scope=doc_scope,
+        exclude_confidential=exclude_confidential,
     )
     sql = (
         f"SELECT DISTINCT {date_expr} AS d "
@@ -459,6 +512,7 @@ def _query_buckets(
     since: datetime | None,
     until: datetime | None,
     doc_scope: list[str] | None,
+    exclude_confidential: bool = False,
 ) -> list[_RawBucket]:
     """Run the temporal bucketing query (spec §3e).
 
@@ -477,6 +531,7 @@ def _query_buckets(
         since=since,
         until=until,
         doc_scope=doc_scope,
+        exclude_confidential=exclude_confidential,
     )
     sql = (
         f"SELECT date_trunc(%s, {date_expr}) AS bucket_start, "
@@ -689,6 +744,7 @@ def build_timeline(
     synthesize: bool = False,
     enricher: OllamaEnricher | None = None,
     tenant: str | None = None,
+    exclude_confidential: bool = False,
 ) -> TimelineContext:
     """Build the temporal timeline for ``query`` (spec §3f — the orchestrator).
 
@@ -706,6 +762,17 @@ def build_timeline(
     a bad ``granularity`` / ``since`` / ``until`` raises ``ValueError``; an
     unknown / ambiguous ``person`` propagates ``PersonNotFound`` /
     ``PersonAmbiguous`` (mapped to clean CLI/MCP errors by the caller).
+
+    ``exclude_confidential`` (F6) drops confidential documents from the matched
+    set before any bucket is formed — see :func:`_compose_doc_filter` for why the
+    gate belongs in the predicate rather than in the projection. It DEFAULTS
+    FALSE (include), matching :mod:`brain.vault.graph` and
+    :mod:`brain.graph_rag._retrieval_common` rather than the MCP layer's
+    ``include_confidential``: ``brain timeline`` at a terminal is the owner
+    reading their own corpus, while :func:`brain.mcp_server.brain_timeline` is
+    the boundary and passes ``exclude_confidential=not include_confidential``.
+    Opposite name AND opposite default, so an inverted bridge leaves every
+    one-directional test green — both directions are pinned.
     """
     requested = _validate_granularity(granularity or cfg.timeline_granularity)
     auto = requested == "auto"
@@ -766,6 +833,7 @@ def build_timeline(
             since=since_dt,
             until=until_dt,
             doc_scope=doc_scope,
+            exclude_confidential=exclude_confidential,
         )
         gran = _resolve_auto_granularity(dates)
     else:
@@ -780,6 +848,7 @@ def build_timeline(
         since=since_dt,
         until=until_dt,
         doc_scope=doc_scope,
+        exclude_confidential=exclude_confidential,
     )
     if not raw_buckets:
         return TimelineContext(

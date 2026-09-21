@@ -56,6 +56,26 @@ BODY_MARKER = "quokkavolt"
 SECRET_SUMMARY = "Bands run one eighty to two twenty under quokkavolt terms."
 
 
+def _blob(payload: object) -> str:
+    """Serialize a whole response for substring assertions.
+
+    ``ensure_ascii=False`` is load-bearing, not tidiness. The default escapes
+    every non-ASCII character, so a title containing an em-dash serializes as
+    ``Wind\\u2014Down`` and a substring check for the title silently fails to
+    match. On a ``not in`` assertion that is worse than a bug: it PASSES,
+    reporting "no leak" about a payload that contains the string in escaped
+    form.
+
+    This module's markers are ASCII TODAY, so every bare ``json.dumps`` here was
+    correct at the moment it was written — which is exactly why the hazard is
+    worth removing rather than arguing about. A sibling file's ``CONF_TITLE``
+    already carries an em-dash; one copied constant, and every withholding
+    assertion in this file turns green-forever with no test failing to say so.
+    Centralising the flag means that copy cannot silently disarm them.
+    """
+    return json.dumps(payload, default=str, ensure_ascii=False)
+
+
 @pytest.fixture
 def vault_dir(tmp_path: Path) -> Path:
     vault = tmp_path / "vault"
@@ -179,7 +199,7 @@ def test_search_response_contains_no_confidential_text_anywhere(
 
     payload = mcp_server.brain_search(query=QUERY, limit=10)
 
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER not in blob
 
 
@@ -257,7 +277,7 @@ def test_recall_response_contains_no_confidential_text_anywhere(
 
     payload = mcp_server.brain_recall(query=QUERY)
 
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER not in blob
 
 
@@ -304,7 +324,7 @@ def test_show_withholds_the_body_derived_summary(
 
     assert payload["content"] is None
     assert "summary" not in payload
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER not in blob
 
 
@@ -404,7 +424,7 @@ def test_resurface_response_contains_no_confidential_text_anywhere(
 
     payload = mcp_server.brain_resurface(limit=50)
 
-    blob = json.dumps(payload, default=str).lower()
+    blob = _blob(payload).lower()
     assert BODY_MARKER not in blob
 
 
@@ -431,3 +451,91 @@ def test_resurface_include_confidential_opts_back_in(
 
     titles = [i["title"] for i in payload["items"]]
     assert "Confidential Comp Doc" in titles
+
+
+# ---------------------------------------------------------------------------
+# brain_list — the fifth surface, and the one the enumeration walked past
+# ---------------------------------------------------------------------------
+#
+# `brain_list` sits thirty lines above `brain_resurface` in `mcp_server.py`.
+# Resurface applies `_confidential_lens`; list did not — it called
+# `queries.list_documents` with no `sensitivity` argument at all, even though
+# that function has accepted one since F6. So the gap was never a missing
+# capability, only an un-passed argument, on the single most listing-shaped
+# tool in the module: no query required, "show me the corpus".
+#
+# The CLI's `brain list` is deliberately unfiltered and stays that way --
+# `list_documents`'s own docstring says a tier you cannot see is a tier you
+# forget you set, and the CLI sits INSIDE the trust boundary. MCP does not.
+
+
+def test_list_does_not_name_a_confidential_document(
+    test_db: psycopg.Connection[Any], confidential_doc: str
+) -> None:
+    """The unprompted listing surface must not name a confidential doc.
+
+    No query is involved, so there is no "the caller asked for it" defence
+    available here: this is the corpus painting itself for a hosted model.
+    """
+    _fixture_is_not_vacuous(test_db, confidential_doc)
+
+    rows = mcp_server.brain_list(limit=50)
+
+    titles = [r["title"] for r in rows]
+    assert "Public Comp Overview" in titles, (
+        "non-vacuity: the decoy must be listed, or an empty result would pass "
+        "this test while listing nothing at all"
+    )
+    assert "Confidential Comp Doc" not in titles
+
+
+def test_list_response_contains_no_confidential_text_anywhere(
+    test_db: psycopg.Connection[Any], confidential_doc: str
+) -> None:
+    """Serialize the whole response, not the fields we happened to think of.
+
+    **Only the title claim is evidence; the two body-derived claims are inert.**
+    ``brain_list`` projects six keys per row — ``id``, ``title``,
+    ``content_type``, ``tags``, ``source_kind``, ``ingested_at`` — and neither
+    the body nor the summary is among them. Measured 2026-08-21 against the
+    PERMISSIVE call (``include_confidential=True``): ``SECRET_SUMMARY`` and
+    ``BODY_MARKER`` are both absent, so neither ``not in`` can fail whatever the
+    gate does, and no control can pin them at this layer. They are kept as
+    forward guards against the projection growing a body-derived field —
+    labelled so nobody counts them as coverage.
+
+    The title claim IS controlled, by
+    :func:`test_list_opt_in_still_returns_the_confidential_document`.
+    """
+    _fixture_is_not_vacuous(test_db, confidential_doc)
+
+    blob = _blob(mcp_server.brain_list(limit=50))
+
+    # Inert by construction — see the docstring. Forward guards, not evidence.
+    assert BODY_MARKER not in blob
+    assert SECRET_SUMMARY not in blob
+    # The live claim, controlled by the opt-in test below.
+    assert "Confidential Comp Doc" not in blob
+
+
+def test_list_opt_in_still_returns_the_confidential_document(
+    test_db: psycopg.Connection[Any], confidential_doc: str
+) -> None:
+    """The gate must be a gate, not a deletion.
+
+    This is the assertion that keeps the two above honest: without it, a
+    `brain_list` that returned nothing at all would satisfy them both.
+    """
+    _fixture_is_not_vacuous(test_db, confidential_doc)
+
+    rows = mcp_server.brain_list(limit=50, include_confidential=True)
+    titles = [r["title"] for r in rows]
+
+    assert "Confidential Comp Doc" in titles
+    assert "Public Comp Overview" in titles
+    # Same layer as the absence it controls: ``…contains_no_confidential_text_
+    # _anywhere`` denies the title over the SERIALIZED blob, not over ``titles``.
+    # Asserting it here too means the serializer is pinned as well as the query
+    # — a projection that dropped ``title`` from the blob would otherwise make
+    # that withholding assertion vacuous while this test stayed green.
+    assert "Confidential Comp Doc" in _blob(rows)

@@ -1,0 +1,534 @@
+/* components — everything with a name: chrome, rail, ledger, inspector
+ * contents, buttons, modals, toast, the deferred tabs. Then, LAST, the
+ * responsive overrides and the motion block.
+ *
+ * Loads fourth and last. Two sections at the end of this file depend on that
+ * position and are commented where they sit. Internal order matches the
+ * original single-file stylesheet, because several of these rules are
+ * same-specificity neighbours whose order is the only thing separating them.
+ */
+
+/* --------------------------------------------------------------- topbar --- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--s-5);
+  height: 2.75rem;
+  padding: 0 var(--s-4);
+  border-bottom: var(--hair);
+  background: var(--paper-raised);
+  position: relative;
+  z-index: 2;
+}
+.brand {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+/* The tab strip scrolls inside ITSELF on a narrow viewport. The page body must
+   never scroll horizontally — at 375px the four tab labels are wider than the
+   screen, and without this the whole document gained a 75px horizontal scroll.
+   `min-width: 0` is required: a flex item defaults to `min-width: auto`, which
+   refuses to shrink below its content and is what pushed the overflow up to
+   the body in the first place. */
+.tabs {
+  display: flex;
+  gap: var(--s-1);
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tab { flex: 0 0 auto; }
+.tab {
+  background: none; border: 0; cursor: pointer;
+  padding: var(--s-1) var(--s-3);
+  border-radius: var(--radius);
+  color: var(--ink-muted);
+}
+.tab:hover { color: var(--ink); background: var(--paper-sunk); }
+.tab.is-active { color: var(--ink); font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+.topbar-right { margin-left: auto; display: flex; align-items: center; gap: var(--s-3); }
+.icon-btn {
+  background: none; border: var(--hair); border-radius: var(--radius);
+  cursor: pointer; padding: var(--s-1) var(--s-2); color: var(--ink-muted);
+}
+.icon-btn:hover { color: var(--ink); }
+.badge {
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--flag-draft); border: 1px solid var(--flag-draft);
+  border-radius: var(--radius-chip); padding: 1px var(--s-2);
+}
+
+/* ----------------------------------------------------------------- rail --- */
+
+.rail-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: var(--s-3) var(--s-4);
+  border-bottom: var(--hair);
+  position: sticky; top: 0; background: var(--paper); z-index: 1;
+}
+.rail-title {
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-muted);
+}
+.tree { padding: var(--s-2) 0 var(--s-6); }
+.tree-group { margin: 0; padding: 0 0 0 var(--s-3); list-style: none; }
+.tree-folder > .tree-label { cursor: pointer; font-weight: 600; }
+.tree-label {
+  display: flex; align-items: center; gap: var(--s-1);
+  padding: 2px var(--s-4); color: var(--ink-muted);
+  text-decoration: none; border-radius: var(--radius);
+}
+.tree-label:hover { background: var(--paper-sunk); color: var(--ink); }
+.tree-note.is-selected > .tree-label,
+.tree-label.is-selected { background: var(--accent-soft); color: var(--ink); }
+/* --ink-faint is TEXT-UNSAFE on every ground in BOTH themes — measured against
+   the three paper tokens: 2.69-3.03:1 light, 3.34-3.84:1 dark. Every rule below
+   that renders READING MATTER therefore points at --ink-muted, which is
+   5.66-7.27:1 across the same six pairings. The token itself is left alone: it
+   is one tier of a three-tier ink scale a later redesign re-cuts, and darkening
+   it enough to pass AA would collapse it into --ink-muted. Its one surviving
+   use is .search-glyph, aria-hidden decoration and therefore exempt.
+   .twisty is a UI glyph judged at 3:1, not 4.5:1 — but at 2.90:1 on the rail's
+   --paper it failed even that, so this is a repair, not a tidy-up.
+   The token DEFINITIONS live in tokens.css; only the uses are here. */
+.twisty { width: 0.8em; display: inline-block; color: var(--ink-muted); }
+.tree-note .tree-label { padding-left: var(--s-5); }
+.dot-draft { color: var(--flag-draft); font-size: 0.7em; }
+
+/* --------------------------------------------------------------- ledger --- */
+
+.search-head {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--paper-sunk);
+  padding: var(--s-3) var(--s-4) var(--s-2);
+  border-bottom: var(--hair);
+}
+.search-box {
+  display: flex; align-items: center; gap: var(--s-2);
+  border: var(--hair); border-radius: var(--radius);
+  background: var(--paper); padding: var(--s-2) var(--s-3);
+}
+.search-box:focus-within { border-color: var(--accent); }
+.search-glyph { color: var(--ink-faint); }
+#q { flex: 1; border: 0; background: none; outline: none; min-width: 0; }
+#q::placeholder { color: var(--ink-muted); }
+kbd.hint {
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  color: var(--ink-muted); border: var(--hair);
+  border-radius: var(--radius-chip); padding: 0 var(--s-1);
+}
+.filters {
+  display: flex; flex-wrap: wrap; gap: var(--s-1);
+  margin-top: var(--s-2);
+}
+.filters select, .filters input {
+  font-size: var(--t-meta); font-family: var(--font-mono);
+  border: var(--hair); border-radius: var(--radius);
+  background: var(--paper); padding: 2px var(--s-1);
+  color: var(--ink-muted); max-width: 9rem;
+}
+.meta-line {
+  margin-top: var(--s-2);
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  color: var(--ink-muted);
+}
+.meta-sub {
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  color: var(--ink-muted);
+}
+
+.results { list-style: none; margin: 0; padding: 0; }
+.result {
+  display: grid; grid-template-columns: var(--gutter-w) 1fr;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-4) var(--s-3);
+  border-bottom: var(--hair);
+  cursor: pointer;
+  text-decoration: none; color: inherit;
+}
+.result:hover { background: var(--paper); }
+.result.is-selected { background: var(--accent-soft); }
+.gutter {
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  color: var(--ink-muted); line-height: 1.5;
+}
+.result-title { font-size: var(--t-title); font-weight: 600; }
+.result-snippet {
+  color: var(--ink-muted); margin-top: 2px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.chips { display: flex; flex-wrap: wrap; gap: var(--s-1); margin-top: var(--s-1); }
+.chip {
+  font-family: var(--font-mono); font-size: var(--t-chip);
+  border: var(--hair); border-radius: var(--radius-chip);
+  padding: 0 var(--s-1); color: var(--ink-muted);
+}
+
+/* ---------------------------------------------------- inspector contents --- */
+
+/* The pane itself — its grid, and the opt-in stretch that grid requires — is
+   in layout.css. What follows is only what goes INSIDE it. */
+
+.empty, .error-state { color: var(--ink-muted); font-style: italic; }
+/* The end-of-ranked-results note (#27). Shares the muted voice of the
+   empty state — it is an explanation, not a result — but keeps its own
+   selector so it can gain a rule (a top border, say) without dragging
+   the empty and error states along with it. */
+.ledger-note { color: var(--ink-muted); font-style: italic; padding: var(--s-3) 0; }
+
+/* The pagination control. Sits below .results inside the .ledger column, and is
+   the ledger's LAST row rather than a sticky bar: the ledger scrolls as one
+   column, and a bar pinned over it would cover a result on every short
+   viewport. */
+.pager {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4) var(--s-4);
+  border-top: var(--hair);
+}
+/* THE `[hidden]` TRAP, fourth instance in this codebase — see `.field[hidden]`
+   below and `.shell[hidden]` in layout.css, which carries the full explanation.
+   `.pager { display: flex }` is an AUTHOR declaration and the UA sheet's
+   `[hidden] { display: none }` is not, so the author rule wins on cascade
+   ORIGIN and js/results.js setting the attribute would hide NOTHING. The equal
+   (0,1,0) specificity this comment used to cite is real and irrelevant: origin
+   is sorted first, so the comparison never happens.
+   The control would sit under every idle ledger with both buttons dead. */
+.pager[hidden] { display: none; }
+/* Centred between the two buttons and allowed to shrink, so a long boundary
+   phrase wraps rather than pushing Next off the column on a narrow ledger. */
+.pager-status {
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  color: var(--ink-muted); text-align: center; min-width: 0;
+}
+.note-title { font-size: var(--t-h1); font-family: var(--font-read); line-height: 1.15; }
+.note-bar {
+  display: flex; align-items: center; gap: var(--s-3);
+  margin: var(--s-3) 0; padding-bottom: var(--s-3);
+  border-bottom: var(--hair); flex-wrap: wrap;
+}
+.frontmatter {
+  font-family: var(--font-mono); font-size: var(--t-meta);
+  color: var(--ink-muted); display: grid; gap: 2px;
+  padding-bottom: var(--s-4); border-bottom: var(--hair); margin-bottom: var(--s-5);
+}
+.save-state { font-family: var(--font-mono); font-size: var(--t-meta); }
+.save-state[data-state="saved"]  { color: var(--flag-ok); }
+.save-state[data-state="dirty"]  { color: var(--flag-draft); }
+.save-state[data-state="saving"] { color: var(--ink-muted); }
+.save-state[data-state="error"],
+.save-state[data-state="conflict"] { color: var(--flag-danger); }
+
+.note-body {
+  font-family: var(--font-read);
+  font-size: var(--t-body);
+  line-height: var(--lead-read);
+  max-width: var(--measure);
+}
+.note-body h1, .note-body h2, .note-body h3 { margin: var(--s-6) 0 var(--s-2); }
+.note-body p, .note-body ul, .note-body ol { margin: 0 0 var(--s-4); }
+.note-body pre {
+  font-family: var(--font-mono); font-size: var(--t-ui);
+  background: var(--paper-sunk); border: var(--hair);
+  border-radius: var(--radius); padding: var(--s-3);
+  overflow-x: auto;
+}
+.note-body code { font-family: var(--font-mono); font-size: 0.9em; }
+.note-body a { color: var(--accent); }
+
+/* Phase 1: tables. The parser gained `table` in render.py; without these the
+   466 documents that use one render as unstyled rows with no cell boundaries,
+   which fails the "renders correctly" bar as surely as not parsing them.
+
+   `display: block; overflow-x: auto` is the load-bearing part. The reading
+   column is capped at `--measure` (48ch) for line length, and a data table is
+   routinely wider than that — a 6-column meeting grid does not fit and never
+   will. Letting the table scroll INSIDE its own box keeps the wide content
+   reachable without the page itself scrolling sideways, which would move the
+   whole reading column and is the failure this avoids. `max-width: 100%` stops
+   it widening its parent in the first place. */
+.note-body table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 var(--s-4);
+  font-size: var(--t-ui);
+  font-family: var(--font-ui);
+}
+.note-body th, .note-body td {
+  border: var(--hair);
+  padding: var(--s-1) var(--s-2);
+  text-align: left;
+  vertical-align: top;
+}
+.note-body thead th {
+  background: var(--paper-sunk);
+  font-weight: 600;
+  white-space: nowrap;
+}
+/* Column alignment from `:---:` / `---:` delimiter rows. markdown-it emits this
+   as `style="text-align:..."`, which the CSP (`style-src 'self'`, no
+   `unsafe-inline`) makes the browser DROP — so `render.py` rewrites those
+   inline styles into these classes. Styling the raw `style` attribute here, or
+   an `align` attribute the parser never emits, would look correct in the
+   stylesheet and do nothing in the page. */
+.note-body .cell--center { text-align: center; }
+.note-body .cell--right  { text-align: right; }
+.note-body .cell--left   { text-align: left; }
+
+/* Phase 1: task lists (180 documents, 6,745 items). The plugin emits
+   `<ul class="contains-task-list">` with `<input type="checkbox" disabled>`,
+   class-based and with no inline styles — verified before this was written.
+
+   The bullet has to go. A task list is still a `<ul>`, so without
+   `list-style: none` every row renders as "• ☐ text" — two markers competing
+   for the same job. The negative indent pulls the checkbox back into the space
+   the bullet vacated so the text edge stays aligned with surrounding prose.
+
+   The checkboxes are `disabled` by design (see render.py): this is a read
+   surface and nothing persists a click. `cursor: default` and full opacity
+   keep them from reading as *broken* rather than as *informational* — the
+   browser default greys a disabled control, which here would wrongly suggest
+   the item itself is inactive. */
+.note-body .contains-task-list {
+  list-style: none;
+  padding-left: var(--s-4);
+}
+.note-body .task-list-item { margin-left: calc(var(--s-4) * -1); }
+.note-body .task-list-item-checkbox {
+  margin-right: var(--s-2);
+  cursor: default;
+  opacity: 1;
+  vertical-align: baseline;
+}
+
+/* Phase 1: syntax highlighting (212 documents with a language-tagged fence).
+   Pygments tokenises into CLASSES — `noclasses=True` would emit inline styles
+   that `style-src 'self'` drops silently, so `render.py` pins the class-based
+   formatter and the test asserts no `style=` survives.
+
+   DELIBERATELY MINIMAL AND NEUTRAL. Phase 3 owns the token system and its
+   contrast work is already measured; picking a Pygments colour scheme here
+   would mean re-doing it there. So this uses only existing tokens and only the
+   distinctions that carry meaning at a glance — comments recede, keywords and
+   strings separate from identifiers. Everything else inherits, which is why
+   there is no rule for `.n`, `.p`, `.w` and the rest: unstyled is the correct
+   state for them until phase 3 decides otherwise, not an omission.
+
+   Class names are Pygments' short forms: c=comment, k=keyword, s=string,
+   m=number, o=operator, nf=function name, nc=class name, err=error token. */
+.note-body pre code .c, .note-body pre code .c1, .note-body pre code .cm,
+.note-body pre code .cs, .note-body pre code .cp {
+  color: var(--ink-muted);
+  font-style: italic;
+}
+.note-body pre code .k, .note-body pre code .kd, .note-body pre code .kn,
+.note-body pre code .kt, .note-body pre code .kc, .note-body pre code .kr {
+  font-weight: 600;
+}
+.note-body pre code .s, .note-body pre code .s1, .note-body pre code .s2,
+.note-body pre code .sb, .note-body pre code .sd, .note-body pre code .se,
+.note-body pre code .sh, .note-body pre code .si, .note-body pre code .sx,
+.note-body pre code .sr, .note-body pre code .ss {
+  color: var(--accent);
+}
+.note-body pre code .m, .note-body pre code .mi, .note-body pre code .mf,
+.note-body pre code .mh, .note-body pre code .mo, .note-body pre code .il {
+  color: var(--accent);
+}
+.note-body pre code .nf, .note-body pre code .nc { font-weight: 600; }
+/* An unlexable token. Marked rather than hidden: silently rendering it as
+   ordinary text is how a broken lexer looks like working code. */
+.note-body pre code .err { text-decoration: underline wavy var(--flag-danger); }
+
+/* Phase 1: strikethrough (31 documents). markdown-it emits `<s>`.
+   Set explicitly rather than left to the browser default so the struck text
+   recedes with the rest of this UI's de-emphasised matter.
+
+   HONEST LIMITATION, because the first version of this comment claimed the
+   opposite. It said the unresolved-link treatment "stays distinguishable by
+   colour". It does not: `.wikilink--unresolved` immediately below resolves to
+   exactly `color: var(--ink-muted); text-decoration: line-through` — the same
+   two declarations, and `--ink-muted` is one token with one value per theme. At
+   rest the two are PIXEL-IDENTICAL. They are separated only by `cursor: help`
+   on hover and by context (one sits in prose, one is a link).
+
+   Left as-is deliberately: phase 3 owns the token system and its contrast work
+   is already measured, so inventing a third ink here would be pre-empting a
+   decision that belongs there. **Recorded for phase 3:** struck prose and a
+   broken wiki link currently look the same, and if that matters it is a palette
+   decision, not a rule to add here. A stylesheet that claims a visual
+   distinction it does not produce is the same defect class this phase's report
+   catalogues — hence stating it rather than quietly keeping the nicer sentence. */
+.note-body s, .note-body del {
+  color: var(--ink-muted);
+  text-decoration: line-through;
+}
+.wikilink--unresolved { color: var(--ink-muted); text-decoration: line-through; cursor: help; }
+.link--blocked { color: var(--flag-danger); cursor: not-allowed; }
+
+/* Height comes from .inspector's grid — see the note in layout.css; it is the
+   ONLY account of this mechanism on purpose. `min-height` is just a
+   short-viewport floor, and `resize: vertical` works because grid honours an
+   explicit height.
+   (This block previously carried a second, contradictory explanation citing a
+   flex column and a `flex: 0 0 auto` handoff in app.js that never existed.
+   Two accounts of one mechanism drift; one is maintainable.) */
+.editor {
+  width: 100%; min-height: 26rem;
+  font-family: var(--font-mono); font-size: var(--t-ui); line-height: 1.6;
+  border: var(--hair); border-radius: var(--radius);
+  background: var(--paper); padding: var(--s-3);
+  resize: vertical;
+}
+.withheld {
+  border-left: 3px solid var(--flag-draft);
+  padding: var(--s-3) var(--s-4);
+  background: var(--paper-sunk);
+  color: var(--ink-muted);
+  max-width: var(--measure);
+}
+
+/* -------------------------------------------------------------- buttons --- */
+
+.ghost-btn, .accent-btn, .danger-btn {
+  cursor: pointer; border-radius: var(--radius);
+  padding: var(--s-1) var(--s-3); border: var(--hair); background: none;
+}
+.ghost-btn:hover  { background: var(--paper-sunk); }
+.accent-btn { background: var(--accent); border-color: var(--accent); color: var(--paper); }
+.danger-btn { background: var(--flag-danger); border-color: var(--flag-danger); color: var(--paper); }
+.danger-btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+button[disabled] { cursor: not-allowed; opacity: 0.5; }
+
+/* --------------------------------------------------------------- modals --- */
+
+.modal {
+  border: var(--hair); border-radius: var(--radius);
+  background: var(--paper-raised); color: var(--ink);
+  padding: 0; max-width: 26rem; width: calc(100vw - 2rem);
+  box-shadow: 0 12px 40px oklch(0% 0 0 / 0.28);   /* one of only two shadows */
+}
+.modal::backdrop { background: oklch(0% 0 0 / 0.4); }
+.modal-body { padding: var(--s-5); display: grid; gap: var(--s-3); }
+.field { display: grid; gap: var(--s-1); font-size: var(--t-meta); color: var(--ink-muted); }
+.field input {
+  border: var(--hair); border-radius: var(--radius);
+  background: var(--paper); padding: var(--s-2); font-size: var(--t-ui);
+}
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: var(--s-2);
+  margin: var(--s-2) 0 0; padding: 0;
+}
+
+/* --------------------------------------------------------------- toast ---- */
+
+.toast {
+  position: fixed; bottom: var(--s-5); left: 50%; transform: translateX(-50%);
+  background: var(--ink); color: var(--paper);
+  padding: var(--s-2) var(--s-4); border-radius: var(--radius);
+  font-size: var(--t-ui); z-index: 10;
+}
+.toast[hidden] { display: none; }
+/* Same trap as `.shell[hidden]` in layout.css, third instance: the UA sheet's
+   bare `[hidden]` LOSES to `.field { display: grid }` because the author origin
+   outranks the UA one — not, as this comment used to say, because the two tie
+   at (0,1,0) and the author rule sits later. They do tie, and it is later, and
+   neither fact is what decides. So setting the attribute from JS hides nothing.
+   A7's overwrite
+   dialog reuses the delete dialog and hides its typed-title field; without this
+   the field stayed visible with delete's caption above it, on a dialog that
+   never wanted it. Caught by a browser test asserting the field was NOT
+   visible — the attribute was set correctly and had no effect. */
+.field[hidden] { display: none; }
+.toast[data-kind="error"] { background: var(--flag-danger); color: var(--paper); }
+
+/* ------------------------------------------------------------- deferred --- */
+
+/* ORDER-DEPENDENT — must stay after `.shell` in layout.css.
+   A tab pane is `class="shell deferred-tab"`, so `.deferred-tab { display:
+   block }` (0,1,0) and `.shell { display: grid }` (0,1,0) are the SAME
+   specificity and only document order decides. layout.css loads before this
+   file, so `block` wins once the pane is unhidden — which is the intent.
+   Move `.deferred-tab` above `.shell` and the tab panes silently render as a
+   three-column grid instead of a prose column. (While `hidden` is present,
+   `.shell[hidden]` at (0,2,0) beats both, so hiding is unaffected either way.) */
+.deferred-tab { display: block; overflow-y: auto; }
+.deferred { max-width: var(--measure); padding: var(--s-7); display: grid; gap: var(--s-4); }
+.deferred h2 { font-family: var(--font-read); font-size: var(--t-h1); }
+.deferred p { color: var(--ink-muted); line-height: var(--lead-read); }
+.deferred pre {
+  font-family: var(--font-mono); background: var(--paper-sunk);
+  border: var(--hair); border-radius: var(--radius); padding: var(--s-3);
+  overflow-x: auto;
+}
+
+/* ----------------------------------------------------------- responsive --- */
+
+/* ORDER-DEPENDENT — this section must be LAST in the last stylesheet.
+   It overrides rules from BOTH layout.css (`.shell`, `.rail`, `.ledger`,
+   `.inspector`) and this file (`.topbar`, `.filters select`), and a media
+   query adds NO specificity. `@media (max-width: 780px) { .filters select {
+   max-width: 7rem } }` is (0,1,1) and so is the base `.filters select` rule
+   above — so if this block were moved into layout.css, the base rule would
+   load afterwards and quietly win, and the filters would stay 9rem wide on a
+   phone with the override sitting right there looking correct.
+   That is the whole reason the responsive rules are not in the layout file
+   despite being layout. Keep them here, at the bottom. */
+
+/* Both of these are hidden at desktop width and revealed by the breakpoints
+   below. Every keyboard shortcut needs a visible, clickable equivalent — a
+   drawer that only Cmd+B can open, or a note view with no way back to the
+   list, is unusable on a touch device. */
+.rail-toggle, .back-btn { display: none; }
+
+/* Below 1100px the rail becomes an overlay drawer (Cmd+B, or ☰). */
+@media (max-width: 1100px) {
+  .rail-toggle { display: inline-block; }
+  .shell { grid-template-columns: var(--ledger-w) 1fr; }
+  .rail {
+    position: fixed; top: 2.75rem; bottom: 0; left: 0; width: var(--rail-w);
+    z-index: 5; border-right: var(--hair); background: var(--paper);
+    transform: translateX(-101%);
+  }
+  .rail.is-open { transform: none; }
+}
+
+/* Below 780px the ledger and inspector become a two-view stack. */
+@media (max-width: 780px) {
+  .shell { grid-template-columns: 1fr; }
+  .ledger { border-right: 0; }
+  body[data-view="note"] .ledger { display: none; }
+  body[data-view="list"] .inspector { display: none; }
+  .inspector { padding: var(--s-5) var(--s-4); }
+  /* No align-self needed: .back-btn sits inside .note-head, an ordinary block
+     container, so it shrink-wraps. It was briefly full-bleed when .inspector
+     was a flex column and this button was a direct child with nothing capping
+     its width — the grid + .note-head structure removes the cause rather than
+     counteracting it. Measured at 77px with the wrapper in place. */
+  .back-btn { display: inline-block; margin-bottom: var(--s-4); }
+  /* Tighten the chrome so the tab strip needs as little scrolling as possible. */
+  .topbar { gap: var(--s-3); padding: 0 var(--s-2); }
+  .filters select, .filters input { max-width: 7rem; }
+}
+
+/* Motion is opt-IN: every transition lives inside this block, so the
+   reduced-motion default is no animation at all rather than an override that
+   can be missed. Only opacity and transform are animated. */
+@media (prefers-reduced-motion: no-preference) {
+  .tab, .icon-btn, .ghost-btn, .accent-btn, .danger-btn,
+  .tree-label, .result {
+    transition: background-color var(--dur-fast) var(--ease),
+                color var(--dur-fast) var(--ease);
+  }
+  .rail { transition: transform var(--dur) var(--ease); }
+  .note-body { animation: fade var(--dur) var(--ease); }
+  .save-state { transition: color var(--dur-fast) var(--ease); }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+}

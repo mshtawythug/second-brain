@@ -12,7 +12,12 @@ from typing import Any
 
 import psycopg
 
-from brain.facets import DEFAULT_TOP_TAGS, compute_facets, count_matching_documents
+from brain.facets import (
+    DEFAULT_TOP_TAGS,
+    SOURCE_NONE_BUCKET,
+    compute_facets,
+    count_matching_documents,
+)
 from brain.ingest import ExtractedDoc, ingest_document
 from brain.search import build_tsquery
 from brain.search_predicate import build_predicate
@@ -156,20 +161,55 @@ def test_no_truncation_reports_zero_remainder(
     assert facets.tag_truncated == 0
 
 
-def test_null_source_falls_back_to_manual_label(
+def test_null_source_gets_its_own_bucket_not_manuals(
     test_db: psycopg.Connection[Any], fake_embedder: Any
 ) -> None:
-    """A doc with no source row lands in 'manual', matching search_table."""
-    # Arrange
-    _ingest(test_db, fake_embedder, title="Quarterly orphan", body="quarterly orphan")
-    test_db.execute("UPDATE documents SET source_id = NULL")
+    """A doc with no ``sources`` row lands in ``none``, never in ``manual``.
+
+    This test previously asserted the opposite, and the behaviour it pinned was
+    a wrong answer that looked right: ``coalesce(s.kind, 'manual')`` filed every
+    source-less document under a REAL source kind, so ``manual``'s count was
+    inflated by all of them and filtering to ``manual`` returned documents with
+    no source at all.
+
+    Both halves are asserted, not just the absence of ``manual``: a query that
+    dropped the row entirely would satisfy ``"manual" not in ...`` while making
+    source-less documents invisible in the panel — the same information loss,
+    quieter. The exact-dict comparison catches both.
+    """
+    # Arrange — two documents, one WITH a manual source and one with none, so
+    # the test distinguishes "moved to its own bucket" from "manual renamed".
+    _ingest(test_db, fake_embedder, title="Quarterly kept", body="quarterly kept",
+            source_kind="manual")
+    _ingest(test_db, fake_embedder, title="Quarterly orphan", body="quarterly orphan",
+            source_kind="manual")
+    test_db.execute(
+        "UPDATE documents SET source_id = NULL WHERE title = %s", ("Quarterly orphan",)
+    )
 
     # Act
     facets = _facets(test_db, "quarterly")
 
     # Assert
-    assert _buckets(facets.source) == {"manual": 1}
-    assert facets.total_documents == 1
+    assert _buckets(facets.source) == {"manual": 1, SOURCE_NONE_BUCKET: 1}
+    # The split moved a count BETWEEN buckets; it did not lose one. ``manual``
+    # was 2 before this change and is 1 now, and the total is unchanged.
+    assert facets.total_documents == 2
+
+
+def test_the_none_bucket_value_is_the_one_the_source_filter_accepts() -> None:
+    """The bucket must be CLICKABLE, which makes this a contract, not a label.
+
+    ``brain.facets`` is core and cannot import ``brain.ui.schemas`` (that would
+    invert the dependency for one string), so the value is defined twice. If the
+    two ever drift, the facet panel offers a ``source`` value the search
+    endpoint rejects — a dead row in the panel that looks live. Pinning them
+    equal here is what makes the duplication safe.
+    """
+    from brain.ui.schemas import SOURCE_FILTER_VALUES, SOURCE_NONE
+
+    assert SOURCE_NONE_BUCKET == SOURCE_NONE
+    assert SOURCE_NONE_BUCKET in SOURCE_FILTER_VALUES
 
 
 def test_empty_match_set_yields_empty_facets(

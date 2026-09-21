@@ -229,8 +229,64 @@ def _force_test_database_url() -> Iterator[None]:
             os.environ["DATABASE_URL"] = original
 
 
+#: Markers whose tests provably open no database connection.
+#:
+#: ``browser`` stubs the API at the network layer and drives the real assets in
+#: chromium; ``nodb`` reads files, parses ASTs and shells out to node. Neither
+#: reads the schema, so neither needs the reset — or the lock.
+_DATABASE_FREE_MARKERS = ("browser", "nodb")
+
+
+def _session_touches_the_database(session: pytest.Session) -> bool:
+    """False only when EVERY collected test is marked ``browser`` or ``nodb``.
+
+    The two session-scoped fixtures below are autouse, so they fire for ANY
+    selection — including ``-m browser``, whose tests stub the API at the
+    network layer and never open a connection. That made
+    ``tests/test_ui_browser.py``'s "no Postgres, and no contention for the
+    machine-wide test-database lock" false as written: pointed at an unreachable
+    database every browser test ERRORed in setup, and while another suite held
+    the advisory lock the session refused to start at all.
+
+    The claim is worth making true rather than softening. It is the harness the
+    CI gate would run, and "needs a live Postgres" and "needs a cached chromium"
+    are very different costs to ask approval for.
+
+    Deliberately conservative in both directions:
+
+    * an EMPTY item list returns True. Collection failed or has not run, and
+      guessing "no database needed" from the absence of evidence is how a suite
+      silently skips its own schema reset.
+    * a MIXED selection returns True. ONE database-touching test is enough to
+      need the real thing, so the opt-out cannot be triggered by adding a marked
+      file to a broader run.
+
+    Extended beyond ``browser`` after the cost was paid rather than predicted:
+    four file-only suites — ``test_ui_static_assets``, ``test_ui_static_behaviour``,
+    ``test_ui_heading_strip`` and ``test_ui_tree_nav`` — took the MACHINE-WIDE
+    advisory lock for a schema they never read, and one unrelated full-suite run
+    blocked this worktree for over fifteen minutes while every test in it was
+    pure filesystem work.
+
+    Adding a database-touching test to a marked module is not silent, but the
+    mechanism is NOT "the connection fails" — with the test Postgres up, which is
+    the normal case, it succeeds. :func:`test_db` and
+    :func:`_restore_baseline_after_fresh_schema` instead refuse to run at all
+    unless :func:`_exclusive_test_database` reports the lock HELD, so the marked
+    module raises before any ``TRUNCATE`` or ``DROP SCHEMA`` is issued. Removing
+    the marker is the visible act that says "this module now needs the DB".
+    """
+    items = getattr(session, "items", None)
+    if not items:
+        return True
+    return not all(
+        any(item.get_closest_marker(marker) for marker in _DATABASE_FREE_MARKERS)
+        for item in items
+    )
+
+
 @pytest.fixture(autouse=True, scope="session")
-def _exclusive_test_database() -> Iterator[None]:
+def _exclusive_test_database(request: pytest.FixtureRequest) -> Iterator[bool]:
     """Refuse to run when another pytest session already owns the test DB.
 
     Every ``test_db`` consumer resets state by ``TRUNCATE``-ing the shared
@@ -250,16 +306,66 @@ def _exclusive_test_database() -> Iterator[None]:
     The lock is a Postgres *session*-level advisory lock, so it is released
     automatically when this process exits — a crashed or killed run never
     leaves the database wedged.
+
+    Skipped entirely for a browser-only selection: taking a machine-wide lock on
+    behalf of tests that never open a connection blocks every other suite on the
+    box for no reason. See :func:`_session_touches_the_database`.
+
+    **Yields whether the lock is HELD**, and that value is the permission slip
+    every destructive reset checks — see :func:`_require_suite_lock`. Yielding
+    ``None`` for both outcomes is what let the opt-out silently authorise a
+    ``TRUNCATE`` it had not locked for.
     """
+    if not _session_touches_the_database(request.session):
+        yield False
+        return
+
     conn = psycopg.connect(TEST_DATABASE_URL, connect_timeout=5)
     with conn.cursor() as cur:
         if not try_acquire_suite_lock(cur):
             conn.close()
             pytest.exit(concurrent_suite_message(TEST_DATABASE_URL), returncode=1)
     try:
-        yield
+        yield True
     finally:
         conn.close()  # releases the advisory lock
+
+
+class UnlockedTestDatabaseError(RuntimeError):
+    """A destructive test-DB reset was attempted without the suite lock.
+
+    Raised by :func:`_require_suite_lock`. Its own class rather than a bare
+    ``RuntimeError`` so the regression test can assert on the failure it means
+    instead of on any error that happens to escape the fixture.
+    """
+
+
+def _require_suite_lock(lock_held: bool, what: str) -> None:
+    """Refuse to reset the shared test DB unless this session took the lock.
+
+    The ``nodb``/``browser`` opt-out in :func:`_session_touches_the_database`
+    skips BOTH session fixtures — the machine-wide advisory lock and the schema
+    reset. Nothing about that opt-out reaches :func:`test_db`, which opens its
+    own connection: with the test Postgres up, a database-touching test inside a
+    marked module used to connect happily and ``TRUNCATE`` the shared tables
+    with no lock held, destroying a concurrent session's fixtures rather than
+    failing. Demonstrated 2026-08-20 against the live test instance — the run
+    exited 0, acquired no lock, and reached the reset.
+
+    So the opt-out's promise is enforced here instead of assumed: the reset asks
+    for evidence the lock was taken, and a marked module that grew a DB test
+    stops on this exception before touching anything.
+    """
+    if lock_held:
+        return
+    raise UnlockedTestDatabaseError(
+        f"{what} was requested by a test in a module marked "
+        f"{' or '.join(_DATABASE_FREE_MARKERS)}, so this session skipped the "
+        "machine-wide test-database lock and the schema reset. Resetting "
+        f"{TEST_DATABASE_URL} without the lock would destroy a concurrent "
+        "suite's data. Remove the marker from the module — that is the visible "
+        "act that says it now needs the database."
+    )
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -530,7 +636,9 @@ def _reset_schema_and_migrate(conn: psycopg.Connection) -> None:
 
 @pytest.fixture(autouse=True, scope="session")
 def _ensure_test_db_initialized(
-    _force_test_database_url: None, _exclusive_test_database: None
+    request: pytest.FixtureRequest,
+    _force_test_database_url: None,
+    _exclusive_test_database: bool,
 ) -> Iterator[None]:
     """Reset the test DB to a known migrated state at session start.
 
@@ -551,7 +659,15 @@ def _ensure_test_db_initialized(
     connection and every test errored in setup. Requesting the lock here makes
     pytest resolve it first, so a second suite exits cleanly before touching
     anything.
+
+    Skipped entirely for a browser-only selection — nothing collected reads the
+    schema, so resetting it is pure cost and a hard dependency on a live
+    Postgres. See :func:`_session_touches_the_database`.
     """
+    if not _session_touches_the_database(request.session):
+        yield
+        return
+
     with connect(TEST_DATABASE_URL) as conn:
         conn.autocommit = True
         _reset_schema_and_migrate(conn)
@@ -620,7 +736,9 @@ def _truncate_reset(conn: psycopg.Connection) -> None:
 
 
 @pytest.fixture
-def test_db(request: pytest.FixtureRequest) -> Iterator[psycopg.Connection]:
+def test_db(
+    request: pytest.FixtureRequest, _exclusive_test_database: bool
+) -> Iterator[psycopg.Connection]:
     """Per-test test-DB connection with a clean starting state.
 
     Default (no marker): a cheap ``TRUNCATE`` reset (:func:`_truncate_reset`) on
@@ -630,7 +748,12 @@ def test_db(request: pytest.FixtureRequest) -> Iterator[psycopg.Connection]:
     (:func:`_reset_schema_and_migrate`), for tests that mutate the schema itself.
     :func:`_restore_baseline_after_fresh_schema` restores the migrated-once
     baseline after such a test so the next TRUNCATE-only test is not poisoned.
+
+    Takes ``_exclusive_test_database`` **for its value, not its ordering** — the
+    fixture is autouse, so it already ran; what is needed is whether it actually
+    took the lock. See :func:`_require_suite_lock`.
     """
+    _require_suite_lock(_exclusive_test_database, "The test_db fixture")
     with connect(TEST_DATABASE_URL) as conn:
         conn.autocommit = True
         if request.node.get_closest_marker("fresh_schema"):
@@ -642,7 +765,7 @@ def test_db(request: pytest.FixtureRequest) -> Iterator[psycopg.Connection]:
 
 @pytest.fixture(autouse=True)
 def _restore_baseline_after_fresh_schema(
-    request: pytest.FixtureRequest,
+    request: pytest.FixtureRequest, _exclusive_test_database: bool
 ) -> Iterator[None]:
     """Restore the migrated-once baseline after any ``fresh_schema`` test.
 
@@ -658,9 +781,17 @@ def _restore_baseline_after_fresh_schema(
     Autouse so it fires for EVERY test, but the teardown is just a marker check for
     the ~5.3k non-schema tests — only the handful of ``fresh_schema`` tests pay the
     reset.
+
+    Gated on the suite lock for the same reason :func:`test_db` is, and it needs
+    its OWN gate rather than inheriting that one: this is the reset that fires
+    for a ``fresh_schema`` test which DDLs on its own connection and never takes
+    ``test_db`` at all.
     """
     yield
     if request.node.get_closest_marker("fresh_schema"):
+        _require_suite_lock(
+            _exclusive_test_database, "The fresh_schema baseline restore"
+        )
         with connect(TEST_DATABASE_URL) as conn:
             conn.autocommit = True
             _reset_schema_and_migrate(conn)

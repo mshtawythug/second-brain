@@ -14,10 +14,52 @@
 
   theme.js is loaded (not deferred) in <head> so the stored theme is applied
   before first paint and the page never flashes the wrong ground colour.
+
+  The stylesheet is a set of <link> tags rather than one file with @import. The
+  preload scanner finds them all in this markup and fetches them in parallel;
+  an @import barrel is only discoverable after the barrel itself has been
+  fetched and parsed, which costs a serialised round trip before first paint.
+  THE ORDER IS LOAD-BEARING — tokens, base, layout, components — see the header
+  comment in css/tokens.css for the two same-specificity pairs that depend on
+  it. The per-feature sheets come after that shared component layer, because
+  each builds on it.
+
+  NEITHER THE COUNT NOR THE ROSTER IS RESTATED HERE, and that is deliberate.
+  This comment used to say "six <link> tags", "all six", and name the
+  per-feature sheets in a parenthesis — three derivable facts that a seventh
+  sheet falsifies in a file whose diff nobody re-reads. The list below IS the
+  roster; anything above it that repeats the list is a second copy waiting to
+  go stale, which is the defect class that has already produced two false
+  comments in this phase.
+
+  THIS BLOCK AND `CSS_ORDER` IN tests/test_ui_static_behaviour.py ARE ONE FACT
+  STORED TWICE. `check_every_stylesheet_is_linked_in_order` asserts they are
+  equal as SEQUENCES — exact, not a superset — so adding a sheet to one without
+  the other reddens the suite immediately. That is deliberate: a sheet linked
+  but unrostered escapes every `css/*` guard, and marginalia.css shipped a real
+  WCAG contrast defect for exactly as long as it sat outside the roster.
 -->
-<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/css/tokens.css">
+<link rel="stylesheet" href="/static/css/base.css">
+<link rel="stylesheet" href="/static/css/layout.css">
+<link rel="stylesheet" href="/static/css/components.css">
+<link rel="stylesheet" href="/static/css/palette.css">
+<link rel="stylesheet" href="/static/css/marginalia.css">
+<link rel="stylesheet" href="/static/css/reading.css">
+<link rel="stylesheet" href="/static/css/explorer.css">
+<link rel="stylesheet" href="/static/css/discovery.css">
+<link rel="stylesheet" href="/static/css/thread.css">
 <script src="/static/theme.js"></script>
-<script type="module" src="/static/app.js"></script>
+<script type="module" src="/static/js/main.js"></script>
+<!-- A SECOND module entry point, and the reason is ownership rather than
+     architecture: js/main.js owns boot order and belongs to another task for
+     the whole of this phase, so js/discovery.js mounts itself instead of being
+     called from boot(). ES modules are keyed by URL, so the store.js this
+     shares with main.js is one instance, not two. It subscribes and draws only
+     into #discovery, which renderInspector never touches, so it is order-free —
+     the property that made wirePalette() safe anywhere in boot() and
+     wireMarginalia() safe only after subscribe(renderInspector). -->
+<script type="module" src="/static/js/discovery.js"></script>
 </head>
 <body>
 
@@ -44,7 +86,12 @@
       <h2 class="rail-title">Vault</h2>
       <button class="ghost-btn" id="new-note" type="button">+ New</button>
     </div>
-    <div class="tree" id="tree" role="tree" aria-label="Vault notes" tabindex="0"></div>
+    <!-- NO tabindex here. The tree uses a roving tabindex (js/tree.js + tree_nav.js):
+         exactly one treeitem carries tabindex="0" and the rest carry -1, which
+         is what makes Tab land on the tree once and the arrow keys move within
+         it. A tabindex on the container as well would make the container itself
+         a second, focusable-but-inert tab stop. -->
+    <div class="tree" id="tree" role="tree" aria-label="Vault notes"></div>
   </nav>
 
   <section class="ledger" aria-label="Search results">
@@ -65,7 +112,32 @@
       <p class="meta-line" id="meta" aria-live="polite"></p>
       <p class="meta-sub" id="meta-sub"></p>
     </div>
+    <!-- The ledger's IDLE state (T17). js/results.js clears #results and returns
+         early while `searchStatus === "idle"`, so this column was blank until a
+         reader typed something. js/discovery.js fills it with the recent rail
+         and the tag index, and hides this section the moment a search runs —
+         two lists of documents in one column is an ambiguous page, not a
+         richer one. Empty here on purpose: every child is rendered by
+         js/discovery.js, so there is no markup to keep in sync with it. -->
+    <section id="discovery" aria-label="Recent captures and tags" hidden></section>
     <ol class="results" id="results"></ol>
+    <!-- PAGING. `GET /api/search` has taken an `offset` since T6 and the front
+         end never sent one, so every row past the first page was unreachable
+         from the UI while `ranking.status` explained the boundary of a page
+         nobody could reach.
+
+         THE BUTTONS ARE STATIC RATHER THAN BUILT PER RENDER, and that is the
+         reason this markup exists at all instead of an empty container like
+         #discovery. js/results.js clears #results wholesale on every render;
+         if these were rebuilt with it, clicking Next would destroy the element
+         holding focus and drop the caret to <body> on every page turn. Only
+         `disabled` and the status text change, so focus survives the turn.
+         js/pager.js decides all three; this file only holds them. -->
+    <nav class="pager" id="pager" aria-label="Result pages" hidden>
+      <button class="ghost-btn" id="pager-prev" type="button" disabled>‹ Previous</button>
+      <span class="pager-status" id="pager-status"></span>
+      <button class="ghost-btn" id="pager-next" type="button" disabled>Next ›</button>
+    </nav>
   </section>
 
   <article class="inspector" id="inspector" aria-label="Note">

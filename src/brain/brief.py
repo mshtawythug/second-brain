@@ -26,6 +26,7 @@ from .activity import recent_captures
 from .config import Config
 from .errors import EnrichmentError
 from .queries import DocumentRow
+from .sensitivity import not_confidential_sql
 from .todo import TodoRow, iter_action_item_docs
 from .vault.frontmatter import dump_frontmatter
 
@@ -112,6 +113,7 @@ def assemble_brief(
     since_hours: int,
     todo_since_days: int,
     on_date: date,
+    exclude_confidential: bool = False,
 ) -> BriefData:
     """Assemble the brief for ``on_date`` (no LLM — ``suggestions`` is empty).
 
@@ -119,16 +121,38 @@ def assemble_brief(
     the open-action-item window; ``on_date`` is the header date (the caller
     passes today so this stays deterministic under test). Suggestions are filled
     separately by :func:`suggest_next_steps`.
+
+    ``exclude_confidential`` (F6) is threaded to ALL THREE reads below, and it
+    has to be all three: they are three independent queries against
+    ``documents`` — a time window, a body scan, and an interaction join — so
+    closing any one of them closes neither of the others. The brief names
+    documents the caller never asked for (that is what a digest IS), and through
+    ``iter_action_item_docs`` it republishes confidential BODY text, which
+    :func:`suggest_next_steps` then puts in a prompt.
+
+    DEFAULTS FALSE (include) — ``brain brief`` at a terminal is inside the trust
+    boundary; :func:`brain.mcp_server.brain_brief` is the boundary and passes
+    ``exclude_confidential=not include_confidential``.
     """
     captures = recent_captures(
-        conn, since_hours=since_hours, limit=cfg.brief_capture_limit
+        conn,
+        since_hours=since_hours,
+        limit=cfg.brief_capture_limit,
+        exclude_confidential=exclude_confidential,
     )
     open_todos = list(
         iter_action_item_docs(
-            conn, since_days=todo_since_days, include_closed=False
+            conn,
+            since_days=todo_since_days,
+            include_closed=False,
+            exclude_confidential=exclude_confidential,
         )
     )
-    pinned = _pinned_docs(conn, limit=cfg.brief_pin_limit)
+    pinned = _pinned_docs(
+        conn,
+        limit=cfg.brief_pin_limit,
+        exclude_confidential=exclude_confidential,
+    )
     return BriefData(
         date=on_date,
         captures=captures,
@@ -138,15 +162,33 @@ def assemble_brief(
     )
 
 
-def _pinned_docs(conn: psycopg.Connection[Any], *, limit: int) -> list[PinnedDoc]:
+def _pinned_docs(
+    conn: psycopg.Connection[Any],
+    *,
+    limit: int,
+    exclude_confidential: bool = False,
+) -> list[PinnedDoc]:
     """Return the most-recently pinned docs (one row per doc, newest first).
 
     A doc may be pinned more than once; ``MAX(at)`` collapses to the latest pin
     timestamp per doc. ``DISTINCT ON`` is invalid alongside ``GROUP BY``, so the
     grouped subquery feeds the title join.
+
+    ``exclude_confidential`` (F6) filters on the OUTER query, where ``documents``
+    is in scope. It cannot go in the inner subquery — that one selects from
+    ``interactions`` alone and has no ``sensitivity`` column to test. Placing it
+    outside costs one subtlety worth stating: ``LIMIT`` applies to the inner
+    grouped set, so a window whose newest pins are all confidential returns fewer
+    than ``limit`` rows rather than back-filling with older ones. That is the
+    correct trade — back-filling would let a caller infer, from the count, that
+    something was withheld, which is the membership oracle
+    :func:`brain.mcp_server._confidential_lens` describes.
     """
+    where = ["TRUE"]
+    if exclude_confidential:
+        where.append(not_confidential_sql("d"))
     rows = conn.execute(
-        """
+        f"""
         SELECT d.id::text, d.title, p.pinned_at
         FROM (
             SELECT document_id, MAX(at) AS pinned_at
@@ -157,6 +199,7 @@ def _pinned_docs(conn: psycopg.Connection[Any], *, limit: int) -> list[PinnedDoc
             LIMIT  %s
         ) p
         JOIN documents d ON d.id = p.document_id
+        WHERE {' AND '.join(where)}
         ORDER BY p.pinned_at DESC, d.id
         """,
         (limit,),

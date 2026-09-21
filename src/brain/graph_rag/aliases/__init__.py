@@ -9,7 +9,7 @@ import psycopg
 import yaml
 
 from brain.errors import GraphReconcileError
-from brain.wiki._person_name import humanize_person_name
+from brain.person_name import humanize_person_name
 
 if TYPE_CHECKING:
     from ..backends.base import GraphBackend
@@ -238,7 +238,7 @@ def _upsert_entity(
     Uses the migration-012 UNIQUE ``(tenant_id, entity_type, canonical_key)``
     constraint so a re-merge re-uses the existing row. ``name`` is set to the
     humanized canonical key on every call — reuses
-    :func:`brain.wiki._person_name.humanize_person_name` so the alias surface
+    :func:`brain.person_name.humanize_person_name` so the alias surface
     matches the people-resolver display-name shape (DRY).
     """
     row = conn.execute(

@@ -27,6 +27,18 @@ extraction time. Both keys are emitted per doc, and
 key to a canonical display_name. The end result is identical because
 every name and email a key could resolve to also lives in
 ``directory_entries``.
+
+**File-size ceiling (CLAUDE.md): already over, and it grew.** No live count
+here on purpose -- re-derive with ``wc -l src/brain/people.py``. The growth is
+the F6 gate on :func:`aggregate_people`: two frozen SQL variants selected by
+``exclude_confidential``, which **defaults True** here unlike everywhere else
+in the codebase. Most of the added lines are that default's argument, and they
+are load-bearing rather than decorative -- a hub page renders each document as
+an ``###`` heading and the page itself publishes, because its frontmatter
+carries no ``sensitivity`` key for Quartz's ``RemoveConfidential`` to read. So
+a confidential Krisp/Gmail title reaching this function reached the site, and
+the site's table of contents, on every participant's page. Reasons inline at
+the SQL variants, at the parameter, and at each of the three call sites.
 """
 import logging
 from dataclasses import dataclass, field
@@ -37,18 +49,19 @@ from typing import Any
 
 import psycopg
 
+from brain.person_name import (
+    expand_owner_keys,
+    humanize_person_name,
+    is_automated_sender,
+    normalize_person_name,
+)
+from brain.sensitivity import not_confidential_sql
 from brain.vault._atomic import atomic_write_text
 from brain.vault.derived_links.directory import _score_directory_rows
 from brain.vault.derived_links.participants import extract_gmail_addresses
 from brain.vault.frontmatter import dump_frontmatter
 from brain.vault.paths import safe_wikilink_alias, strip_md_extension
 from brain.vault.slug import slugify
-from brain.wiki._person_name import (
-    expand_owner_keys,
-    humanize_person_name,
-    is_automated_sender,
-    normalize_person_name,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +130,7 @@ class _DirectoryIndex:
     resolution is dictionary lookups rather than repeated SQL.
 
     Every view is keyed on the **canonical key** produced by
-    :func:`brain.wiki._person_name.normalize_person_name` — the lowercase,
+    :func:`brain.person_name.normalize_person_name` — the lowercase,
     separator-collapsed merge identity. Two directory rows whose raw
     ``display_name`` differs only by separators / mailing-list decoration /
     ``Last, First`` ordering (``Jane.Doe`` vs ``Jane Doe``) therefore collapse
@@ -160,9 +173,9 @@ def _build_directory_index(
     resolver needs. See :class:`_DirectoryIndex` for what each index represents.
 
     Each raw ``display_name`` is run through
-    :func:`brain.wiki._person_name.normalize_person_name` to derive its
+    :func:`brain.person_name.normalize_person_name` to derive its
     canonical key, and each ``(display_name, email)`` row is dropped when
-    :func:`brain.wiki._person_name.is_automated_sender` flags it as a non-human
+    :func:`brain.person_name.is_automated_sender` flags it as a non-human
     / org sender. ``sender_denylist`` (``BRAIN_GRAPH_SENDER_DENYLIST``) adds
     corpus-specific entries to the always-on generic heuristic.
     """
@@ -277,7 +290,7 @@ def _resolve_key_to_person(
     Emails resolve via ``canonical_key_by_email``; an email with no directory
     match returns ``None`` (long-tail one-off senders are dropped, not
     surfaced). Names are normalized via
-    :func:`brain.wiki._person_name.normalize_person_name` and resolve only when
+    :func:`brain.person_name.normalize_person_name` and resolve only when
     their canonical key appears in ``known_keys`` — so a handle-style key like
     ``Jane.Doe`` matches the directory's ``jane doe`` entry, while a one-off
     Krisp speaker label with no directory entry is silently dropped.
@@ -386,12 +399,45 @@ def _assign_slugs(records: list[PersonRecord]) -> list[PersonRecord]:
 # ---- Public API -------------------------------------------------------------
 
 
+#: The gmail/krisp roster scan, in TWO frozen variants selected by
+#: ``exclude_confidential`` — the pattern :mod:`brain.ui.queries` and
+#: :mod:`brain.vault.graph` both use. Frozen rather than composed with a bound
+#: ``%s`` because :func:`brain.sensitivity.not_confidential_sql` deliberately
+#: emits a literal: threading a parameter into a fragment only ONE variant
+#: carries means the caller's positional tuple changes shape with the flag,
+#: which is the class of defect nobody sees in a diff. Neither variant binds
+#: anything, so both are executed with no parameters at all.
+#:
+#: The PERMISSIVE variant: every non-draft gmail/krisp doc, whatever its
+#: sensitivity.
+_ROSTER_SQL_ANY = """
+        SELECT d.id::text, d.title, s.kind, d.metadata, d.vault_path, d.sent_at
+        FROM documents d
+        JOIN sources s ON s.id = d.source_id
+        WHERE s.kind IN ('gmail', 'krisp')
+          AND d.draft = FALSE
+"""
+
+#: The strict variant (F6). Used by every caller that does not explicitly ask
+#: for the permissive one — see :func:`aggregate_people` for why the default
+#: falls this way.
+_ROSTER_SQL = f"""
+        SELECT d.id::text, d.title, s.kind, d.metadata, d.vault_path, d.sent_at
+        FROM documents d
+        JOIN sources s ON s.id = d.source_id
+        WHERE s.kind IN ('gmail', 'krisp')
+          AND d.draft = FALSE
+          AND {not_confidential_sql("d")}
+"""
+
+
 def aggregate_people(
     conn: psycopg.Connection[Any],
     *,
     owner_keys: frozenset[str],
     min_docs: int,
     sender_denylist: frozenset[str] = frozenset(),
+    exclude_confidential: bool = True,
 ) -> list[PersonRecord]:
     """Aggregate per-person doc rosters from ``directory_entries`` + ``documents``.
 
@@ -403,7 +449,7 @@ def aggregate_people(
         conn: Live Postgres connection. Read-only — no writes performed.
         owner_keys: Identifiers (emails AND/OR display names) that count as the
             corpus owner. Expanded via
-            :func:`brain.wiki._person_name.expand_owner_keys` to also cover
+            :func:`brain.person_name.expand_owner_keys` to also cover
             first-name-only and email-local-part variants, then stripped from
             every doc's participant key set so the owner doesn't appear in
             *every* doc list. Persons whose canonical identity (canonical key
@@ -418,6 +464,41 @@ def aggregate_people(
         sender_denylist: Extra ``BRAIN_GRAPH_SENDER_DENYLIST`` substrings /
             addresses forwarded to the automated-sender filter on top of the
             always-on generic heuristic. Default empty.
+        exclude_confidential: Omit ``sensitivity = 'confidential'`` documents
+            from every roster (F6). **Defaults True — fail-closed**, the house
+            pattern for surfaces that EMIT: four more gates in ``related.py``
+            (the ``related.json`` publish path) and four in ``ui/queries.py``
+            default the same way. The reasoning is the asymmetry, not style:
+
+            * Default False and a future caller that PUBLISHES forgets it →
+              confidential Krisp/Gmail titles are rendered as ``###`` headings
+              on ``<vault>/people/<slug>.md``, a page whose own frontmatter
+              carries no ``sensitivity`` key and which Quartz's
+              ``RemoveConfidential`` therefore publishes. That is exactly the
+              defect this parameter was added to close.
+            * Default True and a future LOCAL caller forgets it → the user does
+              not see one of their own documents in their own terminal, on a
+              surface they can re-run with the flag flipped.
+
+            The first is unrecoverable and invisible; the second is neither.
+
+            Note this is the opposite call from :mod:`brain.vault.graph`, whose
+            readers default False to match CLI siblings that have always shown
+            everything. The difference is the caller mix: graph's readers are
+            mostly local, this function's only *emitting* caller
+            (:func:`emit_people_pages`) writes straight to the published vault.
+            The two local callers here — ``brain people`` and
+            :func:`brain.queries.resolve_person_to_keys` — pass False
+            explicitly, so the local surfaces keep the behaviour
+            :mod:`brain.search` documents (an unfiltered local read still
+            returns confidential rows in full).
+
+            Excluding rows here also fixes ``doc_count``: the roster count
+            rendered on each page is ``len(record.docs)``, so a page can never
+            advertise a document it did not list. It also feeds ``min_docs``,
+            which is the intended reading — a person known only through
+            confidential documents is not surfaced by a threshold that counts
+            documents nobody may see.
 
     Raises:
         ValueError: ``min_docs`` is negative.
@@ -435,14 +516,12 @@ def aggregate_people(
     # Pull every gmail/krisp document. Drafts (``draft=TRUE``) are excluded
     # — they're already filtered from the rendered wiki, so a People Hub page
     # listing a draft would surface a doc the user doesn't see anywhere else.
+    # Confidential documents are excluded on the same reasoning and by default
+    # (F6): a hub page names its docs in ``###`` headings, and the page itself
+    # publishes, so the title of a note whose own page Quartz withheld would
+    # otherwise appear on every participant's hub — and in the site ToC.
     rows = conn.execute(
-        """
-        SELECT d.id::text, d.title, s.kind, d.metadata, d.vault_path, d.sent_at
-        FROM documents d
-        JOIN sources s ON s.id = d.source_id
-        WHERE s.kind IN ('gmail', 'krisp')
-          AND d.draft = FALSE
-        """
+        _ROSTER_SQL if exclude_confidential else _ROSTER_SQL_ANY
     ).fetchall()
 
     # canonical_key → list of DocRefs (deduped within a doc — multiple keys for
@@ -559,7 +638,7 @@ def humanize_display_name(display_name: str) -> str:
     the rule. Keep the internal alias below for backwards compat
     inside this module — every call site already routes through it.
 
-    Delegates to :func:`brain.wiki._person_name.humanize_person_name` so the
+    Delegates to :func:`brain.person_name.humanize_person_name` so the
     People Hub, the graph reconcile resolver, and the CLI share one
     presentation transform.
     """
@@ -877,11 +956,17 @@ def emit_people_pages(
     (a SQL failure means we can't safely produce a target set, and
     deleting pages against a partial target would lose data).
     """
+    # ``exclude_confidential=True`` is also the default; passed explicitly
+    # because THIS is the caller the default exists for. Every page written
+    # below lands in ``<vault>/people/`` and is published by Quartz — the
+    # page's own frontmatter has no ``sensitivity`` key, so nothing downstream
+    # will withhold a confidential title that reaches here.
     records = aggregate_people(
         conn,
         owner_keys=owner_keys,
         min_docs=min_docs,
         sender_denylist=sender_denylist,
+        exclude_confidential=True,
     )
 
     people_dir = _people_dir(vault_path)

@@ -594,9 +594,9 @@ def test_build_builds_directory_index_once_not_per_doc(
 ) -> None:
     """A multi-doc batch build builds the People-Hub directory index ONCE (in
     build_graph), not once per document, while person resolution is unchanged."""
-    import brain.wiki.build_people as build_people_mod
+    import brain.people as people_mod
 
-    spy = mocker.spy(build_people_mod, "_build_directory_index")
+    spy = mocker.spy(people_mod, "_build_directory_index")
 
     backend = _backend(test_db)
     _seed_three_docs(test_db)
@@ -618,9 +618,9 @@ def test_incremental_reconcile_builds_its_own_directory_index(
     """Fix B regression: the incremental path (default resolver, no prebuilt
     directory) STILL builds the directory itself — the hoist is batch-only and
     must not break single-document reconcile (sync.py's ingest hook)."""
-    import brain.wiki.build_people as build_people_mod
+    import brain.people as people_mod
 
-    spy = mocker.spy(build_people_mod, "_build_directory_index")
+    spy = mocker.spy(people_mod, "_build_directory_index")
 
     backend = _backend(test_db)
     doc_ids = _seed_three_docs(test_db)

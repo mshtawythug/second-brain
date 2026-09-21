@@ -16,15 +16,31 @@
 // `quartz/static/*` into `<build>/static/`, and (b) `brain.ingest.gmail
 // .to_extracted_thread` keeps emitting `## YYYY-MM-DD HH:MM — <from>`
 // for the latest message and `<details><summary>YYYY-MM-DD HH:MM —
-// <from></summary>...` for older messages. If the markdown assembly
-// shape changes, update `parseFromAddress` and the section walker
-// together.
+// <from></summary>...` for older messages, with `<from>` HTML-ESCAPED
+// on BOTH (defect #57 — the H2 was raw, so the address rendered one way
+// in the summary and another in the heading). The escape is invisible
+// here: `textContent` decodes the entities, so `parseFromAddress` sees
+// `Name <addr>` either way. If the markdown assembly shape changes,
+// update `parseFromAddress` and the section walker together.
 //
 // What this script does, and why: an email_thread page (markdown body
-// produced by `to_extracted_thread`) renders as a leading `<h2>` (the
-// most recent message — always visible) followed by zero or more
-// `<details>` elements (older messages, collapsed by default). The
-// script enhances that shape with two affordances:
+// produced by `to_extracted_thread`) renders as zero or more `<details>`
+// elements (older messages, collapsed by default) followed by a TRAILING
+// `<h2>` — the most recent message, always visible.
+//
+// THE H2 IS LAST, NOT FIRST. This comment said "a leading `<h2>`" for a
+// long time and it was never true: `to_extracted_thread` sorts ascending
+// by `internalDate` and passes `collapsed=(idx != last_idx)`, so the one
+// uncollapsed section is the LAST one. Verified by running the producer,
+// and already pinned by an executable assertion —
+// `tests/test_gmail_thread.py::test_most_recent_message_not_collapsed`
+// asserts `last_h2 > last_details`, i.e. the plain H2 appears after the
+// last `<details>` open tag. The mistake was harmless only by luck: the
+// walker below scans to end-of-article rather than assuming a position.
+// It had already propagated into a test fixture, which is how a comment
+// like this stops being a comment and starts being a belief.
+//
+// The script enhances that shape with two affordances:
 //
 //   1. Annotates every message section with `data-brain-thread-from`
 //      (the From address parsed from the heading) and
@@ -74,7 +90,7 @@
 
   // brain: section class added to wrapped latest-message + each
   // <details>. Gives the SCSS a single hook regardless of whether the
-  // section is the leading H2 (wrapped at runtime) or a markdown
+  // section is the trailing H2 (wrapped at runtime) or a markdown
   // <details>.
   var SECTION_CLASS = "brain-thread-message"
   var LATEST_CLASS = "brain-thread-latest"
@@ -191,12 +207,20 @@
     return false
   }
 
-  // brain: wrap the leading H2-message (and its trailing siblings up
-  // to the first `<details>` / end of article) in a synthetic
-  // `<section>` so the SCSS / filter has the same shape regardless of
-  // whether the section is markdown-emitted `<details>` or the latest
-  // plain H2. The wrapper carries the same data attributes so the
-  // toggle can hide it via the `[data-brain-is-mine]` selector.
+  // brain: wrap the H2-message (and its trailing siblings up to the
+  // first `<details>` / end of article) in a synthetic `<section>` so
+  // the SCSS / filter has the same shape regardless of whether the
+  // section is markdown-emitted `<details>` or the latest plain H2. The
+  // wrapper carries the same data attributes so the toggle can hide it
+  // via the `[data-brain-is-mine]` selector.
+  //
+  // POSITION-AGNOSTIC ON PURPOSE, and that is what saved it. The scan
+  // finds the FIRST thread-shaped H2 among `article.children` and sweeps
+  // forward; it never assumes the H2 is first. On real corpus documents
+  // the H2 is LAST, so the `DETAILS` arm of the end-scan below never
+  // fires — it is defensive, not load-bearing. Kept rather than deleted:
+  // it costs one comparison and it is the reason the "leading `<h2>`"
+  // error at the top of this file was invisible instead of a bug.
   //
   // Rationale: `to_extracted_thread` renders the latest message as
   // `## H2 + body` (test-pinned in `tests/test_gmail_thread.py`). We
