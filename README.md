@@ -29,6 +29,14 @@ Querying `brain` returns a ranked snippet instead of dumping whole threads and f
 
 Brain stores pre-extracted, quote-stripped bodies and hybrid-ranks *before* fetching, so only the passage that matched enters context. See the [full per-source breakdown](docs/configuration.md#token-economics).
 
+`brain search --brief` trims that payload further. With `--json`, each result carries whichever is cheaper — the document's ingest-time summary or its query-conditioned chunk snippet — plus a `snippet_source` key naming which one won, so brief output is 8 keys instead of 7. Ranking is untouched; only the projection changes. Measured over an 11-query sample: **−57.4%** (25,528 → 10,884 tokens, [before](docs/audits/2026-08-10-token-payload-baseline.json) / [after](docs/audits/2026-08-11-token-payload-after-wave1.json)).
+
+```bash
+brain search "platform migration" --json --brief
+```
+
+The tradeoff is stated rather than hidden: a result substituted to `"summary"` no longer says *why* it matched, so re-run without `--brief` to get the query-conditioned passage back. It is a no-op without `--json`. Full matrix in the [CLI reference](docs/cli-reference.md#search-transparency-and-facets).
+
 When the reader is an agent rather than a person, `brain recall` goes one step further. Instead of a ranked list someone has to open, it returns the passages themselves — packed to an explicit token budget, one per document to keep sources diverse, with the same inline `[N]` citations `brain ask` uses:
 
 ```bash
@@ -175,6 +183,8 @@ claude mcp add brain -- brain-mcp
 `uvx secondbrain-py` also launches the MCP server. Full walkthrough (symlink, smoke-test, troubleshooting): [docs/guides/claude-desktop-setup.md](docs/guides/claude-desktop-setup.md).
 
 `search`, `recall`, `rate` and `ingest-stdin` accept `--agent <id>` (or an ambient `BRAIN_AGENT_ID`), so when several agents share one brain, `brain usage` can report which of them has been reading what.
+
+**Payload ceilings.** So no single tool call can eat an agent's context window, six env vars bound what the MCP server returns: `BRAIN_SHOW_MAX_CONTENT_TOKENS` (`25000` — the only one where `0` means unlimited, and it bounds the body *and* the summary, each separately), `BRAIN_SEARCH_MAX_LIMIT` (`50`), `BRAIN_RECALL_MAX_BUDGET_TOKENS` (`13000`), `BRAIN_GRAPH_ENTITIES_MAX_LIMIT` (`500`), `BRAIN_MCP_ROWS_MAX_LIMIT` (`200`) and `BRAIN_GRAPH_COMMUNITIES_LIST_LIMIT` (`25`). An over-ceiling request is refused naming the ceiling that stopped it, and a trimmed body or list flags itself — never a silent cut. `BRAIN_SNIPPET_MAX_CHARS` (`1600`) caps a stitched search snippet on both the CLI and MCP paths. Every default is sized off live-corpus percentiles rather than picked, which is why every one is a knob: [the table](docs/configuration.md#feature-config-knobs) and [the reasoning behind each number](docs/configuration.md#mcp-payload-ceilings--every-default-is-a-judgement-call).
 
 ## Confidential documents
 
