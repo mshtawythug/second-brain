@@ -296,7 +296,7 @@ jobs:
 
       - name: Cache the chromium download
         id: playwright-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           # Linux path. macOS uses ~/Library/Caches/ms-playwright; this job is
           # pinned to ubuntu-latest, so the single path is correct here.
