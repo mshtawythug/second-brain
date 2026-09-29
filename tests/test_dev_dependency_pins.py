@@ -13,7 +13,7 @@ PYPROJECT = REPO_ROOT / "pyproject.toml"
 # current, so the cap is the next unreleased minor. Bumping this constant
 # without re-running the measurement recorded beside the pin in pyproject.toml
 # is exactly the mistake the evidence block there exists to prevent.
-MEASURED_COVERAGE_CEILING = "7.16"
+MEASURED_COVERAGE_CEILING = "7.17"
 
 # The next unreleased MINOR above the newest `ruff` release measured green on
 # this tree. 0.16.4 was newest on 2026-08-20 and is verified green, so the cap is

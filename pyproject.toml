@@ -423,8 +423,39 @@ browser = ["playwright>=1.40"]
 # contract test's old name (`..._below_pgvector_breaking_range`) was a misnomer
 # copied from the pgvector pin above. Both are now fixed.
 #
-# Cap <7.16: 7.15.4 is the newest release and is verified green. Not a claim that
-# 7.16 breaks — a requirement that the next minor be MEASURED before users get
+# RE-MEASURED 2026-09-29 for the 7.16 line (Dependabot #12 proposed `<7.17`
+# and the contract test refused it, as designed). Two venvs on Python 3.11.15
+# whose `pip freeze` differs in the `coverage` line ONLY; collection ON,
+# `--cov-fail-under=0`, isolated COVERAGE_FILE, one sibling test DB per run:
+#
+#     coverage   slice A (284 tests, search/graph/queries)   slice B (3128 tests)
+#     7.15.4     284 passed   26.467056%                    3128 passed   68.650350%
+#     7.16.2     284 passed   26.467056%                    3128 passed   68.650350%
+#
+# Same statements / covered / missing / EXCLUDED counts on both, and zero files
+# whose executed, missing or excluded line sets differ (compared per file from
+# the JSON reports, not from the totals). `PythonParser` over src/brain gives
+# identical per-file statement counts on both. 7.16.0 has a full-suite point
+# from CI on one tree (`f495f66`): 7.15.4 and 7.16.0 both report 93.82%.
+# 7.16.1 was not run on its own; it sits between two measured releases.
+#
+# The slices are NOT the 2026-08-08 ones — those were never written down, which
+# is why the two tables' percentages are not comparable to each other. These
+# are: A = tests/test_{search,vault_graph,queries,graph_rag}*.py,
+# B = tests/test_{c,f,m,e,i}*.py. Only rows WITHIN a table compare.
+#
+# What in 7.16 could have moved the number and did not: 7.16.1 now excludes an
+# irrefutable `case _:` line when its body is excluded, which changes the
+# denominator wherever that shape exists. src/brain has no `case _:` at all
+# (`grep -rnE '^\s*case _:' src/brain`), so it is inert here TODAY — the first
+# `match` with an excluded wildcard arm makes the percentage version-dependent.
+# The rest of 7.16.x is `[paths]`/combine handling and option validation
+# (unused here) and two fixes that apply on Python 3.14+ ONLY. CI and this
+# measurement are 3.11, so 7.16 on 3.14 is NOT measured; branch coverage is
+# off (`meta.branch_coverage: false` in the JSON), which removes one of them.
+#
+# Cap <7.17: 7.16.2 is the newest release and is verified green. Not a claim that
+# 7.17 breaks — a requirement that the next minor be MEASURED before users get
 # it, same convention as `typer` and `pgvector` above.
 #
 # NO FLOOR, deliberately: `pytest-cov` already bounds coverage from below for
@@ -473,7 +504,7 @@ browser = ["playwright>=1.40"]
 # controlled comparison, not two absolute runs that might have measured two
 # different trees. 0.16.4 and 2.3.1 are the newest releases on PyPI as of
 # 2026-08-20 (`pip index versions`), so the caps are the next unreleased minor
-# above the newest MEASURED release, the same rule the `coverage<7.16` block
+# above the newest MEASURED release, the same rule the `coverage<7.17` block
 # above states. Not a claim that 0.17 or 2.4 breaks — a requirement that the
 # next minor be measured before it silently becomes the local gate. For ruff,
 # 0.x minors ARE its breaking-change unit (new rules and rule-behaviour changes
@@ -507,7 +538,7 @@ browser = ["playwright>=1.40"]
 # Self-enforced by tests/test_dev_dependency_pins.py against the named constants
 # MEASURED_RUFF_CEILING / MEASURED_MYPY_CEILING, parsed from the specifier rather
 # than substring-matched. Move a bound here and that constant must move with it.
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.16", "pytest-mock>=3.14", "ruff>=0.7,<0.17", "mypy>=1.13,<2.4", "reportlab>=4.0", "types-PyYAML>=6.0"]
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.17", "pytest-mock>=3.14", "ruff>=0.7,<0.17", "mypy>=1.13,<2.4", "reportlab>=4.0", "types-PyYAML>=6.0"]
 
 [project.scripts]
 brain = "brain.cli:app"
