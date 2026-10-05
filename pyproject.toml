@@ -538,7 +538,7 @@ browser = ["playwright>=1.40"]
 # Self-enforced by tests/test_dev_dependency_pins.py against the named constants
 # MEASURED_RUFF_CEILING / MEASURED_MYPY_CEILING, parsed from the specifier rather
 # than substring-matched. Move a bound here and that constant must move with it.
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.17", "pytest-mock>=3.14", "ruff>=0.7,<0.17", "mypy>=1.13,<2.4", "reportlab>=4.0", "types-PyYAML>=6.0"]
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.17", "pytest-mock>=3.14", "ruff>=0.7,<0.17", "mypy>=1.13,<2.5", "reportlab>=4.0", "types-PyYAML>=6.0"]
 
 [project.scripts]
 brain = "brain.cli:app"
