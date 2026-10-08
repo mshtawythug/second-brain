@@ -168,6 +168,10 @@ def test_an_unsaved_edit_does_not_refetch_and_other_notes_keep_their_cache(
 
     _open_settled(page, ALPHA_ID)
     _open_settled(page, ROOT_ID)
+    # A BOUNDED ABSENCE CHECK, not a sleep-to-pass: the assertion below is that
+    # no refetch happened, and absence has no event to wait for. This only gives
+    # a wrongly-issued request time to show up; with a correct client the test
+    # passes whether or not the wait elapses.
     page.wait_for_timeout(200)
     assert _PUTS == [], "precondition: nothing was meant to be saved"
     assert _fetches(ROOT_ID) == {k: 1 for k in KINDS}, (
@@ -183,6 +187,10 @@ def test_an_unsaved_edit_does_not_refetch_and_other_notes_keep_their_cache(
         arg="Alpha Synthetic Note",
     )
     page.wait_for_selector("#inspector > nav.related-rail")
+    # A BOUNDED ABSENCE CHECK, not a sleep-to-pass: the assertion below is that
+    # no refetch happened, and absence has no event to wait for. This only gives
+    # a wrongly-issued request time to show up; with a correct client the test
+    # passes whether or not the wait elapses.
     page.wait_for_timeout(200)
     assert _fetches(ALPHA_ID) == {k: 1 for k in KINDS}, (
         f"saving one note dropped ANOTHER note's cache: {_fetches(ALPHA_ID)}"

@@ -261,6 +261,10 @@ def test_a_withheld_note_never_requests_its_related_notes(page: Any) -> None:
     page.wait_for_selector("#inspector p.withheld")
     settle(page)
     _dispatch(page, "{}")
+    # A BOUNDED ABSENCE CHECK, not a sleep-to-pass: the assertion below is that
+    # a request did NOT happen, and absence has no event to wait for. This only
+    # gives a wrongly-issued request time to show up; with a correct client the
+    # test passes whether or not the wait elapses.
     page.wait_for_timeout(150)
     assert f"/api/notes/{ROOT_ID}" in _REQUESTS, (
         "precondition: the note itself was never requested"

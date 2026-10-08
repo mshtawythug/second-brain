@@ -52,7 +52,14 @@ export const state = {
  * refetches nothing.
  *
  * A Map, held here rather than on `state`: it is not something any renderer
- * draws, and `dispatch` has no business replacing it. */
+ * draws, and `dispatch` has no business replacing it.
+ *
+ * SUPERSEDED KEYS ARE RETAINED, DELIBERATELY. A bump leaves the old `id:rev`
+ * entries in each module's cache, unreachable, rather than pruning them on
+ * write. This is a single-user local UI: one dead entry per module per save is
+ * trivial, and the per-note caches were already unbounded (one entry per note
+ * opened) before revisions existed. Pruning would add a second code path to
+ * the one invalidation rule for no observable gain. */
 const noteRevisions = new Map();
 
 export function noteRevision(id) {
