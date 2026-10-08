@@ -36,10 +36,11 @@ from ..sensitivity import is_confidential
 from ..vault.graph import graph_data
 from . import graph_layout, notes_service, queries
 from ._http import context_of, db_guard, ok
-from .errors import UiForbidden
+from .errors import UiForbidden, UiNotFound
 
 #: Neighbours drawn on the ring (ruling R4); the rest are reported as ``truncated``.
-GRAPH_CAP = 24
+#: Passed explicitly at the call site, but defined once, in ``graph_layout``.
+GRAPH_CAP = graph_layout.DEFAULT_CAP
 
 
 def _payload(
@@ -82,8 +83,13 @@ async def note_graph(request: Request) -> JSONResponse:
     with 200 and a ``withheld`` notice, so the client never asks for its graph;
     a direct caller gets neither a root-only payload (that would carry the
     title) nor a 404 (which would contradict ``/api/notes`` confirming the id
-    exists). The check runs BEFORE ``layout``, whose ``ValueError`` for a
-    missing root stays that function's own contract and unreachable from here.
+    exists). The check runs BEFORE ``layout``.
+
+    The sensitivity read and ``graph_data`` are separate reads, so a root
+    deleted — or sealed under a strict lens — between them comes back from
+    ``graph_data`` without its root node. That race is a typed 404
+    ``note_not_found`` naming nothing, not ``layout``'s ``ValueError`` as a
+    bare 500.
     It reuses :func:`brain.sensitivity.is_confidential`, the predicate
     ``notes_service.read_note`` decides ``withheld`` with.
     """
@@ -110,5 +116,7 @@ async def note_graph(request: Request) -> JSONResponse:
     except psycopg.Error as exc:
         raise db_guard(exc) from exc
 
+    if all(node.document_id != document_id for node in graph.nodes):
+        raise UiNotFound("no such document", code="note_not_found")
     result = graph_layout.layout(graph, root=document_id, cap=GRAPH_CAP)
     return ok(_payload(document_id, result, linked=corpus_linked))

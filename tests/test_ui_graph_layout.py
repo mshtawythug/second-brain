@@ -148,8 +148,28 @@ def test_edges_dedupe_on_src_dst_kind_but_keep_distinct_kinds() -> None:
     result = layout(GraphData(nodes=nodes, edges=edges), root=ROOT)
 
     assert result.edges == [
-        LayoutEdge(src=ROOT, dst=_id(0), kind="wiki"),
         LayoutEdge(src=ROOT, dst=_id(0), kind="derived"),
+        LayoutEdge(src=ROOT, dst=_id(0), kind="wiki"),
+    ]
+
+
+def test_edges_are_ordered_by_src_dst_kind_whatever_the_input_order() -> None:
+    nodes = [_node(ROOT, "Root Note"), _node(_id(0), "A"), _node(_id(1), "B")]
+    edges = [
+        _edge(_id(1), ROOT, kind="wiki"),
+        _edge(ROOT, _id(1), kind="wiki"),
+        _edge(ROOT, _id(0), kind="wiki"),
+        _edge(ROOT, _id(0), kind="embed", text="![[A]]"),
+        _edge(ROOT, _id(0), kind="derived", text=""),
+    ]
+    result = layout(GraphData(nodes=nodes, edges=edges), root=ROOT)
+
+    assert [(e.src, e.dst, e.kind) for e in result.edges] == [
+        (ROOT, _id(0), "derived"),
+        (ROOT, _id(0), "embed"),
+        (ROOT, _id(0), "wiki"),
+        (ROOT, _id(1), "wiki"),
+        (_id(1), ROOT, "wiki"),
     ]
 
 

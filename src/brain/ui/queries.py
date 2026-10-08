@@ -719,6 +719,6 @@ def document_sensitivity(conn: psycopg.Connection[Any], document_id: str) -> str
     document (body included) through :func:`brain.queries.fetch_document`.
     """
     row = conn.execute(_DOCUMENT_SENSITIVITY_SQL, (document_id,)).fetchone()
-    if row is None:
-        return None
-    return None if row[0] is None else str(row[0])
+    # ``sensitivity`` is NOT NULL DEFAULT 'normal' (migration 026): only a
+    # missing row yields None.
+    return None if row is None else str(row[0])

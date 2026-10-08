@@ -52,7 +52,11 @@ class LayoutNode:
 
 @dataclass(frozen=True)
 class LayoutEdge:
-    """One drawn edge. ``kind`` is the source ``link_kind``: ``wiki`` or ``derived``."""
+    """One drawn edge. ``kind`` is the source ``link_kind``: ``wiki``, ``embed`` or ``derived``.
+
+    Kinds are passed through, never collapsed: ``embed`` (``![[x]]``) and
+    ``wiki`` (``[[x]]``) are distinct ``links.link_kind`` values (migration 003).
+    """
 
     src: str
     dst: str
@@ -150,6 +154,8 @@ def layout(
             continue
         seen.add(key)
         edges.append(LayoutEdge(src=key[0], dst=key[1], kind=key[2]))
+    # Layout owns its own determinism: never inherit the caller's edge order.
+    edges.sort(key=lambda e: (e.src, e.dst, e.kind))
 
     return LayoutResult(
         width=size,

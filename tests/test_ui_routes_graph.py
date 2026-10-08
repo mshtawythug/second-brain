@@ -26,6 +26,7 @@ from brain.ui import graph_layout, queries, routes_graph
 from brain.ui.app import create_app
 from brain.ui.context import UiContext
 from brain.ui.graph_layout import RING_RADIUS
+from brain.vault.graph import GraphData, GraphNode
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -375,11 +376,40 @@ def test_document_sensitivity_reads_the_tier_and_none_for_no_match(
     _make_doc(test_db, doc_id=DOC_A, title="Planning Sync")
 
     assert queries.document_sensitivity(test_db, DOC_S) == CONFIDENTIAL
-    assert queries.document_sensitivity(test_db, DOC_A) == DEFAULT_SENSITIVITY
-    assert queries.document_sensitivity(test_db, DOC_D) is None
+    assert queries.document_sensitivity(test_db, DOC_A) == DEFAULT_SENSITIVITY == "normal"
+    assert queries.document_sensitivity(test_db, DOC_D) is None, "unknown id is None"
 
 
 # ------------------------------------------------------------ fails closed --
+
+
+def test_a_root_gone_by_the_time_graph_data_reads_is_a_typed_404(
+    test_db: psycopg.Connection,
+    tmp_path: Path,
+    fake_embedder: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Race: the root is deleted, or sealed under a strict lens, after resolve_id.
+
+    ``graph_data`` then returns a graph without the root; that must be a typed
+    404 naming nothing, not ``layout``'s ValueError as a bare 500.
+    """
+    _make_doc(test_db, doc_id=DOC_A, title="Planning Sync")
+
+    def rootless_graph(*args: Any, **kwargs: Any) -> GraphData:
+        return GraphData(
+            nodes=[GraphNode(document_id=DOC_B, title="Vendor Evaluation", kind="vault")],
+            edges=[],
+        )
+
+    monkeypatch.setattr(routes_graph, "graph_data", rootless_graph)
+    client = _client(test_db, tmp_path, fake_embedder, raise_server_exceptions=False)
+    response = client.get(f"/api/notes/{DOC_A}/graph")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "note_not_found"
+    for leaked in ("Planning Sync", "Vendor Evaluation", DOC_B):
+        assert leaked not in response.text, f"the 404 envelope named {leaked!r}"
 
 
 def test_unknown_id_is_a_typed_404(client: TestClient, test_db: psycopg.Connection) -> None:
