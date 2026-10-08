@@ -14,6 +14,7 @@ import pytest
 
 from brain.ui import graph_layout
 from brain.ui.graph_layout import (
+    DEFAULT_CAP,
     NEIGHBOUR_RADIUS,
     RING_RADIUS,
     ROOT_RADIUS,
@@ -21,6 +22,10 @@ from brain.ui.graph_layout import (
     layout,
 )
 from brain.vault.graph import GraphData, GraphEdge, GraphNode
+
+#: Pure geometry: nothing here opens a connection (see test_layout_module_does_no_io),
+#: so the suite runs without the test database or its lock.
+pytestmark = pytest.mark.nodb
 
 ROOT = "aaaaaaaa-0000-4000-8000-00000000000a"
 
@@ -184,11 +189,17 @@ def test_a_root_absent_from_the_graph_is_an_error_not_an_invented_node() -> None
         layout(GraphData(nodes=[_node(_id(0), "A")], edges=[]), root=ROOT)
 
 
-def test_the_ring_fits_inside_the_canvas_with_room_for_labels() -> None:
-    """The constants are only meaningful at the default canvas; pin that."""
+def test_the_ring_fits_inside_the_canvas_and_keeps_discs_clear_at_the_cap() -> None:
+    """The constants are only meaningful at the default canvas; pin that.
+
+    This checks DISCS, not labels. Arc spacing says nothing about horizontal
+    labels, which collide from 5 neighbours on (graph.js's
+    ``MAX_LABELLED_NEIGHBOURS``, pinned by the browser layout suite).
+    """
     assert RING_RADIUS + NEIGHBOUR_RADIUS < 320 / 2
-    # 24 nodes spaced along the ring leave more than two label heights apart.
-    assert 2 * math.pi * RING_RADIUS / 24 > 2 * 12
+    # At the cap, adjacent neighbour centres are more than two disc diameters
+    # apart along the arc (~28.8 > 24), so no two discs touch.
+    assert 2 * math.pi * RING_RADIUS / DEFAULT_CAP > 2 * (2 * NEIGHBOUR_RADIUS)
 
 
 def test_layout_module_does_no_io() -> None:

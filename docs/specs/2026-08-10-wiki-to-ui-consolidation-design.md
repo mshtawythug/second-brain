@@ -2134,6 +2134,7 @@ default for the same parameter on the grounds that it "must not silently diverge
 the related-docs panel diverge from `brain search` without anyone noticing?* The failure
 mode is invisible — a wrong cosine floor still returns plausible documents in a plausible
 order.
+
 **CLOSED 2026-10-08 by phase-5 ruling R1 — the panel cannot diverge from `brain search`, because it
 reads the same value.** `brain.ui.routes_related` passes `ctx.cfg.vector_sim_floor` — the `Config`
 field runtime `brain search` reads — and nothing else: no new knob, no literal, no default added to
@@ -2411,6 +2412,7 @@ per note revision on the client. One addition the entry did not anticipate: the 
 SOURCE — a confidential root under a strict lens is a 403 `related_withheld`, checked before
 ranking — because `compute_related` gates candidates only. Re-derive the caller with
 `grep -rn "compute_related" --include="*.py" src`.
+
 ---
 
 ### B-18 · (no S-number) — confidentiality is now TWO flags, and the spec documents one

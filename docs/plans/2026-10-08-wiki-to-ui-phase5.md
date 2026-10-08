@@ -23,7 +23,7 @@ when unbuilt; the related-docs panel answers over HTTP, or the row is not exited
 | **R1** | **B-4:** where does the related route get `vector_sim_floor`? | `ctx.cfg.vector_sim_floor` — the same `Config` value runtime `brain search` reads. No new knob, no literal, no default. | The missing default exists to stop the panel diverging from search without anyone noticing; reading the one shared value is the only answer that cannot diverge. A test pins it: with `cfg.vector_sim_floor` set to a sentinel, the route's `compute_related` call must receive that sentinel (mutation: hard-code `0.25` in the route → red). |
 | **R2** | **Q2:** render primitive | Geometry computed **server-side** in Python (`ui/graph_layout.py`, pure, deterministic radial layout). The client builds the `<svg>` with `document.createElementNS` from the JSON — **no layout code in JS, no vendored library, no `innerHTML`**. | The spec's (d) said "Python emits SVG". The client enforces a single-`innerHTML` rule (`tests/test_ui_static_behaviour.py`) and builds every node with `el()`/`textContent`; injecting a server SVG string would break that rule or need `DOMParser`, which is the same class of risk. Server-side geometry + client-side element creation keeps everything (d) was protecting — zero dependency, zero network, zero force simulation — and keeps the client's rule. Recorded as a deviation from the letter, not the intent. |
 | **R3** | **Q3:** feature subset | Sidebar local graph, depth 1, click-to-navigate, hover-highlight. Nothing else: no zoom, no drag, no fullscreen, no filters, no search, no recency sizing. | Q3's default, verbatim. The fullscreen global graph is "do not build unless reached for" and nobody has. |
-| **R4** | Neighbour cap | At most **24** neighbours drawn, sorted by `(title.lower(), id)`; the rest reported as `truncated: K`. The full list is already one click away in the links rail. | A People Hub page has hundreds of edges; a 300-node ring is unreadable and the rail exists. 24 is the largest count at which 12-px labels on a 320-px ring do not collide at depth 1 (re-derive if the inspector width changes). |
+| **R4** | Neighbour cap | At most **24** neighbours drawn, sorted by `(title.lower(), id)`; the rest reported as `truncated: K`. The full list is already one click away in the links rail. *(Corrected 2026-10-08 in the phase-5 fix round: false. The links rail is the marginalia's "Linked from" list — backlinks only — so an outgoing-only or derived-only neighbour past the cap is on no rail. The client's caption says "+N more not shown" for exactly that reason. See §7.4.)* | A People Hub page has hundreds of edges; a 300-node ring is unreadable and the rail exists. 24 is the largest count at which 12-px labels on a 320-px ring do not collide at depth 1 (re-derive if the inspector width changes). |
 | **R5** | "Unbuilt" for the **link** graph | The route reports `corpus_linked: bool` (any row in `links` or `derived_links`). An isolated note in a linked corpus draws nothing. A note in a corpus with **no** links at all draws a one-line notice naming `brain vault sync`. | §6.4's degraded-state rule, applied to the document-link graph rather than the GraphRAG graph. "Nothing" is honest for an isolated note; a notice is honest for a vault that has never been synced; an error or an empty canvas is neither. |
 | **R6** | Confidentiality gate on the related panel | `exclude_confidential = not (ctx.serve_confidential_titles and ctx.serve_confidential_bodies)` — strict unless BOTH lenses are permissive. The graph route gates on `serve_confidential_titles` alone (titles only, like the links rail). | `RelatedDoc.snippet` is a slice of chunk **content**: body egress. The links rail and the graph carry titles only. Each route takes the strictest lens that covers what it carries. |
 | **R7** | Snippet length in the panel | Cap at `BRAIN_SNIPPET_MAX_CHARS` (`cfg.snippet_max_chars`, default 1600) **server-side**, same knob search uses. | One cap for every snippet surface; the ceiling rule says refused-or-trimmed-with-a-flag, never a silent cut — emit `snippet_truncated: bool`. |
@@ -185,7 +185,7 @@ dispatch carries the no-destructive-DB-ops rule and the no-PII rule.
 | R4 cap | `cap=24` → `cap=25` |
 | layout determinism | sort key `(title.lower(), id)` → `(id,)` |
 | R5 notice | client draws the notice when `corpus_linked` is true |
-| append-order contract | call `wireGraph()` before `wireMarginalia()` |
+| append-order contract | call `wireGraph()` before `wireMarginalia()` *(SUPERSEDED — this mutation can no longer redden anything: since `d5a8a93`, `placeInspectorBlock` fixes the order whatever the wiring order. Replaced by the six-arrival-order test in `tests/test_ui_browser_inspector_blocks.py`, which reddens when `INSPECTOR_BLOCKS` is reordered — see §7.2.)* |
 | R8 import rule | add `import brain.maintenance` to a route module |
 | no-innerHTML | add one `innerHTML =` to `graph.js` |
 
@@ -211,7 +211,7 @@ dispatch carries the no-destructive-DB-ops rule and the no-PII rule.
 1. Both routes answer over HTTP with the contracts in §2, gated per R6, floor per R1.
 2. Opening a note in `brain ui` shows its local graph (or the honest nothing/notice) and its related
    notes; clicking either navigates; hover highlights.
-3. Every guard in §4 reddens under its mutation and is restored byte-identically.
+3. Every guard in §4 reddens under its mutation and is restored byte-identically. *(Except the superseded append-order row, whose mutation no longer applies; its replacement guard is named in §7.2.)*
 4. `ruff check` 0, `mypy src/` 0, full `pytest` green, `pytest tests/test_ui_browser*.py -m browser --no-cov` green.
 5. The spec's §11 phase-5 row is marked exited and B-4 closed, in the same PR.
 6. Rule-14 loop exited clean.
@@ -255,6 +255,27 @@ The full file list is `git diff --stat 121df23..d04d540 -- src`.
   key their caches on `id:rev` and refetch.
 - **Shared fetch helper.** `perNoteFetch` in `static/js/note_fetch.js` is the one fetch-and-cache
   path the inspector blocks use.
+- **The append-order guard was replaced, not proven.** §4's "call `wireGraph()` before
+  `wireMarginalia()`" mutation stopped meaning anything once `placeInspectorBlock` took over the
+  order (`d5a8a93`): the blocks land in canonical order whichever renderer is wired first. The guard
+  that replaced it is the six-arrival-order test in `tests/test_ui_browser_inspector_blocks.py`,
+  verified by the phase audit to redden when `INSPECTOR_BLOCKS` is reordered. The `_INSPECTOR_APPENDS`
+  pinning that §3 planned for the graph and the related rail was not needed: that roster in
+  `tests/test_ui_static_behaviour.py` covers `inspector.js`'s own appends only, and the two blocks go
+  in through `placeInspectorBlock`, not through an append.
+- **The client mirrors both routes' confidential gates (phase-5 fix round).** The closeout text
+  above said each route's 403 is for a note the client never asks about. That was false under the
+  default lenses (bodies served, titles not): the note route withholds on the BODIES lens, so a
+  confidential note opened in full, while the graph route refuses on the TITLES lens and the related
+  route unless titles AND bodies are served — two blank blocks and two console errors, no leak. The
+  server stays exactly as strict. The client now reads both lenses off `/api/health` and the note's
+  own `sensitivity` off its payload (`store.js`: `isConfidentialNote`, `servesConfidential`, failing
+  closed until health answers), mirrors each route in one named predicate (`graphRefusedHere` in
+  `graph.js`, `relatedRefusedHere` in `related.js`), does not issue the request, and shows a one-line
+  notice in the block's slot (`p.graph-withheld` inside `figure.local-graph`, `p.related-withheld`
+  inside `section.related-rail`). A withheld note still draws nothing in either slot. Pinned by the
+  default-lens and lens-matrix tests in `tests/test_ui_browser_graph.py` and
+  `tests/test_ui_browser_related.py`.
 
 ### 7.3 Graph-route latency, and when to revisit
 
@@ -270,9 +291,17 @@ read in `vault/graph.py` rather than the whole-corpus read the route filters tod
 **R4 said 24 is the largest count at which labels on the ring do not collide. It is not.** At the
 cap neighbours sit about 29 units apart along the arc, but labels are horizontal and many times
 wider than that, so on a ring of more than 4 neighbours they can collide. The cap of 24 stands
-(it bounds the drawing, and the links rail holds the full list); the label problem is handled by
-the crowded-ring rule in §7.2. `graph_layout.py`'s `RING_RADIUS` comment repeated the false claim
-and is corrected in the closeout commit.
+(it bounds the drawing); the label problem is handled by the crowded-ring rule in §7.2.
+
+*(Corrected in the phase-5 fix round. This paragraph also said "the links rail holds the full
+list". It does not: the only rail is the marginalia's backlinks ("Linked from"), so an outgoing-only
+or derived-only neighbour past the cap is on no rail at all — which is why the graph's caption reads
+"+N more not shown" and does not point at the rail. R4's own cell carries the same correction.)*
+
+The false legibility claim was repeated in THREE places, not one: `graph_layout.py`'s `RING_RADIUS`
+comment (corrected in the closeout commit), the same module's `DEFAULT_CAP` comment, and
+the name and comment of a test in `tests/test_ui_graph_layout.py` (both corrected in the fix round —
+§7.6).
 
 ### 7.5 Known limits — recorded, not fixed
 
@@ -294,7 +323,9 @@ and is corrected in the closeout commit.
   beside the candidate gate now says source gating is the caller's job and names the route's
   withheld-root check. The module's ceiling trail promoted its descriptive hop to `b7fd0e8`;
   the edit is line-count neutral.
-- `src/brain/ui/graph_layout.py` — the `RING_RADIUS` comment (§7.4).
+- `src/brain/ui/graph_layout.py` — the `RING_RADIUS` comment (§7.4). *(Not the only place the
+  claim appeared: the fix round also corrected the `DEFAULT_CAP` comment beside it and renamed the
+  `tests/test_ui_graph_layout.py` test that asserted "room for labels" from arc spacing alone.)*
 - Design spec — §11 phase-5 row exited with the R2 deviation; §12 Q2 and Q3 marked shipped;
   Appendix B-4 closed by R1; Appendix B-17 given a closing note, original text kept as history.
 - `README.md` "Local web UI" — the two read-only inspector blocks.

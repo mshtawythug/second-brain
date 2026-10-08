@@ -20,8 +20,10 @@ from ..vault.graph import GraphData, GraphNode
 #: Default canvas edge, in px. Square; the client scales it with a viewBox.
 DEFAULT_SIZE = 320
 
-#: Default neighbour cap (ruling R4). Beyond this a ring of labels stops being
-#: legible at :data:`DEFAULT_SIZE`; the remainder is reported as ``truncated``.
+#: Default neighbour cap (ruling R4). It bounds the DRAWING — how many discs the
+#: ring carries (24 keep their discs clear; see :data:`RING_RADIUS`) — not label
+#: legibility, which ends far sooner: above graph.js's ``MAX_LABELLED_NEIGHBOURS``
+#: (4) labels show only on hover or focus. The remainder is reported as ``truncated``.
 DEFAULT_CAP = 24
 
 #: Root disc radius: larger than a neighbour so the centre reads as "you are here".

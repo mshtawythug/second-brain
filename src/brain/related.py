@@ -17,14 +17,14 @@ from here. :mod:`brain.connect` reuses the eligibility + embedding helpers
 for its own auto-link scoring.
 
 **File-size ceiling (CLAUDE.md): this file is now OVER, and the F6 gate below
-is what put it over.** Re-derive with ``wc -l src/brain/related.py``; the
-SHA-bound trail is 714 (``3b16527``, where the wiki/ui split created this
-module) -> 720 (``0473b5f``) -> 726 (``7b5579e``) -> 851 (``b7fd0e8``, the F6
-gate; promoted from a descriptive hop in the phase-5 closeout) -> **the commit
-that named this module's consumer** (prose only), descriptive and with no delta
-because a hop cannot name its own SHA (see ``connect.py``). Read the trail as
-authoritative only THROUGH THE LAST SHA IT NAMES; for anything after it use
-``git log --oneline f8c76c0..HEAD -- src/brain/related.py``.
+is what put it over.** Re-derive with ``wc -l src/brain/related.py``; the trail
+is 714 (``3b16527``, where the wiki/ui split created it) -> 720 (``0473b5f``)
+-> 726 (``7b5579e``) -> 851 (``b7fd0e8``, the F6 gate) -> 851 (``f0abf64``, the
+merge; no line changed) -> 851 (``0af7353``, naming this module's consumer)
+-> **the phase-5 fix-round commit that aligned this trail with CLAUDE.md's**,
+descriptive, no delta: a hop cannot name its own SHA (see ``connect.py``). Read
+it as authoritative only THROUGH THE LAST SHA IT NAMES; for anything after it
+use ``git log --oneline f8c76c0..HEAD -- src/brain/related.py``.
 
 **This crossing is a rule violation, recorded rather than smoothed over.**
 CLAUDE.md's ceiling section says an existing file under 800 "must stay under it
