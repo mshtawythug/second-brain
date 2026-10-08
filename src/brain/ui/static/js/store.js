@@ -63,7 +63,7 @@ export const state = {
  * the one invalidation rule for no observable gain. */
 const noteRevisions = new Map();
 
-export function noteRevision(id) {
+function noteRevision(id) {
   return noteRevisions.get(id) || 0;
 }
 
