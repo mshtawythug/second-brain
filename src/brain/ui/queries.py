@@ -686,3 +686,39 @@ def browseable_tag_counts(
         {"value": str(tag), "count": int(count)}
         for tag, count in conn.execute(sql, (min_doc_count,)).fetchall()
     ]
+
+
+#: Does ANY edge exist anywhere — wiki or derived? Two ``EXISTS`` probes, each
+#: stopping at the first row, so this is constant-cost however large the link
+#: tables grow. Binds no parameters: it takes no input.
+_CORPUS_HAS_LINKS_SQL = (
+    "SELECT EXISTS (SELECT 1 FROM links) OR EXISTS (SELECT 1 FROM derived_links)"
+)
+
+
+def corpus_has_links(conn: psycopg.Connection[Any]) -> bool:
+    """True when the corpus holds at least one wiki or derived edge.
+
+    Lets the graph panel tell "this note has no links" apart from "nothing in
+    this brain is linked yet" — the second means a link build has never run,
+    and the panel says so rather than drawing a lone dot with no explanation.
+    It deliberately reads the tables only; it never triggers a build (spec §6.5).
+    """
+    row = conn.execute(_CORPUS_HAS_LINKS_SQL).fetchone()
+    return bool(row and row[0])
+
+
+_DOCUMENT_SENSITIVITY_SQL = "SELECT sensitivity FROM documents WHERE id = %s"
+
+
+def document_sensitivity(conn: psycopg.Connection[Any], document_id: str) -> str | None:
+    """The ``sensitivity`` tier of one document, or ``None`` if the id matches nothing.
+
+    A one-column read so a route that has only resolved an id can apply
+    :func:`brain.sensitivity.is_confidential` to it without fetching the whole
+    document (body included) through :func:`brain.queries.fetch_document`.
+    """
+    row = conn.execute(_DOCUMENT_SENSITIVITY_SQL, (document_id,)).fetchone()
+    if row is None:
+        return None
+    return None if row[0] is None else str(row[0])
