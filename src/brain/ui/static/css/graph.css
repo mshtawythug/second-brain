@@ -33,37 +33,39 @@
   /* RIM GUTTER. The server places NODES inside the viewBox, not their labels:
      its ring (graph_layout.RING_RADIUS = 110 on a 320 canvas) puts nodes at
      x = 50 and 270 whenever the neighbour count is a multiple of 4, and a
-     28-char label centred there overhangs the viewBox by ~28 units a side.
+     28-char label centred there overhangs the viewBox by ~40 units a side
+     (at the 13.5-unit label size below).
      The inline padding shrinks the drawing (the viewBox scales to the CONTENT
-     box) and leaves that overhang a gutter INSIDE the svg's own border box,
-     so a rim label never reaches the inspector's edge, where `overflow-y:
-     auto` would clip it mid-word. The label text scales with the drawing, so
-     a percentage gutter holds at every width.
+     box) and leaves most of that overhang a gutter inside the svg's own
+     border box; the inspector's own padding takes the rest. A rim label
+     never reaches the inspector's edge, where `overflow-y: auto` would clip
+     it mid-word. The label text scales with the drawing, so a percentage
+     gutter holds at every width.
+     8%, NOT MORE: the gutter also sets the drawing's scale, and with it the
+     label's rendered size. At 10% the labels render at 9.6px on a 320px
+     phone; 8% keeps them at 10.2px and still inside the inspector.
      WHY NOT anchor rim labels inward (text-anchor end/start by side): the
      3 and 9 o'clock labels hang at the root's height, so anchored inward
      they run toward the centre of the canvas. The root's own label is drawn
      ABOVE the root (js/graph.js, ROOT_LABEL_GAP) precisely to keep that row
      free; centred rim labels plus a gutter keep every label apart.
-     MEASURED label-box gaps on the server's ring (2026-10-08, 28-char rim
-     labels; pinned by test_no_two_labels_overlap_on_the_server_ring):
-                            320px  400px  1280px
-       root above 12 o'clock  47     61     54    (vertical)
-       root above 3/9 o'clock 12     16     15    (vertical)
-     Before the root label moved, it overlapped both 3/9 o'clock labels at
-     all three widths.
-     MEASURED (2026-10-08, the server's ring with four 28-char labels; the
-     pixels are label left..right against the inspector):
-       without the gutter: 320px  -8..130 and 189..329 in 0..320  (CLIPPED)
-                           400px -14..161 and 237..416 in 0..400  (CLIPPED)
-       with it:            320px  26..136 and 183..295 in 0..320
-                           400px  28..169 and 230..372 in 0..400
-                          1280px 779..905 and 960..1088 in 586..1280
-     i.e. every rim label now ends inside the svg's own box, 10px or more
-     clear of the inspector edge. The spill is INK overflow: it never widened
-     the inspector's scroll box, it was CUT — so the guard,
-     test_rim_labels_stay_inside_the_inspector, asserts each label's box lies
-     inside the inspector, not merely that nothing scrolls. */
-  padding-inline: 10%;
+     MEASURED 2026-10-08 on the server's ring, four 28-char labels, 13.5-unit
+     labels, 8% gutter. Rim labels' left..right against the inspector
+     (pinned by test_rim_labels_stay_inside_the_inspector):
+       320px    8..146 and 173..313 in 0..320     (8px / 7px clear)
+       400px    6..182 and 217..395 in 0..400     (6px / 5px clear)
+       1280px 752..916 and 949..1115 in 586..1280
+     Before any gutter (11-unit labels) they were cut at -8..130 / 189..329
+     (320px) and -14..161 / 237..416 (400px). Vertical gaps between label
+     boxes (pinned by test_no_two_labels_overlap_on_the_server_ring):
+                              320px  400px  1280px
+       root above 12 o'clock    48     60     56
+       root above 3/9 o'clock   12     14     13
+       root label above its own circle: 3px at all three.
+     The spill is INK overflow: it never widens the inspector's scroll box,
+     it is CUT — so the guards assert each label's box lies inside the
+     inspector, not merely that nothing scrolls. */
+  padding-inline: 8%;
   overflow: visible;
 }
 
@@ -101,9 +103,45 @@
   stroke-dasharray: 2 2;
 }
 
+/* LABEL SIZE IS IN SVG UNITS, on purpose. A px font-size on SVG text is a
+   size in viewBox units, so it scales with the drawing — which is what keeps
+   the rim gutter above valid at every width. 13.5 units renders at 10.2px on
+   a 320px phone (the drawing is ~0.76 scale there) and 12-13px elsewhere;
+   the --t-meta token (11) rendered at 7.9px, too small to read. 14 would make
+   a 3-neighbour ring's lower labels meet, so 13.5 it is (measured
+   2026-10-08 — see MAX_LABELLED_NEIGHBOURS in js/graph.js).
+
+   HALO: the label is stroked in the panel colour UNDER its fill
+   (paint-order), so an edge line passing behind it — the root label sits on
+   the 12 o'clock edge — is cut out around the glyphs instead of striking
+   through them. */
 .local-graph .node text {
-  font: var(--t-meta) var(--font-ui);
+  font-family: var(--font-ui);
+  font-size: 13.5px;
   fill: var(--ink-muted);
+  paint-order: stroke;
+  stroke: var(--paper-raised);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+/* CROWDED RINGS (more neighbours than js/graph.js MAX_LABELLED_NEIGHBOURS):
+   neighbour labels show only for the node in hand — hovered or focused, the
+   same `data-hover` the highlight uses. While one shows, the ROOT's label
+   steps aside too: on the server's ring a label near 2 or 10 o'clock hangs at
+   the root label's height, and the open note's title is already the
+   inspector's heading. `visibility`, not `display`, so the <title> — each
+   link's accessible name — is untouched. */
+.local-graph svg[data-crowded] a.node text {
+  visibility: hidden;
+}
+
+.local-graph svg[data-crowded] a.node[data-hover] text {
+  visibility: visible;
+}
+
+.local-graph svg[data-crowded]:has(a.node[data-hover]) .node-root text {
+  visibility: hidden;
 }
 
 .local-graph .node-root circle {

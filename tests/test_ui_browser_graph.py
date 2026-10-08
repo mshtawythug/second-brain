@@ -529,15 +529,26 @@ _RIM_TITLES: list[tuple[str, str]] = [
 ]
 
 
-def _server_ring_payload() -> dict[str, Any]:
-    """A /graph body whose geometry is the server's, for the layout test."""
+def _crowd_titles(count: int) -> list[tuple[str, str]]:
+    """``count`` synthetic neighbours, every title exactly 28 characters."""
+    return [
+        (f"aaaaaaaa-0000-4000-8000-{0x100 + i:012x}", f"Synthetic Planning Note {i:04d}")
+        for i in range(count)
+    ]
+
+
+def _server_ring_payload(
+    titles: list[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    """A /graph body whose geometry is the server's, for the layout tests."""
+    chosen = _RIM_TITLES if titles is None else titles
     centre = _SERVER_SIZE / 2
-    count = len(_RIM_TITLES)
+    count = len(chosen)
     nodes: list[dict[str, Any]] = [{
         "id": ROOT_ID, "title": ROOT_TITLE, "kind": "vault",
         "x": centre, "y": centre, "r": 9, "root": True,
     }]
-    for index, (node_id, title) in enumerate(_RIM_TITLES):
+    for index, (node_id, title) in enumerate(chosen):
         theta = 2 * math.pi * index / count
         nodes.append({
             "id": node_id, "title": title, "kind": "vault",
@@ -547,8 +558,7 @@ def _server_ring_payload() -> dict[str, Any]:
         })
     return {
         "id": ROOT_ID, "width": _SERVER_SIZE, "height": _SERVER_SIZE, "nodes": nodes,
-        "edges": [{"src": ROOT_ID, "dst": node_id, "kind": "wiki"}
-                  for node_id, _ in _RIM_TITLES],
+        "edges": [{"src": ROOT_ID, "dst": node_id, "kind": "wiki"} for node_id, _ in chosen],
         "truncated": 0, "corpus_linked": True,
     }
 
@@ -640,6 +650,156 @@ def test_no_two_labels_overlap_on_the_server_ring(page: Any, viewport_width: int
     count, hits = overlaps
     assert count == 1 + len(_RIM_TITLES), "precondition: not every label was drawn"
     assert hits == [], f"labels overlap: {hits}"
+
+
+# --------------------------------------------------------- crowded rings --
+
+
+def _label_threshold() -> int:
+    """``MAX_LABELLED_NEIGHBOURS`` read from js/graph.js — one number, one place.
+
+    A copy here would let the test and the module disagree silently; parsing
+    the constant keeps the test aimed at whatever the module actually ships.
+    Absent (the module predates the threshold) reads as 24, the server's cap,
+    i.e. "always label" — which is exactly the behaviour being replaced.
+    """
+    source = (static_dir() / "js" / "graph.js").read_text(encoding="utf-8")
+    found = re.search(r"const MAX_LABELLED_NEIGHBOURS = (\d+);", source)
+    return int(found.group(1)) if found else 24
+
+
+#: Every label on the canvas: whose it is, whether it is VISIBLE (a hidden
+#: label still has a box), its box, and its rendered font size in px.
+_LABELS_JS = """() => {
+    const svg = document.querySelector('.local-graph svg');
+    const scale = svg.getScreenCTM().a;
+    return [...svg.querySelectorAll('text')].map((t) => {
+        const r = t.getBoundingClientRect();
+        return {
+            id: t.closest('[data-note-id]').getAttribute('data-note-id'),
+            root: t.closest('.node-root') !== null,
+            visible: getComputedStyle(t).visibility === 'visible',
+            box: [r.left, r.right, r.top, r.bottom],
+            px: parseFloat(getComputedStyle(t).fontSize) * scale,
+        };
+    });
+}"""
+
+_INSPECTOR_BOX_JS = """() => {
+    const r = document.getElementById('inspector').getBoundingClientRect();
+    return [r.left, r.right];
+}"""
+
+
+def _intersections(labels: list[dict[str, Any]]) -> list[str]:
+    shown = [lab for lab in labels if lab["visible"]]
+    hits = []
+    for i, a in enumerate(shown):
+        for b in shown[i + 1:]:
+            (al, ar, at, ab), (bl, br, bt, bb) = a["box"], b["box"]
+            if al < br and bl < ar and at < bb and bt < ab:
+                hits.append(f"{a['id'][-4:]} {[round(v) for v in a['box']]} meets "
+                            f"{b['id'][-4:]} {[round(v) for v in b['box']]}")
+    return hits
+
+
+def _open_ring(page: Any, count: int, width: int) -> list[tuple[str, str]]:
+    titles = _crowd_titles(count)
+    page.set_viewport_size({"width": width, "height": 800})
+    _GRAPH["payload"] = _server_ring_payload(titles)
+    # A distinct note per count: the client caches each note's graph, so
+    # reopening the same id would draw the PREVIOUS ring without a request.
+    _open(page, f"aaaaaaaa-0000-4000-8000-{0x900 + count:012x}")
+    page.wait_for_selector(".local-graph svg")
+    return titles
+
+
+_WIDTHS = [320, 400, 1280]
+
+
+@pytest.mark.parametrize("viewport_width", _WIDTHS)
+def test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible(
+    page: Any, viewport_width: int,
+) -> None:
+    """(15a) Counts 1..threshold: every label shown, none intersecting, >=10px.
+
+    EVERY count up to the threshold, not just the threshold itself: on the
+    server's ring the collision set is not monotonic in the count (measured:
+    5 collides, 6 does not), so "the threshold count is clean" would not
+    imply the smaller ones are.
+    """
+    threshold = _label_threshold()
+    for count in range(1, threshold + 1):
+        _open_ring(page, count, viewport_width)
+        labels = page.evaluate(_LABELS_JS)
+        left, right = page.evaluate(_INSPECTOR_BOX_JS)
+        assert len(labels) == 1 + count, f"precondition: {count} neighbours drew {len(labels)}"
+        assert all(lab["visible"] for lab in labels), (
+            f"count {count} is at or under the threshold, but a label is hidden"
+        )
+        hits = _intersections(labels)
+        assert hits == [], f"count {count} at {viewport_width}px: labels overlap: {hits}"
+        cut = [lab["id"][-4:] for lab in labels
+               if lab["box"][0] < left or lab["box"][1] > right]
+        assert cut == [], f"count {count} at {viewport_width}px: labels clipped: {cut}"
+        small = sorted({round(lab["px"], 2) for lab in labels if lab["px"] < 10})
+        assert small == [], (
+            f"labels render at {small}px at a {viewport_width}px viewport; "
+            "they must be at least 10px to be readable"
+        )
+
+
+@pytest.mark.parametrize("count_kind", ["threshold+1", "cap"])
+@pytest.mark.parametrize("viewport_width", _WIDTHS)
+def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
+    page: Any, viewport_width: int, count_kind: str,
+) -> None:
+    """(15b) Over the threshold, a neighbour's label shows only while it is
+    hovered or focused — and then it collides with nothing that is showing.
+
+    The NO-INTERSECTION assertion comes first, at rest, so a threshold set too
+    high fails on what the reader would actually see: overlapping text.
+    """
+    count = _label_threshold() + 1 if count_kind == "threshold+1" else 24
+    titles = _open_ring(page, count, viewport_width)
+
+    labels = page.evaluate(_LABELS_JS)
+    assert len(labels) == 1 + count, "precondition: not every node was drawn"
+    hits = _intersections(labels)
+    assert hits == [], f"{count} neighbours at rest: labels overlap: {hits}"
+    shown = [lab["id"] for lab in labels if lab["visible"] and not lab["root"]]
+    assert shown == [], f"{count} neighbours at rest, yet {len(shown)} labels show"
+
+    # Index 1 sits beside 12 o'clock; count // 4 is 3 o'clock, on the root's row.
+    left, right = page.evaluate(_INSPECTOR_BOX_JS)
+    for index, how in ((1, "hover"), (count // 4, "focus")):
+        node_id = titles[index][0]
+        selector = f'.local-graph a.node[data-note-id="{node_id}"]'
+        if how == "hover":
+            page.hover(f"{selector} circle")
+        else:
+            page.mouse.move(1, 1)
+            page.focus(selector)
+        labels = page.evaluate(_LABELS_JS)
+        shown = [lab["id"] for lab in labels if lab["visible"] and not lab["root"]]
+        assert shown == [node_id], f"{how} on #{index} showed {shown}"
+        hits = _intersections(labels)
+        assert hits == [], f"{how} on #{index}: the shown label overlaps: {hits}"
+        mine = next(lab for lab in labels if lab["id"] == node_id)
+        assert left <= mine["box"][0] and mine["box"][1] <= right, (
+            f"{how} on #{index}: the label is clipped by the inspector"
+        )
+        page.evaluate("() => document.activeElement && document.activeElement.blur()")
+        page.mouse.move(1, 1)
+
+
+def test_a_crowded_ring_still_names_every_neighbour(page: Any) -> None:
+    """(15c) Hiding labels is visual only: at the 24 cap every neighbour is
+    still a link named by its FULL title (from its <title>)."""
+    titles = _open_ring(page, 24, 1280)
+    snapshot = page.locator("figure.local-graph").aria_snapshot()
+    missing = [title for _, title in titles if f'link "{title}"' not in snapshot]
+    assert missing == [], f"neighbours lost their accessible name: {missing}\n{snapshot}"
 
 
 # ---------------------------------------------------------- degraded states --

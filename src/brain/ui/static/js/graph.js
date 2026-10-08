@@ -39,6 +39,23 @@ const LABEL_MAX_CHARS = 28;
 /* Fallback canvas size, used only if the payload omits one. */
 const DEFAULT_SIZE = 320;
 
+/* Above this many neighbours, neighbour labels are NOT drawn at rest: each
+   one shows only while its node is hovered or focused (graph.css,
+   `svg[data-crowded]`). Presentation, not layout — the server still places
+   every node; the full title stays in each node's <title>, which is its
+   accessible name, so nothing is lost to a screen reader.
+   MEASURED on the server's ring (graph_layout.RING_RADIUS = 110 on 320,
+   28-char titles, label font 13.5 units) at 320, 400 and 1280px viewports:
+   every pair of label boxes is disjoint for 1, 2, 3 and 4 neighbours; at 5
+   the 2 and 10 o'clock labels hang at the root label's height and meet it
+   (and at 8 and over, neighbours meet each other — at the 24 cap they are
+   ~29 units apart and each label is ~150 wide). 6 happens to be clean, but a
+   threshold must hold for EVERY count beneath it, so it is 4.
+   Pinned by test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible
+   and test_a_crowded_ring_labels_only_the_neighbour_in_hand, which reads
+   this constant from this file. */
+const MAX_LABELLED_NEIGHBOURS = 4;
+
 /* What a node with an empty title is called, on its label AND in its <title>:
    a link with no text has no accessible name. */
 const UNTITLED = "Untitled";
@@ -225,6 +242,7 @@ function buildSvg(graph) {
   /* The root is nodes[0] by contract. It is not a link: it is the note the
      reader already has open. */
   const [root, ...neighbours] = graph.nodes;
+  if (neighbours.length > MAX_LABELLED_NEIGHBOURS) svg.setAttribute("data-crowded", "");
   const rootGroup = svgEl("g", { class: "node node-root", "data-note-id": root.id });
   /* Same as a neighbour, so an ingested root is styled like an ingested node. */
   if (root.kind) rootGroup.setAttribute("data-kind", String(root.kind));
