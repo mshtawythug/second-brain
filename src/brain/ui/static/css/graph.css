@@ -25,23 +25,39 @@
 
 .local-graph svg {
   display: block;
+  box-sizing: border-box;
   width: 100%;
   height: auto;
   max-width: 24rem;
   margin: 0 auto;
-  /* The server places NODES inside the viewBox, not their labels: a 28-char
-     label centred on a node near the rim runs past the edge and would be
-     clipped mid-word. So the overflow stays visible and lands on the
-     inspector's own padding instead.
-     MEASURED, not assumed (2026-10-08, three 28-char labels on the ring): the
-     label text scales with the svg, and the widest spill past the figure was
-     ~7px at a 320px phone and ~9px at 400px, against 16px of inspector padding
-     (24rem caps the svg, so it cannot grow further). Every label stays inside
-     the inspector, so clipping here would cost readable labels for nothing.
-     Note the spill is INK overflow: it never widens the inspector's scroll
-     box, it would only be CUT at the inspector's edge — so the guard,
-     test_long_labels_do_not_scroll_a_narrow_inspector_sideways, asserts each
-     label's box lies inside the inspector, not merely that nothing scrolls. */
+  /* RIM GUTTER. The server places NODES inside the viewBox, not their labels:
+     its ring (graph_layout.RING_RADIUS = 110 on a 320 canvas) puts nodes at
+     x = 50 and 270 whenever the neighbour count is a multiple of 4, and a
+     28-char label centred there overhangs the viewBox by ~28 units a side.
+     The inline padding shrinks the drawing (the viewBox scales to the CONTENT
+     box) and leaves that overhang a gutter INSIDE the svg's own border box,
+     so a rim label never reaches the inspector's edge, where `overflow-y:
+     auto` would clip it mid-word. The label text scales with the drawing, so
+     a percentage gutter holds at every width.
+     WHY NOT anchor rim labels inward (text-anchor end/start by side): the
+     3 and 9 o'clock labels sit on almost the same row as the root's label.
+     Centred, a 28-char rim label already reaches ~17px into it at 320px (the
+     server's radius vs label width, not something this sheet causes);
+     anchored inward it would run across the WHOLE root label. A slightly
+     smaller graph is the cheaper cost.
+     MEASURED (2026-10-08, the server's ring with four 28-char labels; the
+     pixels are label left..right against the inspector):
+       without the gutter: 320px  -8..130 and 189..329 in 0..320  (CLIPPED)
+                           400px -14..161 and 237..416 in 0..400  (CLIPPED)
+       with it:            320px  26..136 and 183..295 in 0..320
+                           400px  28..169 and 230..372 in 0..400
+                          1280px 779..905 and 960..1088 in 586..1280
+     i.e. every rim label now ends inside the svg's own box, 10px or more
+     clear of the inspector edge. The spill is INK overflow: it never widened
+     the inspector's scroll box, it was CUT — so the guard,
+     test_rim_labels_stay_inside_the_inspector, asserts each label's box lies
+     inside the inspector, not merely that nothing scrolls. */
+  padding-inline: 10%;
   overflow: visible;
 }
 

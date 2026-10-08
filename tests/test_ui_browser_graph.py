@@ -29,6 +29,7 @@ and title here is synthetic.
 from __future__ import annotations
 
 import json
+import math
 import re
 import threading
 from collections.abc import Iterator
@@ -502,45 +503,89 @@ def test_an_empty_title_is_called_untitled_on_the_label_and_the_link(page: Any) 
 # ------------------------------------------------------------------ layout --
 
 
-#: Every neighbour gets a label at the 28-char cut, so the widest possible
-#: label sits on each ring position, including the two near the rim.
-_LONG_NEIGHBOURS: list[tuple[str, str, str]] = [
-    (ALPHA_ID, "Alpha Synthetic Note With A Long Title", "vault"),
-    (BRAVO_ID, "Bravo Synthetic Note With A Long Title", "vault"),
-    (CHARLIE_ID, "Charlie Synthetic Note With A Long Title", "vault"),
+DELTA_ID = "aaaaaaaa-0000-4000-8000-00000000000f"
+
+#: The SERVER's ring, not a hand-placed one. Same formula and constants as
+#: ``brain.ui.graph_layout`` (``RING_RADIUS`` = 110.0, ``DEFAULT_SIZE`` = 320,
+#: neighbour ``i`` of ``count`` at ``theta = 2*pi*i/count``, starting at 12
+#: o'clock and running clockwise: ``x = c + R*sin(theta)``, ``y = c - R*cos(theta)``).
+#: An earlier version of this test used a hand-made ring with its outer nodes
+#: at x = 73 / 247 and passed, while the server's real ring puts them at
+#: x = 50 / 270 — where the labels were in fact clipped. Copied rather than
+#: imported: graph_layout is the server route's module (a separate task), and
+#: this file stubs the network and imports nothing of the server beyond
+#: ``static_dir``. If graph_layout's ring changes, change these with it.
+_SERVER_RING_RADIUS = 110.0
+_SERVER_SIZE = 320
+
+#: Four neighbours: a count divisible by 4 puts two of them exactly at 3 and 9
+#: o'clock, the rim positions. Every title is exactly 28 characters — the
+#: longest label the client draws without cutting it.
+_RIM_TITLES: list[tuple[str, str]] = [
+    (ALPHA_ID, "Alpha Synthetic Planning Doc"),
+    (BRAVO_ID, "Bravo Synthetic Planning Doc"),
+    (CHARLIE_ID, "Delta Synthetic Planning Doc"),
+    (DELTA_ID, "Hotel Synthetic Planning Doc"),
 ]
 
-#: Below 780px the ledger and inspector become a two-view stack
-#: (components.css), so on a 320px phone the inspector is the whole 320px with
-#: the narrow padding — the narrowest it ever gets.
-_NARROW_VIEWPORT = {"width": 320, "height": 800}
+
+def _server_ring_payload() -> dict[str, Any]:
+    """A /graph body whose geometry is the server's, for the layout test."""
+    centre = _SERVER_SIZE / 2
+    count = len(_RIM_TITLES)
+    nodes: list[dict[str, Any]] = [{
+        "id": ROOT_ID, "title": ROOT_TITLE, "kind": "vault",
+        "x": centre, "y": centre, "r": 9, "root": True,
+    }]
+    for index, (node_id, title) in enumerate(_RIM_TITLES):
+        theta = 2 * math.pi * index / count
+        nodes.append({
+            "id": node_id, "title": title, "kind": "vault",
+            "x": centre + _SERVER_RING_RADIUS * math.sin(theta),
+            "y": centre - _SERVER_RING_RADIUS * math.cos(theta),
+            "r": 6, "root": False,
+        })
+    return {
+        "id": ROOT_ID, "width": _SERVER_SIZE, "height": _SERVER_SIZE, "nodes": nodes,
+        "edges": [{"src": ROOT_ID, "dst": node_id, "kind": "wiki"}
+                  for node_id, _ in _RIM_TITLES],
+        "truncated": 0, "corpus_linked": True,
+    }
 
 
-def test_long_labels_do_not_scroll_a_narrow_inspector_sideways(page: Any) -> None:
-    """(13) Labels near the rim neither side-scroll nor get cut by the inspector.
+#: 320 / 400: below 780px the ledger and inspector become a two-view stack
+#: (components.css), so on a phone the inspector is the whole viewport with the
+#: narrow padding — the narrowest it ever gets. 1280: the normal desktop.
+@pytest.mark.parametrize("viewport_width", [320, 400, 1280])
+def test_rim_labels_stay_inside_the_inspector(page: Any, viewport_width: int) -> None:
+    """(13) Labels at the server's 3 and 9 o'clock nodes are not cut off.
 
     TWO assertions, because the first one ALONE CANNOT FAIL on label spill —
-    measured: re-anchoring every label to ``start`` (so the right-hand ones run
-    far past the svg) left ``scrollWidth == clientWidth``. Text overflowing an
-    ``overflow: visible`` svg is INK overflow in Chromium, not scrollable
-    overflow, so it never widens the scroll box. What it does instead is get
-    CLIPPED at the inspector's edge (``overflow-y: auto`` clips both axes). So
-    the property a reader would notice — every label wholly inside the visible
-    inspector — is asserted directly, and the scroll check stays as the cheap
-    half for anything that IS scrollable overflow.
+    measured: text overflowing an ``overflow: visible`` svg is INK overflow in
+    Chromium, not scrollable overflow, so it never widens the inspector's
+    scroll box. It is CLIPPED at the inspector's edge instead
+    (``overflow-y: auto`` clips both axes). So the property a reader would
+    notice — every label wholly inside the visible inspector — is asserted
+    directly, and the scroll check stays as the cheap half.
     """
-    page.set_viewport_size(_NARROW_VIEWPORT)
-    _GRAPH["payload"] = graph_payload(neighbours=_LONG_NEIGHBOURS)
+    assert all(len(title) == 28 for _, title in _RIM_TITLES)
+    page.set_viewport_size({"width": viewport_width, "height": 800})
+    _GRAPH["payload"] = _server_ring_payload()
     _open(page)
     page.wait_for_selector(".local-graph svg")
 
-    width, scroll, client = page.evaluate(
+    xs = sorted(round(n["x"]) for n in _GRAPH["payload"]["nodes"][1:])
+    assert xs[0] == 50 and xs[-1] == 270, f"precondition: no node on the rim ({xs})"
+    assert page.locator(".local-graph text").count() == 1 + len(_RIM_TITLES), (
+        "precondition: not every label was drawn"
+    )
+
+    scroll, client = page.evaluate(
         """() => {
             const i = document.getElementById('inspector');
-            return [i.getBoundingClientRect().width, i.scrollWidth, i.clientWidth];
+            return [i.scrollWidth, i.clientWidth];
         }"""
     )
-    assert width <= 340, f"precondition: the inspector is {width}px wide, not ~320px"
     assert scroll <= client, (
         f"the inspector scrolls sideways: scrollWidth {scroll} > clientWidth {client}"
     )
@@ -554,9 +599,6 @@ def test_long_labels_do_not_scroll_a_narrow_inspector_sideways(page: Any) -> Non
               .map(([text, r]) => `${text}: ${Math.round(r.left)}..${Math.round(r.right)}`
                                   + ` outside ${Math.round(box.left)}..${Math.round(box.right)}`);
         }"""
-    )
-    assert page.locator(".local-graph text").count() == 1 + len(_LONG_NEIGHBOURS), (
-        "precondition: not every label was drawn"
     )
     assert spill == [], f"labels run past the inspector and are clipped: {spill}"
 
