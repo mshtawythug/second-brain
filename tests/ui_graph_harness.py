@@ -191,6 +191,11 @@ _GRAPH: dict[str, Any] = {}
 _LINKS: dict[str, Any] = {}
 _RELATED: dict[str, Any] = {}
 _NOTE_EXTRA: dict[str, Any] = {}
+#: ``/api/health`` overrides, read at request time: ``status`` (non-200 answers
+#: a failure, as an unreachable or broken server would) and ``payload`` (a whole
+#: replacement body, e.g. one missing a lens key). Empty = the default stub.
+#: Only boot() asks for health, so a test that sets this calls :func:`reboot`.
+_HEALTH: dict[str, Any] = {}
 _HOLD: set[str] = set()
 _HELD: list[tuple[str, Any]] = []
 _PUTS: list[dict[str, Any]] = []
@@ -252,6 +257,13 @@ def _route_api(route: Any) -> None:
         note_id = match.group(1)
         ok({**NOTE_PAYLOAD, **_NOTE_EXTRA, "id": note_id,
             "title": _TITLES.get(note_id, ROOT_TITLE)})
+        return
+    if path == "/api/health" and _HEALTH.get("status", 200) != 200:
+        route.fulfill(status=_HEALTH["status"], content_type="application/json",
+                      body=json.dumps({"error": {"code": "synthetic", "message": "x"}}))
+        return
+    if path == "/api/health" and "payload" in _HEALTH:
+        ok(_HEALTH["payload"])
         return
     body = _STUBS.get(path)
     if body is None:
@@ -405,6 +417,16 @@ def set_lenses(page: Any, *, titles: bool, bodies: bool) -> None:
     _dispatch(page, json.dumps({"health": health}))
 
 
+def reboot(page: Any) -> None:
+    """Reload the app so ``boot()`` asks ``/api/health`` again, under the
+    current :data:`_HEALTH` knob, and wait for the tree as the fixture does.
+    The request log is cleared so a test sees only the rebooted page's
+    requests."""
+    page.reload()
+    page.wait_for_selector('[role="treeitem"]', timeout=8000)
+    _REQUESTS.clear()
+
+
 @pytest.fixture(name="page")
 def _page_fixture(static_origin: str) -> Iterator[Any]:
     """A booted app page with every API call stubbed and errors recorded."""
@@ -422,6 +444,7 @@ def _page_fixture(static_origin: str) -> Iterator[Any]:
     _RELATED.clear()
     _RELATED.update({"status": 404, "payload": related_payload()})
     _NOTE_EXTRA.clear()
+    _HEALTH.clear()
     _HOLD.clear()
     _HELD.clear()
     _PUTS.clear()

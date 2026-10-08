@@ -30,6 +30,7 @@ import pytest
 
 from tests.ui_graph_harness import (
     _ERRORS,
+    _HEALTH,
     _HELD,
     _HOLD,
     _NOTE_EXTRA,
@@ -45,6 +46,7 @@ from tests.ui_graph_harness import (
     _serve_related_fixture,  # noqa: F401 — registers `serve_related`
     _static_origin_fixture,  # noqa: F401 — registers `static_origin`, which `page` uses
     open_without_waiting_on_blocks,
+    reboot,
     related_payload,
     set_lenses,
     settle,
@@ -413,4 +415,80 @@ def test_the_related_gate_mirrors_the_route_on_both_lenses(
         page.wait_for_selector(_RAIL)
     assert any(r.endswith("/related") for r in _REQUESTS) is requested, _REQUESTS
     assert (page.locator(_RELATED_NOTICE).count() == 1) is not requested
+    assert _ERRORS == [], f"uncaught errors: {_ERRORS}"
+
+
+_GRAPH_NOTICE = "#inspector > figure.local-graph p.graph-withheld"
+
+#: The two degraded health answers ``servesConfidential`` (store.js) must FAIL
+#: CLOSED on: no health at all (boot() catches the failure and still opens
+#: notes, so this is reachable), and a payload that omits the titles key while
+#: the bodies key is present and true.
+_DEGRADED_HEALTH = {
+    "health-500": {"status": 500},
+    "titles-key-missing": {"payload": {
+        "status": "ok", "read_only": False, "notices": [],
+        "serve_confidential_bodies": True,
+    }},
+}
+
+
+def _assert_health_is_degraded(page: Any, degraded: str) -> None:
+    """Precondition: the rebooted client really holds the degraded answer —
+    no health at all, or health without the titles key — or the test below
+    would be measuring the default lenses."""
+    health = page.evaluate(
+        "async () => (await import('/static/js/store.js')).state.health"
+    )
+    if degraded == "health-500":
+        assert health is None, f"precondition: health was not a failure: {health}"
+    else:
+        assert health is not None and "serve_confidential_titles" not in health, (
+            f"precondition: health still carries the titles key: {health}"
+        )
+
+
+@pytest.mark.parametrize("degraded", list(_DEGRADED_HEALTH), ids=list(_DEGRADED_HEALTH))
+def test_a_degraded_health_answer_fails_closed_for_a_confidential_note(
+    page: Any, degraded: str,
+) -> None:
+    """``servesConfidential`` reads a missing or failed health as NOT served."""
+    _HEALTH.update(_DEGRADED_HEALTH[degraded])
+    reboot(page)
+    _assert_health_is_degraded(page, degraded)
+    _NOTE_EXTRA["sensitivity"] = "confidential"
+    open_without_waiting_on_blocks(page)  # a bounded absence window — see its docstring
+    page.wait_for_selector("#inspector > .marginalia .backlinks-rail a")
+
+    assert f"/api/notes/{ROOT_ID}" in _REQUESTS, (
+        "precondition: the note itself was never requested"
+    )
+    assert not any(r.endswith("/graph") for r in _REQUESTS), (
+        f"/graph was requested under a degraded health answer: {_REQUESTS}"
+    )
+    assert not any(r.endswith("/related") for r in _REQUESTS), (
+        f"/related was requested under a degraded health answer: {_REQUESTS}"
+    )
+    assert page.locator(_GRAPH_NOTICE).count() == 1, "no graph notice"
+    assert page.locator(_RELATED_NOTICE).count() == 1, "no related notice"
+    assert _ERRORS == [], f"uncaught errors: {_ERRORS}"
+
+
+@pytest.mark.parametrize("degraded", list(_DEGRADED_HEALTH), ids=list(_DEGRADED_HEALTH))
+def test_a_degraded_health_answer_still_draws_both_blocks_for_a_normal_note(
+    page: Any, degraded: str,
+) -> None:
+    """Fail closed must not mean fail everything: a NON-confidential note in
+    the same degraded state fetches and draws its graph and related rail."""
+    _HEALTH.update(_DEGRADED_HEALTH[degraded])
+    reboot(page)
+    _assert_health_is_degraded(page, degraded)
+    _open(page)
+    page.wait_for_selector("#inspector > figure.local-graph svg")
+    page.wait_for_selector(_RAIL)
+
+    assert any(r.endswith("/graph") for r in _REQUESTS), _REQUESTS
+    assert any(r.endswith("/related") for r in _REQUESTS), _REQUESTS
+    assert page.locator(_GRAPH_NOTICE).count() == 0
+    assert page.locator(_RELATED_NOTICE).count() == 0
     assert _ERRORS == [], f"uncaught errors: {_ERRORS}"
