@@ -3,16 +3,17 @@
 Imported by ``tests/test_ui_browser_graph.py`` (painting, interaction,
 accessibility, degraded states, hardening),
 ``tests/test_ui_browser_graph_layout.py`` (label geometry on the server's
-ring) and ``tests/test_ui_browser_related.py`` (the related-notes rail, the
-canonical block order, the refresh after a save). ONE copy of the stub
-routing, the per-test knobs and the fixtures, so the modules cannot drift
-apart.
+ring), ``tests/test_ui_browser_related.py`` (the related-notes rail),
+``tests/test_ui_browser_inspector_blocks.py`` (the canonical block order) and
+``tests/test_ui_browser_refresh.py`` (the refresh after a save). ONE copy of
+the stub routing, the per-test knobs and the fixtures, so the modules cannot
+drift apart.
 
 **Deliberately not a ``test_*`` module and deliberately unmarked.** It holds no
 tests, so pytest never collects it, and it carries no ``browser`` marker, so
 ``tests/test_ci_workflow.py`` (which discovers browser modules by the marker
-in their source) does not ask the CI glob to cover it. The two modules that
-import it each apply ``pytestmark = pytest.mark.browser`` themselves. Same
+in their source) does not ask the CI glob to cover it. Every module that
+imports it applies ``pytestmark = pytest.mark.browser`` itself. Same
 shape as ``tests/backup_fakes.py``: a plain helper module whose fixtures a test
 module imports (``# noqa: F401``), which registers them with pytest.
 

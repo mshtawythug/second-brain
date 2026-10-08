@@ -62,6 +62,7 @@ def test_blocks_keep_one_order_whatever_order_their_fetches_land(
 
     release_held(page, list(order))
     page.wait_for_selector("#inspector > nav.related-rail")
+    page.wait_for_selector("#inspector > figure.local-graph svg")
     page.wait_for_selector("#inspector > .marginalia .backlinks-rail a")
     assert_canonical_blocks(inspector_children(page), f"after arrival order {order}")
 

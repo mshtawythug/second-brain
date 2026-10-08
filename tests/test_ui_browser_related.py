@@ -296,15 +296,18 @@ def test_an_id_is_encoded_into_the_href(page: Any) -> None:
 
 def test_the_rail_is_readable_in_both_themes(page: Any) -> None:
     """Title and snippet ink against the inspector's ground meet WCAG AA."""
+    # The link's colour TRANSITIONS (--dur-fast), so a read straight after the
+    # theme flip measures the old theme's ink on the new ground. Reduced motion
+    # turns that transition off (related.css), and the getAnimations() wait is
+    # the deterministic backstop for any transition elsewhere — no fixed sleep.
+    page.emulate_media(reduced_motion="reduce")
     _open(page)
     page.wait_for_selector(_RAIL)
     for theme in ("light", "dark"):
         page.evaluate(
             "(t) => document.documentElement.setAttribute('data-theme', t)", theme
         )
-        # The link's colour TRANSITIONS (--dur-fast); read it after it lands, or
-        # the ratio measures the old theme's ink on the new theme's ground.
-        page.wait_for_timeout(400)
+        page.wait_for_function("() => document.getAnimations().length === 0")
         ratios = page.evaluate(_CONTRAST_JS, [f"{_RAIL} a", f"{_RAIL} p.related-snippet",
                                               f"{_RAIL} .rail-heading"])
         for selector, ratio in ratios.items():

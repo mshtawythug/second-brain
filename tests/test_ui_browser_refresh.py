@@ -92,16 +92,28 @@ def _shown(page: Any) -> dict[str, list[str]]:
     )
 
 
-def _wait_for_related(page: Any, note_id: str) -> None:
-    """Give the post-save refetch a bounded chance to land. A timeout is NOT a
-    failure here: the assertion that follows is the oracle, so a missing
+#: True once ALL THREE blocks show the post-save neighbourhood. One condition
+#: over the three, because the three refetches are independent: waiting on one
+#: block and then settling two frames would race the other two.
+_SHOWS_N2_JS = """([linker, id]) => {
+    const texts = (sel) => [...document.querySelectorAll(sel)].map((e) => e.textContent);
+    const ids = (sel) => [...document.querySelectorAll(sel)]
+        .map((e) => e.getAttribute("data-note-id"));
+    const one = (list, value) => list.length === 1 && list[0] === value;
+    return one(texts(".backlinks-rail a"), linker)
+        && one(ids(".local-graph a.node"), id)
+        && one(ids(".related-rail a[data-note-id]"), id);
+}"""
+
+
+def _wait_for_n2(page: Any) -> None:
+    """Give the three post-save refetches a bounded chance to land. A timeout is
+    NOT a failure here: the assertion that follows is the oracle, so a missing
     refresh goes red there, with the evidence, rather than as a bare timeout."""
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
 
     with contextlib.suppress(PlaywrightTimeout):
-        page.wait_for_selector(
-            f'#inspector > nav.related-rail a[data-note-id="{note_id}"]', timeout=3000,
-        )
+        page.wait_for_function(_SHOWS_N2_JS, arg=[N2_LINKER, BRAVO_ID], timeout=3000)
 
 
 def _save_an_edit(page: Any, text: str) -> None:
@@ -125,8 +137,7 @@ def test_saving_a_note_refreshes_all_three_blocks(page: Any) -> None:
     _save_an_edit(page, "# Synthetic Root Note\n\nNow links [[Bravo Synthetic Note]].\n")
     assert len(_PUTS) == 1, f"precondition: the save never reached the server: {_PUTS}"
 
-    _wait_for_related(page, BRAVO_ID)
-    settle(page)
+    _wait_for_n2(page)
     after = _shown(page)
     assert after == {"links": [N2_LINKER], "graph": [BRAVO_ID], "related": [BRAVO_ID]}, (
         f"the blocks still show the pre-save neighbourhood after a save: {after}; "
