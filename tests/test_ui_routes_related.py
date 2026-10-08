@@ -309,6 +309,8 @@ def test_with_the_default_cap_nothing_is_flagged(
 # --------------------------------------------------------------------- R6 --
 
 
+# Also covers the other direction of the withheld-root gate: the root ``A`` is
+# NON-confidential, so under every strict lens below it is still served (200).
 @pytest.mark.parametrize(
     ("titles", "bodies", "present"),
     [
@@ -475,7 +477,13 @@ def test_a_failure_inside_compute_related_is_a_503(
 def test_a_document_without_chunks_still_answers(
     test_db: psycopg.Connection[Any], tmp_path: Path, fake_embedder: Any
 ) -> None:
-    ids = _seed(test_db)
+    """A root with no chunks gets a well-formed 200 whose ``count`` matches its list.
+
+    The list is deliberately NOT asserted empty: with no chunks there is no
+    vector leg, but the FTS leg can still match the root's title against the
+    seeded neighbours, so a non-empty list is correct too.
+    """
+    _seed(test_db)
     bare = _insert_doc(
         test_db,
         doc_id=DOC_D,
@@ -489,7 +497,6 @@ def test_a_document_without_chunks_still_answers(
 
     assert isinstance(payload["related"], list)
     assert payload["count"] == len(payload["related"])
-    assert ids["A"] != bare
 
 
 def test_a_lone_document_has_an_empty_related_list(
