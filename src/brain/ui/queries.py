@@ -686,3 +686,19 @@ def browseable_tag_counts(
         {"value": str(tag), "count": int(count)}
         for tag, count in conn.execute(sql, (min_doc_count,)).fetchall()
     ]
+
+
+_DOCUMENT_SENSITIVITY_SQL = "SELECT sensitivity FROM documents WHERE id = %s"
+
+
+def document_sensitivity(conn: psycopg.Connection[Any], document_id: str) -> str | None:
+    """The ``sensitivity`` tier of one document, or ``None`` if the id matches nothing.
+
+    Read with :func:`brain.sensitivity.is_confidential`. A route that resolved an
+    id with ``notes_service.resolve_id`` has only the id; this is the one place
+    it may fetch the tier from, rather than growing SQL of its own.
+    """
+    row = conn.execute(_DOCUMENT_SENSITIVITY_SQL, (document_id,)).fetchone()
+    if row is None:
+        return None
+    return None if row[0] is None else str(row[0])

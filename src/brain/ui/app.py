@@ -24,6 +24,7 @@ from . import (
     routes_links,
     routes_meta,
     routes_notes,
+    routes_related,
     routes_search,
     routes_tree,
 )
@@ -156,6 +157,7 @@ def create_app(context: UiContext) -> Starlette:
         Route(
             "/api/notes/{id_prefix}/links", routes_links.note_links, methods=["GET"]
         ),
+        Route("/api/notes/{id_prefix}/related", routes_related.note_related, methods=["GET"]),
         Route(
             "/api/notes/{id_prefix}",
             routes_notes.get_note,
