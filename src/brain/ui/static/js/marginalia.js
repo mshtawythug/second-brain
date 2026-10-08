@@ -5,19 +5,27 @@
  * inspector) declared in index.html and layout.css, and BOTH of those files are
  * integrator-owned for the whole of phase 2. A true right-hand marginalia
  * *column* needs a fourth grid track and a DOM slot, so this module does the
- * one thing it can do without touching either: it appends its own
- * `<aside class="marginalia">` to `.inspector`.
+ * one thing it can do without touching either: it places its own
+ * `<aside class="marginalia">` in `.inspector`.
  *
- * APPENDED LAST, and that is load-bearing rather than incidental. `.inspector`
- * is `grid-template-rows: auto 1fr` — the first child gets `auto`, the second
+ * PLACED AFTER THE NOTE, and that is load-bearing rather than incidental.
+ * `.inspector` is `grid-template-rows: auto 1fr` — the first child gets `auto`, the second
  * `1fr`, and any further child an implicit `auto` row. `.note-head` must keep
  * `auto` and `.note-body`/`.editor` must keep `1fr` (layout.css records the
  * measurement behind that: an explicit height defeats grid's `stretch` but is
  * only a base size under `flex-grow`, which is what makes `resize: vertical` on
  * the editor mean anything). Inserting this block anywhere earlier hands the
  * `1fr` track to the wrong child and pushes the body to the foot of the pane.
- * Appending it last is also what layout.css's `.inspector > * { align-self:
- * start }` explicitly anticipates: "the NEXT child added here is safe".
+ * Placing it after the note is also what layout.css's `.inspector > * {
+ * align-self: start }` explicitly anticipates: "the NEXT child added here is
+ * safe".
+ *
+ * IT DOES NOT APPEND, IT PLACES. This block, the graph and the related rail
+ * each re-render when their own fetch resolves, so a bare `host.appendChild`
+ * made the order on screen the order the network answered in — a late
+ * `/links` response put the marginalia below the graph. `placeInspectorBlock`
+ * (dom.js) holds the one order (marginalia, graph, related) and inserts this
+ * block before any block that ranks after it, never before the note.
  *
  * SUBSCRIBER ORDER IS A WIRING CONTRACT. `renderInspector` rebuilds `#inspector`
  * from scratch on every dispatch (`host.textContent = ""`), so this renderer
@@ -35,23 +43,31 @@
  */
 
 import { api } from "/static/js/api.js";
-import { $, el } from "/static/js/dom.js";
+import { $, el, placeInspectorBlock } from "/static/js/dom.js";
 import { state, subscribe } from "/static/js/store.js";
 
 let wired = false;
 
-/* noteId -> the backlink rows already fetched for it.
+/* noteKey(id) -> the backlink rows already fetched for that note.
  *
  * renderMarginalia runs on EVERY dispatch — toggling the editor, saving, moving
  * — and without a cache each of those would re-request the same links. The
  * cache is what makes the fetch happen once per note rather than once per
  * render.
  *
+ * KEYED ON THE NOTE'S REVISION, not its bare id (`noteKey`, store.js). A
+ * successful save bumps the saved note's revision, so its entry here stops
+ * matching and the rail refetches — before that, a `[[wikilink]]` just saved
+ * stayed invisible until a reload. Other notes' keys do not move, so their
+ * entries survive. graph.js and related.js key their caches the same way: one
+ * mechanism for all three blocks.
+ *
  * A FAILED fetch caches `[]` deliberately. The alternative is retrying on every
  * subsequent dispatch, which turns one unreachable endpoint into a request
  * storm against a server that is already failing. The cost is that a transient
- * failure stays blank until the note is reopened — the right trade for a rail
- * that is, by construction, supplementary to the note.
+ * failure stays blank until the page is reloaded or the note is saved — the
+ * right trade for a rail that is, by construction, supplementary to the note.
+ * (This said "until the note is reopened"; reopening never cleared the cache.)
  */
 const backlinkCache = new Map();
 const inFlight = new Set();
@@ -117,7 +133,7 @@ export function renderMarginalia() {
   if (crumbs.length) aside.appendChild(renderBreadcrumbs(crumbs));
   if (headings.length) aside.appendChild(renderToc(headings));
 
-  host.appendChild(aside);
+  placeInspectorBlock(host, aside);
 
   /* LAST, and deliberately NOT awaited. The note is already in the DOM by the
      time this runs; the backlinks are a second request that must never stand

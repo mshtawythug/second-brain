@@ -307,6 +307,47 @@ def release_held(page: Any, order: list[str]) -> None:
     _HELD.clear()
 
 
+#: The supplementary fetches behind the three blocks after the note.
+KINDS = ("links", "graph", "related")
+
+#: The canonical order of those blocks in ``#inspector``, as the class each
+#: carries — the test-side statement of ``INSPECTOR_BLOCKS`` in ``js/dom.js``.
+CANONICAL_BLOCKS = ["marginalia", "local-graph", "related-rail"]
+
+
+def inspector_children(page: Any) -> list[str]:
+    """The class names of ``#inspector``'s children, in DOM order."""
+    return page.evaluate(
+        "() => [...document.getElementById('inspector').children].map(c => c.className)"
+    )
+
+
+def assert_canonical_blocks(children: list[str], context: str) -> None:
+    """The note's head and body first, then exactly the three blocks in order."""
+    assert children[:2] == ["note-head", "note-body"], (
+        f"{context}: the note's own children are not first: {children}"
+    )
+    blocks = [c for c in children[2:] if c in CANONICAL_BLOCKS]
+    assert blocks == CANONICAL_BLOCKS, (
+        f"{context}: blocks are out of the canonical order (marginalia, graph, "
+        f"related) or missing: {children}"
+    )
+    assert len(children) == 2 + len(CANONICAL_BLOCKS), (
+        f"{context}: stray children: {children}"
+    )
+
+
+def start_open(page: Any, note_id: str) -> None:
+    """Open a note through the REAL inspector, waiting only for the note itself."""
+    page.evaluate(
+        """async (id) => {
+            const inspector = await import("/static/js/inspector.js");
+            await inspector.openNote(id);
+        }""",
+        note_id,
+    )
+
+
 @pytest.fixture(name="page")
 def _page_fixture(static_origin: str) -> Iterator[Any]:
     """A booted app page with every API call stubbed and errors recorded."""
@@ -345,6 +386,14 @@ def _page_fixture(static_origin: str) -> Iterator[Any]:
             yield pg
         finally:
             browser.close()
+
+
+@pytest.fixture(name="serve_related")
+def _serve_related_fixture(page: Any) -> None:
+    """Serve ``/related`` (the harness default is 404). Depends on ``page`` so it
+    runs AFTER the page fixture has reset every knob — without that dependency
+    an autouse use of it is set up first and immediately reset."""
+    _RELATED["status"] = 200
 
 
 def _open(page: Any, note_id: str = ROOT_ID) -> None:

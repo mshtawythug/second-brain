@@ -6,7 +6,8 @@
  * ATTACHED AFTER THE NOTE'S OWN CHILDREN of `#inspector`. `.inspector` is
  * `grid-template-rows: auto 1fr`; `.note-head` must keep `auto` and
  * `.note-body`/`.editor` must keep `1fr`, so a block lands only on an implicit
- * `auto` row after them.
+ * `auto` row after them. It goes in through `placeInspectorBlock` (dom.js),
+ * which keeps it LAST of the three blocks whatever order the fetches land in.
  *
  * SUBSCRIBER ORDER IS A WIRING CONTRACT. `renderInspector` wipes `#inspector`
  * (`host.textContent = ""`) on every dispatch, so this renderer must be
@@ -26,7 +27,7 @@
  */
 
 import { api } from "/static/js/api.js";
-import { $, el } from "/static/js/dom.js";
+import { $, el, placeInspectorBlock } from "/static/js/dom.js";
 import { state, subscribe } from "/static/js/store.js";
 
 /* What a row with an empty title is called: a link with no text has no
@@ -37,12 +38,15 @@ const RAIL_LABEL = "Related notes";
 
 let wired = false;
 
-/* noteId -> the related rows already fetched for it, or `null`.
+/* noteKey(id) -> the related rows already fetched for that note, or `null`.
  *
  * Same reasoning as graph.js's graphCache: renderRelated runs on EVERY
  * dispatch, so without a cache each toggle of the editor would re-request the
  * list. A FAILED fetch caches `null` deliberately — retrying on every later
  * dispatch turns one failing endpoint into a request storm.
+ *
+ * Keyed on `noteKey(id)` (store.js), so a save of the note drops its entry and
+ * no other note's — see marginalia.js's backlinkCache.
  */
 const relatedCache = new Map();
 const inFlight = new Set();
@@ -85,7 +89,7 @@ export function renderRelated() {
      empty heading. A heading over no rows is chrome promising a list and
      delivering a blank. */
   if (!cached || !cached.length) return;
-  host.appendChild(buildRail(cached));
+  placeInspectorBlock(host, buildRail(cached));
 }
 
 /* SILENT ON FAILURE — no toast, no placeholder. `api()` throws on a non-2xx and

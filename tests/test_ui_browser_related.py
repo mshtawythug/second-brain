@@ -42,13 +42,14 @@ from tests.ui_graph_harness import (
     ROOT_ID,
     _dispatch,
     _page_fixture,  # noqa: F401 — registers the `page` fixture
+    _serve_related_fixture,  # noqa: F401 — registers `serve_related`
     _static_origin_fixture,  # noqa: F401 — registers `static_origin`, which `page` uses
     related_payload,
     settle,
     wait_for_held,
 )
 
-pytestmark = pytest.mark.browser
+pytestmark = [pytest.mark.browser, pytest.mark.usefixtures("serve_related")]
 
 _RAIL = "#inspector > nav.related-rail"
 
@@ -74,16 +75,6 @@ def _rail_ids(page: Any) -> list[str]:
     return page.eval_on_selector_all(
         f"{_RAIL} a[data-note-id]", "els => els.map(e => e.getAttribute('data-note-id'))"
     )
-
-
-@pytest.fixture(autouse=True)
-def _serve_related(page: Any) -> None:
-    """Every test here wants the rail stubbed; the harness default is 404.
-
-    Depends on ``page`` so it runs AFTER the page fixture has reset every knob
-    — an autouse fixture without that dependency is set up first and its
-    setting is immediately reset back to the default."""
-    _RELATED["status"] = 200
 
 
 # ---------------------------------------------------------------- painting --

@@ -35,9 +35,9 @@ import { wirePalette } from "/static/js/palette.js";
    document.body and subscribes to nothing, so it is order-free. wireMarginalia()
    subscribes to the store and draws INTO #inspector — see boot(). */
 import { wireMarginalia } from "/static/js/marginalia.js";
-/* graph.js has the SAME wiring constraint as marginalia.js and one more: it is
-   wired AFTER wireMarginalia() so its figure is the last child of #inspector
-   after every dispatch that rebuilds it. See boot(). */
+/* graph.js has the SAME wiring constraint as marginalia.js: it subscribes and
+   draws into #inspector, so it is wired after subscribe(renderInspector). See
+   boot(). */
 import { wireGraph } from "/static/js/graph.js";
 /* related.js has the same wiring constraint as graph.js: it subscribes and
    draws into #inspector, so it is wired after subscribe(renderInspector). See
@@ -212,14 +212,18 @@ async function boot() {
      separated from its reason by this comment. */
   subscribe(renderTree); subscribe(renderResults); subscribe(renderInspector); wireMarginalia();
   wireThread();
-  /* wireGraph() MUST stay after wireMarginalia(): both APPEND to #inspector, and
-     registering the graph later is what keeps its figure the LAST child after
-     every dispatch that rebuilds the inspector. It sits on its own line, after
-     wireThread(), rather than on the subscribe line above, because the guard
-     mutations in tests/test_ui_static_behaviour.py anchor on that line and on
-     the line pair it forms with wireThread(). renderThread decorates the body
-     and appends nothing, so the graph's order relative to it is immaterial.
-     Pinned behaviourally by tests/test_ui_browser_graph.py's last-child test. */
+  /* wireGraph() and wireRelated() must stay after subscribe(renderInspector),
+     which wipes #inspector on every dispatch. Their order relative to
+     wireMarginalia() and to each other NO LONGER decides where their blocks
+     land: all three go in through placeInspectorBlock (dom.js), which holds
+     the one order — marginalia, graph, related — whatever order the renderers
+     run in or their fetches resolve in. Pinned behaviourally, for every
+     arrival order, by tests/test_ui_browser_inspector_blocks.py. They sit on
+     their own lines, after wireThread(), rather than on the subscribe line
+     above, because the guard mutations in tests/test_ui_static_behaviour.py
+     anchor on that line and on the line pair it forms with wireThread().
+     renderThread decorates the body and appends nothing, so it is immaterial
+     to the block order. */
   wireGraph();
   wireRelated();
 

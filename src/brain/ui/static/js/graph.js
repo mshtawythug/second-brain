@@ -3,17 +3,18 @@
  * SAME SHAPE AS marginalia.js, and every contract in that module's header
  * applies here verbatim — read it first. In short:
  *
- * APPENDED LAST to `#inspector`. `.inspector` is `grid-template-rows: auto 1fr`;
- * `.note-head` must keep `auto` and `.note-body`/`.editor` must keep `1fr`.
- * Any child appended after them lands on an implicit `auto` row, which is the
- * only safe place for a new block.
+ * PLACED AFTER THE NOTE in `#inspector`. `.inspector` is `grid-template-rows:
+ * auto 1fr`; `.note-head` must keep `auto` and `.note-body`/`.editor` must keep
+ * `1fr`. Any child after them lands on an implicit `auto` row, which is the
+ * only safe place for a new block. The figure goes in through
+ * `placeInspectorBlock` (dom.js), which holds the ONE order of the blocks —
+ * marginalia, this graph, the related rail — whatever order their fetches
+ * resolve in. It is no longer "appended last": the related rail follows it.
  *
  * SUBSCRIBER ORDER IS A WIRING CONTRACT. `renderInspector` wipes `#inspector`
  * (`host.textContent = ""`) on every dispatch, so this renderer must be
- * registered AFTER it. main.js calls `wireGraph()` after `wireMarginalia()`
- * (on its own line, after `wireThread()` — see the comment in boot()), which
- * also makes the figure the LAST child after any dispatch that rebuilds the
- * inspector: inspector, then marginalia, then this.
+ * registered AFTER it. Where the figure lands no longer depends on the order
+ * the three block renderers are registered in — `placeInspectorBlock` decides.
  *
  * GEOMETRY IS THE SERVER'S. `GET /api/notes/{id}/graph` returns every node
  * already placed (root at the centre, neighbours on a ring). Nothing here
@@ -26,7 +27,7 @@
  */
 
 import { api } from "/static/js/api.js";
-import { $, el } from "/static/js/dom.js";
+import { $, el, placeInspectorBlock } from "/static/js/dom.js";
 import { state, subscribe } from "/static/js/store.js";
 
 /* An XML namespace is an identifier, not a fetch: nothing is requested. */
@@ -80,14 +81,17 @@ const ROOT_LABEL_GAP = 6;
 
 let wired = false;
 
-/* noteId -> the graph payload already fetched for it, or `null`.
+/* noteKey(id) -> the graph payload already fetched for that note, or `null`.
  *
  * Same reasoning as marginalia.js's backlinkCache: renderGraph runs on EVERY
  * dispatch, so without a cache each toggle of the editor would re-request the
  * graph. A FAILED fetch caches `null` deliberately — retrying on every later
  * dispatch turns one failing endpoint into a request storm. A transient failure
- * therefore stays blank until the page is reloaded, which is the right trade
- * for a block that is supplementary to the note.
+ * therefore stays blank until the page is reloaded or the note is saved, which
+ * is the right trade for a block that is supplementary to the note.
+ *
+ * Keyed on `noteKey(id)` (store.js), so a save of the note drops its entry and
+ * no other note's — see marginalia.js's backlinkCache.
  */
 const graphCache = new Map();
 const inFlight = new Set();
@@ -126,7 +130,7 @@ export function renderGraph() {
   }
 
   const block = buildBlock(cached);
-  if (block) host.appendChild(block);
+  if (block) placeInspectorBlock(host, block);
 }
 
 /* SILENT ON FAILURE — no toast, no placeholder. `api()` throws on a non-2xx and

@@ -21,9 +21,10 @@ module sits outside that glob. Run it by path:
 ``test_ui_browser_reading.py`` calls ``wireMarginalia()`` from
 ``page.evaluate``, which is why it cannot see a mis-wired ``boot()``. Here the
 graph is reached ONLY through ``js/main.js``'s ``boot()``, so the last-child
-test is a real oracle for the wiring order: ``wireGraph()`` must be registered
-after ``wireMarginalia()``, or the marginalia aside is appended after the
-figure on every dispatch that rebuilds the inspector.
+test runs against the real wiring. Since ``placeInspectorBlock`` (``js/dom.js``)
+took over the block order it no longer depends on REGISTRATION order; what
+the last-child test now pins is that order with the related rail absent, and
+``tests/test_ui_browser_inspector_blocks.py`` pins it for every arrival order.
 
 The ``/graph`` payload follows the contract the server route implements: root
 is ``nodes[0]``, every node is pre-placed, titles are plain strings. Every id
@@ -333,7 +334,7 @@ def test_edit_mode_removes_the_graph_and_leaving_restores_it(page: Any) -> None:
 
 
 def test_the_graph_is_the_last_child_of_the_inspector(page: Any) -> None:
-    """(7) The wiring-order oracle. Reached through boot() only — see header."""
+    """(7) The block order through boot(), related rail absent — see header."""
     _open(page)
     page.wait_for_selector(".local-graph svg")
     # Wait out the backlinks fetch: it re-renders the marginalia asynchronously,
@@ -349,8 +350,10 @@ def test_the_graph_is_the_last_child_of_the_inspector(page: Any) -> None:
         "would be vacuously true"
     )
     assert "local-graph" in children[-1], (
-        f"#inspector children are {children}; the graph must be LAST. "
-        "wireGraph() was registered before wireMarginalia() in boot()."
+        f"#inspector children are {children}; the graph must be LAST when no "
+        "related rail is drawn (the harness serves /related as 404 by default). "
+        "The order is placeInspectorBlock's (js/dom.js); every arrival order "
+        "is pinned by tests/test_ui_browser_inspector_blocks.py."
     )
 
 
