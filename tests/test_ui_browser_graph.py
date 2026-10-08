@@ -61,10 +61,12 @@ NEIGHBOURS: list[tuple[str, str, str]] = [
 #: Edges chosen so hovering ALPHA touches exactly two lines (root-alpha and
 #: alpha-charlie) and leaves two untouched (bravo-root, root-charlie). The
 #: bravo edge is written dst-first so the hover match must consider BOTH ends.
+#: All three server kinds appear (``links.link_kind`` allows ``embed``), so the
+#: client is proven to pass the kind through rather than collapse it.
 EDGES: list[dict[str, str]] = [
     {"src": ROOT_ID, "dst": ALPHA_ID, "kind": "wiki"},
     {"src": BRAVO_ID, "dst": ROOT_ID, "kind": "derived"},
-    {"src": ROOT_ID, "dst": CHARLIE_ID, "kind": "wiki"},
+    {"src": ROOT_ID, "dst": CHARLIE_ID, "kind": "embed"},
     {"src": ALPHA_ID, "dst": CHARLIE_ID, "kind": "derived"},
 ]
 
@@ -306,6 +308,9 @@ def test_opening_a_note_paints_the_root_and_every_neighbour_in_order(page: Any) 
         ".local-graph line.edge", "els => els.map(e => e.getAttribute('data-kind'))"
     )
     assert kinds == [e["kind"] for e in EDGES]
+    assert page.locator(
+        f'.local-graph line.edge[data-src="{ROOT_ID}"][data-dst="{CHARLIE_ID}"]'
+    ).get_attribute("data-kind") == "embed", "an embed edge lost its kind"
 
     dash = page.evaluate(
         """() => getComputedStyle(
@@ -357,6 +362,35 @@ def test_hovering_a_neighbour_highlights_it_and_only_its_edges(page: Any) -> Non
     page.mouse.move(1, 1)
     assert page.locator(".local-graph [data-hover]").count() == 0, (
         "the highlight outlived the hover"
+    )
+
+
+def test_keyboard_focus_highlights_a_neighbour_and_blur_clears_it(page: Any) -> None:
+    """(3b) Focus is the keyboard's hover: same marking, removed on blur.
+
+    BRAVO is chosen because its one edge is written dst-first, so the match must
+    consider both ends here too. The mouse never moves in this test, so any
+    ``data-hover`` can only have come from the focus listener.
+    """
+    _open(page)
+    page.wait_for_selector(".local-graph svg")
+    page.focus(f'.local-graph a.node[data-note-id="{BRAVO_ID}"]')
+
+    hovered_nodes = page.eval_on_selector_all(
+        ".local-graph .node[data-hover]", "els => els.map(e => e.getAttribute('data-note-id'))"
+    )
+    assert hovered_nodes == [BRAVO_ID], (
+        f"focus did not mark exactly the focused node: {hovered_nodes}"
+    )
+    hovered_edges = page.eval_on_selector_all(
+        ".local-graph line.edge[data-hover]",
+        "els => els.map(e => [e.getAttribute('data-src'), e.getAttribute('data-dst')])",
+    )
+    assert hovered_edges == [[BRAVO_ID, ROOT_ID]]
+
+    page.evaluate("() => document.activeElement.blur()")
+    assert page.locator(".local-graph [data-hover]").count() == 0, (
+        "the focus highlight outlived the blur"
     )
 
 

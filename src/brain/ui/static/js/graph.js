@@ -187,7 +187,9 @@ function buildSvg(graph) {
     if (!a || !b) continue;
     svg.appendChild(svgEl("line", {
       class: "edge",
-      "data-kind": edge.kind === "derived" ? "derived" : "wiki",
+      /* The server's kind, unchanged: `wiki`, `embed` or `derived`. Only
+         `derived` is styled differently (dashed), and that is graph.css's call. */
+      "data-kind": String(edge.kind ?? ""),
       "data-src": edge.src,
       "data-dst": edge.dst,
       x1: a.x, y1: a.y, x2: b.x, y2: b.y,
