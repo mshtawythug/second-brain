@@ -44,7 +44,7 @@
 
 import { api } from "/static/js/api.js";
 import { $, el, placeInspectorBlock } from "/static/js/dom.js";
-import { state, subscribe } from "/static/js/store.js";
+import { noteKey, state, subscribe } from "/static/js/store.js";
 
 let wired = false;
 
@@ -160,19 +160,23 @@ export function renderMarginalia() {
  * does NOT toast — toasting is the caller's choice, and this caller declines.
  */
 function attachBacklinks(note, aside) {
-  const cached = backlinkCache.get(note.id);
+  /* Captured once: the response is stored under the revision it was ASKED
+     for, so a save that lands while this request is in flight leaves the
+     answer filed under the old, no-longer-matching key. */
+  const key = noteKey(note.id);
+  const cached = backlinkCache.get(key);
   if (cached !== undefined) {
     if (cached.length) aside.appendChild(renderBacklinks(cached));
     return;
   }
-  if (inFlight.has(note.id)) return;
-  inFlight.add(note.id);
+  if (inFlight.has(key)) return;
+  inFlight.add(key);
 
   api(`/api/notes/${encodeURIComponent(note.id)}/links`).then(
     (payload) => {
-      inFlight.delete(note.id);
+      inFlight.delete(key);
       backlinkCache.set(
-        note.id, Array.isArray(payload && payload.backlinks) ? payload.backlinks : []
+        key, Array.isArray(payload && payload.backlinks) ? payload.backlinks : []
       );
       /* Re-render rather than appending to the captured `aside`: by the time
          this resolves the reader may have opened another note, and that aside
@@ -181,8 +185,8 @@ function attachBacklinks(note, aside) {
       if (state.note && state.note.id === note.id) renderMarginalia();
     },
     () => {
-      inFlight.delete(note.id);
-      backlinkCache.set(note.id, []);
+      inFlight.delete(key);
+      backlinkCache.set(key, []);
     },
   );
 }

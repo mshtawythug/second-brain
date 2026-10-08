@@ -28,7 +28,7 @@
 
 import { api } from "/static/js/api.js";
 import { $, el, placeInspectorBlock } from "/static/js/dom.js";
-import { state, subscribe } from "/static/js/store.js";
+import { noteKey, state, subscribe } from "/static/js/store.js";
 
 /* An XML namespace is an identifier, not a fetch: nothing is requested. */
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -121,11 +121,12 @@ export function renderGraph() {
      a withheld note is drawn, including who it links with. */
   if (!note || state.editing || note.withheld) return;
 
-  const cached = graphCache.get(note.id);
+  const key = noteKey(note.id);
+  const cached = graphCache.get(key);
   if (cached === undefined) {
     /* NOT awaited. The note is already painted; the graph is a second request
        that must never stand between the reader and the note. */
-    fetchGraph(note);
+    fetchGraph(note, key);
     return;
   }
 
@@ -136,21 +137,21 @@ export function renderGraph() {
 /* SILENT ON FAILURE — no toast, no placeholder. `api()` throws on a non-2xx and
    does not toast; this caller declines to, for the same reason the backlinks
    rail does: the reader never asked for this request. */
-function fetchGraph(note) {
-  if (inFlight.has(note.id)) return;
-  inFlight.add(note.id);
+function fetchGraph(note, key) {
+  if (inFlight.has(key)) return;
+  inFlight.add(key);
 
   api(`/api/notes/${encodeURIComponent(note.id)}/graph`).then(
     (payload) => {
-      inFlight.delete(note.id);
-      graphCache.set(note.id, normalise(payload));
+      inFlight.delete(key);
+      graphCache.set(key, normalise(payload));
       /* The stale-response guard: by the time this resolves the reader may have
          opened another note, and a slow response for A must not paint under B. */
       if (state.note && state.note.id === note.id) renderGraph();
     },
     () => {
-      inFlight.delete(note.id);
-      graphCache.set(note.id, null);
+      inFlight.delete(key);
+      graphCache.set(key, null);
     },
   );
 }

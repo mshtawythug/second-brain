@@ -33,6 +33,41 @@ export const state = {
   tree: null, expanded: loadExpanded(), health: null, sessionId: null,
 };
 
+/* PER-NOTE REVISIONS — the one invalidation mechanism for every per-note cache.
+ *
+ * marginalia.js (backlinks), graph.js and related.js each cache what they
+ * fetched for a note, so a re-render on every dispatch costs no request. The
+ * cost of that cache was that it never expired: save a note that adds a
+ * `[[wikilink]]` and all three blocks kept showing the old neighbourhood until
+ * a full reload. So each of them keys its cache on `noteKey(id)` rather than
+ * on the bare id, and inspector.js calls `bumpNoteRevision(id)` on a
+ * SUCCESSFUL save. The saved note's key moves, its stale entries stop
+ * matching, and its blocks refetch on the render the save's dispatch triggers.
+ *
+ * PER NOTE, NOT GLOBAL, and that is the point. A single global counter folded
+ * into every key would invalidate every note's cache on any save; here only
+ * the saved note's key changes, so every other note's entries survive. And
+ * because nothing but a save moves a revision, an ordinary dispatch — toggling
+ * the editor, an unsaved edit, opening another note and coming back — still
+ * refetches nothing.
+ *
+ * A Map, held here rather than on `state`: it is not something any renderer
+ * draws, and `dispatch` has no business replacing it. */
+const noteRevisions = new Map();
+
+export function noteRevision(id) {
+  return noteRevisions.get(id) || 0;
+}
+
+export function bumpNoteRevision(id) {
+  noteRevisions.set(id, noteRevision(id) + 1);
+}
+
+/* The cache key for anything fetched about note `id` at its current revision. */
+export function noteKey(id) {
+  return `${id}:${noteRevision(id)}`;
+}
+
 const listeners = [];
 export function subscribe(fn) { listeners.push(fn); }
 export function dispatch(patch) { Object.assign(state, patch); listeners.forEach((fn) => fn()); }

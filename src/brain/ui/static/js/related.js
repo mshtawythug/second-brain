@@ -28,7 +28,7 @@
 
 import { api } from "/static/js/api.js";
 import { $, el, placeInspectorBlock } from "/static/js/dom.js";
-import { state, subscribe } from "/static/js/store.js";
+import { noteKey, state, subscribe } from "/static/js/store.js";
 
 /* What a row with an empty title is called: a link with no text has no
    accessible name. Same word graph.js uses. */
@@ -77,11 +77,12 @@ export function renderRelated() {
      precedes the fetch, nothing about it is even requested. */
   if (!note || state.editing || note.withheld) return;
 
-  const cached = relatedCache.get(note.id);
+  const key = noteKey(note.id);
+  const cached = relatedCache.get(key);
   if (cached === undefined) {
     /* NOT awaited. The note is already painted; the rail is a second request
        that must never stand between the reader and the note. */
-    fetchRelated(note);
+    fetchRelated(note, key);
     return;
   }
 
@@ -95,21 +96,21 @@ export function renderRelated() {
 /* SILENT ON FAILURE — no toast, no placeholder. `api()` throws on a non-2xx and
    does not toast; this caller declines to, for the same reason the backlinks
    rail and the graph do: the reader never asked for this request. */
-function fetchRelated(note) {
-  if (inFlight.has(note.id)) return;
-  inFlight.add(note.id);
+function fetchRelated(note, key) {
+  if (inFlight.has(key)) return;
+  inFlight.add(key);
 
   api(`/api/notes/${encodeURIComponent(note.id)}/related`).then(
     (payload) => {
-      inFlight.delete(note.id);
-      relatedCache.set(note.id, normalise(payload));
+      inFlight.delete(key);
+      relatedCache.set(key, normalise(payload));
       /* The stale-response guard: by the time this resolves the reader may have
          opened another note, and a slow response for A must not paint under B. */
       if (state.note && state.note.id === note.id) renderRelated();
     },
     () => {
-      inFlight.delete(note.id);
-      relatedCache.set(note.id, null);
+      inFlight.delete(key);
+      relatedCache.set(key, null);
     },
   );
 }
