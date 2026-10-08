@@ -1,10 +1,12 @@
 """Shared harness for the local-graph browser suites (``js/graph.js``).
 
 Imported by ``tests/test_ui_browser_graph.py`` (painting, interaction,
-accessibility, degraded states, hardening) and
+accessibility, degraded states, hardening),
 ``tests/test_ui_browser_graph_layout.py`` (label geometry on the server's
-ring). ONE copy of the stub routing, the per-test knobs and the fixtures, so
-the two modules cannot drift apart.
+ring) and ``tests/test_ui_browser_related.py`` (the related-notes rail, the
+canonical block order, the refresh after a save). ONE copy of the stub
+routing, the per-test knobs and the fixtures, so the modules cannot drift
+apart.
 
 **Deliberately not a ``test_*`` module and deliberately unmarked.** It holds no
 tests, so pytest never collects it, and it carries no ``browser`` marker, so
@@ -138,9 +140,50 @@ _STUBS: dict[str, Any] = {
                     "session_id": "s-synthetic"},
 }
 
+#: Neighbours for ``/api/notes/{id}/related`` — ``(id, title, snippet,
+#: snippet_truncated)``. Synthetic, like everything here.
+RELATED: list[tuple[str, str, str, bool]] = [
+    (ALPHA_ID, "Alpha Synthetic Note", "A synthetic snippet about alpha.", False),
+    (CHARLIE_ID, "Charlie Synthetic Note", "A synthetic snippet that was cut", True),
+]
+
+
+def related_payload(
+    rows: list[tuple[str, str, str, bool]] | None = None, *, note_id: str = ROOT_ID,
+) -> dict[str, Any]:
+    """A ``/api/notes/{id}/related`` body in the contract's exact shape."""
+    chosen = RELATED if rows is None else rows
+    return {
+        "id": note_id,
+        "related": [
+            {"id": rid, "title": title, "vault_path": f"synthetic/{rid[-2:]}.md",
+             "source": "vault", "score": 0.5, "snippet": snippet,
+             "snippet_truncated": truncated}
+            for rid, title, snippet, truncated in chosen
+        ],
+        "count": len(chosen),
+        "vector_sim_floor": 0.25,
+    }
+
+
 #: Per-test knobs, reset by the ``page`` fixture so nothing leaks between tests.
+#:
+#: ``_RELATED`` DEFAULTS TO 404, i.e. "not stubbed", and that is deliberate: the
+#: graph suites predate the related rail, and a default rail would change what
+#: their structural assertions (e.g. which block is last) are measuring. A test
+#: that wants the rail sets ``_RELATED["status"] = 200``.
+#:
+#: ``_HOLD`` names the supplementary routes (``"links"``, ``"graph"``,
+#: ``"related"``) whose responses are NOT fulfilled on arrival but parked in
+#: ``_HELD`` as ``(kind, release)`` pairs, so a test can deliver them in an order
+#: of its choosing — see :func:`release_held`.
 _GRAPH: dict[str, Any] = {}
+_LINKS: dict[str, Any] = {}
+_RELATED: dict[str, Any] = {}
 _NOTE_EXTRA: dict[str, Any] = {}
+_HOLD: set[str] = set()
+_HELD: list[tuple[str, Any]] = []
+_PUTS: list[dict[str, Any]] = []
 _REQUESTS: list[str] = []
 _ERRORS: list[str] = []
 
@@ -175,21 +218,26 @@ def _route_api(route: Any) -> None:
     def ok(body: Any) -> None:
         route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
 
-    if re.fullmatch(r"/api/notes/[^/]+/graph", path) is not None:
-        if _GRAPH["status"] != 200:
-            # 403 is the route's confidential-note refusal; 500 is any failure.
-            code = "graph_withheld" if _GRAPH["status"] == 403 else "database_unavailable"
-            route.fulfill(
-                status=_GRAPH["status"], content_type="application/json",
-                body=json.dumps({"error": {"code": code, "message": "synthetic failure"}}),
-            )
-            return
-        ok(_GRAPH["payload"])
-        return
-    if re.fullmatch(r"/api/notes/[^/]+/links", path) is not None:
-        ok(LINKS_PAYLOAD)
+    supplementary = re.fullmatch(r"/api/notes/[^/]+/(graph|links|related)", path)
+    if supplementary is not None:
+        kind = supplementary.group(1)
+        # The body is decided NOW, at request time, from the knobs as they are
+        # when the request arrives — a held response must not pick up a knob a
+        # test changes while it is parked.
+        respond = partial(_fulfil_supplementary, route, kind, _supplementary_reply(kind))
+        if kind in _HOLD:
+            _HELD.append((kind, respond))
+        else:
+            respond()
         return
     match = re.fullmatch(r"/api/notes/([^/]+)", path)
+    if match is not None and route.request.method == "PUT":
+        # The save path (inspector.js saveNote): PUT {body_hash, body} ->
+        # {body_hash, html}. Recorded so a test can prove the save happened.
+        _PUTS.append(json.loads(route.request.post_data or "{}"))
+        ok({"body_hash": f"sha256:saved-{len(_PUTS)}",
+            "html": "<p>Synthetic saved prose.</p>"})
+        return
     if match is not None:
         note_id = match.group(1)
         ok({**NOTE_PAYLOAD, **_NOTE_EXTRA, "id": note_id,
@@ -200,6 +248,63 @@ def _route_api(route: Any) -> None:
         route.fulfill(status=404, body="{}", content_type="application/json")
         return
     ok(body)
+
+
+def _supplementary_reply(kind: str) -> tuple[int, Any]:
+    """``(status, body)`` for a ``/graph``, ``/links`` or ``/related`` request."""
+    knob = {"graph": _GRAPH, "links": _LINKS, "related": _RELATED}[kind]
+    status = knob["status"]
+    if status == 200:
+        return 200, knob["payload"]
+    # 403 is each route's confidential-note refusal; anything else is a failure.
+    code = f"{kind}_withheld" if status == 403 else "database_unavailable"
+    if status == 404:
+        code = "not_found"
+    return status, {"error": {"code": code, "message": "synthetic failure"}}
+
+
+def _fulfil_supplementary(route: Any, kind: str, reply: tuple[int, Any]) -> None:
+    status, body = reply
+    route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+
+
+def wait_for_held(page: Any, count: int, timeout_ms: int = 8000) -> None:
+    """Pump the page until ``count`` responses are parked in ``_HELD``.
+
+    The route handler runs on Playwright's dispatcher, which only turns while
+    the test thread is inside a Playwright call — so this waits with
+    ``page.wait_for_timeout`` (a Playwright call) rather than ``time.sleep``.
+    """
+    waited = 0
+    while len(_HELD) < count:
+        assert waited < timeout_ms, (
+            f"only {len(_HELD)} of {count} held responses arrived: "
+            f"{[kind for kind, _ in _HELD]}"
+        )
+        page.wait_for_timeout(20)
+        waited += 20
+
+
+def settle(page: Any) -> None:
+    """Two animation frames: a delivered tiny response's `.then` chain and any
+    re-render it triggers have run by the second frame."""
+    page.evaluate(
+        "() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))"
+    )
+
+
+def release_held(page: Any, order: list[str]) -> None:
+    """Deliver the parked responses in ``order`` (by kind), settling after each,
+    so each response is fully handled before the next one is delivered."""
+    by_kind = {kind: respond for kind, respond in _HELD}
+    assert sorted(by_kind) == sorted(order), (
+        f"held {sorted(by_kind)} but asked to release {order}"
+    )
+    for kind in order:
+        with page.expect_response(re.compile(rf"/api/notes/[^/]+/{kind}$")):
+            by_kind[kind]()
+        settle(page)
+    _HELD.clear()
 
 
 @pytest.fixture(name="page")
@@ -214,7 +319,14 @@ def _page_fixture(static_origin: str) -> Iterator[Any]:
     )
     _GRAPH.clear()
     _GRAPH.update({"status": 200, "payload": graph_payload()})
+    _LINKS.clear()
+    _LINKS.update({"status": 200, "payload": LINKS_PAYLOAD})
+    _RELATED.clear()
+    _RELATED.update({"status": 404, "payload": related_payload()})
     _NOTE_EXTRA.clear()
+    _HOLD.clear()
+    _HELD.clear()
+    _PUTS.clear()
     _REQUESTS.clear()
     _ERRORS.clear()
 

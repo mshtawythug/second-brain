@@ -1,0 +1,87 @@
+/* related.css — the related-notes rail at the foot of the inspector (js/related.js).
+ *
+ * A FEATURE SHEET, loaded after graph.css for the same reason that sheet loads
+ * after marginalia.css: it is layered on the shared component tier, not a tier
+ * of its own. index.html's <link> block and `CSS_ORDER` in
+ * tests/test_ui_static_behaviour.py are one fact stored twice and must agree.
+ *
+ * A SIBLING OF THE MARGINALIA, deliberately. Both are rails of links beside
+ * the note, so they share one visual language: a quiet aside separated from
+ * what precedes it by a hairline rule rather than a fill, UI type, muted ink,
+ * and the same hover / focus / reserved-border treatment as the TOC entries.
+ *
+ * EVERY SELECTOR IS SCOPED TO `.related-rail`, so nothing here redeclares a
+ * selector another sheet owns (`check_cross_sheet_overlaps_are_rostered`).
+ *
+ * TOKENS ONLY. No hard-coded colour, no url(), nothing external. Every piece
+ * of text uses --ink or --ink-muted, never --ink-faint: titles and snippets
+ * are text the reader is expected to read, and --ink-faint is below WCAG AA on
+ * these grounds (see marginalia.css and `check_ink_faint_used_once`).
+ */
+
+.related-rail {
+  margin-top: var(--s-6);
+  padding-top: var(--s-4);
+  border-top: var(--hair);
+  font-family: var(--font-ui);
+  font-size: var(--t-ui);
+  color: var(--ink-muted);
+}
+
+.related-rail .rail-heading {
+  margin: 0 0 var(--s-2);
+  font-size: var(--t-meta);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+}
+
+.related-rail ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.related-rail li + li {
+  margin-top: var(--s-1);
+}
+
+.related-rail a {
+  display: block;
+  padding: var(--s-1) var(--s-2) 0;
+  /* Reserved on every entry, as on the TOC, so hover recolours a border that
+     is already there instead of nudging the row sideways. */
+  border-left: 2px solid transparent;
+  color: var(--ink);
+  text-decoration: none;
+  line-height: var(--lead-dense);
+  transition: color var(--dur-fast) var(--ease),
+              border-color var(--dur-fast) var(--ease);
+}
+
+.related-rail a:hover {
+  color: var(--accent);
+  border-left-color: var(--rule);
+}
+
+/* Focus is NOT folded into :hover: the ring is what tells a keyboard user
+   where they are. */
+.related-rail a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* The snippet is secondary to the title — the hierarchy is size and ink
+   weight, never a fainter colour (that is the WCAG rule above). Indented to
+   the link's text so the two read as one entry. */
+.related-rail .related-snippet {
+  padding: 0 var(--s-2) var(--s-1) calc(var(--s-2) + 2px);
+  font-size: var(--t-meta);
+  line-height: var(--lead-dense);
+  color: var(--ink-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .related-rail a { transition: none; }
+}

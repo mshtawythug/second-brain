@@ -39,6 +39,10 @@ import { wireMarginalia } from "/static/js/marginalia.js";
    wired AFTER wireMarginalia() so its figure is the last child of #inspector
    after every dispatch that rebuilds it. See boot(). */
 import { wireGraph } from "/static/js/graph.js";
+/* related.js has the same wiring constraint as graph.js: it subscribes and
+   draws into #inspector, so it is wired after subscribe(renderInspector). See
+   boot(). */
+import { wireRelated } from "/static/js/related.js";
 import { wireThread } from "/static/js/thread.js";
 
 /* The filter controls, as [element id, state.filters key] pairs. Declared once
@@ -217,6 +221,7 @@ async function boot() {
      and appends nothing, so the graph's order relative to it is immaterial.
      Pinned behaviourally by tests/test_ui_browser_graph.py's last-child test. */
   wireGraph();
+  wireRelated();
 
   seedControls();
 
