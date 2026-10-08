@@ -26,6 +26,7 @@ import pytest
 from tests.ui_graph_harness import (
     _ERRORS,
     _GRAPH,
+    _HOLD,
     _LINKS,
     _PUTS,
     _RELATED,
@@ -36,6 +37,7 @@ from tests.ui_graph_harness import (
     KINDS,
     LINKS_PAYLOAD,
     ROOT_ID,
+    _dispatch,
     _page_fixture,  # noqa: F401 — registers the `page` fixture
     _serve_related_fixture,  # noqa: F401 — registers `serve_related`
     _static_origin_fixture,  # noqa: F401 — registers `static_origin`, which `page` uses
@@ -43,8 +45,10 @@ from tests.ui_graph_harness import (
     graph_payload,
     inspector_children,
     related_payload,
+    release_held,
     settle,
     start_open,
+    wait_for_held,
 )
 
 pytestmark = [pytest.mark.browser, pytest.mark.usefixtures("serve_related")]
@@ -183,3 +187,42 @@ def test_an_unsaved_edit_does_not_refetch_and_other_notes_keep_their_cache(
     assert _fetches(ALPHA_ID) == {k: 1 for k in KINDS}, (
         f"saving one note dropped ANOTHER note's cache: {_fetches(ALPHA_ID)}"
     )
+
+
+def test_a_pre_save_response_landing_after_the_save_never_paints(page: Any) -> None:
+    """The save-while-in-flight race: a response REQUESTED before the save but
+    DELIVERED after it must not overwrite the post-save answer.
+
+    Correct by construction today — each module captures ``noteKey(id)`` when
+    it asks, so the late pre-save answer files under the superseded key and
+    never matches again. Nothing else in the suite would notice if the key were
+    recomputed when the answer lands instead: that files the stale answer under
+    the CURRENT key and paints the pre-save neighbourhood. This test does.
+    """
+    _HOLD.update({"related", "links"})
+    start_open(page, ROOT_ID)
+    page.wait_for_selector("#inspector > figure.local-graph svg")
+    wait_for_held(page, 2)  # the PRE-save /related and /links, parked with N1 bodies
+
+    _HOLD.clear()  # the post-save refetches are delivered as they arrive
+    _LINKS["payload"] = N2_LINKS
+    _GRAPH["payload"] = N2_GRAPH
+    _RELATED["payload"] = N2_RELATED
+    _save_an_edit(page, "# Synthetic Root Note\n\nNow links [[Bravo Synthetic Note]].\n")
+    assert len(_PUTS) == 1, f"precondition: the save never reached the server: {_PUTS}"
+    page.wait_for_function(_SHOWS_N2_JS, arg=[N2_LINKER, BRAVO_ID], timeout=5000)
+
+    # NOW deliver the two answers that were asked for before the save.
+    release_held(page, ["related", "links"])
+    _dispatch(page, "{}")  # re-render from whatever the caches now hold
+    after = _shown(page)
+    assert after == {"links": [N2_LINKER], "graph": [BRAVO_ID], "related": [BRAVO_ID]}, (
+        f"a pre-save response delivered after the save repainted the old "
+        f"neighbourhood: {after}"
+    )
+    fetched = _fetches(ROOT_ID)
+    assert (fetched["related"], fetched["links"]) == (2, 2), (
+        f"each held kind must be requested exactly twice (before and after the "
+        f"save): {fetched}"
+    )
+    assert _ERRORS == [], f"uncaught errors: {_ERRORS}"

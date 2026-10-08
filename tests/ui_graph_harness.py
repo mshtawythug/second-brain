@@ -295,15 +295,30 @@ def settle(page: Any) -> None:
 
 
 def release_held(page: Any, order: list[str]) -> None:
-    """Deliver the parked responses in ``order`` (by kind), settling after each,
-    so each response is fully handled before the next one is delivered."""
-    by_kind = {kind: respond for kind, respond in _HELD}
-    assert sorted(by_kind) == sorted(order), (
-        f"held {sorted(by_kind)} but asked to release {order}"
+    """Deliver EVERY parked response, in ``order`` (by kind), settling after each
+    so each response is fully handled before the next one is delivered.
+
+    ``order`` must name each parked request exactly once — a kind parked twice
+    is named twice, and its requests are released in the order they were
+    parked. The count is asserted first: keying the parked requests by kind (as
+    the first version of this function did) silently dropped one of two
+    same-kind requests, left that route unfulfilled, and still passed its own
+    sanity check.
+    """
+    assert len(_HELD) == len(order), (
+        f"{len(_HELD)} responses are parked ({[kind for kind, _ in _HELD]}) "
+        f"but {len(order)} were asked for ({order})"
     )
+    pending = list(_HELD)
     for kind in order:
+        index = next((i for i, (k, _) in enumerate(pending) if k == kind), None)
+        assert index is not None, (
+            f"asked to release a {kind!r} response, but none is parked: "
+            f"{[k for k, _ in pending]}"
+        )
+        _, respond = pending.pop(index)
         with page.expect_response(re.compile(rf"/api/notes/[^/]+/{kind}$")):
-            by_kind[kind]()
+            respond()
         settle(page)
     _HELD.clear()
 
