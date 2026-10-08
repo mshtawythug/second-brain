@@ -53,6 +53,8 @@ from tests.ui_graph_harness import (
     _page_fixture,  # noqa: F401 — registers the `page` fixture
     _static_origin_fixture,  # noqa: F401 — registers `static_origin`, which `page` uses
     graph_payload,
+    open_without_waiting_on_blocks,
+    set_lenses,
 )
 
 pytestmark = pytest.mark.browser
@@ -398,8 +400,12 @@ def test_a_failed_graph_request_leaves_the_note_readable_and_silent(
 def test_a_withheld_note_never_requests_its_graph(page: Any) -> None:
     """(10) A withheld note: the client does not even ASK for its graph.
 
-    The server would refuse with 403 (covered above); this pins the client half
-    of the same rule, so the graph of a withheld note is never fetched at all.
+    Withheld means the BODY is not served. That is not the gate
+    ``routes_graph`` refuses on — it refuses on the TITLES lens — so for a
+    withheld note the client is deliberately stricter than the route: nothing
+    about a withheld note is drawn, including who it links with, and the
+    inspector's own withheld notice already explains the absence. The case the
+    route DOES refuse, a confidential note whose body is served, is (11).
     """
     _NOTE_EXTRA["withheld"] = "Synthetic withheld notice."
     page.evaluate(
@@ -424,4 +430,66 @@ def test_a_withheld_note_never_requests_its_graph(page: Any) -> None:
         f"/graph was requested for a withheld note: {_REQUESTS}"
     )
     assert page.locator(".local-graph").count() == 0
+    assert _ERRORS == [], f"uncaught errors: {_ERRORS}"
+
+
+_GRAPH_NOTICE = "figure.local-graph p.graph-withheld"
+
+
+def test_a_confidential_note_under_the_default_lenses_never_requests_its_graph(
+    page: Any,
+) -> None:
+    """(11) The server's DEFAULT lenses — bodies served, titles not.
+
+    The note opens in full (it is NOT withheld) and its backlinks render, but
+    ``routes_graph`` refuses its graph with 403 ``graph_withheld``, because
+    titles are not served. Before this was mirrored the client asked anyway and
+    drew a blank block plus a console error. Now it does not ask, and says why
+    in the graph's place.
+    """
+    _NOTE_EXTRA["sensitivity"] = "confidential"
+    open_without_waiting_on_blocks(page)
+    page.wait_for_selector("#inspector > .marginalia .backlinks-rail a")
+
+    assert f"/api/notes/{ROOT_ID}" in _REQUESTS, (
+        "precondition: the note itself was never requested"
+    )
+    assert any(r.endswith("/links") for r in _REQUESTS), (
+        "precondition: the backlinks were never requested"
+    )
+    assert not any(r.endswith("/graph") for r in _REQUESTS), (
+        f"/graph was requested for a confidential note this server will not graph: "
+        f"{_REQUESTS}"
+    )
+    assert page.locator(_GRAPH_NOTICE).count() == 1, "no notice in the graph's place"
+    assert page.locator(_GRAPH_NOTICE).text_content() == (
+        "The graph is hidden for confidential notes on this server."
+    )
+    assert page.locator(".local-graph svg").count() == 0
+    assert page.locator(".marginalia .backlinks-rail").text_content().count(
+        "Synthetic Linker"
+    ) == 1, "the backlinks rail did not render beside the notice"
+    assert _ERRORS == [], f"uncaught errors: {_ERRORS}"
+
+
+@pytest.mark.parametrize(
+    ("titles", "bodies", "requested"),
+    [(False, True, False), (True, True, True), (True, False, True)],
+    ids=["titles-off", "titles-and-bodies-on", "titles-on-bodies-off"],
+)
+def test_the_graph_gate_mirrors_the_route_on_the_titles_lens_alone(
+    page: Any, titles: bool, bodies: bool, requested: bool,
+) -> None:
+    """(12) ``graphRefusedHere`` is ``routes_graph``'s gate and nothing else:
+    a confidential note is graphed exactly when titles are served, whatever the
+    bodies lens says. (``titles-on-bodies-off`` would be withheld by the note
+    route on a real server; it is here to pin that the predicate ignores the
+    bodies lens, not as a reachable state.)"""
+    _NOTE_EXTRA["sensitivity"] = "confidential"
+    set_lenses(page, titles=titles, bodies=bodies)
+    open_without_waiting_on_blocks(page)
+    if requested:
+        page.wait_for_selector(".local-graph svg")
+    assert any(r.endswith("/graph") for r in _REQUESTS) is requested, _REQUESTS
+    assert (page.locator(_GRAPH_NOTICE).count() == 1) is not requested
     assert _ERRORS == [], f"uncaught errors: {_ERRORS}"

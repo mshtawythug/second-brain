@@ -82,6 +82,15 @@
   color: var(--ink-muted);
 }
 
+/* The one-line notice shown in the rail's place when the server will not rank
+   a confidential note (js/related.js, `relatedRefusedHere`). Muted, meta-sized,
+   like graph.css's notices — it explains an absence, it is not content. */
+.related-rail .related-withheld {
+  margin: 0;
+  font-size: var(--t-meta);
+  color: var(--ink-muted);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .related-rail a { transition: none; }
 }

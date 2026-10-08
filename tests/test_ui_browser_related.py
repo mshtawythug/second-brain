@@ -44,7 +44,9 @@ from tests.ui_graph_harness import (
     _page_fixture,  # noqa: F401 — registers the `page` fixture
     _serve_related_fixture,  # noqa: F401 — registers `serve_related`
     _static_origin_fixture,  # noqa: F401 — registers `static_origin`, which `page` uses
+    open_without_waiting_on_blocks,
     related_payload,
+    set_lenses,
     settle,
     wait_for_held,
 )
@@ -249,7 +251,12 @@ def test_a_failed_request_is_not_retried_on_every_dispatch(page: Any) -> None:
 
 
 def test_a_withheld_note_never_requests_its_related_notes(page: Any) -> None:
-    """The client half of the server's 403: a withheld note is never asked about."""
+    """A withheld note (body not served) is never asked about, and draws nothing.
+
+    This is ONE of the cases ``routes_related`` refuses, not all of them: it
+    also refuses a confidential note whose body IS served while titles are not
+    — the server's default — and that case is pinned separately, below.
+    """
     _NOTE_EXTRA["withheld"] = "Synthetic withheld notice."
     page.evaluate(
         """async (id) => {
@@ -345,3 +352,65 @@ _CONTRAST_JS = """(selectors) => {
     }
     return out;
 }"""
+
+
+_RELATED_NOTICE = "#inspector > section.related-rail p.related-withheld"
+
+
+def test_a_confidential_note_under_the_default_lenses_never_requests_related(
+    page: Any,
+) -> None:
+    """The server's DEFAULT lenses — bodies served, titles not.
+
+    The note opens in full (it is NOT withheld) and its backlinks render, but
+    ``routes_related`` refuses it with 403 ``related_withheld``, because it
+    serves related notes of a confidential root only when titles AND bodies are
+    served. Before this was mirrored the client asked anyway and drew a blank
+    rail plus a console error. Now it does not ask, and says why in the rail's
+    place.
+    """
+    _NOTE_EXTRA["sensitivity"] = "confidential"
+    open_without_waiting_on_blocks(page)
+    page.wait_for_selector("#inspector > .marginalia .backlinks-rail a")
+
+    assert f"/api/notes/{ROOT_ID}" in _REQUESTS, (
+        "precondition: the note itself was never requested"
+    )
+    assert any(r.endswith("/links") for r in _REQUESTS), (
+        "precondition: the backlinks were never requested"
+    )
+    assert not any(r.endswith("/related") for r in _REQUESTS), (
+        f"/related was requested for a confidential note this server will not rank: "
+        f"{_REQUESTS}"
+    )
+    assert page.locator(_RELATED_NOTICE).count() == 1, "no notice in the rail's place"
+    assert page.locator(_RELATED_NOTICE).text_content() == (
+        "Related notes are hidden for confidential notes on this server."
+    )
+    assert page.locator(_RAIL).count() == 0
+    assert page.locator(".marginalia .backlinks-rail").text_content().count(
+        "Synthetic Linker"
+    ) == 1, "the backlinks rail did not render beside the notice"
+    assert _ERRORS == [], f"uncaught errors: {_ERRORS}"
+
+
+@pytest.mark.parametrize(
+    ("titles", "bodies", "requested"),
+    [(False, True, False), (True, False, False), (True, True, True)],
+    ids=["titles-off", "bodies-off", "titles-and-bodies-on"],
+)
+def test_the_related_gate_mirrors_the_route_on_both_lenses(
+    page: Any, titles: bool, bodies: bool, requested: bool,
+) -> None:
+    """``relatedRefusedHere`` is ``routes_related``'s gate and nothing else: a
+    confidential note is ranked exactly when titles AND bodies are served.
+    (``bodies-off`` would be withheld by the note route on a real server; it is
+    here to pin that the predicate needs both lenses, not as a reachable state.)"""
+    _NOTE_EXTRA["sensitivity"] = "confidential"
+    set_lenses(page, titles=titles, bodies=bodies)
+    open_without_waiting_on_blocks(page)
+    if requested:
+        page.wait_for_selector(_RAIL)
+    assert any(r.endswith("/related") for r in _REQUESTS) is requested, _REQUESTS
+    assert (page.locator(_RELATED_NOTICE).count() == 1) is not requested
+    assert _ERRORS == [], f"uncaught errors: {_ERRORS}"

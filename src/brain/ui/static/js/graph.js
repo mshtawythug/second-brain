@@ -28,7 +28,9 @@
 
 import { $, el, placeInspectorBlock } from "/static/js/dom.js";
 import { perNoteFetch } from "/static/js/note_fetch.js";
-import { state, subscribe } from "/static/js/store.js";
+import {
+  isConfidentialNote, servesConfidential, state, subscribe,
+} from "/static/js/store.js";
 
 /* An XML namespace is an identifier, not a fetch: nothing is requested. */
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -56,6 +58,10 @@ const DEFAULT_SIZE = 320;
    and test_a_crowded_ring_labels_only_the_neighbour_in_hand, which reads
    this constant from this file. */
 const MAX_LABELLED_NEIGHBOURS = 4;
+
+/* What stands in the graph's place when this server refuses it. One line of
+   text, no markup — it names no neighbour, only that the block is hidden. */
+const GRAPH_REFUSED_NOTICE = "The graph is hidden for confidential notes on this server.";
 
 /* What a node with an empty title is called, on its label AND in its <title>:
    a link with no text has no accessible name. */
@@ -117,6 +123,14 @@ export function renderGraph() {
      a withheld note is drawn, including who it links with. */
   if (!note || state.editing || note.withheld) return;
 
+  /* A confidential note this server will not graph: say so, and do NOT ask.
+     The request could only come back 403 `graph_withheld`, leaving a blank
+     block and a console error where the reader deserves a reason. */
+  if (graphRefusedHere(note)) {
+    placeInspectorBlock(host, buildRefusedNotice());
+    return;
+  }
+
   /* `undefined` means the request is in flight (NOT awaited — the note is
      already painted, and the graph must never stand between the reader and
      it); this renders again when it lands. */
@@ -125,6 +139,26 @@ export function renderGraph() {
 
   const block = buildBlock(cached);
   if (block) placeInspectorBlock(host, block);
+}
+
+/* MIRRORS routes_graph.note_graph's gate EXACTLY, and the two change together:
+   the route refuses the graph of a confidential root unless the session serves
+   confidential TITLES (`strict = not ctx.serve_confidential_titles`). The
+   bodies gate is not part of it — a confidential note whose body is served is
+   still refused its graph while titles are not. This is the ONE place the
+   client decides it. */
+function graphRefusedHere(note) {
+  return isConfidentialNote(note) && !servesConfidential("serve_confidential_titles");
+}
+
+/* The block element itself, so the notice keeps the graph's slot in the
+   canonical order (placeInspectorBlock) and is removed with it on the next
+   render. Same shape as the "no links yet" notice in buildBlock. */
+function buildRefusedNotice() {
+  const figure = el("figure", "local-graph");
+  figure.setAttribute("aria-label", GRAPH_LABEL);
+  figure.appendChild(el("p", "graph-withheld", GRAPH_REFUSED_NOTICE));
+  return figure;
 }
 
 /* The payload, validated at the boundary. Anything that is not a drawable graph

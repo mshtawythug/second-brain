@@ -20,21 +20,31 @@
  * THE CONTRACT CONSUMED: `GET /api/notes/{id}/related` answers
  * `{id, related: [{id, title, vault_path, source, score, snippet,
  * snippet_truncated}], count, vector_sim_floor}`. An empty `related` is a
- * normal answer and draws NO rail. A withheld confidential note answers 403
- * `related_withheld` — and this module never asks for a withheld note at all.
+ * normal answer and draws NO rail. A confidential note answers 403
+ * `related_withheld` unless the session serves confidential titles AND bodies
+ * — so this module does not ask in that case (`relatedRefusedHere`, which
+ * mirrors the route's gate) and shows a one-line notice in the rail's place
+ * instead. A WITHHELD note (body not served) is never asked about either, and
+ * draws nothing: the inspector's own withheld notice already explains it.
  * `score` is deliberately not displayed: it is a ranking input, not something
  * the reader can act on.
  */
 
 import { $, el, placeInspectorBlock } from "/static/js/dom.js";
 import { perNoteFetch } from "/static/js/note_fetch.js";
-import { state, subscribe } from "/static/js/store.js";
+import {
+  isConfidentialNote, servesConfidential, state, subscribe,
+} from "/static/js/store.js";
 
 /* What a row with an empty title is called: a link with no text has no
    accessible name. Same word graph.js uses. */
 const UNTITLED = "Untitled";
 
 const RAIL_LABEL = "Related notes";
+
+/* What stands in the rail's place when this server refuses it. One line of
+   text, no markup — it names no candidate, only that the rail is hidden. */
+const RELATED_REFUSED_NOTICE = "Related notes are hidden for confidential notes on this server.";
 
 let wired = false;
 
@@ -75,6 +85,14 @@ export function renderRelated() {
      precedes the fetch, nothing about it is even requested. */
   if (!note || state.editing || note.withheld) return;
 
+  /* A confidential note this server will not rank: say so, and do NOT ask.
+     The request could only come back 403 `related_withheld`, leaving a blank
+     rail and a console error where the reader deserves a reason. */
+  if (relatedRefusedHere(note)) {
+    placeInspectorBlock(host, buildRefusedNotice());
+    return;
+  }
+
   /* `undefined` means the request is in flight (NOT awaited — the note is
      already painted, and the rail must never stand between the reader and
      it); this renders again when it lands. */
@@ -86,6 +104,29 @@ export function renderRelated() {
      delivering a blank. */
   if (!cached || !cached.length) return;
   placeInspectorBlock(host, buildRail(cached));
+}
+
+/* MIRRORS routes_related.note_related's gate EXACTLY, and the two change
+   together: the route refuses a confidential root unless the session serves
+   confidential titles AND bodies
+   (`strict = not (ctx.serve_confidential_titles and ctx.serve_confidential_bodies)`).
+   Stricter than the graph's gate on purpose — a related row carries a snippet,
+   which is body text. This is the ONE place the client decides it. */
+function relatedRefusedHere(note) {
+  return isConfidentialNote(note) && !(
+    servesConfidential("serve_confidential_titles")
+    && servesConfidential("serve_confidential_bodies")
+  );
+}
+
+/* The block element itself (class `related-rail`), so the notice keeps the
+   rail's slot in the canonical order (placeInspectorBlock) and is removed with
+   it on the next render. A section, not a nav: it holds no links. */
+function buildRefusedNotice() {
+  const section = el("section", "related-rail");
+  section.setAttribute("aria-label", RAIL_LABEL);
+  section.appendChild(el("p", "related-withheld", RELATED_REFUSED_NOTICE));
+  return section;
 }
 
 /* The payload, validated at the boundary. Rows without a string id are

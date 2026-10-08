@@ -132,8 +132,17 @@ TREE: dict[str, Any] = {
 #: inspector is showing.
 _TITLES: dict[str, str] = {node_id: title for node_id, title, _ in NEIGHBOURS}
 
+#: The two confidential lenses as a server with the DEFAULT configuration
+#: reports them (``UiContext``: bodies served, titles not; ``routes_meta.health``
+#: carries both). graph.js and related.js read them to mirror their routes'
+#: gates, so a stub that omitted them would test the fail-closed path only.
+DEFAULT_LENSES: dict[str, bool] = {
+    "serve_confidential_bodies": True,
+    "serve_confidential_titles": False,
+}
+
 _STUBS: dict[str, Any] = {
-    "/api/health": {"status": "ok", "read_only": False, "notices": []},
+    "/api/health": {"status": "ok", "read_only": False, "notices": [], **DEFAULT_LENSES},
     "/api/tree": TREE,
     "/api/facets": {"sources": [], "content_types": [], "tags": []},
     "/api/search": {"results": [], "total_documents": 0,
@@ -362,6 +371,38 @@ def start_open(page: Any, note_id: str) -> None:
         }""",
         note_id,
     )
+
+
+#: How long :func:`open_without_waiting_on_blocks` lets a WRONGLY-issued
+#: supplementary request show up before a test asserts it never happened.
+ABSENCE_WINDOW_MS = 150
+
+
+def open_without_waiting_on_blocks(page: Any, note_id: str = ROOT_ID) -> None:
+    """Open a note through the REAL inspector, settle, and wait out a short
+    window — for the tests whose claim is that a block's request is NEVER made.
+
+    A BOUNDED ABSENCE CHECK, not a sleep-to-pass: absence has no event to wait
+    for, so the window only gives a wrongly-issued request time to reach the
+    stub router (``_REQUESTS``). With a correct client the caller's assertions
+    pass whether or not the window elapses.
+    """
+    start_open(page, note_id)
+    page.wait_for_selector(".note-body")
+    settle(page)
+    _dispatch(page, "{}")
+    page.wait_for_timeout(ABSENCE_WINDOW_MS)
+
+
+def set_lenses(page: Any, *, titles: bool, bodies: bool) -> None:
+    """Re-dispatch ``state.health`` as a server with these two confidential
+    lenses would report it (``routes_meta.health``). Call before opening a note."""
+    health = {
+        **_STUBS["/api/health"],
+        "serve_confidential_titles": titles,
+        "serve_confidential_bodies": bodies,
+    }
+    _dispatch(page, json.dumps({"health": health}))
 
 
 @pytest.fixture(name="page")

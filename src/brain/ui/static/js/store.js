@@ -76,6 +76,32 @@ export function noteKey(id) {
   return `${id}:${noteRevision(id)}`;
 }
 
+/* ---------------------------------------------- the confidential lenses --
+ *
+ * The server serves a confidential note through TWO separate gates, and
+ * `/api/health` reports both (routes_meta.health): `serve_confidential_bodies`
+ * (may this session read a confidential note it opened) and
+ * `serve_confidential_titles` (may a surface name one unprompted). The graph
+ * and the related rail are refused by the server on these gates, so each of
+ * those modules mirrors its route's gate EXACTLY rather than asking and
+ * collecting a 403 — see `graphRefusedHere` (graph.js) and
+ * `relatedRefusedHere` (related.js).
+ *
+ * FAILS CLOSED. Until `/api/health` has answered, if it never does, or if it
+ * omits a key, the gate reads as NOT served. The server is the authority;
+ * guessing "served" would only issue a request the server then refuses. */
+const CONFIDENTIAL = "confidential";
+
+/* The note's OWN tier, from its own payload (notes_service.read_note emits
+   `sensitivity` only when it is not the default). */
+export function isConfidentialNote(note) {
+  return Boolean(note) && note.sensitivity === CONFIDENTIAL;
+}
+
+export function servesConfidential(gate) {
+  return Boolean(state.health) && state.health[gate] === true;
+}
+
 const listeners = [];
 export function subscribe(fn) { listeners.push(fn); }
 export function dispatch(patch) { Object.assign(state, patch); listeners.forEach((fn) => fn()); }

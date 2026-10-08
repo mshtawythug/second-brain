@@ -181,7 +181,8 @@
 /* ------------------------------------------------------ caption, notice --- */
 
 .local-graph figcaption,
-.local-graph .graph-empty {
+.local-graph .graph-empty,
+.local-graph .graph-withheld {
   margin: var(--s-2) 0 0;
   font-size: var(--t-meta);
   color: var(--ink-muted);

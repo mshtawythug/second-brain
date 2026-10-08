@@ -79,11 +79,16 @@ async def note_graph(request: Request) -> JSONResponse:
 
     A CONFIDENTIAL ROOT in a strict session is a typed 403 ``graph_withheld``.
     ``graph_data(exclude_confidential=True)`` withholds the root itself, so
-    there is no honest picture to draw. The note route answers that document
-    with 200 and a ``withheld`` notice, so the client never asks for its graph;
-    a direct caller gets neither a root-only payload (that would carry the
-    title) nor a 404 (which would contradict ``/api/notes`` confirming the id
-    exists). The check runs BEFORE ``layout``.
+    there is no honest picture to draw. This gate is on the TITLES lens, not
+    the bodies lens ``notes_service.read_note`` withholds on, so under the
+    default lenses (bodies served, titles not) the note route serves the
+    document in full while this route refuses its graph. The client mirrors
+    this exact gate (``graphRefusedHere`` in ``static/js/graph.js``, reading
+    both lenses off ``/api/health``) and shows a notice instead of asking; the
+    two must change together. A direct caller gets neither a root-only payload
+    (that would carry the title) nor a 404 (which would contradict
+    ``/api/notes`` confirming the id exists). The check runs BEFORE
+    ``layout``.
 
     The sensitivity read and ``graph_data`` are separate reads, so a root
     deleted — or sealed under a strict lens — between them comes back from

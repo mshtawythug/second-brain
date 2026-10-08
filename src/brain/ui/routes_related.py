@@ -100,6 +100,10 @@ async def note_related(request: Request) -> JSONResponse:
 
     ``count`` is taken from the filtered list, so it cannot report how many
     confidential neighbours were withheld.
+
+    The client mirrors the root gate exactly (``relatedRefusedHere`` in
+    ``static/js/related.js``, reading both lenses off ``/api/health``) and shows
+    a notice instead of asking; the two must change together.
     """
     ctx = context_of(request)
     strict = not (ctx.serve_confidential_titles and ctx.serve_confidential_bodies)
