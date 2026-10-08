@@ -150,6 +150,8 @@ brain ui --host 0.0.0.0 --token <secret>  # a shared secret is required off loop
 
 It adds no runtime dependency — `starlette` and `uvicorn` already ship as transitive deps of the MCP SDK — and the front end is hand-written static assets with no bundler and no CDN, so it works fully offline.
 
+Beside each note, the inspector shows its local link graph — the note and its direct neighbours, click a node to open it — and a rail of related notes ranked by the same hybrid scoring and cosine floor `brain search` uses. Both are read-only: they read what is already in the database and never trigger a build.
+
 ## Claude integrations
 
 `brain` and the bundled `brain-mcp` server are harness-agnostic — any agent that runs a shell command or speaks MCP can query the corpus.

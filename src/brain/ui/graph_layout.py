@@ -31,9 +31,12 @@ ROOT_RADIUS = 9
 NEIGHBOUR_RADIUS = 6
 
 #: Ring radius at the default 320px canvas. 24 nodes on a 110px ring are
-#: 2π·110/24 ≈ 28.8px apart along the arc — more than two ~12px label lines, so
-#: adjacent labels do not collide — and 160 − 110 − 6 = 44px remain between a
-#: node's edge and the canvas edge for its label to sit outside the ring.
+#: 2π·110/24 ≈ 28.8px apart along the arc, which keeps the DISCS clear — but
+#: labels are horizontal and far wider than that spacing, so above 4 neighbours
+#: they can collide (measured; not at every count). The client handles it:
+#: above graph.js's ``MAX_LABELLED_NEIGHBOURS`` labels show only on hover or
+#: focus. 160 − 110 − 6 = 44px remain between a node's edge and the canvas edge
+#: for its label.
 RING_RADIUS = 110.0
 
 
