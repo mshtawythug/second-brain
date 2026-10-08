@@ -518,41 +518,8 @@ def test_a_lone_document_has_an_empty_related_list(
     assert payload["count"] == 0
 
 
-# ----------------------------------------------------------- §6.5 imports --
-
-_FORBIDDEN_PACKAGES = ("brain.maintenance", "brain.graph_rag", "brain.wiki")
-
-
-def _imported_modules(module: Any) -> set[str]:
-    """Every module the source imports, relative imports resolved to absolute."""
-    package = module.__name__.rsplit(".", 1)[0]
-    tree = ast.parse(inspect.getsource(module))
-    found: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            found.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            base = node.module or ""
-            if node.level:
-                parts = package.split(".")
-                anchor = ".".join(parts[: len(parts) - (node.level - 1)])
-                base = f"{anchor}.{base}" if base else anchor
-            found.add(base)
-            found.update(f"{base}.{alias.name}" for alias in node.names)
-    return found
-
-
-def test_the_route_imports_nothing_from_the_retiring_layers() -> None:
-    imported = _imported_modules(routes_related)
-
-    assert "brain.related" in imported  # the walker resolves relative imports
-    offenders = sorted(
-        name
-        for name in imported
-        for banned in _FORBIDDEN_PACKAGES
-        if name == banned or name.startswith(f"{banned}.")
-    )
-    assert offenders == []
+# §6.5 (no build path) is asserted for this route, beside the graph surfaces,
+# by the one parametrised test in tests/test_ui_routes_graph.py.
 
 
 def test_config_fields_the_route_reads_exist() -> None:

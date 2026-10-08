@@ -9,7 +9,6 @@ All ids and titles are synthetic.
 """
 from __future__ import annotations
 
-import ast
 import contextlib
 import json
 import math
@@ -22,11 +21,12 @@ from starlette.testclient import TestClient
 
 from brain.config import Config
 from brain.sensitivity import CONFIDENTIAL, DEFAULT_SENSITIVITY
-from brain.ui import graph_layout, queries, routes_graph
+from brain.ui import graph_layout, queries, routes_graph, routes_related
 from brain.ui.app import create_app
 from brain.ui.context import UiContext
 from brain.ui.graph_layout import RING_RADIUS
 from brain.vault.graph import GraphData, GraphNode
+from tests.import_rules import absolute_imports, forbidden_imports
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning")
 
@@ -447,45 +447,29 @@ def test_a_database_failure_is_a_leak_free_503(tmp_path: Path, fake_embedder: An
     assert "SELECT" not in body and "links" not in body
 
 
-# ------------------------------------------- spec §6.5: no graph-build path --
+# ------------------------------------- spec §6.5: no build path, any surface --
 
-_FORBIDDEN_PACKAGES = ("brain.maintenance", "brain.graph_rag", "brain.wiki")
-
-
-def _absolute_imports(module: Any) -> set[str]:
-    """Every module name ``module`` imports, relative imports resolved."""
-    path = Path(module.__file__)
-    package_parts = module.__name__.split(".")[:-1]
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            if node.level:
-                base = package_parts[: len(package_parts) - node.level + 1]
-                prefix = ".".join(base)
-                mod = f"{prefix}.{node.module}" if node.module else prefix
-            else:
-                mod = node.module or ""
-            names.add(mod)
-            names.update(f"{mod}.{alias.name}" for alias in node.names)
-    return names
+#: Every phase-5 surface, each with one import it is KNOWN to make. The known
+#: import is the anti-vacuity check: if the resolver stopped seeing relative
+#: imports, ``forbidden_imports`` would find nothing and pass for the wrong
+#: reason, so each case first proves the resolver saw a real one.
+_SECTION_6_5_SURFACES = [
+    (routes_graph, "brain.vault.graph"),
+    (graph_layout, "brain.vault.graph"),
+    (routes_related, "brain.related"),
+]
 
 
-@pytest.mark.parametrize("module", [routes_graph, graph_layout])
-def test_graph_surfaces_cannot_reach_a_build_path(module: Any) -> None:
-    imported = _absolute_imports(module)
-    assert imported, "anti-vacuity: the parser found no imports at all"
-    bad = {
-        name
-        for name in imported
-        for pkg in _FORBIDDEN_PACKAGES
-        if name == pkg or name.startswith(f"{pkg}.")
-    }
-    assert not bad, f"{module.__name__} imports a build path: {sorted(bad)}"
-
-
-def test_the_import_resolver_sees_relative_imports() -> None:
-    """Guard the guard: ``from ..vault.graph import graph_data`` must resolve."""
-    assert "brain.vault.graph" in _absolute_imports(routes_graph)
+@pytest.mark.nodb
+@pytest.mark.parametrize(
+    ("module", "known_import"),
+    _SECTION_6_5_SURFACES,
+    ids=[module.__name__ for module, _ in _SECTION_6_5_SURFACES],
+)
+def test_a_phase5_surface_cannot_reach_a_build_path(module: Any, known_import: str) -> None:
+    assert known_import in absolute_imports(module), (
+        f"anti-vacuity: the resolver did not see {module.__name__}'s import of "
+        f"{known_import}, so an empty offender list below would prove nothing"
+    )
+    offenders = forbidden_imports(module)
+    assert offenders == [], f"{module.__name__} imports a build path: {offenders}"
