@@ -209,8 +209,8 @@ ALL_CSS = "\n".join(CSS[name] for name in CSS_ORDER)
 JS_ORDER = (
     "dom.js", "api.js", "store.js", "ledger_status.js", "pager.js",
     "inspector.js", "tree.js", "results.js", "keys.js",
-    "palette.js", "marginalia.js", "graph.js", "related.js", "discovery.js",
-    "thread.js", "main.js",
+    "palette.js", "note_fetch.js", "marginalia.js", "graph.js", "related.js",
+    "discovery.js", "thread.js", "main.js",
 )
 JS = {name: (STATIC / "js" / name).read_text(encoding="utf-8") for name in JS_ORDER}
 JS_ALL = "\n".join(JS[name] for name in JS_ORDER)

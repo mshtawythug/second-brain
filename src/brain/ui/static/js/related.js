@@ -26,9 +26,9 @@
  * the reader can act on.
  */
 
-import { api } from "/static/js/api.js";
 import { $, el, placeInspectorBlock } from "/static/js/dom.js";
-import { noteKey, state, subscribe } from "/static/js/store.js";
+import { perNoteFetch } from "/static/js/note_fetch.js";
+import { state, subscribe } from "/static/js/store.js";
 
 /* What a row with an empty title is called: a link with no text has no
    accessible name. Same word graph.js uses. */
@@ -38,18 +38,16 @@ const RAIL_LABEL = "Related notes";
 
 let wired = false;
 
-/* noteKey(id) -> the related rows already fetched for that note, or `null`.
- *
- * Same reasoning as graph.js's graphCache: renderRelated runs on EVERY
- * dispatch, so without a cache each toggle of the editor would re-request the
- * list. A FAILED fetch caches `null` deliberately — retrying on every later
- * dispatch turns one failing endpoint into a request storm.
- *
- * Keyed on `noteKey(id)` (store.js), so a save of the note drops its entry and
- * no other note's — see marginalia.js's backlinkCache.
- */
-const relatedCache = new Map();
-const inFlight = new Set();
+/* The related rows for a note, through the shared per-note fetch
+ * (note_fetch.js — read its header for the cache, the revision key, the
+ * failure sentinel and the stale-response guard). A FAILED fetch caches
+ * `null`, which draws nothing. */
+const fetchRelated = perNoteFetch({
+  endpoint: "related",
+  normalise: (payload) => normalise(payload),
+  failed: null,
+  rerender: () => renderRelated(),
+});
 
 /* Idempotent, like wireMarginalia() and wireGraph(): a second call must not
    register a second subscriber drawing a second rail over the first. */
@@ -77,42 +75,17 @@ export function renderRelated() {
      precedes the fetch, nothing about it is even requested. */
   if (!note || state.editing || note.withheld) return;
 
-  const key = noteKey(note.id);
-  const cached = relatedCache.get(key);
-  if (cached === undefined) {
-    /* NOT awaited. The note is already painted; the rail is a second request
-       that must never stand between the reader and the note. */
-    fetchRelated(note, key);
-    return;
-  }
+  /* `undefined` means the request is in flight (NOT awaited — the note is
+     already painted, and the rail must never stand between the reader and
+     it); this renders again when it lands. */
+  const cached = fetchRelated(note);
+  if (cached === undefined) return;
 
   /* `null` (failed) and `[]` (nothing similar) both draw NOTHING — not an
      empty heading. A heading over no rows is chrome promising a list and
      delivering a blank. */
   if (!cached || !cached.length) return;
   placeInspectorBlock(host, buildRail(cached));
-}
-
-/* SILENT ON FAILURE — no toast, no placeholder. `api()` throws on a non-2xx and
-   does not toast; this caller declines to, for the same reason the backlinks
-   rail and the graph do: the reader never asked for this request. */
-function fetchRelated(note, key) {
-  if (inFlight.has(key)) return;
-  inFlight.add(key);
-
-  api(`/api/notes/${encodeURIComponent(note.id)}/related`).then(
-    (payload) => {
-      inFlight.delete(key);
-      relatedCache.set(key, normalise(payload));
-      /* The stale-response guard: by the time this resolves the reader may have
-         opened another note, and a slow response for A must not paint under B. */
-      if (state.note && state.note.id === note.id) renderRelated();
-    },
-    () => {
-      inFlight.delete(key);
-      relatedCache.set(key, null);
-    },
-  );
 }
 
 /* The payload, validated at the boundary. Rows without a string id are

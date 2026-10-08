@@ -39,8 +39,9 @@ export const state = {
  * fetched for a note, so a re-render on every dispatch costs no request. The
  * cost of that cache was that it never expired: save a note that adds a
  * `[[wikilink]]` and all three blocks kept showing the old neighbourhood until
- * a full reload. So each of them keys its cache on `noteKey(id)` rather than
- * on the bare id, and inspector.js calls `bumpNoteRevision(id)` on a
+ * a full reload. So their shared fetch helper (`perNoteFetch`, note_fetch.js)
+ * keys every cache on `noteKey(id)` rather than on the bare id, and
+ * inspector.js calls `bumpNoteRevision(id)` on a
  * SUCCESSFUL save. The saved note's key moves, its stale entries stop
  * matching, and its blocks refetch on the render the save's dispatch triggers.
  *

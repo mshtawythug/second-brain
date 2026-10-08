@@ -26,9 +26,9 @@
  * whoever wrote the note, and a title is never markup.
  */
 
-import { api } from "/static/js/api.js";
 import { $, el, placeInspectorBlock } from "/static/js/dom.js";
-import { noteKey, state, subscribe } from "/static/js/store.js";
+import { perNoteFetch } from "/static/js/note_fetch.js";
+import { state, subscribe } from "/static/js/store.js";
 
 /* An XML namespace is an identifier, not a fetch: nothing is requested. */
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -81,20 +81,16 @@ const ROOT_LABEL_GAP = 6;
 
 let wired = false;
 
-/* noteKey(id) -> the graph payload already fetched for that note, or `null`.
- *
- * Same reasoning as marginalia.js's backlinkCache: renderGraph runs on EVERY
- * dispatch, so without a cache each toggle of the editor would re-request the
- * graph. A FAILED fetch caches `null` deliberately — retrying on every later
- * dispatch turns one failing endpoint into a request storm. A transient failure
- * therefore stays blank until the page is reloaded or the note is saved, which
- * is the right trade for a block that is supplementary to the note.
- *
- * Keyed on `noteKey(id)` (store.js), so a save of the note drops its entry and
- * no other note's — see marginalia.js's backlinkCache.
- */
-const graphCache = new Map();
-const inFlight = new Set();
+/* The graph payload for a note, through the shared per-note fetch
+ * (note_fetch.js — read its header for the cache, the revision key, the
+ * failure sentinel and the stale-response guard). A FAILED fetch caches
+ * `null`, which draws nothing, as does a payload `normalise` rejects. */
+const fetchGraph = perNoteFetch({
+  endpoint: "graph",
+  normalise: (payload) => normalise(payload),
+  failed: null,
+  rerender: () => renderGraph(),
+});
 
 /* Idempotent, like wireMarginalia(): a second call must not register a second
    subscriber drawing a second figure over the first. */
@@ -121,39 +117,14 @@ export function renderGraph() {
      a withheld note is drawn, including who it links with. */
   if (!note || state.editing || note.withheld) return;
 
-  const key = noteKey(note.id);
-  const cached = graphCache.get(key);
-  if (cached === undefined) {
-    /* NOT awaited. The note is already painted; the graph is a second request
-       that must never stand between the reader and the note. */
-    fetchGraph(note, key);
-    return;
-  }
+  /* `undefined` means the request is in flight (NOT awaited — the note is
+     already painted, and the graph must never stand between the reader and
+     it); this renders again when it lands. */
+  const cached = fetchGraph(note);
+  if (cached === undefined) return;
 
   const block = buildBlock(cached);
   if (block) placeInspectorBlock(host, block);
-}
-
-/* SILENT ON FAILURE — no toast, no placeholder. `api()` throws on a non-2xx and
-   does not toast; this caller declines to, for the same reason the backlinks
-   rail does: the reader never asked for this request. */
-function fetchGraph(note, key) {
-  if (inFlight.has(key)) return;
-  inFlight.add(key);
-
-  api(`/api/notes/${encodeURIComponent(note.id)}/graph`).then(
-    (payload) => {
-      inFlight.delete(key);
-      graphCache.set(key, normalise(payload));
-      /* The stale-response guard: by the time this resolves the reader may have
-         opened another note, and a slow response for A must not paint under B. */
-      if (state.note && state.note.id === note.id) renderGraph();
-    },
-    () => {
-      inFlight.delete(key);
-      graphCache.set(key, null);
-    },
-  );
 }
 
 /* The payload, validated at the boundary. Anything that is not a drawable graph
