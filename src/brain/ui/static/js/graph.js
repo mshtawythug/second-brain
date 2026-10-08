@@ -39,6 +39,14 @@ const LABEL_MAX_CHARS = 28;
 /* Fallback canvas size, used only if the payload omits one. */
 const DEFAULT_SIZE = 320;
 
+/* What a node with an empty title is called, on its label AND in its <title>:
+   a link with no text has no accessible name. */
+const UNTITLED = "Untitled";
+
+/* The accessible name of the graph. The figure and the svg both carry it, so
+   no role in this block is ever unnamed. */
+const GRAPH_LABEL = "Links around this note";
+
 /* Gap between a node's circle and its label, in viewBox units. */
 const LABEL_GAP = 10;
 
@@ -149,7 +157,7 @@ function buildBlock(graph) {
   if (isolated && graph.corpusLinked) return null;
 
   const figure = el("figure", "local-graph");
-  figure.setAttribute("aria-label", "Links around this note");
+  figure.setAttribute("aria-label", GRAPH_LABEL);
 
   if (isolated) {
     figure.appendChild(
@@ -159,8 +167,11 @@ function buildBlock(graph) {
   }
 
   figure.appendChild(buildSvg(graph));
+  /* "not shown", not "in the links rail": the only rail is the marginalia's
+     backlinks ("Linked from"), and a truncated neighbour can be outgoing-only,
+     so pointing at the rail would send the reader somewhere it is not. */
   if (graph.truncated > 0) {
-    figure.appendChild(el("figcaption", null, `+${graph.truncated} more in the links rail`));
+    figure.appendChild(el("figcaption", null, `+${graph.truncated} more not shown`));
   }
   return figure;
 }
@@ -174,9 +185,13 @@ function svgEl(tag, attrs) {
 }
 
 function buildSvg(graph) {
+  /* role="group", NOT "img": an img's descendants are presentational, so the
+     neighbour links inside it would vanish from the accessibility tree, and an
+     unnamed img is itself a defect. A named group keeps every link reachable. */
   const svg = svgEl("svg", {
     viewBox: `0 0 ${graph.width} ${graph.height}`,
-    role: "img",
+    role: "group",
+    "aria-label": GRAPH_LABEL,
   });
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
 
@@ -200,6 +215,8 @@ function buildSvg(graph) {
      reader already has open. */
   const [root, ...neighbours] = graph.nodes;
   const rootGroup = svgEl("g", { class: "node node-root", "data-note-id": root.id });
+  /* Same as a neighbour, so an ingested root is styled like an ingested node. */
+  if (root.kind) rootGroup.setAttribute("data-kind", String(root.kind));
   appendGlyph(rootGroup, root);
   svg.appendChild(rootGroup);
 
@@ -222,8 +239,11 @@ function buildNeighbour(svg, node) {
     event.preventDefault();
     openNoteById(node.id);
   });
-  const on = () => setHover(svg, link, node.id, true);
-  const off = () => setHover(svg, link, node.id, false);
+  /* Pointer and keyboard share ONE highlight. Starting either replaces whatever
+     is lit; ending either falls back to the focused node, if there is one, so a
+     mouse leaving a node never darkens the node the keyboard is still on. */
+  const on = () => showHover(svg, link);
+  const off = () => endHover(svg);
   link.addEventListener("mouseenter", on);
   link.addEventListener("focus", on);
   link.addEventListener("mouseleave", off);
@@ -233,7 +253,7 @@ function buildNeighbour(svg, node) {
 
 function appendGlyph(parent, node) {
   const r = positive(node.r, 6);
-  const title = String(node.title ?? "");
+  const title = String(node.title ?? "").trim() || UNTITLED;
   /* <title> first: it is the accessible name of the group/link and the tooltip
      hover shows, carrying the FULL title the label below may have cut. */
   const tip = svgEl("title");
@@ -249,19 +269,32 @@ function shorten(title) {
   return title.length > LABEL_MAX_CHARS ? `${title.slice(0, LABEL_MAX_CHARS)}…` : title;
 }
 
-/* Highlight the node and every edge that touches it. Attribute comparison in
-   JS rather than a CSS attribute selector built from the id, so an id can never
-   be interpreted as selector syntax. */
-function setHover(svg, nodeEl, id, on) {
-  const targets = [nodeEl];
+/* Light the node and every edge that touches it, after clearing whatever was
+   lit before. Attribute comparison in JS rather than a CSS attribute selector
+   built from the id, so an id can never be interpreted as selector syntax. */
+function showHover(svg, nodeEl) {
+  clearHover(svg);
+  const id = nodeEl.getAttribute("data-note-id");
+  nodeEl.setAttribute("data-hover", "");
   for (const line of svg.querySelectorAll("line.edge")) {
     if (line.getAttribute("data-src") === id || line.getAttribute("data-dst") === id) {
-      targets.push(line);
+      line.setAttribute("data-hover", "");
     }
   }
-  for (const target of targets) {
-    if (on) target.setAttribute("data-hover", "");
-    else target.removeAttribute("data-hover");
+}
+
+function clearHover(svg) {
+  for (const lit of svg.querySelectorAll("[data-hover]")) lit.removeAttribute("data-hover");
+}
+
+/* During `blur` the active element is already <body>, so a blur clears; a
+   mouseleave while a node in THIS graph has focus hands the highlight back. */
+function endHover(svg) {
+  const focused = document.activeElement;
+  if (focused && focused.matches("a.node") && svg.contains(focused)) {
+    showHover(svg, focused);
+  } else {
+    clearHover(svg);
   }
 }
 

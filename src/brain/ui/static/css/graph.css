@@ -31,8 +31,17 @@
   margin: 0 auto;
   /* The server places NODES inside the viewBox, not their labels: a 28-char
      label centred on a node near the rim runs past the edge and would be
-     clipped mid-word. The svg is centred in a wider figure, so the overflow
-     lands on the figure's own blank margin. */
+     clipped mid-word. So the overflow stays visible and lands on the
+     inspector's own padding instead.
+     MEASURED, not assumed (2026-10-08, three 28-char labels on the ring): the
+     label text scales with the svg, and the widest spill past the figure was
+     ~7px at a 320px phone and ~9px at 400px, against 16px of inspector padding
+     (24rem caps the svg, so it cannot grow further). Every label stays inside
+     the inspector, so clipping here would cost readable labels for nothing.
+     Note the spill is INK overflow: it never widens the inspector's scroll
+     box, it would only be CUT at the inspector's edge — so the guard,
+     test_long_labels_do_not_scroll_a_narrow_inspector_sideways, asserts each
+     label's box lies inside the inspector, not merely that nothing scrolls. */
   overflow: visible;
 }
 
