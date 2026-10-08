@@ -40,11 +40,17 @@
      auto` would clip it mid-word. The label text scales with the drawing, so
      a percentage gutter holds at every width.
      WHY NOT anchor rim labels inward (text-anchor end/start by side): the
-     3 and 9 o'clock labels sit on almost the same row as the root's label.
-     Centred, a 28-char rim label already reaches ~17px into it at 320px (the
-     server's radius vs label width, not something this sheet causes);
-     anchored inward it would run across the WHOLE root label. A slightly
-     smaller graph is the cheaper cost.
+     3 and 9 o'clock labels hang at the root's height, so anchored inward
+     they run toward the centre of the canvas. The root's own label is drawn
+     ABOVE the root (js/graph.js, ROOT_LABEL_GAP) precisely to keep that row
+     free; centred rim labels plus a gutter keep every label apart.
+     MEASURED label-box gaps on the server's ring (2026-10-08, 28-char rim
+     labels; pinned by test_no_two_labels_overlap_on_the_server_ring):
+                            320px  400px  1280px
+       root above 12 o'clock  47     61     54    (vertical)
+       root above 3/9 o'clock 12     16     15    (vertical)
+     Before the root label moved, it overlapped both 3/9 o'clock labels at
+     all three widths.
      MEASURED (2026-10-08, the server's ring with four 28-char labels; the
      pixels are label left..right against the inspector):
        without the gutter: 320px  -8..130 and 189..329 in 0..320  (CLIPPED)

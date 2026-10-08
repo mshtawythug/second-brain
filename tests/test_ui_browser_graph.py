@@ -603,6 +603,45 @@ def test_rim_labels_stay_inside_the_inspector(page: Any, viewport_width: int) ->
     assert spill == [], f"labels run past the inspector and are clipped: {spill}"
 
 
+@pytest.mark.parametrize("viewport_width", [320, 400, 1280])
+def test_no_two_labels_overlap_on_the_server_ring(page: Any, viewport_width: int) -> None:
+    """(14) On the server's real ring, no label box intersects another.
+
+    The 3 and 9 o'clock neighbours sit on the root's row, so their labels
+    (drawn BELOW their nodes) share a band with anything drawn below the root.
+    The 12 o'clock neighbour's label sits below IT, i.e. above the root — the
+    other side a root label could move to. Every pair is checked, so moving
+    the root's label cannot trade one collision for another unnoticed.
+    """
+    page.set_viewport_size({"width": viewport_width, "height": 800})
+    _GRAPH["payload"] = _server_ring_payload()
+    _open(page)
+    page.wait_for_selector(".local-graph svg")
+
+    overlaps = page.evaluate(
+        """() => {
+            const boxes = [...document.querySelectorAll('.local-graph text')]
+              .map((t) => [t.textContent, t.getBoundingClientRect()]);
+            const hits = [];
+            for (let i = 0; i < boxes.length; i++) {
+              for (let j = i + 1; j < boxes.length; j++) {
+                const [na, a] = boxes[i]; const [nb, b] = boxes[j];
+                if (a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom) {
+                  hits.push(`${na} [${Math.round(a.left)}..${Math.round(a.right)} x `
+                    + `${Math.round(a.top)}..${Math.round(a.bottom)}] meets ${nb} `
+                    + `[${Math.round(b.left)}..${Math.round(b.right)} x `
+                    + `${Math.round(b.top)}..${Math.round(b.bottom)}]`);
+                }
+              }
+            }
+            return [boxes.length, hits];
+        }"""
+    )
+    count, hits = overlaps
+    assert count == 1 + len(_RIM_TITLES), "precondition: not every label was drawn"
+    assert hits == [], f"labels overlap: {hits}"
+
+
 # ---------------------------------------------------------- degraded states --
 
 

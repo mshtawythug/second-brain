@@ -47,8 +47,19 @@ const UNTITLED = "Untitled";
    no role in this block is ever unnamed. */
 const GRAPH_LABEL = "Links around this note";
 
-/* Gap between a node's circle and its label, in viewBox units. */
+/* Gap between a node's circle and its label, in viewBox units. A label below
+   its node is placed by its BASELINE, so the gap clears the cap height. */
 const LABEL_GAP = 10;
+
+/* The ROOT's label sits ABOVE the root circle, its baseline this far over the
+   circle's top — enough to clear descenders. Where a label sits relative to
+   its OWN node is presentation, not layout: the server still places every
+   node. Below the root it shared a row with the server ring's 3 and 9
+   o'clock neighbours (whose labels hang below them at the root's height),
+   and collided with both; above, it shares nothing — the 12 o'clock label
+   hangs BELOW its node, ~60 units higher. Pinned by
+   test_no_two_labels_overlap_on_the_server_ring. */
+const ROOT_LABEL_GAP = 6;
 
 let wired = false;
 
@@ -217,7 +228,7 @@ function buildSvg(graph) {
   const rootGroup = svgEl("g", { class: "node node-root", "data-note-id": root.id });
   /* Same as a neighbour, so an ingested root is styled like an ingested node. */
   if (root.kind) rootGroup.setAttribute("data-kind", String(root.kind));
-  appendGlyph(rootGroup, root);
+  appendGlyph(rootGroup, root, { above: true });
   svg.appendChild(rootGroup);
 
   for (const node of neighbours) svg.appendChild(buildNeighbour(svg, node));
@@ -251,7 +262,7 @@ function buildNeighbour(svg, node) {
   return link;
 }
 
-function appendGlyph(parent, node) {
+function appendGlyph(parent, node, { above = false } = {}) {
   const r = positive(node.r, 6);
   const title = String(node.title ?? "").trim() || UNTITLED;
   /* <title> first: it is the accessible name of the group/link and the tooltip
@@ -260,7 +271,8 @@ function appendGlyph(parent, node) {
   tip.textContent = title;
   parent.appendChild(tip);
   parent.appendChild(svgEl("circle", { cx: node.x, cy: node.y, r }));
-  const label = svgEl("text", { x: node.x, y: node.y + r + LABEL_GAP, "text-anchor": "middle" });
+  const labelY = above ? node.y - r - ROOT_LABEL_GAP : node.y + r + LABEL_GAP;
+  const label = svgEl("text", { x: node.x, y: labelY, "text-anchor": "middle" });
   label.textContent = shorten(title);
   parent.appendChild(label);
 }
