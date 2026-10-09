@@ -96,7 +96,15 @@ def _assert_the_face_bit(page: Any, face: str) -> None:
     """The ``wide`` face must have forced at least one cut, or its run proved
     nothing the ``platform`` run did not. Asserted LAST, after the geometry,
     so a missing fit fails on overlapping or clipped labels — what a reader
-    would see — and not here."""
+    would see — and not here.
+
+    **One exception, measured:** ``test_rim_labels_stay_inside_the_inspector
+    [1280-wide]``. At 1280 the rim labels never reach the inspector's edge, so
+    with the fit removed nothing clips and that run fails HERE, at this
+    precondition. The cut it counts comes from the ROW bound (the 3 and 9
+    o'clock labels share a row), and that bound's geometry is asserted by
+    ``test_no_two_labels_overlap_on_the_server_ring[1280-wide]``, which does
+    fail on overlapping labels."""
     if face == "wide":
         assert page.evaluate(_CUT_LABELS_JS) > 0, (
             "precondition: the wide face cut no label, so this run tested nothing new"

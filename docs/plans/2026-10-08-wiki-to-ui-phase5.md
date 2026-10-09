@@ -312,9 +312,13 @@ font, not a test artefact. Fixed 2026-10-09 by `fitLabels` in `static/js/graph.j
 to a measured, geometry-derived slot, and refitted when the inspector is resized). The layout suite
 now runs every geometric test at the platform font AND at a deliberately wide face, so a macOS run
 catches this class of defect too. Measured on macOS with `fitLabels` disabled outright: 13 of the
-15 parametrized wide runs go red, twelve on overlapping or clipped labels and one (the rim test at
-1280) on its face-bit assertion, along with both wide-only tests (refit on narrowing, and a draw
-into a hidden inspector). **The other two are a named exemption, not an omission:** the crowded-ring
+15 parametrized wide runs go red. Twelve go red at the geometry assertions, on overlapping or
+clipped labels. One goes red only at its face-bit precondition: the rim test at 1280, where the rim
+labels never reach the inspector's edge. Its cut comes from the row bound, whose geometry the
+overlap test's 1280 wide run asserts. Mutating `fitText`'s slot to `Infinity` instead gives the same
+split on the rim and overlap tests. Both wide-only tests go red as well (refit on narrowing, and a
+draw into a hidden inspector). **The two of the 15 that stay green are a named exemption, not an
+omission:** the crowded-ring
 test's 1280 wide runs. A crowded ring shows no two labels together, so only the inspector's edge
 binds, and at 1280 a rim label's slot is ~540 viewBox units against ~250 for the widest
 28-character label the wide face draws. No title reaches it, so those two runs are copies of their
