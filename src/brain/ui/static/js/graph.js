@@ -115,13 +115,11 @@ let wired = false;
    delivery refits the one drawn svg ONCE, however many of the two boxes
    moved; fitting edits only text inside the svg, which resizes neither box,
    so it cannot loop. One graph is drawn at a time, so `fitted` is the svg
-   being watched. Absent where ResizeObserver is (no current browser), labels
-   are fitted once, at draw time — or, drawn into a hidden inspector, not at
-   all (see fitLabels). */
+   being watched. ResizeObserver is ASSUMED, not feature-tested, like the
+   unguarded `??` in inspector.js and related.js: every browser that can parse
+   these modules has it. */
 let fitted = null;
-const refit = typeof ResizeObserver === "function"
-  ? new ResizeObserver(() => fitLabels(fitted))
-  : null;
+const refit = new ResizeObserver(() => fitLabels(fitted));
 
 /* The graph payload for a note, through the shared per-note fetch
  * (note_fetch.js — read its header for the cache, the revision key, the
@@ -152,7 +150,7 @@ export function renderGraph() {
      is worse than none. */
   const stale = host.querySelector(".local-graph");
   if (stale) stale.remove();
-  if (refit) refit.disconnect();
+  refit.disconnect();
 
   const note = state.note;
   /* Editing: the editor owns the 1fr track, and a graph beside raw markdown
@@ -184,10 +182,8 @@ export function renderGraph() {
   if (!svg) return;
   fitted = svg;
   fitLabels(svg);
-  if (refit) {
-    refit.observe(svg);
-    refit.observe(host);
-  }
+  refit.observe(svg);
+  refit.observe(host);
 }
 
 /* MIRRORS routes_graph.note_graph's gate EXACTLY, and the two change together:
@@ -385,8 +381,7 @@ function fitLabels(svg) {
      labels alone. Tested on the svg's BOX, not its CTM: Chromium returns a
      non-null identity getScreenCTM() for a display:none svg, and fitting to
      the all-zero inspector rect would make every slot negative and every
-     label a bare "…". The observer refits when the box returns; without an
-     observer they keep their character cut until the next draw.
+     label a bare "…". The observer refits when the box returns.
      The ONE guard. An svg with a box is rendered, so it is still inside the
      #inspector it was placed in (nothing moves it), that inspector has a box
      too, and the svg's CTM is non-null; no stylesheet scales or mirrors the

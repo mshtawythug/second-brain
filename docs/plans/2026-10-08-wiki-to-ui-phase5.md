@@ -328,12 +328,14 @@ platform runs and do not assert the cut. The 320 and 400 crowded runs do.
 A draw into a HIDDEN inspector (the phone list view sets it `display: none`) is not fitted at all.
 Chromium returns a non-null identity `getScreenCTM()` for a `display: none` svg, so the first
 guard, which tested the CTM, passed. The all-zero inspector rect then cut every label, root
-included, to a bare "…". The ResizeObserver repaired that before paint, but a browser without one
-would have kept it. `fitLabels` now returns when the svg has no width — the one guard, since an svg
+included, to a bare "…". The ResizeObserver refitted the labels when the inspector was shown
+again, so no reader saw it, but the draw-time fit was wrong all the same. `fitLabels` now returns when the svg has no width — the one guard, since an svg
 with a box sits in an inspector with a box (regression test (15e) in
 `tests/test_ui_browser_graph_layout.py`). The refit observes the inspector as well as the svg: the
 svg is capped at 24rem, so on a wide desktop only its percentage gutter makes its box follow the
-inspector's. Each observation has its own test, (15f) and (15g).
+inspector's. Each observation has its own test, (15f) and (15g), and (15h) pins that every draw
+lets go of the svg it replaced. ResizeObserver is assumed rather than feature-tested, following the
+unguarded `??` in `inspector.js` and `related.js`: any browser that can parse those modules has it.
 
 The false legibility claim was repeated in THREE places, not one: `graph_layout.py`'s `RING_RADIUS`
 comment (corrected in the closeout commit), the same module's `DEFAULT_CAP` comment, and

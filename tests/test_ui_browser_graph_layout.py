@@ -5,7 +5,9 @@ Split out of ``tests/test_ui_browser_graph.py`` to keep each module under the
 ``tests/ui_graph_harness.py``, not copied. Everything here builds its
 ``/graph`` stub with the server's own ring formula (``graph_layout``) and
 measures label BOXES: inside the inspector, never intersecting, legible on a
-phone, and hidden at rest on a ring too crowded to label.
+phone, and hidden at rest on a ring too crowded to label. The refit that keeps
+them so when a box resizes is pinned here too, down to what its
+ResizeObserver watches (15h).
 
 **The four parametrized geometric tests run twice: at the platform's default
 font, and at a deliberately WIDE face** (``_WIDE_FACE_CSS``) — the rim,
@@ -51,9 +53,11 @@ from tests.ui_graph_harness import (
     CHARLIE_ID,
     ROOT_ID,
     ROOT_TITLE,
+    _dispatch,
     _open,
     _page_fixture,  # noqa: F401 — registers the `page` fixture
     _static_origin_fixture,  # noqa: F401 — registers `static_origin`, which `page` uses
+    reboot,
 )
 
 pytestmark = pytest.mark.browser
@@ -480,7 +484,7 @@ def test_labels_are_refitted_when_the_inspector_narrows(page: Any) -> None:
 #: below 780px sets it `display: none`), redraw, and read the labels IN THE
 #: SAME TASK. Read a frame later and the ResizeObserver has already refitted
 #: them, so a broken draw-time fit would be repaired before any assertion saw
-#: it — and stay broken for good in a browser without ResizeObserver.
+#: it.
 _DRAW_WHILE_HIDDEN_JS = """async () => {
     const graph = await import("/static/js/graph.js");
     document.body.dataset.view = "list";
@@ -607,3 +611,56 @@ def test_labels_are_refitted_when_only_the_drawing_resizes(page: Any) -> None:
         "precondition: the inspector resized"
     )
     _assert_refitted_as_a_fresh_draw(page, before, "shrinking the drawing alone")
+
+
+#: Installed BEFORE the app loads (an init script, applied by ``reboot``):
+#: a ResizeObserver that records what it watches, so a test can see the
+#: observer's targets. It wraps the browser's class; it changes nothing in
+#: graph.js, which constructs the app's only ResizeObserver (inspector.js is
+#: pinned to have none by ``check_resize_is_not_inert``), so one set suffices.
+_RECORDING_RESIZE_OBSERVER_JS = """(() => {
+    const live = new Set();
+    window.__resizeTargets = () => [...live];
+    window.ResizeObserver = class extends window.ResizeObserver {
+        observe(target, options) { live.add(target); super.observe(target, options); }
+        unobserve(target) { live.delete(target); super.unobserve(target); }
+        disconnect() { live.clear(); super.disconnect(); }
+    };
+})();"""
+
+#: [how many targets are watched, is the drawn svg one, is #inspector one,
+#: how many watched targets are detached from the document].
+_RESIZE_TARGETS_JS = """() => {
+    const targets = window.__resizeTargets();
+    const svg = document.querySelector('.local-graph svg');
+    return [targets.length, svg !== null && targets.includes(svg),
+            targets.includes(document.getElementById('inspector')),
+            targets.filter((t) => !t.isConnected).length];
+}"""
+
+
+def test_the_refit_observer_watches_only_the_drawn_graph(page: Any) -> None:
+    """(15h) Every draw lets go of the previous one: the observer watches the
+    drawn svg and #inspector and nothing else — not the svg a redraw replaced,
+    which would stay alive, detached, for as long as the page — and once no
+    graph is drawn (the editor owns the inspector), it watches nothing.
+
+    ``_open`` draws twice (once when /graph lands, again on its closing
+    dispatch), so a draw that did not disconnect leaves a detached svg here.
+    """
+    page.add_init_script(_RECORDING_RESIZE_OBSERVER_JS)
+    reboot(page)
+    _GRAPH["payload"] = _server_ring_payload()
+    _open(page)
+    page.wait_for_selector(".local-graph svg")
+    assert page.evaluate(_RESIZE_TARGETS_JS) == [2, True, True, 0], (
+        "after a redraw, the observer does not watch exactly the drawn svg and #inspector"
+    )
+
+    _dispatch(page, '{"editing": true}')
+    assert page.evaluate("() => document.querySelector('.local-graph')") is None, (
+        "precondition: the editor did not take the graph's place"
+    )
+    assert page.evaluate(_RESIZE_TARGETS_JS) == [0, False, False, 0], (
+        "with no graph drawn, the observer still watches something"
+    )
