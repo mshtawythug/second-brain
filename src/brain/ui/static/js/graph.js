@@ -55,7 +55,11 @@ const DEFAULT_SIZE = 320;
    accessible name, so nothing is lost to a screen reader.
    WHAT THE THRESHOLD DOES AND DOES NOT DO. It does NOT keep labels apart:
    fitLabels does, at every count, by cutting each label to its measured
-   slot — so no font can make labels meet. The threshold decides when that
+   slot — so no font can make labels meet, short of a slot narrower than
+   "…" (the bare ellipsis is fitText's floor), which the server's ring never
+   produces: the narrowest shared-row slot it makes is ~186 units (the
+   ~190-unit pair below, less LABEL_CLEARANCE), and on a crowded ring no
+   two labels show together at all. The threshold decides when that
    slot is too narrow to be worth reading. On the server's ring
    (graph_layout.RING_RADIUS = 110 on 320, label font 13.5 units) labels
    share a row only in pairs at up to 4 neighbours (at 3, the 4 and 8 o'clock
