@@ -312,32 +312,72 @@ font, not a test artefact. Fixed 2026-10-09 by `fitLabels` in `static/js/graph.j
 to a measured, geometry-derived slot, and refitted when the inspector or the drawing is resized).
 The layout suite now runs its four parametrized geometric tests at the platform font AND at a
 deliberately wide face, and four refit tests (now in `tests/test_ui_browser_graph_refit.py`) run at
-the wide face only, so a macOS run catches this class of defect too. Measured on macOS with
-`fitLabels` disabled outright: 13 of the 15 parametrized wide runs go red, every one at a geometry
-assertion, on overlapping, clipped or halo-crowded labels. The rim test's 1280 run is the one that
-needed the halo check: there the rim labels never reach the inspector's edge, so nothing clips,
-and it goes red only because its two rim labels overlap. All four wide-only refit tests go red as
-well (refit on narrowing; a draw into a hidden inspector; refit when only the inspector, or only
-the drawing, resizes), and so does the edge-clearance test (15i), at the platform font: 18 in all.
-Mutating `fitText`'s slot to `Infinity` instead turns the same 18 red. **The two of the 15 that
-stay green are a named exemption, not an omission:** the crowded-ring test's 1280 wide runs. A
-crowded ring shows no two labels together, so only the inspector's edge binds, and at 1280 a rim
-label's slot is ~540 viewBox units against ~250 for the widest 28-character label the wide face
-draws. No title reaches it, so those two runs are copies of their platform runs and do not assert
-the cut. The 320 and 400 crowded runs do.
+the wide face only, so a macOS run catches this class of defect too.
 
-The crowded-ring test also pins the TEXT of the label in hand, not only its box. On a crowded ring
-`fitLabels` skips the row bound, since no two labels show together. Applied anyway, a hidden
-neighbour's box cut the hovered label beside 12 o'clock on the 24 ring to "S…", while every box
-check stayed green. Now the label must be its whole title at 1280, and at every width the longest
-cut that the inspector's edge alone allows. With the row bound forced on, all 12 crowded runs go
-red. The clearance `fitLabels` keeps (`LABEL_CLEARANCE`) is checked against the 3-unit halo
-graph.css strokes round each label, read from the computed style. The rim and overlap tests check
-it on whatever cuts their titles produce, and (15i) checks it where the outcome cannot depend on
-the font: a title of `i`, cut a few characters in, beside an inspector with a left border. With
-the clearance set to 0, (15i) goes red, along with four rim and overlap wide runs on macOS. Without
-the border term (`+ host.clientLeft`), only (15i) goes red, because the app's own inspector has no
-left border.
+**Box checks alone cannot see an OVER-cut label, so every geometric test also applies an
+optimality oracle.** *(Added 2026-10-09, after the completion audit of `8aef7be` failed on it.)*
+Dropping the `Math.abs` from the row bound turned the left label of every shared-row pair into a
+bare "…", and dropping the clearance from the row bound put a rim pair 1.36 units apart, inside
+the 3-unit halo; both stayed 188/188 green, because a label cut too short sits inside every box.
+The oracle (`_assert_optimal_cuts`, `tests/ui_graph_geometry.py`) recomputes each label's slot in
+the test from the specified rules — the edge bound from the inspector's padding box, and on a
+non-crowded ring the row bound from every label within the clearance of its row, at `|dx|` less
+the clearance — and requires the label to be the LONGEST cut of its title that fits: one more
+character must not, and a title whose capped form fits must be shown whole. It is measured on the
+same element with the same `getComputedTextLength` as `fitText`. It cannot cancel a mutation: it
+reads nothing from `graph.js`, and it holds the spec's clearance (4) and cap (28) itself, checking
+that `graph.js` ships them only after the geometry. It runs in the rim, overlap and every-ring
+tests at both faces and every width, and with no row bound in the crowded-ring test, on every
+label. Three platform-font tests place their nodes so the outcome cannot depend on the font, and
+measure that as preconditions: (15i) a title of `i` beside each edge of an inspector with side
+borders, so one `i` is narrower than the clearance; (15j) two such titles on one row, level and
+stacked half a clearance apart vertically; and (15k) a slot placed between a long title's 27- and
+28-character cuts.
+
+Measured on macOS (all 40 tests in the two modules; each mutation applied, confirmed applied,
+and reverted to a clean `git diff`):
+
+| Mutation of `graph.js` | Red | Where |
+|---|---|---|
+| `Math.abs` dropped from the row bound | 21 | all at the oracle: rim, overlap and every-ring tests at every width and face, (15i), both (15j) |
+| row bound's `- LABEL_CLEARANCE` dropped | 8 | the oracle in seven (rim and overlap at 1280 wide, every-ring at all three platform widths and 1280 wide, (15j) stacked); (15j) level at the halo check first |
+| row membership tested without the clearance | 1 | (15j) stacked, at the oracle |
+| `LABEL_CLEARANCE` 4 → 0 | 34 | rim and overlap 320/400 wide at the halo check; rim and overlap 1280 wide, five crowded runs, (15j) stacked and (15k) at the oracle; (15i) and (15j) level at the halo check; the other 19 only at the constant check: in them no label's cut differs from the spec's |
+| `clientWidth` → `offsetWidth` | 1 | (15i), at its spill check under the right border |
+| `+ host.clientLeft` dropped | 1 | (15i), at its spill check under the left border |
+| `fitText`'s search capped at 26 (`hi - 2`) | 1 | (15k), at the oracle |
+| row bound applied on a crowded ring | 12 | every crowded run, at the oracle |
+
+With the earlier spill and halo assertions removed, the oracle alone turns (15i) red for
+`offsetWidth` and for the dropped `clientLeft`, and both (15j) runs red for the row clearance.
+
+**`fitLabels` disabled outright: 25 red.** 13 of the 15 parametrized wide runs:
+the rim test's 320 and 400 runs clipped, its 1280 run on the halo (there the rim labels never
+reach the inspector's edge, so nothing clips; its two rim labels overlap); all three overlap runs
+and all three every-ring runs on overlapping labels; and four crowded runs, two clipped (320 and
+400 at threshold+1) and two at the oracle (320 and 400 at the cap). Four platform runs, all at
+the oracle: the every-ring test at all three widths and the crowded test at 400 at the cap. Of
+the four wide-only refit tests, (15d) and (15e) go red on clipped labels, while (15f) and (15g)
+go red at a PRECONDITION, not at geometry: with no fit, the resize changes no label's cut, so
+their guard that the test tested something fires first. And (15i) on labels under the inspector's
+border, (15j) level on overlapping labels, (15j) stacked and (15k) at the oracle. Mutating
+`fitText`'s slot to `Infinity` instead turns the same 25 red. **The two wide runs that stay green
+are a named exemption, not an omission:** the crowded-ring test's 1280 wide runs. A crowded ring
+shows no two labels together, so only the inspector's edge binds, and at 1280 a rim label's slot
+is ~540 viewBox units against ~250 for the widest 28-character label the wide face draws. No
+title reaches it, so those two runs are copies of their platform runs and do not assert the cut.
+The 320 and 400 crowded runs do.
+
+Three survivors remain, all equivalent: `<=` → `<` in `fitText`'s early return, in its binary
+search, and in the row-membership test. Each differs only when a measured length equals a slot,
+or a vertical gap equals the clearance, exactly.
+
+The crowded-ring test pins the TEXT of every label, not only the box of the one in hand. On a
+crowded ring `fitLabels` skips the row bound, since no two labels show together. Applied anyway,
+a hidden neighbour's box cut the hovered label beside 12 o'clock on the 24 ring to "S…", while
+every box check stayed green. The clearance `fitLabels` keeps (`LABEL_CLEARANCE`) is also checked
+against the 3-unit halo graph.css strokes round each label, read from the computed style, in the
+rim and overlap tests and in (15i) and (15j).
 
 A draw into a HIDDEN inspector (the phone list view sets it `display: none`) is not fitted at all.
 Chromium returns a non-null identity `getScreenCTM()` for a `display: none` svg, so the first

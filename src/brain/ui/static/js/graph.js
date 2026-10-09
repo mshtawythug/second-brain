@@ -44,7 +44,10 @@ const LABEL_MAX_CHARS = 28;
    inspector's edge and between two labels sharing a row. It covers the
    3-unit halo graph.css strokes round every glyph, with room to spare.
    Pinned against that halo — read from the label's computed stroke-width,
-   not from here — by test_the_edge_clearance_covers_the_label_halo. */
+   not from here — at both edges by test_the_edge_clearance_covers_the_label_halo
+   and between two labels sharing a row by
+   test_the_row_clearance_covers_the_label_halo; the layout tests' oracle
+   holds every cut to the specified 4, not to whatever this file says. */
 const LABEL_CLEARANCE = 4;
 
 /* Fallback canvas size, used only if the payload omits one. */

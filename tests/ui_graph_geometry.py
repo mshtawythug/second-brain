@@ -12,9 +12,17 @@ and it carries no ``browser`` marker, so ``tests/test_ci_workflow.py`` does not
 ask CI to name it. Every module that imports it applies
 ``pytestmark = pytest.mark.browser`` itself.
 
-**Label clearance is asserted against the HALO** (``_halo_shortfalls``, from
-graph.css's computed ``stroke-width``), never against graph.js's
-``LABEL_CLEARANCE``, so mutating the clearance cannot lower the bar with it.
+**No bar here moves with graph.js.** Label clearance is asserted against the
+HALO (``_halo_shortfalls``, from graph.css's computed ``stroke-width``), never
+against graph.js's ``LABEL_CLEARANCE``. And every label's CUT is held to the
+OPTIMALITY ORACLE (``_assert_optimal_cuts``): its slot recomputed here from the
+specified rules, with the spec's clearance and cap pinned here
+(``_SPEC_LABEL_CLEARANCE``, ``_SPEC_LABEL_MAX_CHARS``) rather than read from
+graph.js, and the label required to be the LONGEST cut of its title that fits
+it. A box check passes an over-cut label; the oracle does not. Mutating a
+constant cannot lower either bar with it: graph.js's constants are compared
+with the spec's only after the geometry, so a changed one fails first on what
+it does to the labels where it does anything.
 """
 from __future__ import annotations
 
@@ -75,13 +83,13 @@ def _assert_the_face_bit(page: Any, face: str) -> None:
     rim test's 1280 ``wide`` run counts comes from the ROW bound (the 3 and 9
     o'clock labels share a row). With the fit removed, that run still fails on
     geometry, not here: its halo check (``_halo_shortfalls``) finds the two
-    rim labels overlapping."""
+    rim labels overlapping, before it reaches the oracle."""
     if face == "wide":
         assert page.evaluate(_CUT_LABELS_JS) > 0, (
             "precondition: the wide face cut no label, so this run tested nothing new"
         )
 
-#: Every label's ADVANCE extent in viewBox units — ``x`` plus or minus half
+#: Every label's ADVANCE extent in viewBox units — whose it is, ``x`` plus or minus half
 #: its ``getComputedTextLength()``, the same length fitText measures, so the
 #: comparisons below are exact and never hang on glyph ink — with its row
 #: (``getBBox``), whether it is visible, and the halo graph.css strokes round
@@ -100,6 +108,7 @@ _EXTENTS_JS = """() => {
             const half = t.getComputedTextLength() / 2;
             const box = t.getBBox();
             return {
+                id: t.closest('[data-note-id]').getAttribute('data-note-id'),
                 text: t.textContent, lo: x - half, hi: x + half,
                 top: box.y, bottom: box.y + box.height,
                 visible: getComputedStyle(t).visibility === 'visible',
@@ -178,9 +187,6 @@ def _server_ring_payload(
     }
 
 
-#: 320 / 400: below 780px the ledger and inspector become a two-view stack
-#: (components.css), so on a phone the inspector is the whole viewport with the
-#: narrow padding — the narrowest it ever gets. 1280: the normal desktop.
 def _graph_js_constant(name: str) -> int | None:
     """An integer ``const`` read from js/graph.js, or None if it is absent.
 
@@ -198,6 +204,137 @@ def _label_threshold() -> int:
     — which is exactly the behaviour being replaced."""
     found = _graph_js_constant("MAX_LABELLED_NEIGHBOURS")
     return 24 if found is None else found
+
+
+# ------------------------------------------------------ the optimality oracle --
+
+#: The SPEC's values, pinned here and NOT read from graph.js: the clearance
+#: fitLabels keeps on each side of a label, and the client's character cap.
+#: An oracle that read them from graph.js would move with a mutated constant
+#: and pass it — set LABEL_CLEARANCE to 0 and the oracle's slots would widen
+#: in step with the fit's. ``_assert_spec_constants`` checks graph.js ships
+#: these values, and runs LAST in ``_assert_optimal_cuts``, after the geometry,
+#: so a changed constant fails first on what it does to the labels.
+_SPEC_LABEL_CLEARANCE = 4
+_SPEC_LABEL_MAX_CHARS = 28
+
+#: Below this, two measured lengths are the same number computed twice.
+_FIT_EPSILON = 1e-6
+
+#: THE ORACLE: every label's slot, recomputed IN THE TEST from the specified
+#: rules, and the label measured against it. ``[clearance, cap, rows]``:
+#:   - the EDGE bound: twice the distance from the label's node to the nearer
+#:     side of the inspector's PADDING box — ``rect.left + clientLeft`` and
+#:     ``clientWidth``, what ``overflow-y: auto`` clips to — less
+#:     ``clearance`` on each side;
+#:   - with ``rows``, the ROW bound: for every other label whose box comes
+#:     within ``clearance`` of this one's vertically, ``|dx| - clearance``.
+#: Rows are judged on each label's box at its CAPPED title, as fitLabels
+#: judges them before it cuts anything. For each label it returns the text
+#: shown, how many title characters it keeps, its measured length, and the
+#: next-longer cut (one more character, or the whole title) with ITS length
+#: — set on the label, measured, and put back. Same element, same font, same
+#: ``getComputedTextLength`` fitText uses, so every comparison is exact.
+#: Nothing here reads graph.js: a mutation there cannot move these slots.
+_FIT_JS = """([clearance, cap, rows]) => {
+    const svg = document.querySelector('.local-graph svg');
+    const ctm = svg.getScreenCTM();
+    const host = document.getElementById('inspector');
+    const edge = host.getBoundingClientRect().left + host.clientLeft;
+    const left = (edge - ctm.e) / ctm.a + clearance;
+    const right = (edge + host.clientWidth - ctm.e) / ctm.a - clearance;
+    const cutTo = (title, n) => (title.length > n ? `${title.slice(0, n)}…` : title);
+    const measure = (text, content) => {
+        const shown = text.textContent;
+        text.textContent = content;
+        const length = text.getComputedTextLength();
+        const box = text.getBBox();
+        text.textContent = shown;
+        return {length, box};
+    };
+    const labels = [...svg.querySelectorAll('.node > text')].map((text) => {
+        const title = text.parentNode.querySelector('title').textContent;
+        const {box} = measure(text, cutTo(title, cap));
+        return {text, title, x: Number(text.getAttribute('x')),
+                top: box.y, bottom: box.y + box.height,
+                id: text.closest('[data-note-id]').getAttribute('data-note-id')};
+    });
+    return labels.map((label) => {
+        let slot = 2 * Math.min(label.x - left, right - label.x);
+        if (rows) {
+            for (const other of labels) {
+                const apart = other.bottom + clearance <= label.top
+                    || label.bottom + clearance <= other.top;
+                if (other !== label && !apart) {
+                    slot = Math.min(slot, Math.abs(label.x - other.x) - clearance);
+                }
+            }
+        }
+        const shown = label.text.textContent;
+        const kept = shown.endsWith('…') ? shown.length - 1 : shown.length;
+        let longer = null;
+        let longerWidth = null;
+        if (kept < Math.min(label.title.length, cap)) {
+            longer = cutTo(label.title, kept + 1);
+            longerWidth = measure(label.text, longer).length;
+        }
+        return {id: label.id, title: label.title, shown, kept, slot,
+                width: label.text.getComputedTextLength(), longer, longerWidth};
+    });
+}"""
+
+
+def _fits(page: Any, *, rows: bool) -> list[dict[str, Any]]:
+    """The oracle's verdict inputs for every drawn label (``_FIT_JS``)."""
+    fits: list[dict[str, Any]] = page.evaluate(
+        _FIT_JS, [_SPEC_LABEL_CLEARANCE, _SPEC_LABEL_MAX_CHARS, rows])
+    return fits
+
+
+def _fit_faults(fits: list[dict[str, Any]]) -> list[str]:
+    """Every label that is not the LONGEST cut of its title fitting its slot.
+
+    A label must be (a) a cut of its own title — its first ``kept``
+    characters, with "…" iff any were dropped, and never more than the cap;
+    (b) no longer than its slot, unless it is the bare "…", fitText's floor;
+    (c) the longest such cut: one character more — or, one short of the
+    whole title, the whole title — must NOT fit. So a title whose capped form
+    fits must be shown whole (capped), and an over-cut label fails (c) even
+    when every box check passes."""
+    faults = []
+    for fit in fits:
+        shown, title, kept = fit["shown"], fit["title"], fit["kept"]
+        expected = title if kept >= len(title) else f"{title[:kept]}…"
+        if shown != expected or kept > _SPEC_LABEL_MAX_CHARS:
+            faults.append(f"{shown!r} is not a cut of {title!r} at the cap")
+        elif kept > 0 and fit["width"] > fit["slot"] + _FIT_EPSILON:
+            faults.append(f"{shown!r} ({fit['width']:.2f}) overruns its slot "
+                          f"({fit['slot']:.2f})")
+        elif fit["longer"] is not None and fit["longerWidth"] <= fit["slot"] - _FIT_EPSILON:
+            faults.append(f"{shown!r} is over-cut: {fit['longer']!r} "
+                          f"({fit['longerWidth']:.2f}) fits its slot ({fit['slot']:.2f})")
+    return faults
+
+
+def _assert_spec_constants() -> None:
+    """graph.js ships the values the oracle holds it to (see above)."""
+    shipped = (_graph_js_constant("LABEL_CLEARANCE"), _graph_js_constant("LABEL_MAX_CHARS"))
+    assert shipped == (_SPEC_LABEL_CLEARANCE, _SPEC_LABEL_MAX_CHARS), (
+        f"graph.js ships LABEL_CLEARANCE, LABEL_MAX_CHARS = {shipped}, not the "
+        f"specified ({_SPEC_LABEL_CLEARANCE}, {_SPEC_LABEL_MAX_CHARS})"
+    )
+
+
+def _assert_optimal_cuts(page: Any, context: str, *, rows: bool = True) -> list[dict[str, Any]]:
+    """Every drawn label is the longest cut that fits the slot the SPEC gives
+    it (``_fit_faults``) — rows included, for a ring whose labels show
+    together. Then, last, that graph.js ships the spec's constants. Returns
+    the oracle's measurements for a caller's preconditions."""
+    fits = _fits(page, rows=rows)
+    faults = _fit_faults(fits)
+    assert faults == [], f"{context}: labels are not their longest fitting cut: {faults}"
+    _assert_spec_constants()
+    return fits
 
 
 #: Every label on the canvas: whose it is, whether it is VISIBLE (a hidden
