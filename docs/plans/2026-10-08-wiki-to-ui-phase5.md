@@ -309,15 +309,16 @@ sans is DejaVu Sans, roughly 8% wider, and five layout tests failed there and no
 3-neighbour ring's two lower labels overlapped, and rim labels ran past a 400 px inspector, where
 `overflow-y: auto` clips them mid-word. That was a production defect for any reader with a wider
 font, not a test artefact. Fixed 2026-10-09 by `fitLabels` in `static/js/graph.js` (labels are cut
-to a measured, geometry-derived slot, and refitted when the inspector is resized). The layout suite
-now runs every geometric test at the platform font AND at a deliberately wide face, so a macOS run
-catches this class of defect too. Measured on macOS with `fitLabels` disabled outright: 13 of the
+to a measured, geometry-derived slot, and refitted when the inspector or the drawing is resized).
+The layout suite now runs its four parametrized geometric tests at the platform font AND at a
+deliberately wide face, and four more geometric tests at the wide face only, so a macOS run catches
+this class of defect too. Measured on macOS with `fitLabels` disabled outright: 13 of the
 15 parametrized wide runs go red. Twelve go red at the geometry assertions, on overlapping or
 clipped labels. One goes red only at its face-bit precondition: the rim test at 1280, where the rim
 labels never reach the inspector's edge. Its cut comes from the row bound, whose geometry the
 overlap test's 1280 wide run asserts. Mutating `fitText`'s slot to `Infinity` instead gives the same
-split on the rim and overlap tests. Both wide-only tests go red as well (refit on narrowing, and a
-draw into a hidden inspector). **The two of the 15 that stay green are a named exemption, not an
+split on the rim and overlap tests. All four wide-only tests go red as well (refit on narrowing; a
+draw into a hidden inspector; refit when only the inspector, or only the drawing, resizes). **The two of the 15 that stay green are a named exemption, not an
 omission:** the crowded-ring
 test's 1280 wide runs. A crowded ring shows no two labels together, so only the inspector's edge
 binds, and at 1280 a rim label's slot is ~540 viewBox units against ~250 for the widest
@@ -328,8 +329,11 @@ A draw into a HIDDEN inspector (the phone list view sets it `display: none`) is 
 Chromium returns a non-null identity `getScreenCTM()` for a `display: none` svg, so the first
 guard, which tested the CTM, passed. The all-zero inspector rect then cut every label, root
 included, to a bare "…". The ResizeObserver repaired that before paint, but a browser without one
-would have kept it. `fitLabels` now returns when the inspector or the svg has no width (regression
-test (15e) in `tests/test_ui_browser_graph_layout.py`).
+would have kept it. `fitLabels` now returns when the svg has no width — the one guard, since an svg
+with a box sits in an inspector with a box (regression test (15e) in
+`tests/test_ui_browser_graph_layout.py`). The refit observes the inspector as well as the svg: the
+svg is capped at 24rem, so on a wide desktop only its percentage gutter makes its box follow the
+inspector's. Each observation has its own test, (15f) and (15g).
 
 The false legibility claim was repeated in THREE places, not one: `graph_layout.py`'s `RING_RADIUS`
 comment (corrected in the closeout commit), the same module's `DEFAULT_CAP` comment, and

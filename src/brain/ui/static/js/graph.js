@@ -105,16 +105,22 @@ const ROOT_LABEL_GAP = 6;
 
 let wired = false;
 
-/* Refits the drawn graph's labels whenever its box changes size: a label's
-   slot is partly the inspector's edge, and that edge moves, in viewBox units,
-   when the window is resized. One graph is drawn at a time, so one observer
-   watches at most one svg. Absent where ResizeObserver is (no current
-   browser), labels are fitted once, at draw time — or, drawn into a hidden
-   inspector, not at all (see fitLabels). */
+/* Refits the drawn graph's labels whenever its svg OR the inspector changes
+   size: a label's slot is partly the inspector's edge in viewBox units, which
+   moves when either box does. BOTH, because neither box tracks the other for
+   certain: the svg is capped at 24rem (graph.css), so on a wide desktop the
+   inspector can resize while the svg's border box does not. Today the svg's
+   content box still moves (its gutter is a percentage of the figure), but a
+   fixed gutter would end that. Each is pinned by its own test. One callback per
+   delivery refits the one drawn svg ONCE, however many of the two boxes
+   moved; fitting edits only text inside the svg, which resizes neither box,
+   so it cannot loop. One graph is drawn at a time, so `fitted` is the svg
+   being watched. Absent where ResizeObserver is (no current browser), labels
+   are fitted once, at draw time — or, drawn into a hidden inspector, not at
+   all (see fitLabels). */
+let fitted = null;
 const refit = typeof ResizeObserver === "function"
-  ? new ResizeObserver((entries) => {
-    for (const entry of entries) fitLabels(entry.target);
-  })
+  ? new ResizeObserver(() => fitLabels(fitted))
   : null;
 
 /* The graph payload for a note, through the shared per-note fetch
@@ -176,8 +182,12 @@ export function renderGraph() {
      paint) a label that has not been fitted. */
   const svg = block.querySelector("svg");
   if (!svg) return;
+  fitted = svg;
   fitLabels(svg);
-  if (refit) refit.observe(svg);
+  if (refit) {
+    refit.observe(svg);
+    refit.observe(host);
+  }
 }
 
 /* MIRRORS routes_graph.note_graph's gate EXACTLY, and the two change together:
@@ -370,17 +380,20 @@ function cut(title, chars) {
  * in hand — so only the inspector's edge binds there.
  * Idempotent: each pass starts again from the full label. */
 function fitLabels(svg) {
+  /* No box (a hidden inspector — the phone list view sets it display:none —
+     or an svg already detached from it): nothing to measure, so leave the
+     labels alone. Tested on the svg's BOX, not its CTM: Chromium returns a
+     non-null identity getScreenCTM() for a display:none svg, and fitting to
+     the all-zero inspector rect would make every slot negative and every
+     label a bare "…". The observer refits when the box returns; without an
+     observer they keep their character cut until the next draw.
+     The ONE guard. An svg with a box is rendered, so it is still inside the
+     #inspector it was placed in (nothing moves it), that inspector has a box
+     too, and the svg's CTM is non-null; no stylesheet scales or mirrors the
+     svg or an ancestor, so the CTM's `a` is its positive scale. */
+  if (!svg.getBoundingClientRect().width) return;
   const host = svg.closest("#inspector");
-  /* No box (a hidden inspector — the phone list view sets it display:none):
-     nothing to measure, so leave the labels alone. Tested on the BOXES, not
-     the CTM: Chromium returns a non-null identity getScreenCTM() for a
-     display:none svg, and fitting to the all-zero inspector rect would make
-     every slot negative and every label a bare "…". The observer refits when
-     the box returns; without an observer they keep their character cut until
-     the next draw. */
-  if (!host || !host.clientWidth || !svg.getBoundingClientRect().width) return;
   const ctm = svg.getScreenCTM();
-  if (!ctm || !(ctm.a > 0)) return;
   const edge = host.getBoundingClientRect().left + host.clientLeft;
   const left = (edge - ctm.e) / ctm.a + LABEL_CLEARANCE;
   const right = (edge + host.clientWidth - ctm.e) / ctm.a - LABEL_CLEARANCE;
