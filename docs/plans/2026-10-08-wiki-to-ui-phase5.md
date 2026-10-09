@@ -311,7 +311,21 @@ sans is DejaVu Sans, roughly 8% wider, and five layout tests failed there and no
 font, not a test artefact. Fixed 2026-10-09 by `fitLabels` in `static/js/graph.js` (labels are cut
 to a measured, geometry-derived slot, and refitted when the inspector is resized). The layout suite
 now runs every geometric test at the platform font AND at a deliberately wide face, so a macOS run
-catches this class of defect too; removing the width bound turns 13 of those wide runs red.
+catches this class of defect too. Measured on macOS with `fitLabels` disabled outright: 13 of the
+15 parametrized wide runs go red, twelve on overlapping or clipped labels and one (the rim test at
+1280) on its face-bit assertion, along with both wide-only tests (refit on narrowing, and a draw
+into a hidden inspector). **The other two are a named exemption, not an omission:** the crowded-ring
+test's 1280 wide runs. A crowded ring shows no two labels together, so only the inspector's edge
+binds, and at 1280 a rim label's slot is ~540 viewBox units against ~250 for the widest
+28-character label the wide face draws. No title reaches it, so those two runs are copies of their
+platform runs and do not assert the cut. The 320 and 400 crowded runs do.
+
+A draw into a HIDDEN inspector (the phone list view sets it `display: none`) is not fitted at all.
+Chromium returns a non-null identity `getScreenCTM()` for a `display: none` svg, so the first
+guard, which tested the CTM, passed. The all-zero inspector rect then cut every label, root
+included, to a bare "…". The ResizeObserver repaired that before paint, but a browser without one
+would have kept it. `fitLabels` now returns when the inspector or the svg has no width (regression
+test (15e) in `tests/test_ui_browser_graph_layout.py`).
 
 The false legibility claim was repeated in THREE places, not one: `graph_layout.py`'s `RING_RADIUS`
 comment (corrected in the closeout commit), the same module's `DEFAULT_CAP` comment, and
@@ -330,9 +344,11 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
   now shared by the graph and related blocks.
 - **Superseded `id:rev` cache keys are retained deliberately** (reason in `store.js`).
 - **At a 400 px viewport** rim labels clear the inspector edge by only 5–6 px on macOS. *(Bounded
-  since 2026-10-09: `fitLabels` keeps every label at least `LABEL_CLEARANCE` (4 viewBox units)
-  inside the inspector in any font, cutting it where it must — so the limit is now how many
-  characters a wide font leaves on a rim label, not whether it is clipped.)*
+  since 2026-10-09: `fitLabels` cuts each label, down to a bare ellipsis, until it sits at least
+  `LABEL_CLEARANCE` (4 viewBox units) inside the inspector in any font. Only a slot narrower than
+  "…" itself can still overflow, because the bare ellipsis is the floor (`fitText`'s comment). So
+  the limit is now how many characters a wide font leaves on a rim label, not whether it is
+  clipped.)*
 
 ### 7.6 Documents corrected in the closeout
 

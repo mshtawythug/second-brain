@@ -105,7 +105,8 @@ let wired = false;
    slot is partly the inspector's edge, and that edge moves, in viewBox units,
    when the window is resized. One graph is drawn at a time, so one observer
    watches at most one svg. Absent where ResizeObserver is (no current
-   browser), labels are fitted once, at draw time. */
+   browser), labels are fitted once, at draw time — or, drawn into a hidden
+   inspector, not at all (see fitLabels). */
 const refit = typeof ResizeObserver === "function"
   ? new ResizeObserver((entries) => {
     for (const entry of entries) fitLabels(entry.target);
@@ -366,10 +367,16 @@ function cut(title, chars) {
  * Idempotent: each pass starts again from the full label. */
 function fitLabels(svg) {
   const host = svg.closest("#inspector");
+  /* No box (a hidden inspector — the phone list view sets it display:none):
+     nothing to measure, so leave the labels alone. Tested on the BOXES, not
+     the CTM: Chromium returns a non-null identity getScreenCTM() for a
+     display:none svg, and fitting to the all-zero inspector rect would make
+     every slot negative and every label a bare "…". The observer refits when
+     the box returns; without an observer they keep their character cut until
+     the next draw. */
+  if (!host || !host.clientWidth || !svg.getBoundingClientRect().width) return;
   const ctm = svg.getScreenCTM();
-  /* Not laid out (a hidden inspector): nothing to measure. The observer
-     refits when it gets a box. */
-  if (!host || !ctm || !(ctm.a > 0)) return;
+  if (!ctm || !(ctm.a > 0)) return;
   const edge = host.getBoundingClientRect().left + host.clientLeft;
   const left = (edge - ctm.e) / ctm.a + LABEL_CLEARANCE;
   const right = (edge + host.clientWidth - ctm.e) / ctm.a - LABEL_CLEARANCE;
@@ -400,7 +407,8 @@ function fitLabels(svg) {
 
 /* Cut `text` to the longest prefix of `title` (at most LABEL_MAX_CHARS) whose
    measured length fits `slot`. Binary search: lengths only grow with the
-   prefix. A slot too narrow for any prefix leaves the bare ellipsis. */
+   prefix. A slot too narrow for any prefix leaves the bare ellipsis — the
+   floor, which itself overruns a slot narrower than "…". */
 function fitText(text, title, slot) {
   if (text.getComputedTextLength() <= slot) return;
   let lo = 0;

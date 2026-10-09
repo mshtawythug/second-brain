@@ -14,7 +14,10 @@ runner — whose default sans is the wider DejaVu Sans — rendered overlapping
 and clipped labels. The ``wide`` runs put that failure on every machine, and
 each one asserts at its END that the wide face really did force a cut, so a
 face that stops being wide cannot turn them into silent copies of the
-``platform`` runs.
+``platform`` runs. **One named exemption:** the crowded-ring test's two 1280
+``wide`` runs ARE copies of their ``platform`` runs and do not assert the
+cut, because at 1280 no 28-character label reaches the only bound a crowded
+ring has, the inspector's edge (measured; the reason is in that test).
 
 **The filename is load-bearing.** CI selects ``tests/test_ui_browser*.py`` by
 path, and ``tests/test_ci_workflow.py`` fails if a ``browser``-marked module
@@ -305,6 +308,10 @@ def _open_ring(page: Any, count: int, width: int) -> list[tuple[str, str]]:
 
 _WIDTHS = [320, 400, 1280]
 
+#: The one width at which a crowded ring's wide run cannot force a cut — see
+#: test_a_crowded_ring_labels_only_the_neighbour_in_hand's docstring.
+_EDGE_NEVER_BINDS_CROWDED = 1280
+
 
 @pytest.mark.parametrize("face", _FACES)
 @pytest.mark.parametrize("viewport_width", _WIDTHS)
@@ -354,6 +361,15 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
 
     The NO-INTERSECTION assertion comes first, at rest, so a threshold set too
     high fails on what the reader would actually see: overlapping text.
+
+    **The 1280 ``wide`` runs are exempt from the face bit, and are copies of
+    the 1280 ``platform`` runs.** On a crowded ring only the inspector's edge
+    binds a label (no two show together), and at 1280 the inspector centres
+    the graph with room to spare: measured, a rim label's slot is ~540
+    viewBox units, while the widest 28-character label the wide face draws is
+    ~250 — and the character cap cuts any longer title first. No title this
+    test could use reaches the edge there, so nothing at 1280 tests the fit;
+    320 and 400 do, and assert it.
     """
     count = _label_threshold() + 1 if count_kind == "threshold+1" else 24
     _use_face(page, face)
@@ -387,6 +403,8 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
         )
         page.evaluate("() => document.activeElement && document.activeElement.blur()")
         page.mouse.move(1, 1)
+    if viewport_width != _EDGE_NEVER_BINDS_CROWDED:  # the exemption, docstring above
+        _assert_the_face_bit(page, face)
 
 
 def test_a_crowded_ring_still_names_every_neighbour(page: Any) -> None:
@@ -426,3 +444,62 @@ def test_labels_are_refitted_when_the_inspector_narrows(page: Any) -> None:
     narrow_cut = page.evaluate("() => [...document.querySelectorAll('.local-graph text')]"
                                ".map((t) => t.textContent)")
     assert narrow_cut != wide_cut, "precondition: narrowing changed no label's cut"
+
+
+_LABEL_TEXTS_JS = (
+    "() => [...document.querySelectorAll('.local-graph text')].map((t) => t.textContent)"
+)
+
+#: Hide the inspector the way the phone layout does (components.css: list view
+#: below 780px sets it `display: none`), redraw, and read the labels IN THE
+#: SAME TASK. Read a frame later and the ResizeObserver has already refitted
+#: them, so a broken draw-time fit would be repaired before any assertion saw
+#: it — and stay broken for good in a browser without ResizeObserver.
+_DRAW_WHILE_HIDDEN_JS = """async () => {
+    const graph = await import("/static/js/graph.js");
+    document.body.dataset.view = "list";
+    graph.renderGraph();
+    const inspector = document.getElementById("inspector");
+    return [getComputedStyle(inspector).display,
+            [...document.querySelectorAll('.local-graph text')].map((t) => t.textContent)];
+}"""
+
+
+def test_a_graph_drawn_in_a_hidden_inspector_is_not_cut_to_ellipses(page: Any) -> None:
+    """(15e) A hidden inspector has no box to fit labels to, so a draw there
+    must leave them alone — not fit them to a slot measured off a zero box.
+
+    The regression: in Chromium a ``display: none`` svg still returns a
+    non-null ``getScreenCTM()`` (a = 1), so a guard on the CTM passed, the
+    inspector's all-zero rect made every slot negative, and every label — the
+    root's included — became a bare "…". Phone width, list view, any dispatch
+    while a note is open. Then, shown again, the labels must be fitted exactly
+    as a fresh draw on the visible inspector fits them. Wide face, so that fit
+    has cuts to make and "fitted correctly" is not trivially "untouched".
+    """
+    page.set_viewport_size({"width": 400, "height": 800})
+    _use_face(page, "wide")
+    _GRAPH["payload"] = _server_ring_payload()
+    _open(page)
+    page.wait_for_selector(".local-graph svg")
+
+    display, hidden = page.evaluate(_DRAW_WHILE_HIDDEN_JS)
+    assert display == "none", f"precondition: the inspector is not hidden ({display})"
+    assert len(hidden) == 1 + len(_RIM_TITLES), "precondition: not every label was drawn"
+    bare = [text for text in hidden if text == "…"]
+    assert bare == [], f"drawn while hidden, {len(bare)} labels became a bare ellipsis: {hidden}"
+
+    page.evaluate("() => { document.body.dataset.view = 'note'; }")
+    # The observer's callback runs in the frame after layout; two frames settle it.
+    page.evaluate("() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))")
+    refitted = page.evaluate(_LABEL_TEXTS_JS)
+    labels = page.evaluate(_LABELS_JS)
+    left, right = page.evaluate(_INSPECTOR_BOX_JS)
+    clipped = [lab["id"][-4:] for lab in labels if lab["box"][0] < left or lab["box"][1] > right]
+    assert clipped == [], f"shown again, labels are clipped: {clipped}"
+    assert _intersections(labels) == [], "shown again, labels overlap"
+    page.evaluate("async () => (await import('/static/js/graph.js')).renderGraph()")
+    assert refitted == page.evaluate(_LABEL_TEXTS_JS), (
+        "shown again, the labels are not the fit a fresh draw makes"
+    )
+    _assert_the_face_bit(page, "wide")
