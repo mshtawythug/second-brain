@@ -2,12 +2,13 @@
 
 Split out of ``tests/test_ui_browser_graph.py`` to keep each module under the
 800-line ceiling; the stub routing and fixtures are shared through
-``tests/ui_graph_harness.py``, not copied. Everything here builds its
+``tests/ui_graph_harness.py`` and the ring, faces and measurements through
+``tests/ui_graph_geometry.py``, not copied. Everything here builds its
 ``/graph`` stub with the server's own ring formula (``graph_layout``) and
-measures label BOXES: inside the inspector, never intersecting, legible on a
-phone, and hidden at rest on a ring too crowded to label. The refit that keeps
-them so when a box resizes is pinned here too, down to what its
-ResizeObserver watches (15h).
+measures label BOXES: inside the inspector, never intersecting, clear of each
+other's halo, legible on a phone, and hidden at rest on a ring too crowded to
+label. The refit that keeps them so when a box resizes, and what its
+ResizeObserver watches, is ``tests/test_ui_browser_graph_refit.py``.
 
 **The four parametrized geometric tests run twice: at the platform's default
 font, and at a deliberately WIDE face** (``_WIDE_FACE_CSS``) — the rim,
@@ -23,41 +24,49 @@ runs and do not assert the cut, because at 1280 no 28-character label reaches
 the only bound a crowded ring has, the inspector's edge (measured; the reason
 is in that test).
 
-**Four more geometric tests are WIDE-ONLY**, each with its own face guard:
+**One runs at the platform font, by design:** (15i), the edge clearance
+against the label halo. Its subject is one ``i`` being narrower than the halo,
+which a widened face works against; it guards that, and that the edge really
+did cut its label, itself.
 
-- (15d) refit when the window narrows — guarded by ``narrow_cut != wide_cut``;
-- (15e) a draw into a hidden inspector — ends in ``_assert_the_face_bit``;
-- (15f) refit when only the inspector resizes and (15g) when only the drawing
-  does — guarded in ``_assert_refitted_as_a_fresh_draw`` by a fresh draw's cut
-  differing from the cut before the resize.
-
-**The filename is load-bearing.** CI selects ``tests/test_ui_browser*.py`` by
-path, and ``tests/test_ci_workflow.py`` fails if a ``browser``-marked module
-sits outside that glob. Run it by path:
+**The filename is load-bearing.** CI names every browser module explicitly
+(``.github/workflows/ci.yml``), and ``tests/test_ci_workflow.py`` fails if a
+``browser``-marked module is missing from that list. Run it by path:
 
     pytest tests/test_ui_browser_graph_layout.py -m browser --no-cov
 """
 from __future__ import annotations
 
 import math
-import re
 from typing import Any
 
 import pytest
 
-from brain.ui.app import static_dir
+from tests.ui_graph_geometry import (
+    _EXTENTS_JS,
+    _FACES,
+    _INSPECTOR_BOX_JS,
+    _LABELS_JS,
+    _RIM_TITLES,
+    _SERVER_SIZE,
+    _TWO_FRAMES_JS,
+    _assert_the_face_bit,
+    _crowd_titles,
+    _graph_js_constant,
+    _halo_shortfalls,
+    _intersections,
+    _label_threshold,
+    _server_ring_payload,
+    _use_face,
+)
 from tests.ui_graph_harness import (
     _GRAPH,
     ALPHA_ID,
-    BRAVO_ID,
-    CHARLIE_ID,
     ROOT_ID,
     ROOT_TITLE,
-    _dispatch,
     _open,
     _page_fixture,  # noqa: F401 — registers the `page` fixture
     _static_origin_fixture,  # noqa: F401 — registers `static_origin`, which `page` uses
-    reboot,
 )
 
 pytestmark = pytest.mark.browser
@@ -66,124 +75,19 @@ pytestmark = pytest.mark.browser
 # ------------------------------------------------------------------ layout --
 
 
-DELTA_ID = "aaaaaaaa-0000-4000-8000-00000000000f"
-
-#: The SERVER's ring, not a hand-placed one. Same formula and constants as
-#: ``brain.ui.graph_layout`` (``RING_RADIUS`` = 110.0, ``DEFAULT_SIZE`` = 320,
-#: neighbour ``i`` of ``count`` at ``theta = 2*pi*i/count``, starting at 12
-#: o'clock and running clockwise: ``x = c + R*sin(theta)``, ``y = c - R*cos(theta)``).
-#: An earlier version of this test used a hand-made ring with its outer nodes
-#: at x = 73 / 247 and passed, while the server's real ring puts them at
-#: x = 50 / 270 — where the labels were in fact clipped. Copied rather than
-#: imported: graph_layout is the server route's module (a separate task), and
-#: this file stubs the network and imports nothing of the server beyond
-#: ``static_dir``. If graph_layout's ring changes, change these with it.
-_SERVER_RING_RADIUS = 110.0
-_SERVER_SIZE = 320
-
-#: Wider than any default sans this suite will meet, on every platform: a
-#: wide real face where one is installed (Verdana ships with macOS; DejaVu
-#: Sans is the Linux default), widened again by letter-spacing, which does
-#: not depend on any installed font at all. Scoped to the graph's labels, so
-#: only the subject of these tests changes.
-_WIDE_FACE_CSS = (
-    ".local-graph .node text {"
-    " font-family: Verdana, 'DejaVu Sans', sans-serif; letter-spacing: 0.12em; }"
-)
-_FACES = ["platform", "wide"]
-
-
-def _use_face(page: Any, face: str) -> None:
-    """Apply ``face`` BEFORE the graph is drawn: labels are fitted at draw time."""
-    if face == "wide":
-        page.add_style_tag(content=_WIDE_FACE_CSS)
-
-
-#: How many drawn labels the width fit cut. Every title in this module is
-#: exactly 28 characters — at the character cap, never over it — so any
-#: ellipsis on a label is the width fit's work.
-_CUT_LABELS_JS = """() => [...document.querySelectorAll('.local-graph text')]
-    .filter((t) => t.textContent.endsWith('…')).length"""
-
-
-def _assert_the_face_bit(page: Any, face: str) -> None:
-    """The ``wide`` face must have forced at least one cut, or its run proved
-    nothing the ``platform`` run did not. Asserted LAST, after the geometry,
-    so a missing fit fails on overlapping or clipped labels — what a reader
-    would see — and not here.
-
-    **One exception, measured:** ``test_rim_labels_stay_inside_the_inspector
-    [1280-wide]``. At 1280 the rim labels never reach the inspector's edge, so
-    with the fit removed nothing clips and that run fails HERE, at this
-    precondition. The cut it counts comes from the ROW bound (the 3 and 9
-    o'clock labels share a row), and that bound's geometry is asserted by
-    ``test_no_two_labels_overlap_on_the_server_ring[1280-wide]``, which does
-    fail on overlapping labels."""
-    if face == "wide":
-        assert page.evaluate(_CUT_LABELS_JS) > 0, (
-            "precondition: the wide face cut no label, so this run tested nothing new"
-        )
-
-#: Four neighbours: a count divisible by 4 puts two of them exactly at 3 and 9
-#: o'clock, the rim positions. Every title is exactly 28 characters — the
-#: longest label the client draws without cutting it.
-_RIM_TITLES: list[tuple[str, str]] = [
-    (ALPHA_ID, "Alpha Synthetic Planning Doc"),
-    (BRAVO_ID, "Bravo Synthetic Planning Doc"),
-    (CHARLIE_ID, "Delta Synthetic Planning Doc"),
-    (DELTA_ID, "Hotel Synthetic Planning Doc"),
-]
-
-
-def _crowd_titles(count: int) -> list[tuple[str, str]]:
-    """``count`` synthetic neighbours, every title exactly 28 characters."""
-    return [
-        (f"aaaaaaaa-0000-4000-8000-{0x100 + i:012x}", f"Synthetic Planning Note {i:04d}")
-        for i in range(count)
-    ]
-
-
-def _server_ring_payload(
-    titles: list[tuple[str, str]] | None = None,
-) -> dict[str, Any]:
-    """A /graph body whose geometry is the server's, for the layout tests."""
-    chosen = _RIM_TITLES if titles is None else titles
-    centre = _SERVER_SIZE / 2
-    count = len(chosen)
-    nodes: list[dict[str, Any]] = [{
-        "id": ROOT_ID, "title": ROOT_TITLE, "kind": "vault",
-        "x": centre, "y": centre, "r": 9, "root": True,
-    }]
-    for index, (node_id, title) in enumerate(chosen):
-        theta = 2 * math.pi * index / count
-        nodes.append({
-            "id": node_id, "title": title, "kind": "vault",
-            "x": centre + _SERVER_RING_RADIUS * math.sin(theta),
-            "y": centre - _SERVER_RING_RADIUS * math.cos(theta),
-            "r": 6, "root": False,
-        })
-    return {
-        "id": ROOT_ID, "width": _SERVER_SIZE, "height": _SERVER_SIZE, "nodes": nodes,
-        "edges": [{"src": ROOT_ID, "dst": node_id, "kind": "wiki"} for node_id, _ in chosen],
-        "truncated": 0, "corpus_linked": True,
-    }
-
-
-#: 320 / 400: below 780px the ledger and inspector become a two-view stack
-#: (components.css), so on a phone the inspector is the whole viewport with the
-#: narrow padding — the narrowest it ever gets. 1280: the normal desktop.
 @pytest.mark.parametrize("face", _FACES)
 @pytest.mark.parametrize("viewport_width", [320, 400, 1280])
 def test_rim_labels_stay_inside_the_inspector(page: Any, viewport_width: int, face: str) -> None:
     """(13) Labels at the server's 3 and 9 o'clock nodes are not cut off.
 
-    TWO assertions, because the first one ALONE CANNOT FAIL on label spill —
-    measured: text overflowing an ``overflow: visible`` svg is INK overflow in
-    Chromium, not scrollable overflow, so it never widens the inspector's
-    scroll box. It is CLIPPED at the inspector's edge instead
+    TWO assertions on the edge, because the first one ALONE CANNOT FAIL on
+    label spill — measured: text overflowing an ``overflow: visible`` svg is
+    INK overflow in Chromium, not scrollable overflow, so it never widens the
+    inspector's scroll box. It is CLIPPED at the inspector's edge instead
     (``overflow-y: auto`` clips both axes). So the property a reader would
     notice — every label wholly inside the visible inspector — is asserted
-    directly, and the scroll check stays as the cheap half.
+    directly, and the scroll check stays as the cheap half. A third, exact
+    in advance units, asks for the halo's width of clearance as well.
     """
     assert all(len(title) == 28 for _, title in _RIM_TITLES)
     page.set_viewport_size({"width": viewport_width, "height": 800})
@@ -219,6 +123,8 @@ def test_rim_labels_stay_inside_the_inspector(page: Any, viewport_width: int, fa
         }"""
     )
     assert spill == [], f"labels run past the inspector and are clipped: {spill}"
+    short = _halo_shortfalls(page.evaluate(_EXTENTS_JS))
+    assert short == [], f"labels sit inside their own halo of the edge or a neighbour: {short}"
     _assert_the_face_bit(page, face)
 
 
@@ -233,7 +139,8 @@ def test_no_two_labels_overlap_on_the_server_ring(
     (drawn BELOW their nodes) share a band with anything drawn below the root.
     The 12 o'clock neighbour's label sits below IT, i.e. above the root — the
     other side a root label could move to. Every pair is checked, so moving
-    the root's label cannot trade one collision for another unnoticed.
+    the root's label cannot trade one collision for another unnoticed. Then
+    the halo: labels sharing a row keep its width apart (``_halo_shortfalls``).
     """
     page.set_viewport_size({"width": viewport_width, "height": 800})
     _use_face(page, face)
@@ -263,58 +170,12 @@ def test_no_two_labels_overlap_on_the_server_ring(
     count, hits = overlaps
     assert count == 1 + len(_RIM_TITLES), "precondition: not every label was drawn"
     assert hits == [], f"labels overlap: {hits}"
+    short = _halo_shortfalls(page.evaluate(_EXTENTS_JS))
+    assert short == [], f"labels sit inside their own halo of the edge or a neighbour: {short}"
     _assert_the_face_bit(page, face)
 
 
 # --------------------------------------------------------- crowded rings --
-
-
-def _label_threshold() -> int:
-    """``MAX_LABELLED_NEIGHBOURS`` read from js/graph.js — one number, one place.
-
-    A copy here would let the test and the module disagree silently; parsing
-    the constant keeps the test aimed at whatever the module actually ships.
-    Absent (the module predates the threshold) reads as 24, the server's cap,
-    i.e. "always label" — which is exactly the behaviour being replaced.
-    """
-    source = (static_dir() / "js" / "graph.js").read_text(encoding="utf-8")
-    found = re.search(r"const MAX_LABELLED_NEIGHBOURS = (\d+);", source)
-    return int(found.group(1)) if found else 24
-
-
-#: Every label on the canvas: whose it is, whether it is VISIBLE (a hidden
-#: label still has a box), its box, and its rendered font size in px.
-_LABELS_JS = """() => {
-    const svg = document.querySelector('.local-graph svg');
-    const scale = svg.getScreenCTM().a;
-    return [...svg.querySelectorAll('text')].map((t) => {
-        const r = t.getBoundingClientRect();
-        return {
-            id: t.closest('[data-note-id]').getAttribute('data-note-id'),
-            root: t.closest('.node-root') !== null,
-            visible: getComputedStyle(t).visibility === 'visible',
-            box: [r.left, r.right, r.top, r.bottom],
-            px: parseFloat(getComputedStyle(t).fontSize) * scale,
-        };
-    });
-}"""
-
-_INSPECTOR_BOX_JS = """() => {
-    const r = document.getElementById('inspector').getBoundingClientRect();
-    return [r.left, r.right];
-}"""
-
-
-def _intersections(labels: list[dict[str, Any]]) -> list[str]:
-    shown = [lab for lab in labels if lab["visible"]]
-    hits = []
-    for i, a in enumerate(shown):
-        for b in shown[i + 1:]:
-            (al, ar, at, ab), (bl, br, bt, bb) = a["box"], b["box"]
-            if al < br and bl < ar and at < bb and bt < ab:
-                hits.append(f"{a['id'][-4:]} {[round(v) for v in a['box']]} meets "
-                            f"{b['id'][-4:]} {[round(v) for v in b['box']]}")
-    return hits
 
 
 def _open_ring(page: Any, count: int, width: int) -> list[tuple[str, str]]:
@@ -333,6 +194,62 @@ _WIDTHS = [320, 400, 1280]
 #: The one width at which a crowded ring's wide run cannot force a cut — see
 #: test_a_crowded_ring_labels_only_the_neighbour_in_hand's docstring.
 _EDGE_NEVER_BINDS_CROWDED = 1280
+
+def _label_max_chars() -> int:
+    """``LABEL_MAX_CHARS``, the client's character cap, read from graph.js."""
+    found = _graph_js_constant("LABEL_MAX_CHARS")
+    assert found is not None, "precondition: graph.js has no LABEL_MAX_CHARS"
+    return found
+
+
+def _capped(title: str, cap: int) -> str:
+    """What graph.js ``cut`` draws for ``title`` at ``cap`` characters."""
+    return title if len(title) <= cap else f"{title[:cap]}…"
+
+
+#: One label measured against the INSPECTOR'S EDGE ALONE, the only bound a
+#: crowded ring has: its slot is twice the distance from its node to the
+#: nearer edge, less ``clearance`` on each side (fitLabels' edge rule). Also
+#: measures the next-longer cut of the same title — one more character — by
+#: setting it on the label, and puts the label back. Same element, same font,
+#: same ``getComputedTextLength`` fitText uses, so the comparison is exact.
+_EDGE_FIT_JS = """([id, clearance, cap]) => {
+    const svg = document.querySelector('.local-graph svg');
+    const node = [...svg.querySelectorAll('[data-note-id]')]
+        .find((n) => n.getAttribute('data-note-id') === id);
+    const text = node.querySelector('text');
+    const title = node.querySelector('title').textContent;
+    const ctm = svg.getScreenCTM();
+    const host = document.getElementById('inspector');
+    const edge = host.getBoundingClientRect().left + host.clientLeft;
+    const left = (edge - ctm.e) / ctm.a + clearance;
+    const right = (edge + host.clientWidth - ctm.e) / ctm.a - clearance;
+    const x = Number(text.getAttribute('x'));
+    const shown = text.textContent;
+    const kept = shown.endsWith('…') ? shown.length - 1 : shown.length;
+    let longer = null;
+    let longerWidth = null;
+    if (kept < Math.min(title.length, cap)) {
+        longer = title.length > kept + 1 ? `${title.slice(0, kept + 1)}…` : title;
+        text.textContent = longer;
+        longerWidth = text.getComputedTextLength();
+        text.textContent = shown;
+    }
+    return {shown, kept, title, slot: 2 * Math.min(x - left, right - x),
+            width: text.getComputedTextLength(), longer, longerWidth};
+}"""
+
+
+def _nearest_on_ring(count: int, clock_hour: int) -> int:
+    """The index of the neighbour nearest ``clock_hour`` on the server's ring
+    of ``count`` (neighbour ``i`` at ``2*pi*i/count`` clockwise from 12)."""
+    target = 2 * math.pi * clock_hour / 12
+
+    def off(index: int) -> float:
+        delta = abs(2 * math.pi * index / count - target) % (2 * math.pi)
+        return min(delta, 2 * math.pi - delta)
+
+    return min(range(count), key=off)
 
 
 @pytest.mark.parametrize("face", _FACES)
@@ -379,10 +296,20 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
     page: Any, viewport_width: int, count_kind: str, face: str,
 ) -> None:
     """(15b) Over the threshold, a neighbour's label shows only while it is
-    hovered or focused — and then it collides with nothing that is showing.
+    hovered or focused — and then it collides with nothing that is showing,
+    and is cut by the inspector's edge ALONE.
 
     The NO-INTERSECTION assertion comes first, at rest, so a threshold set too
     high fails on what the reader would actually see: overlapping text.
+
+    **The shown label's TEXT is pinned, not only its box.** On a crowded ring
+    no two labels show together, so fitLabels skips the row bound there; were
+    it applied, a hidden neighbour's box would still cut the label in hand —
+    beside 12 o'clock on the 24 ring, "Synthetic Planning Note 0001" became
+    "S…", and the box checks below stayed green. So: at 1280, where the edge
+    never binds, the label is its whole (capped) title; at every width it is
+    the LONGEST cut the edge-only slot holds — it fits, and one character
+    more would not.
 
     **The 1280 ``wide`` runs are exempt from the face bit, and are copies of
     the 1280 ``platform`` runs.** On a crowded ring only the inspector's edge
@@ -404,9 +331,19 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
     shown = [lab["id"] for lab in labels if lab["visible"] and not lab["root"]]
     assert shown == [], f"{count} neighbours at rest, yet {len(shown)} labels show"
 
-    # Index 1 sits beside 12 o'clock; count // 4 is 3 o'clock, on the root's row.
+    # Two DIFFERENT neighbours at both counts. Hover: index 1 — beside 12
+    # o'clock on the 24 ring, its row shared with the 12 o'clock label's
+    # (hidden) box; on the threshold+1 ring of 5, the 2 o'clock node, level with
+    # the root's label. Focus: the node nearest 9 o'clock, from the ring's
+    # geometry — 18 of 24 (on the root's row), 4 of 5 (10 o'clock, level with
+    # the root's label too).
+    clearance = _graph_js_constant("LABEL_CLEARANCE")
+    assert clearance is not None, "precondition: graph.js has no LABEL_CLEARANCE"
+    cap = _label_max_chars()
+    nine = _nearest_on_ring(count, 9)
+    assert nine != 1, f"precondition: hover and focus both target #{nine}"
     left, right = page.evaluate(_INSPECTOR_BOX_JS)
-    for index, how in ((1, "hover"), (count // 4, "focus")):
+    for index, how in ((1, "hover"), (nine, "focus")):
         node_id = titles[index][0]
         selector = f'.local-graph a.node[data-note-id="{node_id}"]'
         if how == "hover":
@@ -423,6 +360,20 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
         assert left <= mine["box"][0] and mine["box"][1] <= right, (
             f"{how} on #{index}: the label is clipped by the inspector"
         )
+        fit = page.evaluate(_EDGE_FIT_JS, [node_id, clearance, cap])
+        if viewport_width == _EDGE_NEVER_BINDS_CROWDED:
+            assert fit["shown"] == _capped(fit["title"], cap), (
+                f"{how} on #{index} at 1280, where the edge never binds: "
+                f"{fit['shown']!r} is not the whole title {fit['title']!r}"
+            )
+        assert fit["width"] <= fit["slot"], (
+            f"{how} on #{index}: {fit['shown']!r} is wider than its edge slot"
+        )
+        assert fit["longer"] is None or fit["longerWidth"] > fit["slot"], (
+            f"{how} on #{index}: cut to {fit['shown']!r}, but {fit['longer']!r} "
+            f"({fit['longerWidth']:.1f}) fits the edge slot ({fit['slot']:.1f}) — "
+            "something other than the inspector's edge cut it"
+        )
         page.evaluate("() => document.activeElement && document.activeElement.blur()")
         page.mouse.move(1, 1)
     if viewport_width != _EDGE_NEVER_BINDS_CROWDED:  # the exemption, docstring above
@@ -438,229 +389,92 @@ def test_a_crowded_ring_still_names_every_neighbour(page: Any) -> None:
     assert missing == [], f"neighbours lost their accessible name: {missing}\n{snapshot}"
 
 
-#: Every drawn label's text, in drawing order.
-_LABEL_TEXTS_JS = (
-    "() => [...document.querySelectorAll('.local-graph text')].map((t) => t.textContent)"
-)
+#: A neighbour whose title is all ``i``, the narrowest common glyph, so one
+#: more character widens its label by well under the halo — see 15i.
+_NARROW_TITLE = "i" * 28
 
-#: The observer's callback runs in the frame after layout; two frames settle it.
-#: Settle BEFORE a resize as well as after: observe() queues a first callback
-#: of its own, and a resize made while it is pending is refitted by it, so a
-#: test that does not settle first passes with no resize observation at all.
-_TWO_FRAMES_JS = (
-    "() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))"
-)
+#: How far inside the inspector's padding edge, in viewBox units, 15i places
+#: its neighbour: a slot of twice this, less the clearance, holds a few ``i``.
+_NARROW_NODE_INSET = 16
+
+#: A left border on the inspector, so the padding edge the label is clipped
+#: at is NOT the border-box edge ``getBoundingClientRect`` reports.
+_INSPECTOR_BORDER_CSS = "#inspector { border-left: 24px solid transparent; }"
 
 
-def test_labels_are_refitted_when_the_inspector_narrows(page: Any) -> None:
-    """(15d) A label's slot is partly the inspector's edge, and that edge moves
-    in viewBox units when the window is resized — so a ring fitted on a wide
-    window must be REFITTED when it narrows, not left at its old cut.
+def test_the_edge_clearance_covers_the_label_halo(page: Any) -> None:
+    """(15i) A label cut by the inspector's edge keeps clear of it by more than
+    the halo graph.css strokes round every glyph — on any font.
 
-    Drawn at 1280, where the rim labels have room to spare against the
-    inspector, then narrowed to 320, where the same cut runs past it. Wide
-    face, so the difference does not hang on one machine's metrics.
+    The rim and overlap tests assert the same bar (``_halo_shortfalls``), but
+    whether they catch a fit with NO clearance hangs on the font: such a fit
+    leaves each side a gap of anything under half the next character's width,
+    and for most letters that half is wider than the halo. Measured on macOS
+    with the clearance set to 0, four of their ``wide`` runs went red and every
+    ``platform`` run stayed green. Here the outcome is fixed: one neighbour,
+    placed near the left edge so its slot is a few characters wide, titled in
+    ``i`` — so the gap a clearance-free fit leaves is under half of one ``i``,
+    which the last precondition measures to be under the halo. With the
+    clearance, the gap is at least the clearance, which is over the halo.
+
+    The inspector carries a LEFT BORDER, so the edge fitLabels fits to must be
+    the padding edge (``+ host.clientLeft``), not the border box: the app's
+    own #inspector has no left border, which leaves that term untested
+    everywhere else.
     """
-    page.set_viewport_size({"width": 1280, "height": 800})
-    _use_face(page, "wide")
-    _GRAPH["payload"] = _server_ring_payload()
-    _open(page)
-    page.wait_for_selector(".local-graph svg")
-    page.evaluate(_TWO_FRAMES_JS)
-    wide_cut = page.evaluate(_LABEL_TEXTS_JS)
-
     page.set_viewport_size({"width": 320, "height": 800})
-    page.evaluate(_TWO_FRAMES_JS)
-    labels = page.evaluate(_LABELS_JS)
-    left, right = page.evaluate(_INSPECTOR_BOX_JS)
-    cut = [lab["id"][-4:] for lab in labels if lab["box"][0] < left or lab["box"][1] > right]
-    assert cut == [], f"after narrowing to 320px, labels are clipped: {cut}"
-    assert _intersections(labels) == [], "after narrowing to 320px, labels overlap"
-    narrow_cut = page.evaluate(_LABEL_TEXTS_JS)
-    assert narrow_cut != wide_cut, "precondition: narrowing changed no label's cut"
-
-
-#: Hide the inspector the way the phone layout does (components.css: list view
-#: below 780px sets it `display: none`), redraw, and read the labels IN THE
-#: SAME TASK. Read a frame later and the ResizeObserver has already refitted
-#: them, so a broken draw-time fit would be repaired before any assertion saw
-#: it.
-_DRAW_WHILE_HIDDEN_JS = """async () => {
-    const graph = await import("/static/js/graph.js");
-    document.body.dataset.view = "list";
-    graph.renderGraph();
-    const inspector = document.getElementById("inspector");
-    return [getComputedStyle(inspector).display,
-            [...document.querySelectorAll('.local-graph text')].map((t) => t.textContent)];
-}"""
-
-
-def test_a_graph_drawn_in_a_hidden_inspector_is_not_cut_to_ellipses(page: Any) -> None:
-    """(15e) A hidden inspector has no box to fit labels to, so a draw there
-    must leave them alone — not fit them to a slot measured off a zero box.
-
-    The regression: in Chromium a ``display: none`` svg still returns a
-    non-null ``getScreenCTM()`` (a = 1), so a guard on the CTM passed, the
-    inspector's all-zero rect made every slot negative, and every label — the
-    root's included — became a bare "…". Phone width, list view, any dispatch
-    while a note is open. Then, shown again, the labels must be fitted exactly
-    as a fresh draw on the visible inspector fits them. Wide face, so that fit
-    has cuts to make and "fitted correctly" is not trivially "untouched".
-    """
-    page.set_viewport_size({"width": 400, "height": 800})
-    _use_face(page, "wide")
+    page.add_style_tag(content=_INSPECTOR_BORDER_CSS)
+    # Draw once to MEASURE where the inspector's padding edge falls in viewBox
+    # units, then place the neighbour a fixed distance inside it — so its slot
+    # is a few characters wide whatever the layout, not by a hand-picked x.
     _GRAPH["payload"] = _server_ring_payload()
     _open(page)
     page.wait_for_selector(".local-graph svg")
-
-    display, hidden = page.evaluate(_DRAW_WHILE_HIDDEN_JS)
-    assert display == "none", f"precondition: the inspector is not hidden ({display})"
-    assert len(hidden) == 1 + len(_RIM_TITLES), "precondition: not every label was drawn"
-    bare = [text for text in hidden if text == "…"]
-    assert bare == [], f"drawn while hidden, {len(bare)} labels became a bare ellipsis: {hidden}"
-
-    page.evaluate("() => { document.body.dataset.view = 'note'; }")
-    page.evaluate(_TWO_FRAMES_JS)
-    refitted = page.evaluate(_LABEL_TEXTS_JS)
-    labels = page.evaluate(_LABELS_JS)
-    left, right = page.evaluate(_INSPECTOR_BOX_JS)
-    clipped = [lab["id"][-4:] for lab in labels if lab["box"][0] < left or lab["box"][1] > right]
-    assert clipped == [], f"shown again, labels are clipped: {clipped}"
-    assert _intersections(labels) == [], "shown again, labels overlap"
-    page.evaluate("async () => (await import('/static/js/graph.js')).renderGraph()")
-    assert refitted == page.evaluate(_LABEL_TEXTS_JS), (
-        "shown again, the labels are not the fit a fresh draw makes"
-    )
-    _assert_the_face_bit(page, "wide")
-
-
-#: The drawing's border-box width and both inline paddings, in px: its content
-#: box — the box the ResizeObserver reports — is fixed when all three are.
-_SVG_BOX_JS = """() => {
-    const svg = document.querySelector('.local-graph svg');
-    const style = getComputedStyle(svg);
-    return [svg.getBoundingClientRect().width, style.paddingLeft, style.paddingRight];
-}"""
-
-#: The inspector's padding-box width without any scrollbar: the width fitLabels
-#: fits to.
-_INSPECTOR_WIDTH_JS = "() => document.getElementById('inspector').clientWidth"
-
-
-def _assert_refitted_as_a_fresh_draw(page: Any, before: list[str], change: str) -> None:
-    """After ``change``, settled, the labels must be cut exactly as a fresh
-    draw cuts them. The precondition compares the FRESH draw with ``before``,
-    not the refit: the change must alter the fit (or the test tested nothing),
-    and that must hold whether or not the observer refitted — so a missing
-    refit fails on the refit assertion, not on the precondition."""
-    page.evaluate(_TWO_FRAMES_JS)
-    refitted = page.evaluate(_LABEL_TEXTS_JS)
-    page.evaluate("async () => (await import('/static/js/graph.js')).renderGraph()")
-    fresh = page.evaluate(_LABEL_TEXTS_JS)
-    assert fresh != before, f"precondition: {change} changed no label's fit"
-    assert refitted == fresh, f"after {change}, the labels were not refitted: {refitted}"
-
-
-def test_labels_are_refitted_when_only_the_inspector_resizes(page: Any) -> None:
-    """(15f) The drawing's box need not move when the inspector's does: the
-    svg is capped at 24rem, and only its PERCENTAGE gutter makes its content
-    box follow the figure on a wide desktop. Pin the drawing — 24rem with a
-    fixed 2rem gutter, the cap's own size at 1280 — and narrow the window to
-    320: only the inspector moves, and the labels must still be refitted.
-    Wide face, so the narrowed fit has cuts to make.
-    """
-    page.set_viewport_size({"width": 1280, "height": 800})
-    _use_face(page, "wide")
-    page.add_style_tag(content=".local-graph svg { width: 24rem; padding-inline: 2rem; }")
-    _GRAPH["payload"] = _server_ring_payload()
-    _open(page)
+    edge = page.evaluate(_EXTENTS_JS)["left"]
+    centre = _SERVER_SIZE / 2
+    _GRAPH["payload"] = {
+        "id": ROOT_ID, "width": _SERVER_SIZE, "height": _SERVER_SIZE,
+        "nodes": [
+            {"id": ROOT_ID, "title": ROOT_TITLE, "kind": "vault",
+             "x": centre, "y": centre, "r": 9, "root": True},
+            {"id": ALPHA_ID, "title": _NARROW_TITLE, "kind": "vault",
+             "x": edge + _NARROW_NODE_INSET, "y": centre, "r": 6, "root": False},
+        ],
+        "edges": [{"src": ROOT_ID, "dst": ALPHA_ID, "kind": "wiki"}],
+        "truncated": 0, "corpus_linked": True,
+    }
+    # A distinct note: the client caches each note's graph, so reopening the
+    # first id would redraw the ring without a request.
+    _open(page, "aaaaaaaa-0000-4000-8000-000000000bbb")
     page.wait_for_selector(".local-graph svg")
     page.evaluate(_TWO_FRAMES_JS)
-    svg_box = page.evaluate(_SVG_BOX_JS)
-    inspector_width = page.evaluate(_INSPECTOR_WIDTH_JS)
-    before = page.evaluate(_LABEL_TEXTS_JS)
 
-    page.set_viewport_size({"width": 320, "height": 800})
-    assert page.evaluate(_SVG_BOX_JS) == svg_box, "precondition: the drawing's box moved"
-    assert page.evaluate(_INSPECTOR_WIDTH_JS) < inspector_width, (
-        "precondition: the inspector did not narrow"
+    assert page.evaluate("() => document.getElementById('inspector').clientLeft") > 0, (
+        "precondition: the inspector has no left border"
     )
-    _assert_refitted_as_a_fresh_draw(page, before, "narrowing the inspector alone")
-
-
-def test_labels_are_refitted_when_only_the_drawing_resizes(page: Any) -> None:
-    """(15g) The converse: the drawing can resize while the inspector does not
-    — a cap that changes with the root font size, say. At 400, where the wide
-    face's rim labels are cut by the inspector's edge, shrink the drawing to
-    12rem and leave the window alone: the edge recedes in viewBox units, and
-    the labels must be refitted to it.
-    """
-    page.set_viewport_size({"width": 400, "height": 800})
-    _use_face(page, "wide")
-    _GRAPH["payload"] = _server_ring_payload()
-    _open(page)
-    page.wait_for_selector(".local-graph svg")
-    page.evaluate(_TWO_FRAMES_JS)
-    svg_box = page.evaluate(_SVG_BOX_JS)
-    inspector_width = page.evaluate(_INSPECTOR_WIDTH_JS)
-    before = page.evaluate(_LABEL_TEXTS_JS)
-
-    page.add_style_tag(content=".local-graph svg { max-width: 12rem; }")
-    assert page.evaluate(_SVG_BOX_JS) != svg_box, "precondition: the drawing did not resize"
-    assert page.evaluate(_INSPECTOR_WIDTH_JS) == inspector_width, (
-        "precondition: the inspector resized"
+    spill = page.evaluate(
+        """() => {
+            const host = document.getElementById('inspector');
+            const box = host.getBoundingClientRect();
+            const padding = box.left + host.clientLeft;
+            return [...document.querySelectorAll('.local-graph text')]
+              .filter((t) => t.getBoundingClientRect().left < padding)
+              .map((t) => t.textContent);
+        }"""
     )
-    _assert_refitted_as_a_fresh_draw(page, before, "shrinking the drawing alone")
+    assert spill == [], f"labels run under the inspector's left border: {spill}"
+    short = _halo_shortfalls(page.evaluate(_EXTENTS_JS))
+    assert short == [], f"the cut label sits inside its own halo of the edge: {short}"
 
-
-#: Installed BEFORE the app loads (an init script, applied by ``reboot``):
-#: a ResizeObserver that records what it watches, so a test can see the
-#: observer's targets. It wraps the browser's class; it changes nothing in
-#: graph.js, which constructs the app's only ResizeObserver (inspector.js is
-#: pinned to have none by ``check_resize_is_not_inert``), so one set suffices.
-_RECORDING_RESIZE_OBSERVER_JS = """(() => {
-    const live = new Set();
-    window.__resizeTargets = () => [...live];
-    window.ResizeObserver = class extends window.ResizeObserver {
-        observe(target, options) { live.add(target); super.observe(target, options); }
-        unobserve(target) { live.delete(target); super.unobserve(target); }
-        disconnect() { live.clear(); super.disconnect(); }
-    };
-})();"""
-
-#: [how many targets are watched, is the drawn svg one, is #inspector one,
-#: how many watched targets are detached from the document].
-_RESIZE_TARGETS_JS = """() => {
-    const targets = window.__resizeTargets();
-    const svg = document.querySelector('.local-graph svg');
-    return [targets.length, svg !== null && targets.includes(svg),
-            targets.includes(document.getElementById('inspector')),
-            targets.filter((t) => !t.isConnected).length];
-}"""
-
-
-def test_the_refit_observer_watches_only_the_drawn_graph(page: Any) -> None:
-    """(15h) Every draw lets go of the previous one: the observer watches the
-    drawn svg and #inspector and nothing else — not the svg a redraw replaced,
-    which would stay alive, detached, for as long as the page — and once no
-    graph is drawn (the editor owns the inspector), it watches nothing.
-
-    ``_open`` draws twice (once when /graph lands, again on its closing
-    dispatch), so a draw that did not disconnect leaves a detached svg here.
-    """
-    page.add_init_script(_RECORDING_RESIZE_OBSERVER_JS)
-    reboot(page)
-    _GRAPH["payload"] = _server_ring_payload()
-    _open(page)
-    page.wait_for_selector(".local-graph svg")
-    assert page.evaluate(_RESIZE_TARGETS_JS) == [2, True, True, 0], (
-        "after a redraw, the observer does not watch exactly the drawn svg and #inspector"
+    fit = page.evaluate(_EDGE_FIT_JS, [ALPHA_ID, 0, _label_max_chars()])
+    halo = next(lab["halo"] for lab in page.evaluate(_EXTENTS_JS)["labels"]
+                if lab["text"] == fit["shown"])
+    assert fit["shown"].endswith("…") and fit["kept"] > 0, (
+        f"precondition: the edge did not cut the label to a few characters ({fit['shown']!r})"
+    )
+    assert (fit["longerWidth"] - fit["width"]) / 2 < halo, (
+        "precondition: one more character widens each side by "
+        f"{(fit['longerWidth'] - fit['width']) / 2:.2f}, not under the halo ({halo})"
     )
 
-    _dispatch(page, '{"editing": true}')
-    assert page.evaluate("() => document.querySelector('.local-graph')") is None, (
-        "precondition: the editor did not take the graph's place"
-    )
-    assert page.evaluate(_RESIZE_TARGETS_JS) == [0, False, False, 0], (
-        "with no graph drawn, the observer still watches something"
-    )
+

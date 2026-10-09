@@ -4,11 +4,12 @@ Same construction as ``tests/test_ui_browser.py`` and
 ``tests/test_ui_browser_reading.py``: the real ``index.html``, the real
 ``css/`` and ``js/`` off disk, every API call stubbed at the network layer. No
 Postgres, no Ollama, no contention for the test-database lock. The fixture is
-shared with ``tests/test_ui_browser_graph_layout.py`` through
-``tests/ui_graph_harness.py``, so the two graph suites hold one copy of the
-stub routing and the fixtures between them. The label-geometry tests on the
-server's ring live in that layout module; this one covers painting,
-interaction, accessibility, degraded states and hardening.
+shared with ``tests/test_ui_browser_graph_layout.py`` and
+``tests/test_ui_browser_graph_refit.py`` through ``tests/ui_graph_harness.py``,
+so the three graph suites hold one copy of the stub routing and the fixtures
+between them. The label-geometry tests on the server's ring live in that layout
+module, and the refit when a box resizes in the refit module; this one covers
+painting, interaction, accessibility, degraded states and hardening.
 
 **The filename is load-bearing.** CI selects ``tests/test_ui_browser*.py`` by
 path (a bare ``-m browser`` collects modules that open a database connection at

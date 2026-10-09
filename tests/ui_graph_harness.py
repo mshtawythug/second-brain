@@ -3,7 +3,8 @@
 Imported by ``tests/test_ui_browser_graph.py`` (painting, interaction,
 accessibility, degraded states, hardening),
 ``tests/test_ui_browser_graph_layout.py`` (label geometry on the server's
-ring), ``tests/test_ui_browser_related.py`` (the related-notes rail),
+ring), ``tests/test_ui_browser_graph_refit.py`` (the refit when a box
+resizes), ``tests/test_ui_browser_related.py`` (the related-notes rail),
 ``tests/test_ui_browser_inspector_blocks.py`` (the canonical block order) and
 ``tests/test_ui_browser_refresh.py`` (the refresh after a save). ONE copy of
 the stub routing, the per-test knobs and the fixtures, so the modules cannot

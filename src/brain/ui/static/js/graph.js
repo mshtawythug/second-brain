@@ -42,7 +42,9 @@ const LABEL_MAX_CHARS = 28;
 
 /* Clearance, in viewBox units, that fitLabels keeps between a label and the
    inspector's edge and between two labels sharing a row. It covers the
-   3-unit halo graph.css strokes round every glyph, with room to spare. */
+   3-unit halo graph.css strokes round every glyph, with room to spare.
+   Pinned against that halo — read from the label's computed stroke-width,
+   not from here — by test_the_edge_clearance_covers_the_label_halo. */
 const LABEL_CLEARANCE = 4;
 
 /* Fallback canvas size, used only if the payload omits one. */
@@ -115,9 +117,13 @@ let wired = false;
    delivery refits the one drawn svg ONCE, however many of the two boxes
    moved; fitting edits only text inside the svg, which resizes neither box,
    so it cannot loop. One graph is drawn at a time, so `fitted` is the svg
-   being watched. ResizeObserver is ASSUMED, not feature-tested, like the
-   unguarded `??` in inspector.js and related.js: every browser that can parse
-   these modules has it. */
+   being watched, and null whenever nothing is: it is cleared with every
+   disconnect, so a replaced or withdrawn svg is not kept alive by this
+   module (pinned by test_the_refit_observer_watches_only_the_drawn_graph,
+   which collects it). The callback never sees the null: disconnect() also
+   drops any delivery not yet made. ResizeObserver is ASSUMED, not
+   feature-tested, like the unguarded `??` in inspector.js and related.js:
+   every browser that can parse these modules has it. */
 let fitted = null;
 const refit = new ResizeObserver(() => fitLabels(fitted));
 
@@ -151,6 +157,7 @@ export function renderGraph() {
   const stale = host.querySelector(".local-graph");
   if (stale) stale.remove();
   refit.disconnect();
+  fitted = null;
 
   const note = state.note;
   /* Editing: the editor owns the 1fr track, and a graph beside raw markdown

@@ -311,31 +311,48 @@ sans is DejaVu Sans, roughly 8% wider, and five layout tests failed there and no
 font, not a test artefact. Fixed 2026-10-09 by `fitLabels` in `static/js/graph.js` (labels are cut
 to a measured, geometry-derived slot, and refitted when the inspector or the drawing is resized).
 The layout suite now runs its four parametrized geometric tests at the platform font AND at a
-deliberately wide face, and four more geometric tests at the wide face only, so a macOS run catches
-this class of defect too. Measured on macOS with `fitLabels` disabled outright: 13 of the
-15 parametrized wide runs go red. Twelve go red at the geometry assertions, on overlapping or
-clipped labels. One goes red only at its face-bit precondition: the rim test at 1280, where the rim
-labels never reach the inspector's edge. Its cut comes from the row bound, whose geometry the
-overlap test's 1280 wide run asserts. Mutating `fitText`'s slot to `Infinity` instead gives the same
-split on the rim and overlap tests. All four wide-only tests go red as well (refit on narrowing; a
-draw into a hidden inspector; refit when only the inspector, or only the drawing, resizes). **The two of the 15 that stay green are a named exemption, not an
-omission:** the crowded-ring
-test's 1280 wide runs. A crowded ring shows no two labels together, so only the inspector's edge
-binds, and at 1280 a rim label's slot is ~540 viewBox units against ~250 for the widest
-28-character label the wide face draws. No title reaches it, so those two runs are copies of their
-platform runs and do not assert the cut. The 320 and 400 crowded runs do.
+deliberately wide face, and four refit tests (now in `tests/test_ui_browser_graph_refit.py`) run at
+the wide face only, so a macOS run catches this class of defect too. Measured on macOS with
+`fitLabels` disabled outright: 13 of the 15 parametrized wide runs go red, every one at a geometry
+assertion, on overlapping, clipped or halo-crowded labels. The rim test's 1280 run is the one that
+needed the halo check: there the rim labels never reach the inspector's edge, so nothing clips,
+and it goes red only because its two rim labels overlap. All four wide-only refit tests go red as
+well (refit on narrowing; a draw into a hidden inspector; refit when only the inspector, or only
+the drawing, resizes), and so does the edge-clearance test (15i), at the platform font: 18 in all.
+Mutating `fitText`'s slot to `Infinity` instead turns the same 18 red. **The two of the 15 that
+stay green are a named exemption, not an omission:** the crowded-ring test's 1280 wide runs. A
+crowded ring shows no two labels together, so only the inspector's edge binds, and at 1280 a rim
+label's slot is ~540 viewBox units against ~250 for the widest 28-character label the wide face
+draws. No title reaches it, so those two runs are copies of their platform runs and do not assert
+the cut. The 320 and 400 crowded runs do.
+
+The crowded-ring test also pins the TEXT of the label in hand, not only its box. On a crowded ring
+`fitLabels` skips the row bound, since no two labels show together. Applied anyway, a hidden
+neighbour's box cut the hovered label beside 12 o'clock on the 24 ring to "S…", while every box
+check stayed green. Now the label must be its whole title at 1280, and at every width the longest
+cut that the inspector's edge alone allows. With the row bound forced on, all 12 crowded runs go
+red. The clearance `fitLabels` keeps (`LABEL_CLEARANCE`) is checked against the 3-unit halo
+graph.css strokes round each label, read from the computed style. The rim and overlap tests check
+it on whatever cuts their titles produce, and (15i) checks it where the outcome cannot depend on
+the font: a title of `i`, cut a few characters in, beside an inspector with a left border. With
+the clearance set to 0, (15i) goes red, along with four rim and overlap wide runs on macOS. Without
+the border term (`+ host.clientLeft`), only (15i) goes red, because the app's own inspector has no
+left border.
 
 A draw into a HIDDEN inspector (the phone list view sets it `display: none`) is not fitted at all.
 Chromium returns a non-null identity `getScreenCTM()` for a `display: none` svg, so the first
 guard, which tested the CTM, passed. The all-zero inspector rect then cut every label, root
 included, to a bare "…". The ResizeObserver refitted the labels when the inspector was shown
-again, so no reader saw it, but the draw-time fit was wrong all the same. `fitLabels` now returns when the svg has no width — the one guard, since an svg
-with a box sits in an inspector with a box (regression test (15e) in
-`tests/test_ui_browser_graph_layout.py`). The refit observes the inspector as well as the svg: the
-svg is capped at 24rem, so on a wide desktop only its percentage gutter makes its box follow the
-inspector's. Each observation has its own test, (15f) and (15g), and (15h) pins that every draw
-lets go of the svg it replaced. ResizeObserver is assumed rather than feature-tested, following the
-unguarded `??` in `inspector.js` and `related.js`: any browser that can parse those modules has it.
+again, so no reader saw it, but the draw-time fit was wrong all the same. `fitLabels` now returns
+when the svg has no width. That is the one guard, since an svg with a box sits in an inspector
+with a box (regression test (15e), in `tests/test_ui_browser_graph_refit.py` with the other refit
+tests). The refit observes the inspector as well as the svg: the svg is capped at 24rem, so on a
+wide desktop only its percentage gutter makes its box follow the inspector's. Each observation
+has its own test, (15f) and (15g). (15h) pins that every draw lets go of the svg it replaced, and
+that a withdrawn svg can be garbage-collected: graph.js clears its own reference (`fitted`) on
+every disconnect, and a forced collection clears a WeakRef to the svg. ResizeObserver is assumed
+rather than feature-tested, following the unguarded `??` in `inspector.js` and `related.js`: any
+browser that can parse those modules has it.
 
 The false legibility claim was repeated in THREE places, not one: `graph_layout.py`'s `RING_RADIUS`
 comment (corrected in the closeout commit), the same module's `DEFAULT_CAP` comment, and
