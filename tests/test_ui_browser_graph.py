@@ -115,6 +115,20 @@ def test_opening_a_note_paints_the_root_and_every_neighbour_in_order(page: Any) 
 
 
 def test_a_long_title_is_cut_on_the_label_and_whole_in_the_tooltip(page: Any) -> None:
+    """The CHARACTER cap, alone: 28 characters and an ellipsis.
+
+    Bravo is drawn as the ONLY neighbour, at 12 o'clock with nothing on its
+    row, so the width fit (graph.js ``fitLabels``) has a slot far wider than
+    any 29-character label and the character cap is what cuts it. On the
+    default three-neighbour ring Bravo shares a row with Charlie 174 units
+    away, and the fit cuts it further to stay clear of Charlie's label — by
+    how much depends on the font, which is the layout suite's subject
+    (``tests/test_ui_browser_graph_layout.py``), not this test's.
+    """
+    _GRAPH["payload"] = graph_payload(
+        neighbours=[NEIGHBOURS[1]],
+        edges=[{"src": BRAVO_ID, "dst": ROOT_ID, "kind": "derived"}],
+    )
     _open(page)
     page.wait_for_selector(".local-graph svg")
     _, long_title, _ = NEIGHBOURS[1]

@@ -36,8 +36,14 @@ import {
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 /* Labels longer than this are cut and given an ellipsis; the full title stays
-   available in the node's <title> child, which is what hover shows. */
+   available in the node's <title> child, which is what hover shows. A label
+   can be cut SHORTER than this to fit its slot — see fitLabels. */
 const LABEL_MAX_CHARS = 28;
+
+/* Clearance, in viewBox units, that fitLabels keeps between a label and the
+   inspector's edge and between two labels sharing a row. It covers the
+   3-unit halo graph.css strokes round every glyph, with room to spare. */
+const LABEL_CLEARANCE = 4;
 
 /* Fallback canvas size, used only if the payload omits one. */
 const DEFAULT_SIZE = 320;
@@ -47,16 +53,24 @@ const DEFAULT_SIZE = 320;
    `svg[data-crowded]`). Presentation, not layout — the server still places
    every node; the full title stays in each node's <title>, which is its
    accessible name, so nothing is lost to a screen reader.
-   MEASURED on the server's ring (graph_layout.RING_RADIUS = 110 on 320,
-   28-char titles, label font 13.5 units) at 320, 400 and 1280px viewports:
-   every pair of label boxes is disjoint for 1, 2, 3 and 4 neighbours; at 5
-   the 2 and 10 o'clock labels hang at the root label's height and meet it
-   (and at 8 and over, neighbours meet each other — at the 24 cap they are
-   ~29 units apart and each label is ~150 wide). 6 happens to be clean, but a
+   WHAT THE THRESHOLD DOES AND DOES NOT DO. It does NOT keep labels apart:
+   fitLabels does, at every count, by cutting each label to its measured
+   slot — so no font can make labels meet. The threshold decides when that
+   slot is too narrow to be worth reading. On the server's ring
+   (graph_layout.RING_RADIUS = 110 on 320, label font 13.5 units) labels
+   share a row only in pairs at up to 4 neighbours (at 3, the 4 and 8 o'clock
+   pair, ~190 units apart; at 4, the 3 and 9 o'clock pair, 220 apart). At 5
+   the 2 and 10 o'clock labels hang at the ROOT label's height, ~105 units
+   either side of it, so three labels share ~210 units and each is cut to
+   about half a 28-char title; more neighbours only narrow the slots. A
    threshold must hold for EVERY count beneath it, so it is 4.
+   (First measured 2026-10-08 against macOS font metrics ALONE, as "every
+   pair disjoint" with no fit — which a wider default sans, DejaVu Sans on
+   the GitHub Linux runner, falsified at 3 neighbours.)
    Pinned by test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible
    and test_a_crowded_ring_labels_only_the_neighbour_in_hand, which reads
-   this constant from this file. */
+   this constant from this file, each run at the platform's default font and
+   at a deliberately wide one. */
 const MAX_LABELLED_NEIGHBOURS = 4;
 
 /* What stands in the graph's place when this server refuses it. One line of
@@ -87,6 +101,17 @@ const ROOT_LABEL_GAP = 6;
 
 let wired = false;
 
+/* Refits the drawn graph's labels whenever its box changes size: a label's
+   slot is partly the inspector's edge, and that edge moves, in viewBox units,
+   when the window is resized. One graph is drawn at a time, so one observer
+   watches at most one svg. Absent where ResizeObserver is (no current
+   browser), labels are fitted once, at draw time. */
+const refit = typeof ResizeObserver === "function"
+  ? new ResizeObserver((entries) => {
+    for (const entry of entries) fitLabels(entry.target);
+  })
+  : null;
+
 /* The graph payload for a note, through the shared per-note fetch
  * (note_fetch.js — read its header for the cache, the revision key, the
  * failure sentinel and the stale-response guard). A FAILED fetch caches
@@ -116,6 +141,7 @@ export function renderGraph() {
      is worse than none. */
   const stale = host.querySelector(".local-graph");
   if (stale) stale.remove();
+  if (refit) refit.disconnect();
 
   const note = state.note;
   /* Editing: the editor owns the 1fr track, and a graph beside raw markdown
@@ -138,7 +164,15 @@ export function renderGraph() {
   if (cached === undefined) return;
 
   const block = buildBlock(cached);
-  if (block) placeInspectorBlock(host, block);
+  if (!block) return;
+  placeInspectorBlock(host, block);
+  /* Fitted NOW, synchronously, not only from the observer: the observer's
+     first callback lands after this dispatch, and nothing may read (or
+     paint) a label that has not been fitted. */
+  const svg = block.querySelector("svg");
+  if (!svg) return;
+  fitLabels(svg);
+  if (refit) refit.observe(svg);
 }
 
 /* MIRRORS routes_graph.note_graph's gate EXACTLY, and the two change together:
@@ -306,7 +340,78 @@ function appendGlyph(parent, node, { above = false } = {}) {
 }
 
 function shorten(title) {
-  return title.length > LABEL_MAX_CHARS ? `${title.slice(0, LABEL_MAX_CHARS)}…` : title;
+  return cut(title, LABEL_MAX_CHARS);
+}
+
+/* The first `chars` characters of `title`, with an ellipsis if any were cut. */
+function cut(title, chars) {
+  return title.length > chars ? `${title.slice(0, chars)}…` : title;
+}
+
+/* LABEL WIDTH IS MEASURED, NOT ASSUMED. A label's rendered width is a
+ * property of whichever font the reader's machine resolves --font-ui to, and
+ * those differ by more than the ring has to spare: a 28-char title that fits
+ * between two nodes in SF Pro does not in DejaVu Sans. So every label gets a
+ * SLOT, in viewBox units, from geometry alone —
+ *   - centred on its node, it must stay inside the inspector, whose
+ *     `overflow-y: auto` would clip it mid-word: twice the distance from the
+ *     node to the nearer edge;
+ *   - on a ring where labels show together (not data-crowded), it must not
+ *     meet a label whose row it shares: the distance between the two nodes,
+ *     which gives each label at most half the gap on its side;
+ * and is cut, character by character, until its MEASURED length fits. Its
+ * full title stays in the node's <title>. On a crowded ring no two labels
+ * show together (graph.css): the root's alone at rest, one neighbour's alone
+ * in hand — so only the inspector's edge binds there.
+ * Idempotent: each pass starts again from the full label. */
+function fitLabels(svg) {
+  const host = svg.closest("#inspector");
+  const ctm = svg.getScreenCTM();
+  /* Not laid out (a hidden inspector): nothing to measure. The observer
+     refits when it gets a box. */
+  if (!host || !ctm || !(ctm.a > 0)) return;
+  const edge = host.getBoundingClientRect().left + host.clientLeft;
+  const left = (edge - ctm.e) / ctm.a + LABEL_CLEARANCE;
+  const right = (edge + host.clientWidth - ctm.e) / ctm.a - LABEL_CLEARANCE;
+  const crowded = svg.hasAttribute("data-crowded");
+
+  const labels = [...svg.querySelectorAll(".node > text")].map((text) => {
+    const title = text.parentNode.querySelector("title").textContent;
+    text.textContent = shorten(title);
+    const box = text.getBBox();
+    return {
+      text, title, x: Number(text.getAttribute("x")), top: box.y, bottom: box.y + box.height,
+    };
+  });
+  for (const label of labels) {
+    let slot = 2 * Math.min(label.x - left, right - label.x);
+    if (!crowded) {
+      for (const other of labels) {
+        const apart = other.bottom + LABEL_CLEARANCE <= label.top
+          || label.bottom + LABEL_CLEARANCE <= other.top;
+        if (other !== label && !apart) {
+          slot = Math.min(slot, Math.abs(label.x - other.x) - LABEL_CLEARANCE);
+        }
+      }
+    }
+    fitText(label.text, label.title, slot);
+  }
+}
+
+/* Cut `text` to the longest prefix of `title` (at most LABEL_MAX_CHARS) whose
+   measured length fits `slot`. Binary search: lengths only grow with the
+   prefix. A slot too narrow for any prefix leaves the bare ellipsis. */
+function fitText(text, title, slot) {
+  if (text.getComputedTextLength() <= slot) return;
+  let lo = 0;
+  let hi = Math.min(title.length, LABEL_MAX_CHARS) - 1;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    text.textContent = cut(title, mid);
+    if (text.getComputedTextLength() <= slot) lo = mid;
+    else hi = mid - 1;
+  }
+  text.textContent = cut(title, lo);
 }
 
 /* Light the node and every edge that touches it, after clearing whatever was

@@ -49,9 +49,17 @@
      they run toward the centre of the canvas. The root's own label is drawn
      ABOVE the root (js/graph.js, ROOT_LABEL_GAP) precisely to keep that row
      free; centred rim labels plus a gutter keep every label apart.
-     MEASURED 2026-10-08 on the server's ring, four 28-char labels, 13.5-unit
-     labels, 8% gutter. Rim labels' left..right against the inspector
-     (pinned by test_rim_labels_stay_inside_the_inspector):
+     THE GUTTER GIVES ROOM; IT DOES NOT GUARANTEE FIT. How wide a label is
+     depends on the font the reader's machine resolves --font-ui to, so
+     js/graph.js (fitLabels) measures every label after drawing and cuts it to
+     stay LABEL_CLEARANCE inside the inspector. The figures below are macOS
+     metrics (2026-10-08), where no rim label needs that cut; with DejaVu Sans
+     (GitHub's Linux runner) the same labels ran 3px past a 400px inspector
+     until the fit existed.
+     MEASURED 2026-10-08 (macOS) on the server's ring, four 28-char labels,
+     13.5-unit labels, 8% gutter. Rim labels' left..right against the
+     inspector (pinned by test_rim_labels_stay_inside_the_inspector, which
+     also runs at a deliberately wide face):
        320px    8..146 and 173..313 in 0..320     (8px / 7px clear)
        400px    6..182 and 217..395 in 0..400     (6px / 5px clear)
        1280px 752..916 and 949..1115 in 586..1280
@@ -107,9 +115,11 @@
    size in viewBox units, so it scales with the drawing — which is what keeps
    the rim gutter above valid at every width. 13.5 units renders at 10.2px on
    a 320px phone (the drawing is ~0.76 scale there) and 12-13px elsewhere;
-   the --t-meta token (11) rendered at 7.9px, too small to read. 14 would make
-   a 3-neighbour ring's lower labels meet, so 13.5 it is (measured
-   2026-10-08 — see MAX_LABELLED_NEIGHBOURS in js/graph.js).
+   the --t-meta token (11) rendered at 7.9px, too small to read. 14 made a
+   3-neighbour ring's lower labels meet on macOS (measured 2026-10-08), so
+   13.5 it is. Labels no longer meet at any size or font — js/graph.js cuts
+   each to its measured slot (fitLabels) — so a larger size now costs
+   characters rather than collisions.
 
    HALO: the label is stroked in the panel colour UNDER its fill
    (paint-order), so an edge line passing behind it — the root label sits on

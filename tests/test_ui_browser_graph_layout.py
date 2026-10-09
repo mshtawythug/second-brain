@@ -7,6 +7,15 @@ Split out of ``tests/test_ui_browser_graph.py`` to keep each module under the
 measures label BOXES: inside the inspector, never intersecting, legible on a
 phone, and hidden at rest on a ring too crowded to label.
 
+**Every geometric test runs twice: at the platform's default font, and at a
+deliberately WIDE face** (``_WIDE_FACE_CSS``). The label geometry was first
+measured against macOS metrics only, and it passed here while GitHub's Linux
+runner — whose default sans is the wider DejaVu Sans — rendered overlapping
+and clipped labels. The ``wide`` runs put that failure on every machine, and
+each one asserts at its END that the wide face really did force a cut, so a
+face that stops being wide cannot turn them into silent copies of the
+``platform`` runs.
+
 **The filename is load-bearing.** CI selects ``tests/test_ui_browser*.py`` by
 path, and ``tests/test_ci_workflow.py`` fails if a ``browser``-marked module
 sits outside that glob. Run it by path:
@@ -54,6 +63,41 @@ DELTA_ID = "aaaaaaaa-0000-4000-8000-00000000000f"
 #: ``static_dir``. If graph_layout's ring changes, change these with it.
 _SERVER_RING_RADIUS = 110.0
 _SERVER_SIZE = 320
+
+#: Wider than any default sans this suite will meet, on every platform: a
+#: wide real face where one is installed (Verdana ships with macOS; DejaVu
+#: Sans is the Linux default), widened again by letter-spacing, which does
+#: not depend on any installed font at all. Scoped to the graph's labels, so
+#: only the subject of these tests changes.
+_WIDE_FACE_CSS = (
+    ".local-graph .node text {"
+    " font-family: Verdana, 'DejaVu Sans', sans-serif; letter-spacing: 0.12em; }"
+)
+_FACES = ["platform", "wide"]
+
+
+def _use_face(page: Any, face: str) -> None:
+    """Apply ``face`` BEFORE the graph is drawn: labels are fitted at draw time."""
+    if face == "wide":
+        page.add_style_tag(content=_WIDE_FACE_CSS)
+
+
+#: How many drawn labels the width fit cut. Every title in this module is
+#: exactly 28 characters — at the character cap, never over it — so any
+#: ellipsis on a label is the width fit's work.
+_CUT_LABELS_JS = """() => [...document.querySelectorAll('.local-graph text')]
+    .filter((t) => t.textContent.endsWith('…')).length"""
+
+
+def _assert_the_face_bit(page: Any, face: str) -> None:
+    """The ``wide`` face must have forced at least one cut, or its run proved
+    nothing the ``platform`` run did not. Asserted LAST, after the geometry,
+    so a missing fit fails on overlapping or clipped labels — what a reader
+    would see — and not here."""
+    if face == "wide":
+        assert page.evaluate(_CUT_LABELS_JS) > 0, (
+            "precondition: the wide face cut no label, so this run tested nothing new"
+        )
 
 #: Four neighbours: a count divisible by 4 puts two of them exactly at 3 and 9
 #: o'clock, the rim positions. Every title is exactly 28 characters — the
@@ -103,8 +147,9 @@ def _server_ring_payload(
 #: 320 / 400: below 780px the ledger and inspector become a two-view stack
 #: (components.css), so on a phone the inspector is the whole viewport with the
 #: narrow padding — the narrowest it ever gets. 1280: the normal desktop.
+@pytest.mark.parametrize("face", _FACES)
 @pytest.mark.parametrize("viewport_width", [320, 400, 1280])
-def test_rim_labels_stay_inside_the_inspector(page: Any, viewport_width: int) -> None:
+def test_rim_labels_stay_inside_the_inspector(page: Any, viewport_width: int, face: str) -> None:
     """(13) Labels at the server's 3 and 9 o'clock nodes are not cut off.
 
     TWO assertions, because the first one ALONE CANNOT FAIL on label spill —
@@ -117,6 +162,7 @@ def test_rim_labels_stay_inside_the_inspector(page: Any, viewport_width: int) ->
     """
     assert all(len(title) == 28 for _, title in _RIM_TITLES)
     page.set_viewport_size({"width": viewport_width, "height": 800})
+    _use_face(page, face)
     _GRAPH["payload"] = _server_ring_payload()
     _open(page)
     page.wait_for_selector(".local-graph svg")
@@ -148,10 +194,14 @@ def test_rim_labels_stay_inside_the_inspector(page: Any, viewport_width: int) ->
         }"""
     )
     assert spill == [], f"labels run past the inspector and are clipped: {spill}"
+    _assert_the_face_bit(page, face)
 
 
+@pytest.mark.parametrize("face", _FACES)
 @pytest.mark.parametrize("viewport_width", [320, 400, 1280])
-def test_no_two_labels_overlap_on_the_server_ring(page: Any, viewport_width: int) -> None:
+def test_no_two_labels_overlap_on_the_server_ring(
+    page: Any, viewport_width: int, face: str,
+) -> None:
     """(14) On the server's real ring, no label box intersects another.
 
     The 3 and 9 o'clock neighbours sit on the root's row, so their labels
@@ -161,6 +211,7 @@ def test_no_two_labels_overlap_on_the_server_ring(page: Any, viewport_width: int
     the root's label cannot trade one collision for another unnoticed.
     """
     page.set_viewport_size({"width": viewport_width, "height": 800})
+    _use_face(page, face)
     _GRAPH["payload"] = _server_ring_payload()
     _open(page)
     page.wait_for_selector(".local-graph svg")
@@ -187,6 +238,7 @@ def test_no_two_labels_overlap_on_the_server_ring(page: Any, viewport_width: int
     count, hits = overlaps
     assert count == 1 + len(_RIM_TITLES), "precondition: not every label was drawn"
     assert hits == [], f"labels overlap: {hits}"
+    _assert_the_face_bit(page, face)
 
 
 # --------------------------------------------------------- crowded rings --
@@ -254,18 +306,21 @@ def _open_ring(page: Any, count: int, width: int) -> list[tuple[str, str]]:
 _WIDTHS = [320, 400, 1280]
 
 
+@pytest.mark.parametrize("face", _FACES)
 @pytest.mark.parametrize("viewport_width", _WIDTHS)
 def test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible(
-    page: Any, viewport_width: int,
+    page: Any, viewport_width: int, face: str,
 ) -> None:
     """(15a) Counts 1..threshold: every label shown, none intersecting, >=10px.
 
-    EVERY count up to the threshold, not just the threshold itself: on the
-    server's ring the collision set is not monotonic in the count (measured:
-    5 collides, 6 does not), so "the threshold count is clean" would not
-    imply the smaller ones are.
+    EVERY count up to the threshold, not just the threshold itself: which
+    labels share a row is not monotonic in the count (at 3 the two lower
+    labels do, at 4 the rim pair does, at 2 none do — and on macOS metrics,
+    before graph.js fitted labels to their slots, 5 collided and 6 did not),
+    so "the threshold count is clean" would not imply the smaller ones are.
     """
     threshold = _label_threshold()
+    _use_face(page, face)
     for count in range(1, threshold + 1):
         _open_ring(page, count, viewport_width)
         labels = page.evaluate(_LABELS_JS)
@@ -284,12 +339,15 @@ def test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible(
             f"labels render at {small}px at a {viewport_width}px viewport; "
             "they must be at least 10px to be readable"
         )
+    # The last ring drawn is the threshold's own, which has a shared row.
+    _assert_the_face_bit(page, face)
 
 
+@pytest.mark.parametrize("face", _FACES)
 @pytest.mark.parametrize("count_kind", ["threshold+1", "cap"])
 @pytest.mark.parametrize("viewport_width", _WIDTHS)
 def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
-    page: Any, viewport_width: int, count_kind: str,
+    page: Any, viewport_width: int, count_kind: str, face: str,
 ) -> None:
     """(15b) Over the threshold, a neighbour's label shows only while it is
     hovered or focused — and then it collides with nothing that is showing.
@@ -298,6 +356,7 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
     high fails on what the reader would actually see: overlapping text.
     """
     count = _label_threshold() + 1 if count_kind == "threshold+1" else 24
+    _use_face(page, face)
     titles = _open_ring(page, count, viewport_width)
 
     labels = page.evaluate(_LABELS_JS)
@@ -337,3 +396,33 @@ def test_a_crowded_ring_still_names_every_neighbour(page: Any) -> None:
     snapshot = page.locator("figure.local-graph").aria_snapshot()
     missing = [title for _, title in titles if f'link "{title}"' not in snapshot]
     assert missing == [], f"neighbours lost their accessible name: {missing}\n{snapshot}"
+
+
+def test_labels_are_refitted_when_the_inspector_narrows(page: Any) -> None:
+    """(15d) A label's slot is partly the inspector's edge, and that edge moves
+    in viewBox units when the window is resized — so a ring fitted on a wide
+    window must be REFITTED when it narrows, not left at its old cut.
+
+    Drawn at 1280, where the rim labels have room to spare against the
+    inspector, then narrowed to 320, where the same cut runs past it. Wide
+    face, so the difference does not hang on one machine's metrics.
+    """
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _use_face(page, "wide")
+    _GRAPH["payload"] = _server_ring_payload()
+    _open(page)
+    page.wait_for_selector(".local-graph svg")
+    wide_cut = page.evaluate("() => [...document.querySelectorAll('.local-graph text')]"
+                             ".map((t) => t.textContent)")
+
+    page.set_viewport_size({"width": 320, "height": 800})
+    # The observer's callback runs in the frame after layout; two frames settle it.
+    page.evaluate("() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))")
+    labels = page.evaluate(_LABELS_JS)
+    left, right = page.evaluate(_INSPECTOR_BOX_JS)
+    cut = [lab["id"][-4:] for lab in labels if lab["box"][0] < left or lab["box"][1] > right]
+    assert cut == [], f"after narrowing to 320px, labels are clipped: {cut}"
+    assert _intersections(labels) == [], "after narrowing to 320px, labels overlap"
+    narrow_cut = page.evaluate("() => [...document.querySelectorAll('.local-graph text')]"
+                               ".map((t) => t.textContent)")
+    assert narrow_cut != wide_cut, "precondition: narrowing changed no label's cut"

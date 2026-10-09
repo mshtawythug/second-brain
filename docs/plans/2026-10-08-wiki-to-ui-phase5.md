@@ -244,10 +244,14 @@ The full file list is `git diff --stat 121df23..d04d540 -- src`.
   than surfacing the layout's `ValueError` as a 500.
 - **One shared sensitivity read.** Both routes read the root's tier through
   `brain.ui.queries.document_sensitivity`, so the two gates cannot drift.
-- **Crowded-ring threshold.** Above `MAX_LABELLED_NEIGHBOURS` in `static/js/graph.js` (4, measured)
-  neighbour labels show only on hover or focus. The threshold is the largest count at which EVERY
-  smaller count is collision-free — the collision set is not monotonic in the count, so a clean
-  larger count does not raise it. Rationale and pinning tests are in the comment above the constant.
+- **Crowded-ring threshold.** Above `MAX_LABELLED_NEIGHBOURS` in `static/js/graph.js` (4)
+  neighbour labels show only on hover or focus. *(Corrected 2026-10-09 — see §7.4.)* The threshold
+  no longer keeps labels apart: `fitLabels` does, at every count and in every font, by measuring
+  each label after drawing and cutting it to a slot derived from geometry alone (inside the
+  inspector's edge; clear of any label sharing its row). The threshold decides when those slots are
+  too narrow to be worth reading: up to 4 neighbours, labels share a row only in pairs; at 5 the 2
+  and 10 o'clock labels share the root label's row and each is cut to about half a 28-char title.
+  Rationale and pinning tests are in the comment above the constant.
 - **Canonical inspector block order:** marginalia → graph → related, held in one place
   (`INSPECTOR_BLOCKS` / `placeInspectorBlock` in `static/js/dom.js`), so the order no longer
   depends on which fetch resolves first.
@@ -298,6 +302,17 @@ list". It does not: the only rail is the marginalia's backlinks ("Linked from"),
 or derived-only neighbour past the cap is on no rail at all — which is why the graph's caption reads
 "+N more not shown" and does not point at the rail. R4's own cell carries the same correction.)*
 
+**The threshold's "measured, collision-free" was true on one font only.** §7.2 first said 4 was the
+largest count at which every smaller count is collision-free, "measured". It was measured at 320,
+400 and 1280 px — all on macOS, whose default sans is narrow. On GitHub's Linux runner the default
+sans is DejaVu Sans, roughly 8% wider, and five layout tests failed there and nowhere else: a
+3-neighbour ring's two lower labels overlapped, and rim labels ran past a 400 px inspector, where
+`overflow-y: auto` clips them mid-word. That was a production defect for any reader with a wider
+font, not a test artefact. Fixed 2026-10-09 by `fitLabels` in `static/js/graph.js` (labels are cut
+to a measured, geometry-derived slot, and refitted when the inspector is resized). The layout suite
+now runs every geometric test at the platform font AND at a deliberately wide face, so a macOS run
+catches this class of defect too; removing the width bound turns 13 of those wide runs red.
+
 The false legibility claim was repeated in THREE places, not one: `graph_layout.py`'s `RING_RADIUS`
 comment (corrected in the closeout commit), the same module's `DEFAULT_CAP` comment, and
 the name and comment of a test in `tests/test_ui_graph_layout.py` (both corrected in the fix round —
@@ -314,7 +329,10 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
 - **Cached rows that point at a deleted note persist until reload** — pre-existing for backlinks,
   now shared by the graph and related blocks.
 - **Superseded `id:rev` cache keys are retained deliberately** (reason in `store.js`).
-- **At a 400 px viewport** rim labels clear the inspector edge by only 5–6 px.
+- **At a 400 px viewport** rim labels clear the inspector edge by only 5–6 px on macOS. *(Bounded
+  since 2026-10-09: `fitLabels` keeps every label at least `LABEL_CLEARANCE` (4 viewBox units)
+  inside the inspector in any font, cutting it where it must — so the limit is now how many
+  characters a wide font leaves on a rim label, not whether it is clipped.)*
 
 ### 7.6 Documents corrected in the closeout
 
