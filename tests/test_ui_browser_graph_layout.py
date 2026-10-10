@@ -352,9 +352,9 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
     the 1280 ``platform`` runs.** On a crowded ring only the inspector's edge
     binds a label (no two show together), and at 1280 the inspector centres
     the graph with room to spare: measured, a rim label's slot is ~540
-    viewBox units, while the widest 28-character label the wide face draws is
-    ~250 — and the character cap cuts any longer title first. No title this
-    test could use reaches the edge there, so nothing at 1280 tests the fit;
+    viewBox units, while the suite's widest 28-character title measures ~250
+    in the wide face — and the character cap cuts any longer title first. No
+    title this test uses reaches the edge there, so nothing at 1280 tests the fit;
     320 and 400 do, and assert it.
     """
     count = _SPEC_LABEL_THRESHOLD + 1 if count_kind == "threshold+1" else 24
