@@ -21,9 +21,11 @@ from starlette.staticfiles import StaticFiles
 from ..errors import VaultPathEscape
 from . import (
     routes_discovery,
+    routes_graph,
     routes_links,
     routes_meta,
     routes_notes,
+    routes_related,
     routes_search,
     routes_tree,
 )
@@ -156,6 +158,8 @@ def create_app(context: UiContext) -> Starlette:
         Route(
             "/api/notes/{id_prefix}/links", routes_links.note_links, methods=["GET"]
         ),
+        Route("/api/notes/{id_prefix}/graph", routes_graph.note_graph, methods=["GET"]),
+        Route("/api/notes/{id_prefix}/related", routes_related.note_related, methods=["GET"]),
         Route(
             "/api/notes/{id_prefix}",
             routes_notes.get_note,

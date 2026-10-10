@@ -128,21 +128,44 @@ class _Ledger:
         self.searches = searches
 
     def wait_for_search(self, count: int) -> dict[str, list[str]]:
-        """Block until the ``count``-th search has been issued, and return it."""
+        """Block until the ``count``-th search has been ANSWERED, and return the
+        query string it carried.
+
+        Waits on ``window.__searchAnswered``, not on a count of requests
+        ISSUED. ``searches`` is filled by the route handler, in Python, and an
+        issued-count can reach ``count`` before Playwright has dispatched that
+        handler — the wait returned, ``searches[count - 1]`` did not exist yet,
+        and the test died on an IndexError (1 run in 3 of the CI browser
+        command). An answer cannot arrive before the handler that fulfils it
+        has run, and the handler appends BEFORE it fulfils, so once the page
+        has the ``count``-th response the list has its ``count``-th entry.
+
+        The length check below demands EQUALITY, not ``>=``: ``searches``
+        counts requests that reached the route, answered or not, so a search
+        the app aborted after the handler had appended it, or a request issued
+        past the ``count``-th, would shift ``searches[count - 1]`` onto a
+        different request than the ``count``-th answer. Any such misalignment
+        fails here, loudly, instead of handing a test the wrong query string.
+        """
         self.page.wait_for_function(
-            "n => window.__searchCount >= n", arg=count, timeout=5000
+            "n => window.__searchAnswered >= n", arg=count, timeout=5000
+        )
+        assert len(self.searches) == count, (
+            f"the page has {count} search answers but the route recorded "
+            f"{len(self.searches)} requests"
         )
         return self.searches[count - 1]
 
     def wait_for_ready(self) -> None:
         """Block until the ledger has RENDERED, not merely asked.
 
-        ``wait_for_search`` returns as soon as the request leaves the browser,
-        and the DOM at that instant still shows the previous page — asserting on
-        it there reads the state the click was supposed to change. Race-free
-        because ``runSearch`` dispatches ``loading`` BEFORE it calls ``api()``,
-        so by the time the fetch counter has moved, ``#meta`` already says
-        "searching…" and can only be leaving that state.
+        ``wait_for_search`` returns as soon as the response reaches ``fetch``,
+        before ``runSearch`` has parsed or rendered it, so the DOM at that
+        instant can still show the previous page — asserting on it there reads
+        the state the click was supposed to change. Race-free because
+        ``runSearch`` dispatches ``loading`` BEFORE it calls ``api()``, so by
+        the time the answer counter has moved, ``#meta`` has said "searching…"
+        and can only be in or leaving that state.
         """
         self.page.wait_for_function(
             "() => document.getElementById('meta').textContent !== 'searching…'",
@@ -223,15 +246,21 @@ def make_ledger(browser: Any, static_origin: str) -> Iterator[Any]:
         opened.append(pg)
         pg.route("**/api/**", route_api)
         # Counted in the PAGE so a test can wait on "the Nth search has been
-        # issued" instead of sleeping. Registered before navigation so the very
-        # first search is counted too.
+        # answered" instead of sleeping — see wait_for_search for why ANSWERED
+        # and not issued. Counted when fetch RESOLVES, which is after
+        # route_api has appended and fulfilled. A search the app aborts never
+        # resolves, so it is never counted here — but if its request had
+        # already reached route_api, it WAS appended to `searches`, and the two
+        # counts now disagree (wait_for_search's equality check catches that).
+        # Registered before navigation so the very first search is counted too.
         pg.add_init_script(
-            "window.__searchCount = 0;"
+            "window.__searchAnswered = 0;"
             "const f = window.fetch;"
             "window.fetch = function (input, init) {"
             "  const u = typeof input === 'string' ? input : input.url;"
-            "  if (u && u.indexOf('/api/search') !== -1) window.__searchCount++;"
-            "  return f.apply(this, arguments);"
+            "  const sent = f.apply(this, arguments);"
+            "  if (!u || u.indexOf('/api/search') === -1) return sent;"
+            "  return sent.then((r) => { window.__searchAnswered++; return r; });"
             "};"
         )
         pg.goto(f"{static_origin}/static/index.html?q={TERM}")

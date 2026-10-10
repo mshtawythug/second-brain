@@ -33,6 +33,75 @@ export const state = {
   tree: null, expanded: loadExpanded(), health: null, sessionId: null,
 };
 
+/* PER-NOTE REVISIONS — the one invalidation mechanism for every per-note cache.
+ *
+ * marginalia.js (backlinks), graph.js and related.js each cache what they
+ * fetched for a note, so a re-render on every dispatch costs no request. The
+ * cost of that cache was that it never expired: save a note that adds a
+ * `[[wikilink]]` and all three blocks kept showing the old neighbourhood until
+ * a full reload. So their shared fetch helper (`perNoteFetch`, note_fetch.js)
+ * keys every cache on `noteKey(id)` rather than on the bare id, and
+ * inspector.js calls `bumpNoteRevision(id)` on a
+ * SUCCESSFUL save. The saved note's key moves, its stale entries stop
+ * matching, and its blocks refetch on the render the save's dispatch triggers.
+ *
+ * PER NOTE, NOT GLOBAL, and that is the point. A single global counter folded
+ * into every key would invalidate every note's cache on any save; here only
+ * the saved note's key changes, so every other note's entries survive. And
+ * because nothing but a save moves a revision, an ordinary dispatch — toggling
+ * the editor, an unsaved edit, opening another note and coming back — still
+ * refetches nothing.
+ *
+ * A Map, held here rather than on `state`: it is not something any renderer
+ * draws, and `dispatch` has no business replacing it.
+ *
+ * SUPERSEDED KEYS ARE RETAINED, DELIBERATELY. A bump leaves the old `id:rev`
+ * entries in each module's cache, unreachable, rather than pruning them on
+ * write. This is a single-user local UI: one dead entry per module per save is
+ * trivial, and the per-note caches were already unbounded (one entry per note
+ * opened) before revisions existed. Pruning would add a second code path to
+ * the one invalidation rule for no observable gain. */
+const noteRevisions = new Map();
+
+function noteRevision(id) {
+  return noteRevisions.get(id) || 0;
+}
+
+export function bumpNoteRevision(id) {
+  noteRevisions.set(id, noteRevision(id) + 1);
+}
+
+/* The cache key for anything fetched about note `id` at its current revision. */
+export function noteKey(id) {
+  return `${id}:${noteRevision(id)}`;
+}
+
+/* ---------------------------------------------- the confidential lenses --
+ *
+ * The server serves a confidential note through TWO separate gates, and
+ * `/api/health` reports both (routes_meta.health): `serve_confidential_bodies`
+ * (may this session read a confidential note it opened) and
+ * `serve_confidential_titles` (may a surface name one unprompted). The graph
+ * and the related rail are refused by the server on these gates, so each of
+ * those modules mirrors its route's gate EXACTLY rather than asking and
+ * collecting a 403 — see `graphRefusedHere` (graph.js) and
+ * `relatedRefusedHere` (related.js).
+ *
+ * FAILS CLOSED. Until `/api/health` has answered, if it never does, or if it
+ * omits a key, the gate reads as NOT served. The server is the authority;
+ * guessing "served" would only issue a request the server then refuses. */
+const CONFIDENTIAL = "confidential";
+
+/* The note's OWN tier, from its own payload (notes_service.read_note emits
+   `sensitivity` only when it is not the default). */
+export function isConfidentialNote(note) {
+  return Boolean(note) && note.sensitivity === CONFIDENTIAL;
+}
+
+export function servesConfidential(gate) {
+  return Boolean(state.health) && state.health[gate] === true;
+}
+
 const listeners = [];
 export function subscribe(fn) { listeners.push(fn); }
 export function dispatch(patch) { Object.assign(state, patch); listeners.forEach((fn) => fn()); }

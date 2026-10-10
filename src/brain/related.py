@@ -17,14 +17,14 @@ from here. :mod:`brain.connect` reuses the eligibility + embedding helpers
 for its own auto-link scoring.
 
 **File-size ceiling (CLAUDE.md): this file is now OVER, and the F6 gate below
-is what put it over.** Re-derive with ``wc -l src/brain/related.py``; the
-SHA-bound trail is 714 (``3b16527``, where the wiki/ui split created this
-module) -> 720 (``0473b5f``) -> 726 (``7b5579e``) -> **the commit that added
-this paragraph**, named descriptively and with no delta, for the reason
-``connect.py`` and ``timeline.py`` record: a hop cannot name its own SHA, and a
-delta is falsified by the same write that states it. Read the trail as
-authoritative only THROUGH THE LAST SHA IT NAMES; for anything after it use
-``git log --oneline f8c76c0..HEAD -- src/brain/related.py``.
+is what put it over.** Re-derive with ``wc -l src/brain/related.py``; the trail
+is 714 (``3b16527``, where the wiki/ui split created it) -> 720 (``0473b5f``)
+-> 726 (``7b5579e``) -> 851 (``b7fd0e8``, the F6 gate) -> 851 (``f0abf64``, the
+merge; no line changed) -> 851 (``0af7353``, naming this module's consumer)
+-> **the phase-5 fix-round commit that aligned this trail with CLAUDE.md's**,
+descriptive, no delta: a hop cannot name its own SHA (see ``connect.py``). Read
+it as authoritative only THROUGH THE LAST SHA IT NAMES; for anything after it
+use ``git log --oneline f8c76c0..HEAD -- src/brain/related.py``.
 
 **This crossing is a rule violation, recorded rather than smoothed over.**
 CLAUDE.md's ceiling section says an existing file under 800 "must stay under it
@@ -165,19 +165,19 @@ def compute_related(
     rather than in phase 5 because :class:`RelatedDoc` carries ``snippet``, a
     raw slice of a candidate's chunk ``content``: this is a BODY egress, not a
     title one. Deferring would make the phase-5 panel's author responsible for
-    noticing that, at the moment they are least likely to. It costs nothing
-    today -- the only caller is a test. Polarity: ``exclude_confidential``
+    noticing that, at the moment they are least likely to. (Written before
+    that panel existed; it now does -- see below.) Polarity: ``exclude_confidential``
     (``True`` = exclude) here vs MCP's ``include_confidential`` (``False`` =
     exclude); both exclude by default, bridge is ``not``. See
     :func:`brain.mcp_server._confidential_lens`.
 
-    **Nothing in ``src/`` calls this yet, and that is deliberate.** The
-    related-docs panel it exists for is phase-5 work (design spec §9.2, whose
-    verified block records this function as new code authored ahead of its
-    consumer rather than moved from the emitter); the ``brain ui`` routes carry
-    no such panel today, and only ``tests/test_related_compute.py`` exercises
-    it. It is a deposit, not a live caller — do not delete it as dead code, and
-    do not read the paragraph above as describing a panel that ships.
+    **Its consumer is :mod:`brain.ui.routes_related`** (``GET
+    /api/notes/{id}/related``, phase 5), behind the related-notes rail in the
+    ``brain ui`` inspector; ``tests/test_related_compute.py`` pins it directly.
+    History: it was authored ahead of that consumer (design spec §9.2 and
+    Appendix B-17 record it as a deposit), so the gating above was written for
+    a panel that did not exist yet -- and that panel now ships. The route also
+    gates the SOURCE, which this function does not (see the comment below).
 
     ``vector_sim_floor`` is required, with no default, for the reason
     :func:`brain.wiki.build_related.regenerate_related_json` states: the
@@ -224,10 +224,10 @@ def compute_related(
         title=str(row[0] or ""),
         vault_path=str(row[1] or ""),
     )
-    # Gates CANDIDATES only. The SOURCE document is not re-checked: the caller
-    # already holds ``doc_id``, so refusing to compute neighbours for a
-    # confidential source would withhold nothing it does not already have,
-    # while still leaking the answer through the empty list.
+    # Gates CANDIDATES only; gating the SOURCE is the caller's job. A related
+    # list for a confidential root is a précis of what is being withheld, so
+    # ``brain.ui.routes_related`` checks the root's tier FIRST (403
+    # ``related_withheld`` under a strict lens) and only then calls here.
     neighbors = _neighbors_for_source(
         conn,
         source=source,
