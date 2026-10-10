@@ -65,7 +65,10 @@
        1280px 752..916 and 949..1115 in 586..1280
      Before any gutter (11-unit labels) they were cut at -8..130 / 189..329
      (320px) and -14..161 / 237..416 (400px). Vertical gaps between label
-     boxes (pinned by test_no_two_labels_overlap_on_the_server_ring):
+     boxes (that the root's label sits above its circle, on a row of its own,
+     is pinned by test_the_root_label_sits_above_the_root_on_a_row_of_its_own;
+     test_no_two_labels_overlap_on_the_server_ring pins only that no two
+     boxes meet):
                               320px  400px  1280px
        root above 12 o'clock    48     60     56
        root above 3/9 o'clock   12     14     13

@@ -193,8 +193,12 @@ def test_the_ring_fits_inside_the_canvas_and_keeps_discs_clear_at_the_cap() -> N
     """The constants are only meaningful at the default canvas; pin that.
 
     This checks DISCS, not labels. Arc spacing says nothing about horizontal
-    labels, which collide from 5 neighbours on (graph.js's
-    ``MAX_LABELLED_NEIGHBOURS``, pinned by the browser layout suite).
+    labels: at 5 neighbours three share the root label's row, each cut to
+    about half a title, so past graph.js's ``MAX_LABELLED_NEIGHBOURS`` (4,
+    reasoned in the comment above it) they show only on hover or focus. That 4
+    is held as ``_SPEC_LABEL_THRESHOLD`` in ``tests/ui_graph_geometry.py`` and
+    pinned in ``tests/test_ui_browser_graph_layout.py``, behaviourally by
+    ``test_a_ring_is_crowded_from_one_past_the_specified_threshold``.
     """
     assert RING_RADIUS + NEIGHBOUR_RADIUS < 320 / 2
     # At the cap, adjacent neighbour centres are more than two disc diameters

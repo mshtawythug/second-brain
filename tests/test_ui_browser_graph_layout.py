@@ -38,6 +38,16 @@ a widened face works against — (15k) a slot placed between a long title's
 27- and 28-character cuts, (15l) a slot narrower than the bare "…", and
 (15m) a slot that holds a long title's cut one past the cap. Each measures,
 as preconditions, that its placement really did produce the case it is about.
+Two more run at the platform font only, being about no label's WIDTH, which
+is what the wide face widens: (14b) the root's label sits above the root, on
+a row of its own, and (15n) the crowded-ring threshold is the spec's 4 — a
+ring of 4 is labelled at rest, a ring of 5 is crowded.
+
+**graph.js's constants are pinned at every test's TEARDOWN**, by the autouse
+``spec_constants_pin`` fixture imported from ``tests/ui_graph_geometry.py``:
+after the test's last assertion, so a changed constant fails first on what it
+does to the labels, and an ERROR at teardown (not a FAIL) where it does nothing
+the test can see.
 
 **The filename is load-bearing.** CI names every browser module explicitly
 (``.github/workflows/ci.yml``), and ``tests/test_ci_workflow.py`` fails if a
@@ -61,16 +71,16 @@ from tests.ui_graph_geometry import (
     _SERVER_SIZE,
     _SPEC_LABEL_CLEARANCE,
     _SPEC_LABEL_MAX_CHARS,
+    _SPEC_LABEL_THRESHOLD,
     _TWO_FRAMES_JS,
     _assert_optimal_cuts,
-    _assert_spec_constants,
     _assert_the_face_bit,
     _crowd_titles,
     _fits,
     _halo_shortfalls,
     _intersections,
-    _label_threshold,
     _server_ring_payload,
+    _spec_constants_pin_fixture,  # noqa: F401 — autouse: pins graph.js's constants after each test
     _use_face,
 )
 from tests.ui_graph_harness import (
@@ -197,6 +207,46 @@ def test_no_two_labels_overlap_on_the_server_ring(
     _assert_the_face_bit(page, face)
 
 
+#: The root's circle top and label row, and every neighbour label's row, in
+#: viewBox units (``getBBox``, as fitLabels measures rows).
+_ROOT_ROW_JS = """() => {
+    const root = document.querySelector('.local-graph .node-root');
+    const circle = root.querySelector('circle');
+    const row = (t) => { const b = t.getBBox(); return [t.textContent, b.y, b.y + b.height]; };
+    return {
+        circleTop: Number(circle.getAttribute('cy')) - Number(circle.getAttribute('r')),
+        label: row(root.querySelector('text')),
+        others: [...document.querySelectorAll('.local-graph a.node > text')].map(row),
+    };
+}"""
+
+
+def test_the_root_label_sits_above_the_root_on_a_row_of_its_own(page: Any) -> None:
+    """(14b) The root's label is drawn ABOVE the root — its box's bottom at or
+    over the circle's top — and so, on the server's ring, shares no row with
+    any other label: no neighbour's slot is narrowed by it.
+
+    (14) cannot pin this. Below the root, the root's label shares a row with
+    the 3 and 9 o'clock labels, and fitLabels cuts all three until none
+    overlaps — so every box check stays green, and only the cuts moved. Rows
+    are judged as fitLabels judges them: within the spec's clearance.
+    """
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _GRAPH["payload"] = _server_ring_payload()
+    _open(page)
+    page.wait_for_selector(".local-graph svg")
+
+    rows = page.evaluate(_ROOT_ROW_JS)
+    _, top, bottom = rows["label"]
+    assert bottom <= rows["circleTop"], (
+        f"the root's label reaches {bottom:.2f}, below the root's top {rows['circleTop']:.2f}"
+    )
+    sharing = [text for text, other_top, other_bottom in rows["others"]
+               if other_bottom + _SPEC_LABEL_CLEARANCE > top
+               and bottom + _SPEC_LABEL_CLEARANCE > other_top]
+    assert sharing == [], f"labels share the root label's row: {sharing}"
+
+
 # --------------------------------------------------------- crowded rings --
 
 
@@ -242,14 +292,15 @@ def test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible(
     labels do, at 4 the rim pair does, at 2 none do — and on macOS metrics,
     before graph.js fitted labels to their slots, 5 collided and 6 did not),
     so "the threshold count is clean" would not imply the smaller ones are.
-    At every count, every label is also held to the oracle; the spec's
-    constants are pinned once, after the last count, so a changed one fails
-    first on the counts whose cuts it changes (for a clearance of 0, 3 and 4:
-    measured).
+    At every count, every label is also held to the oracle. The threshold is
+    the SPEC's, not graph.js's: read from graph.js, it would loop to 5 the
+    moment graph.js said 5, and pass the very rings the threshold exists to
+    keep unlabelled. graph.js's constants are pinned at teardown, after the
+    last count, so a changed one fails first on the counts whose cuts it
+    changes (for a clearance of 0, 3 and 4: measured).
     """
-    threshold = _label_threshold()
     _use_face(page, face)
-    for count in range(1, threshold + 1):
+    for count in range(1, _SPEC_LABEL_THRESHOLD + 1):
         _open_ring(page, count, viewport_width)
         labels = page.evaluate(_LABELS_JS)
         left, right = page.evaluate(_INSPECTOR_BOX_JS)
@@ -267,8 +318,7 @@ def test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible(
             f"labels render at {small}px at a {viewport_width}px viewport; "
             "they must be at least 10px to be readable"
         )
-        _assert_optimal_cuts(page, f"count {count} at {viewport_width}px", pin_constants=False)
-    _assert_spec_constants()
+        _assert_optimal_cuts(page, f"count {count} at {viewport_width}px")
     # The last ring drawn is the threshold's own, which has a shared row.
     _assert_the_face_bit(page, face)
 
@@ -304,7 +354,7 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
     test could use reaches the edge there, so nothing at 1280 tests the fit;
     320 and 400 do, and assert it.
     """
-    count = _label_threshold() + 1 if count_kind == "threshold+1" else 24
+    count = _SPEC_LABEL_THRESHOLD + 1 if count_kind == "threshold+1" else 24
     _use_face(page, face)
     titles = _open_ring(page, count, viewport_width)
 
@@ -344,8 +394,7 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
         # The oracle with NO row bound: every label, the one in hand and the
         # hidden ones alike, is the longest cut the inspector's edge alone
         # allows — so a row bound applied here over-cuts and fails it.
-        fits = _assert_optimal_cuts(page, f"{how} on #{index}", rows=False,
-                                    pin_constants=False)
+        fits = _assert_optimal_cuts(page, f"{how} on #{index}", rows=False)
         fit = next(f for f in fits if f["id"] == node_id)
         if viewport_width == _EDGE_NEVER_BINDS_CROWDED:
             assert fit["longer"] is None, (
@@ -354,7 +403,6 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
             )
         page.evaluate("() => document.activeElement && document.activeElement.blur()")
         page.mouse.move(1, 1)
-    _assert_spec_constants()  # once, after both nodes' geometry
     if viewport_width != _EDGE_NEVER_BINDS_CROWDED:  # the exemption, docstring above
         _assert_the_face_bit(page, face)
 
@@ -366,6 +414,35 @@ def test_a_crowded_ring_still_names_every_neighbour(page: Any) -> None:
     snapshot = page.locator("figure.local-graph").aria_snapshot()
     missing = [title for _, title in titles if f'link "{title}"' not in snapshot]
     assert missing == [], f"neighbours lost their accessible name: {missing}\n{snapshot}"
+
+
+_CROWDED_JS = "() => document.querySelector('.local-graph svg').hasAttribute('data-crowded')"
+
+
+@pytest.mark.parametrize(
+    "count", [_SPEC_LABEL_THRESHOLD, _SPEC_LABEL_THRESHOLD + 1], ids=["threshold", "threshold+1"],
+)
+def test_a_ring_is_crowded_from_one_past_the_specified_threshold(page: Any, count: int) -> None:
+    """(15n) The threshold is the SPEC's 4 (plan §7.2), held by the test and
+    not read from graph.js: a ring of 4 is not crowded and shows every label
+    at rest; a ring of 5 is crowded (``data-crowded``, by which graph.css
+    hides neighbour labels and fitLabels drops the row bound) and shows only
+    the root's.
+
+    Both directions: a threshold of 3 crowds the 4-ring, and one of 5 leaves
+    the 5-ring labelled, three labels on the root's row, each cut to about
+    half a title.
+    """
+    titles = _open_ring(page, count, 1280)
+    crowded = page.evaluate(_CROWDED_JS)
+    labels = page.evaluate(_LABELS_JS)
+    assert len(labels) == 1 + count, "precondition: not every node was drawn"
+    assert crowded == (count > _SPEC_LABEL_THRESHOLD), (
+        f"a ring of {count} is {'' if crowded else 'not '}crowded"
+    )
+    shown = sorted(lab["id"] for lab in labels if lab["visible"])
+    labelled = [ROOT_ID] if crowded else [ROOT_ID, *(node_id for node_id, _ in titles)]
+    assert shown == sorted(labelled), f"a ring of {count} at rest shows {len(shown)} labels"
 
 
 #: A neighbour whose title is all ``i``, the narrowest common glyph, so one
@@ -666,10 +743,9 @@ def test_a_slot_narrower_than_the_ellipsis_leaves_the_bare_ellipsis(page: Any) -
         f"precondition: the slot ({fit['slot']:.2f}) holds the bare ellipsis "
         f"({ellipsis:.2f}), so the floor is not reached"
     )
-    fits = _assert_optimal_cuts(page, "a slot under the floor", pin_constants=False)
+    fits = _assert_optimal_cuts(page, "a slot under the floor")
     fit = next(fit for fit in fits if fit["id"] == ALPHA_ID)
     assert fit["shown"] == "…", f"the floor is the bare ellipsis, not {fit['shown']!r}"
-    _assert_spec_constants()
 
 
 def test_a_title_past_the_cap_is_cut_at_the_cap_where_more_would_fit(page: Any) -> None:
@@ -698,9 +774,8 @@ def test_a_title_past_the_cap_is_cut_at_the_cap_where_more_would_fit(page: Any) 
         f"precondition: the slot ({fit['slot']:.2f}) does not hold the cut one "
         f"past the cap ({over_length:.2f}), so a raised cap would change nothing"
     )
-    fits = _assert_optimal_cuts(page, "a roomy slot past the cap", pin_constants=False)
+    fits = _assert_optimal_cuts(page, "a roomy slot past the cap")
     fit = next(fit for fit in fits if fit["id"] == ALPHA_ID)
     assert fit["shown"] == f"{_LONG_TITLE[:_SPEC_LABEL_MAX_CHARS]}…", (
         f"a title past the cap shows {fit['shown']!r}"
     )
-    _assert_spec_constants()

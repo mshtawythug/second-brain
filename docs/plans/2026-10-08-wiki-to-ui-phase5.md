@@ -325,12 +325,18 @@ ring the row bound from every label within the clearance of its row, at `|dx|` l
 and requires the label to be the LONGEST cut of its title that fits: one more character must not,
 and a title whose capped form fits must be shown whole. It is measured on the same element with the
 same `getComputedTextLength` as `fitText`. It cannot cancel a mutation: it reads nothing from
-`graph.js`, and it holds the spec's clearance (4) and cap (28) itself, checking that `graph.js`
-ships them only after each test's last assertion on its labels (preconditions aside). The
-every-ring and crowded-ring tests call the oracle once per ring or per node, so they pin the
-constants ONCE, after the loop (`pin_constants=False` inside it); pinned inside the loop, the check
-fired at the first count, before counts 3 and 4, the only counts at which a clearance of 0 changes
-a cut (measured). (15l) and (15m) assert on their label after the oracle, so they pin last too. The
+`graph.js`, and it holds the spec's clearance (4) and cap (28) itself. That `graph.js` ships them,
+and the crowded-ring threshold (4), is checked at each test's TEARDOWN by an autouse fixture,
+`spec_constants_pin` (`tests/ui_graph_geometry.py`), which the layout module imports: after every
+assertion the test makes, preconditions included. No test pins them itself, so none can forget to,
+and the oracle refuses to run in a test the fixture does not wrap, so a module that uses the oracle
+cannot forget the import. *(Changed 2026-10-09: tests pinned in their bodies, and the looped ones
+passed `pin_constants=False` and pinned after the loop — an opt-out that was silent if the
+follow-up pin was left out.)* A pin inside the every-ring loop fired at the first count, before
+counts 3 and 4, the only counts at which a clearance of 0 changes a cut (measured); at teardown it
+cannot. A changed constant that alters nothing a test can see is still red, as an ERROR at
+teardown rather than a FAIL; where a label assertion catches it first, the test FAILS and the
+teardown errors beside it. The
 oracle runs in the rim, overlap and every-ring tests at both faces and every width, and with no row
 bound in the crowded-ring test, on every label. Five platform-font tests place their nodes so the
 outcome cannot depend on the font, and measure that as preconditions: (15i) a title of `i` beside
@@ -341,28 +347,50 @@ slot narrower than "…" itself, where the label must be the bare "…" — `fit
 one cut the oracle lets overrun its slot; and (15m) a long title mid-canvas, in a slot that holds
 its 29-character cut, where the label must stop at the cap.
 
-Measured on macOS (all 42 tests in the two modules; each mutation applied, confirmed applied,
-and reverted to a clean `git diff`):
+**The crowded-ring threshold is the spec's, not `graph.js`'s.** *(Added 2026-10-09, after the
+completion audit of `cc90f1c` failed on it.)* The every-ring and crowded-ring tests read
+`MAX_LABELLED_NEIGHBOURS` from `graph.js`, so they moved with it: raised to 5, the every-ring test
+looped to 5 and the crowded test crowded 6, and all 64 graph, layout and refit tests stayed green
+(the audit's measurement) —
+while a ring of 5 labelled every node at rest, each cut to about half a title. Both now loop to,
+and crowd one past, `_SPEC_LABEL_THRESHOLD` (4), and (15n) pins it behaviourally: a ring of 4 is
+not `data-crowded` and shows every label at rest; a ring of 5 is, and shows only the root's.
+
+**The root label's place is pinned directly.** `ROOT_LABEL_GAP`'s comment named (14) as its pin,
+but since `fitLabels` a root label drawn BELOW the root leaves (14) green: the fit cuts it and the
+3 and 9 o'clock labels until none overlaps. It died only at two refit tests' preconditions. (14b)
+asserts it: the root label's box ends at or above the root's circle, and shares no row (within the
+spec's clearance) with any other label on the server's ring — each half red on its own (measured).
+
+Measured on macOS (all 45 tests in the two modules — the 40 layout tests the teardown pin wraps and
+the 5 refit tests, which it does not; each mutation applied, confirmed applied, and reverted to a
+clean `git diff`). "FAIL" is a test body's assertion; "teardown" is the constant pin alone:
 
 | Mutation of `graph.js` | Red | Where |
 |---|---|---|
 | `Math.abs` dropped from the row bound | 21 | all at the oracle: rim, overlap and every-ring tests at every width and face, (15i), both (15j) |
 | row bound's `- LABEL_CLEARANCE` dropped | 8 | the oracle in seven (rim and overlap at 1280 wide, every-ring at all three platform widths and 1280 wide, (15j) stacked); (15j) level at the halo check first |
 | row membership tested without the clearance | 1 | (15j) stacked, at the oracle |
-| `LABEL_CLEARANCE` 4 → 0 | 36 | 20 at the geometry: rim and overlap 320/400 wide, (15i) and (15j) level at the halo check; rim and overlap 1280 wide, every-ring at 320 (both faces), 400 platform and 1280 (both faces), five crowded runs (320 and 400 wide at both counts, 400 platform at the cap), (15j) stacked and (15k) at the oracle. The other 16 only at the constant check: in them no label's cut differs from the spec's |
+| `LABEL_CLEARANCE` 4 → 0 | 40 | 20 FAIL at the geometry: rim and overlap 320/400 wide, (15i) and (15j) level at the halo check; rim and overlap 1280 wide, every-ring at 320 (both faces), 400 platform and 1280 (both faces), five crowded runs (320 and 400 wide at both counts, 400 platform at the cap), (15j) stacked and (15k) at the oracle. The other 20 only at teardown: in them no label's cut differs from the spec's |
 | `clientWidth` → `offsetWidth` | 1 | (15i), at its spill check under the right border |
 | `+ host.clientLeft` dropped | 1 | (15i), at its spill check under the left border |
 | `fitText`'s search capped at 26 (`hi - 2`) | 1 | (15k), at the oracle |
 | row bound applied on a crowded ring | 12 | every crowded run, at the oracle |
 | `fitText`'s `lo = 0` → `1` (no bare-"…" floor) | 1 | (15l), at the oracle |
-| `LABEL_MAX_CHARS` 28 → 29 | 36 | (15m) at the oracle; the other 35 only at the constant check |
+| `LABEL_MAX_CHARS` 28 → 29 | 40 | (15m) FAILS at the oracle; the other 39 only at teardown |
+| `LABEL_MAX_CHARS` 28 → 27 | 40 | 31 FAIL at the oracle; the other 9 only at teardown |
+| `MAX_LABELLED_NEIGHBOURS` 4 → 5 | 40 | 7 FAIL: the six threshold+1 crowded runs (five labels show at rest) and (15n) at 5 (not crowded); the other 33 only at teardown |
+| `MAX_LABELLED_NEIGHBOURS` 4 → 3 | 40 | 9 FAIL: all six every-ring runs (a label hidden at 4), (15n) at 4 (crowded), and overlap and rim at 1280 wide, on overlapping labels and at the oracle (a crowded 4-ring drops the row bound, and the wide rim pair meets); the other 31 only at teardown |
+| root label drawn below the root (`{ above: true }` dropped) | 3 | (14b), at its first assertion; and (15d) and (15g), at their preconditions — (14) stays green |
 
 With the earlier spill and halo assertions removed, the oracle alone turns (15i) red for
 `offsetWidth` and for the dropped `clientLeft`, and both (15j) runs red for the row clearance.
-With the constant check removed instead, the geometry alone still turns `LABEL_CLEARANCE` 0 red
-in the same 20 runs, and `LABEL_MAX_CHARS` 29 red in (15m), at the oracle; a cap of 27 is red
-in 31 runs there. Deleting the oracle's own bare-"…" exemption turns (15l) red, so that
-exemption is exercised.
+The FAIL counts above are what the test bodies catch with no constant check at all: the pin
+runs only at teardown, after every body assertion. Deleting the oracle's own bare-"…" exemption turns
+(15l) red, so that exemption is exercised. With the layout module's import of the pin fixture
+deleted, all 36 tests that apply the oracle fail at its guard, and the 4 that do not ((14b),
+(15c), both (15n)) pass. With (14b)'s first assertion disabled, the root-below mutant still fails
+it, at the shared row (the 3 and 9 o'clock labels).
 
 **`fitLabels` disabled outright: 26 red.** 13 of the 15 parametrized wide runs: the rim test's 320
 and 400 runs clipped, its 1280 run on the halo (there the rim labels never reach the inspector's
@@ -382,7 +410,7 @@ title reaches it, so those two runs are copies of their platform runs and do not
 The 320 and 400 crowded runs do.
 
 **Survivors found** — the mutants of `graph.js` that no test turns red in the phase audit's wider
-sweep, each judged equivalent by that audit, with the reason, and each re-run against these 42
+sweep, each judged equivalent by that audit, with the reason, and each re-run against these 45
 tests (0 red):
 
 - `<=` → `<` in `fitText`'s early return, in its binary search, and at either of the two
@@ -446,6 +474,8 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
   pinned by (15l)). So
   the limit is now how many characters a wide font leaves on a rim label, not whether it is
   clipped.)*
+- **(15m)'s 29th character is a space**, so the cap-29 label it rejects ("…Note With …") differs
+  from the cap's ("…Note With…") by a space alone. Follow-up: a title whose 29th is a letter.
 
 ### 7.6 Documents corrected in the closeout
 

@@ -14,27 +14,31 @@ ask CI to name it. Every module that imports it applies
 
 **No bar here moves with graph.js.** Label clearance is asserted against the
 HALO (``_halo_shortfalls``, from graph.css's computed ``stroke-width``), never
-against graph.js's ``LABEL_CLEARANCE``. And every label's CUT is held to the
+against graph.js's ``LABEL_CLEARANCE``. Every label's CUT is held to the
 OPTIMALITY ORACLE (``_assert_optimal_cuts``): its slot recomputed here from the
 specified rules, with the spec's clearance and cap pinned here
 (``_SPEC_LABEL_CLEARANCE``, ``_SPEC_LABEL_MAX_CHARS``) rather than read from
 graph.js, and the label required to be the LONGEST cut of its title that fits
-it. A box check passes an over-cut label; the oracle does not. Mutating a
-constant cannot lower either bar with it: graph.js's constants are compared
-with the spec's only after the geometry, so a changed one fails first on what
-it does to the labels where it does anything. That holds for every test,
-looped or not: ``_assert_optimal_cuts`` pins them after its own geometry, and a
-test that calls it in a loop — once per ring, or per node in hand — or asserts
-on a label after it passes ``pin_constants=False`` and pins them ONCE, after
-its last such assertion, so a changed constant meets all of the test's label
-assertions first. (Preconditions — that a run tested what it is about — may
-follow the pin.)
+it. A box check passes an over-cut label; the oracle does not. And the
+crowded-ring threshold is the spec's (``_SPEC_LABEL_THRESHOLD``), not
+graph.js's, so a test that loops up to it cannot loop up to a mutated one.
+
+Mutating a constant cannot lower any of these bars with it: graph.js's
+constants are compared with the spec's only at TEARDOWN, by the autouse
+``spec_constants_pin`` fixture, after the test's last assertion — so a changed
+one fails first on what it does to the labels, where it does anything, in every
+test of a module that imports the fixture. No test pins them itself, so none
+can forget to; and the oracle refuses to run in a test the fixture does not
+wrap (``_SpecPin``), so a module that uses the oracle cannot forget the import.
 """
 from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterator
 from typing import Any
+
+import pytest
 
 from brain.ui.app import static_dir
 from tests.ui_graph_harness import ALPHA_ID, BRAVO_ID, CHARLIE_ID, ROOT_ID, ROOT_TITLE
@@ -204,30 +208,21 @@ def _graph_js_constant(name: str) -> int | None:
     return int(found.group(1)) if found else None
 
 
-def _label_threshold() -> int:
-    """``MAX_LABELLED_NEIGHBOURS`` — one number, one place. Absent (the module
-    predates the threshold) reads as 24, the server's cap, i.e. "always label"
-    — which is exactly the behaviour being replaced."""
-    found = _graph_js_constant("MAX_LABELLED_NEIGHBOURS")
-    return 24 if found is None else found
-
-
 # ------------------------------------------------------ the optimality oracle --
 
 #: The SPEC's values, pinned here and NOT read from graph.js: the clearance
-#: fitLabels keeps on each side of a label, and the client's character cap.
-#: An oracle that read them from graph.js would move with a mutated constant
-#: and pass it — set LABEL_CLEARANCE to 0 and the oracle's slots would widen
-#: in step with the fit's. ``_assert_spec_constants`` checks graph.js ships
-#: these values, and runs after a test's last label assertion (preconditions
-#: aside), so a changed constant fails first on what it does to the labels:
-#: last in ``_assert_optimal_cuts`` by default, and once at the end of a test
-#: that calls that in a loop — per ring, or per node in hand — or asserts on a
-#: label after it (``pin_constants=False``). Pinned inside the every-ring
-#: loop, it fired on the first ring, before counts 3 and 4: the only counts at
-#: which a clearance of 0 changes a cut (measured).
+#: fitLabels keeps on each side of a label, the client's character cap, and
+#: the most neighbours a ring may have and still label them all at rest
+#: (graph.js's ``MAX_LABELLED_NEIGHBOURS``; plan §7.2). An oracle that read
+#: them from graph.js would move with a mutated constant and pass it — set
+#: LABEL_CLEARANCE to 0 and the oracle's slots would widen in step with the
+#: fit's; read the threshold there, and the every-ring and crowded-ring tests
+#: loop to 5 and crowd 6 the moment it is 5, and stay green. graph.js is held
+#: to these by ``_assert_spec_constants``, at each test's teardown
+#: (``spec_constants_pin``).
 _SPEC_LABEL_CLEARANCE = 4
 _SPEC_LABEL_MAX_CHARS = 28
+_SPEC_LABEL_THRESHOLD = 4
 
 #: Below this, two measured lengths are the same number computed twice.
 _FIT_EPSILON = 1e-6
@@ -328,29 +323,56 @@ def _fit_faults(fits: list[dict[str, Any]]) -> list[str]:
 
 
 def _assert_spec_constants() -> None:
-    """graph.js ships the values the oracle holds it to (see above)."""
-    shipped = (_graph_js_constant("LABEL_CLEARANCE"), _graph_js_constant("LABEL_MAX_CHARS"))
-    assert shipped == (_SPEC_LABEL_CLEARANCE, _SPEC_LABEL_MAX_CHARS), (
-        f"graph.js ships LABEL_CLEARANCE, LABEL_MAX_CHARS = {shipped}, not the "
-        f"specified ({_SPEC_LABEL_CLEARANCE}, {_SPEC_LABEL_MAX_CHARS})"
+    """graph.js ships the values the tests hold it to (see above)."""
+    names = ("LABEL_CLEARANCE", "LABEL_MAX_CHARS", "MAX_LABELLED_NEIGHBOURS")
+    shipped = tuple(_graph_js_constant(name) for name in names)
+    spec = (_SPEC_LABEL_CLEARANCE, _SPEC_LABEL_MAX_CHARS, _SPEC_LABEL_THRESHOLD)
+    assert shipped == spec, (
+        f"graph.js ships {', '.join(names)} = {shipped}, not the specified {spec}"
     )
 
 
-def _assert_optimal_cuts(
-    page: Any, context: str, *, rows: bool = True, pin_constants: bool = True,
-) -> list[dict[str, Any]]:
+class _SpecPin:
+    """Whether the running test will pin graph.js's constants at teardown:
+    set by ``spec_constants_pin`` for the length of each test it wraps."""
+
+    armed = False
+
+
+#: Fixture FUNCTION named ``_..._fixture`` and registered under its public
+#: name, as in ``tests/ui_graph_harness.py``: a test module that imports it,
+#: with a ``noqa`` for F401, registers it — autouse — for every test there.
+@pytest.fixture(autouse=True, name="spec_constants_pin")
+def _spec_constants_pin_fixture() -> Iterator[None]:
+    """Pin graph.js's constants to the spec AFTER the test body: after every
+    assertion it makes on its labels, and after its preconditions.
+
+    A changed constant fails here as an ERROR at teardown, not a FAIL — still
+    red, and still naming the constant. Where a label assertion caught the
+    change first, the test is reported FAILED and this errors beside it."""
+    _SpecPin.armed = True
+    try:
+        yield
+    finally:
+        _SpecPin.armed = False
+    _assert_spec_constants()
+
+
+def _assert_optimal_cuts(page: Any, context: str, *, rows: bool = True) -> list[dict[str, Any]]:
     """Every drawn label is the longest cut that fits the slot the SPEC gives
     it (``_fit_faults``) — rows included, for a ring whose labels show
-    together. Then, last, that graph.js ships the spec's constants — unless
-    ``pin_constants`` is False, which a caller passes when it calls this in a
-    loop or checks a label after it, so that it can call
-    ``_assert_spec_constants`` itself, once, at its end. Returns the oracle's
-    measurements for a caller's preconditions."""
+    together. Returns the oracle's measurements for a caller's preconditions.
+
+    Refuses to run unless ``spec_constants_pin`` wraps the test: the oracle
+    holds graph.js to the spec's values, and that only means something if the
+    test also checks graph.js ships them."""
+    assert _SpecPin.armed, (
+        "the oracle ran in a test that will not pin graph.js's constants: "
+        "import _spec_constants_pin_fixture from tests.ui_graph_geometry"
+    )
     fits = _fits(page, rows=rows)
     faults = _fit_faults(fits)
     assert faults == [], f"{context}: labels are not their longest fitting cut: {faults}"
-    if pin_constants:
-        _assert_spec_constants()
     return fits
 
 

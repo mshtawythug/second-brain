@@ -79,10 +79,13 @@ const DEFAULT_SIZE = 320;
    (First measured 2026-10-08 against macOS font metrics ALONE, as "every
    pair disjoint" with no fit — which a wider default sans, DejaVu Sans on
    the GitHub Linux runner, falsified at 3 neighbours.)
-   Pinned by test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible
-   and test_a_crowded_ring_labels_only_the_neighbour_in_hand, which reads
-   this constant from this file, each run at the platform's default font and
-   at a deliberately wide one. */
+   Pinned at 4 by test_a_ring_is_crowded_from_one_past_the_specified_threshold
+   (a ring of 4 shows every label at rest, a ring of 5 only the root's), and
+   by test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible and
+   test_a_crowded_ring_labels_only_the_neighbour_in_hand, each run at the
+   platform's default font and at a deliberately wide one. All three hold the
+   SPEC's 4 (tests/ui_graph_geometry.py, _SPEC_LABEL_THRESHOLD) and never read
+   this constant, so changing it cannot move them with it. */
 const MAX_LABELLED_NEIGHBOURS = 4;
 
 /* What stands in the graph's place when this server refuses it. One line of
@@ -108,7 +111,10 @@ const LABEL_GAP = 10;
    o'clock neighbours (whose labels hang below them at the root's height),
    and collided with both; above, it shares nothing — the 12 o'clock label
    hangs BELOW its node, ~60 units higher. Pinned by
-   test_no_two_labels_overlap_on_the_server_ring. */
+   test_the_root_label_sits_above_the_root_on_a_row_of_its_own. NOT by
+   test_no_two_labels_overlap_on_the_server_ring: with the root's label
+   below, fitLabels cuts it and the 3 and 9 o'clock labels until none
+   overlaps, so that test stays green. */
 const ROOT_LABEL_GAP = 6;
 
 let wired = false;
