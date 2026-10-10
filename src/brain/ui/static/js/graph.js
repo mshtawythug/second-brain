@@ -64,7 +64,10 @@ const DEFAULT_SIZE = 320;
    "…" (the bare ellipsis is fitText's floor), which the server's ring never
    produces: the narrowest shared-row slot it makes is ~186 units (the
    ~190-unit pair below, less LABEL_CLEARANCE), and on a crowded ring no
-   two labels show together at all. The threshold decides when that
+   two labels show together at all. The floor is still pinned, on a slot a
+   test places below it — on the inspector's edge — by
+   test_a_slot_narrower_than_the_ellipsis_leaves_the_bare_ellipsis, which
+   requires the bare "…" there. The threshold decides when that
    slot is too narrow to be worth reading. On the server's ring
    (graph_layout.RING_RADIUS = 110 on 320, label font 13.5 units) labels
    share a row only in pairs at up to 4 neighbours (at 3, the 4 and 8 o'clock

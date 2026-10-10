@@ -22,7 +22,13 @@ graph.js, and the label required to be the LONGEST cut of its title that fits
 it. A box check passes an over-cut label; the oracle does not. Mutating a
 constant cannot lower either bar with it: graph.js's constants are compared
 with the spec's only after the geometry, so a changed one fails first on what
-it does to the labels where it does anything.
+it does to the labels where it does anything. That holds for every test,
+looped or not: ``_assert_optimal_cuts`` pins them after its own geometry, and a
+test that calls it in a loop — once per ring, or per node in hand — or asserts
+on a label after it passes ``pin_constants=False`` and pins them ONCE, after
+its last such assertion, so a changed constant meets all of the test's label
+assertions first. (Preconditions — that a run tested what it is about — may
+follow the pin.)
 """
 from __future__ import annotations
 
@@ -89,8 +95,8 @@ def _assert_the_face_bit(page: Any, face: str) -> None:
             "precondition: the wide face cut no label, so this run tested nothing new"
         )
 
-#: Every label's ADVANCE extent in viewBox units — whose it is, ``x`` plus or minus half
-#: its ``getComputedTextLength()``, the same length fitText measures, so the
+#: Every label's ADVANCE extent in viewBox units — its owner's id, and ``x`` plus or
+#: minus half its ``getComputedTextLength()``, the same length fitText measures, so the
 #: comparisons below are exact and never hang on glyph ink — with its row
 #: (``getBBox``), whether it is visible, and the halo graph.css strokes round
 #: it (its computed ``stroke-width``). ``left``/``right`` are the inspector's
@@ -213,8 +219,13 @@ def _label_threshold() -> int:
 #: An oracle that read them from graph.js would move with a mutated constant
 #: and pass it — set LABEL_CLEARANCE to 0 and the oracle's slots would widen
 #: in step with the fit's. ``_assert_spec_constants`` checks graph.js ships
-#: these values, and runs LAST in ``_assert_optimal_cuts``, after the geometry,
-#: so a changed constant fails first on what it does to the labels.
+#: these values, and runs after a test's last label assertion (preconditions
+#: aside), so a changed constant fails first on what it does to the labels:
+#: last in ``_assert_optimal_cuts`` by default, and once at the end of a test
+#: that calls that in a loop — per ring, or per node in hand — or asserts on a
+#: label after it (``pin_constants=False``). Pinned inside the every-ring
+#: loop, it fired on the first ring, before counts 3 and 4: the only counts at
+#: which a clearance of 0 changes a cut (measured).
 _SPEC_LABEL_CLEARANCE = 4
 _SPEC_LABEL_MAX_CHARS = 28
 
@@ -325,15 +336,21 @@ def _assert_spec_constants() -> None:
     )
 
 
-def _assert_optimal_cuts(page: Any, context: str, *, rows: bool = True) -> list[dict[str, Any]]:
+def _assert_optimal_cuts(
+    page: Any, context: str, *, rows: bool = True, pin_constants: bool = True,
+) -> list[dict[str, Any]]:
     """Every drawn label is the longest cut that fits the slot the SPEC gives
     it (``_fit_faults``) — rows included, for a ring whose labels show
-    together. Then, last, that graph.js ships the spec's constants. Returns
-    the oracle's measurements for a caller's preconditions."""
+    together. Then, last, that graph.js ships the spec's constants — unless
+    ``pin_constants`` is False, which a caller passes when it calls this in a
+    loop or checks a label after it, so that it can call
+    ``_assert_spec_constants`` itself, once, at its end. Returns the oracle's
+    measurements for a caller's preconditions."""
     fits = _fits(page, rows=rows)
     faults = _fit_faults(fits)
     assert faults == [], f"{context}: labels are not their longest fitting cut: {faults}"
-    _assert_spec_constants()
+    if pin_constants:
+        _assert_spec_constants()
     return fits
 
 

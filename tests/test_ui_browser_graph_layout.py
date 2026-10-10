@@ -30,13 +30,14 @@ runs and do not assert the cut, because at 1280 no 28-character label reaches
 the only bound a crowded ring has, the inspector's edge (measured; the reason
 is in that test).
 
-**Three run at the platform font, by design**, each placing its nodes so its
+**Five run at the platform font, by design**, each placing its nodes so its
 outcome does not hang on the font: (15i) the clearance at both edges of an
 inspector with side borders, (15j) the clearance between two labels sharing a
 row, both with titles of ``i`` — one ``i`` narrower than the clearance, which
-a widened face works against — and (15k) a slot placed between a long title's
-27- and 28-character cuts. Each measures, as preconditions, that its
-placement really did produce the cut it is about.
+a widened face works against — (15k) a slot placed between a long title's
+27- and 28-character cuts, (15l) a slot narrower than the bare "…", and
+(15m) a slot that holds a long title's cut one past the cap. Each measures,
+as preconditions, that its placement really did produce the case it is about.
 
 **The filename is load-bearing.** CI names every browser module explicitly
 (``.github/workflows/ci.yml``), and ``tests/test_ci_workflow.py`` fails if a
@@ -62,6 +63,7 @@ from tests.ui_graph_geometry import (
     _SPEC_LABEL_MAX_CHARS,
     _TWO_FRAMES_JS,
     _assert_optimal_cuts,
+    _assert_spec_constants,
     _assert_the_face_bit,
     _crowd_titles,
     _fits,
@@ -240,7 +242,10 @@ def test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible(
     labels do, at 4 the rim pair does, at 2 none do — and on macOS metrics,
     before graph.js fitted labels to their slots, 5 collided and 6 did not),
     so "the threshold count is clean" would not imply the smaller ones are.
-    At every count, every label is also held to the oracle.
+    At every count, every label is also held to the oracle; the spec's
+    constants are pinned once, after the last count, so a changed one fails
+    first on the counts whose cuts it changes (for a clearance of 0, 3 and 4:
+    measured).
     """
     threshold = _label_threshold()
     _use_face(page, face)
@@ -262,7 +267,8 @@ def test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible(
             f"labels render at {small}px at a {viewport_width}px viewport; "
             "they must be at least 10px to be readable"
         )
-        _assert_optimal_cuts(page, f"count {count} at {viewport_width}px")
+        _assert_optimal_cuts(page, f"count {count} at {viewport_width}px", pin_constants=False)
+    _assert_spec_constants()
     # The last ring drawn is the threshold's own, which has a shared row.
     _assert_the_face_bit(page, face)
 
@@ -338,7 +344,8 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
         # The oracle with NO row bound: every label, the one in hand and the
         # hidden ones alike, is the longest cut the inspector's edge alone
         # allows — so a row bound applied here over-cuts and fails it.
-        fits = _assert_optimal_cuts(page, f"{how} on #{index}", rows=False)
+        fits = _assert_optimal_cuts(page, f"{how} on #{index}", rows=False,
+                                    pin_constants=False)
         fit = next(f for f in fits if f["id"] == node_id)
         if viewport_width == _EDGE_NEVER_BINDS_CROWDED:
             assert fit["longer"] is None, (
@@ -347,6 +354,7 @@ def test_a_crowded_ring_labels_only_the_neighbour_in_hand(
             )
         page.evaluate("() => document.activeElement && document.activeElement.blur()")
         page.mouse.move(1, 1)
+    _assert_spec_constants()  # once, after both nodes' geometry
     if viewport_width != _EDGE_NEVER_BINDS_CROWDED:  # the exemption, docstring above
         _assert_the_face_bit(page, face)
 
@@ -603,14 +611,15 @@ def test_a_label_is_cut_one_short_of_the_cap_when_only_that_fits(page: Any) -> N
     """(15k) The fit searches EVERY cut up to the cap: a slot that holds the
     title cut at 27 characters, but not at 28, shows exactly 27.
 
-    Every other test's titles are exactly 28 characters, so their longest
-    cut short of the whole title is 27 + "…" — and whether any slot falls
-    between that and the whole title is font luck. A search that stopped at
-    26 passed them all. Here the slot is PLACED there: one neighbour with a
-    title past the cap, beside the inspector's left edge at the distance that
-    makes its edge slot the midpoint of the 27- and 28-character cuts'
-    measured lengths (measured first on the same kind of label, then again on
-    its own — the precondition).
+    Every other test's NEIGHBOUR titles are exactly 28 characters, except
+    (15m)'s, whose slot is placed to hold MORE than the cap — so their
+    longest cut short of the whole title is 27 + "…", and whether any slot
+    falls between that and the whole title is font luck. A search that
+    stopped at 26 passed them all. Here the slot is PLACED there: one
+    neighbour with a title past the cap, beside the inspector's left edge at
+    the distance that makes its edge slot the midpoint of the 27- and
+    28-character cuts' measured lengths (measured first on the same kind of
+    label, then again on its own — the precondition).
     """
     page.set_viewport_size({"width": 320, "height": 800})
     left, _ = _padding_edges(page)
@@ -629,3 +638,69 @@ def test_a_label_is_cut_one_short_of_the_cap_when_only_that_fits(page: Any) -> N
         f"28-character cuts ({short_cut:.2f}, {cap_cut:.2f})"
     )
     _assert_optimal_cuts(page, "a slot one character short of the cap")
+
+
+def test_a_slot_narrower_than_the_ellipsis_leaves_the_bare_ellipsis(page: Any) -> None:
+    """(15l) The floor: a slot too narrow for even one character and "…"
+    leaves the bare "…" — fitText's ``lo = 0`` — and the oracle accepts it.
+
+    The server's ring never makes such a slot (graph.js's header), so nothing
+    else reaches the floor, or the oracle's one exemption: a label may overrun
+    its slot only when it keeps no character at all (``_fit_faults`` (b)).
+    Here the slot is PLACED below the floor: one neighbour ON the inspector's
+    left padding edge, so its edge slot is negative — narrower than "…"
+    itself (the precondition measures it). A search that kept one character
+    shows "A…", which overruns the slot and fails the oracle; an oracle
+    without the exemption fails the "…" itself.
+    """
+    page.set_viewport_size({"width": 320, "height": 800})
+    left, _ = _padding_edges(page)
+    centre = _SERVER_SIZE / 2
+    _draw_beside_root(page, "aaaaaaaa-0000-4000-8000-000000000eee", [
+        (ALPHA_ID, _RIM_TITLES[0][1], left, centre),
+    ])
+
+    (ellipsis,) = page.evaluate(_CUT_LENGTHS_JS, [ALPHA_ID, ["…"]])
+    fit = next(fit for fit in _fits(page, rows=True) if fit["id"] == ALPHA_ID)
+    assert fit["slot"] < ellipsis, (
+        f"precondition: the slot ({fit['slot']:.2f}) holds the bare ellipsis "
+        f"({ellipsis:.2f}), so the floor is not reached"
+    )
+    fits = _assert_optimal_cuts(page, "a slot under the floor", pin_constants=False)
+    fit = next(fit for fit in fits if fit["id"] == ALPHA_ID)
+    assert fit["shown"] == "…", f"the floor is the bare ellipsis, not {fit['shown']!r}"
+    _assert_spec_constants()
+
+
+def test_a_title_past_the_cap_is_cut_at_the_cap_where_more_would_fit(page: Any) -> None:
+    """(15m) The character cap binds from ABOVE: a title past the cap, in a
+    slot that would hold one character more, still shows exactly
+    ``_SPEC_LABEL_MAX_CHARS`` characters and "…".
+
+    Every other title in this module is at most the cap, except (15k)'s,
+    whose slot is too narrow for even the capped cut — so a cap raised to 29
+    changed no label they draw, and only the constant check caught it. Here
+    one neighbour with a long title sits mid-canvas, its row its own, where
+    its edge slot holds the 29-character cut (the precondition measures it):
+    the oracle, which holds its own cap, fails a 29-character label as not a
+    cut at the cap.
+    """
+    page.set_viewport_size({"width": 320, "height": 800})
+    centre = _SERVER_SIZE / 2
+    _draw_beside_root(page, "aaaaaaaa-0000-4000-8000-000000000fff", [
+        (ALPHA_ID, _LONG_TITLE, centre, centre - 80),
+    ])
+
+    over = f"{_LONG_TITLE[:_SPEC_LABEL_MAX_CHARS + 1]}…"
+    (over_length,) = page.evaluate(_CUT_LENGTHS_JS, [ALPHA_ID, [over]])
+    fit = next(fit for fit in _fits(page, rows=True) if fit["id"] == ALPHA_ID)
+    assert over_length <= fit["slot"], (
+        f"precondition: the slot ({fit['slot']:.2f}) does not hold the cut one "
+        f"past the cap ({over_length:.2f}), so a raised cap would change nothing"
+    )
+    fits = _assert_optimal_cuts(page, "a roomy slot past the cap", pin_constants=False)
+    fit = next(fit for fit in fits if fit["id"] == ALPHA_ID)
+    assert fit["shown"] == f"{_LONG_TITLE[:_SPEC_LABEL_MAX_CHARS]}…", (
+        f"a title past the cap shows {fit['shown']!r}"
+    )
+    _assert_spec_constants()

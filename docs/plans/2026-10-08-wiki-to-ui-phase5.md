@@ -314,27 +314,34 @@ The layout suite now runs its four parametrized geometric tests at the platform 
 deliberately wide face, and four refit tests (now in `tests/test_ui_browser_graph_refit.py`) run at
 the wide face only, so a macOS run catches this class of defect too.
 
-**Box checks alone cannot see an OVER-cut label, so every geometric test also applies an
-optimality oracle.** *(Added 2026-10-09, after the completion audit of `8aef7be` failed on it.)*
-Dropping the `Math.abs` from the row bound turned the left label of every shared-row pair into a
-bare "…", and dropping the clearance from the row bound put a rim pair 1.36 units apart, inside
-the 3-unit halo; both stayed 188/188 green, because a label cut too short sits inside every box.
-The oracle (`_assert_optimal_cuts`, `tests/ui_graph_geometry.py`) recomputes each label's slot in
-the test from the specified rules — the edge bound from the inspector's padding box, and on a
-non-crowded ring the row bound from every label within the clearance of its row, at `|dx|` less
-the clearance — and requires the label to be the LONGEST cut of its title that fits: one more
-character must not, and a title whose capped form fits must be shown whole. It is measured on the
-same element with the same `getComputedTextLength` as `fitText`. It cannot cancel a mutation: it
-reads nothing from `graph.js`, and it holds the spec's clearance (4) and cap (28) itself, checking
-that `graph.js` ships them only after the geometry. It runs in the rim, overlap and every-ring
-tests at both faces and every width, and with no row bound in the crowded-ring test, on every
-label. Three platform-font tests place their nodes so the outcome cannot depend on the font, and
-measure that as preconditions: (15i) a title of `i` beside each edge of an inspector with side
-borders, so one `i` is narrower than the clearance; (15j) two such titles on one row, level and
-stacked half a clearance apart vertically; and (15k) a slot placed between a long title's 27- and
-28-character cuts.
+**Box checks alone cannot see an OVER-cut label, so every geometric test also applies an optimality
+oracle.** *(Added 2026-10-09, after the completion audit of `8aef7be` failed on it.)* Dropping the
+`Math.abs` from the row bound turned the left label of every shared-row pair into a bare "…", and
+dropping the clearance from the row bound put a rim pair 1.36 units apart, inside the 3-unit halo;
+both stayed 188/188 green, because a label cut too short sits inside every box. The oracle
+(`_assert_optimal_cuts`, `tests/ui_graph_geometry.py`) recomputes each label's slot in the test
+from the specified rules — the edge bound from the inspector's padding box, and on a non-crowded
+ring the row bound from every label within the clearance of its row, at `|dx|` less the clearance —
+and requires the label to be the LONGEST cut of its title that fits: one more character must not,
+and a title whose capped form fits must be shown whole. It is measured on the same element with the
+same `getComputedTextLength` as `fitText`. It cannot cancel a mutation: it reads nothing from
+`graph.js`, and it holds the spec's clearance (4) and cap (28) itself, checking that `graph.js`
+ships them only after each test's last assertion on its labels (preconditions aside). The
+every-ring and crowded-ring tests call the oracle once per ring or per node, so they pin the
+constants ONCE, after the loop (`pin_constants=False` inside it); pinned inside the loop, the check
+fired at the first count, before counts 3 and 4, the only counts at which a clearance of 0 changes
+a cut (measured). (15l) and (15m) assert on their label after the oracle, so they pin last too. The
+oracle runs in the rim, overlap and every-ring tests at both faces and every width, and with no row
+bound in the crowded-ring test, on every label. Five platform-font tests place their nodes so the
+outcome cannot depend on the font, and measure that as preconditions: (15i) a title of `i` beside
+each edge of an inspector with side borders, so one `i` is narrower than the clearance; (15j) two
+such titles on one row, level and stacked half a clearance apart vertically; (15k) a slot placed
+between a long title's 27- and 28-character cuts; (15l) a node ON the inspector's padding edge, a
+slot narrower than "…" itself, where the label must be the bare "…" — `fitText`'s floor, and the
+one cut the oracle lets overrun its slot; and (15m) a long title mid-canvas, in a slot that holds
+its 29-character cut, where the label must stop at the cap.
 
-Measured on macOS (all 40 tests in the two modules; each mutation applied, confirmed applied,
+Measured on macOS (all 42 tests in the two modules; each mutation applied, confirmed applied,
 and reverted to a clean `git diff`):
 
 | Mutation of `graph.js` | Red | Where |
@@ -342,35 +349,57 @@ and reverted to a clean `git diff`):
 | `Math.abs` dropped from the row bound | 21 | all at the oracle: rim, overlap and every-ring tests at every width and face, (15i), both (15j) |
 | row bound's `- LABEL_CLEARANCE` dropped | 8 | the oracle in seven (rim and overlap at 1280 wide, every-ring at all three platform widths and 1280 wide, (15j) stacked); (15j) level at the halo check first |
 | row membership tested without the clearance | 1 | (15j) stacked, at the oracle |
-| `LABEL_CLEARANCE` 4 → 0 | 34 | rim and overlap 320/400 wide at the halo check; rim and overlap 1280 wide, five crowded runs, (15j) stacked and (15k) at the oracle; (15i) and (15j) level at the halo check; the other 19 only at the constant check: in them no label's cut differs from the spec's |
+| `LABEL_CLEARANCE` 4 → 0 | 36 | 20 at the geometry: rim and overlap 320/400 wide, (15i) and (15j) level at the halo check; rim and overlap 1280 wide, every-ring at 320 (both faces), 400 platform and 1280 (both faces), five crowded runs (320 and 400 wide at both counts, 400 platform at the cap), (15j) stacked and (15k) at the oracle. The other 16 only at the constant check: in them no label's cut differs from the spec's |
 | `clientWidth` → `offsetWidth` | 1 | (15i), at its spill check under the right border |
 | `+ host.clientLeft` dropped | 1 | (15i), at its spill check under the left border |
 | `fitText`'s search capped at 26 (`hi - 2`) | 1 | (15k), at the oracle |
 | row bound applied on a crowded ring | 12 | every crowded run, at the oracle |
+| `fitText`'s `lo = 0` → `1` (no bare-"…" floor) | 1 | (15l), at the oracle |
+| `LABEL_MAX_CHARS` 28 → 29 | 36 | (15m) at the oracle; the other 35 only at the constant check |
 
 With the earlier spill and halo assertions removed, the oracle alone turns (15i) red for
 `offsetWidth` and for the dropped `clientLeft`, and both (15j) runs red for the row clearance.
+With the constant check removed instead, the geometry alone still turns `LABEL_CLEARANCE` 0 red
+in the same 20 runs, and `LABEL_MAX_CHARS` 29 red in (15m), at the oracle; a cap of 27 is red
+in 31 runs there. Deleting the oracle's own bare-"…" exemption turns (15l) red, so that
+exemption is exercised.
 
-**`fitLabels` disabled outright: 25 red.** 13 of the 15 parametrized wide runs:
-the rim test's 320 and 400 runs clipped, its 1280 run on the halo (there the rim labels never
-reach the inspector's edge, so nothing clips; its two rim labels overlap); all three overlap runs
-and all three every-ring runs on overlapping labels; and four crowded runs, two clipped (320 and
-400 at threshold+1) and two at the oracle (320 and 400 at the cap). Four platform runs, all at
-the oracle: the every-ring test at all three widths and the crowded test at 400 at the cap. Of
-the four wide-only refit tests, (15d) and (15e) go red on clipped labels, while (15f) and (15g)
-go red at a PRECONDITION, not at geometry: with no fit, the resize changes no label's cut, so
-their guard that the test tested something fires first. And (15i) on labels under the inspector's
-border, (15j) level on overlapping labels, (15j) stacked and (15k) at the oracle. Mutating
-`fitText`'s slot to `Infinity` instead turns the same 25 red. **The two wide runs that stay green
-are a named exemption, not an omission:** the crowded-ring test's 1280 wide runs. A crowded ring
-shows no two labels together, so only the inspector's edge binds, and at 1280 a rim label's slot
-is ~540 viewBox units against ~250 for the widest 28-character label the wide face draws. No
+**`fitLabels` disabled outright: 26 red.** 13 of the 15 parametrized wide runs: the rim test's 320
+and 400 runs clipped, its 1280 run on the halo (there the rim labels never reach the inspector's
+edge, so nothing clips; its two rim labels overlap); all three overlap runs and all three
+every-ring runs on overlapping labels; and four crowded runs, two clipped (320 and 400 at
+threshold+1) and two at the oracle (320 and 400 at the cap). Four platform runs, all at the oracle:
+the every-ring test at all three widths and the crowded test at 400 at the cap. Of the four
+wide-only refit tests, (15d) and (15e) go red on clipped labels, while (15f) and (15g) go red at a
+PRECONDITION, not at geometry: with no fit, the resize changes no label's cut, so their guard that
+the test tested something fires first. And (15i) on labels under the inspector's border, (15j)
+level on overlapping labels, (15j) stacked, (15k) and (15l) at the oracle. Mutating `fitText`'s
+slot to `Infinity` instead turns the same 26 red, at the same checks. **The two wide runs that stay
+green are a named exemption, not an omission:** the crowded-ring test's 1280 wide runs. A crowded
+ring shows no two labels together, so only the inspector's edge binds, and at 1280 a rim label's
+slot is ~540 viewBox units against ~250 for the widest 28-character label the wide face draws. No
 title reaches it, so those two runs are copies of their platform runs and do not assert the cut.
 The 320 and 400 crowded runs do.
 
-Three survivors remain, all equivalent: `<=` → `<` in `fitText`'s early return, in its binary
-search, and in the row-membership test. Each differs only when a measured length equals a slot,
-or a vertical gap equals the clearance, exactly.
+**Survivors found** — the mutants of `graph.js` that no test turns red in the phase audit's wider
+sweep, each judged equivalent by that audit, with the reason, and each re-run against these 42
+tests (0 red):
+
+- `<=` → `<` in `fitText`'s early return, in its binary search, and at either of the two
+  row-membership comparisons: each differs only when a measured length equals a slot, or a
+  vertical gap equals the clearance, exactly.
+- The observer callback guarded as `fitted && fitLabels(fitted)`: it never sees the null, because
+  `disconnect()` drops any delivery not yet made.
+- `observe()` before the synchronous fit rather than after: observer callbacks are delivered
+  asynchronously, so the fit has run by then either way.
+- The no-box guard testing the svg's `.height` instead of `.width`: a hidden svg is 0×0, so both
+  are zero together.
+- The search's upper bound at the cap, at `title.length - 1`, or at `Math.max(...)`: the early
+  return has already rejected the capped cut, and lengths only grow with the prefix, so the
+  search never settles at or past it.
+- `cut(title, hi)` for `cut(title, lo)` at the end of the search: it exits with `lo == hi`.
+
+`lo = 0` → `1` was on this list until (15l) placed a slot below the floor; it is now red.
 
 The crowded-ring test pins the TEXT of every label, not only the box of the one in hand. On a
 crowded ring `fitLabels` skips the row bound, since no two labels show together. Applied anyway,
@@ -413,7 +442,8 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
 - **At a 400 px viewport** rim labels clear the inspector edge by only 5–6 px on macOS. *(Bounded
   since 2026-10-09: `fitLabels` cuts each label, down to a bare ellipsis, until it sits at least
   `LABEL_CLEARANCE` (4 viewBox units) inside the inspector in any font. Only a slot narrower than
-  "…" itself can still overflow, because the bare ellipsis is the floor (`fitText`'s comment). So
+  "…" itself can still overflow, because the bare ellipsis is the floor (`fitText`'s comment;
+  pinned by (15l)). So
   the limit is now how many characters a wide font leaves on a rim label, not whether it is
   clipped.)*
 
