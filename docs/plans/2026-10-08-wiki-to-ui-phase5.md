@@ -429,6 +429,22 @@ tests (0 red):
 
 `lo = 0` → `1` was on this list until (15l) placed a slot below the floor; it is now red.
 
+Further survivors, which both audits (completion and code review) judged not meaningful
+rather than equivalent, each with the reason:
+
+- C5, the full title written at glyph time instead of `shorten(title)`: `fitLabels` resets every
+  label to `shorten(title)` synchronously before it measures, so the glyph-time text is never seen.
+- O11, the observer callback re-querying `.local-graph svg` instead of using `fitted`: only one
+  graph is drawn at a time, so the query finds the same svg.
+- F28, the root excluded from fitting: the root's label sits on a row of its own, and its slot is
+  ~300 units against ~185 at most for a wide 28-character label, so the fit never binds there.
+- K6, `LABEL_GAP` 10 → 4: a vertical presentation constant outside the fit, which no test pins.
+  Recorded as a follow-up in §7.5.
+- `DEFAULT_SIZE` 320 → 300: it applies only to a payload without `width`/`height`, and the server
+  always sends both.
+- Removing `_SpecPin.armed = False` in the test helper (`tests/ui_graph_geometry.py`): it guards
+  only a future module that uses the oracle without importing the pin fixture.
+
 The crowded-ring test pins the TEXT of every label, not only the box of the one in hand. On a
 crowded ring `fitLabels` skips the row bound, since no two labels show together. Applied anyway,
 a hidden neighbour's box cut the hovered label beside 12 o'clock on the 24 ring to "S…", while
@@ -476,6 +492,10 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
   clipped.)*
 - **(15m)'s 29th character is a space**, so the cap-29 label it rejects ("…Note With …") differs
   from the cap's ("…Note With…") by a space alone. Follow-up: a title whose 29th is a letter.
+- **`LABEL_GAP` (`js/graph.js`) is unpinned** — pre-existing since `94cf0cf`. At 1280 a neighbour
+  label's box already overlaps its own circle by ~3.3 units at gap 10, and would by ~9.3 at gap 4,
+  with every test green (survivor K6, §7.4). Follow-up: a (14b)-style check on the neighbour
+  labels' placement would pin it.
 
 ### 7.6 Documents corrected in the closeout
 

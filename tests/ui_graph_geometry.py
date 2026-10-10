@@ -200,8 +200,10 @@ def _server_ring_payload(
 def _graph_js_constant(name: str) -> int | None:
     """An integer ``const`` read from js/graph.js, or None if it is absent.
 
-    A copy here would let the test and the module disagree silently; parsing
-    the constant keeps the test aimed at whatever the module actually ships.
+    It feeds ONLY the teardown pin (``_assert_spec_constants``), which holds
+    what graph.js ships to the spec's values below. No test reads a graph.js
+    constant to drive its geometry: the oracle and the threshold tests use
+    the ``_SPEC_*`` values, so a mutated constant cannot move them with it.
     """
     source = (static_dir() / "js" / "graph.js").read_text(encoding="utf-8")
     found = re.search(rf"const {name} = (\d+);", source)

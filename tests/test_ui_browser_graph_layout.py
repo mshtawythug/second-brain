@@ -11,9 +11,12 @@ label — and holds every label's TEXT to an optimality oracle
 (``_assert_optimal_cuts``): the longest cut of its title that fits the slot
 the spec gives it, recomputed in the test. A box check cannot see a label cut
 SHORTER than it needs to be — the left label of a shared row reduced to a bare
-"…" stays inside every box — so every geometric test here applies the oracle
-too, at every width and face it runs. The refit that keeps them so when a box
-resizes, and what its ResizeObserver watches, is
+"…" stays inside every box — so every test here that checks a label's fit
+applies the oracle too, at every width and face it runs. Four test runs here
+check no fit and do not apply it (plan §7.4): (14b), which checks where the
+root's label box sits; (15c), which checks accessible names; and both (15n)
+runs, which check the crowded-ring threshold. The refit that keeps them so
+when a box resizes, and what its ResizeObserver watches, is
 ``tests/test_ui_browser_graph_refit.py``.
 
 **The four parametrized geometric tests run twice: at the platform's default

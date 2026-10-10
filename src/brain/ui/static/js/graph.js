@@ -80,12 +80,13 @@ const DEFAULT_SIZE = 320;
    pair disjoint" with no fit — which a wider default sans, DejaVu Sans on
    the GitHub Linux runner, falsified at 3 neighbours.)
    Pinned at 4 by test_a_ring_is_crowded_from_one_past_the_specified_threshold
-   (a ring of 4 shows every label at rest, a ring of 5 only the root's), and
-   by test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible and
-   test_a_crowded_ring_labels_only_the_neighbour_in_hand, each run at the
-   platform's default font and at a deliberately wide one. All three hold the
-   SPEC's 4 (tests/ui_graph_geometry.py, _SPEC_LABEL_THRESHOLD) and never read
-   this constant, so changing it cannot move them with it. */
+   (a ring of 4 shows every label at rest, a ring of 5 only the root's), run
+   at the platform's default font only; and by
+   test_every_ring_up_to_the_threshold_is_fully_labelled_and_legible and
+   test_a_crowded_ring_labels_only_the_neighbour_in_hand, those two each run
+   at the platform's default font AND at a deliberately wide one. All three
+   hold the SPEC's 4 (tests/ui_graph_geometry.py, _SPEC_LABEL_THRESHOLD) and
+   never read this constant, so changing it cannot move them with it. */
 const MAX_LABELLED_NEIGHBOURS = 4;
 
 /* What stands in the graph's place when this server refuses it. One line of
