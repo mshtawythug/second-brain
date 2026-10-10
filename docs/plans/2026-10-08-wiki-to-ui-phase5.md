@@ -314,8 +314,12 @@ The layout suite now runs its four parametrized geometric tests at the platform 
 deliberately wide face, and four refit tests (now in `tests/test_ui_browser_graph_refit.py`) run at
 the wide face only, so a macOS run catches this class of defect too.
 
-**Box checks alone cannot see an OVER-cut label, so every geometric test also applies an optimality
-oracle.** *(Added 2026-10-09, after the completion audit of `8aef7be` failed on it.)* Dropping the
+**Box checks alone cannot see an OVER-cut label, so every test that checks a label's fit also
+applies an optimality oracle.** Four test runs check no fit and do not apply it: (14b), which
+checks where the root's label box sits; (15c), which checks accessible names; and both (15n) runs,
+which check the crowded-ring threshold. *(Added 2026-10-09, after the completion audit of `8aef7be`
+failed on it; "every geometric test" narrowed to the tests that check a fit, and the four exempt
+runs named, 2026-10-10.)* Dropping the
 `Math.abs` from the row bound turned the left label of every shared-row pair into a bare "…", and
 dropping the clearance from the row bound put a rim pair 1.36 units apart, inside the 3-unit halo;
 both stayed 188/188 green, because a label cut too short sits inside every box. The oracle
@@ -405,8 +409,8 @@ level on overlapping labels, (15j) stacked, (15k) and (15l) at the oracle. Mutat
 slot to `Infinity` instead turns the same 26 red, at the same checks. **The two wide runs that stay
 green are a named exemption, not an omission:** the crowded-ring test's 1280 wide runs. A crowded
 ring shows no two labels together, so only the inspector's edge binds, and at 1280 a rim label's
-slot is ~540 viewBox units against ~250 for the widest 28-character label the wide face draws. No
-title reaches it, so those two runs are copies of their platform runs and do not assert the cut.
+slot is ~540 viewBox units against ~250 for the suite's widest 28-character title in the wide
+face. No suite title reaches it, so those two runs are copies of their platform runs and do not assert the cut.
 The 320 and 400 crowded runs do.
 
 **Survivors found** — the mutants of `graph.js` that no test turns red in the phase audit's wider
@@ -437,7 +441,11 @@ rather than equivalent, each with the reason:
 - O11, the observer callback re-querying `.local-graph svg` instead of using `fitted`: only one
   graph is drawn at a time, so the query finds the same svg.
 - F28, the root excluded from fitting: the root's label sits on a row of its own, and its slot is
-  ~300 units against ~185 at most for a wide 28-character label, so the fit never binds there.
+  at least ~400 units at every tested width (415 / 406 / 762 at 320 / 400 / 1280), against ~245
+  for the suite's widest 28-character label in the wide face, so the fit never binds on the root.
+  *(Corrected 2026-10-10: this read "~300 units against ~185 at most for a wide 28-character
+  label". Both figures were wrong — ~185 is that label at the platform face, not the wide one — and
+  "at most" does not hold for 28-character labels in general: 28 W's measure 419 in the wide face.)*
 - K6, `LABEL_GAP` 10 → 4: a vertical presentation constant outside the fit, which no test pins.
   Recorded as a follow-up in §7.5.
 - `DEFAULT_SIZE` 320 → 300: it applies only to a payload without `width`/`height`, and the server
