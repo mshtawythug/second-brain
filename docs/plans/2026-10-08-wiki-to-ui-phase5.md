@@ -326,7 +326,8 @@ both stayed 188/188 green, because a label cut too short sits inside every box. 
 (`_assert_optimal_cuts`, `tests/ui_graph_geometry.py`) recomputes each label's slot in the test
 from the specified rules — the edge bound from the inspector's padding box, and on a non-crowded
 ring the row bound from every label within the clearance of its row, at `|dx|` less the clearance —
-and requires the label to be the LONGEST cut of its title that fits: one more character must not,
+and requires the label to be the LONGEST cut of its title that fits: one more character must not
+*(since §8.3, the next cut that DIFFERS, and characters are grapheme clusters)*,
 and a title whose capped form fits must be shown whole. It is measured on the same element with the
 same `getComputedTextLength` as `fitText`. It cannot cancel a mutation: it reads nothing from
 `graph.js`, and it holds the spec's clearance (4) and cap (28) itself. That `graph.js` ships them,
@@ -368,14 +369,16 @@ spec's clearance) with any other label on the server's ring — each half red on
 
 Measured on macOS (all 45 tests in the two modules — the 40 layout tests the teardown pin wraps and
 the 5 refit tests, which it does not; each mutation applied, confirmed applied, and reverted to a
-clean `git diff`). "FAIL" is a test body's assertion; "teardown" is the constant pin alone:
+clean `git diff`). "FAIL" is a test body's assertion; "teardown" is the constant pin alone.
+*(Re-derived 2026-10-12 at `45a6fa9`, after §8 landed. Every row reproduced except the two marked
+below, and the `LABEL_GAP` row is new.)*
 
 | Mutation of `graph.js` | Red | Where |
 |---|---|---|
 | `Math.abs` dropped from the row bound | 21 | all at the oracle: rim, overlap and every-ring tests at every width and face, (15i), both (15j) |
-| row bound's `- LABEL_CLEARANCE` dropped | 8 | the oracle in seven (rim and overlap at 1280 wide, every-ring at all three platform widths and 1280 wide, (15j) stacked); (15j) level at the halo check first |
+| row bound's `- LABEL_CLEARANCE` dropped | 7 | the oracle in six (rim and overlap at 1280 wide, every-ring at all three platform widths, (15j) stacked); (15j) level at the halo check first. *(8 before §8: every-ring at 1280 wide also went red. Measured with the vertical placement held fixed, that run fails under this mutant at `4e701d0` and passes at `45a6fa9`, so the trim (§8.3) is what changed it. Inferred, not printed: the one cut the mutant moves there gains only a trailing space, which the cut now drops.)* |
 | row membership tested without the clearance | 1 | (15j) stacked, at the oracle |
-| `LABEL_CLEARANCE` 4 → 0 | 40 | 20 FAIL at the geometry: rim and overlap 320/400 wide, (15i) and (15j) level at the halo check; rim and overlap 1280 wide, every-ring at 320 (both faces), 400 platform and 1280 (both faces), five crowded runs (320 and 400 wide at both counts, 400 platform at the cap), (15j) stacked and (15k) at the oracle. The other 20 only at teardown: in them no label's cut differs from the spec's |
+| `LABEL_CLEARANCE` 4 → 0 | 40 | 19 FAIL at the geometry: rim and overlap 320/400 wide, (15i) and (15j) level at the halo check; rim and overlap 1280 wide, every-ring at 320 (both faces), 400 platform and 1280 platform, five crowded runs (320 and 400 wide at both counts, 400 platform at the cap), (15j) stacked and (15k) at the oracle. The other 21 only at teardown: in them no label's cut differs from the spec's. *(20 and 20 before §8. Every-ring at 1280 wide moved to teardown-only, measured as in the row above.)* |
 | `clientWidth` → `offsetWidth` | 1 | (15i), at its spill check under the right border |
 | `+ host.clientLeft` dropped | 1 | (15i), at its spill check under the left border |
 | `fitText`'s search capped at 26 (`hi - 2`) | 1 | (15k), at the oracle |
@@ -385,6 +388,7 @@ clean `git diff`). "FAIL" is a test body's assertion; "teardown" is the constant
 | `LABEL_MAX_CHARS` 28 → 27 | 40 | 31 FAIL at the oracle; the other 9 only at teardown |
 | `MAX_LABELLED_NEIGHBOURS` 4 → 5 | 40 | 7 FAIL: the six threshold+1 crowded runs (five labels show at rest) and (15n) at 5 (not crowded); the other 33 only at teardown |
 | `MAX_LABELLED_NEIGHBOURS` 4 → 3 | 40 | 9 FAIL: all six every-ring runs (a label hidden at 4), (15n) at 4 (crowded), and overlap and rim at 1280 wide, on overlapping labels and at the oracle (a crowded 4-ring drops the row bound, and the wide rim pair meets); the other 31 only at teardown |
+| `LABEL_GAP` 2 → 10 (§8.1) | 40 | none FAIL here, all 40 at teardown: where a label hangs below its own node is not these modules' subject. All 7 runs of (14c) and (14d), in `tests/test_ui_browser_graph_labels.py`, FAIL (§8.4) |
 | root label drawn below the root (`{ above: true }` dropped) | 3 | (14b), at its first assertion; and (15d) and (15g), at their preconditions — (14) stays green |
 
 With the earlier spill and halo assertions removed, the oracle alone turns (15i) red for
@@ -447,7 +451,8 @@ rather than equivalent, each with the reason:
   label". Both figures were wrong — ~185 is that label at the platform face, not the wide one — and
   "at most" does not hold for 28-character labels in general: 28 W's measure 419 in the wide face.)*
 - K6, `LABEL_GAP` 10 → 4: a vertical presentation constant outside the fit, which no test pins.
-  Recorded as a follow-up in §7.5.
+  Recorded as a follow-up in §7.5. *(Closed by §8.1, `4e701d0`: labels are now hung by their
+  measured box, and (14c) and the teardown pin hold the gap.)*
 - `DEFAULT_SIZE` 320 → 300: it applies only to a payload without `width`/`height`, and the server
   always sends both.
 - Removing `_SpecPin.armed = False` in the test helper (`tests/ui_graph_geometry.py`): it guards
@@ -498,12 +503,17 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
   pinned by (15l)). So
   the limit is now how many characters a wide font leaves on a rim label, not whether it is
   clipped.)*
-- **(15m)'s 29th character is a space**, so the cap-29 label it rejects ("…Note With …") differs
-  from the cap's ("…Note With…") by a space alone. Follow-up: a title whose 29th is a letter.
-- **`LABEL_GAP` (`js/graph.js`) is unpinned** — pre-existing since `94cf0cf`. At 1280 a neighbour
-  label's box already overlaps its own circle by ~3.3 units at gap 10, and would by ~9.3 at gap 4,
-  with every test green (survivor K6, §7.4). Follow-up: a (14b)-style check on the neighbour
-  labels' placement would pin it.
+- ~~**(15m)'s 29th character is a space**~~ — **closed by `45a6fa9`** (§8.3). Its title's 29th
+  character is now a letter, with a precondition asserting that. The fix was needed, not just
+  tidier: once the cut trims a space before "…", the old title's cap-29 label was identical to the
+  cap's, and (15m) could no longer reject it.
+- ~~**`LABEL_GAP` (`js/graph.js`) is unpinned**~~ — **closed by `4e701d0`** (§8.1). A constant
+  baseline gap could not be right, so labels are now hung by their measured box. The gap is pinned
+  behaviourally by (14c) and (14d) and at teardown.
+- **A hung browser page stalled the suite** (found while closing the above). This was not in the
+  list. **Closed by `c451999`** (§8.2): pytest-timeout, 60s per browser test, `thread` method.
+- **Graph labels could split a character** (code-unit slicing) **and keep a space before "…"**. This
+  was not in the list. **Closed by `45a6fa9`** (§8.3).
 
 ### 7.6 Documents corrected in the closeout
 
@@ -573,3 +583,78 @@ whole cluster; a 28-grapheme title longer in code units is shown whole; a 28th g
 space is trimmed; and the code-point fallback runs with `Intl.Segmenter` removed by an init script.
 The browser API is removed, not a production module patched. The new module goes into `ci.yml` in
 byte order.
+
+### 8.4 What landed (2026-10-12)
+
+The SHAs are those after the rebase onto master `a4ab179` (2026-10-13). That rebase changed only
+`pyproject.toml`'s `dev` line, which now carries both this pin and master's `mypy<2.5`. The
+measurements below were taken on the pre-rebase commits, whose code is the same.
+
+| Commit | Item |
+|---|---|
+| `7a9bc41` | this section's plan (§8.1–8.3), written before the code |
+| `4e701d0` | §8.1: neighbour labels hung by their measured box; `LABEL_GAP` 10 → 2; (14c), (14d) |
+| `c451999` | §8.2: pytest-timeout, 60s per browser test, `thread` method |
+| `45a6fa9` | §8.3: grapheme-safe cut, trim before "…", oracle restated, (15m) re-titled, (16) |
+| the docs commit that adds this subsection | §7.4 table re-derived, §7.5 closed |
+
+**Rulings beyond §8's plan.**
+
+- **The gap is held by measurement, not by a new constant** (§8.1's ruling, confirmed). Measured box
+  ascents were 13 units at the platform face, 14 at the wide face and 15 for an emoji title. They
+  are rounded per device pixel, so they also vary with width: the old gap left the box 2.4–3.3px
+  inside its circle across 320, 400 and 1280. The emoji case decides it, because no font-level
+  constant covers a title-level ascent.
+- **pytest-timeout uses the `thread` method, not the default `signal`.** Measured under the hang
+  mutant on `tests/test_ui_browser_inspector_blocks.py`: `signal` marks the test FAILED and the run
+  then hangs, still running 330s later with `-x`. The stack dump shows the main thread waiting in
+  Playwright's greenlet dispatcher. `thread` ends the run with exit 1 after 60.7s. The cost is that
+  no further test runs after a hang, and the dump does not name the test (its frame is in another
+  greenlet). The progress line names the module.
+- **§8.2's premise was half right.** Most tests that hit the hang mutant were already failing, at
+  `wait_for_selector`'s own 30s timeout. Under that mutant a 7-test module took about 3 minutes
+  and did NOT stall. The stall was real in one place: the full CI browser command was still running
+  after 45 minutes, inside `tests/test_ui_browser_inspector_blocks.py`. That module alone was still
+  running at 300s.
+- **The hook lives in `tests/browser_timeout.py`**, loaded by one `pytest_plugins` line in
+  `tests/conftest.py`, which is already past the ceiling. Its unit tests build markers by name,
+  because a literal `pytest.mark.browser` would make `tests/test_ci_workflow.py` treat them as a
+  browser suite that CI must list.
+- **`tests/test_ui_browser_graph.py`'s long-title test** expected the old space before "…"
+  (`"…With A …"`). It now asserts the 28th character is a space and expects it trimmed.
+- **`_open_ring` and `_CUT_LENGTHS_JS`** moved into `tests/ui_graph_geometry.py`, so the new module
+  shares them and does not copy them.
+
+**Mutation proofs** (macOS; each mutation applied, confirmed applied, and restored byte for byte):
+
+| Mutation | Modules run | Red |
+|---|---|---|
+| `LABEL_GAP` 2 → 10 / → 4 / → 0 | labels, layout, refit | each: 7 FAIL (every (14c) and (14d) run), and a teardown ERROR in all 47 tests the pin wraps (the 5 refit tests are not wrapped) |
+| hang removed (`hangBelowCircle` not called) | same | 7 FAIL, the same 7 |
+| ascent fixed at 13 instead of measured | same | 7 FAIL, the same 7 |
+| root hung too | same | 3 FAIL: (14b), (15d) and (15g) |
+| cut by code unit (the old `cut`) | graph, labels, layout, refit | 8 FAIL: all six (16), the graph module's long-title test, and the 320 wide cap-ring run |
+| code points instead of graphemes | same | 2 FAIL: (16) zwj-native and exactly-the-cap |
+| `trimEnd()` dropped | same | 3 FAIL: (16) space-at-the-cap, the long-title test, the 320 wide cap-ring run |
+| fallback by code unit (`split("")`) | same | 2 FAIL: (16) zwj-absent and astral-absent |
+| `LABEL_MAX_CHARS` 28 → 29 | same | 4 FAIL: (15m) at the oracle; (16) space-at-the-cap and zwj-absent, and the long-title test, on their expected text. Every other pinned test only at teardown |
+| hook: a test's own timeout overridden / non-browser test timed / `signal` method / method dropped / plugin unloaded | `tests/test_browser_timeout.py` | 1 FAIL each |
+
+**Survivor, judged equivalent:** fitText's upper bound computed from code units
+(`title.length`) instead of graphemes. A cut at or past the title's grapheme count is the whole
+title, which the early return has already rejected. And a title with more graphemes than the cap
+has at least as many code units, so both give the cap.
+
+**The hang mutant (`else hi = mid;`), before and after §8.2:** without the plugin, the full CI
+browser command was still running after 45 minutes (killed). With it, the stalled module ends
+with exit 1 after 60.7s.
+
+**Verification on `45a6fa9`'s code** (exit codes read from files): `ruff check` 0; `mypy src/` 0
+(224 files); the exact `ci.yml` browser command three times, 209 passed each time (196 before §8,
+plus 13 new); `tests/test_ci_workflow.py` and `tests/test_eval_workflow_contract.py`, 30 passed
+and 1 skipped (the skip is that module's empty `HERMETIC_EVAL_TESTS`). Linux
+(`mcr.microsoft.com/playwright/python:v1.63.0-noble` plus `fonts-dejavu-core`; DejaVu Sans is the
+default sans, and an emoji font is present): the graph, labels, layout and refit modules, 80
+passed. The image was removed afterwards. The full default suite against a sibling test database
+(`second_brain_test_co` on 5434): exit 0, 8,850 passed, 4 skipped, 318 deselected, coverage
+94.36%.
