@@ -101,9 +101,18 @@ const UNTITLED = "Untitled";
    no role in this block is ever unnamed. */
 const GRAPH_LABEL = "Links around this note";
 
-/* Gap between a node's circle and its label, in viewBox units. A label below
-   its node is placed by its BASELINE, so the gap clears the cap height. */
-const LABEL_GAP = 10;
+/* Gap, in viewBox units, between a NEIGHBOUR's circle and the TOP of its
+   label's box. It is held by measurement, not by the baseline: fitLabels hangs
+   each label so that its box (getBBox) starts exactly this far below the
+   circle. A baseline offset cannot do this, because the box's ascent belongs
+   to the font, the device scale and the title, not to this file. Chromium
+   rounds it to whole device pixels, giving 13 units at macOS's default sans,
+   14 at Verdana, and 15 for ANY title that draws an emoji, whose fallback
+   face is taller (measured 2026-10-12). The old baseline gap of 10 left the
+   box 3 to 5 units INSIDE its own circle. 2 because the circle's widest
+   stroke, the focus ring (graph.css, 3), reaches 1.5 outside `r`. Pinned by
+   test_a_neighbour_label_hangs_its_gap_below_its_own_circle. */
+const LABEL_GAP = 2;
 
 /* The ROOT's label sits ABOVE the root circle, its baseline this far over the
    circle's top — enough to clear descenders. Where a label sits relative to
@@ -111,7 +120,8 @@ const LABEL_GAP = 10;
    node. Below the root it shared a row with the server ring's 3 and 9
    o'clock neighbours (whose labels hang below them at the root's height),
    and collided with both; above, it shares nothing — the 12 o'clock label
-   hangs BELOW its node, ~60 units higher. Pinned by
+   hangs BELOW its node, its box ending 44 to 55px above the root label's at
+   the three tested widths (graph.css has the measured table). Pinned by
    test_the_root_label_sits_above_the_root_on_a_row_of_its_own. NOT by
    test_no_two_labels_overlap_on_the_server_ring: with the root's label
    below, fitLabels cuts it and the 3 and 9 o'clock labels until none
@@ -364,6 +374,8 @@ function appendGlyph(parent, node, { above = false } = {}) {
   tip.textContent = title;
   parent.appendChild(tip);
   parent.appendChild(svgEl("circle", { cx: node.x, cy: node.y, r }));
+  /* A neighbour's `y` here is only a starting baseline: fitLabels hangs the
+     label by its measured box before anything paints it (hangBelowCircle). */
   const labelY = above ? node.y - r - ROOT_LABEL_GAP : node.y + r + LABEL_GAP;
   const label = svgEl("text", { x: node.x, y: labelY, "text-anchor": "middle" });
   label.textContent = shorten(title);
@@ -417,6 +429,7 @@ function fitLabels(svg) {
   const labels = [...svg.querySelectorAll(".node > text")].map((text) => {
     const title = text.parentNode.querySelector("title").textContent;
     text.textContent = shorten(title);
+    if (!text.parentNode.classList.contains("node-root")) hangBelowCircle(text);
     const box = text.getBBox();
     return {
       text, title, x: Number(text.getAttribute("x")), top: box.y, bottom: box.y + box.height,
@@ -435,6 +448,20 @@ function fitLabels(svg) {
     }
     fitText(label.text, label.title, slot);
   }
+}
+
+/* Move a neighbour's label so that the top of its box sits LABEL_GAP below
+   its circle. The box is measured at the CAPPED title, the same box rows are
+   judged on. Every cut fitText may then make is no taller: a cut draws a
+   subset of the same glyphs, and the primary face's ascent counts whether or
+   not it draws a glyph (measured with all-Hebrew, all-Devanagari and all-CJK
+   titles). So the label as shown clears the circle at least as well.
+   Idempotent: the ascent is the baseline less the box's top, whatever `y` is. */
+function hangBelowCircle(text) {
+  const circle = text.parentNode.querySelector("circle");
+  const below = Number(circle.getAttribute("cy")) + Number(circle.getAttribute("r"));
+  const ascent = Number(text.getAttribute("y")) - text.getBBox().y;
+  text.setAttribute("y", String(below + LABEL_GAP + ascent));
 }
 
 /* Cut `text` to the longest prefix of `title` (at most LABEL_MAX_CHARS) whose

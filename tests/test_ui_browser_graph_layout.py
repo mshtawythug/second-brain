@@ -78,10 +78,10 @@ from tests.ui_graph_geometry import (
     _TWO_FRAMES_JS,
     _assert_optimal_cuts,
     _assert_the_face_bit,
-    _crowd_titles,
     _fits,
     _halo_shortfalls,
     _intersections,
+    _open_ring,
     _server_ring_payload,
     _spec_constants_pin_fixture,  # noqa: F401 — autouse: pins graph.js's constants after each test
     _use_face,
@@ -251,17 +251,6 @@ def test_the_root_label_sits_above_the_root_on_a_row_of_its_own(page: Any) -> No
 
 
 # --------------------------------------------------------- crowded rings --
-
-
-def _open_ring(page: Any, count: int, width: int) -> list[tuple[str, str]]:
-    titles = _crowd_titles(count)
-    page.set_viewport_size({"width": width, "height": 800})
-    _GRAPH["payload"] = _server_ring_payload(titles)
-    # A distinct note per count: the client caches each note's graph, so
-    # reopening the same id would draw the PREVIOUS ring without a request.
-    _open(page, f"aaaaaaaa-0000-4000-8000-{0x900 + count:012x}")
-    page.wait_for_selector(".local-graph svg")
-    return titles
 
 
 _WIDTHS = [320, 400, 1280]

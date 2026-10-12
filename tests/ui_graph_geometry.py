@@ -21,7 +21,8 @@ specified rules, with the spec's clearance and cap pinned here
 graph.js, and the label required to be the LONGEST cut of its title that fits
 it. A box check passes an over-cut label; the oracle does not. And the
 crowded-ring threshold is the spec's (``_SPEC_LABEL_THRESHOLD``), not
-graph.js's, so a test that loops up to it cannot loop up to a mutated one.
+graph.js's, so a test that loops up to it cannot loop up to a mutated one. So
+is the gap a neighbour's label hangs below its circle (``_SPEC_LABEL_GAP``).
 
 Mutating a constant cannot lower any of these bars with it: graph.js's
 constants are compared with the spec's only at TEARDOWN, by the autouse
@@ -41,7 +42,15 @@ from typing import Any
 import pytest
 
 from brain.ui.app import static_dir
-from tests.ui_graph_harness import ALPHA_ID, BRAVO_ID, CHARLIE_ID, ROOT_ID, ROOT_TITLE
+from tests.ui_graph_harness import (
+    _GRAPH,
+    ALPHA_ID,
+    BRAVO_ID,
+    CHARLIE_ID,
+    ROOT_ID,
+    ROOT_TITLE,
+    _open,
+)
 
 DELTA_ID = "aaaaaaaa-0000-4000-8000-00000000000f"
 
@@ -197,6 +206,19 @@ def _server_ring_payload(
     }
 
 
+def _open_ring(page: Any, count: int, width: int) -> list[tuple[str, str]]:
+    """Draw the server's ring of ``count`` neighbours (``_crowd_titles``) at
+    viewport ``width``, and return the titles drawn."""
+    titles = _crowd_titles(count)
+    page.set_viewport_size({"width": width, "height": 800})
+    _GRAPH["payload"] = _server_ring_payload(titles)
+    # A distinct note per count: the client caches each note's graph, so
+    # reopening the same id would draw the PREVIOUS ring without a request.
+    _open(page, f"aaaaaaaa-0000-4000-8000-{0x900 + count:012x}")
+    page.wait_for_selector(".local-graph svg")
+    return titles
+
+
 def _graph_js_constant(name: str) -> int | None:
     """An integer ``const`` read from js/graph.js, or None if it is absent.
 
@@ -225,6 +247,12 @@ def _graph_js_constant(name: str) -> int | None:
 _SPEC_LABEL_CLEARANCE = 4
 _SPEC_LABEL_MAX_CHARS = 28
 _SPEC_LABEL_THRESHOLD = 4
+
+#: The gap, in viewBox units, between a neighbour's circle and the top of its
+#: label's box (graph.js ``LABEL_GAP``; plan §8.1). It is the spec's for the same
+#: reason as the three above. (14c) holds every hung label to it, and the
+#: teardown pin holds graph.js to it.
+_SPEC_LABEL_GAP = 2
 
 #: Below this, two measured lengths are the same number computed twice.
 _FIT_EPSILON = 1e-6
@@ -326,9 +354,10 @@ def _fit_faults(fits: list[dict[str, Any]]) -> list[str]:
 
 def _assert_spec_constants() -> None:
     """graph.js ships the values the tests hold it to (see above)."""
-    names = ("LABEL_CLEARANCE", "LABEL_MAX_CHARS", "MAX_LABELLED_NEIGHBOURS")
+    names = ("LABEL_CLEARANCE", "LABEL_MAX_CHARS", "MAX_LABELLED_NEIGHBOURS", "LABEL_GAP")
     shipped = tuple(_graph_js_constant(name) for name in names)
-    spec = (_SPEC_LABEL_CLEARANCE, _SPEC_LABEL_MAX_CHARS, _SPEC_LABEL_THRESHOLD)
+    spec = (_SPEC_LABEL_CLEARANCE, _SPEC_LABEL_MAX_CHARS, _SPEC_LABEL_THRESHOLD,
+            _SPEC_LABEL_GAP)
     assert shipped == spec, (
         f"graph.js ships {', '.join(names)} = {shipped}, not the specified {spec}"
     )
