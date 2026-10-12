@@ -25,6 +25,8 @@ from brain.db import connect, migration_lock, run_migrations
 from brain.ingest import ExtractedDoc, ingest_document
 from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 
+pytest_plugins = ("tests.browser_timeout",)  # fails a hung browser test (see that module)
+
 load_dotenv()
 
 TEST_DATABASE_URL = os.environ.get(
