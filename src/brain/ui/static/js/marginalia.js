@@ -5,19 +5,27 @@
  * inspector) declared in index.html and layout.css, and BOTH of those files are
  * integrator-owned for the whole of phase 2. A true right-hand marginalia
  * *column* needs a fourth grid track and a DOM slot, so this module does the
- * one thing it can do without touching either: it appends its own
- * `<aside class="marginalia">` to `.inspector`.
+ * one thing it can do without touching either: it places its own
+ * `<aside class="marginalia">` in `.inspector`.
  *
- * APPENDED LAST, and that is load-bearing rather than incidental. `.inspector`
- * is `grid-template-rows: auto 1fr` — the first child gets `auto`, the second
+ * PLACED AFTER THE NOTE, and that is load-bearing rather than incidental.
+ * `.inspector` is `grid-template-rows: auto 1fr` — the first child gets `auto`, the second
  * `1fr`, and any further child an implicit `auto` row. `.note-head` must keep
  * `auto` and `.note-body`/`.editor` must keep `1fr` (layout.css records the
  * measurement behind that: an explicit height defeats grid's `stretch` but is
  * only a base size under `flex-grow`, which is what makes `resize: vertical` on
  * the editor mean anything). Inserting this block anywhere earlier hands the
  * `1fr` track to the wrong child and pushes the body to the foot of the pane.
- * Appending it last is also what layout.css's `.inspector > * { align-self:
- * start }` explicitly anticipates: "the NEXT child added here is safe".
+ * Placing it after the note is also what layout.css's `.inspector > * {
+ * align-self: start }` explicitly anticipates: "the NEXT child added here is
+ * safe".
+ *
+ * IT DOES NOT APPEND, IT PLACES. This block, the graph and the related rail
+ * each re-render when their own fetch resolves, so a bare `host.appendChild`
+ * made the order on screen the order the network answered in — a late
+ * `/links` response put the marginalia below the graph. `placeInspectorBlock`
+ * (dom.js) holds the one order (marginalia, graph, related) and inserts this
+ * block before any block that ranks after it, never before the note.
  *
  * SUBSCRIBER ORDER IS A WIRING CONTRACT. `renderInspector` rebuilds `#inspector`
  * from scratch on every dispatch (`host.textContent = ""`), so this renderer
@@ -34,27 +42,25 @@
  * it is inserted as text, never parsed.
  */
 
-import { api } from "/static/js/api.js";
-import { $, el } from "/static/js/dom.js";
+import { $, el, placeInspectorBlock } from "/static/js/dom.js";
+import { perNoteFetch } from "/static/js/note_fetch.js";
 import { state, subscribe } from "/static/js/store.js";
 
 let wired = false;
 
-/* noteId -> the backlink rows already fetched for it.
- *
- * renderMarginalia runs on EVERY dispatch — toggling the editor, saving, moving
- * — and without a cache each of those would re-request the same links. The
- * cache is what makes the fetch happen once per note rather than once per
- * render.
- *
- * A FAILED fetch caches `[]` deliberately. The alternative is retrying on every
- * subsequent dispatch, which turns one unreachable endpoint into a request
- * storm against a server that is already failing. The cost is that a transient
- * failure stays blank until the note is reopened — the right trade for a rail
- * that is, by construction, supplementary to the note.
- */
-const backlinkCache = new Map();
-const inFlight = new Set();
+/* The backlink rows for a note, through the shared per-note fetch (note_fetch.js
+ * — read its header for the cache, the revision key, the failure sentinel and
+ * the stale-response guard). What is THIS module's: the rows are
+ * `payload.backlinks`, and a FAILED fetch caches `[]` — an empty rail, i.e.
+ * none — where the graph and the related rail cache `null`. */
+const fetchBacklinks = perNoteFetch({
+  endpoint: "links",
+  normalise: (payload) => (
+    Array.isArray(payload && payload.backlinks) ? payload.backlinks : []
+  ),
+  failed: [],
+  rerender: () => renderMarginalia(),
+});
 
 /* Idempotent by design, and that idempotence is now LOAD-BEARING rather than
  * anticipatory: main.js's boot() calls this, AND the browser harness calls it
@@ -117,7 +123,7 @@ export function renderMarginalia() {
   if (crumbs.length) aside.appendChild(renderBreadcrumbs(crumbs));
   if (headings.length) aside.appendChild(renderToc(headings));
 
-  host.appendChild(aside);
+  placeInspectorBlock(host, aside);
 
   /* LAST, and deliberately NOT awaited. The note is already in the DOM by the
      time this runs; the backlinks are a second request that must never stand
@@ -127,9 +133,10 @@ export function renderMarginalia() {
 
 /* The backlinks rail: which documents link INTO the open note.
  *
- * SYNCHRONOUS WHEN CACHED, one fetch otherwise. The function is called from
- * renderMarginalia on every dispatch, so the cache is what keeps that from
- * meaning a request per render.
+ * SYNCHRONOUS WHEN CACHED, one fetch otherwise — `fetchBacklinks` answers from
+ * its cache or starts the request and answers `undefined`. When the answer
+ * lands it re-renders the whole marginalia rather than appending to this
+ * `aside`, which may be detached by then.
  *
  * NOT AWAITED, and that is the T14 requirement rather than a style choice. The
  * note body is painted by renderInspector before this runs; making the rail's
@@ -137,38 +144,12 @@ export function renderMarginalia() {
  * that is already fetched and ready. A blocking form is the mutation this is
  * tested against.
  *
- * SILENT ON FAILURE — no toast, no placeholder, no empty rail. `/api/notes/…`
- * already reported anything that stopped the NOTE from loading; a second error
- * for a supplementary rail tells the reader about a request they never made,
- * about a surface they may not be looking at. `api()` throws on a non-2xx and
- * does NOT toast — toasting is the caller's choice, and this caller declines.
+ * SILENT ON FAILURE — no toast, no placeholder, no empty rail; see
+ * note_fetch.js.
  */
 function attachBacklinks(note, aside) {
-  const cached = backlinkCache.get(note.id);
-  if (cached !== undefined) {
-    if (cached.length) aside.appendChild(renderBacklinks(cached));
-    return;
-  }
-  if (inFlight.has(note.id)) return;
-  inFlight.add(note.id);
-
-  api(`/api/notes/${encodeURIComponent(note.id)}/links`).then(
-    (payload) => {
-      inFlight.delete(note.id);
-      backlinkCache.set(
-        note.id, Array.isArray(payload && payload.backlinks) ? payload.backlinks : []
-      );
-      /* Re-render rather than appending to the captured `aside`: by the time
-         this resolves the reader may have opened another note, and that aside
-         is detached. The id check is the stale-response guard — without it a
-         slow response for note A paints A's backlinks under note B. */
-      if (state.note && state.note.id === note.id) renderMarginalia();
-    },
-    () => {
-      inFlight.delete(note.id);
-      backlinkCache.set(note.id, []);
-    },
-  );
+  const rows = fetchBacklinks(note);
+  if (rows !== undefined && rows.length) aside.appendChild(renderBacklinks(rows));
 }
 
 function renderBacklinks(rows) {

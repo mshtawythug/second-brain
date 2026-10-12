@@ -7,7 +7,7 @@
 
 import { api } from "/static/js/api.js";
 import { $, el, toast } from "/static/js/dom.js";
-import { dispatch, state, syncUrl } from "/static/js/store.js";
+import { bumpNoteRevision, dispatch, state, syncUrl } from "/static/js/store.js";
 import { loadTree } from "/static/js/tree.js";
 
 const SAVE_LABELS = {
@@ -90,8 +90,10 @@ export async function openNote(id) {
  *
  * THIS NOTE IS HERE, AT THE SHARED HOST, ON PURPOSE. The constraint is fully
  * documented in layout.css beside the `grid-template-rows` rule, and
- * `marginalia.js` documents its own consequence of it (its block appends
- * LAST). Neither was reachable from this line: a rule about a shared DOM host,
+ * `marginalia.js` documents its own consequence of it (its block goes AFTER
+ * the note — the marginalia, graph and related blocks all enter through
+ * `placeInspectorBlock` in dom.js, which never inserts before this function's
+ * children). Neither was reachable from this line: a rule about a shared DOM host,
  * written only in one consumer's file or only in the stylesheet, is invisible
  * to the next author editing this function — which is exactly how the lede
  * shipped as a sixth append and was caught by a static count guard rather than
@@ -261,6 +263,11 @@ export async function saveNote() {
     note.body = state.draftBody;
     note.body_hash = result.body_hash;
     note.html = result.html;
+    /* BEFORE the dispatch: the dispatch is what re-renders the backlinks rail,
+       the graph and the related rail, and they must see the new revision on
+       that render or they redraw the pre-save neighbourhood from cache. See
+       the per-note revisions note in store.js. */
+    bumpNoteRevision(note.id);
     dispatch({ saveStatus: "saved", editing: false });
     toast("Saved");
   } catch (error) {
@@ -453,6 +460,8 @@ async function overwriteOnDisk() {
       note.body = mine;
       note.body_hash = result.body_hash;
       note.html = result.html;
+      /* The other successful save — same bump, same reason as saveNote. */
+      bumpNoteRevision(note.id);
       dispatch({ saveStatus: "saved", editing: false });
       toast("Saved — the version on disk was replaced");
     } catch (error) {
