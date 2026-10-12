@@ -475,7 +475,8 @@ browser = ["playwright>=1.40"]
 # substring-matched, unlike the version it replaced) and its failure message
 # states how to re-measure. Move this bound and that constant must move with it.
 # ---------------------------------------------------------------------------
-# ruff<0.17 / mypy<2.4 — MEASURED 2026-08-20 on feat/agentic-token-reduction.
+# ruff<0.17 / mypy<2.5 — MEASURED 2026-08-20 on feat/agentic-token-reduction;
+# mypy RE-MEASURED 2026-10-12 for the 2.4 line (see below the first table).
 #
 # WHY THESE GAINED BOUNDS. Both were unbounded (`ruff>=0.7`, `mypy>=1.13`), and
 # the pre-commit gate in scripts/hooks/pre-commit resolved whichever copy `$PATH`
@@ -510,8 +511,31 @@ browser = ["playwright>=1.40"]
 # 0.x minors ARE its breaking-change unit (new rules and rule-behaviour changes
 # land there), so 0.17 is the right granularity rather than a patch cap.
 #
+# mypy RE-MEASURED 2026-10-12 for the 2.4 line (Dependabot #16 proposed `<2.5`
+# and the contract test refused it, as designed — the same shape as coverage's
+# #12). Two venvs on Python 3.11.15, both from `pip install -e ".[dev]"`, whose
+# `pip freeze` differs in the `mypy` line ONLY; same tree (`1a1d068`, clean
+# `src/`), back to back, each with its own fresh `--cache-dir`:
+#
+#   mypy 2.4.0   `mypy src/`  -> exit 0, "no issues found in 224 source files"
+#   mypy 2.3.1   `mypy src/`  -> exit 0, output byte-identical (diff empty)
+#
+# (224, not 214: the tree grew since 2026-08-20. Only rows WITHIN a table
+# compare.) 2.4.0 is the newest release on PyPI as of 2026-10-12, so the cap is
+# <2.5 by the rule above. What in 2.4 could have moved the result and did not:
+# 2.4 makes the NATIVE (Ruff-based) parser the default, and that parser silently
+# ignores type comments on `for`/`with` targets. src/ has no type comments other
+# than `# type: ignore` (`grep -rnP '#\s*type:(?!\s*ignore)' --include='*.py'
+# src/` is empty), so that is inert here TODAY. The legacy parser was run too
+# (`--no-native-parser`, 2.4.0): exit 0, same line. `strict = true` enables
+# `warn_unused_ignores`, so the identical result also means none of the 16
+# `# type: ignore` comments in src/ went stale under 2.4. ruff was NOT
+# re-measured in this pass; its bound is untouched and needs its own measurement
+# before it moves.
+#
 # THE FLOORS ARE LEFT ALONE, AND THAT IS A GAP, NOT A JUDGEMENT. `mypy>=1.13`
-# admits a version TWO MAJORS below the 2.3.1 that is actually resolved; the
+# admits a version TWO MAJORS below the 2.x that is actually resolved (2.3.1 on
+# 2026-08-20, 2.4.0 on 2026-10-12); the
 # floor never noticed 1.x -> 2.x happening. Whether this tree still type-checks
 # under 1.13 is UNMEASURED — nobody has run it, and this block will not pretend
 # otherwise. What would settle it: install 1.13 in a scratch venv, run
@@ -538,7 +562,7 @@ browser = ["playwright>=1.40"]
 # Self-enforced by tests/test_dev_dependency_pins.py against the named constants
 # MEASURED_RUFF_CEILING / MEASURED_MYPY_CEILING, parsed from the specifier rather
 # than substring-matched. Move a bound here and that constant must move with it.
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.17", "pytest-mock>=3.14", "ruff>=0.7,<0.17", "mypy>=1.13,<2.4", "reportlab>=4.0", "types-PyYAML>=6.0"]
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.17", "pytest-mock>=3.14", "ruff>=0.7,<0.17", "mypy>=1.13,<2.5", "reportlab>=4.0", "types-PyYAML>=6.0"]
 
 [project.scripts]
 brain = "brain.cli:app"
