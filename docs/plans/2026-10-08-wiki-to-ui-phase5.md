@@ -521,3 +521,55 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
 - `CLAUDE.md` — `related.py`'s ceiling-table trail promoted; no other row implicated (no new
   `src/` file crossed 800 in this phase — re-derive with
   `find src -name '*.py' -exec wc -l {} + | sort -rn`).
+
+## 8. Follow-ups to §7.5 — label gap, test timeout, grapheme-safe cut (plan, 2026-10-12)
+
+Branch `fix/phase5-followups`, from `1a1d068`. Three items from §7.5. Each has a plan here, and §8.4
+records what landed.
+
+**8.1 `LABEL_GAP`.** Measured first, in Chromium on macOS, label box via `getBBox` at 13.5
+units. The box ascent is the font's ascent, rounded to whole device pixels: 13 at the platform
+face, 14 at Verdana (the wide face), and **15 (descent 5) for any title that draws an emoji**,
+because a fallback face's taller metrics join the primary's. The primary face's metrics always
+count: an all-Hebrew, all-Devanagari or all-CJK title keeps the primary ascent. So a label hung
+by its BASELINE clears its circle only when the gap exceeds an ascent that depends on the font,
+the device scale (rounding) and the title. No constant can be right, for the same reason a fixed
+width was not right in §7.4. **Ruling: hang each neighbour label by its measured box.**
+`fitLabels` sets the label's `y` so that the top of its box, at the capped title (the box rows
+are already judged on), sits exactly `LABEL_GAP` below its circle. A cut's box is never taller
+than the capped title's box, because a cut draws a subset of the same glyphs and the primary
+face always counts. So the shown box clears the circle at least as well. `LABEL_GAP` becomes
+2: the circle's widest stroke (the focus ring, 3) reaches 1.5 outside `r`. The root keeps its
+baseline placement, which (14b) pins. Affected: `static/js/graph.js` (constant, comment,
+`fitLabels`), `static/css/graph.css` (re-measure the vertical-gap table) and
+`tests/ui_graph_geometry.py` (add `_SPEC_LABEL_GAP` and pin `LABEL_GAP` at teardown). New test
+(14c) in a new module, `tests/test_ui_browser_graph_labels.py`: for every neighbour, at counts
+1..4, both faces and three widths, the box clears the circle's painted stroke (read from the
+computed style), and the capped box's top is exactly `_SPEC_LABEL_GAP` below the circle.
+Mutants to prove red: gap 10, 4, 0 (= 2 − 2) and 4 (= 2 + 2), and the measured hang removed.
+Risks: the labels move down about 5 units. Moving them can change which labels share a row,
+and with it the §7.4 counts, so the §7.4 table is re-run.
+
+**8.2 `pytest-timeout`.** Added to `dev`, not `browser`. Two reasons: `--strict-markers` makes
+`pytest.mark.timeout` a hard error wherever the plugin is missing, and every CI job installs
+`dev`. The evidence block gives the measured versions, with a cap at the next unreleased minor.
+A `pytest_collection_modifyitems` hook in `tests/conftest.py` gives every `browser`-marked test
+that lacks its own marker a timeout, sized from `--durations` with headroom. Nothing else in the
+suite is timed. The hook does not use the ini `timeout`: that would time 8,800 database tests to
+fix a browser hang. A new constant and test in `tests/test_dev_dependency_pins.py` follow the
+ruff/mypy pattern. Proof: the hang mutant (`hi = mid`) makes the suite FAIL on a timeout.
+
+**8.3 Grapheme-safe `cut()`.** `cut` counts and slices **grapheme clusters**, using
+`Intl.Segmenter` with grapheme granularity, and trims trailing whitespace before "…". Ruling:
+the 28-character cap counts graphemes, meaning characters as a reader perceives them. ASCII
+titles are unaffected. There is no `Intl.Segmenter` precedent in `static/js`, and
+`graph.css`'s `:has()` admits Firefox 121–124, which lacks it. So the segmenter is feature-tested
+and falls back to code points: still surrogate-safe, and never a thrown module load. The oracle
+in `tests/ui_graph_geometry.py` states the same rule independently. It lists every distinct cut
+of a title at or under the cap, so a trimmed cut that equals a shorter one is not mistaken for an
+over-cut. (15m) gets a title whose 29th character is a letter, with a precondition asserting that.
+New tests in the new module use synthetic ZWJ-emoji and astral titles: a cut at the cap keeps the
+whole cluster; a 28-grapheme title longer in code units is shown whole; a 28th grapheme that is a
+space is trimmed; and the code-point fallback runs with `Intl.Segmenter` removed by an init script.
+The browser API is removed, not a production module patched. The new module goes into `ci.yml` in
+byte order.
