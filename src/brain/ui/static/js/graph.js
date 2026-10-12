@@ -37,7 +37,10 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 /* Labels longer than this are cut and given an ellipsis; the full title stays
    available in the node's <title> child, which is what hover shows. A label
-   can be cut SHORTER than this to fit its slot — see fitLabels. */
+   can be cut SHORTER than this to fit its slot — see fitLabels. CHARACTERS
+   are grapheme clusters, what a reader counts as one character: an emoji ZWJ
+   sequence or an astral letter is one, and a cut never splits it (cut). For
+   ASCII titles that is the same count as code units. */
 const LABEL_MAX_CHARS = 28;
 
 /* Clearance, in viewBox units, that fitLabels keeps between a label and the
@@ -386,9 +389,31 @@ function shorten(title) {
   return cut(title, LABEL_MAX_CHARS);
 }
 
-/* The first `chars` characters of `title`, with an ellipsis if any were cut. */
+/* Splits a title into grapheme clusters. Feature-tested, unlike
+   ResizeObserver: graph.css's :has() admits Firefox 121-124, which lacks
+   Intl.Segmenter, and a constructor that throws at module load would take
+   the whole graph with it. Without it a title splits into CODE POINTS. That
+   still never leaves half a surrogate pair, but it can split an emoji ZWJ
+   sequence at a joint. Both paths are pinned by
+   test_a_label_is_cut_at_the_cap_by_whole_characters. */
+const GRAPHEMES = typeof Intl.Segmenter === "function"
+  ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+  : null;
+
+function characters(title) {
+  return GRAPHEMES
+    ? Array.from(GRAPHEMES.segment(title), (part) => part.segment)
+    : Array.from(title);
+}
+
+/* The first `chars` characters of `title`, with an ellipsis if any were cut.
+   Whitespace before the ellipsis is dropped: "Planning …" reads as two
+   words, not one cut short. So a cut that ends on a space shows the same
+   label as the cut one shorter, and fitText's search still finds the longest
+   distinct one. */
 function cut(title, chars) {
-  return title.length > chars ? `${title.slice(0, chars)}…` : title;
+  const all = characters(title);
+  return all.length > chars ? `${all.slice(0, chars).join("").trimEnd()}…` : title;
 }
 
 /* LABEL WIDTH IS MEASURED, NOT ASSUMED. A label's rendered width is a
@@ -471,7 +496,7 @@ function hangBelowCircle(text) {
 function fitText(text, title, slot) {
   if (text.getComputedTextLength() <= slot) return;
   let lo = 0;
-  let hi = Math.min(title.length, LABEL_MAX_CHARS) - 1;
+  let hi = Math.min(characters(title).length, LABEL_MAX_CHARS) - 1;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
     text.textContent = cut(title, mid);

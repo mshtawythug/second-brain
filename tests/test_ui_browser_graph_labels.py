@@ -25,7 +25,9 @@ from typing import Any
 import pytest
 
 from tests.ui_graph_geometry import (
+    _CUT_LENGTHS_JS,
     _FACES,
+    _SPEC_LABEL_CLEARANCE,
     _SPEC_LABEL_GAP,
     _SPEC_LABEL_MAX_CHARS,
     _SPEC_LABEL_THRESHOLD,
@@ -155,3 +157,98 @@ def test_a_label_that_draws_an_emoji_hangs_by_its_own_taller_box(page: Any) -> N
     )
     assert _hang_faults([plain, emoji]) == [], _hang_faults([plain, emoji])
     _assert_optimal_cuts(page, "a plain and an emoji title")
+
+
+# ------------------------------------------------------- grapheme-safe cut --
+
+#: 27 plain characters: whatever is appended is the title's 28th character,
+#: the last one the cap keeps.
+_PREFIX = "Synthetic Planning Note Six"
+
+#: A ZWJ emoji sequence, one grapheme of seven code points (eleven UTF-16 code
+#: units), and an astral letter, one grapheme of one code point (two code
+#: units). Each is the title's 28th character in the tests below, so slicing
+#: by code unit splits it, and slicing by code point splits the sequence.
+_FAMILY = "\U0001F468‍\U0001F469‍\U0001F467‍\U0001F466"
+_ASTRAL = "\U0001D538"
+_FIRST_CODE_POINT_OF_FAMILY = "\U0001F468"
+
+#: What follows the 28th character, so every title below runs past the cap.
+_TAIL = " Extra Words"
+
+#: Each case: the title, and the label it must show in a slot that holds more
+#: than the cap. ``native`` is a browser with ``Intl.Segmenter``. ``absent``
+#: is one without it (Firefox before 125, say), where graph.js falls back to
+#: code points. That fallback keeps an astral letter whole but may split a
+#: ZWJ sequence at a joint, never inside a code point (plan §8.3).
+_CUT_CASES = {
+    "zwj-native": (f"{_PREFIX}{_FAMILY}{_TAIL}", f"{_PREFIX}{_FAMILY}…"),
+    "astral-native": (f"{_PREFIX}{_ASTRAL}{_TAIL}", f"{_PREFIX}{_ASTRAL}…"),
+    "zwj-absent": (f"{_PREFIX}{_FAMILY}{_TAIL}", f"{_PREFIX}{_FIRST_CODE_POINT_OF_FAMILY}…"),
+    "astral-absent": (f"{_PREFIX}{_ASTRAL}{_TAIL}", f"{_PREFIX}{_ASTRAL}…"),
+    "exactly-the-cap": (f"{_PREFIX}{_FAMILY}", f"{_PREFIX}{_FAMILY}"),
+    "space-at-the-cap": ("Synthetic Planning Notebook Extra Words",
+                         "Synthetic Planning Notebook…"),
+}
+
+_NO_SEGMENTER_JS = "delete Intl.Segmenter;"
+
+#: A neighbour's edge slot, from the inspector's padding box as the oracle
+#: computes it, but with no ``Intl.Segmenter``, so it also runs where the
+#: segmenter has been removed. A lone neighbour at 12 o'clock shares no row.
+_EDGE_SLOT_JS = """(clearance) => {
+    const svg = document.querySelector('.local-graph svg');
+    const ctm = svg.getScreenCTM();
+    const host = document.getElementById('inspector');
+    const edge = host.getBoundingClientRect().left + host.clientLeft;
+    const left = (edge - ctm.e) / ctm.a + clearance;
+    const right = (edge + host.clientWidth - ctm.e) / ctm.a - clearance;
+    const x = Number(document.querySelector('.local-graph a.node text').getAttribute('x'));
+    return 2 * Math.min(x - left, right - x);
+}"""
+
+
+def _draw_lone_neighbour(page: Any, title: str, note_id: str) -> None:
+    """Draw the server's ring of one neighbour, at 12 o'clock mid-canvas,
+    where at 1280 its slot is far wider than any capped title."""
+    page.set_viewport_size({"width": 1280, "height": 800})
+    _GRAPH["payload"] = _server_ring_payload([(ALPHA_ID, title)])
+    _open(page, note_id)
+    page.wait_for_selector(".local-graph svg")
+
+
+@pytest.mark.parametrize("case", sorted(_CUT_CASES))
+def test_a_label_is_cut_at_the_cap_by_whole_characters(page: Any, case: str) -> None:
+    """(16) The cap counts CHARACTERS as a reader sees them, grapheme
+    clusters, and a cut never leaves a space before "…".
+
+    Every title here has its 28th character placed where a careless cut
+    goes wrong. A code-unit slice leaves half a surrogate pair. A code-point
+    slice leaves a lone 👨 out of a family. A 28-character title that is
+    longer in code units gets an ellipsis it does not need. A 28th character
+    that is a space is kept before the "…". The slot holds the WHOLE title,
+    so the cap alone decides the label (precondition). Where
+    ``Intl.Segmenter`` is present the oracle, which states the cut rule
+    itself, also holds the label to it.
+    """
+    title, expected = _CUT_CASES[case]
+    if case.endswith("-absent"):
+        page.add_init_script(_NO_SEGMENTER_JS)
+        page.reload()
+        page.wait_for_selector('[role="treeitem"]')
+        assert page.evaluate("() => typeof Intl.Segmenter") == "undefined", (
+            "precondition: Intl.Segmenter is still present, so the fallback did not run"
+        )
+    index = sorted(_CUT_CASES).index(case)
+    _draw_lone_neighbour(page, title, f"aaaaaaaa-0000-4000-8000-{0xb00 + index:012x}")
+
+    (whole,) = page.evaluate(_CUT_LENGTHS_JS, [ALPHA_ID, [title]])
+    slot = page.evaluate(_EDGE_SLOT_JS, _SPEC_LABEL_CLEARANCE)
+    assert whole <= slot, (
+        f"precondition: the slot ({slot:.2f}) does not hold the whole title ({whole:.2f}), "
+        "so the width fit, not the cap, may have cut this label"
+    )
+    shown = page.evaluate("() => document.querySelector('.local-graph a.node text').textContent")
+    assert shown == expected, f"{case}: {title!r} is shown as {shown!r}, not {expected!r}"
+    if not case.endswith("-absent"):
+        _assert_optimal_cuts(page, case)

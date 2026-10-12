@@ -266,12 +266,25 @@ _FIT_EPSILON = 1e-6
 #:   - with ``rows``, the ROW bound: for every other label whose box comes
 #:     within ``clearance`` of this one's vertically, ``|dx| - clearance``.
 #: Rows are judged on each label's box at its CAPPED title, as fitLabels
-#: judges them before it cuts anything. For each label it returns the text
-#: shown, how many title characters it keeps, its measured length, and the
-#: next-longer cut (one more character, or the whole title) with ITS length
-#: — set on the label, measured, and put back. Same element, same font, same
-#: ``getComputedTextLength`` fitText uses, so every comparison is exact.
-#: Nothing here reads graph.js: a mutation there cannot move these slots.
+#: judges them before it cuts anything.
+#:
+#: THE CUT RULE, stated here independently of graph.js (plan §8.3). A title's
+#: CHARACTERS are its grapheme clusters (``Intl.Segmenter``, grapheme
+#: granularity), so an emoji ZWJ sequence or an astral letter counts as one
+#: and is never split. ``cut(title, n)`` is the title itself if it has at
+#: most ``n`` characters; otherwise its first ``n`` characters, with trailing
+#: whitespace removed, then "…". The label's CUTS are ``cut(title, n)`` for
+#: every ``n`` from 0 up to the cap or the title's length, whichever is
+#: smaller, with duplicates dropped. Trimming makes ``cut(n)`` equal
+#: ``cut(n + 1)`` whenever character ``n + 1`` is a space, and the next cut
+#: that DIFFERS is the one a longer label would show.
+#:
+#: For each label it returns the text shown, its cuts, how many characters it
+#: keeps, its measured length, and the next cut after the shown one, with ITS
+#: length. That cut is set on the label, measured, and put back. Same element,
+#: same font, same ``getComputedTextLength`` fitText uses, so every
+#: comparison is exact. Nothing here reads graph.js: a mutation there cannot
+#: move these slots or this rule.
 _FIT_JS = """([clearance, cap, rows]) => {
     const svg = document.querySelector('.local-graph svg');
     const ctm = svg.getScreenCTM();
@@ -279,7 +292,20 @@ _FIT_JS = """([clearance, cap, rows]) => {
     const edge = host.getBoundingClientRect().left + host.clientLeft;
     const left = (edge - ctm.e) / ctm.a + clearance;
     const right = (edge + host.clientWidth - ctm.e) / ctm.a - clearance;
-    const cutTo = (title, n) => (title.length > n ? `${title.slice(0, n)}…` : title);
+    const segmenter = new Intl.Segmenter(undefined, {granularity: 'grapheme'});
+    const chars = (title) => Array.from(segmenter.segment(title), (s) => s.segment);
+    const cutTo = (title, n) => {
+        const all = chars(title);
+        return all.length > n ? `${all.slice(0, n).join('').trimEnd()}…` : title;
+    };
+    const cutsOf = (title) => {
+        const cuts = [];
+        for (let n = 0; n <= Math.min(chars(title).length, cap); n += 1) {
+            const cut = cutTo(title, n);
+            if (cuts[cuts.length - 1] !== cut) cuts.push(cut);
+        }
+        return cuts;
+    };
     const measure = (text, content) => {
         const shown = text.textContent;
         text.textContent = content;
@@ -307,14 +333,12 @@ _FIT_JS = """([clearance, cap, rows]) => {
             }
         }
         const shown = label.text.textContent;
-        const kept = shown.endsWith('…') ? shown.length - 1 : shown.length;
-        let longer = null;
-        let longerWidth = null;
-        if (kept < Math.min(label.title.length, cap)) {
-            longer = cutTo(label.title, kept + 1);
-            longerWidth = measure(label.text, longer).length;
-        }
-        return {id: label.id, title: label.title, shown, kept, slot,
+        const cuts = cutsOf(label.title);
+        const kept = chars(shown.endsWith('…') ? shown.slice(0, -1) : shown).length;
+        const at = cuts.indexOf(shown);
+        const longer = at >= 0 && at + 1 < cuts.length ? cuts[at + 1] : null;
+        const longerWidth = longer === null ? null : measure(label.text, longer).length;
+        return {id: label.id, title: label.title, shown, cuts, kept, slot,
                 width: label.text.getComputedTextLength(), longer, longerWidth};
     });
 }"""
@@ -330,20 +354,20 @@ def _fits(page: Any, *, rows: bool) -> list[dict[str, Any]]:
 def _fit_faults(fits: list[dict[str, Any]]) -> list[str]:
     """Every label that is not the LONGEST cut of its title fitting its slot.
 
-    A label must be (a) a cut of its own title — its first ``kept``
-    characters, with "…" iff any were dropped, and never more than the cap;
-    (b) no longer than its slot, unless it is the bare "…", fitText's floor;
-    (c) the longest such cut: one character more — or, one short of the
-    whole title, the whole title — must NOT fit. So a title whose capped form
-    fits must be shown whole (capped), and an over-cut label fails (c) even
-    when every box check passes."""
+    A label must be (a) one of its title's CUTS, as the oracle states the cut
+    rule (``_FIT_JS``): never more than the cap, never a split character, no
+    space before "…"; (b) no longer than its slot, unless it is the bare "…",
+    fitText's floor; (c) the longest such cut: the next cut that differs
+    from it, which is one more character or, one short of the whole title,
+    the whole title, must NOT fit. So a title whose capped form fits must be
+    shown whole (capped), and an over-cut label fails (c) even when every box
+    check passes."""
     faults = []
     for fit in fits:
-        shown, title, kept = fit["shown"], fit["title"], fit["kept"]
-        expected = title if kept >= len(title) else f"{title[:kept]}…"
-        if shown != expected or kept > _SPEC_LABEL_MAX_CHARS:
+        shown, title = fit["shown"], fit["title"]
+        if shown not in fit["cuts"]:
             faults.append(f"{shown!r} is not a cut of {title!r} at the cap")
-        elif kept > 0 and fit["width"] > fit["slot"] + _FIT_EPSILON:
+        elif fit["kept"] > 0 and fit["width"] > fit["slot"] + _FIT_EPSILON:
             faults.append(f"{shown!r} ({fit['width']:.2f}) overruns its slot "
                           f"({fit['slot']:.2f})")
         elif fit["longer"] is not None and fit["longerWidth"] <= fit["slot"] - _FIT_EPSILON:
@@ -441,6 +465,20 @@ def _intersections(labels: list[dict[str, Any]]) -> list[str]:
                             f"{b['id'][-4:]} {[round(v) for v in b['box']]}")
     return hits
 
+
+#: The measured lengths of ``cuts`` on one neighbour's label — set on it,
+#: measured, and put back.
+_CUT_LENGTHS_JS = """([id, cuts]) => {
+    const text = [...document.querySelectorAll('.local-graph [data-note-id]')]
+        .find((n) => n.getAttribute('data-note-id') === id).querySelector('text');
+    const shown = text.textContent;
+    const lengths = cuts.map((cut) => {
+        text.textContent = cut;
+        return text.getComputedTextLength();
+    });
+    text.textContent = shown;
+    return lengths;
+}"""
 
 #: Every drawn label's text, in drawing order.
 _LABEL_TEXTS_JS = (

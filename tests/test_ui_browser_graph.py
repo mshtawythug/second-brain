@@ -136,7 +136,10 @@ def test_a_long_title_is_cut_on_the_label_and_whole_in_the_tooltip(page: Any) ->
     anchor = f'.local-graph a.node[data-note-id="{BRAVO_ID}"]'
     label = page.locator(f"{anchor} > text").text_content()
     tip = page.locator(f"{anchor} > title").text_content()
-    assert label == long_title[:28] + "…"
+    # Its 28th character is a space, which the cut drops before the "…"
+    # (plan §8.3; the rule itself is held by test_ui_browser_graph_labels.py).
+    assert long_title[27] == " "
+    assert label == long_title[:27] + "…"
     assert tip == long_title
 
 
