@@ -15,7 +15,7 @@ import logging
 import socket
 import webbrowser
 from collections.abc import Callable, Iterator
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any
 from urllib.parse import quote
@@ -28,7 +28,6 @@ from ..errors import BrainError
 from .context import (
     Resolved,
     UiContext,
-    bind_address,
     bind_origin,
     host_allowlist,
     literal_addresses,
@@ -53,16 +52,20 @@ TELEMETRY_DISABLED_NOTICE = (
 
 SocketFactory = Callable[[int, int], socket.socket]
 
+#: The listen backlog — uvicorn's own default.
+_BACKLOG = 2048
 
-def _probe_socket(
+
+def _listen_socket(
     address: str, socket_factory: SocketFactory = socket.socket
 ) -> socket.socket:
-    """A socket configured the way uvicorn's real bind will be.
+    """An unbound socket configured the way asyncio configures a server socket.
 
-    Same address family as the bind, and for IPv6 the same ``IPV6_V6ONLY=1``
-    asyncio sets on every IPv6 server socket. Without it the probe was
-    dual-stack: on Linux an IPv4 socket holding the port made it report "busy"
-    for a ``::`` server that would have bound fine (phase-7 review round 3).
+    The address's own family, ``SO_REUSEADDR``, and for IPv6 ``IPV6_V6ONLY=1``.
+    This was the PROBE until round 11; it is now the socket the server runs
+    on. Without V6ONLY the old probe was dual-stack: on Linux an IPv4 socket
+    holding the port made it report "busy" for a ``::`` server that would have
+    bound fine (phase-7 review round 3).
     """
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
     # Creation may raise OSError; the caller reports that as "cannot open".
@@ -78,7 +81,7 @@ def _probe_socket(
         sock.close()
         name = "IPv6" if family == socket.AF_INET6 else "IPv4"
         raise BrainError(
-            f"cannot configure an {name} probe socket for --host {address} "
+            f"cannot configure an {name} socket for --host {address} "
             f"({exc.strerror or exc})"
         ) from exc
     return sock
@@ -88,14 +91,16 @@ Resolver = Callable[..., Any]
 
 
 def resolve_bind_addresses(host: str, resolver: Resolver | None = None) -> Resolved:
-    """Every address the bind will use for ``host`` — resolved as uvicorn will.
+    """Every address ``host`` binds — resolved ONCE, then classified and bound.
 
-    A literal needs no lookup. A hostname is resolved with ``getaddrinfo``
-    and ``AI_PASSIVE``, exactly as asyncio's ``create_server`` does before it
-    binds each result (review round 10): classifying the NAME let a name that
-    resolves to 0.0.0.0 bind every interface with no notice, and trusted
-    ``localhost`` as loopback wherever it pointed. ``resolver`` is injectable so
-    tests never touch real DNS.
+    A literal needs no lookup. A hostname is resolved with ``getaddrinfo`` and
+    ``AI_PASSIVE``, as asyncio's ``create_server`` would (review round 10):
+    classifying the NAME let a name that resolves to 0.0.0.0 bind every
+    interface with no notice, and trusted ``localhost`` as loopback wherever it
+    pointed. This answer is the only one used (round 11): :func:`claim_port`
+    binds exactly these addresses and uvicorn is handed the sockets, so a
+    second lookup that answers differently cannot move the bind away from what
+    was classified. ``resolver`` is injectable so tests never touch real DNS.
     """
     literal = literal_addresses(host)
     if literal:
@@ -116,60 +121,71 @@ def resolve_bind_addresses(host: str, resolver: Resolver | None = None) -> Resol
     return addresses
 
 
-def _port_is_free(
-    host: str,
-    port: int,
-    *,
-    socket_factory: SocketFactory = socket.socket,
-    addresses: Resolved | None = None,
-) -> bool:
-    """Probe a port with a real bind. Portable; no ``lsof``.
+class _PortBusy(Exception):
+    """Internal: the port is in use on one of the addresses (EADDRINUSE)."""
 
-    The probe uses the address family the server will bind. It used to be
-    IPv4-only (with ``::1`` mapped to ``127.0.0.1``), so binding ``::`` raised
-    on every port, every port looked busy, and ``brain ui --host ::`` died with
-    "no free port found" before it could print a thing (phase-7 audit L-8).
+
+def _open_listener(
+    host: str, address: str, port: int, socket_factory: SocketFactory
+) -> socket.socket:
+    """One listening socket on exactly ``address``:``port``, or an error.
+
+    This IS the bind, not a probe of it (review round 11): the socket stays
+    open and is handed to uvicorn, so nothing resolves ``host`` again between
+    classification and bind, and no other process can take the port between a
+    probe and the real bind either.
     """
-    if addresses:
-        # One probe per resolved address, in that address's own family — the
-        # bind uses every one (round 10: a name resolving only to IPv6 was
-        # probed as IPv4 and falsely refused). Busy if ANY is busy.
-        return all(
-            _port_is_free(str(a), port, socket_factory=socket_factory) for a in addresses
-        )
-    address = bind_address(host)
     try:
-        probe = _probe_socket(address, socket_factory)
+        sock = _listen_socket(address, socket_factory)
     except OSError as exc:
         # Creating the socket, not binding it: the kernel has no such address
-        # family. It was outside the try below and escaped as a raw traceback
-        # (review round 5). A bind failure means "busy"; this means "never".
+        # family (review round 5).
         family = "IPv6" if ":" in address else "IPv4"
         raise BrainError(
             f"cannot open an {family} socket for --host {host} "
             f"({exc.strerror or exc})\n"
             f"  This machine may not support {family}; pass a different --host."
         ) from exc
-    with closing(probe) as sock:
-        try:
-            sock.bind((address, port))
-        except socket.gaierror as exc:
-            raise BrainError(
-                f"--host {host} does not resolve to an address on this machine "
-                f"({exc.strerror or exc})."
-            ) from exc
-        except OSError as exc:
-            # ONLY "in use" means busy (final round). This was a catch-all, so
-            # an address the machine does not own, or a refused privileged
-            # port, was reported as "port already in use" / "no free port".
-            if exc.errno == errno.EADDRINUSE:
-                return False
-            raise _bind_failure(host, port, exc) from exc
-    return True
+    try:
+        sock.bind((address, port))
+        sock.listen(_BACKLOG)
+    except OSError as exc:
+        sock.close()
+        # ONLY "in use" means busy (final round). A catch-all here reported an
+        # address the machine does not own, or a refused privileged port, as
+        # "port already in use" / "no free port".
+        if exc.errno == errno.EADDRINUSE:
+            raise _PortBusy from exc
+        raise _bind_failure(host, port, exc) from exc
+    return sock
+
+
+def bind_listeners(
+    host: str,
+    port: int,
+    *,
+    addresses: Resolved,
+    socket_factory: SocketFactory = socket.socket,
+) -> list[socket.socket]:
+    """Listening sockets on EXACTLY ``addresses`` — what was classified.
+
+    One per resolved address, each in its own family (round 10: a name
+    resolving only to IPv6 was probed as IPv4). If any one fails, every socket
+    already opened is closed before the error propagates.
+    """
+    sockets: list[socket.socket] = []
+    try:
+        for address in addresses:
+            sockets.append(_open_listener(host, str(address), port, socket_factory))
+    except BaseException:
+        for sock in sockets:
+            sock.close()
+        raise
+    return sockets
 
 
 def _bind_failure(host: str, port: int, exc: OSError) -> BrainError:
-    """The error for a probe bind that failed for any reason but "in use".
+    """The error for a bind that failed for any reason but "in use".
 
     EACCES is not treated as busy: the auto-port bump moves by one, which stays
     inside the privileged range below 1024 and would hide the real cause.
@@ -186,34 +202,41 @@ def _bind_failure(host: str, port: int, exc: OSError) -> BrainError:
     )
 
 
-def resolve_port(
+def claim_port(
     start: int,
     *,
     host: str = DEFAULT_HOST,
+    addresses: Resolved | None = None,
     attempts: int = 20,
     auto: bool = True,
     socket_factory: SocketFactory = socket.socket,
-    addresses: Resolved | None = None,
-) -> int:
-    """Return a free port at or after ``start``.
+) -> tuple[int, list[socket.socket]]:
+    """Bind ``addresses`` at ``start`` or the next free port; return it and the sockets.
 
-    A TOCTOU window remains between this probe and uvicorn's bind, so
-    :func:`serve` also catches ``EADDRINUSE`` and prints the same remediation
-    rather than a traceback.
+    The probe is the bind (review round 11). This used to probe, close, and let
+    uvicorn bind again from ``host`` — a TOCTOU twice over: the port could be
+    taken in between, and a hostname was RESOLVED again by asyncio, so a name
+    classified as loopback could bind somewhere else. The returned sockets
+    are passed to :func:`serve` and bound to exactly what was classified.
+    ``addresses`` defaults to ``host`` itself when it is an IP literal.
     """
-    if _port_is_free(host, start, socket_factory=socket_factory, addresses=addresses):
-        return start
+    targets = addresses if addresses is not None else literal_addresses(host)
+    if not targets:
+        raise BrainError(f"--host {host} has no address to bind; resolve it first.")
+    candidates = range(start, start + attempts) if auto else range(start, start + 1)
+    for candidate in candidates:
+        try:
+            return candidate, bind_listeners(
+                host, candidate, addresses=targets, socket_factory=socket_factory
+            )
+        except _PortBusy:
+            continue
     if not auto:
         raise BrainError(
             f"port {start} is already in use\n"
             f"  Stop the process using port {start}, pass a different --port,\n"
             f"  or drop --no-auto-port to auto-select the next free one."
         )
-    for candidate in range(start + 1, start + attempts):
-        if _port_is_free(
-            host, candidate, socket_factory=socket_factory, addresses=addresses
-        ):
-            return candidate
     raise BrainError(
         f"no free port found in {start}..{start + attempts - 1}; "
         "pass --port with a free one"
@@ -224,8 +247,10 @@ def preflight(cfg: Config) -> tuple[bool, tuple[str, ...]]:
     """Probe the database once. Return ``(logging_enabled, notices)``.
 
     Raises :class:`BrainError` when Postgres is unreachable, so a dead database
-    fails **before** uvicorn binds a port the user would then have to go and
-    kill.
+    fails **before** uvicorn starts serving, leaving no server the user would
+    then have to go and kill. Since round 11 the port is already bound by
+    :func:`claim_port` when this runs (the context needs the port); the CLI
+    closes those sockets on the way out.
     """
     notices: list[str] = []
     try:
@@ -379,22 +404,58 @@ def serve(
     *,
     host: str,
     port: int,
+    sockets: list[socket.socket],
     open_browser: bool,
     opener: Callable[[str], Any] | None = None,
 ) -> None:
-    """Run the app under uvicorn until Ctrl-C.
+    """Run the app under uvicorn until Ctrl-C, on the already-bound ``sockets``.
+
+    ``sockets`` come from :func:`claim_port` (review round 11): uvicorn serves
+    exactly those and never resolves or binds ``host`` itself. ``host`` and
+    ``port`` stay in uvicorn's config only for its own messages. A bind error
+    is therefore raised by OUR code, with our messages; the handler that used
+    to catch EADDRINUSE here was unreachable, because uvicorn >= 0.52 catches a
+    bind OSError itself and exits 3.
 
     Foreground-only by design: no PID file, no launchd plist. Daemonizing a
     *write-capable* HTTP server that could outlive the user's attention is a bad
     idea — the read-only wiki is the surface that gets a daemon.
     """
+    try:
+        _run(
+            context,
+            host=host,
+            port=port,
+            sockets=sockets,
+            open_browser=open_browser,
+            opener=opener,
+        )
+    finally:
+        # Closed on every exit, including a failure before uvicorn starts
+        # (an embedder that will not warm): the sockets were bound by
+        # claim_port, so nothing else would release them.
+        for sock in sockets:
+            sock.close()
+
+
+def _run(
+    context: UiContext,
+    *,
+    host: str,
+    port: int,
+    sockets: list[socket.socket],
+    open_browser: bool,
+    opener: Callable[[str], Any] | None,
+) -> None:
+    """The body of :func:`serve`; the caller closes ``sockets``."""
     import uvicorn
 
     from .app import create_app
 
-    # Before the bind, so the cost lands in startup rather than in the first
+    # Before serving, so the cost lands in startup rather than in the first
     # request — and before the browser opens, so a warm model is ready by the
-    # time anyone can type.
+    # time anyone can type. The sockets are already bound: a connection made
+    # meanwhile waits in the listen backlog.
     warm_embedder(context.embedder)
 
     # The guard's own origin: the opened tab cannot diverge from the Origin the
@@ -407,8 +468,8 @@ def serve(
     server = uvicorn.Server(config)
 
     if open_browser:
-        # Opened after the bind rather than before it, so the browser cannot
-        # race the socket and land on a connection-refused page.
+        # Opened after uvicorn starts serving rather than before, so the
+        # browser cannot land on a page nobody is answering yet.
         original_startup = server.startup
 
         async def startup_then_open(*args: Any, **kwargs: Any) -> None:
@@ -417,15 +478,7 @@ def serve(
 
         server.startup = startup_then_open  # type: ignore[method-assign]
 
-    try:
-        server.run()
-    except OSError as exc:
-        if exc.errno == errno.EADDRINUSE:
-            raise BrainError(
-                f"port {port} is already in use\n"
-                f"  Stop the process using port {port}, or pass a different --port."
-            ) from exc
-        raise
+    server.run(sockets=sockets)
 
 
 def with_notice(context: UiContext, notice: str) -> UiContext:

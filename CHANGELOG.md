@@ -47,11 +47,13 @@ git tag scheme:
   never worked from another device's browser.
 - **`--host` is judged by the address it will actually bind**, not by how it
   is spelled or named. An IP address is checked numerically (no DNS); a
-  hostname is resolved the way the bind resolves it, and judged by EVERY
-  address it resolves to. Any unspecified address makes it a wildcard (with the
-  notice), and it is loopback only if every address is loopback — so a name
-  that points at `0.0.0.0` gets the notice, and `localhost` mapped elsewhere
-  needs a token like any other bind. Every spelling of the wildcard gets the
+  hostname is resolved ONCE, judged by EVERY address it resolves to, and the
+  server binds exactly those addresses — the name is never looked up again,
+  so a second DNS answer cannot move the bind away from what was judged. Any
+  unspecified address makes it a wildcard (with the notice, and the URL of the
+  wildcard's own loopback), and it is loopback only if every address is
+  loopback — so a name that points at `0.0.0.0` gets the notice, and
+  `localhost` mapped elsewhere needs a token like any other bind. Every spelling of the wildcard gets the
   notice and every spelling of loopback is loopback (`127.0.0.2` included).
   Spellings that bound something unexpected are refused, each with a usage
   error that says why:
@@ -111,6 +113,11 @@ git tag scheme:
   … already in use" or "no free port found" whatever the cause. Now only a
   port in use is busy: an address this machine does not own, a name that does
   not resolve, and a privileged port below 1024 each get their own message.
+- **The free port could be taken before the server bound it.** `brain ui`
+  probed the port, released it, and let the server bind it again; another
+  process could take it in between. The check is now the bind: the sockets it
+  opens are the ones served, and a port in use is reported by `brain ui`
+  itself rather than by the web server's startup error.
 - **`brain ui --host LOCALHOST` refused its own URL with 400** — as did any
   mixed-case hostname. A browser lower-cases the host it sends and the Host
   check is case-sensitive, so the allowlist and URL kept a spelling no browser

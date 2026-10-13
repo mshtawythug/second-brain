@@ -368,8 +368,11 @@ def bind_origin(host: str, port: int, resolved: Resolved | None = None) -> str:
     addresses = resolved if resolved is not None else literal_addresses(address)
     if classify_addresses(addresses) == "wildcard":
         # The loopback of a family the wildcard actually covers; a name that
-        # resolves to 0.0.0.0 is IPv4 though it has no colon (round 10).
-        url_host = "127.0.0.1" if any(a.version == 4 for a in addresses) else "[::1]"
+        # resolves to 0.0.0.0 is IPv4 though it has no colon (round 10). The
+        # IPv4 address must be the UNSPECIFIED one: a name resolving to
+        # (192.0.2.5, ::) binds no IPv4 loopback at all (round 11).
+        v4_wildcard = any(a.is_unspecified and a.version == 4 for a in addresses)
+        url_host = "127.0.0.1" if v4_wildcard else "[::1]"
     elif ":" in address:
         url_host = f"[{address}]"
     else:

@@ -14,12 +14,17 @@ asserts that importing ``brain.cli`` leaves both out of ``sys.modules``.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 
 from .config import Config
 from .errors import BrainError
+
+if TYPE_CHECKING:
+    import socket
+
+    from .ui.context import Resolved
 
 #: The panel's --lan hint. A constant so tests can assert its absence on other
 #: binds by the text itself, not by a guessed fragment (review round 6).
@@ -159,7 +164,7 @@ def ui(
     from .ui import lan as lan_mod
     from .ui import server as ui_server
     from .ui.context import HostRefused, address_class, validate_host
-    from .ui.server import browser_url, build_context, resolve_port, serve
+    from .ui.server import claim_port
 
     # Once, here: every consumer below — the probe, the bind, the allowlist,
     # the URL — gets the canonical bare address (bind_origin re-brackets it
@@ -225,23 +230,71 @@ def ui(
         )
         raise typer.Exit(1)
 
+    # Round 11: bound HERE, to exactly the addresses classified above, and
+    # handed to uvicorn as live sockets — it never resolves `host` again, and
+    # the port cannot be taken between a probe and the real bind.
     try:
-        resolved_port = resolve_port(
+        resolved_port, sockets = claim_port(
             port, host=host, auto=auto_port, addresses=resolved
-        )
-        context = build_context(
-            cfg,
-            host=host,
-            port=resolved_port,
-            read_only=read_only,
-            token=token,
-            include_confidential=include_confidential,
-            embedder=_build_embedder(cfg),
-            resolved=resolved,
         )
     except BrainError as exc:
         typer.secho(str(exc), fg="red", err=True)
         raise typer.Exit(1) from exc
+
+    try:
+        _start(
+            cfg,
+            host=host,
+            port=port,
+            resolved_port=resolved_port,
+            sockets=sockets,
+            resolved=resolved,
+            kind=kind,
+            token=token,
+            read_only=read_only,
+            include_confidential=include_confidential,
+            open_browser=open_browser,
+            lan=lan,
+        )
+    except BrainError as exc:
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        # serve() closes them too; this covers a failure before it runs.
+        for sock in sockets:
+            sock.close()
+    typer.echo("brain ui stopped")
+
+
+def _start(
+    cfg: Config,
+    *,
+    host: str,
+    port: int,
+    resolved_port: int,
+    sockets: list[socket.socket],
+    resolved: Resolved,
+    kind: str,
+    token: str,
+    read_only: bool,
+    include_confidential: bool,
+    open_browser: bool,
+    lan: bool,
+) -> None:
+    """Build the context on the bound port, print the panel, and serve."""
+    from .ui import lan as lan_mod
+    from .ui.server import browser_url, build_context, serve
+
+    context = build_context(
+        cfg,
+        host=host,
+        port=resolved_port,
+        read_only=read_only,
+        token=token,
+        include_confidential=include_confidential,
+        embedder=_build_embedder(cfg),
+        resolved=resolved,
+    )
 
     if resolved_port != port:
         typer.secho(
@@ -255,21 +308,19 @@ def ui(
         url=browser_url(host, resolved_port, token, resolved=resolved),
         cfg=cfg,
         read_only=read_only,
-        loopback=loopback,
+        loopback=kind == "loopback",
         serve_confidential=context.serve_confidential_bodies,
         notices=notices,
         note_count=None,
         lan=lan,
     )
-
-    try:
-        serve(
-            context, host=host, port=resolved_port, open_browser=open_browser
-        )
-    except BrainError as exc:
-        typer.secho(str(exc), fg="red", err=True)
-        raise typer.Exit(1) from exc
-    typer.echo("brain ui stopped")
+    serve(
+        context,
+        host=host,
+        port=resolved_port,
+        sockets=sockets,
+        open_browser=open_browser,
+    )
 
 
 def register_ui_commands(app: typer.Typer) -> None:

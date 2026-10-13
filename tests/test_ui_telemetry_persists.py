@@ -229,7 +229,7 @@ def test_warm_up_does_not_swallow_a_real_bug() -> None:
         warm_embedder(Broken())
 
 
-def test_serve_actually_warms_the_embedder_before_binding(tmp_path: Any) -> None:
+def test_serve_actually_warms_the_embedder_before_serving(tmp_path: Any) -> None:
     """The CALL SITE, not the function — GAP: five tests, none covering the wiring.
 
     Every warm-up test above calls ``warm_embedder`` directly. Delete
@@ -239,7 +239,7 @@ def test_serve_actually_warms_the_embedder_before_binding(tmp_path: Any) -> None
     indistinguishable, from the user's side, from one that does not exist.
 
     So this drives the REAL ``serve()`` with only ``uvicorn.Server.run``
-    stubbed — nothing binds a socket — and asserts the embedder was warmed
+    stubbed — and no sockets handed in, so nothing serves — and asserts the embedder was warmed
     through the real call path. It deliberately does NOT patch
     ``warm_embedder``: asserting that a mock was called would prove the mock
     was installed, not that the server warms anything.
@@ -281,7 +281,10 @@ def test_serve_actually_warms_the_embedder_before_binding(tmp_path: Any) -> None
     )
 
     with mock.patch.object(uvicorn.Server, "run", return_value=None) as run:
-        serve(context, host="127.0.0.1", port=8765, open_browser=False)
+        # Renamed from "...before_binding" in review round 11: the port is now
+        # bound by claim_port before serve() runs; the warm-up still precedes
+        # uvicorn serving, which is the property that matters to the user.
+        serve(context, host="127.0.0.1", port=8765, sockets=[], open_browser=False)
 
     assert run.called, (
         "serve() never reached uvicorn.Server.run, so this test stubbed the "

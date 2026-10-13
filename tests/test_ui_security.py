@@ -235,6 +235,32 @@ def test_bind_origin_brackets_ipv6_and_passes_other_hosts_through() -> None:
     assert bind_origin("FD00:0:0::5", 8765) == "http://[fd00::5]:8765"
 
 
+@pytest.mark.parametrize(
+    ("resolved", "expected"),
+    [
+        (("0.0.0.0",), "http://127.0.0.1:8765"),
+        (("::",), "http://[::1]:8765"),
+        (("0.0.0.0", "::"), "http://127.0.0.1:8765"),
+        # Round 11: the IPv4 address here is a SPECIFIC one, so 127.0.0.1 is
+        # not bound at all — only `::` makes this a wildcard, and only its
+        # loopback answers. "Any IPv4 address" picked 127.0.0.1 and opened a
+        # page on a port nobody was listening on.
+        (("192.0.2.5", "::"), "http://[::1]:8765"),
+        (("127.0.0.1", "::"), "http://[::1]:8765"),
+        (("::1", "0.0.0.0"), "http://127.0.0.1:8765"),
+    ],
+)
+def test_a_wildcard_name_opens_the_loopback_of_its_unspecified_family(
+    resolved: tuple[str, ...], expected: str
+) -> None:
+    import ipaddress
+
+    from brain.ui.context import bind_origin
+
+    addresses = tuple(ipaddress.ip_address(a) for a in resolved)
+    assert bind_origin("brain-1.lan", 8765, addresses) == expected
+
+
 def test_a_lan_bind_allowlist_is_exactly_the_bound_address() -> None:
     """HIGH-1 (phase-7 audit): a LAN bind accepts its own address and NOTHING else.
 
