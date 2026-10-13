@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import socket
 from pathlib import Path
 
@@ -28,7 +29,7 @@ from brain.cli_ui import PHONE_LINE
 from brain.ui.context import UiContext
 from brain.ui.lan import WILDCARD_NOTICE
 from brain.ui.security import is_loopback
-from brain.ui.server import DEFAULT_PORT, claim_port, serve
+from brain.ui.server import DEFAULT_PORT, bind_listeners, serve
 from tests.ui_cli_support import (
     LAN_IP,
     Started,
@@ -463,7 +464,10 @@ def test_real_uvicorn_serves_only_the_claimed_socket(monkeypatch: pytest.MonkeyP
             self.should_exit = True
 
     monkeypatch.setattr(uvicorn, "Server", _StopOnceStarted)
-    port, sockets = claim_port(DEFAULT_PORT + 4500, auto=True)
+    # Port 0: the OS assigns a free one, so this cannot collide with anything
+    # (review round 13).
+    sockets = bind_listeners("127.0.0.1", 0, addresses=(ipaddress.ip_address("127.0.0.1"),))
+    port = sockets[0].getsockname()[1]
     opened: list[str] = []
     context = _ui_context(f"http://127.0.0.1:{port}", "127.0.0.1")
     serve(

@@ -118,6 +118,14 @@ git tag scheme:
   process could take it in between. The check is now the bind: the sockets it
   opens are the ones served, and a port in use is reported by `brain ui`
   itself rather than by the web server's startup error.
+- **A wildcard bind could hand the token to another program.** On macOS,
+  `brain ui --host 0.0.0.0` (or `::`) bound its port even when another
+  program already listened on that port's loopback address, and the
+  loopback URL it printed and opened — token included — reached that
+  program instead. A wildcard bind no longer shares a port: `brain ui` moves
+  to the next free one, or with `--no-auto-port` says the port is in use. One
+  side effect, on every platform: restarting a wildcard bind while the last
+  run's connections are still closing may land on the next port.
 - **`brain ui --port` outside 1–65535 printed a traceback**, as did an
   auto-port search walking past 65535; `--port 0` bound a different random
   port on each address. Each is now a usage error, and the search stops at

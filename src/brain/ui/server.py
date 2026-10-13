@@ -63,19 +63,29 @@ _MAX_PORT = 65535
 def _listen_socket(
     address: str, socket_factory: SocketFactory = socket.socket
 ) -> socket.socket:
-    """An unbound socket configured the way asyncio configures a server socket.
+    """An unbound server socket for ``address``.
 
-    The address's own family, ``SO_REUSEADDR``, and for IPv6 ``IPV6_V6ONLY=1``.
+    The address's own family; for IPv6 ``IPV6_V6ONLY=1``, as asyncio sets it.
     This was the PROBE until round 11; it is now the socket the server runs
     on. Without V6ONLY the old probe was dual-stack: on Linux an IPv4 socket
     holding the port made it report "busy" for a ``::`` server that would have
     bound fine (phase-7 review round 3).
+
+    ``SO_REUSEADDR`` is set for a SPECIFIC address only, never the wildcard
+    (review round 13). On macOS it lets ``0.0.0.0:P`` bind while another
+    process already listens on ``127.0.0.1:P``; the loopback URL we print and
+    open, token in the fragment, then reaches THAT process. Without it the
+    bind fails with EADDRINUSE and auto-port moves on. Linux refuses that
+    overlap even with the option, so there it changes one thing only: a
+    wildcard restart while old connections sit in TIME_WAIT steps to the next
+    port (or, with ``--no-auto-port``, reports the port in use).
     """
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
     # Creation may raise OSError; the caller reports that as "cannot open".
     sock = socket_factory(family, socket.SOCK_STREAM)
     try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if not ipaddress.ip_address(address).is_unspecified:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if family == socket.AF_INET6:
             sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
     except OSError as exc:
@@ -430,7 +440,7 @@ def serve(
     ``port`` stay in uvicorn's config only for its own messages. A bind error
     is therefore raised by OUR code, with our messages; the handler that used
     to catch EADDRINUSE here was unreachable, because uvicorn catches a bind
-    OSError itself and exits 3.
+    OSError itself and exits (3 from uvicorn 0.50, 1 before).
 
     Foreground-only by design: no PID file, no launchd plist. Daemonizing a
     *write-capable* HTTP server that could outlive the user's attention is a bad

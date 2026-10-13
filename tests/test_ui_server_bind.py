@@ -213,18 +213,31 @@ class _Factory:
         return self.made[-1]
 
 
-@pytest.mark.parametrize(("address", "ipv6"), [("::", True), ("127.0.0.1", False)])
-def test_the_listen_socket_sets_the_options_asyncio_uses(address: str, ipv6: bool) -> None:
-    """Round 9, item 2: dropping ``SO_REUSEADDR`` survived every test.
-
-    Without it a port in TIME_WAIT looks busy, so ``--no-auto-port`` refuses a
-    usable port. Recorded through the injected socket factory; no production
-    module is patched.
+@pytest.mark.parametrize(
+    ("address", "ipv6", "reuse"),
+    [
+        ("127.0.0.1", False, True),
+        ("::1", True, True),
+        ("192.0.2.5", False, True),
+        ("0.0.0.0", False, False),
+        ("::", True, False),
+    ],
+)
+def test_the_listen_socket_sets_its_options_by_address(
+    address: str, ipv6: bool, reuse: bool
+) -> None:
+    """Round 9, item 2: dropping ``SO_REUSEADDR`` survived every test — without
+    it a port in TIME_WAIT looks busy, so ``--no-auto-port`` refuses a usable
+    port. Round 13: but NOT on a wildcard, where on macOS it let the bind
+    overlap another process's loopback listener (the real-socket test below).
+    Recorded through the injected socket factory; no production module is
+    patched.
     """
     factory = _Factory()
     _listen_socket(address, factory)  # type: ignore[arg-type]
     (sock,) = factory.made
-    assert (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in sock.options, sock.options
+    reuseaddr = (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    assert (reuseaddr in sock.options) is reuse, sock.options
     v6only = (socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
     assert (v6only in sock.options) is ipv6, sock.options
 
@@ -482,3 +495,61 @@ def test_a_bind_that_raises_a_non_oserror_still_closes_its_socket() -> None:
         _open_listener("127.0.0.1", "127.0.0.1", 70000, factory)
     (sock,) = made
     assert sock.fileno() == -1, "the socket leaked"
+
+
+# --------------------------------------------------------------------------
+# Review round 13 — a wildcard must not share a port with a loopback listener
+# --------------------------------------------------------------------------
+
+
+def _overlap_is_possible(family: int, loopback: str, wildcard: str) -> bool:
+    """Can a SO_REUSEADDR wildcard bind over a live loopback listener here?
+
+    macOS: yes (measured). Linux refuses it even with the option, so there is
+    nothing for the guard to do and the test below skips, saying why.
+    """
+    with socket.socket(family, socket.SOCK_STREAM) as held:
+        held.bind((loopback, 0))
+        held.listen(1)
+        port = held.getsockname()[1]
+        with socket.socket(family, socket.SOCK_STREAM) as over:
+            over.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                over.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            try:
+                over.bind((wildcard, port))
+            except OSError:
+                return False
+    return True
+
+
+@pytest.mark.parametrize(
+    ("family", "loopback", "wildcard"),
+    [
+        (socket.AF_INET, "127.0.0.1", "0.0.0.0"),
+        pytest.param(socket.AF_INET6, "::1", "::", marks=needs_ipv6),
+    ],
+    ids=["ipv4", "ipv6"],
+)
+def test_a_wildcard_never_binds_over_another_process_on_loopback(
+    family: int, loopback: str, wildcard: str
+) -> None:
+    """Review round 13, a token leak: on macOS ``--host 0.0.0.0`` bound port P
+    although another process already listened on ``127.0.0.1:P``, because the
+    socket set SO_REUSEADDR. The URL ``brain ui`` printed and opened —
+    ``http://127.0.0.1:P/#t=<token>`` — then went to that other process.
+
+    A REAL listener and the REAL claim_port: the wildcard must step past P, or
+    with ``--no-auto-port`` say P is in use."""
+    if not _overlap_is_possible(family, loopback, wildcard):
+        pytest.skip("this platform refuses the overlap even with SO_REUSEADDR")
+    with socket.socket(family, socket.SOCK_STREAM) as other_process:
+        other_process.bind((loopback, 0))
+        other_process.listen(1)
+        taken = other_process.getsockname()[1]
+
+        with pytest.raises(BrainError, match="already in use"):
+            claim_port(taken, host=wildcard, auto=False)
+        port, sockets = claim_port(taken, host=wildcard, auto=True)
+        _close(sockets)
+        assert port != taken, "the wildcard bound over another process's loopback port"
