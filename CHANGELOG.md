@@ -22,6 +22,42 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — `brain ui` is the reading surface; the wiki is demoted
+
+- **`brain-up` no longer opens the wiki in a browser.** `BRAIN_OPEN_BROWSER`
+  now defaults to `0` (it was `1`); set it to `1` to get the old behaviour.
+  The banner leads with `read: brain ui`, and the wiki line is labelled legacy.
+  The wiki still builds and serves — nothing was removed.
+- **`brain setup`'s closing report** names `brain ui` ahead of the legacy wiki
+  URL, and the MCP `brain_capture` description points at the `brain ui` tree
+  instead of the Quartz UI.
+
+### Added
+
+- **`brain ui --lan`** — read from a phone or tablet on the same network. It
+  binds this machine's LAN address and uses `--token` if given, otherwise mints
+  one, then prints the URL to open. It cannot be combined with `--host`, and
+  `brain ui` still never binds a non-loopback address without a token. Guide:
+  `docs/guides/brain-ui-on-your-phone.md`.
+- **A startup notice on wildcard binds** (`--host 0.0.0.0` or `::`): other
+  devices are refused, because a wildcard bind accepts only loopback Host
+  names. The docs previously recommended `--host 0.0.0.0 --token` for remote
+  reading, which never worked from another device.
+
+### Fixed
+
+- **A tokened `brain ui` opened a page that could not load anything.** The
+  opened URL lacked the `#t=` fragment, and the panel printed it only for
+  non-loopback binds. Both now carry the token, percent-encoded — a `%` in a
+  token used to stop the page from booting.
+- **`brain ui --host ::` refused every request**, its own machine's included,
+  and died at startup with "no free port found": the port probe was IPv4-only,
+  and the IPv6 wildcard's Host allowlist held a value no browser sends. `::`
+  now behaves exactly like `0.0.0.0`.
+- **A wildcard bind printed and opened `http://0.0.0.0:<port>/`** (refused with
+  400) and expected a write Origin no browser sends. It now prints and opens
+  the loopback URL, and accepts writes from it.
+
 ## [0.3.0] - 2026-08-07
 
 ### Fixed — configuration resolution and the background daemons

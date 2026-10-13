@@ -200,7 +200,11 @@ Two earlier drafts of this line quoted an unanchored pattern and each one
 matched itself, which is the same self-invalidation the head counts had, one
 level down.) Re-verified at the
 2026-09-02 merge and still true, and master (`f495f66`) touched none of those
-five either, so neither leg of their trails moved. It is a fact about a frozen commit and cannot rot. For
+rows' files either, so neither leg of their trails moved. *(This sentence said
+"those five" until 2026-10-13, and the anchored grep returned 4 at `1a1d068`;
+phase 7 then rewrote `setup.py`'s row to carry a growth hop, which took it out
+of the set. A digit here is the failure the grep exists to prevent — the set is
+whatever the grep returns.)* It is a fact about a frozen commit and cannot rot. For
 the present head, run `git rev-parse --short HEAD`; to see what moved since,
 `git diff --stat b71c923..HEAD -- src`.
 

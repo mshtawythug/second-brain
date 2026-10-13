@@ -203,3 +203,18 @@ def test_vault_and_wiki_marks_the_wiki_as_legacy() -> None:
     text = VAULT_AND_WIKI.read_text(encoding="utf-8")
     intro = text[: text.index("## Vault model")]
     assert "brain ui" in intro and "legacy" in intro.lower(), intro
+
+
+def test_vault_and_wiki_documents_the_brain_up_default_truthfully() -> None:
+    """M-4 (phase-7 audit): the default flipped to 0, and the doc said so in one
+    place while two others still described brain-up opening the browser.
+
+    The table row is pinned exactly, because a row stating the old default
+    reads as authoritative and survived the first round unpinned.
+    """
+    text = VAULT_AND_WIKI.read_text(encoding="utf-8")
+    assert re.search(r"^\| `BRAIN_OPEN_BROWSER` \| `0` \|", text, re.MULTILINE), (
+        "the env table must state BRAIN_OPEN_BROWSER's default as `0`"
+    )
+    assert "and opens the browser" not in text
+    assert "→ open browser" not in text

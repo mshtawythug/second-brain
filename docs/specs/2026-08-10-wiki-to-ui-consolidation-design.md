@@ -1267,6 +1267,17 @@ Acceptable for a v1 side-tool; unacceptable for the surface someone does all the
 > **A7 — must land before R1 (demotion), not before R3.** A client-side draft buffer
 > (`localStorage`) that preserves unsaved text across a 409, plus a way to see both versions.
 > Losing writing is the fastest way to make the user distrust the new surface.
+>
+> **✅ CLOSED in phase 4 (`3b16527`) by a DIFFERENT mechanism than this paragraph names — recorded
+> 2026-10-13 as the phase-7 gate ruling.** Measurement redirected the fix: a 409 never discarded the
+> edit; the text survived the conflict and its retries, and it was the toast's advice to *reopen*
+> that destroyed it. So A7 shipped as **consent before discard** (`confirmDiscardDraft`, before the
+> reopen) plus **"Replace on disk"** (`overwriteOnDisk`: a fresh GET for the hash, then a PUT of the
+> user's text, read at PUT time). **Deviations, accepted:** there is **no `localStorage` buffer**, so a
+> tab close or crash mid-edit still loses unsaved text (a separate feature, not the 409 path G1
+> describes); and **"a way to see both versions" is reduced to a confirm that names the file and
+> says what is lost** — there is no side-by-side view. Evidence (file:line and the six browser
+> tests): `docs/plans/2026-10-12-wiki-to-ui-phase7.md` §1.
 
 **G2 — `_ingested/` has no reliable single source of truth.** `sync_one_file`'s
 `body_unchanged` check applies to **both** tiers, branching by tier only for metadata and
@@ -1305,7 +1316,7 @@ concurrency — only `body_hash` is. It is descriptive provenance consumed by se
 | C2 | A save against a changed-on-disk body fails loudly with 409. | Fresh-read `body_hash`, `notes_service.py:114-118,285-289` | **Holds — verified** |
 | C3 | A note open in the inspector that changes on disk surfaces that fact. | — | **GAP** |
 | C4 | UI writes are atomic; no half-written file. | `atomic_write_text`, `notes_service.py:50` | **Holds** |
-| C5 | A 409 preserves the user's work and offers a path forward. | — | **GAP → A7** |
+| C5 | A 409 preserves the user's work and offers a path forward. | — | ~~**GAP → A7**~~ **✅ CLOSED (phase 4, `3b16527`)** — the edit survives the 409; reopening asks first; "Replace on disk" saves the user's text over the moved version. No `localStorage` buffer and no side-by-side view: see the A7 note above and `docs/plans/2026-10-12-wiki-to-ui-phase7.md` §1. |
 | C6 | Nothing in `brain ui` triggers a full-corpus sync. | `sync_one_file` only — verified as the sole sync import in `ui/` | **Holds — must not regress** |
 | C7 | `_ingested/` has one stated, tested source-of-truth rule. | — | **GAP → A8** |
 
