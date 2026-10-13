@@ -145,6 +145,8 @@ def test_phone_guide_covers_the_q1_contract() -> None:
         "--include-confidential",
         "trust",
         "wiki",
+        "in memory only",
+        "never saved on the device",
     ):
         assert needle in text, f"phone guide is missing {needle!r}"
     # The guide NAMES the wildcard bind, as the trap — so it must say why.

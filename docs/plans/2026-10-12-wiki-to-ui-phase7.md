@@ -260,8 +260,9 @@ than smoothed over.
 ### 10.5 Known limits — recorded, not fixed
 
 - **The UI token lives in memory only** (`ui/static/js/api.js:12-16`). A phone that reloads, or a
-  bookmark taken after load, gets 403 until the full `#t=` URL is reopened. Persisting it (e.g.
-  `sessionStorage`) is a security decision for the user; the guide documents the behaviour.
+  bookmark taken after load, gets 403 until the full `#t=` URL is reopened. **Ruled 2026-10-13
+  (team-lead): it stays in memory only** — the safer default; a lost or lent phone keeps no
+  key. Not persisted to `sessionStorage`. The guide now states this as deliberate, not as a gap.
 - **No crash-survival draft buffer** (§1): a tab close mid-edit still loses unsaved text. A7's
   409 path is closed; this is a separate feature.
 - **`brain brief --wiki`** keeps its name (§2 #9); renaming it is launchd work for phase 8.

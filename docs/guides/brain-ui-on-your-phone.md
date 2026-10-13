@@ -62,6 +62,10 @@ never write them to access logs, and never leak them in a `Referer`. The page re
 keeps it **in memory only**, and removes it from the address bar right away. Every API call
 then carries it in a request header.
 
+**The token is never saved on the device — not in a cookie, not in browser storage.** That is
+deliberate, and it is the safer default: a phone you lose or lend does not keep a key to your
+brain once the tab is gone. The price is the first consequence below.
+
 Two consequences follow:
 
 - **A reload loses the token.** If the phone reloads the tab, or the browser evicts it in the
