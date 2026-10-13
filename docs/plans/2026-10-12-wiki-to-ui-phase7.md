@@ -251,7 +251,10 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Review round 8 — fixes | `a4c2f35` | `cli_ui.py` (empty host, zones), `ui/context.py` (`meaningless_zone`), CHANGELOG, this file's ruff note, `test_cli_ui.py` (runner width, new tests), `test_ui_lan.py` |
 | Review round 8 — plan | `08c1ac3` | this file: §10.9, §10.15 |
 | Audit round 9 — code | `f1bdbea` | `ui/context.py` (`validate_host`, `HostRefused`), `cli_ui.py`, CHANGELOG, `test_cli_ui.py` (`REFUSED_HOSTS` table, S14, probe options) |
-| Audit round 9 — plan | **the commit that added this row** | this file: §10.9 (validator test-existence check), §10.16 |
+| Audit round 9 — plan | `f73d694` | this file: §10.9 (validator test-existence check), §10.16 |
+| Round 9 — review folded in | `2e01ea0` | `ui/context.py` (`validate_host` by resolved address, `address_class`), `ui/security.py`, `cli_ui.py`, CHANGELOG, guide, this file §10.15, `HOST_SPELLINGS` table, class tests |
+| Round 9 — E303 | `3f2bf65` | `test_ui_security.py` blank line |
+| Round 9 — plan | **the commit that added this row** | this file: §10.9, §10.16 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -432,10 +435,12 @@ and, since round 5, that every entry which no longer applies at HEAD is marked S
 Run from the repository root with `python` and the script on stdin. Result at `c282288` (round 3): **59/59, exit 0.** Result at `7363980` (round 4): 63/63, exit 0. At `593022a` (round 5, HEAD check added): 74/74, 16
 superseded and marked, exit 0. At `af22825` (round 6): 83/83, 17 superseded and marked, exit 0. At `9d8024f` (round 7): 92/92, 18 marked, exit 0 — and
 again after the merge of `second-brain/master` (`136030b`): unchanged, as a merge preserves every
-cited SHA. At `08c1ac3` (round 8): 98/98, 18 marked, exit 0. Result at the commit
-that added this sentence (round 9), with the test-existence check added: **round 0 22/22, round 1
-17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round 7 9/9, round 8
-6/6, round 9 8/8 — 106/106; 27 entries superseded at HEAD, every one marked; exit 0.** Its
+cited SHA. At `08c1ac3` (round 8): 98/98, 18 marked, exit 0. At `f73d694` (round 9, first half): 106/106, 27 marked,
+exit 0. Result at the commit that added this sentence (round 9, with the review folded in):
+**round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6
+9/9, round 7 9/9, round 8 6/6, round 9 8/8 + 10/10 — 116/116; 43 entries superseded at HEAD,
+every one marked; exit 0.** The address-based restructure superseded 16 entries at once; the
+validator listed all of them before any was marked. Its
 first run after round 9 flagged nine entries: six whose CLI code moved into `validate_host`, and
 three whose text still applies but whose TEST had become a row of the new table — the drift the
 text-only check could not see, and the reason it now also checks that each entry's test exists. The HEAD check again flagged the round's one casualty (R3-7) before it was marked. The HEAD check earned its place on its
@@ -1068,6 +1073,7 @@ R4-3 F16 README intro calls the wiki legacy
   red at:  README's intro must call the rendered wiki legacy
 
 R4-4 F8 the notice fires on every wildcard
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): the notice condition is `address_class(host) == "wildcard"`; use R9-14
   NOTE at HEAD (round 6): still applies, but goes red at `assert WILDCARD_NOTICE in result.output` — the test now asserts the notice by constant
   file:    src/brain/cli_ui.py
   replace: '    if host.strip().lower() in WILDCARD_HOSTS:\n'
@@ -1082,6 +1088,7 @@ R4-4 F8 the notice fires on every wildcard
 
 ```text
 R5-1 allowlist brackets an IPv6 literal (equality)
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): host_allowlist builds `own` per address class; use R9-16 and the IPv6 equality/middleware tests, which still pin the bracketed form
   file:    src/brain/ui/context.py
   replace: '        return frozenset({f"[{address}]"})\n'
   with:    '        return frozenset({address})\n'
@@ -1090,6 +1097,7 @@ R5-1 allowlist brackets an IPv6 literal (equality)
   red at:  assert host_allowlist(given) == expected
 
 R5-2 an IPv6 bind serves its own URL (middleware)
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): same rewrite; the middleware test still pins it
   file:    src/brain/ui/context.py
   replace: '        return frozenset({f"[{address}]"})\n'
   with:    '        return frozenset({address})\n'
@@ -1106,6 +1114,7 @@ R5-3 bind_address canonicalises IP literals
   red at:  assert host_allowlist(spelling) == LOOPBACK_HOSTS
 
 R5-4 host_allowlist normalises its input
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): host_allowlist classifies via address_class; use R9-14, R9-15
   file:    src/brain/ui/context.py
   replace: '    address = bind_address(host)\n    if address in LOOPBACK_HOSTS or address in WILDCARD_HOSTS:\n'
   with:    '    address = host\n    if address in LOOPBACK_HOSTS or address in WILDCARD_HOSTS:\n'
@@ -1114,6 +1123,7 @@ R5-4 host_allowlist normalises its input
   red at:  assert host_allowlist(given) == expected
 
 R5-5 bind_origin normalises its input
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): bind_origin classifies via address_class; the `bind_origin` spelling assertions still pin it
   file:    src/brain/ui/context.py
   replace: '    address = bind_address(host)\n    if address == "0.0.0.0":'
   with:    '    address = host\n    if address == "0.0.0.0":'
@@ -1122,6 +1132,7 @@ R5-5 bind_origin normalises its input
   red at:  assert bind_origin("0:0:0:0:0:0:0:1", 8765)
 
 R5-6 is_loopback normalises its input
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): is_loopback is `address_class(...) == "loopback"`; use R9-15
   file:    src/brain/ui/security.py
   replace: '    return bind_address(host.strip()).lower() in LOOPBACK_HOSTS\n'
   with:    '    return host.strip().lower() in LOOPBACK_HOSTS\n'
@@ -1175,6 +1186,7 @@ R5-11 the CLI refuses edge whitespace in a token
 
 ```text
 R6-1 the wildcard notice is absent on non-wildcard binds
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): the notice condition is `address_class(host) == "wildcard"`; the `binds` rows of `HOST_SPELLINGS` also assert the notice ABSENT
   file:    src/brain/cli_ui.py
   replace: '    if host.strip().lower() in WILDCARD_HOSTS:\n'
   with:    '    if True:\n'
@@ -1215,6 +1227,7 @@ R6-5 vault-and-wiki has no '→ open browser'
   red at:  assert "→ open browser" not in text
 
 R6-6 LOCALHOST serves its own URL (middleware)
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): `return bare.lower()` now occurs twice (validate_host also lower-cases), so the replace count is 2; use R9-13
   file:    src/brain/ui/context.py
   replace: '        return bare.lower()\n'
   with:    '        return bare\n'
@@ -1223,6 +1236,7 @@ R6-6 LOCALHOST serves its own URL (middleware)
   red at:  assert response.status_code == status
 
 R6-7 --host LOCALHOST binds as localhost (CLI)
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): same — count 2; use R9-13
   file:    src/brain/ui/context.py
   replace: '        return bare.lower()\n'
   with:    '        return bare\n'
@@ -1311,6 +1325,7 @@ R7-7 the shorthand check asks the IPv4 resolver
   red at:  assert result.exit_code == 2
 
 R7-8 a hostname is not refused as a shorthand
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): ipv4_shorthand is folded into validate_host's numeric-disagreement rule; use R9-8, R9-10
   file:    src/brain/ui/context.py
   replace: '    except socket.gaierror:\n        return None\n'
   with:    '    except socket.gaierror:\n        return host\n'
@@ -1360,6 +1375,7 @@ R8-3 a zone on loopback is meaningless too
   red at:  assert result.exit_code == 2
 
 R8-4 a link-local zone is left alone
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): ruling N1 REVERSED it — every zone is refused, link-local included; use R9-9, R9-17
   file:    src/brain/ui/context.py
   replace: '    return address.is_unspecified or address.is_loopback\n'
   with:    '    return True\n'
@@ -1399,6 +1415,7 @@ S14 bind_address strips only a balanced pair
   red at:  assert bind_address("[::1") == "[::1"
 
 R9-1 unbalanced brackets are refused
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): its test became rows of `HOST_SPELLINGS`; the mutation itself still applies
   file:    src/brain/ui/context.py
   replace: '        if not balanced:\n'
   with:    '        if False:\n'
@@ -1407,6 +1424,7 @@ R9-1 unbalanced brackets are refused
   red at:  assert result.exit_code == 2
 
 R9-2 repeated brackets are refused
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): its test became rows of `HOST_SPELLINGS`; the mutation itself still applies
   file:    src/brain/ui/context.py
   replace: '            and host.count("[") == 1 and host.count("]") == 1\n'
   with:    '\n'
@@ -1415,6 +1433,7 @@ R9-2 repeated brackets are refused
   red at:  assert says in result.output
 
 R9-3 brackets around a non-IPv6 value are refused
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): its test became rows of `HOST_SPELLINGS`; the mutation itself still applies
   file:    src/brain/ui/context.py
   replace: '        if not isinstance(inner, ipaddress.IPv6Address):\n'
   with:    '        if inner is None and False:\n'
@@ -1423,6 +1442,7 @@ R9-3 brackets around a non-IPv6 value are refused
   red at:  assert result.exit_code == 2
 
 R9-4 the CLI routes --host through validate_host
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): its test became rows of `HOST_SPELLINGS`; the mutation itself still applies
   file:    src/brain/cli_ui.py
   replace: '        host = validate_host(host)\n'
   with:    '        host = host\n'
@@ -1431,6 +1451,7 @@ R9-4 the CLI routes --host through validate_host
   red at:  assert result.exit_code == 2
 
 R9-5 validate_host still refuses an empty host
+  SUPERSEDED at HEAD by round 9, continued (classification by the RESOLVED address, `3f2bf65`): its test became rows of `HOST_SPELLINGS`; the mutation itself still applies
   file:    src/brain/ui/context.py
   replace: '    if not host.strip():\n        raise HostRefused('
   with:    '    if False:\n        raise HostRefused('
@@ -1453,6 +1474,91 @@ R9-7 the probe sets IPV6_V6ONLY for IPv6 only
   count:   1
   test:    tests/test_cli_ui.py::test_the_probe_socket_sets_the_options_the_real_bind_uses[127.0.0.1-False]
   red at:  assert (v6only in sock.options) is ipv6
+
+```
+
+**Round 9 — against `3f2bf65`** (continued: the review's findings, folded into round 9 — classify by the resolved address).
+
+```text
+R9-8 classify by the RESOLVED address (resolution disabled = spelling only)
+  file:    src/brain/ui/context.py
+  replace: '            bare, None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST\n'
+  with:    '            bare + "!", None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[0-refused-reads it as 0.0.0.0]
+  red at:  assert result.exit_code == 2
+
+R9-9 every zone is refused, by its own rule
+  file:    src/brain/ui/context.py
+  replace: '    if "%" in host:\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[::%-refused-zone IDs (%\u2026) are not supported]
+  red at:  assert expected in result.output
+
+R9-10 a numeric disagreement is refused
+  file:    src/brain/ui/context.py
+  replace: '    if spelled is None or resolved != {spelled}:\n'
+  with:    '    if spelled is not None and resolved != {spelled}:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[127.1-refused-reads it as 127.0.0.1]
+  red at:  assert result.exit_code == 2
+
+R9-11 surrounding whitespace is refused
+  file:    src/brain/ui/context.py
+  replace: '    if host != host.strip():\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[ 127.0.0.1-refused-leading or trailing whitespace]
+  red at:  assert result.exit_code == 2
+
+R9-12 an IPv4-mapped address is refused
+  file:    src/brain/ui/context.py
+  replace: '    if isinstance(spelled, ipaddress.IPv6Address) and spelled.ipv4_mapped is not None:\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[::ffff:127.0.0.1-refused-IPv4-mapped IPv6 addresses cannot be bound]
+  red at:  assert result.exit_code == 2
+
+R9-13 a hostname is lower-cased
+  file:    src/brain/ui/context.py
+  replace: '        return bare.lower()\n    resolved'
+  with:    '        return bare\n    resolved'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[LOCALHOST-binds-localhost]
+  red at:  assert started.context_kwargs["host"] == expected
+
+R9-14 the wildcard is classed by address
+  file:    src/brain/ui/context.py
+  replace: '    if parsed.is_unspecified:\n'
+  with:    '    if address == "0.0.0.0":\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[::0-wildcard-::]
+  red at:  assert (WILDCARD_NOTICE in result.output) is (kind == "wildcard")
+
+R9-15 loopback is classed by address
+  file:    src/brain/ui/context.py
+  replace: '    if parsed.is_loopback:\n'
+  with:    '    if address in ("127.0.0.1", "::1"):\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_address_class_is_decided_by_the_address_not_the_spelling[127.0.0.2-loopback]
+  red at:  assert address_class(host) == kind
+
+R9-16 a loopback allowlist includes its own address
+  file:    src/brain/ui/context.py
+  replace: '        return LOOPBACK_HOSTS | {own}\n'
+  with:    '        return LOOPBACK_HOSTS\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_a_hostname_bind_is_matched_case_insensitively[127.0.0.2-127.0.0.2:8765-200]
+  red at:  assert response.status_code == status
+
+R9-17 L2: the zone refusal names zone IDs exactly
+  file:    src/brain/ui/context.py
+  replace: 'f"--host {host}: zone IDs (%…) are not supported — a browser cannot "'
+  with:    'f"--host {host}: zones are not supported — a browser cannot "'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[fe80::1%en0-refused-zone IDs (%\u2026) are not supported]
+  red at:  assert expected in result.output
 
 ```
 
@@ -1573,3 +1679,21 @@ The audit's sweep of `6c02fe9`. Fixed in `f1bdbea`.
 
 **Mutation evidence (round 9):** 8 guards, each on all five clauses, against `f1bdbea` on a clean
 tree (§10.9).
+
+**The review of `08c1ac3`, folded into round 9 — classify by the resolved address.** Fixed in
+`2e01ea0` (and `3f2bf65`, a blank line).
+
+| Item | Fix |
+|---|---|
+| M1 MEDIUM — the class was still open | `--host '[]'` (closed by `f1bdbea`'s bracket rule) and `::%`, `[::%]`, `0::%`, `::0%`: `ipaddress` rejects the empty zone, so `meaningless_zone` said False, while the resolver read `::` — a wildcard bind with no notice; `::1%` bound loopback but classed as other. **Structural fix:** `validate_host` now resolves the host the way the bind will (numeric-only `getaddrinfo`, `AF_UNSPEC`, never DNS) and judges THAT: a numeric spelling `ipaddress` reads differently is refused (this absorbs `ipv4_shorthand`), and `address_class` decides wildcard / loopback / other from the PARSED address for the notice, `is_loopback`, the allowlist and the origin — `127.0.0.2` is loopback, `0:0::0` the wildcard. Each earlier round had refused one more SPELLING; this ends the class |
+| (a) L1 — surrounding whitespace | refused (`' 127.0.0.1'` classed as loopback, then failed as "no free port") |
+| (b) N1 — **ruling: no zone IDs at all, link-local included** | a browser cannot open a URL that carries a zone, so a zoned bind's printed URL is unusable; the round-8 exception for link-local zones assumed otherwise and is reversed. CHANGELOG and guide (pinned) say so |
+| (c) — IPv4-mapped | `::ffff:127.0.0.1` refused: an IPv6-only socket cannot bind it (measured, `EADDRNOTAVAIL`), although `ipaddress` calls it loopback |
+| L2 — the zone refusal's phrase | asserted exactly (`zone IDs (%…) are not supported`), and mutation-proven (R9-17) |
+| Table | `HOST_SPELLINGS` holds every spelling the phase has met — refused (with its phrase), binds (notice asserted ABSENT) or wildcard (notice asserted PRESENT) — replacing `REFUSED_HOSTS` and three single-spelling tests |
+| CHANGELOG, §10.15 | both said the class closed in round 8; corrected |
+
+**Mutation evidence:** 10 more guards on all five clauses, against `3f2bf65` (R9-8 to R9-17). R9-8
+is the headline: disable the resolution step — classify by spelling again — and `0` binds. R9-9
+shows the layering: with the zone rule off, `::%` is STILL refused, by the numeric-disagreement
+rule, so the test goes red only at the exact phrase.
