@@ -129,5 +129,7 @@ def test_the_wildcard_notice_says_the_token_is_the_guard() -> None:
     """
     from brain.ui.lan import WILDCARD_NOTICE
 
-    assert "token" in WILDCARD_NOTICE, WILDCARD_NOTICE
+    # The exact phrase, as the guide's twin pins it — `"token" in` was
+    # satisfied by any sentence that merely mentioned a token (round 8).
+    assert "the token is what keeps other clients out" in WILDCARD_NOTICE, WILDCARD_NOTICE
     assert "other devices cannot use this bind" not in WILDCARD_NOTICE

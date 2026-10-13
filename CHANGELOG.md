@@ -49,6 +49,10 @@ git tag scheme:
   `010.0.0.1`. The system reads `0` as `0.0.0.0`, so it was a wildcard bind
   that skipped the notice; platforms disagree on `010.0.0.1` (8.0.0.1 or
   10.0.0.1). The error names what the system would have bound.
+- **`--host` refuses an empty value and a zone on `::` or `::1`.** An empty
+  `--host` made asyncio bind `0.0.0.0` and `::` together, and `::%en0` bound
+  every interface; both skipped the wildcard notice. A zone on a link-local
+  address, where it means something, is still accepted.
 
 ### Fixed
 

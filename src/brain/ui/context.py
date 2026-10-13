@@ -187,6 +187,28 @@ def bind_address(host: str) -> str:
         return bare.lower()
 
 
+def meaningless_zone(host: str) -> bool:
+    """True when ``host`` is ``::`` or ``::1`` carrying an IPv6 zone (``%en0``).
+
+    A zone scopes a LINK-LOCAL address to one interface. On the unspecified
+    address it means nothing — ``::%en0`` still binds every interface — and on
+    loopback nothing either; but the zoned spelling matched neither
+    ``WILDCARD_HOSTS`` nor ``LOOPBACK_HOSTS``, so ``--host ::%en0`` was a
+    wildcard bind with no notice (review round 8). ``brain ui`` refuses it
+    rather than classifying it: classifying would send two spellings of one
+    address through every helper (zoned for the bind, bare for the checks),
+    while refusing is one check and leaves link-local zones, where a zone is
+    real, untouched.
+    """
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if not isinstance(address, ipaddress.IPv6Address) or address.scope_id is None:
+        return False
+    return address.is_unspecified or address.is_loopback
+
+
 def ipv4_shorthand(host: str) -> str | None:
     """What the system reads a NON-canonical IPv4 literal as, or ``None``.
 

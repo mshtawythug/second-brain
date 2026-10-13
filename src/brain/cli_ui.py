@@ -157,13 +157,31 @@ def ui(
         return
 
     from .ui import lan as lan_mod
-    from .ui.context import WILDCARD_HOSTS, bind_address, ipv4_shorthand
+    from .ui.context import (
+        WILDCARD_HOSTS,
+        bind_address,
+        ipv4_shorthand,
+        meaningless_zone,
+    )
     from .ui.security import is_loopback
     from .ui.server import browser_url, build_context, resolve_port, serve
+
+    # Review round 8: asyncio binds an empty host as 0.0.0.0 AND `::` — a
+    # dual-stack wildcard that matched nothing below, so it printed no notice.
+    if not host.strip():
+        raise typer.BadParameter(
+            "--host must not be empty; omit it for 127.0.0.1, or name an address."
+        )
 
     # Once, here: every consumer below — the probe, the bind, the allowlist,
     # the URL — gets the bare address; bind_origin re-brackets it for URLs.
     host = bind_address(host)
+
+    if meaningless_zone(host):
+        raise typer.BadParameter(
+            f"--host {host}: a zone means nothing on the wildcard or loopback "
+            "address; drop the '%…' part."
+        )
 
     # Review round 7: `0` binds 0.0.0.0 but is no IP literal to `ipaddress`, so
     # it reached the bind un-canonicalised — a wildcard with no notice.

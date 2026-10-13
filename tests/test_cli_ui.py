@@ -22,7 +22,12 @@ from brain.ui.lan import WILDCARD_NOTICE
 from brain.ui.security import is_loopback
 from brain.ui.server import DEFAULT_PORT, resolve_port
 
-runner = CliRunner()
+#: Rich draws usage errors and `--help` in a box wrapped at COLUMNS, so an
+#: assertion on their text depends on the terminal it happens to run in —
+#: measured in review round 8: four tests fail at COLUMNS=40 and at 60, all pass
+#: at 200. Pinned wide for every invoke in this module, as
+#: tests/test_cli_directory.py does with monkeypatch.
+runner = CliRunner(env={"COLUMNS": "200"})
 
 
 @pytest.fixture
@@ -734,3 +739,40 @@ def test_a_numeric_looking_hostname_that_is_not_an_address_still_binds(
     result = runner.invoke(app, ["ui", "--host", "brain-1.lan", "--token", "x", "--no-open"])
     assert result.exit_code == 0, result.output
     assert started.context_kwargs["host"] == "brain-1.lan"
+
+
+@pytest.mark.parametrize("given", ["", "   "])
+def test_an_empty_host_is_a_usage_error(
+    app: typer.Typer, started: _Started, given: str
+) -> None:
+    """Round 8, item 1: ``--host ""`` reached asyncio, which binds 0.0.0.0 AND
+    ``::`` for an empty host — a dual-stack wildcard with no notice, a panel
+    URL of ``http://:8765/`` and an allowlist of ``{""}``."""
+    result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
+    assert result.exit_code == 2, result.output
+    assert "--host must not be empty" in result.output, result.output
+    assert started.context_kwargs == {}
+
+
+@pytest.mark.parametrize("given", ["::%en0", "[::%en0]", "::1%lo0"])
+def test_a_zone_on_the_wildcard_or_loopback_is_a_usage_error(
+    app: typer.Typer, started: _Started, given: str
+) -> None:
+    """Round 8, item 1: ``::%en0`` binds ``::`` — every interface, whatever the
+    zone says — but did not match ``WILDCARD_HOSTS``, so no notice. A zone on
+    ``::`` or ``::1`` means nothing, so it is refused rather than classified."""
+    result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
+    assert result.exit_code == 2, result.output
+    assert "zone" in result.output, result.output
+    assert started.context_kwargs == {}
+
+
+def test_a_zone_on_a_link_local_address_is_left_alone(
+    app: typer.Typer, started: _Started
+) -> None:
+    """Where a zone DOES mean something — link-local — it is not refused."""
+    result = runner.invoke(
+        app, ["ui", "--host", "fe80::1%lo0", "--token", "x", "--no-open"]
+    )
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["host"] == "fe80::1%lo0"
