@@ -694,32 +694,6 @@ def test_a_socket_that_cannot_be_configured_is_closed_and_reported() -> None:
     assert made and all(sock.closed for sock in made), "the probe socket leaked"
 
 
-@pytest.mark.parametrize(
-    ("given", "means"),
-    [
-        ("0", "0.0.0.0"),
-        ("127.1", "127.0.0.1"),
-        ("0x7f.1", "127.0.0.1"),
-        # No expected reading: platforms DISAGREE on this one — inet_aton reads
-        # the leading zero as octal (8.0.0.1), macOS getaddrinfo as decimal
-        # (10.0.0.1). That disagreement is the case for refusing outright.
-        ("010.0.0.1", ""),
-    ],
-)
-def test_a_non_canonical_ipv4_literal_is_refused(
-    app: typer.Typer, started: _Started, given: str, means: str
-) -> None:
-    """Round 7, item 4: the OS reads ``0`` as ``0.0.0.0``, but ``ipaddress``
-    rejects it, so the bind was a wildcard with an allowlist of ``{"0"}`` and
-    no notice. Refused, naming what the OS would have bound, so the user
-    writes it out in full."""
-    result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
-    assert result.exit_code == 2, result.output
-    assert "not a canonical IPv4 address" in result.output, result.output
-    assert means in result.output, result.output
-    assert started.context_kwargs == {}
-
-
 @pytest.mark.parametrize("spelling", ["::0", "0:0:0:0:0:0:0:0"])
 def test_a_non_canonical_ipv6_wildcard_is_the_wildcard(
     app: typer.Typer, started: _Started, spelling: str
@@ -741,32 +715,6 @@ def test_a_numeric_looking_hostname_that_is_not_an_address_still_binds(
     assert started.context_kwargs["host"] == "brain-1.lan"
 
 
-@pytest.mark.parametrize("given", ["", "   "])
-def test_an_empty_host_is_a_usage_error(
-    app: typer.Typer, started: _Started, given: str
-) -> None:
-    """Round 8, item 1: ``--host ""`` reached asyncio, which binds 0.0.0.0 AND
-    ``::`` for an empty host — a dual-stack wildcard with no notice, a panel
-    URL of ``http://:8765/`` and an allowlist of ``{""}``."""
-    result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
-    assert result.exit_code == 2, result.output
-    assert "--host must not be empty" in result.output, result.output
-    assert started.context_kwargs == {}
-
-
-@pytest.mark.parametrize("given", ["::%en0", "[::%en0]", "::1%lo0"])
-def test_a_zone_on_the_wildcard_or_loopback_is_a_usage_error(
-    app: typer.Typer, started: _Started, given: str
-) -> None:
-    """Round 8, item 1: ``::%en0`` binds ``::`` — every interface, whatever the
-    zone says — but did not match ``WILDCARD_HOSTS``, so no notice. A zone on
-    ``::`` or ``::1`` means nothing, so it is refused rather than classified."""
-    result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
-    assert result.exit_code == 2, result.output
-    assert "zone" in result.output, result.output
-    assert started.context_kwargs == {}
-
-
 def test_a_zone_on_a_link_local_address_is_left_alone(
     app: typer.Typer, started: _Started
 ) -> None:
@@ -776,3 +724,101 @@ def test_a_zone_on_a_link_local_address_is_left_alone(
     )
     assert result.exit_code == 0, result.output
     assert started.context_kwargs["host"] == "fe80::1%lo0"
+
+
+#: Every --host spelling `brain ui` refuses, and the text the refusal must
+#: contain. ONE table, by design (review round 9): rounds 7, 8 and 9 each found
+#: an odd spelling that bound something unexpected, so the next one should be a
+#: row here, not a new test. Every row exits 2 before anything is resolved.
+REFUSED_HOSTS = [
+    # empty — asyncio binds 0.0.0.0 AND `::` for "" (round 8)
+    ("", "must not be empty"),
+    ("   ", "must not be empty"),
+    # IPv4 shorthand — the system reads these, `ipaddress` does not (round 7)
+    ("0", "reads it as 0.0.0.0"),
+    ("127.1", "reads it as 127.0.0.1"),
+    ("0x7f.1", "reads it as 127.0.0.1"),
+    # platforms disagree on this one (8.0.0.1 vs 10.0.0.1), so no reading
+    ("010.0.0.1", "not a canonical IPv4 address"),
+    # a zone on the wildcard or loopback means nothing (round 8)
+    ("::%en0", "zone means nothing"),
+    ("[::%en0]", "zone means nothing"),
+    ("::1%lo0", "zone means nothing"),
+    # brackets: balanced, once, around an IPv6 literal — nothing else (round 9)
+    ("[::1", "unbalanced or misplaced brackets"),
+    ("::1]", "unbalanced or misplaced brackets"),
+    ("[[::1]]", "unbalanced or misplaced brackets"),
+    ("[]", "brackets are for IPv6 literals only"),
+    ("[127.0.0.1]", "brackets are for IPv6 literals only"),
+    ("[localhost]", "brackets are for IPv6 literals only"),
+]
+
+
+@pytest.mark.parametrize(("given", "says"), REFUSED_HOSTS)
+def test_a_refused_host_spelling_is_a_usage_error(
+    app: typer.Typer, started: _Started, given: str, says: str
+) -> None:
+    """Rounds 7–9: each spelling here bound something it should not have, or
+    failed later with a misleading message (``[::1`` exited 1 with "port
+    already in use"). All are usage errors now, raised by
+    ``context.validate_host`` before any probe or bind."""
+    result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
+    assert result.exit_code == 2, result.output
+    assert says in result.output, result.output
+    assert started.context_kwargs == {}
+
+
+def test_bind_address_strips_only_a_balanced_pair_of_brackets() -> None:
+    """S14 (phase-7 audit): ``startswith("[")`` alone survived every test.
+
+    Under it, ``[::1`` lost its first and last characters and became ``::`` —
+    the IPv6 WILDCARD. ``validate_host`` refuses that spelling first, so this
+    pins the helper itself: an unbalanced bracket is left for the caller to
+    refuse, never repaired into a different address.
+    """
+    from brain.ui.context import bind_address
+
+    assert bind_address("[::1") == "[::1"
+    assert bind_address("::1]") == "::1]"
+    assert bind_address("[::1]") == "::1"
+
+
+class _RecordingSocket:
+    """Records every ``setsockopt`` call the probe makes."""
+
+    def __init__(self) -> None:
+        self.options: list[tuple[int, int, int]] = []
+
+    def setsockopt(self, level: int, option: int, value: int) -> None:
+        self.options.append((level, option, value))
+
+    def close(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(("address", "ipv6"), [("::", True), ("127.0.0.1", False)])
+def test_the_probe_socket_sets_the_options_the_real_bind_uses(
+    address: str, ipv6: bool
+) -> None:
+    """Round 9, item 2: dropping ``SO_REUSEADDR`` survived every test.
+
+    Without it the probe can report a port busy that uvicorn — which sets it —
+    would bind, so ``--no-auto-port`` refuses a usable port. Recorded through the
+    injected socket factory; no production module is patched.
+    """
+    import socket
+
+    from brain.ui.server import _probe_socket
+
+    made: list[_RecordingSocket] = []
+
+    def factory(family: int, kind: int) -> _RecordingSocket:
+        made.append(_RecordingSocket())
+        return made[-1]
+
+    _probe_socket(address, factory)  # type: ignore[arg-type]
+    (sock,) = made
+    assert (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in sock.options, sock.options
+    v6only = (socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    assert (v6only in sock.options) is ipv6, sock.options
+

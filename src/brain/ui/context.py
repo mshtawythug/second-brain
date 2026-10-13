@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from ..errors import BrainError
+
 if TYPE_CHECKING:  # pragma: no cover — typing only
     import psycopg
 
@@ -185,6 +187,61 @@ def bind_address(host: str) -> str:
         # sends and starlette compares Host case-sensitively, so `--host
         # LOCALHOST` refused its own URL (review round 6).
         return bare.lower()
+
+
+class HostRefused(BrainError):
+    """``--host`` names something ``brain ui`` will not bind; the message says why."""
+
+
+def validate_host(host: str) -> str:
+    """Return ``host`` as its canonical bind address, or raise :class:`HostRefused`.
+
+    The ONE place a ``--host`` spelling is judged (review round 9). Rounds 7–9
+    each found a spelling that bound something unexpected or failed later with
+    a misleading error, and each fix had been a separate check in the CLI; the
+    next odd spelling should be one more rule here and one more row in the test
+    table. In order:
+
+    * empty or whitespace — asyncio binds ``0.0.0.0`` AND ``::`` for ``""``;
+    * brackets — balanced, once, around an IPv6 literal, nothing else:
+      ``[::1`` used to reach the probe and fail as "port already in use", and
+      ``[127.0.0.1]`` is not URL syntax for anything;
+    * a zone on ``::`` or ``::1`` (:func:`meaningless_zone`);
+    * IPv4 shorthand such as ``0`` (:func:`ipv4_shorthand`).
+    """
+    if not host.strip():
+        raise HostRefused(
+            "--host must not be empty; omit it for 127.0.0.1, or name an address."
+        )
+    if "[" in host or "]" in host:
+        balanced = (
+            host.startswith("[") and host.endswith("]")
+            and host.count("[") == 1 and host.count("]") == 1
+        )
+        if not balanced:
+            raise HostRefused(f"--host {host}: unbalanced or misplaced brackets.")
+        try:
+            inner = ipaddress.ip_address(host[1:-1])
+        except ValueError:
+            inner = None
+        if not isinstance(inner, ipaddress.IPv6Address):
+            raise HostRefused(
+                f"--host {host}: brackets are for IPv6 literals only; "
+                "write the address or hostname without them."
+            )
+    address = bind_address(host)
+    if meaningless_zone(address):
+        raise HostRefused(
+            f"--host {address}: a zone means nothing on the wildcard or loopback "
+            "address; drop the '%…' part."
+        )
+    reading = ipv4_shorthand(address)
+    if reading is not None:
+        raise HostRefused(
+            f"--host {address} is not a canonical IPv4 address (the system reads "
+            f"it as {reading}); write the address out in full."
+        )
+    return address
 
 
 def meaningless_zone(host: str) -> bool:

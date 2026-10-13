@@ -45,14 +45,17 @@ git tag scheme:
   clients out: a program can send a loopback Host header by hand. The docs
   previously recommended `--host 0.0.0.0 --token` for remote reading, which
   never worked from another device's browser.
-- **`--host` refuses non-canonical IPv4 literals** such as `0`, `127.1` and
-  `010.0.0.1`. The system reads `0` as `0.0.0.0`, so it was a wildcard bind
-  that skipped the notice; platforms disagree on `010.0.0.1` (8.0.0.1 or
-  10.0.0.1). The error names what the system would have bound.
-- **`--host` refuses an empty value and a zone on `::` or `::1`.** An empty
-  `--host` made asyncio bind `0.0.0.0` and `::` together, and `::%en0` bound
-  every interface; both skipped the wildcard notice. A zone on a link-local
-  address, where it means something, is still accepted.
+- **`--host` refuses spellings that bound something unexpected**, each with a
+  usage error that says why:
+  - an empty value: asyncio bound `0.0.0.0` and `::` together, with no notice;
+  - IPv4 shorthand such as `0`, `127.1` and `010.0.0.1`: the system reads `0`
+    as `0.0.0.0`, and platforms disagree on `010.0.0.1` (8.0.0.1 or 10.0.0.1).
+    The error names what the system would have bound;
+  - a zone on `::` or `::1`: `::%en0` bound every interface with no notice. A
+    zone on a link-local address, where it means something, is accepted;
+  - brackets that are unbalanced, repeated, or around anything but an IPv6
+    literal: `[::1` used to fail later as "port already in use", and
+    `[127.0.0.1]` is not URL syntax.
 
 ### Fixed
 
