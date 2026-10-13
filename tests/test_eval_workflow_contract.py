@@ -19,14 +19,20 @@ eval gate's ``except OllamaUnavailable: pytest.skip(...)`` never fires and the
 gate FAILS where it was designed to skip.
 
 The guard documents its own escape hatch: ``@pytest.mark.live_ollama``. A gate
-that genuinely dials a live model needs it. A gate that does *not* must keep the
-socket ban, because that ban is the only thing stopping a supposedly hermetic
-test from reaching the network. Those are opposite requirements, so this module
-does not assert one blanket implication over the whole population — it pins an
-explicit, hand-classified roster (:data:`LIVE_MODEL_EVAL_TESTS` /
-:data:`HERMETIC_EVAL_TESTS`) and fails when a new eval test appears in neither.
-Adding an eval test is then a deliberate two-line classification rather than a
-standing instruction to strip a guard.
+that genuinely dials a live model needs it. This module pins an explicit,
+hand-maintained roster (:data:`LIVE_MODEL_EVAL_TESTS`) and fails when an eval
+test appears that is not on it, so adding one is a deliberate classification
+rather than a standing instruction to strip a guard.
+
+**Every eval test is a live-model gate, by decision.** A model-free ("hermetic")
+eval gate — e.g. a retrieval gate over a fake embedder — was considered and the
+user chose on 2026-10-12 to keep the retrieval-quality gate local (CLAUDE.md,
+"Eval gate (CI)"). The empty ``HERMETIC_EVAL_TESTS`` roster and its permanently
+skipped mirror test were removed with that decision; a hermetic eval test now
+fails :func:`test_every_eval_test_is_a_live_model_gate` instead of being waved
+through. If the decision is ever reversed, reintroduce the roster together with
+the mirror invariant — a hermetic gate must KEEP the socket ban, because that
+ban is the only thing stopping it from reaching the network.
 
 **Markers come from pytest, never from parsing source.** An earlier revision of
 this module walked ``ast`` decorator lists, which recognised ``@pytest.mark.eval``
@@ -50,7 +56,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -70,13 +75,6 @@ LIVE_MODEL_EVAL_TESTS = frozenset(
         "tests/test_graphrag_concept_gate.py::test_concept_extractor_no_leakage_on_sparse_docs",
     }
 )
-
-# Eval gates that need the corpus but no model — e.g. a retrieval gate over a
-# fake embedder. Each MUST NOT carry ``live_ollama``: keeping the socket ban is
-# the only thing that stops it silently reaching the network. Empty today; this
-# roster exists so that adding such a test is possible WITHOUT deleting its
-# guard to satisfy a contract.
-HERMETIC_EVAL_TESTS: frozenset[str] = frozenset()
 
 # A collection plugin, materialised into a temp dir and loaded with ``-p``. It
 # reports the markers pytest itself resolved for each collected item, which is
@@ -173,21 +171,24 @@ def test_eval_marker_population_is_not_empty() -> None:
     )
 
 
-def test_every_eval_test_is_classified_live_or_hermetic() -> None:
-    """A new eval test must be classified before the invariants below can hold.
+def test_every_eval_test_is_a_live_model_gate() -> None:
+    """Every eval test is rostered as a live-model gate — there are no others.
 
-    Without this, the two rosters silently stop describing the population and
-    the marker assertions quietly cover fewer tests than they appear to.
+    Without this, the roster silently stops describing the population and the
+    marker assertions quietly cover fewer tests than they appear to. It also
+    records the 2026-10-12 decision: no hermetic (model-free) eval gate.
     """
     collected = set(_collected_eval_markers())
-    classified = set(LIVE_MODEL_EVAL_TESTS) | set(HERMETIC_EVAL_TESTS)
+    classified = set(LIVE_MODEL_EVAL_TESTS)
 
     unclassified = sorted(collected - classified)
     assert not unclassified, (
         f"eval-marked tests missing from this module's roster: {unclassified}. "
-        "Add each to LIVE_MODEL_EVAL_TESTS (it dials a live chat/embedder, and "
-        "therefore needs @pytest.mark.live_ollama) or to HERMETIC_EVAL_TESTS (it "
-        "needs the corpus but no model, and must KEEP the socket guard)."
+        "If it dials a live chat/embedder, add it to LIVE_MODEL_EVAL_TESTS (it "
+        "then needs @pytest.mark.live_ollama). If it needs no model it is a "
+        "hermetic eval gate, which the 2026-10-12 decision ruled out (CLAUDE.md, "
+        "'Eval gate (CI)'): drop the `eval` marker, or revisit that decision and "
+        "reintroduce a hermetic roster that KEEPS the socket guard."
     )
 
     stale = sorted(classified - collected)
@@ -220,31 +221,6 @@ def test_live_model_eval_gates_opt_out_of_the_live_ollama_guard() -> None:
         "LiveOllamaForbidden (a BaseException) from socket.connect, which "
         "bypasses brain.chat's ConnectError -> OllamaUnavailable translation, "
         "so the test's clean-skip path never runs and the eval workflow fails."
-    )
-
-
-def test_hermetic_eval_gates_keep_the_live_ollama_socket_guard() -> None:
-    """The mirror invariant: a hermetic gate must NOT opt out of the socket ban.
-
-    Skips loudly while the roster is empty, so the inertness is visible in the
-    run summary instead of reading as a passing check over nothing.
-    """
-    if not HERMETIC_EVAL_TESTS:
-        pytest.skip(
-            "HERMETIC_EVAL_TESTS is empty — no eval gate is classified as "
-            "model-free yet, so there is nothing to check here"
-        )
-
-    collected = _collected_eval_markers()
-    escaped = sorted(
-        nodeid
-        for nodeid in HERMETIC_EVAL_TESTS
-        if "live_ollama" in collected.get(nodeid, frozenset())
-    )
-    assert not escaped, (
-        f"hermetic eval gates carrying @pytest.mark.live_ollama: {escaped}. That "
-        "marker lifts tests/conftest.py::_forbid_live_ollama's socket ban, so a "
-        "test classified as needing no model can silently reach a live one."
     )
 
 

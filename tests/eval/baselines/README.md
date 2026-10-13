@@ -18,6 +18,16 @@ a catastrophic regression that has nothing to do with retrieval quality. A run o
 all-zero metrics is the signature. Confirm with `brain status` — if the document
 count is not the one the baseline was recorded against, that is your answer.
 
+A document set that has only *grown* resolves every UUID but still moves rows:
+new documents compete for the top ranks against judgments that never saw them.
+*The 2026-10-13 re-record was this case, not recency drift (2) alone.* Ingests
+added 608 documents to the document set (Krisp on 2026-10-05, a Confluence
+import on 2026-10-08) and moved 12 non-recency rows as well; the means fell from
+0.4834 / 0.5835 / 0.7267 to **0.2589 / 0.3697 / 0.5852** (nDCG@5 / MRR /
+Recall@20). The golden judgments predate ~30% of the document set, so the
+absolute scores understate quality until `golden_corpus.yaml` is re-judged
+against the new documents.
+
 **2. Two `recency` queries are clock-dependent.** They filter on
 `documents.ingested_at` via `since_days: 40`, so the matched set is stable only
 while `today - 40 days` stays inside one gap in this brain's ingest history.
@@ -29,15 +39,8 @@ about search changed. *(The first recording, 2026-09-02, sat in a different
 gap and drifted on 2026-09-20 exactly as this paragraph predicted — one query,
 `-0.15` nDCG@5, every other row unchanged to four decimals.)*
 
-*The 2026-10-13 re-record was a **corpus change (4), not drift alone**.* The
-ingests of +608 docs (Krisp on 2026-10-05, a Confluence import on 2026-10-08)
-moved 12 non-recency rows as well, and the means fell from 0.4834 / 0.5835 /
-0.7267 to **0.2589 / 0.3697 / 0.5852** (nDCG@5 / MRR / Recall@20). The golden
-judgments predate ~30% of the corpus, so the absolute scores understate quality
-until the corpus is re-judged against the new documents.
-
-Re-derive the window before you re-record; it is a property of the corpus, not
-of the code:
+Re-derive the window before you re-record; it is a property of the document
+set, not of the code:
 
 ```sql
 WITH b AS (SELECT now() - interval '40 days' AS cut)
@@ -47,12 +50,6 @@ FROM documents, b;
 ```
 
 The baseline is stable from `last_before + 40 days` to `first_after + 40 days`.
-
-**Follow-up (found 2026-10-12, fix pending in a separate PR that will
-re-record):** the vector leg in `search.py` has no per-document chunk cap
-(the FTS leg has `PER_DOC_CHUNK_CAP`), and it returns ~40 rows rather than
-`CANDIDATE_LIMIT`, probably capped by HNSW `ef_search`. On one query a few long
-new docs filled the whole pool, shrinking its results from 17 docs to 6.
 
 **3. The retrieval config moved.** Changing the embedder,
 `recency_halflife_days`, `vector_sim_floor`, or `snippet_context_tokens` shifts
@@ -66,6 +63,16 @@ re-judging a query's `expected_doc_ids` — invalidates the baseline for the
 queries it touched. `diff_reports` compares the *intersection* of the two query
 sets and reports added/removed queries separately, so an added query cannot
 dilute the mean; but a re-judged one silently changes what "correct" means.
+
+## Known retrieval issues
+
+- **Vector-leg candidate pool** (found 2026-10-12; a separate PR will fix it and
+  re-record): the vector leg in `search.py` is served by the HNSW index, so it
+  returns at most `hnsw.ef_search` (default 40) rows rather than
+  `CANDIDATE_LIMIT`, and filters apply after the index scan, so filtered queries
+  get fewer still. Its recall@50 against an exact scan averages 0.76 on the
+  golden queries. On one query a few long new documents filled the whole pool,
+  shrinking its results from 17 documents to 6.
 
 ## Who re-records, and when
 
