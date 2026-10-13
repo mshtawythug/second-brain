@@ -708,17 +708,25 @@ checks — those are what stop a restore from half-applying.
 ## brain ui
 
 ```bash
-brain ui                            # loopback only, opens a browser
+brain ui                                  # loopback only, opens a browser
 brain ui --read-only
-brain ui --host 0.0.0.0 --token <secret>
+brain ui --lan --read-only                # serve to the LAN (e.g. a phone), token minted
+brain ui --host <LAN address> --token <secret>   # the manual form of --lan
 ```
 
-A local single-user web surface over the same corpus. Adds **no** runtime
+The primary reading surface: a local, single-user web app over the same corpus. Adds **no** runtime
 dependency — `starlette` and `uvicorn` already ship as transitive deps of the
 MCP SDK — and the front end is hand-written static assets with no bundler and
 no CDN, so it works fully offline.
 
 `--token` is **required** whenever `--host` is not loopback.
+
+`--lan` binds this machine's LAN address. It uses `--token` if given and otherwise mints one,
+then prints `http://<address>:<port>/#t=<token>` to open on the other device. It cannot be
+combined with `--host`. Do not use `--host 0.0.0.0` to reach other devices: a wildcard bind
+gets the loopback `Host` allowlist, so every other device is refused with 400. The server
+prints a warning when you use it. Full walkthrough and caveats:
+[Reading your brain from a phone](guides/brain-ui-on-your-phone.md).
 
 Confidential bodies follow the bind, not a flag. On a **loopback** bind they are
 always served — the UI is exactly as inside the trust boundary as `brain show`
