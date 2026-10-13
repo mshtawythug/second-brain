@@ -246,7 +246,10 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Audit round 7 — code + docs | `ab560d4` | `ui/lan.py` (notice), `ui/context.py` (`ipv4_shorthand`, comment), `cli_ui.py` (refusal), guide, cli-reference, CHANGELOG, spec Q1, plan §3, tests |
 | Audit round 7 — plan | `9d8024f` | this file: §10.9, §10.14 |
 | Review round 7 — fixes | `89e4786` | `cli_ui.py` (doc-comment order), CHANGELOG (LOCALHOST), blank lines in two test files |
-| Review round 7 — plan | **the commit that added this row** | this file: §10.14 |
+| Review round 7 — plan | `6c02fe9` | this file: §10.14 |
+| Merge of `second-brain/master` | `136030b` | master's #18–#21 delta (8 files); one conflict in `tests/test_dev_dependency_pins.py`, both sides kept. MERGED, not rebased, so every SHA in this file stays valid |
+| Review round 8 — fixes | `a4c2f35` | `cli_ui.py` (empty host, zones), `ui/context.py` (`meaningless_zone`), CHANGELOG, this file's ruff note, `test_cli_ui.py` (runner width, new tests), `test_ui_lan.py` |
+| Review round 8 — plan | **the commit that added this row** | this file: §10.9, §10.15 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -425,10 +428,11 @@ again. Apply a mutation at the SHA named for its round.
 **Validated.** The script below checks every entry's `count` against `git show <SHA>:<file>`,
 and, since round 5, that every entry which no longer applies at HEAD is marked SUPERSEDED.
 Run from the repository root with `python` and the script on stdin. Result at `c282288` (round 3): **59/59, exit 0.** Result at `7363980` (round 4): 63/63, exit 0. At `593022a` (round 5, HEAD check added): 74/74, 16
-superseded and marked, exit 0. At `af22825` (round 6): 83/83, 17 superseded and marked, exit 0. Result at the commit that added
-this sentence (round 7): **round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4,
-round 5 11/11, round 6 9/9, round 7 9/9 — 92/92; 18 entries superseded at HEAD, every one marked;
-exit 0.** The HEAD check again flagged the round's one casualty (R3-7) before it was marked. The HEAD check earned its place on its
+superseded and marked, exit 0. At `af22825` (round 6): 83/83, 17 superseded and marked, exit 0. At `9d8024f` (round 7): 92/92, 18 marked, exit 0 — and
+again after the merge of `second-brain/master` (`136030b`): unchanged, as a merge preserves every
+cited SHA. Result at the commit that added this sentence (round 8): **round 0 22/22, round 1
+17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round 7 9/9, round 8
+6/6 — 98/98; 18 entries superseded at HEAD, every one marked; exit 0.** The HEAD check again flagged the round's one casualty (R3-7) before it was marked. The HEAD check earned its place on its
 first run after round 6: it flagged L-13, which round 6 had made inapplicable, before it was marked.
 It checks the replaced TEXT only; an entry whose text still applies but whose red-at assertion moved
 carries a NOTE line instead (R4-4, L-6 panel).
@@ -1243,6 +1247,7 @@ R7-2 the route target is not a LAN address
   red at:  assert any(address in net for net in documentation)
 
 R7-3 the notice names the token as the guard
+  NOTE at HEAD (round 8): still applies, but goes red at `assert "the token is what keeps other clients out" in WILDCARD_NOTICE` — the test now pins the exact phrase
   file:    src/brain/ui/lan.py
   replace: '"network; the token is what keeps other clients out. Use --lan, or "'
   with:    '"network. Use --lan, or "'
@@ -1297,6 +1302,60 @@ R7-9 the refusal names what the system reads
   count:   1
   test:    tests/test_cli_ui.py::test_a_non_canonical_ipv4_literal_is_refused[0-0.0.0.0]
   red at:  assert means in result.output
+
+```
+
+**Round 8 — against `a4c2f35`.**
+
+```text
+R8-1 an empty --host is refused
+  file:    src/brain/cli_ui.py
+  replace: '    if not host.strip():\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_an_empty_host_is_a_usage_error
+  red at:  assert result.exit_code == 2
+
+R8-2 the CLI refuses a meaningless zone
+  file:    src/brain/cli_ui.py
+  replace: '    if meaningless_zone(host):\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_zone_on_the_wildcard_or_loopback_is_a_usage_error
+  red at:  assert result.exit_code == 2
+
+R8-3 a zone on loopback is meaningless too
+  file:    src/brain/ui/context.py
+  replace: '    return address.is_unspecified or address.is_loopback\n'
+  with:    '    return address.is_unspecified\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_zone_on_the_wildcard_or_loopback_is_a_usage_error[::1%lo0]
+  red at:  assert result.exit_code == 2
+
+R8-4 a link-local zone is left alone
+  file:    src/brain/ui/context.py
+  replace: '    return address.is_unspecified or address.is_loopback\n'
+  with:    '    return True\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_zone_on_a_link_local_address_is_left_alone
+  red at:  assert result.exit_code == 0
+
+R8-5 the notice names the token by its exact phrase
+  file:    src/brain/ui/lan.py
+  replace: '"network; the token is what keeps other clients out. Use --lan, or "'
+  with:    '"network; the token keeps other clients out. Use --lan, or "'
+  count:   1
+  test:    tests/test_ui_lan.py::test_the_wildcard_notice_says_the_token_is_the_guard
+  red at:  assert "the token is what keeps other clients out" in WILDCARD_NOTICE
+
+R8-6 CLI output assertions hold at a narrow terminal (run with COLUMNS=40)
+  pytest:  run with COLUMNS=40 in the environment — at the default width this passes mutated or not
+  file:    tests/test_cli_ui.py
+  replace: 'runner = CliRunner(env={"COLUMNS": "200"})\n'
+  with:    'runner = CliRunner()\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_non_canonical_ipv4_literal_is_refused[127.1-127.0.0.1]
+  red at:  assert "not a canonical IPv4 address" in result.output
 
 ```
 
@@ -1387,3 +1446,19 @@ added, so no mutation either, and the validator still reads 92/92, 18 marked, ex
 | LOW — `PHONE_LINE` split `ui_app` from its `#:` doc-comment | moved above it; each `#:` block documents its own symbol |
 | LOW — CHANGELOG missing round 6's user-visible fix | `--host LOCALHOST` / mixed-case hostnames refusing their own URL, under Fixed; round 7's `--host 0` refusal was already under Added |
 | NIT — triple blank lines | five in `tests/test_cli_ui.py` (the reviewer's lines) and one more in `tests/test_ui_lan.py`, all added by this phase (none at `1a1d068`), collapsed to two. **ruff 0.16.10 — the version CI resolved at the time — did not flag them under `--select E303 --preview`**; they were found by scanning every test file the phase touched for three consecutive blank lines. *(Corrected in round 8: this cell said 0.16.10 was "the version CI resolves"; since #21 CI resolves **0.17.0**, and 0.17.0 DOES flag E303 under `--preview` — measured, it caught one this phase added in round 8. E303 is preview-only, so CI's default `ruff check` gates it under neither version.)* |
+
+### 10.15 Review round 8 (2026-10-13) and the merge of master
+
+The phase-7 review of `6c02fe9`. Fixed in `136030b` (merge) and `a4c2f35`.
+
+| Item | Fix |
+|---|---|
+| 1 MEDIUM — two more wildcard spellings with no notice | `--host ""` (asyncio binds `0.0.0.0` AND `::`; the panel printed `http://:8765/`, the allowlist was `{""}`) and `::%en0` (binds every interface; matched no `WILDCARD_HOSTS` spelling). Both refused, exit 2: an empty or whitespace-only host, and `context.meaningless_zone` — a zone on `::` or `::1`. **Refused rather than classified:** classifying would carry two spellings of one address through every helper — zoned for the bind, bare for the checks — while refusing is one check; link-local zones, where a zone is real, pass through (pinned) |
+| 2 MERGE BLOCKER — conflict with master `6a82db2` | `second-brain/master` MERGED (`136030b`), not rebased, so the catalog's SHAs survive (validator re-run: unchanged). The one conflict, in `tests/test_dev_dependency_pins.py` (both sides appended at EOF and shared the hunk's closing paren), keeps master's `test_ceiling_is_the_next_minor_above_the_measured_version` with its `)` restored, then the starlette floor test. #21's `test_every_capped_dev_pin_is_measured` walks `dev` pins only, so it does not cover the RUNTIME starlette pin, which keeps its own test. All 12 pin tests pass on the merged tree; `git merge-tree --write-tree second-brain/master HEAD` is clean |
+| 3 LOW — CLI tests depend on terminal width | measured first: four `test_cli_ui` tests (three of this phase's IPv4 cases, and the older `--help` flags test) fail at `COLUMNS=40` and `60` and pass at 200, because Rich wraps usage errors and help at `COLUMNS`. The module's `runner` is pinned to `COLUMNS=200` for every invoke (the house pattern, as `test_cli_directory.py` does); the file passes at 40 and 60. Other test files the phase touched assert on no Rich-boxed output |
+| 4 LOW — `"token" in WILDCARD_NOTICE` | the exact phrase, as the guide twin pins it |
+| 5 LOW — "ruff 0.16.10, the version CI resolves" | corrected in §10.14's table. Since #21 CI resolves **0.17.0** — and, contrary to the brief, 0.17.0 DOES flag E303 under `--preview`: measured, it caught one triple blank line this round's own test append introduced, fixed in `a4c2f35`. E303 is preview-only, so CI's default `ruff check` gates it under neither version; every test file the phase touched is clean under both the 0.17.0 preview check and a direct scan |
+
+**Mutation evidence (round 8):** 6 guards, each on all five clauses, against `a4c2f35` on a clean
+tree, the whole round run with `COLUMNS=40` exported — R8-6 (the runner's width pin) can only go
+red at a narrow terminal, and every other test passes at 40, so the baseline is unaffected (§10.9).
