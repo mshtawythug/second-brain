@@ -1,54 +1,75 @@
-"""Vector-leg candidate SQL for hybrid search: an exact cosine scan, never HNSW.
+"""Vector-leg candidate query for hybrid search: an iterative HNSW scan, near-exact.
 
 Extracted from :func:`brain.search.hybrid_search` (which is over the 800-line
-ceiling) together with the fix that motivated it. Design and measurements:
-``docs/specs/2026-10-13-search-vector-leg-design.md``.
+ceiling) together with the fix that motivated it. Design, measurements and the
+decision history: ``docs/specs/2026-10-13-search-vector-leg-design.md``.
 
-**Why the ORDER BY is ``score DESC, c.id`` and not ``c.embedding <=> q``.** The
-index-operator form is exactly the shape the HNSW index ``chunks_embedding_idx``
-serves, so the planner used it, and three documented pgvector properties
-followed:
+**The defect.** The leg used to be ``ORDER BY c.embedding <=> q LIMIT 50`` with
+pgvector's default session settings. The HNSW index served it, so:
 
-1. An HNSW scan returns at most ``hnsw.ef_search`` rows (default **40**), so a
-   ``LIMIT 50`` got ~40 on the live corpus.
-2. Every ``WHERE`` condition (the metadata predicate and the cosine floor alike)
-   is applied *after* the index scan, so filtered queries kept only the matching
-   fraction of those ~40: 14-33 rows on the golden queries.
-3. The scan is approximate. Recall@50 against an exact scan was 0.757 mean, with
-   a minimum of 0.00.
+1. a scan returned at most ``hnsw.ef_search`` rows (default **40**);
+2. every ``WHERE`` condition (metadata predicate and cosine floor alike) applied
+   *after* the scan, so filtered queries got 14-33 rows;
+3. recall@50 against an exact scan was 0.757 mean, minimum 0.00.
 
-An HNSW index can only serve ``ORDER BY embedding <=> q``. Ordering by the score
-*expression* therefore makes the index unusable for this query regardless of
-``ef_search``, statistics or session settings: the scan is exact, every filter
-is exact, and the pool is the true top ``limit`` among chunks with a defined
-cosine. ``c.id`` makes the order total, so equal-cosine chunks rank
-deterministically.
+**The fix, and why it is not the exact scan.** The first version made the leg
+an exact scan (recall 1.0 by construction). Under recorded load its own time
+was a p90 of 249-259 ms at 21k chunks, growing linearly, which is over the 150 ms
+budget. This version keeps the index and fixes all three defects:
+
+- ``hnsw.iterative_scan = relaxed_order`` keeps scanning until ``limit`` rows
+  survive the filters (bounded by ``hnsw.max_scan_tuples``), so filters no
+  longer starve the pool;
+- ``hnsw.ef_search = 1000`` (pgvector's maximum) gives a mean recall@50 of
+  0.9987 (minimum 0.98) against the exact scan over the 31 golden queries.
+  ef=400 measured 0.9903 with a minimum of 0.90, too little margin;
+- ``enable_seqscan = off``, because raising ``ef_search`` raises the index
+  scan's estimated cost and the planner would otherwise switch to a sequential
+  scan. A plan that does not use the index (some filtered queries) is exact,
+  never wrong.
+
+Relaxed ordering can return rows slightly out of distance order, so the scan
+sits in a ``MATERIALIZED`` CTE and is re-sorted outside it by ``dist + 0, id``.
+The ``+ 0`` keeps the outer sort from being satisfied by the index (pgvector's
+documented pattern for Postgres 17+). The ``id`` tie-break makes the order total.
+
+**Settings are scoped to this one query and never leak.** They are set with
+``set_config(…, is_local => true)`` inside the leg's own ``conn.transaction()``.
+For an autocommit caller that is a real transaction, so the settings end at its
+COMMIT. Inside a caller's transaction it is a savepoint, and a *released*
+savepoint keeps local settings, so the prior values are read first and restored
+explicitly after the query. If the query raises, the savepoint rollback reverts
+them.
 
 **Why the floor is written ``(e <=> q) <= 1 - floor``.** A zero-norm embedding
 has a cosine distance of NaN. Postgres orders NaN above every number and
 evaluates ``NaN >= x`` as TRUE, so the algebraically equal
-``1 - (e <=> q) >= floor`` would admit such a row and ``score DESC`` would rank
-it first. ``NaN <= x`` is FALSE, so this form excludes it. The HNSW path never
-returned these rows, because pgvector does not index zero vectors for cosine;
-the exact scan must exclude them itself. Prod held 0 such chunks on 2026-10-13.
+``1 - (e <=> q) >= floor`` would admit such a row whenever a plan does not use
+the index (pgvector does not index zero vectors for cosine, but an exact plan
+reads every row). ``NaN <= x`` is FALSE. Prod held 0 such chunks on 2026-10-13.
 
-**Rejected alternatives, measured** (spec §3):
-
-- *Raising ``hnsw.ef_search``* flips the planner to a sequential scan unless
-  ``enable_seqscan`` is also forced off. ``SET LOCAL`` would leak into the
-  caller's transaction, and recall still depends on graph quality.
-- *A per-document chunk cap* (FTS's ``PER_DOC_CHUNK_CAP``) scored worse than the
-  exact scan alone on all three eval means.
-
-**Cost:** about 100 ms per search at 21k chunks, growing linearly. Revisit (tuned
-HNSW plus a recall health check) when ``SearchDiagnostics.sql_ms`` p90 over the
-31 golden queries exceeds 250 ms. ``sql_ms`` includes this leg plus the FTS leg,
-the count and the doc fetch, so it is a conservative proxy, since no tool reports
-the leg alone. The read-only procedure is in spec §5 (147.5 ms on 2026-10-13).
+**Revisit** when ``SearchDiagnostics.vector_ms`` p90 over the golden queries
+exceeds 150 ms, measured with the read-only procedure in spec §5, or when the
+recall@50 check in spec §5 falls below 0.99 (it depends on HNSW graph quality,
+which shifts with ingests and reindexes).
 """
+from time import perf_counter
 from typing import Any
 
+import psycopg
+
 from .search_predicate import SearchPredicate
+
+#: ``hnsw.ef_search`` for the leg. 1000 is pgvector's maximum; see the module
+#: docstring for the recall measurements that chose it.
+HNSW_EF_SEARCH = 1000
+
+#: ``(name, value)`` pairs set locally around the leg's query, in this order.
+_SCAN_SETTINGS: tuple[tuple[str, str], ...] = (
+    ("hnsw.ef_search", str(HNSW_EF_SEARCH)),
+    ("hnsw.iterative_scan", "relaxed_order"),
+    ("enable_seqscan", "off"),
+)
 
 
 def vector_leg_sql(
@@ -63,7 +84,9 @@ def vector_leg_sql(
     Rows are ``(chunk id, document id, chunk index, content, cosine score)``,
     best first. ``limit`` is the only value formatted into the SQL text, and it is
     validated as a positive ``int`` first. The embedding, every predicate value
-    and the floor are bound as ``%s`` parameters.
+    and the floor are bound as ``%s`` parameters. The query is shaped for the
+    HNSW index (inner ``ORDER BY … <=> … LIMIT``); run it via
+    :func:`run_vector_leg`, which applies the scan settings it relies on.
 
     Raises:
         ValueError: ``limit`` is not a positive ``int``.
@@ -79,16 +102,80 @@ def vector_leg_sql(
             *predicate.where_params,
             query_embedding,
             vector_sim_floor,
+            query_embedding,
         ]
     else:
         where = f"WHERE {floor_pred}"
-        params = [query_embedding, query_embedding, vector_sim_floor]
+        params = [query_embedding, query_embedding, vector_sim_floor, query_embedding]
     sql = f"""
-            SELECT c.id, c.document_id, c.chunk_index, c.content,
-                   1 - (c.embedding <=> %s::vector) AS score
-            FROM chunks c
-            {predicate.join_clause}
-            {where}
-            ORDER BY score DESC, c.id
-            LIMIT {limit}"""
+            WITH nn AS MATERIALIZED (
+                SELECT c.id, c.document_id, c.chunk_index, c.content,
+                       c.embedding <=> %s::vector AS dist
+                FROM chunks c
+                {predicate.join_clause}
+                {where}
+                ORDER BY c.embedding <=> %s::vector
+                LIMIT {limit}
+            )
+            SELECT id, document_id, chunk_index, content, 1 - dist AS score
+            FROM nn
+            ORDER BY dist + 0, id"""
     return sql, params
+
+
+def run_vector_leg(
+    conn: psycopg.Connection[Any],
+    *,
+    predicate: SearchPredicate,
+    query_embedding: list[float],
+    vector_sim_floor: float,
+    limit: int,
+) -> tuple[list[Any], float]:
+    """Execute the vector leg under its scan settings; return ``(rows, seconds)``.
+
+    The elapsed time covers only the candidate query, which is what makes
+    ``SearchDiagnostics.vector_ms`` (the revisit trigger's input) a measurement
+    of this leg, rather than of the settings round trips or the whole ``sql_ms``
+    phase. See the module docstring for how the settings are scoped.
+    """
+    sql, params = vector_leg_sql(
+        predicate=predicate,
+        query_embedding=query_embedding,
+        vector_sim_floor=vector_sim_floor,
+        limit=limit,
+    )
+    names = [name for name, _ in _SCAN_SETTINGS]
+    with conn.transaction():
+        prior = conn.execute(
+            "SELECT current_setting(%s, true), current_setting(%s, true), "
+            "current_setting(%s, true)",
+            names,
+        ).fetchone()
+        conn.execute(
+            "SELECT set_config(%s, %s, true), set_config(%s, %s, true), "
+            "set_config(%s, %s, true)",
+            [part for pair in _SCAN_SETTINGS for part in pair],
+        )
+        started = perf_counter()
+        rows = conn.execute(sql, params, prepare=predicate.prepare_flag).fetchall()
+        elapsed = perf_counter() - started
+        _restore_settings(conn, names, prior)
+    return rows, elapsed
+
+
+def _restore_settings(
+    conn: psycopg.Connection[Any], names: list[str], prior: tuple[Any, ...] | None
+) -> None:
+    """Put each setting back to the value it had before the leg ran.
+
+    A ``NULL`` prior value means the ``hnsw.*`` variable did not exist yet:
+    pgvector's library is not preloaded, so a fresh session has no ``hnsw.*``
+    settings until its first vector operation. ``set_config(name, NULL, true)``
+    resets a setting to its session default (verified 2026-10-13: a local 777
+    returned to 40), which is the correct restore target in that case.
+    """
+    values = list(prior) if prior is not None else [None] * len(names)
+    conn.execute(
+        "SELECT " + ", ".join(["set_config(%s, %s, true)"] * len(names)),
+        [part for pair in zip(names, values, strict=True) for part in pair],
+    )

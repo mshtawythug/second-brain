@@ -20,8 +20,8 @@ combiner (see `docs/plans/2026-05-06-search-ranking-fix.md`):
    :data:`DEFAULT_VECTOR_SIM_FLOOR`, overridable via
    ``BRAIN_VECTOR_SIM_FLOOR`` in :mod:`brain.config`). Tuned
    empirically — see :mod:`brain.config` and
-   ``tests/test_search_floor_default_excludes_known_bad.py``. The leg is an
-   exact scan, never HNSW-served: see :mod:`brain.search_vector_leg`.
+   ``tests/test_search_floor_default_excludes_known_bad.py``. The leg's scan
+   strategy and its scoped settings live in :mod:`brain.search_vector_leg`.
 
 The fts_only path bypasses (3) entirely.
 
@@ -29,9 +29,11 @@ The fts_only path bypasses (3) entirely.
 carries no live line count on purpose -- re-derive with
 ``wc -l src/brain/search.py``. What cannot rot is the trail: 837 (``f8c76c0``,
 branch base) -> 853 (``3b16527``) -> 867 (``0473b5f``) -> 870 (``d99ca34``) ->
-826 (``f0abf64``, the PR #8 merge) -> the commit that added this hop, which
-SHRANK it by moving the vector-leg SQL to :mod:`brain.search_vector_leg` with
-the exact-scan fix -- a ranking change, eval-measured and re-baselined.
+826 (``f0abf64``, the PR #8 merge) -> 819 (``0ee6a86``: the vector-leg SQL moved
+to :mod:`brain.search_vector_leg` with the exact-scan fix -- a ranking change,
+eval-measured and re-baselined) -> 819 (``f7882ea``) -> the commit that added
+this hop (+2: ``SearchDiagnostics.vector_ms``, the leg's own time, which the
+revisit trigger needs; still net below 826).
 Two earlier changes, both reasoned inline at the
 point of growth: :attr:`SearchResult.recency_ts`, whose read was hoisted OUT of
 the recency-boost branch so a hit's displayed date and its ranking date cannot
@@ -70,7 +72,7 @@ from .search_predicate import (  # noqa: F401 — _ensure_utc is a re-export
     _ensure_utc,
     build_predicate,
 )
-from .search_vector_leg import vector_leg_sql
+from .search_vector_leg import run_vector_leg
 from .snippet_context import DEFAULT_SNIPPET_MAX_CHARS, expand_snippet_with_neighbors
 
 logger = logging.getLogger(__name__)
@@ -137,7 +139,9 @@ class SearchDiagnostics:
     ``brain ui``. ``embed_ms`` / ``embed_cached`` stay ``None`` under fts-only
     (printing ``embed 0ms`` would falsely imply a free embed); ``sql_ms``
     accumulates the FTS leg, vector leg, optional count and doc-metadata
-    fetch; ``total_ms`` is the wall clock. ``facets_ms`` is written by the
+    fetch; ``vector_ms`` is the vector leg's own share of ``sql_ms`` (``None``
+    when the leg did not run), and is the input to the revisit trigger in
+    :mod:`brain.search_vector_leg`. ``total_ms`` is the wall clock. ``facets_ms`` is written by the
     CALLER after :func:`brain.facets.compute_facets` — the search module
     ranks, the facet module aggregates.
 
@@ -155,6 +159,7 @@ class SearchDiagnostics:
     embed_ms: float | None = None
     embed_cached: bool | None = None
     sql_ms: float | None = None
+    vector_ms: float | None = None
     total_ms: float | None = None
     facets_ms: float | None = None
     results_tokens: int | None = None
@@ -589,18 +594,17 @@ def hybrid_search(
             diagnostics.embed_cached = (
                 _cached_query_embed.cache_info().hits > _hits_before
             )
-        # An exact scan, deliberately not HNSW-served: see brain.search_vector_leg.
-        vec_sql, vec_params = vector_leg_sql(
+        # SQL, scan strategy and timing live in brain.search_vector_leg.
+        vec_rows, vec_seconds = run_vector_leg(
+            conn,
             predicate=predicate,
             query_embedding=q_emb,
             vector_sim_floor=vector_sim_floor,
             limit=CANDIDATE_LIMIT,
         )
-        _t = perf_counter()
-        vec_rows = conn.execute(
-            vec_sql, vec_params, prepare=prepare_flag
-        ).fetchall()
-        sql_seconds += perf_counter() - _t
+        sql_seconds += vec_seconds
+        if diagnostics is not None:
+            diagnostics.vector_ms = vec_seconds * 1000.0
 
     # Exact total-match count (opt-in). Runs AFTER both ranking legs so a
     # Ctrl-C during it still leaves the caller its ranked results, and before

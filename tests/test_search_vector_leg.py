@@ -55,22 +55,23 @@ _NO_FTS_QUERY = "zzqxvectorlegprobe"
 # ---------------------------------------------------------------------------
 # SQL builder — unit tests (no database)
 # ---------------------------------------------------------------------------
-def _order_by_clause(sql: str) -> str:
-    tail = sql.split("ORDER BY", 1)[1]
-    return tail.split("LIMIT", 1)[0].strip()
+def test_inner_scan_is_index_shaped_and_outer_resort_is_total() -> None:
+    """Inner: the HNSW-servable shape. Outer: a total re-sort no index can serve.
 
-
-def test_orders_by_score_never_by_the_index_operator() -> None:
-    """The ORDER BY must be one an HNSW index cannot serve — that is the fix."""
+    ``relaxed_order`` may return the inner rows slightly out of order; the outer
+    ``dist + 0, id`` restores exact, deterministic order.
+    """
     sql, _ = vector_leg_sql(
         predicate=build_predicate(),
         query_embedding=[0.1, 0.2],
         vector_sim_floor=0.25,
         limit=CANDIDATE_LIMIT,
     )
-    order_by = _order_by_clause(sql)
-    assert "<=>" not in order_by
-    assert order_by == "score DESC, c.id"
+    inner, outer = sql.split("FROM nn", 1)
+    assert "AS MATERIALIZED" in inner
+    inner_order = inner.split("ORDER BY", 1)[1].split("LIMIT", 1)[0].strip()
+    assert inner_order == "c.embedding <=> %s::vector"
+    assert outer.split("ORDER BY", 1)[1].strip() == "dist + 0, id"
 
 
 def test_limit_is_the_argument() -> None:
@@ -81,7 +82,7 @@ def test_limit_is_the_argument() -> None:
             vector_sim_floor=0.0,
             limit=limit,
         )
-        assert sql.rstrip().endswith(f"LIMIT {limit}")
+        assert sql.count(f"LIMIT {limit}\n") == 1
 
 
 @pytest.mark.parametrize("bad", [0, -1, True, 2.5])
@@ -103,7 +104,7 @@ def test_params_without_filters() -> None:
         vector_sim_floor=0.3,
         limit=10,
     )
-    assert params == [emb, emb, 0.3]
+    assert params == [emb, emb, 0.3, emb]
     assert sql.count("%s") == len(params)
     assert "JOIN documents" not in sql
 
@@ -117,7 +118,7 @@ def test_params_with_filters_carry_the_shared_predicate() -> None:
         vector_sim_floor=0.3,
         limit=10,
     )
-    assert params == [emb, *predicate.where_params, emb, 0.3]
+    assert params == [emb, *predicate.where_params, emb, 0.3, emb]
     assert sql.count("%s") == len(params)
     assert predicate.join_clause in sql
     assert predicate.where_sql in sql
@@ -131,7 +132,7 @@ def test_floor_is_bound_never_interpolated() -> None:
         limit=10,
     )
     assert "0.31415" not in sql
-    assert params[-1] == 0.31415
+    assert params[-2] == 0.31415
 
 
 # ---------------------------------------------------------------------------
@@ -360,3 +361,231 @@ def test_zero_norm_chunk_never_enters_the_vector_leg(
         or not math.isnan(r.explain.vector_cosine)
         for r in results
     )
+
+
+# ---------------------------------------------------------------------------
+# SearchDiagnostics.vector_ms — the leg's own time (the revisit trigger's input)
+# ---------------------------------------------------------------------------
+def test_vector_ms_reports_the_leg_and_is_part_of_sql_ms(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder
+) -> None:
+    """``vector_ms`` is measured around the leg alone and is a sub-phase of ``sql_ms``."""
+    from brain.search import SearchDiagnostics
+
+    ingest_document(
+        test_db,
+        embedder=fake_embedder,
+        doc=ExtractedDoc(
+            title="Synthetic timing probe",
+            content="synthetic timing probe body",
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        source_external_id="manual:timing-probe",
+        tags=[],
+    )
+    diag = SearchDiagnostics()
+    hybrid_search(
+        test_db,
+        embedder=fake_embedder,
+        query=_NO_FTS_QUERY,
+        limit=5,
+        vector_sim_floor=-1.0,
+        diagnostics=diag,
+    )
+    assert diag.vector_ms is not None and diag.vector_ms > 0.0
+    assert diag.sql_ms is not None and diag.vector_ms <= diag.sql_ms
+
+
+def test_vector_ms_stays_none_when_the_leg_does_not_run(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder
+) -> None:
+    """Under ``fts_only`` there is no vector leg; ``None`` is not ``0`` (no fake free leg)."""
+    from brain.search import SearchDiagnostics
+
+    diag = SearchDiagnostics()
+    hybrid_search(
+        test_db, embedder=fake_embedder, query="anything", limit=5, fts_only=True,
+        diagnostics=diag,
+    )
+    assert diag.vector_ms is None
+
+
+# ---------------------------------------------------------------------------
+# The floor's boundary is inclusive: a chunk exactly AT the floor is a candidate
+# ---------------------------------------------------------------------------
+def _floor_hitting_distance_exactly(distance: float) -> float | None:
+    """A float ``f`` with ``1.0 - f == distance`` exactly, or ``None`` if none exists.
+
+    The leg evaluates ``(e <=> q) <= 1 - %s`` in float8, and Python floats are
+    the same IEEE-754 doubles, so the search is over the representable
+    neighbours of ``1 - distance``. The caller re-verifies the equality in
+    Postgres; that is the check that counts.
+    """
+    candidate = 1.0 - distance
+    for _ in range(64):
+        if 1.0 - candidate == distance:
+            return candidate
+        candidate = math.nextafter(
+            candidate, math.inf if 1.0 - candidate > distance else -math.inf
+        )
+    return None
+
+
+def test_floor_boundary_is_inclusive(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder
+) -> None:
+    """The k-th chunk sits EXACTLY on the floor and is in; the (k+1)-th is out.
+
+    ``<=`` versus ``<`` is otherwise only visible in the golden SQL pin, which a
+    later author would re-capture. The threshold is read from Postgres using the
+    leg's own expression (``c.embedding <=> q``), so no Python cosine
+    approximation is involved.
+    """
+    for i in range(30):
+        ingest_document(
+            test_db,
+            embedder=fake_embedder,
+            doc=ExtractedDoc(
+                title=f"Synthetic floor-boundary doc {i:02d}",
+                content=f"synthetic floor boundary body {i:02d}",
+                content_type="note",
+                source_path=None,
+                metadata={},
+            ),
+            source_kind="manual",
+            source_external_id=f"manual:floor-boundary-{i:02d}",
+            tags=[],
+        )
+    q = fake_embedder.embed([_NO_FTS_QUERY], input_type="query")[0]
+    ranked = test_db.execute(
+        "SELECT c.document_id::text, c.embedding <=> %s::vector AS dist "
+        "FROM chunks c ORDER BY dist, c.id",
+        [q],
+    ).fetchall()
+
+    # The first k >= 20 whose distance has an exact float floor, and whose
+    # successor is strictly farther (so "the (k+1)-th is out" is well defined).
+    chosen: tuple[int, float] | None = None
+    for k in range(20, len(ranked)):
+        dist_k, dist_next = ranked[k - 1][1], ranked[k][1]
+        floor = _floor_hitting_distance_exactly(dist_k)
+        if floor is not None and dist_next > dist_k:
+            chosen = (k, floor)
+            break
+    assert chosen is not None, "no rank in 20..29 has an exactly representable floor"
+    k, floor = chosen
+
+    # The equality the test depends on, checked where it is evaluated: in float8.
+    exact = test_db.execute(
+        "SELECT (1 - %s::float8) = %s::float8, (1 - %s::float8) < %s::float8",
+        [floor, ranked[k - 1][1], floor, ranked[k][1]],
+    ).fetchone()
+    assert exact == (True, True), exact
+
+    got = _vector_leg_docs(test_db, fake_embedder, vector_sim_floor=floor)
+    assert ranked[k - 1][0] in got  # exactly on the floor: included
+    assert ranked[k][0] not in got  # just past it: excluded
+    assert got == [doc for doc, _ in ranked[:k]]
+
+
+# ---------------------------------------------------------------------------
+# Scan settings are scoped to the leg's query and never leak to the caller
+# ---------------------------------------------------------------------------
+_SETTING_NAMES = ("hnsw.ef_search", "hnsw.iterative_scan", "enable_seqscan")
+
+
+def _settings(conn: psycopg.Connection[Any]) -> tuple[str | None, ...]:
+    row = conn.execute(
+        "SELECT current_setting('hnsw.ef_search', true), "
+        "current_setting('hnsw.iterative_scan', true), "
+        "current_setting('enable_seqscan')"
+    ).fetchone()
+    assert row is not None
+    return tuple(row)
+
+
+def _one_doc(conn: psycopg.Connection[Any], embedder: FakeEmbedder) -> None:
+    ingest_document(
+        conn,
+        embedder=embedder,
+        doc=ExtractedDoc(
+            title="Synthetic settings probe",
+            content="synthetic settings probe body",
+            content_type="note",
+            source_path=None,
+            metadata={},
+        ),
+        source_kind="manual",
+        source_external_id="manual:settings-probe",
+        tags=[],
+    )
+
+
+def test_settings_do_not_leak_from_an_autocommit_search(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder
+) -> None:
+    _one_doc(test_db, fake_embedder)
+    hybrid_search(test_db, embedder=fake_embedder, query=_NO_FTS_QUERY, limit=5)
+    before = _settings(test_db)
+    hybrid_search(test_db, embedder=fake_embedder, query=_NO_FTS_QUERY, limit=5)
+    assert _settings(test_db) == before
+    assert before[1] == "off"  # pgvector's default; the leg's relaxed_order is gone
+
+
+def test_settings_do_not_leak_inside_the_callers_transaction(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder
+) -> None:
+    """Inside a caller's transaction the leg runs in a savepoint, and a released
+    savepoint keeps local settings, so the explicit restore is what matters.
+    The caller's own local values must survive untouched."""
+    _one_doc(test_db, fake_embedder)
+    with test_db.transaction():
+        test_db.execute("SET LOCAL hnsw.ef_search = 77")
+        test_db.execute("SET LOCAL hnsw.iterative_scan = strict_order")
+        before = _settings(test_db)
+        hybrid_search(test_db, embedder=fake_embedder, query=_NO_FTS_QUERY, limit=5)
+        assert _settings(test_db) == before
+        assert before[:2] == ("77", "strict_order")
+
+
+def test_settings_restore_on_a_fresh_session_before_pgvector_is_loaded(
+    fake_embedder: FakeEmbedder, test_db: psycopg.Connection[Any]
+) -> None:
+    """A brand-new session has no ``hnsw.*`` variables until pgvector loads; the
+    restore must then fall back to the session defaults, not to NULL."""
+    _one_doc(test_db, fake_embedder)
+    from tests.conftest import TEST_DATABASE_URL
+
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as fresh, fresh.transaction():
+        hybrid_search(fresh, embedder=fake_embedder, query=_NO_FTS_QUERY, limit=5)
+        assert _settings(fresh) == ("40", "off", "on")
+
+
+@pytest.mark.fresh_schema
+def test_iterative_scan_fills_a_filtered_pool_beyond_ef_search(
+    hnsw_corpus: tuple[psycopg.Connection[Any], FakeEmbedder],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``ef_search`` at pgvector's default 40, the iterative scan still fills it.
+
+    On a 90-row table ``ef_search = 1000`` alone already covers every row, so the
+    other tests cannot tell whether ``iterative_scan`` is on. On the live corpus
+    (21k chunks) it is what stops a filter from starving the pool. Lowering
+    ``ef_search`` here recreates that regime: without the iterative scan only the
+    tagged fraction of 40 candidates (about 13) survives the filter.
+    """
+    import brain.search_vector_leg as leg
+
+    monkeypatch.setattr(
+        leg,
+        "_SCAN_SETTINGS",
+        (("hnsw.ef_search", "40"), *leg._SCAN_SETTINGS[1:]),
+    )
+    conn, embedder = hnsw_corpus
+    expected = [doc for _, doc in _oracle_ranking(conn, embedder, tag=_KEEP_TAG)]
+
+    got = _vector_leg_docs(conn, embedder, vector_sim_floor=-1.0, tag=_KEEP_TAG)
+    assert got == expected

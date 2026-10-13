@@ -1,6 +1,6 @@
 # Search vector leg: exact candidate scan — design
 
-**Date:** 2026-10-13 · **Status:** accepted (option C, approved 2026-10-13); implemented · **Branch:** `fix/search-vector-leg-cap`
+**Date:** 2026-10-13 · **Status:** implemented as **option D** (§4a). Option C (§4) was approved and implemented first, then superseded the same day after the latency audit · **Branch:** `fix/search-vector-leg-cap`
 **Scope:** `hybrid_search`'s vector leg only. `related.py` and `connect.py` share the
 pattern and are listed as follow-ups (§8), not changed here.
 
@@ -60,9 +60,11 @@ documents, not 6.
 | A+B | Both | Inherits B's mechanism and A's measured harm. Rejected. |
 | **C** | **Exact scan.** Order by the score expression, which the index cannot serve | Recall 1.0 by construction. Every query gets its full 50 rows, filtered ones included. **Better than baseline on all three means** (§6). Costs latency (§5). |
 
-## 4. Decision
+## 4. Decision (first version, superseded by §4a)
 
-**C: make the vector leg an exact scan.** No per-doc cap, and no GUCs.
+**C: make the vector leg an exact scan.** No per-doc cap, and no GUCs. *Kept here as
+the reasoning of record. C is still the recall reference that §4a is measured
+against.*
 
 The query orders by `score DESC, c.id` (`score = 1 - (c.embedding <=> q)`). An HNSW
 index serves only `ORDER BY embedding <=> q`, so the planner cannot pick it, regardless
@@ -85,6 +87,58 @@ Why C over B, with B's latency advantage on the table:
 
 The HNSW index stays: `related.py` and `connect.py` still order by it.
 
+## 4a. Decision revised (2026-10-13, after the latency audit): D, an iterative HNSW scan
+
+**What changed.** The audit measured C under load and found its leg time over budget.
+`vector_ms` (added to `SearchDiagnostics` for this purpose) was then measured with the
+§5 procedure. No lull came within the 20-minute wait, so the conditions are recorded
+next to the numbers:
+
+| Measurement | Conditions | Leg p50 / p90 | Recall@50 vs exact (mean / min) | Eval means |
+|---|---|---|---|---|
+| Old (HNSW, pgvector defaults) | (earlier, unrecorded) | 3.7 ms median | 0.757 / 0.00 | 0.2589 / 0.3697 / 0.5852 |
+| C, exact scan (`vector_ms`, real code path) | 1-min loadavg 67–71, 10 pytest procs | **186.8 / 248.8 ms** | 1.0 (reference) | 0.2779 / 0.3826 / 0.7112 |
+| C, exact (interleaved with D, raw SQL) | loadavg 57 → 100 | 174.9 / 258.8 ms | 1.0 | — |
+| D at ef=100 / 200 / 400 (raw SQL) | same window | 19 / 25 / 26 ms p50; 39 / 42 / 69 ms p90 | 0.870 / 0.910 / **0.990**; min 0.00 / 0.00 / 0.90 | — |
+| **D at ef=1000** (raw SQL) | same window | **41.6 / 81.3 ms** | **0.9987 / 0.98** | — |
+| **D at ef=1000 (`vector_ms`, real code path)** | loadavg 82–96 (heavier than C's run), 7 pytest procs | **35.9 / 52.7 ms** | 0.9987 / 0.98 (§5 snippet, verbatim) | **0.2779 / 0.3826 / 0.7112** |
+
+C's leg p90 was over the 150 ms bar under the only conditions available. Cost grows
+linearly with chunk count, so there is no headroom on today's 21k chunks. The rule set
+for this decision was: above 150 ms, take the best-recall option that stays fast, keep
+recall ≥ 0.99 and keep the eval means ≥ C's. **D at ef=1000 meets all three.** Its eval
+means equal C's exactly: 0 of 31 queries differ on any metric, and 29 of 31 top-20 lists
+are identical (the other 2 differ only in order, at positions that do not change a
+metric). ef=400 also clears 0.99, but only just, with a 0.90 minimum; ef=1000 is
+pgvector's maximum.
+
+**D, precisely** (`brain/search_vector_leg.py`):
+- The leg's own `conn.transaction()` sets three settings locally with
+  `set_config(…, true)`: `hnsw.ef_search = 1000`, `hnsw.iterative_scan = relaxed_order`
+  and `enable_seqscan = off`. pgvector's iterative scan docs were checked via ctx7.
+- `enable_seqscan = off` is needed because a raised `ef_search` raises the index scan's
+  estimated cost, and the planner would otherwise sequential-scan.
+- The scan sits in a `MATERIALIZED` CTE, re-sorted outside by `dist + 0, id`.
+  `relaxed_order` may return rows slightly out of order, and the `+ 0` is pgvector's
+  documented Postgres 17+ pattern.
+- The floor stays in the NaN-safe form `(e <=> q) <= 1 - floor`.
+
+**How D answers the reasons C was chosen (§4):**
+1. *Correct by tuning, so it must be measured.* Recall is no longer correct by
+   construction. §5 therefore adds a read-only recall@50-vs-exact procedure with a 0.99
+   revisit trigger, so a degrading graph is detectable rather than silent. It was
+   undetectable for months before this change.
+2. *Filters stay complete.* The iterative scan keeps scanning until `limit` rows survive
+   the filters (bounded by `hnsw.max_scan_tuples`, default 20,000, about the whole
+   table). A test pins `ef_search` at 40 and proves a filtered pool still fills. Any plan
+   that does not use the index is exact.
+3. *No transaction side effects.* The prior values are read first and restored after the
+   query, because a released savepoint keeps local settings. On error, the rollback
+   reverts them. A NULL prior means pgvector has not loaded yet in the session (it is not
+   preloaded); `set_config(name, NULL, true)` then resets to the session default. Three
+   tests cover the autocommit path, a caller's own transaction with prior local values,
+   and a fresh session. Mutant M7 (no restore) is killed.
+
 ## 5. Risks
 
 - **Latency.** The vector-leg SQL goes from 3.7 ms to ~106 ms median (p90 ~120 ms). End
@@ -94,14 +148,18 @@ The HNSW index stays: `related.py` and `connect.py` still order by it.
   It is noticeable but acceptable for the UI's debounced search.
   **Measured after implementation** (§6.3): end to end it is **161 ms median /
   234 ms p90**, above the ~135 ms estimate; `sql_ms` is 113 ms median / 148 ms p90.
-- **Revisit trigger: `sql_ms` p90 above 250 ms over the 31 golden queries** (about 1.7×
-  today); see §7. No tool reports the vector leg's own time. `SearchDiagnostics.sql_ms`
-  accumulates the vector leg plus the FTS leg, the optional count and the doc-metadata
-  fetch, so it is a **conservative proxy**: it can only overstate the leg, and the trigger
-  fires early rather than late. (Before this change the non-vector part of `sql_ms` was
-  ~11 ms median.) Procedure, read-only, from a checkout with the prod `.env` loaded and the
-  local golden corpus present. It calls `hybrid_search` directly; it deliberately does
-  **not** use `brain search`, which writes a `search_queries` telemetry row:
+- **Revisit triggers (D).** (i) `SearchDiagnostics.vector_ms` p90 over the 31 golden
+  queries above **150 ms**, or (ii) mean recall@50 against the exact scan below **0.99**.
+  `vector_ms` times only the leg's candidate query. It was added for this; the earlier
+  `sql_ms` proxy, which included the FTS leg and the doc fetch, is retired. Both
+  procedures are read-only and run from a checkout with the prod `.env` loaded and the
+  local golden corpus present. Neither uses `brain search`, which writes a
+  `search_queries` telemetry row. **Record the conditions with every measurement**: the
+  1-minute load average before and after, and the number of concurrent test processes.
+  Measure at the quietest moment available.
+
+  *(i) Latency.* One warm-up pass, then 3 runs per query. Keep the per-query median; p90
+  is the 28th of the 31 sorted medians.
 
   ```python
   import os, statistics, psycopg, yaml
@@ -110,27 +168,55 @@ The HNSW index stays: `related.py` and `connect.py` still order by it.
   from brain.search import SearchDiagnostics, hybrid_search
   cfg = Config.load(); emb = make_embedder(cfg)
   qs = yaml.safe_load(open("tests/eval/golden_corpus.yaml"))["queries"]
-  per_query = []
+  def run(conn, q):
+      d = SearchDiagnostics()
+      hybrid_search(conn, embedder=emb, query=q["query"], limit=20,
+                    source_kind=q.get("source_filter"), tag=q.get("tag_filter"),
+                    since_days=q.get("since_days"), vector_sim_floor=cfg.vector_sim_floor,
+                    recency_halflife_days=cfg.recency_halflife_days,
+                    snippet_context_tokens=cfg.snippet_context_tokens, diagnostics=d)
+      return d
+  print("loadavg before", os.getloadavg())
   with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
       conn.execute("SET default_transaction_read_only = on")
       for q in qs:
-          runs = []
-          for _ in range(3):
-              d = SearchDiagnostics()
-              hybrid_search(conn, embedder=emb, query=q["query"], limit=20,
-                            source_kind=q.get("source_filter"), tag=q.get("tag_filter"),
-                            since_days=q.get("since_days"),
-                            vector_sim_floor=cfg.vector_sim_floor,
-                            recency_halflife_days=cfg.recency_halflife_days,
-                            snippet_context_tokens=cfg.snippet_context_tokens,
-                            diagnostics=d)
-              runs.append(d.sql_ms)
-          per_query.append(statistics.median(runs))
-  s = sorted(per_query)
-  print("sql_ms p90:", s[int(0.9 * len(s)) - 1])
+          run(conn, q)                                   # warm-up
+      med = [statistics.median(run(conn, q).vector_ms for _ in range(3)) for q in qs]
+  print("loadavg after", os.getloadavg())
+  s = sorted(med); print("vector_ms p50", s[15 - 1], "p90", s[28 - 1])
   ```
 
-  The p90 is the 28th of the 31 sorted per-query medians. Measured 2026-10-13: 147.5 ms.
+  *(ii) Recall.* Per golden query: D's chunk ids (from `run_vector_leg`) against the
+  exact top 50 for the same predicate and floor. The exact reference orders by the score
+  expression, which no HNSW index can serve. This is option C's SQL.
+
+  ```python
+  import os, statistics, psycopg, yaml
+  from brain.config import Config
+  from brain.embeddings import make_embedder
+  from brain.search_predicate import build_predicate
+  from brain.search_vector_leg import run_vector_leg
+  cfg = Config.load(); emb = make_embedder(cfg)
+  qs = yaml.safe_load(open("tests/eval/golden_corpus.yaml"))["queries"]
+  recalls = []
+  with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+      conn.execute("SET default_transaction_read_only = on")
+      for q in qs:
+          p = build_predicate(source_kind=q.get("source_filter"), tag=q.get("tag_filter"),
+                              since_days=q.get("since_days"))
+          v = emb.embed([q["query"]], input_type="query")[0]
+          d_rows, _ = run_vector_leg(conn, predicate=p, query_embedding=v,
+                                     vector_sim_floor=cfg.vector_sim_floor, limit=50)
+          fp = "(c.embedding <=> %s::vector) <= 1 - %s"
+          where = f"WHERE {p.where_sql} AND {fp}" if p.has_filters else f"WHERE {fp}"
+          exact = conn.execute(
+              f"SELECT c.id FROM chunks c {p.join_clause} {where} "
+              "ORDER BY 1 - (c.embedding <=> %s::vector) DESC, c.id LIMIT 50",
+              [*p.where_params, v, cfg.vector_sim_floor, v]).fetchall()
+          ex = {r[0] for r in exact}
+          recalls.append(len({r[0] for r in d_rows} & ex) / max(len(ex), 1))
+  print("recall@50 mean", statistics.mean(recalls), "min", min(recalls))
+  ```
 - **`fts_only` / `BRAIN_EMBEDDER=none`** skip the vector leg entirely, so they are
   unaffected.
 - **Metric movement is intended.** Ranking changes, so `ci.json` must be re-recorded on
@@ -232,7 +318,22 @@ baseline exactly (0.2589 / 0.3697 / 0.5852), so the document set had not moved.
    **0 of 9** judged-relevant docs. After, 20 results, top cosine **0.473**, **8 of 9**
    judged-relevant at ranks 5–15. The HNSW scan had missed the true nearest
    neighbours entirely.
-3. **Latency:** see §5.
+3. **Latency:** see §5 and §6.4.
+
+### 6.4 Latency gate (audit), real code path, 31 golden queries
+
+Measured with the §5 procedure (warm-up, then the median of 3 runs per query). No
+1-minute load average below 5 occurred in either 20-minute wait, so both runs happened
+under heavy contention from concurrent test suites. D's run had the *higher* load.
+
+| | Conditions (1-min loadavg before → after; pytest procs) | `vector_ms` p50 / p90 / max | `sql_ms` p50 / p90 | `total_ms` p50 / p90 |
+|---|---|---|---|---|
+| C, exact scan | 67.5 → 71.1; 10 | 186.8 / **248.8** / 470.7 | 206.3 / 265.2 | 483.5 / 689.9 |
+| **D, iterative HNSW, ef=1000** | 92.2 → 81.7; 7 | 35.9 / **52.7** / 103.5 | 43.8 / 60.1 | 127.8 / 229.6 |
+
+Gate: a vector-leg p90 of at most 150 ms. C fails at 248.8 ms; D passes at 52.7 ms under
+heavier load. Quiet-machine figures for D are expected to be lower still; re-measure
+with §5 and record the conditions.
 
 The plan for measuring the implementation (kept for reference):
 
@@ -245,14 +346,18 @@ The plan for measuring the implementation (kept for reference):
 
 ## 7. Revisit criteria (not in scope)
 
-If corpus growth pushes `sql_ms` p90 over the golden queries above 250 ms (the §5 proxy and
-procedure), take option B *with* a guard:
+D's two triggers (§5) answer different failures:
 
-- a `REINDEX` with higher `m` / `ef_construction`, as a prod write the user runs
-  deliberately;
-- save-and-restore GUC scoping;
-- a recall@50-vs-exact health check in `brain doctor`, so approximate recall can never
-  degrade silently again.
+- **Recall below 0.99** means the HNSW graph has degraded (with ingests), and ef_search
+  is already at its maximum. Remedies: a `REINDEX` with higher `m` / `ef_construction`,
+  as a prod write the user runs deliberately; or C's exact scan if the corpus is still
+  small enough for it.
+- **`vector_ms` p90 above 150 ms** means even D is too slow: lower ef_search with
+  measured recall, or partition the scan.
+- Not done here, and worth doing: wire the §5 recall check into `brain doctor`, so
+  approximate recall can never degrade silently again. *(Updated from the C-era text,
+  whose trigger was a `sql_ms` proxy and whose remedy was "take option B with a guard",
+  which is what §4a now is.)*
 
 ## 8. Follow-ups found during this investigation
 
@@ -273,18 +378,29 @@ procedure), take option B *with* a guard:
 
 - **New module `src/brain/search_vector_leg.py`** (under 800 lines): `vector_leg_sql()`
   builds the SQL and its params from the shared `SearchPredicate`, the floor and the
-  candidate limit. It carries the reasoning above in its docstring.
+  candidate limit; `run_vector_leg()` executes it under the scoped scan settings (§4a)
+  and returns the rows plus the leg's own elapsed time, which feeds
+  `SearchDiagnostics.vector_ms`. It carries the reasoning above in its docstring.
 - **`search.py` gets smaller**, not bigger: the inline `vec_sql` block is replaced by
-  one call. Per CLAUDE.md's ceiling rule, the `search.py` row's trailing descriptive hop
+  one call. `vector_ms` added 2 lines back; the file is still net below 826. Per CLAUDE.md's ceiling rule, the `search.py` row's trailing descriptive hop
   is promoted to `826 (f0abf64)`, a fresh descriptive hop is added for this change, and
   the module-docstring trail is updated to match.
 - **Tests (real Postgres, fake embedder):**
   - full-pool count under `enable_seqscan = off` (the 40-cap regression);
   - a filtered query returns every matching chunk above the floor (the starvation
     regression);
-  - ordering is exact and deterministic (`score DESC, id`);
-  - the floor and predicate are still applied;
-  - a SQL-shape guard that the leg never orders by the index operator.
-  - a zero-norm (NaN-cosine) chunk never enters the leg (added after review; mutant M5).
-  Each guard is mutation-proven by re-applying the old `ORDER BY` and confirming the
-  test fails.
+  - ordering is exact and deterministic (C: `score DESC, id`; D: inner index-shaped scan,
+    outer `dist + 0, id`);
+  - the floor and predicate are still applied, and the floor boundary is inclusive (the
+    k-th chunk exactly at `1 - floor`, verified equal in float8, is in; the (k+1)-th is out);
+  - a zero-norm (NaN-cosine) chunk never enters the leg (added after review);
+  - D only: with `ef_search` pinned at 40, a filtered pool still fills (iterative scan),
+    and the scan settings never leak (autocommit, inside a caller's transaction with prior
+    local values, and in a fresh session before pgvector loads);
+  - `vector_ms` is set by the leg, is ≤ `sql_ms`, and is `None` under `fts_only`.
+  Mutation harness for D: M1 pgvector defaults, M2 no tie-break, M3 floor neutralised,
+  M4 predicate dropped, M5 NaN-admitting floor, M6 strict `<`, M7 no restore, M9
+  iterative off. Each is killed by exactly its declared tests. An M8 (break the
+  NULL-prior fallback) survived as an *equivalent* mutant, because
+  `set_config(name, NULL, true)` already resets to the session default. The redundant
+  fallback was deleted rather than kept untestable.

@@ -20,11 +20,13 @@ count is not the one the baseline was recorded against, that is your answer.
 
 A document set that has only *grown* resolves every UUID but still moves rows:
 new documents compete for the top ranks against judgments that never saw them.
-*The 2026-10-13 re-record was this case, not recency drift (2) alone.* Ingests
-added 608 documents to the document set (Krisp on 2026-10-05, a Confluence
-import on 2026-10-08) and moved 12 non-recency rows as well; the means fell from
-0.4834 / 0.5835 / 0.7267 to **0.2589 / 0.3697 / 0.5852** (nDCG@5 / MRR /
-Recall@20). The golden judgments predate ~30% of the document set, so the
+*The first 2026-10-13 re-record (corpus growth) was this case, not recency
+drift (2) alone.* Ingests added 608 documents to the document set (Krisp on
+2026-10-05, a Confluence import on 2026-10-08) and moved 12 non-recency rows as
+well; the means fell from 0.4834 / 0.5835 / 0.7267 to 0.2589 / 0.3697 / 0.5852
+(nDCG@5 / MRR / Recall@20). Those are no longer the committed file's means: a
+second re-record the same day followed a ranking change, so for the current
+means see "Vector-leg candidate pool" under "Known retrieval issues" below. The golden judgments predate ~30% of the document set, so the
 absolute scores understate quality until `golden_corpus.yaml` is re-judged
 against the new documents.
 
@@ -74,11 +76,15 @@ dilute the mean; but a re-judged one silently changes what "correct" means.
   over the golden queries. That figure depends on the HNSW graph's quality, so
   it shifts with ingests and reindexes. On one query a few long new documents
   filled the whole pool, shrinking its results from 17 documents to 6. It is now
-  an exact scan (`brain/search_vector_leg.py`; design and measurements in
-  `docs/specs/2026-10-13-search-vector-leg-design.md`), which takes the HNSW
-  graph out of this path entirely. `ci.json` was re-recorded for that ranking
-  change: the means went from 0.2589 / 0.3697 / 0.5852 to **0.2779 / 0.3826 /
-  0.7112**, on the same document set and the same window as in (2). The same
+  an iterative HNSW scan with `ef_search = 1000` (recall@50 vs exact 0.9987,
+  measured the same day), scoped per query (`brain/search_vector_leg.py`; design
+  and measurements, including the exact-scan version it replaced, in
+  `docs/specs/2026-10-13-search-vector-leg-design.md`). Recall still depends
+  on the graph, so spec §5 has a read-only recall check with a 0.99 trigger.
+  `ci.json` was re-recorded for the ranking change (first for the exact scan,
+  then for the iterative scan, whose metrics are identical): the means went
+  from 0.2589 / 0.3697 / 0.5852 to **0.2779 / 0.3826 / 0.7112**, on the same
+  document set and the same window as in (2). The same
   HNSW shape remains in `related.py` and `connect.py`; those are unmeasured
   follow-ups.
 

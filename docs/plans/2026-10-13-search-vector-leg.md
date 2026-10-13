@@ -80,6 +80,16 @@ must not grow.
 | (c) floor honoured | M3 |
 | shape: no `<=>` in ORDER BY; tie-break present | M1, M2 |
 | zero-norm chunk excluded (review fix; NaN cosine) | M5 (the `1 - (e <=> q) >= floor` form), M3 |
+| floor boundary inclusive (audit #6) | M6 (strict `<`), M3 |
+| **D (audit, latency):** filtered pool fills with ef_search pinned at 40 | M9 (iterative off), M1, M4 |
+| **D:** scan settings never leak (caller txn, fresh session) | M7 (no restore) |
+
+**Amendment, 2026-10-13 (audit):** the latency gate measured C's `vector_ms` p90 at 248.8 ms
+(1-min loadavg 67–71), above 150 ms. Per the gate, the leg became option D: an iterative
+HNSW scan, `ef_search` 1000, `relaxed_order`, settings scoped and restored, with C's exact
+scan as the recall reference. See spec §4a. `SearchDiagnostics.vector_ms` was added so the
+trigger measures the leg itself. M8 (the NULL-prior fallback) was an equivalent mutant, and
+its redundant code was deleted.
 
 ## 4. Out of scope
 
