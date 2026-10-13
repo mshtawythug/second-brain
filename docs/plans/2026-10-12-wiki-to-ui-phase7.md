@@ -242,7 +242,9 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Review round 5 — tests | `932c10a` | `test_ui_security.py` (literal Origin; `bind_origin` spellings) |
 | Review round 5 — plan | `593022a` | this file: §10.9, §10.12 |
 | Review round 6 — code | `c21c52f` | `cli_ui.py` (`PHONE_LINE`), `ui/context.py` (lower-cased hostnames), `ui/server.py` (probe closes on setsockopt), `test_cli_ui.py`, `test_ui_security.py` |
-| Review round 6 — plan | **the commit that added this row** | this file: §10.9, §10.13 |
+| Review round 6 — plan | `af22825` | this file: §10.9, §10.13 |
+| Audit round 7 — code + docs | `ab560d4` | `ui/lan.py` (notice), `ui/context.py` (`ipv4_shorthand`, comment), `cli_ui.py` (refusal), guide, cli-reference, CHANGELOG, spec Q1, plan §3, tests |
+| Audit round 7 — plan | **the commit that added this row** | this file: §10.9, §10.14 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -421,9 +423,10 @@ again. Apply a mutation at the SHA named for its round.
 **Validated.** The script below checks every entry's `count` against `git show <SHA>:<file>`,
 and, since round 5, that every entry which no longer applies at HEAD is marked SUPERSEDED.
 Run from the repository root with `python` and the script on stdin. Result at `c282288` (round 3): **59/59, exit 0.** Result at `7363980` (round 4): 63/63, exit 0. At `593022a` (round 5, HEAD check added): 74/74, 16
-superseded and marked, exit 0. Result at the commit that added this sentence (round 6): **round 0
-22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9 — 83/83;
-17 entries superseded at HEAD, every one marked; exit 0.** The HEAD check earned its place on its
+superseded and marked, exit 0. At `af22825` (round 6): 83/83, 17 superseded and marked, exit 0. Result at the commit that added
+this sentence (round 7): **round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4,
+round 5 11/11, round 6 9/9, round 7 9/9 — 92/92; 18 entries superseded at HEAD, every one marked;
+exit 0.** The HEAD check again flagged the round's one casualty (R3-7) before it was marked. The HEAD check earned its place on its
 first run after round 6: it flagged L-13, which round 6 had made inapplicable, before it was marked.
 It checks the replaced TEXT only; an entry whose text still applies but whose red-at assertion moved
 carries a NOTE line instead (R4-4, L-6 panel).
@@ -1000,6 +1003,7 @@ R3-6 the probe socket uses the bind's family
   red at:  assert sock.family == socket.AF_INET6
 
 R3-7 the :: notice says IPv6-only
+  SUPERSEDED at HEAD by round 7 (the notice was reworded to name the token as the guard); its test still asserts "IPv6-only", so the equivalent mutation removes that clause from the new text
   file:    src/brain/ui/lan.py
   replace: '"is refused with 400 — and `::` is IPv6-only, so an IPv4 phone cannot even "\n    "connect. Use --lan'
   with:    '"is refused with 400. Use --lan'
@@ -1217,6 +1221,83 @@ R6-9 a setsockopt failure is reported as configure, not open
 
 ```
 
+**Round 7 — against `ab560d4`.**
+
+```text
+R7-1 the route target is not loopback
+  file:    src/brain/ui/lan.py
+  replace: '_ROUTE_TARGET = ("192.0.2.1", 9)'
+  with:    '_ROUTE_TARGET = ("127.0.0.1", 9)'
+  count:   1
+  test:    tests/test_ui_lan.py::test_the_route_target_is_a_documentation_address_off_the_lan
+  red at:  assert any(address in net for net in documentation)
+
+R7-2 the route target is not a LAN address
+  file:    src/brain/ui/lan.py
+  replace: '_ROUTE_TARGET = ("192.0.2.1", 9)'
+  with:    '_ROUTE_TARGET = ("192.168.1.1", 9)'
+  count:   1
+  test:    tests/test_ui_lan.py::test_the_route_target_is_a_documentation_address_off_the_lan
+  red at:  assert any(address in net for net in documentation)
+
+R7-3 the notice names the token as the guard
+  file:    src/brain/ui/lan.py
+  replace: '"network; the token is what keeps other clients out. Use --lan, or "'
+  with:    '"network. Use --lan, or "'
+  count:   1
+  test:    tests/test_ui_lan.py::test_the_wildcard_notice_says_the_token_is_the_guard
+  red at:  assert "token" in WILDCARD_NOTICE
+
+R7-4 the notice does not claim other devices are kept out
+  file:    src/brain/ui/lan.py
+  replace: '"a phone\'s browser cannot use this bind: a wildcard address accepts only "'
+  with:    '"other devices cannot use this bind: a wildcard address accepts only "'
+  count:   1
+  test:    tests/test_ui_lan.py::test_the_wildcard_notice_says_the_token_is_the_guard
+  red at:  assert "other devices cannot use this bind" not in WILDCARD_NOTICE
+
+R7-5 the guide says the token keeps other clients out
+  file:    docs/guides/brain-ui-on-your-phone.md
+  replace: 'wildcard, a LAN address, `--lan` — it is the token that keeps other clients out.'
+  with:    'wildcard, a LAN address, `--lan` — the bind decides who can connect.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_phone_guide_covers_the_q1_contract
+  red at:  phone guide is missing 'it is the token that keeps other clients out'
+
+R7-6 the CLI refuses an IPv4 shorthand
+  file:    src/brain/cli_ui.py
+  replace: '    if reading is not None:\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_non_canonical_ipv4_literal_is_refused
+  red at:  assert result.exit_code == 2
+
+R7-7 the shorthand check asks the IPv4 resolver
+  file:    src/brain/ui/context.py
+  replace: '            host, None, family=socket.AF_INET, flags=socket.AI_NUMERICHOST'
+  with:    '            host, None, family=socket.AF_INET6, flags=socket.AI_NUMERICHOST'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_non_canonical_ipv4_literal_is_refused
+  red at:  assert result.exit_code == 2
+
+R7-8 a hostname is not refused as a shorthand
+  file:    src/brain/ui/context.py
+  replace: '    except socket.gaierror:\n        return None\n'
+  with:    '    except socket.gaierror:\n        return host\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_numeric_looking_hostname_that_is_not_an_address_still_binds
+  red at:  assert result.exit_code == 0
+
+R7-9 the refusal names what the system reads
+  file:    src/brain/cli_ui.py
+  replace: 'f"it as {reading}); write the address out in full."'
+  with:    'f"it as something else); write the address out in full."'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_non_canonical_ipv4_literal_is_refused[0-0.0.0.0]
+  red at:  assert means in result.output
+
+```
+
 ### 10.10 Review round 3 (2026-10-13)
 
 The phase-7 review of `5402c8f`: one MEDIUM, four LOW. Fixed in `3994ea3` (deps) and `5627743`
@@ -1280,3 +1361,18 @@ The phase-7 review of `593022a`. Fixed in `c21c52f`.
 tree (§10.9). R6-5's first run reported red NOT at its target: a harness-needle error, not a guard
 gap — the needle used the wrong quote style. The failure was at exactly the targeted assertion
 (`assert "→ open browser" not in text`); the needle was corrected and the whole round re-run.
+
+### 10.14 Audit round 7 (2026-10-13)
+
+The audit's interim findings on `7363980`, still open at `af22825`; #1 (the vacuous wildcard
+test) was already closed by round 6. Fixed in `ab560d4`.
+
+| Item | Fix |
+|---|---|
+| 2 MEDIUM — `_ROUTE_TARGET` unpinned | a recording probe asserts the target `detect_lan_address` passes is in an RFC 5737 documentation range and is not loopback, link-local, unspecified or RFC 1918. `("127.0.0.1", 9)` and `("192.168.1.1", 9)` both go red (R7-1, R7-2). The F14 real-probe test is kept: it pins the OTHER half — that the probe reads the local end of the route — and needs a target unlike its answer, which `127.0.0.2` is |
+| 3 LOW — "reachable from this machine and from nowhere else" | false: the auditor measured a LAN client sending `Host: 127.0.0.1:<port>` plus the token getting 200. The Host allowlist is a browser DNS-rebinding defence; on every non-loopback bind the token is the guard. Corrected in `context.py`'s comment, the notice (which now says so — pinned, R7-3/R7-4), the guide (pinned, R7-5), cli-reference, the CHANGELOG, the spec's Q1 annotation and this plan's §3. `brain ui`'s other claims ("cannot serve a phone") were narrowed to the browser case they are true of |
+| 4 LOW — `--host 0` | refused (exit 2), with `127.1`, `0x7f.1` and `010.0.0.1`: `ipv4_shorthand` finds IPv4 literals that numeric-only `getaddrinfo` accepts and `ipaddress` does not, and the error names what the system would bind. Refusing beat canonicalising on evidence: platforms disagree on `010.0.0.1` (8.0.0.1 under `inet_aton`, 10.0.0.1 under macOS `getaddrinfo`), so no canonical form is safe to guess. A hostname is not refused (R7-8) |
+| `::0`, `0:0:0:0:0:0:0:0` | verified closed by round 5 and now pinned: canonicalised to `::`, notice printed, `http://[::1]:<port>/` printed |
+
+**Mutation evidence (round 7):** 9 guards, each on all five clauses, against `ab560d4` on a clean
+tree (§10.9).
