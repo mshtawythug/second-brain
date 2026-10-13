@@ -563,7 +563,6 @@ def test_write_endpoints_reject_get(tmp_path: Path, path: str) -> None:
         assert client.get(path).status_code == 405
 
 
-
 @pytest.mark.parametrize(
     ("host", "kind"),
     [("0.0.0.0", "wildcard"), ("::", "wildcard"), ("0:0::0", "wildcard"),
