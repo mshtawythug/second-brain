@@ -48,7 +48,7 @@ hits are vault *format*, not pointers at the wiki, and are excluded — `brain u
 | # | Surface | What it does today | Decision | Reason |
 |---|---|---|---|---|
 | 1 | **`brain-up`** (`src/brain/templates/bin/brain-up.sh:202-212`, banner `:215-221`) | Waits for the wiki, then **opens `http://localhost:8080` in a browser by default** (`BRAIN_OPEN_BROWSER` defaults to `1`); banner's first line is `wiki: <url>` | **REPOINT.** Opening the wiki becomes opt-in (`BRAIN_OPEN_BROWSER=1`); the banner leads with `read: brain ui` and labels the wiki line legacy | The single strongest daily-loop pointer: every `brain-up` puts the wiki in front of the user. `brain ui` is foreground-only by design (`ui/server.py` `serve` docstring), so `brain-up` cannot start it — it names it |
-| 2 | **`brain setup` final report** (`src/brain/setup.py:921-923`, next steps `:929-932`) | Prints `wiki url` + `start wiki: caddy run …`; the next steps never mention `brain ui` | **REPOINT.** Add `brain ui` to next steps; the wiki lines stay (still installed) but follow it | The first thing a new install reads. Wiki lines go with Q8/phase 9 |
+| 2 | **`brain setup` final report** (`src/brain/setup.py:921-923`, next steps `:929-932`) | Prints `wiki url` + `start wiki: caddy run …`; the next steps never mention `brain ui` | **REPOINT.** A `read: brain ui` line printed **ahead of** the wiki block; the wiki URL stays (still installed), labelled legacy. *(Review round 1, M-2: the first version added `brain ui` to the next steps, BELOW the wiki URL, while the module docstring claimed "ahead of" — corrected to the order the docstring states, and the test now asserts the order.)* | The first thing a new install reads. Wiki lines go with Q8/phase 9 |
 | 3 | **`brain capture` callback docstring** (`src/brain/_capture_command.py:68-69`) | "visible in the Quartz UI without the "Show ingested" toggle" | **REPOINT** to `brain ui`'s tree (which has the same toggle — `ui/static/js/tree.js:38-57`) | *Corrected during execution:* this row first said `brain capture --help` shows the sentence. It does not — `capture_app` passes `help=` to `typer.Typer`, which overrides the callback docstring (measured: `brain capture --help` contains no "Quartz"). It is still repointed, net zero, because it is the MCP description's twin (#4); the test pins the docstring and says why |
 | 4 | **MCP `brain_capture` description** (`src/brain/mcp_server.py:1652`) | Same sentence, shown to every MCP client | **REPOINT**, net-zero lines | Same; MCP descriptions are a listed candidate |
 | 5 | **README** (`README.md:14`, `:143-149`) | Lists the wiki beside `brain ui` as equals; documents `brain ui --host 0.0.0.0 --token <secret>` | **REPOINT + FIX.** `brain ui` named the reading surface, wiki "legacy, still builds"; the LAN recipe replaced (see §3 — the documented one **cannot serve a phone**) | |
@@ -95,8 +95,8 @@ allowlist and the origin both become that IP.
 
 Justification: (1) the obvious recipe silently fails (above); (2) finding the LAN IP by hand is
 the friction that would push the user back to the zero-config wiki; (3) a generated token keeps a
-weak or reused secret out of shell history. It adds one flag and one ~60-line module, no
-dependency.
+weak or reused secret out of shell history. It adds one flag and one small module
+(`wc -l src/brain/ui/lan.py` — re-derive, do not inherit a digit), no dependency.
 
 **Ruling Q1-b — warn on `--host 0.0.0.0` / `::`.** Not an error (it still serves the machine
 itself on `localhost`), but a startup notice naming `--lan` / `--host <LAN IP>`, so the trap is
@@ -129,7 +129,7 @@ surface in the daily loop sends them anywhere else**, and that the LAN replaceme
 | E1 | `brain-up` with default env does **not** open the wiki in a browser | `tests/test_bin_scripts.py` — stub `open`/`xdg-open`/`curl` on `PATH`, assert the opener log is empty |
 | E2 | `brain-up`'s banner names `brain ui` as the reading surface, ahead of the wiki line | same file, asserts on stdout order |
 | E3 | `BRAIN_OPEN_BROWSER=1` still opens the wiki (opt-in kept, nothing removed) | same file |
-| E4 | `brain setup`'s next steps name `brain ui` | `tests/test_setup.py`, through `_print_final_report` |
+| E4 | `brain setup`'s report names `brain ui` ahead of the legacy wiki URL | `tests/test_reading_surface_pointers.py`, through `_print_final_report` (asserts the order) |
 | E5 | The MCP `brain_capture` description (and its CLI docstring twin) name `brain ui`, not Quartz | `tests/test_reading_surface_pointers.py` (new) |
 | E6 | README / cli-reference / guide no longer present `--host 0.0.0.0 --token` as the remote recipe, and point at the phone guide | `tests/test_reading_surface_pointers.py` |
 | E7 | `brain ui --lan` binds a LAN address, always with a non-empty token, and prints `http://<ip>:<port>/#t=<token>`; `--lan --host` is exit 2 | `tests/test_cli_ui.py` |
@@ -157,16 +157,18 @@ One teammate can carry this; it is small and the files barely overlap. Order:
 ## 6. Ceiling (CLAUDE.md "File-size ceiling")
 
 - `src/brain/ui/lan.py` — new, well under 800.
-- `src/brain/cli_ui.py` — 214, stays under.
+- `src/brain/cli_ui.py` — 214 at `1a1d068` (`git show 1a1d068:src/brain/cli_ui.py | wc -l`);
+  stays under — re-derive with `wc -l src/brain/cli_ui.py`.
 - `src/brain/setup.py` — **listed** (trail 1,356 at `f8c76c0`, untouched since —
-  `git log --oneline f8c76c0..HEAD -- src/brain/setup.py` is empty). It grows by the `brain ui`
-  next-step line. Requires the inline comment at the growth site, a module-docstring pointer, and
+  `git log --oneline f8c76c0..1a1d068 -- src/brain/setup.py` is empty). It grows by the
+  `read: brain ui` line and its comment. Requires the inline comment at the growth site, a module-docstring pointer, and
   a new descriptive hop on its row.
 - `src/brain/mcp_server.py` — **listed**; the edit is net zero, but the promotion rule still
   applies on touch: promote its trailing descriptive hop to `4,938 (f0abf64)` (the merge; verified
   `git show "${s}:src/brain/mcp_server.py" | wc -l` = 4,938, and nothing after it touched the
   file), then add a descriptive hop for this change.
-- `_capture_command.py` (469) — not listed, net zero.
+- `_capture_command.py` — not listed (`git show 1a1d068:src/brain/_capture_command.py | wc -l`),
+  net zero.
 
 ## 7. Guards that must be proven able to fail (five clauses each: passes unmutated; the mutation
 lands, verified by diff; the guard goes red; red at the assertion it targets; one entry per claim)
@@ -176,8 +178,8 @@ lands, verified by diff; the guard goes red; red at the assertion it targets; on
 | M1 | E1 brain-up does not open the wiki | restore default `BRAIN_OPEN_BROWSER:-1` |
 | M2 | E2 banner leads with `brain ui` | delete the `read:` line |
 | M3 | E3 opt-in still opens | change the opt-in comparison to never match |
-| M4 | E4 setup next steps | delete the `brain ui` line |
-| M5 | E5 capture help | revert to the Quartz sentence |
+| M4 | E4 setup names `brain ui` | delete the `brain ui` line (round 1: move it below the wiki block) |
+| M5 | E5 capture docstring twin | revert to the Quartz sentence |
 | M6 | E5 MCP description | revert to the Quartz sentence |
 | M7 | E6 docs | reintroduce `--host 0.0.0.0 --token` in README |
 | M8 | E7 generated token | generate `""` |
@@ -199,6 +201,9 @@ lands, verified by diff; the guard goes red; red at the assertion it targets; on
 
 Worktree `.claude/worktrees/phase7`, own Python 3.11 venv. Test DB
 `postgresql://brain:brain@localhost:5434/second_brain_t_evalb` (sibling `…_evalc` if locked).
+Review round 1 ran in a second worktree, `.claude/worktrees/phase7-fix` (branch
+`fix/phase7-review-r1`), because another session was running the full suite inside the first, and
+used `second_brain_t_auditmeas`.
 Prod 55432 and the live vault are off-limits; CLI exercised only against `brain demo` (55433).
 No `DROP DATABASE`, no `compose down -v`, no launchd changes, no PII, no push.
 
@@ -206,13 +211,23 @@ No `DROP DATABASE`, no `compose down -v`, no launchd changes, no PII, no push.
 
 ### 10.1 What shipped
 
+SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-brain/master`
+`a4ab179` (2026-10-13). The pre-rebase SHAs this table first carried are not on the branch.
+
 | Task | Commit | Surfaces |
 |---|---|---|
-| Plan | `4b288e1` | this file |
-| 1 — `--lan`, wildcard notice, opened-URL fix | `05fb151` | `src/brain/ui/lan.py` (new), `cli_ui.py`, `ui/server.py` `browser_url` |
-| 2 — `brain-up` | `be6270c` | `templates/bin/brain-up.sh` |
-| 4 — docs | `5e07b6c` | README, `docs/cli-reference.md`, `docs/README.md`, `docs/vault-and-wiki.md`, `docs/guides/brain-ui-on-your-phone.md` (new) |
-| 3 — setup / capture / MCP text | `b862b79` | `setup.py`, `_capture_command.py`, `mcp_server.py`, CLAUDE.md ceiling rows |
+| Plan | `14a59be` | this file |
+| 1 — `--lan`, wildcard notice, opened-URL fix | `5742c91` | `src/brain/ui/lan.py` (new), `cli_ui.py`, `ui/server.py` `browser_url` |
+| 2 — `brain-up` | `01f18a2` | `templates/bin/brain-up.sh` |
+| 4 — docs | `ce124e2` | README, `docs/cli-reference.md`, `docs/README.md`, `docs/vault-and-wiki.md`, `docs/guides/brain-ui-on-your-phone.md` (new) |
+| 3 — setup / capture / MCP text | `2475d11` | `setup.py`, `_capture_command.py`, `mcp_server.py`, CLAUDE.md ceiling rows |
+| Closeout | `8768393` | this file, §10 |
+| Token ruling in the guide | `2572d83` | guide, §10.5, pointer test |
+| Stale test pointer | `e671288` | `cli_ui.py` docstring |
+| Import-purity test | `9baa2ba` | `tests/test_cli_ui.py`, `ui/__init__.py` comment |
+| Review round 1 — code | `8748b70` | `ui/context.py` (`WILDCARD_HOSTS`, `bind_origin`), `ui/server.py`, `ui/lan.py`, `cli_ui.py`, security/CLI/wiring/browser tests |
+| Review round 1 — setup, brain-up, guide | `4974f24` | `setup.py`, `brain-up.sh`, guide, CLAUDE.md, pointer + bin tests |
+| Review round 1 — docs | **the commit that added this row** | this file, the spec |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -230,8 +245,23 @@ both, is green at every commit.
   silently passed. Compared by name; reasoned inline in `cli_ui.py`; mutation M9 pins it.
 - **Row #3 was wrong** — corrected in place in §2: the capture sentence is a docstring that
   `--help` never shows.
+- **W1 (approved by team-lead 2026-10-13): `::` behaves exactly like `0.0.0.0`.**
+  `host_allowlist("::")` was `{"::"}` — a Host value no browser sends, since starlette keeps the
+  brackets on IPv6 literals — so a `--host ::` server refused every request, this machine's
+  included. All three wildcards (`brain.ui.context.WILDCARD_HOSTS`) now get exactly the loopback
+  allowlist; a test asserts EQUALITY with `0.0.0.0`'s, so the IPv6 wildcard can never accept more.
+- **W2 (approved 2026-10-13): one helper derives the URL and the Origin.**
+  `brain.ui.context.bind_origin` is the single source for the URL `brain ui` prints and opens
+  (`server.browser_url`) and the Origin the write guard expects (`build_context`'s
+  `allowed_origin`). A wildcard maps to its loopback literal. Before, a wildcard bind printed and
+  opened `http://0.0.0.0:<port>/` (400 here) and expected an Origin no browser sends, so it could
+  be read only by typing another URL, and never written. Security tests: the LAN Host is still
+  refused on every wildcard; a foreign Origin is still refused on writes; the derived loopback
+  Origin is accepted. `tests/test_ui_bind_wiring.py` proves `build_context` uses both helpers.
 
 ### 10.3 Verification (exit codes read from files)
+
+*Measured on the pre-rebase head `99957eb`. The verification of the audited head is in the review-loop report, not here: a line in this file cannot record a run on the commit that contains it.*
 
 - `ruff check` → 0; `mypy src/` → 0 (225 files).
 - Full default suite, `TEST_DATABASE_URL=…/second_brain_t_evalb`: **8,884 passed, 4 skipped,
@@ -248,9 +278,9 @@ both, is green at every commit.
 
 Harness: baseline green on all 27 targeted tests; each mutation applied exactly once and
 confirmed by `git diff --numstat`; targeted tests red; red at the named assertion; every file
-restored and the post-run green. **22/22 guards proven** (M1–M18 as §7, plus M4b setup legacy
-label, M7b cli-reference wildcard, M12 `browser_url`, M13 `serve`, M14/M14b the two allowlist
-pins, M15–M19 docs).
+restored and the post-run green. **22/22 guards proven**: M1–M11 as §7, plus M4b (setup legacy
+label), M7b (cli-reference wildcard), M12 (`browser_url`), M13 (`serve`), M14/M14b (the two
+allowlist pins) and M15–M19 (docs). The M-numbers are the harness's, not a contiguous range of §7.
 
 **One mutation was mis-scoped, not one guard.** M19 first removed a single `--read-only` from the
 guide and survived, because the guide says it twice and the guard is a presence check.
@@ -259,10 +289,13 @@ than smoothed over.
 
 ### 10.5 Known limits — recorded, not fixed
 
-- **The UI token lives in memory only** (`ui/static/js/api.js:12-16`). A phone that reloads, or a
-  bookmark taken after load, gets 403 until the full `#t=` URL is reopened. **Ruled 2026-10-13
-  (team-lead): it stays in memory only** — the safer default; a lost or lent phone keeps no
-  key. Not persisted to `sessionStorage`. The guide now states this as deliberate, not as a gap.
+- **The UI token lives in memory only** (`ui/static/js/api.js:12-16`). A phone that reloads gets
+  403 until the full `#t=` URL is reopened. **Ruled 2026-10-13 (team-lead): the PAGE keeps it in
+  memory only** — it is not persisted to `sessionStorage`. *(Review round 1, M-1: this entry and
+  the guide first said "a lost or lent phone keeps no key", while recommending a bookmark of the
+  URL that carries the token. Both are corrected: the page never persists the token, but a
+  bookmark or a history entry of the printed URL does, and browser sync copies it. The guide now
+  says to treat the URL as a password.)*
 - **No crash-survival draft buffer** (§1): a tab close mid-edit still loses unsaved text. A7's
   409 path is closed; this is a separate feature.
 - **`brain brief --wiki`** keeps its name (§2 #9); renaming it is launchd work for phase 8.
@@ -272,5 +305,34 @@ than smoothed over.
 ### 10.6 CLI surface changed (for the memory update, CLAUDE.md rule 11)
 
 `brain ui --lan` (new flag). `brain-up` no longer opens the wiki unless `BRAIN_OPEN_BROWSER=1`
-(default flipped from 1 to 0); its banner leads with `read: brain ui`. `brain setup`'s report
-leads its next steps with `brain ui`.
+(default flipped from 1 to 0); its banner leads with `read: brain ui`, and a pid not yet written
+reads "not written yet — check brain-status" instead of `?`. `brain setup`'s report prints
+`read: brain ui` ahead of the legacy wiki URL. A wildcard `--host` (`0.0.0.0`, `::`) now prints
+and opens a loopback URL and accepts writes from it (W1/W2).
+
+### 10.7 Review round 1 (2026-10-13)
+
+Findings M-1…M-4 and L-1…L-6 from the phase code review of `9baa2ba`, all fixed:
+
+| Finding | Fix |
+|---|---|
+| M-1 guide contradicts itself on the token | rewritten (§10.5); pins updated |
+| M-2 setup docstring claimed an order the report did not print | report reordered; test asserts the order |
+| M-3 stale pre-rebase SHAs | §10.1 re-pointed; no other stale SHA in src/tests/docs (`grep -rnE '4b288e1|05fb151|be6270c|5e07b6c|b862b79|99957eb'` hits only this plan's history notes) |
+| M-4 spec not updated | Q1 answered, R-4 mitigated, §11 phase-7 row EXITED (subject to the loop closing) |
+| L-1 notice false for `::` | reworded; W1 makes "loopback names only" true for every wildcard |
+| L-2 recipe regex | catches `--host ::`/`[::]`, spares `::1`; parametrized both ways |
+| L-3 token not percent-encoded | `quote(token, safe="")`; unit test + a browser test through the real `api.js` |
+| L-4 stale pid comment / bare `?` | comment rewritten; fallback names `brain-status`; test |
+| L-5 plan counts | every count SHA-bound or a command |
+| L-6 wildcard printed/opened URL 400s | W2; loopback URL printed and opened; test |
+
+**Mutation evidence (round 1):** 17 guards, each proven on all five clauses — W1 equality; W1
+LAN-Host refusal (a widening mutation); W2 loopback-Origin acceptance; W2 foreign-Origin refusal;
+`build_context` using `bind_origin` and `host_allowlist`; IPv6 bracketing; L-6 `browser_url` and
+panel; L-3 unit and browser; M-2 order; L-4 fallback; L-2 both directions; M-1 two pins.
+**One mutation was invalid, not one guard:** M-2's first mutation moved the `read:` line inside
+the `if wiki_installed:` block and raised `IndentationError` — red, but not at the assertion.
+Re-run moving it below the whole block: red at `assert _read_line(lines) < wiki[0]`
+(`assert 7 < 5`). L-1 is a wording fix and has no dedicated guard; the behaviour it describes is
+guarded by the W1 tests.
