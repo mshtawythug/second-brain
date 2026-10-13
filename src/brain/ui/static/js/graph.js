@@ -120,11 +120,12 @@ const GRAPH_LABEL = "Links around this note";
    the focus ring (graph.css, 3, so 1.5 outside `r`). Ink can reach the very
    TOP of its own box but not past it. A glyph taller than the rounded ascent
    grows the box: a label with Å in Verdana has a box that rises 10.205px
-   above its baseline, where a plain label's rises 10px, at 320px. Measured on accented and stacked-diacritic
-   labels (Å É Ö À, Ǻ Ấ Ǖ Ḗ Ṍ) at both faces and three widths, ink never rose
-   over its box. So the painted label reaches 0 + 1.5 above the box, and the
-   ring 1.5 below it at gap 0. At gap 3 the two touch, and 4 is the smallest
-   whole value that clears them (by 1.0, measured 2026-10-13; plan §8.6).
+   above its baseline, where a plain label's rises 10px, at 320px. Measured on
+   accented and stacked-diacritic labels (Å É Ö À, Ǻ Ấ Ǖ Ḗ Ṍ) at both faces
+   and three widths, ink never rose over its box. So the painted label reaches
+   0 + 1.5 above the box, and the ring 1.5 below it at gap 0. At gap 3 the two
+   touch, and 4 is the smallest whole value that clears them (by 1.0, measured
+   2026-10-13; plan §8.6).
    Pinned by test_a_neighbour_label_hangs_its_gap_below_its_own_circle, which
    checks the exact gap AND the ink-plus-halo clearance on an accented ring. */
 const LABEL_GAP = 4;
