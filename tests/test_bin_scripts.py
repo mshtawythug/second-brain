@@ -365,6 +365,86 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     assert "launchd" in result.stdout, result.stdout
 
 
+def _run_brain_up_for_reading(
+    stub_dir: Path,
+    vault_dir: Path,
+    hermetic_pids: HermeticPids,
+    *,
+    open_browser: str | None,
+) -> subprocess.CompletedProcess[str]:
+    """Run ``brain-up`` with a healthy build and stubbed ``curl`` / ``open``.
+
+    ``open_browser`` is the value of ``BRAIN_OPEN_BROWSER``; ``None`` UNSETS it,
+    which is the case that matters — the default is what the daily loop gets.
+    ``curl`` exits 0 so ``wait_for_url`` succeeds at once, and both openers log
+    instead of opening anything.
+    """
+    _seed_healthy_current(vault_dir)
+    for name in ("brain", "python", "curl", "open", "xdg-open"):
+        _write_stub(stub_dir, name)
+    env = _make_env(
+        stub_dir=stub_dir,
+        vault_dir=vault_dir,
+        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+    )
+    env.pop("BRAIN_OPEN_BROWSER")
+    if open_browser is not None:
+        env["BRAIN_OPEN_BROWSER"] = open_browser
+    return subprocess.run(  # noqa: S603 — list-form, no shell
+        [str(BIN / "brain-up")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+
+def test_brain_up_does_not_open_the_wiki_by_default(
+    stub_dir: Path, vault_dir: Path, hermetic_pids: HermeticPids
+) -> None:
+    """Phase 7 (R1, E1): the daily loop no longer puts the wiki in front of you.
+
+    Before R1 every ``brain-up`` waited for Caddy and opened the wiki. The wiki
+    still builds and serves — only the default browser-open is gone.
+    """
+    result = _run_brain_up_for_reading(
+        stub_dir, vault_dir, hermetic_pids, open_browser=None
+    )
+
+    assert result.returncode == 0, result.stderr
+    opened = _read_log(stub_dir / "open.calls") + _read_log(stub_dir / "xdg-open.calls")
+    assert opened == [], f"brain-up opened the wiki by default: {opened}"
+
+
+def test_brain_up_banner_names_brain_ui_before_the_wiki(
+    stub_dir: Path, vault_dir: Path, hermetic_pids: HermeticPids
+) -> None:
+    """E2: the banner tells you where to read, and the wiki line is demoted."""
+    result = _run_brain_up_for_reading(
+        stub_dir, vault_dir, hermetic_pids, open_browser=None
+    )
+
+    lines = result.stdout.splitlines()
+    read = [i for i, line in enumerate(lines) if line.strip().startswith("read:")]
+    wiki = [i for i, line in enumerate(lines) if line.strip().startswith("wiki")]
+    assert read and "brain ui" in lines[read[0]], result.stdout
+    assert wiki and read[0] < wiki[0], result.stdout
+    assert "legacy" in lines[wiki[0]], result.stdout
+
+
+def test_brain_up_still_opens_the_wiki_on_request(
+    stub_dir: Path, vault_dir: Path, hermetic_pids: HermeticPids
+) -> None:
+    """E3: demoted, not removed — ``BRAIN_OPEN_BROWSER=1`` keeps the old behaviour."""
+    result = _run_brain_up_for_reading(
+        stub_dir, vault_dir, hermetic_pids, open_browser="1"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _read_log(stub_dir / "open.calls") == ["http://localhost:8080"]
+
+
 def test_brain_up_aborts_when_cold_start_fails(
     stub_dir: Path,
     vault_dir: Path,

@@ -2,6 +2,12 @@
 # Start the second-brain wiki + sync watcher (blue/green serve edition).
 # Idempotent — safe to re-run.
 #
+# Reading surface (phase 7, R1 "Demoted", 2026-10-12): `brain ui` is where you
+# read. This script still builds and serves the wiki, but it no longer opens it
+# in a browser unless BRAIN_OPEN_BROWSER=1, and its banner names `brain ui`
+# first. `brain ui` is foreground-only by design (no daemon), so this script
+# names it rather than starting it.
+#
 # Architecture (post blue/green migration + 2026-05-08 launchd handoff):
 #   - Caddy serves <vault>/.quartz/current/ statically on :8080 + brain.test.
 #     This script does NOT spawn Quartz's --serve dev server anymore.
@@ -31,7 +37,7 @@
 # Env overrides:
 #   BRAIN_VAULT_PATH        (default: ~/brain-vault)
 #   BRAIN_WIKI_PORT         (default: 8080 — for the URL we curl/open)
-#   BRAIN_OPEN_BROWSER      (default: 1; set 0 to skip)
+#   BRAIN_OPEN_BROWSER      (default: 0; set 1 to open the wiki — opt-in since R1)
 #   BRAIN_NO_OVERLAY        (default: 0; set 1 to skip the overlay step)
 #   BRAIN_WIKI_KEEP_BUILDS  (default: 3 — old build dirs retained per swap)
 #   BRAIN_NO_BUILD_WATCHER  (default: 0; set 1 to skip launchd supervision —
@@ -187,7 +193,8 @@ apply_overlay
 cold_start_build
 ensure_supervised
 
-if [[ "${BRAIN_OPEN_BROWSER:-1}" == '1' ]]; then
+# Opt-in since phase 7 (R1): the daily loop no longer points at the wiki.
+if [[ "${BRAIN_OPEN_BROWSER:-0}" == '1' ]]; then
     if wait_for_url; then
         if command -v open >/dev/null 2>&1; then
             open "$URL"
@@ -213,7 +220,8 @@ SUPERVISOR='launchd (KeepAlive)'
 
 echo
 echo '🧠 brain is up:'
-echo "   wiki:       $URL  (also brain.test if Caddy is configured)"
+echo '   read:       brain ui   (search, read and edit — opens a browser)'
+echo "   wiki:       $URL  (legacy; still built until R2 — BRAIN_OPEN_BROWSER=1 opens it)"
 echo "   vault:      re-syncing on file changes (pid $WATCH_PID_VALUE)"
 echo "   build:      re-rendering on vault changes (pid $BUILD_PID_VALUE)"
 echo "   supervisor: $SUPERVISOR"
