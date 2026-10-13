@@ -227,7 +227,16 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Import-purity test | `9baa2ba` | `tests/test_cli_ui.py`, `ui/__init__.py` comment |
 | Review round 1 — code | `8748b70` | `ui/context.py` (`WILDCARD_HOSTS`, `bind_origin`), `ui/server.py`, `ui/lan.py`, `cli_ui.py`, security/CLI/wiring/browser tests |
 | Review round 1 — setup, brain-up, guide | `4974f24` | `setup.py`, `brain-up.sh`, guide, CLAUDE.md, pointer + bin tests |
-| Review round 1 — docs | **the commit that added this row** | this file, the spec |
+| Review round 1 — docs | `f48d858` | this file, the spec |
+| Audit round 2 — code | `2bf1f12` | `ui/server.py` (IPv6 probe), security/CLI tests |
+| Audit round 2 — docs | `afbc8f3` | `vault-and-wiki.md`, the spec (A7), CHANGELOG, CLAUDE.md, pointer test |
+| Audit round 2 — plan | `77074bb` | this file: §10.8, the §10.9 catalog |
+| Audit round 2 — §10.3 | `5402c8f` | this file |
+| Review round 3 — deps | `3994ea3` | `pyproject.toml` (starlette ≥ 1.7), pin test |
+| Review round 3 — UI | `5627743` | `ui/context.py` (`bind_address`), `ui/server.py` (`_probe_socket`), `ui/lan.py`, `cli_ui.py`, guide, CHANGELOG, CLI tests |
+| Review round 3 — plan | `c282288` | this file: §10.9 validator, §10.10 |
+| Audit round 4 — tests | `fd2f064` | `test_ui_lan.py`, `test_cli_ui.py`, `test_reading_surface_pointers.py`, CLAUDE.md hops |
+| Audit round 4 — plan | **the commit that added this row** | this file: §10.1, §10.3, §10.8 legend, §10.9, §10.11 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -265,9 +274,11 @@ both, is green at every commit.
 
 ### 10.3 Verification (exit codes read from files)
 
+*Each measurement is bound to the commit it ran on. The run on this branch's final head is in the review-loop report for that head: a line in this file cannot record a run on the commit that contains it, and every round so far has added a commit after its run.*
+
 *Two measurements, each bound to the commit it ran on. A line in this file cannot record a run on the commit that contains it, so the newest one is bound to the commit before the one that wrote it, and `git diff --stat 77074bb..<this commit>` shows only this file.*
 
-**On `77074bb` (audit round 2, the last code-bearing commit), 2026-10-13:** `ruff check` → 0; `mypy src/` (mypy 2.4.0) → 0, 225 files; full default suite on `second_brain_t_p7b` → **8,923 passed, 4 skipped, 306 deselected, 94.54% coverage**, exit 0; CI's browser command → **197 passed**, exit 0; `tests/test_ci_workflow.py` → 22 passed. End to end on the `brain demo` sandbox: `--lan` (200 with the token, 403 without, 400 for a foreign Host); `--host ::` binds, prints the notice and `http://[::1]:<port>/#t=…`, serves `[::1]` (200), refuses a foreign Host (400) and passes the write guard with the loopback Origin; `--host 0.0.0.0` prints a `127.0.0.1` URL, 400 from the LAN address, write guard accepts the loopback Origin and refuses a foreign one (403).
+**On `77074bb` (audit round 2's plan commit — plan-only; its last code-bearing ancestor is `afbc8f3`, and `git diff --stat afbc8f3..77074bb` touches only this file), 2026-10-13:** `ruff check` → 0; `mypy src/` (mypy 2.4.0) → 0, 225 files; full default suite on `second_brain_t_p7b` → **8,923 passed, 4 skipped, 306 deselected, 94.54% coverage**, exit 0; CI's browser command → **197 passed**, exit 0; `tests/test_ci_workflow.py` → 22 passed. End to end on the `brain demo` sandbox: `--lan` (200 with the token, 403 without, 400 for a foreign Host); `--host ::` binds, prints the notice and `http://[::1]:<port>/#t=…`, serves `[::1]` (200), refuses a foreign Host (400) and passes the write guard with the loopback Origin; `--host 0.0.0.0` prints a `127.0.0.1` URL, 400 from the LAN address, write guard accepts the loopback Origin and refuses a foreign one (403).
 
 **On the pre-rebase head `99957eb` (the first closeout):**
 
@@ -368,6 +379,26 @@ The phase-7 audit of `9baa2ba` (AUDIT FAILED). Items already closed by round 1 w
 | L-12 unbracketed IPv6 from `browser_url` | **verified closed** by W2 at `f48d858`; a dedicated `::1` test added |
 | L-13 Phone line unpinned on loopback (A30) | **fixed** — absent on loopback, present on `--lan` |
 
+**A-numbers and F-numbers** are the auditor's mutation and finding IDs, not this plan's; they are
+defined here so the rows above can be read without the audit report. Each names the mutation that
+SURVIVED before the fix, and the catalog entry (§10.9) that now kills it:
+
+| ID | Surviving mutation | Killed by |
+|---|---|---|
+| A20 | the panel drops the token on loopback (`cli_ui.py`, `browser_url(..., "" if loopback else token)`) | M-2/A20 |
+| A21 | `serve` opens the URL without the token on loopback | M-2/A21 |
+| A24 | the `BRAIN_OPEN_BROWSER` table row states default `1` | M-4/A24 |
+| A26 | the `--lan` failure path loses its `secho` (exit 1, no message) | M-3/A26 |
+| A27 | the `--lan` failure path loses its `try`/`except` (a traceback) | M-3/A27 |
+| A30 | the Phone line prints on every bind | L-13 |
+| F8 | the wildcard check narrowed to `== "0.0.0.0"` | R4-4 |
+| F14 | the probe returns its target instead of `getsockname()` | R4-1 |
+| F16 | README's intro reverted to listing the wiki as an equal reader | R4-2, R4-3 |
+
+`A18` was cited in the round-4 brief as referenced here; it is not — `git grep -n A18` and
+`git show 5402c8f:<this file> | grep A18` both return nothing — so there is nothing to define or
+remove.
+
 **Mutation evidence (round 2):** 13 guards, each proven on all five clauses, run against
 `afbc8f3` on a clean tree (§10.9). None was mis-scoped.
 
@@ -382,10 +413,11 @@ tests go red; the failure contains the "red at" text; the file is restored and t
 again. Apply a mutation at the SHA named for its round.
 
 **Validated.** The script below checks every entry's `count` against `git show <SHA>:<file>`.
-Run from the repository root with `python` and the script on stdin. Result at the commit that
-added this sentence: **round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7 — 59/59, exit 0.**
+Run from the repository root with `python` and the script on stdin. Result at `c282288` (round 3): **59/59, exit 0.** Result at the commit that added this sentence
+(round 4): **round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4 — 63/63, exit 0.**
 *(Review round 3, item 5: M19 was an annotation, not exact text, so it matched 0 times; it is
-now `'--read-only'` with count 2.)*
+now `'--read-only'` with count 2 — re-verified in round 4.)* Entries marked SUPERSEDED still validate at their
+round's SHA, which is what the script checks; at HEAD their text or test has moved, for the reason given.
 
 ```python
 """Validate plan §10.9: each mutation's `replace` text occurs `count` times at its round's SHA."""
@@ -462,6 +494,7 @@ M3 brain-up opt-in still opens
   red at:  open.calls
 
 M4 setup next steps name brain ui
+  SUPERSEDED at HEAD by round 1 (M-2): the next-step line it deletes was replaced by a `read:` line, and its test renamed; use round 1's "M-2 setup names brain ui before the wiki"
   file:    src/brain/setup.py
   replace: '    typer.echo("     brain ui                       # read, search and edit in a browser")\n'
   with:    ''
@@ -470,6 +503,7 @@ M4 setup next steps name brain ui
   red at:  assert "brain ui" in steps
 
 M4b setup wiki url labelled legacy
+  SUPERSEDED at HEAD by round 1 (M-2): its test was renamed to test_setup_report_names_brain_ui_before_the_legacy_wiki_url
   file:    src/brain/setup.py
   replace: '  (legacy — read in brain ui)'
   with:    ''
@@ -574,6 +608,7 @@ M10 lan.py refuses loopback/unspecified
   red at:  DID NOT RAISE
 
 M11 wildcard notice
+  SUPERSEDED at HEAD by round 1 (`ALL_INTERFACES` moved to `context.WILDCARD_HOSTS`) and round 4 (R4-4)
   file:    src/brain/cli_ui.py
   replace: 'if host.strip().lower() in lan_mod.ALL_INTERFACES:'
   with:    'if False:'
@@ -582,6 +617,7 @@ M11 wildcard notice
   red at:  assert "--lan" in result.output
 
 M12 browser_url carries the token
+  SUPERSEDED at HEAD by round 1 (`bind_origin`, percent-encoding); use round 1's L-6 and L-3 entries
   file:    src/brain/ui/server.py
   replace: 'return f"{url}#t={token}" if token else url'
   with:    'return url'
@@ -598,6 +634,7 @@ M13 serve opens the tokened url
   red at:  assert opened ==
 
 M14 wildcard bind refuses a phone Host
+  SUPERSEDED at HEAD by round 1 (W1 rewrote host_allowlist); use round 1's W1 entries
   file:    src/brain/ui/context.py
   replace: 'if host in LOOPBACK_HOSTS or host == "0.0.0.0":  # noqa: S104 — compared, not bound\n        return LOOPBACK_HOSTS'
   with:    'if host in LOOPBACK_HOSTS:\n        return LOOPBACK_HOSTS\n    if host in ("0.0.0.0", "::"):\n        return frozenset({"*"})'
@@ -700,6 +737,7 @@ L-3 token percent-encoded (unit)
   red at:  assert url ==
 
 L-3 token reaches api.js intact (browser)
+  pytest:  run with `-m browser` — the module is browser-marked and deselected by default
   file:    src/brain/ui/server.py
   replace: "quote(token, safe='')"
   with:    'token'
@@ -927,6 +965,43 @@ R3-7 the :: notice says IPv6-only
 
 ```
 
+**Round 4 — against `fd2f064`.**
+
+```text
+R4-1 F14 the probe returns the LOCAL end, not the target
+  file:    src/brain/ui/lan.py
+  replace: '        return str(sock.getsockname()[0])\n'
+  with:    '        return str(target[0])\n'
+  count:   1
+  test:    tests/test_ui_lan.py::test_the_real_probe_reads_the_local_end_of_a_route
+  red at:  assert udp_route_probe(("127.0.0.2", 9)) ==
+
+R4-2 F16 README intro does not list the wiki as an equal
+  file:    README.md
+  replace: 'You read it through the CLI or the [local web UI](#local-web-ui); the older [rendered wiki](docs/vault-and-wiki.md) still builds, as a legacy view.'
+  with:    'You get the same corpus through the CLI, a [local web UI](#local-web-ui), or a [rendered wiki](docs/vault-and-wiki.md).'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_readme_intro_names_the_wiki_legacy_not_an_equal_reader
+  red at:  README's intro lists the wiki as an equal reading surface again
+
+R4-3 F16 README intro calls the wiki legacy
+  file:    README.md
+  replace: 'the older [rendered wiki](docs/vault-and-wiki.md) still builds, as a legacy view.'
+  with:    'the [rendered wiki](docs/vault-and-wiki.md) still builds.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_readme_intro_names_the_wiki_legacy_not_an_equal_reader
+  red at:  README's intro must call the rendered wiki legacy
+
+R4-4 F8 the notice fires on every wildcard
+  file:    src/brain/cli_ui.py
+  replace: '    if host.strip().lower() in WILDCARD_HOSTS:\n'
+  with:    '    if host.strip().lower() == "0.0.0.0":\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_wildcard_bind_warns_that_other_devices_are_refused
+  red at:  assert "--lan" in result.output
+
+```
+
 ### 10.10 Review round 3 (2026-10-13)
 
 The phase-7 review of `5402c8f`: one MEDIUM, four LOW. Fixed in `3994ea3` (deps) and `5627743`
@@ -942,3 +1017,19 @@ The phase-7 review of `5402c8f`: one MEDIUM, four LOW. Fixed in `3994ea3` (deps)
 
 **Mutation evidence (round 3):** 7 guards, each on all five clauses, against `5627743` on a clean
 tree (§10.9).
+
+### 10.11 Audit round 4 (2026-10-13)
+
+The phase-7 audit of `5402c8f`: every prior finding closed; these were new. Fixed in `fd2f064`
+(tests, CLAUDE.md) and the commit that added this section (plan).
+
+| Item | Fix |
+|---|---|
+| 1 MEDIUM F14 — real probe aimed at its own answer | aimed at `127.0.0.2`, expects `127.0.0.1` (measured on macOS; 127.1.2.3 likewise) |
+| 2 MEDIUM F16 — README intro unpinned, falsifying the spec's "pinned by a test" | pinned both ways: no "or a [rendered wiki]", and "legacy" beside it |
+| 3 LOW F8 — wildcard notice tested on `0.0.0.0` only | parametrized over `0.0.0.0`, `::`, `[::]` |
+| 4 LOW — CLAUDE.md setup.py row one hop short | 1,363 (`2475d11`) → 1,364 (`4974f24`) promoted; mcp_server.py's hop promoted to 4,938 (`2475d11`); nothing later touches either |
+| 5 LOW — plan records | §10.1 promoted (`f48d858`) and completed; §10.3's `77074bb` labelled plan-only; §10.8 already bound per measurement (fixed in round 3) and now carries the A/F-number legend; the L-3 browser entry notes `-m browser`; M19 verified exact; `A18` absent (legend note); superseded entries marked; validator re-run, 63/63 |
+
+**Mutation evidence (round 4):** 4 guards, each on all five clauses, against `fd2f064` on a clean
+tree (§10.9). R4-4 goes red on exactly the two IPv6 parametrizations, `0.0.0.0` staying green.
