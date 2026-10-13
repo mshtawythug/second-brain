@@ -222,9 +222,10 @@ def literal_addresses(host: str) -> Resolved:
 def classify_addresses(addresses: Resolved) -> str:
     """``"wildcard"``, ``"loopback"`` or ``"other"`` for a set of bound addresses.
 
-    uvicorn binds EVERY address a host resolves to, so ANY unspecified address
-    makes the bind a wildcard, and it is loopback only if ALL are loopback
-    (review round 10). No addresses — an unresolved name — is "other".
+    ``server.claim_port`` binds EVERY address a host resolves to, so ANY
+    unspecified address makes the bind a wildcard, and it is loopback only if
+    ALL are loopback (review round 10). No addresses — an unresolved name — is
+    "other".
     """
     if not addresses:
         return "other"

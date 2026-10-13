@@ -55,6 +55,10 @@ SocketFactory = Callable[[int, int], socket.socket]
 #: The listen backlog — uvicorn's own default.
 _BACKLOG = 2048
 
+#: The highest TCP port. ``bind`` raises ``OverflowError`` past it, which is not
+#: an ``OSError`` (review round 12).
+_MAX_PORT = 65535
+
 
 def _listen_socket(
     address: str, socket_factory: SocketFactory = socket.socket
@@ -157,6 +161,12 @@ def _open_listener(
         if exc.errno == errno.EADDRINUSE:
             raise _PortBusy from exc
         raise _bind_failure(host, port, exc) from exc
+    except BaseException:
+        # Not an OSError, but the socket exists all the same: ``bind`` raises
+        # OverflowError for a port outside 0–65535 (review round 12), and an
+        # interrupt can land here too. Closed, then re-raised unchanged.
+        sock.close()
+        raise
     return sock
 
 
@@ -220,11 +230,16 @@ def claim_port(
     are passed to :func:`serve` and bound to exactly what was classified.
     ``addresses`` defaults to ``host`` itself when it is an IP literal.
     """
+    if not 1 <= start <= _MAX_PORT:
+        # Port 0 asks the kernel for an ephemeral port, which it would pick
+        # PER ADDRESS — a different one on each socket (review round 12).
+        raise BrainError(f"--port {start} is not a usable port; pass 1 to {_MAX_PORT}.")
     targets = addresses if addresses is not None else literal_addresses(host)
     if not targets:
         raise BrainError(f"--host {host} has no address to bind; resolve it first.")
-    candidates = range(start, start + attempts) if auto else range(start, start + 1)
-    for candidate in candidates:
+    # Auto-port stops at the last port rather than walking into OverflowError.
+    stop = min(start + attempts, _MAX_PORT + 1) if auto else start + 1
+    for candidate in range(start, stop):
         try:
             return candidate, bind_listeners(
                 host, candidate, addresses=targets, socket_factory=socket_factory
@@ -238,7 +253,7 @@ def claim_port(
             f"  or drop --no-auto-port to auto-select the next free one."
         )
     raise BrainError(
-        f"no free port found in {start}..{start + attempts - 1}; "
+        f"no free port found in {start}..{stop - 1}; "
         "pass --port with a free one"
     )
 
@@ -414,8 +429,8 @@ def serve(
     exactly those and never resolves or binds ``host`` itself. ``host`` and
     ``port`` stay in uvicorn's config only for its own messages. A bind error
     is therefore raised by OUR code, with our messages; the handler that used
-    to catch EADDRINUSE here was unreachable, because uvicorn >= 0.52 catches a
-    bind OSError itself and exits 3.
+    to catch EADDRINUSE here was unreachable, because uvicorn catches a bind
+    OSError itself and exits 3.
 
     Foreground-only by design: no PID file, no launchd plist. Daemonizing a
     *write-capable* HTTP server that could outlive the user's attention is a bad
@@ -473,6 +488,10 @@ def _run(
         original_startup = server.startup
 
         async def startup_then_open(*args: Any, **kwargs: Any) -> None:
+            # Forward EVERYTHING: uvicorn passes ``sockets=`` here, and a
+            # startup without it binds config.host:port itself — the
+            # resolve-again bind round 11 removed, back on the default --open
+            # path (review round 12, measured against uvicorn 0.54).
             await original_startup(*args, **kwargs)
             (opener or webbrowser.open)(url)
 

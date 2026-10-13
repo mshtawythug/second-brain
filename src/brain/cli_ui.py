@@ -124,7 +124,11 @@ def _describe_db(database_url: str) -> str:
 @ui_app.callback()
 def ui(
     ctx: typer.Context,
-    port: int = typer.Option(8765, "--port", help="Port to bind."),
+    # 1 to 65535 (review round 12): bind raised a raw OverflowError past the
+    # top, and 0 bound a different ephemeral port on each address.
+    port: int = typer.Option(
+        8765, "--port", min=1, max=65535, help="Port to bind (1 to 65535)."
+    ),
     host: str = typer.Option("127.0.0.1", "--host", help="Bind address."),
     open_browser: bool = typer.Option(
         True, "--open/--no-open", help="Open a browser on start."
@@ -166,7 +170,7 @@ def ui(
     from .ui.context import HostRefused, address_class, validate_host
     from .ui.server import claim_port
 
-    # Once, here: every consumer below — the probe, the bind, the allowlist,
+    # Once, here: every consumer below — the bind, the allowlist,
     # the URL — gets the canonical bare address (bind_origin re-brackets it
     # for URLs), and every refused spelling becomes a usage error. The rules
     # live in ONE function, context.validate_host (review round 9).
@@ -232,7 +236,8 @@ def ui(
 
     # Round 11: bound HERE, to exactly the addresses classified above, and
     # handed to uvicorn as live sockets — it never resolves `host` again, and
-    # the port cannot be taken between a probe and the real bind.
+    # with no separate probe there is no window for another process to take
+    # the port before it is served.
     try:
         resolved_port, sockets = claim_port(
             port, host=host, auto=auto_port, addresses=resolved

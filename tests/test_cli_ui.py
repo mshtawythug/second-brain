@@ -28,7 +28,7 @@ from brain.cli_ui import PHONE_LINE
 from brain.ui.context import UiContext
 from brain.ui.lan import WILDCARD_NOTICE
 from brain.ui.security import is_loopback
-from brain.ui.server import DEFAULT_PORT, serve
+from brain.ui.server import DEFAULT_PORT, claim_port, serve
 from tests.ui_cli_support import (
     LAN_IP,
     Started,
@@ -367,21 +367,30 @@ def test_browser_url_percent_encodes_the_token() -> None:
 class _Server:
     """uvicorn's ``Server``, replaced: ``run`` performs the startup hook and
     returns, so nothing serves. Records the sockets it was handed, and whether
-    each was still open when it ran."""
+    each was still open when it ran.
+
+    It calls ``startup(sockets=sockets)`` exactly as uvicorn's ``_serve`` does
+    (review round 12). It used to call ``startup()`` with nothing, so a
+    ``startup_then_open`` that dropped its arguments passed every test while
+    real uvicorn, handed no sockets, bound ``config.host:port`` for itself.
+    ``tests/test_cli_ui.py::test_real_uvicorn_serves_only_the_claimed_socket``
+    checks the same thing against uvicorn itself, so this double cannot drift
+    from it again unnoticed."""
 
     runs: list[list[socket.socket]] = []
+    started: list[list[socket.socket] | None] = []
 
     def __init__(self, config: object) -> None:
         self.config = config
 
-    async def startup(self, *args: object, **kwargs: object) -> None:
-        return None
+    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+        _Server.started.append(sockets)
 
     def run(self, sockets: list[socket.socket] | None = None) -> None:
         assert sockets is not None, "serve() let uvicorn bind for itself"
         assert all(sock.fileno() != -1 for sock in sockets), "a socket closed early"
         _Server.runs.append(sockets)
-        asyncio.run(self.startup())
+        asyncio.run(self.startup(sockets=sockets))
 
 
 def _ui_context(origin: str, host: str) -> UiContext:
@@ -407,18 +416,64 @@ def fake_uvicorn(monkeypatch: pytest.MonkeyPatch) -> type[_Server]:
     import uvicorn
 
     monkeypatch.setattr(_Server, "runs", [])
+    monkeypatch.setattr(_Server, "started", [])
     monkeypatch.setattr(uvicorn, "Server", _Server)
     return _Server
 
 
 @pytest.mark.parametrize("bind", ["127.0.0.1", LAN_IP])
 def test_serve_opens_the_tokened_url(fake_uvicorn: type[_Server], bind: str) -> None:
-    """``serve`` must hand the opener the same URL the panel prints."""
+    """``serve`` must hand the opener the same URL the panel prints — and, on
+    this default ``--open`` path, its startup wrapper must pass the claimed
+    sockets through to uvicorn's startup (review round 12)."""
     opened: list[str] = []
     context = _ui_context(f"http://{bind}:8765", bind)
-    serve(context, host=bind, port=8765, sockets=[], open_browser=True, opener=opened.append)
+    with socket.socket() as sock:
+        serve(
+            context, host=bind, port=8765, sockets=[sock],
+            open_browser=True, opener=opened.append,
+        )
 
-    assert opened == [f"http://{bind}:8765/#t=s3cret"]
+        assert opened == [f"http://{bind}:8765/#t=s3cret"]
+        (handed,) = fake_uvicorn.started
+        assert handed is not None, "startup ran without the claimed sockets"
+        assert handed == [sock] and handed[0] is sock
+
+
+def test_real_uvicorn_serves_only_the_claimed_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review round 12, against uvicorn itself rather than a double: with the
+    browser opening (the default), the server listens on the claimed socket and
+    nothing else. Dropping ``sockets=`` in the startup wrapper made uvicorn bind
+    ``config.host:port`` on its own as well — measured on 0.54 — so the config
+    port here is 0: that stray bind, if it ever comes back, shows up as a
+    second listener instead of colliding with the claimed port.
+
+    The server is real; the subclass only records what it listens on and asks
+    it to stop once started."""
+    import uvicorn
+
+    listening: list[list[tuple[str, int]]] = []
+
+    class _StopOnceStarted(uvicorn.Server):
+        async def startup(self, sockets: list[socket.socket] | None = None) -> None:
+            await super().startup(sockets=sockets)
+            listening.append(sorted(
+                sock.getsockname()[:2] for server in self.servers for sock in server.sockets
+            ))
+            self.should_exit = True
+
+    monkeypatch.setattr(uvicorn, "Server", _StopOnceStarted)
+    port, sockets = claim_port(DEFAULT_PORT + 4500, auto=True)
+    opened: list[str] = []
+    context = _ui_context(f"http://127.0.0.1:{port}", "127.0.0.1")
+    serve(
+        context, host="127.0.0.1", port=0, sockets=sockets,
+        open_browser=True, opener=opened.append,
+    )
+
+    assert listening == [[("127.0.0.1", port)]], "uvicorn listened beyond the claimed socket"
+    assert opened == [f"http://127.0.0.1:{port}/#t=s3cret"]
+    assert all(sock.fileno() == -1 for sock in sockets)
 
 
 def test_serve_runs_uvicorn_on_the_sockets_it_was_given_and_closes_them(

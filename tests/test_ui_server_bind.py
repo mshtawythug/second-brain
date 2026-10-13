@@ -22,7 +22,7 @@ import pytest
 import typer
 
 from brain.errors import BrainError
-from brain.ui.server import DEFAULT_PORT, _listen_socket, claim_port
+from brain.ui.server import DEFAULT_PORT, _listen_socket, _open_listener, claim_port
 from brain.ui.server import resolve_bind_addresses as _REAL_RESOLVE
 from tests.ui_cli_support import (
     Started,
@@ -187,6 +187,9 @@ class _RecordingSocket:
         self.options.append((level, option, value))
 
     def bind(self, address: tuple[str, int]) -> None:
+        if not 0 <= address[1] <= 65535:
+            # What a real socket raises — an OverflowError, not an OSError.
+            raise OverflowError("bind(): port must be 0-65535.")
         if address[0] in self.refuse:
             raise self.refuse[address[0]]
         self.bound = address
@@ -421,3 +424,61 @@ def test_the_cli_closes_its_sockets_when_startup_fails(
     assert result.exit_code == 1, result.output
     assert claimed, "the real claim_port never ran"
     assert all(sock.fileno() == -1 for sock in claimed), "the CLI leaked its socket"
+
+
+# --------------------------------------------------------------------------
+# Review round 12 — the port range
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("port", ["70000", "65536", "-1", "0"])
+def test_a_port_outside_1_to_65535_is_a_usage_error(
+    app: typer.Typer, started: Started, port: str
+) -> None:
+    """``bind`` raised a raw OverflowError past 65535, and 0 asked the kernel
+    for an ephemeral port — a DIFFERENT one on each address — while the panel
+    printed ``:0``. Refused before anything binds."""
+    result = runner.invoke(app, ["ui", "--port", port, "--no-open"])
+    assert result.exit_code == 2, result.output
+    assert "--port" in result.output, result.output
+    assert started.context_kwargs == {}
+
+
+@pytest.mark.parametrize("port", [0, 65536, 70000])
+def test_claim_port_refuses_a_port_outside_the_range(port: int) -> None:
+    factory = _Factory()
+    with pytest.raises(BrainError, match="is not a usable port"):
+        claim_port(port, socket_factory=factory)  # type: ignore[arg-type]
+    assert factory.made == [], "a socket was opened for an impossible port"
+
+
+def test_auto_port_stops_at_65535_with_a_message() -> None:
+    """Walking up from 65530 used to reach 65536 and raise OverflowError."""
+
+    class _AllBusy(_Factory):
+        def __call__(self, family: int, kind: int) -> _RecordingSocket:
+            sock = super().__call__(family, kind)
+            sock.refuse = {"127.0.0.1": OSError(errno.EADDRINUSE, "in use")}
+            return sock
+
+    factory = _AllBusy()
+    with pytest.raises(BrainError) as excinfo:
+        claim_port(65530, attempts=20, socket_factory=factory)  # type: ignore[arg-type]
+    assert "no free port found in 65530..65535" in str(excinfo.value)
+    assert len(factory.made) == 6
+    assert all(sock.closed for sock in factory.made)
+
+
+def test_a_bind_that_raises_a_non_oserror_still_closes_its_socket() -> None:
+    """A REAL socket and a real bind: past 65535 ``bind`` raises OverflowError,
+    which ``except OSError`` let past without closing the socket."""
+    made: list[socket.socket] = []
+
+    def factory(family: int, kind: int) -> socket.socket:
+        made.append(socket.socket(family, kind))
+        return made[-1]
+
+    with pytest.raises(OverflowError):
+        _open_listener("127.0.0.1", "127.0.0.1", 70000, factory)
+    (sock,) = made
+    assert sock.fileno() == -1, "the socket leaked"

@@ -118,6 +118,10 @@ git tag scheme:
   process could take it in between. The check is now the bind: the sockets it
   opens are the ones served, and a port in use is reported by `brain ui`
   itself rather than by the web server's startup error.
+- **`brain ui --port` outside 1–65535 printed a traceback**, as did an
+  auto-port search walking past 65535; `--port 0` bound a different random
+  port on each address. Each is now a usage error, and the search stops at
+  65535 with a message.
 - **`brain ui --host LOCALHOST` refused its own URL with 400** — as did any
   mixed-case hostname. A browser lower-cases the host it sends and the Host
   check is case-sensitive, so the allowlist and URL kept a spelling no browser
