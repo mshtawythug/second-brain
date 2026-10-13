@@ -127,9 +127,10 @@ git tag scheme:
   either order: it will not bind over another program's loopback listener
   (`brain ui` moves to the next free port, or with `--no-auto-port` says the
   port is in use), and it also holds its own loopback address, so nothing can
-  bind there afterwards. One side effect, on every platform: restarting a
-  wildcard bind while the last run's connections are still closing may land
-  on the next port.
+  bind there afterwards — except in the instant between those two binds, a
+  window of microseconds that remains open. One side effect, on every
+  platform: restarting a wildcard bind while the last run's connections are
+  still closing may land on the next port.
 - **`brain ui --port` outside 1–65535 printed a traceback**, as did an
   auto-port search walking past 65535; `--port 0` bound a different random
   port on each address. Each is now a usage error, and the search stops at

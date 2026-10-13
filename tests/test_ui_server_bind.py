@@ -602,6 +602,24 @@ def test_a_companion_refused_as_linux_refuses_it_is_tolerated(
     assert factory.made[1].closed, "the refused companion socket leaked"
 
 
+@pytest.mark.parametrize(
+    ("wildcard", "loopback"), [("0.0.0.0", "127.0.0.1"), ("::", "::1")], ids=["ipv4", "ipv6"]
+)
+def test_a_companion_address_the_host_lacks_is_tolerated(wildcard: str, loopback: str) -> None:
+    """Review round 15: Linux with IPv6 disabled on ``lo`` binds ``::`` but has
+    no ``::1`` — EADDRNOTAVAIL on the companion. That aborted the whole bind with
+    "--host :: is not an address this machine owns". With no ``::1`` on the host
+    no other process can hold ``::1:P`` either, so the wildcard serves alone."""
+    factory = _Factory(refuse={loopback: OSError(errno.EADDRNOTAVAIL, "not available")})
+    port, sockets = claim_port(
+        8765, host=wildcard, auto=False, socket_factory=factory  # type: ignore[arg-type]
+    )
+    assert port == 8765
+    assert sockets == [factory.made[0]]  # type: ignore[comparison-overlap]
+    assert factory.made[0].listening and not factory.made[0].closed
+    assert factory.made[1].closed, "the refused companion socket leaked"
+
+
 def test_any_other_companion_failure_is_reported_and_releases_the_wildcard() -> None:
     factory = _Factory(refuse={"127.0.0.1": OSError(errno.EINVAL, "Invalid argument")})
     with pytest.raises(BrainError, match="cannot be bound"):

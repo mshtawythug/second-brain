@@ -235,17 +235,26 @@ def _loopback_companion(
     with ``SO_REUSEPORT``. It exposes nothing new: loopback is inside the
     wildcard, and it is served like any other socket.
 
-    Linux refuses this bind against our own wildcard (EADDRINUSE) and needs no
-    companion, since it refuses the foreign bind too, so exactly that failure is
-    tolerated. Any other failure propagates. One gap remains on macOS: a
-    process that binds loopback in the instant between our two binds turns
-    this companion into EADDRINUSE as well.
+    Two failures are tolerated, and only two. EADDRINUSE: Linux refuses this
+    bind against our own wildcard and needs no companion, since it refuses the
+    foreign bind too. EADDRNOTAVAIL: a host with IPv6 disabled on ``lo``
+    (``net.ipv6.conf.lo.disable_ipv6=1``) binds ``::`` but has no ``::1`` —
+    and then no other process can hold ``::1:P`` either (review round 15:
+    refusing it made ``brain ui --host ::`` fail there with "not an address
+    this machine owns"). Any other failure propagates. One gap remains on
+    macOS: a process that binds loopback in the instant between our two binds
+    turns this companion into EADDRINUSE as well.
     """
     loopback = "::1" if wildcard.version == 6 else "127.0.0.1"
     try:
         return _open_listener(host, loopback, port, socket_factory)
     except _PortBusy:
         return None
+    except BrainError as exc:
+        cause = exc.__cause__
+        if isinstance(cause, OSError) and cause.errno == errno.EADDRNOTAVAIL:
+            return None
+        raise
 
 
 def _bind_failure(host: str, port: int, exc: OSError) -> BrainError:
