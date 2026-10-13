@@ -11,10 +11,12 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 # The newest `coverage` release measured green against this tree — 7.16.2 on
-# 2026-09-29 (re-measured for Dependabot #12, landed in #15) — so the cap is
-# the next unreleased minor. Bumping this constant without re-running the
-# measurement recorded beside the pin in pyproject.toml is exactly the mistake
-# the evidence block there exists to prevent.
+# 2026-09-29 (re-measured for Dependabot #12, landed in #15) — and the cap
+# derived from it, the next unreleased minor. Bumping either without re-running
+# the measurement recorded beside the pin in pyproject.toml is exactly the
+# mistake the evidence block there exists to prevent; the next-minor test below
+# fails if one moves without the other.
+MEASURED_COVERAGE_VERSION = "7.16.2"
 MEASURED_COVERAGE_CEILING = "7.17"
 
 # The newest `ruff` release measured green on this tree, and the cap derived
@@ -23,8 +25,8 @@ MEASURED_COVERAGE_CEILING = "7.17"
 # same enabled rules). For a 0.x project the minor IS the breaking-change unit —
 # ruff lands new rules and rule-behaviour changes there — so this is the
 # meaningful granularity, not a patch cap. The two move TOGETHER;
-# `test_gate_tool_ceiling_is_the_next_minor_above_the_measured_version` fails
-# if one moves without the other.
+# `test_ceiling_is_the_next_minor_above_the_measured_version` fails if one
+# moves without the other.
 MEASURED_RUFF_VERSION = "0.17.0"
 MEASURED_RUFF_CEILING = "0.18"
 
@@ -44,9 +46,15 @@ GATE_TOOL_CEILINGS = {
     "ruff": MEASURED_RUFF_CEILING,
     "mypy": MEASURED_MYPY_CEILING,
 }
-GATE_TOOL_MEASURED_VERSIONS = {
-    "ruff": MEASURED_RUFF_VERSION,
-    "mypy": MEASURED_MYPY_VERSION,
+
+# Every measured pin — the gate tools plus `coverage` — as (measured version,
+# ceiling). The admits and next-minor checks run over ALL of them: coverage was
+# left out at first, and `coverage<7.16` with a ceiling of "7.16" then passed
+# every test while excluding the 7.16.2 the evidence block records.
+MEASURED_PINS = {
+    "coverage": (MEASURED_COVERAGE_VERSION, MEASURED_COVERAGE_CEILING),
+    "ruff": (MEASURED_RUFF_VERSION, MEASURED_RUFF_CEILING),
+    "mypy": (MEASURED_MYPY_VERSION, MEASURED_MYPY_CEILING),
 }
 
 
@@ -175,29 +183,30 @@ def test_gate_tool_is_capped_at_the_measured_ceiling(tool: str) -> None:
     )
 
 
-@pytest.mark.parametrize("tool", sorted(GATE_TOOL_CEILINGS))
-def test_gate_tool_ceiling_admits_the_version_that_was_measured(tool: str) -> None:
+@pytest.mark.parametrize("name", sorted(MEASURED_PINS))
+def test_ceiling_admits_the_version_that_was_measured(name: str) -> None:
     """The cap must not exclude the very version the evidence block measured.
 
     A ceiling that forbids the release it was derived from is self-refuting, and
     it fails at `pip install` time rather than here — which is worse, because the
     bound then looks deliberate. This is the counterfactual half of the pin: the
     test above proves the bound EXISTS, this one proves it ADMITS its own
-    evidence.
+    evidence. It checks the specifier AS WRITTEN, so it holds for `coverage`'s
+    upper-bound-only `<7.17` as much as for `ruff`'s `>=0.7,<0.18`.
     """
-    measured = GATE_TOOL_MEASURED_VERSIONS[tool]
-    requirement = _dev_requirement(tool)
+    measured, _ceiling = MEASURED_PINS[name]
+    requirement = _dev_requirement(name)
 
     assert requirement.specifier.contains(measured), (
-        f"`{requirement}` excludes {tool} {measured}, which is the version the "
+        f"`{requirement}` excludes {name} {measured}, which is the version the "
         "evidence block in pyproject.toml records as measured green on this "
         "tree. Either the cap is wrong or the evidence block is stale — fix "
         "whichever, but they cannot disagree."
     )
 
 
-@pytest.mark.parametrize("tool", sorted(GATE_TOOL_CEILINGS))
-def test_gate_tool_ceiling_is_the_next_minor_above_the_measured_version(tool: str) -> None:
+@pytest.mark.parametrize("name", sorted(MEASURED_PINS))
+def test_ceiling_is_the_next_minor_above_the_measured_version(name: str) -> None:
     """Each ceiling constant must be derived from its measured-version constant.
 
     The two tests above compare pyproject.toml against the constants, so they
@@ -209,15 +218,16 @@ def test_gate_tool_ceiling_is_the_next_minor_above_the_measured_version(tool: st
     next unreleased minor above the newest MEASURED release — so moving either
     constant alone goes red here.
     """
-    assert set(GATE_TOOL_MEASURED_VERSIONS) == set(GATE_TOOL_CEILINGS), (
-        "every gate tool needs both a measured version and a ceiling: "
-        f"{sorted(GATE_TOOL_MEASURED_VERSIONS)} vs {sorted(GATE_TOOL_CEILINGS)}"
+    assert set(GATE_TOOL_CEILINGS) <= set(MEASURED_PINS), (
+        "every gate tool needs a measured version as well as a ceiling: "
+        f"{sorted(GATE_TOOL_CEILINGS)} vs {sorted(MEASURED_PINS)}"
     )
-    measured = Version(GATE_TOOL_MEASURED_VERSIONS[tool])
+    raw_measured, ceiling = MEASURED_PINS[name]
+    measured = Version(raw_measured)
     expected = f"{measured.major}.{measured.minor + 1}"
 
-    assert GATE_TOOL_CEILINGS[tool] == expected, (
-        f"`{tool}` ceiling constant is <{GATE_TOOL_CEILINGS[tool]} but the measured "
+    assert ceiling == expected, (
+        f"`{name}` ceiling constant is <{ceiling} but the measured "
         f"version constant is {measured}, whose next unreleased minor is "
         f"<{expected}. Move the measured version, the ceiling and the evidence "
         "block in pyproject.toml together."

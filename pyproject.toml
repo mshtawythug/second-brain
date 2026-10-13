@@ -473,7 +473,9 @@ browser = ["playwright>=1.40"]
 # The self-enforcing part is tests/test_dev_dependency_pins.py: it asserts the
 # UPPER BOUND against a named MEASURED_COVERAGE_CEILING constant (parsed, not
 # substring-matched, unlike the version it replaced) and its failure message
-# states how to re-measure. Move this bound and that constant must move with it.
+# states how to re-measure. Move this bound and that constant must move with it —
+# and so must MEASURED_COVERAGE_VERSION, the measured release the ceiling is
+# the next minor above; the bound as written must admit it.
 # ---------------------------------------------------------------------------
 # ruff<0.18 / mypy<2.5 — MEASURED 2026-08-20 on feat/agentic-token-reduction;
 # mypy RE-MEASURED 2026-10-12 for the 2.4 line and ruff RE-MEASURED 2026-10-13
