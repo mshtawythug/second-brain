@@ -29,6 +29,7 @@ from tests.ui_cli_support import (
     install_started,
     make_app,
     needs_ipv6,
+    needs_ipv6_loopback,
     runner,
 )
 
@@ -287,7 +288,7 @@ def test_any_other_bind_failure_is_reported_not_called_busy() -> None:
     assert "in use" not in message
 
 
-@needs_ipv6
+@needs_ipv6_loopback
 def test_claim_port_binds_every_resolved_family() -> None:
     """Round 10, item 3: the probe chose its family by ``":" in host``, so a
     name that resolves only to IPv6 was probed as IPv4 and falsely refused."""
@@ -506,10 +507,16 @@ def _overlap_is_possible(family: int, loopback: str, wildcard: str) -> bool:
     """Can a SO_REUSEADDR wildcard bind over a live loopback listener here?
 
     macOS: yes (measured). Linux refuses it even with the option, so there is
-    nothing for the guard to do and the test below skips, saying why.
+    nothing for the guard to do and the test below skips, saying why. A host
+    without the loopback address at all (no ``::1``) cannot create the overlap
+    either — and used to ERROR here, the bind sitting outside any handler
+    (review round 15b).
     """
     with socket.socket(family, socket.SOCK_STREAM) as held:
-        held.bind((loopback, 0))
+        try:
+            held.bind((loopback, 0))
+        except OSError:
+            return False
         held.listen(1)
         port = held.getsockname()[1]
         with socket.socket(family, socket.SOCK_STREAM) as over:
@@ -527,7 +534,7 @@ def _overlap_is_possible(family: int, loopback: str, wildcard: str) -> bool:
     ("family", "loopback", "wildcard"),
     [
         (socket.AF_INET, "127.0.0.1", "0.0.0.0"),
-        pytest.param(socket.AF_INET6, "::1", "::", marks=needs_ipv6),
+        pytest.param(socket.AF_INET6, "::1", "::", marks=needs_ipv6_loopback),
     ],
     ids=["ipv4", "ipv6"],
 )
@@ -692,7 +699,7 @@ def _reverse_overlap_is_possible(family: int, loopback: str, wildcard: str) -> b
     ("family", "loopback", "wildcard"),
     [
         (socket.AF_INET, "127.0.0.1", "0.0.0.0"),
-        pytest.param(socket.AF_INET6, "::1", "::", marks=needs_ipv6),
+        pytest.param(socket.AF_INET6, "::1", "::", marks=needs_ipv6_loopback),
     ],
     ids=["ipv4", "ipv6"],
 )

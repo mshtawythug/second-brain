@@ -21,6 +21,7 @@ from tests.ui_cli_support import (
     Started,
     fake_resolver,
     install_started,
+    ipv6_loopback_available,
     ipv6_wildcard_available,
     make_app,
     runner,
@@ -215,8 +216,11 @@ def test_every_host_spelling_does_what_the_table_says(
         if kind == "unowned-on-darwin" and sys.platform != "darwin":
             kind = "binds-real"
     if kind == "binds-real":
-        if not ipv6_wildcard_available():
-            pytest.skip("this host cannot open an IPv6 socket")
+        # Round 15b: what the row binds for real, not whether `::` binds —
+        # `ip6-localhost` is ::1, which a host can lack while `::` binds.
+        binds_ipv6 = any(":" in a for a in FAKE_DNS.get(given, [given]))
+        if binds_ipv6 and not ipv6_loopback_available():
+            pytest.skip("this host has no IPv6 loopback (::1)")
         monkeypatch.setattr(server, "claim_port", claim_port)
     result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
     # Both "busy" phrasings: the catch-all said "already in use" without

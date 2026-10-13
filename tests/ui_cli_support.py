@@ -127,3 +127,26 @@ def ipv6_wildcard_available() -> bool:
 needs_ipv6 = pytest.mark.skipif(
     not ipv6_wildcard_available(), reason="this host cannot bind the IPv6 wildcard"
 )
+
+
+def ipv6_loopback_available() -> bool:
+    """Can this host bind ``::1``? Not the same question as the wildcard's.
+
+    Review round 15b: Linux with IPv6 disabled on ``lo``
+    (``net.ipv6.conf.lo.disable_ipv6=1``) binds ``::`` but has no ``::1``, so a
+    test that binds ``::1`` under ``needs_ipv6`` ERRORED there instead of
+    skipping.
+    """
+    try:
+        with closing(socket.socket(socket.AF_INET6, socket.SOCK_STREAM)) as sock:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            sock.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+#: For a test that binds ``::1`` itself (round 15b).
+needs_ipv6_loopback = pytest.mark.skipif(
+    not ipv6_loopback_available(), reason="this host has no IPv6 loopback (::1)"
+)
