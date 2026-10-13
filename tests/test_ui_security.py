@@ -261,6 +261,93 @@ def test_a_non_loopback_bind_refuses_a_foreign_host_header(
     assert response.status_code == 400
 
 
+IPV6_LAN = "fd00::5"  # unique-local (RFC 4193): synthetic, never routed
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        (IPV6_LAN, frozenset({"[fd00::5]"})),
+        ("[fd00::5]", frozenset({"[fd00::5]"})),
+        ("FD00:0:0::5", frozenset({"[fd00::5]"})),
+        ("192.0.2.10", frozenset({"192.0.2.10"})),
+    ],
+)
+def test_a_non_loopback_allowlist_is_exactly_the_canonical_host_header(
+    given: str, expected: frozenset[str]
+) -> None:
+    """Round 5, item 1: starlette >= 1.7 hands the middleware ``[fd00::5]``.
+
+    The allowlist held the bare ``fd00::5``, so every request to an IPv6 bind
+    was refused — its own URL included. The set must hold the form the Host
+    header ARRIVES in: bracketed, and canonical, because a browser serialises
+    an IPv6 literal compressed and lower-case whatever was typed.
+    """
+    from brain.ui.context import host_allowlist
+
+    assert host_allowlist(given) == expected
+
+
+@pytest.mark.parametrize("spelling", ["0:0:0:0:0:0:0:1", "[0:0:0:0:0:0:0:1]"])
+def test_a_non_canonical_loopback_is_loopback(spelling: str) -> None:
+    from brain.ui.context import LOOPBACK_HOSTS, host_allowlist
+
+    assert host_allowlist(spelling) == LOOPBACK_HOSTS
+    assert is_loopback(spelling)
+
+
+def test_a_non_canonical_wildcard_is_a_wildcard() -> None:
+    from brain.ui.context import LOOPBACK_HOSTS, host_allowlist
+
+    assert host_allowlist("0:0:0:0:0:0:0:0") == LOOPBACK_HOSTS
+
+
+@pytest.mark.parametrize(
+    ("host", "status"),
+    [("[fd00::5]:8765", 200), ("evil.example", 400), ("[fd00::6]:8765", 400)],
+)
+def test_an_ipv6_bind_serves_its_own_url_and_refuses_others(
+    tmp_path: Path, host: str, status: int
+) -> None:
+    """Round 5, item 1, through the real middleware: own URL 200, foreign 400."""
+    from brain.ui.context import bind_origin, host_allowlist
+
+    origin = bind_origin(IPV6_LAN, 8765)
+    assert origin == "http://[fd00::5]:8765"
+    context = _context(
+        tmp_path, token="t", allowed_origin=origin,
+        allowed_hosts=host_allowlist(IPV6_LAN),
+    )
+    with _client(context) as client:
+        response = client.get("/api/health", headers={"Host": host, TOKEN_HEADER: "t"})
+    assert response.status_code == status
+
+
+def test_an_ipv6_bind_accepts_a_write_from_its_own_origin(tmp_path: Path) -> None:
+    from brain.ui.context import bind_origin, host_allowlist
+
+    origin = bind_origin("FD00:0:0::5", 8765)
+    context = _context(
+        tmp_path, token="t", allowed_origin=origin,
+        allowed_hosts=host_allowlist("FD00:0:0::5"),
+    )
+    with TestClient(create_app(context), base_url="http://[fd00::5]:8765") as client:
+        response = client.post(
+            "/api/no-such-route", json={}, headers={"Origin": origin, TOKEN_HEADER: "t"}
+        )
+    assert response.status_code == 404, response.text
+
+
+def test_a_non_ascii_token_is_refused_not_a_server_error(tmp_path: Path) -> None:
+    """Round 5, item 5: ``secrets.compare_digest`` raises ``TypeError`` on a
+    non-ASCII ``str``, so a server started with ``--token café`` answered every
+    API call with 500. The comparison is on bytes now; the CLI also refuses
+    such a token up front."""
+    with _client(_context(tmp_path, token="café")) as client:
+        response = client.get("/api/health", headers={TOKEN_HEADER: "wrong"})
+    assert response.status_code == 403
+
+
 def test_a_lan_address_bind_accepts_its_own_host_header(tmp_path: Path) -> None:
     """The working half: bind the LAN address and the phone's Host matches."""
     from brain.ui.context import host_allowlist

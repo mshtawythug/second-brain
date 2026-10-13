@@ -18,6 +18,7 @@ threadpool. Each request opens and closes its own.
 """
 from __future__ import annotations
 
+import ipaddress
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -142,10 +143,20 @@ def host_allowlist(host: str) -> frozenset[str]:
     literal, which is why ``::`` could never match ``{"::"}`` before ruling W1
     — and why the starlette floor is 1.7: earlier releases cut ``[::1]:8765``
     to ``[`` and refused it.
+
+    The set holds the Host value as it ARRIVES (review round 5): an IPv6
+    literal bracketed and canonical (``[fd00::5]``), because a browser
+    serialises the URL's address compressed and lower-case. Holding the bare
+    ``fd00::5`` refused every request to an IPv6 bind, its own URL included.
+    The input is normalised first, so ``0:0:0:0:0:0:0:1`` is loopback and
+    ``FD00:0:0::5`` is ``[fd00::5]``.
     """
-    if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:
+    address = bind_address(host)
+    if address in LOOPBACK_HOSTS or address in WILDCARD_HOSTS:
         return LOOPBACK_HOSTS
-    return frozenset({host})
+    if ":" in address:
+        return frozenset({f"[{address}]"})
+    return frozenset({address})
 
 
 def bind_address(host: str) -> str:
@@ -155,10 +166,17 @@ def bind_address(host: str) -> str:
     bind — ``--host [::]`` reached uvicorn verbatim and died in ``getaddrinfo``
     (``gaierror 8``) after the panel had already printed (phase-7 review
     round 3). ``brain ui`` normalises once, at the CLI.
+
+    An IP literal is also made canonical (review round 5) — ``FD00:0:0::5``
+    becomes ``fd00::5`` and ``0:0:0:0:0:0:0:1`` becomes ``::1`` — so every
+    consumer sees one spelling, the one a browser will send. A hostname is
+    returned unchanged.
     """
-    if host.startswith("[") and host.endswith("]"):
-        return host[1:-1]
-    return host
+    bare = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    try:
+        return str(ipaddress.ip_address(bare))
+    except ValueError:
+        return bare
 
 
 def bind_origin(host: str, port: int) -> str:
@@ -174,12 +192,13 @@ def bind_origin(host: str, port: int) -> str:
     ``[::1]``), which :func:`host_allowlist` accepts; an IPv6 literal is
     bracketed, as a URL requires; anything else passes through unchanged.
     """
-    if host == "0.0.0.0":  # noqa: S104 — compared, not bound
+    address = bind_address(host)
+    if address == "0.0.0.0":  # noqa: S104 — compared, not bound
         url_host = "127.0.0.1"
-    elif host in WILDCARD_HOSTS:
+    elif address in WILDCARD_HOSTS:
         url_host = "[::1]"
-    elif ":" in host and not host.startswith("["):
-        url_host = f"[{host}]"
+    elif ":" in address:
+        url_host = f"[{address}]"
     else:
-        url_host = host
+        url_host = address
     return f"http://{url_host}:{port}"

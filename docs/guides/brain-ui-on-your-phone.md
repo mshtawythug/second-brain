@@ -59,7 +59,8 @@ a home network — cannot connect to it at all (connection refused, not 400), an
 `http://127.0.0.1:<port>/` is refused too; use the `[::1]` URL it prints.
 
 For the same reason, open the **IP address** URL that `brain ui` prints, not the machine's
-`<name>.local` name: the allowlist holds the address you bound, nothing else.
+`<name>.local` name: the allowlist holds the address you bound, nothing else — in the form a
+browser sends it (for IPv6, bracketed and canonical: `--host FD00:0:0::5` is `[fd00::5]`).
 
 ## How the token travels
 

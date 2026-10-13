@@ -518,6 +518,7 @@ def test_resolve_port_sees_a_busy_ipv6_wildcard_port() -> None:
 
 
 
+@needs_ipv6
 def test_the_probe_socket_is_ipv6_only_like_the_real_bind() -> None:
     """Review round 3, item 3: asyncio binds ``::`` with ``IPV6_V6ONLY=1``.
 
@@ -576,3 +577,56 @@ def test_the_ipv6_wildcard_notice_says_ipv4_devices_cannot_connect(
     result = runner.invoke(app, ["ui", "--host", "::", "--token", "x", "--no-open"])
     assert result.exit_code == 0, result.output
     assert "IPv6-only" in result.output, result.output
+
+
+
+def test_resolve_port_reports_a_host_without_ipv6_cleanly() -> None:
+    """Round 5, item 4: the probe socket was created OUTSIDE the ``try``.
+
+    On a machine without IPv6, ``--host ::`` died in a raw ``OSError``
+    traceback. The socket factory is injected — no production module is
+    patched — and raises what such a kernel raises.
+    """
+    import errno
+
+    from brain.errors import BrainError
+
+    def no_ipv6(family: int, kind: int) -> object:
+        raise OSError(errno.EAFNOSUPPORT, "Address family not supported by protocol")
+
+    with pytest.raises(BrainError) as excinfo:
+        resolve_port(8765, host="::", socket_factory=no_ipv6)
+    assert "IPv6" in str(excinfo.value)
+    assert "--host" in str(excinfo.value)
+
+
+def test_a_non_canonical_loopback_binds_as_its_canonical_form(
+    app: typer.Typer, started: _Started
+) -> None:
+    """Round 5, item 1: ``0:0:0:0:0:0:0:1`` IS loopback; it binds as ``::1``."""
+    result = runner.invoke(app, ["ui", "--host", "0:0:0:0:0:0:0:1", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["host"] == "::1"
+
+
+@pytest.mark.parametrize("token", ["café", " padded", "padded ", "tab\there"])
+def test_a_token_that_cannot_travel_in_a_header_is_a_usage_error(
+    app: typer.Typer, started: _Started, token: str
+) -> None:
+    """Round 5, item 5: printable ASCII with no edge whitespace, or exit 2.
+
+    Non-ASCII made every API call a 500; edge whitespace is trimmed from a
+    header value in transit, so the comparison would fail forever.
+    """
+    result = runner.invoke(app, ["ui", "--token", token, "--no-open"])
+    assert result.exit_code == 2, result.output
+    assert "printable ASCII" in result.output
+    assert started.context_kwargs == {}
+
+
+def test_a_token_with_inner_spaces_and_symbols_is_accepted(
+    app: typer.Typer, started: _Started
+) -> None:
+    result = runner.invoke(app, ["ui", "--token", "50% off #1", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["token"] == "50% off #1"

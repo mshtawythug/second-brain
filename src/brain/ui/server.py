@@ -43,7 +43,12 @@ TELEMETRY_DISABLED_NOTICE = (
 )
 
 
-def _probe_socket(address: str) -> socket.socket:
+SocketFactory = Callable[[int, int], socket.socket]
+
+
+def _probe_socket(
+    address: str, socket_factory: SocketFactory = socket.socket
+) -> socket.socket:
     """A socket configured the way uvicorn's real bind will be.
 
     Same address family as the bind, and for IPv6 the same ``IPV6_V6ONLY=1``
@@ -52,14 +57,16 @@ def _probe_socket(address: str) -> socket.socket:
     for a ``::`` server that would have bound fine (phase-7 review round 3).
     """
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
-    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock = socket_factory(family, socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     if family == socket.AF_INET6:
         sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
     return sock
 
 
-def _port_is_free(host: str, port: int) -> bool:
+def _port_is_free(
+    host: str, port: int, *, socket_factory: SocketFactory = socket.socket
+) -> bool:
     """Probe a port with a real bind. Portable; no ``lsof``.
 
     The probe uses the address family the server will bind. It used to be
@@ -68,7 +75,19 @@ def _port_is_free(host: str, port: int) -> bool:
     "no free port found" before it could print a thing (phase-7 audit L-8).
     """
     address = bind_address(host)
-    with closing(_probe_socket(address)) as sock:
+    try:
+        probe = _probe_socket(address, socket_factory)
+    except OSError as exc:
+        # Creating the socket, not binding it: the kernel has no such address
+        # family. It was outside the try below and escaped as a raw traceback
+        # (review round 5). A bind failure means "busy"; this means "never".
+        family = "IPv6" if ":" in address else "IPv4"
+        raise BrainError(
+            f"cannot open an {family} socket for --host {host} "
+            f"({exc.strerror or exc})\n"
+            f"  This machine may not support {family}; pass a different --host."
+        ) from exc
+    with closing(probe) as sock:
         try:
             sock.bind((address, port))
         except OSError:
@@ -77,7 +96,12 @@ def _port_is_free(host: str, port: int) -> bool:
 
 
 def resolve_port(
-    start: int, *, host: str = DEFAULT_HOST, attempts: int = 20, auto: bool = True
+    start: int,
+    *,
+    host: str = DEFAULT_HOST,
+    attempts: int = 20,
+    auto: bool = True,
+    socket_factory: SocketFactory = socket.socket,
 ) -> int:
     """Return a free port at or after ``start``.
 
@@ -85,7 +109,7 @@ def resolve_port(
     :func:`serve` also catches ``EADDRINUSE`` and prints the same remediation
     rather than a traceback.
     """
-    if _port_is_free(host, start):
+    if _port_is_free(host, start, socket_factory=socket_factory):
         return start
     if not auto:
         raise BrainError(
@@ -94,7 +118,7 @@ def resolve_port(
             f"  or drop --no-auto-port to auto-select the next free one."
         )
     for candidate in range(start + 1, start + attempts):
-        if _port_is_free(host, candidate):
+        if _port_is_free(host, candidate, socket_factory=socket_factory):
             return candidate
     raise BrainError(
         f"no free port found in {start}..{start + attempts - 1}; "

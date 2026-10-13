@@ -57,15 +57,26 @@ git tag scheme:
   `http://[::1]:<port>/`. It stays IPv6-only, so IPv4 clients — including
   `127.0.0.1` — cannot connect to it. `--host [::]` and `--host [::1]` now bind
   instead of failing in `getaddrinfo`.
+- **A wildcard bind printed and opened `http://0.0.0.0:<port>/`** (refused with
+  400) and expected a write Origin no browser sends. It now prints and opens
+  the loopback URL, and accepts writes from it.
+- **`brain ui --host <an IPv6 address>` works.** Before, the port probe was
+  IPv4-only and refused the bind; an IPv6 address now gets a Host allowlist in
+  the bracketed, canonical form the browser sends (`[fd00::5]`), so its own URL
+  is served and every other Host is refused. Non-canonical spellings such as
+  `0:0:0:0:0:0:0:1` are normalised (that one is loopback).
+- **A non-ASCII `--token` made every API call fail with 500**
+  (`secrets.compare_digest` raises on a non-ASCII string). `brain ui` now
+  refuses a token that is not printable ASCII, or that has leading or trailing
+  whitespace, with a usage error; the server also compares the token as bytes.
+- **A host without IPv6 support** no longer prints a traceback for
+  `--host ::`; it exits with a message naming the missing address family.
 
 ### Dependencies
 
 - **`starlette>=1.7`** (was `>=0.47`). Earlier releases parse the IPv6 Host
   `[::1]:8765` as `[` and refuse it, which breaks `brain ui --host ::`.
   Measured: 1.6.0 fails the two `::` security tests; 1.7.0 and 1.8.0 pass.
-- **A wildcard bind printed and opened `http://0.0.0.0:<port>/`** (refused with
-  400) and expected a write Origin no browser sends. It now prints and opens
-  the loopback URL, and accepts writes from it.
 
 ## [0.3.0] - 2026-08-07
 

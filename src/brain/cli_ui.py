@@ -161,6 +161,15 @@ def ui(
     # the URL — gets the bare address; bind_origin re-brackets it for URLs.
     host = bind_address(host)
 
+    # Review round 5: the token travels in an HTTP header. Non-ASCII made every
+    # API call a 500; edge whitespace is trimmed in transit, so it could never
+    # match. Refuse both here, before anything binds.
+    if token and not (token.isascii() and token.isprintable() and token == token.strip()):
+        raise typer.BadParameter(
+            "--token must be printable ASCII with no leading or trailing "
+            "whitespace — it is sent in an HTTP header."
+        )
+
     if lan:
         # Phase 7 / spec Q1: the phone-reading replacement for the wiki. Two
         # answers to "where do I bind" is a usage error, not a precedence rule.
