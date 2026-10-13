@@ -293,7 +293,21 @@ dependencies = [
   # `brain ui` imports these directly. They resolve transitively via `mcp`
   # today, so declaring them adds zero new wheels — it stops a silent
   # import-time break if `mcp` ever drops them.
-  "starlette>=0.47,<2",
+  # starlette floor 1.7 — MEASURED 2026-10-13 (phase 7, review round 3). Before
+  # 1.7.0, TrustedHostMiddleware took `headers["host"].split(":")[0]`, so an
+  # IPv6 Host such as `[::1]:8765` became `[` and was refused with 400; 1.7.0 is
+  # the first release with `starlette._utils.parse_host_header`, which keeps
+  # the brackets. `brain ui --host ::` (ruling W1) depends on that.
+  #   starlette 1.6.0  test_a_wildcard_bind_accepts_a_write_from_the_url_it_opens[::-[::1]]
+  #                    and test_a_wildcard_bind_still_refuses_a_foreign_origin_on_writes[::]
+  #                    -> 2 failed (the two `::` cases; the 0.0.0.0 cases pass)
+  #   starlette 1.7.0  -> 4 passed; UI + MCP set (security, cli_ui, bind_wiring,
+  #                    routes, app_wiring, mcp_tool_registration) -> 143 passed
+  #   starlette 1.8.0  -> the same 143 passed (latest at measurement)
+  # The old `>=0.47` floor was a false claim once W1 landed. mcp 2.3.0 asks for
+  # `starlette>=0.27` and sse-starlette for `>=0.49.1`, so 1.7 narrows nothing
+  # they need.
+  "starlette>=1.7,<2",
   "uvicorn>=0.30",
   # Same shape as starlette/uvicorn above: `brain ui`'s markdown renderer
   # imports pygments directly to tokenise fenced code (212 corpus documents
