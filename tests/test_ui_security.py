@@ -357,7 +357,9 @@ def test_a_non_ascii_token_is_refused_not_a_server_error(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     ("bind", "host", "status"),
     [("LOCALHOST", "localhost:8765", 200), ("MyMac.LOCAL", "mymac.local:8765", 200),
-     ("MyMac.LOCAL", "evil.example", 400)],
+     ("MyMac.LOCAL", "evil.example", 400),
+     # Round 9: loopback by ADDRESS, not by spelling — and its own URL works.
+     ("127.0.0.2", "127.0.0.2:8765", 200), ("127.0.0.2", "evil.example", 400)],
 )
 def test_a_hostname_bind_is_matched_case_insensitively(
     tmp_path: Path, bind: str, host: str, status: int
@@ -559,3 +561,22 @@ def test_read_endpoints_reject_mutating_methods(
 def test_write_endpoints_reject_get(tmp_path: Path, path: str) -> None:
     with _client(_context(tmp_path)) as client:
         assert client.get(path).status_code == 405
+
+
+
+@pytest.mark.parametrize(
+    ("host", "kind"),
+    [("0.0.0.0", "wildcard"), ("::", "wildcard"), ("0:0::0", "wildcard"),
+     ("127.0.0.1", "loopback"), ("127.0.0.2", "loopback"), ("::1", "loopback"),
+     ("localhost", "loopback"), ("LOCALHOST", "loopback"),
+     ("192.0.2.10", "other"), ("fd00::5", "other"), ("brain-1.lan", "other")],
+)
+def test_address_class_is_decided_by_the_address_not_the_spelling(
+    host: str, kind: str
+) -> None:
+    """Round 9 (review): classify by the parsed address. ``127.0.0.2`` is
+    loopback although no loopback SET spells it; ``0:0::0`` is the wildcard."""
+    from brain.ui.context import address_class
+
+    assert address_class(host) == kind
+    assert is_loopback(host) is (kind == "loopback")

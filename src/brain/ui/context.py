@@ -159,11 +159,15 @@ def host_allowlist(host: str) -> frozenset[str]:
     ``FD00:0:0::5`` is ``[fd00::5]``.
     """
     address = bind_address(host)
-    if address in LOOPBACK_HOSTS or address in WILDCARD_HOSTS:
+    kind = address_class(address)
+    if kind == "wildcard":
         return LOOPBACK_HOSTS
-    if ":" in address:
-        return frozenset({f"[{address}]"})
-    return frozenset({address})
+    own = f"[{address}]" if ":" in address else address
+    if kind == "loopback":
+        # Loopback by ADDRESS (review round 9): 127.0.0.2 is loopback although
+        # no spelling in LOOPBACK_HOSTS names it, and its own URL must work.
+        return LOOPBACK_HOSTS | {own}
+    return frozenset({own})
 
 
 def bind_address(host: str) -> str:
@@ -193,25 +197,62 @@ class HostRefused(BrainError):
     """``--host`` names something ``brain ui`` will not bind; the message says why."""
 
 
+def address_class(host: str) -> str:
+    """``"wildcard"``, ``"loopback"`` or ``"other"`` — judged on the ADDRESS.
+
+    Review round 9: every earlier classification compared SPELLINGS against
+    ``WILDCARD_HOSTS`` / ``LOOPBACK_HOSTS``, so each new spelling of the same
+    address (``0:0::0``, ``::%``, ``127.0.0.2``) slipped past it. This parses
+    the address and asks it; only a hostname falls back to its name.
+    """
+    address = bind_address(host)
+    if address == "localhost":
+        return "loopback"
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return "other"
+    if parsed.is_unspecified:
+        return "wildcard"
+    if parsed.is_loopback:
+        return "loopback"
+    return "other"
+
+
 def validate_host(host: str) -> str:
-    """Return ``host`` as its canonical bind address, or raise :class:`HostRefused`.
+    """Return ``host`` as the canonical address it will bind, or raise :class:`HostRefused`.
 
-    The ONE place a ``--host`` spelling is judged (review round 9). Rounds 7–9
-    each found a spelling that bound something unexpected or failed later with
-    a misleading error, and each fix had been a separate check in the CLI; the
-    next odd spelling should be one more rule here and one more row in the test
-    table. In order:
+    The ONE place a ``--host`` spelling is judged. Review rounds 7–9 each found
+    a spelling that bound something unexpected because it was CLASSIFIED BY
+    ITS SPELLING; the rule since round 9 is to resolve it the way the bind will
+    — numeric-only ``getaddrinfo``, which never touches DNS — and judge the
+    result. In order:
 
-    * empty or whitespace — asyncio binds ``0.0.0.0`` AND ``::`` for ``""``;
-    * brackets — balanced, once, around an IPv6 literal, nothing else:
-      ``[::1`` used to reach the probe and fail as "port already in use", and
-      ``[127.0.0.1]`` is not URL syntax for anything;
-    * a zone on ``::`` or ``::1`` (:func:`meaningless_zone`);
-    * IPv4 shorthand such as ``0`` (:func:`ipv4_shorthand`).
+    * empty, or surrounding whitespace — asyncio binds ``0.0.0.0`` AND ``::``
+      for ``""``; `` 127.0.0.1`` failed later as "no free port";
+    * any ``%`` zone, link-local included (ruling N1): a browser cannot open a
+      zoned URL, so the printed address could never be used; and an EMPTY zone
+      (``::%``) was rejected by :mod:`ipaddress` yet read as ``::`` by the
+      resolver — a wildcard with no notice;
+    * brackets other than one balanced pair around an IPv6 literal;
+    * a numeric spelling the resolver reads differently from :mod:`ipaddress`
+      (``0`` is 0.0.0.0; platforms disagree on ``010.0.0.1``) — refused, naming
+      what the system would bind;
+    * an IPv4-mapped IPv6 address, which the IPv6-only socket cannot bind.
+
+    A spelling that does not resolve numerically is a hostname: lower-cased,
+    because a browser lower-cases the host it sends.
     """
     if not host.strip():
         raise HostRefused(
             "--host must not be empty; omit it for 127.0.0.1, or name an address."
+        )
+    if host != host.strip():
+        raise HostRefused(f"--host {host!r} has leading or trailing whitespace.")
+    if "%" in host:
+        raise HostRefused(
+            f"--host {host}: zone IDs (%…) are not supported — a browser cannot "
+            "open a URL that carries one."
         )
     if "[" in host or "]" in host:
         balanced = (
@@ -229,68 +270,32 @@ def validate_host(host: str) -> str:
                 f"--host {host}: brackets are for IPv6 literals only; "
                 "write the address or hostname without them."
             )
-    address = bind_address(host)
-    if meaningless_zone(address):
-        raise HostRefused(
-            f"--host {address}: a zone means nothing on the wildcard or loopback "
-            "address; drop the '%…' part."
-        )
-    reading = ipv4_shorthand(address)
-    if reading is not None:
-        raise HostRefused(
-            f"--host {address} is not a canonical IPv4 address (the system reads "
-            f"it as {reading}); write the address out in full."
-        )
-    return address
-
-
-def meaningless_zone(host: str) -> bool:
-    """True when ``host`` is ``::`` or ``::1`` carrying an IPv6 zone (``%en0``).
-
-    A zone scopes a LINK-LOCAL address to one interface. On the unspecified
-    address it means nothing — ``::%en0`` still binds every interface — and on
-    loopback nothing either; but the zoned spelling matched neither
-    ``WILDCARD_HOSTS`` nor ``LOOPBACK_HOSTS``, so ``--host ::%en0`` was a
-    wildcard bind with no notice (review round 8). ``brain ui`` refuses it
-    rather than classifying it: classifying would send two spellings of one
-    address through every helper (zoned for the bind, bare for the checks),
-    while refusing is one check and leaves link-local zones, where a zone is
-    real, untouched.
-    """
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    if not isinstance(address, ipaddress.IPv6Address) or address.scope_id is None:
-        return False
-    return address.is_unspecified or address.is_loopback
-
-
-def ipv4_shorthand(host: str) -> str | None:
-    """What the system reads a NON-canonical IPv4 literal as, or ``None``.
-
-    ``0``, ``127.1``, ``0x7f.1`` and ``010.0.0.1`` are IPv4 to the resolver
-    (``0`` binds ``0.0.0.0``) but not to :mod:`ipaddress`, so they slipped past
-    canonicalisation: ``--host 0`` was a wildcard bind with an allowlist of
-    ``{"0"}`` and no notice (review round 7). Platforms even disagree on some
-    of them — ``010.0.0.1`` is 8.0.0.1 to ``inet_aton`` and 10.0.0.1 to macOS
-    ``getaddrinfo`` — so ``brain ui`` refuses them rather than guess. The
-    reading reported is the bind path's: numeric-only ``getaddrinfo``, which
-    never touches DNS. A canonical address or a hostname returns ``None``.
-    """
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        pass
-    else:
-        return None
+    bare = host[1:-1] if host.startswith("[") else host
     try:
         infos = socket.getaddrinfo(
-            host, None, family=socket.AF_INET, flags=socket.AI_NUMERICHOST
+            bare, None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST
         )
     except socket.gaierror:
-        return None
-    return str(infos[0][4][0])
+        return bare.lower()
+    resolved = {ipaddress.ip_address(info[4][0]) for info in infos}
+    try:
+        spelled: ipaddress.IPv4Address | ipaddress.IPv6Address | None = (
+            ipaddress.ip_address(bare)
+        )
+    except ValueError:
+        spelled = None
+    if spelled is None or resolved != {spelled}:
+        reading = ", ".join(sorted(str(address) for address in resolved))
+        raise HostRefused(
+            f"--host {host} is not a canonical IP address (the system reads it "
+            f"as {reading}); write the address out in full."
+        )
+    if isinstance(spelled, ipaddress.IPv6Address) and spelled.ipv4_mapped is not None:
+        raise HostRefused(
+            f"--host {host}: IPv4-mapped IPv6 addresses cannot be bound (the "
+            f"server's IPv6 socket is IPv6-only); write {spelled.ipv4_mapped}."
+        )
+    return str(spelled)
 
 
 def bind_origin(host: str, port: int) -> str:
@@ -307,10 +312,8 @@ def bind_origin(host: str, port: int) -> str:
     bracketed, as a URL requires; anything else passes through unchanged.
     """
     address = bind_address(host)
-    if address == "0.0.0.0":  # noqa: S104 — compared, not bound
-        url_host = "127.0.0.1"
-    elif address in WILDCARD_HOSTS:
-        url_host = "[::1]"
+    if address_class(address) == "wildcard":
+        url_host = "[::1]" if ":" in address else "127.0.0.1"
     elif ":" in address:
         url_host = f"[{address}]"
     else:

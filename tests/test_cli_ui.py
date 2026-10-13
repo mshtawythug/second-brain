@@ -706,66 +706,75 @@ def test_a_non_canonical_ipv6_wildcard_is_the_wildcard(
     assert "http://[::1]:8765/#t=x" in result.output
 
 
-def test_a_numeric_looking_hostname_that_is_not_an_address_still_binds(
-    app: typer.Typer, started: _Started
-) -> None:
-    """The refusal is for what the OS would parse as an IPv4 address, only."""
-    result = runner.invoke(app, ["ui", "--host", "brain-1.lan", "--token", "x", "--no-open"])
-    assert result.exit_code == 0, result.output
-    assert started.context_kwargs["host"] == "brain-1.lan"
-
-
-def test_a_zone_on_a_link_local_address_is_left_alone(
-    app: typer.Typer, started: _Started
-) -> None:
-    """Where a zone DOES mean something — link-local — it is not refused."""
-    result = runner.invoke(
-        app, ["ui", "--host", "fe80::1%lo0", "--token", "x", "--no-open"]
-    )
-    assert result.exit_code == 0, result.output
-    assert started.context_kwargs["host"] == "fe80::1%lo0"
-
-
-#: Every --host spelling `brain ui` refuses, and the text the refusal must
-#: contain. ONE table, by design (review round 9): rounds 7, 8 and 9 each found
-#: an odd spelling that bound something unexpected, so the next one should be a
-#: row here, not a new test. Every row exits 2 before anything is resolved.
-REFUSED_HOSTS = [
-    # empty — asyncio binds 0.0.0.0 AND `::` for "" (round 8)
-    ("", "must not be empty"),
-    ("   ", "must not be empty"),
-    # IPv4 shorthand — the system reads these, `ipaddress` does not (round 7)
-    ("0", "reads it as 0.0.0.0"),
-    ("127.1", "reads it as 127.0.0.1"),
-    ("0x7f.1", "reads it as 127.0.0.1"),
-    # platforms disagree on this one (8.0.0.1 vs 10.0.0.1), so no reading
-    ("010.0.0.1", "not a canonical IPv4 address"),
-    # a zone on the wildcard or loopback means nothing (round 8)
-    ("::%en0", "zone means nothing"),
-    ("[::%en0]", "zone means nothing"),
-    ("::1%lo0", "zone means nothing"),
-    # brackets: balanced, once, around an IPv6 literal — nothing else (round 9)
-    ("[::1", "unbalanced or misplaced brackets"),
-    ("::1]", "unbalanced or misplaced brackets"),
-    ("[[::1]]", "unbalanced or misplaced brackets"),
-    ("[]", "brackets are for IPv6 literals only"),
-    ("[127.0.0.1]", "brackets are for IPv6 literals only"),
-    ("[localhost]", "brackets are for IPv6 literals only"),
+#: Every --host spelling seen across the phase's review rounds, and what it must
+#: do. ONE table (rounds 7–9): each round found a spelling that bound something
+#: unexpected, so the next one is a row here. Kinds:
+#:   ("refused", phrase)  exit 2, before any probe or bind, saying `phrase`;
+#:   ("binds", host)      exit 0, bound as `host`, NO wildcard notice;
+#:   ("wildcard", host)   exit 0, bound as `host`, WITH the wildcard notice.
+#: "binds"/"wildcard" are decided by the address the system will actually
+#: bind (numeric getaddrinfo), not by the spelling — the review-round-9 rule.
+HOST_SPELLINGS: list[tuple[str, str, str]] = [
+    ("", "refused", "must not be empty"),
+    ("   ", "refused", "must not be empty"),
+    (" 127.0.0.1", "refused", "leading or trailing whitespace"),
+    ("localhost ", "refused", "leading or trailing whitespace"),
+    # zones: browsers cannot open a zoned URL, so none is accepted (ruling N1)
+    ("::%", "refused", "zone IDs (%…) are not supported"),
+    ("[::%]", "refused", "zone IDs (%…) are not supported"),
+    ("0::%", "refused", "zone IDs (%…) are not supported"),
+    ("::0%", "refused", "zone IDs (%…) are not supported"),
+    ("::1%", "refused", "zone IDs (%…) are not supported"),
+    ("::%en0", "refused", "zone IDs (%…) are not supported"),
+    ("[::%en0]", "refused", "zone IDs (%…) are not supported"),
+    ("::1%lo0", "refused", "zone IDs (%…) are not supported"),
+    ("fe80::1%en0", "refused", "zone IDs (%…) are not supported"),
+    # brackets: one balanced pair, around an IPv6 literal
+    ("[]", "refused", "brackets are for IPv6 literals only"),
+    ("[127.0.0.1]", "refused", "brackets are for IPv6 literals only"),
+    ("[localhost]", "refused", "brackets are for IPv6 literals only"),
+    ("[::1", "refused", "unbalanced or misplaced brackets"),
+    ("::1]", "refused", "unbalanced or misplaced brackets"),
+    ("[[::1]]", "refused", "unbalanced or misplaced brackets"),
+    # numeric spellings the system reads differently from `ipaddress`
+    ("0", "refused", "reads it as 0.0.0.0"),
+    ("127.1", "refused", "reads it as 127.0.0.1"),
+    ("0x7f.1", "refused", "reads it as 127.0.0.1"),
+    ("010.0.0.1", "refused", "is not a canonical IP address"),
+    # an IPv6-only socket cannot bind an IPv4-mapped address (measured)
+    ("::ffff:127.0.0.1", "refused", "IPv4-mapped IPv6 addresses cannot be bound"),
+    # accepted, classified by the resolved address
+    ("0.0.0.0", "wildcard", "0.0.0.0"),
+    ("::", "wildcard", "::"),
+    ("::0", "wildcard", "::"),
+    ("0:0::0", "wildcard", "::"),
+    ("[::]", "wildcard", "::"),
+    ("127.0.0.1", "binds", "127.0.0.1"),
+    ("127.0.0.2", "binds", "127.0.0.2"),
+    ("[::1]", "binds", "::1"),
+    ("0:0:0:0:0:0:0:1", "binds", "::1"),
+    ("LOCALHOST", "binds", "localhost"),
+    ("brain-1.lan", "binds", "brain-1.lan"),
+    ("FD00:0:0::5", "binds", "fd00::5"),
 ]
 
 
-@pytest.mark.parametrize(("given", "says"), REFUSED_HOSTS)
-def test_a_refused_host_spelling_is_a_usage_error(
-    app: typer.Typer, started: _Started, given: str, says: str
+@pytest.mark.parametrize(("given", "kind", "expected"), HOST_SPELLINGS)
+def test_every_host_spelling_does_what_the_table_says(
+    app: typer.Typer, started: _Started, given: str, kind: str, expected: str
 ) -> None:
-    """Rounds 7–9: each spelling here bound something it should not have, or
-    failed later with a misleading message (``[::1`` exited 1 with "port
-    already in use"). All are usage errors now, raised by
-    ``context.validate_host`` before any probe or bind."""
+    """Rounds 7–9, one row per spelling. A refusal happens in
+    ``context.validate_host`` before any probe or bind; a bind is classified by
+    the address it resolves to."""
     result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
-    assert result.exit_code == 2, result.output
-    assert says in result.output, result.output
-    assert started.context_kwargs == {}
+    if kind == "refused":
+        assert result.exit_code == 2, result.output
+        assert expected in result.output, result.output
+        assert started.context_kwargs == {}
+        return
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["host"] == expected
+    assert (WILDCARD_NOTICE in result.output) is (kind == "wildcard"), result.output
 
 
 def test_bind_address_strips_only_a_balanced_pair_of_brackets() -> None:

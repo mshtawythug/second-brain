@@ -39,7 +39,7 @@ import json
 import secrets
 from typing import TYPE_CHECKING, Any
 
-from .context import LOOPBACK_HOSTS, bind_address
+from .context import address_class
 from .errors import UiError, UiForbidden, UiUnsupportedMedia
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -85,7 +85,7 @@ def is_loopback(host: str) -> bool:
     treating it as safe is the exact mistake that would expose an
     unauthenticated corpus to the local network.
     """
-    return bind_address(host.strip()).lower() in LOOPBACK_HOSTS
+    return address_class(host.strip()) == "loopback"
 
 
 async def _send_error(send: Send, exc: UiError) -> None:

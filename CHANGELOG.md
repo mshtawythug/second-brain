@@ -45,17 +45,28 @@ git tag scheme:
   clients out: a program can send a loopback Host header by hand. The docs
   previously recommended `--host 0.0.0.0 --token` for remote reading, which
   never worked from another device's browser.
-- **`--host` refuses spellings that bound something unexpected**, each with a
-  usage error that says why:
-  - an empty value: asyncio bound `0.0.0.0` and `::` together, with no notice;
-  - IPv4 shorthand such as `0`, `127.1` and `010.0.0.1`: the system reads `0`
-    as `0.0.0.0`, and platforms disagree on `010.0.0.1` (8.0.0.1 or 10.0.0.1).
-    The error names what the system would have bound;
-  - a zone on `::` or `::1`: `::%en0` bound every interface with no notice. A
-    zone on a link-local address, where it means something, is accepted;
+- **`--host` is judged by the address it will actually bind**, not by how it
+  is spelled. `brain ui` resolves it the way the bind does (numeric only, no
+  DNS) and decides wildcard / loopback / other from the result, so every
+  spelling of the wildcard gets the notice and every spelling of loopback is
+  loopback (`127.0.0.2` included). Spellings that bound something unexpected
+  are refused, each with a usage error that says why:
+  - an empty value, or leading/trailing whitespace: asyncio bound `0.0.0.0`
+    and `::` together for `""`, with no notice;
+  - any IPv6 zone (`%…`), link-local included: a browser cannot open a zoned
+    URL, and an empty zone (`::%`) was read as the wildcard `::`;
+  - a numeric spelling the system reads differently from its canonical form,
+    such as `0`, `127.1` and `010.0.0.1`. The system reads `0` as `0.0.0.0`,
+    and platforms disagree on `010.0.0.1` (8.0.0.1 or 10.0.0.1). The error
+    names what the system would have bound;
+  - an IPv4-mapped address such as `::ffff:127.0.0.1`, which the IPv6-only
+    socket cannot bind;
   - brackets that are unbalanced, repeated, or around anything but an IPv6
     literal: `[::1` used to fail later as "port already in use", and
     `[127.0.0.1]` is not URL syntax.
+  This class of bug was first reported as closed after review round 8; it was
+  not, because each fix refused one more SPELLING. Classifying by the resolved
+  address closes it.
 
 ### Fixed
 

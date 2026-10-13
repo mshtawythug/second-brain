@@ -63,6 +63,11 @@ wildcard, a LAN address, `--lan` — it is the token that keeps other clients ou
 a home network — cannot connect to it at all (connection refused, not 400), and on this machine
 `http://127.0.0.1:<port>/` is refused too; use the `[::1]` URL it prints.
 
+`--host` is judged by the address it will bind, not by its spelling: `0`, `127.1`, a
+whitespace-padded value and any IPv6 zone such as `%en0` are refused with a message that says
+why. Zones are refused even on link-local addresses, because a browser cannot open a URL that
+carries one.
+
 For the same reason, open the **IP address** URL that `brain ui` prints, not the machine's
 `<name>.local` name: the allowlist holds the address you bound, nothing else — in the form a
 browser sends it (for IPv6, bracketed and canonical: `--host FD00:0:0::5` is `[fd00::5]`).

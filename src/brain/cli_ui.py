@@ -157,7 +157,7 @@ def ui(
         return
 
     from .ui import lan as lan_mod
-    from .ui.context import WILDCARD_HOSTS, HostRefused, validate_host
+    from .ui.context import HostRefused, address_class, validate_host
     from .ui.security import is_loopback
     from .ui.server import browser_url, build_context, resolve_port, serve
 
@@ -237,7 +237,7 @@ def ui(
         )
 
     notices = context.notices
-    if host.strip().lower() in WILDCARD_HOSTS:
+    if address_class(host) == "wildcard":
         notices = (*notices, lan_mod.WILDCARD_NOTICE)
     _panel(
         url=browser_url(host, resolved_port, token),

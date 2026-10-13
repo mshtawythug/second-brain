@@ -179,6 +179,8 @@ def test_phone_guide_covers_the_q1_contract() -> None:
         "trust",
         "wiki",
         "it is the token that keeps other clients out",
+        "judged by the address it will bind",
+        "Zones are refused even on link-local addresses",
         "in memory only",
         "page itself never saves the token",
         "the URL is the token",
