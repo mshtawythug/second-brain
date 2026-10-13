@@ -245,11 +245,15 @@ both, is green at every commit.
   silently passed. Compared by name; reasoned inline in `cli_ui.py`; mutation M9 pins it.
 - **Row #3 was wrong** — corrected in place in §2: the capture sentence is a docstring that
   `--help` never shows.
-- **W1 (approved by team-lead 2026-10-13): `::` behaves exactly like `0.0.0.0`.**
+- **W1 (approved by team-lead 2026-10-13): `::` gets exactly `0.0.0.0`'s Host allowlist.**
   `host_allowlist("::")` was `{"::"}` — a Host value no browser sends, since starlette keeps the
   brackets on IPv6 literals — so a `--host ::` server refused every request, this machine's
   included. All three wildcards (`brain.ui.context.WILDCARD_HOSTS`) now get exactly the loopback
   allowlist; a test asserts EQUALITY with `0.0.0.0`'s, so the IPv6 wildcard can never accept more.
+  *(Review round 3: the allowlist is ALL they share. `::` is IPv6-only — asyncio sets
+  `IPV6_V6ONLY` — so its local URL is `[::1]` and IPv4 clients are refused at connect; and W1
+  needs `starlette>=1.7`, the first release that keeps the brackets on an IPv6 Host. The
+  heading said "behaves exactly like `0.0.0.0`" until then.)*
 - **W2 (approved 2026-10-13): one helper derives the URL and the Origin.**
   `brain.ui.context.bind_origin` is the single source for the URL `brain ui` prints and opens
   (`server.browser_url`) and the Origin the write guard expects (`build_context`'s
@@ -323,7 +327,8 @@ Findings M-1…M-4 and L-1…L-6 from the phase code review of `9baa2ba`, all fi
 |---|---|
 | M-1 guide contradicts itself on the token | rewritten (§10.5); pins updated |
 | M-2 setup docstring claimed an order the report did not print | report reordered; test asserts the order |
-| M-3 stale pre-rebase SHAs | §10.1 re-pointed; no other stale SHA in src/tests/docs (`grep -rnE '4b288e1|05fb151|be6270c|5e07b6c|b862b79|99957eb'` hits only this plan's history notes) |
+| M-3 stale pre-rebase SHAs | §10.1 re-pointed; no other stale SHA in src/tests/docs (`grep -rnE '4b288e1|05fb151|be6270c|5e07b6c|b862b79|99957eb'` hits only this plan's history notes — true at `f48d858`; round 2 then added `05fb151` to
+`tests/test_cli_ui.py`, repointed in round 3, §10.10) |
 | M-4 spec not updated | Q1 answered, R-4 mitigated, §11 phase-7 row EXITED (subject to the loop closing) |
 | L-1 notice false for `::` | reworded; W1 makes "loopback names only" true for every wildcard |
 | L-2 recipe regex | catches `--host ::`/`[::]`, spares `::1`; parametrized both ways |
@@ -355,7 +360,7 @@ The phase-7 audit of `9baa2ba` (AUDIT FAILED). Items already closed by round 1 w
 | M-4 `vault-and-wiki.md` still said brain-up opens the browser; table default unpinned (A24) | **fixed** — three passages corrected; the table row is pinned |
 | M-5 guide token contradiction | **verified closed** at `f48d858` (round 1, M-1) |
 | M-6 setup order | **verified closed** at `f48d858` (round 1, M-2) |
-| M-7 stale SHAs; scratchpad-only mutations; §10.3 count | **fixed** — every mutation of all three rounds is in §10.9; §10.3 stays bound to `99957eb`, and the audited head's run is in the review-loop report (a line here cannot record a run on its own commit) |
+| M-7 stale SHAs; scratchpad-only mutations; §10.3 count | **fixed** — every mutation of all three rounds is in §10.9; §10.3 is bound to the commit each measurement ran on (`77074bb` since `5402c8f`; a line here cannot record a run on its own commit) |
 | L-8 `brain ui --host ::` died in `resolve_port` | **fixed** — the probe binds the server's address family; tests for a free and a busy IPv6-wildcard port |
 | L-9 spec silent on the A7 deviation | **fixed** — §8.3 and C5 annotated; the Q1 annotation from round 1 re-verified |
 | L-10 CHANGELOG `[Unreleased]` empty | **fixed** |
@@ -369,21 +374,74 @@ The phase-7 audit of `9baa2ba` (AUDIT FAILED). Items already closed by round 1 w
 ### 10.9 Mutation catalog — every mutation, reproducible
 
 Each entry is one mutation as the harness applied it: the file, the exact text replaced (Python
-`repr`), its replacement, the test(s) run, and the text that must appear in the failure. The five
-clauses, every time: the targeted tests pass unmutated; the replacement matches exactly once and
-`git diff --numstat` shows it landed; the tests go red; the failure contains the "red at" text; the
-file is restored and the tests pass again. Apply a mutation at the SHA named for its round.
+`repr`), its replacement, how many times the replaced text occurs at the round's SHA (`count`; the
+harness replaces every occurrence when it is above 1), the test(s) run, and the text that must
+appear in the failure. The five clauses, every time: the targeted tests pass unmutated; the
+replaced text occurs exactly `count` times and `git diff --numstat` shows the change landed; the
+tests go red; the failure contains the "red at" text; the file is restored and the tests pass
+again. Apply a mutation at the SHA named for its round.
+
+**Validated.** The script below checks every entry's `count` against `git show <SHA>:<file>`.
+Run from the repository root with `python` and the script on stdin. Result at the commit that
+added this sentence: **round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7 — 59/59, exit 0.**
+*(Review round 3, item 5: M19 was an annotation, not exact text, so it matched 0 times; it is
+now `'--read-only'` with count 2.)*
+
+```python
+"""Validate plan §10.9: each mutation's `replace` text occurs `count` times at its round's SHA."""
+import ast
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+PLAN = Path("docs/plans/2026-10-12-wiki-to-ui-phase7.md")
+text = PLAN.read_text(encoding="utf-8")
+catalog = text[text.index("### 10.9"):]
+FENCE = "`" * 3  # spelled out: a literal one would end this script's own code block
+rounds = re.findall(
+    rf"\*\*Round (\d) — against `([0-9a-f]{{7}})`.*?\n{FENCE}text\n(.*?)\n{FENCE}",
+    catalog,
+    re.S,
+)
+failures = 0
+for number, sha, body in rounds:
+    entries = [e for e in body.strip().split("\n\n") if e.strip()]
+    matched = 0
+    for entry in entries:
+        lines = entry.splitlines()
+        fields = {}
+        for line in lines[1:]:
+            key, _, value = line.partition(":")
+            if key.strip() in {"file", "replace", "count"}:
+                fields[key.strip()] = value.strip()
+        old = ast.literal_eval(fields["replace"])
+        want = int(fields["count"])
+        shown = subprocess.run(
+            ["git", "show", f"{sha}:{fields['file']}"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        got = shown.count(old)
+        if got == want:
+            matched += 1
+        else:
+            failures += 1
+            print(f"MISMATCH round {number} {lines[0]!r}: {got} != {want}")
+    print(f"round {number} @ {sha}: {matched}/{len(entries)} entries match their count")
+sys.exit(1 if failures else 0)
+```
 
 **Round 0 — against `8768393`** (the rebased closeout; every mutated file is byte-identical to the
 pre-rebase `99957eb` the harness first ran on — `git diff --stat 99957eb 8768393` touches only
-`tests/test_dev_dependency_pins.py`, which no mutation uses). M19 must remove BOTH occurrences;
-the first run removed one and survived (§10.4).
+`tests/test_dev_dependency_pins.py`, which no mutation uses). M19 removes BOTH occurrences; the
+first run removed one and survived (§10.4).
 
 ```text
 M1 brain-up default does not open wiki
   file:    src/brain/templates/bin/brain-up.sh
   replace: 'BRAIN_OPEN_BROWSER:-0}" == \'1\''
   with:    'BRAIN_OPEN_BROWSER:-1}" == \'1\''
+  count:   1
   test:    tests/test_bin_scripts.py::test_brain_up_does_not_open_the_wiki_by_default
   red at:  brain-up opened the wiki by default
 
@@ -391,6 +449,7 @@ M2 brain-up banner leads with brain ui
   file:    src/brain/templates/bin/brain-up.sh
   replace: "echo '   read:       brain ui   (search, read and edit — opens a browser)'\n"
   with:    ''
+  count:   1
   test:    tests/test_bin_scripts.py::test_brain_up_banner_names_brain_ui_before_the_wiki
   red at:  assert read and
 
@@ -398,6 +457,7 @@ M3 brain-up opt-in still opens
   file:    src/brain/templates/bin/brain-up.sh
   replace: 'BRAIN_OPEN_BROWSER:-0}" == \'1\' ]]'
   with:    'BRAIN_OPEN_BROWSER:-0}" == \'never\' ]]'
+  count:   1
   test:    tests/test_bin_scripts.py::test_brain_up_still_opens_the_wiki_on_request
   red at:  open.calls
 
@@ -405,6 +465,7 @@ M4 setup next steps name brain ui
   file:    src/brain/setup.py
   replace: '    typer.echo("     brain ui                       # read, search and edit in a browser")\n'
   with:    ''
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_setup_next_steps_name_brain_ui
   red at:  assert "brain ui" in steps
 
@@ -412,6 +473,7 @@ M4b setup wiki url labelled legacy
   file:    src/brain/setup.py
   replace: '  (legacy — read in brain ui)'
   with:    ''
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_setup_report_puts_brain_ui_before_the_wiki_url
   red at:  assert wiki and "legacy"
 
@@ -419,6 +481,7 @@ M5 capture docstring twin
   file:    src/brain/_capture_command.py
   replace: '``brain ui`` tree without "Show ingested" on'
   with:    'Quartz UI without the "Show ingested" toggle'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_capture_docstring_names_brain_ui_not_quartz
   red at:  assert "brain ui" in text
 
@@ -426,6 +489,7 @@ M6 MCP brain_capture description
   file:    src/brain/mcp_server.py
   replace: '(visible in the ``brain ui``\n    tree without "Show ingested" on)'
   with:    '(visible in the Quartz UI\n    without the "Show ingested" toggle)'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_mcp_capture_description_names_brain_ui_not_quartz
   red at:  assert "brain ui" in text
 
@@ -433,6 +497,7 @@ M7 README ships no wildcard recipe
   file:    README.md
   replace: 'brain ui --lan --read-only                # read from your phone: LAN address + a token'
   with:    'brain ui --host 0.0.0.0 --token <secret>  # a shared secret is required off loopback'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_docs_do_not_ship_the_wildcard_phone_recipe[README.md]
   red at:  documents `brain ui --host 0.0.0.0`
 
@@ -440,6 +505,7 @@ M7b cli-reference ships no wildcard recipe
   file:    docs/cli-reference.md
   replace: 'brain ui --lan --read-only                # serve to the LAN (e.g. a phone), token minted'
   with:    'brain ui --host 0.0.0.0 --token <secret>'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_docs_do_not_ship_the_wildcard_phone_recipe[cli-reference.md]
   red at:  documents `brain ui --host 0.0.0.0`
 
@@ -447,6 +513,7 @@ M15 cli-reference links the phone guide
   file:    docs/cli-reference.md
   replace: '[Reading your brain from a phone](guides/brain-ui-on-your-phone.md).'
   with:    'the phone guide.'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_docs_point_at_the_phone_guide_and_lan[cli-reference.md]
   red at:  assert "brain-ui-on-your-phone.md" in text
 
@@ -454,6 +521,7 @@ M16 docs index lists the guide
   file:    docs/README.md
   replace: '| [guides/brain-ui-on-your-phone.md](guides/brain-ui-on-your-phone.md) |'
   with:    '| guides |'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_docs_index_lists_the_phone_guide
   red at:  assert 'brain-ui-on-your-phone.md' in
 
@@ -461,6 +529,7 @@ M17 README calls brain ui primary
   file:    README.md
   replace: '`brain ui` is the primary reading surface:'
   with:    '`brain ui` is a reading surface:'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_readme_names_brain_ui_as_the_reading_surface
   red at:  assert "primary" in section.lower()
 
@@ -468,13 +537,15 @@ M18 vault-and-wiki marks the wiki legacy
   file:    docs/vault-and-wiki.md
   replace: '> **The wiki is now a legacy view.**'
   with:    '> **The wiki.**'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_vault_and_wiki_marks_the_wiki_as_legacy
   red at:  assert "brain ui" in intro and "legacy"
 
 M19 guide keeps --read-only advice
   file:    docs/guides/brain-ui-on-your-phone.md
-  replace: '--read-only (EVERY occurrence; both must go)'
+  replace: '--read-only'
   with:    ''
+  count:   2
   test:    tests/test_reading_surface_pointers.py::test_phone_guide_covers_the_q1_contract
   red at:  phone guide is missing '--read-only'
 
@@ -482,6 +553,7 @@ M8 --lan mints a real token
   file:    src/brain/cli_ui.py
   replace: 'token = token or lan_mod.new_token()'
   with:    'token = token or "x"'
+  count:   1
   test:    tests/test_cli_ui.py::test_lan_binds_the_lan_address_with_a_minted_token
   red at:  --lan must always run with a token
 
@@ -489,6 +561,7 @@ M9 --lan and --host are exclusive
   file:    src/brain/cli_ui.py
   replace: 'source.name == "COMMANDLINE"'
   with:    'False'
+  count:   1
   test:    tests/test_cli_ui.py::test_lan_and_host_together_is_a_usage_error
   red at:  assert result.exit_code == 2
 
@@ -496,6 +569,7 @@ M10 lan.py refuses loopback/unspecified
   file:    src/brain/ui/lan.py
   replace: 'if address.is_loopback or address.is_unspecified:'
   with:    'if False:'
+  count:   1
   test:    tests/test_ui_lan.py::test_a_loopback_or_unspecified_answer_is_refused
   red at:  DID NOT RAISE
 
@@ -503,6 +577,7 @@ M11 wildcard notice
   file:    src/brain/cli_ui.py
   replace: 'if host.strip().lower() in lan_mod.ALL_INTERFACES:'
   with:    'if False:'
+  count:   1
   test:    tests/test_cli_ui.py::test_wildcard_bind_warns_that_other_devices_are_refused
   red at:  assert "--lan" in result.output
 
@@ -510,6 +585,7 @@ M12 browser_url carries the token
   file:    src/brain/ui/server.py
   replace: 'return f"{url}#t={token}" if token else url'
   with:    'return url'
+  count:   1
   test:    tests/test_cli_ui.py::test_browser_url_carries_the_token_whenever_one_is_set
   red at:  assert browser_url(LAN_IP
 
@@ -517,6 +593,7 @@ M13 serve opens the tokened url
   file:    src/brain/ui/server.py
   replace: 'url = browser_url(host, port, context.token)'
   with:    'url = f"http://{host}:{port}/"'
+  count:   1
   test:    tests/test_cli_ui.py::test_serve_opens_the_tokened_url
   red at:  assert opened ==
 
@@ -524,6 +601,7 @@ M14 wildcard bind refuses a phone Host
   file:    src/brain/ui/context.py
   replace: 'if host in LOOPBACK_HOSTS or host == "0.0.0.0":  # noqa: S104 — compared, not bound\n        return LOOPBACK_HOSTS'
   with:    'if host in LOOPBACK_HOSTS:\n        return LOOPBACK_HOSTS\n    if host in ("0.0.0.0", "::"):\n        return frozenset({"*"})'
+  count:   1
   test:    tests/test_ui_security.py::test_a_wildcard_bind_refuses_another_devices_host_header
   red at:  assert response.status_code == 400
 
@@ -531,6 +609,7 @@ M14b LAN bind accepts its own Host
   file:    src/brain/ui/context.py
   replace: '    return frozenset({host})\n'
   with:    '    return LOOPBACK_HOSTS\n'
+  count:   1
   test:    tests/test_ui_security.py::test_a_lan_address_bind_accepts_its_own_host_header
   red at:  assert response.status_code == 200
 
@@ -544,6 +623,7 @@ W1 :: gets 0.0.0.0's allowlist
   file:    src/brain/ui/context.py
   replace: 'if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:'
   with:    'if host in LOOPBACK_HOSTS or host == "0.0.0.0":  # noqa: S104'
+  count:   1
   test:    tests/test_ui_security.py::test_an_ipv6_wildcard_gets_exactly_the_ipv4_wildcards_allowlist
   red at:  assert host_allowlist(wildcard) ==
 
@@ -551,6 +631,7 @@ W1 LAN Host still refused on wildcards (no wider)
   file:    src/brain/ui/context.py
   replace: '    if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:\n        return LOOPBACK_HOSTS\n'
   with:    '    if host in WILDCARD_HOSTS:\n        return LOOPBACK_HOSTS | frozenset({"192.0.2.10"})\n    if host in LOOPBACK_HOSTS:\n        return LOOPBACK_HOSTS\n'
+  count:   1
   test:    tests/test_ui_security.py::test_a_wildcard_bind_refuses_another_devices_host_header
   red at:  assert response.status_code == 400
 
@@ -558,6 +639,7 @@ W2 loopback Origin accepted on wildcard writes
   file:    src/brain/ui/security.py
   replace: 'if origin != ctx.allowed_origin:'
   with:    'if origin != ctx.allowed_origin.replace("127.0.0.1", "0.0.0.0").replace("[::1]", "[::]"):'
+  count:   1
   test:    tests/test_ui_security.py::test_a_wildcard_bind_accepts_a_write_from_the_url_it_opens
   red at:  assert response.status_code == 404
 
@@ -565,6 +647,7 @@ W2 foreign Origin still refused
   file:    src/brain/ui/security.py
   replace: 'if origin != ctx.allowed_origin:'
   with:    'if origin != ctx.allowed_origin and not origin.startswith("http://192.0.2."):'
+  count:   1
   test:    tests/test_ui_security.py::test_a_wildcard_bind_still_refuses_a_foreign_origin_on_writes
   red at:  assert response.status_code == 403
 
@@ -572,6 +655,7 @@ W2 build_context uses bind_origin
   file:    src/brain/ui/server.py
   replace: 'allowed_origin=bind_origin(host, port),'
   with:    'allowed_origin=f"http://{host}:{port}",'
+  count:   1
   test:    tests/test_ui_bind_wiring.py::test_build_context_derives_origin_and_hosts_from_the_bind
   red at:  assert context.allowed_origin == origin
 
@@ -579,6 +663,7 @@ W2 build_context uses host_allowlist (wildcard)
   file:    src/brain/ui/context.py
   replace: 'if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:'
   with:    'if host in LOOPBACK_HOSTS:'
+  count:   1
   test:    tests/test_ui_bind_wiring.py::test_build_context_derives_origin_and_hosts_from_the_bind
   red at:  assert context.allowed_hosts == hosts
 
@@ -586,6 +671,7 @@ bind_origin brackets IPv6
   file:    src/brain/ui/context.py
   replace: '        url_host = f"[{host}]"'
   with:    '        url_host = host'
+  count:   1
   test:    tests/test_ui_security.py::test_bind_origin_brackets_ipv6_and_passes_other_hosts_through
   red at:  assert bind_origin("::1", 8765)
 
@@ -593,6 +679,7 @@ L-6 browser_url loopback for wildcards
   file:    src/brain/ui/server.py
   replace: 'url = f"{bind_origin(host, port)}/"'
   with:    'url = f"http://{host}:{port}/"'
+  count:   1
   test:    tests/test_cli_ui.py::test_browser_url_for_a_wildcard_bind_is_a_loopback_url
   red at:  assert browser_url(wildcard, 8765
 
@@ -600,6 +687,7 @@ L-6 panel prints loopback URL
   file:    src/brain/ui/server.py
   replace: 'url = f"{bind_origin(host, port)}/"'
   with:    'url = f"http://{host}:{port}/"'
+  count:   1
   test:    tests/test_cli_ui.py::test_wildcard_bind_prints_a_loopback_url_not_the_bind_address
   red at:  assert "http://127.0.0.1:8765/#t=x" in
 
@@ -607,6 +695,7 @@ L-3 token percent-encoded (unit)
   file:    src/brain/ui/server.py
   replace: "quote(token, safe='')"
   with:    'token'
+  count:   1
   test:    tests/test_cli_ui.py::test_browser_url_percent_encodes_the_token
   red at:  assert url ==
 
@@ -614,6 +703,7 @@ L-3 token reaches api.js intact (browser)
   file:    src/brain/ui/server.py
   replace: "quote(token, safe='')"
   with:    'token'
+  count:   1
   test:    tests/test_ui_browser_api.py::test_a_token_with_reserved_characters_reaches_the_api_intact
   red at:  the page threw while reading the token
 
@@ -621,6 +711,7 @@ M-2 setup names brain ui before the wiki
   file:    src/brain/setup.py
   replace: '    typer.echo("   read:       brain ui   (search, read and edit in a browser)")\n    if wiki_installed:\n        typer.echo(f"   wiki url:   http://localhost:{wiki_port}  (legacy — read in brain ui)")\n        typer.echo(f"   start wiki: caddy run --config {brain_home}/Caddyfile")\n'
   with:    '    if wiki_installed:\n        typer.echo(f"   wiki url:   http://localhost:{wiki_port}  (legacy — read in brain ui)")\n        typer.echo(f"   start wiki: caddy run --config {brain_home}/Caddyfile")\n    typer.echo("   read:       brain ui   (search, read and edit in a browser)")\n'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_setup_report_names_brain_ui_before_the_legacy_wiki_url
   red at:  assert _read_line(lines) < wiki[0]
 
@@ -628,6 +719,7 @@ L-4 pid fallback names brain-status
   file:    src/brain/templates/bin/brain-up.sh
   replace: "PID_PENDING='not written yet — check brain-status'"
   with:    "PID_PENDING='?'"
+  count:   1
   test:    tests/test_bin_scripts.py::test_brain_up_banner_says_where_to_look_when_a_pid_is_not_written_yet
   red at:  assert "pid ?" not in
 
@@ -635,6 +727,7 @@ L-2 pattern catches --host ::
   file:    tests/test_reading_surface_pointers.py
   replace: '(?:0\\.0\\.0\\.0|\\[?::\\]?)'
   with:    '(?:0\\.0\\.0\\.0)'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_wildcard_recipe_pattern_catches_every_wildcard
   red at:  assert _WILDCARD_RECIPE.search(line)
 
@@ -642,6 +735,7 @@ L-2 pattern spares ::1
   file:    tests/test_reading_surface_pointers.py
   replace: '(?![0-9A-Za-z.:\\]])'
   with:    ''
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_wildcard_recipe_pattern_spares_real_addresses
   red at:  assert not _WILDCARD_RECIPE.search(line)
 
@@ -649,6 +743,7 @@ M-1 guide: URL is a password
   file:    docs/guides/brain-ui-on-your-phone.md
   replace: '- **Treat the printed URL as a password.**'
   with:    '- **Keep the printed URL handy.**'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_phone_guide_covers_the_q1_contract
   red at:  phone guide is missing 'Treat the printed URL as a password'
 
@@ -656,6 +751,7 @@ M-1 guide: the URL is the token
   file:    docs/guides/brain-ui-on-your-phone.md
   replace: '**But the URL is the token, and the browser can keep the URL.**'
   with:    '**The browser may keep the URL.**'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_phone_guide_covers_the_q1_contract
   red at:  phone guide is missing 'the URL is the token'
 
@@ -668,6 +764,7 @@ HIGH-1 LAN allowlist is exactly the bound address
   file:    src/brain/ui/context.py
   replace: '    return frozenset({host})\n'
   with:    '    return frozenset({host, "*"}) if "." in host else frozenset({host})\n'
+  count:   1
   test:    tests/test_ui_security.py::test_a_lan_bind_allowlist_is_exactly_the_bound_address
   red at:  assert host_allowlist("192.0.2.10") ==
 
@@ -675,6 +772,7 @@ HIGH-1 LAN bind refuses a foreign Host (app)
   file:    src/brain/ui/context.py
   replace: '    return frozenset({host})\n'
   with:    '    return frozenset({host, "*"}) if "." in host else frozenset({host})\n'
+  count:   1
   test:    tests/test_ui_security.py::test_a_non_loopback_bind_refuses_a_foreign_host_header[192.0.2.10]
   red at:  assert response.status_code == 400
 
@@ -682,6 +780,7 @@ HIGH-1 wildcard binds refuse a foreign Host (app)
   file:    src/brain/ui/context.py
   replace: '    if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:\n        return LOOPBACK_HOSTS\n'
   with:    '    if host in WILDCARD_HOSTS:\n        return LOOPBACK_HOSTS | frozenset({"*"})\n    if host in LOOPBACK_HOSTS:\n        return LOOPBACK_HOSTS\n'
+  count:   1
   test:    tests/test_ui_security.py::test_a_non_loopback_bind_refuses_a_foreign_host_header[0.0.0.0]
   red at:  assert response.status_code == 400
 
@@ -689,6 +788,7 @@ M-2/A20 panel carries the token on loopback
   file:    src/brain/cli_ui.py
   replace: 'url=browser_url(host, resolved_port, token),'
   with:    'url=browser_url(host, resolved_port, "" if loopback else token),'
+  count:   1
   test:    tests/test_cli_ui.py::test_loopback_with_a_token_prints_the_tokened_url
   red at:  assert "http://127.0.0.1:8765/#t=s3cret" in
 
@@ -696,6 +796,7 @@ M-2/A21 serve opens the tokened URL on loopback
   file:    src/brain/ui/server.py
   replace: 'url = browser_url(host, port, context.token)'
   with:    'url = browser_url(host, port, "" if is_loopback(host) else context.token)'
+  count:   1
   test:    tests/test_cli_ui.py::test_serve_opens_the_tokened_url[127.0.0.1]
   red at:  assert opened ==
 
@@ -703,6 +804,7 @@ M-3/A26 --lan failure prints the remedy
   file:    src/brain/cli_ui.py
   replace: '            typer.secho(str(exc), fg="red", err=True)\n            raise typer.Exit(1) from exc\n        # Minted'
   with:    '            raise typer.Exit(1) from exc\n        # Minted'
+  count:   1
   test:    tests/test_cli_ui.py::test_lan_without_a_network_exits_one_with_the_override
   red at:  assert "Pass --host" in result.output
 
@@ -710,6 +812,7 @@ M-3/A27 --lan failure is not a traceback
   file:    src/brain/cli_ui.py
   replace: '        try:\n            host = lan_mod.detect_lan_address()\n        except BrainError as exc:\n            typer.secho(str(exc), fg="red", err=True)\n            raise typer.Exit(1) from exc\n'
   with:    '        host = lan_mod.detect_lan_address()\n'
+  count:   1
   test:    tests/test_cli_ui.py::test_lan_without_a_network_exits_one_with_the_override
   red at:  assert isinstance(result.exception, SystemExit)
 
@@ -717,6 +820,7 @@ L-8 port probe uses the IPv6 family
   file:    src/brain/ui/server.py
   replace: 'family = socket.AF_INET6 if ":" in address else socket.AF_INET'
   with:    'family = socket.AF_INET'
+  count:   1
   test:    tests/test_cli_ui.py::test_resolve_port_finds_a_free_port_on_the_ipv6_wildcard
   red at:  assert resolve_port(free, host=wildcard
 
@@ -724,6 +828,7 @@ L-8 port probe still sees a busy IPv6 port
   file:    src/brain/ui/server.py
   replace: '        except OSError:\n            return False\n    return True\n'
   with:    '        except OSError:\n            return True\n    return True\n'
+  count:   1
   test:    tests/test_cli_ui.py::test_resolve_port_sees_a_busy_ipv6_wildcard_port
   red at:  assert resolve_port(busy, host=
 
@@ -731,6 +836,7 @@ L-12 browser_url brackets an IPv6 literal
   file:    src/brain/ui/context.py
   replace: '        url_host = f"[{host}]"'
   with:    '        url_host = host'
+  count:   1
   test:    tests/test_cli_ui.py::test_browser_url_brackets_an_ipv6_literal
   red at:  assert browser_url("::1", 8765, "") ==
 
@@ -738,6 +844,7 @@ L-13 no Phone line on loopback
   file:    src/brain/cli_ui.py
   replace: '    if lan:\n        typer.echo("  Phone'
   with:    '    if True:\n        typer.echo("  Phone'
+  count:   1
   test:    tests/test_cli_ui.py::test_the_phone_line_is_printed_only_for_lan
   red at:  assert "Phone" not in loopback.output
 
@@ -745,6 +852,7 @@ M-4/A24 table states the 0 default
   file:    docs/vault-and-wiki.md
   replace: '| `BRAIN_OPEN_BROWSER` | `0` |'
   with:    '| `BRAIN_OPEN_BROWSER` | `1` |'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_vault_and_wiki_documents_the_brain_up_default_truthfully
   red at:  the env table must state BRAIN_OPEN_BROWSER's default
 
@@ -752,7 +860,85 @@ M-4 no stale 'opens the browser'
   file:    docs/vault-and-wiki.md
   replace: 'and starts the\nbuild watcher.'
   with:    'starts the\nbuild watcher, and opens the browser.'
+  count:   1
   test:    tests/test_reading_surface_pointers.py::test_vault_and_wiki_documents_the_brain_up_default_truthfully
   red at:  assert 'and opens the browser' not in
 
 ```
+
+**Round 3 — against `5627743`.**
+
+```text
+R3-1 starlette floor excludes 1.6.0
+  file:    pyproject.toml
+  replace: '"starlette>=1.7,<2",'
+  with:    '"starlette>=0.47,<2",'
+  count:   1
+  test:    tests/test_dev_dependency_pins.py::test_starlette_floor_excludes_the_release_that_breaks_ipv6_hosts
+  red at:  admits starlette 1.6.0
+
+R3-2 bind_address strips brackets
+  file:    src/brain/ui/context.py
+  replace: '        return host[1:-1]\n'
+  with:    '        return host\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_bracketed_host_is_bound_without_its_brackets
+  red at:  assert started.context_kwargs["host"] == bound
+
+R3-3 the CLI normalises the host once
+  file:    src/brain/cli_ui.py
+  replace: '    host = bind_address(host)\n'
+  with:    ''
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_bracketed_host_is_bound_without_its_brackets
+  red at:  assert started.context_kwargs["host"] == bound
+
+R3-4 [::1] binds as ::1
+  file:    src/brain/cli_ui.py
+  replace: '    host = bind_address(host)\n'
+  with:    ''
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_bracketed_loopback_needs_no_token
+  red at:  assert started.context_kwargs["host"] == "::1"
+
+R3-5 the probe socket is IPv6-only
+  file:    src/brain/ui/server.py
+  replace: '        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)\n'
+  with:    '        pass\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_probe_socket_is_ipv6_only_like_the_real_bind
+  red at:  assert sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 1
+
+R3-6 the probe socket uses the bind's family
+  file:    src/brain/ui/server.py
+  replace: '    family = socket.AF_INET6 if ":" in address else socket.AF_INET\n    sock = socket.socket(family'
+  with:    '    family = socket.AF_INET\n    sock = socket.socket(family'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_probe_socket_is_ipv6_only_like_the_real_bind
+  red at:  assert sock.family == socket.AF_INET6
+
+R3-7 the :: notice says IPv6-only
+  file:    src/brain/ui/lan.py
+  replace: '"is refused with 400 — and `::` is IPv6-only, so an IPv4 phone cannot even "\n    "connect. Use --lan'
+  with:    '"is refused with 400. Use --lan'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_ipv6_wildcard_notice_says_ipv4_devices_cannot_connect
+  red at:  assert "IPv6-only" in result.output
+
+```
+
+### 10.10 Review round 3 (2026-10-13)
+
+The phase-7 review of `5402c8f`: one MEDIUM, four LOW. Fixed in `3994ea3` (deps) and `5627743`
+(UI), recorded here.
+
+| Item | Fix |
+|---|---|
+| 1 MEDIUM — starlette floor too low for W1 | `starlette>=1.7,<2`. Measured: on 1.6.0 the two `::` security tests fail (`[::1]:8765` split to `[`, 400); on 1.7.0 they pass; the UI + MCP set (143 tests) passes on 1.7.0 and on 1.8.0. mcp 2.3.0 asks `>=0.27` and sse-starlette `>=0.49.1`, so 1.7 narrows nothing they need; `pip install --dry-run -e ".[dev,browser]"` resolves cleanly. A new test pins the floor (excludes 1.6.0, admits 1.7.0). No other test bounded starlette. |
+| 2 LOW — `--host [::]` died in uvicorn | the CLI normalises the host once (`context.bind_address`); `bind_origin` re-brackets for URLs. `[::1]` was the same pre-existing failure and is fixed by the same line |
+| 3 LOW — `::` is IPv6-only (V6ONLY) | the probe socket sets `IPV6_V6ONLY=1` like asyncio's bind, asserted on the option (the behavioural difference is Linux-only: macOS reports both free — measured; Linux NOT measured, no image cached locally). The notice, guide, CHANGELOG and docstrings now say `::` is IPv6-only, its local URL is `[::1]`, and IPv4 clients are refused at connect |
+| 4 LOW — `05fb151` in `tests/test_cli_ui.py` | repointed to `5742c91`. Whole-repo `git grep -nE '4b288e1|05fb151|be6270c|5e07b6c|b862b79|99957eb'` now hits only this plan's history notes |
+| 5 LOW — M19 not exact text | exact text with an explicit count; all 59 entries validated (§10.9) |
+
+**Mutation evidence (round 3):** 7 guards, each on all five clauses, against `5627743` on a clean
+tree (§10.9).
