@@ -139,6 +139,12 @@ embedder. Options, honestly stated:
 `tests/test_eval_workflow_contract.py:233` already carries a skipped test keyed to an empty
 `HERMETIC_EVAL_TESTS` list — that is where a hermetic gate would register itself.
 
+*Addendum 2026-10-13 (this paragraph is a 2026-09-29 snapshot and is left as
+written):* the user decided on 2026-10-12 to keep the retrieval-quality gate
+local. The empty `HERMETIC_EVAL_TESTS` placeholder and its skipped test were
+retired in PR #20. The docstring of `tests/test_eval_workflow_contract.py`
+explains how to reintroduce them if that decision is ever reversed.
+
 ### 3.4 Dependabot #12 and #14
 
 Every `pyproject.toml` bound carries an inline evidence block, and two bounds were **false**

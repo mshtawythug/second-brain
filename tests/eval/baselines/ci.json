@@ -5,10 +5,10 @@
     "snippet_context_tokens": 200,
     "vector_sim_floor": 0.25
   },
-  "generated_at": "2026-09-21T21:03:47.351941Z",
-  "mean_mrr": 0.5835,
-  "mean_ndcg_at_5": 0.4834,
-  "mean_recall_at_20": 0.7267,
+  "generated_at": "2026-10-13T12:42:01.414155Z",
+  "mean_mrr": 0.3697,
+  "mean_ndcg_at_5": 0.2589,
+  "mean_recall_at_20": 0.5852,
   "per_category": {
     "email": {
       "category": "email",
@@ -20,44 +20,44 @@
     "interview": {
       "category": "interview",
       "count": 5,
-      "mean_mrr": 0.5667,
-      "mean_ndcg_at_5": 0.5795,
+      "mean_mrr": 0.3622,
+      "mean_ndcg_at_5": 0.3097,
       "mean_recall_at_20": 0.75
     },
     "meeting": {
       "category": "meeting",
       "count": 5,
-      "mean_mrr": 0.4,
-      "mean_ndcg_at_5": 0.3398,
-      "mean_recall_at_20": 0.6267
+      "mean_mrr": 0.2412,
+      "mean_ndcg_at_5": 0.131,
+      "mean_recall_at_20": 0.5467
     },
     "people": {
       "category": "people",
       "count": 2,
-      "mean_mrr": 1.0,
-      "mean_ndcg_at_5": 0.5566,
-      "mean_recall_at_20": 0.2386
+      "mean_mrr": 0.5357,
+      "mean_ndcg_at_5": 0.1952,
+      "mean_recall_at_20": 0.1932
     },
     "recency": {
       "category": "recency",
       "count": 2,
-      "mean_mrr": 1.0,
-      "mean_ndcg_at_5": 0.927,
-      "mean_recall_at_20": 0.75
+      "mean_mrr": 0.25,
+      "mean_ndcg_at_5": 0.2648,
+      "mean_recall_at_20": 0.1429
     },
     "semantic": {
       "category": "semantic",
       "count": 9,
-      "mean_mrr": 0.7937,
-      "mean_ndcg_at_5": 0.6737,
-      "mean_recall_at_20": 0.9074
+      "mean_mrr": 0.5741,
+      "mean_ndcg_at_5": 0.4369,
+      "mean_recall_at_20": 0.665
     },
     "source-specific": {
       "category": "source-specific",
       "count": 4,
-      "mean_mrr": 0.4554,
-      "mean_ndcg_at_5": 0.3396,
-      "mean_recall_at_20": 0.875
+      "mean_mrr": 0.3531,
+      "mean_ndcg_at_5": 0.2429,
+      "mean_recall_at_20": 0.75
     }
   },
   "results": [
@@ -65,12 +65,14 @@
       "actual_doc_ids": [
         "77352385-930a-4caa-8499-466c8814ba9a",
         "f25525e1-00fe-4dc1-9532-201fae0b1113",
+        "e01135dd-2f82-4f72-9005-952b93f7d8b9",
+        "cefaf198-ba44-4b0e-bee7-40647a073215",
         "a1a4afd3-d435-4b8b-9c2a-2a0a3638d34c",
         "64adc8aa-207b-4ace-b581-ba537165c2a2",
         "69b5000c-570a-4b45-a935-bf9cb8e555d9",
         "c3a885d7-97d7-4709-b21d-bf59778afc92",
-        "3af8bd36-b577-4bda-b2b5-707b46bace9a",
         "d3ba24a6-debc-4d26-b20b-8ce6ecb033d8",
+        "3af8bd36-b577-4bda-b2b5-707b46bace9a",
         "8b5c05e8-8182-4b5a-9a35-44a8658443eb",
         "edbbf390-194a-40b6-a30e-93ad88c2aa77",
         "c69d7735-dce0-4d91-a9d6-6bbc79a6235d",
@@ -80,9 +82,7 @@
         "2414da2a-5f3b-4983-b3e4-c0a6bde7658c",
         "559bbf47-0932-4eca-a64c-f225c2766475",
         "627e7645-9d66-457d-8ada-f7bf38002912",
-        "96ec00f1-d217-4075-92db-9992cc2905dc",
-        "f82349a5-4a79-4db2-a2d6-f058bb1c73eb",
-        "cad6092f-447e-433a-9bd5-899ae83ccfd4"
+        "96ec00f1-d217-4075-92db-9992cc2905dc"
       ],
       "category": "semantic",
       "expected_doc_ids": [
@@ -99,26 +99,32 @@
         "69b5000c-570a-4b45-a935-bf9cb8e555d9"
       ],
       "mrr": 1.0,
-      "ndcg_at_5": 0.8304,
+      "ndcg_at_5": 0.5531,
       "query": "offline-first mobile app for field technicians",
-      "recall_at_20": 1.0
+      "recall_at_20": 0.8182
     },
     {
       "actual_doc_ids": [
-        "a8dc1736-f2b0-4c88-94ca-d27711abd959",
-        "0d6b202c-905b-4c23-920f-431ce24c4e67",
-        "5503d689-d905-47ec-a09f-c831a96a8748",
-        "0aa14231-47d5-4bf0-a7df-e33c208c7657",
-        "772501bd-0fab-4deb-bd81-1e51dbef1c93",
-        "e515bd53-9abb-4e2b-aa9d-a24a4e8c058d",
-        "3407dabe-fa6f-4eb0-9b44-42bb28d67175",
-        "e4887ea7-3744-476e-ac2e-f65aafb17949",
-        "f9ef1bbd-692d-47a1-8dfb-c79d3c675718",
-        "3326e942-14e1-4528-bb71-df5233ede13c",
-        "4cd59e1b-5d94-4618-993a-80110abc7318",
-        "74e880f7-2424-4879-9316-8c7fe466b3d2",
-        "735f0098-bb0c-4a29-ae6c-8e19066a0e07",
-        "120a4d48-56ab-4c59-85b1-e756b9bfaca5"
+        "bf849cbb-ae04-4e9f-9858-915505e8d879",
+        "6e2c7123-8361-48dc-8393-8d578e91fef1",
+        "92a9917e-3f21-46a1-a31c-70d3967ece97",
+        "df0be710-e994-535f-b003-718ee4cd68eb",
+        "472c97f2-2b7e-415a-8e77-ee8d3a27e408",
+        "1147af65-f6fc-4a20-af61-534748532a23",
+        "585c40fc-4415-4f3c-939c-c1a1f6cfe64c",
+        "892ab6c7-5d5f-55ed-8981-366134c2b62e",
+        "c1fc1c46-80e2-422d-9f4c-7c619a78c91a",
+        "8ac1380e-b4da-58c0-b691-4b759ba955a8",
+        "bc23dc1b-3b43-58fb-9c89-a6a4444916dc",
+        "372b1d55-e438-4169-9f2c-3e7dca08e5ed",
+        "8b1533ac-03ca-4c01-ac4e-923fa69f05e7",
+        "ed7529c0-83df-4725-adac-af7b9709e897",
+        "0f0ce922-e213-40d3-ad26-716715ae3749",
+        "9f3d7dca-ab65-49c2-8e74-aee70f7f1da2",
+        "63417694-a7b1-4142-afaf-c65e46ff3d57",
+        "50bd59ec-4630-406c-a6ad-c4afb9d5cd68",
+        "fb805aee-7b87-4aaf-8f10-5ed1677c26b0",
+        "ff6e76ef-d9f3-4bca-8fb7-965e48c91e4d"
       ],
       "category": "semantic",
       "expected_doc_ids": [
@@ -128,10 +134,10 @@
         "0d6b202c-905b-4c23-920f-431ce24c4e67",
         "e515bd53-9abb-4e2b-aa9d-a24a4e8c058d"
       ],
-      "mrr": 1.0,
-      "ndcg_at_5": 0.8539,
+      "mrr": 0.0,
+      "ndcg_at_5": 0.0,
       "query": "converting a single-tenant application to a multi-tenant schema",
-      "recall_at_20": 1.0
+      "recall_at_20": 0.0
     },
     {
       "actual_doc_ids": [
@@ -168,23 +174,12 @@
     },
     {
       "actual_doc_ids": [
-        "985a0a98-2030-4418-9ee4-a1d49b21f136",
-        "5c8bb467-9d36-4478-b29e-bd8483ab1972",
-        "c8085f25-25f5-4939-a2bb-f60751cda60c",
-        "87993d73-ae46-4fb2-b317-4d963ac8a495",
-        "d1e4efaa-3c71-4f11-bfb1-c17527c5702b",
-        "a410ada3-5cc2-475e-b9a8-cdab65d5d4d2",
-        "f88e9eff-c514-43da-a568-09f91778dc22",
-        "e3c3b949-7fb1-4e8e-8661-d43f789563b6",
-        "850d9260-dd99-4be9-9ff2-79cc31485e90",
-        "3f289994-7f6b-4faf-80fc-654867328c99",
-        "7a7444c0-7aeb-4483-8e85-14690f988414",
-        "78eae146-373b-4183-80bd-5b3556e0bba2",
-        "6203e698-5290-42fd-b88c-cda518d99c37",
-        "248ee901-81f5-4f3e-89e5-7d11e9160391",
-        "e39dafa9-5173-49b7-95e0-a002e48af2a9",
-        "7238bce0-d9df-46e1-88d8-ffec920f851c",
-        "677a469c-13c3-47ce-bb2a-38697e3c7d2a"
+        "c6cf2af9-a1c9-5401-8d75-abaf136a034e",
+        "2b213f75-f570-54c1-bba2-0803aea4c050",
+        "781394d7-c27a-5b41-81b7-b0ff469e7ec9",
+        "c054b5e5-c903-5064-a4e0-3576c69b5364",
+        "0b1fb403-0443-5b71-9ba9-e91815c4c511",
+        "f787b635-6e58-545f-90ac-a521705e9cbb"
       ],
       "category": "semantic",
       "expected_doc_ids": [
@@ -198,10 +193,10 @@
         "f88e9eff-c514-43da-a568-09f91778dc22",
         "248ee901-81f5-4f3e-89e5-7d11e9160391"
       ],
-      "mrr": 1.0,
-      "ndcg_at_5": 1.0,
+      "mrr": 0.0,
+      "ndcg_at_5": 0.0,
       "query": "SEO keyword strategy for a marketing website rebuild",
-      "recall_at_20": 1.0
+      "recall_at_20": 0.0
     },
     {
       "actual_doc_ids": [
@@ -238,6 +233,7 @@
         "de3a7df5-86f9-44b4-b7f1-9bf82be56b25",
         "d3a70bd8-f2eb-4b8d-9d56-88ef41aee0bc",
         "abaccc9a-b05d-4c17-8534-cda0aae2a7dd",
+        "d2351a2d-cfbf-5ab5-a9b5-8e424d13dfef",
         "66c12f71-cf6e-4106-8bc7-a64cfcd2eeef",
         "c408b3a6-a788-4864-9e3e-74f88faa5ee4",
         "095518de-c6e7-4b8d-93d7-c55c4ae7aea1",
@@ -304,23 +300,23 @@
         "ff6e76ef-d9f3-4bca-8fb7-965e48c91e4d",
         "659c81b4-e74c-4f5e-8e21-8617ef2a15e5",
         "fad1db4d-47ac-4720-86bb-be94ff3984a0",
-        "471b23ea-381f-48ef-afd7-c3a5b3bbeb59",
-        "9eecf51f-7b4e-44c9-98e2-d5334c456610",
         "514c58ae-2578-41d3-8bc5-cce3f17d68b8",
+        "9eecf51f-7b4e-44c9-98e2-d5334c456610",
         "e9a637af-f1db-49d2-8525-aafe2303cca7",
         "65bfbd21-abb1-4aa5-b37e-4b4c204d77e3",
         "d3a70bd8-f2eb-4b8d-9d56-88ef41aee0bc",
         "a2580e06-c9dc-463a-bca9-3b98aa779c6a",
         "f7febd20-1acf-4d04-8695-10cfe4a416d7",
         "b5aa8167-bbe7-42ea-8140-90fa514c02b3",
-        "6970ff38-a87a-485c-b690-70b34d0dae79",
         "4f53def5-ed83-4b35-8947-d885fcad0510",
         "4143e4d9-d19a-42c6-ac8e-ea0b6a08984a",
         "4313f0d5-95af-499d-98a4-1d3444098c63",
         "09cb4f44-a156-4291-88c2-f7a1cec3e1e7",
         "ef06b385-425c-4f77-8ccd-84bc87fbb938",
+        "4ac8efe6-aa52-4fd3-9dc8-6c43e57fbd57",
         "b6d41f26-7dde-43bd-92fc-0ea61f34f0b2",
-        "4ac8efe6-aa52-4fd3-9dc8-6c43e57fbd57"
+        "fc87034a-87ff-4aab-95d9-65b58c316931",
+        "241e1a6a-8786-4594-9b19-487f325b63f5"
       ],
       "category": "semantic",
       "expected_doc_ids": [
@@ -328,7 +324,7 @@
         "e9a637af-f1db-49d2-8525-aafe2303cca7",
         "4143e4d9-d19a-42c6-ac8e-ea0b6a08984a"
       ],
-      "mrr": 0.1429,
+      "mrr": 0.1667,
       "ndcg_at_5": 0.0,
       "query": "reducing LLM inference cost in a production feature",
       "recall_at_20": 0.6667
@@ -399,26 +395,26 @@
     },
     {
       "actual_doc_ids": [
+        "0df1aac6-d03d-457e-acc9-93248e0e0e83",
+        "c793bd79-f507-4b5e-90b2-6148fed31a9b",
+        "83aa2ba1-009b-47be-ab2c-5b0aa89e5513",
+        "1f6c8d2a-3857-49f3-904f-3e37274dc7b9",
         "31912a2c-eab9-46c9-b8fb-44094ce23f44",
         "ea41d7c7-73d5-4fbc-8584-893d6e9010e7",
         "5a80e29f-20f1-48a8-8ec9-0cc2d8dbc4d9",
         "cd42f630-95be-477a-9cf8-a3a294e2e3e1",
         "8e0f4668-c8c4-44f6-a797-0e61c01c7378",
-        "58f6bbd8-26cc-44f8-b30d-cae12d64d861",
         "5c9b34cd-0138-452e-a389-6562545e7be6",
+        "58f6bbd8-26cc-44f8-b30d-cae12d64d861",
         "9c2ac1ef-e687-4391-a18b-e870626b2e1c",
         "a0c77799-ebd7-40e2-89b8-170c4bb50139",
         "37cc49bc-fdbf-4696-86ea-276f5b32af18",
         "6dff9cae-7fc8-4ea5-8708-2a8b45c0f179",
-        "41d9d635-06ef-4e0d-9883-60ce6759afa5",
         "3882eaec-f3e0-4f77-9f0b-261e4b983095",
+        "41d9d635-06ef-4e0d-9883-60ce6759afa5",
         "87b82893-b6ec-4445-bd56-66cf348fff3b",
-        "d2145841-7ba2-45dc-966a-f8e9e1665564",
         "2bda888a-7a4d-493f-9569-be9508934345",
-        "74b821f4-1615-41e8-9eb7-3db6321eeb9e",
-        "801af2b0-4dca-4980-a4b6-743c80ac53a2",
-        "2105a77a-0463-4bff-af9b-842698788f43",
-        "ed97bbd2-eeaf-45b3-be38-999a705b9519"
+        "74b821f4-1615-41e8-9eb7-3db6321eeb9e"
       ],
       "category": "interview",
       "expected_doc_ids": [
@@ -427,40 +423,40 @@
         "5a80e29f-20f1-48a8-8ec9-0cc2d8dbc4d9",
         "cd42f630-95be-477a-9cf8-a3a294e2e3e1"
       ],
-      "mrr": 1.0,
-      "ndcg_at_5": 1.0,
+      "mrr": 0.2,
+      "ndcg_at_5": 0.151,
       "query": "handling a toxic high performer on the team",
       "recall_at_20": 1.0
     },
     {
       "actual_doc_ids": [
-        "2e39d499-3074-484b-8a71-81029a2a1d63",
+        "a4572c6b-9a83-5ae0-bde8-112fd47a5707",
+        "25864a96-b820-41f3-bf6d-86a034d8879f",
+        "59a36d45-10b3-40c9-bd76-a9aa00c9588e",
+        "3d2b48dc-cbda-4432-9880-1c7bfaabcde4",
+        "e31f3dd1-5b4b-44e0-9238-2e62093fab04",
+        "b7828039-424f-4542-8195-a81d32fc0ebd",
+        "fff1efbc-cfd9-4699-9104-6602759a75dd",
         "6b28a8b7-7779-48be-bff5-bf2e58a3de83",
         "8ddc86a4-1785-4fcd-9d13-a9605d290c77",
         "ff6e76ef-d9f3-4bca-8fb7-965e48c91e4d",
         "9c2ac1ef-e687-4391-a18b-e870626b2e1c",
         "8fafc2de-41cc-46cc-8015-2c8736c506a1",
+        "d122e72c-42fa-4ff9-acae-dc35de40190c",
+        "caf1c6ed-6a14-46b3-87a9-5b33a31611d4",
+        "2f827605-dab9-45f7-aaee-ac4b27ba2b37",
         "c666b9a7-2b1e-4d57-857b-4e089d76e4cd",
-        "09e6f54d-29de-431d-821b-88e4184ba53c",
-        "91728aec-d64d-47fb-a3dd-980cc755fba5",
         "68b1f767-7667-4999-959f-2541291863cf",
-        "e6e3ebbe-fe54-40b3-a9da-ae86285a17d7",
         "55754172-586f-4572-8b33-9ec8c223c79e",
-        "3e0cbe2e-222c-4acb-9e26-48694c1a7550",
-        "d2015673-d913-4cf6-bf13-f7f384814d51",
-        "0aba5fb2-3adb-45c6-b0ae-a6e8c8196afb",
-        "4f362a7f-c2a9-4c22-9997-a6bfdc92db5b",
-        "7ad17811-4ce9-483c-a9e5-bde9b5623d01",
-        "9042cae9-56ec-4908-85d7-42896ba791d2",
-        "33c1e3ee-e148-4351-b19a-1df117793757",
-        "f818bbfb-3ffc-4352-b2fc-79ae88e48af7"
+        "e6e3ebbe-fe54-40b3-a9da-ae86285a17d7",
+        "09e6f54d-29de-431d-821b-88e4184ba53c"
       ],
       "category": "interview",
       "expected_doc_ids": [
         "8ddc86a4-1785-4fcd-9d13-a9605d290c77"
       ],
-      "mrr": 0.3333,
-      "ndcg_at_5": 0.5,
+      "mrr": 0.1111,
+      "ndcg_at_5": 0.0,
       "query": "technical interview with a live coding exercise",
       "recall_at_20": 1.0
     },
@@ -506,18 +502,18 @@
         "7affc645-e5da-4c33-a5d6-a2faee7b51bd",
         "19619f7c-b64d-4bd7-9d80-bf74403bc1d0",
         "6e6ad228-efda-4cc4-8cca-0a60dffe728b",
+        "c666b9a7-2b1e-4d57-857b-4e089d76e4cd",
         "8b93c370-25bd-4a0c-b80c-fe4e7d5f3664",
-        "d17de991-52d6-4776-8b53-74bebe068d48",
         "c753b473-88fc-4ddb-a7b4-2d8d02c99c6e",
-        "93f1d33c-fde3-45a6-b6d6-575cbc8c941b",
+        "d17de991-52d6-4776-8b53-74bebe068d48",
         "33c1e3ee-e148-4351-b19a-1df117793757",
+        "93f1d33c-fde3-45a6-b6d6-575cbc8c941b",
+        "a48cbc10-328a-44eb-93bd-cebecb4d564f",
         "c1648384-600b-42c3-a254-5440562cf050",
         "2ef9de65-4bec-428c-8a9a-08d173fafeb7",
         "6dff9cae-7fc8-4ea5-8708-2a8b45c0f179",
-        "c666b9a7-2b1e-4d57-857b-4e089d76e4cd",
         "5e27f71d-f236-4f9a-94a0-f6e232b13090",
-        "b8764039-d022-4b4b-bba4-a256055fbba9",
-        "85f81704-35df-4159-b092-75974f0c2bf0"
+        "b8764039-d022-4b4b-bba4-a256055fbba9"
       ],
       "category": "interview",
       "expected_doc_ids": [
@@ -534,25 +530,25 @@
     {
       "actual_doc_ids": [
         "271f9d95-444e-4d66-8fa8-4ddeeee1e6e5",
+        "3b4f5f1d-069e-58be-b3a1-041906a19191",
+        "caf1c6ed-6a14-46b3-87a9-5b33a31611d4",
+        "2d8a7f35-60f9-41d1-9c9f-57b6c64f8b22",
+        "0ef83534-b6d3-4e97-a887-deee977abe83",
+        "50b2b73b-2c83-4467-b7a6-a8080c9df323",
+        "a4572c6b-9a83-5ae0-bde8-112fd47a5707",
+        "fa43ed16-6768-4a86-934f-dfe8d5ddaa09",
+        "21904962-b6b5-4988-ab70-7978f75e982d",
+        "6e9899b2-b5af-4e2a-9cfb-232eb8a8d19a",
         "cf4e276d-4a5a-4630-ac07-afae55cea734",
         "65bfbd21-abb1-4aa5-b37e-4b4c204d77e3",
+        "8a44ceb3-a291-4e80-a602-bacd0545cc49",
+        "c21b5170-bff7-4914-8a1e-9d427e561d73",
         "4ac8efe6-aa52-4fd3-9dc8-6c43e57fbd57",
         "aa7fab38-1cf1-4595-9ae2-59a1c51c31bc",
+        "43806979-f95c-4976-b907-55a571d8f965",
         "7aaf06a2-7769-4d0a-9a63-a5793198a8b1",
-        "54c7a7ad-0c29-4f79-ab9e-96743659e6f5",
-        "3f82bfad-2a20-4cac-83fe-ee85cd65fb70",
-        "2b2a8aa8-d2a9-411c-9867-24ef7ee153d2",
-        "77f6169f-a256-4190-9e32-57e51e5e91ad",
-        "85200b04-116b-43bf-9803-6ea21e32635c",
-        "0869848c-7007-41d4-9298-2f4d624b55c6",
-        "321e8324-9942-484c-9ea0-86ef9cf65077",
-        "9575c6c1-651e-4dd8-b2d0-63c90a157bfb",
-        "c3f5aac3-f1b5-43e0-8dab-3264f148b5d2",
-        "e938df4a-bb93-4108-a4ce-6caf0edc410d",
-        "3b94eb0b-040f-49f9-982e-9c1eb3a659b2",
-        "ba192f2d-5e33-4f4a-b19b-616137424f8a",
-        "9e93de0e-eaad-4a66-8a52-6623bb499bb3",
-        "38aa3ea4-587c-45d0-a434-06be442407b2"
+        "beff3a87-5092-4549-9fe8-fad9b6e395d0",
+        "492875cb-e09e-4e0c-8364-4ba34fd648c6"
       ],
       "category": "meeting",
       "expected_doc_ids": [
@@ -572,33 +568,33 @@
         "15df704d-a17d-4ae4-bd06-1b16c6940e34",
         "77f6169f-a256-4190-9e32-57e51e5e91ad"
       ],
-      "mrr": 0.5,
-      "ndcg_at_5": 0.3452,
+      "mrr": 0.0909,
+      "ndcg_at_5": 0.0,
       "query": "sprint refinement and backlog grooming session",
-      "recall_at_20": 0.4
+      "recall_at_20": 0.1333
     },
     {
       "actual_doc_ids": [
         "c3f5aac3-f1b5-43e0-8dab-3264f148b5d2",
+        "b352dc1d-1b36-4bb3-838d-5dff20845bae",
         "8e6603fc-ff30-467c-a920-89736b2bf36b",
         "7aaf06a2-7769-4d0a-9a63-a5793198a8b1",
+        "5551d39f-47a6-4568-b254-80f7f4f6f831",
+        "85e4057d-fb0d-461b-82ad-3d30752bc4b7",
         "41d9d635-06ef-4e0d-9883-60ce6759afa5",
         "15303c9a-1091-44e6-94b6-6988f1894d2e",
         "e45ba093-b6ba-4dc4-ac74-c00b8723da6e",
-        "7a8a391e-6f73-4a03-afba-6964d2f19505",
-        "4238bce7-adbb-4508-a9f0-b84ab29e140e",
         "09ef86ef-cd84-451d-80ae-f9da0779e56a",
+        "4238bce7-adbb-4508-a9f0-b84ab29e140e",
         "3d1b4d18-3508-4cdc-ad45-7a71f1c69cb5",
         "8c211289-e512-4f73-a8bb-0709a772b999",
         "9edfcc38-1506-42c5-8754-31a16cfe5db6",
-        "cfb94e6d-29de-4418-a1f8-38d66137fc3b",
-        "1d47dc6b-d4ca-4fdc-9317-9e616cacb97a",
         "36482072-26a5-42a6-bc84-e95bafac5b50",
+        "1d47dc6b-d4ca-4fdc-9317-9e616cacb97a",
         "072bb116-66a7-4d69-9672-ba876447064c",
         "06d4ba1c-44fe-473e-8a45-d9c22e30c4ec",
-        "67effdb8-8135-48bd-93f8-625569a640e9",
-        "d8d2df67-6f25-4a78-85e2-d0998775e2bf",
-        "16a60f0a-9d62-4a74-a048-2ff4d9826453"
+        "54372473-a20b-483d-aa23-4f41029d624a",
+        "67effdb8-8135-48bd-93f8-625569a640e9"
       ],
       "category": "meeting",
       "expected_doc_ids": [
@@ -619,12 +615,13 @@
         "06d4ba1c-44fe-473e-8a45-d9c22e30c4ec"
       ],
       "mrr": 1.0,
-      "ndcg_at_5": 0.8539,
+      "ndcg_at_5": 0.6548,
       "query": "daily engineering standup blockers and updates",
-      "recall_at_20": 0.7333
+      "recall_at_20": 0.6
     },
     {
       "actual_doc_ids": [
+        "5ef04ff7-0dd4-4ddd-bbf7-4d4531b9768d",
         "34976538-a508-455d-b0e4-84e904b3a3c1",
         "5e0456f2-fc93-44f4-a7d7-930a57e40e35",
         "a5a59a58-b679-45e9-a3e2-a3936b01aafd",
@@ -636,15 +633,14 @@
         "d55c9d1f-b11f-4f6d-9ee7-bdeae8a8272f",
         "4626a2b5-308a-420a-b609-7fd1c699e415",
         "18284535-5b84-4000-b967-f1cff765e10f",
-        "5ef04ff7-0dd4-4ddd-bbf7-4d4531b9768d",
         "bc9f06c9-ef5f-4bda-8b45-60a407e052f2",
         "5ba40ae0-3aa7-4957-9e0a-7bfaefc14f6c",
-        "a0c77799-ebd7-40e2-89b8-170c4bb50139",
         "4959fe59-bedd-4a2a-b692-7f9bfe15d816",
         "9d5cb7bc-cc62-4243-b1bf-1eb31bd2476e",
         "7ef6442c-2403-40b4-a4b1-07fa70ce841d",
         "7ec0e007-dbf6-4127-b5b0-ab179766325f",
-        "abaccc9a-b05d-4c17-8534-cda0aae2a7dd"
+        "abaccc9a-b05d-4c17-8534-cda0aae2a7dd",
+        "98903ac4-9b5f-4292-9003-7dd6c31a5f20"
       ],
       "category": "meeting",
       "expected_doc_ids": [
@@ -659,64 +655,64 @@
     },
     {
       "actual_doc_ids": [
-        "85200b04-116b-43bf-9803-6ea21e32635c",
-        "484dce3e-f96e-4c82-9e12-40ce0f2338da",
+        "382a3e30-2ef4-5fe6-bb20-48daf6c2d88e",
+        "96da929d-d067-44fd-b6ef-d9e52f10c98d",
+        "7e906942-ed7b-4b65-b394-08a0b6f93c01",
+        "f705433a-a275-5938-980b-86711ef9348b",
+        "c1f534e6-560c-5b98-ac10-a9adb2c62489",
+        "259caa51-579d-4057-9bbf-9cad9c1e27c8",
+        "a525a1e8-10b1-4cd9-834c-ec49661e61ee",
+        "f67d8176-853c-4d78-bed6-0dafa4cd58bc",
+        "6ce0d646-2e01-5b51-80ae-adfab5d2bef7",
+        "5de53903-cd6b-5398-bb86-dd0d6c8e1037",
+        "fa43ed16-6768-4a86-934f-dfe8d5ddaa09",
+        "c9defaa5-6a1c-46b2-8297-116cb2cad88a",
+        "0ef83534-b6d3-4e97-a887-deee977abe83",
+        "044d8127-541a-4e92-9ec2-929cc0c2ba4a",
+        "7001263c-9179-4382-8edf-44b0a0136c23",
         "cedb4ebc-69dd-497d-af26-32dee5a36977",
-        "b86d4514-2a29-4091-97bf-95f37ff8a80f",
-        "8007fc39-c1ff-4308-a34e-7789555146b4",
-        "e938df4a-bb93-4108-a4ce-6caf0edc410d",
-        "54c7a7ad-0c29-4f79-ab9e-96743659e6f5",
-        "f5a12f59-8933-44b4-a0f6-e57df1a18ad0",
-        "57462343-6c86-49d9-ad9e-9a51ff81804a",
-        "e100f99f-3a01-49f9-9149-d59f6fa523be",
-        "706c82ba-b59d-4676-811c-9d124ddba50a",
-        "afa0ead1-306a-4aaa-a7b1-0f7300961d9a",
-        "4ac8efe6-aa52-4fd3-9dc8-6c43e57fbd57",
-        "a668e7ae-5734-4f5f-bcc2-724f3c5a4515",
-        "7f9a6741-dbea-437c-a507-ac9ba695d849",
-        "bd9bf31d-5027-44ee-8f28-d38a9c6d4b18",
-        "b4fd8f8d-ba00-4656-b202-86a9f78f1eb6",
-        "a0c77799-ebd7-40e2-89b8-170c4bb50139",
-        "d495e2f2-cb5f-4960-99f7-cf92f50657c6",
-        "6132507f-0b52-41c2-a7e2-06b76b9791db"
+        "e4eff9cc-d730-4ed0-9754-55ed9d90adfd",
+        "92fbf4b8-63c9-44a5-b529-e968e4e34bd2",
+        "85200b04-116b-43bf-9803-6ea21e32635c",
+        "1bd90cb6-c599-487b-a9a1-fd4b9735ec3b"
       ],
       "category": "meeting",
       "expected_doc_ids": [
         "cedb4ebc-69dd-497d-af26-32dee5a36977"
       ],
-      "mrr": 0.3333,
-      "ndcg_at_5": 0.5,
+      "mrr": 0.0625,
+      "ndcg_at_5": 0.0,
       "query": "project kickoff meeting with scope overview",
       "recall_at_20": 1.0
     },
     {
       "actual_doc_ids": [
+        "830b84b0-2a20-5df4-9683-7eb9277d4df9",
+        "e92ba6d6-77ae-5ab5-aee6-5c0d5fc73b34",
+        "a4572c6b-9a83-5ae0-bde8-112fd47a5707",
         "66e522b4-0069-44e2-98d7-f38747514d46",
+        "d3efd2a6-83d3-5dee-9e57-d9a75b151193",
         "73806db1-5126-4b67-a47b-318750bfbf0b",
         "34a456dd-c68f-4d20-b78f-4fe176d8b641",
+        "d4fd1e93-1f58-5352-b0d7-9ff7f964e888",
+        "0798727a-4d18-4490-ab1e-6ff8e9b98a9c",
         "833455b9-23e9-47b1-b261-c6d67d10e4db",
         "3a6a68ee-aa43-4924-8fa8-c7baf4ad9e54",
+        "70ca1223-f1b2-5987-85d1-8fd99dbbb857",
+        "ab45d6ab-fb13-4428-89ed-3df02099f97c",
+        "32deefb9-cb01-507f-be6a-f7dace5e3107",
+        "21fcaf4d-6942-5a11-bf69-31826bdb7f86",
+        "4d132b6f-838d-55dd-8293-3dc3c591c05e",
+        "f4f385ff-43d1-5cee-8115-60092a825b37",
+        "d8dc4601-9da3-4ad8-9816-35c8a36c9a2a",
         "0f0ce922-e213-40d3-ad26-716715ae3749",
-        "e938df4a-bb93-4108-a4ce-6caf0edc410d",
-        "36482072-26a5-42a6-bc84-e95bafac5b50",
-        "d0d78d5c-db6e-4d70-8daf-7d666dc4839c",
-        "d8d2df67-6f25-4a78-85e2-d0998775e2bf",
-        "a1d1cdd0-597c-434c-b762-f503a3e4c8e9",
-        "7cd0b884-4780-45ec-a333-23aee7b2bab4",
-        "abaccc9a-b05d-4c17-8534-cda0aae2a7dd",
-        "5353c25b-ad8d-4c7f-aabc-7fcb8021afc0",
-        "6e114cbf-f8c9-444b-8653-683a7af9400a",
-        "31d12c1b-1256-49bf-b4a0-fbc2f7fdc06a",
-        "b86d4514-2a29-4091-97bf-95f37ff8a80f",
-        "afa0ead1-306a-4aaa-a7b1-0f7300961d9a",
-        "7deb9b2e-eb30-43f4-8419-c31c60721e06",
-        "cf4e276d-4a5a-4630-ac07-afae55cea734"
+        "ca6aa949-d27e-4cf7-8d92-189d5fa2776d"
       ],
       "category": "meeting",
       "expected_doc_ids": [
         "0f0ce922-e213-40d3-ad26-716715ae3749"
       ],
-      "mrr": 0.1667,
+      "mrr": 0.0526,
       "ndcg_at_5": 0.0,
       "query": "quarterly all-hands review meeting",
       "recall_at_20": 1.0
@@ -756,6 +752,7 @@
     },
     {
       "actual_doc_ids": [
+        "697d95f6-e059-466a-905e-046b09b28fa6",
         "cf6dc02c-f02e-4542-a817-c162bc499e11",
         "33c1e3ee-e148-4351-b19a-1df117793757",
         "c326512f-9d12-4f47-84d5-15d223f3d372",
@@ -773,7 +770,6 @@
         "4f262839-5108-4f9d-afcd-e178d079bfb9",
         "bc9213f5-ea44-44d7-90ee-3a1e891bc29e",
         "bad7016f-6568-4592-9811-2de7c2b3a365",
-        "0608a8f0-4b10-4559-8c47-1c38878df048",
         "68b1f767-7667-4999-959f-2541291863cf",
         "309cbe29-7a7a-4637-8d9f-c261dddbe990"
       ],
@@ -852,27 +848,30 @@
     },
     {
       "actual_doc_ids": [
+        "507aac8e-4278-44ea-bf0c-d9ffc9b76556",
+        "6e2c7123-8361-48dc-8393-8d578e91fef1",
+        "9c2b49ce-e31b-4346-b13c-685a9e0bb2f1",
+        "b055acf2-bd8a-448f-9840-6e4cd5827424",
+        "526a6907-d17b-4006-8813-4d17e8bc350d",
+        "a96ce3b7-f955-4b88-ac5b-c8f4b3d6ba35",
+        "e82bc819-24c5-4c16-ad6c-045028a67051",
+        "e2f02b53-6a4b-4538-a284-bcd5dbb9e861",
+        "d8dc4601-9da3-4ad8-9816-35c8a36c9a2a",
         "0f0ce922-e213-40d3-ad26-716715ae3749",
         "5d7da074-f064-4209-aa26-edb939ceadd5",
+        "1fda5691-26da-4f63-9f27-92b0013261f9",
         "50bd59ec-4630-406c-a6ad-c4afb9d5cd68",
-        "f21ccb2d-eb20-43e2-bcc8-d842bbdfc9b5",
-        "b613eae7-3345-4c14-af0b-a20d21173dcd",
-        "cedb4ebc-69dd-497d-af26-32dee5a36977",
-        "afa0ead1-306a-4aaa-a7b1-0f7300961d9a",
-        "31d12c1b-1256-49bf-b4a0-fbc2f7fdc06a",
-        "1f1ade8b-d113-4c2b-b240-f23c2bd6bddb",
-        "d8d2df67-6f25-4a78-85e2-d0998775e2bf",
-        "5effa7da-d7ac-4518-b0f4-8e85e722ea26"
+        "f21ccb2d-eb20-43e2-bcc8-d842bbdfc9b5"
       ],
       "category": "source-specific",
       "expected_doc_ids": [
         "5d7da074-f064-4209-aa26-edb939ceadd5",
         "d8d2df67-6f25-4a78-85e2-d0998775e2bf"
       ],
-      "mrr": 0.5,
-      "ndcg_at_5": 0.3869,
+      "mrr": 0.0909,
+      "ndcg_at_5": 0.0,
       "query": "privacy review of personal health data handling",
-      "recall_at_20": 1.0
+      "recall_at_20": 0.5
     },
     {
       "actual_doc_ids": [
@@ -923,14 +922,12 @@
         "86d05201-b389-4b06-b2cf-0b55a94aa1cb",
         "7cc59d52-dd64-4d5a-87eb-fd08457eb893",
         "ba192f2d-5e33-4f4a-b19b-616137424f8a",
+        "72581a94-77d1-49ae-a8b4-e6dae5509e66",
         "937f911c-b2f1-44c9-9764-3b6e0c24c2bc",
         "16a60f0a-9d62-4a74-a048-2ff4d9826453",
-        "36482072-26a5-42a6-bc84-e95bafac5b50",
         "634da128-000b-40ff-9074-8ad074f076bf",
+        "36482072-26a5-42a6-bc84-e95bafac5b50",
         "6970ff38-a87a-485c-b690-70b34d0dae79",
-        "5e3752d3-f13f-487a-9e69-4066c2241289",
-        "4238bce7-adbb-4508-a9f0-b84ab29e140e",
-        "06d4ba1c-44fe-473e-8a45-d9c22e30c4ec",
         "1f4fcb5f-a542-4f6a-b832-11b0c4eb156f"
       ],
       "category": "source-specific",
@@ -981,22 +978,25 @@
     },
     {
       "actual_doc_ids": [
-        "e559388e-aa7e-46b4-85e5-cd4100338247",
-        "7e1837ee-f042-44f6-9903-db80611b3142",
-        "ef2bcbc7-02de-4302-a9ce-1e112bb54d23",
-        "05d2e581-b6d4-4288-9b61-b10c331aceea",
-        "e71cd373-c7e1-461c-ac49-dbbf0fe8212d",
-        "f9cd4010-e435-42c8-8cff-4b8c74ffa013",
-        "26576289-ecdc-4580-9e98-2f8396680143",
-        "e1e4e39e-13b9-4a24-bcf6-79711fd2a9f6",
-        "7fe4119a-fdf8-41be-8f28-018ea14c71e6",
+        "d5dc1276-6340-4d64-b395-6ca5d7863eea",
         "752fb7ee-c005-4f14-8476-a3cfaa131d5d",
-        "ad996490-8887-4d8c-9865-b22a522b9891",
+        "12bc9814-7a7c-41b8-89da-f76b29b72f96",
         "be4accfa-76f2-4675-9dbc-9a791941ec76",
-        "e1908d8e-567a-457b-9a87-a4a76c64183f",
+        "b28db8ea-58b1-4f9f-a536-54e126d56f26",
+        "b5c637ee-5898-48b3-af34-24a29c882228",
+        "05d2e581-b6d4-4288-9b61-b10c331aceea",
+        "48f1b5d4-f79a-4c3b-be02-81b3cde8d026",
+        "96ffdb54-0bd7-49ba-a557-5cd87930a821",
+        "571182e3-8c2b-413a-8160-3a564c172fcf",
+        "eef87b58-853d-4d1e-b4af-ed363943c7c1",
         "7d20773b-01b1-4c67-8faa-99268810c765",
+        "ec3beb79-e2c5-4e84-8f93-2affd13c25aa",
+        "65fb18a1-276e-4387-a589-1435cf848f71",
         "1948663e-e1d7-44f0-9935-3160d83eaac8",
-        "0798727a-4d18-4490-ab1e-6ff8e9b98a9c"
+        "0c3c225d-9e43-4ccc-a7c2-c87dc845bdfd",
+        "0798727a-4d18-4490-ab1e-6ff8e9b98a9c",
+        "06020c23-c09f-40eb-90d5-ed548822130a",
+        "eee6dfa6-4f4a-42a6-b363-b9b42fc73b63"
       ],
       "category": "recency",
       "expected_doc_ids": [
@@ -1029,22 +1029,24 @@
         "e1908d8e-567a-457b-9a87-a4a76c64183f",
         "1948663e-e1d7-44f0-9935-3160d83eaac8"
       ],
-      "mrr": 1.0,
-      "ndcg_at_5": 0.8539,
+      "mrr": 0.5,
+      "ndcg_at_5": 0.5296,
       "query": "daily brief digest of recent captures and action items",
-      "recall_at_20": 0.5
+      "recall_at_20": 0.2857
     },
     {
       "actual_doc_ids": [
-        "73806db1-5126-4b67-a47b-318750bfbf0b",
-        "34a456dd-c68f-4d20-b78f-4fe176d8b641",
-        "66e522b4-0069-44e2-98d7-f38747514d46",
-        "3a6a68ee-aa43-4924-8fa8-c7baf4ad9e54",
-        "833455b9-23e9-47b1-b261-c6d67d10e4db",
-        "ad996490-8887-4d8c-9865-b22a522b9891",
         "0798727a-4d18-4490-ab1e-6ff8e9b98a9c",
-        "be4accfa-76f2-4675-9dbc-9a791941ec76",
-        "752fb7ee-c005-4f14-8476-a3cfaa131d5d"
+        "e92ba6d6-77ae-5ab5-aee6-5c0d5fc73b34",
+        "5f98bf6c-ccf4-54fd-8ea9-4bda260eb577",
+        "c4374ffb-e8ad-5d69-ab37-d9d37a815c37",
+        "d1c649d6-0574-4abb-8fe7-0e5d45b2bdd6",
+        "cc22789c-5a88-5da5-84ad-f043d3beb3ab",
+        "5fe3e9fe-d620-449a-b3c2-ed44985c9a44",
+        "2b213f75-f570-54c1-bba2-0803aea4c050",
+        "259caa51-579d-4057-9bbf-9cad9c1e27c8",
+        "7a21bd85-0db7-4329-a914-0bd50d18710a",
+        "92fbf4b8-63c9-44a5-b529-e968e4e34bd2"
       ],
       "category": "recency",
       "expected_doc_ids": [
@@ -1054,10 +1056,10 @@
         "66e522b4-0069-44e2-98d7-f38747514d46",
         "73806db1-5126-4b67-a47b-318750bfbf0b"
       ],
-      "mrr": 1.0,
-      "ndcg_at_5": 1.0,
+      "mrr": 0.0,
+      "ndcg_at_5": 0.0,
       "query": "quarterly planning review of budget allocation and hiring plans",
-      "recall_at_20": 1.0
+      "recall_at_20": 0.0
     },
     {
       "actual_doc_ids": [
@@ -1096,26 +1098,26 @@
     },
     {
       "actual_doc_ids": [
+        "32ddc306-dc17-4b24-86c6-5d6b7760f970",
+        "75e0755a-be72-4032-8cfd-443796276302",
+        "044d8127-541a-4e92-9ec2-929cc0c2ba4a",
+        "7001263c-9179-4382-8edf-44b0a0136c23",
+        "0df1aac6-d03d-457e-acc9-93248e0e0e83",
+        "b8d3db4e-3ee9-4ba1-954e-b252a8eb7e96",
+        "a631fa7a-4a12-42a8-a3a4-0a4685177636",
+        "a96ce3b7-f955-4b88-ac5b-c8f4b3d6ba35",
+        "6277e50c-d6ca-4355-a497-20d8c1b75939",
+        "bbf857e9-3ad4-458f-950e-59105947e07d",
+        "0e8f3779-c172-41a1-809a-ff2f952e0734",
+        "fc39ebcd-4545-498b-afa9-04859ad718ce",
+        "8b8bc374-2ee6-4685-a595-a17ed4e53f4e",
         "4ac8efe6-aa52-4fd3-9dc8-6c43e57fbd57",
+        "4ba27760-38d5-4ce2-b7c9-cc241af6f120",
         "af5ad7d7-3404-47c5-9989-224278f0bba5",
         "9d389d09-f2b7-484c-9909-ad8f808161f7",
-        "3b8aaa5b-14c3-4850-b9bf-244cc510b53e",
         "a668e7ae-5734-4f5f-bcc2-724f3c5a4515",
-        "abaccc9a-b05d-4c17-8534-cda0aae2a7dd",
-        "8e0f4668-c8c4-44f6-a797-0e61c01c7378",
-        "5b9c3e12-fe14-432d-8b40-62213400dcd4",
-        "60bf4a5f-694b-4be2-b176-e3a55dced5cd",
-        "f1c17c70-a713-4669-979c-67043fe51420",
-        "3861b409-fb0b-469e-85e6-d24be7cb567c",
-        "a0c77799-ebd7-40e2-89b8-170c4bb50139",
-        "cf6dc02c-f02e-4542-a817-c162bc499e11",
-        "ea32b992-e78f-4ac8-a382-9825ba323052",
-        "eab67ff1-4e60-4eef-980b-0aa91cde91f1",
-        "870e9b40-690d-4954-92dd-ad13346e5714",
-        "bd9bf31d-5027-44ee-8f28-d38a9c6d4b18",
-        "5e75d09f-4e5f-4f24-8dd8-f6654db1d417",
-        "fd51a664-189c-4f11-a4dd-ab5c8a4f0d32",
-        "2a69afa4-1a4a-4769-a954-75c372f66ce6"
+        "3b8aaa5b-14c3-4850-b9bf-244cc510b53e",
+        "0eeab76b-5a0a-4803-8dae-8049d294e91f"
       ],
       "category": "people",
       "expected_doc_ids": [
@@ -1142,10 +1144,10 @@
         "4ac8efe6-aa52-4fd3-9dc8-6c43e57fbd57",
         "f5d16991-f1eb-42a4-ab6f-404aced3ed03"
       ],
-      "mrr": 1.0,
-      "ndcg_at_5": 0.7227,
+      "mrr": 0.0714,
+      "ndcg_at_5": 0.0,
       "query": "introductory first one-on-one with a new team member",
-      "recall_at_20": 0.2273
+      "recall_at_20": 0.1364
     }
   ]
 }

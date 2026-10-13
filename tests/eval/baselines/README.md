@@ -18,17 +18,29 @@ a catastrophic regression that has nothing to do with retrieval quality. A run o
 all-zero metrics is the signature. Confirm with `brain status` — if the document
 count is not the one the baseline was recorded against, that is your answer.
 
+A document set that has only *grown* resolves every UUID but still moves rows:
+new documents compete for the top ranks against judgments that never saw them.
+*The 2026-10-13 re-record was this case, not recency drift (2) alone.* Ingests
+added 608 documents to the document set (Krisp on 2026-10-05, a Confluence
+import on 2026-10-08) and moved 12 non-recency rows as well; the means fell from
+0.4834 / 0.5835 / 0.7267 to **0.2589 / 0.3697 / 0.5852** (nDCG@5 / MRR /
+Recall@20). The golden judgments predate ~30% of the document set, so the
+absolute scores understate quality until `golden_corpus.yaml` is re-judged
+against the new documents.
+
 **2. Two `recency` queries are clock-dependent.** They filter on
 `documents.ingested_at` via `since_days: 40`, so the matched set is stable only
 while `today - 40 days` stays inside one gap in this brain's ingest history.
-The baseline was re-recorded on **2026-09-21**, when that boundary sat inside a
-16-day gap (last ingest 2026-08-11, next 2026-08-27), which makes it stable
-from roughly **2026-09-20 to 2026-10-05**. Outside that range one or both of
+The baseline was re-recorded on **2026-10-13**, when that boundary sat inside a
+21-day gap (last ingest 2026-08-31, next 2026-09-21), which makes it stable
+from roughly **2026-10-10 to 2026-10-31**. Outside that range one or both of
 those queries drift on their own and the baseline needs re-recording. Nothing
 about search changed. *(The first recording, 2026-09-02, sat in a different
 gap and drifted on 2026-09-20 exactly as this paragraph predicted — one query,
-`-0.15` nDCG@5, every other row unchanged to four decimals.)* Re-derive the
-window before you re-record; it is a property of the corpus, not of the code:
+`-0.15` nDCG@5, every other row unchanged to four decimals.)*
+
+Re-derive the window before you re-record; it is a property of the document
+set, not of the code:
 
 ```sql
 WITH b AS (SELECT now() - interval '40 days' AS cut)
@@ -51,6 +63,18 @@ re-judging a query's `expected_doc_ids` — invalidates the baseline for the
 queries it touched. `diff_reports` compares the *intersection* of the two query
 sets and reports added/removed queries separately, so an added query cannot
 dilute the mean; but a re-judged one silently changes what "correct" means.
+
+## Known retrieval issues
+
+- **Vector-leg candidate pool** (found 2026-10-12; a separate PR will fix it and
+  re-record): the vector leg in `search.py` is served by the HNSW index, so it
+  returns at most `hnsw.ef_search` (default 40) rows rather than
+  `CANDIDATE_LIMIT`, and filters apply after the index scan, so filtered queries
+  get fewer still. Measured 2026-10-13 on the live corpus (1,999 docs / 21,281
+  chunks): recall@50 against an exact scan averaged 0.76 over the golden
+  queries. That figure depends on the HNSW graph's quality, so it shifts with
+  ingests and reindexes. On one query a few long new documents filled the whole pool,
+  shrinking its results from 17 documents to 6.
 
 ## Who re-records, and when
 
