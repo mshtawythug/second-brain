@@ -19,6 +19,7 @@ threadpool. Each request opens and closes its own.
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -193,6 +194,13 @@ def bind_address(host: str) -> str:
         return bare.lower()
 
 
+#: An RFC 1123 hostname: dot-separated labels of letters, digits and inner
+#: hyphens, optionally fully qualified with a trailing dot.
+_HOSTNAME = re.compile(
+    r"(?i)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?"
+)
+
+
 class HostRefused(BrainError):
     """``--host`` names something ``brain ui`` will not bind; the message says why."""
 
@@ -276,6 +284,14 @@ def validate_host(host: str) -> str:
             bare, None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST
         )
     except socket.gaierror:
+        # Not numeric, so it must be a HOSTNAME (RFC 1123 labels). Anything
+        # else — `127.0.0.1:8080`, a URL, `0.0.0.0/0` — failed at the bind as
+        # a resolver error the user could not act on (final round).
+        if not _HOSTNAME.fullmatch(bare):
+            raise HostRefused(
+                f"--host {host} is not an IP address or a hostname; pass the "
+                "address alone (a port goes in --port)."
+            ) from None
         return bare.lower()
     resolved = {ipaddress.ip_address(info[4][0]) for info in infos}
     try:
@@ -289,6 +305,13 @@ def validate_host(host: str) -> str:
         raise HostRefused(
             f"--host {host} is not a canonical IP address (the system reads it "
             f"as {reading}); write the address out in full."
+        )
+    if isinstance(spelled, ipaddress.IPv6Address) and spelled.is_link_local:
+        # A link-local address binds only with a zone, and zones are refused
+        # (N1); without this it failed at the bind as "not owned" (final round).
+        raise HostRefused(
+            f"--host {host}: link-local addresses need a zone ID to bind, and "
+            "zone IDs are not supported — use a global or loopback address."
         )
     if isinstance(spelled, ipaddress.IPv6Address) and spelled.ipv4_mapped is not None:
         raise HostRefused(

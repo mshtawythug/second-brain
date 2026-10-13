@@ -61,6 +61,11 @@ git tag scheme:
     names what the system would have bound;
   - an IPv4-mapped address such as `::ffff:127.0.0.1`, which the IPv6-only
     socket cannot bind;
+  - a link-local IPv6 address without a zone (`fe80::1`): it binds only with
+    a zone, and zones are refused;
+  - anything that is neither an address nor a hostname, such as
+    `127.0.0.1:8080`, `http://127.0.0.1` or `0.0.0.0/0` (a port goes in
+    `--port`);
   - brackets that are unbalanced, repeated, or around anything but an IPv6
     literal: `[::1` used to fail later as "port already in use", and
     `[127.0.0.1]` is not URL syntax.
@@ -95,6 +100,10 @@ git tag scheme:
   whitespace, with a usage error; the server also compares the token as bytes.
 - **A host without IPv6 support** no longer prints a traceback for
   `--host ::`; it exits with a message naming the missing address family.
+- **Every bind failure was reported as a busy port.** `brain ui` said "port
+  … already in use" or "no free port found" whatever the cause. Now only a
+  port in use is busy: an address this machine does not own, a name that does
+  not resolve, and a privileged port below 1024 each get their own message.
 - **`brain ui --host LOCALHOST` refused its own URL with 400** — as did any
   mixed-case hostname. A browser lower-cases the host it sends and the Host
   check is case-sensitive, so the allowlist and URL kept a spelling no browser

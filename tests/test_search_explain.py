@@ -144,7 +144,6 @@ def test_explain_recency_boost_lt_one_for_old_docs(test_db, fake_embedder):
     """A 365-day-old doc with halflife=180 gets boost ≈ 0.5^(365/180) ≈ 0.249."""
     from datetime import UTC, datetime, timedelta
 
-
     # Ingest once normally to get the document id.
     ingest_document(
         test_db,

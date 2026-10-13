@@ -102,9 +102,37 @@ def _port_is_free(
     with closing(probe) as sock:
         try:
             sock.bind((address, port))
-        except OSError:
-            return False
+        except socket.gaierror as exc:
+            raise BrainError(
+                f"--host {host} does not resolve to an address on this machine "
+                f"({exc.strerror or exc})."
+            ) from exc
+        except OSError as exc:
+            # ONLY "in use" means busy (final round). This was a catch-all, so
+            # an address the machine does not own, or a refused privileged
+            # port, was reported as "port already in use" / "no free port".
+            if exc.errno == errno.EADDRINUSE:
+                return False
+            raise _bind_failure(host, port, exc) from exc
     return True
+
+
+def _bind_failure(host: str, port: int, exc: OSError) -> BrainError:
+    """The error for a probe bind that failed for any reason but "in use".
+
+    EACCES is not treated as busy: the auto-port bump moves by one, which stays
+    inside the privileged range below 1024 and would hide the real cause.
+    """
+    if exc.errno == errno.EADDRNOTAVAIL:
+        return BrainError(f"--host {host} is not an address this machine owns.")
+    if exc.errno == errno.EACCES:
+        return BrainError(
+            f"permission denied binding port {port} — ports below 1024 need "
+            "privileges; pass --port 1024 or higher."
+        )
+    return BrainError(
+        f"--host {host} cannot be bound on this machine ({exc.strerror or exc})."
+    )
 
 
 def resolve_port(

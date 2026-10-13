@@ -28,7 +28,6 @@ NOW = datetime(2026, 7, 25, 14, 12, 3, tzinfo=UTC)
 EMBEDDING_DIM = 4096
 
 
-
 @pytest.fixture
 def runner() -> StubDumpRunner:
     return StubDumpRunner(responses={"--version": CONTAINER_VERSION})

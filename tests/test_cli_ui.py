@@ -711,9 +711,15 @@ def test_a_non_canonical_ipv6_wildcard_is_the_wildcard(
 #: unexpected, so the next one is a row here. Kinds:
 #:   ("refused", phrase)  exit 2, before any probe or bind, saying `phrase`;
 #:   ("binds", host)      exit 0, bound as `host`, NO wildcard notice;
-#:   ("wildcard", host)   exit 0, bound as `host`, WITH the wildcard notice.
+#:   ("wildcard", host)   exit 0, bound as `host`, WITH the wildcard notice;
+#:   ("unowned", phrase)  exit 1 from the REAL port probe, saying `phrase` and
+#:                        never "in use" — the address is not this machine's;
+#:   ("unowned-on-darwin", phrase)  that on macOS, which owns only 127.0.0.1
+#:                        of 127/8; Linux binds the whole block, so exit 0.
 #: "binds"/"wildcard" are decided by the address the system will actually
 #: bind (numeric getaddrinfo), not by the spelling — the review-round-9 rule.
+#: Their probe is replaced, so they test classification; "unowned" rows run
+#: the real probe (the final round: only EADDRINUSE means "busy").
 HOST_SPELLINGS: list[tuple[str, str, str]] = [
     ("", "refused", "must not be empty"),
     ("   ", "refused", "must not be empty"),
@@ -743,6 +749,17 @@ HOST_SPELLINGS: list[tuple[str, str, str]] = [
     ("010.0.0.1", "refused", "is not a canonical IP address"),
     # an IPv6-only socket cannot bind an IPv4-mapped address (measured)
     ("::ffff:127.0.0.1", "refused", "IPv4-mapped IPv6 addresses cannot be bound"),
+    # not an address or a hostname at all
+    ("127.0.0.1:8080", "refused", "is not an IP address or a hostname"),
+    ("http://127.0.0.1", "refused", "is not an IP address or a hostname"),
+    ("0.0.0.0/0", "refused", "is not an IP address or a hostname"),
+    # link-local needs a zone to bind, and zones are refused (N1)
+    ("fe80::1", "refused", "link-local addresses need a zone ID"),
+    # real probe: addresses this machine does not own, or names that do not resolve
+    ("1.2.3.4", "unowned", "is not an address this machine owns"),
+    ("fd00::5", "unowned", "is not an address this machine owns"),
+    ("brain-2.lan", "unowned", "does not resolve to an address on this machine"),
+    ("127.0.0.2", "unowned-on-darwin", "is not an address this machine owns"),
     # accepted, classified by the resolved address
     ("0.0.0.0", "wildcard", "0.0.0.0"),
     ("::", "wildcard", "::"),
@@ -761,12 +778,39 @@ HOST_SPELLINGS: list[tuple[str, str, str]] = [
 
 @pytest.mark.parametrize(("given", "kind", "expected"), HOST_SPELLINGS)
 def test_every_host_spelling_does_what_the_table_says(
-    app: typer.Typer, started: _Started, given: str, kind: str, expected: str
+    app: typer.Typer,
+    started: _Started,
+    monkeypatch: pytest.MonkeyPatch,
+    given: str,
+    kind: str,
+    expected: str,
 ) -> None:
-    """Rounds 7–9, one row per spelling. A refusal happens in
-    ``context.validate_host`` before any probe or bind; a bind is classified by
-    the address it resolves to."""
+    """Rounds 7–9 and the final round, one row per spelling. A refusal happens
+    in ``context.validate_host`` before any probe or bind; a bind is classified
+    by the address it resolves to; an unowned address fails in the REAL probe,
+    never as "in use"."""
+    import sys
+
+    import brain.ui.server as server
+
+    if kind.startswith("unowned"):
+        if ":" in given and not _ipv6_wildcard_available():
+            pytest.skip("this host cannot open an IPv6 socket")
+        # The real probe: `resolve_port` was imported at module top, before the
+        # fixture replaced the module attribute.
+        monkeypatch.setattr(server, "resolve_port", resolve_port)
+        if kind == "unowned-on-darwin" and sys.platform != "darwin":
+            kind = "binds-real"
     result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
+    assert "in use" not in result.output, result.output
+    if kind.startswith("unowned"):
+        assert result.exit_code == 1, result.output
+        assert expected in result.output, result.output
+        assert started.context_kwargs == {}
+        return
+    if kind == "binds-real":
+        assert result.exit_code == 0, result.output
+        return
     if kind == "refused":
         assert result.exit_code == 2, result.output
         assert expected in result.output, result.output
@@ -831,3 +875,79 @@ def test_the_probe_socket_sets_the_options_the_real_bind_uses(
     v6only = (socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
     assert (v6only in sock.options) is ipv6, sock.options
 
+
+class _BindFails:
+    """A probe socket whose ``bind`` raises ``exc``."""
+
+    def __init__(self, exc: OSError) -> None:
+        self.exc = exc
+
+    def setsockopt(self, *args: object) -> None:
+        return None
+
+    def bind(self, address: object) -> None:
+        raise self.exc
+
+    def close(self) -> None:
+        return None
+
+
+def _probe_with(exc: OSError, *, host: str = "192.0.2.10", auto: bool = False) -> str:
+    """Run the REAL resolve_port with a probe socket that fails with ``exc``."""
+    from brain.errors import BrainError
+
+    def factory(family: int, kind: int) -> _BindFails:
+        return _BindFails(exc)
+
+    with pytest.raises(BrainError) as excinfo:
+        resolve_port(8765, host=host, auto=auto, socket_factory=factory)  # type: ignore[arg-type]
+    return str(excinfo.value)
+
+
+def test_only_address_in_use_means_busy() -> None:
+    """The final round: ``except OSError: return False`` called EVERY bind
+    failure "busy". EADDRINUSE still is — and still says so."""
+    import errno
+
+    assert "already in use" in _probe_with(OSError(errno.EADDRINUSE, "in use"))
+    assert "no free port found" in _probe_with(
+        OSError(errno.EADDRINUSE, "in use"), auto=True
+    )
+
+
+def test_an_address_this_machine_does_not_own_is_reported_as_such() -> None:
+    """EADDRNOTAVAIL — 49 on macOS, 99 on Linux; ``errno`` names it per platform."""
+    import errno
+
+    message = _probe_with(OSError(errno.EADDRNOTAVAIL, "Can't assign requested address"))
+    assert "is not an address this machine owns" in message, message
+    assert "in use" not in message and "no free port" not in message
+
+
+def test_a_name_that_does_not_resolve_is_reported_as_such() -> None:
+    import socket
+
+    message = _probe_with(socket.gaierror(8, "nodename nor servname provided"))
+    assert "does not resolve to an address on this machine" in message, message
+    assert "in use" not in message
+
+
+def test_a_privileged_port_is_a_permission_error_not_busy() -> None:
+    """EACCES is NOT busy (decided in the final round): auto-port moves up by
+    one, which stays inside the privileged range below 1024 and hides the
+    cause. It says what to do instead."""
+    import errno
+
+    message = _probe_with(OSError(errno.EACCES, "Permission denied"))
+    assert "permission denied" in message.lower(), message
+    assert "--port" in message
+    assert "in use" not in message
+
+
+def test_any_other_bind_failure_is_reported_not_called_busy() -> None:
+    import errno
+
+    message = _probe_with(OSError(errno.EINVAL, "Invalid argument"))
+    assert "cannot be bound" in message, message
+    assert "Invalid argument" in message
+    assert "in use" not in message
