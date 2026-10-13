@@ -262,7 +262,15 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | S19/S20 — plan | `ae7dda8` | this file: §10.9, §10.17 |
 | Round 10 — code | `733e347` | `ui/context.py` (`classify_addresses`, `literal_addresses`, ASCII/length/idna rules), `ui/security.py`, `ui/server.py` (`resolve_bind_addresses`, per-family probe, serve opens the guard's origin), `cli_ui.py`, CHANGELOG, guide, FAKE_DNS tests |
 | Round 10 — tests | `34a85f9` | the ASCII-only pattern; serve's opened origin |
-| Round 10 — plan | **the commit that added this row** | this file: §10.9, §10.18 |
+| Round 10 — plan | `c45c3bc` | this file: §10.9, §10.18 |
+| Round 11 — code | `4cefe58` | `ui/server.py` (`claim_port`, `bind_listeners`, `_open_listener`, `_listen_socket`; `serve(sockets=…)`; the unreachable EADDRINUSE handler deleted), `ui/context.py` (`bind_origin`), `cli_ui.py` (`_start`), CHANGELOG, guide; `test_cli_ui.py` split into it + `test_cli_ui_host.py` + `test_ui_server_bind.py` + `ui_cli_support.py`; `test_ui_server_preflight.py`, `test_ui_telemetry_persists.py`, `test_ui_security.py` |
+| Round 12 — code | `13d1593` | `ui/server.py` (`_MAX_PORT`, `claim_port` range and cap, `_open_listener` closes on any exception, the startup-wrapper comment, uvicorn-version wording), `cli_ui.py` (`--port` 1–65535, stale "probe" comments), `ui/context.py` (stale comment), CHANGELOG, `test_cli_ui.py` (the uvicorn double mirrors `startup(sockets=…)`; a real-uvicorn listener test), `test_ui_server_bind.py` (port-range tests) |
+| Round 13 — code | `1264162` | `ui/server.py` (`_listen_socket`: SO_REUSEADDR for specific addresses only; serve's docstring on uvicorn's exit code), CHANGELOG, `test_ui_server_bind.py` (the real-socket overlap test; the options table by address), `test_cli_ui.py` (the real-uvicorn test on an OS-assigned port) |
+| Round 14 — code | `969c9b8` | `ui/server.py` (`_loopback_companion`; `bind_listeners` skips a specific address under its own wildcard; docstrings), CHANGELOG, `test_ui_server_bind.py` (companion tests, injected and real; the reverse-order test; the coverage rule on real sockets) |
+| Round 15 — code | `6cc04fe` | `ui/server.py` (`_loopback_companion` tolerates EADDRNOTAVAIL), CHANGELOG (the bind window named), `test_ui_server_bind.py` (the missing-loopback regression test) |
+| Round 15b — tests | `5bf2c69` | `ui_cli_support.py` (`ipv6_loopback_available`, `needs_ipv6_loopback`), `test_ui_server_bind.py` (the marker on the tests that bind `::1`; the overlap probe's bind inside its handler), `test_cli_ui_host.py` (binds-real rows skip on what they bind) |
+| Round 15b — tests | `5367194` | `test_ui_server_bind.py`: the overlap probe's missing-address branch, driven on every platform |
+| Rounds 11–15b — plan | **the commit that added this row** | this file: §10.1, §10.9 (validator: `MOVED` lines; round headers may carry a letter), §10.19–§10.23. Rounds 11 to 15 never got a plan commit of their own: the next round arrived first each time |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -470,7 +478,10 @@ round's SHA, which is what the script checks; at HEAD their text or test has mov
    test function no longer exists, carries a SUPERSEDED line saying why — so
    a reader re-running it at HEAD is told. (The test-name half was added in
    review round 9, when consolidating three tests into one table renamed
-   tests that still-applicable entries cite.)
+   tests that still-applicable entries cite.) An entry whose tests MOVED
+   (review round 11 split `tests/test_cli_ui.py`) names the new nodes on
+   `MOVED … to:` lines, and those are what must exist at HEAD; `test:` keeps
+   the node as it was at the round's SHA.
 """
 import ast
 import re
@@ -483,7 +494,7 @@ FENCE = "`" * 3  # spelled out: a literal one would end this script's own code b
 text = PLAN.read_text(encoding="utf-8")
 catalog = text[text.index("### 10.9"):]
 rounds = re.findall(
-    rf"\*\*Round (\d+) — against `([0-9a-f]{{7}})`.*?\n{FENCE}text\n(.*?)\n{FENCE}",
+    rf"\*\*Round (\d+[a-z]?) — against `([0-9a-f]{{7}})`.*?\n{FENCE}text\n(.*?)\n{FENCE}",
     catalog,
     re.S,
 )
@@ -497,6 +508,13 @@ def show(sha: str, path: str) -> str:
 
 failures = 0
 superseded = 0
+# Every round header must be parsed: a header the pattern above misses (round
+# 15b's letter did, until the pattern took one) would drop its whole block from
+# validation without a word.
+headers = re.findall(r"\*\*Round \S+ — against `", catalog)
+if len(headers) != len(rounds):
+    failures += 1
+    print(f"UNPARSED: {len(headers)} round headers, {len(rounds)} blocks parsed")
 for number, sha, body in rounds:
     entries = [e for e in body.strip().split("\n\n") if e.strip()]
     matched = 0
@@ -520,8 +538,13 @@ for number, sha, body in rounds:
             print(f"MISMATCH round {number} {lines[0]!r}: {got} != {want} at {sha}")
         marked = any(line.strip().startswith("SUPERSEDED") for line in lines)
         superseded += marked
+        moved = [
+            line.split(" to: ", 1)[1].strip()
+            for line in lines
+            if line.strip().startswith("MOVED")
+        ]
         gone = [
-            t for t in tests
+            t for t in (moved or tests)
             if f"def {t.split('::')[1].split('[')[0]}(" not in show("HEAD", t.split("::")[0])
         ]
         if show("HEAD", fields["file"]).count(old) != want and not marked:
@@ -945,6 +968,8 @@ M-3/A27 --lan failure is not a traceback
   red at:  assert isinstance(result.exception, SystemExit)
 
 L-8 port probe uses the IPv6 family
+  MOVED in round 11 (`4cefe58`) to: tests/test_ui_server_bind.py::test_claim_port_binds_a_free_port_on_the_ipv6_wildcard
+  NOTE at HEAD (round 11): still applies, but goes red at `port, sockets = claim_port(free, host=wildcard` — the test now claims the port
   file:    src/brain/ui/server.py
   replace: 'family = socket.AF_INET6 if ":" in address else socket.AF_INET'
   with:    'family = socket.AF_INET'
@@ -1036,6 +1061,7 @@ R3-4 [::1] binds as ::1
   red at:  assert started.context_kwargs["host"] == "::1"
 
 R3-5 the probe socket is IPv6-only
+  MOVED in round 11 (`4cefe58`) to: tests/test_ui_server_bind.py::test_the_listen_socket_is_ipv6_only_like_asyncio_makes_it
   file:    src/brain/ui/server.py
   replace: '        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)\n'
   with:    '        pass\n'
@@ -1167,6 +1193,7 @@ R5-7 an IPv6 write from the browser's literal Origin passes
   red at:  assert response.status_code == 404
 
 R5-8 no IPv6 support is a clean BrainError
+  SUPERSEDED at HEAD by round 11 (`4cefe58`): the probe became `_open_listener`, which creates the socket inside its own `try`; use R11-18
   file:    src/brain/ui/server.py
   replace: '    try:\n        probe = _probe_socket(address, socket_factory)\n    except OSError as exc:\n'
   with:    '    probe = _probe_socket(address, socket_factory)\n    if False:\n        exc = OSError()\n'
@@ -1264,6 +1291,8 @@ R6-7 --host LOCALHOST binds as localhost (CLI)
   red at:  assert started.context_kwargs["host"] == "localhost"
 
 R6-8 a setsockopt failure closes the socket
+  MOVED in round 11 (`4cefe58`) to: tests/test_ui_server_bind.py::test_a_socket_that_cannot_be_configured_is_closed_and_reported
+  NOTE at HEAD (round 11): still applies, but goes red at `the socket leaked` — the assertion message dropped "probe"
   file:    src/brain/ui/server.py
   replace: '        sock.close()\n        name = '
   with:    '        name = '
@@ -1272,6 +1301,7 @@ R6-8 a setsockopt failure closes the socket
   red at:  the probe socket leaked
 
 R6-9 a setsockopt failure is reported as configure, not open
+  SUPERSEDED at HEAD by round 11 (`4cefe58`): the message no longer says "probe socket"; use R11-19
   file:    src/brain/ui/server.py
   replace: '        raise BrainError(\n            f"cannot configure an {name} probe socket for --host {address} "\n            f"({exc.strerror or exc})"\n        ) from exc\n'
   with:    '        raise\n'
@@ -1426,6 +1456,7 @@ R8-6 CLI output assertions hold at a narrow terminal (run with COLUMNS=40)
 
 ```text
 S14 bind_address strips only a balanced pair
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_bind_address_strips_only_a_balanced_pair_of_brackets
   file:    src/brain/ui/context.py
   replace: '    bare = host[1:-1] if host.startswith("[") and host.endswith("]") else host\n'
   with:    '    bare = host[1:-1] if host.startswith("[") else host\n'
@@ -1479,6 +1510,8 @@ R9-5 validate_host still refuses an empty host
   red at:  assert result.exit_code == 2
 
 R9-6 the probe sets SO_REUSEADDR
+  MOVED in round 11 (`4cefe58`), renamed in round 13 (`1264162`), to: tests/test_ui_server_bind.py::test_the_listen_socket_sets_its_options_by_address
+  NOTE at HEAD (round 13): still applies, but goes red at `assert (reuseaddr in sock.options) is reuse`, on the three specific-address rows only — a wildcard sets no SO_REUSEADDR now
   file:    src/brain/ui/server.py
   replace: '        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n'
   with:    '        pass\n'
@@ -1487,6 +1520,7 @@ R9-6 the probe sets SO_REUSEADDR
   red at:  assert (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in sock.options
 
 R9-7 the probe sets IPV6_V6ONLY for IPv6 only
+  MOVED in round 11 (`4cefe58`), renamed in round 13 (`1264162`), to: tests/test_ui_server_bind.py::test_the_listen_socket_sets_its_options_by_address[127.0.0.1-False-True]
   file:    src/brain/ui/server.py
   replace: '        if family == socket.AF_INET6:\n            sock.setsockopt(socket.IPPROTO_IPV6'
   with:    '        if True:\n            sock.setsockopt(socket.IPPROTO_IPV6'
@@ -1500,6 +1534,7 @@ R9-7 the probe sets IPV6_V6ONLY for IPv6 only
 
 ```text
 R9-8 classify by the RESOLVED address (resolution disabled = spelling only)
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[0-refused-reads it as 0.0.0.0]
   NOTE: weaker than its name. Appending "!" does not disable resolution for a ZONED spelling — the resolver reads everything after `%` as the zone, so `::%!` still resolves to `::`. Valid for its target row (`0`); the faithful mutation is R9-18
   file:    src/brain/ui/context.py
   replace: '            bare, None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST\n'
@@ -1509,6 +1544,7 @@ R9-8 classify by the RESOLVED address (resolution disabled = spelling only)
   red at:  assert result.exit_code == 2
 
 R9-9 every zone is refused, by its own rule
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[::%-refused-zone IDs (%\u2026) are not supported]
   file:    src/brain/ui/context.py
   replace: '    if "%" in host:\n'
   with:    '    if False:\n'
@@ -1517,6 +1553,7 @@ R9-9 every zone is refused, by its own rule
   red at:  assert expected in result.output
 
 R9-10 a numeric disagreement is refused
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[127.1-refused-reads it as 127.0.0.1]
   file:    src/brain/ui/context.py
   replace: '    if spelled is None or resolved != {spelled}:\n'
   with:    '    if spelled is not None and resolved != {spelled}:\n'
@@ -1525,6 +1562,8 @@ R9-10 a numeric disagreement is refused
   red at:  assert result.exit_code == 2
 
 R9-11 surrounding whitespace is refused
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[ 127.0.0.1-refused-leading or trailing whitespace]
+  NOTE at HEAD (round 11): still applies, but goes red at `assert expected in result.output` — the padded value is now refused by the next rule too (exit 2, "is not an IP address or a hostname"), so only the phrase tells the rules apart
   file:    src/brain/ui/context.py
   replace: '    if host != host.strip():\n'
   with:    '    if False:\n'
@@ -1533,6 +1572,7 @@ R9-11 surrounding whitespace is refused
   red at:  assert result.exit_code == 2
 
 R9-12 an IPv4-mapped address is refused
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[::ffff:127.0.0.1-refused-IPv4-mapped IPv6 addresses cannot be bound]
   file:    src/brain/ui/context.py
   replace: '    if isinstance(spelled, ipaddress.IPv6Address) and spelled.ipv4_mapped is not None:\n'
   with:    '    if False:\n'
@@ -1541,6 +1581,8 @@ R9-12 an IPv4-mapped address is refused
   red at:  assert result.exit_code == 2
 
 R9-13 a hostname is lower-cased
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[LOCALHOST-binds-localhost]
+  NOTE at HEAD (round 11): still applies, but goes red at `assert result.exit_code == 0` — the un-lowered `LOCALHOST` misses the case-sensitive FAKE_DNS and exits 1
   file:    src/brain/ui/context.py
   replace: '        return bare.lower()\n    resolved'
   with:    '        return bare\n    resolved'
@@ -1575,6 +1617,7 @@ R9-16 a loopback allowlist includes its own address
   red at:  assert response.status_code == status
 
 R9-17 L2: the zone refusal names zone IDs exactly
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[fe80::1%en0-refused-zone IDs (%\u2026) are not supported]
   file:    src/brain/ui/context.py
   replace: 'f"--host {host}: zone IDs (%…) are not supported — a browser cannot "'
   with:    'f"--host {host}: zones are not supported — a browser cannot "'
@@ -1588,6 +1631,7 @@ R9-17 L2: the zone refusal names zone IDs exactly
 
 ```text
 R9-18 classify by the RESOLVED address (faithful: resolution never succeeds)
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[0:0::0-wildcard-::]
   file:    src/brain/ui/context.py
   replace: '    try:\n        infos = socket.getaddrinfo(\n'
   with:    '    try:\n        raise socket.gaierror\n        infos = socket.getaddrinfo(\n'
@@ -1596,6 +1640,7 @@ R9-18 classify by the RESOLVED address (faithful: resolution never succeeds)
   red at:  assert result.exit_code == 0
 
 RF-1 the catch-all OSError -> busy is gone
+  SUPERSEDED at HEAD by round 11 (`4cefe58`): `_port_is_free` is gone; `_open_listener` raises `_PortBusy` only for EADDRINUSE; use R11-16
   file:    src/brain/ui/server.py
   replace: '            if exc.errno == errno.EADDRINUSE:\n                return False\n            raise _bind_failure(host, port, exc) from exc\n'
   with:    '            return False\n'
@@ -1604,6 +1649,7 @@ RF-1 the catch-all OSError -> busy is gone
   red at:  assert "is not an address this machine owns" in message
 
 RF-2 an unowned address is not reported as busy (real probe)
+  SUPERSEDED at HEAD by round 11 (`4cefe58`): `_port_is_free` is gone; the same guard on the real bind is R11-21
   file:    src/brain/ui/server.py
   replace: '            if exc.errno == errno.EADDRINUSE:\n                return False\n            raise _bind_failure(host, port, exc) from exc\n'
   with:    '            return False\n'
@@ -1612,6 +1658,7 @@ RF-2 an unowned address is not reported as busy (real probe)
   red at:  assert busy not in result.output
 
 RF-3 EADDRINUSE still means busy
+  SUPERSEDED at HEAD by round 11 (`4cefe58`): `_port_is_free` is gone; use R11-20
   file:    src/brain/ui/server.py
   replace: '            if exc.errno == errno.EADDRINUSE:\n                return False\n'
   with:    '            if False:\n                return False\n'
@@ -1620,6 +1667,7 @@ RF-3 EADDRINUSE still means busy
   red at:  assert "already in use" in _probe_with
 
 RF-4 a name that does not resolve says so
+  SUPERSEDED at HEAD by round 11 (`4cefe58`): the bind no longer resolves anything — it binds the classified addresses, so a `gaierror` there cannot happen and its test is deleted; an unresolvable name is reported by `resolve_bind_addresses`, R10-15
   file:    src/brain/ui/server.py
   replace: '                f"--host {host} does not resolve to an address on this machine "\n'
   with:    '                f"--host {host} cannot be bound "\n'
@@ -1628,6 +1676,7 @@ RF-4 a name that does not resolve says so
   red at:  assert "does not resolve to an address on this machine" in message
 
 RF-5 a privileged port is a permission error
+  MOVED in round 11 (`4cefe58`) to: tests/test_ui_server_bind.py::test_a_privileged_port_is_a_permission_error_not_busy
   file:    src/brain/ui/server.py
   replace: '    if exc.errno == errno.EACCES:\n'
   with:    '    if False:\n'
@@ -1636,6 +1685,7 @@ RF-5 a privileged port is a permission error
   red at:  assert "ports below 1024 need privileges" in message
 
 RF-6 any other failure names its cause
+  MOVED in round 11 (`4cefe58`) to: tests/test_ui_server_bind.py::test_any_other_bind_failure_is_reported_not_called_busy
   file:    src/brain/ui/server.py
   replace: '        f"--host {host} cannot be bound on this machine ({exc.strerror or exc})."\n'
   with:    '        f"--host {host} cannot be bound on this machine."\n'
@@ -1653,6 +1703,7 @@ RF-7 a non-address, non-hostname is refused
   red at:  assert result.exit_code == 2
 
 RF-8 a zoneless link-local address is refused
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[fe80::1-refused-link-local addresses need a zone ID]
   file:    src/brain/ui/context.py
   replace: '    if isinstance(spelled, ipaddress.IPv6Address) and spelled.is_link_local:\n'
   with:    '    if False:\n'
@@ -1695,6 +1746,7 @@ S20b the docs index names brain ui the primary reading surface
 
 ```text
 R10-1 idna's UnicodeError is caught
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[.-refused-is not an IP address or a hostname]
   file:    src/brain/ui/context.py
   replace: '    except UnicodeError:\n        # The idna codec'
   with:    '    except LookupError:\n        # The idna codec'
@@ -1703,6 +1755,7 @@ R10-1 idna's UnicodeError is caught
   red at:  assert result.exit_code == 2
 
 R10-2 a non-ASCII host is refused
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[localho\u017ft-refused-must be ASCII]
   file:    src/brain/ui/context.py
   replace: '    if not host.isascii():\n'
   with:    '    if False:\n'
@@ -1719,6 +1772,7 @@ R10-3 the hostname pattern is ASCII-only
   red at:  assert not _HOSTNAME.fullmatch(name)
 
 R10-4 a name over 253 characters is refused
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says
   file:    src/brain/ui/context.py
   replace: ' or len(bare.rstrip(".")) > _HOSTNAME_MAX'
   with:    ''
@@ -1735,6 +1789,7 @@ R10-5 ANY unspecified address makes a wildcard
   red at:  assert address_class("some.name", resolved) == kind
 
 R10-6 loopback only if ALL addresses are loopback
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_a_name_resolving_to_loopback_and_elsewhere_is_not_loopback
   file:    src/brain/ui/context.py
   replace: '    if all(address.is_loopback for address in addresses):\n'
   with:    '    if any(address.is_loopback for address in addresses):\n'
@@ -1743,6 +1798,7 @@ R10-6 loopback only if ALL addresses are loopback
   red at:  assert result.exit_code == 2
 
 R10-7 the CLI classifies by the resolved addresses
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[0.0.0.0.nip.io-wildcard-0.0.0.0.nip.io]
   file:    src/brain/cli_ui.py
   replace: '    kind = address_class(host, resolved)\n'
   with:    '    kind = address_class(host)\n'
@@ -1751,6 +1807,7 @@ R10-7 the CLI classifies by the resolved addresses
   red at:  assert (WILDCARD_NOTICE in result.output) is (kind == "wildcard")
 
 R10-8 the CLI hands the resolved addresses to build_context
+  SUPERSEDED at HEAD by round 11 (`4cefe58`): the `build_context` call moved into `cli_ui._start`; use R11-22
   file:    src/brain/cli_ui.py
   replace: '            resolved=resolved,\n        )\n    except BrainError as exc:'
   with:    '        )\n    except BrainError as exc:'
@@ -1775,6 +1832,7 @@ R10-10 build_context's loopback lens follows the resolved addresses
   red at:  assert context.serve_confidential_bodies is confidential
 
 R10-11 the probe binds every resolved family
+  SUPERSEDED at HEAD by round 11 (`4cefe58`): the per-address probe became `bind_listeners`; use R11-8 and R11-23
   file:    src/brain/ui/server.py
   replace: '    if addresses:\n        # One probe per resolved address'
   with:    '    if False:\n        # One probe per resolved address'
@@ -1783,6 +1841,7 @@ R10-11 the probe binds every resolved family
   red at:  assert resolve_port(
 
 R10-12 a name is resolved passively, like the bind
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_resolve_bind_addresses_resolves_a_name_passively_like_the_bind
   file:    src/brain/ui/server.py
   replace: 'socket.SOCK_STREAM, 0, socket.AI_PASSIVE)'
   with:    'socket.SOCK_STREAM, 0, 0)'
@@ -1791,6 +1850,7 @@ R10-12 a name is resolved passively, like the bind
   red at:  assert (host, family, kind, flags) ==
 
 R10-13 a literal never reaches the resolver
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_resolve_bind_addresses_never_resolves_a_literal
   file:    src/brain/ui/server.py
   replace: '    if literal:\n        return literal\n'
   with:    ''
@@ -1807,6 +1867,7 @@ R10-14 serve opens the guard's origin
   red at:  assert opened ==
 
 R10-15 a hostname that will not resolve is reported
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_resolve_bind_addresses_reports_a_name_that_will_not_resolve
   file:    src/brain/ui/server.py
   replace: '    except socket.gaierror as exc:\n        raise BrainError(\n            f"--host {host} does not resolve'
   with:    '    except OSError as exc:\n        raise BrainError(\n            f"--host {host} cannot resolve'
@@ -1815,6 +1876,7 @@ R10-15 a hostname that will not resolve is reported
   red at:  assert "does not resolve to an address on this machine" in str(excinfo.value)
 
 R10-16 the resolver's UnicodeError is reported cleanly
+  MOVED in round 11 (`4cefe58`) to: tests/test_cli_ui_host.py::test_resolve_bind_addresses_reports_a_unicode_failure_cleanly
   file:    src/brain/ui/server.py
   replace: '    except UnicodeError as exc:\n        raise BrainError(f"--host {host} is not a valid hostname.") from exc\n'
   with:    ''
@@ -1822,6 +1884,425 @@ R10-16 the resolver's UnicodeError is reported cleanly
   test:    tests/test_cli_ui.py::test_resolve_bind_addresses_reports_a_unicode_failure_cleanly
   red at:  raise UnicodeError("idna: label empty or too long")
 
+```
+
+**Round 11 — against `4cefe58`** (review round 11 of `c45c3bc`: bind exactly the classified addresses and serve those sockets; `bind_origin`'s unspecified-IPv4 rule; the test split). Strict clause 4.
+
+```text
+R11-1 CLI re-resolves the host for the bind
+  file:    src/brain/cli_ui.py
+  replace: 'port, host=host, auto=auto_port, addresses=resolved'
+  with:    'port, host=host, auto=auto_port, addresses=ui_server.resolve_bind_addresses(host)'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_the_cli_binds_what_it_classified_even_if_dns_changes_its_answer
+  red at:  the host was resolved more than once
+
+R11-2 serve lets uvicorn bind for itself
+  file:    src/brain/ui/server.py
+  replace: '    server.run(sockets=sockets)\n'
+  with:    '    server.run()\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_serve_runs_uvicorn_on_the_sockets_it_was_given_and_closes_them
+  red at:  serve() let uvicorn bind for itself
+
+R11-3 serve does not close its sockets
+  file:    src/brain/ui/server.py
+  replace: '        # claim_port, so nothing else would release them.\n        for sock in sockets:\n            sock.close()\n'
+  with:    '        # claim_port, so nothing else would release them.\n        pass\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_serve_runs_uvicorn_on_the_sockets_it_was_given_and_closes_them
+  test:    tests/test_cli_ui.py::test_serve_closes_its_sockets_when_startup_fails
+  red at:  serve() left its socket open
+
+R11-4 CLI does not close sockets on a failed start
+  file:    src/brain/cli_ui.py
+  replace: '        # serve() closes them too; this covers a failure before it runs.\n        for sock in sockets:\n            sock.close()\n'
+  with:    '        # serve() closes them too; this covers a failure before it runs.\n        pass\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_the_cli_closes_its_sockets_when_startup_fails
+  red at:  the CLI leaked its socket
+
+R11-5 bind_listeners leaks earlier sockets
+  file:    src/brain/ui/server.py
+  replace: '    except BaseException:\n        for sock in sockets:\n            sock.close()\n        raise\n'
+  with:    '    except BaseException:\n        raise\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_failed_address_closes_every_socket_already_bound
+  red at:  a bound socket leaked
+
+R11-6 a failed bind leaks its own socket
+  file:    src/brain/ui/server.py
+  replace: '    except OSError as exc:\n        sock.close()\n        # ONLY'
+  with:    '    except OSError as exc:\n        # ONLY'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_an_address_this_machine_does_not_own_is_reported_as_such
+  red at:  a socket leaked
+
+R11-7 the claimed socket is not listening
+  file:    src/brain/ui/server.py
+  replace: '        sock.listen(_BACKLOG)\n'
+  with:    ''
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_the_claimed_socket_is_already_listening
+  red at:  the claimed socket is not listening
+
+R11-8 bind the host spelling, not the classified address
+  file:    src/brain/ui/server.py
+  replace: 'sockets.append(_open_listener(host, str(address), port, socket_factory))'
+  with:    'sockets.append(_open_listener(host, host, port, socket_factory))'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_claim_port_binds_exactly_the_given_addresses_and_listens
+  red at:  sock.bound for sock in factory.made
+
+R11-9 a busy address is skipped, binding a subset
+  SUPERSEDED at HEAD by round 14 (`969c9b8`): the loop body moved under the coverage rule (deeper indent); use R14-7
+  file:    src/brain/ui/server.py
+  replace: '        for address in addresses:\n            sockets.append(_open_listener(host, str(address), port, socket_factory))\n'
+  with:    '        for address in addresses:\n            try:\n                sockets.append(_open_listener(host, str(address), port, socket_factory))\n            except _PortBusy:\n                pass\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_busy_address_frees_the_others_before_the_next_port
+  red at:  assert port == 8766
+
+R11-10 a hostname with no addresses binds nothing, silently
+  file:    src/brain/ui/server.py
+  replace: '    if not targets:\n        raise BrainError(f"--host {host} has no address to bind; resolve it first.")\n'
+  with:    ''
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_claim_port_refuses_a_hostname_it_was_not_given_addresses_for
+  red at:  DID NOT RAISE
+
+R11-11 bind_origin: any IPv4 address picks 127.0.0.1
+  file:    src/brain/ui/context.py
+  replace: 'any(a.is_unspecified and a.version == 4 for a in addresses)'
+  with:    'any(a.version == 4 for a in addresses)'
+  count:   1
+  test:    tests/test_ui_security.py::test_a_wildcard_name_opens_the_loopback_of_its_unspecified_family
+  red at:  assert bind_origin("brain-1.lan", 8765, addresses) == expected
+
+R11-12 the CLI serves without the claimed sockets
+  file:    src/brain/cli_ui.py
+  replace: '        sockets=sockets,\n        open_browser=open_browser,\n    )\n'
+  with:    '        sockets=[],\n        open_browser=open_browser,\n    )\n'
+  count:   1
+  test:    tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[ip6-localhost-binds-real-ip6-localhost]
+  red at:  started.bound
+
+R11-13 the listen socket drops SO_REUSEADDR
+  SUPERSEDED at HEAD by round 13 (`1264162`): the line now sits inside `if not … is_unspecified:`, so deleting it leaves an empty block (a SyntaxError, not a mutation); use R13-3, and R9-6 for the specific rows
+  file:    src/brain/ui/server.py
+  replace: '        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n'
+  with:    ''
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_the_listen_socket_sets_the_options_asyncio_uses
+  red at:  SO_REUSEADDR
+
+R11-14 the listen socket is dual-stack
+  file:    src/brain/ui/server.py
+  replace: '            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)\n'
+  with:    '            pass\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_the_listen_socket_is_ipv6_only_like_asyncio_makes_it
+  red at:  IPV6_V6ONLY
+
+R11-15 --no-auto-port steps anyway
+  SUPERSEDED at HEAD by round 12 (`13d1593`): the candidate range became `stop = min(…)`, capped at 65535; use R12-9
+  file:    src/brain/ui/server.py
+  replace: '    candidates = range(start, start + attempts) if auto else range(start, start + 1)\n'
+  with:    '    candidates = range(start, start + attempts)\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_no_auto_port_refuses_with_the_remediation_text
+  red at:  DID NOT RAISE
+
+R11-16 every bind failure is busy again
+  file:    src/brain/ui/server.py
+  replace: '        if exc.errno == errno.EADDRINUSE:\n            raise _PortBusy from exc\n'
+  with:    '        raise _PortBusy from exc\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_an_address_this_machine_does_not_own_is_reported_as_such
+  red at:  is not an address this machine owns
+
+R11-17 a socket that cannot be configured leaks
+  file:    src/brain/ui/server.py
+  replace: '        sock.close()\n        name = "IPv6" if family == socket.AF_INET6 else "IPv4"\n'
+  with:    '        name = "IPv6" if family == socket.AF_INET6 else "IPv4"\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_socket_that_cannot_be_configured_is_closed_and_reported
+  red at:  the socket leaked
+
+R11-18 no IPv6 support is a clean BrainError (was R5-8)
+  file:    src/brain/ui/server.py
+  replace: '    try:\n        sock = _listen_socket(address, socket_factory)\n    except OSError as exc:\n'
+  with:    '    sock = _listen_socket(address, socket_factory)\n    if False:\n        exc = OSError()\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_claim_port_reports_a_host_without_ipv6_cleanly
+  red at:  Address family not supported
+
+R11-19 a setsockopt failure is reported as configure (was R6-9)
+  file:    src/brain/ui/server.py
+  replace: '        raise BrainError(\n            f"cannot configure an {name} socket for --host {address} "\n            f"({exc.strerror or exc})"\n        ) from exc\n'
+  with:    '        raise\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_socket_that_cannot_be_configured_is_closed_and_reported
+  red at:  assert "configure" in message
+
+R11-20 EADDRINUSE still means busy (was RF-3)
+  file:    src/brain/ui/server.py
+  replace: '        if exc.errno == errno.EADDRINUSE:\n            raise _PortBusy from exc\n'
+  with:    '        if False:\n            raise _PortBusy from exc\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_only_address_in_use_means_busy
+  red at:  assert "already in use" in _bind_with
+
+R11-21 an unowned address is not busy, real bind (was RF-2)
+  file:    src/brain/ui/server.py
+  replace: '        if exc.errno == errno.EADDRINUSE:\n            raise _PortBusy from exc\n'
+  with:    '        raise _PortBusy from exc\n'
+  count:   1
+  test:    tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[1.2.3.4-unowned-is not an address this machine owns]
+  red at:  assert busy not in result.output
+
+R11-22 the CLI hands the resolved addresses to build_context (was R10-8)
+  file:    src/brain/cli_ui.py
+  replace: '        resolved=resolved,\n    )\n\n    if resolved_port != port:'
+  with:    '    )\n\n    if resolved_port != port:'
+  count:   1
+  test:    tests/test_cli_ui_host.py::test_the_cli_threads_the_resolved_addresses_into_the_context
+  red at:  assert started.context_kwargs["resolved"]
+
+R11-23 each resolved address binds in its own family (was R10-11)
+  file:    src/brain/ui/server.py
+  replace: 'sockets.append(_open_listener(host, str(address), port, socket_factory))'
+  with:    'sockets.append(_open_listener(host, host, port, socket_factory))'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_claim_port_binds_every_resolved_family
+  red at:  port, sockets = claim_port(
+```
+
+**Round 12 — against `13d1593`** (review round 12 of `4cefe58`: the --open startup wrapper forwards the sockets; --port is 1–65535). Strict clause 4.
+
+```text
+R12-1 the --open wrapper drops sockets (double)
+  file:    src/brain/ui/server.py
+  replace: '            await original_startup(*args, **kwargs)\n'
+  with:    '            await original_startup()\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_serve_opens_the_tokened_url[127.0.0.1]
+  red at:  startup ran without the claimed sockets
+
+R12-2 the --open wrapper drops sockets (real uvicorn)
+  file:    src/brain/ui/server.py
+  replace: '            await original_startup(*args, **kwargs)\n'
+  with:    '            await original_startup()\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_real_uvicorn_serves_only_the_claimed_socket
+  red at:  uvicorn listened beyond the claimed socket
+
+R12-3 --port has no range
+  file:    src/brain/cli_ui.py
+  replace: '8765, "--port", min=1, max=65535, help='
+  with:    '8765, "--port", help='
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_port_outside_1_to_65535_is_a_usage_error[70000]
+  test:    tests/test_ui_server_bind.py::test_a_port_outside_1_to_65535_is_a_usage_error[-1]
+  test:    tests/test_ui_server_bind.py::test_a_port_outside_1_to_65535_is_a_usage_error[0]
+  red at:  assert result.exit_code == 2
+
+R12-4 claim_port accepts port 0
+  file:    src/brain/ui/server.py
+  replace: '    if not 1 <= start <= _MAX_PORT:\n'
+  with:    '    if not 0 <= start <= _MAX_PORT:\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_claim_port_refuses_a_port_outside_the_range[0]
+  red at:  DID NOT RAISE
+
+R12-5 claim_port accepts a port past the top
+  file:    src/brain/ui/server.py
+  replace: '    if not 1 <= start <= _MAX_PORT:\n'
+  with:    '    if not 1 <= start:\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_claim_port_refuses_a_port_outside_the_range[70000]
+  red at:  Regex pattern did not match
+
+R12-6 auto-port walks past 65535
+  file:    src/brain/ui/server.py
+  replace: '    stop = min(start + attempts, _MAX_PORT + 1) if auto else start + 1\n'
+  with:    '    stop = start + attempts if auto else start + 1\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_auto_port_stops_at_65535_with_a_message
+  red at:  OverflowError
+
+R12-7 the exhausted range is misreported
+  file:    src/brain/ui/server.py
+  replace: 'f"no free port found in {start}..{stop - 1}; "'
+  with:    'f"no free port found in {start}..{start + attempts - 1}; "'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_auto_port_stops_at_65535_with_a_message
+  red at:  assert "no free port found in 65530..65535" in str(excinfo.value)
+
+R12-8 a non-OSError bind failure leaks the socket
+  file:    src/brain/ui/server.py
+  replace: '        # interrupt can land here too. Closed, then re-raised unchanged.\n        sock.close()\n'
+  with:    '        # interrupt can land here too. Closed, then re-raised unchanged.\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_bind_that_raises_a_non_oserror_still_closes_its_socket
+  red at:  the socket leaked
+
+R12-9 --no-auto-port steps anyway (was R11-15)
+  file:    src/brain/ui/server.py
+  replace: '    stop = min(start + attempts, _MAX_PORT + 1) if auto else start + 1\n'
+  with:    '    stop = min(start + attempts, _MAX_PORT + 1)\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_no_auto_port_refuses_with_the_remediation_text
+  red at:  DID NOT RAISE
+```
+
+**Round 13 — against `1264162`** (review round 13 of `13d1593`: no SO_REUSEADDR on a wildcard bind). Strict clause 4.
+
+```text
+R13-1 SO_REUSEADDR always set (the wildcard overlaps again)
+  NOTE: measured on macOS; the test skips where the platform refuses the overlap (Linux). R13-2 is the guard every platform runs
+  file:    src/brain/ui/server.py
+  replace: '        if not ipaddress.ip_address(address).is_unspecified:\n'
+  with:    '        if True:\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_wildcard_never_binds_over_another_process_on_loopback[ipv4]
+  test:    tests/test_ui_server_bind.py::test_a_wildcard_never_binds_over_another_process_on_loopback[ipv6]
+  red at:  DID NOT RAISE
+
+R13-2 SO_REUSEADDR always set (options table)
+  file:    src/brain/ui/server.py
+  replace: '        if not ipaddress.ip_address(address).is_unspecified:\n'
+  with:    '        if True:\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_the_listen_socket_sets_its_options_by_address[0.0.0.0-False-False]
+  test:    tests/test_ui_server_bind.py::test_the_listen_socket_sets_its_options_by_address[::-True-False]
+  red at:  assert (reuseaddr in sock.options) is reuse
+
+R13-3 SO_REUSEADDR never set (TIME_WAIT for specific binds)
+  file:    src/brain/ui/server.py
+  replace: '        if not ipaddress.ip_address(address).is_unspecified:\n'
+  with:    '        if False:\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_the_listen_socket_sets_its_options_by_address[127.0.0.1-False-True]
+  test:    tests/test_ui_server_bind.py::test_the_listen_socket_sets_its_options_by_address[::1-True-True]
+  red at:  assert (reuseaddr in sock.options) is reuse
+
+R13-4 the IPv6 wildcard is judged by its spelling, not its address
+  file:    src/brain/ui/server.py
+  replace: '        if not ipaddress.ip_address(address).is_unspecified:\n'
+  with:    '        if address != "0.0.0.0":\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_the_listen_socket_sets_its_options_by_address[::-True-False]
+  red at:  assert (reuseaddr in sock.options) is reuse
+  NOTE (round 14): first proved on `test_a_wildcard_never_binds_over_another_process_on_loopback[ipv6]` (red at `DID NOT RAISE`), measured on macOS — that test skips where the platform refuses the overlap. Retargeted to the options-table `::` row, which runs on every platform; re-proved at `969c9b8`: PASS
+```
+
+**Round 14 — against `969c9b8`** (review round 14 of `1264162`: a wildcard also holds its loopback address; a specific address under its own wildcard is not bound twice). Strict clause 4.
+
+```text
+R14-1 no loopback companion (real sockets, reverse order)
+  NOTE: measured on macOS; the test skips where the platform refuses the overlap (Linux). R14-2 is the guard every platform runs
+  file:    src/brain/ui/server.py
+  replace: '                if companion is not None:\n                    sockets.append(companion)\n'
+  with:    '                if companion is not None:\n                    companion.close()\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_nothing_can_bind_our_loopback_after_our_wildcard[ipv4]
+  test:    tests/test_ui_server_bind.py::test_nothing_can_bind_our_loopback_after_our_wildcard[ipv6]
+  red at:  DID NOT RAISE
+
+R14-2 no loopback companion (injected sockets)
+  file:    src/brain/ui/server.py
+  replace: '                if companion is not None:\n                    sockets.append(companion)\n'
+  with:    '                if companion is not None:\n                    companion.close()\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_wildcard_also_holds_its_loopback_address[ipv4]
+  test:    tests/test_ui_server_bind.py::test_a_wildcard_also_holds_its_loopback_address[ipv6]
+  red at:  assert sockets == factory.made
+
+R14-3 the companion's EADDRINUSE means busy
+  file:    src/brain/ui/server.py
+  replace: '    except _PortBusy:\n        return None\n'
+  with:    '    except _PortBusy:\n        raise\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_companion_refused_as_linux_refuses_it_is_tolerated[ipv4]
+  test:    tests/test_ui_server_bind.py::test_a_companion_refused_as_linux_refuses_it_is_tolerated[ipv6]
+  red at:  BrainError: port 8765 is already in use
+
+R14-4 every companion failure is tolerated
+  file:    src/brain/ui/server.py
+  replace: '    except _PortBusy:\n        return None\n'
+  with:    '    except (_PortBusy, BrainError):\n        return None\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_any_other_companion_failure_is_reported_and_releases_the_wildcard
+  red at:  DID NOT RAISE
+
+R14-5 a specific address under its wildcard is bound again
+  file:    src/brain/ui/server.py
+  replace: '            if address.version in wildcards and not address.is_unspecified:\n                continue\n'
+  with:    ''
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_name_resolving_to_loopback_and_the_wildcard_binds_for_real
+  red at:  no free port found
+
+R14-6 the companion is bound on the wildcard's address
+  file:    src/brain/ui/server.py
+  replace: '    loopback = "::1" if wildcard.version == 6 else "127.0.0.1"\n'
+  with:    '    loopback = str(wildcard)\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_wildcard_also_holds_its_loopback_address[ipv4]
+  red at:  assert [sock.bound for sock in factory.made]
+
+R14-7 a busy address is skipped, binding a subset (was R11-9)
+  NOTE: proved against the sibling test DB `second_brain_t_p7b`, while the full suite held the main one — see §10.22 for the one overlap with the run of record
+  file:    src/brain/ui/server.py
+  replace: '            sockets.append(_open_listener(host, str(address), port, socket_factory))\n'
+  with:    '            try:\n                sockets.append(_open_listener(host, str(address), port, socket_factory))\n            except _PortBusy:\n                continue\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_busy_address_frees_the_others_before_the_next_port
+  red at:  assert port == 8766
+```
+
+**Round 15 — against `6cc04fe`** (review round 15 of `969c9b8`: the companion tolerates EADDRNOTAVAIL). Strict clause 4.
+
+```text
+R15-1 a companion address the host lacks aborts the bind
+  file:    src/brain/ui/server.py
+  replace: '        if isinstance(cause, OSError) and cause.errno == errno.EADDRNOTAVAIL:\n            return None\n        raise\n'
+  with:    '        raise\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_a_companion_address_the_host_lacks_is_tolerated[ipv6]
+  test:    tests/test_ui_server_bind.py::test_a_companion_address_the_host_lacks_is_tolerated[ipv4]
+  red at:  is not an address this machine owns
+
+R15-2 every companion BrainError is tolerated
+  file:    src/brain/ui/server.py
+  replace: '        if isinstance(cause, OSError) and cause.errno == errno.EADDRNOTAVAIL:\n'
+  with:    '        if isinstance(cause, OSError):\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_any_other_companion_failure_is_reported_and_releases_the_wildcard
+  red at:  DID NOT RAISE
+```
+
+**Round 15b — against `5367194`** (round 15's reviewer note, tests only: skip, not error, where the host has no `::1`). Strict clause 4.
+
+```text
+R15b-1 the ::1 probe asks about the wildcard again
+  NOTE: container-only — red only where `::` binds and `::1` does not. Proved in `python:3.11-slim` with `--network none --sysctl net.ipv6.conf.lo.disable_ipv6=1`, on `git archive` copies (base and mutated; the worktree untouched), with a scratch plugin outside the repo marking the selection `nodb` so conftest takes no database lock. Base: 4 skipped. Mutated: 2 FAILED, red at the needle on an `E` line; the 2 overlap tests fall through to the round-15b helper and skip. On a host with `::1` both probes agree and this mutation is invisible
+  file:    tests/ui_cli_support.py
+  replace: '            sock.bind(("::1", 0))\n'
+  with:    '            sock.bind(("::", 0))\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_claim_port_binds_every_resolved_family
+  test:    tests/test_cli_ui_host.py::test_every_host_spelling_does_what_the_table_says[ip6-localhost-binds-real-ip6-localhost]
+  red at:  Cannot assign requested address
+
+R15b-2 the overlap probe's loopback bind is outside its handler again
+  file:    tests/test_ui_server_bind.py
+  replace: '        try:\n            held.bind((loopback, 0))\n        except OSError:\n            return False\n'
+  with:    '        held.bind((loopback, 0))\n'
+  count:   1
+  test:    tests/test_ui_server_bind.py::test_the_overlap_probe_reads_a_missing_address_as_no_overlap
+  red at:  OSError
 ```
 
 ### 10.10 Review round 3 (2026-10-13)
@@ -2026,3 +2507,186 @@ against `34a85f9`. Two guards had no test that could fail until `34a85f9` added 
 serve's opened origin). R10-2's first run named its parametrised node with the raw `ſ`; pytest
 escapes non-ASCII in ids (`localho\u017ft`), so nothing ran — re-run with the escaped id, PASS.
 Ten earlier entries are superseded by this round and marked.
+
+### 10.19 Review round 11 (2026-10-13)
+
+The review of `c45c3bc`. Fixed in `4cefe58`.
+
+| Item | Fix |
+|---|---|
+| 1 MEDIUM, security — resolve-again TOCTOU | `--host` was classified on one `getaddrinfo` and `uvicorn.Config(host=NAME)` resolved it AGAIN at `create_server`, so a second answer could bind somewhere the first was not judged to be — a name that answered loopback (no token) could bind a wildcard. The probe is now the bind: `server.claim_port` opens one listening socket per classified address (`_listen_socket`: the address's family, `SO_REUSEADDR`, `IPV6_V6ONLY` for IPv6; bind; listen) and returns them; `serve` hands them to `uvicorn.Server.run(sockets=…)`, keeping host/port in the config for logging only. The port can no longer be taken between a probe and the bind either. Any failure closes every socket already opened (`bind_listeners`); the CLI and `serve` both close them on every exit. Regression test: a resolver answering `127.0.0.1` then `::1` — the CLI must resolve once and the sockets `serve` receives must be on `127.0.0.1`. The `resolve_bind_addresses` docstring, CHANGELOG and guide say so |
+| 2 LOW — `bind_origin` | picked `127.0.0.1` if ANY resolved address was IPv4; now only an UNSPECIFIED IPv4 address does, so `(192.0.2.5, ::)` opens `[::1]`. Table of six resolved sets in `test_ui_security.py`, mixed rows included |
+| 3 — unreachable handler | `serve`'s `except OSError … EADDRINUSE` could never run (uvicorn catches the bind `OSError` and exits — 3 from uvicorn 0.50, 1 before, measured in the wheels; this row first said "≥ 0.52 … exits 3", and round 12's fix to the docstring was itself wrong, see §10.21). Deleted; bind errors are mapped in our code, on the sockets we bind. `resolve_port` is gone with its docstring claim; `preflight`'s docstring now says the port is claimed before it runs and the CLI closes it on failure, and the preflight ordering test is renamed `…fails_before_the_server_starts` (likewise the telemetry warm-up test, `…before_serving`) |
+| 4 — test split | `tests/test_cli_ui.py` (1,176 lines) → itself (command surface, `--lan`, URL, `serve`), `tests/test_cli_ui_host.py` (validation, `HOST_SPELLINGS`, resolution), `tests/test_ui_server_bind.py` (`claim_port`, sockets, bind errors, the TOCTOU test) and `tests/ui_cli_support.py` (runner, `FAKE_DNS`, `install_started`, `needs_ipv6`). Each under 800. `test_ci_workflow.py` passes. Catalog entries citing moved tests carry `MOVED … to:` lines; the embedded validator checks those nodes at HEAD |
+| 5 — cleanup | the auditor's untracked `sweep4c.exit` / `sweep4c.out` removed, not committed |
+
+**What the table now proves on a real bind.** `HOST_SPELLINGS` gained a `binds-real` assertion:
+the sockets `serve` receives are on exactly the resolved addresses. The fake bind still covers
+the classification-only rows. `test_a_name_that_does_not_resolve_is_reported_as_such` is deleted,
+because the bind no longer resolves anything (RF-4 superseded). An unresolvable name is reported
+by `resolve_bind_addresses` (R10-15) and the `brain-2.invalid` row.
+
+**Mutation evidence (round 11):** 23 guards, each on all five clauses with the strict clause 4,
+against `4cefe58` on a clean tree, so `git diff --numstat` shows only the mutation. R11-18 to
+R11-23 re-prove, on the new code, guards whose round-5, -6, -9 and -10 entries this round
+superseded. The 26 entries whose tests moved were re-run at HEAD on their new nodes: 22 passed
+strict as recorded, and 4 go red at a different line, each with a NOTE (L-8, R6-8, R9-11,
+R9-13). All 4 were re-run with that needle: PASS. On R11-7, a socket that is bound but not
+listening is refused on Linux; on macOS the connect times out instead (measured). So the test
+fails with its own message, not on an exception type. Eight entries are newly SUPERSEDED. The
+validator is exit 0, and it was itself shown to fail on a wrong `MOVED` target and on a dropped
+`MOVED` line.
+
+**Voided runs.** Three full-suite runs count for nothing:
+
+- **`c45c3bc`:** it was running when a scratchpad cleanup removed the directory holding its log.
+  Its exit code could not be read, and it was stopped.
+- **`4cefe58`:** stopped at about 35%, on team-lead's instruction, because round 12 changes code.
+- **`13d1593`:** stopped at 22% with no failures so far, because round 13 changes code.
+- **`1264162`:** stopped at 16% with no failures so far, because round 14 changes code.
+- **`969c9b8`, first run:** discounted, because a mutation proof touched the worktree during it
+  (§10.22).
+- **`969c9b8`, restart:** stopped at 5% with no failures so far, because round 15 changes code.
+- **`6cc04fe`:** stopped minutes in, on team-lead's instruction, to fold in round 15b.
+
+The one full suite of record is on round 15b's `5367194` (§10.23).
+
+### 10.20 Review round 12 (2026-10-13)
+
+The review of `4cefe58`. Fixed in `13d1593`.
+
+| Item | Fix |
+|---|---|
+| 1 LOW–MEDIUM — the `--open` startup wrapper | `startup_then_open` must forward `sockets=` to uvicorn's `startup`. The uvicorn double in `test_cli_ui.py` called `startup()` with nothing, so dropping the arguments passed every test. Against real uvicorn 0.54, though, that bound `config.host:port` as well: the TOCTOU came back on the default path as a silent second bind. The double now mirrors uvicorn (`run(sockets)` → `startup(sockets=sockets)`), and the `--open` test asserts the exact claimed sockets reach `startup`. `test_real_uvicorn_serves_only_the_claimed_socket` runs uvicorn itself and requires it to listen on the claimed socket and nothing else |
+| 2 LOW — the port range | `bind` raises `OverflowError` past 65535. That is not an `OSError`, so `_open_listener` leaked its socket and the CLI printed a traceback. `--port` is now `min=1, max=65535`, which also refuses 0: port 0 would have given a different ephemeral port on each address. `claim_port` refuses an impossible start, auto-port stops at 65535 and names the range it searched, and `_open_listener` closes its socket on any exception |
+| 3 LOW — "uvicorn ≥ 0.52" | dropped. The replacement, "exits 3", was wrong too; see §10.21 |
+| 4 LOW — stale wording | `context.classify_addresses` now names `claim_port` rather than uvicorn, and `cli_ui.py`'s "probe" comments are fixed. The grep of the phase's src left only historical mentions ("this used to probe") and unrelated ones (`lan.udp_route_probe`, the telemetry probe) |
+
+**Mutation evidence (round 12):** 9 guards, each on all five clauses with the strict clause 4,
+against `13d1593`. R12-1 and R12-2 are the reviewer's own mutation. One catches it through the
+double, the other through real uvicorn. R12-5's first needle was wrong: with the 65535 cap, an
+impossible start makes an empty search, which reports "no free port found in 70000..65535". So it
+fails on the message, not on `OverflowError`. Re-run with that needle: PASS. R11-15 is
+superseded by R12-9.
+
+### 10.21 Review round 13 (2026-10-13)
+
+The review of `13d1593` verified round 12's fixes and found one LOW. Team-lead added two items.
+All three are fixed in `1264162`.
+
+| Item | Fix |
+|---|---|
+| 1 LOW — uvicorn's exit code | `serve`'s docstring said uvicorn "exits 3". Measured in the wheels: 0.30–0.49 call `sys.exit(1)`, and 0.50+ exit with `STARTUP_FAILURE` (3). The pyproject floor is 0.30. It now says "3 from uvicorn 0.50, 1 before". Round 12's fix, which replaced "≥ 0.52" with "exits 3", was itself wrong. §10.19's row 3 is corrected in place, and says so |
+| 2 SECURITY, pre-existing — a wildcard could share a port | On macOS a `SO_REUSEADDR` socket bound `0.0.0.0:P` (or `::`) while another process listened on `127.0.0.1:P` (or `::1`); measured on this machine, both families. The loopback URL `brain ui` prints and opens, token in the fragment, then went to that process. `_listen_socket` now sets `SO_REUSEADDR` for a specific address only. A wildcard bind then fails with EADDRINUSE (48, measured), so auto-port moves on, or `--no-auto-port` says the port is in use. Linux refuses that overlap even with the option, so there the change only costs one thing: a wildcard restart while old connections sit in TIME_WAIT steps to the next port. Loopback and specific binds keep the option, and so keep TIME_WAIT restarts. The real-socket test holds a loopback listener and requires `claim_port`'s wildcard to report it in use, or to step past it. Where the platform refuses the overlap anyway, it skips and says so. CHANGELOG, under Fixed. **This closed one bind order only**: a process binding loopback AFTER our wildcard could still take the loopback traffic on macOS. Round 14 closes that order (§10.22) |
+| 3 — an ephemeral port for the real-uvicorn test | it binds port 0 via `bind_listeners`, so the OS picks a free port and it cannot collide |
+
+**Mutation evidence (round 13):** 4 guards, each on all five clauses with the strict clause 4,
+against `1264162`:
+
+- R13-1: `SO_REUSEADDR` always set. The real-socket test goes red in both families. Measured on
+  macOS; the test skips where the platform refuses the overlap.
+- R13-2: the options table, wildcard rows.
+- R13-3: never set. The table's specific rows go red.
+- R13-4: the wildcard judged by spelling. The IPv6 overlap goes red, measured on macOS. In round 14
+  it was retargeted to the options-table `::` row, which every platform runs, and re-proved.
+
+R11-13 is superseded: its deletion now leaves an empty block, a SyntaxError rather than a
+mutation. R9-6 and R9-7 follow the renamed options test, and were re-run at HEAD: PASS. R9-6 now
+goes red on the three specific-address rows only.
+
+### 10.22 Review round 14 (2026-10-13)
+
+The delta review of `1264162`. Fixed in `969c9b8`.
+
+| Item | Fix |
+|---|---|
+| 1 LOW, security — the other bind order | Once OUR wildcard listened on `0.0.0.0:P` (or `::`), macOS let another process bind `127.0.0.1:P` (`::1`) with `SO_REUSEADDR`, even `SO_REUSEPORT` too, and accept loopback connections: the tokened URL we open, during warm-up or any time after. Measured here, both families. `bind_listeners` now gives each wildcard a loopback companion of its family: `_loopback_companion` binds and listens on `127.0.0.1:P` (`::1:P`) with `SO_REUSEADDR`. It is served like any other socket and closed on every path, the same list `claim_port` returns. A later foreign loopback bind then fails with EADDRINUSE (48, measured). Linux refuses the companion against our own wildcard and refuses the foreign bind too, so exactly that EADDRINUSE is tolerated. It is not "busy", and the refused socket is closed. Any other failure propagates and releases every socket. *(Corrected in round 15: "any other failure" was too strict. EADDRNOTAVAIL, on a host without `::1`, is tolerated too; see §10.23.)* `bind_origin` and the Host allowlist are computed from the RESOLVED addresses, so they are unchanged. One gap is recorded, not closed: a process binding loopback in the instant between our two binds turns the companion into EADDRINUSE too |
+| found while fixing it — a specific address under its own wildcard | for a name resolving to `(127.0.0.1, 0.0.0.0)`, binding `127.0.0.1` first made the wildcard's bind (no `SO_REUSEADDR` since round 13) fail on every port. On Linux it always had, since round 11 bound every address. The wildcard covers it, so it is skipped. Proven on real sockets, which works on both platforms |
+| 2 — plan notes | R13-1 and R14-1 are marked "measured on macOS; skips where refused". R13-4 is retargeted to the options-table `::` row and re-proved |
+
+Tests that every platform runs use injected sockets: the companion is bound, listening, with
+`SO_REUSEADDR` and served; a refusal like Linux's is tolerated and closed; any other failure is
+reported and releases the wildcard; the coverage rule holds. A real-socket test covers the
+reverse order (it skips where the platform refuses it), and another covers the coverage rule.
+Their parametrised ids are `ipv4`/`ipv6`, not the numeric address family (`AF_INET6` is 30 on
+macOS and 10 on Linux, which made the node ids platform-specific).
+
+**Mutation evidence (round 14):** 7 guards, each on all five clauses with the strict clause 4,
+against `969c9b8`:
+
+- R14-1: the companion removed, on real sockets (macOS).
+- R14-2: the same mutation, on injected sockets (every platform).
+- R14-3: the companion's EADDRINUSE treated as busy.
+- R14-4: every companion failure tolerated.
+- R14-5: a specific address bound under its own wildcard. It was first red only at a list
+  assertion on fakes, and is now red on real sockets ("no free port found").
+- R14-6: the companion put on the wildcard's own address.
+- R14-7: replaces R11-9, whose loop text moved.
+
+**A discounted run.** R14-7 was proved against the sibling test database while the first full
+suite on `969c9b8` ran, and for its ~10 s `src/brain/ui/server.py` held that mutation on disk.
+Several tests spawn subprocesses that import from disk (the `bin/` shims, `cli_ui`'s
+import-cost check), so team-lead discounted that run. It was stopped and restarted on
+`969c9b8`, and nothing touched the worktree while the restart ran. The rule from here: while a
+run of record is going, mutation proofs happen only in a `git archive` copy, never in the
+worktree.
+
+### 10.23 Review round 15 (2026-10-13)
+
+The review of `969c9b8`: one LOW. Fixed in `6cc04fe`.
+
+| Item | Fix |
+|---|---|
+| 1 LOW — the `::1` companion on a host without it | On Linux with IPv6 disabled on `lo` (`net.ipv6.conf.lo.disable_ipv6=1`, or `all`), binding `::` works but the `::1` companion gets EADDRNOTAVAIL. That aborted `claim_port` with a false "--host :: is not an address this machine owns", so `brain ui --host ::` worked at `1264162` and failed at `969c9b8`. `_loopback_companion` now tolerates EADDRNOTAVAIL too, read from the `BrainError`'s `__cause__`. The reason is the same as for EADDRINUSE: with no `::1` on the host, no other process can hold `::1:P` either. Every other errno still propagates (the EINVAL test). The regression test is injected (`::1` refused with EADDRNOTAVAIL): the wildcard alone is returned, still listening and served, and the refused socket is closed. It runs on both families |
+| 4 — the CHANGELOG overclaimed | "in either order" now names the microsecond window between the wildcard bind and the companion bind, as the docstring and §10.22 do |
+
+**Mutation evidence (round 15):** 2 guards, each on all five clauses with the strict clause 4,
+against `6cc04fe`, proved before the run of record started:
+
+- R15-1: the EADDRNOTAVAIL branch removed. Red at "is not an address this machine owns", in
+  both families.
+- R15-2: every companion `BrainError` tolerated. The EINVAL test goes red at `DID NOT RAISE`.
+
+**Round 15b (tests only), the reviewer's uncounted note on `6cc04fe`.** `needs_ipv6` probes the
+`::` wildcard. Linux with IPv6 disabled on `lo` still binds `::` but has no `::1`, so tests that
+bind `::1` themselves failed there instead of skipping. Three changes:
+
+- **A new marker:** `ipv6_loopback_available()` probes `::1`, and the `needs_ipv6_loopback`
+  marker guards the tests that bind it.
+- **The overlap helper:** the round-13 helper `_overlap_is_possible` binds its loopback inside
+  its handler, so a missing address reads as "no overlap possible".
+- **The `HOST_SPELLINGS` binds-real rows:** they skip on what they actually bind
+  (`ip6-localhost` is `::1`).
+
+A TEST-NET-1 address drives the helper's new branch on every platform (`5367194`).
+
+**Proved on that host, not argued.** In `python:3.11-slim` with `--network none --sysctl
+net.ipv6.conf.lo.disable_ipv6=1` (`::` binds, `::1` is refused with errno 99), on `git archive`
+copies with deps installed for Linux in a scratch directory:
+
+- `6cc04fe`: 3 failed — `test_claim_port_binds_every_resolved_family`,
+  `test_a_wildcard_never_binds_over_another_process_on_loopback[ipv6]`, and the `ip6-localhost`
+  table row.
+- `5bf2c69`: 153 passed, 6 skipped, 0 failed. Three of the skips say "no IPv6 loopback (::1)".
+
+A scratch plugin outside the repo marked that selection `nodb`, so conftest took no database
+lock. **Mutation evidence:** R15b-1 (container) and R15b-2 (every platform), strict.
+
+**The validator, twice.** Its round-header pattern took digits only, so the `Round 15b` block
+would have been skipped silently, with exit 0. The pattern now allows one letter. The
+validator also counts round headers against parsed blocks and fails on a difference: a copy
+with the old pattern exits 1 with `UNPARSED: 20 round headers, 19 blocks parsed`.
+
+### Verification of rounds 11–15b (2026-10-13; every exit code read from a file)
+
+All of it ran on `5367194`, with the worktree untouched while the run of record ran:
+
+| Check | Result |
+|---|---|
+| `ruff check` (0.17.0) | exit 0 |
+| `mypy src/` (2.4.0) | exit 0, 225 source files |
+| **Full suite — the run of record**, `pytest` on `second_brain_t_auditmeas` | **exit 0**: 9,107 passed, 3 skipped, 306 deselected; coverage 94.62% (floor 85%); 53m28s. `tests/test_ci_workflow.py` passed inside it |
+| The `ci.yml` browser command (14 modules, `-m browser --no-cov`) | exit 0, 197 passed |
+| Table e2e: every `HOST_SPELLINGS` row through the real `brain ui` on the demo sandbox (55433), sockets read with `lsof` by PID | exit 0, 0 failures. Every serving row listens on exactly the resolved addresses, plus each wildcard's loopback companion (`0.0.0.0` → `0.0.0.0` + `127.0.0.1`; `::` → `::` + `::1`), and its printed URL answers 200. Rows naming an address this Mac does not own (`127.0.0.2`, `fd00::5`) exit 1 with "is not an address this machine owns". Names with no real DNS answer (`brain-1.lan`, `ip6-localhost`) exit 1 with "does not resolve". No `brain ui` process was left behind |
+| `git merge-tree --write-tree HEAD second-brain/master` (`6a82db2`) | exit 0, no conflicts |
+| The §10.9 validator | exit 0: 191 entries, 65 superseded and marked, every round header parsed |
