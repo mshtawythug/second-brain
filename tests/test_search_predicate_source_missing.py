@@ -302,6 +302,16 @@ def test_combining_the_two_source_filters_is_an_empty_conjunction(
 #: records what the ranker asked Postgres before this change; if a diff appears,
 #: the question is what moved in the ranking SQL and whether the eval baseline
 #: must be re-recorded — never how to make the comparison green again.
+#:
+#: **One deliberate update, 2026-10-13: ``vector_no_filters`` only.** The vector
+#: leg's ORDER BY changed from ``c.embedding <=> %s::vector`` to
+#: ``score DESC, c.id``, so that the HNSW index can no longer serve it (an exact
+#: scan; see ``docs/specs/2026-10-13-search-vector-leg-design.md``). That is
+#: exactly the ranking move this pin exists to surface. It was answered the way
+#: the paragraph above demands: ``brain eval`` was run before and after, and
+#: ``ci.json`` was re-recorded in the same change. The new entry was captured
+#: from a real emission through :class:`RecordingConnection`, not hand-edited.
+#: The two FTS entries are untouched.
 PRE_CHANGE_SQL_PATH = Path(__file__).parent / "fixtures" / (
     "pre_change_hybrid_search_sql.json"
 )

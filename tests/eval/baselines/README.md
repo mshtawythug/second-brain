@@ -66,15 +66,21 @@ dilute the mean; but a re-judged one silently changes what "correct" means.
 
 ## Known retrieval issues
 
-- **Vector-leg candidate pool** (found 2026-10-12; a separate PR will fix it and
-  re-record): the vector leg in `search.py` is served by the HNSW index, so it
-  returns at most `hnsw.ef_search` (default 40) rows rather than
-  `CANDIDATE_LIMIT`, and filters apply after the index scan, so filtered queries
-  get fewer still. Measured 2026-10-13 on the live corpus (1,999 docs / 21,281
-  chunks): recall@50 against an exact scan averaged 0.76 over the golden
-  queries. That figure depends on the HNSW graph's quality, so it shifts with
-  ingests and reindexes. On one query a few long new documents filled the whole pool,
-  shrinking its results from 17 documents to 6.
+- **Vector-leg candidate pool — FIXED 2026-10-13.** The vector leg was served by
+  the HNSW index, so it returned at most `hnsw.ef_search` (default 40) rows
+  rather than `CANDIDATE_LIMIT`. Filters applied after the index scan, so
+  filtered queries got fewer still. Measured 2026-10-13 on the live corpus
+  (1,999 docs / 21,281 chunks): recall@50 against an exact scan averaged 0.76
+  over the golden queries. That figure depends on the HNSW graph's quality, so
+  it shifts with ingests and reindexes. On one query a few long new documents
+  filled the whole pool, shrinking its results from 17 documents to 6. It is now
+  an exact scan (`brain/search_vector_leg.py`; design and measurements in
+  `docs/specs/2026-10-13-search-vector-leg-design.md`), which takes the HNSW
+  graph out of this path entirely. `ci.json` was re-recorded for that ranking
+  change: the means went from 0.2589 / 0.3697 / 0.5852 to **0.2779 / 0.3826 /
+  0.7112**, on the same document set and the same window as in (2). The same
+  HNSW shape remains in `related.py` and `connect.py`; those are unmeasured
+  follow-ups.
 
 ## Who re-records, and when
 
