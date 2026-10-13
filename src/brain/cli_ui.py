@@ -9,8 +9,8 @@ never the reverse.
 avoiding expensive module-scope imports. This module imports only ``typer``,
 ``Config``, and the error types at module level; ``brain.ui.server`` — and
 through it ``starlette`` and ``uvicorn`` — is imported inside the command body.
-``tests/test_ui_import_cost.py`` asserts that importing ``brain.cli`` leaves
-both out of ``sys.modules``.
+``tests/test_cli_ui.py::test_importing_brain_cli_does_not_pull_starlette_or_uvicorn``
+asserts that importing ``brain.cli`` leaves both out of ``sys.modules``.
 """
 from __future__ import annotations
 
