@@ -236,7 +236,10 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Review round 3 — UI | `5627743` | `ui/context.py` (`bind_address`), `ui/server.py` (`_probe_socket`), `ui/lan.py`, `cli_ui.py`, guide, CHANGELOG, CLI tests |
 | Review round 3 — plan | `c282288` | this file: §10.9 validator, §10.10 |
 | Audit round 4 — tests | `fd2f064` | `test_ui_lan.py`, `test_cli_ui.py`, `test_reading_surface_pointers.py`, CLAUDE.md hops |
-| Audit round 4 — plan | **the commit that added this row** | this file: §10.1, §10.3, §10.8 legend, §10.9, §10.11 |
+| Audit round 4 — plan | `7363980` | this file: §10.1, §10.3, §10.8 legend, §10.9, §10.11 |
+| Review round 5 — code | `d9a3004` | `ui/context.py` (canonical, bracketed allowlist), `ui/security.py` (bytes compare, `is_loopback`), `ui/server.py` (socket factory), `cli_ui.py` (token charset), CHANGELOG, guide, tests |
+| Review round 5 — tests | `932c10a` | `test_ui_security.py` (literal Origin; `bind_origin` spellings) |
+| Review round 5 — plan | **the commit that added this row** | this file: §10.9, §10.12 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -412,15 +415,22 @@ replaced text occurs exactly `count` times and `git diff --numstat` shows the ch
 tests go red; the failure contains the "red at" text; the file is restored and the tests pass
 again. Apply a mutation at the SHA named for its round.
 
-**Validated.** The script below checks every entry's `count` against `git show <SHA>:<file>`.
-Run from the repository root with `python` and the script on stdin. Result at `c282288` (round 3): **59/59, exit 0.** Result at the commit that added this sentence
-(round 4): **round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4 — 63/63, exit 0.**
+**Validated.** The script below checks every entry's `count` against `git show <SHA>:<file>`,
+and, since round 5, that every entry which no longer applies at HEAD is marked SUPERSEDED.
+Run from the repository root with `python` and the script on stdin. Result at `c282288` (round 3): **59/59, exit 0.** Result at `7363980` (round 4): 63/63, exit 0. Result at the commit that added this sentence
+(round 5), with the HEAD check added: **round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7,
+round 4 4/4, round 5 11/11 — 74/74; 16 entries superseded at HEAD, every one marked; exit 0.**
 *(Review round 3, item 5: M19 was an annotation, not exact text, so it matched 0 times; it is
 now `'--read-only'` with count 2 — re-verified in round 4.)* Entries marked SUPERSEDED still validate at their
 round's SHA, which is what the script checks; at HEAD their text or test has moved, for the reason given.
 
 ```python
-"""Validate plan §10.9: each mutation's `replace` text occurs `count` times at its round's SHA."""
+"""Validate plan §10.9 two ways.
+
+1. Each mutation's `replace` text occurs `count` times at its round's SHA.
+2. At HEAD, an entry whose text no longer occurs `count` times carries a
+   SUPERSEDED line saying why — so a reader re-running it at HEAD is told.
+"""
 import ast
 import re
 import subprocess
@@ -428,15 +438,24 @@ import sys
 from pathlib import Path
 
 PLAN = Path("docs/plans/2026-10-12-wiki-to-ui-phase7.md")
+FENCE = "`" * 3  # spelled out: a literal one would end this script's own code block
 text = PLAN.read_text(encoding="utf-8")
 catalog = text[text.index("### 10.9"):]
-FENCE = "`" * 3  # spelled out: a literal one would end this script's own code block
 rounds = re.findall(
     rf"\*\*Round (\d) — against `([0-9a-f]{{7}})`.*?\n{FENCE}text\n(.*?)\n{FENCE}",
     catalog,
     re.S,
 )
+
+
+def show(sha: str, path: str) -> str:
+    return subprocess.run(
+        ["git", "show", f"{sha}:{path}"], capture_output=True, text=True, check=True
+    ).stdout
+
+
 failures = 0
+superseded = 0
 for number, sha, body in rounds:
     entries = [e for e in body.strip().split("\n\n") if e.strip()]
     matched = 0
@@ -449,23 +468,28 @@ for number, sha, body in rounds:
                 fields[key.strip()] = value.strip()
         old = ast.literal_eval(fields["replace"])
         want = int(fields["count"])
-        shown = subprocess.run(
-            ["git", "show", f"{sha}:{fields['file']}"],
-            capture_output=True, text=True, check=True,
-        ).stdout
-        got = shown.count(old)
+        got = show(sha, fields["file"]).count(old)
         if got == want:
             matched += 1
         else:
             failures += 1
-            print(f"MISMATCH round {number} {lines[0]!r}: {got} != {want}")
+            print(f"MISMATCH round {number} {lines[0]!r}: {got} != {want} at {sha}")
+        marked = any(line.strip().startswith("SUPERSEDED") for line in lines)
+        superseded += marked
+        if show("HEAD", fields["file"]).count(old) != want and not marked:
+            failures += 1
+            print(f"UNMARKED round {number} {lines[0]!r}: no longer applies at HEAD")
     print(f"round {number} @ {sha}: {matched}/{len(entries)} entries match their count")
+print(f"superseded at HEAD, and marked: {superseded}")
 sys.exit(1 if failures else 0)
 ```
 
 **Round 0 — against `8768393`** (the rebased closeout; every mutated file is byte-identical to the
-pre-rebase `99957eb` the harness first ran on — `git diff --stat 99957eb 8768393` touches only
-`tests/test_dev_dependency_pins.py`, which no mutation uses). M19 removes BOTH occurrences; the
+pre-rebase `99957eb` the harness first ran on — `git diff --stat 99957eb 8768393` touches three
+files, `.gitignore`, `pyproject.toml` and `tests/test_dev_dependency_pins.py`, which is master's
+`a4ab179` delta, and no round-0 mutation uses any of them. *(Said "touches only
+`tests/test_dev_dependency_pins.py`" until review round 5: that count came from a path-filtered
+diff.)* M19 removes BOTH occurrences; the
 first run removed one and survived (§10.4).
 
 ```text
@@ -643,6 +667,7 @@ M14 wildcard bind refuses a phone Host
   red at:  assert response.status_code == 400
 
 M14b LAN bind accepts its own Host
+  SUPERSEDED at HEAD by round 5 (host_allowlist returns the bracketed/normalised `address`); use R5-1, R5-2
   file:    src/brain/ui/context.py
   replace: '    return frozenset({host})\n'
   with:    '    return LOOPBACK_HOSTS\n'
@@ -657,6 +682,7 @@ invalid (§10.7).
 
 ```text
 W1 :: gets 0.0.0.0's allowlist
+  SUPERSEDED at HEAD by round 5 (the check reads the normalised `address`, not `host`); use R5-4
   file:    src/brain/ui/context.py
   replace: 'if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:'
   with:    'if host in LOOPBACK_HOSTS or host == "0.0.0.0":  # noqa: S104'
@@ -665,6 +691,7 @@ W1 :: gets 0.0.0.0's allowlist
   red at:  assert host_allowlist(wildcard) ==
 
 W1 LAN Host still refused on wildcards (no wider)
+  SUPERSEDED at HEAD by round 5 (same rewrite); the equivalent mutation targets `address`
   file:    src/brain/ui/context.py
   replace: '    if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:\n        return LOOPBACK_HOSTS\n'
   with:    '    if host in WILDCARD_HOSTS:\n        return LOOPBACK_HOSTS | frozenset({"192.0.2.10"})\n    if host in LOOPBACK_HOSTS:\n        return LOOPBACK_HOSTS\n'
@@ -697,6 +724,7 @@ W2 build_context uses bind_origin
   red at:  assert context.allowed_origin == origin
 
 W2 build_context uses host_allowlist (wildcard)
+  SUPERSEDED at HEAD by round 5 (same rewrite); the equivalent mutation targets `address`
   file:    src/brain/ui/context.py
   replace: 'if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:'
   with:    'if host in LOOPBACK_HOSTS:'
@@ -705,6 +733,7 @@ W2 build_context uses host_allowlist (wildcard)
   red at:  assert context.allowed_hosts == hosts
 
 bind_origin brackets IPv6
+  SUPERSEDED at HEAD by round 5 (bind_origin brackets the normalised `address`); use R5-7
   file:    src/brain/ui/context.py
   replace: '        url_host = f"[{host}]"'
   with:    '        url_host = host'
@@ -799,6 +828,7 @@ M-1 guide: the URL is the token
 
 ```text
 HIGH-1 LAN allowlist is exactly the bound address
+  SUPERSEDED at HEAD by round 5 (non-loopback allowlists hold the normalised `address`); use R5-1
   file:    src/brain/ui/context.py
   replace: '    return frozenset({host})\n'
   with:    '    return frozenset({host, "*"}) if "." in host else frozenset({host})\n'
@@ -807,6 +837,7 @@ HIGH-1 LAN allowlist is exactly the bound address
   red at:  assert host_allowlist("192.0.2.10") ==
 
 HIGH-1 LAN bind refuses a foreign Host (app)
+  SUPERSEDED at HEAD by round 5 (same rewrite); use R5-2
   file:    src/brain/ui/context.py
   replace: '    return frozenset({host})\n'
   with:    '    return frozenset({host, "*"}) if "." in host else frozenset({host})\n'
@@ -815,6 +846,7 @@ HIGH-1 LAN bind refuses a foreign Host (app)
   red at:  assert response.status_code == 400
 
 HIGH-1 wildcard binds refuse a foreign Host (app)
+  SUPERSEDED at HEAD by round 5 (the check reads `address`); the equivalent mutation targets `address`
   file:    src/brain/ui/context.py
   replace: '    if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:\n        return LOOPBACK_HOSTS\n'
   with:    '    if host in WILDCARD_HOSTS:\n        return LOOPBACK_HOSTS | frozenset({"*"})\n    if host in LOOPBACK_HOSTS:\n        return LOOPBACK_HOSTS\n'
@@ -871,6 +903,7 @@ L-8 port probe still sees a busy IPv6 port
   red at:  assert resolve_port(busy, host=
 
 L-12 browser_url brackets an IPv6 literal
+  SUPERSEDED at HEAD by round 5 (bind_origin brackets `address`); use R5-7
   file:    src/brain/ui/context.py
   replace: '        url_host = f"[{host}]"'
   with:    '        url_host = host'
@@ -916,6 +949,7 @@ R3-1 starlette floor excludes 1.6.0
   red at:  admits starlette 1.6.0
 
 R3-2 bind_address strips brackets
+  SUPERSEDED at HEAD by round 5 (bind_address also canonicalises); use R5-3
   file:    src/brain/ui/context.py
   replace: '        return host[1:-1]\n'
   with:    '        return host\n'
@@ -948,6 +982,7 @@ R3-5 the probe socket is IPv6-only
   red at:  assert sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 1
 
 R3-6 the probe socket uses the bind's family
+  SUPERSEDED at HEAD by round 5 (the socket comes from an injected `socket_factory`); the equivalent mutation targets `socket_factory(family`
   file:    src/brain/ui/server.py
   replace: '    family = socket.AF_INET6 if ":" in address else socket.AF_INET\n    sock = socket.socket(family'
   with:    '    family = socket.AF_INET\n    sock = socket.socket(family'
@@ -1002,6 +1037,99 @@ R4-4 F8 the notice fires on every wildcard
 
 ```
 
+**Round 5 — against `932c10a`.**
+
+```text
+R5-1 allowlist brackets an IPv6 literal (equality)
+  file:    src/brain/ui/context.py
+  replace: '        return frozenset({f"[{address}]"})\n'
+  with:    '        return frozenset({address})\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_a_non_loopback_allowlist_is_exactly_the_canonical_host_header
+  red at:  assert host_allowlist(given) == expected
+
+R5-2 an IPv6 bind serves its own URL (middleware)
+  file:    src/brain/ui/context.py
+  replace: '        return frozenset({f"[{address}]"})\n'
+  with:    '        return frozenset({address})\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_an_ipv6_bind_serves_its_own_url_and_refuses_others[[fd00::5]:8765-200]
+  red at:  assert response.status_code == status
+
+R5-3 bind_address canonicalises IP literals
+  file:    src/brain/ui/context.py
+  replace: '        return str(ipaddress.ip_address(bare))\n'
+  with:    '        return bare\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_a_non_canonical_loopback_is_loopback
+  red at:  assert host_allowlist(spelling) == LOOPBACK_HOSTS
+
+R5-4 host_allowlist normalises its input
+  file:    src/brain/ui/context.py
+  replace: '    address = bind_address(host)\n    if address in LOOPBACK_HOSTS or address in WILDCARD_HOSTS:\n'
+  with:    '    address = host\n    if address in LOOPBACK_HOSTS or address in WILDCARD_HOSTS:\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_a_non_loopback_allowlist_is_exactly_the_canonical_host_header
+  red at:  assert host_allowlist(given) == expected
+
+R5-5 bind_origin normalises its input
+  file:    src/brain/ui/context.py
+  replace: '    address = bind_address(host)\n    if address == "0.0.0.0":'
+  with:    '    address = host\n    if address == "0.0.0.0":'
+  count:   1
+  test:    tests/test_ui_security.py::test_bind_origin_brackets_ipv6_and_passes_other_hosts_through
+  red at:  assert bind_origin("0:0:0:0:0:0:0:1", 8765)
+
+R5-6 is_loopback normalises its input
+  file:    src/brain/ui/security.py
+  replace: '    return bind_address(host.strip()).lower() in LOOPBACK_HOSTS\n'
+  with:    '    return host.strip().lower() in LOOPBACK_HOSTS\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_a_non_canonical_loopback_is_loopback
+  red at:  assert is_loopback(spelling)
+
+R5-7 an IPv6 write from the browser's literal Origin passes
+  file:    src/brain/ui/context.py
+  replace: '    elif ":" in address:\n        url_host = f"[{address}]"\n'
+  with:    '    elif ":" in address:\n        url_host = address\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_an_ipv6_bind_accepts_a_write_from_its_own_origin
+  red at:  assert response.status_code == 404
+
+R5-8 no IPv6 support is a clean BrainError
+  file:    src/brain/ui/server.py
+  replace: '    try:\n        probe = _probe_socket(address, socket_factory)\n    except OSError as exc:\n'
+  with:    '    probe = _probe_socket(address, socket_factory)\n    if False:\n        exc = OSError()\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_resolve_port_reports_a_host_without_ipv6_cleanly
+  red at:  Address family not supported
+
+R5-9 the token is compared as bytes
+  file:    src/brain/ui/security.py
+  replace: '            if not secrets.compare_digest(\n                supplied.encode("utf-8", "surrogateescape"),\n                ctx.token.encode("utf-8", "surrogateescape"),\n            ):'
+  with:    '            if not secrets.compare_digest(supplied, ctx.token):'
+  count:   1
+  test:    tests/test_ui_security.py::test_a_non_ascii_token_is_refused_not_a_server_error
+  red at:  TypeError
+
+R5-10 the CLI refuses a non-ASCII token
+  file:    src/brain/cli_ui.py
+  replace: '    if token and not (token.isascii() and token.isprintable() and token == token.strip()):'
+  with:    '    if token and not (token.isprintable() and token == token.strip()):'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_token_that_cannot_travel_in_a_header_is_a_usage_error[caf\xe9]
+  red at:  assert result.exit_code == 2
+
+R5-11 the CLI refuses edge whitespace in a token
+  file:    src/brain/cli_ui.py
+  replace: '    if token and not (token.isascii() and token.isprintable() and token == token.strip()):'
+  with:    '    if token and not (token.isascii() and token.isprintable()):'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_token_that_cannot_travel_in_a_header_is_a_usage_error[ padded]
+  red at:  assert result.exit_code == 2
+
+```
+
 ### 10.10 Review round 3 (2026-10-13)
 
 The phase-7 review of `5402c8f`: one MEDIUM, four LOW. Fixed in `3994ea3` (deps) and `5627743`
@@ -1033,3 +1161,20 @@ The phase-7 audit of `5402c8f`: every prior finding closed; these were new. Fixe
 
 **Mutation evidence (round 4):** 4 guards, each on all five clauses, against `fd2f064` on a clean
 tree (§10.9). R4-4 goes red on exactly the two IPv6 parametrizations, `0.0.0.0` staying green.
+
+### 10.12 Review round 5 (2026-10-13)
+
+The phase-7 review of `7363980`. Fixed in `d9a3004` and `932c10a`.
+
+| Item | Fix |
+|---|---|
+| 1 MEDIUM — an IPv6 bind refused its own URL (a phase-7 regression) | the allowlist holds the Host as it arrives: bracketed and canonical (`[fd00::5]`). `bind_address` canonicalises IP literals, and `host_allowlist`, `bind_origin` and `is_loopback` normalise their input, so `0:0:0:0:0:0:0:1` is loopback and `FD00:0:0::5` is `[fd00::5]`. Pinned by equality tests and through the real middleware: own URL 200, a foreign Host and a neighbour address 400, a write from the browser's literal Origin passes the guard. The guide's "the allowlist holds the address you bound" is true, and says in which form. **E2E unmeasured:** this Mac has only `::1` and link-local `fe80::` addresses (a link-local bind needs a zone ID, which browsers do not reliably carry in a URL), so the middleware tests stand in for it |
+| 2 LOW — CHANGELOG W2 bullet under Dependencies | moved back under Fixed |
+| 3 LOW — "touches only one file" | three files; corrected in §10.9 with the reason it was wrong |
+| 4 LOW — `@needs_ipv6`; raw OSError on a host without IPv6 | decorator added; `_probe_socket` takes an injected `socket_factory`, and a socket that cannot be CREATED is a `BrainError` naming the family. Tested with a factory raising EAFNOSUPPORT, no production module patched |
+| 5 pre-existing — non-ASCII `--token` gave 500 on every call | the CLI refuses a token that is not printable ASCII or has edge whitespace (exit 2); the guard compares bytes. Both recorded under Fixed in the CHANGELOG |
+
+**Mutation evidence (round 5):** 11 guards, each on all five clauses, against `932c10a` on a clean
+tree (§10.9). Before running them, two of this round's own tests were found weak and fixed in
+`932c10a`: nothing pinned `bind_origin`'s normalisation, and the IPv6 write test computed its
+Origin with the helper under test, so it could only agree with itself.
