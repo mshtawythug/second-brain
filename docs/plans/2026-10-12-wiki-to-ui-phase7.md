@@ -244,7 +244,9 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Review round 6 — code | `c21c52f` | `cli_ui.py` (`PHONE_LINE`), `ui/context.py` (lower-cased hostnames), `ui/server.py` (probe closes on setsockopt), `test_cli_ui.py`, `test_ui_security.py` |
 | Review round 6 — plan | `af22825` | this file: §10.9, §10.13 |
 | Audit round 7 — code + docs | `ab560d4` | `ui/lan.py` (notice), `ui/context.py` (`ipv4_shorthand`, comment), `cli_ui.py` (refusal), guide, cli-reference, CHANGELOG, spec Q1, plan §3, tests |
-| Audit round 7 — plan | **the commit that added this row** | this file: §10.9, §10.14 |
+| Audit round 7 — plan | `9d8024f` | this file: §10.9, §10.14 |
+| Review round 7 — fixes | `89e4786` | `cli_ui.py` (doc-comment order), CHANGELOG (LOCALHOST), blank lines in two test files |
+| Review round 7 — plan | **the commit that added this row** | this file: §10.14 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -1376,3 +1378,12 @@ test) was already closed by round 6. Fixed in `ab560d4`.
 
 **Mutation evidence (round 7):** 9 guards, each on all five clauses, against `ab560d4` on a clean
 tree (§10.9).
+
+**Review round 7 (of `af22825`), folded into the same round** — fixed in `89e4786`; no guard was
+added, so no mutation either, and the validator still reads 92/92, 18 marked, exit 0:
+
+| Item | Fix |
+|---|---|
+| LOW — `PHONE_LINE` split `ui_app` from its `#:` doc-comment | moved above it; each `#:` block documents its own symbol |
+| LOW — CHANGELOG missing round 6's user-visible fix | `--host LOCALHOST` / mixed-case hostnames refusing their own URL, under Fixed; round 7's `--host 0` refusal was already under Added |
+| NIT — triple blank lines | five in `tests/test_cli_ui.py` (the reviewer's lines) and one more in `tests/test_ui_lan.py`, all added by this phase (none at `1a1d068`), collapsed to two. **ruff 0.16.10 — the version CI resolves — does not flag them under `--select E303 --preview`**; they were found by scanning every test file the phase touched for three consecutive blank lines |
