@@ -540,7 +540,12 @@ records what landed.
 **8.1 `LABEL_GAP`.** Measured first, in Chromium on macOS, label box via `getBBox` at 13.5
 units. The box ascent is the font's ascent, rounded to whole device pixels: 13 at the platform
 face, 14 at Verdana (the wide face), and **15 (descent 5) for any title that draws an emoji**,
-because a fallback face's taller metrics join the primary's. The primary face's metrics always
+because a fallback face's taller metrics join the primary's. *(Corrected in the fix round,
+2026-10-13. Those figures came from a standalone svg at scale 1, where px and units coincide. In
+the drawn graph the scale is 0.76 / 0.97 / 0.90 at 320 / 400 / 1280px, the ascent is whole in px
+and not in units, and both faces give the SAME box: 13.23 / 13.46 / 13.32 units, which is 10 /
+13 / 12px. An emoji title gives 15.87 / 15.53 / 15.54 units. The ruling below stands, on the
+emoji and device-scale evidence.)* The primary face's metrics always
 count: an all-Hebrew, all-Devanagari or all-CJK title keeps the primary ascent. So a label hung
 by its BASELINE clears its circle only when the gap exceeds an ascent that depends on the font,
 the device scale (rounding) and the title. No constant can be right, for the same reason a fixed
@@ -556,7 +561,8 @@ baseline placement, which (14b) pins. Affected: `static/js/graph.js` (constant, 
 (14c) in a new module, `tests/test_ui_browser_graph_labels.py`: for every neighbour, at counts
 1..4, both faces and three widths, the box clears the circle's painted stroke (read from the
 computed style), and the capped box's top is exactly `_SPEC_LABEL_GAP` below the circle.
-Mutants to prove red: gap 10, 4, 0 (= 2 − 2) and 4 (= 2 + 2), and the measured hang removed.
+Mutants to prove red: gap 10 (the old value), 4 (named in §7.5, and also 2 + 2) and 0 (2 − 2),
+and the measured hang removed.
 Risks: the labels move down about 5 units. Moving them can change which labels share a row,
 and with it the §7.4 counts, so the §7.4 table is re-run.
 
@@ -600,11 +606,13 @@ measurements below were taken on the pre-rebase commits, whose code is the same.
 
 **Rulings beyond §8's plan.**
 
-- **The gap is held by measurement, not by a new constant** (§8.1's ruling, confirmed). Measured box
-  ascents were 13 units at the platform face, 14 at the wide face and 15 for an emoji title. They
-  are rounded per device pixel, so they also vary with width: the old gap left the box 2.4–3.3px
-  inside its circle across 320, 400 and 1280. The emoji case decides it, because no font-level
-  constant covers a title-level ascent.
+- **The gap is held by measurement, not by a new constant** (§8.1's ruling, confirmed). In the
+  drawn graph, measured box ascents are 13.23 / 13.46 / 13.32 units at 320 / 400 / 1280px, the
+  same at both faces, and 15.87 / 15.53 / 15.54 for an emoji title. They are whole in device
+  pixels, so in units they vary with width. The old gap left a plain label's box 2.4–3.3px (3.2–3.5
+  units) inside its circle. The emoji case decides it, because no font-level constant covers a
+  title-level ascent. *(This bullet first gave "13 at the platform face, 14 at the wide face", a
+  standalone-svg figure that the drawn graph does not reproduce, as the fix-round audit found.)*
 - **pytest-timeout uses the `thread` method, not the default `signal`.** Measured under the hang
   mutant on `tests/test_ui_browser_inspector_blocks.py`: `signal` marks the test FAILED and the run
   then hangs, still running 330s later with `-x`. The stack dump shows the main thread waiting in
@@ -629,7 +637,7 @@ measurements below were taken on the pre-rebase commits, whose code is the same.
 
 | Mutation | Modules run | Red |
 |---|---|---|
-| `LABEL_GAP` 2 → 10 / → 4 / → 0 | labels, layout, refit | each: 7 FAIL (every (14c) and (14d) run), and a teardown ERROR in all 47 tests the pin wraps (the 5 refit tests are not wrapped) |
+| `LABEL_GAP` 2 → 10 / → 4 / → 0 | labels, layout, refit | each: 7 FAIL (every (14c) and (14d) run), and a teardown ERROR in all 53 tests the pin wraps (labels 13 + layout 40; the 5 refit tests are not wrapped). Measured on the fix-round tree (`1e1c610` plus this round). First recorded as 47: at `4e701d0` the labels module had 7 tests, and (16) added 6 in `45a6fa9`, without the count being re-derived |
 | hang removed (`hangBelowCircle` not called) | same | 7 FAIL, the same 7 |
 | ascent fixed at 13 instead of measured | same | 7 FAIL, the same 7 |
 | root hung too | same | 3 FAIL: (14b), (15d) and (15g) |
@@ -658,3 +666,37 @@ default sans, and an emoji font is present): the graph, labels, layout and refit
 passed. The image was removed afterwards. The full default suite against a sibling test database
 (`second_brain_test_co` on 5434): exit 0, 8,850 passed, 4 skipped, 318 deselected, coverage
 94.36%.
+
+### 8.5 Fix round on `1e1c610` (2026-10-13)
+
+The review and the audit of `1e1c610` each reported findings. All are closed in one commit (the
+fix-round commit that adds this subsection):
+
+- **`BROWSER_TEST_TIMEOUT_S` was unpinned** (audit, MEDIUM). pytest-timeout times a test only when
+  its timeout is above 0. The hook's tests compared the marker with the constant, so 0, None or
+  6000 stayed green, and the audit showed the hang mutant with 0 stalling past 300s.
+  `tests/test_browser_timeout.py` now pins the value. It must be a positive number (not a bool),
+  at least 10× the slowest measured phase (1.54s), and at most 300s, a quarter of the browser job's
+  20-minute `timeout-minutes`. The per-item marker's argument must also be positive. Mutants 0,
+  None, 6000, True and 5 each go red.
+- **§8.4's "all 47 tests the pin wraps"** was 53 at HEAD. Re-derived above and bound to the tree.
+- **"14 at Verdana" did not reproduce** in the drawn graph. It is corrected in `graph.js`, §8.1,
+  §8.4 and `tests/test_ui_browser_graph_labels.py`, with the measured px/unit distinction.
+- **`tests/conftest.py` grew without its module-docstring pointer.** It now has one, digit-free,
+  and the inline comment gives the reason the line must live there: `pytest_plugins` can only be
+  declared in a conftest or an already-loaded plugin.
+- **(a) The halo.** The note asked for "ink sits below the box ascent, Å by ~1.8 > 1.5". Measured,
+  that premise is false. In the drawn graph Å's ink tops out 0.36–0.58 units under the box at the
+  platform face, and 0.05–0.27 units OVER it at Verdana, because rounding trims the box. A Latin
+  capital's ink does sit 3.4–3.9 units under it. So `graph.js` states the measured figures, and
+  this is recorded as a **known limit, accepted**: an accented capital's 1.5-unit halo can reach
+  about 0.5 units into a resting circle's stroke and about 1.3 into a focused ring. The halo is
+  painted in the panel colour, so the effect is a sliver cut from the circle's outline, under that
+  one glyph. Raising `LABEL_GAP` to 4 would clear it. That is the lead's call, not taken here.
+- **(b) The (14c) stroke check** now reads the circle's WIDEST stroke: the focus ring, from
+  graph.css's loaded `.local-graph a.node:focus-visible circle` rule via the CSSOM. A missing rule
+  is a failure. Mutants: the focus ring 3 → 5, and the rule's selector renamed, each turn all 7
+  hang runs red.
+- **(c) graph.css's own-circle rows** are now the measured 2.5 / 2.8 / 2.4px (root) and 1.5 / 1.9
+  / 1.8px (neighbour), not rounded to "3px" and "2px".
+- **(d) §8.1's mutant list** named 4 twice. De-duplicated.

@@ -6,6 +6,11 @@ each test that takes ``test_db`` then gets a cheap ``TRUNCATE`` data-reset
 ``@pytest.mark.fresh_schema`` and get the full ``DROP SCHEMA`` + migrate reset,
 with :func:`_restore_baseline_after_fresh_schema` restoring the migrated-once
 baseline afterwards so the next TRUNCATE-only test is unaffected.
+
+Past the 800-line ceiling (CLAUDE.md). Its growth on fix/phase5-followups is the
+``pytest_plugins`` line that loads tests/browser_timeout.py, the comment beside
+it giving the reason it must live here, and this paragraph. No line count is
+given here: it would be stale as soon as written (``wc -l tests/conftest.py``).
 """
 
 import hashlib
@@ -25,7 +30,10 @@ from brain.db import connect, migration_lock, run_migrations
 from brain.ingest import ExtractedDoc, ingest_document
 from tests.db_lock import concurrent_suite_message, try_acquire_suite_lock
 
-pytest_plugins = ("tests.browser_timeout",)  # fails a hung browser test (see that module)
+# Fails a hung browser test (see that module). The hook itself lives there, out of
+# this over-ceiling file, but `pytest_plugins` can only be declared in a conftest
+# (or a plugin already loaded), so this one line has to be here.
+pytest_plugins = ("tests.browser_timeout",)
 
 load_dotenv()
 

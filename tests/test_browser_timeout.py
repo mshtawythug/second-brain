@@ -41,7 +41,42 @@ def test_a_browser_test_without_a_timeout_gets_the_browser_timeout() -> None:
 
     timeout = item.get_closest_marker("timeout")
     assert timeout is not None and timeout.args == (BROWSER_TEST_TIMEOUT_S,)
+    (seconds,) = timeout.args
+    assert _is_positive_number(seconds), f"the marker times nothing: timeout({seconds!r})"
     assert timeout.kwargs == {"method": BROWSER_TIMEOUT_METHOD}
+
+
+#: The slowest phase measured on the CI browser command (tests/browser_timeout.py):
+#: the first test's setup, which launches chromium. A timeout must leave room for a
+#: shared runner several times slower than the machine that measured it.
+_SLOWEST_MEASURED_PHASE_S = 1.54
+_MIN_HEADROOM = 10
+
+#: The browser job's `timeout-minutes` in .github/workflows/ci.yml is 20. A
+#: per-test timeout must fire well inside it, or a hang ends as a cancelled job
+#: with no stack dump: at most a quarter of it.
+_MAX_TIMEOUT_S = 300
+
+
+def _is_positive_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def test_the_browser_timeout_is_positive_and_bounded() -> None:
+    """pytest-timeout times a test only when its timeout is above 0, so 0 or
+    None would silently time nothing (measured by the phase-5 audit: the hang
+    mutant with 0 stalled past 300s). The tests above compare the marker with
+    the constant, so they cannot see a bad constant. This one pins its value."""
+    assert _is_positive_number(BROWSER_TEST_TIMEOUT_S), (
+        f"BROWSER_TEST_TIMEOUT_S = {BROWSER_TEST_TIMEOUT_S!r} times nothing"
+    )
+    assert _SLOWEST_MEASURED_PHASE_S * _MIN_HEADROOM <= BROWSER_TEST_TIMEOUT_S, (
+        f"{BROWSER_TEST_TIMEOUT_S}s leaves under {_MIN_HEADROOM}x headroom over the "
+        f"slowest measured phase ({_SLOWEST_MEASURED_PHASE_S}s)"
+    )
+    assert BROWSER_TEST_TIMEOUT_S <= _MAX_TIMEOUT_S, (
+        f"{BROWSER_TEST_TIMEOUT_S}s would let a hang run into the browser job's limit"
+    )
 
 
 def test_the_browser_timeout_ends_the_process_rather_than_raising() -> None:

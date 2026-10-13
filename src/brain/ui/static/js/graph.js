@@ -108,12 +108,20 @@ const GRAPH_LABEL = "Links around this note";
    label's box. It is held by measurement, not by the baseline: fitLabels hangs
    each label so that its box (getBBox) starts exactly this far below the
    circle. A baseline offset cannot do this, because the box's ascent belongs
-   to the font, the device scale and the title, not to this file. Chromium
-   rounds it to whole device pixels, giving 13 units at macOS's default sans,
-   14 at Verdana, and 15 for ANY title that draws an emoji, whose fallback
-   face is taller (measured 2026-10-12). The old baseline gap of 10 left the
-   box 3 to 5 units INSIDE its own circle. 2 because the circle's widest
-   stroke, the focus ring (graph.css, 3), reaches 1.5 outside `r`. Pinned by
+   to the device scale and the title, not to this file. Chromium rounds it to
+   whole DEVICE PIXELS, so in viewBox units it is not whole and moves with the
+   width: 13.23 / 13.46 / 13.32 units at 320 / 400 / 1280px, the same at the
+   platform face and at Verdana, and 15.87 / 15.53 / 15.54 for any title that
+   draws an emoji, whose fallback face is taller (measured 2026-10-13 in the
+   drawn graph). The old baseline gap of 10 left a plain label's box 3.2 to
+   3.5 units INSIDE its circle, and an emoji label's 5.5 to 5.9.
+   2 because the circle's widest stroke, the focus ring (graph.css, 3),
+   reaches 1.5 outside `r`. The label's own 3-unit halo paints 1.5 beyond its
+   INK, and ink usually sits below the box's top: a Latin capital by 3.4 to
+   3.9 units. An accented capital is the exception. Å's ink tops out 0.4 to
+   0.6 units under the box at the platform face and up to 0.3 OVER it at
+   Verdana (rounding trims the box), so its halo can reach a focused ring by
+   about 1.3 units. That is cosmetic and accepted (plan §8.5). Pinned by
    test_a_neighbour_label_hangs_its_gap_below_its_own_circle. */
 const LABEL_GAP = 2;
 
