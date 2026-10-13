@@ -86,12 +86,19 @@ def test_events_inside_one_window_build_once(tmp_path: Path, mocker: MockerFixtu
 
 def test_the_production_timer_is_a_daemon_threading_timer() -> None:
     """Without a ``timer_factory`` the debouncer gets ``_daemon_timer``: a
-    ``threading.Timer`` that is a daemon, so a pending debounce never keeps the
-    process alive on shutdown, and that fires its callback when started."""
+    ``threading.Timer`` set to the interval it is given, a daemon (so a pending
+    debounce never keeps the process alive on shutdown), and one that fires its
+    callback when started.
+
+    The interval is the debounce itself. A factory that built
+    ``threading.Timer(0.0, fire)`` would turn off production debouncing while
+    every manual-clock test stayed green, because those never build a real
+    timer. It is read off the timer, not measured by waiting."""
     fired = threading.Event()
-    timer = _daemon_timer(0.0, fired.set)
+    timer = _daemon_timer(0.25, fired.set)
 
     assert isinstance(timer, threading.Timer)
+    assert timer.interval == 0.25
     assert timer.daemon
     assert not fired.is_set(), "the factory must not start the timer"
     timer.start()
