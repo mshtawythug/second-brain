@@ -24,7 +24,7 @@ import psycopg
 from ..config import Config
 from ..db import connect
 from ..errors import BrainError
-from .context import UiContext, bind_origin, host_allowlist
+from .context import UiContext, bind_address, bind_origin, host_allowlist
 from .security import is_loopback
 from .telemetry import ui_source_supported
 
@@ -43,6 +43,22 @@ TELEMETRY_DISABLED_NOTICE = (
 )
 
 
+def _probe_socket(address: str) -> socket.socket:
+    """A socket configured the way uvicorn's real bind will be.
+
+    Same address family as the bind, and for IPv6 the same ``IPV6_V6ONLY=1``
+    asyncio sets on every IPv6 server socket. Without it the probe was
+    dual-stack: on Linux an IPv4 socket holding the port made it report "busy"
+    for a ``::`` server that would have bound fine (phase-7 review round 3).
+    """
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if family == socket.AF_INET6:
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    return sock
+
+
 def _port_is_free(host: str, port: int) -> bool:
     """Probe a port with a real bind. Portable; no ``lsof``.
 
@@ -51,10 +67,8 @@ def _port_is_free(host: str, port: int) -> bool:
     on every port, every port looked busy, and ``brain ui --host ::`` died with
     "no free port found" before it could print a thing (phase-7 audit L-8).
     """
-    address = host.strip("[]")
-    family = socket.AF_INET6 if ":" in address else socket.AF_INET
-    with closing(socket.socket(family, socket.SOCK_STREAM)) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    address = bind_address(host)
+    with closing(_probe_socket(address)) as sock:
         try:
             sock.bind((address, port))
         except OSError:

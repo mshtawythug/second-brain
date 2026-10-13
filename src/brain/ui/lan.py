@@ -24,10 +24,13 @@ from ..errors import BrainError
 #: Printed on a wildcard bind (``brain.ui.context.WILDCARD_HOSTS``). Those are
 #: not loopback, so they need a token, but they cannot serve another device:
 #: their Host allowlist is loopback names only (ruling W1), which is the trap.
+#: ``::`` is IPv6-only besides — asyncio sets ``IPV6_V6ONLY`` — so an IPv4
+#: device is refused at connect, before any Host check (review round 3).
 WILDCARD_NOTICE = (
     "other devices cannot use this bind: a wildcard address accepts only "
     "loopback Host names, so a phone reaching this machine by its LAN address "
-    "is refused with 400. Use --lan, or --host <this machine's LAN address>."
+    "is refused with 400 — and `::` is IPv6-only, so an IPv4 phone cannot even "
+    "connect. Use --lan, or --host <this machine's LAN address>."
 )
 
 #: TEST-NET-1 (RFC 5737). ``connect()`` on a UDP socket only consults the

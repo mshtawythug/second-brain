@@ -53,7 +53,16 @@ git tag scheme:
 - **`brain ui --host ::` refused every request**, its own machine's included,
   and died at startup with "no free port found": the port probe was IPv4-only,
   and the IPv6 wildcard's Host allowlist held a value no browser sends. `::`
-  now behaves exactly like `0.0.0.0`.
+  now gets the same loopback-only Host allowlist as `0.0.0.0` and serves
+  `http://[::1]:<port>/`. It stays IPv6-only, so IPv4 clients — including
+  `127.0.0.1` — cannot connect to it. `--host [::]` and `--host [::1]` now bind
+  instead of failing in `getaddrinfo`.
+
+### Dependencies
+
+- **`starlette>=1.7`** (was `>=0.47`). Earlier releases parse the IPv6 Host
+  `[::1]:8765` as `[` and refuse it, which breaks `brain ui --host ::`.
+  Measured: 1.6.0 fails the two `::` security tests; 1.7.0 and 1.8.0 pass.
 - **A wildcard bind printed and opened `http://0.0.0.0:<port>/`** (refused with
   400) and expected a write Origin no browser sends. It now prints and opens
   the loopback URL, and accepts writes from it.

@@ -335,7 +335,7 @@ def test_loopback_with_a_token_prints_the_tokened_url(
 ) -> None:
     """M-2 / rule 12 (phase-7 audit): the panel half of the ``#t=`` fix.
 
-    Before ``05fb151`` the panel printed the fragment only for non-loopback
+    Before ``5742c91`` the panel printed the fragment only for non-loopback
     binds, so ``--token`` on loopback printed a URL whose page 403'd. The
     serve half has its own test; this pins the panel.
     """
@@ -482,7 +482,7 @@ needs_ipv6 = pytest.mark.skipif(
 
 
 @needs_ipv6
-@pytest.mark.parametrize("wildcard", ["::", "[::]"])
+@pytest.mark.parametrize("wildcard", ["::"])
 def test_resolve_port_finds_a_free_port_on_the_ipv6_wildcard(wildcard: str) -> None:
     """L-8 (phase-7 audit): the port probe bound ``::`` with an IPv4 socket.
 
@@ -509,3 +509,64 @@ def test_resolve_port_sees_a_busy_ipv6_wildcard_port() -> None:
         busy = sock.getsockname()[1]
         sock.listen(1)
         assert resolve_port(busy, host="::", auto=True) != busy
+
+
+
+def test_the_probe_socket_is_ipv6_only_like_the_real_bind() -> None:
+    """Review round 3, item 3: asyncio binds ``::`` with ``IPV6_V6ONLY=1``.
+
+    A dual-stack probe (the OS default, ``0``) answers a different question
+    from the bind that follows: on Linux it reports a port busy because an IPv4
+    socket holds it, although the IPv6-only server would bind it fine. Asserted
+    on the socket option itself, because the behavioural difference is
+    Linux-only — macOS reports both cases free (measured 2026-10-13).
+    """
+    import socket
+
+    from brain.ui.server import _probe_socket
+
+    with _probe_socket("::") as sock:
+        assert sock.family == socket.AF_INET6
+        assert sock.getsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY) == 1
+    with _probe_socket("127.0.0.1") as sock:
+        assert sock.family == socket.AF_INET
+
+
+@pytest.mark.parametrize(
+    ("given", "bound", "url"),
+    [
+        ("[::]", "::", "http://[::1]:8765/#t=x"),
+        ("[::1]", "::1", "http://[::1]:8765/#t=x"),
+    ],
+)
+def test_a_bracketed_host_is_bound_without_its_brackets(
+    app: typer.Typer, started: _Started, given: str, bound: str, url: str
+) -> None:
+    """Review round 3, item 2: ``--host [::]`` passed the probe, printed a panel,
+    then uvicorn died with ``gaierror 8``: brackets belong in URLs, never in a
+    bind address. The host is normalised once, in the CLI; ``bind_origin``
+    re-brackets it for the URL."""
+    result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["host"] == bound
+    assert started.serve_kwargs["host"] == bound
+    assert url in result.output
+
+
+def test_a_bracketed_loopback_needs_no_token(
+    app: typer.Typer, started: _Started
+) -> None:
+    """``[::1]`` is loopback once normalised, exactly as ``::1`` is."""
+    result = runner.invoke(app, ["ui", "--host", "[::1]", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["host"] == "::1"
+
+
+def test_the_ipv6_wildcard_notice_says_ipv4_devices_cannot_connect(
+    app: typer.Typer, started: _Started
+) -> None:
+    """Review round 3, item 3: ``::`` is IPv6-only, so "refused with 400" is
+    not the whole story — an IPv4 phone is refused at connect."""
+    result = runner.invoke(app, ["ui", "--host", "::", "--token", "x", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert "IPv6-only" in result.output, result.output

@@ -153,9 +153,13 @@ def ui(
         return
 
     from .ui import lan as lan_mod
-    from .ui.context import WILDCARD_HOSTS
+    from .ui.context import WILDCARD_HOSTS, bind_address
     from .ui.security import is_loopback
     from .ui.server import browser_url, build_context, resolve_port, serve
+
+    # Once, here: every consumer below — the probe, the bind, the allowlist,
+    # the URL — gets the bare address; bind_origin re-brackets it for URLs.
+    host = bind_address(host)
 
     if lan:
         # Phase 7 / spec Q1: the phone-reading replacement for the wiki. Two

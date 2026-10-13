@@ -50,9 +50,13 @@ server only accepts requests whose `Host` header is on an allowlist, and that al
 defeats DNS-rebinding attacks. A wildcard bind — `0.0.0.0` or `::` — gets the loopback
 allowlist, so a phone that reaches the machine at its LAN address is refused with **400 Invalid
 host header**. The guard is correct, so bind the LAN address itself. On a wildcard bind
-`brain ui` prints a warning, and the URL it prints and opens is the loopback one
-(`http://127.0.0.1:<port>/`, or `http://[::1]:<port>/` for `::`), which works on this machine
-only.
+`brain ui` prints a warning, and the URL it prints and opens is the loopback one, which works on
+this machine only: `http://127.0.0.1:<port>/` for `0.0.0.0`, and `http://[::1]:<port>/` for
+`::`.
+
+`::` differs from `0.0.0.0` in one more way: it is **IPv6-only**. An IPv4 device — most phones on
+a home network — cannot connect to it at all (connection refused, not 400), and on this machine
+`http://127.0.0.1:<port>/` is refused too; use the `[::1]` URL it prints.
 
 For the same reason, open the **IP address** URL that `brain ui` prints, not the machine's
 `<name>.local` name: the allowlist holds the address you bound, nothing else.

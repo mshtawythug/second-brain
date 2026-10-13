@@ -37,8 +37,12 @@ LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "[:
 
 #: The wildcard binds: "every interface", a bind address and never a
 #: destination. Ruling W1 (phase 7): all three get exactly the loopback
-#: allowlist, so a wildcard bind is reachable from this machine and from
-#: nowhere else — never wider than ``0.0.0.0`` already was.
+#: ALLOWLIST, so a wildcard bind is reachable from this machine and from
+#: nowhere else — never wider than ``0.0.0.0`` already was. The allowlist is
+#: the only thing they share: ``::`` is IPv6-only (asyncio sets
+#: ``IPV6_V6ONLY``), so its local URL is ``[::1]`` and ``127.0.0.1`` is refused
+#: at connect. W1 also needs ``starlette>=1.7``: older TrustedHostMiddleware
+#: split ``[::1]:8765`` on the first colon (see the pin in pyproject.toml).
 WILDCARD_HOSTS: frozenset[str] = frozenset({"0.0.0.0", "::", "[::]"})  # noqa: S104
 
 
@@ -134,12 +138,27 @@ def host_allowlist(host: str) -> frozenset[str]:
     the DNS-rebinding hole this allowlist exists to close.
 
     ``TrustedHostMiddleware`` strips the port before comparing, so only bare
-    hostnames belong here. It keeps the brackets on an IPv6 literal, which is
-    why ``::`` could never match ``{"::"}`` before ruling W1.
+    hostnames belong here. From starlette 1.7 it keeps the brackets on an IPv6
+    literal, which is why ``::`` could never match ``{"::"}`` before ruling W1
+    — and why the starlette floor is 1.7: earlier releases cut ``[::1]:8765``
+    to ``[`` and refused it.
     """
     if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:
         return LOOPBACK_HOSTS
     return frozenset({host})
+
+
+def bind_address(host: str) -> str:
+    """``host`` as a socket bind address: an IPv6 literal without its brackets.
+
+    Brackets belong in a URL (:func:`bind_origin` adds them back), never in a
+    bind — ``--host [::]`` reached uvicorn verbatim and died in ``getaddrinfo``
+    (``gaierror 8``) after the panel had already printed (phase-7 review
+    round 3). ``brain ui`` normalises once, at the CLI.
+    """
+    if host.startswith("[") and host.endswith("]"):
+        return host[1:-1]
+    return host
 
 
 def bind_origin(host: str, port: int) -> str:
