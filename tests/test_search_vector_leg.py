@@ -1,4 +1,4 @@
-"""Vector-leg candidate pool: exact scan, full pool, filters never starve it.
+"""Vector-leg candidate pool: near-exact iterative HNSW scan, full pool, filters never starve it.
 
 Regression tests for the defect in ``docs/specs/2026-10-13-search-vector-leg-design.md``:
 the vector leg ordered by ``embedding <=> q``, so the planner served it from the
@@ -15,7 +15,9 @@ the production shape under ``fresh_schema`` — 1024 dims via
 :func:`brain.queries.finalize_embedding_index`, the same calls ``brain init`` /
 ``brain reembed`` make — and assert, as a precondition, that the planner really
 chooses the index for an index-shaped query. Without that precondition a pass
-would prove nothing.
+would prove nothing. The leg itself (option D, spec §4a) is a scoped iterative HNSW
+scan: its inner query is index-shaped on purpose, and the tests pin the settings,
+the floor placement and the recall-relevant behaviour around it.
 
 The expected candidate set comes from an independent oracle: cosine computed in
 Python over the stored embeddings, never from SQL that mirrors the code under
@@ -178,9 +180,10 @@ def hnsw_corpus(
     simply cheapest; on 90 rows the planner would otherwise serve a filtered query
     with a nested loop over ``documents`` plus an exact sort, which is exact by
     accident and would let the old SQL pass. Disabling the sort leaves the index
-    scan as the only path that delivers ordered rows. The new SQL orders by an
-    expression no index provides, so it still sorts (the setting is a cost
-    penalty, not a ban). The precondition below proves the pressure took effect
+    scan as the only path that delivers ordered rows. The current leg's inner query
+    orders by ``c.embedding <=> q`` too, so this pressure suits it; its outer
+    ``dist + 0, id`` re-sort still runs, because ``enable_sort = off`` is a cost
+    penalty, not a ban. The precondition below proves the pressure took effect
     for both query shapes.
     """
     embedder = _seed_hnsw_corpus(test_db)
@@ -750,6 +753,9 @@ def test_vector_ms_is_in_milliseconds(
     assert 250.0 <= diag.vector_ms < 25_000.0
     assert diag.sql_ms is not None
     assert diag.sql_ms - diag.vector_ms >= 300.0  # the FTS delay is outside the leg
+    # sql_ms is a phase of the wall clock, so it cannot exceed total_ms. That bound
+    # catches sql_seconds absorbing the leg's milliseconds unconverted.
+    assert diag.total_ms is not None and diag.sql_ms <= diag.total_ms
 
 
 def test_run_vector_leg_reports_exact_milliseconds_from_its_clock(

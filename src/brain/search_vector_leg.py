@@ -37,10 +37,15 @@ as pgvector's README directs for distance filters. Inside, it would become a
 condition the iterative scan keeps walking to satisfy, so an off-corpus query
 with nothing above the floor would traverse the index up to
 ``hnsw.max_scan_tuples``. Review measured that on a synthetic 21k x 1024 table:
-751 ms inside versus 86 ms outside, with the same ids returned. Because the floor
-is a distance threshold, the rows that pass it are a prefix of the distance
-order, so "top ``limit``, then floor" returns the same set as "floor, then top
-``limit``".
+751 ms inside versus 86 ms outside, with the same ids returned. Under an EXACT
+order the two shapes are equivalent: the floor is a distance threshold, so the
+rows that pass it are a prefix of the distance order. Under the approximate
+scan they are not. Outside, the scan stops at the first ``limit`` candidates and
+the floor only removes rows, so the result is a SUBSET of what the inside shape
+would find. Recall for the shipped shape was re-measured (spec §6.5). Golden
+queries: 0.9987 mean, 0.98 minimum. Low-similarity queries: wherever the floor is
+binding, the exact floor-passing set was returned every time, and the mean over
+all of them is 0.994, with a 0.96 minimum.
 The ``+ 0`` keeps the outer sort from being satisfied by the index (pgvector's
 documented pattern for Postgres 17+). The ``id`` tie-break makes the order total.
 
@@ -166,6 +171,7 @@ def run_vector_leg(
             "current_setting(%s, true)",
             names,
         ).fetchone()
+        assert prior is not None  # a SELECT with no FROM always returns one row
         conn.execute(
             "SELECT set_config(%s, %s, true), set_config(%s, %s, true), "
             "set_config(%s, %s, true)",
@@ -179,7 +185,7 @@ def run_vector_leg(
 
 
 def _restore_settings(
-    conn: psycopg.Connection[Any], names: list[str], prior: tuple[Any, ...] | None
+    conn: psycopg.Connection[Any], names: list[str], prior: tuple[Any, ...]
 ) -> None:
     """Put each setting back to the value it had before the leg ran.
 
@@ -189,8 +195,7 @@ def _restore_settings(
     resets a setting to its session default (verified 2026-10-13: a local 777
     returned to 40), which is the correct restore target in that case.
     """
-    values = list(prior) if prior is not None else [None] * len(names)
     conn.execute(
         "SELECT " + ", ".join(["set_config(%s, %s, true)"] * len(names)),
-        [part for pair in zip(names, values, strict=True) for part in pair],
+        [part for pair in zip(names, prior, strict=True) for part in pair],
     )

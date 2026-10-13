@@ -110,6 +110,12 @@ next to the numbers:
 | **D at ef=1000** (raw SQL) | same window | **41.6 / 81.3 ms** | **0.9987 / 0.98** | — |
 | **D at ef=1000 (`vector_ms`, real code path)** | loadavg 82–96 (heavier than C's run), 7 pytest procs | **35.9 / 52.7 ms** | 0.9987 / 0.98 (§5 snippet, verbatim) | **0.2779 / 0.3826 / 0.7112** |
 
+*Quantile note (R2): the two `vector_ms` rows above came from a pre-fix helper that took
+p50 as `s[14]` (the 15th of 31, not the median) and p90 as `s[26]` (the 27th of 31, not
+nearest-rank). They are kept as measured. §6.5 supersedes them with figures from the §5
+snippets, under the stated rule. The gate verdict does not change: C's 27th-of-31 value
+alone (248.8 ms) is already over 150 ms.*
+
 C's leg p90 was over the 150 ms bar under the only conditions available. Cost grows
 linearly with chunk count, so there is no headroom on today's 21k chunks. The rule set
 for this decision was: above 150 ms, take the best-recall option that stays fast, keep
@@ -137,9 +143,12 @@ pgvector's maximum.
   treats it as a filter it must satisfy, so an off-corpus query (nothing above the floor)
   walks the index up to `hnsw.max_scan_tuples`. Review measured that on a synthetic
   21k × 1024 table: 751 ms inside versus 86 ms outside (C exact: 169 ms), with the same
-  ids returned. The floor is a distance threshold, so the rows passing it are a prefix of
-  the distance order, and "top 50, then floor" returns the same set as "floor, then
-  top 50". The form stays NaN-safe: zero vectors are not indexed, and in an exact plan
+  ids returned. Under an *exact* order the two shapes are equivalent: the floor is a
+  distance threshold, so the rows passing it are a prefix of the distance order. Under the
+  *approximate* scan they are not. Outside, the scan stops at the first 50 candidates and
+  the floor only removes rows, so the result is a **subset** of what the inside shape
+  would find. §5(ii) measures what that costs, and §6.5 records it for the shipped shape.
+  The form stays NaN-safe: zero vectors are not indexed, and in an exact plan
   `NaN <= x` is FALSE.
 
 **How D answers the reasons C was chosen (§4):**
@@ -173,11 +182,13 @@ pgvector's maximum.
   **Measured after implementation** (§6.3): end to end it is **161 ms median /
   234 ms p90**, above the ~135 ms estimate; `sql_ms` is 113 ms median / 148 ms p90.
 - **Revisit triggers (D).** (i) `SearchDiagnostics.vector_ms` p90 above **150 ms**, over
-  the 31 golden queries **or** over the off-corpus probes in (iii); or (ii) mean
-  recall@50 against the exact scan below **0.99**. The golden set never exercises the
+  the 31 golden queries **or** over the off-corpus probes in (iii); or (ii) recall@50
+  against the exact scan below **0.99**, as the **mean over the 31 golden queries**.
+  The trigger is on that mean, not per query. Per-query values, and the low-similarity
+  set in §6.5, are recorded for information: a single query below 0.99 is not a breach. The golden set never exercises the
   no-match path that off-topic queries and partially typed UI searches take, hence (iii).
   `vector_ms` times only the leg's candidate query. It was added for this; the earlier
-  `sql_ms` proxy, which included the FTS leg and the doc fetch, is retired. Both
+  `sql_ms` proxy, which included the FTS leg and the doc fetch, is retired. All three
   procedures are read-only and run from a checkout with the prod `.env` loaded and the
   local golden corpus present. Neither uses `brain search`, which writes a
   `search_queries` telemetry row. **Record the conditions with every measurement**: the
@@ -188,7 +199,7 @@ pgvector's maximum.
   is the 28th of the 31 sorted medians.
 
   ```python
-  import os, statistics, psycopg, yaml
+  import math, os, statistics, psycopg, yaml
   from brain.config import Config
   from brain.embeddings import make_embedder
   from brain.search import SearchDiagnostics, hybrid_search
@@ -209,17 +220,51 @@ pgvector's maximum.
           run(conn, q)                                   # warm-up
       med = [statistics.median(run(conn, q).vector_ms for _ in range(3)) for q in qs]
   print("loadavg after", os.getloadavg())
-  s = sorted(med); print("vector_ms p50", s[15], "p90", s[28 - 1])  # 31 values: median = s[15]
+  s = sorted(med)
+  print("vector_ms p50", statistics.median(s), "p90", s[math.ceil(0.9 * len(s)) - 1])
   ```
 
-  *(iii) Off-corpus probes.* Run procedure (i) over these synthetic queries instead of
-  the golden set: `"zxqv plorb wintermute gleep"`, `"sourdough focaccia hydration and
-  crumb structure"`, `"lattice gauge theory in quantum chromodynamics"`, `"volcanic tuff
-  petrography under polarized light"`, `"medieval falconry hood stitching"`, `"mee"`,
-  `"standu"` and `"qq"`. Pass them as plain `query` strings with no filters. Report p50,
-  p90 and max of the per-probe medians. A regression here means the floor (or another
-  distance condition) has moved back inside the CTE, or the planner stopped using the
-  index.
+  *Quantile rule for (i) and (iii):* p50 is `statistics.median` of the per-query medians.
+  p90 is the **nearest-rank** value `s[ceil(0.9 · n) − 1]` of the sorted per-query
+  medians: the 28th of 31 golden queries, and the 8th of 8 probes (that is, the max).
+
+  *(iii) Off-corpus probes.* These synthetic, unfiltered queries cover the no-match path
+  that off-topic queries and partially typed UI searches take:
+
+  ```python
+  import math, os, statistics, psycopg
+  from brain.config import Config
+  from brain.embeddings import make_embedder
+  from brain.search import SearchDiagnostics, hybrid_search
+  PROBES = ["zxqv plorb wintermute gleep",
+            "sourdough focaccia hydration and crumb structure",
+            "lattice gauge theory in quantum chromodynamics",
+            "volcanic tuff petrography under polarized light",
+            "medieval falconry hood stitching", "mee", "standu", "qq"]
+  cfg = Config.load(); emb = make_embedder(cfg)
+  def run(conn, text):
+      d = SearchDiagnostics()
+      hybrid_search(conn, embedder=emb, query=text, limit=20,
+                    vector_sim_floor=cfg.vector_sim_floor,
+                    recency_halflife_days=cfg.recency_halflife_days,
+                    snippet_context_tokens=cfg.snippet_context_tokens, diagnostics=d)
+      return d.vector_ms
+  print("loadavg before", os.getloadavg())
+  with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as conn:
+      conn.execute("SET default_transaction_read_only = on")
+      for t in PROBES:
+          run(conn, t)                                   # warm-up
+      med = [statistics.median(run(conn, t) for _ in range(3)) for t in PROBES]
+  print("loadavg after", os.getloadavg())
+  s = sorted(med)
+  print("off-corpus vector_ms p50", statistics.median(s),
+        "p90", s[math.ceil(0.9 * len(s)) - 1], "max", s[-1])
+  ```
+
+  A regression here means the floor (or another distance condition) has moved back
+  inside the CTE, or the planner has stopped using the index. For recall on these probes,
+  run (ii) with `PROBES` in place of the golden queries (no filters). A probe whose exact
+  set is empty has no recall to measure; report it separately and do not average it.
 
   *(ii) Recall.* Per golden query: D's chunk ids (from `run_vector_leg`) against the
   exact top 50 for the same predicate and floor. The exact reference orders by the score
@@ -367,7 +412,9 @@ under heavy contention from concurrent test suites. D's run had the *higher* loa
 | **D, iterative HNSW, ef=1000** | 92.2 → 81.7; 7 | 35.9 / **52.7** / 103.5 | 43.8 / 60.1 | 127.8 / 229.6 |
 
 Gate: a vector-leg p90 of at most 150 ms. C fails at 248.8 ms; D passes at 52.7 ms under
-heavier load. Quiet-machine figures for D are expected to be lower still; re-measure
+heavier load. *These figures came from a pre-fix helper: p50 is `s[14]` (the 15th of 31)
+and p90 is `s[26]` (the 27th of 31), not the median and nearest-rank rule now in §5. They
+are superseded by §6.5. The verdict holds either way.* Quiet-machine figures for D are expected to be lower still; re-measure
 with §5 and record the conditions.
 
 The plan for measuring the implementation (kept for reference):
@@ -381,14 +428,55 @@ The plan for measuring the implementation (kept for reference):
 
 ### 6.5 Round 3 (floor outside the CTE): latency gate, off-corpus included
 
-Measured with the §5 procedures (i) and (iii), run immediately rather than after a lull.
-Conditions: 1-minute loadavg 21.3 → 24.1, with 5- and 15-minute averages of 72 and 95,
-and 6 concurrent pytest processes. The median is the true median, `s[15]` of 31.
+Every figure in this table was produced by running the §5 (i) and (iii) snippets
+**verbatim** at `c343f5c`. p50 is `statistics.median`. p90 is nearest-rank,
+`s[ceil(0.9·n) − 1]`: `s[27]`, the 28th of 31, for the golden queries; `s[7]`, the 8th of
+8 and therefore the max, for the probes.
 
-| `vector_ms`, real code path | p50 | p90 | max |
+| `vector_ms`, real code path | Conditions (1-min loadavg before → after; 15-min; pytest procs) | p50 | p90 |
 |---|---|---|---|
-| 31 golden queries | 19.8 ms | **30.2 ms** | 48.3 ms |
-| 8 off-corpus probes (§5 iii) | 19.5 ms | **20.8 ms** | 22.3 ms |
+| 31 golden queries, (i) | 14.8 → 22.5; ~57; 6 | 28.0 ms | **56.9 ms** |
+| 8 off-corpus probes, (iii) | 18.5 → 16.2; ~58; 6 | 23.2 ms | **40.5 ms** (= max) |
+| 31 golden queries, (i) | 131 → 116; ~174; 6 | 48.9 ms | **70.9 ms** |
+| 8 off-corpus probes, (iii) | 142 → 137; ~176; 6 | 41.0 ms | **91.3 ms** (= max) |
+
+All four sit under the 150 ms trigger, at loads from about 15 to 140.
+
+*Superseded first report (round 3, `latency_gate2.py`, loadavg 21→24): golden 19.8 / 30.2 ms
+and probes 19.5 / 20.8 ms. That script took p50 as the median, but p90 as `s[26]` (the
+27th of 31) for the golden queries and `s[6]` (the 7th of 8) for the probes, so its p90s
+do not follow the §5 rule. It is kept for the record only.*
+
+**Recall for the shipped shape** (floor outside the CTE), §5 (ii), read-only at
+`c343f5c`. Recall is defined over floor-passing rows: each query is compared against the
+exact set of chunks that pass the same predicate and floor, which can be fewer than 50.
+
+*Golden queries, measured by the audit, 2026-10-13* (~15:12–15:20, through
+`run_vector_leg` against the exact top 50): mean **0.99871**, min **0.98**. That is
+identical to the round-2 figure. The same audit measured latency (i) at loadavg ~25:
+p50 22.7 / p90 32.5 ms; (iii) per-probe medians 22.7–47.8 ms, p50 35.7 ms; eval gate
+exit 0. *(An independent re-run during round 4 matched it: 0.9987 / 0.98, with q03 and
+q28 each missing 1 of 50.)*
+
+*Low-similarity queries, round 4* — the case the golden set lacks, where the subset
+effect could bite. These are the 8 §5 (iii) probes plus 6 deliberately low-similarity
+everyday topics: weekend weather, repotting a houseplant, guitar chords, a home-office
+tax deduction, marathon training and cheap flights. 1-minute loadavg 78–87 (15-minute
+~158), with 10 pytest processes; load does not affect recall.
+
+| Exact floor-passing set | Queries | Recall |
+|---|---|---|
+| **fewer than 50 (floor binding)** | 5: gibberish 32, volcanic tuff 6, falconry 7, weather 7, tax 1 | **1.0 on every one** (exact match) |
+| a full 50 (floor not binding) | 2: marathon, sourdough | 50/50 and 48/50 (an ordinary approximate-scan miss) |
+| empty (nothing above the floor) | 7: lattice gauge, `mee`, `standu`, `qq`, houseplant, guitar, flights | no recall to measure; the leg returns nothing, which is correct |
+
+Over the 7 queries with a defined recall: mean **0.9943**, min **0.96**. Wherever the floor
+is binding, the shipped shape returned the exact floor-passing set. The subset relation in
+§4a costs nothing measurable, and both the golden and the low-similarity means sit above
+the 0.99 trigger. The 0.96 minimum is a single query (sourdough, 2 of 50 missed in a full
+pool) and is recorded as such. **It is not a trigger breach:** the §5 (ii) trigger is
+the mean over the 31 golden queries (0.99871), not any single query. No design change
+was needed.
 
 Raw leg SQL under the leg's own settings, interleaved per probe, on prod. This is the
 review's finding reproduced on the live corpus:
@@ -405,7 +493,7 @@ review's finding reproduced on the live corpus:
 | `qq` | 0 rows, 25.7 ms | 0 rows, 406.3 ms |
 
 The row counts are identical on every probe. Wherever fewer than 50 rows pass the floor,
-the inside shape costs 300–600 ms, because it walks the index looking for rows that do
+the inside shape costs 303–609 ms, because it walks the index looking for rows that do
 not exist. Eval after the move: 0.2779 / 0.3826 / 0.7112, and all 31 result lists are
 identical to the committed `ci.json`, so no re-record was needed.
 
@@ -473,8 +561,9 @@ D's two triggers (§5) answer different failures:
     - **`vector_ms` is in milliseconds**: a known 250 ms delay inside the leg reads as
       ≥ 250 and < 25,000. A separate 300 ms delay on the FTS statement must stay out of
       it (`sql_ms − vector_ms ≥ 300`), which catches `vector_ms` reporting the whole
-      `sql_ms` phase. A fake clock (100.0 → 100.25) pins `run_vector_leg`'s return at
-      exactly 250.0;
+      `sql_ms` phase. `sql_ms ≤ total_ms` bounds it from above, which catches the leg's
+      milliseconds being added to `sql_seconds` unconverted (audit survivor A32). A fake
+      clock (100.0 → 100.25) pins `run_vector_leg`'s return at exactly 250.0;
     - audit survivors S1–S5:
       - `HNSW_EF_SEARCH == 1000` is pinned, alongside the live in-statement read;
       - on a connection with **no** outside planner pressure, `EXPLAIN` of the leg's SQL
@@ -494,10 +583,19 @@ D's two triggers (§5) answer different failures:
   - M6 strict `<`;
   - M7 no restore;
   - M9 iterative off;
-  - M10 floor back inside the CTE;
-  - M11 ef_search 400;
-  - M12 `vector_ms` in seconds.
-  Each is killed by exactly its declared tests, at an assertion. An M8 (break the
+  - M10 floor back inside the CTE (killed by the off-corpus test's `EXPLAIN` assertion);
+  - M11 ef_search 400, M16 ef_search 100, M17 ef_search 40 (iterative scan kept): each
+    killed by the ef pin and the live-settings probe;
+  - M12 the leg returns seconds: killed by the exact fake-clock test and the units probe;
+  - M13 `enable_seqscan` left on: killed by the live-settings probe and the
+    pressure-free `EXPLAIN` test;
+  - M14 restore with `is_local => false`: killed by the caller-transaction test's
+    after-COMMIT assertion;
+  - M15 `vector_ms` set to the whole `sql_seconds`: killed by the units probe (the FTS
+    delay must stay out of it);
+  - M18 the `set_config` call dropped: killed by the live-settings probe, the full-pool
+    test, the filtered test, the iterative-fill test and the filtered floor case.
+  Each of the 17 is killed by exactly its declared tests, at an assertion. An M8 (break the
   NULL-prior fallback) survived as an *equivalent* mutant, because
   `set_config(name, NULL, true)` already resets to the session default. The redundant
   fallback was deleted rather than kept untestable.
