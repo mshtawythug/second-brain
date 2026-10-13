@@ -923,6 +923,9 @@ def _print_final_report(
     typer.echo(f"   brain_home: {brain_home}")
     typer.echo(f"   vault:      {vault}")
     typer.echo(f"   embedder:   {effective_embedder}")
+    # Phase 7 (R1): `brain ui` is the reading surface, so it is named first and
+    # the wiki URL after it, labelled legacy — the same order as brain-up's banner.
+    typer.echo("   read:       brain ui   (search, read and edit in a browser)")
     if wiki_installed:
         typer.echo(f"   wiki url:   http://localhost:{wiki_port}  (legacy — read in brain ui)")
         typer.echo(f"   start wiki: caddy run --config {brain_home}/Caddyfile")
@@ -933,8 +936,6 @@ def _print_final_report(
         typer.echo(f"   {OLLAMA_FALLBACK_HINT if ollama_fell_back else FTS_ONLY_NOTE}")
     typer.echo("")
     typer.echo("   next steps:")
-    # Phase 7 (R1): `brain ui` is the reading surface, so it leads the steps.
-    typer.echo("     brain ui                       # read, search and edit in a browser")
     typer.echo("     brain ingest <path>            # ingest a file or directory")
     typer.echo('     brain search "..."             # query the corpus')
     typer.echo("     brain doctor                   # re-check health")

@@ -24,7 +24,9 @@ VAULT_AND_WIKI = REPO_ROOT / "docs" / "vault-and-wiki.md"
 #: The recipe the docs shipped for reading from another device. It cannot work:
 #: a wildcard bind gets the loopback Host allowlist (pinned in
 #: ``tests/test_ui_security.py``), so a phone is refused with 400.
-_WILDCARD_RECIPE = re.compile(r"brain ui[^\n`]*--host\s+(0\.0\.0\.0|::)\b")
+_WILDCARD_RECIPE = re.compile(
+    r"brain ui[^\n`]*--host\s+(?:0\.0\.0\.0|\[?::\]?)(?![0-9A-Za-z.:\]])"
+)
 
 
 # --------------------------------------------------------------------------
@@ -32,44 +34,75 @@ _WILDCARD_RECIPE = re.compile(r"brain ui[^\n`]*--host\s+(0\.0\.0\.0|::)\b")
 # --------------------------------------------------------------------------
 
 
+def _setup_report(capsys: pytest.CaptureFixture[str], tmp_path: Path, *, wiki: bool) -> list[str]:
+    from brain.setup import _print_final_report
+
+    _print_final_report(
+        brain_home=tmp_path,
+        vault=tmp_path / "vault",
+        wiki_port=8080,
+        wiki_installed=wiki,
+        skill_installed=False,
+        effective_embedder="arctic",
+        ollama_fell_back=False,
+    )
+    return capsys.readouterr().out.splitlines()
+
+
+def _read_line(lines: list[str]) -> int:
+    hits = [i for i, line in enumerate(lines) if line.strip().startswith("read:")]
+    assert hits and "brain ui" in lines[hits[0]], lines
+    return hits[0]
+
+
 @pytest.mark.parametrize("wiki_installed", [True, False])
-def test_setup_next_steps_name_brain_ui(
+def test_setup_report_names_brain_ui_as_the_reading_surface(
     capsys: pytest.CaptureFixture[str], tmp_path: Path, wiki_installed: bool
 ) -> None:
-    from brain.setup import _print_final_report
-
-    _print_final_report(
-        brain_home=tmp_path,
-        vault=tmp_path / "vault",
-        wiki_port=8080,
-        wiki_installed=wiki_installed,
-        skill_installed=False,
-        effective_embedder="arctic",
-        ollama_fell_back=False,
-    )
-    out = capsys.readouterr().out
-    steps = out[out.index("next steps:"):]
-    assert "brain ui" in steps, out
+    _read_line(_setup_report(capsys, tmp_path, wiki=wiki_installed))
 
 
-def test_setup_report_puts_brain_ui_before_the_wiki_url(
+def test_setup_report_names_brain_ui_before_the_legacy_wiki_url(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:
-    """With the wiki installed, its URL is labelled legacy, not presented as THE reader."""
-    from brain.setup import _print_final_report
+    """M-2 (phase-7 review): the ORDER, not just the label.
 
-    _print_final_report(
-        brain_home=tmp_path,
-        vault=tmp_path / "vault",
-        wiki_port=8080,
-        wiki_installed=True,
-        skill_installed=False,
-        effective_embedder="arctic",
-        ollama_fell_back=False,
-    )
-    lines = capsys.readouterr().out.splitlines()
-    wiki = [line for line in lines if "http://localhost:8080" in line]
-    assert wiki and "legacy" in wiki[0], lines
+    The first version of this test was named for the order and asserted only
+    that the wiki line said "legacy", while the report printed the wiki URL
+    above everything else. Both halves are asserted now.
+    """
+    lines = _setup_report(capsys, tmp_path, wiki=True)
+    wiki = [i for i, line in enumerate(lines) if "http://localhost:8080" in line]
+    assert wiki and "legacy" in lines[wiki[0]], lines
+    assert _read_line(lines) < wiki[0], lines
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "brain ui --host 0.0.0.0 --token s",
+        "brain ui --host :: --token s",
+        "brain ui --host [::] --token s",
+        "`brain ui --host 0.0.0.0`",
+    ],
+)
+def test_wildcard_recipe_pattern_catches_every_wildcard(line: str) -> None:
+    """L-2: the pattern missed ``--host ::`` (``\\b`` needs a word character)."""
+    assert _WILDCARD_RECIPE.search(line), line
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "brain ui --host ::1 --token s",
+        "brain ui --host 0.0.0.01 --token s",
+        "brain ui --host 192.0.2.10 --token s",
+        "brain ui --lan",
+    ],
+)
+def test_wildcard_recipe_pattern_spares_real_addresses(line: str) -> None:
+    """L-2: ``::1`` is loopback, not a wildcard — the old pattern flagged it."""
+    assert not _WILDCARD_RECIPE.search(line), line
 
 
 # --------------------------------------------------------------------------
@@ -146,7 +179,9 @@ def test_phone_guide_covers_the_q1_contract() -> None:
         "trust",
         "wiki",
         "in memory only",
-        "never saved on the device",
+        "page itself never saves the token",
+        "the URL is the token",
+        "Treat the printed URL as a password",
     ):
         assert needle in text, f"phone guide is missing {needle!r}"
     # The guide NAMES the wildcard bind, as the trap — so it must say why.

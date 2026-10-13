@@ -204,17 +204,19 @@ if [[ "${BRAIN_OPEN_BROWSER:-0}" == '1' ]]; then
     fi
 fi
 
-WATCH_PID_VALUE='?'
-BUILD_PID_VALUE='?'
+# The banner can print before the launchd wrappers have written their pid
+# files. Until phase 7 (R1) that was a rare race, masked by wait_for_url's 30s
+# wait; since R1 that wait only runs with BRAIN_OPEN_BROWSER=1, so on the
+# default path a missing pid file is the COMMON case. Say where to look rather
+# than printing a bare '?'.
+PID_PENDING='not written yet — check brain-status'
+WATCH_PID_VALUE="$PID_PENDING"
+BUILD_PID_VALUE="$PID_PENDING"
 [[ -f "$WATCH_PID" ]] && WATCH_PID_VALUE="$(cat "$WATCH_PID")"
 [[ -f "$BUILD_PID" ]] && BUILD_PID_VALUE="$(cat "$BUILD_PID")"
 
 # brain (2026-05-08): note the supervisor in the report so the user
-# knows their daemons survive terminal close + crashes. The pid '?'
-# fallback handles the brief race between launchctl bootstrap and the
-# wrapper writing the pid file (it's almost always populated by the
-# time wait_for_url succeeds, but the fallback keeps the report
-# readable in the unlikely race).
+# knows their daemons survive terminal close + crashes.
 SUPERVISOR='launchd (KeepAlive)'
 [[ "${BRAIN_NO_BUILD_WATCHER:-0}" == '1' ]] && SUPERVISOR='unsupervised (BRAIN_NO_BUILD_WATCHER=1)'
 

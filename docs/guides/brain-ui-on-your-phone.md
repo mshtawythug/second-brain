@@ -47,10 +47,12 @@ address.
 
 Earlier docs recommended `--host 0.0.0.0` (every interface). **That cannot serve a phone.** The
 server only accepts requests whose `Host` header is on an allowlist, and that allowlist is what
-defeats DNS-rebinding attacks. A wildcard bind gets the loopback allowlist, so a phone that
-reaches the machine at its LAN address is refused with **400 Invalid host header**. Writes fail
-on that bind from every device. The guard is correct, so bind the LAN address itself. `brain ui`
-prints a warning if you use the wildcard bind.
+defeats DNS-rebinding attacks. A wildcard bind — `0.0.0.0` or `::` — gets the loopback
+allowlist, so a phone that reaches the machine at its LAN address is refused with **400 Invalid
+host header**. The guard is correct, so bind the LAN address itself. On a wildcard bind
+`brain ui` prints a warning, and the URL it prints and opens is the loopback one
+(`http://127.0.0.1:<port>/`, or `http://[::1]:<port>/` for `::`), which works on this machine
+only.
 
 For the same reason, open the **IP address** URL that `brain ui` prints, not the machine's
 `<name>.local` name: the allowlist holds the address you bound, nothing else.
@@ -58,23 +60,29 @@ For the same reason, open the **IP address** URL that `brain ui` prints, not the
 ## How the token travels
 
 The token rides in the URL **fragment** (`#t=…`). Browsers never send fragments to the server,
-never write them to access logs, and never leak them in a `Referer`. The page reads the token,
-keeps it **in memory only**, and removes it from the address bar right away. Every API call
-then carries it in a request header.
+never write them to the server's access log, and never leak them in a `Referer`. The page reads
+the token, keeps it **in memory only**, and removes it from the address bar right away. Every
+API call then carries it in a request header.
 
-**The token is never saved on the device — not in a cookie, not in browser storage.** That is
-deliberate, and it is the safer default: a phone you lose or lend does not keep a key to your
-brain once the tab is gone. The price is the first consequence below.
+**The page itself never saves the token** — not in a cookie, not in browser storage. That is
+deliberate: closing the tab drops it.
 
-Two consequences follow:
+**But the URL is the token, and the browser can keep the URL.** Opening the printed URL can
+record it in the browser's history before the page strips it, and a bookmark of it stores it
+outright. Browser sync (iCloud, a Google account) then copies both to your other devices. So:
 
-- **A reload loses the token.** If the phone reloads the tab, or the browser evicts it in the
-  background, every request is refused (403) until you open the full `#t=` URL again.
-  **Bookmark the URL exactly as `brain ui` printed it**, not the address bar after the page has
-  loaded.
-- **A minted token changes on every run**, so that bookmark breaks when you restart `brain ui`.
-  For a stable bookmark, pass your own `--token`. The trade-off is that a secret typed on the
-  command line lands in your shell history and is visible in `ps` while the server runs.
+- **Treat the printed URL as a password.** Do not bookmark it on a phone you might lose or lend.
+  Clear it from history if that phone is shared.
+- **A minted token dies when `brain ui` stops.** A saved copy of a `--lan` URL is useless after a
+  restart, which limits the damage of a leaked one.
+- **A stable `--token` lives as long as you keep using it.** A bookmark of that URL keeps working
+  across restarts, and keeps working for whoever holds it. Pick that trade-off on purpose. A
+  secret typed on the command line also lands in your shell history and is visible in `ps`
+  while the server runs.
+
+**A reload loses the token.** Because the page holds it in memory only, a reload — or the browser
+evicting the tab in the background — leaves every request refused (403) until you open the full
+`#t=` URL again.
 
 ## Caveats — read these before you turn it on
 

@@ -433,6 +433,27 @@ def test_brain_up_banner_names_brain_ui_before_the_wiki(
     assert "legacy" in lines[wiki[0]], result.stdout
 
 
+def test_brain_up_banner_says_where_to_look_when_a_pid_is_not_written_yet(
+    stub_dir: Path, vault_dir: Path, hermetic_pids: HermeticPids
+) -> None:
+    """L-4 (phase-7 review): no more bare ``pid ?``.
+
+    The ``?`` fallback used to be masked by ``wait_for_url``'s 30s wait, which
+    gave launchd time to write the pid files. Since R1 that wait only runs on
+    ``BRAIN_OPEN_BROWSER=1``, so on the default path the banner prints straight
+    after bootstrap and a missing pid file is the common case, not a race.
+    """
+    result = _run_brain_up_for_reading(
+        stub_dir, vault_dir, hermetic_pids, open_browser=None
+    )
+
+    vault_line = next(
+        line for line in result.stdout.splitlines() if line.strip().startswith("vault:")
+    )
+    assert "pid ?" not in result.stdout, result.stdout
+    assert "brain-status" in vault_line, vault_line
+
+
 def test_brain_up_still_opens_the_wiki_on_request(
     stub_dir: Path, vault_dir: Path, hermetic_pids: HermeticPids
 ) -> None:
