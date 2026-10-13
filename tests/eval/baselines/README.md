@@ -70,8 +70,10 @@ dilute the mean; but a re-judged one silently changes what "correct" means.
   re-record): the vector leg in `search.py` is served by the HNSW index, so it
   returns at most `hnsw.ef_search` (default 40) rows rather than
   `CANDIDATE_LIMIT`, and filters apply after the index scan, so filtered queries
-  get fewer still. Its recall@50 against an exact scan averages 0.76 on the
-  golden queries. On one query a few long new documents filled the whole pool,
+  get fewer still. Measured 2026-10-13 on the live corpus (1,999 docs / 21,281
+  chunks): recall@50 against an exact scan averaged 0.76 over the golden
+  queries. That figure depends on the HNSW graph's quality, so it shifts with
+  ingests and reindexes. On one query a few long new documents filled the whole pool,
   shrinking its results from 17 documents to 6.
 
 ## Who re-records, and when
