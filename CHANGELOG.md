@@ -77,6 +77,10 @@ git tag scheme:
   whitespace, with a usage error; the server also compares the token as bytes.
 - **A host without IPv6 support** no longer prints a traceback for
   `--host ::`; it exits with a message naming the missing address family.
+- **`brain ui --host LOCALHOST` refused its own URL with 400** — as did any
+  mixed-case hostname. A browser lower-cases the host it sends and the Host
+  check is case-sensitive, so the allowlist and URL kept a spelling no browser
+  uses. Hostnames are now lower-cased at the CLI.
 
 ### Dependencies
 

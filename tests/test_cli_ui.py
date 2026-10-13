@@ -483,7 +483,6 @@ def test_serve_opens_the_tokened_url(
     assert opened == [f"http://{bind}:8765/#t=s3cret"]
 
 
-
 def _ipv6_wildcard_available() -> bool:
     import socket
     from contextlib import closing
@@ -529,7 +528,6 @@ def test_resolve_port_sees_a_busy_ipv6_wildcard_port() -> None:
         busy = sock.getsockname()[1]
         sock.listen(1)
         assert resolve_port(busy, host="::", auto=True) != busy
-
 
 
 @needs_ipv6
@@ -593,7 +591,6 @@ def test_the_ipv6_wildcard_notice_says_ipv4_devices_cannot_connect(
     assert "IPv6-only" in result.output, result.output
 
 
-
 def test_resolve_port_reports_a_host_without_ipv6_cleanly() -> None:
     """Round 5, item 4: the probe socket was created OUTSIDE the ``try``.
 
@@ -646,7 +643,6 @@ def test_a_token_with_inner_spaces_and_symbols_is_accepted(
     assert started.context_kwargs["token"] == "50% off #1"
 
 
-
 @pytest.mark.parametrize("spelling", ["LOCALHOST", "LocalHost"])
 def test_an_upper_case_localhost_binds_as_localhost(
     app: typer.Typer, started: _Started, spelling: str
@@ -691,7 +687,6 @@ def test_a_socket_that_cannot_be_configured_is_closed_and_reported() -> None:
     assert "configure" in message, message
     assert "cannot open" not in message, message
     assert made and all(sock.closed for sock in made), "the probe socket leaked"
-
 
 
 @pytest.mark.parametrize(

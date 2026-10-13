@@ -21,13 +21,13 @@ import typer
 from .config import Config
 from .errors import BrainError
 
-#: Registered as a sub-app with ``invoke_without_command=True`` so ``brain ui``
-#: runs the server directly, while leaving room for ``brain ui open`` later
-#: without a breaking change. Same shape as ``capture_app``.
 #: The panel's --lan hint. A constant so tests can assert its absence on other
 #: binds by the text itself, not by a guessed fragment (review round 6).
 PHONE_LINE = "open the URL above on your phone, on this network"
 
+#: Registered as a sub-app with ``invoke_without_command=True`` so ``brain ui``
+#: runs the server directly, while leaving room for ``brain ui open`` later
+#: without a breaking change. Same shape as ``capture_app``.
 ui_app = typer.Typer(
     help="Serve the local web UI for your brain.",
     invoke_without_command=True,

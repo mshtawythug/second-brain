@@ -87,7 +87,6 @@ def test_wildcard_hosts_names_both_wildcards_and_no_loopback() -> None:
     assert "127.0.0.1" not in WILDCARD_HOSTS
 
 
-
 def test_the_route_target_is_a_documentation_address_off_the_lan() -> None:
     """Round 7, item 2: every other test injects a probe that ignores its target.
 
