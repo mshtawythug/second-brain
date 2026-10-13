@@ -22,11 +22,12 @@ MEASURED_COVERAGE_CEILING = "7.17"
 # not a patch cap.
 MEASURED_RUFF_CEILING = "0.17"
 
-# Same rule for `mypy`: 2.3.1 was newest on 2026-08-20 and is verified green, so
-# the cap is the next unreleased minor. NOTE the floor is `>=1.13`, two majors
-# below what actually resolves — see the evidence block in pyproject.toml, which
-# records that as an UNMEASURED gap rather than quietly raising it.
-MEASURED_MYPY_CEILING = "2.4"
+# Same rule for `mypy`: 2.4.0 was newest on 2026-10-12 and is verified green
+# (byte-identical to 2.3.1 on the same tree), so the cap is the next unreleased
+# minor. NOTE the floor is `>=1.13`, two majors below what actually resolves —
+# see the evidence block in pyproject.toml, which records that as an UNMEASURED
+# gap rather than quietly raising it.
+MEASURED_MYPY_CEILING = "2.5"
 
 # The gate tools, and why they are tested together: both are what
 # `scripts/hooks/pre-commit` and ci.yml's `lint` job run, and both were unbounded
