@@ -259,7 +259,10 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Final — tests | `98c99f6` | `test_cli_ui.py`: both busy phrasings forbidden; the EACCES remediation asserted |
 | Final — plan | `4c164cb` | this file: §10.9, §10.17 |
 | S19/S20 — tests | `1d9e65b` | `test_reading_surface_pointers.py`: cli-reference "primary", docs index "legacy" |
-| S19/S20 — plan | **the commit that added this row** | this file: §10.9, §10.17 |
+| S19/S20 — plan | `ae7dda8` | this file: §10.9, §10.17 |
+| Round 10 — code | `733e347` | `ui/context.py` (`classify_addresses`, `literal_addresses`, ASCII/length/idna rules), `ui/security.py`, `ui/server.py` (`resolve_bind_addresses`, per-family probe, serve opens the guard's origin), `cli_ui.py`, CHANGELOG, guide, FAKE_DNS tests |
+| Round 10 — tests | `34a85f9` | the ASCII-only pattern; serve's opened origin |
+| Round 10 — plan | **the commit that added this row** | this file: §10.9, §10.18 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -442,10 +445,12 @@ superseded and marked, exit 0. At `af22825` (round 6): 83/83, 17 superseded and 
 again after the merge of `second-brain/master` (`136030b`): unchanged, as a merge preserves every
 cited SHA. At `08c1ac3` (round 8): 98/98, 18 marked, exit 0. At `f73d694` (round 9, first half): 106/106, 27 marked,
 exit 0. At `6f6e3ba` (round 9 with the review folded in): 116/116, 43
-marked, exit 0. At `4c164cb` (the final commit): 125/125, 44 marked, exit 0. Result at
-the commit that added this sentence (S19/S20): **round 0 22/22, round 1 17/17, round 2 13/13,
-round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round 7 9/9, round 8 6/6, round 9 8/8 +
-10/10 + 9/9 + 3/3 — 128/128; 44 entries superseded at HEAD, every one marked; exit 0.** The address-based restructure superseded 16 entries at once; the
+marked, exit 0. At `4c164cb` (the final commit): 125/125, 44 marked, exit 0. At `ae7dda8` (S19/S20): 128/128,
+44 marked, exit 0. Result at the commit that added this sentence (round 10): **round 0 22/22,
+round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round 7 9/9,
+round 8 6/6, round 9 8/8 + 10/10 + 9/9 + 3/3, round 10 16/16 — 144/144; 54 entries superseded at
+HEAD, every one marked; exit 0.** The round-header pattern was `Round (\d)` until round 10 — a
+"Round 10" block would have been skipped silently; it is `Round (\d+)` now. The address-based restructure superseded 16 entries at once; the
 validator listed all of them before any was marked. Its
 first run after round 9 flagged nine entries: six whose CLI code moved into `validate_host`, and
 three whose text still applies but whose TEST had become a row of the new table — the drift the
@@ -478,7 +483,7 @@ FENCE = "`" * 3  # spelled out: a literal one would end this script's own code b
 text = PLAN.read_text(encoding="utf-8")
 catalog = text[text.index("### 10.9"):]
 rounds = re.findall(
-    rf"\*\*Round (\d) — against `([0-9a-f]{{7}})`.*?\n{FENCE}text\n(.*?)\n{FENCE}",
+    rf"\*\*Round (\d+) — against `([0-9a-f]{{7}})`.*?\n{FENCE}text\n(.*?)\n{FENCE}",
     catalog,
     re.S,
 )
@@ -696,6 +701,7 @@ M12 browser_url carries the token
   red at:  assert browser_url(LAN_IP
 
 M13 serve opens the tokened url
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): serve opens `context.allowed_origin`; use R10-14
   file:    src/brain/ui/server.py
   replace: 'url = browser_url(host, port, context.token)'
   with:    'url = f"http://{host}:{port}/"'
@@ -762,6 +768,7 @@ W2 foreign Origin still refused
   red at:  assert response.status_code == 403
 
 W2 build_context uses bind_origin
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): the call is `bind_origin(host, port, resolved)`; the equivalent mutation drops `resolved` (R10-9 is its allowlist twin)
   file:    src/brain/ui/server.py
   replace: 'allowed_origin=bind_origin(host, port),'
   with:    'allowed_origin=f"http://{host}:{port}",'
@@ -788,6 +795,7 @@ bind_origin brackets IPv6
   red at:  assert bind_origin("::1", 8765)
 
 L-6 browser_url loopback for wildcards
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): browser_url returns `_with_token(f"{bind_origin(host, port, resolved)}/", token)`; the equivalent mutation targets that
   file:    src/brain/ui/server.py
   replace: 'url = f"{bind_origin(host, port)}/"'
   with:    'url = f"http://{host}:{port}/"'
@@ -796,6 +804,7 @@ L-6 browser_url loopback for wildcards
   red at:  assert browser_url(wildcard, 8765
 
 L-6 panel prints loopback URL
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): same rewrite of browser_url
   NOTE at HEAD (round 6): still applies, but goes red at `assert "http://0.0.0.0" not in result.output`, which now runs first — see R6-2
   file:    src/brain/ui/server.py
   replace: 'url = f"{bind_origin(host, port)}/"'
@@ -902,6 +911,7 @@ HIGH-1 wildcard binds refuse a foreign Host (app)
   red at:  assert response.status_code == 400
 
 M-2/A20 panel carries the token on loopback
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): the panel call is `browser_url(host, resolved_port, token, resolved=resolved)`; the equivalent mutation targets that
   file:    src/brain/cli_ui.py
   replace: 'url=browser_url(host, resolved_port, token),'
   with:    'url=browser_url(host, resolved_port, "" if loopback else token),'
@@ -910,6 +920,7 @@ M-2/A20 panel carries the token on loopback
   red at:  assert "http://127.0.0.1:8765/#t=s3cret" in
 
 M-2/A21 serve opens the tokened URL on loopback
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): serve opens `context.allowed_origin`; use R10-14
   file:    src/brain/ui/server.py
   replace: 'url = browser_url(host, port, context.token)'
   with:    'url = browser_url(host, port, "" if is_loopback(host) else context.token)'
@@ -1202,6 +1213,7 @@ R6-1 the wildcard notice is absent on non-wildcard binds
   red at:  assert WILDCARD_NOTICE not in result.output
 
 R6-2 a wildcard panel never prints the bind address
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): browser_url rewritten as above
   file:    src/brain/ui/server.py
   replace: 'url = f"{bind_origin(host, port)}/"'
   with:    'url = f"http://{host}:{port}/"'
@@ -1537,6 +1549,7 @@ R9-13 a hostname is lower-cased
   red at:  assert started.context_kwargs["host"] == expected
 
 R9-14 the wildcard is classed by address
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): address_class delegates to classify_addresses; use R10-5
   file:    src/brain/ui/context.py
   replace: '    if parsed.is_unspecified:\n'
   with:    '    if address == "0.0.0.0":\n'
@@ -1545,6 +1558,7 @@ R9-14 the wildcard is classed by address
   red at:  assert (WILDCARD_NOTICE in result.output) is (kind == "wildcard")
 
 R9-15 loopback is classed by address
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): same; use R10-6
   file:    src/brain/ui/context.py
   replace: '    if parsed.is_loopback:\n'
   with:    '    if address in ("127.0.0.1", "::1"):\n'
@@ -1630,6 +1644,7 @@ RF-6 any other failure names its cause
   red at:  assert "Invalid argument" in message
 
 RF-7 a non-address, non-hostname is refused
+  SUPERSEDED at HEAD by round 10 (`733e347`: the bind's RESOLVED addresses are threaded through): the check gained a length term (`… or len(bare.rstrip(".")) > _HOSTNAME_MAX`); the equivalent mutation targets the whole condition
   file:    src/brain/ui/context.py
   replace: '        if not _HOSTNAME.fullmatch(bare):\n'
   with:    '        if False:\n'
@@ -1673,6 +1688,139 @@ S20b the docs index names brain ui the primary reading surface
   count:   1
   test:    tests/test_reading_surface_pointers.py::test_docs_index_calls_the_rendered_wiki_legacy
   red at:  assert "`brain ui` is the primary reading surface" in row
+
+```
+
+**Round 10 — against `34a85f9`** (review round 10 of `4c164cb`: classify a hostname by what it resolves to; odd names refused). Strict clause 4.
+
+```text
+R10-1 idna's UnicodeError is caught
+  file:    src/brain/ui/context.py
+  replace: '    except UnicodeError:\n        # The idna codec'
+  with:    '    except LookupError:\n        # The idna codec'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[.-refused-is not an IP address or a hostname]
+  red at:  assert result.exit_code == 2
+
+R10-2 a non-ASCII host is refused
+  file:    src/brain/ui/context.py
+  replace: '    if not host.isascii():\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[localho\u017ft-refused-must be ASCII]
+  red at:  assert expected in result.output
+
+R10-3 the hostname pattern is ASCII-only
+  file:    src/brain/ui/context.py
+  replace: '    re.ASCII,\n'
+  with:    ''
+  count:   1
+  test:    tests/test_ui_security.py::test_the_hostname_pattern_is_ascii_only
+  red at:  assert not _HOSTNAME.fullmatch(name)
+
+R10-4 a name over 253 characters is refused
+  file:    src/brain/ui/context.py
+  replace: ' or len(bare.rstrip(".")) > _HOSTNAME_MAX'
+  with:    ''
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says
+  red at:  assert result.exit_code == 2
+
+R10-5 ANY unspecified address makes a wildcard
+  file:    src/brain/ui/context.py
+  replace: '    if any(address.is_unspecified for address in addresses):\n'
+  with:    '    if all(address.is_unspecified for address in addresses):\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_a_name_is_classified_by_every_address_it_resolves_to[addresses1-wildcard]
+  red at:  assert address_class("some.name", resolved) == kind
+
+R10-6 loopback only if ALL addresses are loopback
+  file:    src/brain/ui/context.py
+  replace: '    if all(address.is_loopback for address in addresses):\n'
+  with:    '    if any(address.is_loopback for address in addresses):\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_name_resolving_to_loopback_and_elsewhere_is_not_loopback
+  red at:  assert result.exit_code == 2
+
+R10-7 the CLI classifies by the resolved addresses
+  file:    src/brain/cli_ui.py
+  replace: '    kind = address_class(host, resolved)\n'
+  with:    '    kind = address_class(host)\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[0.0.0.0.nip.io-wildcard-0.0.0.0.nip.io]
+  red at:  assert (WILDCARD_NOTICE in result.output) is (kind == "wildcard")
+
+R10-8 the CLI hands the resolved addresses to build_context
+  file:    src/brain/cli_ui.py
+  replace: '            resolved=resolved,\n        )\n    except BrainError as exc:'
+  with:    '        )\n    except BrainError as exc:'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_cli_threads_the_resolved_addresses_into_the_context
+  red at:  assert started.context_kwargs["resolved"]
+
+R10-9 build_context's allowlist follows the resolved addresses
+  file:    src/brain/ui/server.py
+  replace: '        allowed_hosts=host_allowlist(host, resolved),\n'
+  with:    '        allowed_hosts=host_allowlist(host),\n'
+  count:   1
+  test:    tests/test_ui_bind_wiring.py::test_build_context_classifies_a_hostname_by_its_resolved_addresses[0.0.0.0.nip.io-resolved0-http://127.0.0.1:8765-hosts0-False]
+  red at:  assert context.allowed_hosts == hosts
+
+R10-10 build_context's loopback lens follows the resolved addresses
+  file:    src/brain/ui/server.py
+  replace: '    loopback = is_loopback(host, resolved)\n'
+  with:    '    loopback = is_loopback(host)\n'
+  count:   1
+  test:    tests/test_ui_bind_wiring.py::test_build_context_classifies_a_hostname_by_its_resolved_addresses[localhost-resolved1-http://localhost:8765-hosts1-True]
+  red at:  assert context.serve_confidential_bodies is confidential
+
+R10-11 the probe binds every resolved family
+  file:    src/brain/ui/server.py
+  replace: '    if addresses:\n        # One probe per resolved address'
+  with:    '    if False:\n        # One probe per resolved address'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_probe_binds_every_resolved_family
+  red at:  assert resolve_port(
+
+R10-12 a name is resolved passively, like the bind
+  file:    src/brain/ui/server.py
+  replace: 'socket.SOCK_STREAM, 0, socket.AI_PASSIVE)'
+  with:    'socket.SOCK_STREAM, 0, 0)'
+  count:   1
+  test:    tests/test_cli_ui.py::test_resolve_bind_addresses_resolves_a_name_passively_like_the_bind
+  red at:  assert (host, family, kind, flags) ==
+
+R10-13 a literal never reaches the resolver
+  file:    src/brain/ui/server.py
+  replace: '    if literal:\n        return literal\n'
+  with:    ''
+  count:   1
+  test:    tests/test_cli_ui.py::test_resolve_bind_addresses_never_resolves_a_literal
+  red at:  raise AssertionError("a literal must not reach the resolver")
+
+R10-14 serve opens the guard's origin
+  file:    src/brain/ui/server.py
+  replace: '    url = _with_token(f"{context.allowed_origin}/", context.token)'
+  with:    '    url = _with_token(f"http://{host}:{port}/", context.token)'
+  count:   1
+  test:    tests/test_cli_ui.py::test_serve_opens_the_guards_origin_not_the_bind_spelling
+  red at:  assert opened ==
+
+R10-15 a hostname that will not resolve is reported
+  file:    src/brain/ui/server.py
+  replace: '    except socket.gaierror as exc:\n        raise BrainError(\n            f"--host {host} does not resolve'
+  with:    '    except OSError as exc:\n        raise BrainError(\n            f"--host {host} cannot resolve'
+  count:   1
+  test:    tests/test_cli_ui.py::test_resolve_bind_addresses_reports_a_name_that_will_not_resolve
+  red at:  assert "does not resolve to an address on this machine" in str(excinfo.value)
+
+R10-16 the resolver's UnicodeError is reported cleanly
+  file:    src/brain/ui/server.py
+  replace: '    except UnicodeError as exc:\n        raise BrainError(f"--host {host} is not a valid hostname.") from exc\n'
+  with:    ''
+  count:   1
+  test:    tests/test_cli_ui.py::test_resolve_bind_addresses_reports_a_unicode_failure_cleanly
+  red at:  raise UnicodeError("idna: label empty or too long")
 
 ```
 
@@ -1841,7 +1989,7 @@ original bug. `::%` has two independent guards.
 | Every bind failure was "busy" | `_port_is_free`'s `except OSError: return False` reported an unowned address, an unresolvable name and a privileged port as "already in use" / "no free port found". Now only `EADDRINUSE` is busy. `EADDRNOTAVAIL` (49 on macOS, 99 on Linux, named via `errno`) → "is not an address this machine owns"; `socket.gaierror` → "does not resolve to an address on this machine"; `EACCES` → "permission denied … ports below 1024 need privileges; pass --port 1024 or higher"; anything else → "cannot be bound on this machine (<cause>)". **`EACCES` is deliberately NOT busy:** the auto-port bump moves by one, stays inside the privileged range, and would hide the cause. Each class has a test through the injected socket factory; `EADDRINUSE` keeps its two |
 | Non-addresses | `validate_host` refuses a value that is neither an IP address nor an RFC 1123 hostname — `127.0.0.1:8080`, `http://127.0.0.1`, `0.0.0.0/0` — before any bind |
 | Zoneless link-local | `fe80::1` is refused: it binds only with a zone, and zones are refused (N1) |
-| Table | `HOST_SPELLINGS` gains every case; its "unowned" rows run the REAL probe (`1.2.3.4`, `fd00::5`, `brain-2.lan` → exit 1 with the owning/resolving message). `127.0.0.2` is platform-dependent and asserted per platform: macOS owns only `127.0.0.1` of 127/8 (exit 1), Linux binds the whole block (exit 0). Every row forbids BOTH busy phrasings |
+| Table | `HOST_SPELLINGS` gains every case; its "unowned" rows run the REAL probe (`1.2.3.4`, `fd00::5`, `brain-2.lan` → exit 1 with the owning/resolving message — *round 10: `brain-2.lan` did real DNS, and `.lan` resolves on many home routers; it is now `brain-2.invalid` (RFC 6761), resolved through the test module's FAKE_DNS*). `127.0.0.2` is platform-dependent and asserted per platform: macOS owns only `127.0.0.1` of 127/8 (exit 1), Linux binds the whole block (exit 0). Every row forbids BOTH busy phrasings |
 | Two weak assertions the strict harness found | forbidding only `"in use"` missed the auto-port wording "no free port found"; asserting "permission denied" could not tell the `EACCES` branch from the generic one (strerror says it too). Both fixed in `98c99f6` |
 | Scout law | four triple-blank-line spots (ruff 0.17.0 preview E303) in `test_backup_create`, `test_search_explain`, `test_ui_browser_graph`, `test_ui_static_behaviour` — five blank-line deletions, nothing else; `tests/` is now clean under the preview check |
 
@@ -1860,3 +2008,21 @@ the strict clause 4, against `1d9e65b`.
 (the disk had filled to 2.3 GB free) while the full suite on `4c164cb` was at about 9%. Every DB
 test after that point errored, so that run was stopped and counts for nothing. Team-lead freed
 space and restarted Docker; the test DB and its sibling databases survived.
+
+### 10.18 Review round 10 (2026-10-13)
+
+The review of `4c164cb`, folded in on top of `1d9e65b`. Fixed in `733e347` and `34a85f9`.
+
+| Item | Fix |
+|---|---|
+| 1 MEDIUM — idna's `UnicodeError` escaped | `.`, `..`, `a..b`, a 64-character label: the numeric `getaddrinfo` in `validate_host` idna-encodes and raised `UnicodeError`, a raw traceback with exit 1. Caught → "is not an IP address or a hostname"; names over 253 characters are refused too |
+| 2 MEDIUM — hostnames classified by NAME | `0.0.0.0.nip.io`, or any hosts-file name mapped to 0.0.0.0, classed "other" while binding every interface; `localhost` was loopback (no token) wherever it pointed. `validate_host` stays DNS-free; at the bind stage `server.resolve_bind_addresses` resolves the host as asyncio's `create_server` will (`getaddrinfo`, `AI_PASSIVE`; literals never reach it) and `context.classify_addresses` judges EVERY resolved address — any unspecified → wildcard, ALL loopback → loopback, else other; an unresolved name is "other", `localhost` included. The CLI resolves once and threads the result into the token rule, the notice, the probe, `build_context` (loopback lens, Origin, Host allowlist) and the printed URL; `serve` opens `context.allowed_origin`. Tests resolve through an injected `FAKE_DNS`, never real DNS. A pre-existing test asserting `is_loopback("localhost")` by name now asserts the resolved form |
+| 3 LOW — probe family by `":" in host` | each resolved address is probed in its own family; a name resolving only to IPv6 (`ip6-localhost`) binds |
+| 4 LOW — `_HOSTNAME` without `re.ASCII` | any non-ASCII `--host` is refused, and the pattern is `re.ASCII` — a redundant layer behind the `isascii()` check, so it has its own direct test (R10-3) |
+| 5 LOW — `brain-2.lan` did real DNS | now `brain-2.invalid` (RFC 6761), through `FAKE_DNS`; §10.17 corrected |
+
+**Mutation evidence (round 10):** 16 guards, each on all five clauses with the strict clause 4,
+against `34a85f9`. Two guards had no test that could fail until `34a85f9` added one (re.ASCII,
+serve's opened origin). R10-2's first run named its parametrised node with the raw `ſ`; pytest
+escapes non-ASCII in ids (`localho\u017ft`), so nothing ran — re-run with the escaped id, PASS.
+Ten earlier entries are superseded by this round and marked.
