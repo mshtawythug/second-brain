@@ -239,7 +239,9 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Audit round 4 — plan | `7363980` | this file: §10.1, §10.3, §10.8 legend, §10.9, §10.11 |
 | Review round 5 — code | `d9a3004` | `ui/context.py` (canonical, bracketed allowlist), `ui/security.py` (bytes compare, `is_loopback`), `ui/server.py` (socket factory), `cli_ui.py` (token charset), CHANGELOG, guide, tests |
 | Review round 5 — tests | `932c10a` | `test_ui_security.py` (literal Origin; `bind_origin` spellings) |
-| Review round 5 — plan | **the commit that added this row** | this file: §10.9, §10.12 |
+| Review round 5 — plan | `593022a` | this file: §10.9, §10.12 |
+| Review round 6 — code | `c21c52f` | `cli_ui.py` (`PHONE_LINE`), `ui/context.py` (lower-cased hostnames), `ui/server.py` (probe closes on setsockopt), `test_cli_ui.py`, `test_ui_security.py` |
+| Review round 6 — plan | **the commit that added this row** | this file: §10.9, §10.13 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -417,9 +419,13 @@ again. Apply a mutation at the SHA named for its round.
 
 **Validated.** The script below checks every entry's `count` against `git show <SHA>:<file>`,
 and, since round 5, that every entry which no longer applies at HEAD is marked SUPERSEDED.
-Run from the repository root with `python` and the script on stdin. Result at `c282288` (round 3): **59/59, exit 0.** Result at `7363980` (round 4): 63/63, exit 0. Result at the commit that added this sentence
-(round 5), with the HEAD check added: **round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7,
-round 4 4/4, round 5 11/11 — 74/74; 16 entries superseded at HEAD, every one marked; exit 0.**
+Run from the repository root with `python` and the script on stdin. Result at `c282288` (round 3): **59/59, exit 0.** Result at `7363980` (round 4): 63/63, exit 0. At `593022a` (round 5, HEAD check added): 74/74, 16
+superseded and marked, exit 0. Result at the commit that added this sentence (round 6): **round 0
+22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9 — 83/83;
+17 entries superseded at HEAD, every one marked; exit 0.** The HEAD check earned its place on its
+first run after round 6: it flagged L-13, which round 6 had made inapplicable, before it was marked.
+It checks the replaced TEXT only; an entry whose text still applies but whose red-at assertion moved
+carries a NOTE line instead (R4-4, L-6 panel).
 *(Review round 3, item 5: M19 was an annotation, not exact text, so it matched 0 times; it is
 now `'--read-only'` with count 2 — re-verified in round 4.)* Entries marked SUPERSEDED still validate at their
 round's SHA, which is what the script checks; at HEAD their text or test has moved, for the reason given.
@@ -750,6 +756,7 @@ L-6 browser_url loopback for wildcards
   red at:  assert browser_url(wildcard, 8765
 
 L-6 panel prints loopback URL
+  NOTE at HEAD (round 6): still applies, but goes red at `assert "http://0.0.0.0" not in result.output`, which now runs first — see R6-2
   file:    src/brain/ui/server.py
   replace: 'url = f"{bind_origin(host, port)}/"'
   with:    'url = f"http://{host}:{port}/"'
@@ -912,6 +919,7 @@ L-12 browser_url brackets an IPv6 literal
   red at:  assert browser_url("::1", 8765, "") ==
 
 L-13 no Phone line on loopback
+  SUPERSEDED at HEAD by round 6 (the Phone line is printed from `PHONE_LINE`, and the test asserts the constant); use R6-3
   file:    src/brain/cli_ui.py
   replace: '    if lan:\n        typer.echo("  Phone'
   with:    '    if True:\n        typer.echo("  Phone'
@@ -1028,6 +1036,7 @@ R4-3 F16 README intro calls the wiki legacy
   red at:  README's intro must call the rendered wiki legacy
 
 R4-4 F8 the notice fires on every wildcard
+  NOTE at HEAD (round 6): still applies, but goes red at `assert WILDCARD_NOTICE in result.output` — the test now asserts the notice by constant
   file:    src/brain/cli_ui.py
   replace: '    if host.strip().lower() in WILDCARD_HOSTS:\n'
   with:    '    if host.strip().lower() == "0.0.0.0":\n'
@@ -1130,6 +1139,83 @@ R5-11 the CLI refuses edge whitespace in a token
 
 ```
 
+**Round 6 — against `c21c52f`.**
+
+```text
+R6-1 the wildcard notice is absent on non-wildcard binds
+  file:    src/brain/cli_ui.py
+  replace: '    if host.strip().lower() in WILDCARD_HOSTS:\n'
+  with:    '    if True:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_non_wildcard_bind_does_not_print_the_wildcard_warning
+  red at:  assert WILDCARD_NOTICE not in result.output
+
+R6-2 a wildcard panel never prints the bind address
+  file:    src/brain/ui/server.py
+  replace: 'url = f"{bind_origin(host, port)}/"'
+  with:    'url = f"http://{host}:{port}/"'
+  count:   1
+  test:    tests/test_cli_ui.py::test_wildcard_bind_prints_a_loopback_url_not_the_bind_address
+  red at:  assert "http://0.0.0.0" not in result.output
+
+R6-3 the Phone line is absent on loopback
+  file:    src/brain/cli_ui.py
+  replace: '    if lan:\n        typer.echo(f"  Phone'
+  with:    '    if True:\n        typer.echo(f"  Phone'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_phone_line_is_printed_only_for_lan
+  red at:  assert PHONE_LINE not in loopback.output
+
+R6-4 the Phone line is present on --lan
+  file:    src/brain/cli_ui.py
+  replace: '    if lan:\n        typer.echo(f"  Phone'
+  with:    '    if False:\n        typer.echo(f"  Phone'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_phone_line_is_printed_only_for_lan
+  red at:  assert PHONE_LINE in lan.output
+
+R6-5 vault-and-wiki has no '→ open browser'
+  file:    docs/vault-and-wiki.md
+  replace: '               # build (if needed) → start build watcher. Opens the wiki only\n               # with BRAIN_OPEN_BROWSER=1. Idempotent.'
+  with:    '               # build (if needed) → start build watcher → open browser.\n               # Idempotent.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_vault_and_wiki_documents_the_brain_up_default_truthfully
+  red at:  assert "→ open browser" not in text
+
+R6-6 LOCALHOST serves its own URL (middleware)
+  file:    src/brain/ui/context.py
+  replace: '        return bare.lower()\n'
+  with:    '        return bare\n'
+  count:   1
+  test:    tests/test_ui_security.py::test_a_hostname_bind_is_matched_case_insensitively[LOCALHOST-localhost:8765-200]
+  red at:  assert response.status_code == status
+
+R6-7 --host LOCALHOST binds as localhost (CLI)
+  file:    src/brain/ui/context.py
+  replace: '        return bare.lower()\n'
+  with:    '        return bare\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_an_upper_case_localhost_binds_as_localhost
+  red at:  assert started.context_kwargs["host"] == "localhost"
+
+R6-8 a setsockopt failure closes the socket
+  file:    src/brain/ui/server.py
+  replace: '        sock.close()\n        name = '
+  with:    '        name = '
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_socket_that_cannot_be_configured_is_closed_and_reported
+  red at:  the probe socket leaked
+
+R6-9 a setsockopt failure is reported as configure, not open
+  file:    src/brain/ui/server.py
+  replace: '        raise BrainError(\n            f"cannot configure an {name} probe socket for --host {address} "\n            f"({exc.strerror or exc})"\n        ) from exc\n'
+  with:    '        raise\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_socket_that_cannot_be_configured_is_closed_and_reported
+  red at:  assert "configure" in message
+
+```
+
 ### 10.10 Review round 3 (2026-10-13)
 
 The phase-7 review of `5402c8f`: one MEDIUM, four LOW. Fixed in `3994ea3` (deps) and `5627743`
@@ -1178,3 +1264,18 @@ The phase-7 review of `7363980`. Fixed in `d9a3004` and `932c10a`.
 tree (§10.9). Before running them, two of this round's own tests were found weak and fixed in
 `932c10a`: nothing pinned `bind_origin`'s normalisation, and the IPv6 write test computed its
 Origin with the helper under test, so it could only agree with itself.
+
+### 10.13 Review round 6 (2026-10-13)
+
+The phase-7 review of `593022a`. Fixed in `c21c52f`.
+
+| Item | Fix |
+|---|---|
+| 1 MEDIUM — a vacuous negative assertion | the non-wildcard test asserted `"Host allowlist"` absent, a phrase `WILDCARD_NOTICE` lost in `8748b70`, so `if True:` on the notice check passed all 150 tests. It now asserts `WILDCARD_NOTICE` itself absent, on `--lan` AND loopback, while the wildcard test asserts it present. **Sweep of every other negative check in this phase's tests:** the Phone line is asserted by the `PHONE_LINE` constant both ways; `"http://0.0.0.0" not in` now runs before its positive twin, so a revert goes red AT it (R6-2); `"→ open browser" not in` had never been mutated on its own and now is (R6-5); `"Traceback" not in result.output` was **vacuous** — CliRunner keeps an uncaught exception in `result.exception` and never writes its traceback to `output` — and is removed, `SystemExit` being the real guard. The rest name text that a proven mutation produces (`"Quartz"` — M5/M6; `"or a [rendered wiki]"` — R4-2; `"and opens the browser"` — M-4; `"pid ?"` — L-4; `127.0.0.1` not in `WILDCARD_HOSTS`, beside an equality check) or predate the phase |
+| 2 LOW pre-existing — `--host LOCALHOST` refused its own URL | `bind_address` lower-cases hostnames, so all four helpers agree; pinned through the real middleware (`LOCALHOST` → `localhost` 200; `MyMac.LOCAL` → `mymac.local` 200, a foreign Host 400) and at the CLI |
+| 3 — setsockopt after creation | the probe closes the socket and reports "cannot configure", distinct from "cannot open"; tested with an injected factory whose socket raises `ENOPROTOOPT` on `setsockopt` |
+
+**Mutation evidence (round 6):** 9 guards, each on all five clauses, against `c21c52f` on a clean
+tree (§10.9). R6-5's first run reported red NOT at its target: a harness-needle error, not a guard
+gap — the needle used the wrong quote style. The failure was at exactly the targeted assertion
+(`assert "→ open browser" not in text`); the needle was corrected and the whole round re-run.
