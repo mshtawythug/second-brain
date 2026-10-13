@@ -553,8 +553,10 @@ the device scale (rounding) and the title. No constant can be right, for the sam
 width was not right in §7.4. **Ruling: hang each neighbour label by its measured box.**
 `fitLabels` sets the label's `y` so that the top of its box, at the capped title (the box rows
 are already judged on), sits exactly `LABEL_GAP` below its circle. A cut's box is never taller
-than the capped title's box, because a cut draws a subset of the same glyphs and the primary
-face always counts. So the shown box clears the circle at least as well. `LABEL_GAP` becomes
+than the capped title's box, because a cut draws a subset of the same glyphs plus "…", which the
+primary face draws inside its ascent (measured 2026-10-13: appending "…" moves no box top, at both
+faces and three widths, for plain, accented, emoji and CJK titles), and the primary face always
+counts. So the shown box clears the circle at least as well. `LABEL_GAP` becomes
 2: the circle's widest stroke (the focus ring, 3) reaches 1.5 outside `r`. *(Superseded by §8.6:
 4, which also clears the label's own halo.)* The root keeps its
 baseline placement, which (14b) pins. Affected: `static/js/graph.js` (constant, comment,
@@ -728,8 +730,9 @@ halo graph.css strokes round it, and the widest stroke is the focus ring.
 
 **The measurement, redone on the labels themselves.** §8.5 compared a lone glyph's canvas ink with
 a plain label's box and found accented capitals reaching 0.05–0.27 units over it in Verdana. That
-does not happen to a real label. A label that CONTAINS the accent gets a taller box (Å in Verdana:
-10.205px where a plain label's is 10px, at 320px), and the hang is measured on that box. Measured in
+does not happen to a real label. A label that CONTAINS the accent gets a box that rises higher (Å
+in Verdana: its box rises 10.205px above its baseline, where a plain label's rises 10px, at 320px),
+and the hang is measured on that box. Measured in
 the drawn graph on accented labels (Å É Ö À) and stacked-diacritic labels (Ǻ Ấ Ǖ Ḗ Ṍ, Ů Ő Ű Č Ř,
 Ḯ Ǘ Ǜ Ẫ), at both faces and at 320, 400 and 1280px, ink rose over its own box by at most 0.000.
 

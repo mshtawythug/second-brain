@@ -65,8 +65,9 @@ def _is_positive_number(value: object) -> bool:
 def test_the_browser_timeout_is_positive_and_bounded() -> None:
     """pytest-timeout times a test only when its timeout is above 0, so 0 or
     None would silently time nothing (measured by the phase-5 audit: the hang
-    mutant with 0 stalled past 300s). The tests above compare the marker with
-    the constant, so they cannot see a bad constant. This one pins its value."""
+    mutant with 0 stalled past 300s). The tests above catch a non-positive
+    constant (``_is_positive_number``) but not one out of range. This one pins
+    the range."""
     assert _is_positive_number(BROWSER_TEST_TIMEOUT_S), (
         f"BROWSER_TEST_TIMEOUT_S = {BROWSER_TEST_TIMEOUT_S!r} times nothing"
     )

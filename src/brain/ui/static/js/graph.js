@@ -119,8 +119,8 @@ const GRAPH_LABEL = "Links around this note";
    strokes round it (1.5 beyond the ink), reaches the circle's widest stroke,
    the focus ring (graph.css, 3, so 1.5 outside `r`). Ink can reach the very
    TOP of its own box but not past it. A glyph taller than the rounded ascent
-   grows the box: a label with Å in Verdana has a box 10.205px tall where a
-   plain label's is 10px, at 320px. Measured on accented and stacked-diacritic
+   grows the box: a label with Å in Verdana has a box that rises 10.205px
+   above its baseline, where a plain label's rises 10px, at 320px. Measured on accented and stacked-diacritic
    labels (Å É Ö À, Ǻ Ấ Ǖ Ḗ Ṍ) at both faces and three widths, ink never rose
    over its box. So the painted label reaches 0 + 1.5 above the box, and the
    ring 1.5 below it at gap 0. At gap 3 the two touch, and 4 is the smallest
@@ -490,9 +490,12 @@ function fitLabels(svg) {
 /* Move a neighbour's label so that the top of its box sits LABEL_GAP below
    its circle. The box is measured at the CAPPED title, the same box rows are
    judged on. Every cut fitText may then make is no taller: a cut draws a
-   subset of the same glyphs, and the primary face's ascent counts whether or
-   not it draws a glyph (measured with all-Hebrew, all-Devanagari and all-CJK
-   titles). So the label as shown clears the circle at least as well.
+   subset of the same glyphs plus "…", which the primary face draws inside its
+   ascent (measured: appending "…" moves no box top, at both faces and three
+   widths, for plain, accented, emoji and CJK titles), and the primary face's
+   ascent counts whether or not it draws a glyph (measured with all-Hebrew,
+   all-Devanagari and all-CJK titles). So the label as shown clears the
+   circle at least as well.
    Idempotent: the ascent is the baseline less the box's top, whatever `y` is. */
 function hangBelowCircle(text) {
   const circle = text.parentNode.querySelector("circle");
