@@ -230,6 +230,9 @@ def test_bind_origin_brackets_ipv6_and_passes_other_hosts_through() -> None:
     assert bind_origin("192.0.2.10", 9000) == "http://192.0.2.10:9000"
     assert bind_origin("::1", 8765) == "http://[::1]:8765"
     assert bind_origin("[::]", 8765) == "http://[::1]:8765"
+    # Round 5: non-canonical spellings become the origin a browser sends.
+    assert bind_origin("0:0:0:0:0:0:0:1", 8765) == "http://[::1]:8765"
+    assert bind_origin("FD00:0:0::5", 8765) == "http://[fd00::5]:8765"
 
 
 def test_a_lan_bind_allowlist_is_exactly_the_bound_address() -> None:
@@ -326,14 +329,17 @@ def test_an_ipv6_bind_serves_its_own_url_and_refuses_others(
 def test_an_ipv6_bind_accepts_a_write_from_its_own_origin(tmp_path: Path) -> None:
     from brain.ui.context import bind_origin, host_allowlist
 
-    origin = bind_origin("FD00:0:0::5", 8765)
+    # The Origin is the LITERAL a browser sends for this bind — not one
+    # computed by the helper under test, which would agree with itself.
+    browser_origin = "http://[fd00::5]:8765"
     context = _context(
-        tmp_path, token="t", allowed_origin=origin,
+        tmp_path, token="t", allowed_origin=bind_origin("FD00:0:0::5", 8765),
         allowed_hosts=host_allowlist("FD00:0:0::5"),
     )
-    with TestClient(create_app(context), base_url="http://[fd00::5]:8765") as client:
+    with TestClient(create_app(context), base_url=browser_origin) as client:
         response = client.post(
-            "/api/no-such-route", json={}, headers={"Origin": origin, TOKEN_HEADER: "t"}
+            "/api/no-such-route", json={},
+            headers={"Origin": browser_origin, TOKEN_HEADER: "t"},
         )
     assert response.status_code == 404, response.text
 
