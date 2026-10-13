@@ -204,6 +204,18 @@ def warm_embedder(embedder: Any) -> bool:
     return True
 
 
+def browser_url(host: str, port: int, token: str) -> str:
+    """The URL to open: the bind, plus the token in the fragment when one is set.
+
+    The fragment is how the client receives the token (``static/js/api.js``):
+    it is never sent to the server, logged, or leaked in a Referer. Without it a
+    tokened server opens a page whose every API call is refused. One function
+    for the opened tab and the printed panel, so the two cannot disagree.
+    """
+    url = f"http://{host}:{port}/"
+    return f"{url}#t={token}" if token else url
+
+
 def serve(
     context: UiContext,
     *,
@@ -227,7 +239,7 @@ def serve(
     # time anyone can type.
     warm_embedder(context.embedder)
 
-    url = f"http://{host}:{port}/"
+    url = browser_url(host, port, context.token)
     app = create_app(context)
     config = uvicorn.Config(
         app, host=host, port=port, log_level="warning", access_log=False

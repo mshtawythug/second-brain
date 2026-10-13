@@ -158,3 +158,199 @@ def test_importing_brain_cli_does_not_pull_starlette_or_uvicorn() -> None:
     assert result.stdout.strip() == "False False", (
         f"brain.cli now imports a web dependency at module scope: {result.stdout!r}"
     )
+
+
+# --------------------------------------------------------------------------
+# Phase 7 / Q1 — `--lan`, the wildcard-bind notice, and the opened URL
+# --------------------------------------------------------------------------
+
+LAN_IP = "192.0.2.44"  # TEST-NET-1 (RFC 5737): synthetic
+
+
+class _Started:
+    """What the command handed to the (replaced) server layer."""
+
+    def __init__(self) -> None:
+        self.context_kwargs: dict[str, object] = {}
+        self.serve_kwargs: dict[str, object] = {}
+
+
+@pytest.fixture
+def started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> _Started:
+    """Run `brain ui` up to the bind without binding anything.
+
+    ``resolve_port``, ``build_context`` and ``serve`` are replaced with pytest
+    ``monkeypatch`` (standard test doubles, CLAUDE.md rule 13). The command
+    imports them from ``brain.ui.server`` inside its body, so replacing the
+    module attributes is what it sees.
+    """
+    from types import SimpleNamespace
+
+    import brain.ui.server as server
+
+    record = _Started()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(vault))
+    monkeypatch.setattr(
+        "brain.cli_ui._build_embedder", lambda cfg: object()
+    )
+    monkeypatch.setattr(server, "resolve_port", lambda port, **kw: port)
+
+    def fake_build_context(cfg: object, **kwargs: object) -> object:
+        record.context_kwargs = kwargs
+        return SimpleNamespace(
+            serve_confidential_bodies=False, notices=(), token=kwargs["token"]
+        )
+
+    def fake_serve(context: object, **kwargs: object) -> None:
+        record.serve_kwargs = kwargs
+
+    monkeypatch.setattr(server, "build_context", fake_build_context)
+    monkeypatch.setattr(server, "serve", fake_serve)
+    monkeypatch.setattr(
+        "brain.ui.lan.detect_lan_address", lambda *a, **k: LAN_IP
+    )
+    return record
+
+
+def test_lan_binds_the_lan_address_with_a_minted_token(
+    app: typer.Typer, started: _Started
+) -> None:
+    """E7: the convenience never skips the token rule — it mints one."""
+    result = runner.invoke(app, ["ui", "--lan", "--no-open"])
+
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["host"] == LAN_IP
+    token = started.context_kwargs["token"]
+    assert isinstance(token, str) and len(token) >= 32, (
+        "--lan must always run with a token; an empty one would bind the LAN "
+        "unauthenticated"
+    )
+    assert f"http://{LAN_IP}:8765/#t={token}" in result.output
+    assert started.serve_kwargs["host"] == LAN_IP
+
+
+def test_lan_uses_a_supplied_token(app: typer.Typer, started: _Started) -> None:
+    result = runner.invoke(
+        app, ["ui", "--lan", "--token", "a-stable-secret", "--no-open"]
+    )
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["token"] == "a-stable-secret"
+
+
+def test_lan_tells_the_user_to_open_the_url_on_another_device(
+    app: typer.Typer, started: _Started
+) -> None:
+    result = runner.invoke(app, ["ui", "--lan", "--no-open"])
+    assert "on your phone" in result.output
+
+
+def test_lan_and_host_together_is_a_usage_error(
+    app: typer.Typer, started: _Started
+) -> None:
+    """Exit 2 before anything is resolved — two answers to one question."""
+    result = runner.invoke(
+        app, ["ui", "--lan", "--host", "192.0.2.9", "--token", "x", "--no-open"]
+    )
+    assert result.exit_code == 2
+    assert started.context_kwargs == {}
+
+
+def test_lan_without_a_network_exits_one_with_the_override(
+    app: typer.Typer, started: _Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brain.ui.lan import LanAddressError
+
+    def no_route(*args: object, **kwargs: object) -> str:
+        raise LanAddressError("--lan found no network route\n  Pass --host …")
+
+    monkeypatch.setattr("brain.ui.lan.detect_lan_address", no_route)
+    result = runner.invoke(app, ["ui", "--lan", "--no-open"])
+    assert result.exit_code == 1
+    assert started.context_kwargs == {}
+
+
+def test_wildcard_bind_warns_that_other_devices_are_refused(
+    app: typer.Typer, started: _Started
+) -> None:
+    """E9: the recipe the docs used to ship serves no phone; say so at startup."""
+    result = runner.invoke(
+        app, ["ui", "--host", "0.0.0.0", "--token", "x", "--no-open"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "--lan" in result.output
+    assert "400" in result.output
+
+
+def test_a_lan_bind_does_not_print_the_wildcard_warning(
+    app: typer.Typer, started: _Started
+) -> None:
+    result = runner.invoke(app, ["ui", "--lan", "--no-open"])
+    assert "Host allowlist" not in result.output
+
+
+def test_browser_url_carries_the_token_whenever_one_is_set() -> None:
+    """The opened tab needs the fragment too, or every API call is a 403.
+
+    Regression: ``serve`` opened ``http://host:port/`` with no ``#t=``, so a
+    tokened server opened a page that could not load a single note, and the
+    panel printed the fragment only for non-loopback binds.
+    """
+    from brain.ui.server import browser_url
+
+    assert browser_url("127.0.0.1", 8765, "") == "http://127.0.0.1:8765/"
+    assert browser_url(LAN_IP, 8766, "s3cret") == f"http://{LAN_IP}:8766/#t=s3cret"
+    assert browser_url("127.0.0.1", 8765, "s3cret").endswith("/#t=s3cret")
+
+
+def test_serve_opens_the_tokened_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``serve`` must hand the opener the same URL the panel prints.
+
+    uvicorn's ``Server`` is replaced with a double whose ``run`` performs the
+    startup hook and returns, so nothing binds.
+    """
+    import asyncio
+    import contextlib
+    from dataclasses import replace
+
+    import uvicorn
+
+    from brain.ui.context import UiContext
+    from brain.ui.server import serve
+
+    class _Server:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        async def startup(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def run(self) -> None:
+            asyncio.run(self.startup())
+
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+
+    @contextlib.contextmanager
+    def conn_factory():  # type: ignore[no-untyped-def]
+        yield None
+
+    context = UiContext(
+        cfg=object(),  # type: ignore[arg-type]
+        conn_factory=conn_factory,
+        embedder=object(),
+        search_fn=lambda *a, **k: [],
+        token="s3cret",
+        allowed_origin=f"http://{LAN_IP}:8765",
+        allowed_hosts=frozenset({LAN_IP}),
+    )
+    opened: list[str] = []
+    # FTS-only shape, so the boot-time warm-up is skipped rather than faked.
+    context = replace(context, embedder=None)
+    serve(context, host=LAN_IP, port=8765, open_browser=True, opener=opened.append)
+
+    assert opened == [f"http://{LAN_IP}:8765/#t=s3cret"]

@@ -47,12 +47,15 @@ def _panel(
     serve_confidential: bool,
     notices: tuple[str, ...],
     note_count: int | None,
+    lan: bool = False,
 ) -> None:
     """Print the startup panel, in the `brain doctor` / `brain setup` style."""
     typer.echo("")
     typer.echo("🧠 brain ui")
     typer.echo("")
     typer.echo(f"  URL        {url}")
+    if lan:
+        typer.echo("  Phone      open the URL above on your phone, on this network")
     if read_only:
         typer.secho("  Mode       read-only  ·  every write is blocked", fg="yellow")
     else:
@@ -135,13 +138,39 @@ def ui(
     auto_port: bool = typer.Option(
         True, "--auto-port/--no-auto-port", help="Bump to the next free port if taken."
     ),
+    lan: bool = typer.Option(
+        False,
+        "--lan",
+        help=(
+            "Serve to other devices on this network (e.g. a phone): bind this "
+            "machine's LAN address and require a token, minting one unless "
+            "--token is given. Cannot be combined with --host."
+        ),
+    ),
 ) -> None:
     """Serve the local web UI: browse, search, and edit your brain."""
     if ctx.invoked_subcommand is not None:
         return
 
+    from .ui import lan as lan_mod
     from .ui.security import is_loopback
-    from .ui.server import build_context, resolve_port, serve
+    from .ui.server import browser_url, build_context, resolve_port, serve
+
+    if lan:
+        # Phase 7 / spec Q1: the phone-reading replacement for the wiki. Two
+        # answers to "where do I bind" is a usage error, not a precedence rule.
+        # Compared by NAME: Typer vendors its own click, so `click.core`'s
+        # ParameterSource is a different enum and an `is` check never matches.
+        source = ctx.get_parameter_source("host")
+        if source is not None and source.name == "COMMANDLINE":
+            raise typer.BadParameter("--lan picks the address itself; drop --host.")
+        try:
+            host = lan_mod.detect_lan_address()
+        except BrainError as exc:
+            typer.secho(str(exc), fg="red", err=True)
+            raise typer.Exit(1) from exc
+        # Minted, never empty: --lan must not be a way around the token rule.
+        token = token or lan_mod.new_token()
 
     loopback = is_loopback(host)
     if not loopback and not token:
@@ -184,15 +213,18 @@ def ui(
             f"port {port} was busy — using {resolved_port} instead", fg="yellow"
         )
 
-    url = f"http://{host}:{resolved_port}/"
+    notices = context.notices
+    if host.strip().lower() in lan_mod.ALL_INTERFACES:
+        notices = (*notices, lan_mod.ALL_INTERFACES_NOTICE)
     _panel(
-        url=url if loopback else f"{url}#t={token}",
+        url=browser_url(host, resolved_port, token),
         cfg=cfg,
         read_only=read_only,
         loopback=loopback,
         serve_confidential=context.serve_confidential_bodies,
-        notices=context.notices,
+        notices=notices,
         note_count=None,
+        lan=lan,
     )
 
     try:

@@ -20,7 +20,7 @@ from starlette.testclient import TestClient
 
 from brain.ui.app import create_app
 from brain.ui.context import UiContext
-from brain.ui.security import CSP, is_loopback
+from brain.ui.security import CSP, TOKEN_HEADER, is_loopback
 
 # starlette 1.3.1 + httpx 0.28 emit a deprecation warning from TestClient
 # itself. Scoped to this module rather than added to pyproject's global
@@ -137,6 +137,41 @@ def test_loopback_host_spellings_are_accepted(tmp_path: Path) -> None:
     with _client(_context(tmp_path)) as client:
         for host in ("127.0.0.1", "localhost", "127.0.0.1:8765"):
             assert client.get("/api/health", headers={"Host": host}).status_code == 200
+
+
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::"])
+def test_a_wildcard_bind_refuses_another_devices_host_header(
+    tmp_path: Path, wildcard: str
+) -> None:
+    """Why the phone recipe is ``--host <LAN IP>`` (or ``--lan``), never ``0.0.0.0``.
+
+    A wildcard bind gets the LOOPBACK allowlist, so a phone that reaches the
+    machine by its LAN address is refused before any route runs. That is the
+    DNS-rebinding defence working as designed; the docs used to ship this bind
+    as the remote-reading recipe. Pinned so the guide cannot drift from it.
+    """
+    from brain.ui.context import host_allowlist
+
+    context = _context(tmp_path, token="t", allowed_hosts=host_allowlist(wildcard))
+    with _client(context) as client:
+        response = client.get(
+            "/api/health", headers={"Host": "192.0.2.10:8765", TOKEN_HEADER: "t"}
+        )
+    assert response.status_code == 400
+
+
+def test_a_lan_address_bind_accepts_its_own_host_header(tmp_path: Path) -> None:
+    """The working half: bind the LAN address and the phone's Host matches."""
+    from brain.ui.context import host_allowlist
+
+    context = _context(
+        tmp_path, token="t", allowed_hosts=host_allowlist("192.0.2.10")
+    )
+    with _client(context) as client:
+        response = client.get(
+            "/api/health", headers={"Host": "192.0.2.10:8765", TOKEN_HEADER: "t"}
+        )
+    assert response.status_code == 200
 
 
 def test_is_loopback_rejects_all_interfaces() -> None:
