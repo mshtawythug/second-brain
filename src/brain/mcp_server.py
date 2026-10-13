@@ -1649,8 +1649,8 @@ def brain_capture(
 ) -> dict[str, Any]:
     """Quick-capture a thought into the brain's inbox (tagged ``inbox``).
 
-    Authors a vault-tier note under ``capture/`` (visible in the Quartz UI
-    without the "Show ingested" toggle). Every captured document carries the
+    Authors a vault-tier note under ``capture/`` (visible in the ``brain ui``
+    tree without "Show ingested" on). Every captured document carries the
     always-on ``inbox`` tag (plus any caller extras), normalized at the write
     boundary, until it is reviewed out via ``brain capture review``. When
     ``title`` is omitted/blank it defaults to a deterministic, date-stamped

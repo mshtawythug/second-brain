@@ -66,7 +66,7 @@ def capture(
 
     Content comes from ``--text`` when provided, otherwise from stdin. Each
     capture authors a vault-tier note under ``capture/`` (visible in the
-    Quartz UI without the "Show ingested" toggle). No inline graph sync is
+    ``brain ui`` tree without "Show ingested" on). No inline graph sync is
     performed — captures are picked up by the normal ``brain-rebuild`` cycle.
 
     No inline enrichment is performed — ``documents.summary`` stays ``NULL``

@@ -1,4 +1,9 @@
-"""brain setup — interactive one-command installer for the second-brain runtime."""
+"""brain setup — interactive one-command installer for the second-brain runtime.
+
+Over the 800-line ceiling (CLAUDE.md table). Phase-7 growth, reasoned inline in
+``_print_final_report``: the closing report names ``brain ui`` as the reading
+surface (spec R1), ahead of the legacy wiki URL.
+"""
 import enum
 import os
 import shutil
@@ -919,7 +924,7 @@ def _print_final_report(
     typer.echo(f"   vault:      {vault}")
     typer.echo(f"   embedder:   {effective_embedder}")
     if wiki_installed:
-        typer.echo(f"   wiki url:   http://localhost:{wiki_port}")
+        typer.echo(f"   wiki url:   http://localhost:{wiki_port}  (legacy — read in brain ui)")
         typer.echo(f"   start wiki: caddy run --config {brain_home}/Caddyfile")
     if skill_installed:
         typer.echo("   skill:      ~/.claude/skills/brain/SKILL.md")
@@ -928,6 +933,8 @@ def _print_final_report(
         typer.echo(f"   {OLLAMA_FALLBACK_HINT if ollama_fell_back else FTS_ONLY_NOTE}")
     typer.echo("")
     typer.echo("   next steps:")
+    # Phase 7 (R1): `brain ui` is the reading surface, so it leads the steps.
+    typer.echo("     brain ui                       # read, search and edit in a browser")
     typer.echo("     brain ingest <path>            # ingest a file or directory")
     typer.echo('     brain search "..."             # query the corpus')
     typer.echo("     brain doctor                   # re-check health")
