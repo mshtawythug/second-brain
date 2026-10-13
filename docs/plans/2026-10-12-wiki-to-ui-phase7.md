@@ -249,7 +249,9 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Review round 7 — plan | `6c02fe9` | this file: §10.14 |
 | Merge of `second-brain/master` | `136030b` | master's #18–#21 delta (8 files); one conflict in `tests/test_dev_dependency_pins.py`, both sides kept. MERGED, not rebased, so every SHA in this file stays valid |
 | Review round 8 — fixes | `a4c2f35` | `cli_ui.py` (empty host, zones), `ui/context.py` (`meaningless_zone`), CHANGELOG, this file's ruff note, `test_cli_ui.py` (runner width, new tests), `test_ui_lan.py` |
-| Review round 8 — plan | **the commit that added this row** | this file: §10.9, §10.15 |
+| Review round 8 — plan | `08c1ac3` | this file: §10.9, §10.15 |
+| Audit round 9 — code | `f1bdbea` | `ui/context.py` (`validate_host`, `HostRefused`), `cli_ui.py`, CHANGELOG, `test_cli_ui.py` (`REFUSED_HOSTS` table, S14, probe options) |
+| Audit round 9 — plan | **the commit that added this row** | this file: §10.9 (validator test-existence check), §10.16 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -430,9 +432,13 @@ and, since round 5, that every entry which no longer applies at HEAD is marked S
 Run from the repository root with `python` and the script on stdin. Result at `c282288` (round 3): **59/59, exit 0.** Result at `7363980` (round 4): 63/63, exit 0. At `593022a` (round 5, HEAD check added): 74/74, 16
 superseded and marked, exit 0. At `af22825` (round 6): 83/83, 17 superseded and marked, exit 0. At `9d8024f` (round 7): 92/92, 18 marked, exit 0 — and
 again after the merge of `second-brain/master` (`136030b`): unchanged, as a merge preserves every
-cited SHA. Result at the commit that added this sentence (round 8): **round 0 22/22, round 1
+cited SHA. At `08c1ac3` (round 8): 98/98, 18 marked, exit 0. Result at the commit
+that added this sentence (round 9), with the test-existence check added: **round 0 22/22, round 1
 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round 7 9/9, round 8
-6/6 — 98/98; 18 entries superseded at HEAD, every one marked; exit 0.** The HEAD check again flagged the round's one casualty (R3-7) before it was marked. The HEAD check earned its place on its
+6/6, round 9 8/8 — 106/106; 27 entries superseded at HEAD, every one marked; exit 0.** Its
+first run after round 9 flagged nine entries: six whose CLI code moved into `validate_host`, and
+three whose text still applies but whose TEST had become a row of the new table — the drift the
+text-only check could not see, and the reason it now also checks that each entry's test exists. The HEAD check again flagged the round's one casualty (R3-7) before it was marked. The HEAD check earned its place on its
 first run after round 6: it flagged L-13, which round 6 had made inapplicable, before it was marked.
 It checks the replaced TEXT only; an entry whose text still applies but whose red-at assertion moved
 carries a NOTE line instead (R4-4, L-6 panel).
@@ -444,8 +450,11 @@ round's SHA, which is what the script checks; at HEAD their text or test has mov
 """Validate plan §10.9 two ways.
 
 1. Each mutation's `replace` text occurs `count` times at its round's SHA.
-2. At HEAD, an entry whose text no longer occurs `count` times carries a
-   SUPERSEDED line saying why — so a reader re-running it at HEAD is told.
+2. At HEAD, an entry whose text no longer occurs `count` times, OR whose
+   test function no longer exists, carries a SUPERSEDED line saying why — so
+   a reader re-running it at HEAD is told. (The test-name half was added in
+   review round 9, when consolidating three tests into one table renamed
+   tests that still-applicable entries cite.)
 """
 import ast
 import re
@@ -478,10 +487,13 @@ for number, sha, body in rounds:
     for entry in entries:
         lines = entry.splitlines()
         fields = {}
+        tests = []
         for line in lines[1:]:
             key, _, value = line.partition(":")
             if key.strip() in {"file", "replace", "count"}:
                 fields[key.strip()] = value.strip()
+            if key.strip() == "test":
+                tests.append(value.strip())
         old = ast.literal_eval(fields["replace"])
         want = int(fields["count"])
         got = show(sha, fields["file"]).count(old)
@@ -492,9 +504,16 @@ for number, sha, body in rounds:
             print(f"MISMATCH round {number} {lines[0]!r}: {got} != {want} at {sha}")
         marked = any(line.strip().startswith("SUPERSEDED") for line in lines)
         superseded += marked
+        gone = [
+            t for t in tests
+            if f"def {t.split('::')[1].split('[')[0]}(" not in show("HEAD", t.split("::")[0])
+        ]
         if show("HEAD", fields["file"]).count(old) != want and not marked:
             failures += 1
             print(f"UNMARKED round {number} {lines[0]!r}: no longer applies at HEAD")
+        elif gone and not marked:
+            failures += 1
+            print(f"UNMARKED round {number} {lines[0]!r}: test gone at HEAD: {gone}")
     print(f"round {number} @ {sha}: {matched}/{len(entries)} entries match their count")
 print(f"superseded at HEAD, and marked: {superseded}")
 sys.exit(1 if failures else 0)
@@ -976,6 +995,7 @@ R3-2 bind_address strips brackets
   red at:  assert started.context_kwargs["host"] == bound
 
 R3-3 the CLI normalises the host once
+  SUPERSEDED at HEAD by round 9 (the CLI calls context.validate_host instead of bind_address); use R9-4
   file:    src/brain/cli_ui.py
   replace: '    host = bind_address(host)\n'
   with:    ''
@@ -984,6 +1004,7 @@ R3-3 the CLI normalises the host once
   red at:  assert started.context_kwargs["host"] == bound
 
 R3-4 [::1] binds as ::1
+  SUPERSEDED at HEAD by round 9 (same move into validate_host); use R9-4
   file:    src/brain/cli_ui.py
   replace: '    host = bind_address(host)\n'
   with:    ''
@@ -1272,6 +1293,7 @@ R7-5 the guide says the token keeps other clients out
   red at:  phone guide is missing 'it is the token that keeps other clients out'
 
 R7-6 the CLI refuses an IPv4 shorthand
+  SUPERSEDED at HEAD by round 9 (the check moved into context.validate_host; its rows are in test_a_refused_host_spelling_is_a_usage_error); the equivalent mutation targets `if reading is not None:` there
   file:    src/brain/cli_ui.py
   replace: '    if reading is not None:\n'
   with:    '    if False:\n'
@@ -1280,6 +1302,7 @@ R7-6 the CLI refuses an IPv4 shorthand
   red at:  assert result.exit_code == 2
 
 R7-7 the shorthand check asks the IPv4 resolver
+  SUPERSEDED at HEAD by round 9 (its test became rows of test_a_refused_host_spelling_is_a_usage_error); the mutation itself still applies
   file:    src/brain/ui/context.py
   replace: '            host, None, family=socket.AF_INET, flags=socket.AI_NUMERICHOST'
   with:    '            host, None, family=socket.AF_INET6, flags=socket.AI_NUMERICHOST'
@@ -1296,6 +1319,7 @@ R7-8 a hostname is not refused as a shorthand
   red at:  assert result.exit_code == 0
 
 R7-9 the refusal names what the system reads
+  SUPERSEDED at HEAD by round 9 (the message moved into context.validate_host; its rows are in test_a_refused_host_spelling_is_a_usage_error)
   file:    src/brain/cli_ui.py
   replace: 'f"it as {reading}); write the address out in full."'
   with:    'f"it as something else); write the address out in full."'
@@ -1309,6 +1333,7 @@ R7-9 the refusal names what the system reads
 
 ```text
 R8-1 an empty --host is refused
+  SUPERSEDED at HEAD by round 9 (the check moved into context.validate_host); use R9-5
   file:    src/brain/cli_ui.py
   replace: '    if not host.strip():\n'
   with:    '    if False:\n'
@@ -1317,6 +1342,7 @@ R8-1 an empty --host is refused
   red at:  assert result.exit_code == 2
 
 R8-2 the CLI refuses a meaningless zone
+  SUPERSEDED at HEAD by round 9 (the check moved into context.validate_host; its rows are in test_a_refused_host_spelling_is_a_usage_error); the equivalent mutation targets `if meaningless_zone(address):` there
   file:    src/brain/cli_ui.py
   replace: '    if meaningless_zone(host):\n'
   with:    '    if False:\n'
@@ -1325,6 +1351,7 @@ R8-2 the CLI refuses a meaningless zone
   red at:  assert result.exit_code == 2
 
 R8-3 a zone on loopback is meaningless too
+  SUPERSEDED at HEAD by round 9 (its test became the `::1%lo0` row of test_a_refused_host_spelling_is_a_usage_error); the mutation itself still applies
   file:    src/brain/ui/context.py
   replace: '    return address.is_unspecified or address.is_loopback\n'
   with:    '    return address.is_unspecified\n'
@@ -1349,6 +1376,7 @@ R8-5 the notice names the token by its exact phrase
   red at:  assert "the token is what keeps other clients out" in WILDCARD_NOTICE
 
 R8-6 CLI output assertions hold at a narrow terminal (run with COLUMNS=40)
+  SUPERSEDED at HEAD by round 9 (its test became rows of test_a_refused_host_spelling_is_a_usage_error); the width-pin mutation still applies, against e.g. the `127.1` row
   pytest:  run with COLUMNS=40 in the environment — at the default width this passes mutated or not
   file:    tests/test_cli_ui.py
   replace: 'runner = CliRunner(env={"COLUMNS": "200"})\n'
@@ -1356,6 +1384,75 @@ R8-6 CLI output assertions hold at a narrow terminal (run with COLUMNS=40)
   count:   1
   test:    tests/test_cli_ui.py::test_a_non_canonical_ipv4_literal_is_refused[127.1-127.0.0.1]
   red at:  assert "not a canonical IPv4 address" in result.output
+
+```
+
+**Round 9 — against `f1bdbea`.**
+
+```text
+S14 bind_address strips only a balanced pair
+  file:    src/brain/ui/context.py
+  replace: '    bare = host[1:-1] if host.startswith("[") and host.endswith("]") else host\n'
+  with:    '    bare = host[1:-1] if host.startswith("[") else host\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_bind_address_strips_only_a_balanced_pair_of_brackets
+  red at:  assert bind_address("[::1") == "[::1"
+
+R9-1 unbalanced brackets are refused
+  file:    src/brain/ui/context.py
+  replace: '        if not balanced:\n'
+  with:    '        if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_refused_host_spelling_is_a_usage_error[[::1-unbalanced or misplaced brackets]
+  red at:  assert result.exit_code == 2
+
+R9-2 repeated brackets are refused
+  file:    src/brain/ui/context.py
+  replace: '            and host.count("[") == 1 and host.count("]") == 1\n'
+  with:    '\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_refused_host_spelling_is_a_usage_error[[[::1]]-unbalanced or misplaced brackets]
+  red at:  assert says in result.output
+
+R9-3 brackets around a non-IPv6 value are refused
+  file:    src/brain/ui/context.py
+  replace: '        if not isinstance(inner, ipaddress.IPv6Address):\n'
+  with:    '        if inner is None and False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_refused_host_spelling_is_a_usage_error[[127.0.0.1]-brackets are for IPv6 literals only]
+  red at:  assert result.exit_code == 2
+
+R9-4 the CLI routes --host through validate_host
+  file:    src/brain/cli_ui.py
+  replace: '        host = validate_host(host)\n'
+  with:    '        host = host\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_refused_host_spelling_is_a_usage_error[[localhost]-brackets are for IPv6 literals only]
+  red at:  assert result.exit_code == 2
+
+R9-5 validate_host still refuses an empty host
+  file:    src/brain/ui/context.py
+  replace: '    if not host.strip():\n        raise HostRefused('
+  with:    '    if False:\n        raise HostRefused('
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_refused_host_spelling_is_a_usage_error[-must not be empty]
+  red at:  assert result.exit_code == 2
+
+R9-6 the probe sets SO_REUSEADDR
+  file:    src/brain/ui/server.py
+  replace: '        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n'
+  with:    '        pass\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_probe_socket_sets_the_options_the_real_bind_uses
+  red at:  assert (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in sock.options
+
+R9-7 the probe sets IPV6_V6ONLY for IPv6 only
+  file:    src/brain/ui/server.py
+  replace: '        if family == socket.AF_INET6:\n            sock.setsockopt(socket.IPPROTO_IPV6'
+  with:    '        if True:\n            sock.setsockopt(socket.IPPROTO_IPV6'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_probe_socket_sets_the_options_the_real_bind_uses[127.0.0.1-False]
+  red at:  assert (v6only in sock.options) is ipv6
 
 ```
 
@@ -1462,3 +1559,17 @@ The phase-7 review of `6c02fe9`. Fixed in `136030b` (merge) and `a4c2f35`.
 **Mutation evidence (round 8):** 6 guards, each on all five clauses, against `a4c2f35` on a clean
 tree, the whole round run with `COLUMNS=40` exported — R8-6 (the runner's width pin) can only go
 red at a narrow terminal, and every other test passes at 40, so the baseline is unaffected (§10.9).
+
+### 10.16 Audit round 9 (2026-10-13)
+
+The audit's sweep of `6c02fe9`. Fixed in `f1bdbea`.
+
+| Item | Fix |
+|---|---|
+| 1 LOW — unbalanced brackets unpinned (S14) | `[::1` and `::1]` reached the probe and exited 1 with "port already in use"; `[127.0.0.1]` and `[localhost]` had their brackets silently dropped; `[]` became empty; `[[::1]]` became `[::1]`. A host may carry brackets only as ONE balanced pair around an IPv6 literal — everything else is a usage error. S14 itself (`startswith("[")` alone in `bind_address`, which turned `[::1` into the wildcard `::`) is pinned by a direct test of `bind_address`, since `validate_host` now refuses that spelling before `bind_address` sees it |
+| Consolidation | every refusal lives in ONE function, `context.validate_host`, which returns the canonical bind address or raises `HostRefused` (the CLI maps it to exit 2). One table, `REFUSED_HOSTS` in `test_cli_ui.py`, covers every refused spelling — empty, whitespace, IPv4 shorthand, meaningless zones, unbalanced/repeated brackets, bracketed non-IPv6 — and replaces the three separate tests, so the next odd spelling is one row |
+| 2 pre-existing — `SO_REUSEADDR` unpinned | a recording socket from the injected factory asserts `SO_REUSEADDR` on both families and `IPV6_V6ONLY` on IPv6 only (R9-6, R9-7) |
+| CHANGELOG | the refusals are one bullet, matching the one validator |
+
+**Mutation evidence (round 9):** 8 guards, each on all five clauses, against `f1bdbea` on a clean
+tree (§10.9).
