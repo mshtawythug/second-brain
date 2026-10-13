@@ -371,7 +371,8 @@ Measured on macOS (all 45 tests in the two modules — the 40 layout tests the t
 the 5 refit tests, which it does not; each mutation applied, confirmed applied, and reverted to a
 clean `git diff`). "FAIL" is a test body's assertion; "teardown" is the constant pin alone.
 *(Re-derived 2026-10-12 at `45a6fa9`, after §8 landed. Every row reproduced except the two marked
-below, and the `LABEL_GAP` row is new.)*
+below, and the `LABEL_GAP` row is new. Re-derived again 2026-10-13 at `LABEL_GAP` 4 (§8.6): every row
+is identical, down to the list of failing tests, so the 2 units the labels moved changed none.)*
 
 | Mutation of `graph.js` | Red | Where |
 |---|---|---|
@@ -388,7 +389,7 @@ below, and the `LABEL_GAP` row is new.)*
 | `LABEL_MAX_CHARS` 28 → 27 | 40 | 31 FAIL at the oracle; the other 9 only at teardown |
 | `MAX_LABELLED_NEIGHBOURS` 4 → 5 | 40 | 7 FAIL: the six threshold+1 crowded runs (five labels show at rest) and (15n) at 5 (not crowded); the other 33 only at teardown |
 | `MAX_LABELLED_NEIGHBOURS` 4 → 3 | 40 | 9 FAIL: all six every-ring runs (a label hidden at 4), (15n) at 4 (crowded), and overlap and rim at 1280 wide, on overlapping labels and at the oracle (a crowded 4-ring drops the row bound, and the wide rim pair meets); the other 31 only at teardown |
-| `LABEL_GAP` 2 → 10 (§8.1) | 40 | none FAIL here, all 40 at teardown: where a label hangs below its own node is not these modules' subject. All 7 runs of (14c) and (14d), in `tests/test_ui_browser_graph_labels.py`, FAIL (§8.4) |
+| `LABEL_GAP` 4 → 10 (§8.6; first measured as 2 → 10) | 40 | none FAIL here, all 40 at teardown: where a label hangs below its own node is not these modules' subject. All 7 runs of (14c) and (14d), in `tests/test_ui_browser_graph_labels.py`, FAIL (§8.4) |
 | root label drawn below the root (`{ above: true }` dropped) | 3 | (14b), at its first assertion; and (15d) and (15g), at their preconditions — (14) stays green |
 
 With the earlier spill and halo assertions removed, the oracle alone turns (15i) red for
@@ -554,7 +555,8 @@ width was not right in §7.4. **Ruling: hang each neighbour label by its measure
 are already judged on), sits exactly `LABEL_GAP` below its circle. A cut's box is never taller
 than the capped title's box, because a cut draws a subset of the same glyphs and the primary
 face always counts. So the shown box clears the circle at least as well. `LABEL_GAP` becomes
-2: the circle's widest stroke (the focus ring, 3) reaches 1.5 outside `r`. The root keeps its
+2: the circle's widest stroke (the focus ring, 3) reaches 1.5 outside `r`. *(Superseded by §8.6:
+4, which also clears the label's own halo.)* The root keeps its
 baseline placement, which (14b) pins. Affected: `static/js/graph.js` (constant, comment,
 `fitLabels`), `static/css/graph.css` (re-measure the vertical-gap table) and
 `tests/ui_graph_geometry.py` (add `_SPEC_LABEL_GAP` and pin `LABEL_GAP` at teardown). New test
@@ -599,7 +601,7 @@ measurements below were taken on the pre-rebase commits, whose code is the same.
 | Commit | Item |
 |---|---|
 | `7a9bc41` | this section's plan (§8.1–8.3), written before the code |
-| `4e701d0` | §8.1: neighbour labels hung by their measured box; `LABEL_GAP` 10 → 2; (14c), (14d) |
+| `4e701d0` | §8.1: neighbour labels hung by their measured box; `LABEL_GAP` 10 → 2 (→ 4 in §8.6); (14c), (14d) |
 | `c451999` | §8.2: pytest-timeout, 60s per browser test, `thread` method |
 | `45a6fa9` | §8.3: grapheme-safe cut, trim before "…", oracle restated, (15m) re-titled, (16) |
 | the docs commit that adds this subsection | §7.4 table re-derived, §7.5 closed |
@@ -637,7 +639,7 @@ measurements below were taken on the pre-rebase commits, whose code is the same.
 
 | Mutation | Modules run | Red |
 |---|---|---|
-| `LABEL_GAP` 2 → 10 / → 4 / → 0 | labels, layout, refit | each: 7 FAIL (every (14c) and (14d) run), and a teardown ERROR in all 53 tests the pin wraps (labels 13 + layout 40; the 5 refit tests are not wrapped). Measured on the fix-round tree (`1e1c610` plus this round). First recorded as 47: at `4e701d0` the labels module had 7 tests, and (16) added 6 in `45a6fa9`, without the count being re-derived |
+| `LABEL_GAP` 2 → 10 / → 4 / → 0 | labels, layout, refit | each: 7 FAIL (every (14c) and (14d) run), and a teardown ERROR in all 53 tests the pin wraps (labels 13 + layout 40; the 5 refit tests are not wrapped). Measured on the fix-round tree (`1e1c610` plus this round). First recorded as 47: at `4e701d0` the labels module had 7 tests, and (16) added 6 in `45a6fa9`, without the count being re-derived. *(At the §8.6 value, `LABEL_GAP` 4 → 10 / → 3 / → 2 / → 0: the same 7 FAIL and 53 teardown ERRORs each. Every other row of this table re-derived identically at 4, down to the failing tests.)* |
 | hang removed (`hangBelowCircle` not called) | same | 7 FAIL, the same 7 |
 | ascent fixed at 13 instead of measured | same | 7 FAIL, the same 7 |
 | root hung too | same | 3 FAIL: (14b), (15d) and (15g) |
@@ -693,6 +695,10 @@ fix-round commit that adds this subsection):
   about 0.5 units into a resting circle's stroke and about 1.3 into a focused ring. The halo is
   painted in the panel colour, so the effect is a sliver cut from the circle's outline, under that
   one glyph. Raising `LABEL_GAP` to 4 would clear it. That is the lead's call, not taken here.
+  *(Superseded by §8.6. The lead ruled to fix it, not accept it, and the gap is now 4. The "0.05–0.27
+  OVER the box" figures were also a measurement artefact: they compared a lone glyph's ink with a
+  PLAIN label's box. A label that contains the accent has a taller box, and its ink reaches the box's
+  top but not past it.)*
 - **(b) The (14c) stroke check** now reads the circle's WIDEST stroke: the focus ring, from
   graph.css's loaded `.local-graph a.node:focus-visible circle` rule via the CSSOM. A missing rule
   is a failure. Mutants: the focus ring 3 → 5, and the rule's selector renamed, each turn all 7
@@ -700,3 +706,50 @@ fix-round commit that adds this subsection):
 - **(c) graph.css's own-circle rows** are now the measured 2.5 / 2.8 / 2.4px (root) and 1.5 / 1.9
   / 1.8px (neighbour), not rounded to "3px" and "2px".
 - **(d) §8.1's mutant list** named 4 twice. De-duplicated.
+
+### 8.6 Ruling: `LABEL_GAP` 4, so no label's ink plus halo reaches the focus ring (2026-10-13)
+
+**Supersedes §8.5's accepted limit.** The lead ruled that a label's painted extent must clear the
+circle's widest painted stroke, not merely its box. The painted extent is its ink plus the 3-unit
+halo graph.css strokes round it, and the widest stroke is the focus ring.
+
+**The measurement, redone on the labels themselves.** §8.5 compared a lone glyph's canvas ink with
+a plain label's box and found accented capitals reaching 0.05–0.27 units over it in Verdana. That
+does not happen to a real label. A label that CONTAINS the accent gets a taller box (Å in Verdana:
+10.205px where a plain label's is 10px, at 320px), and the hang is measured on that box. Measured in
+the drawn graph on accented labels (Å É Ö À) and stacked-diacritic labels (Ǻ Ấ Ǖ Ḗ Ṍ, Ů Ő Ű Č Ř,
+Ḯ Ǘ Ǜ Ẫ), at both faces and at 320, 400 and 1280px, ink rose over its own box by at most 0.000.
+
+**The arithmetic.** The painted label reaches 0 (ink over the box) + 1.5 (half the halo) above its
+box top. The focus ring reaches 1.5 (half its 3-unit stroke) below the circle's `r`. At gap 3 the
+two touch, with zero clearance. 4 is the smallest whole value that clears them, by 1.0. That is
+the lead's estimate, with the overreach term measured at 0 rather than 0.27.
+
+**What changed.**
+- `graph.js`: `LABEL_GAP` 2 → 4, and the rationale rewritten with the arithmetic.
+- `_SPEC_LABEL_GAP` 2 → 4.
+- (14c) adds an ink-plus-halo clearance to every label it checks, ink measured with a canvas
+  `measureText` of the shown text in the label's computed font at its device size. Its run ends on
+  a ring of accented capitals: "Ångström Synthetic Note", "Économie…", "Ölfeld…", "Àrbre…". A
+  precondition requires each accent to rise over a plain capital's ink.
+- The clearance is STRICT: the halo must clear the ring by more than rounding. At gap 3 the margin
+  is ±0.000, and a non-strict check went red at two of the three wide widths and green at the third
+  on float noise alone.
+- graph.css's vertical table re-measured at 4: 42/53/50, 17/21/20, root 2.5/2.8/2.4px, neighbour
+  3.0/3.9/3.6px. `graph.js`'s `ROOT_LABEL_GAP` comment now says 42 to 53px.
+
+**Mutation proofs** (labels module, each run twice, identical both times):
+
+| Mutation | Red |
+|---|---|
+| `LABEL_GAP` 4 → 3, alone | all 7 (14c) and (14d) runs, at the exact gap; 13 teardown ERRORs |
+| `LABEL_GAP` 4 → 2, alone | the same |
+| `LABEL_GAP` AND `_SPEC_LABEL_GAP` 4 → 3 (the exact gap and the pin both satisfied) | 4: (14c) at 320, 400 and 1280 wide, where the halo touches the ring, and (14d). The platform runs stay green, because there the accent's ink sits 0.36–0.58 under its box |
+| `LABEL_GAP` AND `_SPEC_LABEL_GAP` 4 → 2 | all 7 |
+
+The last two rows are the ones that matter. With the exact-gap check and the pin both moved out of
+the way, the ink-plus-halo clearance alone turns gap 3 and gap 2 red.
+
+**Re-derived at 4.** §7.4's table is identical row for row, failing tests included. §8.4's rows
+are identical too, with the `LABEL_GAP` row now read as 4 → 10 / 3 / 2 / 0: 7 FAIL and 53 teardown
+ERRORs each.

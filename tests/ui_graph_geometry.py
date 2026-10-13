@@ -252,7 +252,7 @@ _SPEC_LABEL_THRESHOLD = 4
 #: label's box (graph.js ``LABEL_GAP``; plan §8.1). It is the spec's for the same
 #: reason as the three above. (14c) holds every hung label to it, and the
 #: teardown pin holds graph.js to it.
-_SPEC_LABEL_GAP = 2
+_SPEC_LABEL_GAP = 4
 
 #: Below this, two measured lengths are the same number computed twice.
 _FIT_EPSILON = 1e-6

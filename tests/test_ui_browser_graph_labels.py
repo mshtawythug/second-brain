@@ -62,13 +62,27 @@ _FOCUS_RING_SELECTOR = ".local-graph a.node:focus-visible circle"
 #: (computed ``stroke-width``) and the focus ring's, which is read from the
 #: LOADED stylesheet's rule rather than by focusing each node, because
 #: ``:focus-visible`` on a scripted focus depends on the last input. A
-#: missing rule is reported as null and fails the test. In viewBox units
-#: (``getBBox``), as fitLabels measures.
+#: missing rule is reported as null and fails the test. Also each label's INK
+#: top, from a canvas ``measureText`` of the shown text in the label's computed
+#: font at its device size, and its halo (computed ``stroke-width``), and the
+#: ink of a plain capital "H" for comparison. In viewBox units (``getBBox``), as
+#: fitLabels measures.
 _HANG_JS = """(focusSelector) => {
+    const ink = (text, shown, scale) => {
+        const style = getComputedStyle(text);
+        const pen = document.createElement('canvas').getContext('2d');
+        const px = parseFloat(style.fontSize) * scale;
+        pen.font = `${style.fontWeight} ${px}px ${style.fontFamily}`;
+        const rise = (s) => pen.measureText(s).actualBoundingBoxAscent / scale;
+        const baseline = Number(text.getAttribute('y'));
+        return {inkTop: baseline - rise(shown), capTop: baseline - rise('H'),
+                halo: parseFloat(style.strokeWidth)};
+    };
     const focusRule = [...document.styleSheets]
         .flatMap((sheet) => [...sheet.cssRules])
         .find((rule) => rule.selectorText === focusSelector);
     const focusRing = focusRule ? parseFloat(focusRule.style.strokeWidth) : null;
+    const scale = document.querySelector('.local-graph svg').getScreenCTM().a;
     return [...document.querySelectorAll('.local-graph a.node')].map((node) => {
     const circle = node.querySelector('circle');
     const text = node.querySelector('text');
@@ -82,16 +96,20 @@ _HANG_JS = """(focusSelector) => {
         baseline: Number(text.getAttribute('y')),
         below: Number(circle.getAttribute('cy')) + Number(circle.getAttribute('r')),
         stroke: parseFloat(getComputedStyle(circle).strokeWidth), focusRing,
+        ...ink(text, shown, scale),
     };
     });
 }"""
 
 
 def _hang_faults(hangs: list[dict[str, Any]]) -> list[str]:
-    """Every neighbour label whose box reaches into its circle's WIDEST
-    painted stroke (the focus ring, or the resting stroke if wider), or whose
-    box at the full title is not hung exactly ``_SPEC_LABEL_GAP`` below the
-    circle."""
+    """Every neighbour label whose box, or whose ink plus halo, reaches into
+    its circle's WIDEST painted stroke (the focus ring, or the resting stroke
+    if wider), or whose box at the full title is not hung exactly
+    ``_SPEC_LABEL_GAP`` below the circle. Ink plus halo must CLEAR the ring,
+    by more than rounding: touching is a fault. The box alone cannot show it,
+    because the halo paints 1.5 beyond ink that can reach the box's top
+    (plan §8.6)."""
     faults = []
     for hang in hangs:
         if hang["focusRing"] is None:
@@ -100,6 +118,10 @@ def _hang_faults(hangs: list[dict[str, Any]]) -> list[str]:
         painted = hang["below"] + max(hang["stroke"], hang["focusRing"]) / 2
         if hang["shownTop"] < painted:
             faults.append(f"{hang['shown']!r}: box top {hang['shownTop']:.2f} is inside its "
+                          f"circle, painted to {painted:.2f}")
+        label_top = hang["inkTop"] - hang["halo"] / 2
+        if label_top < painted + _HANG_EPSILON:
+            faults.append(f"{hang['shown']!r}: ink plus halo reaches {label_top:.2f}, into its "
                           f"circle, painted to {painted:.2f}")
         gap = hang["titleTop"] - hang["below"]
         if abs(gap - _SPEC_LABEL_GAP) > _HANG_EPSILON:
@@ -127,6 +149,11 @@ def test_a_neighbour_label_hangs_its_gap_below_its_own_circle(
     hangs by, must start ``_SPEC_LABEL_GAP`` below the circle, to within
     rounding. That catches a gap in either direction. Every title here is at
     most the cap, so the full title is the capped title graph.js measures.
+    The run ends on a ring of accented capitals, whose ink plus halo must
+    also clear the focus ring. That ink-plus-halo clearance is the reason for
+    the gap's value (plan §8.6). With the exact-gap check set aside (spec
+    and graph.js moved together), it fails at gap 3 at the wide face, where
+    the halo touches the ring, and at gap 2 at both faces.
     """
     _use_face(page, face)
     for count in range(1, _SPEC_LABEL_THRESHOLD + 1):
@@ -140,6 +167,29 @@ def test_a_neighbour_label_hangs_its_gap_below_its_own_circle(
             f"count {count} at {viewport_width}px: {_hang_faults(hangs)}"
         )
         _assert_optimal_cuts(page, f"count {count} at {viewport_width}px")
+
+    _GRAPH["payload"] = _server_ring_payload(_ACCENTED_TITLES)
+    _open(page, "aaaaaaaa-0000-4000-8000-0000000009a0")
+    page.wait_for_selector(".local-graph svg")
+    hangs = page.evaluate(_HANG_JS, _FOCUS_RING_SELECTOR)
+    assert len(hangs) == len(_ACCENTED_TITLES), "precondition: not every accented label drew"
+    plain = [hang["shown"] for hang in hangs if hang["capTop"] - hang["inkTop"] < 1]
+    assert plain == [], f"precondition: no accent rises over a plain capital in {plain}"
+    assert _hang_faults(hangs) == [], f"accented ring at {viewport_width}px: {_hang_faults(hangs)}"
+
+
+#: The ring (14c) ends on: four titles led by an accented capital, the
+#: tallest ink a Latin label draws. In Verdana that ink reaches the very top of
+#: its label's box (the box grows to take it in; plan §8.6), so its halo
+#: reaches 1.5 above the box. At gap 3 the halo would touch the focus ring,
+#: which is why the gap is 4.
+_ACCENTED_TITLES = [
+    (f"aaaaaaaa-0000-4000-8000-{0x200 + index:012x}", title)
+    for index, title in enumerate([
+        "Ångström Synthetic Note", "Économie Synthetic Note",
+        "Ölfeld Synthetic Note", "Àrbre Synthetic Note",
+    ])
+]
 
 
 #: A title that draws an emoji. The emoji comes from a fallback face whose

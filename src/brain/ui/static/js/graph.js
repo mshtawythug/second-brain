@@ -115,15 +115,19 @@ const GRAPH_LABEL = "Links around this note";
    draws an emoji, whose fallback face is taller (measured 2026-10-13 in the
    drawn graph). The old baseline gap of 10 left a plain label's box 3.2 to
    3.5 units INSIDE its circle, and an emoji label's 5.5 to 5.9.
-   2 because the circle's widest stroke, the focus ring (graph.css, 3),
-   reaches 1.5 outside `r`. The label's own 3-unit halo paints 1.5 beyond its
-   INK, and ink usually sits below the box's top: a Latin capital by 3.4 to
-   3.9 units. An accented capital is the exception. Å's ink tops out 0.4 to
-   0.6 units under the box at the platform face and up to 0.3 OVER it at
-   Verdana (rounding trims the box), so its halo can reach a focused ring by
-   about 1.3 units. That is cosmetic and accepted (plan §8.5). Pinned by
-   test_a_neighbour_label_hangs_its_gap_below_its_own_circle. */
-const LABEL_GAP = 2;
+   4 so that no label's PAINTED extent, its ink plus the 3-unit halo graph.css
+   strokes round it (1.5 beyond the ink), reaches the circle's widest stroke,
+   the focus ring (graph.css, 3, so 1.5 outside `r`). Ink can reach the very
+   TOP of its own box but not past it. A glyph taller than the rounded ascent
+   grows the box: a label with Å in Verdana has a box 10.205px tall where a
+   plain label's is 10px, at 320px. Measured on accented and stacked-diacritic
+   labels (Å É Ö À, Ǻ Ấ Ǖ Ḗ Ṍ) at both faces and three widths, ink never rose
+   over its box. So the painted label reaches 0 + 1.5 above the box, and the
+   ring 1.5 below it at gap 0. At gap 3 the two touch, and 4 is the smallest
+   whole value that clears them (by 1.0, measured 2026-10-13; plan §8.6).
+   Pinned by test_a_neighbour_label_hangs_its_gap_below_its_own_circle, which
+   checks the exact gap AND the ink-plus-halo clearance on an accented ring. */
+const LABEL_GAP = 4;
 
 /* The ROOT's label sits ABOVE the root circle, its baseline this far over the
    circle's top — enough to clear descenders. Where a label sits relative to
@@ -131,7 +135,7 @@ const LABEL_GAP = 2;
    node. Below the root it shared a row with the server ring's 3 and 9
    o'clock neighbours (whose labels hang below them at the root's height),
    and collided with both; above, it shares nothing — the 12 o'clock label
-   hangs BELOW its node, its box ending 44 to 55px above the root label's at
+   hangs BELOW its node, its box ending 42 to 53px above the root label's at
    the three tested widths (graph.css has the measured table). Pinned by
    test_the_root_label_sits_above_the_root_on_a_row_of_its_own. NOT by
    test_no_two_labels_overlap_on_the_server_ring: with the root's label
