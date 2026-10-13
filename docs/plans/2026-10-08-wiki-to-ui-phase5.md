@@ -370,14 +370,14 @@ spec's clearance) with any other label on the server's ring — each half red on
 Measured on macOS (all 45 tests in the two modules — the 40 layout tests the teardown pin wraps and
 the 5 refit tests, which it does not; each mutation applied, confirmed applied, and reverted to a
 clean `git diff`). "FAIL" is a test body's assertion; "teardown" is the constant pin alone.
-*(Re-derived 2026-10-12 at `45a6fa9`, after §8 landed. Every row reproduced except the two marked
+*(Re-derived 2026-10-12 at `f4ed74d`, after §8 landed. Every row reproduced except the two marked
 below, and the `LABEL_GAP` row is new. Re-derived again 2026-10-13 at `LABEL_GAP` 4 (§8.6): every row
 is identical, down to the list of failing tests, so the 2 units the labels moved changed none.)*
 
 | Mutation of `graph.js` | Red | Where |
 |---|---|---|
 | `Math.abs` dropped from the row bound | 21 | all at the oracle: rim, overlap and every-ring tests at every width and face, (15i), both (15j) |
-| row bound's `- LABEL_CLEARANCE` dropped | 7 | the oracle in six (rim and overlap at 1280 wide, every-ring at all three platform widths, (15j) stacked); (15j) level at the halo check first. *(8 before §8: every-ring at 1280 wide also went red. Measured with the vertical placement held fixed, that run fails under this mutant at `4e701d0` and passes at `45a6fa9`, so the trim (§8.3) is what changed it. Inferred, not printed: the one cut the mutant moves there gains only a trailing space, which the cut now drops.)* |
+| row bound's `- LABEL_CLEARANCE` dropped | 7 | the oracle in six (rim and overlap at 1280 wide, every-ring at all three platform widths, (15j) stacked); (15j) level at the halo check first. *(8 before §8: every-ring at 1280 wide also went red. Measured with the vertical placement held fixed, that run fails under this mutant at `d016a8f` and passes at `f4ed74d`, so the trim (§8.3) is what changed it. Inferred, not printed: the one cut the mutant moves there gains only a trailing space, which the cut now drops.)* |
 | row membership tested without the clearance | 1 | (15j) stacked, at the oracle |
 | `LABEL_CLEARANCE` 4 → 0 | 40 | 19 FAIL at the geometry: rim and overlap 320/400 wide, (15i) and (15j) level at the halo check; rim and overlap 1280 wide, every-ring at 320 (both faces), 400 platform and 1280 platform, five crowded runs (320 and 400 wide at both counts, 400 platform at the cap), (15j) stacked and (15k) at the oracle. The other 21 only at teardown: in them no label's cut differs from the spec's. *(20 and 20 before §8. Every-ring at 1280 wide moved to teardown-only, measured as in the row above.)* |
 | `clientWidth` → `offsetWidth` | 1 | (15i), at its spill check under the right border |
@@ -452,7 +452,7 @@ rather than equivalent, each with the reason:
   label". Both figures were wrong — ~185 is that label at the platform face, not the wide one — and
   "at most" does not hold for 28-character labels in general: 28 W's measure 419 in the wide face.)*
 - K6, `LABEL_GAP` 10 → 4: a vertical presentation constant outside the fit, which no test pins.
-  Recorded as a follow-up in §7.5. *(Closed by §8.1, `4e701d0`: labels are now hung by their
+  Recorded as a follow-up in §7.5. *(Closed by §8.1, `d016a8f`: labels are now hung by their
   measured box, and (14c) and the teardown pin hold the gap.)*
 - `DEFAULT_SIZE` 320 → 300: it applies only to a payload without `width`/`height`, and the server
   always sends both.
@@ -504,17 +504,17 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
   pinned by (15l)). So
   the limit is now how many characters a wide font leaves on a rim label, not whether it is
   clipped.)*
-- ~~**(15m)'s 29th character is a space**~~ — **closed by `45a6fa9`** (§8.3). Its title's 29th
+- ~~**(15m)'s 29th character is a space**~~ — **closed by `f4ed74d`** (§8.3). Its title's 29th
   character is now a letter, with a precondition asserting that. The fix was needed, not just
   tidier: once the cut trims a space before "…", the old title's cap-29 label was identical to the
   cap's, and (15m) could no longer reject it.
-- ~~**`LABEL_GAP` (`js/graph.js`) is unpinned**~~ — **closed by `4e701d0`** (§8.1). A constant
+- ~~**`LABEL_GAP` (`js/graph.js`) is unpinned**~~ — **closed by `d016a8f`** (§8.1). A constant
   baseline gap could not be right, so labels are now hung by their measured box. The gap is pinned
   behaviourally by (14c) and (14d) and at teardown.
 - **A hung browser page stalled the suite** (found while closing the above). This was not in the
-  list. **Closed by `c451999`** (§8.2): pytest-timeout, 60s per browser test, `thread` method.
+  list. **Closed by `d940168`** (§8.2): pytest-timeout, 60s per browser test, `thread` method.
 - **Graph labels could split a character** (code-unit slicing) **and keep a space before "…"**. This
-  was not in the list. **Closed by `45a6fa9`** (§8.3).
+  was not in the list. **Closed by `f4ed74d`** (§8.3).
 
 ### 7.6 Documents corrected in the closeout
 
@@ -594,16 +594,29 @@ byte order.
 
 ### 8.4 What landed (2026-10-12)
 
-The SHAs are those after the rebase onto master `a4ab179` (2026-10-13). That rebase changed only
-`pyproject.toml`'s `dev` line, which now carries both this pin and master's `mypy<2.5`. The
-measurements below were taken on the pre-rebase commits, whose code is the same.
+The SHAs are those after the second rebase, onto master `6a82db2` (2026-10-13). Both rebases
+changed only `pyproject.toml`'s `dev` line, which carries this pin beside master's `ruff<0.18` and
+`mypy<2.5`, and, on the second, `tests/test_dev_dependency_pins.py`, where this pin is now a
+`MEASURED_PINS` entry in master's structure. The measurements below were taken on the pre-rebase
+commits, whose graph code is the same. Commit MESSAGES are not rewritten by a rebase, so a message
+may cite an earlier SHA. Map them with this table:
+
+| First commit | After rebase onto `a4ab179` | After rebase onto `6a82db2` (current) |
+|---|---|---|
+| `9b2a26f` | `7a9bc41` | `0635ce1` |
+| `af08f60` | `4e701d0` | `d016a8f` |
+| `23bf8de` | `c451999` | `d940168` |
+| `2de726b` | `45a6fa9` | `f4ed74d` |
+| `33cfc8f` | `1e1c610` | `620f759` |
+| — | `b75b2e2` (§8.5) | `28465d1` |
+| — | `b7a6381` (§8.6) | `b808ded` |
 
 | Commit | Item |
 |---|---|
-| `7a9bc41` | this section's plan (§8.1–8.3), written before the code |
-| `4e701d0` | §8.1: neighbour labels hung by their measured box; `LABEL_GAP` 10 → 2 (→ 4 in §8.6); (14c), (14d) |
-| `c451999` | §8.2: pytest-timeout, 60s per browser test, `thread` method |
-| `45a6fa9` | §8.3: grapheme-safe cut, trim before "…", oracle restated, (15m) re-titled, (16) |
+| `0635ce1` | this section's plan (§8.1–8.3), written before the code |
+| `d016a8f` | §8.1: neighbour labels hung by their measured box; `LABEL_GAP` 10 → 2 (→ 4 in §8.6); (14c), (14d) |
+| `d940168` | §8.2: pytest-timeout, 60s per browser test, `thread` method |
+| `f4ed74d` | §8.3: grapheme-safe cut, trim before "…", oracle restated, (15m) re-titled, (16) |
 | the docs commit that adds this subsection | §7.4 table re-derived, §7.5 closed |
 
 **Rulings beyond §8's plan.**
@@ -639,7 +652,7 @@ measurements below were taken on the pre-rebase commits, whose code is the same.
 
 | Mutation | Modules run | Red |
 |---|---|---|
-| `LABEL_GAP` 2 → 10 / → 4 / → 0 | labels, layout, refit | each: 7 FAIL (every (14c) and (14d) run), and a teardown ERROR in all 53 tests the pin wraps (labels 13 + layout 40; the 5 refit tests are not wrapped). Measured on the fix-round tree (`1e1c610` plus this round). First recorded as 47: at `4e701d0` the labels module had 7 tests, and (16) added 6 in `45a6fa9`, without the count being re-derived. *(At the §8.6 value, `LABEL_GAP` 4 → 10 / → 3 / → 2 / → 0: the same 7 FAIL and 53 teardown ERRORs each. Every other row of this table re-derived identically at 4, down to the failing tests.)* |
+| `LABEL_GAP` 2 → 10 / → 4 / → 0 | labels, layout, refit | each: 7 FAIL (every (14c) and (14d) run), and a teardown ERROR in all 53 tests the pin wraps (labels 13 + layout 40; the 5 refit tests are not wrapped). Measured on the fix-round tree (`620f759` plus this round). First recorded as 47: at `d016a8f` the labels module had 7 tests, and (16) added 6 in `f4ed74d`, without the count being re-derived. *(At the §8.6 value, `LABEL_GAP` 4 → 10 / → 3 / → 2 / → 0: the same 7 FAIL and 53 teardown ERRORs each. Every other row of this table re-derived identically at 4, down to the failing tests.)* |
 | hang removed (`hangBelowCircle` not called) | same | 7 FAIL, the same 7 |
 | ascent fixed at 13 instead of measured | same | 7 FAIL, the same 7 |
 | root hung too | same | 3 FAIL: (14b), (15d) and (15g) |
@@ -659,7 +672,7 @@ has at least as many code units, so both give the cap.
 browser command was still running after 45 minutes (killed). With it, the stalled module ends
 with exit 1 after 60.7s.
 
-**Verification on `45a6fa9`'s code** (exit codes read from files): `ruff check` 0; `mypy src/` 0
+**Verification on `f4ed74d`'s code** (exit codes read from files): `ruff check` 0; `mypy src/` 0
 (224 files); the exact `ci.yml` browser command three times, 209 passed each time (196 before §8,
 plus 13 new); `tests/test_ci_workflow.py` and `tests/test_eval_workflow_contract.py`, 30 passed
 and 1 skipped (the skip is that module's empty `HERMETIC_EVAL_TESTS`). Linux
@@ -669,9 +682,9 @@ passed. The image was removed afterwards. The full default suite against a sibli
 (`second_brain_test_co` on 5434): exit 0, 8,850 passed, 4 skipped, 318 deselected, coverage
 94.36%.
 
-### 8.5 Fix round on `1e1c610` (2026-10-13)
+### 8.5 Fix round on `620f759` (2026-10-13)
 
-The review and the audit of `1e1c610` each reported findings. All are closed in one commit (the
+The review and the audit of `620f759` each reported findings. All are closed in one commit (the
 fix-round commit that adds this subsection):
 
 - **`BROWSER_TEST_TIMEOUT_S` was unpinned** (audit, MEDIUM). pytest-timeout times a test only when
@@ -753,3 +766,26 @@ the way, the ink-plus-halo clearance alone turns gap 3 and gap 2 red.
 **Re-derived at 4.** §7.4's table is identical row for row, failing tests included. §8.4's rows
 are identical too, with the `LABEL_GAP` row now read as 4 → 10 / 3 / 2 / 0: 7 FAIL and 53 teardown
 ERRORs each.
+
+### 8.7 Rebased onto `6a82db2`; pytest-timeout joins `MEASURED_PINS` (2026-10-13)
+
+Master's PR #21 restructured `tests/test_dev_dependency_pins.py`. Every capped `dev` pin now needs a
+`MEASURED_PINS` entry, enforced by `test_every_capped_dev_pin_is_measured`, and the admits and
+next-minor checks run over every entry. The pytest-timeout pin now follows that structure:
+`MEASURED_PYTEST_TIMEOUT_VERSION = "2.4.0"` and `MEASURED_PYTEST_TIMEOUT_CEILING = "2.5"`, entered in
+`MEASURED_PINS`. The old standalone test that checked both the cap and the admits is replaced by
+`test_pytest_timeout_is_capped_at_the_measured_ceiling`, which checks the cap only, because the
+generic tests now do the admits half. 2.4.0 was re-checked as the newest release on PyPI
+(`pip index versions`). In pyproject.toml the `dev` line carries the pin beside master's `ruff<0.18`
+and `mypy<2.5`, and master's comment lines are kept verbatim. Against master, the file changes only
+by that line and the added evidence block.
+
+Mutation proofs (`tests/test_dev_dependency_pins.py`):
+
+| Mutation | Red |
+|---|---|
+| the `MEASURED_PINS` entry dropped | `test_every_capped_dev_pin_is_measured` |
+| the pyproject cap `<2.5` → `<2.6` | `test_pytest_timeout_is_capped_at_the_measured_ceiling` |
+| the pyproject floor `>=2.4.0` → `>=2.4.1` | the admits check for pytest-timeout |
+| the ceiling constant `"2.5"` → `"2.6"` | the next-minor check and the cap test |
+| the version constant `"2.4.0"` → `"2.3.1"` | the admits check and the next-minor check |
