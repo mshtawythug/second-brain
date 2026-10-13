@@ -1131,3 +1131,46 @@ def test_browser_url_for_a_name_resolving_to_the_wildcard_is_loopback() -> None:
     v6 = (ipaddress.ip_address("::"),)
     assert browser_url("0.0.0.0.nip.io", 8765, "", resolved=v4) == "http://127.0.0.1:8765/"
     assert browser_url("wild6.example", 8765, "", resolved=v6) == "http://[::1]:8765/"
+
+
+def test_serve_opens_the_guards_origin_not_the_bind_spelling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Round 10: for a hostname the URL to open is the Origin the write guard
+    expects — a name resolving to 0.0.0.0 opens 127.0.0.1, not the name."""
+    import asyncio
+    import contextlib
+
+    import uvicorn
+
+    from brain.ui.context import UiContext
+    from brain.ui.server import serve
+
+    class _Server:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+        async def startup(self, *args: object, **kwargs: object) -> None:
+            return None
+
+        def run(self) -> None:
+            asyncio.run(self.startup())
+
+    monkeypatch.setattr(uvicorn, "Server", _Server)
+
+    @contextlib.contextmanager
+    def conn_factory():  # type: ignore[no-untyped-def]
+        yield None
+
+    context = UiContext(
+        cfg=object(),  # type: ignore[arg-type]
+        conn_factory=conn_factory,
+        embedder=None,
+        search_fn=lambda *a, **k: [],
+        token="s3cret",
+        allowed_origin="http://127.0.0.1:8765",
+        allowed_hosts=frozenset({"127.0.0.1"}),
+    )
+    opened: list[str] = []
+    serve(context, host="0.0.0.0.nip.io", port=8765, open_browser=True, opener=opened.append)
+    assert opened == ["http://127.0.0.1:8765/#t=s3cret"]

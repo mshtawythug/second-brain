@@ -606,3 +606,13 @@ def test_a_name_is_classified_by_every_address_it_resolves_to(
     resolved = tuple(ipaddress.ip_address(a) for a in addresses)
     assert address_class("some.name", resolved) == kind
     assert is_loopback("some.name", resolved) is (kind == "loopback")
+
+
+@pytest.mark.parametrize("name", ["localhoſt", "K", "brain-ı.lan"])
+def test_the_hostname_pattern_is_ascii_only(name: str) -> None:
+    """Round 10, item 4, on the pattern itself: ``validate_host`` refuses
+    non-ASCII before the pattern runs, so only a direct test can show the
+    pattern would not let ``ſ`` or the Kelvin sign through on its own."""
+    from brain.ui.context import _HOSTNAME
+
+    assert not _HOSTNAME.fullmatch(name)
