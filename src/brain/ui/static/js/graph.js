@@ -37,7 +37,10 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 
 /* Labels longer than this are cut and given an ellipsis; the full title stays
    available in the node's <title> child, which is what hover shows. A label
-   can be cut SHORTER than this to fit its slot — see fitLabels. */
+   can be cut SHORTER than this to fit its slot — see fitLabels. CHARACTERS
+   are grapheme clusters, what a reader counts as one character: an emoji ZWJ
+   sequence or an astral letter is one, and a cut never splits it (cut). For
+   ASCII titles that is the same count as code units. */
 const LABEL_MAX_CHARS = 28;
 
 /* Clearance, in viewBox units, that fitLabels keeps between a label and the
@@ -101,9 +104,31 @@ const UNTITLED = "Untitled";
    no role in this block is ever unnamed. */
 const GRAPH_LABEL = "Links around this note";
 
-/* Gap between a node's circle and its label, in viewBox units. A label below
-   its node is placed by its BASELINE, so the gap clears the cap height. */
-const LABEL_GAP = 10;
+/* Gap, in viewBox units, between a NEIGHBOUR's circle and the TOP of its
+   label's box. It is held by measurement, not by the baseline: fitLabels hangs
+   each label so that its box (getBBox) starts exactly this far below the
+   circle. A baseline offset cannot do this, because the box's ascent belongs
+   to the device scale and the title, not to this file. Chromium rounds it to
+   whole DEVICE PIXELS, so in viewBox units it is not whole and moves with the
+   width: 13.23 / 13.46 / 13.32 units at 320 / 400 / 1280px, the same at the
+   platform face and at Verdana, and 15.87 / 15.53 / 15.54 for any title that
+   draws an emoji, whose fallback face is taller (measured 2026-10-13 in the
+   drawn graph). The old baseline gap of 10 left a plain label's box 3.2 to
+   3.5 units INSIDE its circle, and an emoji label's 5.5 to 5.9.
+   4 so that no label's PAINTED extent, its ink plus the 3-unit halo graph.css
+   strokes round it (1.5 beyond the ink), reaches the circle's widest stroke,
+   the focus ring (graph.css, 3, so 1.5 outside `r`). Ink can reach the very
+   TOP of its own box but not past it. A glyph taller than the rounded ascent
+   grows the box: a label with Å in Verdana has a box that rises 10.205px
+   above its baseline, where a plain label's rises 10px, at 320px. Measured on
+   accented and stacked-diacritic labels (Å É Ö À, Ǻ Ấ Ǖ Ḗ Ṍ) at both faces
+   and three widths, ink never rose over its box. So the painted label reaches
+   0 + 1.5 above the box, and the ring 1.5 below it at gap 0. At gap 3 the two
+   touch, and 4 is the smallest whole value that clears them (by 1.0, measured
+   2026-10-13; plan §8.6).
+   Pinned by test_a_neighbour_label_hangs_its_gap_below_its_own_circle, which
+   checks the exact gap AND the ink-plus-halo clearance on an accented ring. */
+const LABEL_GAP = 4;
 
 /* The ROOT's label sits ABOVE the root circle, its baseline this far over the
    circle's top — enough to clear descenders. Where a label sits relative to
@@ -111,7 +136,8 @@ const LABEL_GAP = 10;
    node. Below the root it shared a row with the server ring's 3 and 9
    o'clock neighbours (whose labels hang below them at the root's height),
    and collided with both; above, it shares nothing — the 12 o'clock label
-   hangs BELOW its node, ~60 units higher. Pinned by
+   hangs BELOW its node, its box ending 42 to 53px above the root label's at
+   the three tested widths (graph.css has the measured table). Pinned by
    test_the_root_label_sits_above_the_root_on_a_row_of_its_own. NOT by
    test_no_two_labels_overlap_on_the_server_ring: with the root's label
    below, fitLabels cuts it and the 3 and 9 o'clock labels until none
@@ -364,6 +390,8 @@ function appendGlyph(parent, node, { above = false } = {}) {
   tip.textContent = title;
   parent.appendChild(tip);
   parent.appendChild(svgEl("circle", { cx: node.x, cy: node.y, r }));
+  /* A neighbour's `y` here is only a starting baseline: fitLabels hangs the
+     label by its measured box before anything paints it (hangBelowCircle). */
   const labelY = above ? node.y - r - ROOT_LABEL_GAP : node.y + r + LABEL_GAP;
   const label = svgEl("text", { x: node.x, y: labelY, "text-anchor": "middle" });
   label.textContent = shorten(title);
@@ -374,9 +402,31 @@ function shorten(title) {
   return cut(title, LABEL_MAX_CHARS);
 }
 
-/* The first `chars` characters of `title`, with an ellipsis if any were cut. */
+/* Splits a title into grapheme clusters. Feature-tested, unlike
+   ResizeObserver: graph.css's :has() admits Firefox 121-124, which lacks
+   Intl.Segmenter, and a constructor that throws at module load would take
+   the whole graph with it. Without it a title splits into CODE POINTS. That
+   still never leaves half a surrogate pair, but it can split an emoji ZWJ
+   sequence at a joint. Both paths are pinned by
+   test_a_label_is_cut_at_the_cap_by_whole_characters. */
+const GRAPHEMES = typeof Intl.Segmenter === "function"
+  ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+  : null;
+
+function characters(title) {
+  return GRAPHEMES
+    ? Array.from(GRAPHEMES.segment(title), (part) => part.segment)
+    : Array.from(title);
+}
+
+/* The first `chars` characters of `title`, with an ellipsis if any were cut.
+   Whitespace before the ellipsis is dropped: "Planning …" reads as two
+   words, not one cut short. So a cut that ends on a space shows the same
+   label as the cut one shorter, and fitText's search still finds the longest
+   distinct one. */
 function cut(title, chars) {
-  return title.length > chars ? `${title.slice(0, chars)}…` : title;
+  const all = characters(title);
+  return all.length > chars ? `${all.slice(0, chars).join("").trimEnd()}…` : title;
 }
 
 /* LABEL WIDTH IS MEASURED, NOT ASSUMED. A label's rendered width is a
@@ -417,6 +467,7 @@ function fitLabels(svg) {
   const labels = [...svg.querySelectorAll(".node > text")].map((text) => {
     const title = text.parentNode.querySelector("title").textContent;
     text.textContent = shorten(title);
+    if (!text.parentNode.classList.contains("node-root")) hangBelowCircle(text);
     const box = text.getBBox();
     return {
       text, title, x: Number(text.getAttribute("x")), top: box.y, bottom: box.y + box.height,
@@ -437,6 +488,23 @@ function fitLabels(svg) {
   }
 }
 
+/* Move a neighbour's label so that the top of its box sits LABEL_GAP below
+   its circle. The box is measured at the CAPPED title, the same box rows are
+   judged on. Every cut fitText may then make is no taller: a cut draws a
+   subset of the same glyphs plus "…", which the primary face draws inside its
+   ascent (measured: appending "…" moves no box top, at both faces and three
+   widths, for plain, accented, emoji and CJK titles), and the primary face's
+   ascent counts whether or not it draws a glyph (measured with all-Hebrew,
+   all-Devanagari and all-CJK titles). So the label as shown clears the
+   circle at least as well.
+   Idempotent: the ascent is the baseline less the box's top, whatever `y` is. */
+function hangBelowCircle(text) {
+  const circle = text.parentNode.querySelector("circle");
+  const below = Number(circle.getAttribute("cy")) + Number(circle.getAttribute("r"));
+  const ascent = Number(text.getAttribute("y")) - text.getBBox().y;
+  text.setAttribute("y", String(below + LABEL_GAP + ascent));
+}
+
 /* Cut `text` to the longest prefix of `title` (at most LABEL_MAX_CHARS) whose
    measured length fits `slot`. Binary search: lengths only grow with the
    prefix. A slot too narrow for any prefix leaves the bare ellipsis — the
@@ -444,7 +512,7 @@ function fitLabels(svg) {
 function fitText(text, title, slot) {
   if (text.getComputedTextLength() <= slot) return;
   let lo = 0;
-  let hi = Math.min(title.length, LABEL_MAX_CHARS) - 1;
+  let hi = Math.min(characters(title).length, LABEL_MAX_CHARS) - 1;
   while (lo < hi) {
     const mid = Math.ceil((lo + hi) / 2);
     text.textContent = cut(title, mid);

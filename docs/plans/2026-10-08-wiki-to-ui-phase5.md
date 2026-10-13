@@ -326,7 +326,8 @@ both stayed 188/188 green, because a label cut too short sits inside every box. 
 (`_assert_optimal_cuts`, `tests/ui_graph_geometry.py`) recomputes each label's slot in the test
 from the specified rules — the edge bound from the inspector's padding box, and on a non-crowded
 ring the row bound from every label within the clearance of its row, at `|dx|` less the clearance —
-and requires the label to be the LONGEST cut of its title that fits: one more character must not,
+and requires the label to be the LONGEST cut of its title that fits: one more character must not
+*(since §8.3, the next cut that DIFFERS, and characters are grapheme clusters)*,
 and a title whose capped form fits must be shown whole. It is measured on the same element with the
 same `getComputedTextLength` as `fitText`. It cannot cancel a mutation: it reads nothing from
 `graph.js`, and it holds the spec's clearance (4) and cap (28) itself. That `graph.js` ships them,
@@ -368,14 +369,17 @@ spec's clearance) with any other label on the server's ring — each half red on
 
 Measured on macOS (all 45 tests in the two modules — the 40 layout tests the teardown pin wraps and
 the 5 refit tests, which it does not; each mutation applied, confirmed applied, and reverted to a
-clean `git diff`). "FAIL" is a test body's assertion; "teardown" is the constant pin alone:
+clean `git diff`). "FAIL" is a test body's assertion; "teardown" is the constant pin alone.
+*(Re-derived 2026-10-12 at `f4ed74d`, after §8 landed. Every row reproduced except the two marked
+below, and the `LABEL_GAP` row is new. Re-derived again 2026-10-13 at `LABEL_GAP` 4 (§8.6): every row
+is identical, down to the list of failing tests, so the 2 units the labels moved changed none.)*
 
 | Mutation of `graph.js` | Red | Where |
 |---|---|---|
 | `Math.abs` dropped from the row bound | 21 | all at the oracle: rim, overlap and every-ring tests at every width and face, (15i), both (15j) |
-| row bound's `- LABEL_CLEARANCE` dropped | 8 | the oracle in seven (rim and overlap at 1280 wide, every-ring at all three platform widths and 1280 wide, (15j) stacked); (15j) level at the halo check first |
+| row bound's `- LABEL_CLEARANCE` dropped | 7 | the oracle in six (rim and overlap at 1280 wide, every-ring at all three platform widths, (15j) stacked); (15j) level at the halo check first. *(8 before §8: every-ring at 1280 wide also went red. Measured with the vertical placement held fixed, that run fails under this mutant at `d016a8f` and passes at `f4ed74d`, so the trim (§8.3) is what changed it. Inferred, not printed: the one cut the mutant moves there gains only a trailing space, which the cut now drops.)* |
 | row membership tested without the clearance | 1 | (15j) stacked, at the oracle |
-| `LABEL_CLEARANCE` 4 → 0 | 40 | 20 FAIL at the geometry: rim and overlap 320/400 wide, (15i) and (15j) level at the halo check; rim and overlap 1280 wide, every-ring at 320 (both faces), 400 platform and 1280 (both faces), five crowded runs (320 and 400 wide at both counts, 400 platform at the cap), (15j) stacked and (15k) at the oracle. The other 20 only at teardown: in them no label's cut differs from the spec's |
+| `LABEL_CLEARANCE` 4 → 0 | 40 | 19 FAIL at the geometry: rim and overlap 320/400 wide, (15i) and (15j) level at the halo check; rim and overlap 1280 wide, every-ring at 320 (both faces), 400 platform and 1280 platform, five crowded runs (320 and 400 wide at both counts, 400 platform at the cap), (15j) stacked and (15k) at the oracle. The other 21 only at teardown: in them no label's cut differs from the spec's. *(20 and 20 before §8. Every-ring at 1280 wide moved to teardown-only, measured as in the row above.)* |
 | `clientWidth` → `offsetWidth` | 1 | (15i), at its spill check under the right border |
 | `+ host.clientLeft` dropped | 1 | (15i), at its spill check under the left border |
 | `fitText`'s search capped at 26 (`hi - 2`) | 1 | (15k), at the oracle |
@@ -385,6 +389,7 @@ clean `git diff`). "FAIL" is a test body's assertion; "teardown" is the constant
 | `LABEL_MAX_CHARS` 28 → 27 | 40 | 31 FAIL at the oracle; the other 9 only at teardown |
 | `MAX_LABELLED_NEIGHBOURS` 4 → 5 | 40 | 7 FAIL: the six threshold+1 crowded runs (five labels show at rest) and (15n) at 5 (not crowded); the other 33 only at teardown |
 | `MAX_LABELLED_NEIGHBOURS` 4 → 3 | 40 | 9 FAIL: all six every-ring runs (a label hidden at 4), (15n) at 4 (crowded), and overlap and rim at 1280 wide, on overlapping labels and at the oracle (a crowded 4-ring drops the row bound, and the wide rim pair meets); the other 31 only at teardown |
+| `LABEL_GAP` 4 → 10 (§8.6; first measured as 2 → 10) | 40 | none FAIL here, all 40 at teardown: where a label hangs below its own node is not these modules' subject. All 7 runs of (14c) and (14d), in `tests/test_ui_browser_graph_labels.py`, FAIL (§8.4) |
 | root label drawn below the root (`{ above: true }` dropped) | 3 | (14b), at its first assertion; and (15d) and (15g), at their preconditions — (14) stays green |
 
 With the earlier spill and halo assertions removed, the oracle alone turns (15i) red for
@@ -447,7 +452,8 @@ rather than equivalent, each with the reason:
   label". Both figures were wrong — ~185 is that label at the platform face, not the wide one — and
   "at most" does not hold for 28-character labels in general: 28 W's measure 419 in the wide face.)*
 - K6, `LABEL_GAP` 10 → 4: a vertical presentation constant outside the fit, which no test pins.
-  Recorded as a follow-up in §7.5.
+  Recorded as a follow-up in §7.5. *(Closed by §8.1, `d016a8f`: labels are now hung by their
+  measured box, and (14c) and the teardown pin hold the gap.)*
 - `DEFAULT_SIZE` 320 → 300: it applies only to a payload without `width`/`height`, and the server
   always sends both.
 - Removing `_SpecPin.armed = False` in the test helper (`tests/ui_graph_geometry.py`): it guards
@@ -498,12 +504,17 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
   pinned by (15l)). So
   the limit is now how many characters a wide font leaves on a rim label, not whether it is
   clipped.)*
-- **(15m)'s 29th character is a space**, so the cap-29 label it rejects ("…Note With …") differs
-  from the cap's ("…Note With…") by a space alone. Follow-up: a title whose 29th is a letter.
-- **`LABEL_GAP` (`js/graph.js`) is unpinned** — pre-existing since `94cf0cf`. At 1280 a neighbour
-  label's box already overlaps its own circle by ~3.3 units at gap 10, and would by ~9.3 at gap 4,
-  with every test green (survivor K6, §7.4). Follow-up: a (14b)-style check on the neighbour
-  labels' placement would pin it.
+- ~~**(15m)'s 29th character is a space**~~ — **closed by `f4ed74d`** (§8.3). Its title's 29th
+  character is now a letter, with a precondition asserting that. The fix was needed, not just
+  tidier: once the cut trims a space before "…", the old title's cap-29 label was identical to the
+  cap's, and (15m) could no longer reject it.
+- ~~**`LABEL_GAP` (`js/graph.js`) is unpinned**~~ — **closed by `d016a8f`** (§8.1). A constant
+  baseline gap could not be right, so labels are now hung by their measured box. The gap is pinned
+  behaviourally by (14c) and (14d) and at teardown.
+- **A hung browser page stalled the suite** (found while closing the above). This was not in the
+  list. **Closed by `d940168`** (§8.2): pytest-timeout, 60s per browser test, `thread` method.
+- **Graph labels could split a character** (code-unit slicing) **and keep a space before "…"**. This
+  was not in the list. **Closed by `f4ed74d`** (§8.3).
 
 ### 7.6 Documents corrected in the closeout
 
@@ -521,3 +532,263 @@ the name and comment of a test in `tests/test_ui_graph_layout.py` (both correcte
 - `CLAUDE.md` — `related.py`'s ceiling-table trail promoted; no other row implicated (no new
   `src/` file crossed 800 in this phase — re-derive with
   `find src -name '*.py' -exec wc -l {} + | sort -rn`).
+
+## 8. Follow-ups to §7.5 — label gap, test timeout, grapheme-safe cut (plan, 2026-10-12)
+
+Branch `fix/phase5-followups`, from `1a1d068`. Three items from §7.5. Each has a plan here, and §8.4
+records what landed.
+
+**8.1 `LABEL_GAP`.** Measured first, in Chromium on macOS, label box via `getBBox` at 13.5
+units. The box ascent is the font's ascent, rounded to whole device pixels: 13 at the platform
+face, 14 at Verdana (the wide face), and **15 (descent 5) for any title that draws an emoji**,
+because a fallback face's taller metrics join the primary's. *(Corrected in the fix round,
+2026-10-13. Those figures came from a standalone svg at scale 1, where px and units coincide. In
+the drawn graph the scale is 0.76 / 0.97 / 0.90 at 320 / 400 / 1280px, the ascent is whole in px
+and not in units, and both faces give the SAME box: 13.23 / 13.46 / 13.32 units, which is 10 /
+13 / 12px. An emoji title gives 15.87 / 15.53 / 15.54 units. The ruling below stands, on the
+emoji and device-scale evidence.)* The primary face's metrics always
+count: an all-Hebrew, all-Devanagari or all-CJK title keeps the primary ascent. So a label hung
+by its BASELINE clears its circle only when the gap exceeds an ascent that depends on the font,
+the device scale (rounding) and the title. No constant can be right, for the same reason a fixed
+width was not right in §7.4. **Ruling: hang each neighbour label by its measured box.**
+`fitLabels` sets the label's `y` so that the top of its box, at the capped title (the box rows
+are already judged on), sits exactly `LABEL_GAP` below its circle. A cut's box is never taller
+than the capped title's box, because a cut draws a subset of the same glyphs plus "…", which the
+primary face draws inside its ascent (measured 2026-10-13: appending "…" moves no box top, at both
+faces and three widths, for plain, accented, emoji and CJK titles), and the primary face always
+counts. So the shown box clears the circle at least as well. `LABEL_GAP` becomes
+2: the circle's widest stroke (the focus ring, 3) reaches 1.5 outside `r`. *(Superseded by §8.6:
+4, which also clears the label's own halo.)* The root keeps its
+baseline placement, which (14b) pins. Affected: `static/js/graph.js` (constant, comment,
+`fitLabels`), `static/css/graph.css` (re-measure the vertical-gap table) and
+`tests/ui_graph_geometry.py` (add `_SPEC_LABEL_GAP` and pin `LABEL_GAP` at teardown). New test
+(14c) in a new module, `tests/test_ui_browser_graph_labels.py`: for every neighbour, at counts
+1..4, both faces and three widths, the box clears the circle's painted stroke (read from the
+computed style), and the capped box's top is exactly `_SPEC_LABEL_GAP` below the circle.
+Mutants to prove red: gap 10 (the old value), 4 (named in §7.5, and also 2 + 2) and 0 (2 − 2),
+and the measured hang removed.
+Risks: the labels move down about 5 units. Moving them can change which labels share a row,
+and with it the §7.4 counts, so the §7.4 table is re-run.
+
+**8.2 `pytest-timeout`.** Added to `dev`, not `browser`. Two reasons: `--strict-markers` makes
+`pytest.mark.timeout` a hard error wherever the plugin is missing, and every CI job installs
+`dev`. The evidence block gives the measured versions, with a cap at the next unreleased minor.
+A `pytest_collection_modifyitems` hook in `tests/conftest.py` gives every `browser`-marked test
+that lacks its own marker a timeout, sized from `--durations` with headroom. Nothing else in the
+suite is timed. The hook does not use the ini `timeout`: that would time 8,800 database tests to
+fix a browser hang. A new constant and test in `tests/test_dev_dependency_pins.py` follow the
+ruff/mypy pattern. Proof: the hang mutant (`hi = mid`) makes the suite FAIL on a timeout.
+
+**8.3 Grapheme-safe `cut()`.** `cut` counts and slices **grapheme clusters**, using
+`Intl.Segmenter` with grapheme granularity, and trims trailing whitespace before "…". Ruling:
+the 28-character cap counts graphemes, meaning characters as a reader perceives them. ASCII
+titles are unaffected. There is no `Intl.Segmenter` precedent in `static/js`, and
+`graph.css`'s `:has()` admits Firefox 121–124, which lacks it. So the segmenter is feature-tested
+and falls back to code points: still surrogate-safe, and never a thrown module load. The oracle
+in `tests/ui_graph_geometry.py` states the same rule independently. It lists every distinct cut
+of a title at or under the cap, so a trimmed cut that equals a shorter one is not mistaken for an
+over-cut. (15m) gets a title whose 29th character is a letter, with a precondition asserting that.
+New tests in the new module use synthetic ZWJ-emoji and astral titles: a cut at the cap keeps the
+whole cluster; a 28-grapheme title longer in code units is shown whole; a 28th grapheme that is a
+space is trimmed; and the code-point fallback runs with `Intl.Segmenter` removed by an init script.
+The browser API is removed, not a production module patched. The new module goes into `ci.yml` in
+byte order.
+
+### 8.4 What landed (2026-10-12)
+
+The SHAs are those after the second rebase, onto master `6a82db2` (2026-10-13). Both rebases
+changed only `pyproject.toml`'s `dev` line, which carries this pin beside master's `ruff<0.18` and
+`mypy<2.5`, and, on the second, `tests/test_dev_dependency_pins.py`, where this pin is now a
+`MEASURED_PINS` entry in master's structure. The measurements below were taken on the pre-rebase
+commits, whose graph code is the same. Commit MESSAGES are not rewritten by a rebase, so a message
+may cite an earlier SHA. Map them with this table:
+
+| First commit | After rebase onto `a4ab179` | After rebase onto `6a82db2` (current) |
+|---|---|---|
+| `9b2a26f` | `7a9bc41` | `0635ce1` |
+| `af08f60` | `4e701d0` | `d016a8f` |
+| `23bf8de` | `c451999` | `d940168` |
+| `2de726b` | `45a6fa9` | `f4ed74d` |
+| `33cfc8f` | `1e1c610` | `620f759` |
+| — | `b75b2e2` (§8.5) | `28465d1` |
+| — | `b7a6381` (§8.6) | `b808ded` |
+
+| Commit | Item |
+|---|---|
+| `0635ce1` | this section's plan (§8.1–8.3), written before the code |
+| `d016a8f` | §8.1: neighbour labels hung by their measured box; `LABEL_GAP` 10 → 2 (→ 4 in §8.6); (14c), (14d) |
+| `d940168` | §8.2: pytest-timeout, 60s per browser test, `thread` method |
+| `f4ed74d` | §8.3: grapheme-safe cut, trim before "…", oracle restated, (15m) re-titled, (16) |
+| the docs commit that adds this subsection | §7.4 table re-derived, §7.5 closed |
+
+**Rulings beyond §8's plan.**
+
+- **The gap is held by measurement, not by a new constant** (§8.1's ruling, confirmed). In the
+  drawn graph, measured box ascents are 13.23 / 13.46 / 13.32 units at 320 / 400 / 1280px, the
+  same at both faces, and 15.87 / 15.53 / 15.54 for an emoji title. They are whole in device
+  pixels, so in units they vary with width. The old gap left a plain label's box 2.4–3.3px (3.2–3.5
+  units) inside its circle. The emoji case decides it, because no font-level constant covers a
+  title-level ascent. *(This bullet first gave "13 at the platform face, 14 at the wide face", a
+  standalone-svg figure that the drawn graph does not reproduce, as the fix-round audit found.)*
+- **pytest-timeout uses the `thread` method, not the default `signal`.** Measured under the hang
+  mutant on `tests/test_ui_browser_inspector_blocks.py`: `signal` marks the test FAILED and the run
+  then hangs, still running 330s later with `-x`. The stack dump shows the main thread waiting in
+  Playwright's greenlet dispatcher. `thread` ends the run with exit 1 after 60.7s. The cost is that
+  no further test runs after a hang, and the dump does not name the test (its frame is in another
+  greenlet). The progress line names the module.
+- **§8.2's premise was half right.** Most tests that hit the hang mutant were already failing, at
+  `wait_for_selector`'s own 30s timeout. Under that mutant a 7-test module took about 3 minutes
+  and did NOT stall. The stall was real in one place: the full CI browser command was still running
+  after 45 minutes, inside `tests/test_ui_browser_inspector_blocks.py`. That module alone was still
+  running at 300s.
+- **The hook lives in `tests/browser_timeout.py`**, loaded by one `pytest_plugins` line in
+  `tests/conftest.py`, which is already past the ceiling. Its unit tests build markers by name,
+  because a literal `pytest.mark.browser` would make `tests/test_ci_workflow.py` treat them as a
+  browser suite that CI must list.
+- **`tests/test_ui_browser_graph.py`'s long-title test** expected the old space before "…"
+  (`"…With A …"`). It now asserts the 28th character is a space and expects it trimmed.
+- **`_open_ring` and `_CUT_LENGTHS_JS`** moved into `tests/ui_graph_geometry.py`, so the new module
+  shares them and does not copy them.
+
+**Mutation proofs** (macOS; each mutation applied, confirmed applied, and restored byte for byte):
+
+| Mutation | Modules run | Red |
+|---|---|---|
+| `LABEL_GAP` 2 → 10 / → 4 / → 0 | labels, layout, refit | each: 7 FAIL (every (14c) and (14d) run), and a teardown ERROR in all 53 tests the pin wraps (labels 13 + layout 40; the 5 refit tests are not wrapped). Measured on the fix-round tree (`620f759` plus this round). First recorded as 47: at `d016a8f` the labels module had 7 tests, and (16) added 6 in `f4ed74d`, without the count being re-derived. *(At the §8.6 value, `LABEL_GAP` 4 → 10 / → 3 / → 2 / → 0: the same 7 FAIL and 53 teardown ERRORs each. Every other row of this table re-derived identically at 4, down to the failing tests.)* |
+| hang removed (`hangBelowCircle` not called) | same | 7 FAIL, the same 7 |
+| ascent fixed at 13 instead of measured | same | 7 FAIL, the same 7 |
+| root hung too | same | 3 FAIL: (14b), (15d) and (15g) |
+| cut by code unit (the old `cut`) | graph, labels, layout, refit | 8 FAIL: all six (16), the graph module's long-title test, and the 320 wide cap-ring run |
+| code points instead of graphemes | same | 2 FAIL: (16) zwj-native and exactly-the-cap |
+| `trimEnd()` dropped | same | 3 FAIL: (16) space-at-the-cap, the long-title test, the 320 wide cap-ring run |
+| fallback by code unit (`split("")`) | same | 2 FAIL: (16) zwj-absent and astral-absent |
+| `LABEL_MAX_CHARS` 28 → 29 | same | 4 FAIL: (15m) at the oracle; (16) space-at-the-cap and zwj-absent, and the long-title test, on their expected text. Every other pinned test only at teardown |
+| hook: a test's own timeout overridden / non-browser test timed / `signal` method / method dropped / plugin unloaded | `tests/test_browser_timeout.py` | 1 FAIL each |
+
+**Survivor, judged equivalent:** fitText's upper bound computed from code units
+(`title.length`) instead of graphemes. A cut at or past the title's grapheme count is the whole
+title, which the early return has already rejected. And a title with more graphemes than the cap
+has at least as many code units, so both give the cap.
+
+**The hang mutant (`else hi = mid;`), before and after §8.2:** without the plugin, the full CI
+browser command was still running after 45 minutes (killed). With it, the stalled module ends
+with exit 1 after 60.7s.
+
+**Verification on `f4ed74d`'s code** (exit codes read from files): `ruff check` 0; `mypy src/` 0
+(224 files); the exact `ci.yml` browser command three times, 209 passed each time (196 before §8,
+plus 13 new); `tests/test_ci_workflow.py` and `tests/test_eval_workflow_contract.py`, 30 passed
+and 1 skipped (the skip is that module's empty `HERMETIC_EVAL_TESTS`). Linux
+(`mcr.microsoft.com/playwright/python:v1.63.0-noble` plus `fonts-dejavu-core`; DejaVu Sans is the
+default sans, and an emoji font is present): the graph, labels, layout and refit modules, 80
+passed. The image was removed afterwards. The full default suite against a sibling test database
+(`second_brain_test_co` on 5434): exit 0, 8,850 passed, 4 skipped, 318 deselected, coverage
+94.36%.
+
+### 8.5 Fix round on `620f759` (2026-10-13)
+
+The review and the audit of `620f759` each reported findings. All are closed in one commit (the
+fix-round commit that adds this subsection):
+
+- **`BROWSER_TEST_TIMEOUT_S` was unpinned** (audit, MEDIUM). pytest-timeout times a test only when
+  its timeout is above 0. The hook's tests compared the marker with the constant, so 0, None or
+  6000 stayed green, and the audit showed the hang mutant with 0 stalling past 300s.
+  `tests/test_browser_timeout.py` now pins the value. It must be a positive number (not a bool),
+  at least 10× the slowest measured phase (1.54s), and at most 300s, a quarter of the browser job's
+  20-minute `timeout-minutes`. The per-item marker's argument must also be positive. Mutants 0,
+  None, 6000, True and 5 each go red.
+- **§8.4's "all 47 tests the pin wraps"** was 53 at HEAD. Re-derived above and bound to the tree.
+- **"14 at Verdana" did not reproduce** in the drawn graph. It is corrected in `graph.js`, §8.1,
+  §8.4 and `tests/test_ui_browser_graph_labels.py`, with the measured px/unit distinction.
+- **`tests/conftest.py` grew without its module-docstring pointer.** It now has one, digit-free,
+  and the inline comment gives the reason the line must live there: `pytest_plugins` can only be
+  declared in a conftest or an already-loaded plugin.
+- **(a) The halo.** The note asked for "ink sits below the box ascent, Å by ~1.8 > 1.5". Measured,
+  that premise is false. In the drawn graph Å's ink tops out 0.36–0.58 units under the box at the
+  platform face, and 0.05–0.27 units OVER it at Verdana, because rounding trims the box. A Latin
+  capital's ink does sit 3.4–3.9 units under it. So `graph.js` states the measured figures, and
+  this is recorded as a **known limit, accepted**: an accented capital's 1.5-unit halo can reach
+  about 0.5 units into a resting circle's stroke and about 1.3 into a focused ring. The halo is
+  painted in the panel colour, so the effect is a sliver cut from the circle's outline, under that
+  one glyph. Raising `LABEL_GAP` to 4 would clear it. That is the lead's call, not taken here.
+  *(Superseded by §8.6. The lead ruled to fix it, not accept it, and the gap is now 4. The "0.05–0.27
+  OVER the box" figures were also a measurement artefact: they compared a lone glyph's ink with a
+  PLAIN label's box. A label that contains the accent has a taller box, and its ink reaches the box's
+  top but not past it.)*
+- **(b) The (14c) stroke check** now reads the circle's WIDEST stroke: the focus ring, from
+  graph.css's loaded `.local-graph a.node:focus-visible circle` rule via the CSSOM. A missing rule
+  is a failure. Mutants: the focus ring 3 → 5, and the rule's selector renamed, each turn all 7
+  hang runs red.
+- **(c) graph.css's own-circle rows** are now the measured 2.5 / 2.8 / 2.4px (root) and 1.5 / 1.9
+  / 1.8px (neighbour), not rounded to "3px" and "2px".
+- **(d) §8.1's mutant list** named 4 twice. De-duplicated.
+
+### 8.6 Ruling: `LABEL_GAP` 4, so no label's ink plus halo reaches the focus ring (2026-10-13)
+
+**Supersedes §8.5's accepted limit.** The lead ruled that a label's painted extent must clear the
+circle's widest painted stroke, not merely its box. The painted extent is its ink plus the 3-unit
+halo graph.css strokes round it, and the widest stroke is the focus ring.
+
+**The measurement, redone on the labels themselves.** §8.5 compared a lone glyph's canvas ink with
+a plain label's box and found accented capitals reaching 0.05–0.27 units over it in Verdana. That
+does not happen to a real label. A label that CONTAINS the accent gets a box that rises higher (Å
+in Verdana: its box rises 10.205px above its baseline, where a plain label's rises 10px, at 320px),
+and the hang is measured on that box. Measured in
+the drawn graph on accented labels (Å É Ö À) and stacked-diacritic labels (Ǻ Ấ Ǖ Ḗ Ṍ, Ů Ő Ű Č Ř,
+Ḯ Ǘ Ǜ Ẫ), at both faces and at 320, 400 and 1280px, ink rose over its own box by at most 0.000.
+
+**The arithmetic.** The painted label reaches 0 (ink over the box) + 1.5 (half the halo) above its
+box top. The focus ring reaches 1.5 (half its 3-unit stroke) below the circle's `r`. At gap 3 the
+two touch, with zero clearance. 4 is the smallest whole value that clears them, by 1.0. That is
+the lead's estimate, with the overreach term measured at 0 rather than 0.27.
+
+**What changed.**
+- `graph.js`: `LABEL_GAP` 2 → 4, and the rationale rewritten with the arithmetic.
+- `_SPEC_LABEL_GAP` 2 → 4.
+- (14c) adds an ink-plus-halo clearance to every label it checks, ink measured with a canvas
+  `measureText` of the shown text in the label's computed font at its device size. Its run ends on
+  a ring of accented capitals: "Ångström Synthetic Note", "Économie…", "Ölfeld…", "Àrbre…". A
+  precondition requires each accent to rise over a plain capital's ink.
+- The clearance is STRICT: the halo must clear the ring by more than rounding. At gap 3 the margin
+  is ±0.000, and a non-strict check went red at two of the three wide widths and green at the third
+  on float noise alone.
+- graph.css's vertical table re-measured at 4: 42/53/50, 17/21/20, root 2.5/2.8/2.4px, neighbour
+  3.0/3.9/3.6px. `graph.js`'s `ROOT_LABEL_GAP` comment now says 42 to 53px.
+
+**Mutation proofs** (labels module, each run twice, identical both times):
+
+| Mutation | Red |
+|---|---|
+| `LABEL_GAP` 4 → 3, alone | all 7 (14c) and (14d) runs, at the exact gap; 13 teardown ERRORs |
+| `LABEL_GAP` 4 → 2, alone | the same |
+| `LABEL_GAP` AND `_SPEC_LABEL_GAP` 4 → 3 (the exact gap and the pin both satisfied) | 4: (14c) at 320, 400 and 1280 wide, where the halo touches the ring, and (14d). The platform runs stay green, because there the accent's ink sits 0.36–0.58 under its box |
+| `LABEL_GAP` AND `_SPEC_LABEL_GAP` 4 → 2 | all 7 |
+
+The last two rows are the ones that matter. With the exact-gap check and the pin both moved out of
+the way, the ink-plus-halo clearance alone turns gap 3 and gap 2 red.
+
+**Re-derived at 4.** §7.4's table is identical row for row, failing tests included. §8.4's rows
+are identical too, with the `LABEL_GAP` row now read as 4 → 10 / 3 / 2 / 0: 7 FAIL and 53 teardown
+ERRORs each.
+
+### 8.7 Rebased onto `6a82db2`; pytest-timeout joins `MEASURED_PINS` (2026-10-13)
+
+Master's PR #21 restructured `tests/test_dev_dependency_pins.py`. Every capped `dev` pin now needs a
+`MEASURED_PINS` entry, enforced by `test_every_capped_dev_pin_is_measured`, and the admits and
+next-minor checks run over every entry. The pytest-timeout pin now follows that structure:
+`MEASURED_PYTEST_TIMEOUT_VERSION = "2.4.0"` and `MEASURED_PYTEST_TIMEOUT_CEILING = "2.5"`, entered in
+`MEASURED_PINS`. The old standalone test that checked both the cap and the admits is replaced by
+`test_pytest_timeout_is_capped_at_the_measured_ceiling`, which checks the cap only, because the
+generic tests now do the admits half. 2.4.0 was re-checked as the newest release on PyPI
+(`pip index versions`). In pyproject.toml the `dev` line carries the pin beside master's `ruff<0.18`
+and `mypy<2.5`, and master's comment lines are kept verbatim. Against master, the file changes only
+by that line and the added evidence block.
+
+Mutation proofs (`tests/test_dev_dependency_pins.py`):
+
+| Mutation | Red |
+|---|---|
+| the `MEASURED_PINS` entry dropped | `test_every_capped_dev_pin_is_measured` |
+| the pyproject cap `<2.5` → `<2.6` | `test_pytest_timeout_is_capped_at_the_measured_ceiling` |
+| the pyproject floor `>=2.4.0` → `>=2.4.1` | the admits check for pytest-timeout |
+| the ceiling constant `"2.5"` → `"2.6"` | the next-minor check and the cap test |
+| the version constant `"2.4.0"` → `"2.3.1"` | the admits check and the next-minor check |

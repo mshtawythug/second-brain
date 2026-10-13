@@ -590,7 +590,36 @@ browser = ["playwright>=1.40"]
 # than substring-matched. Move a bound here and that constant must move with it —
 # and so must MEASURED_RUFF_VERSION / MEASURED_MYPY_VERSION, the measured release
 # each ceiling is the next minor above (the bound must admit it).
-dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.17", "pytest-mock>=3.14", "ruff>=0.7,<0.18", "mypy>=1.13,<2.5", "reportlab>=4.0", "types-PyYAML>=6.0"]
+# ---------------------------------------------------------------------------
+# pytest-timeout>=2.4.0,<2.5 — MEASURED 2026-10-12 on fix/phase5-followups.
+#
+# WHAT IT IS FOR. tests/browser_timeout.py gives every `browser`-marked test a
+# 60s timeout, so a page that loops forever FAILS the run instead of stalling
+# it. Playwright's `page.evaluate` has no timeout of its own. Under graph.js's
+# fitText hang mutant (`else hi = mid;`), the CI browser command was still
+# running after 45 minutes, stalled in tests/test_ui_browser_inspector_blocks.py,
+# and that module alone was still running after 300s. With the plugin, the same
+# module exits 1 after 60.7s.
+#
+# MEASURED on 2.4.0, the newest release (`pip index versions`), with pytest
+# 9.1.1 on Python 3.11.15 (macOS): the CI browser command is all green with the
+# timeout in place, and under the hang mutant the run ends as above. The method
+# is `thread`, not the default `signal`. With `signal` the hung test was reported
+# FAILED and the run then hung anyway, because the signal lands in Playwright's
+# greenlet dispatcher (measured, with -x, still running after 330s).
+#
+# WHY IN `dev`, NOT `browser`. `--strict-markers` is in addopts, so
+# `pytest.mark.timeout` is a hard error wherever the plugin is missing, and the
+# hook's own unit tests (tests/test_browser_timeout.py) run in the default
+# suite. Every CI job installs `dev`; the browser job installs `dev,browser`.
+#
+# THE FLOOR is the one release measured, not a judgement that 2.3.x fails: 2.3.1
+# was not run. THE CAP is the next unreleased minor above it, by the rule the
+# coverage, ruff and mypy blocks above state. Self-enforced by
+# tests/test_dev_dependency_pins.py: MEASURED_PYTEST_TIMEOUT_VERSION /
+# MEASURED_PYTEST_TIMEOUT_CEILING, entered in MEASURED_PINS, so the admits and
+# next-minor checks run over it. Move this bound and those must move with it.
+dev = ["pytest>=8.3", "pytest-cov>=5.0", "coverage<7.17", "pytest-mock>=3.14", "pytest-timeout>=2.4.0,<2.5", "ruff>=0.7,<0.18", "mypy>=1.13,<2.5", "reportlab>=4.0", "types-PyYAML>=6.0"]
 
 [project.scripts]
 brain = "brain.cli:app"
