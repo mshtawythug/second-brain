@@ -254,7 +254,10 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Audit round 9 — plan | `f73d694` | this file: §10.9 (validator test-existence check), §10.16 |
 | Round 9 — review folded in | `2e01ea0` | `ui/context.py` (`validate_host` by resolved address, `address_class`), `ui/security.py`, `cli_ui.py`, CHANGELOG, guide, this file §10.15, `HOST_SPELLINGS` table, class tests |
 | Round 9 — E303 | `3f2bf65` | `test_ui_security.py` blank line |
-| Round 9 — plan | **the commit that added this row** | this file: §10.9, §10.16 |
+| Round 9 — plan | `6f6e3ba` | this file: §10.9, §10.16 |
+| Final — code | `f995721` | `ui/server.py` (only EADDRINUSE is busy; `_bind_failure`), `ui/context.py` (hostname syntax, zoneless link-local), CHANGELOG, `HOST_SPELLINGS` rows, probe-class tests, four E303 spots in untouched test files |
+| Final — tests | `98c99f6` | `test_cli_ui.py`: both busy phrasings forbidden; the EACCES remediation asserted |
+| Final — plan | **the commit that added this row** | this file: §10.9, §10.17 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -436,10 +439,11 @@ Run from the repository root with `python` and the script on stdin. Result at `c
 superseded and marked, exit 0. At `af22825` (round 6): 83/83, 17 superseded and marked, exit 0. At `9d8024f` (round 7): 92/92, 18 marked, exit 0 — and
 again after the merge of `second-brain/master` (`136030b`): unchanged, as a merge preserves every
 cited SHA. At `08c1ac3` (round 8): 98/98, 18 marked, exit 0. At `f73d694` (round 9, first half): 106/106, 27 marked,
-exit 0. Result at the commit that added this sentence (round 9, with the review folded in):
-**round 0 22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6
-9/9, round 7 9/9, round 8 6/6, round 9 8/8 + 10/10 — 116/116; 43 entries superseded at HEAD,
-every one marked; exit 0.** The address-based restructure superseded 16 entries at once; the
+exit 0. At `6f6e3ba` (round 9 with the review folded in): 116/116, 43
+marked, exit 0. Result at the commit that added this sentence (the final commit): **round 0
+22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round
+7 9/9, round 8 6/6, round 9 8/8 + 10/10 + 9/9 — 125/125; 44 entries superseded at HEAD, every one
+marked; exit 0.** The address-based restructure superseded 16 entries at once; the
 validator listed all of them before any was marked. Its
 first run after round 9 flagged nine entries: six whose CLI code moved into `validate_host`, and
 three whose text still applies but whose TEST had become a row of the new table — the drift the
@@ -936,6 +940,7 @@ L-8 port probe uses the IPv6 family
   red at:  assert resolve_port(free, host=wildcard
 
 L-8 port probe still sees a busy IPv6 port
+  SUPERSEDED at HEAD by the final commit (`98c99f6`: only EADDRINUSE is busy; the catch-all `except OSError: return False` is gone); use RF-1, RF-3
   file:    src/brain/ui/server.py
   replace: '        except OSError:\n            return False\n    return True\n'
   with:    '        except OSError:\n            return True\n    return True\n'
@@ -1481,6 +1486,7 @@ R9-7 the probe sets IPV6_V6ONLY for IPv6 only
 
 ```text
 R9-8 classify by the RESOLVED address (resolution disabled = spelling only)
+  NOTE: weaker than its name. Appending "!" does not disable resolution for a ZONED spelling — the resolver reads everything after `%` as the zone, so `::%!` still resolves to `::`. Valid for its target row (`0`); the faithful mutation is R9-18
   file:    src/brain/ui/context.py
   replace: '            bare, None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST\n'
   with:    '            bare + "!", None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST\n'
@@ -1559,6 +1565,83 @@ R9-17 L2: the zone refusal names zone IDs exactly
   count:   1
   test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[fe80::1%en0-refused-zone IDs (%\u2026) are not supported]
   red at:  assert expected in result.output
+
+```
+
+**Round 9 — against `98c99f6`** (the final commit: only "in use" is busy; non-addresses and zoneless link-local refused; R9-18 is the faithful classify-by-spelling mutation). Verified with the STRICT clause 4 (§10.17).
+
+```text
+R9-18 classify by the RESOLVED address (faithful: resolution never succeeds)
+  file:    src/brain/ui/context.py
+  replace: '    try:\n        infos = socket.getaddrinfo(\n'
+  with:    '    try:\n        raise socket.gaierror\n        infos = socket.getaddrinfo(\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[0:0::0-wildcard-::]
+  red at:  assert result.exit_code == 0
+
+RF-1 the catch-all OSError -> busy is gone
+  file:    src/brain/ui/server.py
+  replace: '            if exc.errno == errno.EADDRINUSE:\n                return False\n            raise _bind_failure(host, port, exc) from exc\n'
+  with:    '            return False\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_an_address_this_machine_does_not_own_is_reported_as_such
+  red at:  assert "is not an address this machine owns" in message
+
+RF-2 an unowned address is not reported as busy (real probe)
+  file:    src/brain/ui/server.py
+  replace: '            if exc.errno == errno.EADDRINUSE:\n                return False\n            raise _bind_failure(host, port, exc) from exc\n'
+  with:    '            return False\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[1.2.3.4-unowned-is not an address this machine owns]
+  red at:  assert busy not in result.output
+
+RF-3 EADDRINUSE still means busy
+  file:    src/brain/ui/server.py
+  replace: '            if exc.errno == errno.EADDRINUSE:\n                return False\n'
+  with:    '            if False:\n                return False\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_only_address_in_use_means_busy
+  red at:  assert "already in use" in _probe_with
+
+RF-4 a name that does not resolve says so
+  file:    src/brain/ui/server.py
+  replace: '                f"--host {host} does not resolve to an address on this machine "\n'
+  with:    '                f"--host {host} cannot be bound "\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_name_that_does_not_resolve_is_reported_as_such
+  red at:  assert "does not resolve to an address on this machine" in message
+
+RF-5 a privileged port is a permission error
+  file:    src/brain/ui/server.py
+  replace: '    if exc.errno == errno.EACCES:\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_a_privileged_port_is_a_permission_error_not_busy
+  red at:  assert "ports below 1024 need privileges" in message
+
+RF-6 any other failure names its cause
+  file:    src/brain/ui/server.py
+  replace: '        f"--host {host} cannot be bound on this machine ({exc.strerror or exc})."\n'
+  with:    '        f"--host {host} cannot be bound on this machine."\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_any_other_bind_failure_is_reported_not_called_busy
+  red at:  assert "Invalid argument" in message
+
+RF-7 a non-address, non-hostname is refused
+  file:    src/brain/ui/context.py
+  replace: '        if not _HOSTNAME.fullmatch(bare):\n'
+  with:    '        if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[127.0.0.1:8080-refused-is not an IP address or a hostname]
+  red at:  assert result.exit_code == 2
+
+RF-8 a zoneless link-local address is refused
+  file:    src/brain/ui/context.py
+  replace: '    if isinstance(spelled, ipaddress.IPv6Address) and spelled.is_link_local:\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_every_host_spelling_does_what_the_table_says[fe80::1-refused-link-local addresses need a zone ID]
+  red at:  assert result.exit_code == 2
 
 ```
 
@@ -1697,3 +1780,40 @@ tree (§10.9).
 is the headline: disable the resolution step — classify by spelling again — and `0` binds. R9-9
 shows the layering: with the zone rule off, `::%` is STILL refused, by the numeric-disagreement
 rule, so the test goes red only at the exact phrase.
+
+### 10.17 The final commit (2026-10-13), and a stricter mutation harness
+
+**A flaw in every round's clause 4, found while answering "classify by spelling must turn `::%`
+red".** The harness checked "red at the targeted assertion" by finding the 'red at' text
+ANYWHERE in pytest's output. A long traceback prints the test's source UP TO the failing line, so
+a needle on an EARLIER line of the test also matched. **Every one of the 116 catalogued entries
+was re-verified STRICTLY**, each at its own round SHA, in a separate worktree: the needle must be
+on the failing `>` line or in its `E` lines. **Result: 116/116 PASS** — the loose check had
+produced no false pass in the catalog. It had produced one outside it: R9-18, first proven with the
+loose check, really fails at a different line; its needle was corrected before cataloguing. From
+here every mutation is run with the strict check, which immediately found two weak assertions in
+this commit's own new tests (below).
+
+**R9-8 was weaker than its name** (NOTE on its entry): for a zoned spelling the resolver reads
+everything after `%` as the zone, so its `"!"` suffix did not disable resolution. The faithful
+classify-by-spelling mutation is R9-18 (`raise socket.gaierror` before the lookup). Alone it
+turns nine rows red — `0`, `127.1`, `0x7f.1`, `010.0.0.1`, `::ffff:127.0.0.1`, `::0` and `0:0::0`
+(no longer recognised as the wildcard), `0:0:0:0:0:0:0:1`, `FD00:0:0::5` — but **not** `::%`,
+which the zone rule refuses independently. With the zone rule ALSO off, all nine zone rows go red
+and `::%` fails at `assert 0 == 2`: accepted, binding the IPv6 wildcard with no notice — the
+original bug. `::%` has two independent guards.
+
+**The final commit** (`f995721`, `98c99f6`) — team-lead's finding, broadened by the audit:
+
+| Item | Fix |
+|---|---|
+| Every bind failure was "busy" | `_port_is_free`'s `except OSError: return False` reported an unowned address, an unresolvable name and a privileged port as "already in use" / "no free port found". Now only `EADDRINUSE` is busy. `EADDRNOTAVAIL` (49 on macOS, 99 on Linux, named via `errno`) → "is not an address this machine owns"; `socket.gaierror` → "does not resolve to an address on this machine"; `EACCES` → "permission denied … ports below 1024 need privileges; pass --port 1024 or higher"; anything else → "cannot be bound on this machine (<cause>)". **`EACCES` is deliberately NOT busy:** the auto-port bump moves by one, stays inside the privileged range, and would hide the cause. Each class has a test through the injected socket factory; `EADDRINUSE` keeps its two |
+| Non-addresses | `validate_host` refuses a value that is neither an IP address nor an RFC 1123 hostname — `127.0.0.1:8080`, `http://127.0.0.1`, `0.0.0.0/0` — before any bind |
+| Zoneless link-local | `fe80::1` is refused: it binds only with a zone, and zones are refused (N1) |
+| Table | `HOST_SPELLINGS` gains every case; its "unowned" rows run the REAL probe (`1.2.3.4`, `fd00::5`, `brain-2.lan` → exit 1 with the owning/resolving message). `127.0.0.2` is platform-dependent and asserted per platform: macOS owns only `127.0.0.1` of 127/8 (exit 1), Linux binds the whole block (exit 0). Every row forbids BOTH busy phrasings |
+| Two weak assertions the strict harness found | forbidding only `"in use"` missed the auto-port wording "no free port found"; asserting "permission denied" could not tell the `EACCES` branch from the generic one (strerror says it too). Both fixed in `98c99f6` |
+| Scout law | four triple-blank-line spots (ruff 0.17.0 preview E303) in `test_backup_create`, `test_search_explain`, `test_ui_browser_graph`, `test_ui_static_behaviour` — five blank-line deletions, nothing else; `tests/` is now clean under the preview check |
+
+**Mutation evidence (final):** 9 guards — R9-18 and RF-1 to RF-8 — each on all five clauses with
+the STRICT clause 4, against `98c99f6` on a clean tree. RF-1 is the headline: restore the catch-all
+OSError → busy and the unowned-address test goes red. L-8 (round 2) is superseded by it and marked.
