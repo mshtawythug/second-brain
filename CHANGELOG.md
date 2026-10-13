@@ -122,10 +122,14 @@ git tag scheme:
   `brain ui --host 0.0.0.0` (or `::`) bound its port even when another
   program already listened on that port's loopback address, and the
   loopback URL it printed and opened — token included — reached that
-  program instead. A wildcard bind no longer shares a port: `brain ui` moves
-  to the next free one, or with `--no-auto-port` says the port is in use. One
-  side effect, on every platform: restarting a wildcard bind while the last
-  run's connections are still closing may land on the next port.
+  program instead — and a program could take that loopback port after
+  `brain ui` had bound it, too. A wildcard bind no longer shares its port in
+  either order: it will not bind over another program's loopback listener
+  (`brain ui` moves to the next free port, or with `--no-auto-port` says the
+  port is in use), and it also holds its own loopback address, so nothing can
+  bind there afterwards. One side effect, on every platform: restarting a
+  wildcard bind while the last run's connections are still closing may land
+  on the next port.
 - **`brain ui --port` outside 1–65535 printed a traceback**, as did an
   auto-port search walking past 65535; `--port 0` bound a different random
   port on each address. Each is now a usage error, and the search stops at

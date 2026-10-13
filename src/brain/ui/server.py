@@ -78,7 +78,9 @@ def _listen_socket(
     bind fails with EADDRINUSE and auto-port moves on. Linux refuses that
     overlap even with the option, so there it changes one thing only: a
     wildcard restart while old connections sit in TIME_WAIT steps to the next
-    port (or, with ``--no-auto-port``, reports the port in use).
+    port (or, with ``--no-auto-port``, reports the port in use). The other
+    order — a process binding loopback AFTER our wildcard — is closed by
+    :func:`_loopback_companion` (round 14).
     """
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
     # Creation may raise OSError; the caller reports that as "cannot open".
@@ -192,16 +194,58 @@ def bind_listeners(
     One per resolved address, each in its own family (round 10: a name
     resolving only to IPv6 was probed as IPv4). If any one fails, every socket
     already opened is closed before the error propagates.
+
+    Two refinements, both review round 14. A specific address under a wildcard
+    of its own family is already covered by it, so it is not bound again —
+    binding it first would make the wildcard's bind, which carries no
+    ``SO_REUSEADDR``, fail on every port. And each wildcard gets a loopback
+    companion: see :func:`_loopback_companion`.
     """
+    wildcards = {a.version for a in addresses if a.is_unspecified}
     sockets: list[socket.socket] = []
     try:
         for address in addresses:
+            if address.version in wildcards and not address.is_unspecified:
+                continue
             sockets.append(_open_listener(host, str(address), port, socket_factory))
+            if address.is_unspecified:
+                companion = _loopback_companion(host, address, port, socket_factory)
+                if companion is not None:
+                    sockets.append(companion)
     except BaseException:
         for sock in sockets:
             sock.close()
         raise
     return sockets
+
+
+def _loopback_companion(
+    host: str,
+    wildcard: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    port: int,
+    socket_factory: SocketFactory,
+) -> socket.socket | None:
+    """Also hold the wildcard's loopback address, or ``None`` where it cannot be.
+
+    Review round 14, the other bind order of round 13's leak: once our
+    wildcard listens on ``0.0.0.0:P``, macOS lets another process bind
+    ``127.0.0.1:P`` with ``SO_REUSEADDR`` and receive every loopback
+    connection — the tokened URL we open included (measured, both families).
+    Holding ``127.0.0.1:P`` (``::1:P``) ourselves makes that bind fail, even
+    with ``SO_REUSEPORT``. It exposes nothing new: loopback is inside the
+    wildcard, and it is served like any other socket.
+
+    Linux refuses this bind against our own wildcard (EADDRINUSE) and needs no
+    companion, since it refuses the foreign bind too, so exactly that failure is
+    tolerated. Any other failure propagates. One gap remains on macOS: a
+    process that binds loopback in the instant between our two binds turns
+    this companion into EADDRINUSE as well.
+    """
+    loopback = "::1" if wildcard.version == 6 else "127.0.0.1"
+    try:
+        return _open_listener(host, loopback, port, socket_factory)
+    except _PortBusy:
+        return None
 
 
 def _bind_failure(host: str, port: int, exc: OSError) -> BrainError:

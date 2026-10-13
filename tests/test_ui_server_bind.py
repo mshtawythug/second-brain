@@ -553,3 +553,145 @@ def test_a_wildcard_never_binds_over_another_process_on_loopback(
         port, sockets = claim_port(taken, host=wildcard, auto=True)
         _close(sockets)
         assert port != taken, "the wildcard bound over another process's loopback port"
+
+
+# --------------------------------------------------------------------------
+# Review round 14 — the other order: nothing binds our loopback after us
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("wildcard", "loopback", "family"),
+    [("0.0.0.0", "127.0.0.1", socket.AF_INET), ("::", "::1", socket.AF_INET6)],
+    ids=["ipv4", "ipv6"],
+)
+def test_a_wildcard_also_holds_its_loopback_address(
+    wildcard: str, loopback: str, family: int
+) -> None:
+    """Deterministic, so every platform runs it: a wildcard bind also binds and
+    listens on its loopback address, with SO_REUSEADDR, and serves it."""
+    factory = _Factory()
+    port, sockets = claim_port(
+        8765, host=wildcard, socket_factory=factory  # type: ignore[arg-type]
+    )
+    assert port == 8765
+    assert [sock.bound for sock in factory.made] == [(wildcard, 8765), (loopback, 8765)]
+    assert sockets == factory.made  # type: ignore[comparison-overlap]
+    companion = factory.made[1]
+    assert companion.family == family
+    assert companion.listening and not companion.closed
+    assert (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) in companion.options
+
+
+@pytest.mark.parametrize(
+    ("wildcard", "loopback"), [("0.0.0.0", "127.0.0.1"), ("::", "::1")], ids=["ipv4", "ipv6"]
+)
+def test_a_companion_refused_as_linux_refuses_it_is_tolerated(
+    wildcard: str, loopback: str
+) -> None:
+    """Linux refuses a loopback bind beside our own wildcard (EADDRINUSE) — and
+    refuses a foreign one too, so it needs no companion. Exactly that failure
+    is tolerated: the port is NOT treated as busy, and the refused socket is
+    closed."""
+    factory = _Factory(refuse={loopback: OSError(errno.EADDRINUSE, "in use")})
+    port, sockets = claim_port(
+        8765, host=wildcard, auto=False, socket_factory=factory  # type: ignore[arg-type]
+    )
+    assert port == 8765
+    assert sockets == [factory.made[0]]  # type: ignore[comparison-overlap]
+    assert factory.made[1].closed, "the refused companion socket leaked"
+
+
+def test_any_other_companion_failure_is_reported_and_releases_the_wildcard() -> None:
+    factory = _Factory(refuse={"127.0.0.1": OSError(errno.EINVAL, "Invalid argument")})
+    with pytest.raises(BrainError, match="cannot be bound"):
+        claim_port(8765, host="0.0.0.0", socket_factory=factory)  # type: ignore[arg-type]
+    assert len(factory.made) == 2
+    assert all(sock.closed for sock in factory.made), "a socket leaked"
+
+
+def test_a_specific_address_under_its_own_wildcard_is_not_bound_again() -> None:
+    """A name resolving to (127.0.0.1, 0.0.0.0): binding 127.0.0.1 first made
+    the wildcard's bind — no SO_REUSEADDR since round 13 — fail on macOS, on
+    every port. The wildcard covers it; ::1 has no IPv6 wildcard, so it binds."""
+    addresses = (
+        ipaddress.ip_address("127.0.0.1"),
+        ipaddress.ip_address("0.0.0.0"),
+        ipaddress.ip_address("::1"),
+    )
+    factory = _Factory()
+    port, _sockets = claim_port(
+        8765, host="brain-1.lan", addresses=addresses, socket_factory=factory  # type: ignore[arg-type]
+    )
+    assert port == 8765
+    assert [sock.bound for sock in factory.made] == [
+        ("0.0.0.0", 8765), ("127.0.0.1", 8765), ("::1", 8765),
+    ]
+
+
+def test_a_name_resolving_to_loopback_and_the_wildcard_binds_for_real() -> None:
+    """The same rule on REAL sockets, where it matters: with 127.0.0.1 bound
+    first, a wildcard bind (no SO_REUSEADDR) is refused — on macOS and on Linux
+    alike — so every port looked busy and the search ended "no free port"."""
+    addresses = (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("0.0.0.0"))
+    port, sockets = claim_port(DEFAULT_PORT + 4700, host="brain-1.lan", addresses=addresses)
+    try:
+        assert sockets[0].getsockname() == ("0.0.0.0", port)
+    finally:
+        _close(sockets)
+
+
+def _foreign_loopback_bind(family: int) -> socket.socket:
+    """A socket set up as a hostile local process would: SO_REUSEADDR, and
+    SO_REUSEPORT where it exists."""
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    if family == socket.AF_INET6:
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    return sock
+
+
+def _reverse_overlap_is_possible(family: int, loopback: str, wildcard: str) -> bool:
+    """Can a foreign SO_REUSEADDR loopback bind land beside a bare wildcard?
+
+    macOS: yes (measured). Linux refuses it, so the test below skips there."""
+    with socket.socket(family, socket.SOCK_STREAM) as ours:
+        if family == socket.AF_INET6:
+            ours.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        ours.bind((wildcard, 0))
+        ours.listen(1)
+        with _foreign_loopback_bind(family) as foreign:
+            try:
+                foreign.bind((loopback, ours.getsockname()[1]))
+            except OSError:
+                return False
+    return True
+
+
+@pytest.mark.parametrize(
+    ("family", "loopback", "wildcard"),
+    [
+        (socket.AF_INET, "127.0.0.1", "0.0.0.0"),
+        pytest.param(socket.AF_INET6, "::1", "::", marks=needs_ipv6),
+    ],
+    ids=["ipv4", "ipv6"],
+)
+def test_nothing_can_bind_our_loopback_after_our_wildcard(
+    family: int, loopback: str, wildcard: str
+) -> None:
+    """Review round 14, round 13's leak in the other order: once ``brain ui``
+    listened on ``0.0.0.0:P``, another process could bind ``127.0.0.1:P`` with
+    SO_REUSEADDR and accept the browser's tokened connection. REAL sockets:
+    after claim_port's wildcard, that bind must fail with EADDRINUSE."""
+    if not _reverse_overlap_is_possible(family, loopback, wildcard):
+        pytest.skip("this platform refuses a loopback bind beside a wildcard anyway")
+    port, sockets = claim_port(DEFAULT_PORT + 4600, host=wildcard, auto=True)
+    try:
+        with _foreign_loopback_bind(family) as intruder:
+            with pytest.raises(OSError) as excinfo:
+                intruder.bind((loopback, port))
+            assert excinfo.value.errno == errno.EADDRINUSE
+    finally:
+        _close(sockets)
