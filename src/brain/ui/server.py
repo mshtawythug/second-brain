@@ -57,10 +57,22 @@ def _probe_socket(
     for a ``::`` server that would have bound fine (phase-7 review round 3).
     """
     family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    # Creation may raise OSError; the caller reports that as "cannot open".
     sock = socket_factory(family, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if family == socket.AF_INET6:
-        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if family == socket.AF_INET6:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    except OSError as exc:
+        # The socket EXISTS here, so close it, and say what actually failed:
+        # "cannot open" would send the user looking for a missing address
+        # family that is present (review round 6).
+        sock.close()
+        name = "IPv6" if family == socket.AF_INET6 else "IPv4"
+        raise BrainError(
+            f"cannot configure an {name} probe socket for --host {address} "
+            f"({exc.strerror or exc})"
+        ) from exc
     return sock
 
 

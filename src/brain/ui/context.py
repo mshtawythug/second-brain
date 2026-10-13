@@ -170,13 +170,16 @@ def bind_address(host: str) -> str:
     An IP literal is also made canonical (review round 5) — ``FD00:0:0::5``
     becomes ``fd00::5`` and ``0:0:0:0:0:0:0:1`` becomes ``::1`` — so every
     consumer sees one spelling, the one a browser will send. A hostname is
-    returned unchanged.
+    lower-cased, for the same reason (review round 6).
     """
     bare = host[1:-1] if host.startswith("[") and host.endswith("]") else host
     try:
         return str(ipaddress.ip_address(bare))
     except ValueError:
-        return bare
+        # A hostname: lower-cased, because a browser lower-cases the host it
+        # sends and starlette compares Host case-sensitively, so `--host
+        # LOCALHOST` refused its own URL (review round 6).
+        return bare.lower()
 
 
 def bind_origin(host: str, port: int) -> str:

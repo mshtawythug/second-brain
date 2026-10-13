@@ -354,6 +354,27 @@ def test_a_non_ascii_token_is_refused_not_a_server_error(tmp_path: Path) -> None
     assert response.status_code == 403
 
 
+@pytest.mark.parametrize(
+    ("bind", "host", "status"),
+    [("LOCALHOST", "localhost:8765", 200), ("MyMac.LOCAL", "mymac.local:8765", 200),
+     ("MyMac.LOCAL", "evil.example", 400)],
+)
+def test_a_hostname_bind_is_matched_case_insensitively(
+    tmp_path: Path, bind: str, host: str, status: int
+) -> None:
+    """Round 6, item 2, through the real middleware. A browser lower-cases the
+    host before sending it; the allowlist must hold the same spelling."""
+    from brain.ui.context import bind_origin, host_allowlist
+
+    context = _context(
+        tmp_path, token="t", allowed_origin=bind_origin(bind, 8765),
+        allowed_hosts=host_allowlist(bind),
+    )
+    with _client(context) as client:
+        response = client.get("/api/health", headers={"Host": host, TOKEN_HEADER: "t"})
+    assert response.status_code == status
+
+
 def test_a_lan_address_bind_accepts_its_own_host_header(tmp_path: Path) -> None:
     """The working half: bind the LAN address and the phone's Host matches."""
     from brain.ui.context import host_allowlist

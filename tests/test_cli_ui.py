@@ -17,7 +17,8 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from brain.cli_ui import register_ui_commands
+from brain.cli_ui import PHONE_LINE, register_ui_commands
+from brain.ui.lan import WILDCARD_NOTICE
 from brain.ui.security import is_loopback
 from brain.ui.server import DEFAULT_PORT, resolve_port
 
@@ -301,8 +302,11 @@ def test_lan_without_a_network_exits_one_with_the_override(
     assert started.context_kwargs == {}
     # M-3 (phase-7 audit): the remedy reaches the user, as a message, not a
     # traceback. Exit code 1 alone was satisfied by an uncaught exception too.
+    # SystemExit is the no-traceback check. A `"Traceback" not in output`
+    # assertion stood here until round 6 and was vacuous: CliRunner keeps an
+    # uncaught exception in `result.exception` and never writes its traceback
+    # into `output`, so that line passed whatever happened.
     assert isinstance(result.exception, SystemExit), result.exception
-    assert "Traceback" not in result.output
     assert "Pass --host" in result.output, result.output
 
 
@@ -320,8 +324,7 @@ def test_wildcard_bind_warns_that_other_devices_are_refused(
         app, ["ui", "--host", wildcard, "--token", "x", "--no-open"]
     )
     assert result.exit_code == 0, result.output
-    assert "--lan" in result.output
-    assert "400" in result.output
+    assert WILDCARD_NOTICE in result.output, result.output
 
 
 def test_wildcard_bind_prints_a_loopback_url_not_the_bind_address(
@@ -332,8 +335,11 @@ def test_wildcard_bind_prints_a_loopback_url_not_the_bind_address(
         app, ["ui", "--host", "0.0.0.0", "--token", "x", "--no-open"]
     )
     assert result.exit_code == 0, result.output
+    # Negative FIRST, so the revert (printing the bind address) goes red here
+    # rather than at the positive check below — round 6 found negatives that
+    # had only ever been reached after a positive one had already failed.
+    assert "http://0.0.0.0" not in result.output, result.output
     assert "http://127.0.0.1:8765/#t=x" in result.output
-    assert "http://0.0.0.0" not in result.output
 
 
 def test_loopback_with_a_token_prints_the_tokened_url(
@@ -357,15 +363,23 @@ def test_the_phone_line_is_printed_only_for_lan(
     loopback = runner.invoke(app, ["ui", "--no-open"])
     lan = runner.invoke(app, ["ui", "--lan", "--no-open"])
     assert loopback.exit_code == 0 and lan.exit_code == 0
-    assert "Phone" not in loopback.output, loopback.output
-    assert "Phone" in lan.output, lan.output
+    # The real line, by constant: a negative check must name text the
+    # positive path actually prints, or it passes whatever happens (round 6).
+    assert PHONE_LINE in lan.output, lan.output
+    assert PHONE_LINE not in loopback.output, loopback.output
 
 
-def test_a_lan_bind_does_not_print_the_wildcard_warning(
-    app: typer.Typer, started: _Started
+@pytest.mark.parametrize("args", [["--lan"], []], ids=["lan", "loopback"])
+def test_a_non_wildcard_bind_does_not_print_the_wildcard_warning(
+    app: typer.Typer, started: _Started, args: list[str]
 ) -> None:
-    result = runner.invoke(app, ["ui", "--lan", "--no-open"])
-    assert "Host allowlist" not in result.output
+    """Round 6, item 1: this asserted ``"Host allowlist" not in output`` — a
+    phrase the notice had not contained since ``8748b70``, so ``if True:`` on
+    the notice check passed every test. It now names the notice itself, which
+    the wildcard test above proves IS printed when it should be."""
+    result = runner.invoke(app, ["ui", *args, "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert WILDCARD_NOTICE not in result.output, result.output
 
 
 def test_browser_url_carries_the_token_whenever_one_is_set() -> None:
@@ -630,3 +644,50 @@ def test_a_token_with_inner_spaces_and_symbols_is_accepted(
     result = runner.invoke(app, ["ui", "--token", "50% off #1", "--no-open"])
     assert result.exit_code == 0, result.output
     assert started.context_kwargs["token"] == "50% off #1"
+
+
+
+@pytest.mark.parametrize("spelling", ["LOCALHOST", "LocalHost"])
+def test_an_upper_case_localhost_binds_as_localhost(
+    app: typer.Typer, started: _Started, spelling: str
+) -> None:
+    """Round 6, item 2: a browser lower-cases the host, and starlette compares
+    Host case-sensitively, so ``--host LOCALHOST`` refused its own URL."""
+    result = runner.invoke(app, ["ui", "--host", spelling, "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["host"] == "localhost"
+    assert "http://localhost:8765/" in result.output
+
+
+class _SocketThatCannotBeConfigured:
+    """A socket whose ``setsockopt`` fails, recording whether it was closed."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def setsockopt(self, *args: object) -> None:
+        import errno
+
+        raise OSError(errno.ENOPROTOOPT, "Protocol not available")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_a_socket_that_cannot_be_configured_is_closed_and_reported() -> None:
+    """Round 6, item 3: ``setsockopt`` failing after the socket exists must
+    neither leak the socket nor be reported as "cannot open"."""
+    from brain.errors import BrainError
+
+    made: list[_SocketThatCannotBeConfigured] = []
+
+    def factory(family: int, kind: int) -> _SocketThatCannotBeConfigured:
+        made.append(_SocketThatCannotBeConfigured())
+        return made[-1]
+
+    with pytest.raises(BrainError) as excinfo:
+        resolve_port(8765, host="::", socket_factory=factory)  # type: ignore[arg-type]
+    message = str(excinfo.value)
+    assert "configure" in message, message
+    assert "cannot open" not in message, message
+    assert made and all(sock.closed for sock in made), "the probe socket leaked"
