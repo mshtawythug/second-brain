@@ -90,6 +90,8 @@ as any other committed fixture. Re-record after any of:
 - an ingest or deletion that changes the document set
 - a re-embed, or an embedder swap
 - a change to any key in the baseline's `config_signature`
+- a change to the ranking code (SQL or fusion) — e.g. `search.py`,
+  `search_vector_leg.py`, `rank_fusion.py`
 - an edit to `tests/eval/golden_corpus.yaml`
 - drift past the recency window in (2) above
 

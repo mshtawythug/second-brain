@@ -79,6 +79,7 @@ must not grow.
 | (b) filtered query keeps every match | M1 (post-filter starvation), M4 |
 | (c) floor honoured | M3 |
 | shape: no `<=>` in ORDER BY; tie-break present | M1, M2 |
+| zero-norm chunk excluded (review fix; NaN cosine) | M5 (the `1 - (e <=> q) >= floor` form), M3 |
 
 ## 4. Out of scope
 

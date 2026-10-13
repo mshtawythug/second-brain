@@ -295,3 +295,68 @@ def test_vector_leg_still_honours_the_cosine_floor(
     expected = [doc for _, doc in ranking[:keep]]
 
     assert _vector_leg_docs(conn, embedder, vector_sim_floor=floor) == expected
+
+
+# ---------------------------------------------------------------------------
+# Zero-norm embeddings: cosine is NaN and must never pass the floor
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("floor", [-1.0, 0.0, 0.25])
+def test_zero_norm_chunk_never_enters_the_vector_leg(
+    test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder, floor: float
+) -> None:
+    """A zero vector's cosine distance is NaN; it must be excluded, not ranked #1.
+
+    Postgres orders NaN above every number and evaluates ``NaN >= x`` as TRUE,
+    so a floor written as ``1 - (e <=> q) >= floor`` admits the row and
+    ``score DESC`` puts it first. The HNSW path never returned it (pgvector does
+    not index zero vectors for cosine), so the exact scan must exclude it
+    explicitly. Prod held 0 such chunks on 2026-10-13; this guards the latent
+    case: an embedder that emits all zeros, or a hand-edited row.
+    """
+    ids = []
+    for i in range(3):
+        result = ingest_document(
+            test_db,
+            embedder=fake_embedder,
+            doc=ExtractedDoc(
+                title=f"Synthetic zero-norm probe {i}",
+                content=f"synthetic zero norm probe body {i}",
+                content_type="note",
+                source_path=None,
+                metadata={},
+            ),
+            source_kind="manual",
+            source_external_id=f"manual:zero-norm-{i}",
+            tags=[],
+        )
+        assert result.document_id is not None
+        ids.append(result.document_id)
+    zero_doc = ids[0]
+    test_db.execute(
+        "UPDATE chunks SET embedding = array_fill(0, ARRAY[%s])::vector "
+        "WHERE document_id = %s",
+        [fake_embedder.dim, zero_doc],
+    )
+    # Precondition: the row really is zero-norm (cosine distance NaN).
+    nan_rows = test_db.execute(
+        "SELECT count(*) FROM chunks WHERE document_id = %s "
+        "AND (embedding <=> embedding) = 'NaN'::float8",
+        [zero_doc],
+    ).fetchone()
+    assert nan_rows is not None and nan_rows[0] >= 1
+
+    results = hybrid_search(
+        test_db,
+        embedder=fake_embedder,
+        query=_NO_FTS_QUERY,
+        limit=10,
+        vector_sim_floor=floor,
+        explain=True,
+    )
+    assert zero_doc not in [r.document_id for r in results]
+    assert all(
+        r.explain is None
+        or r.explain.vector_cosine is None
+        or not math.isnan(r.explain.vector_cosine)
+        for r in results
+    )
