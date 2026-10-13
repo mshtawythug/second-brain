@@ -11,6 +11,10 @@ debouncer + build lock. We swap two things in tests:
    ``mocker.patch`` is pytest-mock with automatic cleanup, NOT
    production monkey-patching — fine per CLAUDE.md.
 
+The debounce test also swaps the timer, via ``timer_factory=`` and
+``tests/wiki/manual_timer.py``, so it fires the debounce itself rather than
+sleeping against a real one.
+
 Tests don't sleep blindly; they synchronize on either ``threading.Event``s
 fired from the patched ``build_and_swap`` body, or short bounded waits
 guarded by ``_wait_for(predicate)`` helpers.
@@ -38,6 +42,7 @@ from brain.wiki.build_watcher import (
     main,
     run_watcher,
 )
+from tests.wiki.manual_timer import ManualClock
 
 # ---------------------------------------------------------------------------
 # Fake watchdog Observer.
@@ -106,6 +111,7 @@ def _start_watcher(
     debounce_seconds: float,
     on_build: Any = None,
     refresh_runner: Any = None,
+    timer_factory: Any = None,
 ) -> tuple[threading.Thread, _FakeObserver, Any]:
     """Run ``run_watcher`` in a background thread.
 
@@ -145,6 +151,7 @@ def _start_watcher(
             observer_factory=_factory,
             on_build=on_build,
             refresh_runner=refresh_runner,
+            **({"timer_factory": timer_factory} if timer_factory else {}),
         )
 
     thread = threading.Thread(target=_target, daemon=True)
@@ -248,11 +255,16 @@ def _make_result(build_id: str = "20260501-120000-abcdef") -> BuildResult:
 def test_debounce_coalesces_events(
     tmp_path: Path, mocker: MockerFixture
 ) -> None:
-    """10 modify events within 100ms produce exactly 1 ``build_and_swap`` call.
+    """10 modify events within one debounce window produce exactly 1
+    ``build_and_swap`` call.
 
-    Uses the real debouncer (``debounce_seconds=0.05`` for snappy
-    tests) and a ``mocker.patch`` on ``build_and_swap`` so we can both
-    count calls and avoid running ``npx``.
+    The debounce timer is a MANUAL one (``ManualClock``), fired by the
+    test when the quiet period ends. This test used to sleep 5ms between
+    events against a real 50ms timer, and under load a sleep overran the
+    window and split the burst into two builds (6 failures in 30 runs at a
+    load average around 55). Each event must reset the window: ten timers
+    at the full interval, all but the last cancelled. ``mocker.patch`` on
+    ``build_and_swap`` counts calls and avoids running ``npx``.
     """
     patched = mocker.patch(
         "brain.wiki.build_watcher.build_and_swap",
@@ -262,19 +274,18 @@ def test_debounce_coalesces_events(
     note = tmp_path / "note.md"
     note.write_text("# hi")
 
+    clock = ManualClock()
     thread, observer, _ = _start_watcher(
-        vault=tmp_path, debounce_seconds=0.05
+        vault=tmp_path, debounce_seconds=0.05, timer_factory=clock
     )
     try:
         for _ in range(10):
             observer.inject(FileModifiedEvent(str(note)))
-            time.sleep(0.005)
-        # Wait long enough for the debounce timer to fire and the
-        # build to complete.
-        _wait_for(lambda: patched.call_count >= 1, timeout=2.0)
-        # Give any spurious follow-up calls a chance to land before
-        # asserting the final count.
-        time.sleep(0.2)
+        assert [timer.interval for timer in clock.timers] == [0.05] * 10
+        assert clock.live() == [clock.timers[-1]], "an event did not reset the window"
+        # The quiet period ends: the one live timer fires, synchronously,
+        # and the build runs to completion before ``fire`` returns.
+        clock.timers[-1].fire()
     finally:
         # Stop the watcher: setting the observer's handler-state
         # stop_event isn't directly exposed; calling observer.stop()
