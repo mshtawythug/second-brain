@@ -201,6 +201,34 @@ def test_ui_tree_and_render_import_without_starlette_or_uvicorn() -> None:
 LAN_IP = "192.0.2.44"  # TEST-NET-1 (RFC 5737): synthetic
 
 
+#: The ONLY name resolution these tests see (review round 10): every CLI test
+#: resolves hostnames through this table, never through real DNS — `.lan`
+#: resolves on many home routers, and ISP NXDOMAIN hijacking answers the rest.
+FAKE_DNS: dict[str, list[str]] = {
+    "localhost": ["127.0.0.1", "::1"],
+    "brain-1.lan": ["192.0.2.20"],
+    # a public wildcard-DNS service answers this with 0.0.0.0 (round 10)
+    "0.0.0.0.nip.io": ["0.0.0.0"],
+    # IPv6-only, as Linux's /etc/hosts entry is (round 10, item 3)
+    "ip6-localhost": ["::1"],
+}
+
+
+def fake_resolver(
+    host: str, port: object, family: int = 0, type: int = 0, proto: int = 0, flags: int = 0
+) -> list[tuple[int, int, int, str, tuple[object, ...]]]:
+    """``socket.getaddrinfo``'s shape, answered from FAKE_DNS."""
+    import socket
+
+    if host not in FAKE_DNS:
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+    return [
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", (a, 0, 0, 0)) if ":" in a
+        else (socket.AF_INET, socket.SOCK_STREAM, 6, "", (a, 0))
+        for a in FAKE_DNS[host]
+    ]
+
+
 class _Started:
     """What the command handed to the (replaced) server layer."""
 
@@ -244,6 +272,12 @@ def started(
 
     monkeypatch.setattr(server, "build_context", fake_build_context)
     monkeypatch.setattr(server, "serve", fake_serve)
+    import functools
+
+    monkeypatch.setattr(
+        server, "resolve_bind_addresses",
+        functools.partial(server.resolve_bind_addresses, resolver=fake_resolver),
+    )
     monkeypatch.setattr(
         "brain.ui.lan.detect_lan_address", lambda *a, **k: LAN_IP
     )
@@ -749,6 +783,17 @@ HOST_SPELLINGS: list[tuple[str, str, str]] = [
     ("010.0.0.1", "refused", "is not a canonical IP address"),
     # an IPv6-only socket cannot bind an IPv4-mapped address (measured)
     ("::ffff:127.0.0.1", "refused", "IPv4-mapped IPv6 addresses cannot be bound"),
+    # idna rejects these inside getaddrinfo — a raw UnicodeError escaped (round 10)
+    (".", "refused", "is not an IP address or a hostname"),
+    ("..", "refused", "is not an IP address or a hostname"),
+    ("a..b", "refused", "is not an IP address or a hostname"),
+    ("a" * 64, "refused", "is not an IP address or a hostname"),
+    (("a" * 63 + ".") * 3 + "a" * 62, "refused", "is not an IP address or a hostname"),
+    # non-ASCII: the regex lacked re.ASCII, so these passed or were rewritten
+    ("é" * 64, "refused", "must be ASCII"),
+    ("localhoſt", "refused", "must be ASCII"),
+    ("\u212a", "refused", "must be ASCII"),
+    ("İ", "refused", "must be ASCII"),
     # not an address or a hostname at all
     ("127.0.0.1:8080", "refused", "is not an IP address or a hostname"),
     ("http://127.0.0.1", "refused", "is not an IP address or a hostname"),
@@ -758,7 +803,7 @@ HOST_SPELLINGS: list[tuple[str, str, str]] = [
     # real probe: addresses this machine does not own, or names that do not resolve
     ("1.2.3.4", "unowned", "is not an address this machine owns"),
     ("fd00::5", "unowned", "is not an address this machine owns"),
-    ("brain-2.lan", "unowned", "does not resolve to an address on this machine"),
+    ("brain-2.invalid", "unowned", "does not resolve to an address on this machine"),
     ("127.0.0.2", "unowned-on-darwin", "is not an address this machine owns"),
     # accepted, classified by the resolved address
     ("0.0.0.0", "wildcard", "0.0.0.0"),
@@ -772,6 +817,10 @@ HOST_SPELLINGS: list[tuple[str, str, str]] = [
     ("0:0:0:0:0:0:0:1", "binds", "::1"),
     ("LOCALHOST", "binds", "localhost"),
     ("brain-1.lan", "binds", "brain-1.lan"),
+    # a hostname is classified by what it RESOLVES to (round 10, item 2)
+    ("0.0.0.0.nip.io", "wildcard", "0.0.0.0.nip.io"),
+    # IPv6-only resolution is probed as IPv6 (round 10, item 3)
+    ("ip6-localhost", "binds-real", "ip6-localhost"),
     ("FD00:0:0::5", "binds", "fd00::5"),
 ]
 
@@ -801,6 +850,10 @@ def test_every_host_spelling_does_what_the_table_says(
         monkeypatch.setattr(server, "resolve_port", resolve_port)
         if kind == "unowned-on-darwin" and sys.platform != "darwin":
             kind = "binds-real"
+    if kind == "binds-real":
+        if not _ipv6_wildcard_available():
+            pytest.skip("this host cannot open an IPv6 socket")
+        monkeypatch.setattr(server, "resolve_port", resolve_port)
     result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
     # Both "busy" phrasings: the catch-all said "already in use" without
     # --auto-port and "no free port found" with it (the default). Checking
@@ -814,6 +867,9 @@ def test_every_host_spelling_does_what_the_table_says(
         return
     if kind == "binds-real":
         assert result.exit_code == 0, result.output
+        if expected != given:
+            return
+        assert started.context_kwargs["host"] == expected
         return
     if kind == "refused":
         assert result.exit_code == 2, result.output
@@ -958,3 +1014,120 @@ def test_any_other_bind_failure_is_reported_not_called_busy() -> None:
     assert "cannot be bound" in message, message
     assert "Invalid argument" in message
     assert "in use" not in message
+
+
+def test_localhost_that_does_not_resolve_to_loopback_needs_a_token(
+    app: typer.Typer, started: _Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 10, item 2 (the mirror case): ``localhost`` was trusted as loopback
+    BY NAME. If it resolves elsewhere it is not loopback, so a token is
+    required — and without one the bind is refused."""
+    monkeypatch.setitem(FAKE_DNS, "localhost", ["192.0.2.30"])
+    result = runner.invoke(app, ["ui", "--host", "localhost", "--no-open"])
+    assert result.exit_code == 2, result.output
+    assert "pass --token" in result.output, result.output
+    assert started.context_kwargs == {}
+
+
+def test_a_name_resolving_to_loopback_and_elsewhere_is_not_loopback(
+    app: typer.Typer, started: _Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loopback only if EVERY resolved address is loopback: uvicorn binds them all."""
+    monkeypatch.setitem(FAKE_DNS, "localhost", ["127.0.0.1", "192.0.2.30"])
+    result = runner.invoke(app, ["ui", "--host", "localhost", "--no-open"])
+    assert result.exit_code == 2, result.output
+    assert "pass --token" in result.output, result.output
+
+
+def test_the_cli_threads_the_resolved_addresses_into_the_context(
+    app: typer.Typer, started: _Started
+) -> None:
+    """Round 10: the allowlist, the origin and the confidential lens are built
+    from the RESOLVED addresses, so the CLI must hand them to build_context."""
+    import ipaddress
+
+    result = runner.invoke(
+        app, ["ui", "--host", "0.0.0.0.nip.io", "--token", "x", "--no-open"]
+    )
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["resolved"] == (ipaddress.ip_address("0.0.0.0"),)
+    assert "http://127.0.0.1:8765/#t=x" in result.output
+
+
+def test_resolve_bind_addresses_resolves_a_name_passively_like_the_bind() -> None:
+    """The resolver sees exactly what uvicorn's bind will ask: AI_PASSIVE."""
+    import ipaddress
+    import socket
+
+    from brain.ui.server import resolve_bind_addresses
+
+    calls: list[tuple[object, ...]] = []
+
+    def recording(*args: object) -> list[tuple[int, int, int, str, tuple[object, ...]]]:
+        calls.append(args)
+        return fake_resolver(*args)  # type: ignore[arg-type]
+
+    assert resolve_bind_addresses("localhost", resolver=recording) == (
+        ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1"),
+    )
+    ((host, _port, family, kind, _proto, flags),) = calls
+    assert (host, family, kind, flags) == (
+        "localhost", socket.AF_UNSPEC, socket.SOCK_STREAM, socket.AI_PASSIVE,
+    )
+
+
+def test_resolve_bind_addresses_never_resolves_a_literal() -> None:
+    import ipaddress
+
+    from brain.ui.server import resolve_bind_addresses
+
+    def refuse(*args: object) -> list[object]:
+        raise AssertionError("a literal must not reach the resolver")
+
+    assert resolve_bind_addresses("::1", resolver=refuse) == (ipaddress.ip_address("::1"),)
+
+
+def test_resolve_bind_addresses_reports_a_name_that_will_not_resolve() -> None:
+    from brain.errors import BrainError
+    from brain.ui.server import resolve_bind_addresses
+
+    with pytest.raises(BrainError) as excinfo:
+        resolve_bind_addresses("brain-2.invalid", resolver=fake_resolver)
+    assert "does not resolve to an address on this machine" in str(excinfo.value)
+
+
+def test_resolve_bind_addresses_reports_a_unicode_failure_cleanly() -> None:
+    """Belt and braces: validate_host refuses these first, but the resolver's
+    idna codec must never escape as a traceback from here either."""
+    from brain.errors import BrainError
+    from brain.ui.server import resolve_bind_addresses
+
+    def idna_fails(*args: object) -> list[object]:
+        raise UnicodeError("idna: label empty or too long")
+
+    with pytest.raises(BrainError) as excinfo:
+        resolve_bind_addresses("odd-name", resolver=idna_fails)
+    assert "is not a valid hostname" in str(excinfo.value)
+
+
+@needs_ipv6
+def test_the_probe_binds_every_resolved_family() -> None:
+    """Round 10, item 3: the probe chose its family by ``":" in host``, so a
+    name that resolves only to IPv6 was probed as IPv4 and falsely refused."""
+    import ipaddress
+
+    assert resolve_port(
+        DEFAULT_PORT + 4100, host="ip6-localhost", auto=True,
+        addresses=(ipaddress.ip_address("::1"),),
+    ) >= DEFAULT_PORT + 4100
+
+
+def test_browser_url_for_a_name_resolving_to_the_wildcard_is_loopback() -> None:
+    import ipaddress
+
+    from brain.ui.server import browser_url
+
+    v4 = (ipaddress.ip_address("0.0.0.0"),)
+    v6 = (ipaddress.ip_address("::"),)
+    assert browser_url("0.0.0.0.nip.io", 8765, "", resolved=v4) == "http://127.0.0.1:8765/"
+    assert browser_url("wild6.example", 8765, "", resolved=v6) == "http://[::1]:8765/"

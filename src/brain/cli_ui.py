@@ -157,8 +157,8 @@ def ui(
         return
 
     from .ui import lan as lan_mod
+    from .ui import server as ui_server
     from .ui.context import HostRefused, address_class, validate_host
-    from .ui.security import is_loopback
     from .ui.server import browser_url, build_context, resolve_port, serve
 
     # Once, here: every consumer below — the probe, the bind, the allowlist,
@@ -195,7 +195,16 @@ def ui(
         # Minted, never empty: --lan must not be a way around the token rule.
         token = token or lan_mod.new_token()
 
-    loopback = is_loopback(host)
+    # Review round 10: classify by what the bind RESOLVES the host to, once,
+    # here — a name pointing at 0.0.0.0 is a wildcard, and `localhost` is
+    # loopback only if every address it resolves to is. Literals need no DNS.
+    try:
+        resolved = ui_server.resolve_bind_addresses(host)
+    except BrainError as exc:
+        typer.secho(str(exc), fg="red", err=True)
+        raise typer.Exit(1) from exc
+    kind = address_class(host, resolved)
+    loopback = kind == "loopback"
     if not loopback and not token:
         raise typer.BadParameter(
             "binding to a non-loopback address exposes your entire brain to the "
@@ -217,7 +226,9 @@ def ui(
         raise typer.Exit(1)
 
     try:
-        resolved_port = resolve_port(port, host=host, auto=auto_port)
+        resolved_port = resolve_port(
+            port, host=host, auto=auto_port, addresses=resolved
+        )
         context = build_context(
             cfg,
             host=host,
@@ -226,6 +237,7 @@ def ui(
             token=token,
             include_confidential=include_confidential,
             embedder=_build_embedder(cfg),
+            resolved=resolved,
         )
     except BrainError as exc:
         typer.secho(str(exc), fg="red", err=True)
@@ -237,10 +249,10 @@ def ui(
         )
 
     notices = context.notices
-    if address_class(host) == "wildcard":
+    if kind == "wildcard":
         notices = (*notices, lan_mod.WILDCARD_NOTICE)
     _panel(
-        url=browser_url(host, resolved_port, token),
+        url=browser_url(host, resolved_port, token, resolved=resolved),
         cfg=cfg,
         read_only=read_only,
         loopback=loopback,

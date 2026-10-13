@@ -138,7 +138,7 @@ class UiContext:
         return self.conn_factory()
 
 
-def host_allowlist(host: str) -> frozenset[str]:
+def host_allowlist(host: str, resolved: Resolved | None = None) -> frozenset[str]:
     """The Host-header allowlist for a server bound to ``host``.
 
     A loopback bind accepts every spelling of loopback, because the browser may
@@ -160,7 +160,7 @@ def host_allowlist(host: str) -> frozenset[str]:
     ``FD00:0:0::5`` is ``[fd00::5]``.
     """
     address = bind_address(host)
-    kind = address_class(address)
+    kind = address_class(address, resolved)
     if kind == "wildcard":
         return LOOPBACK_HOSTS
     own = f"[{address}]" if ":" in address else address
@@ -197,34 +197,55 @@ def bind_address(host: str) -> str:
 #: An RFC 1123 hostname: dot-separated labels of letters, digits and inner
 #: hyphens, optionally fully qualified with a trailing dot.
 _HOSTNAME = re.compile(
-    r"(?i)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?"
+    r"(?i)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?",
+    re.ASCII,
 )
+#: RFC 1035's limit on a name's text form, without the trailing root dot.
+_HOSTNAME_MAX = 253
 
 
 class HostRefused(BrainError):
     """``--host`` names something ``brain ui`` will not bind; the message says why."""
 
 
-def address_class(host: str) -> str:
-    """``"wildcard"``, ``"loopback"`` or ``"other"`` — judged on the ADDRESS.
+Resolved = tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, ...]
 
-    Review round 9: every earlier classification compared SPELLINGS against
-    ``WILDCARD_HOSTS`` / ``LOOPBACK_HOSTS``, so each new spelling of the same
-    address (``0:0::0``, ``::%``, ``127.0.0.2``) slipped past it. This parses
-    the address and asks it; only a hostname falls back to its name.
-    """
-    address = bind_address(host)
-    if address == "localhost":
-        return "loopback"
+
+def literal_addresses(host: str) -> Resolved:
+    """``(address,)`` for an IP literal, ``()`` for a hostname. No DNS."""
     try:
-        parsed = ipaddress.ip_address(address)
+        return (ipaddress.ip_address(bind_address(host)),)
     except ValueError:
+        return ()
+
+
+def classify_addresses(addresses: Resolved) -> str:
+    """``"wildcard"``, ``"loopback"`` or ``"other"`` for a set of bound addresses.
+
+    uvicorn binds EVERY address a host resolves to, so ANY unspecified address
+    makes the bind a wildcard, and it is loopback only if ALL are loopback
+    (review round 10). No addresses — an unresolved name — is "other".
+    """
+    if not addresses:
         return "other"
-    if parsed.is_unspecified:
+    if any(address.is_unspecified for address in addresses):
         return "wildcard"
-    if parsed.is_loopback:
+    if all(address.is_loopback for address in addresses):
         return "loopback"
     return "other"
+
+
+def address_class(host: str, resolved: Resolved | None = None) -> str:
+    """``"wildcard"``, ``"loopback"`` or ``"other"`` — judged on the ADDRESS.
+
+    Review round 9 stopped classifying by SPELLING; review round 10 stopped
+    classifying a HOSTNAME by its name. A literal is judged on itself; a
+    hostname only on ``resolved``, the addresses the bind resolves it to
+    (:func:`brain.ui.server.resolve_bind_addresses`). Unresolved, a hostname
+    is "other" — ``localhost`` included, which used to be trusted as loopback by
+    name alone, so a ``localhost`` mapped elsewhere skipped the token.
+    """
+    return classify_addresses(resolved if resolved is not None else literal_addresses(host))
 
 
 def validate_host(host: str) -> str:
@@ -257,6 +278,10 @@ def validate_host(host: str) -> str:
         )
     if host != host.strip():
         raise HostRefused(f"--host {host!r} has leading or trailing whitespace.")
+    if not host.isascii():
+        # Review round 10: the hostname pattern lacked re.ASCII, so `localhoſt`
+        # and the Kelvin sign matched, and `İ` was rewritten by lower().
+        raise HostRefused(f"--host {host!r} must be ASCII.")
     if "%" in host:
         raise HostRefused(
             f"--host {host}: zone IDs (%…) are not supported — a browser cannot "
@@ -279,19 +304,24 @@ def validate_host(host: str) -> str:
                 "write the address or hostname without them."
             )
     bare = host[1:-1] if host.startswith("[") else host
+    not_a_host = HostRefused(
+        f"--host {host} is not an IP address or a hostname; pass the "
+        "address alone (a port goes in --port)."
+    )
     try:
         infos = socket.getaddrinfo(
             bare, None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_NUMERICHOST
         )
+    except UnicodeError:
+        # The idna codec refuses an empty or over-long label (`.`, `a..b`, 64
+        # characters); it escaped as a raw traceback (review round 10).
+        raise not_a_host from None
     except socket.gaierror:
         # Not numeric, so it must be a HOSTNAME (RFC 1123 labels). Anything
         # else — `127.0.0.1:8080`, a URL, `0.0.0.0/0` — failed at the bind as
         # a resolver error the user could not act on (final round).
-        if not _HOSTNAME.fullmatch(bare):
-            raise HostRefused(
-                f"--host {host} is not an IP address or a hostname; pass the "
-                "address alone (a port goes in --port)."
-            ) from None
+        if not _HOSTNAME.fullmatch(bare) or len(bare.rstrip(".")) > _HOSTNAME_MAX:
+            raise not_a_host from None
         return bare.lower()
     resolved = {ipaddress.ip_address(info[4][0]) for info in infos}
     try:
@@ -321,7 +351,7 @@ def validate_host(host: str) -> str:
     return str(spelled)
 
 
-def bind_origin(host: str, port: int) -> str:
+def bind_origin(host: str, port: int, resolved: Resolved | None = None) -> str:
     """The origin a browser on THIS machine uses to reach a server bound to ``host``.
 
     Ruling W2 (phase 7): the single source for both the URL ``brain ui`` prints
@@ -335,8 +365,11 @@ def bind_origin(host: str, port: int) -> str:
     bracketed, as a URL requires; anything else passes through unchanged.
     """
     address = bind_address(host)
-    if address_class(address) == "wildcard":
-        url_host = "[::1]" if ":" in address else "127.0.0.1"
+    addresses = resolved if resolved is not None else literal_addresses(address)
+    if classify_addresses(addresses) == "wildcard":
+        # The loopback of a family the wildcard actually covers; a name that
+        # resolves to 0.0.0.0 is IPv4 though it has no colon (round 10).
+        url_host = "127.0.0.1" if any(a.version == 4 for a in addresses) else "[::1]"
     elif ":" in address:
         url_host = f"[{address}]"
     else:

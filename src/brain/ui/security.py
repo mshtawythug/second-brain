@@ -39,7 +39,7 @@ import json
 import secrets
 from typing import TYPE_CHECKING, Any
 
-from .context import address_class
+from .context import Resolved, address_class
 from .errors import UiError, UiForbidden, UiUnsupportedMedia
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -78,14 +78,14 @@ _STATIC_HEADERS: tuple[tuple[bytes, bytes], ...] = (
 )
 
 
-def is_loopback(host: str) -> bool:
+def is_loopback(host: str, resolved: Resolved | None = None) -> bool:
     """True when ``host`` is a loopback address the server may bind unguarded.
 
     ``0.0.0.0`` is emphatically **not** loopback — it is every interface, and
     treating it as safe is the exact mistake that would expose an
     unauthenticated corpus to the local network.
     """
-    return address_class(host.strip()) == "loopback"
+    return address_class(host.strip(), resolved) == "loopback"
 
 
 async def _send_error(send: Send, exc: UiError) -> None:

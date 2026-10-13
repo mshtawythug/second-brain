@@ -43,3 +43,31 @@ def test_build_context_derives_origin_and_hosts_from_the_bind(
     context = _build(bind)
     assert context.allowed_origin == origin  # type: ignore[attr-defined]
     assert context.allowed_hosts == hosts  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("bind", "resolved", "origin", "hosts", "confidential"),
+    [
+        ("0.0.0.0.nip.io", ("0.0.0.0",), "http://127.0.0.1:8765", LOOPBACK_HOSTS, False),
+        ("localhost", ("127.0.0.1", "::1"), "http://localhost:8765", LOOPBACK_HOSTS, True),
+        ("localhost", ("192.0.2.30",), "http://localhost:8765", frozenset({"localhost"}), False),
+    ],
+)
+def test_build_context_classifies_a_hostname_by_its_resolved_addresses(
+    bind: str, resolved: tuple[str, ...], origin: str, hosts: frozenset[str],
+    confidential: bool,
+) -> None:
+    """Round 10: allowlist, origin and the confidential lens follow the RESOLVED
+    addresses — a name pointing at 0.0.0.0 is a wildcard, and ``localhost``
+    pointing elsewhere is not loopback."""
+    import ipaddress
+
+    context = build_context(
+        Config(database_url=TEST_DATABASE_URL, embedder="none"),
+        host=bind, port=8765, read_only=True, token="t",
+        include_confidential=False, embedder=None,
+        resolved=tuple(ipaddress.ip_address(a) for a in resolved),
+    )
+    assert context.allowed_origin == origin
+    assert context.allowed_hosts == hosts
+    assert context.serve_confidential_bodies is confidential

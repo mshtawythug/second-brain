@@ -393,9 +393,14 @@ def test_a_lan_address_bind_accepts_its_own_host_header(tmp_path: Path) -> None:
 
 def test_is_loopback_rejects_all_interfaces() -> None:
     """0.0.0.0 is every interface, not loopback. Treating it as safe is the bug."""
+    import ipaddress
+
     assert is_loopback("127.0.0.1")
-    assert is_loopback("localhost")
     assert is_loopback("::1")
+    # Review round 10: `localhost` is loopback because of where it RESOLVES,
+    # never by its name — this line asserted the name alone until then.
+    assert not is_loopback("localhost")
+    assert is_loopback("localhost", (ipaddress.ip_address("127.0.0.1"),))
     assert not is_loopback("0.0.0.0")
     assert not is_loopback("192.168.1.10")
 
@@ -567,7 +572,9 @@ def test_write_endpoints_reject_get(tmp_path: Path, path: str) -> None:
     ("host", "kind"),
     [("0.0.0.0", "wildcard"), ("::", "wildcard"), ("0:0::0", "wildcard"),
      ("127.0.0.1", "loopback"), ("127.0.0.2", "loopback"), ("::1", "loopback"),
-     ("localhost", "loopback"), ("LOCALHOST", "loopback"),
+     # Round 10: a hostname is never classified by its NAME — unresolved, it is
+     # "other" (and needs a token); see the resolved cases below.
+     ("localhost", "other"), ("LOCALHOST", "other"),
      ("192.0.2.10", "other"), ("fd00::5", "other"), ("brain-1.lan", "other")],
 )
 def test_address_class_is_decided_by_the_address_not_the_spelling(
@@ -579,3 +586,23 @@ def test_address_class_is_decided_by_the_address_not_the_spelling(
 
     assert address_class(host) == kind
     assert is_loopback(host) is (kind == "loopback")
+
+
+@pytest.mark.parametrize(
+    ("addresses", "kind"),
+    [(["0.0.0.0"], "wildcard"), (["127.0.0.1", "0.0.0.0"], "wildcard"),
+     (["127.0.0.1", "::1"], "loopback"), (["127.0.0.1", "192.0.2.30"], "other"),
+     (["192.0.2.30"], "other"), (["::"], "wildcard")],
+)
+def test_a_name_is_classified_by_every_address_it_resolves_to(
+    addresses: list[str], kind: str
+) -> None:
+    """Round 10, item 2: ANY unspecified address makes it a wildcard; it is
+    loopback only if ALL are loopback, because uvicorn binds every one."""
+    import ipaddress
+
+    from brain.ui.context import address_class
+
+    resolved = tuple(ipaddress.ip_address(a) for a in addresses)
+    assert address_class("some.name", resolved) == kind
+    assert is_loopback("some.name", resolved) is (kind == "loopback")

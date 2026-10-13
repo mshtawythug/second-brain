@@ -46,11 +46,15 @@ git tag scheme:
   previously recommended `--host 0.0.0.0 --token` for remote reading, which
   never worked from another device's browser.
 - **`--host` is judged by the address it will actually bind**, not by how it
-  is spelled. `brain ui` resolves it the way the bind does (numeric only, no
-  DNS) and decides wildcard / loopback / other from the result, so every
-  spelling of the wildcard gets the notice and every spelling of loopback is
-  loopback (`127.0.0.2` included). Spellings that bound something unexpected
-  are refused, each with a usage error that says why:
+  is spelled or named. An IP address is checked numerically (no DNS); a
+  hostname is resolved the way the bind resolves it, and judged by EVERY
+  address it resolves to. Any unspecified address makes it a wildcard (with the
+  notice), and it is loopback only if every address is loopback — so a name
+  that points at `0.0.0.0` gets the notice, and `localhost` mapped elsewhere
+  needs a token like any other bind. Every spelling of the wildcard gets the
+  notice and every spelling of loopback is loopback (`127.0.0.2` included).
+  Spellings that bound something unexpected are refused, each with a usage
+  error that says why:
   - an empty value, or leading/trailing whitespace: asyncio bound `0.0.0.0`
     and `::` together for `""`, with no notice;
   - any IPv6 zone (`%…`), link-local included: a browser cannot open a zoned
@@ -63,6 +67,9 @@ git tag scheme:
     socket cannot bind;
   - a link-local IPv6 address without a zone (`fe80::1`): it binds only with
     a zone, and zones are refused;
+  - a non-ASCII value (`localhoſt`, the Kelvin sign), and a name with an empty
+    or over-long label (`.`, `a..b`, 64 characters), which escaped as a raw
+    traceback;
   - anything that is neither an address nor a hostname, such as
     `127.0.0.1:8080`, `http://127.0.0.1` or `0.0.0.0/0` (a port goes in
     `--port`);

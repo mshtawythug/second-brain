@@ -10,6 +10,7 @@ is a much worse experience than one discovered at startup.
 from __future__ import annotations
 
 import errno
+import ipaddress
 import logging
 import socket
 import webbrowser
@@ -24,7 +25,14 @@ import psycopg
 from ..config import Config
 from ..db import connect
 from ..errors import BrainError
-from .context import UiContext, bind_address, bind_origin, host_allowlist
+from .context import (
+    Resolved,
+    UiContext,
+    bind_address,
+    bind_origin,
+    host_allowlist,
+    literal_addresses,
+)
 from .security import is_loopback
 from .telemetry import ui_source_supported
 
@@ -76,8 +84,44 @@ def _probe_socket(
     return sock
 
 
+Resolver = Callable[..., Any]
+
+
+def resolve_bind_addresses(host: str, resolver: Resolver | None = None) -> Resolved:
+    """Every address the bind will use for ``host`` — resolved as uvicorn will.
+
+    A literal needs no lookup. A hostname is resolved with ``getaddrinfo``
+    and ``AI_PASSIVE``, exactly as asyncio's ``create_server`` does before it
+    binds each result (review round 10): classifying the NAME let a name that
+    resolves to 0.0.0.0 bind every interface with no notice, and trusted
+    ``localhost`` as loopback wherever it pointed. ``resolver`` is injectable so
+    tests never touch real DNS.
+    """
+    literal = literal_addresses(host)
+    if literal:
+        return literal
+    lookup = resolver or socket.getaddrinfo
+    try:
+        infos = lookup(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, socket.AI_PASSIVE)
+    except socket.gaierror as exc:
+        raise BrainError(
+            f"--host {host} does not resolve to an address on this machine "
+            f"({exc.strerror or exc})."
+        ) from exc
+    except UnicodeError as exc:
+        raise BrainError(f"--host {host} is not a valid hostname.") from exc
+    addresses = tuple(dict.fromkeys(ipaddress.ip_address(info[4][0]) for info in infos))
+    if not addresses:
+        raise BrainError(f"--host {host} does not resolve to an address on this machine.")
+    return addresses
+
+
 def _port_is_free(
-    host: str, port: int, *, socket_factory: SocketFactory = socket.socket
+    host: str,
+    port: int,
+    *,
+    socket_factory: SocketFactory = socket.socket,
+    addresses: Resolved | None = None,
 ) -> bool:
     """Probe a port with a real bind. Portable; no ``lsof``.
 
@@ -86,6 +130,13 @@ def _port_is_free(
     on every port, every port looked busy, and ``brain ui --host ::`` died with
     "no free port found" before it could print a thing (phase-7 audit L-8).
     """
+    if addresses:
+        # One probe per resolved address, in that address's own family — the
+        # bind uses every one (round 10: a name resolving only to IPv6 was
+        # probed as IPv4 and falsely refused). Busy if ANY is busy.
+        return all(
+            _port_is_free(str(a), port, socket_factory=socket_factory) for a in addresses
+        )
     address = bind_address(host)
     try:
         probe = _probe_socket(address, socket_factory)
@@ -142,6 +193,7 @@ def resolve_port(
     attempts: int = 20,
     auto: bool = True,
     socket_factory: SocketFactory = socket.socket,
+    addresses: Resolved | None = None,
 ) -> int:
     """Return a free port at or after ``start``.
 
@@ -149,7 +201,7 @@ def resolve_port(
     :func:`serve` also catches ``EADDRINUSE`` and prints the same remediation
     rather than a traceback.
     """
-    if _port_is_free(host, start, socket_factory=socket_factory):
+    if _port_is_free(host, start, socket_factory=socket_factory, addresses=addresses):
         return start
     if not auto:
         raise BrainError(
@@ -158,7 +210,9 @@ def resolve_port(
             f"  or drop --no-auto-port to auto-select the next free one."
         )
     for candidate in range(start + 1, start + attempts):
-        if _port_is_free(host, candidate, socket_factory=socket_factory):
+        if _port_is_free(
+            host, candidate, socket_factory=socket_factory, addresses=addresses
+        ):
             return candidate
     raise BrainError(
         f"no free port found in {start}..{start + attempts - 1}; "
@@ -200,12 +254,18 @@ def build_context(
     embedder: Any,
     search_fn: Callable[..., Any] | None = None,
     graph_syncer: Any | None = None,
+    resolved: Resolved | None = None,
 ) -> UiContext:
-    """Assemble the :class:`UiContext` the app will run on."""
+    """Assemble the :class:`UiContext` the app will run on.
+
+    ``resolved`` is what the bind resolves ``host`` to
+    (:func:`resolve_bind_addresses`); the loopback test, the Origin and the Host
+    allowlist all follow it, so a hostname is judged by where it points.
+    """
     from ..search import hybrid_search
 
     logging_enabled, notices = preflight(cfg)
-    loopback = is_loopback(host)
+    loopback = is_loopback(host, resolved)
 
     @contextmanager
     def conn_factory() -> Iterator[Any]:
@@ -239,8 +299,8 @@ def build_context(
         search_fn=search_fn or hybrid_search,
         read_only=read_only,
         token=token,
-        allowed_origin=bind_origin(host, port),
-        allowed_hosts=host_allowlist(host),
+        allowed_origin=bind_origin(host, port, resolved),
+        allowed_hosts=host_allowlist(host, resolved),
         logging_enabled=logging_enabled,
         graph_syncer=graph_syncer,
         notices=notices,
@@ -291,7 +351,9 @@ def warm_embedder(embedder: Any) -> bool:
     return True
 
 
-def browser_url(host: str, port: int, token: str) -> str:
+def browser_url(
+    host: str, port: int, token: str, resolved: Resolved | None = None
+) -> str:
     """The URL to open: the bind's origin, plus the token in the fragment.
 
     The fragment is how the client receives the token (``static/js/api.js``):
@@ -304,7 +366,11 @@ def browser_url(host: str, port: int, token: str) -> str:
     it: a raw ``%`` threw ``URIError`` before the page could boot, and a raw
     ``#`` truncated the secret (phase-7 review L-3).
     """
-    url = f"{bind_origin(host, port)}/"
+    return _with_token(f"{bind_origin(host, port, resolved)}/", token)
+
+
+def _with_token(url: str, token: str) -> str:
+    """``url`` with the token in its fragment, percent-encoded (L-3)."""
     return f"{url}#t={quote(token, safe='')}" if token else url
 
 
@@ -331,7 +397,9 @@ def serve(
     # time anyone can type.
     warm_embedder(context.embedder)
 
-    url = browser_url(host, port, context.token)
+    # The guard's own origin: the opened tab cannot diverge from the Origin the
+    # write guard expects, whatever the host resolved to (round 10).
+    url = _with_token(f"{context.allowed_origin}/", context.token)
     app = create_app(context)
     config = uvicorn.Config(
         app, host=host, port=port, log_level="warning", access_log=False
