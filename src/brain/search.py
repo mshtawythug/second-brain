@@ -31,9 +31,9 @@ carries no live line count on purpose -- re-derive with
 branch base) -> 853 (``3b16527``) -> 867 (``0473b5f``) -> 870 (``d99ca34``) ->
 826 (``f0abf64``, the PR #8 merge) -> 819 (``0ee6a86``: the vector-leg SQL moved
 to :mod:`brain.search_vector_leg` with the exact-scan fix -- a ranking change,
-eval-measured and re-baselined) -> 819 (``f7882ea``) -> the commit that added
-this hop (+2: ``SearchDiagnostics.vector_ms``, the leg's own time, which the
-revisit trigger needs; still net below 826).
+eval-measured and re-baselined) -> 819 (``f7882ea``) -> 823 (``128f78f``:
+``SearchDiagnostics.vector_ms``, the leg's own time, which the revisit trigger
+needs; still net below 826) -> the commit that added this hop (descriptive).
 Two earlier changes, both reasoned inline at the
 point of growth: :attr:`SearchResult.recency_ts`, whose read was hoisted OUT of
 the recency-boost branch so a hit's displayed date and its ranking date cannot
@@ -595,16 +595,16 @@ def hybrid_search(
                 _cached_query_embed.cache_info().hits > _hits_before
             )
         # SQL, scan strategy and timing live in brain.search_vector_leg.
-        vec_rows, vec_seconds = run_vector_leg(
+        vec_rows, vec_ms = run_vector_leg(
             conn,
             predicate=predicate,
             query_embedding=q_emb,
             vector_sim_floor=vector_sim_floor,
             limit=CANDIDATE_LIMIT,
         )
-        sql_seconds += vec_seconds
+        sql_seconds += vec_ms / 1000.0
         if diagnostics is not None:
-            diagnostics.vector_ms = vec_seconds * 1000.0
+            diagnostics.vector_ms = vec_ms
 
     # Exact total-match count (opt-in). Runs AFTER both ranking legs so a
     # Ctrl-C during it still leaves the caller its ranked results, and before

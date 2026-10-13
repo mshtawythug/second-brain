@@ -18,8 +18,10 @@ was a p90 of 249-259 ms at 21k chunks, growing linearly, which is over the 150 m
 budget. This version keeps the index and fixes all three defects:
 
 - ``hnsw.iterative_scan = relaxed_order`` keeps scanning until ``limit`` rows
-  survive the filters (bounded by ``hnsw.max_scan_tuples``), so filters no
-  longer starve the pool;
+  survive the *metadata* filters (bounded by ``hnsw.max_scan_tuples``, default
+  20,000, about the whole corpus), so filters no longer starve the pool. That
+  bound is also a **latency** risk: a highly selective metadata filter can
+  walk up to that many tuples before ``limit`` rows match;
 - ``hnsw.ef_search = 1000`` (pgvector's maximum) gives a mean recall@50 of
   0.9987 (minimum 0.98) against the exact scan over the 31 golden queries.
   ef=400 measured 0.9903 with a minimum of 0.90, too little margin;
@@ -30,6 +32,15 @@ budget. This version keeps the index and fixes all three defects:
 
 Relaxed ordering can return rows slightly out of distance order, so the scan
 sits in a ``MATERIALIZED`` CTE and is re-sorted outside it by ``dist + 0, id``.
+**The cosine floor is applied OUTSIDE the CTE** (``WHERE dist <= 1 - floor``),
+as pgvector's README directs for distance filters. Inside, it would become a
+condition the iterative scan keeps walking to satisfy, so an off-corpus query
+with nothing above the floor would traverse the index up to
+``hnsw.max_scan_tuples``. Review measured that on a synthetic 21k x 1024 table:
+751 ms inside versus 86 ms outside, with the same ids returned. Because the floor
+is a distance threshold, the rows that pass it are a prefix of the distance
+order, so "top ``limit``, then floor" returns the same set as "floor, then top
+``limit``".
 The ``+ 0`` keeps the outer sort from being satisfied by the index (pgvector's
 documented pattern for Postgres 17+). The ``id`` tie-break makes the order total.
 
@@ -41,18 +52,20 @@ savepoint keeps local settings, so the prior values are read first and restored
 explicitly after the query. If the query raises, the savepoint rollback reverts
 them.
 
-**Why the floor is written ``(e <=> q) <= 1 - floor``.** A zero-norm embedding
-has a cosine distance of NaN. Postgres orders NaN above every number and
-evaluates ``NaN >= x`` as TRUE, so the algebraically equal
-``1 - (e <=> q) >= floor`` would admit such a row whenever a plan does not use
-the index (pgvector does not index zero vectors for cosine, but an exact plan
-reads every row). ``NaN <= x`` is FALSE. Prod held 0 such chunks on 2026-10-13.
+**Why the floor is written ``dist <= 1 - floor``.** A zero-norm embedding has
+a cosine distance of NaN. Postgres orders NaN above every number and evaluates
+``NaN >= x`` as TRUE, so the algebraically equal ``1 - dist >= floor`` would
+admit such a row whenever a plan does not use the index. pgvector does not index
+zero vectors for cosine, but an exact plan reads every row, and its ascending
+distance order puts NaN last, inside a short pool. ``NaN <= x`` is FALSE.
+Prod held 0 such chunks on 2026-10-13.
 
-**Revisit** when ``SearchDiagnostics.vector_ms`` p90 over the golden queries
-exceeds 150 ms, measured with the read-only procedure in spec §5, or when the
-recall@50 check in spec §5 falls below 0.99 (it depends on HNSW graph quality,
-which shifts with ingests and reindexes).
+**Revisit** when ``SearchDiagnostics.vector_ms`` p90 exceeds 150 ms over the
+golden queries *or* over the off-corpus probe queries, or when the recall@50
+check falls below 0.99. Recall depends on HNSW graph quality, which shifts with
+ingests and reindexes. All three procedures are read-only and are in spec §5.
 """
+from collections.abc import Callable
 from time import perf_counter
 from typing import Any
 
@@ -93,20 +106,17 @@ def vector_leg_sql(
     """
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError(f"limit must be a positive int, got {limit!r}")
-    floor_pred = "(c.embedding <=> %s::vector) <= 1 - %s"
-    params: list[Any]
-    if predicate.has_filters:
-        where = f"WHERE {predicate.where_sql} AND {floor_pred}"
-        params = [
-            query_embedding,
-            *predicate.where_params,
-            query_embedding,
-            vector_sim_floor,
-            query_embedding,
-        ]
-    else:
-        where = f"WHERE {floor_pred}"
-        params = [query_embedding, query_embedding, vector_sim_floor, query_embedding]
+    # Metadata filters go INSIDE the CTE: the iterative scan must keep walking
+    # until `limit` rows match them. The distance floor goes OUTSIDE: inside, an
+    # off-corpus query (nothing above the floor) would walk the whole index, up
+    # to hnsw.max_scan_tuples. pgvector's README gives the same placement rule.
+    where = f"WHERE {predicate.where_sql}" if predicate.has_filters else ""
+    params: list[Any] = [
+        query_embedding,
+        *predicate.where_params,
+        query_embedding,
+        vector_sim_floor,
+    ]
     sql = f"""
             WITH nn AS MATERIALIZED (
                 SELECT c.id, c.document_id, c.chunk_index, c.content,
@@ -119,6 +129,7 @@ def vector_leg_sql(
             )
             SELECT id, document_id, chunk_index, content, 1 - dist AS score
             FROM nn
+            WHERE dist <= 1 - %s
             ORDER BY dist + 0, id"""
     return sql, params
 
@@ -130,13 +141,17 @@ def run_vector_leg(
     query_embedding: list[float],
     vector_sim_floor: float,
     limit: int,
+    clock: Callable[[], float] = perf_counter,
 ) -> tuple[list[Any], float]:
-    """Execute the vector leg under its scan settings; return ``(rows, seconds)``.
+    """Execute the vector leg under its scan settings; return ``(rows, elapsed_ms)``.
 
     The elapsed time covers only the candidate query, which is what makes
     ``SearchDiagnostics.vector_ms`` (the revisit trigger's input) a measurement
     of this leg, rather than of the settings round trips or the whole ``sql_ms``
-    phase. See the module docstring for how the settings are scoped.
+    phase. It is returned in **milliseconds**: the unit conversion lives here, so
+    a test can inject ``clock`` (seconds, like :func:`time.perf_counter`) and
+    assert the exact value. See the module docstring for how the settings are
+    scoped.
     """
     sql, params = vector_leg_sql(
         predicate=predicate,
@@ -156,11 +171,11 @@ def run_vector_leg(
             "set_config(%s, %s, true)",
             [part for pair in _SCAN_SETTINGS for part in pair],
         )
-        started = perf_counter()
+        started = clock()
         rows = conn.execute(sql, params, prepare=predicate.prepare_flag).fetchall()
-        elapsed = perf_counter() - started
+        elapsed_ms = (clock() - started) * 1000.0
         _restore_settings(conn, names, prior)
-    return rows, elapsed
+    return rows, elapsed_ms
 
 
 def _restore_settings(

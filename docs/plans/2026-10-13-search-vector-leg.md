@@ -1,4 +1,8 @@
-# Search vector leg: exact candidate scan — plan
+# Search vector leg: a full, near-exact candidate pool — plan
+
+*Originally planned as an exact scan (option C). Superseded the same day by option D,
+a scoped iterative HNSW scan, after the latency gate (spec §4a). Tasks 1–10 below are
+the C-era plan, kept as written; the amendment after the guard table records what changed.*
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use team-driven-development to implement this plan task-by-task.
 
@@ -94,4 +98,5 @@ its redundant code was deleted.
 ## 4. Out of scope
 
 - `related.py` / `connect.py` share the HNSW shape (spec §8); they are separate follow-ups.
-- Any `REINDEX` or GUC tuning (spec §7).
+- Any `REINDEX` (spec §7). *GUC tuning was out of scope for C; it became the substance
+  of option D (scoped `set_config`, spec §4a), so this line is superseded for D.*
