@@ -232,6 +232,35 @@ def test_bind_origin_brackets_ipv6_and_passes_other_hosts_through() -> None:
     assert bind_origin("[::]", 8765) == "http://[::1]:8765"
 
 
+def test_a_lan_bind_allowlist_is_exactly_the_bound_address() -> None:
+    """HIGH-1 (phase-7 audit): a LAN bind accepts its own address and NOTHING else.
+
+    Equality, not membership. The audit's mutation — adding ``"*"`` to the set
+    for any dotted host — survived every non-browser test, because the only pin
+    was that the bound address was accepted. ``"*"`` disables Host checking in
+    ``TrustedHostMiddleware`` entirely, reopening DNS rebinding on the one bind
+    that is reachable from the network.
+    """
+    from brain.ui.context import host_allowlist
+
+    assert host_allowlist("192.0.2.10") == frozenset({"192.0.2.10"})
+
+
+@pytest.mark.parametrize("bind", ["192.0.2.10", "0.0.0.0", "::", "[::]"])
+def test_a_non_loopback_bind_refuses_a_foreign_host_header(
+    tmp_path: Path, bind: str
+) -> None:
+    """HIGH-1: the rebinding defence, through the real app, on every bind kind."""
+    from brain.ui.context import host_allowlist
+
+    context = _context(tmp_path, token="t", allowed_hosts=host_allowlist(bind))
+    with _client(context) as client:
+        response = client.get(
+            "/api/health", headers={"Host": "evil.example", TOKEN_HEADER: "t"}
+        )
+    assert response.status_code == 400
+
+
 def test_a_lan_address_bind_accepts_its_own_host_header(tmp_path: Path) -> None:
     """The working half: bind the LAN address and the phone's Host matches."""
     from brain.ui.context import host_allowlist

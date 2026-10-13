@@ -299,6 +299,11 @@ def test_lan_without_a_network_exits_one_with_the_override(
     result = runner.invoke(app, ["ui", "--lan", "--no-open"])
     assert result.exit_code == 1
     assert started.context_kwargs == {}
+    # M-3 (phase-7 audit): the remedy reaches the user, as a message, not a
+    # traceback. Exit code 1 alone was satisfied by an uncaught exception too.
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert "Traceback" not in result.output
+    assert "Pass --host" in result.output, result.output
 
 
 def test_wildcard_bind_warns_that_other_devices_are_refused(
@@ -323,6 +328,31 @@ def test_wildcard_bind_prints_a_loopback_url_not_the_bind_address(
     assert result.exit_code == 0, result.output
     assert "http://127.0.0.1:8765/#t=x" in result.output
     assert "http://0.0.0.0" not in result.output
+
+
+def test_loopback_with_a_token_prints_the_tokened_url(
+    app: typer.Typer, started: _Started
+) -> None:
+    """M-2 / rule 12 (phase-7 audit): the panel half of the ``#t=`` fix.
+
+    Before ``05fb151`` the panel printed the fragment only for non-loopback
+    binds, so ``--token`` on loopback printed a URL whose page 403'd. The
+    serve half has its own test; this pins the panel.
+    """
+    result = runner.invoke(app, ["ui", "--token", "s3cret", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert "http://127.0.0.1:8765/#t=s3cret" in result.output
+
+
+def test_the_phone_line_is_printed_only_for_lan(
+    app: typer.Typer, started: _Started
+) -> None:
+    """L-13 (phase-7 audit): "open … on your phone" is wrong advice on loopback."""
+    loopback = runner.invoke(app, ["ui", "--no-open"])
+    lan = runner.invoke(app, ["ui", "--lan", "--no-open"])
+    assert loopback.exit_code == 0 and lan.exit_code == 0
+    assert "Phone" not in loopback.output, loopback.output
+    assert "Phone" in lan.output, lan.output
 
 
 def test_a_lan_bind_does_not_print_the_wildcard_warning(
@@ -363,6 +393,13 @@ def test_browser_url_for_a_wildcard_bind_is_a_loopback_url(
     assert browser_url(wildcard, 8765, "") == expected
 
 
+def test_browser_url_brackets_an_ipv6_literal() -> None:
+    """L-12 (phase-7 audit): ``http://::1:8765/`` is not a URL."""
+    from brain.ui.server import browser_url
+
+    assert browser_url("::1", 8765, "") == "http://[::1]:8765/"
+
+
 def test_browser_url_percent_encodes_the_token() -> None:
     """L-3: ``api.js`` runs ``decodeURIComponent`` on the fragment.
 
@@ -375,8 +412,9 @@ def test_browser_url_percent_encodes_the_token() -> None:
     assert url == "http://127.0.0.1:8765/#t=50%25%20off%20%231"
 
 
+@pytest.mark.parametrize("bind", ["127.0.0.1", LAN_IP])
 def test_serve_opens_the_tokened_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bind: str
 ) -> None:
     """``serve`` must hand the opener the same URL the panel prints.
 
@@ -414,12 +452,60 @@ def test_serve_opens_the_tokened_url(
         embedder=object(),
         search_fn=lambda *a, **k: [],
         token="s3cret",
-        allowed_origin=f"http://{LAN_IP}:8765",
-        allowed_hosts=frozenset({LAN_IP}),
+        allowed_origin=f"http://{bind}:8765",
+        allowed_hosts=frozenset({bind}),
     )
     opened: list[str] = []
     # FTS-only shape, so the boot-time warm-up is skipped rather than faked.
     context = replace(context, embedder=None)
-    serve(context, host=LAN_IP, port=8765, open_browser=True, opener=opened.append)
+    serve(context, host=bind, port=8765, open_browser=True, opener=opened.append)
 
-    assert opened == [f"http://{LAN_IP}:8765/#t=s3cret"]
+    assert opened == [f"http://{bind}:8765/#t=s3cret"]
+
+
+
+def _ipv6_wildcard_available() -> bool:
+    import socket
+    from contextlib import closing
+
+    try:
+        with closing(socket.socket(socket.AF_INET6, socket.SOCK_STREAM)) as sock:
+            sock.bind(("::", 0))
+    except OSError:
+        return False
+    return True
+
+
+needs_ipv6 = pytest.mark.skipif(
+    not _ipv6_wildcard_available(), reason="this host cannot bind the IPv6 wildcard"
+)
+
+
+@needs_ipv6
+@pytest.mark.parametrize("wildcard", ["::", "[::]"])
+def test_resolve_port_finds_a_free_port_on_the_ipv6_wildcard(wildcard: str) -> None:
+    """L-8 (phase-7 audit): the port probe bound ``::`` with an IPv4 socket.
+
+    That always raised, so every port looked busy and ``brain ui --host ::``
+    died with "no free port found" before the notice could print.
+    """
+    import socket
+    from contextlib import closing
+
+    with closing(socket.socket(socket.AF_INET6, socket.SOCK_STREAM)) as sock:
+        sock.bind(("::", 0))
+        free = sock.getsockname()[1]
+    assert resolve_port(free, host=wildcard, auto=False) == free
+
+
+@needs_ipv6
+def test_resolve_port_sees_a_busy_ipv6_wildcard_port() -> None:
+    """The fix must not make the probe always succeed for IPv6."""
+    import socket
+
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("::", 0))
+        busy = sock.getsockname()[1]
+        sock.listen(1)
+        assert resolve_port(busy, host="::", auto=True) != busy

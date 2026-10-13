@@ -44,11 +44,19 @@ TELEMETRY_DISABLED_NOTICE = (
 
 
 def _port_is_free(host: str, port: int) -> bool:
-    """Probe a port with a real bind. Portable; no ``lsof``."""
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
+    """Probe a port with a real bind. Portable; no ``lsof``.
+
+    The probe uses the address family the server will bind. It used to be
+    IPv4-only (with ``::1`` mapped to ``127.0.0.1``), so binding ``::`` raised
+    on every port, every port looked busy, and ``brain ui --host ::`` died with
+    "no free port found" before it could print a thing (phase-7 audit L-8).
+    """
+    address = host.strip("[]")
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    with closing(socket.socket(family, socket.SOCK_STREAM)) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            sock.bind((host if host != "::1" else "127.0.0.1", port))
+            sock.bind((address, port))
         except OSError:
             return False
     return True
