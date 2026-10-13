@@ -21,14 +21,23 @@ count is not the one the baseline was recorded against, that is your answer.
 **2. Two `recency` queries are clock-dependent.** They filter on
 `documents.ingested_at` via `since_days: 40`, so the matched set is stable only
 while `today - 40 days` stays inside one gap in this brain's ingest history.
-The baseline was re-recorded on **2026-09-21**, when that boundary sat inside a
-16-day gap (last ingest 2026-08-11, next 2026-08-27), which makes it stable
-from roughly **2026-09-20 to 2026-10-05**. Outside that range one or both of
+The baseline was re-recorded on **2026-10-13**, when that boundary sat inside a
+21-day gap (last ingest 2026-08-31, next 2026-09-21), which makes it stable
+from roughly **2026-10-10 to 2026-10-31**. Outside that range one or both of
 those queries drift on their own and the baseline needs re-recording. Nothing
 about search changed. *(The first recording, 2026-09-02, sat in a different
 gap and drifted on 2026-09-20 exactly as this paragraph predicted — one query,
-`-0.15` nDCG@5, every other row unchanged to four decimals.)* Re-derive the
-window before you re-record; it is a property of the corpus, not of the code:
+`-0.15` nDCG@5, every other row unchanged to four decimals.)*
+
+*The 2026-10-13 re-record was a **corpus change (4), not drift alone**.* The
+ingests of +608 docs (Krisp on 2026-10-05, a Confluence import on 2026-10-08)
+moved 12 non-recency rows as well, and the means fell from 0.4834 / 0.5835 /
+0.7267 to **0.2589 / 0.3697 / 0.5852** (nDCG@5 / MRR / Recall@20). The golden
+judgments predate ~30% of the corpus, so the absolute scores understate quality
+until the corpus is re-judged against the new documents.
+
+Re-derive the window before you re-record; it is a property of the corpus, not
+of the code:
 
 ```sql
 WITH b AS (SELECT now() - interval '40 days' AS cut)
@@ -38,6 +47,12 @@ FROM documents, b;
 ```
 
 The baseline is stable from `last_before + 40 days` to `first_after + 40 days`.
+
+**Follow-up (found 2026-10-12, fix pending in a separate PR that will
+re-record):** the vector leg in `search.py` has no per-document chunk cap
+(the FTS leg has `PER_DOC_CHUNK_CAP`), and it returns ~40 rows rather than
+`CANDIDATE_LIMIT`, probably capped by HNSW `ef_search`. On one query a few long
+new docs filled the whole pool, shrinking its results from 17 docs to 6.
 
 **3. The retrieval config moved.** Changing the embedder,
 `recency_halflife_days`, `vector_sim_floor`, or `snippet_context_tokens` shifts
