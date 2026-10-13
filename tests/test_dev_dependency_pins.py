@@ -9,18 +9,20 @@ from packaging.requirements import Requirement
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
-# The newest `coverage` release measured green against this tree — 7.15.4 is
-# current, so the cap is the next unreleased minor. Bumping this constant
+# The newest `coverage` release measured green against this tree — 7.16.2 on
+# 2026-09-29 (re-measured for Dependabot #12, landed in #15) — so the cap is the
+# next unreleased minor. Bumping this constant
 # without re-running the measurement recorded beside the pin in pyproject.toml
 # is exactly the mistake the evidence block there exists to prevent.
 MEASURED_COVERAGE_CEILING = "7.17"
 
 # The next unreleased MINOR above the newest `ruff` release measured green on
-# this tree. 0.16.4 was newest on 2026-08-20 and is verified green, so the cap is
-# 0.17. For a 0.x project the minor IS the breaking-change unit — ruff lands new
+# this tree. 0.17.0 was newest on 2026-10-13 and is verified green (byte-identical
+# to 0.16.10 on the same tree, same files, same enabled rules), so the cap is
+# 0.18. For a 0.x project the minor IS the breaking-change unit — ruff lands new
 # rules and rule-behaviour changes there — so this is the meaningful granularity,
 # not a patch cap.
-MEASURED_RUFF_CEILING = "0.17"
+MEASURED_RUFF_CEILING = "0.18"
 
 # Same rule for `mypy`: 2.4.0 was newest on 2026-10-12 and is verified green
 # (byte-identical to 2.3.1 on the same tree), so the cap is the next unreleased
