@@ -139,16 +139,17 @@ def test_loopback_host_spellings_are_accepted(tmp_path: Path) -> None:
             assert client.get("/api/health", headers={"Host": host}).status_code == 200
 
 
-@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::"])
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "[::]"])
 def test_a_wildcard_bind_refuses_another_devices_host_header(
     tmp_path: Path, wildcard: str
 ) -> None:
-    """Why the phone recipe is ``--host <LAN IP>`` (or ``--lan``), never ``0.0.0.0``.
+    """Why the phone recipe is ``--host <LAN IP>`` (or ``--lan``), never a wildcard.
 
-    A wildcard bind gets the LOOPBACK allowlist, so a phone that reaches the
-    machine by its LAN address is refused before any route runs. That is the
-    DNS-rebinding defence working as designed; the docs used to ship this bind
-    as the remote-reading recipe. Pinned so the guide cannot drift from it.
+    Every wildcard bind gets the LOOPBACK allowlist (phase-7 ruling W1), so a
+    phone that reaches the machine by its LAN address is refused before any
+    route runs. That is the DNS-rebinding defence working as designed; the docs
+    used to ship ``0.0.0.0`` as the remote-reading recipe. Pinned so the guide
+    cannot drift from it.
     """
     from brain.ui.context import host_allowlist
 
@@ -158,6 +159,77 @@ def test_a_wildcard_bind_refuses_another_devices_host_header(
             "/api/health", headers={"Host": "192.0.2.10:8765", TOKEN_HEADER: "t"}
         )
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("wildcard", ["::", "[::]"])
+def test_an_ipv6_wildcard_gets_exactly_the_ipv4_wildcards_allowlist(wildcard: str) -> None:
+    """Ruling W1 (phase 7): ``::`` behaves like ``0.0.0.0``, and no wider.
+
+    Before W1, ``host_allowlist("::")`` was ``{"::"}`` — a Host value no browser
+    can send (IPv6 literals arrive bracketed), so a ``--host ::`` server refused
+    every request, this machine's included. Equality, not superset: the IPv6
+    wildcard must not accept anything the IPv4 one does not.
+    """
+    from brain.ui.context import LOOPBACK_HOSTS, host_allowlist
+
+    assert host_allowlist(wildcard) == host_allowlist("0.0.0.0") == LOOPBACK_HOSTS
+
+
+@pytest.mark.parametrize(
+    ("wildcard", "local_host"), [("0.0.0.0", "127.0.0.1"), ("::", "[::1]")]
+)
+def test_a_wildcard_bind_accepts_a_write_from_the_url_it_opens(
+    tmp_path: Path, wildcard: str, local_host: str
+) -> None:
+    """Ruling W2: the opened URL and the expected Origin come from one helper.
+
+    Before W2 the Origin a wildcard bind expected was ``http://0.0.0.0:<port>``,
+    which no browser ever sends, so every write from the opened page was refused
+    as cross-origin. The request is a POST to an unrouted path so the guard is
+    the only thing that can refuse it: passing it yields 404, not 403.
+    """
+    from brain.ui.context import bind_origin, host_allowlist
+
+    origin = bind_origin(wildcard, 8765)
+    assert origin == f"http://{local_host}:8765"
+    context = _context(
+        tmp_path, allowed_origin=origin, allowed_hosts=host_allowlist(wildcard)
+    )
+    with TestClient(create_app(context), base_url=origin) as client:
+        response = client.post(
+            "/api/no-such-route", json={}, headers={"Origin": origin}
+        )
+    assert response.status_code == 404, response.text
+
+
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::"])
+def test_a_wildcard_bind_still_refuses_a_foreign_origin_on_writes(
+    tmp_path: Path, wildcard: str
+) -> None:
+    """W2 must not loosen CSRF: only the derived origin passes, nothing else."""
+    from brain.ui.context import bind_origin, host_allowlist
+
+    origin = bind_origin(wildcard, 8765)
+    context = _context(
+        tmp_path, allowed_origin=origin, allowed_hosts=host_allowlist(wildcard)
+    )
+    with TestClient(create_app(context), base_url=origin) as client:
+        response = client.post(
+            "/api/no-such-route",
+            json={},
+            headers={"Origin": "http://192.0.2.10:8765"},
+        )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "origin_mismatch"
+
+
+def test_bind_origin_brackets_ipv6_and_passes_other_hosts_through() -> None:
+    from brain.ui.context import bind_origin
+
+    assert bind_origin("127.0.0.1", 8765) == "http://127.0.0.1:8765"
+    assert bind_origin("192.0.2.10", 9000) == "http://192.0.2.10:9000"
+    assert bind_origin("::1", 8765) == "http://[::1]:8765"
+    assert bind_origin("[::]", 8765) == "http://[::1]:8765"
 
 
 def test_a_lan_address_bind_accepts_its_own_host_header(tmp_path: Path) -> None:

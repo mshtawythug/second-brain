@@ -17,13 +17,14 @@ from collections.abc import Callable, Iterator
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from typing import Any
+from urllib.parse import quote
 
 import psycopg
 
 from ..config import Config
 from ..db import connect
 from ..errors import BrainError
-from .context import UiContext, host_allowlist
+from .context import UiContext, bind_origin, host_allowlist
 from .security import is_loopback
 from .telemetry import ui_source_supported
 
@@ -152,7 +153,7 @@ def build_context(
         search_fn=search_fn or hybrid_search,
         read_only=read_only,
         token=token,
-        allowed_origin=f"http://{host}:{port}",
+        allowed_origin=bind_origin(host, port),
         allowed_hosts=host_allowlist(host),
         logging_enabled=logging_enabled,
         graph_syncer=graph_syncer,
@@ -205,15 +206,20 @@ def warm_embedder(embedder: Any) -> bool:
 
 
 def browser_url(host: str, port: int, token: str) -> str:
-    """The URL to open: the bind, plus the token in the fragment when one is set.
+    """The URL to open: the bind's origin, plus the token in the fragment.
 
     The fragment is how the client receives the token (``static/js/api.js``):
     it is never sent to the server, logged, or leaked in a Referer. Without it a
     tokened server opens a page whose every API call is refused. One function
-    for the opened tab and the printed panel, so the two cannot disagree.
+    for the opened tab and the printed panel, so the two cannot disagree, and
+    built on :func:`bind_origin`, so neither can disagree with the write guard.
+
+    The token is percent-encoded because ``api.js`` ``decodeURIComponent``-s
+    it: a raw ``%`` threw ``URIError`` before the page could boot, and a raw
+    ``#`` truncated the secret (phase-7 review L-3).
     """
-    url = f"http://{host}:{port}/"
-    return f"{url}#t={token}" if token else url
+    url = f"{bind_origin(host, port)}/"
+    return f"{url}#t={quote(token, safe='')}" if token else url
 
 
 def serve(

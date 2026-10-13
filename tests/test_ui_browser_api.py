@@ -163,3 +163,62 @@ def test_an_error_response_that_is_not_json_still_falls_back_to_the_status_text(
     )
     assert result["status"] == 500
     assert "not JSON" not in result["message"]
+
+
+def test_a_token_with_reserved_characters_reaches_the_api_intact(
+    static_origin: str,
+) -> None:
+    """L-3 (phase-7 review): the fragment the CLI prints is the one ``api.js`` decodes.
+
+    ``api.js`` runs ``decodeURIComponent`` on ``#t=…``. Before the fix,
+    ``browser_url`` wrote the token raw, so a ``--token`` containing ``%`` threw
+    ``URIError`` at module evaluation and the page never booted; ``#`` would
+    have truncated it. The URL here is built by the REAL ``browser_url``, so the
+    Python and JavaScript halves are tested as one contract.
+    """
+    from urllib.parse import urlsplit
+
+    from brain.ui.server import browser_url
+
+    sync_api = pytest.importorskip(
+        "playwright.sync_api",
+        reason='Playwright not installed — `pip install -e ".[browser]"`',
+    )
+    token = "50% off #1"
+    fragment = urlsplit(browser_url("127.0.0.1", 8765, token)).fragment
+    seen: list[str] = []
+
+    def route_api(route: Any) -> None:
+        seen.append(route.request.headers.get("x-brain-ui-token", ""))
+        path = "/" + route.request.url.split("127.0.0.1:")[-1].split("/", 1)[-1]
+        body = _STUBS.get(path.split("?")[0])
+        route.fulfill(status=200 if body else 404,
+                      body=json.dumps(body) if body else "{}",
+                      content_type="application/json")
+
+    with sync_api.sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            pg = browser.new_page()
+            errors: list[str] = []
+            pg.on("pageerror", lambda exc: errors.append(str(exc)))
+            pg.route("**/api/**", route_api)
+            pg.goto(f"{static_origin}/static/index.html#{fragment}")
+            pg.wait_for_load_state("networkidle")
+            booted = pg.evaluate(
+                """async () => {
+                    try {
+                        const mod = await import("/static/js/api.js");
+                        await mod.api("/api/health");
+                        return true;
+                    } catch (error) {
+                        return String(error);
+                    }
+                }"""
+            )
+        finally:
+            browser.close()
+
+    assert errors == [], f"the page threw while reading the token: {errors}"
+    assert booted is True, booted
+    assert seen and set(seen) == {token}, seen

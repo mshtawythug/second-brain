@@ -35,6 +35,12 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 #: what actually defeats DNS rebinding (see :mod:`brain.ui.security`).
 LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
+#: The wildcard binds: "every interface", a bind address and never a
+#: destination. Ruling W1 (phase 7): all three get exactly the loopback
+#: allowlist, so a wildcard bind is reachable from this machine and from
+#: nowhere else — never wider than ``0.0.0.0`` already was.
+WILDCARD_HOSTS: frozenset[str] = frozenset({"0.0.0.0", "::", "[::]"})  # noqa: S104
+
 
 def _utcnow() -> datetime:
     """Default clock. Injectable via ``UiContext.now_fn`` so tests can freeze it."""
@@ -128,8 +134,33 @@ def host_allowlist(host: str) -> frozenset[str]:
     the DNS-rebinding hole this allowlist exists to close.
 
     ``TrustedHostMiddleware`` strips the port before comparing, so only bare
-    hostnames belong here.
+    hostnames belong here. It keeps the brackets on an IPv6 literal, which is
+    why ``::`` could never match ``{"::"}`` before ruling W1.
     """
-    if host in LOOPBACK_HOSTS or host == "0.0.0.0":  # noqa: S104 — compared, not bound
+    if host in LOOPBACK_HOSTS or host in WILDCARD_HOSTS:
         return LOOPBACK_HOSTS
     return frozenset({host})
+
+
+def bind_origin(host: str, port: int) -> str:
+    """The origin a browser on THIS machine uses to reach a server bound to ``host``.
+
+    Ruling W2 (phase 7): the single source for both the URL ``brain ui`` prints
+    and opens (:func:`brain.ui.server.browser_url`) and the ``Origin`` its write
+    guard expects (``UiContext.allowed_origin``). Before W2 the guard expected
+    ``http://0.0.0.0:<port>`` — an origin no browser sends — so a wildcard bind
+    could be read but never written, and its printed URL answered 400.
+
+    A wildcard maps to the matching loopback literal (IPv4 ``127.0.0.1``, IPv6
+    ``[::1]``), which :func:`host_allowlist` accepts; an IPv6 literal is
+    bracketed, as a URL requires; anything else passes through unchanged.
+    """
+    if host == "0.0.0.0":  # noqa: S104 — compared, not bound
+        url_host = "127.0.0.1"
+    elif host in WILDCARD_HOSTS:
+        url_host = "[::1]"
+    elif ":" in host and not host.startswith("["):
+        url_host = f"[{host}]"
+    else:
+        url_host = host
+    return f"http://{url_host}:{port}"

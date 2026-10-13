@@ -313,6 +313,18 @@ def test_wildcard_bind_warns_that_other_devices_are_refused(
     assert "400" in result.output
 
 
+def test_wildcard_bind_prints_a_loopback_url_not_the_bind_address(
+    app: typer.Typer, started: _Started
+) -> None:
+    """L-6, at the panel: the printed URL is the one that works on this machine."""
+    result = runner.invoke(
+        app, ["ui", "--host", "0.0.0.0", "--token", "x", "--no-open"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "http://127.0.0.1:8765/#t=x" in result.output
+    assert "http://0.0.0.0" not in result.output
+
+
 def test_a_lan_bind_does_not_print_the_wildcard_warning(
     app: typer.Typer, started: _Started
 ) -> None:
@@ -332,6 +344,35 @@ def test_browser_url_carries_the_token_whenever_one_is_set() -> None:
     assert browser_url("127.0.0.1", 8765, "") == "http://127.0.0.1:8765/"
     assert browser_url(LAN_IP, 8766, "s3cret") == f"http://{LAN_IP}:8766/#t=s3cret"
     assert browser_url("127.0.0.1", 8765, "s3cret").endswith("/#t=s3cret")
+
+
+@pytest.mark.parametrize(
+    ("wildcard", "expected"),
+    [("0.0.0.0", "http://127.0.0.1:8765/"), ("::", "http://[::1]:8765/")],
+)
+def test_browser_url_for_a_wildcard_bind_is_a_loopback_url(
+    wildcard: str, expected: str
+) -> None:
+    """L-6: ``http://0.0.0.0:<port>/`` is not a URL a browser can use here.
+
+    The wildcard is a bind address, not a destination; its Host allowlist is
+    loopback names (ruling W1), so the opened page must be a loopback URL.
+    """
+    from brain.ui.server import browser_url
+
+    assert browser_url(wildcard, 8765, "") == expected
+
+
+def test_browser_url_percent_encodes_the_token() -> None:
+    """L-3: ``api.js`` runs ``decodeURIComponent`` on the fragment.
+
+    An unencoded ``%`` makes that throw (``URIError``) at module evaluation and
+    the page never boots; ``#`` and spaces would truncate or mangle it.
+    """
+    from brain.ui.server import browser_url
+
+    url = browser_url("127.0.0.1", 8765, "50% off #1")
+    assert url == "http://127.0.0.1:8765/#t=50%25%20off%20%231"
 
 
 def test_serve_opens_the_tokened_url(

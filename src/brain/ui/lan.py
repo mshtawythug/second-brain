@@ -3,10 +3,10 @@
 Spec Q1 (answered 2026-10-12) replaced the wiki's zero-config phone reading with
 a documented ``brain ui --host <ip> --token <secret>``. ``--lan`` is the
 convenience over that recipe, and it exists because the obvious recipe does not
-work: ``--host 0.0.0.0`` gets a loopback-only Host allowlist
-(:func:`brain.ui.context.host_allowlist`), so a phone's request is refused with
-400. Binding the LAN address itself makes the allowlist and the allowed Origin
-that address. See ``docs/guides/brain-ui-on-your-phone.md``.
+work: a wildcard bind (``0.0.0.0`` or ``::``) gets a loopback-only Host
+allowlist (:func:`brain.ui.context.host_allowlist`), so a phone's request is
+refused with 400. Binding the LAN address itself makes the allowlist and the
+allowed Origin that address. See ``docs/guides/brain-ui-on-your-phone.md``.
 
 Nothing here widens the security model: ``--lan`` always runs with a token, and
 this module never touches the allowlist.
@@ -21,15 +21,13 @@ from contextlib import closing
 
 from ..errors import BrainError
 
-#: The wildcard binds. They are not loopback, so they need a token, but they
-#: also cannot serve another device (see the module docstring), which is the
-#: trap the startup notice below warns about.
-ALL_INTERFACES: frozenset[str] = frozenset({"0.0.0.0", "::", "[::]"})  # noqa: S104
-
-ALL_INTERFACES_NOTICE = (
-    "other devices cannot use this bind: the Host allowlist for a wildcard "
-    "address is loopback-only, so a phone is refused with 400. Use --lan, or "
-    "--host <this machine's LAN address>."
+#: Printed on a wildcard bind (``brain.ui.context.WILDCARD_HOSTS``). Those are
+#: not loopback, so they need a token, but they cannot serve another device:
+#: their Host allowlist is loopback names only (ruling W1), which is the trap.
+WILDCARD_NOTICE = (
+    "other devices cannot use this bind: a wildcard address accepts only "
+    "loopback Host names, so a phone reaching this machine by its LAN address "
+    "is refused with 400. Use --lan, or --host <this machine's LAN address>."
 )
 
 #: TEST-NET-1 (RFC 5737). ``connect()`` on a UDP socket only consults the

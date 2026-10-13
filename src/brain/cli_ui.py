@@ -153,6 +153,7 @@ def ui(
         return
 
     from .ui import lan as lan_mod
+    from .ui.context import WILDCARD_HOSTS
     from .ui.security import is_loopback
     from .ui.server import browser_url, build_context, resolve_port, serve
 
@@ -214,8 +215,8 @@ def ui(
         )
 
     notices = context.notices
-    if host.strip().lower() in lan_mod.ALL_INTERFACES:
-        notices = (*notices, lan_mod.ALL_INTERFACES_NOTICE)
+    if host.strip().lower() in WILDCARD_HOSTS:
+        notices = (*notices, lan_mod.WILDCARD_NOTICE)
     _panel(
         url=browser_url(host, resolved_port, token),
         cfg=cfg,

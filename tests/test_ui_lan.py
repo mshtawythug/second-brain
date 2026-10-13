@@ -9,8 +9,8 @@ from __future__ import annotations
 import pytest
 
 from brain.errors import BrainError
+from brain.ui.context import WILDCARD_HOSTS
 from brain.ui.lan import (
-    ALL_INTERFACES,
     LanAddressError,
     detect_lan_address,
     new_token,
@@ -74,6 +74,6 @@ def test_minted_tokens_are_long_and_distinct() -> None:
     assert min(len(token) for token in tokens) >= 32
 
 
-def test_all_interfaces_names_both_wildcards() -> None:
-    assert {"0.0.0.0", "::"} <= ALL_INTERFACES
-    assert "127.0.0.1" not in ALL_INTERFACES
+def test_wildcard_hosts_names_both_wildcards_and_no_loopback() -> None:
+    assert {"0.0.0.0", "::", "[::]"} == WILDCARD_HOSTS
+    assert "127.0.0.1" not in WILDCARD_HOSTS
