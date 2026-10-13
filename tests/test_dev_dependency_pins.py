@@ -5,28 +5,38 @@ from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
-# The newest `coverage` release measured green against this tree — 7.15.4 is
-# current, so the cap is the next unreleased minor. Bumping this constant
-# without re-running the measurement recorded beside the pin in pyproject.toml
-# is exactly the mistake the evidence block there exists to prevent.
+# The newest `coverage` release measured green against this tree — 7.16.2 on
+# 2026-09-29 (re-measured for Dependabot #12, landed in #15) — and the cap
+# derived from it, the next unreleased minor. Bumping either without re-running
+# the measurement recorded beside the pin in pyproject.toml is exactly the
+# mistake the evidence block there exists to prevent; the next-minor test below
+# fails if one moves without the other.
+MEASURED_COVERAGE_VERSION = "7.16.2"
 MEASURED_COVERAGE_CEILING = "7.17"
 
-# The next unreleased MINOR above the newest `ruff` release measured green on
-# this tree. 0.16.4 was newest on 2026-08-20 and is verified green, so the cap is
-# 0.17. For a 0.x project the minor IS the breaking-change unit — ruff lands new
-# rules and rule-behaviour changes there — so this is the meaningful granularity,
-# not a patch cap.
-MEASURED_RUFF_CEILING = "0.17"
+# The newest `ruff` release measured green on this tree, and the cap derived
+# from it: the next unreleased MINOR above it. 0.17.0 was newest on 2026-10-13
+# and is verified green (byte-identical to 0.16.10 on the same tree, same files,
+# same enabled rules). For a 0.x project the minor IS the breaking-change unit —
+# ruff lands new rules and rule-behaviour changes there — so this is the
+# meaningful granularity, not a patch cap. The two move TOGETHER;
+# `test_ceiling_is_the_next_minor_above_the_measured_version` fails if one
+# moves without the other.
+MEASURED_RUFF_VERSION = "0.17.0"
+MEASURED_RUFF_CEILING = "0.18"
 
 # Same rule for `mypy`: 2.4.0 was newest on 2026-10-12 and is verified green
-# (byte-identical to 2.3.1 on the same tree), so the cap is the next unreleased
-# minor. NOTE the floor is `>=1.13`, two majors below what actually resolves —
-# see the evidence block in pyproject.toml, which records that as an UNMEASURED
-# gap rather than quietly raising it.
+# (byte-identical to 2.3.1 on the same tree). NOTE the floor is `>=1.13`, two
+# majors below what actually resolves — see the evidence block in
+# pyproject.toml, which records that as an UNMEASURED gap rather than quietly
+# raising it.
+MEASURED_MYPY_VERSION = "2.4.0"
 MEASURED_MYPY_CEILING = "2.5"
 
 # The gate tools, and why they are tested together: both are what
@@ -38,6 +48,25 @@ GATE_TOOL_CEILINGS = {
     "mypy": MEASURED_MYPY_CEILING,
 }
 
+# Every measured pin — the gate tools plus `coverage` — as (measured version,
+# ceiling). The admits and next-minor checks run over ALL of them: coverage was
+# left out at first, and `coverage<7.16` with a ceiling of "7.16" then passed
+# every test while excluding the 7.16.2 the evidence block records. Which names
+# belong here is not a choice: `test_every_capped_dev_pin_is_measured` derives
+# it from pyproject.toml.
+MEASURED_PINS = {
+    "coverage": (MEASURED_COVERAGE_VERSION, MEASURED_COVERAGE_CEILING),
+    "ruff": (MEASURED_RUFF_VERSION, MEASURED_RUFF_CEILING),
+    "mypy": (MEASURED_MYPY_VERSION, MEASURED_MYPY_CEILING),
+}
+
+
+def _dev_requirements() -> list[Requirement]:
+    """Return every requirement in the `dev` extra, parsed."""
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    dev_deps: list[str] = data["project"]["optional-dependencies"]["dev"]
+    return [Requirement(raw) for raw in dev_deps]
+
 
 def _dev_requirement(name: str) -> Requirement:
     """Return the parsed `dev` extra requirement for ``name``.
@@ -45,14 +74,49 @@ def _dev_requirement(name: str) -> Requirement:
     Parses the specifier rather than substring-matching the raw string, so the
     assertions below test the BOUND and not the formatting.
     """
-    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    dev_deps: list[str] = data["project"]["optional-dependencies"]["dev"]
-    for raw in dev_deps:
-        requirement = Requirement(raw)
+    requirements = _dev_requirements()
+    for requirement in requirements:
         if requirement.name == name:
             return requirement
     raise AssertionError(
-        f"no `{name}` requirement in [project.optional-dependencies].dev: {dev_deps}"
+        f"no `{name}` requirement in [project.optional-dependencies].dev: "
+        f"{[str(r) for r in requirements]}"
+    )
+
+
+def test_every_capped_dev_pin_is_measured() -> None:
+    """Every `dev` requirement with an upper bound must have a MEASURED_PINS entry.
+
+    The cap convention is "the next unreleased minor above the newest MEASURED
+    release", so a cap with no measurement behind it is a guess. The admits and
+    next-minor tests below only cover names that are already in MEASURED_PINS,
+    so membership has to come from pyproject.toml rather than from this file:
+    otherwise dropping `coverage` from the map (or adding a new capped dev dep
+    and forgetting the map) leaves every test green.
+
+    TO ADD A CAPPED DEV DEP — e.g. `pytest-timeout>=2.4.0,<2.5` — measure the
+    newest release on this tree, write the evidence block beside the pin in
+    pyproject.toml, then add both constants here and the entry, e.g.
+    `MEASURED_PYTEST_TIMEOUT_VERSION = "2.4.0"`,
+    `MEASURED_PYTEST_TIMEOUT_CEILING = "2.5"` and
+    `"pytest-timeout": (MEASURED_PYTEST_TIMEOUT_VERSION,
+    MEASURED_PYTEST_TIMEOUT_CEILING)`. An uncapped dep (`>=` only) needs nothing.
+    """
+    capped = {
+        canonicalize_name(requirement.name)
+        for requirement in _dev_requirements()
+        if any(spec.operator in {"<", "<="} for spec in requirement.specifier)
+    }
+    measured = {canonicalize_name(name) for name in MEASURED_PINS}
+
+    assert measured == capped, (
+        f"capped dev pins without a MEASURED_PINS entry: {sorted(capped - measured)}; "
+        f"MEASURED_PINS entries with no capped dev pin: {sorted(measured - capped)}. "
+        "Every upper bound in [project.optional-dependencies].dev must be "
+        "measured: add MEASURED_<NAME>_VERSION and MEASURED_<NAME>_CEILING (the "
+        "next minor above the version) and a MEASURED_PINS entry for it, plus "
+        "the evidence block in pyproject.toml — see this test's docstring. If "
+        "the cap was dropped, drop the entry too."
     )
 
 
@@ -164,24 +228,51 @@ def test_gate_tool_is_capped_at_the_measured_ceiling(tool: str) -> None:
     )
 
 
-@pytest.mark.parametrize("tool", sorted(GATE_TOOL_CEILINGS))
-def test_gate_tool_ceiling_admits_the_version_that_was_measured(tool: str) -> None:
+@pytest.mark.parametrize("name", sorted(MEASURED_PINS))
+def test_ceiling_admits_the_version_that_was_measured(name: str) -> None:
     """The cap must not exclude the very version the evidence block measured.
 
     A ceiling that forbids the release it was derived from is self-refuting, and
     it fails at `pip install` time rather than here — which is worse, because the
     bound then looks deliberate. This is the counterfactual half of the pin: the
     test above proves the bound EXISTS, this one proves it ADMITS its own
-    evidence.
+    evidence. It checks the specifier AS WRITTEN, so it holds for `coverage`'s
+    upper-bound-only `<7.17` as much as for `ruff`'s `>=0.7,<0.18`.
     """
-    measured = {"ruff": "0.16.4", "mypy": "2.3.1"}[tool]
-    requirement = _dev_requirement(tool)
+    measured, _ceiling = MEASURED_PINS[name]
+    requirement = _dev_requirement(name)
 
     assert requirement.specifier.contains(measured), (
-        f"`{requirement}` excludes {tool} {measured}, which is the version the "
+        f"`{requirement}` excludes {name} {measured}, which is the version the "
         "evidence block in pyproject.toml records as measured green on this "
         "tree. Either the cap is wrong or the evidence block is stale — fix "
         "whichever, but they cannot disagree."
+    )
+
+
+@pytest.mark.parametrize("name", sorted(MEASURED_PINS))
+def test_ceiling_is_the_next_minor_above_the_measured_version(name: str) -> None:
+    """Each ceiling constant must be derived from its measured-version constant.
+
+    The two tests above compare pyproject.toml against the constants, so they
+    cannot notice the constants disagreeing with EACH OTHER. Before the
+    measured versions were named constants, the admits-test carried a literal
+    map (`0.16.4` / `2.3.1`) that two cap raises left behind, and a bound of
+    `<0.17` with a ceiling of "0.17" passed every test while excluding the
+    0.17.0 just measured. This pins the rule the evidence block states — cap =
+    next unreleased minor above the newest MEASURED release — so moving either
+    constant alone goes red here. (Which names are in MEASURED_PINS is
+    enforced separately, by `test_every_capped_dev_pin_is_measured`.)
+    """
+    raw_measured, ceiling = MEASURED_PINS[name]
+    measured = Version(raw_measured)
+    expected = f"{measured.major}.{measured.minor + 1}"
+
+    assert ceiling == expected, (
+        f"`{name}` ceiling constant is <{ceiling} but the measured "
+        f"version constant is {measured}, whose next unreleased minor is "
+        f"<{expected}. Move the measured version, the ceiling and the evidence "
+        "block in pyproject.toml together."
     )
 
 

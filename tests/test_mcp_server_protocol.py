@@ -53,8 +53,9 @@ async def _list_tools_via_stdio() -> dict[str, dict[str, object]]:
         },
     )
     with anyio.fail_after(15):
-        # One statement, two contexts: ruff 0.16.8 (CI) flags the nested form
-        # as SIM117; 0.16.4 (the pinned floor most local venvs carry) does not.
+        # One statement, two contexts: ruff 0.16.8+ flags the nested form as
+        # SIM117 (checked through 0.17.0); 0.16.4, still admitted by the
+        # `ruff>=0.7` floor, does not.
         async with (
             stdio_client(params) as (read, write),
             ClientSession(read, write) as session,
