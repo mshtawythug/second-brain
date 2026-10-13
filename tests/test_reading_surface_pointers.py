@@ -234,3 +234,28 @@ def test_vault_and_wiki_documents_the_brain_up_default_truthfully() -> None:
     )
     assert "and opens the browser" not in text
     assert "→ open browser" not in text
+
+
+def _section(text: str, heading: str) -> str:
+    """The body of a ``## heading`` section, up to the next ``## `` heading."""
+    start = text.index(f"\n{heading}\n")
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
+
+def test_cli_reference_names_brain_ui_the_primary_reading_surface() -> None:
+    """S19 (phase-7 audit): reverting the section to "A local, single-user web
+    app" — the pre-phase wording — stayed green."""
+    section = _section(CLI_REFERENCE.read_text(encoding="utf-8"), "## brain ui")
+    assert "The primary reading surface" in section, section
+
+
+def test_docs_index_calls_the_rendered_wiki_legacy() -> None:
+    """S20 (phase-7 audit): the docs index row for vault-and-wiki.md was
+    repointed to call the wiki legacy, and nothing pinned it."""
+    row = next(
+        line for line in DOCS_INDEX.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| [vault-and-wiki.md]")
+    )
+    assert "the legacy Quartz + Caddy rendered wiki" in row, row
+    assert "`brain ui` is the primary reading surface" in row, row
