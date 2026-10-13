@@ -257,7 +257,9 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Round 9 — plan | `6f6e3ba` | this file: §10.9, §10.16 |
 | Final — code | `f995721` | `ui/server.py` (only EADDRINUSE is busy; `_bind_failure`), `ui/context.py` (hostname syntax, zoneless link-local), CHANGELOG, `HOST_SPELLINGS` rows, probe-class tests, four E303 spots in untouched test files |
 | Final — tests | `98c99f6` | `test_cli_ui.py`: both busy phrasings forbidden; the EACCES remediation asserted |
-| Final — plan | **the commit that added this row** | this file: §10.9, §10.17 |
+| Final — plan | `4c164cb` | this file: §10.9, §10.17 |
+| S19/S20 — tests | `1d9e65b` | `test_reading_surface_pointers.py`: cli-reference "primary", docs index "legacy" |
+| S19/S20 — plan | **the commit that added this row** | this file: §10.9, §10.17 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -440,10 +442,10 @@ superseded and marked, exit 0. At `af22825` (round 6): 83/83, 17 superseded and 
 again after the merge of `second-brain/master` (`136030b`): unchanged, as a merge preserves every
 cited SHA. At `08c1ac3` (round 8): 98/98, 18 marked, exit 0. At `f73d694` (round 9, first half): 106/106, 27 marked,
 exit 0. At `6f6e3ba` (round 9 with the review folded in): 116/116, 43
-marked, exit 0. Result at the commit that added this sentence (the final commit): **round 0
-22/22, round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round
-7 9/9, round 8 6/6, round 9 8/8 + 10/10 + 9/9 — 125/125; 44 entries superseded at HEAD, every one
-marked; exit 0.** The address-based restructure superseded 16 entries at once; the
+marked, exit 0. At `4c164cb` (the final commit): 125/125, 44 marked, exit 0. Result at
+the commit that added this sentence (S19/S20): **round 0 22/22, round 1 17/17, round 2 13/13,
+round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round 7 9/9, round 8 6/6, round 9 8/8 +
+10/10 + 9/9 + 3/3 — 128/128; 44 entries superseded at HEAD, every one marked; exit 0.** The address-based restructure superseded 16 entries at once; the
 validator listed all of them before any was marked. Its
 first run after round 9 flagged nine entries: six whose CLI code moved into `validate_host`, and
 three whose text still applies but whose TEST had become a row of the new table — the drift the
@@ -1645,6 +1647,35 @@ RF-8 a zoneless link-local address is refused
 
 ```
 
+**Round 9 — against `1d9e65b`** (the audit's partial sweep, S19/S20: two docs pins). Strict clause 4.
+
+```text
+S19 cli-reference calls brain ui the primary reading surface
+  file:    docs/cli-reference.md
+  replace: 'The primary reading surface: a local, single-user web app over the same corpus.'
+  with:    'A local, single-user web app over the same corpus.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_cli_reference_names_brain_ui_the_primary_reading_surface
+  red at:  assert "The primary reading surface" in section
+
+S20 the docs index calls the rendered wiki legacy
+  file:    docs/README.md
+  replace: 'and the legacy Quartz + Caddy rendered wiki (`brain ui` is the primary reading surface).'
+  with:    'and the optional Quartz + Caddy rendered wiki.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_docs_index_calls_the_rendered_wiki_legacy
+  red at:  assert "the legacy Quartz + Caddy rendered wiki" in row
+
+S20b the docs index names brain ui the primary reading surface
+  file:    docs/README.md
+  replace: ' (`brain ui` is the primary reading surface).'
+  with:    '.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_docs_index_calls_the_rendered_wiki_legacy
+  red at:  assert "`brain ui` is the primary reading surface" in row
+
+```
+
 ### 10.10 Review round 3 (2026-10-13)
 
 The phase-7 review of `5402c8f`: one MEDIUM, four LOW. Fixed in `3994ea3` (deps) and `5627743`
@@ -1817,3 +1848,15 @@ original bug. `::%` has two independent guards.
 **Mutation evidence (final):** 9 guards — R9-18 and RF-1 to RF-8 — each on all five clauses with
 the STRICT clause 4, against `98c99f6` on a clean tree. RF-1 is the headline: restore the catch-all
 OSError → busy and the unowned-address test goes red. L-8 (round 2) is superseded by it and marked.
+
+**S19 and S20 (the audit's partial sweep, both LOW)** — `1d9e65b`. Two repointed sentences were
+unpinned: `docs/cli-reference.md`'s `## brain ui` ("The primary reading surface: …") and the
+`docs/README.md` row for `vault-and-wiki.md` ("the legacy Quartz + Caddy rendered wiki (`brain ui`
+is the primary reading surface)"). Each is pinned, the first scoped to its section and the second
+to its row. Three mutations (S19, S20, S20b — the parenthetical alone) pass all five clauses with
+the strict clause 4, against `1d9e65b`.
+
+**An outage during this step, recorded because it voided a run.** The Docker daemon stopped
+(the disk had filled to 2.3 GB free) while the full suite on `4c164cb` was at about 9%. Every DB
+test after that point errored, so that run was stopped and counts for nothing. Team-lead freed
+space and restarted Docker; the test DB and its sibling databases survived.
