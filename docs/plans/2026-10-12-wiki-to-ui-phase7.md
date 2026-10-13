@@ -49,7 +49,7 @@ hits are vault *format*, not pointers at the wiki, and are excluded — `brain u
 |---|---|---|---|---|
 | 1 | **`brain-up`** (`src/brain/templates/bin/brain-up.sh:202-212`, banner `:215-221`) | Waits for the wiki, then **opens `http://localhost:8080` in a browser by default** (`BRAIN_OPEN_BROWSER` defaults to `1`); banner's first line is `wiki: <url>` | **REPOINT.** Opening the wiki becomes opt-in (`BRAIN_OPEN_BROWSER=1`); the banner leads with `read: brain ui` and labels the wiki line legacy | The single strongest daily-loop pointer: every `brain-up` puts the wiki in front of the user. `brain ui` is foreground-only by design (`ui/server.py` `serve` docstring), so `brain-up` cannot start it — it names it |
 | 2 | **`brain setup` final report** (`src/brain/setup.py:921-923`, next steps `:929-932`) | Prints `wiki url` + `start wiki: caddy run …`; the next steps never mention `brain ui` | **REPOINT.** Add `brain ui` to next steps; the wiki lines stay (still installed) but follow it | The first thing a new install reads. Wiki lines go with Q8/phase 9 |
-| 3 | **`brain capture --help`** (`src/brain/_capture_command.py:68-69`) | "visible in the Quartz UI without the "Show ingested" toggle" | **REPOINT** to `brain ui`'s tree (which has the same toggle — `ui/static/js/tree.js:38-57`) | User-facing help text naming the wiki as where you read |
+| 3 | **`brain capture` callback docstring** (`src/brain/_capture_command.py:68-69`) | "visible in the Quartz UI without the "Show ingested" toggle" | **REPOINT** to `brain ui`'s tree (which has the same toggle — `ui/static/js/tree.js:38-57`) | *Corrected during execution:* this row first said `brain capture --help` shows the sentence. It does not — `capture_app` passes `help=` to `typer.Typer`, which overrides the callback docstring (measured: `brain capture --help` contains no "Quartz"). It is still repointed, net zero, because it is the MCP description's twin (#4); the test pins the docstring and says why |
 | 4 | **MCP `brain_capture` description** (`src/brain/mcp_server.py:1652`) | Same sentence, shown to every MCP client | **REPOINT**, net-zero lines | Same; MCP descriptions are a listed candidate |
 | 5 | **README** (`README.md:14`, `:143-149`) | Lists the wiki beside `brain ui` as equals; documents `brain ui --host 0.0.0.0 --token <secret>` | **REPOINT + FIX.** `brain ui` named the reading surface, wiki "legacy, still builds"; the LAN recipe replaced (see §3 — the documented one **cannot serve a phone**) | |
 | 6 | **`docs/cli-reference.md` `## brain ui`** (`:708-724`) | Same broken `0.0.0.0` recipe | **FIX + DOCUMENT** `--lan`, link the phone guide | |
@@ -130,7 +130,7 @@ surface in the daily loop sends them anywhere else**, and that the LAN replaceme
 | E2 | `brain-up`'s banner names `brain ui` as the reading surface, ahead of the wiki line | same file, asserts on stdout order |
 | E3 | `BRAIN_OPEN_BROWSER=1` still opens the wiki (opt-in kept, nothing removed) | same file |
 | E4 | `brain setup`'s next steps name `brain ui` | `tests/test_setup.py`, through `_print_final_report` |
-| E5 | `brain capture --help` and the MCP `brain_capture` description name `brain ui`, not Quartz | `tests/test_reading_surface_pointers.py` (new) |
+| E5 | The MCP `brain_capture` description (and its CLI docstring twin) name `brain ui`, not Quartz | `tests/test_reading_surface_pointers.py` (new) |
 | E6 | README / cli-reference / guide no longer present `--host 0.0.0.0 --token` as the remote recipe, and point at the phone guide | `tests/test_reading_surface_pointers.py` |
 | E7 | `brain ui --lan` binds a LAN address, always with a non-empty token, and prints `http://<ip>:<port>/#t=<token>`; `--lan --host` is exit 2 | `tests/test_cli_ui.py` |
 | E8 | A `0.0.0.0` bind refuses a foreign Host and a LAN-IP bind accepts its own — the fact the recipe rests on | `tests/test_ui_security.py` |
@@ -204,4 +204,72 @@ No `DROP DATABASE`, no `compose down -v`, no launchd changes, no PII, no push.
 
 ## 10. Closeout
 
-*(Filled in after implementation: what shipped per task, SHAs, mutation evidence, deviations.)*
+### 10.1 What shipped
+
+| Task | Commit | Surfaces |
+|---|---|---|
+| Plan | `4b288e1` | this file |
+| 1 — `--lan`, wildcard notice, opened-URL fix | `05fb151` | `src/brain/ui/lan.py` (new), `cli_ui.py`, `ui/server.py` `browser_url` |
+| 2 — `brain-up` | `be6270c` | `templates/bin/brain-up.sh` |
+| 4 — docs | `5e07b6c` | README, `docs/cli-reference.md`, `docs/README.md`, `docs/vault-and-wiki.md`, `docs/guides/brain-ui-on-your-phone.md` (new) |
+| 3 — setup / capture / MCP text | `b862b79` | `setup.py`, `_capture_command.py`, `mcp_server.py`, CLAUDE.md ceiling rows |
+
+Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
+both, is green at every commit.
+
+### 10.2 Rulings and corrections made during execution
+
+- **A fix outside the inventory, on the Q1 path.** `ui/server.py` `serve` opened
+  `http://host:port/` **without** the `#t=` fragment, so any tokened server — and so every
+  `--lan` run with the default `--open` — opened a page whose every API call was refused. The
+  panel also printed the fragment only for non-loopback binds. Both now come from one
+  `browser_url(host, port, token)`. Regression tests: `test_browser_url_carries_the_token_whenever_one_is_set`,
+  `test_serve_opens_the_tokened_url`.
+- **Typer vendors click.** `click.core.ParameterSource` is a different enum from the one Typer's
+  context returns, so an `is ParameterSource.COMMANDLINE` check never matched and `--lan --host`
+  silently passed. Compared by name; reasoned inline in `cli_ui.py`; mutation M9 pins it.
+- **Row #3 was wrong** — corrected in place in §2: the capture sentence is a docstring that
+  `--help` never shows.
+
+### 10.3 Verification (exit codes read from files)
+
+- `ruff check` → 0; `mypy src/` → 0 (225 files).
+- Full default suite, `TEST_DATABASE_URL=…/second_brain_t_evalb`: **8,884 passed, 4 skipped,
+  305 deselected, 94.54% coverage**, exit 0.
+- CI's browser command (the 14 explicit modules, `-m browser --no-cov`): **196 passed**, exit 0.
+- `tests/test_ci_workflow.py`: 22 passed.
+- End to end against the `brain demo` sandbox (55433, FTS-only, throwaway vault — never prod or
+  the live vault): `brain ui --lan --read-only` printed `http://<LAN-IP>:18765/#t=<32 chars>`;
+  `/api/health` 200 with the token, 403 without; `/api/tree` 200. `--host 0.0.0.0 --token …`
+  printed the notice; a request to the LAN address → **400**, to `localhost` → 200.
+  `--lan --host …` → exit 2.
+
+### 10.4 Mutation evidence (five clauses each)
+
+Harness: baseline green on all 27 targeted tests; each mutation applied exactly once and
+confirmed by `git diff --numstat`; targeted tests red; red at the named assertion; every file
+restored and the post-run green. **22/22 guards proven** (M1–M18 as §7, plus M4b setup legacy
+label, M7b cli-reference wildcard, M12 `browser_url`, M13 `serve`, M14/M14b the two allowlist
+pins, M15–M19 docs).
+
+**One mutation was mis-scoped, not one guard.** M19 first removed a single `--read-only` from the
+guide and survived, because the guide says it twice and the guard is a presence check.
+Re-run removing both occurrences: red at `phone guide is missing '--read-only'`. Recorded rather
+than smoothed over.
+
+### 10.5 Known limits — recorded, not fixed
+
+- **The UI token lives in memory only** (`ui/static/js/api.js:12-16`). A phone that reloads, or a
+  bookmark taken after load, gets 403 until the full `#t=` URL is reopened. Persisting it (e.g.
+  `sessionStorage`) is a security decision for the user; the guide documents the behaviour.
+- **No crash-survival draft buffer** (§1): a tab close mid-edit still loses unsaved text. A7's
+  409 path is closed; this is a separate feature.
+- **`brain brief --wiki`** keeps its name (§2 #9); renaming it is launchd work for phase 8.
+- **The exit criterion's human half** — that the user actually reads in `brain ui` — is confirmed
+  at the phase-9 gate, not here.
+
+### 10.6 CLI surface changed (for the memory update, CLAUDE.md rule 11)
+
+`brain ui --lan` (new flag). `brain-up` no longer opens the wiki unless `BRAIN_OPEN_BROWSER=1`
+(default flipped from 1 to 0); its banner leads with `read: brain ui`. `brain setup`'s report
+leads its next steps with `brain ui`.
