@@ -65,7 +65,15 @@ def test_lan_address_error_is_a_brain_error() -> None:
 
 
 def test_the_real_probe_reads_the_local_end_of_a_route() -> None:
-    assert udp_route_probe(("127.0.0.1", 9)) == "127.0.0.1"
+    """The LOCAL end, which must differ from the target to prove anything.
+
+    F14 (phase-7 audit): aimed at ``127.0.0.1``, local and target are equal, so
+    a probe returning its own target instead of ``getsockname()`` passed.
+    ``127.0.0.2`` routes over loopback with source ``127.0.0.1`` (measured on
+    macOS 2026-10-13; Linux's ``local 127.0.0.0/8`` route also uses
+    ``src 127.0.0.1``), and no packet is sent.
+    """
+    assert udp_route_probe(("127.0.0.2", 9)) == "127.0.0.1"
 
 
 def test_minted_tokens_are_long_and_distinct() -> None:

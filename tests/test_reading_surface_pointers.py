@@ -199,6 +199,19 @@ def test_readme_names_brain_ui_as_the_reading_surface() -> None:
     assert "primary" in section.lower(), section
 
 
+def test_readme_intro_names_the_wiki_legacy_not_an_equal_reader() -> None:
+    """F16 (phase-7 audit): inventory row #5 repointed README's opening sentence,
+    and nothing pinned it — reverting to "the same corpus through the CLI, a
+    local web UI, or a rendered wiki" stayed green."""
+    text = README.read_text(encoding="utf-8")
+    assert "or a [rendered wiki]" not in text, (
+        "README's intro lists the wiki as an equal reading surface again"
+    )
+    assert re.search(r"\[rendered wiki\]\([^)]*\)[^\n.]*legacy", text), (
+        "README's intro must call the rendered wiki legacy"
+    )
+
+
 def test_vault_and_wiki_marks_the_wiki_as_legacy() -> None:
     text = VAULT_AND_WIKI.read_text(encoding="utf-8")
     intro = text[: text.index("## Vault model")]

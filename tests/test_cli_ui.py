@@ -306,12 +306,18 @@ def test_lan_without_a_network_exits_one_with_the_override(
     assert "Pass --host" in result.output, result.output
 
 
+@pytest.mark.parametrize("wildcard", ["0.0.0.0", "::", "[::]"])
 def test_wildcard_bind_warns_that_other_devices_are_refused(
-    app: typer.Typer, started: _Started
+    app: typer.Typer, started: _Started, wildcard: str
 ) -> None:
-    """E9: the recipe the docs used to ship serves no phone; say so at startup."""
+    """E9: the recipe the docs used to ship serves no phone; say so at startup.
+
+    Every wildcard, F8 (phase-7 audit): with only ``0.0.0.0`` here, narrowing
+    the check to ``== "0.0.0.0"`` survived. ``[::]`` proves the notice still
+    fires after the CLI strips the brackets.
+    """
     result = runner.invoke(
-        app, ["ui", "--host", "0.0.0.0", "--token", "x", "--no-open"]
+        app, ["ui", "--host", wildcard, "--token", "x", "--no-open"]
     )
     assert result.exit_code == 0, result.output
     assert "--lan" in result.output
