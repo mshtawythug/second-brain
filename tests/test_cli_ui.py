@@ -160,6 +160,34 @@ def test_importing_brain_cli_does_not_pull_starlette_or_uvicorn() -> None:
     )
 
 
+def test_ui_tree_and_render_import_without_starlette_or_uvicorn() -> None:
+    """``brain.ui.tree`` and ``brain.ui.render`` stay pure modules.
+
+    ``brain/ui/__init__.py`` deliberately does not re-export ``create_app`` so
+    that importing either module never drags in :mod:`brain.ui.app` — and
+    through it ``starlette``. Same clean-interpreter shape as the test above:
+    this session has already imported both web dependencies.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import brain.ui.tree, brain.ui.render, sys;"
+            "print('starlette' in sys.modules, 'uvicorn' in sys.modules)",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert result.stdout.strip() == "False False", (
+        "brain.ui.tree / brain.ui.render now import a web dependency: "
+        f"{result.stdout!r}"
+    )
+
+
 # --------------------------------------------------------------------------
 # Phase 7 / Q1 — `--lan`, the wildcard-bind notice, and the opened URL
 # --------------------------------------------------------------------------
