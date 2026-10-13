@@ -261,7 +261,11 @@ both, is green at every commit.
 
 ### 10.3 Verification (exit codes read from files)
 
-*Measured on the pre-rebase head `99957eb`. The verification of the audited head is in the review-loop report, not here: a line in this file cannot record a run on the commit that contains it.*
+*Two measurements, each bound to the commit it ran on. A line in this file cannot record a run on the commit that contains it, so the newest one is bound to the commit before the one that wrote it, and `git diff --stat 77074bb..<this commit>` shows only this file.*
+
+**On `77074bb` (audit round 2, the last code-bearing commit), 2026-10-13:** `ruff check` → 0; `mypy src/` (mypy 2.4.0) → 0, 225 files; full default suite on `second_brain_t_p7b` → **8,923 passed, 4 skipped, 306 deselected, 94.54% coverage**, exit 0; CI's browser command → **197 passed**, exit 0; `tests/test_ci_workflow.py` → 22 passed. End to end on the `brain demo` sandbox: `--lan` (200 with the token, 403 without, 400 for a foreign Host); `--host ::` binds, prints the notice and `http://[::1]:<port>/#t=…`, serves `[::1]` (200), refuses a foreign Host (400) and passes the write guard with the loopback Origin; `--host 0.0.0.0` prints a `127.0.0.1` URL, 400 from the LAN address, write guard accepts the loopback Origin and refuses a foreign one (403).
+
+**On the pre-rebase head `99957eb` (the first closeout):**
 
 - `ruff check` → 0; `mypy src/` → 0 (225 files).
 - Full default suite, `TEST_DATABASE_URL=…/second_brain_t_evalb`: **8,884 passed, 4 skipped,
