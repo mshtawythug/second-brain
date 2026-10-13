@@ -480,8 +480,9 @@ round's SHA, which is what the script checks; at HEAD their text or test has mov
    review round 9, when consolidating three tests into one table renamed
    tests that still-applicable entries cite.) An entry whose tests MOVED
    (review round 11 split `tests/test_cli_ui.py`) names the new nodes on
-   `MOVED … to:` lines, and those are what must exist at HEAD; `test:` keeps
-   the node as it was at the round's SHA.
+   `MOVED … to:` lines, one per `test:` line and in the same order (an
+   unmoved test repeats its node), and those are what must exist at HEAD;
+   `test:` keeps the node as it was at the round's SHA.
 """
 import ast
 import re
@@ -543,8 +544,19 @@ for number, sha, body in rounds:
             for line in lines
             if line.strip().startswith("MOVED")
         ]
+        # Per test, not per entry: one MOVED line per `test:` line, in order,
+        # naming that test's node at HEAD (unchanged when it did not move).
+        # `moved or tests` checked only the MOVED nodes, so an entry where one
+        # test moved and another vanished passed (plan review of `0965b61`).
+        if moved and len(moved) != len(tests):
+            failures += 1
+            print(
+                f"MOVED round {number} {lines[0]!r}: {len(moved)} MOVED line(s) for "
+                f"{len(tests)} test(s) — one per test, in order"
+            )
+        current = moved if len(moved) == len(tests) and moved else tests
         gone = [
-            t for t in (moved or tests)
+            t for t in current
             if f"def {t.split('::')[1].split('[')[0]}(" not in show("HEAD", t.split("::")[0])
         ]
         if show("HEAD", fields["file"]).count(old) != want and not marked:
@@ -2537,7 +2549,7 @@ fails with its own message, not on an exception type. Eight entries are newly SU
 validator is exit 0, and it was itself shown to fail on a wrong `MOVED` target and on a dropped
 `MOVED` line.
 
-**Voided runs.** Three full-suite runs count for nothing:
+**Voided runs.** Seven full-suite runs count for nothing:
 
 - **`c45c3bc`:** it was running when a scratchpad cleanup removed the directory holding its log.
   Its exit code could not be read, and it was stopped.
@@ -2638,7 +2650,7 @@ The review of `969c9b8`: one LOW. Fixed in `6cc04fe`.
 | Item | Fix |
 |---|---|
 | 1 LOW — the `::1` companion on a host without it | On Linux with IPv6 disabled on `lo` (`net.ipv6.conf.lo.disable_ipv6=1`, or `all`), binding `::` works but the `::1` companion gets EADDRNOTAVAIL. That aborted `claim_port` with a false "--host :: is not an address this machine owns", so `brain ui --host ::` worked at `1264162` and failed at `969c9b8`. `_loopback_companion` now tolerates EADDRNOTAVAIL too, read from the `BrainError`'s `__cause__`. The reason is the same as for EADDRINUSE: with no `::1` on the host, no other process can hold `::1:P` either. Every other errno still propagates (the EINVAL test). The regression test is injected (`::1` refused with EADDRNOTAVAIL): the wildcard alone is returned, still listening and served, and the refused socket is closed. It runs on both families |
-| 4 — the CHANGELOG overclaimed | "in either order" now names the microsecond window between the wildcard bind and the companion bind, as the docstring and §10.22 do |
+| 2 — the CHANGELOG overclaimed | "in either order" now names the microsecond window between the wildcard bind and the companion bind, as the docstring and §10.22 do |
 
 **Mutation evidence (round 15):** 2 guards, each on all five clauses with the strict clause 4,
 against `6cc04fe`, proved before the run of record started:
@@ -2667,7 +2679,15 @@ copies with deps installed for Linux in a scratch directory:
 - `6cc04fe`: 3 failed — `test_claim_port_binds_every_resolved_family`,
   `test_a_wildcard_never_binds_over_another_process_on_loopback[ipv6]`, and the `ip6-localhost`
   table row.
-- `5bf2c69`: 153 passed, 6 skipped, 0 failed. Three of the skips say "no IPv6 loopback (::1)".
+- `5bf2c69`: 153 passed, 6 skipped, 0 failed. **Four** of the skips say "no IPv6 loopback
+  (::1)": `test_claim_port_binds_every_resolved_family`,
+  `test_a_wildcard_never_binds_over_another_process_on_loopback[ipv6]`,
+  `test_nothing_can_bind_our_loopback_after_our_wildcard[ipv6]` and the `ip6-localhost` table row.
+  The other two are the `[ipv4]` overlap tests ("this platform refuses…"). *(Corrected after
+  review: this line first said "Three". The run's `-rs` output lists the four by file and line —
+  `test_ui_server_bind.py:291`, `:533`, `:698`, `test_cli_ui_host.py:223` — and the miscount was
+  mine. The log file itself was removed with the container scratch; the lines survive in the
+  session's recorded output.)*
 
 A scratch plugin outside the repo marked that selection `nodb`, so conftest took no database
 lock. **Mutation evidence:** R15b-1 (container) and R15b-2 (every platform), strict.
@@ -2676,6 +2696,26 @@ lock. **Mutation evidence:** R15b-1 (container) and R15b-2 (every platform), str
 would have been skipped silently, with exit 0. The pattern now allows one letter. The
 validator also counts round headers against parsed blocks and fails on a difference: a copy
 with the old pattern exits 1 with `UNPARSED: 20 round headers, 19 blocks parsed`.
+
+**Plan review of `0965b61` (plan-only fixes).** p7-reviewer found two LOW issues and a nit, and
+team-lead added a validator weakness:
+
+- §10.19's voided-runs line said "Three" over seven bullets. It now says seven.
+- §10.23 said three skips read "no IPv6 loopback"; there were four. It is corrected in place, with
+  the evidence.
+- §10.23's rows were numbered 1 and 4 (team-lead's item numbers). They are renumbered 1 and 2.
+- **The validator checked MOVED entries per entry, not per test.** `moved or tests` meant an entry
+  with any `MOVED` line had only those nodes checked, so a test that neither moved nor survived
+  went unnoticed. It now requires one `MOVED` line per `test:` line, in order, and checks every
+  node.
+
+Re-proved on a scratch copy of the plan carrying a crafted round-9 entry: one test moved (with its
+`MOVED` line), and a second `test:` gone at HEAD with none.
+
+- The **old** validator exited 0 and counted the entry (`round 9 @ f1bdbea: 9/9`).
+- The **new** one exits 1, with `MOVED … 1 MOVED line(s) for 2 test(s)` and
+  `UNMARKED … test gone at HEAD`.
+- On the real plan it exits 0, and every existing `MOVED` entry already met the one-per-test rule.
 
 ### Verification of rounds 11–15b (2026-10-13; every exit code read from a file)
 
