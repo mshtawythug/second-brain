@@ -530,6 +530,14 @@ def _overlap_is_possible(family: int, loopback: str, wildcard: str) -> bool:
     return True
 
 
+def test_the_overlap_probe_reads_a_missing_address_as_no_overlap() -> None:
+    """Round 15b: the probe's own bind sat outside its handler, so a host
+    without the loopback address ERRORED instead of skipping. Driven on every
+    platform with an address no host owns (TEST-NET-1), so the handler is
+    exercised here and not only on a Linux box without ``::1``."""
+    assert _overlap_is_possible(socket.AF_INET, "192.0.2.1", "0.0.0.0") is False
+
+
 @pytest.mark.parametrize(
     ("family", "loopback", "wildcard"),
     [
