@@ -802,7 +802,11 @@ def test_every_host_spelling_does_what_the_table_says(
         if kind == "unowned-on-darwin" and sys.platform != "darwin":
             kind = "binds-real"
     result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
-    assert "in use" not in result.output, result.output
+    # Both "busy" phrasings: the catch-all said "already in use" without
+    # --auto-port and "no free port found" with it (the default). Checking
+    # only "in use" missed the second — found by the strict harness.
+    for busy in ("in use", "no free port"):
+        assert busy not in result.output, result.output
     if kind.startswith("unowned"):
         assert result.exit_code == 1, result.output
         assert expected in result.output, result.output
@@ -939,8 +943,11 @@ def test_a_privileged_port_is_a_permission_error_not_busy() -> None:
     import errno
 
     message = _probe_with(OSError(errno.EACCES, "Permission denied"))
-    assert "permission denied" in message.lower(), message
-    assert "--port" in message
+    # The remediation, not merely "permission denied": strerror alone already
+    # says that, so asserting it could not tell this branch from the generic
+    # one — found by the strict harness.
+    assert "ports below 1024 need privileges" in message, message
+    assert "--port 1024 or higher" in message, message
     assert "in use" not in message
 
 
