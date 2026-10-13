@@ -157,13 +157,22 @@ def ui(
         return
 
     from .ui import lan as lan_mod
-    from .ui.context import WILDCARD_HOSTS, bind_address
+    from .ui.context import WILDCARD_HOSTS, bind_address, ipv4_shorthand
     from .ui.security import is_loopback
     from .ui.server import browser_url, build_context, resolve_port, serve
 
     # Once, here: every consumer below — the probe, the bind, the allowlist,
     # the URL — gets the bare address; bind_origin re-brackets it for URLs.
     host = bind_address(host)
+
+    # Review round 7: `0` binds 0.0.0.0 but is no IP literal to `ipaddress`, so
+    # it reached the bind un-canonicalised — a wildcard with no notice.
+    reading = ipv4_shorthand(host)
+    if reading is not None:
+        raise typer.BadParameter(
+            f"--host {host} is not a canonical IPv4 address (the system reads "
+            f"it as {reading}); write the address out in full."
+        )
 
     # Review round 5: the token travels in an HTTP header. Non-ASCII made every
     # API call a 500; edge whitespace is trimmed in transit, so it could never

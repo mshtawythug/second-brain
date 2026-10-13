@@ -691,3 +691,51 @@ def test_a_socket_that_cannot_be_configured_is_closed_and_reported() -> None:
     assert "configure" in message, message
     assert "cannot open" not in message, message
     assert made and all(sock.closed for sock in made), "the probe socket leaked"
+
+
+
+@pytest.mark.parametrize(
+    ("given", "means"),
+    [
+        ("0", "0.0.0.0"),
+        ("127.1", "127.0.0.1"),
+        ("0x7f.1", "127.0.0.1"),
+        # No expected reading: platforms DISAGREE on this one — inet_aton reads
+        # the leading zero as octal (8.0.0.1), macOS getaddrinfo as decimal
+        # (10.0.0.1). That disagreement is the case for refusing outright.
+        ("010.0.0.1", ""),
+    ],
+)
+def test_a_non_canonical_ipv4_literal_is_refused(
+    app: typer.Typer, started: _Started, given: str, means: str
+) -> None:
+    """Round 7, item 4: the OS reads ``0`` as ``0.0.0.0``, but ``ipaddress``
+    rejects it, so the bind was a wildcard with an allowlist of ``{"0"}`` and
+    no notice. Refused, naming what the OS would have bound, so the user
+    writes it out in full."""
+    result = runner.invoke(app, ["ui", "--host", given, "--token", "x", "--no-open"])
+    assert result.exit_code == 2, result.output
+    assert "not a canonical IPv4 address" in result.output, result.output
+    assert means in result.output, result.output
+    assert started.context_kwargs == {}
+
+
+@pytest.mark.parametrize("spelling", ["::0", "0:0:0:0:0:0:0:0"])
+def test_a_non_canonical_ipv6_wildcard_is_the_wildcard(
+    app: typer.Typer, started: _Started, spelling: str
+) -> None:
+    """Round 7: ``::0`` and the long form canonicalise to ``::`` (round 5)."""
+    result = runner.invoke(app, ["ui", "--host", spelling, "--token", "x", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["host"] == "::"
+    assert WILDCARD_NOTICE in result.output
+    assert "http://[::1]:8765/#t=x" in result.output
+
+
+def test_a_numeric_looking_hostname_that_is_not_an_address_still_binds(
+    app: typer.Typer, started: _Started
+) -> None:
+    """The refusal is for what the OS would parse as an IPv4 address, only."""
+    result = runner.invoke(app, ["ui", "--host", "brain-1.lan", "--token", "x", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["host"] == "brain-1.lan"

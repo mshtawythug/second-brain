@@ -45,7 +45,7 @@ address.
 
 ### Why not `--host 0.0.0.0`?
 
-Earlier docs recommended `--host 0.0.0.0` (every interface). **That cannot serve a phone.** The
+Earlier docs recommended `--host 0.0.0.0` (every interface). **That cannot serve a phone's browser.** The
 server only accepts requests whose `Host` header is on an allowlist, and that allowlist is what
 defeats DNS-rebinding attacks. A wildcard bind — `0.0.0.0` or `::` — gets the loopback
 allowlist, so a phone that reaches the machine at its LAN address is refused with **400 Invalid
@@ -53,6 +53,11 @@ host header**. The guard is correct, so bind the LAN address itself. On a wildca
 `brain ui` prints a warning, and the URL it prints and opens is the loopback one, which works on
 this machine only: `http://127.0.0.1:<port>/` for `0.0.0.0`, and `http://[::1]:<port>/` for
 `::`.
+
+The allowlist turns away browsers; it is not access control. It defeats DNS rebinding, because
+a browser always sends the host it was pointed at, but any program on your network that can
+reach the port can send a loopback `Host` header by hand. On every non-loopback bind — a
+wildcard, a LAN address, `--lan` — it is the token that keeps other clients out.
 
 `::` differs from `0.0.0.0` in one more way: it is **IPv6-only**. An IPv4 device — most phones on
 a home network — cannot connect to it at all (connection refused, not 400), and on this machine

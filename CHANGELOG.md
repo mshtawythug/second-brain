@@ -39,10 +39,16 @@ git tag scheme:
   one, then prints the URL to open. It cannot be combined with `--host`, and
   `brain ui` still never binds a non-loopback address without a token. Guide:
   `docs/guides/brain-ui-on-your-phone.md`.
-- **A startup notice on wildcard binds** (`--host 0.0.0.0` or `::`): other
-  devices are refused, because a wildcard bind accepts only loopback Host
-  names. The docs previously recommended `--host 0.0.0.0 --token` for remote
-  reading, which never worked from another device.
+- **A startup notice on wildcard binds** (`--host 0.0.0.0` or `::`): a browser
+  on another device is refused, because a wildcard bind accepts only loopback
+  Host names. The notice also says the token, not the bind, keeps other
+  clients out: a program can send a loopback Host header by hand. The docs
+  previously recommended `--host 0.0.0.0 --token` for remote reading, which
+  never worked from another device's browser.
+- **`--host` refuses non-canonical IPv4 literals** such as `0`, `127.1` and
+  `010.0.0.1`. The system reads `0` as `0.0.0.0`, so it was a wildcard bind
+  that skipped the notice; platforms disagree on `010.0.0.1` (8.0.0.1 or
+  10.0.0.1). The error names what the system would have bound.
 
 ### Fixed
 

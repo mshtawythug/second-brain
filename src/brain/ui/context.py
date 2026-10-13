@@ -19,6 +19,7 @@ threadpool. Each request opens and closes its own.
 from __future__ import annotations
 
 import ipaddress
+import socket
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
@@ -38,9 +39,13 @@ LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "[:
 
 #: The wildcard binds: "every interface", a bind address and never a
 #: destination. Ruling W1 (phase 7): all three get exactly the loopback
-#: ALLOWLIST, so a wildcard bind is reachable from this machine and from
-#: nowhere else — never wider than ``0.0.0.0`` already was. The allowlist is
-#: the only thing they share: ``::`` is IPv6-only (asyncio sets
+#: ALLOWLIST — never wider than ``0.0.0.0`` already was. That allowlist is a
+#: DNS-rebinding defence for BROWSERS, which send the host they were pointed
+#: at; it is not access control. Any program on the network that reaches the
+#: port can send ``Host: 127.0.0.1`` by hand (measured by the phase-7 audit),
+#: so on every non-loopback bind it is the TOKEN that keeps other clients out
+#: (review round 7: this said "reachable from this machine and from nowhere
+#: else"). The allowlist is the only thing the wildcards share: ``::`` is IPv6-only (asyncio sets
 #: ``IPV6_V6ONLY``), so its local URL is ``[::1]`` and ``127.0.0.1`` is refused
 #: at connect. W1 also needs ``starlette>=1.7``: older TrustedHostMiddleware
 #: split ``[::1]:8765`` on the first colon (see the pin in pyproject.toml).
@@ -180,6 +185,33 @@ def bind_address(host: str) -> str:
         # sends and starlette compares Host case-sensitively, so `--host
         # LOCALHOST` refused its own URL (review round 6).
         return bare.lower()
+
+
+def ipv4_shorthand(host: str) -> str | None:
+    """What the system reads a NON-canonical IPv4 literal as, or ``None``.
+
+    ``0``, ``127.1``, ``0x7f.1`` and ``010.0.0.1`` are IPv4 to the resolver
+    (``0`` binds ``0.0.0.0``) but not to :mod:`ipaddress`, so they slipped past
+    canonicalisation: ``--host 0`` was a wildcard bind with an allowlist of
+    ``{"0"}`` and no notice (review round 7). Platforms even disagree on some
+    of them — ``010.0.0.1`` is 8.0.0.1 to ``inet_aton`` and 10.0.0.1 to macOS
+    ``getaddrinfo`` — so ``brain ui`` refuses them rather than guess. The
+    reading reported is the bind path's: numeric-only ``getaddrinfo``, which
+    never touches DNS. A canonical address or a hostname returns ``None``.
+    """
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return None
+    try:
+        infos = socket.getaddrinfo(
+            host, None, family=socket.AF_INET, flags=socket.AI_NUMERICHOST
+        )
+    except socket.gaierror:
+        return None
+    return str(infos[0][4][0])
 
 
 def bind_origin(host: str, port: int) -> str:

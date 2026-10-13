@@ -85,3 +85,50 @@ def test_minted_tokens_are_long_and_distinct() -> None:
 def test_wildcard_hosts_names_both_wildcards_and_no_loopback() -> None:
     assert {"0.0.0.0", "::", "[::]"} == WILDCARD_HOSTS
     assert "127.0.0.1" not in WILDCARD_HOSTS
+
+
+
+def test_the_route_target_is_a_documentation_address_off_the_lan() -> None:
+    """Round 7, item 2: every other test injects a probe that ignores its target.
+
+    So ``_ROUTE_TARGET = ("127.0.0.1", 9)`` survived everything, and on a real
+    machine ``--lan`` would then always refuse with "found only 127.0.0.1":
+    a loopback target routes over loopback. The target must be an address the
+    OS routes via the default route — off-machine, off the LAN — and one that
+    names no real host: a documentation range (RFC 5737).
+    """
+    import ipaddress
+
+    seen: list[tuple[str, int]] = []
+
+    def recording(target: tuple[str, int]) -> str:
+        seen.append(target)
+        return LAN_IP
+
+    detect_lan_address(recording)
+    ((host, _port),) = seen
+    address = ipaddress.ip_address(host)
+    documentation = [
+        ipaddress.ip_network(net)
+        for net in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
+    ]
+    rfc1918 = [
+        ipaddress.ip_network(net)
+        for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+    ]
+    assert any(address in net for net in documentation), address
+    assert not (address.is_loopback or address.is_link_local or address.is_unspecified)
+    assert not any(address in net for net in rfc1918), address
+
+
+def test_the_wildcard_notice_says_the_token_is_the_guard() -> None:
+    """Round 7, item 3: the Host allowlist stops browsers, not programs.
+
+    A LAN client can send ``Host: 127.0.0.1:<port>`` by hand and is served if
+    it holds the token (measured by the auditor). The notice must not imply
+    the bind keeps others out.
+    """
+    from brain.ui.lan import WILDCARD_NOTICE
+
+    assert "token" in WILDCARD_NOTICE, WILDCARD_NOTICE
+    assert "other devices cannot use this bind" not in WILDCARD_NOTICE

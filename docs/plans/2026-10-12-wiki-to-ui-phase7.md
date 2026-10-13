@@ -72,7 +72,8 @@ hits are vault *format*, not pointers at the wiki, and are excluded — `brain u
 
 **A measured defect in the recipe the docs ship today.** `README.md:148` and
 `docs/cli-reference.md:713` document `brain ui --host 0.0.0.0 --token <secret>`. That bind
-cannot serve another device: `ui/context.py` `host_allowlist("0.0.0.0")` returns the
+cannot serve another device's browser *(round 7: "another device" overclaimed — a program can
+send a loopback Host by hand; the allowlist is a rebinding defence and the token is the guard)*: `ui/context.py` `host_allowlist("0.0.0.0")` returns the
 **loopback** names, so `TrustedHostMiddleware` rejects a phone's `Host: <lan-ip>` header.
 Measured 2026-10-12 against `create_app` through `TestClient`: bind `0.0.0.0`, `Host:
 192.0.2.10` → **400 Invalid host header**; bind `192.0.2.10`, same request → **200**. Mutations

@@ -724,8 +724,9 @@ no CDN, so it works fully offline.
 `--lan` binds this machine's LAN address. It uses `--token` if given and otherwise mints one,
 then prints `http://<address>:<port>/#t=<token>` to open on the other device. It cannot be
 combined with `--host`. Do not use `--host 0.0.0.0` to reach other devices: a wildcard bind
-gets the loopback `Host` allowlist, so every other device is refused with 400. The server
-prints a warning when you use it. Full walkthrough and caveats:
+gets the loopback `Host` allowlist, so a browser on another device is refused with 400. The
+port is still reachable by programs that set `Host` themselves — the token, not the bind, is
+what keeps other clients out. The server prints a warning when you use it. Full walkthrough and caveats:
 [Reading your brain from a phone](guides/brain-ui-on-your-phone.md).
 
 Confidential bodies follow the bind, not a flag. On a **loopback** bind they are

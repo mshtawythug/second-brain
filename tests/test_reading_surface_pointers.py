@@ -178,6 +178,7 @@ def test_phone_guide_covers_the_q1_contract() -> None:
         "--include-confidential",
         "trust",
         "wiki",
+        "it is the token that keeps other clients out",
         "in memory only",
         "page itself never saves the token",
         "the URL is the token",
