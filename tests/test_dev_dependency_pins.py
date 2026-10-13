@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -50,12 +51,21 @@ GATE_TOOL_CEILINGS = {
 # Every measured pin — the gate tools plus `coverage` — as (measured version,
 # ceiling). The admits and next-minor checks run over ALL of them: coverage was
 # left out at first, and `coverage<7.16` with a ceiling of "7.16" then passed
-# every test while excluding the 7.16.2 the evidence block records.
+# every test while excluding the 7.16.2 the evidence block records. Which names
+# belong here is not a choice: `test_every_capped_dev_pin_is_measured` derives
+# it from pyproject.toml.
 MEASURED_PINS = {
     "coverage": (MEASURED_COVERAGE_VERSION, MEASURED_COVERAGE_CEILING),
     "ruff": (MEASURED_RUFF_VERSION, MEASURED_RUFF_CEILING),
     "mypy": (MEASURED_MYPY_VERSION, MEASURED_MYPY_CEILING),
 }
+
+
+def _dev_requirements() -> list[Requirement]:
+    """Return every requirement in the `dev` extra, parsed."""
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    dev_deps: list[str] = data["project"]["optional-dependencies"]["dev"]
+    return [Requirement(raw) for raw in dev_deps]
 
 
 def _dev_requirement(name: str) -> Requirement:
@@ -64,14 +74,49 @@ def _dev_requirement(name: str) -> Requirement:
     Parses the specifier rather than substring-matching the raw string, so the
     assertions below test the BOUND and not the formatting.
     """
-    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-    dev_deps: list[str] = data["project"]["optional-dependencies"]["dev"]
-    for raw in dev_deps:
-        requirement = Requirement(raw)
+    requirements = _dev_requirements()
+    for requirement in requirements:
         if requirement.name == name:
             return requirement
     raise AssertionError(
-        f"no `{name}` requirement in [project.optional-dependencies].dev: {dev_deps}"
+        f"no `{name}` requirement in [project.optional-dependencies].dev: "
+        f"{[str(r) for r in requirements]}"
+    )
+
+
+def test_every_capped_dev_pin_is_measured() -> None:
+    """Every `dev` requirement with an upper bound must have a MEASURED_PINS entry.
+
+    The cap convention is "the next unreleased minor above the newest MEASURED
+    release", so a cap with no measurement behind it is a guess. The admits and
+    next-minor tests below only cover names that are already in MEASURED_PINS,
+    so membership has to come from pyproject.toml rather than from this file:
+    otherwise dropping `coverage` from the map (or adding a new capped dev dep
+    and forgetting the map) leaves every test green.
+
+    TO ADD A CAPPED DEV DEP — e.g. `pytest-timeout>=2.4.0,<2.5` — measure the
+    newest release on this tree, write the evidence block beside the pin in
+    pyproject.toml, then add both constants here and the entry, e.g.
+    `MEASURED_PYTEST_TIMEOUT_VERSION = "2.4.0"`,
+    `MEASURED_PYTEST_TIMEOUT_CEILING = "2.5"` and
+    `"pytest-timeout": (MEASURED_PYTEST_TIMEOUT_VERSION,
+    MEASURED_PYTEST_TIMEOUT_CEILING)`. An uncapped dep (`>=` only) needs nothing.
+    """
+    capped = {
+        canonicalize_name(requirement.name)
+        for requirement in _dev_requirements()
+        if any(spec.operator in {"<", "<="} for spec in requirement.specifier)
+    }
+    measured = {canonicalize_name(name) for name in MEASURED_PINS}
+
+    assert measured == capped, (
+        f"capped dev pins without a MEASURED_PINS entry: {sorted(capped - measured)}; "
+        f"MEASURED_PINS entries with no capped dev pin: {sorted(measured - capped)}. "
+        "Every upper bound in [project.optional-dependencies].dev must be "
+        "measured: add MEASURED_<NAME>_VERSION and MEASURED_<NAME>_CEILING (the "
+        "next minor above the version) and a MEASURED_PINS entry for it, plus "
+        "the evidence block in pyproject.toml — see this test's docstring. If "
+        "the cap was dropped, drop the entry too."
     )
 
 
@@ -216,12 +261,9 @@ def test_ceiling_is_the_next_minor_above_the_measured_version(name: str) -> None
     `<0.17` with a ceiling of "0.17" passed every test while excluding the
     0.17.0 just measured. This pins the rule the evidence block states — cap =
     next unreleased minor above the newest MEASURED release — so moving either
-    constant alone goes red here.
+    constant alone goes red here. (Which names are in MEASURED_PINS is
+    enforced separately, by `test_every_capped_dev_pin_is_measured`.)
     """
-    assert set(GATE_TOOL_CEILINGS) <= set(MEASURED_PINS), (
-        "every gate tool needs a measured version as well as a ceiling: "
-        f"{sorted(GATE_TOOL_CEILINGS)} vs {sorted(MEASURED_PINS)}"
-    )
     raw_measured, ceiling = MEASURED_PINS[name]
     measured = Version(raw_measured)
     expected = f"{measured.major}.{measured.minor + 1}"
