@@ -113,7 +113,9 @@ evicting the tab in the background — leaves every request refused (403) until 
 - **Prefer `--read-only` for phone reading.** A phone on the LAN then has no write path at all.
 - **Confidential documents are withheld off loopback.** On a LAN bind, the bodies of documents
   marked `sensitivity: confidential` are not served unless you pass `--include-confidential`.
-  The startup panel states which mode you got. On loopback they are always served.
+  The startup panel states which mode you got. On a loopback address or `localhost` they are
+  always served; a name other than `localhost` that resolves to loopback is guarded like a LAN
+  bind, so its bodies are withheld unless you pass `--include-confidential` too.
 - **The machine must keep `brain ui` running.** It runs in the foreground and has no daemon, by
   design: a write-capable server should not outlive your attention. Closing the terminal, or the
   machine sleeping, ends phone access.

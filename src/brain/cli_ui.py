@@ -180,10 +180,14 @@ def ui(
     include_confidential: bool = typer.Option(
         False,
         "--include-confidential",
+        # Round 16c: three modes since round 16, not two — a loopback ALIAS
+        # withholds bodies like a network bind, so the flag is not a no-op there.
         help=(
-            "Serve bodies of documents marked sensitivity=confidential even on "
-            "a non-loopback bind. Ignored on loopback, where they are always "
-            "served."
+            "Serve bodies of documents marked sensitivity=confidential where "
+            "they are otherwise withheld: a non-loopback bind, or a loopback "
+            "alias (a name other than localhost that resolves to loopback). "
+            "No effect on a loopback address or localhost, where they are "
+            "always served."
         ),
     ),
     auto_port: bool = typer.Option(

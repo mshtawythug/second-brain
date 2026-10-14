@@ -732,11 +732,14 @@ port is still reachable by programs that set `Host` themselves — the token, no
 what keeps other clients out. The server prints a warning when you use it. Full walkthrough and caveats:
 [Reading your brain from a phone](guides/brain-ui-on-your-phone.md).
 
-Confidential bodies follow the bind, not a flag. On a **loopback** bind they are
-always served — the UI is exactly as inside the trust boundary as `brain show`
-is — and `--include-confidential` is ignored. On a **non-loopback** bind they
-are withheld unless you pass `--include-confidential`, since the material is
-then crossing the wire. The startup banner states which of the two you got.
+Confidential bodies follow the bind. On a **loopback address** (`127.0.0.1`,
+`::1`) or **`localhost`** they are always served — the UI is exactly as inside
+the trust boundary as `brain show` is — and `--include-confidential` has no
+effect. On a **non-loopback** bind they are withheld unless you pass
+`--include-confidential`, since the material is then crossing the wire. A
+**loopback alias** — any other name that resolves to loopback — is guarded like
+a network bind: a token is required, and bodies are withheld unless you pass
+`--include-confidential`. The startup banner states which of the three you got.
 
 ## brain people
 

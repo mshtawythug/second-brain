@@ -63,6 +63,25 @@ def test_ui_command_is_registered(app: typer.Typer) -> None:
         assert flag in result.output
 
 
+def test_include_confidential_help_names_all_three_modes() -> None:
+    """Round 16c (audit of `e0d6067`): the help said the flag was "Ignored on
+    loopback, where they are always served", but since round 16 a loopback
+    ALIAS withholds bodies unless the flag is passed — it widens egress there.
+    Read from the option itself, so Rich's wrapping cannot split a phrase."""
+    from brain.cli_ui import ui_app
+
+    command = typer.main.get_command(ui_app)
+    # By `opts`, not `isinstance(click.Option)`: Typer vendors its own click,
+    # so the top-level click's Option is a different class (§10.2).
+    option = next(
+        p for p in command.params if "--include-confidential" in getattr(p, "opts", ())
+    )
+    text = getattr(option, "help", None) or ""
+    assert "Ignored on loopback" not in text, text
+    assert "a loopback alias" in text, text
+    assert "No effect on a loopback address or localhost" in text, text
+
+
 def test_help_does_not_need_a_database(app: typer.Typer) -> None:
     """`--help` must work on a machine with no Postgres running at all."""
     result = runner.invoke(app, ["ui", "--help"])
