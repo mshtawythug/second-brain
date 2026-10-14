@@ -409,8 +409,9 @@ def build_context(
         notices=notices,
         # Confidential bodies leave this process only when the server is
         # loopback-bound (CLI-equivalent trust) or the operator said so.
-        # `loopback` is a loopback ADDRESS or `localhost` only: a loopback
-        # alias is not, so it withholds like a network bind (round 16).
+        # `loopback` is a loopback ADDRESS, or `localhost` resolving only to
+        # loopback: a loopback alias is not, so it withholds like a network
+        # bind (round 16), and neither is a `localhost` with a mixed answer.
         serve_confidential_bodies=loopback or include_confidential,
         # Confidential TITLES on the unprompted listing surfaces are a
         # separate, config-only decision — deliberately NOT ``or``-ed with

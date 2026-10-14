@@ -124,8 +124,9 @@ class UiContext:
     graph_syncer: Any | None = None
     notices: tuple[str, ...] = field(default=())
     #: Whether a ``sensitivity='confidential'`` document may have its BODY sent
-    #: over the wire. True on a loopback bind (a loopback address or
-    #: ``localhost``; since round 16 a loopback ALIAS is not one), where the UI is exactly as
+    #: over the wire. True on a loopback bind (a loopback address, or
+    #: ``localhost`` resolving only to loopback; since round 16 a loopback
+    #: ALIAS is not one), where the UI is exactly as
     #: inside the trust boundary as ``brain show`` is. False on a non-loopback
     #: bind — there the corpus is crossing a network, which is a different
     #: trust question than "the user is looking at their own machine" — unless

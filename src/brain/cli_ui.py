@@ -186,8 +186,8 @@ def ui(
             "Serve bodies of documents marked sensitivity=confidential where "
             "they are otherwise withheld: a non-loopback bind, or a loopback "
             "alias (a name other than localhost that resolves to loopback). "
-            "No effect on a loopback address or localhost, where they are "
-            "always served."
+            "No effect on a loopback address, or on localhost when it "
+            "resolves only to loopback, where they are always served."
         ),
     ),
     auto_port: bool = typer.Option(

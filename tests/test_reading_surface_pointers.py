@@ -259,6 +259,9 @@ def test_cli_reference_documents_three_confidential_modes() -> None:
     assert "which of the two you got" not in section, section
     assert "A **loopback alias**" in section, section
     assert "which of the three you got" in section, section
+    # Round 16c (review): localhost is loopback only when it resolves only to
+    # loopback; a mixed answer is a non-loopback bind.
+    assert "or on **`localhost` when it resolves only to loopback**" in section, section
 
 
 def test_phone_guide_says_a_loopback_alias_withholds_bodies() -> None:
@@ -266,7 +269,10 @@ def test_phone_guide_says_a_loopback_alias_withholds_bodies() -> None:
     name other than localhost that resolves to loopback."""
     text = " ".join(PHONE_GUIDE.read_text(encoding="utf-8").split())
     assert "On loopback they are always served" not in text, text
-    assert "On a loopback address or `localhost` they are always served" in text, text
+    assert (
+        "On a loopback address, or on `localhost` when it resolves only to loopback, "
+        "they are always served" in text
+    ), text
     assert "guarded like a LAN bind" in text, text
 
 

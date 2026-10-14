@@ -733,9 +733,11 @@ what keeps other clients out. The server prints a warning when you use it. Full 
 [Reading your brain from a phone](guides/brain-ui-on-your-phone.md).
 
 Confidential bodies follow the bind. On a **loopback address** (`127.0.0.1`,
-`::1`) or **`localhost`** they are always served — the UI is exactly as inside
-the trust boundary as `brain show` is — and `--include-confidential` has no
-effect. On a **non-loopback** bind they are withheld unless you pass
+`::1`), or on **`localhost` when it resolves only to loopback**, they are always
+served — the UI is exactly as inside the trust boundary as `brain show` is —
+and `--include-confidential` has no
+effect. (A `localhost` that also resolves to a non-loopback address is a
+non-loopback bind.) On a **non-loopback** bind they are withheld unless you pass
 `--include-confidential`, since the material is then crossing the wire. A
 **loopback alias** — any other name that resolves to loopback — is guarded like
 a network bind: a token is required, and bodies are withheld unless you pass

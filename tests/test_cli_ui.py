@@ -79,7 +79,10 @@ def test_include_confidential_help_names_all_three_modes() -> None:
     text = getattr(option, "help", None) or ""
     assert "Ignored on loopback" not in text, text
     assert "a loopback alias" in text, text
-    assert "No effect on a loopback address or localhost" in text, text
+    # Round 16c (review): localhost is loopback only when EVERY address it
+    # resolves to is; a mixed answer withholds bodies, so the flag matters.
+    qualified = "No effect on a loopback address, or on localhost when it resolves only to loopback"
+    assert qualified in text, text
 
 
 def test_help_does_not_need_a_database(app: typer.Typer) -> None:
