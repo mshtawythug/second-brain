@@ -28,7 +28,9 @@ must not grow.
 ## 2. Ordered tasks
 
 1. **RED: SQL-builder unit tests.**
-   - the ORDER BY is `score DESC, c.id` and never `embedding <=>`;
+   - the ORDER BY is `score DESC, c.id` and never `embedding <=>`. *(C only. Under D the
+     inner query is `ORDER BY c.embedding <=> %s::vector` on purpose, and the outer re-sort
+     is `dist + 0, id`; see the shape rows in §3.)*
    - LIMIT equals the argument;
    - the params order is right with and without filters;
    - the floor is bound as a parameter, never interpolated.
@@ -38,7 +40,9 @@ must not grow.
      `finalize_embedding_index`, so a real HNSW index exists.
    - Ingest synthetic one-chunk docs and set `enable_seqscan = off` on the test connection.
    - (a) The **full pool**: the set of chunks the vector leg contributes equals the exact
-     top-`CANDIDATE_LIMIT` set computed independently by the test.
+     top-`CANDIDATE_LIMIT` set computed independently by the test. *(Under D this holds on
+     the 90-row fixture at `ef_search = 1000`, not as a guarantee: D is approximate and its
+     recall@50 is measured, spec §5 (ii), §6.5.)*
    - (b) **Filter starvation**: with a tag filter matching a minority of docs, every
      matching chunk above the floor is a vector candidate.
    - (c) The **floor** is still honoured.
@@ -79,11 +83,12 @@ must not grow.
 
 | Guard | Fails under |
 |---|---|
-| (a) full pool equals the exact top-N | M1 (HNSW returns ≤ `ef_search` = 40 rows from a pool of more than 50) |
+| (a) full pool equals the exact top-N (under D: on the 90-row fixture at `ef_search = 1000`, not a guarantee) | M1 (HNSW returns ≤ `ef_search` = 40 rows from a pool of more than 50) |
 | (b) filtered query keeps every match | M1 (post-filter starvation), M4 |
 | (c) floor honoured | M3 |
-| shape: no `<=>` in ORDER BY; tie-break present | M1, M2 |
-| zero-norm chunk excluded (review fix; NaN cosine) | M5 (the `1 - (e <=> q) >= floor` form), M3 |
+| **C only** — shape: no `<=>` in ORDER BY; tie-break present | M1, M2 |
+| **D** — shape: inner index-shaped scan (`ORDER BY c.embedding <=> %s::vector` inside a `MATERIALIZED` CTE); outer `WHERE dist <= 1 - %s` and `ORDER BY dist + 0, id` | M2 (no tie-break) |
+| zero-norm chunk excluded (review fix; NaN cosine) | M5 (the `1 - (e <=> q) >= floor` form; under D, `1 - dist >= floor`), M3 |
 | floor boundary inclusive (audit #6) | M6 (strict `<`), M3 |
 | **D (audit, latency):** filtered pool fills with ef_search pinned at 40 | M9 (iterative off), M1, M4 |
 | **D:** scan settings never leak (caller txn, fresh session) | M7 (no restore) |
