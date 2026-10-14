@@ -1,43 +1,40 @@
 #!/usr/bin/env bash
-# Start the second-brain wiki + sync watcher (blue/green serve edition).
+# Start the second-brain vault-sync watcher (and, on request, build the legacy wiki).
 # Idempotent — safe to re-run.
 #
 # Reading surface (phase 7, R1 "Demoted", 2026-10-12): `brain ui` is where you
-# read. This script still builds and serves the wiki, but it no longer opens it
-# in a browser unless BRAIN_OPEN_BROWSER=1, and its banner names `brain ui`
-# first. `brain ui` is foreground-only by design (no daemon), so this script
+# read. `brain ui` is foreground-only by design (no daemon), so this script
 # names it rather than starting it.
 #
-# Architecture (post blue/green migration + 2026-05-08 launchd handoff):
-#   - Caddy serves <vault>/.quartz/current/ statically on :8080 + brain.test.
-#     This script does NOT spawn Quartz's --serve dev server anymore.
-#   - Watcher A: `brain vault sync --watch` — DB <-> vault mirror.
-#   - Cold start: if <vault>/.quartz/current is missing or unhealthy, run a
-#     synchronous one-shot `python -m brain.wiki.build_swap` so the wiki has
-#     something to serve before Watcher B comes up.
-#   - Watcher B: `python -m brain.wiki.build_watcher` — re-renders the site
-#     into a fresh build dir and atomically retargets `current` on every
-#     vault change.
+# The wiki is DORMANT (phase 8, R2): this script no longer builds it. Caddy
+# keeps serving <vault>/.quartz/current/ (the last build) on :8080 +
+# brain.test, but nothing rebuilds it unless asked: `brain-rebuild --only
+# quartz` for a one-off rebuild, or BRAIN_WIKI_BUILD=1 to have this run apply
+# the overlay and cold-start build as it used to. The Quartz rebuild daemon
+# (com.brain.build) is retired, and the next brain-install-launchd removes it.
 #
-# Daemon supervision: BOTH watchers run under launchd via the LaunchAgents
-# installed by `bin/brain-install-launchd` (KeepAlive=true → respawn within
-# ~10s of any death). The pre-launchd nohup paths were removed because
-# they silently lost daemons to terminal close / sleep-wake / unexplained
-# crashes — `brain-status` would just go quiet and the user had to notice.
-# This script delegates to install-launchd unconditionally; install-launchd
-# is idempotent (rewrites + reboots the plists every run, no-ops if already
-# loaded), so re-running brain-up is safe and self-healing if launchd has
-# booted out the agents for any reason.
+# Architecture at R2:
+#   - The vault-sync watcher: `brain vault sync --watch` — DB <-> vault mirror,
+#     supervised by launchd (com.brain.watcher, KeepAlive=true → respawn within
+#     ~10s of any death). com.brain.brief is the 07:00 daily-brief job.
+#   - BRAIN_WIKI_BUILD=1 only: apply the brain Quartz overlay
+#     (`quartz_overrides/`) to the workspace, then, if <vault>/.quartz/current
+#     is missing or unhealthy, run a one-shot `python -m brain.wiki.build_swap`
+#     so the wiki has something to serve. BRAIN_NO_OVERLAY=1 skips the overlay.
 #
-# Applies the brain Quartz overlay (`quartz_overrides/`) into the workspace
-# BEFORE the cold-start build so the reload-signal transformer is wired in.
-# Set BRAIN_NO_OVERLAY=1 to skip the overlay (use whatever's already in the
-# workspace).
+# Daemon supervision: this script delegates to install-launchd
+# unconditionally; install-launchd is idempotent (rewrites + reboots the plists
+# every run, no-ops if already loaded), so re-running brain-up is safe and
+# self-healing if launchd has booted out the agents for any reason. The
+# pre-launchd nohup paths were removed because they silently lost daemons to
+# terminal close / sleep-wake / unexplained crashes.
 #
 # Env overrides:
 #   BRAIN_VAULT_PATH        (default: ~/brain-vault)
 #   BRAIN_WIKI_PORT         (default: 8080 — for the URL we curl/open)
 #   BRAIN_OPEN_BROWSER      (default: 0; set 1 to open the wiki — opt-in since R1)
+#   BRAIN_WIKI_BUILD        (default: 0; set 1 to apply the overlay and run the
+#                            cold-start wiki build — the wiki is dormant since R2)
 #   BRAIN_NO_OVERLAY        (default: 0; set 1 to skip the overlay step)
 #   BRAIN_WIKI_KEEP_BUILDS  (default: 3 — old build dirs retained per swap)
 #   BRAIN_NO_BUILD_WATCHER  (default: 0; set 1 to skip launchd supervision —
@@ -72,8 +69,6 @@ BRAIN_HOME_RESOLVED="${BRAIN_HOME:-$( cd "$SCRIPT_DIR/.." && pwd )}"
 # hermetically against a tmp dir, never colliding with a live brain-up install.
 WATCH_PID="${BRAIN_WATCH_PID:-$BRAIN_HOME_RESOLVED/run/brain-watch.pid}"
 WATCH_LOG="${BRAIN_WATCH_LOG:-/tmp/brain-watch.log}"
-BUILD_PID="${BRAIN_BUILD_PID:-$BRAIN_HOME_RESOLVED/run/brain-build.pid}"
-BUILD_LOG="${BRAIN_BUILD_LOG:-/tmp/brain-build.log}"
 
 # Pick the Python interpreter once. BRAIN_PY (env var) wins; otherwise
 # prefer python3 on PATH. The installed-shim flow (in $BRAIN_HOME/bin/)
@@ -100,8 +95,7 @@ apply_overlay() {
         return 0
     fi
     # `--no-build` applies the overlay to the workspace without running
-    # `npx quartz build` — the build watcher does its own builds on every
-    # vault change, and we run a cold-start build below if needed.
+    # `npx quartz build` — the cold-start build below runs one if needed.
     if ! brain vault render --overlay --no-build --vault "$VAULT" 2>&1; then
         echo 'overlay: failed — wiki will start with whatever is in the workspace' >&2
         return 0
@@ -112,7 +106,7 @@ current_healthy() {
     # Healthy = `current` is a symlink, resolves to a directory, and that
     # directory contains both `index.html` AND `.build-id`. Anything else
     # (no symlink, dangling target, empty target, missing `.build-id`)
-    # means we need a cold-start build before the watcher comes up.
+    # means we need a cold-start build.
     local cur="$QUARTZ_DIR/current"
     if [[ ! -L "$cur" ]]; then
         return 1
@@ -189,8 +183,13 @@ wait_for_url() {
     return 1
 }
 
-apply_overlay
-cold_start_build
+# R2 (phase 8): the wiki is dormant, so the Quartz steps run only on request.
+if [[ "${BRAIN_WIKI_BUILD:-0}" == '1' ]]; then
+    apply_overlay
+    cold_start_build
+else
+    echo 'legacy wiki: not built — dormant since R2 (BRAIN_WIKI_BUILD=1 builds it here; brain-rebuild --only quartz rebuilds it)'
+fi
 ensure_supervised
 
 # Opt-in since phase 7 (R1): the daily loop no longer points at the wiki.
@@ -211,9 +210,7 @@ fi
 # than printing a bare '?'.
 PID_PENDING='not written yet — check brain-status'
 WATCH_PID_VALUE="$PID_PENDING"
-BUILD_PID_VALUE="$PID_PENDING"
 [[ -f "$WATCH_PID" ]] && WATCH_PID_VALUE="$(cat "$WATCH_PID")"
-[[ -f "$BUILD_PID" ]] && BUILD_PID_VALUE="$(cat "$BUILD_PID")"
 
 # brain (2026-05-08): note the supervisor in the report so the user
 # knows their daemons survive terminal close + crashes.
@@ -223,9 +220,9 @@ SUPERVISOR='launchd (KeepAlive)'
 echo
 echo '🧠 brain is up:'
 echo '   read:       brain ui   (search, read and edit — opens a browser)'
-echo "   wiki:       $URL  (legacy; still built until R2 — BRAIN_OPEN_BROWSER=1 opens it)"
+echo "   wiki:       $URL  (legacy, dormant since R2: serves its last build — BRAIN_OPEN_BROWSER=1 opens it)"
 echo "   vault:      re-syncing on file changes (pid $WATCH_PID_VALUE)"
-echo "   build:      re-rendering on vault changes (pid $BUILD_PID_VALUE)"
+echo '   build:      dormant since R2 — brain-rebuild --only quartz rebuilds the wiki'
 echo "   supervisor: $SUPERVISOR"
 echo '   stop:       brain-down'
 echo '   status:     brain-status'

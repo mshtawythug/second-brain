@@ -59,7 +59,9 @@ REPO_PY = REPO_ROOT / ".venv" / "bin" / "python"
 INSTALLED_PY = (
     Path.home() / ".local" / "share" / "uv" / "tools" / "secondbrain-py" / "bin" / "python"
 )
-LAUNCHD_LABELS = ("com.brain.watcher", "com.brain.build", "com.brain.brief")
+# The agents brain-install-launchd installs: brain.bin.launchd._INSTALLED_LABELS.
+# com.brain.build is retired at R2 (phase 8) and has nothing left to restart.
+LAUNCHD_LABELS = ("com.brain.watcher", "com.brain.brief")
 MINIMAL_PATH = "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin"
 
 PASS, FAIL, SKIP, BLOCKED = "PASS", "FAIL", "SKIP", "BLOCKED"
@@ -267,10 +269,10 @@ def check_3(tier: str, *, allow_restart: bool) -> Result:
         code = (
             _PKG_PROBE + "\n"
             "from pathlib import Path\n"
-            "from brain.bin.launchd import render_plist, _LABELS\n"
+            "from brain.bin.launchd import render_plist, _INSTALLED_LABELS\n"
             "import xml.etree.ElementTree as ET\n"
             "missing = []\n"
-            "for label in _LABELS:\n"
+            "for label in _INSTALLED_LABELS:\n"
             "    text = render_plist(label, brain_home=Path('/synthetic/home'),\n"
             "        vault_path=Path('/synthetic/vault'), pipx_bin_dir=Path('/synthetic/bin'),\n"
             "        brain_py=Path('/synthetic/python'))\n"

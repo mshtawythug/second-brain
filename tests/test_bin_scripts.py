@@ -89,16 +89,39 @@ def hermetic_pids(tmp_path: Path) -> HermeticPids:
     return HermeticPids(paths=paths, env=env)
 
 
+def _new_stub_dir(tmp_path: Path) -> Path:
+    """Create ``tmp_path/stubs`` seeded with a recording ``launchctl`` that exits 1.
+
+    ``_make_env`` rebuilds ``PATH`` from scratch, which drops both of conftest's
+    launchctl layers, and ``/bin/launchctl`` is on that ``PATH``. The seeded stub
+    stands in for them: a test that reaches launchctl without stubbing it records
+    to ``launchctl.unexpected`` and fails, rather than booting out the
+    developer's live LaunchAgents. A test that needs a working launchctl
+    overwrites it with ``_write_stub(stub_dir, "launchctl", body=...)``.
+    Guarded by ``tests/test_launchctl_isolation.py``.
+    """
+    d = tmp_path / "stubs"
+    d.mkdir()
+    _write_stub(
+        d,
+        "launchctl",
+        body=(
+            "#!/usr/bin/env bash\n"
+            f'echo "$@" >> {d}/launchctl.unexpected\n'
+            "exit 1\n"
+        ),
+    )
+    return d
+
+
 @pytest.fixture
 def stub_dir(tmp_path: Path) -> Path:
-    """Directory that holds the fake ``brain`` + ``python`` stubs.
+    """Directory that holds the fake ``brain`` + ``python`` (+ ``launchctl``) stubs.
 
     Returned as a ``Path`` so individual tests can inspect the call logs
     written next to the executables.
     """
-    d = tmp_path / "stubs"
-    d.mkdir()
-    return d
+    return _new_stub_dir(tmp_path)
 
 
 @pytest.fixture
@@ -157,7 +180,9 @@ def _make_env(
     the developer's real ``brain`` / ``python``. ``BRAIN_PY`` points at
     the stub so the cold-start build + build-watcher commands flow
     through it. ``BRAIN_OPEN_BROWSER=0`` skips the 30s ``wait_for_url``
-    + browser-open dance during tests.
+    + browser-open dance during tests. ``BRAIN_LAUNCHCTL`` defaults to the
+    ``launchctl`` stub ``stub_dir`` is seeded with, because this env drops the
+    conftest layers that would otherwise keep a script off the real binary.
     """
     env: dict[str, str] = {
         "PATH": f"{stub_dir}:/usr/bin:/bin",
@@ -165,6 +190,7 @@ def _make_env(
         "BRAIN_VAULT_PATH": str(vault_dir),
         "BRAIN_OPEN_BROWSER": "0",
         "BRAIN_PY": str(stub_dir / "python"),
+        "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
     }
     if extras:
         env.update(extras)
@@ -227,7 +253,13 @@ def test_brain_up_skips_cold_start_when_current_healthy(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        # The cold start is opt-in at R2 (phase 8 T5); this test exercises it.
+        extras={
+            **hermetic_pids.env,
+            "BRAIN_NO_BUILD_WATCHER": "1",
+            "BRAIN_NO_OVERLAY": "1",
+            "BRAIN_WIKI_BUILD": "1",
+        },
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
         [str(BIN / "brain-up")],
@@ -267,7 +299,13 @@ def test_brain_up_runs_cold_start_when_current_missing(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        # The cold start is opt-in at R2 (phase 8 T5); this test exercises it.
+        extras={
+            **hermetic_pids.env,
+            "BRAIN_NO_BUILD_WATCHER": "1",
+            "BRAIN_NO_OVERLAY": "1",
+            "BRAIN_WIKI_BUILD": "1",
+        },
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
         [str(BIN / "brain-up")],
@@ -294,7 +332,7 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     hermetic_pids: HermeticPids,
     tmp_path: Path,
 ) -> None:
-    """brain-up calls install-launchd → launchctl bootstrap fires for both labels.
+    """brain-up calls install-launchd → launchctl bootstrap fires for the installed labels.
 
     This is the "single source of truth for daemon lifecycle" regression
     guard: the pre-2026-05-08 brain-up used `nohup ... &` to spawn the
@@ -307,7 +345,8 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     a tmp directory (so we don't drop plists into the developer's real
     ~/Library/LaunchAgents), seeds a healthy current/ to short-circuit
     cold-start, and verifies launchctl was called with `bootstrap` for
-    both com.brain.watcher AND com.brain.build.
+    com.brain.watcher AND com.brain.brief, and never for com.brain.build,
+    which is retired at R2 (phase 8 T2).
     """
     _seed_healthy_current(vault_dir)
     _write_stub(stub_dir, "brain")
@@ -346,19 +385,20 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     # observable side effect of install-launchd having fired.
     launchctl_calls = _read_log(stub_dir / "launchctl.calls")
     bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
-    assert len(bootstrap_calls) == 3, (
-        f"brain-up must bootstrap the watcher, build, and brief LaunchAgents; "
+    assert len(bootstrap_calls) == 2, (
+        f"brain-up must bootstrap the watcher and brief LaunchAgents; "
         f"saw {bootstrap_calls!r} (full launchctl call log: {launchctl_calls!r}; "
         f"brain-up stdout: {result.stdout!r}; stderr: {result.stderr!r})"
     )
     assert any("com.brain.watcher.plist" in c for c in bootstrap_calls), bootstrap_calls
-    assert any("com.brain.build.plist" in c for c in bootstrap_calls), bootstrap_calls
     assert any("com.brain.brief.plist" in c for c in bootstrap_calls), bootstrap_calls
+    assert not [c for c in bootstrap_calls if "com.brain.build" in c], bootstrap_calls
 
-    # Both plists landed on disk in the tmp dir, not the developer's
-    # real ~/Library/LaunchAgents.
+    # The plists landed on disk in the tmp dir, not the developer's
+    # real ~/Library/LaunchAgents — and the retired build daemon's did not.
     assert (launchd_dir / "com.brain.watcher.plist").is_file()
-    assert (launchd_dir / "com.brain.build.plist").is_file()
+    assert (launchd_dir / "com.brain.brief.plist").is_file()
+    assert not (launchd_dir / "com.brain.build.plist").exists()
 
     # Report line surfaces the new "supervisor: launchd (KeepAlive)" tag
     # so the user immediately knows what's supervising.
@@ -405,8 +445,8 @@ def test_brain_up_does_not_open_the_wiki_by_default(
 ) -> None:
     """Phase 7 (R1, E1): the daily loop no longer puts the wiki in front of you.
 
-    Before R1 every ``brain-up`` waited for Caddy and opened the wiki. The wiki
-    still builds and serves — only the default browser-open is gone.
+    Before R1 every ``brain-up`` waited for Caddy and opened the wiki. Since R2
+    (phase 8) the wiki is also dormant; Caddy still serves its last build.
     """
     result = _run_brain_up_for_reading(
         stub_dir, vault_dir, hermetic_pids, open_browser=None
@@ -491,7 +531,13 @@ def test_brain_up_aborts_when_cold_start_fails(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        # The cold start is opt-in at R2 (phase 8 T5); this test exercises it.
+        extras={
+            **hermetic_pids.env,
+            "BRAIN_NO_BUILD_WATCHER": "1",
+            "BRAIN_NO_OVERLAY": "1",
+            "BRAIN_WIKI_BUILD": "1",
+        },
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
         [str(BIN / "brain-up")],
@@ -672,7 +718,10 @@ def test_brain_status_three_rows(
 
 
 def test_brain_rebuild_dry_run_lists_stages(tmp_path: Path) -> None:
-    """``--dry-run`` prints all 7 stage ids and exits 0 (no live DB needed).
+    """``--dry-run`` prints the default stage ids and exits 0 (no live DB needed).
+
+    At R2 the default plan ends in ``mirror`` and never names the opt-in
+    ``quartz`` stage (phase 8, E1), so the subprocess check pins both halves.
 
     The Python orchestrator entry prints the stage plan and returns immediately
     when ``--dry-run`` is passed — it never opens a DB connection, never
@@ -695,12 +744,13 @@ def test_brain_rebuild_dry_run_lists_stages(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     for sid in (
         "embeddings", "summaries", "search", "graph",
-        "graph-weights", "communities", "wiki",
+        "graph-weights", "communities", "connect", "mirror",
     ):
         assert sid in result.stdout, (
             f"expected stage id {sid!r} in --dry-run output;\n"
             f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
+    assert "quartz" not in result.stdout.lower(), result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -814,7 +864,7 @@ def test_brain_watcher_fg_writes_pid_and_execs_brain_sync(
 
 
 def test_brain_watcher_fg_aborts_when_brain_cli_missing(
-    stub_dir: Path,  # noqa: ARG001 — fixture forces test isolation
+    stub_dir: Path,
     vault_dir: Path,
     hermetic_pids: HermeticPids,
 ) -> None:
@@ -836,6 +886,9 @@ def test_brain_watcher_fg_aborts_when_brain_cli_missing(
         "HOME": str(vault_dir.parent),
         "BRAIN_VAULT_PATH": str(vault_dir),
         "BRAIN_SKIP_VENV_AUTOLOAD": "1",
+        # This env is built from scratch like _make_env's, so it carries the
+        # same launchctl stand-in (phase 8 T0), for uniformity.
+        "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
         # Hermetic: point the pid path at a tmp file so the assertion below
         # checks the override (never the global /tmp/brain-watch.pid).
         **hermetic_pids.env,
@@ -932,12 +985,13 @@ def test_install_launchd_writes_plists_and_bootstraps(
     vault_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """install-launchd writes both plists with KeepAlive=true and bootstraps them.
+    """install-launchd writes the watcher + brief plists and bootstraps them.
 
     Plist content is checked structurally (ProgramArguments line points at
     the wrapper, KeepAlive present, Label correct). The stub launchctl
     captures calls so we can assert the bootstrap step actually fired for
-    both labels.
+    both installed labels, and never for the retired ``com.brain.build``
+    (phase 8 T2; ``tests/test_bin_launchd_retired.py`` covers its removal).
     """
     launchd_dir = tmp_path / "LaunchAgents"
     _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
@@ -961,9 +1015,9 @@ def test_install_launchd_writes_plists_and_bootstraps(
     assert result.returncode == 0, result.stderr
 
     watcher_plist = launchd_dir / "com.brain.watcher.plist"
-    build_plist = launchd_dir / "com.brain.build.plist"
     assert watcher_plist.is_file(), watcher_plist
-    assert build_plist.is_file(), build_plist
+    assert (launchd_dir / "com.brain.brief.plist").is_file()
+    assert not (launchd_dir / "com.brain.build.plist").exists()
 
     watcher_text = watcher_plist.read_text()
     assert "<string>com.brain.watcher</string>" in watcher_text
@@ -981,24 +1035,12 @@ def test_install_launchd_writes_plists_and_bootstraps(
         "`python -m brain.*` call fails with ModuleNotFoundError"
     )
 
-    build_text = build_plist.read_text()
-    assert "<string>com.brain.build</string>" in build_text
-    assert "_brain-build-fg" in build_text
-    assert "<key>KeepAlive</key>" in build_text
-    # Same path change — build logs are also under $BRAIN_HOME/logs/.
-    assert "logs/com.brain.build.out.log" in build_text
-    # Same BRAIN_PY regression guard for the build daemon plist.
-    assert "<key>BRAIN_PY</key>" in build_text, (
-        "com.brain.build.plist is missing BRAIN_PY — without it "
-        "`python -m brain.wiki.build_watcher` fails at launchd start"
-    )
-
     launchctl_calls = _read_log(stub_dir / "launchctl.calls")
     bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
-    assert len(bootstrap_calls) == 3, launchctl_calls
+    assert len(bootstrap_calls) == 2, launchctl_calls
     assert any("com.brain.watcher.plist" in c for c in bootstrap_calls)
-    assert any("com.brain.build.plist" in c for c in bootstrap_calls)
     assert any("com.brain.brief.plist" in c for c in bootstrap_calls)
+    assert not [c for c in bootstrap_calls if "com.brain.build" in c], launchctl_calls
 
 
 def test_uninstall_launchd_boots_out_and_removes_plists(

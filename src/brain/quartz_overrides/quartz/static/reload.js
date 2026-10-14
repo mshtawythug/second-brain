@@ -21,9 +21,10 @@
 // architecture (see
 // `docs/plans/2026-05-01-quartz-blue-green-serve.md`), Caddy
 // serves whichever build dir `<vault>/.quartz/current` symlinks
-// to. The brain build watcher rebuilds the site into a fresh
-// `<vault>/.quartz/builds/<id>/` dir on every vault change, then
-// atomically retargets `current` at the new build. Because the
+// to. Each build (since R2, only on request: `brain-rebuild
+// --only quartz`; the build watcher that rebuilt on every vault change
+// is retired) renders into a fresh `<vault>/.quartz/builds/<id>/` dir,
+// then atomically retargets `current` at the new build. Because the
 // swap happens server-side (rename(2) on a symlink), open
 // browsers have no signal that the page they're viewing is now
 // stale. Quartz's own `--serve` mode opens a WebSocket from the

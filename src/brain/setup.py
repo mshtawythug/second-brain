@@ -187,7 +187,6 @@ _SHIM_NAMES: tuple[str, ...] = (
     "brain-down",
     "brain-status",
     "_brain-watcher-fg",
-    "_brain-build-fg",
 )
 
 
@@ -753,9 +752,7 @@ def _maybe_install_wiki(
         True  — wiki was installed (or dry-run would install it).
         False — skipped via flag or user declined interactively.
 
-    The return value is forwarded to ``_maybe_install_launchd`` so the
-    watcher supervisors are only registered when there is actually a wiki
-    workspace to supervise.
+    The return value feeds the final report's legacy wiki lines.
     """
     if skip:
         typer.echo("[skipped] wiki install (--skip-wiki)")
@@ -829,7 +826,6 @@ def _maybe_install_skill(
 
 
 def _maybe_install_launchd(
-    wiki_installed: bool,
     vault_path: Path,
     brain_home: Path,
     dry_run: bool,
@@ -844,22 +840,18 @@ def _maybe_install_launchd(
     Background daemons are OPT-IN (ticket contract):
 
     * ``--non-interactive`` NEVER installs daemons — a scripted install must not
-      register three KeepAlive LaunchAgents behind the user's back.
+      register LaunchAgents behind the user's back.
     * Interactively the prompt defaults to **No**; pass ``--daemons`` to install
       without being asked.
 
-    Guarded by ``wiki_installed`` (not the raw ``--skip-wiki`` flag) so that an
-    interactive decline also suppresses the launchd registration — there would
-    be no Quartz workspace for the watcher to supervise.
+    Not gated on the wiki (Q8, phase 8): the daemons are the vault-sync watcher
+    and the daily brief, and neither needs a Quartz workspace.
 
     Passes ``vault_path`` and ``brain_home`` directly to ``install_plists``
     rather than going through ``install_main()``, which would silently use the
     default vault and brain_home resolved from env/config at call time instead
     of the values chosen for this setup run.
     """
-    if not wiki_installed:
-        typer.echo("[skipped] launchd install (wiki not installed)")
-        return
     if sys.platform != "darwin":
         typer.echo("[skipped] launchd install (not macOS)")
         return
@@ -876,7 +868,7 @@ def _maybe_install_launchd(
     else:
         do_install = typer.confirm(
             "Install launchd background daemons "
-            "(auto-start Postgres + wiki watcher on login)?",
+            "(vault-sync watcher + 07:00 daily brief, loaded on login)?",
             default=False,
         )
     if not do_install:
@@ -885,12 +877,12 @@ def _maybe_install_launchd(
     if dry_run:
         typer.echo("[dry-run] would: brain-install-launchd")
         return
-    from .bin.launchd import install_plists
+    from .bin.launchd import install_plists, resolve_launchctl
 
     launchd_dir = Path(
         os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
     )
-    launchctl = os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
+    launchctl = resolve_launchctl()
     install_plists(brain_home, launchd_dir, launchctl, vault_path=vault_path)
     typer.echo(f"  [ok] brain LaunchAgents installed in {launchd_dir}")
 
@@ -1340,7 +1332,6 @@ def run_setup(
     # ------------------------------------------------------------------
     if prof.offer_daemons:
         _maybe_install_launchd(
-            wiki_installed=wiki_installed,
             vault_path=vault_path,
             brain_home=brain_home,
             dry_run=dry_run,

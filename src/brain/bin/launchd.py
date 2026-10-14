@@ -26,14 +26,32 @@ from ..config import _brain_home_root
 from ..errors import BrainError
 from ._launcher import ensure_shim
 
-# The launchd labels managed by brain. watcher/build are KeepAlive daemons;
-# brief (Plan 01) is a one-shot StartCalendarInterval job (07:00 daily). All are
-# installed + cleaned together — adding brief here means uninstall sweeps it too.
-_LABELS = ("com.brain.watcher", "com.brain.build", "com.brain.brief")
+# The launchd labels brain installs. watcher is the KeepAlive vault-sync daemon;
+# brief (Plan 01) is a one-shot StartCalendarInterval job (07:00 daily).
+_INSTALLED_LABELS = ("com.brain.watcher", "com.brain.brief")
+# Retired at R2 (wiki-to-ui phase 8): the Quartz rebuild daemon. It is never
+# installed again; install_plists boots out and deletes a leftover one, and
+# uninstall still sweeps it. Its template and _brain-build-fg wrapper stay until R3.
+_RETIRED_LABELS = ("com.brain.build",)
+# Every label brain has ever installed: what uninstall_plists sweeps.
+_ALL_LABELS = _INSTALLED_LABELS + _RETIRED_LABELS
 
 
 class LaunchdError(BrainError):
     """Raised when a launchd plist render or launchctl operation fails."""
+
+
+def resolve_launchctl() -> str:
+    """The ``launchctl`` to run: ``$BRAIN_LAUNCHCTL``, else the bare name on ``PATH``.
+
+    The one place this default is resolved. ``install_plists`` and
+    ``uninstall_plists`` default to it rather than to a literal, so a direct call
+    honours the seam exactly as the entry points, ``brain setup`` and
+    ``brain doctor`` do. A literal default never read the environment, so a
+    caller that omitted ``launchctl=`` ran the real binary whatever
+    ``BRAIN_LAUNCHCTL`` said, including from inside the test suite.
+    """
+    return os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
 
 
 # ---------------------------------------------------------------------------
@@ -125,22 +143,29 @@ def render_plist(
 def install_plists(
     brain_home: Path,
     launchd_dir: Path,
-    launchctl: str = "launchctl",
+    launchctl: str | None = None,
     vault_path: Path | None = None,
 ) -> None:
-    """Write both plists and load them into launchd. Idempotent.
+    """Write the installed jobs' plists and load them into launchd. Idempotent.
 
-    Steps for each label:
+    First, each retired label (``com.brain.build`` at R2) is booted out, errors
+    suppressed because "not loaded" is its normal answer, and its plist deleted.
+    That is the R2 migration, and it runs on every install.
+
+    Then, for each installed label:
     1. Render the plist template.
     2. Write to *launchd_dir*/<label>.plist atomically.
     3. ``launchctl bootout`` (suppress errors — idempotent).
     4. ``launchctl bootstrap`` (fail loudly on error).
+
+    ``launchctl`` defaults to :func:`resolve_launchctl`, never a literal.
     """
+    launchctl = launchctl if launchctl is not None else resolve_launchctl()
     launchd_dir.mkdir(parents=True, exist_ok=True)
 
     # Install the foreground wrapper scripts the plists reference.
     # ensure_shim() is idempotent — skips the write if the shim is current.
-    for wrapper in ("_brain-watcher-fg", "_brain-build-fg", "_brain-brief-fg"):
+    for wrapper in ("_brain-watcher-fg", "_brain-brief-fg"):
         ensure_shim(wrapper, brain_home)
 
     effective_vault_path = vault_path if vault_path is not None else Path.home() / "brain-vault"
@@ -148,7 +173,15 @@ def install_plists(
     brain_py = resolve_brain_py()
     uid: int = os.getuid()
 
-    for label in _LABELS:
+    for label in _RETIRED_LABELS:
+        subprocess.run(
+            [launchctl, "bootout", f"gui/{uid}/{label}"],
+            check=False,
+            capture_output=True,
+        )
+        (launchd_dir / f"{label}.plist").unlink(missing_ok=True)
+
+    for label in _INSTALLED_LABELS:
         plist_content = render_plist(
             label,
             brain_home=brain_home,
@@ -195,18 +228,21 @@ def install_plists(
 
 def uninstall_plists(
     launchd_dir: Path,
-    launchctl: str = "launchctl",
+    launchctl: str | None = None,
 ) -> None:
-    """Bootout and remove both plists. Idempotent.
+    """Bootout and remove every brain plist, retired ones included. Idempotent.
 
-    For each label:
+    For each label in ``_ALL_LABELS``:
     1. Probe ``launchctl print gui/<uid>/<label>`` — if loaded, bootout.
     2. Remove the plist file if it exists.
     3. Print a "nothing to remove" message if neither action was taken.
+
+    ``launchctl`` defaults to :func:`resolve_launchctl`, never a literal.
     """
+    launchctl = launchctl if launchctl is not None else resolve_launchctl()
     uid: int = os.getuid()
 
-    for label in _LABELS:
+    for label in _ALL_LABELS:
         plist_path = launchd_dir / f"{label}.plist"
         domain = f"gui/{uid}/{label}"
         did_something = False
@@ -243,7 +279,7 @@ def install_main() -> None:
     launchd_dir = Path(
         os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
     )
-    launchctl = os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
+    launchctl = resolve_launchctl()
     brain_home = _brain_home_root()
     install_plists(brain_home, launchd_dir, launchctl)
     print(f"🧠 brain LaunchAgents installed in {launchd_dir}")
@@ -254,7 +290,7 @@ def uninstall_main() -> None:
     launchd_dir = Path(
         os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
     )
-    launchctl = os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
+    launchctl = resolve_launchctl()
     uninstall_plists(launchd_dir, launchctl)
 
 

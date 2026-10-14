@@ -11,7 +11,7 @@ Local, queryable knowledge base and note vault with hybrid search and an entity-
 [![PyPI downloads](https://img.shields.io/pypi/dm/secondbrain-py)](https://pypistats.org/packages/secondbrain-py)
 [![GitHub stars](https://img.shields.io/github/stars/mshtawythug/second-brain)](https://github.com/mshtawythug/second-brain)
 
-Stores career docs, interview prep, Krisp transcripts, Slack threads, Gmail, and authored Markdown notes in Postgres + pgvector. Any agent reaches all of it through the `brain` CLI or the bundled `brain-mcp` MCP server — no re-pasting context into every chat. You read it through the CLI or the [local web UI](#local-web-ui); the older [rendered wiki](docs/vault-and-wiki.md) still builds, as a legacy view.
+Stores career docs, interview prep, Krisp transcripts, Slack threads, Gmail, and authored Markdown notes in Postgres + pgvector. Any agent reaches all of it through the `brain` CLI or the bundled `brain-mcp` MCP server — no re-pasting context into every chat. You read it through the CLI or the [local web UI](#local-web-ui); the older [rendered wiki](docs/vault-and-wiki.md) is a legacy view, dormant since R2 (`brain-rebuild --only quartz` rebuilds it).
 
 The everyday loop — capture a note, search it back, read the top hit, check the corpus:
 

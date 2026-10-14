@@ -12,7 +12,8 @@ from unittest.mock import patch
 import pytest
 
 from brain.bin.launchd import (
-    _LABELS,
+    _ALL_LABELS,
+    _INSTALLED_LABELS,
     install_main,
     install_plists,
     render_plist,
@@ -129,7 +130,7 @@ def test_install_plists_writes_both_files(tmp_path: Path, monkeypatch: pytest.Mo
         launchctl="/usr/bin/true",
     )
 
-    for label in _LABELS:
+    for label in _INSTALLED_LABELS:
         plist = launchd_dir / f"{label}.plist"
         assert plist.exists(), f"expected {plist} to exist"
         assert plist.stat().st_size > 0
@@ -160,7 +161,7 @@ def test_install_plists_calls_launchctl_bootstrap(
 
     log_content = log_path.read_text()
     # bootstrap must be present for both labels.
-    for label in _LABELS:
+    for label in _INSTALLED_LABELS:
         assert "bootstrap" in log_content, "expected 'bootstrap' in stub log"
         assert label in log_content, f"expected {label} in stub log"
 
@@ -182,14 +183,14 @@ def test_uninstall_plists_removes_files(
         launchd_dir=launchd_dir,
         launchctl="/usr/bin/true",
     )
-    for label in _LABELS:
+    for label in _INSTALLED_LABELS:
         assert (launchd_dir / f"{label}.plist").exists()
 
     # Uninstall — /usr/bin/true returns 0 for the "print" probe, so each label
     # is considered loaded; bootout is called (also /usr/bin/true).
     uninstall_plists(launchd_dir=launchd_dir, launchctl="/usr/bin/true")
 
-    for label in _LABELS:
+    for label in _ALL_LABELS:
         assert not (launchd_dir / f"{label}.plist").exists(), (
             f"{label}.plist should have been removed"
         )
@@ -233,7 +234,7 @@ def test_install_main_uses_env_overrides(
 
     install_main()
 
-    for label in _LABELS:
+    for label in _INSTALLED_LABELS:
         plist = agents_dir / f"{label}.plist"
         assert plist.exists(), f"expected {plist} to land in {agents_dir}"
 
@@ -261,7 +262,11 @@ def test_resolve_pipx_bin_dir_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_install_plists_installs_foreground_wrappers(
     tmp_path: Path,
 ) -> None:
-    """install_plists writes _brain-watcher-fg and _brain-build-fg into brain_home/bin/."""
+    """install_plists writes the installed jobs' wrappers into brain_home/.shims/.
+
+    ``_brain-build-fg`` is not among them at R2: nothing installed runs it
+    (``tests/test_bin_launchd_retired.py`` pins its absence).
+    """
     brain_home = tmp_path / "brain"
     launchd_dir = tmp_path / "agents"
 
@@ -271,7 +276,7 @@ def test_install_plists_installs_foreground_wrappers(
         launchctl="/usr/bin/true",
     )
 
-    for wrapper in ("_brain-watcher-fg", "_brain-build-fg", "_brain-brief-fg"):
+    for wrapper in ("_brain-watcher-fg", "_brain-brief-fg"):
         shim = brain_home / ".shims" / wrapper
         assert shim.exists(), f"expected shim {shim} to be installed"
         assert shim.stat().st_mode & 0o111, f"expected {shim} to be executable"
@@ -317,7 +322,7 @@ def _environment_variables(text: str) -> dict[str, str]:
     }
 
 
-@pytest.mark.parametrize("label", _LABELS)
+@pytest.mark.parametrize("label", _INSTALLED_LABELS)
 def test_plist_pins_every_var_the_daemons_need(label: str) -> None:
     """Each plist explicitly sets every variable its shim + config chain read.
 
@@ -338,7 +343,7 @@ def test_plist_pins_every_var_the_daemons_need(label: str) -> None:
         assert env[required].strip(), f"{label} pins {required} to an empty value"
 
 
-@pytest.mark.parametrize("label", _LABELS)
+@pytest.mark.parametrize("label", _INSTALLED_LABELS)
 def test_plist_opts_out_of_the_cwd_dotenv_walkup(label: str) -> None:
     """Daemons must not resolve config through an ambient-cwd read.
 
@@ -356,14 +361,14 @@ def test_plist_opts_out_of_the_cwd_dotenv_walkup(label: str) -> None:
     )
 
 
-@pytest.mark.parametrize("label", _LABELS)
+@pytest.mark.parametrize("label", _INSTALLED_LABELS)
 def test_plist_exports_brain_home(label: str) -> None:
     """BRAIN_HOME is exported as the rendered brain_home — this is the fix."""
     env = _environment_variables(_render(label))
     assert env["BRAIN_HOME"] == str(_FAKE_BRAIN_HOME)
 
 
-@pytest.mark.parametrize("label", _LABELS)
+@pytest.mark.parametrize("label", _INSTALLED_LABELS)
 def test_plist_sets_explicit_working_directory(label: str) -> None:
     """A daemon with no useful cwd must never resolve paths relative to one."""
     working_dir = _plist_value(_render(label), "WorkingDirectory")
@@ -371,7 +376,7 @@ def test_plist_sets_explicit_working_directory(label: str) -> None:
     assert working_dir.text == str(_FAKE_BRAIN_HOME)
 
 
-@pytest.mark.parametrize("label", _LABELS)
+@pytest.mark.parametrize("label", _INSTALLED_LABELS)
 def test_plist_bakes_no_secret_values(label: str) -> None:
     """Only paths belong in a plist; secrets stay in $BRAIN_HOME/.env.
 
@@ -409,7 +414,7 @@ def test_plist_brain_home_drives_config_resolution(
     assert _brain_home_root() == synthetic_home
 
 
-@pytest.mark.parametrize("label", _LABELS)
+@pytest.mark.parametrize("label", _INSTALLED_LABELS)
 def test_shim_rotates_logs_before_exec(label: str, tmp_path: Path) -> None:
     """Every shim caps its log before exec'ing the daemon (item #5).
 

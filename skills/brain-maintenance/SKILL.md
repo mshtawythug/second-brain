@@ -215,20 +215,20 @@ Directory rebuild only (steps 1 + 3 above). No linker pass, no fence rewrite,
 no People Hub emit. Use when you only edited `_people.yml` and don't need a
 full relink. Soft-fails on missing `gws` and exits 0.
 
-## Wiki build (Quartz blue/green)
+## Wiki build (Quartz blue/green) — dormant since R2
 
-Run via the bin scripts:
+Nothing rebuilds the wiki by default (`com.brain.build` is retired); Caddy serves the last build.
 
 ```bash
-bin/brain-up                                   # start watcher A (DB↔vault) + watcher B (vault→Quartz)
-bin/brain-status                               # pid + current symlink + .build-id
-bin/brain-rebuild                              # force rebuild without bouncing watchers
-bin/brain-rebuild --clean-cache                # wipe parser cache and rebuild from cold
-bin/brain-down                                 # stop watchers (Caddy keeps serving last-good)
+bin/brain-up                                   # start the vault-sync watcher (launchd)
+bin/brain-status                               # pid + current symlink + .build-id ("build: dormant")
+bin/brain-rebuild --only quartz                # rebuild the dormant wiki (atomic swap)
+bin/brain-rebuild --only quartz --clean-cache  # wipe parser cache and rebuild from cold
+bin/brain-down                                 # stop the watcher (Caddy keeps serving last-good)
 ```
 
-If the wiki is misbehaving, `bin/brain-status` is the first stop. If a stale
-build is showing, `bin/brain-rebuild` swaps in a fresh one atomically.
+A stale build is expected since R2. `--wiki-only` is gone (exits 2): use
+`--only mirror` or `--only quartz`.
 
 ## Init / migrations — `brain init`
 

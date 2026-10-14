@@ -381,21 +381,24 @@ def test_setup_preflight_caddy_missing_only_when_wiki_enabled(
 # ---------------------------------------------------------------------------
 
 
-def test_setup_launchd_skipped_when_skip_wiki(tmp_path: Path) -> None:
-    """Full profile: --skip-wiki suppresses launchd; daemons stay opt-in otherwise.
+def test_setup_skip_wiki_no_longer_suppresses_launchd(tmp_path: Path) -> None:
+    """Q8 / R8-1: --skip-wiki no longer gates launchd; daemons stay opt-in.
 
     launchd is a full-profile-only component; standard/minimal never reach it.
-    ``_dry_run_output`` runs --non-interactive, and daemons are opt-in only, so
-    neither run may install them.
+    ``_dry_run_output`` runs --non-interactive and does NOT patch
+    ``sys.platform``, so the skip line it sees is platform-correct: on macOS the
+    --non-interactive contract line, elsewhere the not-macOS gate, which returns
+    first. On both, the old wiki gate's line must be gone. That gate ran BEFORE
+    the platform gate, so restoring it turns this red on either platform.
     """
-    # skip_wiki=True → wiki not installed → launchd skipped
     out_skipped = _dry_run_output(tmp_path / "skip", profile="full", skip_wiki=True)
-    assert "launchd" in out_skipped.lower(), (
-        "expected launchd mention when --skip-wiki"
+    assert "launchd install (wiki not installed)" not in out_skipped, (
+        "the wiki gate is gone (Q8): a wikiless install is still offered daemons"
     )
-    assert "wiki not installed" in out_skipped or "wiki" in out_skipped.lower(), (
-        "expected wiki-not-installed rationale in launchd skip message"
-    )
+    if sys.platform == "darwin":
+        assert "[skipped] launchd background daemons (--non-interactive" in out_skipped
+    else:
+        assert "[skipped] launchd install (not macOS)" in out_skipped
 
     # skip_wiki=False + --non-interactive → daemons NEVER auto-install.
     out_enabled = _dry_run_output(tmp_path / "enabled", profile="full", skip_wiki=False)
@@ -471,7 +474,6 @@ def test_setup_daemons_flag_installs_when_interactive(tmp_path: Path) -> None:
         from brain.setup import _maybe_install_launchd
 
         _maybe_install_launchd(
-            wiki_installed=True,
             vault_path=tmp_path / "vault",
             brain_home=tmp_path / ".brain",
             dry_run=False,
@@ -497,7 +499,6 @@ def test_setup_launchd_interactive_default_no(tmp_path: Path) -> None:
         from brain.setup import _maybe_install_launchd
 
         _maybe_install_launchd(
-            wiki_installed=True,
             vault_path=tmp_path / "vault",
             brain_home=tmp_path / ".brain",
             dry_run=False,
@@ -672,7 +673,6 @@ def test_launchd_receives_resolved_vault_path(tmp_path: Path) -> None:
         patch("sys.platform", "darwin"),
     ):
         _maybe_install_launchd(
-            wiki_installed=True,
             vault_path=custom_vault,
             brain_home=brain_home,
             dry_run=False,
@@ -1274,17 +1274,19 @@ def test_minimal_dry_run_narrative_reaches_doctor(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Regression: Bug 2 — interactive wiki decline must suppress launchd
+# Q8 (phase 8): declining the wiki no longer suppresses launchd
 # ---------------------------------------------------------------------------
 
 
-def test_launchd_skipped_when_wiki_interactively_declined(tmp_path: Path) -> None:
-    """Regression: user declining wiki via confirm must prevent launchd install.
+def test_launchd_offered_when_wiki_interactively_declined(tmp_path: Path) -> None:
+    """Q8 / R8-1: declining the wiki still offers, and on Yes installs, the daemons.
 
-    Before the fix, _maybe_install_launchd was gated on the --skip-wiki flag,
-    not on whether the wiki was actually installed.  A user answering 'no' to
-    the typer.confirm prompt would still trigger launchd registration against a
-    Quartz workspace that was never created.
+    This test used to pin the opposite ("Bug 2"): the launchd install was gated
+    on ``wiki_installed`` because the only daemons supervised the wiki. At R2 the
+    installed daemons are the vault-sync watcher and the brief, which need no
+    wiki. The first confirm declines the wiki and the second accepts the
+    daemons. A single ``return_value=False`` would answer No to BOTH, so it
+    could not tell a removed gate from a restored one.
     """
     from brain.setup import _maybe_install_launchd, _maybe_install_wiki
 
@@ -1294,7 +1296,8 @@ def test_launchd_skipped_when_wiki_interactively_declined(tmp_path: Path) -> Non
         install_plists_calls.append((args, kwargs))
 
     with (
-        patch("typer.confirm", return_value=False),  # user declines wiki
+        # Declines the wiki, then accepts the daemons.
+        patch("typer.confirm", side_effect=[False, True]),
         patch("brain.bin.launchd.install_plists", side_effect=_record_install_plists),
         patch("sys.platform", "darwin"),
     ):
@@ -1311,12 +1314,11 @@ def test_launchd_skipped_when_wiki_interactively_declined(tmp_path: Path) -> Non
         )
 
         _maybe_install_launchd(
-            wiki_installed=wiki_installed,
             vault_path=tmp_path / "vault",
             brain_home=tmp_path / ".brain",
             dry_run=False,
         )
 
-    assert install_plists_calls == [], (
-        "install_plists must NOT be called when wiki was interactively declined"
+    assert len(install_plists_calls) == 1, (
+        "declining the wiki must not suppress the daemons the user accepted"
     )

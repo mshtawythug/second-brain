@@ -366,4 +366,5 @@ jobs:
           tests/test_ui_browser_reading.py
           tests/test_ui_browser_refresh.py
           tests/test_ui_browser_related.py
+          tests/test_ui_browser_tabs.py
           -m browser --no-cov

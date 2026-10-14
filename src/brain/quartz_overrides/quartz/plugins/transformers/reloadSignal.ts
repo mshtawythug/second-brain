@@ -21,9 +21,9 @@
 // architecture (see
 // `docs/plans/2026-05-01-quartz-blue-green-serve.md`), Caddy
 // serves whichever build dir `<vault>/.quartz/current` symlinks
-// to, and the brain build watcher atomically retargets that
-// symlink at a fresh `<vault>/.quartz/builds/<id>/` after every
-// rebuild. Stock Quartz's `--serve` mode opens a WebSocket from
+// to, and each build (since R2, only on request: `brain-rebuild
+// --only quartz`; the build watcher is retired) atomically retargets
+// that symlink at a fresh `<vault>/.quartz/builds/<id>/`. Stock Quartz's `--serve` mode opens a WebSocket from
 // the dev server back to the page so it can push a reload — but
 // `--serve` is dead in our flow (Caddy serves the static output
 // directly; Quartz only builds), so the WebSocket-reload path is

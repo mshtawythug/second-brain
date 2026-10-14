@@ -20,7 +20,6 @@ import pytest
 from brain.config import Config
 from brain.doctor_runtime import (
     BUILD_COMPLETE_MARKER,
-    WIKI_STALE_DAYS,
     _default_launchd_dir,
     daemon_code_doctor_check,
     daemon_doctor_check,
@@ -30,7 +29,9 @@ from brain.doctor_runtime import (
     wiki_freshness_doctor_check,
 )
 
-_LABELS = ("com.brain.watcher", "com.brain.build", "com.brain.brief")
+# The labels the daemon checks cover (phase 8: com.brain.build is retired and
+# reported only by its own check, never by these).
+_LABELS = ("com.brain.watcher", "com.brain.brief")
 
 
 def _statuses(*, running: bool = True, **by_label: int) -> str:
@@ -77,9 +78,7 @@ def _install_plists(
         (launchd_dir / f"{label}.plist").write_bytes(plistlib.dumps(payload))
 
 
-def _daemons(
-    launchd_dir: Path, stdout: str, *, returncode: int = 0, wiki_stale: bool = False
-):
+def _daemons(launchd_dir: Path, stdout: str, *, returncode: int = 0):
     """Run the daemon check on darwin with ``launchctl list`` stubbed out."""
     with patch(
         "brain.doctor_runtime.subprocess.run",
@@ -89,7 +88,6 @@ def _daemons(
             launchd_dir=launchd_dir,
             launchctl="launchctl",
             platform="darwin",
-            wiki_stale=wiki_stale,
         )
 
 
@@ -249,7 +247,7 @@ def test_daemon_last_exit_one_fails(tmp_path: Path) -> None:
     """
     _install_plists(tmp_path, *_LABELS)
     stdout = _statuses(
-        **{"com.brain.watcher": 1, "com.brain.build": 0, "com.brain.brief": 1}
+        **{"com.brain.watcher": 1, "com.brain.brief": 1}
     )
 
     (check,) = _daemons(tmp_path, stdout)
@@ -267,12 +265,12 @@ def test_daemon_error_log_path_comes_from_the_installed_plist(tmp_path: Path) ->
     with a different ``$BRAIN_HOME`` at install time.
     """
     _install_plists(tmp_path, *_LABELS)
-    stdout = _statuses(**{lbl: (1 if lbl == "com.brain.build" else 0) for lbl in _LABELS})
+    stdout = _statuses(**{lbl: (1 if lbl == "com.brain.brief" else 0) for lbl in _LABELS})
 
     (check,) = _daemons(tmp_path, stdout)
 
     rendered = "\n".join(line.text for line in check.lines)
-    assert "/synthetic/logs/com.brain.build.err.log" in rendered
+    assert "/synthetic/logs/com.brain.brief.err.log" in rendered
 
 
 def test_config_error_exit_is_distinguished_from_a_transient_build_failure(
@@ -289,8 +287,7 @@ def test_config_error_exit_is_distinguished_from_a_transient_build_failure(
     stdout = _statuses(
         **{
             "com.brain.watcher": EXIT_CONFIG_ERROR,
-            "com.brain.build": EXIT_BUILD_ERROR,
-            "com.brain.brief": 0,
+            "com.brain.brief": EXIT_BUILD_ERROR,
         }
     )
 
@@ -300,8 +297,8 @@ def test_config_error_exit_is_distinguished_from_a_transient_build_failure(
     assert "MISCONFIGURED" in check.detail
     assert "brain-install-launchd" not in (check.remedy or "")
     # The plain build failure keeps the ordinary wording.
-    assert f"com.brain.build last exit {EXIT_BUILD_ERROR}" in check.detail
-    assert "com.brain.build last exit 1 — MISCONFIGURED" not in check.detail
+    assert f"com.brain.brief last exit {EXIT_BUILD_ERROR}" in check.detail
+    assert "com.brain.brief last exit 1 — MISCONFIGURED" not in check.detail
 
 
 def test_transient_build_failure_still_suggests_a_reload(tmp_path: Path) -> None:
@@ -319,35 +316,21 @@ def test_transient_build_failure_still_suggests_a_reload(tmp_path: Path) -> None
 
 
 def test_signal_death_that_recovered_warns_but_does_not_fail(tmp_path: Path) -> None:
-    """Restarted after SIGTERM, wiki current → the user lost nothing. WARN."""
-    _install_plists(tmp_path, *_LABELS, keep_alive=True)
-    stdout = _statuses(
-        **{"com.brain.watcher": 0, "com.brain.build": -15, "com.brain.brief": 0}
-    )
+    """Restarted after SIGTERM and running again → nothing is down. WARN.
 
-    (check,) = _daemons(tmp_path, stdout, wiki_stale=False)
-
-    assert check.status == "warn"
-    assert "signal 15" in check.detail
-
-
-def test_signal_death_that_left_a_stale_wiki_fails(tmp_path: Path) -> None:
-    """The C16 shape: a self-inflicted kill the restart did NOT recover from.
-
-    `launchctl` exposes only the signal NUMBER — SIGTERM is what bootout, a
-    shutdown, and a build-timeout kill all send — so cause cannot be inferred
-    from the signal. Composing with wiki freshness answers the question that
-    actually matters: did the user end up with a current wiki?
+    Before phase 8 this was composed with wiki freshness (a stale wiki turned it
+    into a FAIL). At R2 the wiki is dormant, so its age says nothing about a
+    daemon; ``tests/test_doctor_watcher.py`` pins the decoupling.
     """
     _install_plists(tmp_path, *_LABELS, keep_alive=True)
     stdout = _statuses(
-        **{"com.brain.watcher": 0, "com.brain.build": -15, "com.brain.brief": 0}
+        **{"com.brain.watcher": -15, "com.brain.brief": 0}
     )
 
-    (check,) = _daemons(tmp_path, stdout, wiki_stale=True)
+    (check,) = _daemons(tmp_path, stdout)
 
-    assert check.status == "fail", "a signal death over a stale wiki is not routine"
-    assert "STALE" in check.detail
+    assert check.status == "warn"
+    assert "signal 15" in check.detail
 
 
 def test_signal_killed_keepalive_daemon_that_is_down_fails(tmp_path: Path) -> None:
@@ -359,10 +342,10 @@ def test_signal_killed_keepalive_daemon_that_is_down_fails(tmp_path: Path) -> No
     _install_plists(tmp_path, *_LABELS, keep_alive=True)
     stdout = _statuses(
         running=False,
-        **{"com.brain.watcher": -9, "com.brain.build": 0, "com.brain.brief": 0},
+        **{"com.brain.watcher": -9, "com.brain.brief": 0},
     )
 
-    (check,) = _daemons(tmp_path, stdout, wiki_stale=False)
+    (check,) = _daemons(tmp_path, stdout)
 
     assert check.status == "fail"
     assert "NOT RUNNING" in check.detail
@@ -373,7 +356,7 @@ def test_one_shot_brief_job_not_running_is_normal(tmp_path: Path) -> None:
     _install_plists(tmp_path, "com.brain.brief", keep_alive=False)
     stdout = _statuses(running=False, **{"com.brain.brief": -15})
 
-    (check,) = _daemons(tmp_path, stdout, wiki_stale=False)
+    (check,) = _daemons(tmp_path, stdout)
 
     assert check.status == "warn", "a one-shot job at rest must not read as down"
 
@@ -381,7 +364,7 @@ def test_one_shot_brief_job_not_running_is_normal(tmp_path: Path) -> None:
 def test_installed_but_not_loaded_fails(tmp_path: Path) -> None:
     """Plist on disk but absent from launchctl: nothing is running."""
     _install_plists(tmp_path, *_LABELS)
-    stdout = _statuses(**{"com.brain.watcher": 0, "com.brain.build": 0})
+    stdout = _statuses(**{"com.brain.watcher": 0})
 
     (check,) = _daemons(tmp_path, stdout)
 
@@ -570,18 +553,6 @@ def test_daemon_code_check_is_silent_when_there_is_nothing_to_compare(
 # ---------------------------------------------------------------------------
 
 
-def test_stale_wiki_build_fails(tmp_path: Path) -> None:
-    """A 12-day-old build is the user-visible symptom of the whole outage."""
-    builds = tmp_path / ".quartz" / "builds"
-    _write_build(builds, "20260726-090000-aaaaaa", age_days=12, complete=True)
-
-    (check,) = wiki_freshness_doctor_check(tmp_path, now=time.time())
-
-    assert check.status == "fail"
-    assert "STALE" in check.detail
-    assert check.remedy == "brain-rebuild"
-
-
 def test_fresh_wiki_build_passes(tmp_path: Path) -> None:
     builds = tmp_path / ".quartz" / "builds"
     _write_build(builds, "20260807-090000-bbbbbb", age_days=0.1, complete=True)
@@ -591,20 +562,16 @@ def test_fresh_wiki_build_passes(tmp_path: Path) -> None:
     assert check.status == "ok"
 
 
-def test_half_written_build_does_not_count_as_fresh(tmp_path: Path) -> None:
-    """A build dir without ``.build-id`` never completed.
-
-    Counting it would let a stream of FAILING builds keep the wiki looking
-    healthy — the exact illusion this check exists to break.
-    """
+def test_half_written_build_is_not_reported_as_the_last_build(tmp_path: Path) -> None:
+    """A build dir without ``.build-id`` never completed, so it is not "last built"."""
     builds = tmp_path / ".quartz" / "builds"
     _write_build(builds, "20260726-090000-aaaaaa", age_days=12, complete=True)
     _write_build(builds, "20260807-093000-cccccc", age_days=0.0, complete=False)
 
     (check,) = wiki_freshness_doctor_check(tmp_path, now=time.time())
 
-    assert check.status == "fail", "the incomplete build must not mask the stale one"
-    assert "STALE" in check.detail
+    assert "20260726-090000-aaaaaa" in check.detail
+    assert "20260807-093000-cccccc" not in check.detail
 
 
 def test_newest_completed_build_ignores_incomplete_dirs(tmp_path: Path) -> None:
@@ -618,38 +585,12 @@ def test_newest_completed_build_ignores_incomplete_dirs(tmp_path: Path) -> None:
     assert found[0] == good
 
 
-def test_no_completed_build_fails(tmp_path: Path) -> None:
-    builds = tmp_path / ".quartz" / "builds"
-    _write_build(builds, "20260807-090000-ffffff", age_days=0, complete=False)
-
-    (check,) = wiki_freshness_doctor_check(tmp_path, now=time.time())
-
-    assert check.status == "fail"
-    assert "NO completed build" in check.detail
-
-
 def test_vault_without_quartz_workspace_is_not_broken(tmp_path: Path) -> None:
     """The wiki is optional; plenty of installs never render one."""
     (check,) = wiki_freshness_doctor_check(tmp_path, now=time.time())
 
     assert check.status == "ok"
     assert "not configured" in check.detail
-
-
-def test_freshness_boundary_is_the_named_threshold(tmp_path: Path) -> None:
-    """Just inside WIKI_STALE_DAYS passes; just outside fails."""
-    builds = tmp_path / ".quartz" / "builds"
-    _write_build(
-        builds, "20260805-090000-111111", age_days=WIKI_STALE_DAYS - 0.5, complete=True
-    )
-    assert wiki_freshness_doctor_check(tmp_path, now=time.time())[0].status == "ok"
-
-    other = tmp_path / "other"
-    builds2 = other / ".quartz" / "builds"
-    _write_build(
-        builds2, "20260801-090000-222222", age_days=WIKI_STALE_DAYS + 0.5, complete=True
-    )
-    assert wiki_freshness_doctor_check(other, now=time.time())[0].status == "fail"
 
 
 # ---------------------------------------------------------------------------
@@ -691,14 +632,18 @@ def test_all_healthy_yields_no_failures(
             cfg, launchd_dir=launchd_dir, launchctl="launchctl", platform="darwin"
         )
 
-    assert [c.check for c in checks] == ["config", "daemons", "wiki build"]
-    assert [c.status for c in checks] == ["ok", "ok", "ok"]
+    assert [c.check for c in checks] == ["config", "daemons", "vault watcher", "wiki build"]
+    assert [c.status for c in checks] == ["ok", "ok", "ok", "ok"]
 
 
 def test_every_failing_check_names_a_remedy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A red line the user cannot act on is only marginally better than silence."""
+    """A red or yellow line the user cannot act on is only marginally better than silence.
+
+    The 30-day-old build no longer FAILs (R8-4: the wiki is dormant at R2), and
+    the leftover ``com.brain.build`` plist adds the retired-daemon WARN.
+    """
     monkeypatch.setenv("BRAIN_HOME", str(tmp_path / "absent"))
     monkeypatch.chdir(tmp_path)
 
@@ -708,7 +653,7 @@ def test_every_failing_check_names_a_remedy(
     )
     launchd_dir = tmp_path / "agents"
     launchd_dir.mkdir()
-    _install_plists(launchd_dir, *_LABELS)
+    _install_plists(launchd_dir, *_LABELS, "com.brain.build")
 
     cfg = Config(database_url="postgresql://synthetic/x", vault_path=vault)
     with patch(
@@ -719,7 +664,8 @@ def test_every_failing_check_names_a_remedy(
             cfg, launchd_dir=launchd_dir, launchctl="launchctl", platform="darwin"
         )
 
-    failing = [c for c in checks if c.status == "fail"]
-    assert len(failing) == 3, [c.check for c in checks]
-    for check in failing:
-        assert check.remedy, f"{check.check} FAILs without naming a remedy"
+    flagged = {c.check: c.status for c in checks if c.status != "ok"}
+    assert flagged == {"config": "fail", "daemons": "fail", "retired daemon": "warn"}, flagged
+    for check in checks:
+        if check.status != "ok":
+            assert check.remedy, f"{check.check} {check.status} without naming a remedy"

@@ -73,7 +73,6 @@
     <button class="tab is-active" data-tab="notes" type="button" aria-current="page">Notes</button>
     <button class="tab" data-tab="ingest" type="button">Ingest</button>
     <button class="tab" data-tab="agent" type="button">Agent</button>
-    <button class="tab" data-tab="publish" type="button">Publish</button>
   </nav>
   <div class="topbar-right">
     <span class="badge" id="mode-badge" hidden>read-only</span>
@@ -171,20 +170,6 @@ brain ingest-dir &lt;directory&gt;</code></pre>
        hardening pass rather than riding along on v1.</p>
     <p>Use the CLI today:</p>
     <pre><code>brain ask "your question"</code></pre>
-  </div>
-</section>
-
-<section class="shell deferred-tab" id="tab-publish" hidden>
-  <div class="deferred">
-    <h2>Publish</h2>
-    <p>Deferred to a later release. The wiki is a static Quartz build —
-       <code>npm install</code>, build, blue/green swap behind a proxy —
-       and triggering that from a request handler is the worst case of the
-       background-job problem.</p>
-    <p>The one instant piece has already shipped: the
-       <strong>draft ↔ published toggle</strong> lives in the Notes inspector.</p>
-    <p>Use the CLI for a full rebuild:</p>
-    <pre><code>brain-rebuild</code></pre>
   </div>
 </section>
 
