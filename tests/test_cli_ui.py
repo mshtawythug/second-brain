@@ -93,6 +93,35 @@ def test_a_busy_port_is_named_with_the_one_used_instead(
     assert started.context_kwargs["port"] == 8766
 
 
+@pytest.mark.parametrize("serve_confidential", [False, True])
+def test_the_panel_never_contradicts_the_confidential_lens_on_an_alias(
+    capsys: pytest.CaptureFixture[str], serve_confidential: bool
+) -> None:
+    """Round 16b (review of `2af3667`): the alias note said "confidential bodies
+    withheld" even under --include-confidential, which serves them, and the
+    Confidential line called a loopback alias a "non-loopback bind"."""
+    from types import SimpleNamespace
+
+    from brain.cli_ui import _panel
+
+    _panel(
+        url="http://loopback-alias.example:8765/#t=x",
+        cfg=SimpleNamespace(  # type: ignore[arg-type]
+            vault_path=Path("/vault"), database_url="postgresql://h:1/db", embedder="none"
+        ),
+        read_only=False, loopback=False, serve_confidential=serve_confidential,
+        notices=(), note_count=None, alias_of="loopback-alias.example",
+    )
+    out = capsys.readouterr().out
+    assert "non-loopback bind" not in out, out
+    assert "guarded like a network bind" in out, out
+    assert ("withheld" in out) is not serve_confidential, out
+    if serve_confidential:
+        assert "bodies SERVED on a loopback alias" in out, out
+    else:
+        assert "bodies withheld (loopback alias, guarded like a network bind)" in out, out
+
+
 def test_default_bind_is_loopback() -> None:
     from brain.cli_ui import ui
 

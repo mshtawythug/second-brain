@@ -719,9 +719,10 @@ dependency — `starlette` and `uvicorn` already ship as transitive deps of the
 MCP SDK — and the front end is hand-written static assets with no bundler and
 no CDN, so it works fully offline.
 
-`--token` is **required** whenever `--host` is not loopback. Among hostnames only `localhost`
-and `ip6-localhost` count as loopback (and only when they resolve to loopback alone); any other
-name needs a token even if it resolves to `127.0.0.1`.
+`--token` is **required** whenever `--host` is not loopback. The only hostname that counts as
+loopback is `localhost` (and only when it resolves to loopback alone); any other name — including
+`ip6-localhost` and `localhost.` — needs a token even if it resolves to `127.0.0.1`. The address
+literals `127.0.0.1` and `::1` need none.
 
 `--lan` binds this machine's LAN address. It uses `--token` if given and otherwise mints one,
 then prints `http://<address>:<port>/#t=<token>` to open on the other device. It cannot be

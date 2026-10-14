@@ -638,19 +638,24 @@ def test_a_name_is_classified_by_every_address_it_resolves_to(
 
 
 @pytest.mark.parametrize(
-    ("name", "addresses", "kind"),
+    ("name", "addresses", "kind", "alias"),
     [
-        ("loopback-alias.example", ["127.0.0.1"], "other"),
-        ("loopback-alias.example", ["127.0.0.1", "::1"], "other"),
-        ("127.0.0.1.nip.io", ["127.0.0.1"], "other"),
-        ("localhost", ["127.0.0.1", "::1"], "loopback"),
-        ("LOCALHOST", ["127.0.0.1"], "loopback"),
-        ("ip6-localhost", ["::1"], "loopback"),
-        ("loopback-alias.example", ["0.0.0.0"], "wildcard"),
+        ("loopback-alias.example", ["127.0.0.1"], "other", True),
+        ("loopback-alias.example", ["127.0.0.1", "::1"], "other", True),
+        ("127.0.0.1.nip.io", ["127.0.0.1"], "other", True),
+        ("localhost", ["127.0.0.1", "::1"], "loopback", False),
+        ("LOCALHOST", ["127.0.0.1"], "loopback", False),
+        # Round 16b: not trusted — macOS resolves it through network DNS
+        ("ip6-localhost", ["::1"], "other", True),
+        # Round 16b: the trailing dot is a different name and Host value
+        ("localhost.", ["127.0.0.1"], "other", True),
+        # Round 16b, edge case (b): a trusted name with a mixed answer
+        ("localhost", ["127.0.0.1", "192.0.2.30"], "other", False),
+        ("loopback-alias.example", ["0.0.0.0"], "wildcard", False),
     ],
 )
 def test_only_a_trusted_name_resolving_to_loopback_is_loopback(
-    name: str, addresses: list[str], kind: str
+    name: str, addresses: list[str], kind: str, alias: bool
 ) -> None:
     """Round 16 (phase-7 audit of `cb4b6ed`, finding 1). A loopback bind skips
     the token and allowlists its own name, so a name whose DNS someone else
@@ -671,7 +676,6 @@ def test_only_a_trusted_name_resolving_to_loopback_is_loopback(
     resolved = tuple(ipaddress.ip_address(a) for a in addresses)
     assert address_class(name, resolved) == kind
     assert is_loopback(name, resolved) is (kind == "loopback")
-    alias = kind == "other"
     assert is_loopback_alias(name, resolved) is alias
     if alias:
         assert classify_addresses(resolved) == "loopback"

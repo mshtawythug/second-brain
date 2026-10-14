@@ -51,14 +51,15 @@ git tag scheme:
   server binds exactly those addresses — the name is never looked up again,
   so a second DNS answer cannot move the bind away from what was judged. Any
   unspecified address makes it a wildcard (with the notice, and the URL of the
-  wildcard's own loopback). Only `localhost` and `ip6-localhost` can be
-  loopback names, and only when every address they resolve to is loopback —
-  so a name that points at `0.0.0.0` gets the notice, `localhost` mapped
-  elsewhere needs a token like any other bind, and any OTHER name needs a
-  token even when it resolves to `127.0.0.1` (`127.0.0.1.nip.io`, say):
-  whoever controls that name's DNS could re-point it at the server and pass
-  its Host check. Every spelling of the wildcard gets the
-  notice and every spelling of loopback is loopback (`127.0.0.2` included).
+  wildcard's own loopback). `localhost` is the only loopback NAME, and only
+  when every address it resolves to is loopback — so a name that points at
+  `0.0.0.0` gets the notice, `localhost` mapped elsewhere needs a token like
+  any other bind, and any OTHER name needs a token even when it resolves to
+  `127.0.0.1` (`127.0.0.1.nip.io`, `ip6-localhost`, `localhost.` with its
+  trailing dot): whoever controls that name's DNS could re-point it at the
+  server and pass its Host check. Every spelling of the wildcard gets the
+  notice and every loopback address literal is loopback (`127.0.0.2` and
+  `::1` included).
   Spellings that bound something unexpected are refused, each with a usage
   error that says why:
   - an empty value, or leading/trailing whitespace: asyncio bound `0.0.0.0`

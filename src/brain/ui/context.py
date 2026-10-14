@@ -46,9 +46,19 @@ LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "[:
 #: to resolve to 127.0.0.1 handed the DNS-rebinding defence to whoever controls
 #: that name's DNS: `--host 127.0.0.1.nip.io` (a public service) ran tokenless,
 #: and a page served from that name, once re-pointed at 127.0.0.1, sent an
-#: allowlisted Host and the allowed Origin. These two are the names a hosts
-#: file defines for loopback; every other name is "other" and needs a token.
-LOOPBACK_NAMES: frozenset[str] = frozenset({"localhost", "ip6-localhost"})
+#: allowlisted Host and the allowed Origin. Every other name is "other" and
+#: needs a token.
+#:
+#: ``localhost`` only (review round 16b). ``ip6-localhost`` was trusted in
+#: round 16 and is not: Debian's /etc/hosts defines it, macOS's does not, and
+#: there ``getaddrinfo`` falls through to network DNS and the search domains,
+#: so a hostile resolver could point it anywhere — and browsers do not
+#: hard-wire it the way they do ``localhost``. Master never trusted it. The
+#: literal ``::1`` (``[::1]``) is loopback by address and needs no name. A
+#: trailing dot (``localhost.``) is a different Host value from ``localhost``
+#: — a browser sends it as typed, and ``LOOPBACK_HOSTS`` does not hold it —
+#: so it is "other" too, consistently with the Host check.
+LOOPBACK_NAMES: frozenset[str] = frozenset({"localhost"})
 
 #: The wildcard binds: "every interface", a bind address and never a
 #: destination. Ruling W1 (phase 7): all three get exactly the loopback

@@ -44,6 +44,8 @@ FAKE_DNS: dict[str, list[str]] = {
     # Round 16: a name that is NOT a trusted loopback name but resolves only to
     # loopback, as public services such as 127.0.0.1.nip.io do (synthetic here).
     "loopback-alias.example": ["127.0.0.1"],
+    # Round 16b: the trailing-dot spelling of localhost is a different name
+    "localhost.": ["127.0.0.1", "::1"],
 }
 
 
@@ -98,8 +100,16 @@ def install_started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Started:
 
     def fake_build_context(cfg: object, **kwargs: object) -> object:
         record.context_kwargs = kwargs
+        # Round 16b: derived as build_context derives it (server.py), not
+        # hard-coded False — a constant here hid a panel that contradicted
+        # itself under --include-confidential.
+        from brain.ui.security import is_loopback
+
+        serve = bool(kwargs["include_confidential"]) or is_loopback(
+            str(kwargs["host"]), kwargs["resolved"]  # type: ignore[arg-type]
+        )
         return SimpleNamespace(
-            serve_confidential_bodies=False, notices=(), token=kwargs["token"]
+            serve_confidential_bodies=serve, notices=(), token=kwargs["token"]
         )
 
     def fake_serve(context: object, **kwargs: object) -> None:

@@ -188,6 +188,8 @@ HOST_SPELLINGS: list[tuple[str, str, str]] = [
     ("ip6-localhost", "binds-real", "ip6-localhost"),
     # Round 16: binds (with the table's --token), guarded like a network bind
     ("loopback-alias.example", "binds", "loopback-alias.example"),
+    # Round 16b: a different name from localhost; binds only with the token
+    ("localhost.", "binds", "localhost."),
     ("FD00:0:0::5", "binds", "fd00::5"),
 ]
 
@@ -287,30 +289,42 @@ def test_a_name_resolving_to_loopback_and_elsewhere_is_not_loopback(
     result = runner.invoke(app, ["ui", "--host", "localhost", "--no-open"])
     assert result.exit_code == 2, result.output
     assert "pass --token" in result.output, result.output
+    # Round 16b, the lead's edge case (b): a TRUSTED name with a mixed answer is
+    # plain "other" — the network-bind refusal, not the alias one.
+    assert "only localhost is trusted" not in result.output, result.output
 
 
-@pytest.mark.parametrize("name", ["localhost", "LOCALHOST", "ip6-localhost"])
+@pytest.mark.parametrize("name", ["localhost", "LOCALHOST"])
 def test_a_trusted_loopback_name_needs_no_token(
     app: typer.Typer, started: Started, name: str
 ) -> None:
-    """Round 16 kept these tokenless: LOOPBACK_NAMES resolving only to loopback."""
+    """LOOPBACK_NAMES resolving only to loopback stay tokenless. ``LOCALHOST``
+    is lower-cased by validate_host, as a browser lower-cases the Host it sends;
+    ``ip6-localhost`` left this list in round 16b (see the refusal test)."""
     result = runner.invoke(app, ["ui", "--host", name, "--no-open"])
     assert result.exit_code == 0, result.output
     assert started.context_kwargs["token"] == ""
     assert "bodies served (loopback bind)" in result.output, result.output
 
 
+@pytest.mark.parametrize("name", ["loopback-alias.example", "ip6-localhost", "localhost."])
 def test_a_loopback_alias_without_a_token_is_refused(
-    app: typer.Typer, started: Started
+    app: typer.Typer, started: Started, name: str
 ) -> None:
     """Round 16 (phase-7 audit of `cb4b6ed`, finding 1): a name outside
     LOOPBACK_NAMES that resolves only to 127.0.0.1 ran with NO token and
     allowlisted its own name — `--host 127.0.0.1.nip.io` was measured doing so.
-    Whoever controls that name's DNS could rebind it onto this server."""
-    result = runner.invoke(app, ["ui", "--host", "loopback-alias.example", "--no-open"])
+    Whoever controls that name's DNS could rebind it onto this server.
+
+    Round 16b: ``ip6-localhost`` is such a name (macOS resolves it through
+    network DNS), and so is ``localhost.`` — the refusal says to drop the dot."""
+    result = runner.invoke(app, ["ui", "--host", name, "--no-open"])
+    # Rich wraps the usage error in a box; read it as one line of words.
+    flat = " ".join(result.output.replace("│", " ").split())
     assert result.exit_code == 2, result.output
-    assert "only localhost and ip6-localhost are trusted" in result.output, result.output
-    assert "pass --token" in result.output, result.output
+    assert "only localhost is trusted as a loopback name" in flat, result.output
+    assert "pass --token" in flat, result.output
+    assert ("drop the trailing dot to use localhost" in flat) is name.endswith("."), flat
     assert started.context_kwargs == {}
 
 
@@ -325,8 +339,24 @@ def test_a_loopback_alias_with_a_token_is_guarded_like_a_network_bind(
     assert result.exit_code == 0, result.output
     assert "guarded like a network bind" in result.output, result.output
     assert "NOT bound to loopback" not in result.output, result.output
-    assert "bodies withheld (non-loopback bind)" in result.output, result.output
+    assert "bodies withheld (loopback alias" in result.output, result.output
+    assert "non-loopback bind" not in result.output, result.output
     assert "http://loopback-alias.example:8765/#t=x" in result.output, result.output
+
+
+def test_a_loopback_alias_with_include_confidential_never_says_withheld(
+    app: typer.Typer, started: Started
+) -> None:
+    """Round 16b: --include-confidential DOES serve bodies on an alias
+    (build_context's lens), so neither the Confidential line nor the alias
+    note may claim they are withheld."""
+    result = runner.invoke(app, [
+        "ui", "--host", "loopback-alias.example", "--token", "x",
+        "--include-confidential", "--no-open",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "withheld" not in result.output, result.output
+    assert "bodies SERVED on a loopback alias" in result.output, result.output
 
 
 def test_the_cli_threads_the_resolved_addresses_into_the_context(

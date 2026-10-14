@@ -34,10 +34,21 @@ PHONE_LINE = "open the URL above on your phone, on this network"
 #: ``context.LOOPBACK_NAMES`` is guarded like a network bind. Said in the
 #: refusal and in the panel, because "NOT bound to loopback" would be false.
 LOOPBACK_ALIAS_REASON = (
-    "resolves to loopback, but only localhost and ip6-localhost are trusted as "
-    "loopback names — whoever controls another name's DNS could re-point it "
-    "at this server (DNS rebinding)"
+    "resolves to loopback, but only localhost is trusted as a loopback name — "
+    "whoever controls another name's DNS could re-point it at this server "
+    "(DNS rebinding)"
 )
+
+
+def _alias_reason(host: str) -> str:
+    """:data:`LOOPBACK_ALIAS_REASON`, plus the fix when ``host`` is ``localhost.``.
+
+    Round 16b: the trailing dot makes a different name, and a different Host
+    header, so it is not trusted — say so rather than leave it a puzzle.
+    """
+    if host.endswith(".") and host.rstrip(".") == "localhost":
+        return f"{LOOPBACK_ALIAS_REASON}; drop the trailing dot to use localhost"
+    return LOOPBACK_ALIAS_REASON
 
 #: Registered as a sub-app with ``invoke_without_command=True`` so ``brain ui``
 #: runs the server directly, while leaving room for ``brain ui open`` later
@@ -96,24 +107,32 @@ def _panel(
     # Always state the effective confidentiality mode, so an operator who
     # passed --include-confidential on a non-loopback bind SEES that they did.
     # A flag that silently widens egress is the one worth printing.
+    # Round 16b: a loopback alias is neither "over the network" nor a
+    # "non-loopback bind" — it is loopback, guarded like a network bind.
     if loopback:
         typer.echo("  Confidential  bodies served (loopback bind)")
     elif serve_confidential:
+        where = "on a loopback alias" if alias_of else "over the network"
         typer.secho(
-            "  Confidential  bodies SERVED over the network "
-            "(--include-confidential)",
+            f"  Confidential  bodies SERVED {where} (--include-confidential)",
             fg="red",
+        )
+    elif alias_of:
+        typer.echo(
+            "  Confidential  bodies withheld (loopback alias, guarded like a "
+            "network bind)"
         )
     else:
         typer.echo("  Confidential  bodies withheld (non-loopback bind)")
     typer.echo("")
 
     if alias_of:
-        # Round 16: bound to loopback, guarded as if it were not.
+        # Round 16: bound to loopback, guarded as if it were not. Round 16b:
+        # bodies are withheld only when --include-confidential is absent.
+        guard = "token required" + ("" if serve_confidential else ", confidential bodies withheld")
         typer.secho(
-            f"  ⚠  --host {alias_of} {LOOPBACK_ALIAS_REASON}.\n"
-            "     It is guarded like a network bind: token required, confidential\n"
-            "     bodies withheld.",
+            f"  ⚠  --host {alias_of} {_alias_reason(alias_of)}.\n"
+            f"     It is guarded like a network bind: {guard}.",
             fg="yellow",
         )
         typer.echo("")
@@ -237,7 +256,7 @@ def ui(
     loopback = kind == "loopback"
     if not loopback and not token and is_loopback_alias(host, resolved):
         raise typer.BadParameter(
-            f"--host {host} {LOOPBACK_ALIAS_REASON}; pass --token <secret>, or "
+            f"--host {host} {_alias_reason(host)}; pass --token <secret>, or "
             "use --host 127.0.0.1."
         )
     if not loopback and not token:

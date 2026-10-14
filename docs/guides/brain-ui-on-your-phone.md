@@ -65,10 +65,10 @@ a home network — cannot connect to it at all (connection refused, not 400), an
 
 `--host` is judged by the address it will bind, not by its spelling: `0`, `127.1`, a
 whitespace-padded value and any IPv6 zone such as `%en0` are refused with a message that says
-why. A hostname is judged by every address it resolves to, and only `localhost` and
-`ip6-localhost` can count as loopback — and only when they resolve to loopback addresses alone.
-Any other name needs `--token`, even one that resolves to `127.0.0.1`: whoever controls its DNS
-could point it at your machine and get past the Host check. A name is looked up once: `brain ui` binds
+why. A hostname is judged by every address it resolves to, and only `localhost` can count as
+loopback — and only when it resolves to loopback addresses alone. Any other name needs `--token`,
+even one that resolves to `127.0.0.1` (`ip6-localhost` and `localhost.` included): whoever
+controls its DNS could point it at your machine and get past the Host check. A name is looked up once: `brain ui` binds
 exactly those addresses, so the name cannot point somewhere else by the time it binds. Zones are refused even on link-local addresses, because a browser cannot open a URL that
 carries one.
 
