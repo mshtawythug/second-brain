@@ -651,6 +651,7 @@ files. Both ran on `second_brain_t_p7b`, under option (b) (below).
 | Mutation replay (§10.6), each at its own SHA | 46/46 (T0–T7) + 3/3 (round C), 0 failures, all five clauses |
 | Mutation replay at `bbfb114` | 48/48 applicable, 0 failures; T3-P3 SUPERSEDED (§10.6) |
 | **Mutation replay at `1763056`** | **48/48 applicable, 0 failures, all five clauses**; T3-P3 SUPERSEDED |
+| Phase-8 audit of `1763056` (team-lead) | full suite 9,248, catalog 48/48, browser 211; **2 LOW test gaps**, closed by `5fd491b` (tests only; round D, 5/5 at `5fd491b`). `test_bin_monitor`, `test_doctor_watcher`, `test_doctor_runtime` and `test_maintenance` run in full: 130 passed. No full suite: tests only, so the audit's run stands |
 | §10.6 validator | see §10.6 |
 
 **Both runs used option (b) for the skills-drift tests, approved by team-lead.** `BRAIN_SKILLS_DEST` pointed
@@ -728,6 +729,9 @@ archives the SHA into a scratch copy with its own thin venv (§10.2), then check
 5. the unmutated copy is green.
 
 Results:
+- round D (the phase-8 audit's two test gaps) at `5fd491b`, **5/5**. The audit found the three
+  cross-check mutants D1–D3 and the two loose matchers D4–D5 SURVIVING at `1763056`; each now goes
+  red;
 - at each task's own SHA, **46/46 mutations, 0 failures**;
 - round C (the review fixes) at `120934a`, **3/3**;
 - at `5780bb2` (T7), 46/46;
@@ -735,10 +739,10 @@ Results:
   because `120934a` reworded its text; it is marked SUPERSEDED, and C-C2/C-C3 replace it.
 
 **Validated.** The script below is the phase-7 validator with the round pattern widened to
-`T\d|C`. It checks every entry's `count` against `git show <SHA>:<file>`, and checks that every
+`T\d|C|D`. It checks every entry's `count` against `git show <SHA>:<file>`, and checks that every
 entry which no longer applies at HEAD is marked SUPERSEDED. Run it from the repository root with
 `python` and the script on stdin. Result at the commit that added this section:
-**rounds T0–T7 and C: 5+6+7+7+7+8+3+7+3 = 53/53 entries match their count; 1 superseded at HEAD (T3-P3) and marked; exit 0.**
+**rounds T0–T7 and C: 5+6+7+7+7+8+3+7+3 = 53/53 entries match their count; 1 superseded at HEAD (T3-P3) and marked; exit 0.** After round D (the phase-8 audit): **58/58, 1 superseded and marked, exit 0.**
 
 ```python
 """Validate plan §10.6: each `replace` occurs `count` times at its round's SHA, and an entry that
@@ -754,7 +758,7 @@ FENCE = "`" * 3  # spelled out: a literal one would end this script's own code b
 text = PLAN.read_text(encoding="utf-8")
 catalog = text[text.index("### 10.6"):]
 rounds = re.findall(
-    rf"\*\*Round (T\d|C) — against `([0-9a-f]{{7}})`.*?\n{FENCE}text\n(.*?)\n{FENCE}",
+    rf"\*\*Round (T\d|C|D) — against `([0-9a-f]{{7}})`.*?\n{FENCE}text\n(.*?)\n{FENCE}",
     catalog,
     re.S,
 )
@@ -1293,6 +1297,51 @@ C-C3 the prompt names a time the brief plist does not schedule
   count:   1
   test:    tests/test_setup_daemons.py::test_the_daemon_prompt_names_the_vault_watcher_and_the_brief
   red at:  07:00 daily brief
+```
+
+**Round D — against `5fd491b`** (the audit's test-gap commit).
+
+```text
+D-D1 the build-watcher cross-check never flags
+  file:    src/brain/bin/monitor.py
+  replace: '    build_mismatch = build_seen > 1 or (build_seen == 0 and build_pid != "-")'
+  with:    '    build_mismatch = False'
+  count:   1
+  test:    tests/test_bin_monitor.py::test_snapshot_flags_an_orphaned_second_build_watcher
+  test:    tests/test_bin_monitor.py::test_snapshot_flags_a_build_pid_file_naming_no_process
+  red at:  process count vs pid file
+
+D-D2 the stale-pid half of the cross-check dropped
+  file:    src/brain/bin/monitor.py
+  replace: '    build_mismatch = build_seen > 1 or (build_seen == 0 and build_pid != "-")'
+  with:    '    build_mismatch = build_seen > 1'
+  count:   1
+  test:    tests/test_bin_monitor.py::test_snapshot_flags_a_build_pid_file_naming_no_process
+  red at:  process count vs pid file
+
+D-D3 an orphan needs three build watchers to flag
+  file:    src/brain/bin/monitor.py
+  replace: '    build_mismatch = build_seen > 1 or (build_seen == 0 and build_pid != "-")'
+  with:    '    build_mismatch = build_seen > 2 or (build_seen == 0 and build_pid != "-")'
+  count:   1
+  test:    tests/test_bin_monitor.py::test_snapshot_flags_an_orphaned_second_build_watcher
+  red at:  process count vs pid file
+
+D-D4 the watcher matcher only asks for the word vault
+  file:    src/brain/doctor_watcher.py
+  replace: 'return tokens[i + 1 : i + 3] == ["vault", "sync"] and "--watch" in tokens[i + 3 :]'
+  with:    'return "vault" in tokens and "--watch" in tokens[i + 3 :]'
+  count:   1
+  test:    tests/test_doctor_watcher.py::test_the_process_scan_ignores_everything_else
+  red at:  assert not True
+
+D-D5 the watcher matcher only asks for sync somewhere after brain
+  file:    src/brain/doctor_watcher.py
+  replace: 'return tokens[i + 1 : i + 3] == ["vault", "sync"] and "--watch" in tokens[i + 3 :]'
+  with:    'return "sync" in tokens[i + 1 :] and "--watch" in tokens[i + 3 :]'
+  count:   1
+  test:    tests/test_doctor_watcher.py::test_the_process_scan_ignores_everything_else
+  red at:  assert not True
 ```
 
 
