@@ -280,7 +280,9 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Rounds 16/16b — plan | `1b45da4` (PROMOTED from "the commit that added this row") | this file: §10.1, §10.9 (R16-4 superseded, R16-7 NOTE, round-16b block), §10.24 rewritten for 16, 16b and the merge |
 | Plan review of `1b45da4` | `e0d6067` (PROMOTED from "the commit that added this row") | this file: R16b-9 keeps its `6a46869` needle plus a `NOTE at HEAD (7d1ec3d)`; §10.24's round-16b mutation sentence corrected (9/9 at `6a46869` only with that needle) and the `7d1ec3d` entry check recorded |
 | Round 16c — code | `6f0d376` | `cli_ui.py` (`--include-confidential` help), `docs/cli-reference.md`, the phone guide, comments in `ui/server.py` and `ui/context.py`; pins in `test_cli_ui.py` and `test_reading_surface_pointers.py` |
-| Round 16c — plan | **the commit that added this row** | this file: §10.1, §10.9 (round-16c block), §10.24 (round-16c note) |
+| Round 16c — plan | `5eb3f03` (PROMOTED from "the commit that added this row") | this file: §10.1, §10.9 (round-16c block), §10.24 (round-16c note) |
+| Round 16c — the localhost qualifier | `664ae2f` | `cli_ui.py` help, `docs/cli-reference.md`, the phone guide, the lens comments in `ui/server.py` and `ui/context.py`; the help pin and both doc pins require the qualifier |
+| Round 16c — plan, continued | **the commit that added this row** | this file: §10.1, §10.9 (R16c-1/R16c-4 superseded; R16c-5..R16c-9), §10.24 |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -467,7 +469,7 @@ marked, exit 0. At `4c164cb` (the final commit): 125/125, 44 marked, exit 0. At 
 44 marked, exit 0. Result at the commit that added this sentence (round 10): **round 0 22/22,
 round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round 7 9/9,
 round 8 6/6, round 9 8/8 + 10/10 + 9/9 + 3/3, round 10 16/16 — 144/144; 54 entries superseded at
-HEAD, every one marked; exit 0.** At the round-16 plan commit (rounds 11–15b and 16 added): **201/201, 65 superseded and marked, every round header parsed; exit 0.** At the rounds-16/16b plan commit: **210/210, 66 superseded and marked (R16-4 joined), every round header parsed; exit 0.** At the round-16c plan commit: **214/214, 66 superseded and marked, every round header parsed; exit 0.** The round-header pattern was `Round (\d)` until round 10 — a
+HEAD, every one marked; exit 0.** At the round-16 plan commit (rounds 11–15b and 16 added): **201/201, 65 superseded and marked, every round header parsed; exit 0.** At the rounds-16/16b plan commit: **210/210, 66 superseded and marked (R16-4 joined), every round header parsed; exit 0.** At the round-16c plan commit: **214/214, 66 superseded and marked, every round header parsed; exit 0.** After the localhost qualifier: **219/219, 68 superseded and marked, every round header parsed; exit 0.** The round-header pattern was `Round (\d)` until round 10 — a
 "Round 10" block would have been skipped silently; it is `Round (\d+)` now. The address-based restructure superseded 16 entries at once; the
 validator listed all of them before any was marked. Its
 first run after round 9 flagged nine entries: six whose CLI code moved into `validate_host`, and
@@ -2496,6 +2498,7 @@ R16b-9 a trusted name with a mixed answer gets the alias refusal
 
 ```text
 R16c-1 the --include-confidential help says it is ignored on loopback again
+  SUPERSEDED at HEAD by `664ae2f` (round 16c, the localhost qualifier): the help text it replaces now carries "or on localhost when it resolves only to loopback"; use R16c-5
   file:    src/brain/cli_ui.py
   replace: '            "Serve bodies of documents marked sensitivity=confidential where "\n            "they are otherwise withheld: a non-loopback bind, or a loopback "\n            "alias (a name other than localhost that resolves to loopback). "\n            "No effect on a loopback address or localhost, where they are "\n            "always served."\n'
   with:    '            "Serve bodies of documents marked sensitivity=confidential even on "\n            "a non-loopback bind. Ignored on loopback, where they are always "\n            "served."\n'
@@ -2520,8 +2523,53 @@ R16c-3 cli-reference drops the loopback-alias mode
   red at:  assert "which of the two you got" not in section
 
 R16c-4 the phone guide says bodies are always served on loopback again
+  SUPERSEDED at HEAD by `664ae2f` (round 16c, the localhost qualifier): the guide sentence it replaces was requalified; use R16c-9
   file:    docs/guides/brain-ui-on-your-phone.md
   replace: 'On a loopback address or `localhost` they are\n  always served; a name other than `localhost` that resolves to loopback is guarded like a LAN\n  bind, so its bodies are withheld unless you pass `--include-confidential` too.'
+  with:    'On loopback they are always served.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_phone_guide_says_a_loopback_alias_withholds_bodies
+  red at:  assert "On loopback they are always served" not in text
+```
+
+**Round 16c — against `664ae2f`** (continued: the review of `6f0d376` — `localhost` is always-served only when it resolves only to loopback). Strict clause 4.
+
+```text
+R16c-5 the --include-confidential help says it is ignored on loopback again (at the qualified text)
+  file:    src/brain/cli_ui.py
+  replace: '            "Serve bodies of documents marked sensitivity=confidential where "\n            "they are otherwise withheld: a non-loopback bind, or a loopback "\n            "alias (a name other than localhost that resolves to loopback). "\n            "No effect on a loopback address, or on localhost when it "\n            "resolves only to loopback, where they are always served."\n'
+  with:    '            "Serve bodies of documents marked sensitivity=confidential even on "\n            "a non-loopback bind. Ignored on loopback, where they are always "\n            "served."\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_include_confidential_help_names_all_three_modes
+  red at:  assert "Ignored on loopback" not in text
+
+R16c-6 the help drops the localhost qualifier
+  file:    src/brain/cli_ui.py
+  replace: '            "No effect on a loopback address, or on localhost when it "\n            "resolves only to loopback, where they are always served."\n'
+  with:    '            "No effect on a loopback address or localhost, where they are "\n            "always served."\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_include_confidential_help_names_all_three_modes
+  red at:  assert qualified in text
+
+R16c-7 cli-reference drops the localhost qualifier
+  file:    docs/cli-reference.md
+  replace: '`::1`), or on **`localhost` when it resolves only to loopback**, they are always\nserved'
+  with:    '`::1`) or **`localhost`** they are always\nserved'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_cli_reference_documents_three_confidential_modes
+  red at:  assert "or on **`localhost` when it resolves only to loopback**" in section
+
+R16c-8 the phone guide drops the localhost qualifier
+  file:    docs/guides/brain-ui-on-your-phone.md
+  replace: 'On a loopback address, or on `localhost` when it\n  resolves only to loopback, they are always served;'
+  with:    'On a loopback address or `localhost` they are\n  always served;'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_phone_guide_says_a_loopback_alias_withholds_bodies
+  red at:  when it resolves only to loopback, they are always served' in
+
+R16c-9 the phone guide says bodies are always served on loopback again (at the qualified text)
+  file:    docs/guides/brain-ui-on-your-phone.md
+  replace: 'On a loopback address, or on `localhost` when it\n  resolves only to loopback, they are always served; a name other than `localhost` that resolves\n  to loopback is guarded like a LAN bind, so its bodies are withheld unless you pass\n  `--include-confidential` too.'
   with:    'On loopback they are always served.'
   count:   1
   test:    tests/test_reading_surface_pointers.py::test_phone_guide_says_a_loopback_alias_withholds_bodies
@@ -3078,3 +3126,21 @@ did not pass by skipping.
   preflight and every doc-pin module, 408 passed, exit 0.
 - `ruff check` exit 0; `mypy src/` exit 0, 226 files.
 - The §10.9 validator exit 0, 214 entries, 66 superseded.
+
+**Round 16c, continued (`664ae2f`): the localhost qualifier.** The review of `6f0d376` found
+a NIT, fixed at team-lead's direction. "Always served on `localhost`" was unconditional, but
+`localhost` counts as loopback only when EVERY address it resolves to is loopback (round 10). A
+`localhost` that also answers `192.0.2.30` (the case pinned in
+`test_a_name_resolving_to_loopback_and_elsewhere_is_not_loopback`) is a non-loopback bind. There
+bodies are withheld, and `--include-confidential` does have an effect.
+
+The help, the cli-reference paragraph and the guide now say "a loopback address, or `localhost`
+when it resolves only to loopback". The cli-reference also says that a mixed `localhost` is a
+non-loopback bind. The lens comments say the same. The help pin and both doc pins require the
+qualifier.
+
+R16c-1 and R16c-4 no longer apply at HEAD, so they are SUPERSEDED, replaced by R16c-5 and
+R16c-9. R16c-6, R16c-7 and R16c-8 prove that dropping the qualifier goes red in each place. All
+five are strict at `664ae2f`. R16c-8's needle is a substring of its `E` line, because the guide
+assertion spans several lines, so pytest's `>` marker does not show its text. The drift check was repeated at `664ae2f`: every non-superseded entry that mutates a file this round touched, or runs a test in `test_cli_ui.py` or `test_reading_surface_pointers.py`, ran strict with the `browser` extra installed — 133/133. Targeted modules: 408 passed, exit 0. `ruff check` and `mypy src/`
+both exit 0.
