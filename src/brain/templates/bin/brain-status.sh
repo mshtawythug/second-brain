@@ -42,7 +42,14 @@ check_one() {
 
 echo '🧠 brain status'
 check_one "$WATCH_PID" 'watcher' "(logs: $WATCH_LOG)"
-check_one "$BUILD_PID" 'build'   "(logs: $BUILD_LOG)"
+# The Quartz build watcher is dormant since R2 (phase 8): stopped is its normal
+# state, so it is labelled rather than reported as an outage. A build watcher
+# someone started by hand still shows as running.
+if [[ -f "$BUILD_PID" ]] && kill -0 "$(cat "$BUILD_PID")" 2>/dev/null; then
+    check_one "$BUILD_PID" 'build' "(logs: $BUILD_LOG)"
+else
+    printf '  %-9s ⏸  dormant since R2 — brain-rebuild --only quartz rebuilds the wiki\n' 'build:'
+fi
 
 # Legacy row — only show if a stale pid file from the pre-blue/green
 # install is still on disk. Helps diagnose half-migrated machines.

@@ -299,3 +299,50 @@ def test_main_probe_rejects_multiple_extra_positionals(
     monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
     rc = main(["probe", "5", "extra"])
     assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 T5 (R8-7): the build watcher is dormant at R2.
+# ---------------------------------------------------------------------------
+
+
+def test_probe_says_the_build_is_dormant_and_how_to_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``probe`` is positional (there is no ``--probe``) and already exits 1 at once
+    on a dead build pid. What changes is the advice: ``brain-up`` no longer starts a
+    build watcher, so "start with brain-up" would send the user nowhere.
+    """
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
+
+    rc = main(["probe"])
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "dormant" in err
+    assert "brain-rebuild --only quartz" in err and "BRAIN_WIKI_BUILD" in err
+    assert "start with brain-up" not in err
+
+
+def test_snapshot_labels_a_stopped_build_watcher_dormant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A stopped build watcher is the R2 resting state, not a pid/process mismatch."""
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    monkeypatch.setenv("BRAIN_WIKI_PORT", "18080")
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
+    monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
+    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
+    (tmp_path / "watch.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "brain.bin.monitor._pgrep_count", lambda pattern: 1 if "vault sync" in pattern else 0
+    )
+
+    assert main([]) == 0
+
+    out = capsys.readouterr().out
+    (build,) = [line for line in out.splitlines() if "build watcher" in line]
+    # The state column, not the line: tmp paths in it can contain any word.
+    assert build.split("pid=")[0].split("build watcher", 1)[1].strip() == "dormant (R2)", out
+    assert "process count vs pid file" not in out, out

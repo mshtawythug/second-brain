@@ -203,18 +203,22 @@ def _snapshot(vault: Path, port: int) -> int:
     sync_pid = _pid_or_dash(WATCH_PID)
     build_pid = _pid_or_dash(BUILD_PID)
     sync_state = "running" if _pid_alive(WATCH_PID) else "stopped"
-    build_state = "running" if _pid_alive(BUILD_PID) else "stopped"
+    # Dormant since R2 (phase 8): a stopped build watcher is the resting state.
+    build_state = "running" if _pid_alive(BUILD_PID) else "dormant (R2)"
     url = f"http://localhost:{port}"
 
     print(f"🧠 brain-monitor   vault={vault}")
     print()
-    print(f"  sync watcher   {sync_state:<7}  pid={sync_pid:<7}  log={_watch_log()}")
-    print(f"  build watcher  {build_state:<7}  pid={build_pid:<7}  log={_build_log()}")
+    print(f"  sync watcher   {sync_state:<12}  pid={sync_pid:<7}  log={_watch_log()}")
+    print(f"  build watcher  {build_state:<12}  pid={build_pid:<7}  log={_build_log()}")
 
     # Cross-check: PID file says one thing; ps may say another. Surface mismatches.
     sync_seen = _pgrep_count("brain vault sync --watch")
     build_seen = _pgrep_count("brain.wiki.build_watcher")
-    if sync_seen != 1 or build_seen != 1:
+    # No build watcher is expected at R2, so 0 is only a mismatch when a pid
+    # file claims one; >1 is an orphan either way.
+    build_mismatch = build_seen > 1 or (build_seen == 0 and build_pid != "-")
+    if sync_seen != 1 or build_mismatch:
         print()
         print("  ⚠️  process count vs pid file:")
         print(f"       sync_watcher  pgrep={sync_seen}  pidfile={sync_pid}")
@@ -369,7 +373,12 @@ def _probe(vault: Path, timeout: int = 90) -> int:
         print(f"vault not found at {vault}", file=sys.stderr)
         return 1
     if not _pid_alive(BUILD_PID):
-        print("build watcher not running — start with brain-up", file=sys.stderr)
+        print(
+            "build watcher not running: the wiki is dormant since R2, so there is no "
+            "rebuild to time. Rebuild it once with `brain-rebuild --only quartz` (or "
+            "`BRAIN_WIKI_BUILD=1 brain-up` for a cold start).",
+            file=sys.stderr,
+        )
         return 1
 
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -460,7 +469,8 @@ def _make_parser() -> argparse.ArgumentParser:
             "Modes:\n"
             "  (default)   Snapshot of both watchers and recent activity.\n"
             "  -f/--tail   Live stream of relevant events from both logs.\n"
-            "  probe [N]   Touch a vault file and time the rebuild (timeout N sec).\n"
+            "  probe [N]   Touch a vault file and time the build watcher's rebuild\n"
+            "              (timeout N sec; none runs while the wiki is dormant, R2).\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(

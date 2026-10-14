@@ -253,7 +253,13 @@ def test_brain_up_skips_cold_start_when_current_healthy(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        # The cold start is opt-in at R2 (phase 8 T5); this test exercises it.
+        extras={
+            **hermetic_pids.env,
+            "BRAIN_NO_BUILD_WATCHER": "1",
+            "BRAIN_NO_OVERLAY": "1",
+            "BRAIN_WIKI_BUILD": "1",
+        },
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
         [str(BIN / "brain-up")],
@@ -293,7 +299,13 @@ def test_brain_up_runs_cold_start_when_current_missing(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        # The cold start is opt-in at R2 (phase 8 T5); this test exercises it.
+        extras={
+            **hermetic_pids.env,
+            "BRAIN_NO_BUILD_WATCHER": "1",
+            "BRAIN_NO_OVERLAY": "1",
+            "BRAIN_WIKI_BUILD": "1",
+        },
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
         [str(BIN / "brain-up")],
@@ -433,8 +445,8 @@ def test_brain_up_does_not_open_the_wiki_by_default(
 ) -> None:
     """Phase 7 (R1, E1): the daily loop no longer puts the wiki in front of you.
 
-    Before R1 every ``brain-up`` waited for Caddy and opened the wiki. The wiki
-    still builds and serves — only the default browser-open is gone.
+    Before R1 every ``brain-up`` waited for Caddy and opened the wiki. Since R2
+    (phase 8) the wiki is also dormant; Caddy still serves its last build.
     """
     result = _run_brain_up_for_reading(
         stub_dir, vault_dir, hermetic_pids, open_browser=None
@@ -519,7 +531,13 @@ def test_brain_up_aborts_when_cold_start_fails(
     env = _make_env(
         stub_dir=stub_dir,
         vault_dir=vault_dir,
-        extras={**hermetic_pids.env, "BRAIN_NO_BUILD_WATCHER": "1", "BRAIN_NO_OVERLAY": "1"},
+        # The cold start is opt-in at R2 (phase 8 T5); this test exercises it.
+        extras={
+            **hermetic_pids.env,
+            "BRAIN_NO_BUILD_WATCHER": "1",
+            "BRAIN_NO_OVERLAY": "1",
+            "BRAIN_WIKI_BUILD": "1",
+        },
     )
     result = subprocess.run(  # noqa: S603 — list-form, no shell
         [str(BIN / "brain-up")],
