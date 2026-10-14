@@ -81,17 +81,21 @@ must not grow.
 
 ## 3. Guard table (each must be proven able to fail)
 
-| Guard | Fails under |
-|---|---|
-| (a) full pool equals the exact top-N (under D: on the 90-row fixture at `ef_search = 1000`, not a guarantee) | M1 (HNSW returns ≤ `ef_search` = 40 rows from a pool of more than 50) |
-| (b) filtered query keeps every match | M1 (post-filter starvation), M4 |
-| (c) floor honoured | M3 |
-| **C only** — shape: no `<=>` in ORDER BY; tie-break present | M1, M2 |
-| **D** — shape: inner index-shaped scan (`ORDER BY c.embedding <=> %s::vector` inside a `MATERIALIZED` CTE); outer `WHERE dist <= 1 - %s` and `ORDER BY dist + 0, id` | M2 (no tie-break) |
-| zero-norm chunk excluded (review fix; NaN cosine) | M5 (the `1 - (e <=> q) >= floor` form; under D, `1 - dist >= floor`), M3 |
-| floor boundary inclusive (audit #6) | M6 (strict `<`), M3 |
-| **D (audit, latency):** filtered pool fills with ef_search pinned at 40 | M9 (iterative off), M1, M4 |
-| **D:** scan settings never leak (caller txn, fresh session) | M7 (no restore) |
+The C column is the plan as written. The D column is **measured** (spec §9): each mutant
+was applied alone to a `git archive` copy of `c14cd43`, and the vector-leg and
+vector-floor test files were run. Spec §9 records the exact change for each mutant.
+
+| Guard (test) | Fails under: C, as planned | Fails under: D, measured |
+|---|---|---|
+| (a) full pool equals the exact top-N; under D on the 90-row fixture at `ef_search = 1000`, not a guarantee (`test_vector_leg_fills_the_pool_in_oracle_order_on_the_fixture`) | M1 (HNSW returns ≤ `ef_search` = 40 rows from a pool of more than 50) | M1, M18 |
+| (b) filtered query keeps every match (`test_filtered_vector_leg_keeps_every_matching_chunk`) | M1 (post-filter starvation), M4 | M1, M4, M18 |
+| (c) floor honoured (`test_vector_leg_still_honours_the_cosine_floor`) | M3 | M3 (both cases); M1, M4, M18 (filtered case) |
+| **C only** — shape: no `<=>` in ORDER BY; tie-break present | M1, M2 | — (D's inner query orders by `<=>` on purpose) |
+| **D** — shape: inner index-shaped scan (`ORDER BY c.embedding <=> %s::vector` inside a `MATERIALIZED` CTE); outer `WHERE dist <= 1 - %s` and `ORDER BY dist + 0, id` (`test_inner_scan_is_index_shaped_and_outer_resort_is_total`) | — | M2, M3, M5, M6, M10 |
+| zero-norm chunk excluded (review fix; NaN cosine) (`test_zero_norm_chunk_never_enters_the_vector_leg`) | M5 (the `1 - (e <=> q) >= floor` form), M3 | M5 (`1 - dist >= floor`). D's M3 (`dist <= 2 + 0 * %s`) keeps NaN excluded, so it survives this test by design |
+| floor boundary inclusive (audit #6) (`test_floor_boundary_is_inclusive`) | M6 (strict `<`), M3 | M3, M6 (both cases); M4 (filtered case) |
+| **D (audit, latency):** filtered pool fills with ef_search pinned at 40 (`test_iterative_scan_fills_a_filtered_pool_beyond_ef_search`) | — | M1, M4, M9, M18 |
+| **D:** scan settings never leak: caller txn (`test_settings_do_not_leak_inside_the_callers_transaction`) and fresh session (`test_settings_restore_on_a_fresh_session_before_pgvector_is_loaded`) | — | caller txn: M7, M14; fresh session: M7 |
 
 **Amendment, 2026-10-13 (audit):** the latency gate measured C's `vector_ms` p90 at 248.8 ms
 (1-min loadavg 67–71), above 150 ms. Per the gate, the leg became option D: an iterative

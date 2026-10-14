@@ -586,28 +586,44 @@ D's two triggers (§5) answer different failures:
       - after a caller's transaction that set its own `SET LOCAL hnsw.*` values commits,
         the session is back to its pre-transaction values, which catches a restore
         written with `is_local => false`.
-  Mutation harness for D:
-  - M1 pgvector defaults;
-  - M2 no tie-break;
-  - M3 floor neutralised;
-  - M4 predicate dropped;
-  - M5 NaN-admitting floor;
-  - M6 strict `<`;
-  - M7 no restore;
-  - M9 iterative off;
-  - M10 floor back inside the CTE (killed by the off-corpus test's `EXPLAIN` assertion);
-  - M11 ef_search 400, M16 ef_search 100, M17 ef_search 40 (iterative scan kept): each
-    killed by the ef pin and the live-settings probe;
-  - M12 the leg returns seconds: killed by the exact fake-clock test and the units probe;
-  - M13 `enable_seqscan` left on: killed by the live-settings probe and the
-    pressure-free `EXPLAIN` test;
-  - M14 restore with `is_local => false`: killed by the caller-transaction test's
-    after-COMMIT assertion;
-  - M15 `vector_ms` set to the whole `sql_seconds`: killed by the units probe (the FTS
-    delay must stay out of it);
-  - M18 the `set_config` call dropped: killed by the live-settings probe, the full-pool
-    test, the filtered test, the iterative-fill test and the filtered floor case.
-  Each of the 17 is killed by exactly its declared tests, at an assertion. An M8 (break the
-  NULL-prior fallback) survived as an *equivalent* mutant, because
-  `set_config(name, NULL, true)` already resets to the session default. The redundant
-  fallback was deleted rather than kept untestable.
+
+**Mutation harness for D.** The kill sets below are **measured, not declared**. Each
+mutant was applied alone to a `git archive` copy of `c14cd43`, with the replacement
+count checked and the diff inspected, and with `brain` imported from the copy. Then
+`tests/test_search_vector_leg.py` and `tests/test_search_vector_floor.py` were run on the
+5434 test database: 44 tests, all passing unmutated. The full run was repeated, and every
+kill set came out identical. Every failure is a failed assertion; none is a collection or
+setup error. A kill set depends on the exact text of the change, so the change is recorded
+with it.
+
+| Mutant | Change applied | Failing tests (measured) |
+|---|---|---|
+| M1 pgvector defaults | `_SCAN_SETTINGS` set to pgvector's defaults: `("hnsw.ef_search", "40")`, `("hnsw.iterative_scan", "off")`, `("enable_seqscan", "on")` | 7: `test_ef_search_is_pinned_at_pgvectors_maximum`; `test_filtered_vector_leg_keeps_every_matching_chunk`; `test_iterative_scan_fills_a_filtered_pool_beyond_ef_search`; `test_leg_query_runs_under_the_pinned_scan_settings`; `test_the_legs_own_settings_make_the_planner_use_hnsw`; `test_vector_leg_fills_the_pool_in_oracle_order_on_the_fixture`; `test_vector_leg_still_honours_the_cosine_floor` [filtered] |
+| M2 no tie-break | outer `ORDER BY dist + 0, id` → `ORDER BY dist + 0` | 1: `test_inner_scan_is_index_shaped_and_outer_resort_is_total` |
+| M3 floor neutralised | outer `WHERE dist <= 1 - %s` → `WHERE dist <= 2 + 0 * %s` (no floor; NaN still excluded) | 7: `test_floor_boundary_is_inclusive` (both cases); `test_floor_one_excludes_all_vector_candidates`; `test_inner_scan_is_index_shaped_and_outer_resort_is_total`; `test_off_corpus_query_reads_at_most_limit_index_rows`; `test_vector_leg_still_honours_the_cosine_floor` (both cases) |
+| M4 predicate dropped | `where = ""` and `*predicate.where_params` removed from the params | 5: `test_filtered_vector_leg_keeps_every_matching_chunk`; `test_floor_boundary_is_inclusive` [filtered]; `test_iterative_scan_fills_a_filtered_pool_beyond_ef_search`; `test_params_with_filters_carry_the_shared_predicate`; `test_vector_leg_still_honours_the_cosine_floor` [filtered] |
+| M5 NaN-admitting floor | outer `WHERE dist <= 1 - %s` → `WHERE 1 - dist >= %s` | 7: `test_inner_scan_is_index_shaped_and_outer_resort_is_total`; `test_zero_norm_chunk_never_enters_the_vector_leg` (all 6 cases) |
+| M6 strict `<` | outer `WHERE dist <= 1 - %s` → `WHERE dist < 1 - %s` | 3: `test_floor_boundary_is_inclusive` (both cases); `test_inner_scan_is_index_shaped_and_outer_resort_is_total` |
+| M7 no restore | the `_restore_settings(...)` call removed | 2: `test_settings_do_not_leak_inside_the_callers_transaction`; `test_settings_restore_on_a_fresh_session_before_pgvector_is_loaded` |
+| M9 iterative off | `("hnsw.iterative_scan", "relaxed_order")` → `"off"` | 2: `test_iterative_scan_fills_a_filtered_pool_beyond_ef_search`; `test_leg_query_runs_under_the_pinned_scan_settings` |
+| M10 floor back inside the CTE | floor moved into the CTE: `(c.embedding <=> %s::vector) <= 1 - %s` appended to the inner `WHERE`, the outer `WHERE` removed, params `[emb, *where, emb, floor, emb]` | 5: `test_floor_is_bound_never_interpolated`; `test_inner_scan_is_index_shaped_and_outer_resort_is_total`; `test_off_corpus_query_reads_at_most_limit_index_rows`; `test_params_with_filters_carry_the_shared_predicate`; `test_params_without_filters` |
+| M11 ef_search 400 | `HNSW_EF_SEARCH = 400` | 2: `test_ef_search_is_pinned_at_pgvectors_maximum`; `test_leg_query_runs_under_the_pinned_scan_settings` |
+| M12 leg returns seconds | `elapsed_ms = (clock() - started)` (seconds) | 2: `test_run_vector_leg_reports_exact_milliseconds_from_its_clock`; `test_vector_ms_is_in_milliseconds` |
+| M13 enable_seqscan left on | `("enable_seqscan", "on")` | 2: `test_leg_query_runs_under_the_pinned_scan_settings`; `test_the_legs_own_settings_make_the_planner_use_hnsw` |
+| M14 restore is_local false | restore with `set_config(%s, %s, false)` | 1: `test_settings_do_not_leak_inside_the_callers_transaction` |
+| M15 vector_ms = whole sql_seconds | in `search.py`, `diagnostics.vector_ms = sql_seconds * 1000.0` | 1: `test_vector_ms_is_in_milliseconds` |
+| M16 ef_search 100 | `HNSW_EF_SEARCH = 100` | 2: `test_ef_search_is_pinned_at_pgvectors_maximum`; `test_leg_query_runs_under_the_pinned_scan_settings` |
+| M17 ef_search 40 | `HNSW_EF_SEARCH = 40` | 2: `test_ef_search_is_pinned_at_pgvectors_maximum`; `test_leg_query_runs_under_the_pinned_scan_settings` |
+| M18 set_config dropped | the leg's `set_config` statement removed | 5: `test_filtered_vector_leg_keeps_every_matching_chunk`; `test_iterative_scan_fills_a_filtered_pool_beyond_ef_search`; `test_leg_query_runs_under_the_pinned_scan_settings`; `test_vector_leg_fills_the_pool_in_oracle_order_on_the_fixture`; `test_vector_leg_still_honours_the_cosine_floor` [filtered] |
+
+Each of the 17 is killed, and within those two files the table lists every test that
+kills it. (Other suites, such as the golden SQL pin in
+`tests/test_search_predicate_source_missing.py`, were not part of this run.) Earlier
+drafts of this section declared narrower sets; M10, for example, was listed as killed only
+by the off-corpus test's `EXPLAIN` assertion, whereas the SQL-builder unit tests for the
+outer `WHERE`, the params and the bound floor kill it too. The table supersedes those
+declarations. The audit survivor A32 (`sql_seconds += vec_ms`, the `/ 1000` dropped) is
+not among the 17. It is killed by `test_vector_ms_is_in_milliseconds` at its
+`sql_ms <= total_ms` assertion (round 4). An M8 (break the NULL-prior fallback) survived as
+an *equivalent* mutant, because `set_config(name, NULL, true)` already resets to the session
+default. The redundant fallback was deleted rather than kept untestable.
