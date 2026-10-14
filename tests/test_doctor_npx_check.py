@@ -143,17 +143,22 @@ def test_doctor_reports_npx_not_installed(
     Run on both platforms because ``brain doctor`` does not make the same
     subprocess calls on each. Off macOS its vault-watcher line takes a ``ps``
     snapshot (phase 8, ``brain.doctor_watcher``), and ``brain.cli.subprocess``
-    is the ``subprocess`` module itself, so patching its ``run`` counts that
-    call too. This assertion used to be ``call_count == 0``, which passed on
-    macOS and failed on Linux CI. The property is narrower: the npx VERSION
-    probe never runs.
+    is the ``subprocess`` module itself, so patching its ``run`` would count
+    that call too. That made this test fail on Linux CI only. The snapshot is
+    therefore stubbed where doctor_watcher binds it, and the assertion stays
+    the exact ``call_count == 0``. A looser "no call names npx" check was tried
+    and is NOT enough: with the ``npx_path is None`` guard deleted, the probe
+    runs as ``run([None, "--version"])``, whose repr names no npx.
     """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
     monkeypatch.setattr("sys.platform", platform)
     mocker.patch(
         "brain.cli.shutil.which", side_effect=_which_factory(npx_path=None)
     )
-    # The npx probe must NEVER run when which returns None.
+    # Off macOS the doctor's vault-watcher line scans `ps`; stub it at the
+    # binding doctor_watcher uses, so the count below sees only the npx probe.
+    mocker.patch("brain.doctor_watcher.snapshot_processes", return_value=[])
+    # subprocess.run should NEVER be called when which returns None.
     run_mock = mocker.patch("brain.cli.subprocess.run")
 
     with _patch_httpx_client(_ok_ollama_transport()):
@@ -162,8 +167,7 @@ def test_doctor_reports_npx_not_installed(
     assert "quartz/npx" in result.output
     assert "not installed" in result.output
     assert "Node.js" in result.output
-    npx_calls = [c for c in run_mock.call_args_list if "npx" in repr(c)]
-    assert npx_calls == [], npx_calls
+    assert run_mock.call_count == 0
 
 
 def test_doctor_npx_missing_does_not_fail_doctor(
