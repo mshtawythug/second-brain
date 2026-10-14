@@ -633,22 +633,27 @@ R8-1 – R8-7 shipped as written in §1. Things the plan did not say, decided wh
 
 ### 10.3 Verification (exit codes read from files)
 
-Exit codes were read from files. The suite of record ran **once**, on the final code SHA
-`bbfb114` (the merge of master `edd8986`), with nothing touching the worktree. The worktree was
-clean at start and HEAD was unchanged at the end. It ran on `second_brain_t_p7b`.
+Exit codes were read from files. **The suite of record is the run on `1763056`**, the merge of
+master `5b1d285` (phase 7, PR #26) into this branch and the final code SHA. It **supersedes** the
+earlier run on `bbfb114` (the merge of master `edd8986`), which is kept in the table below as
+history. Each run was made **once** on its SHA, with nothing touching the worktree. The worktree
+was clean at start and at end, and HEAD was the same SHA before and after; both are read from
+files. Both ran on `second_brain_t_p7b`, under option (b) (below).
 
 | Check | Result |
 |---|---|
 | `ruff check` | All checks passed |
 | `mypy src/` | no issues, 227 source files |
-| **Full suite of record, `bbfb114`** | **exit 0: 9,220 passed, 5 skipped, 320 deselected (25m39s); coverage 94.68% (gate 85%)** |
+| **Full suite of record, `1763056`** | **exit 0: 9,248 passed, 5 skipped, 320 deselected (21m29s); coverage 94.70% (gate 85%)**. +28 passed over `bbfb114`: phase 7's round-16 tests, arriving through the merge. No test changed outcome |
+| Full suite, `bbfb114` (superseded) | exit 0: 9,220 passed, 5 skipped, 320 deselected (25m39s); coverage 94.68% |
 | Baseline on `eab156d` (before T0) | exit 0: 9,107 passed, 3 skipped, 306 deselected |
 | T0 run, `b3e0216` tree | exit 0: 9,115 passed, 3 skipped, 306 deselected, coverage 94.64%. No test changed outcome. The conftest stubs recorded only the guard tests' 12 calls, and the PATH stub recorded none |
 | Mutation replay (§10.6), each at its own SHA | 46/46 (T0–T7) + 3/3 (round C), 0 failures, all five clauses |
 | Mutation replay at `bbfb114` | 48/48 applicable, 0 failures; T3-P3 SUPERSEDED (§10.6) |
+| **Mutation replay at `1763056`** | **48/48 applicable, 0 failures, all five clauses**; T3-P3 SUPERSEDED |
 | §10.6 validator | see §10.6 |
 
-**The skills-drift tests ran under option (b), approved by team-lead.** `BRAIN_SKILLS_DEST` pointed
+**Both runs used option (b) for the skills-drift tests, approved by team-lead.** `BRAIN_SKILLS_DEST` pointed
 at an empty temp dir, so `test_skills_sync_is_not_drifted` and
 `test_no_installed_skill_entry_is_a_symlink` skipped, exactly as on CI where no skills are
 installed. They are 2 of the 5 skips; the other 3 are the usual ones. Against the real
@@ -656,9 +661,9 @@ installed. They are 2 of the 5 skips; the other 3 are the usual ones. Against th
 **`bin/brain-skills-sync` is owed after merge.** The user's installed skills were not touched from
 this branch.
 
-The +113 tests between the baseline and the suite of record are this phase's new tests plus
-those master brought in through the merge (PRs #22–#25). Neither set changed the outcome of an
-existing test.
+The +141 tests between the baseline and the suite of record are this phase's new tests plus
+those master brought in through the two merges: PRs #22–#25 at `bbfb114`, and phase 7's round 16
+(PR #26) at `1763056`. None of them changed the outcome of an existing test.
 
 
 ### 10.4 Known limits — recorded, not fixed
