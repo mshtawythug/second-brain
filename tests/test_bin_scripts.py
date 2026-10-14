@@ -320,7 +320,7 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     hermetic_pids: HermeticPids,
     tmp_path: Path,
 ) -> None:
-    """brain-up calls install-launchd → launchctl bootstrap fires for both labels.
+    """brain-up calls install-launchd → launchctl bootstrap fires for the installed labels.
 
     This is the "single source of truth for daemon lifecycle" regression
     guard: the pre-2026-05-08 brain-up used `nohup ... &` to spawn the
@@ -333,7 +333,8 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     a tmp directory (so we don't drop plists into the developer's real
     ~/Library/LaunchAgents), seeds a healthy current/ to short-circuit
     cold-start, and verifies launchctl was called with `bootstrap` for
-    both com.brain.watcher AND com.brain.build.
+    com.brain.watcher AND com.brain.brief, and never for com.brain.build,
+    which is retired at R2 (phase 8 T2).
     """
     _seed_healthy_current(vault_dir)
     _write_stub(stub_dir, "brain")
@@ -372,19 +373,20 @@ def test_brain_up_bootstraps_launchd_when_supervisor_not_skipped(
     # observable side effect of install-launchd having fired.
     launchctl_calls = _read_log(stub_dir / "launchctl.calls")
     bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
-    assert len(bootstrap_calls) == 3, (
-        f"brain-up must bootstrap the watcher, build, and brief LaunchAgents; "
+    assert len(bootstrap_calls) == 2, (
+        f"brain-up must bootstrap the watcher and brief LaunchAgents; "
         f"saw {bootstrap_calls!r} (full launchctl call log: {launchctl_calls!r}; "
         f"brain-up stdout: {result.stdout!r}; stderr: {result.stderr!r})"
     )
     assert any("com.brain.watcher.plist" in c for c in bootstrap_calls), bootstrap_calls
-    assert any("com.brain.build.plist" in c for c in bootstrap_calls), bootstrap_calls
     assert any("com.brain.brief.plist" in c for c in bootstrap_calls), bootstrap_calls
+    assert not [c for c in bootstrap_calls if "com.brain.build" in c], bootstrap_calls
 
-    # Both plists landed on disk in the tmp dir, not the developer's
-    # real ~/Library/LaunchAgents.
+    # The plists landed on disk in the tmp dir, not the developer's
+    # real ~/Library/LaunchAgents — and the retired build daemon's did not.
     assert (launchd_dir / "com.brain.watcher.plist").is_file()
-    assert (launchd_dir / "com.brain.build.plist").is_file()
+    assert (launchd_dir / "com.brain.brief.plist").is_file()
+    assert not (launchd_dir / "com.brain.build.plist").exists()
 
     # Report line surfaces the new "supervisor: launchd (KeepAlive)" tag
     # so the user immediately knows what's supervising.
@@ -962,12 +964,13 @@ def test_install_launchd_writes_plists_and_bootstraps(
     vault_dir: Path,
     tmp_path: Path,
 ) -> None:
-    """install-launchd writes both plists with KeepAlive=true and bootstraps them.
+    """install-launchd writes the watcher + brief plists and bootstraps them.
 
     Plist content is checked structurally (ProgramArguments line points at
     the wrapper, KeepAlive present, Label correct). The stub launchctl
     captures calls so we can assert the bootstrap step actually fired for
-    both labels.
+    both installed labels, and never for the retired ``com.brain.build``
+    (phase 8 T2; ``tests/test_bin_launchd_retired.py`` covers its removal).
     """
     launchd_dir = tmp_path / "LaunchAgents"
     _write_stub(stub_dir, "launchctl", body=_launchctl_stub_body(stub_dir, print_succeeds=False))
@@ -991,9 +994,9 @@ def test_install_launchd_writes_plists_and_bootstraps(
     assert result.returncode == 0, result.stderr
 
     watcher_plist = launchd_dir / "com.brain.watcher.plist"
-    build_plist = launchd_dir / "com.brain.build.plist"
     assert watcher_plist.is_file(), watcher_plist
-    assert build_plist.is_file(), build_plist
+    assert (launchd_dir / "com.brain.brief.plist").is_file()
+    assert not (launchd_dir / "com.brain.build.plist").exists()
 
     watcher_text = watcher_plist.read_text()
     assert "<string>com.brain.watcher</string>" in watcher_text
@@ -1011,24 +1014,12 @@ def test_install_launchd_writes_plists_and_bootstraps(
         "`python -m brain.*` call fails with ModuleNotFoundError"
     )
 
-    build_text = build_plist.read_text()
-    assert "<string>com.brain.build</string>" in build_text
-    assert "_brain-build-fg" in build_text
-    assert "<key>KeepAlive</key>" in build_text
-    # Same path change — build logs are also under $BRAIN_HOME/logs/.
-    assert "logs/com.brain.build.out.log" in build_text
-    # Same BRAIN_PY regression guard for the build daemon plist.
-    assert "<key>BRAIN_PY</key>" in build_text, (
-        "com.brain.build.plist is missing BRAIN_PY — without it "
-        "`python -m brain.wiki.build_watcher` fails at launchd start"
-    )
-
     launchctl_calls = _read_log(stub_dir / "launchctl.calls")
     bootstrap_calls = [c for c in launchctl_calls if c.startswith("bootstrap ")]
-    assert len(bootstrap_calls) == 3, launchctl_calls
+    assert len(bootstrap_calls) == 2, launchctl_calls
     assert any("com.brain.watcher.plist" in c for c in bootstrap_calls)
-    assert any("com.brain.build.plist" in c for c in bootstrap_calls)
     assert any("com.brain.brief.plist" in c for c in bootstrap_calls)
+    assert not [c for c in bootstrap_calls if "com.brain.build" in c], launchctl_calls
 
 
 def test_uninstall_launchd_boots_out_and_removes_plists(

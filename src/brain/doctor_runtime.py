@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING
 
 from dotenv import dotenv_values
 
-from .bin.launchd import _LABELS as DAEMON_LABELS
+from .bin.launchd import _INSTALLED_LABELS as DAEMON_LABELS
 from .bin.launchd import resolve_launchctl
 from .config import Config, _brain_home_dotenv, _brain_home_root, dotenv_chain
 from .wiki.build_swap import EXIT_CONFIG_ERROR

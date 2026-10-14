@@ -30,7 +30,9 @@ from brain.doctor_runtime import (
     wiki_freshness_doctor_check,
 )
 
-_LABELS = ("com.brain.watcher", "com.brain.build", "com.brain.brief")
+# The labels the daemon checks cover (phase 8: com.brain.build is retired and
+# reported only by its own check, never by these).
+_LABELS = ("com.brain.watcher", "com.brain.brief")
 
 
 def _statuses(*, running: bool = True, **by_label: int) -> str:
@@ -249,7 +251,7 @@ def test_daemon_last_exit_one_fails(tmp_path: Path) -> None:
     """
     _install_plists(tmp_path, *_LABELS)
     stdout = _statuses(
-        **{"com.brain.watcher": 1, "com.brain.build": 0, "com.brain.brief": 1}
+        **{"com.brain.watcher": 1, "com.brain.brief": 1}
     )
 
     (check,) = _daemons(tmp_path, stdout)
@@ -267,12 +269,12 @@ def test_daemon_error_log_path_comes_from_the_installed_plist(tmp_path: Path) ->
     with a different ``$BRAIN_HOME`` at install time.
     """
     _install_plists(tmp_path, *_LABELS)
-    stdout = _statuses(**{lbl: (1 if lbl == "com.brain.build" else 0) for lbl in _LABELS})
+    stdout = _statuses(**{lbl: (1 if lbl == "com.brain.brief" else 0) for lbl in _LABELS})
 
     (check,) = _daemons(tmp_path, stdout)
 
     rendered = "\n".join(line.text for line in check.lines)
-    assert "/synthetic/logs/com.brain.build.err.log" in rendered
+    assert "/synthetic/logs/com.brain.brief.err.log" in rendered
 
 
 def test_config_error_exit_is_distinguished_from_a_transient_build_failure(
@@ -289,8 +291,7 @@ def test_config_error_exit_is_distinguished_from_a_transient_build_failure(
     stdout = _statuses(
         **{
             "com.brain.watcher": EXIT_CONFIG_ERROR,
-            "com.brain.build": EXIT_BUILD_ERROR,
-            "com.brain.brief": 0,
+            "com.brain.brief": EXIT_BUILD_ERROR,
         }
     )
 
@@ -300,8 +301,8 @@ def test_config_error_exit_is_distinguished_from_a_transient_build_failure(
     assert "MISCONFIGURED" in check.detail
     assert "brain-install-launchd" not in (check.remedy or "")
     # The plain build failure keeps the ordinary wording.
-    assert f"com.brain.build last exit {EXIT_BUILD_ERROR}" in check.detail
-    assert "com.brain.build last exit 1 — MISCONFIGURED" not in check.detail
+    assert f"com.brain.brief last exit {EXIT_BUILD_ERROR}" in check.detail
+    assert "com.brain.brief last exit 1 — MISCONFIGURED" not in check.detail
 
 
 def test_transient_build_failure_still_suggests_a_reload(tmp_path: Path) -> None:
@@ -322,7 +323,7 @@ def test_signal_death_that_recovered_warns_but_does_not_fail(tmp_path: Path) -> 
     """Restarted after SIGTERM, wiki current → the user lost nothing. WARN."""
     _install_plists(tmp_path, *_LABELS, keep_alive=True)
     stdout = _statuses(
-        **{"com.brain.watcher": 0, "com.brain.build": -15, "com.brain.brief": 0}
+        **{"com.brain.watcher": -15, "com.brain.brief": 0}
     )
 
     (check,) = _daemons(tmp_path, stdout, wiki_stale=False)
@@ -341,7 +342,7 @@ def test_signal_death_that_left_a_stale_wiki_fails(tmp_path: Path) -> None:
     """
     _install_plists(tmp_path, *_LABELS, keep_alive=True)
     stdout = _statuses(
-        **{"com.brain.watcher": 0, "com.brain.build": -15, "com.brain.brief": 0}
+        **{"com.brain.watcher": -15, "com.brain.brief": 0}
     )
 
     (check,) = _daemons(tmp_path, stdout, wiki_stale=True)
@@ -359,7 +360,7 @@ def test_signal_killed_keepalive_daemon_that_is_down_fails(tmp_path: Path) -> No
     _install_plists(tmp_path, *_LABELS, keep_alive=True)
     stdout = _statuses(
         running=False,
-        **{"com.brain.watcher": -9, "com.brain.build": 0, "com.brain.brief": 0},
+        **{"com.brain.watcher": -9, "com.brain.brief": 0},
     )
 
     (check,) = _daemons(tmp_path, stdout, wiki_stale=False)
@@ -381,7 +382,7 @@ def test_one_shot_brief_job_not_running_is_normal(tmp_path: Path) -> None:
 def test_installed_but_not_loaded_fails(tmp_path: Path) -> None:
     """Plist on disk but absent from launchctl: nothing is running."""
     _install_plists(tmp_path, *_LABELS)
-    stdout = _statuses(**{"com.brain.watcher": 0, "com.brain.build": 0})
+    stdout = _statuses(**{"com.brain.watcher": 0})
 
     (check,) = _daemons(tmp_path, stdout)
 
