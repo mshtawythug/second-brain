@@ -20,11 +20,13 @@ count is not the one the baseline was recorded against, that is your answer.
 
 A document set that has only *grown* resolves every UUID but still moves rows:
 new documents compete for the top ranks against judgments that never saw them.
-*The 2026-10-13 re-record was this case, not recency drift (2) alone.* Ingests
-added 608 documents to the document set (Krisp on 2026-10-05, a Confluence
-import on 2026-10-08) and moved 12 non-recency rows as well; the means fell from
-0.4834 / 0.5835 / 0.7267 to **0.2589 / 0.3697 / 0.5852** (nDCG@5 / MRR /
-Recall@20). The golden judgments predate ~30% of the document set, so the
+*The first 2026-10-13 re-record (corpus growth) was this case, not recency
+drift (2) alone.* Ingests added 608 documents to the document set (Krisp on
+2026-10-05, a Confluence import on 2026-10-08) and moved 12 non-recency rows as
+well; the means fell from 0.4834 / 0.5835 / 0.7267 to 0.2589 / 0.3697 / 0.5852
+(nDCG@5 / MRR / Recall@20). Those are no longer the committed file's means: a
+second re-record the same day followed a ranking change, so for the current
+means see "Vector-leg candidate pool" under "Known retrieval issues" below. The golden judgments predate ~30% of the document set, so the
 absolute scores understate quality until `golden_corpus.yaml` is re-judged
 against the new documents.
 
@@ -38,6 +40,22 @@ those queries drift on their own and the baseline needs re-recording. Nothing
 about search changed. *(The first recording, 2026-09-02, sat in a different
 gap and drifted on 2026-09-20 exactly as this paragraph predicted — one query,
 `-0.15` nDCG@5, every other row unchanged to four decimals.)*
+
+**The gap protects only the trailing edge.** The SQL below finds when old
+documents cross the 40-day boundary. It says nothing about the leading edge:
+every newly ingested document lands inside the window at once. That matters for
+one query in particular. "Daily brief digest of recent captures and action
+items" has 28 judged documents, all of them daily briefs, and on 2026-10-14 its
+top 20 was all daily briefs too. The vault watcher now syncs a brief note
+(`daily/<year>/<date>-brief.md`) on most days, and each one is an unjudged
+competitor for exactly that query. Re-recorded **2026-10-14** for this reason:
+after a restart the watcher synced 7 notes (6 briefs and `index.md`), which
+moved that query alone (nDCG@5 0.5296 → 0.3601, Recall@20 0.2857 → 0.2143)
+and the means by −0.0055 nDCG@5 / −0.0023 Recall@20, with every other row at
+±0.0000. **Expect the same on most days a brief lands**: an exit 3 in which
+only that `recency` row moved is this drift, not a regression. Check the diff
+table before re-recording. The other `recency` query ("quarterly planning
+review …") had 3 briefs in its top 20 and was not moved by those 6.
 
 Re-derive the window before you re-record; it is a property of the document
 set, not of the code:
@@ -66,15 +84,29 @@ dilute the mean; but a re-judged one silently changes what "correct" means.
 
 ## Known retrieval issues
 
-- **Vector-leg candidate pool** (found 2026-10-12; a separate PR will fix it and
-  re-record): the vector leg in `search.py` is served by the HNSW index, so it
-  returns at most `hnsw.ef_search` (default 40) rows rather than
-  `CANDIDATE_LIMIT`, and filters apply after the index scan, so filtered queries
-  get fewer still. Measured 2026-10-13 on the live corpus (1,999 docs / 21,281
-  chunks): recall@50 against an exact scan averaged 0.76 over the golden
-  queries. That figure depends on the HNSW graph's quality, so it shifts with
-  ingests and reindexes. On one query a few long new documents filled the whole pool,
-  shrinking its results from 17 documents to 6.
+- **Vector-leg candidate pool — FIXED 2026-10-13.** The vector leg was served by
+  the HNSW index, so it returned at most `hnsw.ef_search` (default 40) rows
+  rather than `CANDIDATE_LIMIT`. Filters applied after the index scan, so
+  filtered queries got fewer still. Measured 2026-10-13 on the live corpus
+  (1,999 docs / 21,281 chunks): recall@50 against an exact scan averaged 0.76
+  over the golden queries. That figure depends on the HNSW graph's quality, so
+  it shifts with ingests and reindexes. On one query a few long new documents
+  filled the whole pool, shrinking its results from 17 documents to 6. It is now
+  an iterative HNSW scan with `ef_search = 1000`, scoped per query. Its recall@50
+  against an exact scan, measured for the shipped shape, is 0.9987 mean / 0.98
+  min over the golden queries and 0.994 / 0.96 over low-similarity queries,
+  returning the exact floor-passing set wherever the floor is binding (spec §6.5). The code is in `brain/search_vector_leg.py`; the design and
+  measurements, including the exact-scan version it replaced, are in
+  `docs/specs/2026-10-13-search-vector-leg-design.md`. Recall still depends
+  on the graph, so spec §5 has a read-only recall check with a 0.99 trigger.
+  `ci.json` was re-recorded for the ranking change (first for the exact scan,
+  then for the iterative scan, whose metrics are identical): the means went
+  from 0.2589 / 0.3697 / 0.5852 to 0.2779 / 0.3826 / 0.7112, on the same
+  document set and the same window as in (2). The current committed means,
+  after the 2026-10-14 re-record for the synced daily briefs in (2), are
+  **0.2724 / 0.3826 / 0.7089**. The same
+  HNSW shape remains in `related.py` and `connect.py`; those are unmeasured
+  follow-ups.
 
 ## Who re-records, and when
 
@@ -84,6 +116,8 @@ as any other committed fixture. Re-record after any of:
 - an ingest or deletion that changes the document set
 - a re-embed, or an embedder swap
 - a change to any key in the baseline's `config_signature`
+- a change to the ranking code (SQL or fusion) — e.g. `search.py`,
+  `search_vector_leg.py`, `rank_fusion.py`
 - an edit to `tests/eval/golden_corpus.yaml`
 - drift past the recency window in (2) above
 

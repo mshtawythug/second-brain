@@ -21,7 +21,8 @@ specified rules, with the spec's clearance and cap pinned here
 graph.js, and the label required to be the LONGEST cut of its title that fits
 it. A box check passes an over-cut label; the oracle does not. And the
 crowded-ring threshold is the spec's (``_SPEC_LABEL_THRESHOLD``), not
-graph.js's, so a test that loops up to it cannot loop up to a mutated one.
+graph.js's, so a test that loops up to it cannot loop up to a mutated one. So
+is the gap a neighbour's label hangs below its circle (``_SPEC_LABEL_GAP``).
 
 Mutating a constant cannot lower any of these bars with it: graph.js's
 constants are compared with the spec's only at TEARDOWN, by the autouse
@@ -41,7 +42,15 @@ from typing import Any
 import pytest
 
 from brain.ui.app import static_dir
-from tests.ui_graph_harness import ALPHA_ID, BRAVO_ID, CHARLIE_ID, ROOT_ID, ROOT_TITLE
+from tests.ui_graph_harness import (
+    _GRAPH,
+    ALPHA_ID,
+    BRAVO_ID,
+    CHARLIE_ID,
+    ROOT_ID,
+    ROOT_TITLE,
+    _open,
+)
 
 DELTA_ID = "aaaaaaaa-0000-4000-8000-00000000000f"
 
@@ -197,6 +206,19 @@ def _server_ring_payload(
     }
 
 
+def _open_ring(page: Any, count: int, width: int) -> list[tuple[str, str]]:
+    """Draw the server's ring of ``count`` neighbours (``_crowd_titles``) at
+    viewport ``width``, and return the titles drawn."""
+    titles = _crowd_titles(count)
+    page.set_viewport_size({"width": width, "height": 800})
+    _GRAPH["payload"] = _server_ring_payload(titles)
+    # A distinct note per count: the client caches each note's graph, so
+    # reopening the same id would draw the PREVIOUS ring without a request.
+    _open(page, f"aaaaaaaa-0000-4000-8000-{0x900 + count:012x}")
+    page.wait_for_selector(".local-graph svg")
+    return titles
+
+
 def _graph_js_constant(name: str) -> int | None:
     """An integer ``const`` read from js/graph.js, or None if it is absent.
 
@@ -226,6 +248,12 @@ _SPEC_LABEL_CLEARANCE = 4
 _SPEC_LABEL_MAX_CHARS = 28
 _SPEC_LABEL_THRESHOLD = 4
 
+#: The gap, in viewBox units, between a neighbour's circle and the top of its
+#: label's box (graph.js ``LABEL_GAP``; plan §8.1). It is the spec's for the same
+#: reason as the three above. (14c) holds every hung label to it, and the
+#: teardown pin holds graph.js to it.
+_SPEC_LABEL_GAP = 4
+
 #: Below this, two measured lengths are the same number computed twice.
 _FIT_EPSILON = 1e-6
 
@@ -238,12 +266,25 @@ _FIT_EPSILON = 1e-6
 #:   - with ``rows``, the ROW bound: for every other label whose box comes
 #:     within ``clearance`` of this one's vertically, ``|dx| - clearance``.
 #: Rows are judged on each label's box at its CAPPED title, as fitLabels
-#: judges them before it cuts anything. For each label it returns the text
-#: shown, how many title characters it keeps, its measured length, and the
-#: next-longer cut (one more character, or the whole title) with ITS length
-#: — set on the label, measured, and put back. Same element, same font, same
-#: ``getComputedTextLength`` fitText uses, so every comparison is exact.
-#: Nothing here reads graph.js: a mutation there cannot move these slots.
+#: judges them before it cuts anything.
+#:
+#: THE CUT RULE, stated here independently of graph.js (plan §8.3). A title's
+#: CHARACTERS are its grapheme clusters (``Intl.Segmenter``, grapheme
+#: granularity), so an emoji ZWJ sequence or an astral letter counts as one
+#: and is never split. ``cut(title, n)`` is the title itself if it has at
+#: most ``n`` characters; otherwise its first ``n`` characters, with trailing
+#: whitespace removed, then "…". The label's CUTS are ``cut(title, n)`` for
+#: every ``n`` from 0 up to the cap or the title's length, whichever is
+#: smaller, with duplicates dropped. Trimming makes ``cut(n)`` equal
+#: ``cut(n + 1)`` whenever character ``n + 1`` is a space, and the next cut
+#: that DIFFERS is the one a longer label would show.
+#:
+#: For each label it returns the text shown, its cuts, how many characters it
+#: keeps, its measured length, and the next cut after the shown one, with ITS
+#: length. That cut is set on the label, measured, and put back. Same element,
+#: same font, same ``getComputedTextLength`` fitText uses, so every
+#: comparison is exact. Nothing here reads graph.js: a mutation there cannot
+#: move these slots or this rule.
 _FIT_JS = """([clearance, cap, rows]) => {
     const svg = document.querySelector('.local-graph svg');
     const ctm = svg.getScreenCTM();
@@ -251,7 +292,20 @@ _FIT_JS = """([clearance, cap, rows]) => {
     const edge = host.getBoundingClientRect().left + host.clientLeft;
     const left = (edge - ctm.e) / ctm.a + clearance;
     const right = (edge + host.clientWidth - ctm.e) / ctm.a - clearance;
-    const cutTo = (title, n) => (title.length > n ? `${title.slice(0, n)}…` : title);
+    const segmenter = new Intl.Segmenter(undefined, {granularity: 'grapheme'});
+    const chars = (title) => Array.from(segmenter.segment(title), (s) => s.segment);
+    const cutTo = (title, n) => {
+        const all = chars(title);
+        return all.length > n ? `${all.slice(0, n).join('').trimEnd()}…` : title;
+    };
+    const cutsOf = (title) => {
+        const cuts = [];
+        for (let n = 0; n <= Math.min(chars(title).length, cap); n += 1) {
+            const cut = cutTo(title, n);
+            if (cuts[cuts.length - 1] !== cut) cuts.push(cut);
+        }
+        return cuts;
+    };
     const measure = (text, content) => {
         const shown = text.textContent;
         text.textContent = content;
@@ -279,14 +333,12 @@ _FIT_JS = """([clearance, cap, rows]) => {
             }
         }
         const shown = label.text.textContent;
-        const kept = shown.endsWith('…') ? shown.length - 1 : shown.length;
-        let longer = null;
-        let longerWidth = null;
-        if (kept < Math.min(label.title.length, cap)) {
-            longer = cutTo(label.title, kept + 1);
-            longerWidth = measure(label.text, longer).length;
-        }
-        return {id: label.id, title: label.title, shown, kept, slot,
+        const cuts = cutsOf(label.title);
+        const kept = chars(shown.endsWith('…') ? shown.slice(0, -1) : shown).length;
+        const at = cuts.indexOf(shown);
+        const longer = at >= 0 && at + 1 < cuts.length ? cuts[at + 1] : null;
+        const longerWidth = longer === null ? null : measure(label.text, longer).length;
+        return {id: label.id, title: label.title, shown, cuts, kept, slot,
                 width: label.text.getComputedTextLength(), longer, longerWidth};
     });
 }"""
@@ -302,20 +354,20 @@ def _fits(page: Any, *, rows: bool) -> list[dict[str, Any]]:
 def _fit_faults(fits: list[dict[str, Any]]) -> list[str]:
     """Every label that is not the LONGEST cut of its title fitting its slot.
 
-    A label must be (a) a cut of its own title — its first ``kept``
-    characters, with "…" iff any were dropped, and never more than the cap;
-    (b) no longer than its slot, unless it is the bare "…", fitText's floor;
-    (c) the longest such cut: one character more — or, one short of the
-    whole title, the whole title — must NOT fit. So a title whose capped form
-    fits must be shown whole (capped), and an over-cut label fails (c) even
-    when every box check passes."""
+    A label must be (a) one of its title's CUTS, as the oracle states the cut
+    rule (``_FIT_JS``): never more than the cap, never a split character, no
+    space before "…"; (b) no longer than its slot, unless it is the bare "…",
+    fitText's floor; (c) the longest such cut: the next cut that differs
+    from it, which is one more character or, one short of the whole title,
+    the whole title, must NOT fit. So a title whose capped form fits must be
+    shown whole (capped), and an over-cut label fails (c) even when every box
+    check passes."""
     faults = []
     for fit in fits:
-        shown, title, kept = fit["shown"], fit["title"], fit["kept"]
-        expected = title if kept >= len(title) else f"{title[:kept]}…"
-        if shown != expected or kept > _SPEC_LABEL_MAX_CHARS:
+        shown, title = fit["shown"], fit["title"]
+        if shown not in fit["cuts"]:
             faults.append(f"{shown!r} is not a cut of {title!r} at the cap")
-        elif kept > 0 and fit["width"] > fit["slot"] + _FIT_EPSILON:
+        elif fit["kept"] > 0 and fit["width"] > fit["slot"] + _FIT_EPSILON:
             faults.append(f"{shown!r} ({fit['width']:.2f}) overruns its slot "
                           f"({fit['slot']:.2f})")
         elif fit["longer"] is not None and fit["longerWidth"] <= fit["slot"] - _FIT_EPSILON:
@@ -326,9 +378,10 @@ def _fit_faults(fits: list[dict[str, Any]]) -> list[str]:
 
 def _assert_spec_constants() -> None:
     """graph.js ships the values the tests hold it to (see above)."""
-    names = ("LABEL_CLEARANCE", "LABEL_MAX_CHARS", "MAX_LABELLED_NEIGHBOURS")
+    names = ("LABEL_CLEARANCE", "LABEL_MAX_CHARS", "MAX_LABELLED_NEIGHBOURS", "LABEL_GAP")
     shipped = tuple(_graph_js_constant(name) for name in names)
-    spec = (_SPEC_LABEL_CLEARANCE, _SPEC_LABEL_MAX_CHARS, _SPEC_LABEL_THRESHOLD)
+    spec = (_SPEC_LABEL_CLEARANCE, _SPEC_LABEL_MAX_CHARS, _SPEC_LABEL_THRESHOLD,
+            _SPEC_LABEL_GAP)
     assert shipped == spec, (
         f"graph.js ships {', '.join(names)} = {shipped}, not the specified {spec}"
     )
@@ -412,6 +465,20 @@ def _intersections(labels: list[dict[str, Any]]) -> list[str]:
                             f"{b['id'][-4:]} {[round(v) for v in b['box']]}")
     return hits
 
+
+#: The measured lengths of ``cuts`` on one neighbour's label — set on it,
+#: measured, and put back.
+_CUT_LENGTHS_JS = """([id, cuts]) => {
+    const text = [...document.querySelectorAll('.local-graph [data-note-id]')]
+        .find((n) => n.getAttribute('data-note-id') === id).querySelector('text');
+    const shown = text.textContent;
+    const lengths = cuts.map((cut) => {
+        text.textContent = cut;
+        return text.getComputedTextLength();
+    });
+    text.textContent = shown;
+    return lengths;
+}"""
 
 #: Every drawn label's text, in drawing order.
 _LABEL_TEXTS_JS = (
