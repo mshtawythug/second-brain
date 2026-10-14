@@ -44,8 +44,11 @@ from tests.conftest import FakeEmbedder
 
 # The production HNSW-capable dimensionality (arctic / voyage).
 _DIM = 1024
-# Enough one-chunk documents that the exact pool (CANDIDATE_LIMIT = 50) is
-# strictly larger than what an ef_search=40 index scan can return.
+# Enough one-chunk documents that the true top CANDIDATE_LIMIT (50) is strictly
+# larger than what an ef_search=40 index scan can return. At the leg's
+# ef_search=1000 the scan reaches all 90 rows, so on THIS fixture the leg's pool
+# equals the oracle's exact top 50. That is a property of the fixture, not a
+# guarantee: on the live corpus the leg is approximate (spec §6.5).
 _DOC_COUNT = 90
 # Every third document carries this tag: 30 matches, fewer than CANDIDATE_LIMIT,
 # so a correct filtered leg returns ALL of them.
@@ -267,10 +270,16 @@ def _vector_leg_docs(
 
 
 @pytest.mark.fresh_schema
-def test_vector_leg_returns_the_exact_full_pool(
+def test_vector_leg_fills_the_pool_in_oracle_order_on_the_fixture(
     hnsw_corpus: tuple[psycopg.Connection[Any], FakeEmbedder],
 ) -> None:
-    """All ``CANDIDATE_LIMIT`` nearest chunks, in exact order — not ef_search's 40."""
+    """A full ``CANDIDATE_LIMIT`` pool, not ef_search's 40, in the oracle's order.
+
+    On this 90-row fixture at ``ef_search = 1000`` the iterative scan reaches
+    every row, so the pool equals the oracle's exact top 50. That holds here, not
+    in general: on a large corpus the leg is approximate, and its recall@50 is
+    measured, not guaranteed (spec §5 (ii), §6.5).
+    """
     conn, embedder = hnsw_corpus
     expected = [doc for _, doc in _oracle_ranking(conn, embedder)][:CANDIDATE_LIMIT]
     assert len(expected) == CANDIDATE_LIMIT  # the pool is genuinely larger than 40
@@ -326,14 +335,16 @@ def test_zero_norm_chunk_never_enters_the_vector_leg(
     test_db: psycopg.Connection[Any], fake_embedder: FakeEmbedder, floor: float,
     filtered: bool,
 ) -> None:
-    """A zero vector's cosine distance is NaN; it must be excluded, not ranked #1.
+    """A zero vector's cosine distance is NaN; the floor must exclude it.
 
     Postgres orders NaN above every number and evaluates ``NaN >= x`` as TRUE,
-    so a floor written as ``1 - (e <=> q) >= floor`` admits the row and
-    ``score DESC`` puts it first. The HNSW path never returned it (pgvector does
-    not index zero vectors for cosine), so the exact scan must exclude it
-    explicitly. Prod held 0 such chunks on 2026-10-13; this guards the latent
-    case: an embedder that emits all zeros, or a hand-edited row.
+    so a floor written as ``1 - dist >= floor`` admits the row. pgvector does not
+    index zero vectors for cosine, so the HNSW path never returns it, but a plan
+    that does not use the index (some filtered queries, and this test database,
+    whose 4096-dim column has no HNSW index) reads every row and would, so the
+    floor ``dist <= 1 - floor`` must exclude it: ``NaN <= x`` is FALSE. Prod held
+    0 such chunks on 2026-10-13; this guards the latent case: an embedder that
+    emits all zeros, or a hand-edited row.
     """
     ids = []
     for i in range(3):

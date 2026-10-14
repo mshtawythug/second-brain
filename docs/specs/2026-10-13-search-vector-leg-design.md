@@ -315,8 +315,10 @@ pgvector's maximum.
   first form of the exact scan (`1 - (e <=> q) >= floor`, `ORDER BY score DESC`) would
   have ranked such a row **#1**. The HNSW path never returned it, because pgvector does
   not index zero vectors for cosine. The floor is now `(e <=> q) <= 1 - floor`, and
-  `NaN <= x` is FALSE. Prod held **0** zero-norm (and 0 NULL) chunks on 2026-10-13, so
-  this was latent. A regression test (RED first) and mutant M5 guard it.
+  `NaN <= x` is FALSE. This still matters under D: the HNSW path never returns a zero
+  vector, but a plan that does not use the index (some filtered queries) reads every
+  row, so the floor is what excludes it. Prod held **0** zero-norm (and 0 NULL) chunks
+  on 2026-10-13, so this was latent. A regression test (RED first) and mutant M5 guard it.
 
 ## 6. Measurement — before / after, same corpus, same day
 
@@ -460,9 +462,11 @@ q28 each missing 1 of 50.)*
 
 *Low-similarity queries, round 4* — the case the golden set lacks, where the subset
 effect could bite. These are the 8 §5 (iii) probes plus 6 deliberately low-similarity
-everyday topics: weekend weather, repotting a houseplant, guitar chords, a home-office
-tax deduction, marathon training and cheap flights. 1-minute loadavg 78–87 (15-minute
-~158), with 10 pytest processes; load does not affect recall.
+everyday queries, verbatim: `weekend weather forecast`, `how to repot a houseplant`,
+`guitar chord progressions for beginners`, `home office tax deduction`,
+`marathon training schedule` and `cheap flights to lisbon` (the table below names each
+by one keyword). 1-minute loadavg 78–87 (15-minute ~158), with 10 pytest processes;
+load does not affect recall.
 
 | Exact floor-passing set | Queries | Recall |
 |---|---|---|
@@ -496,6 +500,12 @@ The row counts are identical on every probe. Wherever fewer than 50 rows pass th
 the inside shape costs 303–609 ms, because it walks the index looking for rows that do
 not exist. Eval after the move: 0.2779 / 0.3826 / 0.7112, and all 31 result lists are
 identical to the committed `ci.json`, so no re-record was needed.
+
+*2026-10-14 note.* The local eval gate (`brain eval --baseline ci --diff --fail-below`)
+now exits 3, for a reason outside this PR: after a machine restart the vault watcher
+synced 7 vault notes (6 daily briefs and `index.md`), which moved one `recency` query,
+while the other 30 queries are ±0.0000. Re-recording `ci.json` for that document-set
+change is separate from this PR.
 
 ## 7. Revisit criteria (not in scope)
 
@@ -540,11 +550,13 @@ D's two triggers (§5) answer different failures:
   is promoted to `826 (f0abf64)`, a fresh descriptive hop is added for this change, and
   the module-docstring trail is updated to match.
 - **Tests (real Postgres, fake embedder):**
-  - full-pool count under `enable_seqscan = off` (the 40-cap regression);
+  - full-pool count under `enable_seqscan = off` (the 40-cap regression). On the 90-row
+    fixture at `ef_search = 1000` the pool equals the oracle's exact top 50; that is a
+    property of the fixture, not a guarantee (D's recall is measured, §6.5);
   - a filtered query returns every matching chunk above the floor (the starvation
     regression);
-  - ordering is exact and deterministic (C: `score DESC, id`; D: inner index-shaped scan,
-    outer `dist + 0, id`);
+  - ordering is total and deterministic (C: `score DESC, id`; D: inner index-shaped scan,
+    outer `dist + 0, id`, which re-sorts the returned rows into exact distance order);
   - the floor and predicate are still applied, and the floor boundary is inclusive (the
     k-th chunk exactly at `1 - floor`, verified equal in float8, is in; the (k+1)-th is out);
   - a zero-norm (NaN-cosine) chunk never enters the leg (added after review);
