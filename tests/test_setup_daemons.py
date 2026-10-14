@@ -12,7 +12,9 @@ conftest launchctl stub is the backstop.
 from __future__ import annotations
 
 import io
+import re
 from contextlib import redirect_stdout
+from importlib.resources import files as resource_files
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -47,6 +49,18 @@ def _interactive_full_dry_run(tmp_path: Path, *, answer: bool) -> str:
     return buf.getvalue()
 
 
+def _brief_time() -> str:
+    """The brief's StartCalendarInterval as HH:MM, read from the plist template it installs."""
+    template = (
+        resource_files("brain.templates.launchd") / "com.brain.brief.plist.j2"
+    ).read_text(encoding="utf-8")
+    schedule = template.split("<key>StartCalendarInterval</key>", 1)[1]
+    hour = re.search(r"<key>Hour</key>\s*<integer>(\d+)</integer>", schedule)
+    minute = re.search(r"<key>Minute</key>\s*<integer>(\d+)</integer>", schedule)
+    assert hour and minute, "the brief plist template lost its schedule"
+    return f"{int(hour[1]):02d}:{int(minute[1]):02d}"
+
+
 def test_a_wikiless_interactive_setup_offers_and_installs_the_daemons(tmp_path: Path) -> None:
     """E7: with the wiki skipped, accepting the prompt reaches the daemon install."""
     out = _interactive_full_dry_run(tmp_path, answer=True)
@@ -78,7 +92,8 @@ def test_the_daemon_prompt_names_the_vault_watcher_and_the_brief(tmp_path: Path)
 
     (prompt,) = prompts
     assert "vault-sync watcher" in prompt
-    assert "daily brief" in prompt
+    assert f"{_brief_time()} daily brief" in prompt
+    assert "loaded on login" in prompt, "the brief runs on a schedule; login only loads it"
     assert "wiki" not in prompt.lower()
     assert "postgres" not in prompt.lower()
 

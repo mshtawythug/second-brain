@@ -32,7 +32,10 @@ git tag scheme:
   **The way back:** `brain-rebuild --only quartz` rebuilds the wiki once, and
   `BRAIN_WIKI_BUILD=1 brain-up` runs the old overlay + cold-start build. To get
   the rebuild daemon itself back, run `brain wiki install`, then
-  `brain-install-launchd` from a release before this one.
+  `brain-install-launchd` from a release before this one. This release's next
+  `brain-up` removes it again, so keeping the daemon means staying on the
+  earlier release; on this release, rebuild on request with
+  `brain-rebuild --only quartz`.
 - **`brain-rebuild`:** the `wiki` stage is split. `mirror` (vault export,
   sync-summaries, prune-orphans) runs by default; the Quartz overlay and build
   are the opt-in `quartz` stage (`--only quartz`). `--wiki-only` is removed (it

@@ -868,7 +868,7 @@ def _maybe_install_launchd(
     else:
         do_install = typer.confirm(
             "Install launchd background daemons "
-            "(vault-sync watcher + daily brief, started on login)?",
+            "(vault-sync watcher + 07:00 daily brief, loaded on login)?",
             default=False,
         )
     if not do_install:

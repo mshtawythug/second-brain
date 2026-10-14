@@ -864,7 +864,7 @@ def test_brain_watcher_fg_writes_pid_and_execs_brain_sync(
 
 
 def test_brain_watcher_fg_aborts_when_brain_cli_missing(
-    stub_dir: Path,  # noqa: ARG001 — fixture forces test isolation
+    stub_dir: Path,
     vault_dir: Path,
     hermetic_pids: HermeticPids,
 ) -> None:
@@ -886,6 +886,9 @@ def test_brain_watcher_fg_aborts_when_brain_cli_missing(
         "HOME": str(vault_dir.parent),
         "BRAIN_VAULT_PATH": str(vault_dir),
         "BRAIN_SKIP_VENV_AUTOLOAD": "1",
+        # This env is built from scratch like _make_env's, so it carries the
+        # same launchctl stand-in (phase 8 T0), for uniformity.
+        "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
         # Hermetic: point the pid path at a tmp file so the assertion below
         # checks the override (never the global /tmp/brain-watch.pid).
         **hermetic_pids.env,

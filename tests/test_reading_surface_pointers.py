@@ -314,3 +314,12 @@ def test_changelog_warns_that_the_next_brain_up_removes_the_build_daemon() -> No
     unreleased = unreleased.split("\n## [", 1)[0]
     assert "next `brain-up` after upgrading removes the `com.brain.build`" in unreleased
     assert "**The way back:**" in unreleased and _REBUILD_ON_REQUEST in unreleased
+
+
+def test_changelog_says_the_way_back_to_the_daemon_is_not_durable() -> None:
+    """T7 review (LOW): this release's ``brain-up`` reruns ``brain-install-launchd``, which
+    removes ``com.brain.build`` again, so a reinstall from an earlier release does not stick."""
+    unreleased = CHANGELOG.read_text(encoding="utf-8").split("## [Unreleased]", 1)[1]
+    unreleased = " ".join(unreleased.split("\n## [", 1)[0].split())
+    assert "This release's next `brain-up` removes it again" in unreleased
+    assert "keeping the daemon means staying on the earlier release" in unreleased

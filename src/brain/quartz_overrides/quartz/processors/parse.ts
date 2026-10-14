@@ -284,7 +284,7 @@ export async function parseMarkdown(ctx: BuildCtx, fps: FilePath[]): Promise<Pro
   // `cacheDir: undefined` from an upstream BuildCtx constructor means
   // "not set yet" and falls through to the default.
   // NOTE: this path must match brain.maintenance._PARSER_CACHE_RELPATH
-  // (.quartz/.cache/parser), wiped by `brain-rebuild --clean-cache`.
+  // (.quartz/.cache/parser), wiped by `brain-rebuild --only quartz --clean-cache`.
   const cacheDir: string | null =
     ctx.cacheDir !== undefined
       ? ctx.cacheDir

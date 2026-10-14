@@ -35,7 +35,14 @@ def _load(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 def test_tier_a_renders_every_installed_plist_without_defects(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Tier A runs under the repo venv's python; here, the interpreter running the tests.
+
+    ``REPO_ROOT/.venv`` need not exist (CI, a worktree, an archive copy), and the
+    question is whether the plists the CURRENT code renders are sound, which
+    ``sys.executable`` answers.
+    """
     vr = _load(monkeypatch)
+    monkeypatch.setattr(vr, "REPO_PY", Path(sys.executable))
 
     result = vr.check_3("A", allow_restart=False)
 

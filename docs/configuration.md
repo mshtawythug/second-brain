@@ -160,7 +160,7 @@ which brain          # → /opt/homebrew/bin/brain (or ~/.local/bin/brain)
 which brain-mcp      # optional; same prefix if you created the symlink
 which brain-up       # → /Users/<you>/workspace/second-brain/bin/brain-up
 brain doctor         # → required components OK; optional ones may warn
-brain-status         # → wiki/watcher status (both stopped initially)
+brain-status         # → watcher status (stopped initially); the build row reads dormant
 ```
 
 Once both are on PATH, the daily flow is just `brain-up` / `brain-down` —

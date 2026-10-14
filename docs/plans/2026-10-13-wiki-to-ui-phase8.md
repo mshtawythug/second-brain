@@ -85,7 +85,11 @@ start (`brain-up.sh:155-175`, `ensure_supervised`). So **the user's next `brain-
 merges boots out and deletes `com.brain.build`** without any separate step. That is the intended
 R2 transition, but it must not surprise anyone: the **PR body** and the **CHANGELOG** both say so,
 in plain words, with the way back (`brain wiki install`, then `brain-install-launchd` from a
-pre-phase-8 build, or `brain-rebuild --only quartz` for a one-off rebuild).
+pre-phase-8 build, or `brain-rebuild --only quartz` for a one-off rebuild). **The first way back is
+not durable on this release:** its `brain-up` runs `brain-install-launchd` on every start, which
+boots out and deletes `com.brain.build` again. So keeping the daemon means staying on the earlier
+release, and on this release the wiki is rebuilt on request with `brain-rebuild --only quartz`
+(T7 review, LOW).
 
 ## 4. Exit criterion, made testable
 
@@ -531,8 +535,9 @@ proofs happen only in a `git archive` copy, never in the worktree** (phase-7 les
 ## 8. Risks
 
 - **R2 is not reversible on the user's machine by code alone.** Once `com.brain.build` is booted
-  out, getting it back means `brain wiki install` plus a reinstall. Mitigation: S1/S4; the
-  CHANGELOG names the way back.
+  out, getting it back means `brain wiki install` plus a reinstall from an earlier release, and
+  even that lasts only until the next `brain-up` on this one. Mitigation: S1/S4; the CHANGELOG
+  names the way back and says it is not durable.
 - **A stale wiki looks like a broken wiki.** Caddy keeps serving the last build indefinitely.
   Mitigation: the banner, `brain-status` and the doctor all say "dormant" (E8, E9).
 - **The watcher check cries wolf** on machines that never opted into daemons (R8-5 severity).
