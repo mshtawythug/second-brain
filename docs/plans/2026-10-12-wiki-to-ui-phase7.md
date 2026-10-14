@@ -278,7 +278,9 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Merge of `second-brain/master` | `5b13ab9` | master `c30449e` (PRs #22 and #23). One conflict, `CLAUDE.md`'s ceiling table (adjacent rows), both kept; `wiki/build_watcher.py` and `search.py` hops promoted. MERGED, not rebased, so every SHA in this file stays valid |
 | Round 16b — tests | `7d1ec3d` | `test_cli_ui_host.py` (the mixed-answer test reads the boxed error as one line), `ui_cli_support.py` (the double's `.get`): two guards the strict sweep at `5b13ab9` found red beside their targets |
 | Rounds 16/16b — plan | `1b45da4` (PROMOTED from "the commit that added this row") | this file: §10.1, §10.9 (R16-4 superseded, R16-7 NOTE, round-16b block), §10.24 rewritten for 16, 16b and the merge |
-| Plan review of `1b45da4` | **the commit that added this row** | this file: R16b-9 keeps its `6a46869` needle plus a `NOTE at HEAD (7d1ec3d)`; §10.24's round-16b mutation sentence corrected (9/9 at `6a46869` only with that needle) and the `7d1ec3d` entry check recorded |
+| Plan review of `1b45da4` | `e0d6067` (PROMOTED from "the commit that added this row") | this file: R16b-9 keeps its `6a46869` needle plus a `NOTE at HEAD (7d1ec3d)`; §10.24's round-16b mutation sentence corrected (9/9 at `6a46869` only with that needle) and the `7d1ec3d` entry check recorded |
+| Round 16c — code | `6f0d376` | `cli_ui.py` (`--include-confidential` help), `docs/cli-reference.md`, the phone guide, comments in `ui/server.py` and `ui/context.py`; pins in `test_cli_ui.py` and `test_reading_surface_pointers.py` |
+| Round 16c — plan | **the commit that added this row** | this file: §10.1, §10.9 (round-16c block), §10.24 (round-16c note) |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -465,7 +467,7 @@ marked, exit 0. At `4c164cb` (the final commit): 125/125, 44 marked, exit 0. At 
 44 marked, exit 0. Result at the commit that added this sentence (round 10): **round 0 22/22,
 round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round 7 9/9,
 round 8 6/6, round 9 8/8 + 10/10 + 9/9 + 3/3, round 10 16/16 — 144/144; 54 entries superseded at
-HEAD, every one marked; exit 0.** At the round-16 plan commit (rounds 11–15b and 16 added): **201/201, 65 superseded and marked, every round header parsed; exit 0.** At the rounds-16/16b plan commit: **210/210, 66 superseded and marked (R16-4 joined), every round header parsed; exit 0.** The round-header pattern was `Round (\d)` until round 10 — a
+HEAD, every one marked; exit 0.** At the round-16 plan commit (rounds 11–15b and 16 added): **201/201, 65 superseded and marked, every round header parsed; exit 0.** At the rounds-16/16b plan commit: **210/210, 66 superseded and marked (R16-4 joined), every round header parsed; exit 0.** At the round-16c plan commit: **214/214, 66 superseded and marked, every round header parsed; exit 0.** The round-header pattern was `Round (\d)` until round 10 — a
 "Round 10" block would have been skipped silently; it is `Round (\d+)` now. The address-based restructure superseded 16 entries at once; the
 validator listed all of them before any was marked. Its
 first run after round 9 flagged nine entries: six whose CLI code moved into `validate_host`, and
@@ -2490,6 +2492,42 @@ R16b-9 a trusted name with a mixed answer gets the alias refusal
   NOTE at HEAD (7d1ec3d): still applies, but goes red at `assert "only localhost is trusted" not in flat` — at `6a46869` the test asserted "pass --token" first on the raw output, and the alias refusal wraps that phrase across Rich's box edge, so the guard went red there, ahead of the assertion it targets; `7d1ec3d` reads the boxed error as one line and checks the alias text first
 ```
 
+**Round 16c — against `6f0d376`** (the independent audit of `e0d6067`: the `--include-confidential` help and two docs still described two confidential modes, not three). Strict clause 4.
+
+```text
+R16c-1 the --include-confidential help says it is ignored on loopback again
+  file:    src/brain/cli_ui.py
+  replace: '            "Serve bodies of documents marked sensitivity=confidential where "\n            "they are otherwise withheld: a non-loopback bind, or a loopback "\n            "alias (a name other than localhost that resolves to loopback). "\n            "No effect on a loopback address or localhost, where they are "\n            "always served."\n'
+  with:    '            "Serve bodies of documents marked sensitivity=confidential even on "\n            "a non-loopback bind. Ignored on loopback, where they are always "\n            "served."\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_include_confidential_help_names_all_three_modes
+  red at:  assert "Ignored on loopback" not in text
+
+R16c-2 cli-reference says the flag is ignored on loopback again
+  file:    docs/cli-reference.md
+  replace: 'and `--include-confidential` has no\neffect.'
+  with:    'and `--include-confidential` is ignored.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_cli_reference_documents_three_confidential_modes
+  red at:  assert "`--include-confidential` is ignored" not in section
+
+R16c-3 cli-reference drops the loopback-alias mode
+  file:    docs/cli-reference.md
+  replace: 'which of the three you got'
+  with:    'which of the two you got'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_cli_reference_documents_three_confidential_modes
+  red at:  assert "which of the two you got" not in section
+
+R16c-4 the phone guide says bodies are always served on loopback again
+  file:    docs/guides/brain-ui-on-your-phone.md
+  replace: 'On a loopback address or `localhost` they are\n  always served; a name other than `localhost` that resolves to loopback is guarded like a LAN\n  bind, so its bodies are withheld unless you pass `--include-confidential` too.'
+  with:    'On loopback they are always served.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_phone_guide_says_a_loopback_alias_withholds_bodies
+  red at:  assert "On loopback they are always served" not in text
+```
+
 ### 10.10 Review round 3 (2026-10-13)
 
 The phase-7 review of `5402c8f`: one MEDIUM, four LOW. Fixed in `3994ea3` (deps) and `5627743`
@@ -3001,3 +3039,42 @@ master's pytest-timeout, and nothing touched the worktree while the run went. An
 | `tests/test_ci_workflow.py` | exit 0, 22 passed |
 | `git merge-tree --write-tree HEAD second-brain/master` (`edd8986`, after `git fetch`; master moved again with PR #25, an eval baseline re-record) | exit 0, no conflicts |
 | The §10.9 validator | exit 0: 210 entries, 66 superseded and marked, every round header parsed |
+
+**Round 16c (`6f0d376`), the independent audit of `e0d6067`.** That audit passed everything else:
+a full suite of 9,179, 40/40 strict mutations, E2E and the security checks. It found one LOW.
+Three places still described two confidential modes: the `--include-confidential` help ("Ignored
+on loopback, where they are always served"), `docs/cli-reference.md` ("`--include-confidential`
+is ignored … which of the two you got") and the phone guide ("On loopback they are always
+served").
+
+Since round 16 there are three. Bodies are always served on a loopback ADDRESS or `localhost`. A
+non-loopback bind withholds them unless `--include-confidential` is passed. A loopback ALIAS — a
+name other than `localhost` that resolves to loopback — is guarded like a network bind and
+withholds them too. So on an alias the help called the flag a no-op exactly where it widens
+egress.
+
+All three sources now name the three modes, as do the comments on `build_context`'s lens and on
+`UiContext.serve_confidential_bodies`. A grep of README and `docs/`, excluding plans, specs,
+audits and handoffs, found no other "always served" or "ignored on loopback" claim.
+
+The pins:
+- a help test that reads the option's own `help`, so Rich's wrapping cannot split a phrase. It
+  matches by `opts`, because Typer vendors its own click, and an `isinstance(click.Option)` check
+  found nothing (the §10.2 trap);
+- a cli-reference test;
+- a phone-guide test.
+
+**Mutation evidence (round 16c):** 4 guards, R16c-1 to R16c-4, each on all five clauses with the
+strict clause 4, in a `git archive` copy of `6f0d376`. Every other non-superseded entry was then
+re-run strict at `6f0d376`, to check for drift, wherever it mutates a file this round touched or
+runs a test in `test_cli_ui.py` or `test_reading_surface_pointers.py`. That is 130 entries with
+the four above, and all 130 pass. L-3's browser entry was re-run with the `browser` extra, so it
+did not pass by skipping.
+
+**Verification:**
+- The code change is a help string, comments and docs, so the full suite was not re-run, at
+  team-lead's direction. The audit's run on `e0d6067` stands, plus CI on the PR.
+- The targeted modules passed: the UI CLI, host, security, wiring, pointers, lan, bind,
+  preflight and every doc-pin module, 408 passed, exit 0.
+- `ruff check` exit 0; `mypy src/` exit 0, 226 files.
+- The §10.9 validator exit 0, 214 entries, 66 superseded.
