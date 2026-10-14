@@ -4,10 +4,11 @@ Kept separate from ``test_ui_telemetry_persists.py`` — that module is about
 whether a telemetry row SURVIVES, this one is about whether the server starts
 and what it tells the user when it starts degraded.
 
-Nothing here binds a listening socket or starts uvicorn. The two branches that
-genuinely require a real bind — ``serve``'s startup hook and its ``EADDRINUSE``
-handler — are deliberately out of scope; they are covered by running the thing,
-not by a unit test that would have to fake the operating system to reach them.
+Nothing here starts uvicorn. ``claim_port`` binds real sockets, closed by each
+test that takes them. ``serve``'s ``EADDRINUSE`` handler, which this docstring
+used to scope out, is gone (review round 11): uvicorn never binds now, so there
+was nothing left for it to catch. ``serve`` itself is covered in
+``tests/test_cli_ui.py``.
 """
 from __future__ import annotations
 
@@ -22,8 +23,8 @@ from brain.errors import BrainError
 from brain.ui.context import UiContext
 from brain.ui.server import (
     TELEMETRY_DISABLED_NOTICE,
+    claim_port,
     preflight,
-    resolve_port,
     with_notice,
 )
 
@@ -36,9 +37,8 @@ UNREACHABLE_DB = "postgresql://brain:brain@127.0.0.1:1/nowhere"
 def occupied_port() -> Any:
     """A port genuinely held by a listening socket for the test's duration.
 
-    A real bind, not a patched ``_port_is_free``: the function under test exists
-    precisely because probing ports is fiddly, so faking the probe would test
-    the fake.
+    A real bind, not a faked socket: the function under test exists precisely
+    because claiming ports is fiddly, so faking the bind would test the fake.
     """
     with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
         sock.bind(("127.0.0.1", 0))
@@ -51,7 +51,9 @@ def occupied_port() -> Any:
 
 def test_an_occupied_port_is_stepped_over(occupied_port: int) -> None:
     """The default: take the next free port rather than making the user care."""
-    resolved = resolve_port(occupied_port, host="127.0.0.1", attempts=20, auto=True)
+    resolved, sockets = claim_port(occupied_port, host="127.0.0.1", attempts=20, auto=True)
+    for sock in sockets:
+        sock.close()
     assert resolved != occupied_port
     assert resolved > occupied_port
 
@@ -61,13 +63,13 @@ def test_giving_up_after_the_attempt_window_names_the_range(
 ) -> None:
     """Exhausting the window must fail with a remediation, not an IndexError.
 
-    ``attempts=1`` makes the candidate range empty, which is the boundary case:
-    the loop body never runs and control falls through to the raise. An
-    off-by-one that made the range non-empty would silently return a port that
-    was never probed.
+    ``attempts=1`` makes the window the one occupied port, which is the
+    boundary case: the loop tries it once and control falls through to the
+    raise. An off-by-one that widened the window would silently bind a port
+    outside the range it reports.
     """
     with pytest.raises(BrainError) as excinfo:
-        resolve_port(occupied_port, host="127.0.0.1", attempts=1, auto=True)
+        claim_port(occupied_port, host="127.0.0.1", attempts=1, auto=True)
 
     message = str(excinfo.value)
     assert "no free port found" in message
@@ -81,7 +83,7 @@ def test_giving_up_after_the_attempt_window_names_the_range(
 def test_auto_port_can_be_refused(occupied_port: int) -> None:
     """``--no-auto-port`` means the user chose the port deliberately."""
     with pytest.raises(BrainError) as excinfo:
-        resolve_port(occupied_port, host="127.0.0.1", attempts=20, auto=False)
+        claim_port(occupied_port, host="127.0.0.1", attempts=20, auto=False)
 
     assert "already in use" in str(excinfo.value)
 
@@ -89,14 +91,16 @@ def test_auto_port_can_be_refused(occupied_port: int) -> None:
 # ------------------------------------------------------------------ preflight --
 
 
-def test_an_unreachable_database_fails_before_the_port_is_bound() -> None:
+def test_an_unreachable_database_fails_before_the_server_starts() -> None:
     """A dead database must fail EARLY, and say how to diagnose it.
 
     The ordering is the point, and it is a usability property rather than a
-    correctness one: preflight runs before uvicorn binds, so a user with
+    correctness one: preflight runs before uvicorn serves, so a user with
     Postgres down gets an actionable message instead of a server that appears
     to start and then 500s on first use — and no orphaned listener to hunt down
-    and kill.
+    and kill. (Renamed in review round 11, "before the port is bound" stopped
+    being true: the port is claimed first and the CLI closes it on this failure
+    — ``tests/test_ui_server_bind.py::test_the_cli_closes_its_sockets_when_startup_fails``.)
     """
     cfg = Config(database_url=UNREACHABLE_DB, embedder="none")
 

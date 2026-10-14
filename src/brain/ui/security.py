@@ -39,7 +39,7 @@ import json
 import secrets
 from typing import TYPE_CHECKING, Any
 
-from .context import LOOPBACK_HOSTS
+from .context import Resolved, address_class
 from .errors import UiError, UiForbidden, UiUnsupportedMedia
 
 if TYPE_CHECKING:  # pragma: no cover — typing only
@@ -78,14 +78,14 @@ _STATIC_HEADERS: tuple[tuple[bytes, bytes], ...] = (
 )
 
 
-def is_loopback(host: str) -> bool:
+def is_loopback(host: str, resolved: Resolved | None = None) -> bool:
     """True when ``host`` is a loopback address the server may bind unguarded.
 
     ``0.0.0.0`` is emphatically **not** loopback — it is every interface, and
     treating it as safe is the exact mistake that would expose an
     unauthenticated corpus to the local network.
     """
-    return host.strip().lower() in LOOPBACK_HOSTS
+    return address_class(host.strip(), resolved) == "loopback"
 
 
 async def _send_error(send: Send, exc: UiError) -> None:
@@ -184,7 +184,13 @@ class RequestGuardMiddleware:
         # /api/, which is what the token actually protects.
         if ctx.token and path.startswith("/api/"):
             supplied = self._header(scope, TOKEN_HEADER)
-            if not secrets.compare_digest(supplied, ctx.token):
+            # Bytes, not str: compare_digest raises TypeError on a non-ASCII
+            # str, which made a `--token café` server answer every call with
+            # 500 (review round 5). The CLI refuses such a token too.
+            if not secrets.compare_digest(
+                supplied.encode("utf-8", "surrogateescape"),
+                ctx.token.encode("utf-8", "surrogateescape"),
+            ):
                 raise UiForbidden(
                     "missing or invalid access token", code="invalid_token"
                 )

@@ -1,4 +1,4 @@
-"""Static checks for dev dependency pins that protect local verification."""
+"""Static checks for dependency pins: the dev gate tools and the starlette floor."""
 
 import tomllib
 from pathlib import Path
@@ -311,4 +311,39 @@ def test_ceiling_is_the_next_minor_above_the_measured_version(name: str) -> None
         f"version constant is {measured}, whose next unreleased minor is "
         f"<{expected}. Move the measured version, the ceiling and the evidence "
         "block in pyproject.toml together."
+    )
+
+
+# `starlette` is a RUNTIME pin, not a dev one, but it is measured the same way.
+# 1.7.0 is the first release whose TrustedHostMiddleware keeps the brackets on an
+# IPv6 Host header; below it `[::1]:8765` is parsed as `[` and refused, which
+# breaks `brain ui --host ::` (phase-7 ruling W1). Measured 2026-10-13: 1.6.0
+# fails the two `::` security tests, 1.7.0 and 1.8.0 pass them.
+STARLETTE_LAST_BROKEN = "1.6.0"
+STARLETTE_FIRST_WORKING = "1.7.0"
+
+
+def _runtime_requirement(name: str) -> Requirement:
+    """Return the parsed `[project].dependencies` requirement for ``name``."""
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    for raw in data["project"]["dependencies"]:
+        requirement = Requirement(raw)
+        if requirement.name == name:
+            return requirement
+    raise AssertionError(f"no `{name}` requirement in [project].dependencies")
+
+
+def test_starlette_floor_excludes_the_release_that_breaks_ipv6_hosts() -> None:
+    """Review round 3: the floor was `>=0.47`, which admitted 1.6.0 — and the repo
+    venv held exactly 1.6.0, where the `::` bind refuses its own loopback URL."""
+    requirement = _runtime_requirement("starlette")
+
+    assert not requirement.specifier.contains(STARLETTE_LAST_BROKEN), (
+        f"`{requirement}` admits starlette {STARLETTE_LAST_BROKEN}, whose Host "
+        "parsing splits `[::1]:8765` on the first colon — see the evidence block "
+        "beside the pin in pyproject.toml"
+    )
+    assert requirement.specifier.contains(STARLETTE_FIRST_WORKING), (
+        f"`{requirement}` excludes {STARLETTE_FIRST_WORKING}, the release the "
+        "evidence block measured green"
     )

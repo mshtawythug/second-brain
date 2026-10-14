@@ -22,6 +22,135 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — `brain ui` is the reading surface; the wiki is demoted
+
+- **`brain-up` no longer opens the wiki in a browser.** `BRAIN_OPEN_BROWSER`
+  now defaults to `0` (it was `1`); set it to `1` to get the old behaviour.
+  The banner leads with `read: brain ui`, and the wiki line is labelled legacy.
+  The wiki still builds and serves — nothing was removed.
+- **`brain setup`'s closing report** names `brain ui` ahead of the legacy wiki
+  URL, and the MCP `brain_capture` description points at the `brain ui` tree
+  instead of the Quartz UI.
+
+### Added
+
+- **`brain ui --lan`** — read from a phone or tablet on the same network. It
+  binds this machine's LAN address and uses `--token` if given, otherwise mints
+  one, then prints the URL to open. It cannot be combined with `--host`, and
+  `brain ui` still never binds a non-loopback address without a token. Guide:
+  `docs/guides/brain-ui-on-your-phone.md`.
+- **A startup notice on wildcard binds** (`--host 0.0.0.0` or `::`): a browser
+  on another device is refused, because a wildcard bind accepts only loopback
+  Host names. The notice also says the token, not the bind, keeps other
+  clients out: a program can send a loopback Host header by hand. The docs
+  previously recommended `--host 0.0.0.0 --token` for remote reading, which
+  never worked from another device's browser.
+- **`--host` is judged by the address it will actually bind**, not by how it
+  is spelled or named. An IP address is checked numerically (no DNS); a
+  hostname is resolved ONCE, judged by EVERY address it resolves to, and the
+  server binds exactly those addresses — the name is never looked up again,
+  so a second DNS answer cannot move the bind away from what was judged. Any
+  unspecified address makes it a wildcard (with the notice, and the URL of the
+  wildcard's own loopback). `localhost` is the only loopback NAME, and only
+  when every address it resolves to is loopback — so a name that points at
+  `0.0.0.0` gets the notice, `localhost` mapped elsewhere needs a token like
+  any other bind, and any OTHER name needs a token even when it resolves to
+  `127.0.0.1` (`127.0.0.1.nip.io`, `ip6-localhost`, `localhost.` with its
+  trailing dot): whoever controls that name's DNS could re-point it at the
+  server and pass its Host check. Every spelling of the wildcard gets the
+  notice and every loopback address literal is loopback (`127.0.0.2` and
+  `::1` included).
+  Spellings that bound something unexpected are refused, each with a usage
+  error that says why:
+  - an empty value, or leading/trailing whitespace: asyncio bound `0.0.0.0`
+    and `::` together for `""`, with no notice;
+  - any IPv6 zone (`%…`), link-local included: a browser cannot open a zoned
+    URL, and an empty zone (`::%`) was read as the wildcard `::`;
+  - a numeric spelling the system reads differently from its canonical form,
+    such as `0`, `127.1` and `010.0.0.1`. The system reads `0` as `0.0.0.0`,
+    and platforms disagree on `010.0.0.1` (8.0.0.1 or 10.0.0.1). The error
+    names what the system would have bound;
+  - an IPv4-mapped address such as `::ffff:127.0.0.1`, which the IPv6-only
+    socket cannot bind;
+  - a link-local IPv6 address without a zone (`fe80::1`): it binds only with
+    a zone, and zones are refused;
+  - a non-ASCII value (`localhoſt`, the Kelvin sign), and a name with an empty
+    or over-long label (`.`, `a..b`, 64 characters), which escaped as a raw
+    traceback;
+  - anything that is neither an address nor a hostname, such as
+    `127.0.0.1:8080`, `http://127.0.0.1` or `0.0.0.0/0` (a port goes in
+    `--port`);
+  - brackets that are unbalanced, repeated, or around anything but an IPv6
+    literal: `[::1` used to fail later as "port already in use", and
+    `[127.0.0.1]` is not URL syntax.
+  This class of bug was first reported as closed after review round 8; it was
+  not, because each fix refused one more SPELLING. Classifying by the resolved
+  address closes it.
+
+### Fixed
+
+- **A tokened `brain ui` opened a page that could not load anything.** The
+  opened URL lacked the `#t=` fragment, and the panel printed it only for
+  non-loopback binds. Both now carry the token, percent-encoded — a `%` in a
+  token used to stop the page from booting.
+- **`brain ui --host ::` refused every request**, its own machine's included,
+  and died at startup with "no free port found": the port probe was IPv4-only,
+  and the IPv6 wildcard's Host allowlist held a value no browser sends. `::`
+  now gets the same loopback-only Host allowlist as `0.0.0.0` and serves
+  `http://[::1]:<port>/`. It stays IPv6-only, so IPv4 clients — including
+  `127.0.0.1` — cannot connect to it. `--host [::]` and `--host [::1]` now bind
+  instead of failing in `getaddrinfo`.
+- **A wildcard bind printed and opened `http://0.0.0.0:<port>/`** (refused with
+  400) and expected a write Origin no browser sends. It now prints and opens
+  the loopback URL, and accepts writes from it.
+- **`brain ui --host <an IPv6 address>` works.** Before, the port probe was
+  IPv4-only and refused the bind; an IPv6 address now gets a Host allowlist in
+  the bracketed, canonical form the browser sends (`[fd00::5]`), so its own URL
+  is served and every other Host is refused. Non-canonical spellings such as
+  `0:0:0:0:0:0:0:1` are normalised (that one is loopback).
+- **A non-ASCII `--token` made every API call fail with 500**
+  (`secrets.compare_digest` raises on a non-ASCII string). `brain ui` now
+  refuses a token that is not printable ASCII, or that has leading or trailing
+  whitespace, with a usage error; the server also compares the token as bytes.
+- **A host without IPv6 support** no longer prints a traceback for
+  `--host ::`; it exits with a message naming the missing address family.
+- **Every bind failure was reported as a busy port.** `brain ui` said "port
+  … already in use" or "no free port found" whatever the cause. Now only a
+  port in use is busy: an address this machine does not own, a name that does
+  not resolve, and a privileged port below 1024 each get their own message.
+- **The free port could be taken before the server bound it.** `brain ui`
+  probed the port, released it, and let the server bind it again; another
+  process could take it in between. The check is now the bind: the sockets it
+  opens are the ones served, and a port in use is reported by `brain ui`
+  itself rather than by the web server's startup error.
+- **A wildcard bind could hand the token to another program.** On macOS,
+  `brain ui --host 0.0.0.0` (or `::`) bound its port even when another
+  program already listened on that port's loopback address, and the
+  loopback URL it printed and opened — token included — reached that
+  program instead — and a program could take that loopback port after
+  `brain ui` had bound it, too. A wildcard bind no longer shares its port in
+  either order: it will not bind over another program's loopback listener
+  (`brain ui` moves to the next free port, or with `--no-auto-port` says the
+  port is in use), and it also holds its own loopback address, so nothing can
+  bind there afterwards — except in the instant between those two binds, a
+  window of microseconds that remains open. One side effect, on every
+  platform: restarting a wildcard bind while the last run's connections are
+  still closing may land on the next port.
+- **`brain ui --port` outside 1–65535 printed a traceback**, as did an
+  auto-port search walking past 65535; `--port 0` bound a different random
+  port on each address. Each is now a usage error, and the search stops at
+  65535 with a message.
+- **`brain ui --host LOCALHOST` refused its own URL with 400** — as did any
+  mixed-case hostname. A browser lower-cases the host it sends and the Host
+  check is case-sensitive, so the allowlist and URL kept a spelling no browser
+  uses. Hostnames are now lower-cased at the CLI.
+
+### Dependencies
+
+- **`starlette>=1.7`** (was `>=0.47`). Earlier releases parse the IPv6 Host
+  `[::1]:8765` as `[` and refuse it, which breaks `brain ui --host ::`.
+  Measured: 1.6.0 fails the two `::` security tests; 1.7.0 and 1.8.0 pass.
+
 ## [0.3.0] - 2026-08-07
 
 ### Fixed — configuration resolution and the background daemons

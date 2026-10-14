@@ -2195,7 +2195,6 @@ def test_every_guard_can_fail(
         guard(mutated)  # type: ignore[operator]
 
 
-
 #: Assertions that no single mutation can reach, keyed by
 #: ``"<guard>::<assertion source text>"``, mapped to WHY.
 #:

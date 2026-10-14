@@ -6,6 +6,8 @@
 
 The [optional wiki view](#wiki-rendered-view-optional) renders your vault as an Obsidian-style site (graph, backlinks, full-text search, People Hub) via Quartz. Above: a synthetic demo vault — regenerate with [`bin/brain-wiki-gif`](../bin/brain-wiki-gif).
 
+> **The wiki is now a legacy view.** `brain ui` is the primary reading surface: it searches with the same hybrid ranking as `brain search`, and it can edit. The wiki still builds and serves exactly as described below, but the daily loop no longer points at it. `brain-up` stops opening it unless `BRAIN_OPEN_BROWSER=1`. To read from a phone, see [Reading your brain from a phone](guides/brain-ui-on-your-phone.md).
+
 ## Vault model
 
 Brain has two storage tiers, both searchable through the same hybrid index:
@@ -176,8 +178,9 @@ brain-up
 ```
 
 `brain-up` starts the vault sync watcher, applies the brain Quartz overlay,
-runs the cold-start build (if `current/` is empty or unhealthy), starts the
-build watcher, and opens the browser. After it returns, every save in
+runs the cold-start build (if `current/` is empty or unhealthy), and starts the
+build watcher. It opens the wiki in a browser only with `BRAIN_OPEN_BROWSER=1`
+(the wiki is a legacy view; read in `brain ui`). After it returns, every save in
 `~/brain-vault/` triggers a fresh background rebuild, and open tabs
 auto-reload the moment the new build is swapped in. See [Daily use —
 `bin/` scripts](#daily-use--bin-scripts) for the full daily workflow. The
@@ -343,8 +346,8 @@ Four convenience scripts under `bin/` cover the daily flow. They assume `bin/` i
 
 ```bash
 brain-up       # start vault sync watcher → apply Quartz overlay → cold-start
-               # build (if needed) → start build watcher → open browser.
-               # Idempotent.
+               # build (if needed) → start build watcher. Opens the wiki only
+               # with BRAIN_OPEN_BROWSER=1. Idempotent.
 brain-down     # stop both watchers. Caddy is left running so brain.test keeps
                # serving the last good build.
 brain-rebuild  # full-corpus rebuild: embeddings → summaries → search →
@@ -369,8 +372,8 @@ Env overrides:
 | Variable | Default | Purpose |
 |---|---|---|
 | `BRAIN_VAULT_PATH` | `~/brain-vault` | Vault directory the watchers + builds operate against. |
-| `BRAIN_WIKI_PORT` | `8080` | Port `brain-up` opens / `brain-status` curls. Caddy must be configured to listen on it (see [Serve locally](#serve-locally)). |
-| `BRAIN_OPEN_BROWSER` | `1` | Set `0` to skip the auto-`open` after `brain-up`. |
+| `BRAIN_WIKI_PORT` | `8080` | Port the wiki URL uses: `brain-up` opens it (only with `BRAIN_OPEN_BROWSER=1`), `brain-status` curls it. Caddy must be configured to listen on it (see [Serve locally](#serve-locally)). |
+| `BRAIN_OPEN_BROWSER` | `0` | Set `1` to open the wiki after `brain-up`. Opt-in since the wiki became a legacy view; `brain ui` is the reading surface. |
 | `BRAIN_WIKI_KEEP_BUILDS` | `3` | How many old build dirs under `builds/` to retain after each swap. Lets you `git diff`-style inspect prior builds. |
 | `BRAIN_NO_OVERLAY` | `0` | Set `1` to skip the Quartz overlay step at startup. Useful when iterating on stock Quartz behavior. |
 | `BRAIN_NO_BUILD_WATCHER` | `0` | Set `1` to skip starting the build watcher (used by the bin-script tests; also handy when debugging the sync watcher in isolation). |

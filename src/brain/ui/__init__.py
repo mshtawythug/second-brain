@@ -31,8 +31,8 @@ from .context import UiContext
 #: ``import brain.ui`` pull :mod:`brain.ui.app`, and through it ``starlette`` —
 #: defeating the whole point of keeping :mod:`brain.ui.tree` and
 #: :mod:`brain.ui.render` importable as pure modules, and making
-#: ``tests/test_ui_import_cost.py`` unsatisfiable. Callers that need the
-#: application import it from its own module:
+#: ``tests/test_cli_ui.py::test_ui_tree_and_render_import_without_starlette_or_uvicorn``
+#: fail. Callers that need the application import it from its own module:
 #:
 #:     from brain.ui.app import create_app
 __all__ = ["UiContext"]

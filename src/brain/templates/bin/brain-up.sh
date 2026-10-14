@@ -2,6 +2,12 @@
 # Start the second-brain wiki + sync watcher (blue/green serve edition).
 # Idempotent — safe to re-run.
 #
+# Reading surface (phase 7, R1 "Demoted", 2026-10-12): `brain ui` is where you
+# read. This script still builds and serves the wiki, but it no longer opens it
+# in a browser unless BRAIN_OPEN_BROWSER=1, and its banner names `brain ui`
+# first. `brain ui` is foreground-only by design (no daemon), so this script
+# names it rather than starting it.
+#
 # Architecture (post blue/green migration + 2026-05-08 launchd handoff):
 #   - Caddy serves <vault>/.quartz/current/ statically on :8080 + brain.test.
 #     This script does NOT spawn Quartz's --serve dev server anymore.
@@ -31,7 +37,7 @@
 # Env overrides:
 #   BRAIN_VAULT_PATH        (default: ~/brain-vault)
 #   BRAIN_WIKI_PORT         (default: 8080 — for the URL we curl/open)
-#   BRAIN_OPEN_BROWSER      (default: 1; set 0 to skip)
+#   BRAIN_OPEN_BROWSER      (default: 0; set 1 to open the wiki — opt-in since R1)
 #   BRAIN_NO_OVERLAY        (default: 0; set 1 to skip the overlay step)
 #   BRAIN_WIKI_KEEP_BUILDS  (default: 3 — old build dirs retained per swap)
 #   BRAIN_NO_BUILD_WATCHER  (default: 0; set 1 to skip launchd supervision —
@@ -187,7 +193,8 @@ apply_overlay
 cold_start_build
 ensure_supervised
 
-if [[ "${BRAIN_OPEN_BROWSER:-1}" == '1' ]]; then
+# Opt-in since phase 7 (R1): the daily loop no longer points at the wiki.
+if [[ "${BRAIN_OPEN_BROWSER:-0}" == '1' ]]; then
     if wait_for_url; then
         if command -v open >/dev/null 2>&1; then
             open "$URL"
@@ -197,23 +204,26 @@ if [[ "${BRAIN_OPEN_BROWSER:-1}" == '1' ]]; then
     fi
 fi
 
-WATCH_PID_VALUE='?'
-BUILD_PID_VALUE='?'
+# The banner can print before the launchd wrappers have written their pid
+# files. Until phase 7 (R1) that was a rare race, masked by wait_for_url's 30s
+# wait; since R1 that wait only runs with BRAIN_OPEN_BROWSER=1, so on the
+# default path a missing pid file is the COMMON case. Say where to look rather
+# than printing a bare '?'.
+PID_PENDING='not written yet — check brain-status'
+WATCH_PID_VALUE="$PID_PENDING"
+BUILD_PID_VALUE="$PID_PENDING"
 [[ -f "$WATCH_PID" ]] && WATCH_PID_VALUE="$(cat "$WATCH_PID")"
 [[ -f "$BUILD_PID" ]] && BUILD_PID_VALUE="$(cat "$BUILD_PID")"
 
 # brain (2026-05-08): note the supervisor in the report so the user
-# knows their daemons survive terminal close + crashes. The pid '?'
-# fallback handles the brief race between launchctl bootstrap and the
-# wrapper writing the pid file (it's almost always populated by the
-# time wait_for_url succeeds, but the fallback keeps the report
-# readable in the unlikely race).
+# knows their daemons survive terminal close + crashes.
 SUPERVISOR='launchd (KeepAlive)'
 [[ "${BRAIN_NO_BUILD_WATCHER:-0}" == '1' ]] && SUPERVISOR='unsupervised (BRAIN_NO_BUILD_WATCHER=1)'
 
 echo
 echo '🧠 brain is up:'
-echo "   wiki:       $URL  (also brain.test if Caddy is configured)"
+echo '   read:       brain ui   (search, read and edit — opens a browser)'
+echo "   wiki:       $URL  (legacy; still built until R2 — BRAIN_OPEN_BROWSER=1 opens it)"
 echo "   vault:      re-syncing on file changes (pid $WATCH_PID_VALUE)"
 echo "   build:      re-rendering on vault changes (pid $BUILD_PID_VALUE)"
 echo "   supervisor: $SUPERVISOR"

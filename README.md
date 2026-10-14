@@ -11,7 +11,7 @@ Local, queryable knowledge base and note vault with hybrid search and an entity-
 [![PyPI downloads](https://img.shields.io/pypi/dm/secondbrain-py)](https://pypistats.org/packages/secondbrain-py)
 [![GitHub stars](https://img.shields.io/github/stars/mshtawythug/second-brain)](https://github.com/mshtawythug/second-brain)
 
-Stores career docs, interview prep, Krisp transcripts, Slack threads, Gmail, and authored Markdown notes in Postgres + pgvector. Any agent reaches all of it through the `brain` CLI or the bundled `brain-mcp` MCP server — no re-pasting context into every chat. You get the same corpus through the CLI, a [local web UI](#local-web-ui), or a [rendered wiki](docs/vault-and-wiki.md).
+Stores career docs, interview prep, Krisp transcripts, Slack threads, Gmail, and authored Markdown notes in Postgres + pgvector. Any agent reaches all of it through the `brain` CLI or the bundled `brain-mcp` MCP server — no re-pasting context into every chat. You read it through the CLI or the [local web UI](#local-web-ui); the older [rendered wiki](docs/vault-and-wiki.md) still builds, as a legacy view.
 
 The everyday loop — capture a note, search it back, read the top hit, check the corpus:
 
@@ -140,13 +140,15 @@ Full flags and examples for these and `brain audio` are in the [CLI reference](d
 
 ## Local web UI
 
-If you would rather read and write in a browser, `brain ui` serves a single-user web surface over the same corpus — browse the tree, search with facets, read a document, and create, edit, move, or delete vault notes:
+`brain ui` is the primary reading surface: a single-user web app over the same corpus. You can browse the tree, search with facets, read a document, and create, edit, move, or delete vault notes:
 
 ```bash
 brain ui                                  # binds 127.0.0.1:8765 and opens a browser
 brain ui --read-only                      # serve the corpus, block every mutation
-brain ui --host 0.0.0.0 --token <secret>  # a shared secret is required off loopback
+brain ui --lan --read-only                # read from your phone: LAN address + a token
 ```
+
+Reading from another device always needs a token. `--lan` binds this machine's LAN address and mints a token, then prints the URL to open. See [Reading your brain from a phone](docs/guides/brain-ui-on-your-phone.md) for the manual `--host <LAN address> --token <secret>` form and the caveats.
 
 It adds no runtime dependency — `starlette` and `uvicorn` already ship as transitive deps of the MCP SDK — and the front end is hand-written static assets with no bundler and no CDN, so it works fully offline.
 
