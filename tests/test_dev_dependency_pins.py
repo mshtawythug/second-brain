@@ -39,6 +39,13 @@ MEASURED_RUFF_CEILING = "0.18"
 MEASURED_MYPY_VERSION = "2.4.0"
 MEASURED_MYPY_CEILING = "2.5"
 
+# `pytest-timeout`, added 2026-10-12 so a hung browser test FAILS the run instead
+# of stalling it (tests/browser_timeout.py). 2.4.0 is the newest release and the
+# one measured (evidence block beside the pin in pyproject.toml), and the cap is
+# the next unreleased minor above it, by the same rule as ruff and mypy.
+MEASURED_PYTEST_TIMEOUT_VERSION = "2.4.0"
+MEASURED_PYTEST_TIMEOUT_CEILING = "2.5"
+
 # The gate tools, and why they are tested together: both are what
 # `scripts/hooks/pre-commit` and ci.yml's `lint` job run, and both were unbounded
 # until 2026-08-20. Parameterising over this keeps the two assertions from
@@ -58,6 +65,7 @@ MEASURED_PINS = {
     "coverage": (MEASURED_COVERAGE_VERSION, MEASURED_COVERAGE_CEILING),
     "ruff": (MEASURED_RUFF_VERSION, MEASURED_RUFF_CEILING),
     "mypy": (MEASURED_MYPY_VERSION, MEASURED_MYPY_CEILING),
+    "pytest-timeout": (MEASURED_PYTEST_TIMEOUT_VERSION, MEASURED_PYTEST_TIMEOUT_CEILING),
 }
 
 
@@ -225,6 +233,36 @@ def test_gate_tool_is_capped_at_the_measured_ceiling(tool: str) -> None:
         "is controlled, then update this constant AND the evidence block beside "
         "the pin in pyproject.toml. To LOWER it, record which version regressed "
         "and on what."
+    )
+
+
+def test_pytest_timeout_is_capped_at_the_measured_ceiling() -> None:
+    """`pytest-timeout` must stay capped at the next minor above the release
+    measured. (That the cap admits that release, and is its next minor, is
+    checked for every MEASURED_PINS entry below.)
+
+    WHY CAPPED. The plugin is the only thing that turns a hung browser test into
+    a failure: `page.evaluate` has no timeout of its own. A release that changed
+    how the `timeout` marker is read, or how the `thread` method ends a run,
+    would put the stall back silently, with the suite still green on every
+    healthy run. So the next minor is measured before it becomes the guard. WHY
+    IN `dev`: `--strict-markers` makes `pytest.mark.timeout` a hard error
+    wherever the plugin is missing, and every CI job installs `dev`.
+    """
+    requirement = _dev_requirement("pytest-timeout")
+    upper_bounds = {
+        (spec.operator, spec.version)
+        for spec in requirement.specifier
+        if spec.operator in {"<", "<="}
+    }
+
+    assert upper_bounds == {("<", MEASURED_PYTEST_TIMEOUT_CEILING)}, (
+        f"`pytest-timeout` is capped at {sorted(upper_bounds)} but the measured "
+        f"ceiling is <{MEASURED_PYTEST_TIMEOUT_CEILING}. To RAISE it: install the "
+        "new version in a scratch venv, run the CI browser command clean (all "
+        "green) and under the fitText hang mutant (`else hi = mid;`; it must "
+        "FAIL, not stall), then move MEASURED_PYTEST_TIMEOUT_VERSION, this "
+        "ceiling AND the evidence block beside the pin in pyproject.toml."
     )
 
 

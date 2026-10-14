@@ -302,6 +302,16 @@ def test_combining_the_two_source_filters_is_an_empty_conjunction(
 #: records what the ranker asked Postgres before this change; if a diff appears,
 #: the question is what moved in the ranking SQL and whether the eval baseline
 #: must be re-recorded — never how to make the comparison green again.
+#:
+#: **One deliberate update, 2026-10-13: ``vector_no_filters`` only.** The vector
+#: leg became an iterative HNSW scan with a NaN-safe floor, inside a
+#: ``MATERIALIZED`` CTE (``docs/specs/2026-10-13-search-vector-leg-design.md``),
+#: and it now runs after two settings statements, so its index moved from 2 to 4.
+#: That is exactly the ranking move this pin exists to surface. It was answered
+#: the way the paragraph above demands: ``brain eval`` was run before and after,
+#: and ``ci.json`` was re-recorded in the same change. The new entry was captured
+#: from a real emission through :class:`RecordingConnection`, not hand-edited.
+#: The two FTS entries are untouched.
 PRE_CHANGE_SQL_PATH = Path(__file__).parent / "fixtures" / (
     "pre_change_hybrid_search_sql.json"
 )
@@ -346,7 +356,7 @@ def _statements(conn: Any, embedder: Any, **kwargs: Any) -> list[str]:
     [
         ("fts_no_filters", 1, {"fts_only": True}),
         ("fts_source_kind", 1, {"fts_only": True, "source_kind": "gmail"}),
-        ("vector_no_filters", 2, {"fts_only": False}),
+        ("vector_no_filters", 4, {"fts_only": False}),
     ],
 )
 def test_the_whole_path_emits_byte_identical_sql_when_the_flag_is_off(

@@ -66,6 +66,7 @@ from typing import Any
 import pytest
 
 from tests.ui_graph_geometry import (
+    _CUT_LENGTHS_JS,
     _EXTENTS_JS,
     _FACES,
     _INSPECTOR_BOX_JS,
@@ -78,10 +79,10 @@ from tests.ui_graph_geometry import (
     _TWO_FRAMES_JS,
     _assert_optimal_cuts,
     _assert_the_face_bit,
-    _crowd_titles,
     _fits,
     _halo_shortfalls,
     _intersections,
+    _open_ring,
     _server_ring_payload,
     _spec_constants_pin_fixture,  # noqa: F401 — autouse: pins graph.js's constants after each test
     _use_face,
@@ -251,17 +252,6 @@ def test_the_root_label_sits_above_the_root_on_a_row_of_its_own(page: Any) -> No
 
 
 # --------------------------------------------------------- crowded rings --
-
-
-def _open_ring(page: Any, count: int, width: int) -> list[tuple[str, str]]:
-    titles = _crowd_titles(count)
-    page.set_viewport_size({"width": width, "height": 800})
-    _GRAPH["payload"] = _server_ring_payload(titles)
-    # A distinct note per count: the client caches each note's graph, so
-    # reopening the same id would draw the PREVIOUS ring without a request.
-    _open(page, f"aaaaaaaa-0000-4000-8000-{0x900 + count:012x}")
-    page.wait_for_selector(".local-graph svg")
-    return titles
 
 
 _WIDTHS = [320, 400, 1280]
@@ -669,22 +659,11 @@ def test_the_row_clearance_covers_the_label_halo(page: Any, stacking: str) -> No
         assert between > 0, f"precondition: the stacked boxes overlap ({between:.2f})"
 
 
-#: A synthetic title well past the character cap.
-_LONG_TITLE = "Synthetic Planning Note With A Longer Title"
-
-#: The measured lengths of ``cuts`` on one neighbour's label — set on it,
-#: measured, and put back.
-_CUT_LENGTHS_JS = """([id, cuts]) => {
-    const text = [...document.querySelectorAll('.local-graph [data-note-id]')]
-        .find((n) => n.getAttribute('data-note-id') === id).querySelector('text');
-    const shown = text.textContent;
-    const lengths = cuts.map((cut) => {
-        text.textContent = cut;
-        return text.getComputedTextLength();
-    });
-    text.textContent = shown;
-    return lengths;
-}"""
+#: A synthetic title well past the character cap, whose 28th and 29th
+#: characters are both letters ("...Note With" | "in"). The cut trims a space
+#: before "…", so a 29th character that is a space would make a cap of 29
+#: render the same as 28, and (15m) could not tell them apart.
+_LONG_TITLE = "Synthetic Planning Note Within A Longer Title"
 
 
 def test_a_label_is_cut_one_short_of_the_cap_when_only_that_fits(page: Any) -> None:
@@ -770,6 +749,9 @@ def test_a_title_past_the_cap_is_cut_at_the_cap_where_more_would_fit(page: Any) 
         (ALPHA_ID, _LONG_TITLE, centre, centre - 80),
     ])
 
+    assert not _LONG_TITLE[_SPEC_LABEL_MAX_CHARS].isspace(), (
+        "precondition: the character past the cap is a space, so its cut is the cap's"
+    )
     over = f"{_LONG_TITLE[:_SPEC_LABEL_MAX_CHARS + 1]}…"
     (over_length,) = page.evaluate(_CUT_LENGTHS_JS, [ALPHA_ID, [over]])
     fit = next(fit for fit in _fits(page, rows=True) if fit["id"] == ALPHA_ID)

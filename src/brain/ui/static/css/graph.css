@@ -69,10 +69,19 @@
      is pinned by test_the_root_label_sits_above_the_root_on_a_row_of_its_own;
      test_no_two_labels_overlap_on_the_server_ring pins only that no two
      boxes meet):
-                              320px  400px  1280px
-       root above 12 o'clock    48     60     56
-       root above 3/9 o'clock   12     14     13
-       root label above its own circle: 3px at all three.
+                                          320px  400px  1280px
+       root above 12 o'clock                42     53     50
+       root above 3/9 o'clock               17     21     20
+       root label above its own circle      2.5    2.8    2.4
+       neighbour label below its own circle 3.0    3.9    3.6
+       (the last two are box-to-circle; the last is LABEL_GAP's 4 units at
+       each width's scale)
+     (Vertical rows re-measured 2026-10-13 at LABEL_GAP 4, after js/graph.js
+     began hanging each neighbour label by its measured box. At gap 2 they
+     read 44/55/51, 15/19/18 and 1.5/1.9/1.8. Before hanging, the first two
+     read 48/60/56 and 12/14/13, and every neighbour label's box reached 2.4
+     to 3.3px INSIDE its own circle. The horizontal figures above are
+     unchanged, since hanging moves labels only vertically.)
      The spill is INK overflow: it never widens the inspector's scroll box,
      it is CUT — so the guards assert each label's box lies inside the
      inspector, not merely that nothing scrolls. */

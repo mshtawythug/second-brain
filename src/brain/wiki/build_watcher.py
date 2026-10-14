@@ -21,6 +21,15 @@ Design notes:
 - ``observer_factory`` is the test seam: production passes ``None`` and
   watchdog's real ``Observer`` is used; tests pass a fake observer
   with an ``inject(event)`` method to drive the handler synchronously.
+- ``timer_factory`` is the clock seam, the same shape: production gets
+  a daemon ``threading.Timer``, and tests pass a manual timer they fire
+  themselves, so debounce tests never race the wall clock.
+
+Past the 800-line ceiling (CLAUDE.md has its row). Its one growth since
+the base, on fix/build-watcher-debounce-clock, is that seam: the
+``_DebounceTimer`` protocol, ``_daemon_timer``, and its threading through
+``run_watcher`` and ``_Handler``. A test whose 5ms sleeps overran a 50ms
+debounce window under load could not be made deterministic without it.
 """
 from __future__ import annotations
 
@@ -34,6 +43,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers.api import BaseObserver
@@ -85,6 +95,26 @@ def _is_single_md_file(batch: frozenset[Path]) -> bool:
     return next(iter(batch)).suffix.lower() == ".md"
 
 
+class _DebounceTimer(Protocol):
+    """What the debouncer needs of a timer: ``threading.Timer``'s two calls."""
+
+    def start(self) -> None: ...
+
+    def cancel(self) -> None: ...
+
+
+def _daemon_timer(interval: float, fire: Callable[[], None]) -> _DebounceTimer:
+    """The production ``timer_factory``: a daemon ``threading.Timer``.
+
+    Growth past the ceiling, recorded in the module docstring: this and
+    ``_DebounceTimer`` are the clock seam that lets the debounce tests fire
+    the timer themselves instead of sleeping against it.
+    """
+    timer = threading.Timer(interval, fire)
+    timer.daemon = True
+    return timer
+
+
 @dataclass
 class _WatcherState:
     """Mutable state shared between Observer thread and timer thread.
@@ -112,7 +142,7 @@ class _WatcherState:
     """
 
     lock: threading.Lock = field(default_factory=threading.Lock)
-    timer: threading.Timer | None = None
+    timer: _DebounceTimer | None = None
     # Paths that triggered events during the current debounce window.
     # Populated by on_any_event (under ``lock``).  _fire drains this
     # atomically: either into a new build (no in-flight build) or into
@@ -144,6 +174,7 @@ def run_watcher(
     on_build: Callable[[BuildResult], None] | None = None,
     observer_factory: Callable[[], BaseObserver] | None = None,
     refresh_runner: Callable[[], None] | None = None,
+    timer_factory: Callable[[float, Callable[[], None]], _DebounceTimer] = _daemon_timer,
 ) -> None:
     """Block until the stop event fires, rebuilding on debounced events.
 
@@ -171,6 +202,10 @@ def run_watcher(
     exercise handler logic without touching the real DB or vault. See
     :class:`_Handler` for the full contract.
 
+    ``timer_factory`` makes the debounce timer from an interval and a
+    callback; it defaults to a daemon ``threading.Timer``. Tests pass a
+    manual timer so they can fire the debounce themselves.
+
     The function returns when ``state.stop_event`` is set — production
     flips it from a SIGINT/SIGTERM handler installed by :func:`main`;
     tests flip it directly.
@@ -184,6 +219,7 @@ def run_watcher(
         keep=keep,
         on_build=on_build,
         refresh_runner=refresh_runner,
+        timer_factory=timer_factory,
     )
     factory: Callable[[], BaseObserver] = observer_factory or Observer
     observer = factory()
@@ -302,8 +338,10 @@ class _Handler(FileSystemEventHandler):
         keep: int,
         on_build: Callable[[BuildResult], None] | None,
         refresh_runner: Callable[[], None] | None = None,
+        timer_factory: Callable[[float, Callable[[], None]], _DebounceTimer] = _daemon_timer,
     ) -> None:
         self._state = state
+        self._timer_factory = timer_factory
         self._vault = vault
         self._quartz_dir = quartz_dir
         self._debounce_seconds = debounce_seconds
@@ -365,8 +403,7 @@ class _Handler(FileSystemEventHandler):
         with self._state.lock:
             if self._state.timer is not None:
                 self._state.timer.cancel()
-            timer = threading.Timer(self._debounce_seconds, self._fire)
-            timer.daemon = True
+            timer = self._timer_factory(self._debounce_seconds, self._fire)
             self._state.timer = timer
             timer.start()
 
