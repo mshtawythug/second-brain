@@ -132,6 +132,10 @@ def test_the_process_scan_recognises_a_running_watcher(cmd: str) -> None:
         "/x/bin/brain search 'vault sync --watch'",
         "/usr/bin/python3 -m brain.wiki.build_watcher --vault /v --keep 3",
         "/x/bin/brain ingest-stdin --source krisp",
+        # Near-misses that pin the token ORDER (phase-8 audit): every word is
+        # present, unquoted, but not as `brain vault sync ... --watch`.
+        "/x/bin/brain search vault sync --watch",
+        "/x/bin/brain vault export --watch",
     ],
 )
 def test_the_process_scan_ignores_everything_else(cmd: str) -> None:

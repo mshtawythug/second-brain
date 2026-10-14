@@ -1,6 +1,7 @@
 """Tests for brain.bin.monitor — cross-platform shims and core logic."""
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -346,3 +347,56 @@ def test_snapshot_labels_a_stopped_build_watcher_dormant(
     # The state column, not the line: tmp paths in it can contain any word.
     assert build.split("pid=")[0].split("build watcher", 1)[1].strip() == "dormant (R2)", out
     assert "process count vs pid file" not in out, out
+
+
+def _snapshot_with_build_watchers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    build_seen: int,
+    build_pid_text: str | None,
+) -> str:
+    """A snapshot with one healthy sync watcher, so only the build half can flag."""
+    monkeypatch.setenv("BRAIN_VAULT_PATH", str(tmp_path))
+    monkeypatch.setenv("BRAIN_WIKI_PORT", "18080")
+    monkeypatch.setenv("BRAIN_HOME", str(tmp_path))
+    monkeypatch.setattr("brain.bin.monitor.WATCH_PID", tmp_path / "watch.pid")
+    monkeypatch.setattr("brain.bin.monitor.BUILD_PID", tmp_path / "build.pid")
+    (tmp_path / "watch.pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+    if build_pid_text is not None:
+        (tmp_path / "build.pid").write_text(build_pid_text, encoding="utf-8")
+    monkeypatch.setattr(
+        "brain.bin.monitor._pgrep_count",
+        lambda pattern: 1 if "vault sync" in pattern else build_seen,
+    )
+
+    assert main([]) == 0
+    return capsys.readouterr().out
+
+
+def test_snapshot_flags_an_orphaned_second_build_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Two build watchers is an orphan whatever R2 expects (phase-8 audit)."""
+    out = _snapshot_with_build_watchers(
+        tmp_path, monkeypatch, capsys, build_seen=2, build_pid_text=None
+    )
+
+    assert "process count vs pid file" in out, out
+    assert "build_watcher pgrep=2  pidfile=-" in out, out
+
+
+def test_snapshot_flags_a_build_pid_file_naming_no_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pid file with no matching process is a stale pid, which is still worth a line."""
+    finished = subprocess.Popen(["/usr/bin/true"])  # noqa: S603 — fixed argv
+    finished.wait()
+
+    out = _snapshot_with_build_watchers(
+        tmp_path, monkeypatch, capsys, build_seen=0, build_pid_text=f"{finished.pid}\n"
+    )
+
+    assert "process count vs pid file" in out, out
+    assert f"build_watcher pgrep=0  pidfile={finished.pid}" in out, out
