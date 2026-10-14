@@ -38,6 +38,7 @@ from typing import TYPE_CHECKING
 from dotenv import dotenv_values
 
 from .bin.launchd import _LABELS as DAEMON_LABELS
+from .bin.launchd import resolve_launchctl
 from .config import Config, _brain_home_dotenv, _brain_home_root, dotenv_chain
 from .wiki.build_swap import EXIT_CONFIG_ERROR
 
@@ -89,11 +90,6 @@ def _default_launchd_dir() -> Path:
     )
 
 
-def _default_launchctl() -> str:
-    """The ``launchctl`` binary, honouring the ``BRAIN_LAUNCHCTL`` seam."""
-    return os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
-
-
 def runtime_doctor_checks(
     cfg: Config,
     *,
@@ -124,7 +120,7 @@ def runtime_doctor_checks(
         *dotenv_doctor_check(),
         *daemon_doctor_check(
             launchd_dir=resolved_dir,
-            launchctl=launchctl if launchctl is not None else _default_launchctl(),
+            launchctl=launchctl if launchctl is not None else resolve_launchctl(),
             platform=resolved_platform,
             wiki_stale=wiki_stale,
         ),

@@ -36,6 +36,19 @@ class LaunchdError(BrainError):
     """Raised when a launchd plist render or launchctl operation fails."""
 
 
+def resolve_launchctl() -> str:
+    """The ``launchctl`` to run: ``$BRAIN_LAUNCHCTL``, else the bare name on ``PATH``.
+
+    The one place this default is resolved. ``install_plists`` and
+    ``uninstall_plists`` default to it rather than to a literal, so a direct call
+    honours the seam exactly as the entry points, ``brain setup`` and
+    ``brain doctor`` do. A literal default never read the environment, so a
+    caller that omitted ``launchctl=`` ran the real binary whatever
+    ``BRAIN_LAUNCHCTL`` said, including from inside the test suite.
+    """
+    return os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
+
+
 # ---------------------------------------------------------------------------
 # Public helpers (test-visible)
 # ---------------------------------------------------------------------------
@@ -125,7 +138,7 @@ def render_plist(
 def install_plists(
     brain_home: Path,
     launchd_dir: Path,
-    launchctl: str = "launchctl",
+    launchctl: str | None = None,
     vault_path: Path | None = None,
 ) -> None:
     """Write both plists and load them into launchd. Idempotent.
@@ -135,7 +148,10 @@ def install_plists(
     2. Write to *launchd_dir*/<label>.plist atomically.
     3. ``launchctl bootout`` (suppress errors — idempotent).
     4. ``launchctl bootstrap`` (fail loudly on error).
+
+    ``launchctl`` defaults to :func:`resolve_launchctl`, never a literal.
     """
+    launchctl = launchctl if launchctl is not None else resolve_launchctl()
     launchd_dir.mkdir(parents=True, exist_ok=True)
 
     # Install the foreground wrapper scripts the plists reference.
@@ -195,7 +211,7 @@ def install_plists(
 
 def uninstall_plists(
     launchd_dir: Path,
-    launchctl: str = "launchctl",
+    launchctl: str | None = None,
 ) -> None:
     """Bootout and remove both plists. Idempotent.
 
@@ -203,7 +219,10 @@ def uninstall_plists(
     1. Probe ``launchctl print gui/<uid>/<label>`` — if loaded, bootout.
     2. Remove the plist file if it exists.
     3. Print a "nothing to remove" message if neither action was taken.
+
+    ``launchctl`` defaults to :func:`resolve_launchctl`, never a literal.
     """
+    launchctl = launchctl if launchctl is not None else resolve_launchctl()
     uid: int = os.getuid()
 
     for label in _LABELS:
@@ -243,7 +262,7 @@ def install_main() -> None:
     launchd_dir = Path(
         os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
     )
-    launchctl = os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
+    launchctl = resolve_launchctl()
     brain_home = _brain_home_root()
     install_plists(brain_home, launchd_dir, launchctl)
     print(f"🧠 brain LaunchAgents installed in {launchd_dir}")
@@ -254,7 +273,7 @@ def uninstall_main() -> None:
     launchd_dir = Path(
         os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
     )
-    launchctl = os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
+    launchctl = resolve_launchctl()
     uninstall_plists(launchd_dir, launchctl)
 
 

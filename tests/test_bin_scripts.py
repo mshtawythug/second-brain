@@ -89,16 +89,39 @@ def hermetic_pids(tmp_path: Path) -> HermeticPids:
     return HermeticPids(paths=paths, env=env)
 
 
+def _new_stub_dir(tmp_path: Path) -> Path:
+    """Create ``tmp_path/stubs`` seeded with a recording ``launchctl`` that exits 1.
+
+    ``_make_env`` rebuilds ``PATH`` from scratch, which drops both of conftest's
+    launchctl layers, and ``/bin/launchctl`` is on that ``PATH``. The seeded stub
+    stands in for them: a test that reaches launchctl without stubbing it records
+    to ``launchctl.unexpected`` and fails, rather than booting out the
+    developer's live LaunchAgents. A test that needs a working launchctl
+    overwrites it with ``_write_stub(stub_dir, "launchctl", body=...)``.
+    Guarded by ``tests/test_launchctl_isolation.py``.
+    """
+    d = tmp_path / "stubs"
+    d.mkdir()
+    _write_stub(
+        d,
+        "launchctl",
+        body=(
+            "#!/usr/bin/env bash\n"
+            f'echo "$@" >> {d}/launchctl.unexpected\n'
+            "exit 1\n"
+        ),
+    )
+    return d
+
+
 @pytest.fixture
 def stub_dir(tmp_path: Path) -> Path:
-    """Directory that holds the fake ``brain`` + ``python`` stubs.
+    """Directory that holds the fake ``brain`` + ``python`` (+ ``launchctl``) stubs.
 
     Returned as a ``Path`` so individual tests can inspect the call logs
     written next to the executables.
     """
-    d = tmp_path / "stubs"
-    d.mkdir()
-    return d
+    return _new_stub_dir(tmp_path)
 
 
 @pytest.fixture
@@ -157,7 +180,9 @@ def _make_env(
     the developer's real ``brain`` / ``python``. ``BRAIN_PY`` points at
     the stub so the cold-start build + build-watcher commands flow
     through it. ``BRAIN_OPEN_BROWSER=0`` skips the 30s ``wait_for_url``
-    + browser-open dance during tests.
+    + browser-open dance during tests. ``BRAIN_LAUNCHCTL`` defaults to the
+    ``launchctl`` stub ``stub_dir`` is seeded with, because this env drops the
+    conftest layers that would otherwise keep a script off the real binary.
     """
     env: dict[str, str] = {
         "PATH": f"{stub_dir}:/usr/bin:/bin",
@@ -165,6 +190,7 @@ def _make_env(
         "BRAIN_VAULT_PATH": str(vault_dir),
         "BRAIN_OPEN_BROWSER": "0",
         "BRAIN_PY": str(stub_dir / "python"),
+        "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),
     }
     if extras:
         env.update(extras)

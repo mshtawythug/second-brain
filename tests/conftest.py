@@ -198,6 +198,63 @@ def _force_test_runtime_home(tmp_path_factory: pytest.TempPathFactory) -> Iterat
                 os.environ[key] = original
 
 
+def _write_launchctl_stub(directory: Path) -> Path:
+    """An executable ``launchctl`` that records its argv beside itself and exits 1."""
+    directory.mkdir(parents=True, exist_ok=True)
+    stub = directory / "launchctl"
+    log = directory / "launchctl.calls"
+    stub.write_text(
+        "#!/bin/sh\n"
+        "# Test-session stand-in for launchctl: records argv, never touches launchd.\n"
+        f'echo "$@" >> "{log}"\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    stub.chmod(0o755)
+    return stub
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _force_test_launchctl_stubs(tmp_path_factory: pytest.TempPathFactory) -> Iterator[None]:
+    """Make the real ``launchctl`` unreachable from the suite, in two layers.
+
+    * ``BRAIN_LAUNCHCTL`` names a recording stub. Every production reader goes
+      through ``brain.bin.launchd.resolve_launchctl`` or the shell scripts'
+      ``${BRAIN_LAUNCHCTL:-launchctl}``, so an un-doubled call lands here.
+    * A session dir holding a SECOND stub named ``launchctl`` is prepended to
+      ``PATH``. Anything that loses the env layer and runs a bare
+      ``launchctl`` (a literal default, a script without the seam) resolves to
+      this stub, never to ``/bin/launchctl``.
+
+    Both exit 1, so a test that silently relied on launchd succeeding fails
+    loudly rather than passing. ``tests/test_launchctl_isolation.py`` proves both
+    layers, and that the env layer is the one actually hit. Subprocess tests that
+    rebuild ``PATH`` from scratch carry their own stand-in
+    (``tests/test_bin_scripts._make_env``).
+    """
+    root = tmp_path_factory.mktemp("launchctl")
+    env_stub = _write_launchctl_stub(root / "env")
+    path_dir = root / "path"
+    _write_launchctl_stub(path_dir)
+
+    originals = {
+        "BRAIN_LAUNCHCTL": os.environ.get("BRAIN_LAUNCHCTL"),
+        "PATH": os.environ.get("PATH"),
+    }
+    os.environ["BRAIN_LAUNCHCTL"] = str(env_stub)
+    os.environ["PATH"] = os.pathsep.join(
+        part for part in (str(path_dir), os.environ.get("PATH", "")) if part
+    )
+    try:
+        yield
+    finally:
+        for key, original in originals.items():
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _force_test_database_url() -> Iterator[None]:
     """Bulletproof prod-DB isolation for the entire test session.

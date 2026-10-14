@@ -885,12 +885,12 @@ def _maybe_install_launchd(
     if dry_run:
         typer.echo("[dry-run] would: brain-install-launchd")
         return
-    from .bin.launchd import install_plists
+    from .bin.launchd import install_plists, resolve_launchctl
 
     launchd_dir = Path(
         os.environ.get("BRAIN_LAUNCHD_DIR") or Path.home() / "Library" / "LaunchAgents"
     )
-    launchctl = os.environ.get("BRAIN_LAUNCHCTL") or "launchctl"
+    launchctl = resolve_launchctl()
     install_plists(brain_home, launchd_dir, launchctl, vault_path=vault_path)
     typer.echo(f"  [ok] brain LaunchAgents installed in {launchd_dir}")
 
