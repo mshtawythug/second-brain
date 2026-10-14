@@ -652,6 +652,7 @@ files. Both ran on `second_brain_t_p7b`, under option (b) (below).
 | Mutation replay at `bbfb114` | 48/48 applicable, 0 failures; T3-P3 SUPERSEDED (§10.6) |
 | **Mutation replay at `1763056`** | **48/48 applicable, 0 failures, all five clauses**; T3-P3 SUPERSEDED |
 | Phase-8 audit of `1763056` (team-lead) | full suite 9,248, catalog 48/48, browser 211; **2 LOW test gaps**, closed by `5fd491b` (tests only; round D, 5/5 at `5fd491b`). `test_bin_monitor`, `test_doctor_watcher`, `test_doctor_runtime` and `test_maintenance` run in full: 130 passed. No full suite: tests only, so the audit's run stands |
+| **PR #27 CI on `257fdef`** | Tests job: **1 failed**, 9,247 passed. `tests/test_doctor_npx_check.py::test_doctor_reports_npx_not_installed` asserted `subprocess.run.call_count == 0` while patching `brain.cli.subprocess.run`, which is the `subprocess` module's `run`, so it counted EVERY caller. On Linux, T4's off-macOS vault-watcher check takes a `ps` snapshot, which made one call. That never happens on macOS, so every local run passed. Reproduced locally by forcing `sys.platform = "linux"`. Fixed by the commit that added this row (tests only): the test is parametrized over darwin and linux and asserts that no call probed `npx`, which is its stated property. A mutant that probes npx when it is absent goes red at that assertion. The other four checks passed |
 | §10.6 validator | see §10.6 |
 
 **Both runs used option (b) for the skills-drift tests, approved by team-lead.** `BRAIN_SKILLS_DEST` pointed

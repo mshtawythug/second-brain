@@ -134,15 +134,26 @@ def test_doctor_reports_npx_ok(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
 def test_doctor_reports_npx_not_installed(
-    monkeypatch: pytest.MonkeyPatch, mocker: Any
+    monkeypatch: pytest.MonkeyPatch, mocker: Any, platform: str
 ) -> None:
-    """``shutil.which("npx")`` returns None → warning, exit 0 (soft check)."""
+    """``shutil.which("npx")`` returns None → warning, exit 0 (soft check).
+
+    Run on both platforms because ``brain doctor`` does not make the same
+    subprocess calls on each. Off macOS its vault-watcher line takes a ``ps``
+    snapshot (phase 8, ``brain.doctor_watcher``), and ``brain.cli.subprocess``
+    is the ``subprocess`` module itself, so patching its ``run`` counts that
+    call too. This assertion used to be ``call_count == 0``, which passed on
+    macOS and failed on Linux CI. The property is narrower: the npx VERSION
+    probe never runs.
+    """
     monkeypatch.setenv("DATABASE_URL", TEST_DATABASE_URL)
+    monkeypatch.setattr("sys.platform", platform)
     mocker.patch(
         "brain.cli.shutil.which", side_effect=_which_factory(npx_path=None)
     )
-    # subprocess.run should NEVER be called when which returns None.
+    # The npx probe must NEVER run when which returns None.
     run_mock = mocker.patch("brain.cli.subprocess.run")
 
     with _patch_httpx_client(_ok_ollama_transport()):
@@ -151,7 +162,8 @@ def test_doctor_reports_npx_not_installed(
     assert "quartz/npx" in result.output
     assert "not installed" in result.output
     assert "Node.js" in result.output
-    assert run_mock.call_count == 0
+    npx_calls = [c for c in run_mock.call_args_list if "npx" in repr(c)]
+    assert npx_calls == [], npx_calls
 
 
 def test_doctor_npx_missing_does_not_fail_doctor(
