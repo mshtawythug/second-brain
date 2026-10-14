@@ -41,6 +41,9 @@ FAKE_DNS: dict[str, list[str]] = {
     "0.0.0.0.nip.io": ["0.0.0.0"],
     # IPv6-only, as Linux's /etc/hosts entry is (round 10, item 3)
     "ip6-localhost": ["::1"],
+    # Round 16: a name that is NOT a trusted loopback name but resolves only to
+    # loopback, as public services such as 127.0.0.1.nip.io do (synthetic here).
+    "loopback-alias.example": ["127.0.0.1"],
 }
 
 

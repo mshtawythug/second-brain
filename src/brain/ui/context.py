@@ -40,6 +40,16 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 #: what actually defeats DNS rebinding (see :mod:`brain.ui.security`).
 LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
+#: The only HOSTNAMES that may be treated as loopback, and then only when every
+#: address they resolve to is loopback (review round 16). A loopback bind runs
+#: with no token and allowlists its own name, so trusting ANY name that happens
+#: to resolve to 127.0.0.1 handed the DNS-rebinding defence to whoever controls
+#: that name's DNS: `--host 127.0.0.1.nip.io` (a public service) ran tokenless,
+#: and a page served from that name, once re-pointed at 127.0.0.1, sent an
+#: allowlisted Host and the allowed Origin. These two are the names a hosts
+#: file defines for loopback; every other name is "other" and needs a token.
+LOOPBACK_NAMES: frozenset[str] = frozenset({"localhost", "ip6-localhost"})
+
 #: The wildcard binds: "every interface", a bind address and never a
 #: destination. Ruling W1 (phase 7): all three get exactly the loopback
 #: ALLOWLIST — never wider than ``0.0.0.0`` already was. That allowlist is a
@@ -245,8 +255,27 @@ def address_class(host: str, resolved: Resolved | None = None) -> str:
     (:func:`brain.ui.server.resolve_bind_addresses`). Unresolved, a hostname
     is "other" — ``localhost`` included, which used to be trusted as loopback by
     name alone, so a ``localhost`` mapped elsewhere skipped the token.
+
+    Review round 16: a hostname resolving only to loopback is loopback only if
+    it is one of :data:`LOOPBACK_NAMES`; any other such name is "other". Its
+    addresses are unchanged — :func:`classify_addresses` still says "loopback"
+    for them, which is how :func:`is_loopback_alias` tells the user why.
     """
+    if is_loopback_alias(host, resolved):
+        return "other"
     return classify_addresses(resolved if resolved is not None else literal_addresses(host))
+
+
+def is_loopback_alias(host: str, resolved: Resolved | None) -> bool:
+    """True for a hostname outside :data:`LOOPBACK_NAMES` that resolves only to loopback.
+
+    Such a name binds loopback but is guarded like a network bind — a token,
+    a Host allowlist of the name alone, confidential bodies withheld — because
+    whoever controls its DNS could re-point it (review round 16).
+    """
+    if literal_addresses(host) or bind_address(host) in LOOPBACK_NAMES:
+        return False
+    return classify_addresses(resolved or ()) == "loopback"
 
 
 def validate_host(host: str) -> str:

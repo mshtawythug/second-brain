@@ -79,6 +79,20 @@ def test_non_loopback_without_a_token_is_a_usage_error(app: typer.Typer) -> None
     assert result.exit_code == 2
 
 
+def test_a_busy_port_is_named_with_the_one_used_instead(
+    app: typer.Typer, started: Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 16 (audit finding 3): when claim_port steps past a busy port the
+    panel says so — no test executed this line before."""
+    import brain.ui.server as server
+
+    monkeypatch.setattr(server, "claim_port", lambda port, **kw: (port + 1, []))
+    result = runner.invoke(app, ["ui", "--port", "8765", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert "port 8765 was busy — using 8766 instead" in result.output, result.output
+    assert started.context_kwargs["port"] == 8766
+
+
 def test_default_bind_is_loopback() -> None:
     from brain.cli_ui import ui
 

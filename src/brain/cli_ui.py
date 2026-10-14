@@ -30,6 +30,15 @@ if TYPE_CHECKING:
 #: binds by the text itself, not by a guessed fragment (review round 6).
 PHONE_LINE = "open the URL above on your phone, on this network"
 
+#: Review round 16: a name that resolves only to loopback but is not one of
+#: ``context.LOOPBACK_NAMES`` is guarded like a network bind. Said in the
+#: refusal and in the panel, because "NOT bound to loopback" would be false.
+LOOPBACK_ALIAS_REASON = (
+    "resolves to loopback, but only localhost and ip6-localhost are trusted as "
+    "loopback names — whoever controls another name's DNS could re-point it "
+    "at this server (DNS rebinding)"
+)
+
 #: Registered as a sub-app with ``invoke_without_command=True`` so ``brain ui``
 #: runs the server directly, while leaving room for ``brain ui open`` later
 #: without a breaking change. Same shape as ``capture_app``.
@@ -57,6 +66,7 @@ def _panel(
     notices: tuple[str, ...],
     note_count: int | None,
     lan: bool = False,
+    alias_of: str = "",
 ) -> None:
     """Print the startup panel, in the `brain doctor` / `brain setup` style."""
     typer.echo("")
@@ -98,7 +108,16 @@ def _panel(
         typer.echo("  Confidential  bodies withheld (non-loopback bind)")
     typer.echo("")
 
-    if not loopback:
+    if alias_of:
+        # Round 16: bound to loopback, guarded as if it were not.
+        typer.secho(
+            f"  ⚠  --host {alias_of} {LOOPBACK_ALIAS_REASON}.\n"
+            "     It is guarded like a network bind: token required, confidential\n"
+            "     bodies withheld.",
+            fg="yellow",
+        )
+        typer.echo("")
+    elif not loopback:
         typer.secho(
             "  ⚠  This server is NOT bound to loopback. Anyone who can reach\n"
             "     this address can read your entire brain.",
@@ -167,7 +186,7 @@ def ui(
 
     from .ui import lan as lan_mod
     from .ui import server as ui_server
-    from .ui.context import HostRefused, address_class, validate_host
+    from .ui.context import HostRefused, address_class, is_loopback_alias, validate_host
     from .ui.server import claim_port
 
     # Once, here: every consumer below — the bind, the allowlist,
@@ -207,6 +226,8 @@ def ui(
     # Review round 10: classify by what the bind RESOLVES the host to, once,
     # here — a name pointing at 0.0.0.0 is a wildcard, and `localhost` is
     # loopback only if every address it resolves to is. Literals need no DNS.
+    # Round 16: and only a trusted name (context.LOOPBACK_NAMES) can be
+    # loopback at all; any other name is guarded like a network bind.
     try:
         resolved = ui_server.resolve_bind_addresses(host)
     except BrainError as exc:
@@ -214,6 +235,11 @@ def ui(
         raise typer.Exit(1) from exc
     kind = address_class(host, resolved)
     loopback = kind == "loopback"
+    if not loopback and not token and is_loopback_alias(host, resolved):
+        raise typer.BadParameter(
+            f"--host {host} {LOOPBACK_ALIAS_REASON}; pass --token <secret>, or "
+            "use --host 127.0.0.1."
+        )
     if not loopback and not token:
         raise typer.BadParameter(
             "binding to a non-loopback address exposes your entire brain to the "
@@ -288,6 +314,7 @@ def _start(
 ) -> None:
     """Build the context on the bound port, print the panel, and serve."""
     from .ui import lan as lan_mod
+    from .ui.context import is_loopback_alias
     from .ui.server import browser_url, build_context, serve
 
     context = build_context(
@@ -318,6 +345,7 @@ def _start(
         notices=notices,
         note_count=None,
         lan=lan,
+        alias_of=host if is_loopback_alias(host, resolved) else "",
     )
     serve(
         context,
