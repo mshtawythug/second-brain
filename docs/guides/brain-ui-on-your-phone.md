@@ -118,9 +118,11 @@ evicting the tab in the background — leaves every request refused (403) until 
 - **The firewall may ask.** On macOS the first LAN bind can prompt you to allow incoming
   connections for Python. Allow it, or the phone will time out.
 
-## The wiki is still there
+## The wiki is dormant
 
-Until phase 8 of the wiki → `brain ui` consolidation, the Quartz wiki keeps building and Caddy
-keeps serving it as before, including on the LAN with no token. It is no longer where the
-daily loop points: `brain-up` no longer opens it unless you set `BRAIN_OPEN_BROWSER=1`. It stays
-available as a fallback, for example when Postgres is down, until you decide to retire it.
+Since phase 8 of the wiki → `brain ui` consolidation (R2), nothing rebuilds the Quartz wiki by
+default. Caddy keeps serving its last build as before, including on the LAN with no token, so
+what a phone sees there can be out of date. It is not where the daily loop points: `brain-up`
+no longer opens it unless you set `BRAIN_OPEN_BROWSER=1`, and `brain-rebuild --only quartz`
+rebuilds it on request. It stays available as a fallback, for example when Postgres is down,
+until you decide to retire it.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stop the second-brain wiki build watcher + sync watcher (blue/green serve edition).
+# Stop the second-brain vault-sync watcher, and any legacy wiki build watcher (dormant since R2).
 # Idempotent — safe to re-run.
 #
 # Caddy is intentionally left running: it keeps serving the last-good build

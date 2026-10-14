@@ -22,12 +22,46 @@ git tag scheme:
 
 ## [Unreleased]
 
+### Changed — the wiki is dormant (R2)
+
+- **The next `brain-up` after upgrading removes the `com.brain.build`
+  LaunchAgent.** `brain-up` runs `brain-install-launchd` on every start, and it
+  now installs only `com.brain.watcher` (vault sync) and `com.brain.brief`,
+  booting out and deleting a leftover `com.brain.build`. Nothing rebuilds the
+  wiki in the background any more; Caddy keeps serving its last build.
+  **The way back:** `brain-rebuild --only quartz` rebuilds the wiki once, and
+  `BRAIN_WIKI_BUILD=1 brain-up` runs the old overlay + cold-start build. To get
+  the rebuild daemon itself back, run `brain wiki install`, then
+  `brain-install-launchd` from a release before this one.
+- **`brain-rebuild`:** the `wiki` stage is split. `mirror` (vault export,
+  sync-summaries, prune-orphans) runs by default; the Quartz overlay and build
+  are the opt-in `quartz` stage (`--only quartz`). `--wiki-only` is removed (it
+  exits 2 and names `--only mirror` / `--only quartz`), and `--clean-cache` now
+  requires `--only quartz`.
+- **`brain-up`** builds the wiki only with `BRAIN_WIKI_BUILD=1`. Its banner and
+  `brain-status` say the wiki is dormant, and `brain-monitor probe` explains why
+  there is no rebuild to time.
+- **`brain setup`** offers the launchd daemons whether or not the wiki is
+  installed, since they are the vault-sync watcher and the daily brief. The
+  offer is still default-No interactively and never made under
+  `--non-interactive`. Setup no longer installs the `_brain-build-fg` shim.
+- **`brain doctor`:**
+  - the `wiki build` line reports the wiki dormant and never fails on its age
+    (it used to FAIL after 3 days);
+  - a new `vault watcher` line warns when the vault-sync watcher is not
+    installed (macOS) or not running (elsewhere), because external edits will
+    not reach search until `brain vault sync`;
+  - a new `retired daemon` line warns while a `com.brain.build` plist is still
+    installed.
+- **`brain ui`:** the Publish tab is gone.
+
 ### Changed — `brain ui` is the reading surface; the wiki is demoted
 
 - **`brain-up` no longer opens the wiki in a browser.** `BRAIN_OPEN_BROWSER`
   now defaults to `0` (it was `1`); set it to `1` to get the old behaviour.
   The banner leads with `read: brain ui`, and the wiki line is labelled legacy.
-  The wiki still builds and serves — nothing was removed.
+  The wiki kept building and serving — nothing was removed. (R2, above, then
+  made it dormant.)
 - **`brain setup`'s closing report** names `brain ui` ahead of the legacy wiki
   URL, and the MCP `brain_capture` description points at the `brain ui` tree
   instead of the Quartz UI.

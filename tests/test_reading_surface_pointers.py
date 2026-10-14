@@ -259,3 +259,58 @@ def test_docs_index_calls_the_rendered_wiki_legacy() -> None:
     )
     assert "the legacy Quartz + Caddy rendered wiki" in row, row
     assert "`brain ui` is the primary reading surface" in row, row
+
+
+# --------------------------------------------------------------------------
+# Phase 8 (R2, "Dormant"), E11: no doc or skill still describes a wiki that
+# rebuilds itself. Each pin fails if its sentence reverts.
+# --------------------------------------------------------------------------
+
+MAINTENANCE_SKILL = REPO_ROOT / "skills" / "brain-maintenance" / "SKILL.md"
+CHANGELOG = REPO_ROOT / "CHANGELOG.md"
+_REBUILD_ON_REQUEST = "brain-rebuild --only quartz"
+
+
+def test_readme_intro_calls_the_wiki_dormant() -> None:
+    intro = README.read_text(encoding="utf-8").split("\n## ", 1)[0]
+    assert "still builds" not in intro
+    assert re.search(r"\[rendered wiki\]\([^)]*\)[^\n.]*dormant", intro), intro
+
+
+def test_vault_and_wiki_callout_says_the_wiki_is_dormant() -> None:
+    text = VAULT_AND_WIKI.read_text(encoding="utf-8")
+    intro = text[: text.index("## Vault model")]
+    assert "dormant" in intro and _REBUILD_ON_REQUEST in intro, intro
+    assert "still builds and serves" not in intro
+
+
+def test_vault_and_wiki_documents_the_r2_rebuild_flags() -> None:
+    section = _section(VAULT_AND_WIKI.read_text(encoding="utf-8"), "### Daily use — `bin/` scripts")
+    assert "--wiki-only     run only the wiki stage" not in section
+    assert "--only quartz" in section and "requires --only quartz" in section
+    assert "start build watcher" not in section
+    assert re.search(r"^\| `BRAIN_WIKI_BUILD` \| `0` \|", section, re.MULTILINE), section
+
+
+def test_phone_guide_says_the_wiki_is_dormant() -> None:
+    text = PHONE_GUIDE.read_text(encoding="utf-8")
+    assert "Until phase 8" not in text and "keeps building" not in text
+    section = _section(text, "## The wiki is dormant")
+    assert _REBUILD_ON_REQUEST in section, section
+
+
+def test_maintenance_skill_rebuilds_the_wiki_only_on_request() -> None:
+    text = MAINTENANCE_SKILL.read_text(encoding="utf-8")
+    assert "dormant since R2" in text
+    assert "watcher B (vault→Quartz)" not in text
+    for line in text.splitlines():
+        if "--clean-cache" in line and line.lstrip().startswith("bin/brain-rebuild"):
+            assert "--only quartz" in line, line
+
+
+def test_changelog_warns_that_the_next_brain_up_removes_the_build_daemon() -> None:
+    """Plan §3: the migration runs itself on the next ``brain-up``, so it must not surprise."""
+    unreleased = CHANGELOG.read_text(encoding="utf-8").split("## [Unreleased]", 1)[1]
+    unreleased = unreleased.split("\n## [", 1)[0]
+    assert "next `brain-up` after upgrading removes the `com.brain.build`" in unreleased
+    assert "**The way back:**" in unreleased and _REBUILD_ON_REQUEST in unreleased
