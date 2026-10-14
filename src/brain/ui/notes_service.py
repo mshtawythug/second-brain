@@ -562,11 +562,12 @@ def _update_ingested_note(
 def set_draft(
     ctx: UiContext, conn: psycopg.Connection[Any], document_id: str, *, draft: bool
 ) -> dict[str, Any]:
-    """Toggle draft ↔ published. The one instant slice of the deferred Publish tab.
+    """Toggle draft ↔ published.
 
-    Regenerates the mirror's ``draft:`` frontmatter so the next Quartz build
-    hides or shows the note. Idempotent: setting the value it already has is a
-    no-op, matching ``cli._set_draft``.
+    ``draft`` gates every reading surface, and the vault mirror's ``draft:``
+    frontmatter is regenerated so the files agree with the database (a
+    ``brain-rebuild --only quartz`` honours it too). Idempotent: setting the
+    value it already has is a no-op, matching ``cli._set_draft``.
     """
     from ..ingest import update_document
 

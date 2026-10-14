@@ -105,7 +105,7 @@ function wireTabs() {
         if (other === tab) other.setAttribute("aria-current", "page");
         else other.removeAttribute("aria-current");
       }
-      for (const name of ["notes", "ingest", "agent", "publish"]) {
+      for (const name of ["notes", "ingest", "agent"]) {
         $(`tab-${name}`).hidden = name !== tab.dataset.tab;
       }
     });
