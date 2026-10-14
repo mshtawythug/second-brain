@@ -8,7 +8,7 @@ rebased onto `master` after phase 7 merges if needed. Contract:
 §9.5, §9.6, §11 (phase-8 row), §12 Q8 and Q10. Every line reference below was read at `0965b61`.
 **Re-derive each one at edit time:** the spec has shipped stale anchors before (§9.5b).*
 
-**Status: DRAFT. Rulings R8-1–R8-7 decided by team-lead 2026-10-13 (§1). p7-reviewer's plan review is folded in (2026-10-14; where each finding landed is in §11). No code is written until the plan is approved (CLAUDE.md rule 7).**
+**Status: BUILT 2026-10-14 (T0–T7, review fixes, merge of master), final code SHA `bbfb114`; closeout in §10. Rulings R8-1–R8-7 decided by team-lead 2026-10-13 (§1); the plan review is folded in (§11).**
 
 ## 0. What phase 8 is, in one paragraph
 
@@ -562,14 +562,731 @@ proofs happen only in a `git archive` copy, never in the worktree** (phase-7 les
 
 ## 10. Closeout
 
-*(Written at the end of the phase: rulings as decided, verification table, mutation catalog with
-its validator.)*
+Built task by task by one builder (`deb-author`), 2026-10-14, because new teammates could not be
+spawned. Each task: red tests first, then the change, then every mutation proven red in a
+throwaway copy of the working tree, never in the worktree. One commit per task.
+
+### 10.1 What shipped
+
+| Task | Commit | What |
+|---|---|---|
+| plan | `eab156d` | This plan, approved after two review rounds (§11). |
+| **T0** | `b3e0216` | The suite cannot reach the real `launchctl`. `brain.bin.launchd.resolve_launchctl()` is the one resolver, and `install_plists`/`uninstall_plists` default to it rather than to a literal. conftest points `BRAIN_LAUNCHCTL` at a recording stub that exits 1 and shadows a bare `launchctl` on `PATH` with a second one. `test_bin_scripts`' `stub_dir` seeds its own stand-in, and `_make_env` defaults to it. 8 guard tests. `setup.py` net-zero. |
+| **T1** | `96f4b80` | A10: `brain-rebuild`'s `wiki` stage split into `mirror` (default) and the opt-in `quartz` stage (`Stage.opt_in`; R8-2). `--wiki-only` exits 2 naming the replacements, and `--clean-cache` needs `quartz` (R8-3). |
+| **T2** | `3bd0b96` | `com.brain.build` retired. `_INSTALLED_LABELS` / `_RETIRED_LABELS` / `_ALL_LABELS`. Install boots out and deletes a leftover; uninstall sweeps it; the doctor reads the installed labels only. **Also fixed** `scripts/verify_release.py`, which imported the removed `_LABELS` (found while re-deriving importers). |
+| **T3** | `b9c2631` | Q8 / R8-1: `brain setup` offers the daemons without a wiki. The prompt names the vault-sync watcher and the daily brief, and `_SHIM_NAMES` drops `_brain-build-fg`. The two `test_setup.py` tests that pinned the removed gate are rewritten platform-correct. `setup.py` net-negative (1,364 → 1,355). |
+| **T4** | `589cfed` | A9's doctor half (`brain/doctor_watcher.py`): a `vault watcher` line (macOS: plist installed; elsewhere: a `ps` scan through a `processes` seam) and a `retired daemon` line. R8-4: `wiki build` is dormant OK in both former FAIL branches, both naming `brain-rebuild --only quartz`. The `wiki_stale` coupling is gone, and `snapshot_processes` is public. `doctor_runtime.py` 699 → 679. |
+| **T5** | `4bd08f2` | R8-6/R8-7. `brain-up` builds only with `BRAIN_WIKI_BUILD=1`, and its banner says dormant. `brain-status` shows a dormant build row. `brain-monitor` labels it dormant (R2), stops flagging a build watcher nothing runs, and `probe` explains itself. |
+| **T6** | `e30160e` | Q10: the Publish tab is deleted (button, section, `wireTabs` entry, two docstrings). A static test and a browser test, added to `ci.yml`'s explicit list. |
+| **T7** | `5780bb2` | E11: README, `vault-and-wiki.md`, the phone guide, the `brain-maintenance` skill, `brain-down`'s header, a CHANGELOG R2 section with the migration warning and the way back, and the spec's R8-2 deviation record (§9.4, §11 row 8). Six pointer tests. |
+| fixes | `120934a` | The review findings, folded in. T7 LOW: the CHANGELOG way-back says it is not durable, because this release's `brain-up` re-removes `com.brain.build` (pinned). T7 nits: the overlay comments, reload comments, `configuration.md` and the callout. Earlier nits: `BRAIN_LAUNCHCTL` at the `_brain-watcher-fg` test, the verify_release tier-A test on `sys.executable`, and the prompt "(vault-sync watcher + 07:00 daily brief, loaded on login)", with the time read from the brief plist template. |
+| merge | `bbfb114` | Merge of `second-brain/master` @ `edd8986` (PRs #22–#25). CLAUDE.md conflicted only in the size table; both rows are kept. The over-800 row set was re-derived: 18 files, 18 rows. **The final code SHA.** |
+
+### 10.2 Rulings as decided, and corrections made during execution
+
+R8-1 – R8-7 shipped as written in §1. Things the plan did not say, decided while building:
+
+- **The test DB.** The lead named `second_brain_p7b`; it does not exist on 5434. Runs of record
+  used `second_brain_t_p7b`, and mutation copies used `second_brain_t_p7aud1`. Both were checked
+  idle in `pg_stat_activity` first.
+- **T2 moved a doctor test subject.** Switching `DAEMON_LABELS` to the installed labels (as T2
+  requires) would have broken about fifteen `test_doctor_runtime.py` cases that used
+  `com.brain.build` only as a convenient KeepAlive label. They were retargeted to the watcher and
+  the brief, because the exit-code and signal logic does not depend on the label.
+  The build template's render-validity case in `test_bin_launchd.py` stays, because the template
+  ships until R3.
+- **T2 found a shipping bug in the release harness.** `scripts/verify_release.py` check 3 imported
+  `_LABELS` (tier A would have failed every release on an ImportError) and kickstarted
+  `com.brain.build` (tier B). Fixed in T2 with a regression test that was red first on the exact
+  ImportError.
+- **T4's `wiki build` OK carries a remedy.** `_check` renders an OK line without one, but the
+  JSON doctor output (`cli.py:854`) includes it, so `brain doctor --json` names
+  `brain-rebuild --only quartz` too.
+- **T5: the monitor's cross-check.** R8-7 named only the label. At R2, though, `build_watcher
+  pgrep=0` would have tripped the "process count vs pid file" warning on every snapshot. It now
+  flags only an orphan (>1) or a pid file with no process.
+- **T5: `brain-up`'s skip line.** It first read "wiki build: skipped…", which phase 7's
+  "read before wiki" banner test took for the wiki line. It now reads "legacy wiki: not built —
+  dormant since R2…".
+- **T6: `set_draft`'s docstring** also dropped its claim that the toggle matters to "the next
+  Quartz build".
+- **T7: the skill's length.** The first rewrite took `brain-maintenance/SKILL.md` to 305 lines,
+  and `test_skill_length_is_within_house_range` (house band 100–300) caught it. Trimmed to 300.
+- **Four mutants were rebuilt because they did not test what they claimed.** T3-P1 first put a
+  defaulted parameter before non-defaulted ones, which is a SyntaxError and proved nothing.
+  T3-P2 first only deleted a `return`, so tests fell into an interactive prompt and failed on a
+  stdin read. T4-Q4 first failed with a `KeyError` rather than an assertion, so the test gained an
+  explicit presence assertion. T0-d and T5-R4 had the same issue at authoring time (a `KeyError`
+  where an assertion belonged), fixed before the first run. Every entry in §10.6 is the corrected
+  form.
+- **`120934a` touched `setup.py` without adding its ceiling hop.** The merge commit `bbfb114`
+  records it, late, and promotes T3's hop to `b9c2631`. Both are net-zero or net-negative, so no
+  growth record is owed.
+- **Snapshots for mutation copies.** `git stash create` refuses intent-to-add entries, so from T2
+  onward each working tree was copied with `git ls-files -z -co --exclude-standard | tar`, which
+  only reads it.
+- **Shell-template mutants need their own venv.** `bin/brain-up` execs `.venv/bin/brain-up`,
+  which imports `brain` from the editable install, i.e. the worktree. A mutated template in a
+  plain archive copy would never run. Each copy gets a thin venv whose `00copy.pth` lists the
+  copy's `src` first and then the worktree venv's site-packages, plus `brain-up` / `brain-status`
+  console scripts. Whether `brain` resolves into the copy is checked per copy.
+
+### 10.3 Verification (exit codes read from files)
+
+Exit codes were read from files. The suite of record ran **once**, on the final code SHA
+`bbfb114` (the merge of master `edd8986`), with nothing touching the worktree. The worktree was
+clean at start and HEAD was unchanged at the end. It ran on `second_brain_t_p7b`.
+
+| Check | Result |
+|---|---|
+| `ruff check` | All checks passed |
+| `mypy src/` | no issues, 227 source files |
+| **Full suite of record, `bbfb114`** | **exit 0: 9,220 passed, 5 skipped, 320 deselected (25m39s); coverage 94.68% (gate 85%)** |
+| Baseline on `eab156d` (before T0) | exit 0: 9,107 passed, 3 skipped, 306 deselected |
+| T0 run, `b3e0216` tree | exit 0: 9,115 passed, 3 skipped, 306 deselected, coverage 94.64%. No test changed outcome. The conftest stubs recorded only the guard tests' 12 calls, and the PATH stub recorded none |
+| Mutation replay (§10.6), each at its own SHA | 46/46 (T0–T7) + 3/3 (round C), 0 failures, all five clauses |
+| Mutation replay at `bbfb114` | 48/48 applicable, 0 failures; T3-P3 SUPERSEDED (§10.6) |
+| §10.6 validator | see §10.6 |
+
+**The skills-drift tests ran under option (b), approved by team-lead.** `BRAIN_SKILLS_DEST` pointed
+at an empty temp dir, so `test_skills_sync_is_not_drifted` and
+`test_no_installed_skill_entry_is_a_symlink` skipped, exactly as on CI where no skills are
+installed. They are 2 of the 5 skips; the other 3 are the usual ones. Against the real
+`~/.claude/skills` the first reports `brain-maintenance` STALE, because T7 edits that skill.
+**`bin/brain-skills-sync` is owed after merge.** The user's installed skills were not touched from
+this branch.
+
+The +113 tests between the baseline and the suite of record are this phase's new tests plus
+those master brought in through the merge (PRs #22–#25). Neither set changed the outcome of an
+existing test.
+
+
+### 10.4 Known limits — recorded, not fixed
+
+- **S4 has not run.** Nothing in this phase booted out or deleted the real `com.brain.build` on
+  this machine. The migration happens on the user's next `brain-up` after merge (§3), and
+  verifying it end to end needs the user's go.
+- **`test_skills_sync_is_not_drifted` is machine-dependent.** It compares the repo's skills with
+  the copies installed in `~/.claude/skills`. T7 edits `brain-maintenance`, so on this machine it
+  reports STALE until `bin/brain-skills-sync` runs after merge. It skips on CI, where nothing is
+  installed. The installed skills were deliberately not touched from an unmerged branch.
+- **One of T4-Q6's two reds read the real process table.** "No watcher → WARN" saw the user's
+  live `brain vault sync --watch` when the mutant ignored the seam. The read is read-only (§3, S3).
+  The deterministic guard is `test_runtime_doctor_checks_threads_the_processes_seam`.
+- **The off-macOS watcher check matches command lines only.** It does not read a pid file,
+  because nothing off macOS writes one for a hand-started watcher.
+- **Still present until R3, by design:** `com.brain.build.plist.j2`, `_brain-build-fg.sh`,
+  `brain.wiki.build_watcher`, `brain-down`'s bootout of `com.brain.build` (E6) and the
+  `quartz` stage.
+
+### 10.5 CLI surface changed (for the memory update, CLAUDE.md rule 11)
+
+- `brain-rebuild`: stages `connect → mirror` by default, plus the opt-in `quartz`; `--wiki-only`
+  exits 2; `--clean-cache` requires `--only quartz`.
+- `brain-up`: `BRAIN_WIKI_BUILD=1` opts into the overlay and cold-start build; the banner says
+  dormant.
+- `brain-status` / `brain-monitor`: the build watcher reads dormant; `probe`'s message changed.
+- `brain setup`: daemons offered without a wiki; the prompt names the vault-sync watcher and the
+  daily brief.
+- `brain doctor`: new `vault watcher` and `retired daemon` lines; `wiki build` never FAILs.
+- `brain-install-launchd`: installs `com.brain.watcher` + `com.brain.brief`, and removes a
+  leftover `com.brain.build`.
+- `brain ui`: no Publish tab.
+
+### 10.6 Mutation catalog — every mutation, reproducible
+
+The phase-7 §10.9 format: per entry, the file, the exact text replaced (Python `repr`), its
+replacement, how many times the replaced text occurs at the round's SHA, the tests, and the text
+that must appear in the failure. A mutation made of several edits is listed one edit per entry
+(`T3-P1.1` … `.3`), and they are applied together. Rounds are tasks, and each is proven against
+its task's commit.
+
+**Replayed, all five clauses, by a harness rather than by hand.** For each entry the replay
+archives the SHA into a scratch copy with its own thin venv (§10.2), then checks five things:
+
+1. the targeted tests pass unmutated;
+2. every edit's text occurs exactly once, and `git diff --numstat` shows it landed;
+3. the tests go red;
+4. the failure contains the red-at text;
+5. the unmutated copy is green.
+
+Results:
+- at each task's own SHA, **46/46 mutations, 0 failures**;
+- round C (the review fixes) at `120934a`, **3/3**;
+- at `5780bb2` (T7), 46/46;
+- at `bbfb114` (the final code SHA), **48/48 applicable, 0 failures**. T3-P3 is skipped there
+  because `120934a` reworded its text; it is marked SUPERSEDED, and C-C2/C-C3 replace it.
+
+**Validated.** The script below is the phase-7 validator with the round pattern widened to
+`T\d|C`. It checks every entry's `count` against `git show <SHA>:<file>`, and checks that every
+entry which no longer applies at HEAD is marked SUPERSEDED. Run it from the repository root with
+`python` and the script on stdin. Result at the commit that added this section:
+**rounds T0–T7 and C: 5+6+7+7+7+8+3+7+3 = 53/53 entries match their count; 1 superseded at HEAD (T3-P3) and marked; exit 0.**
+
+```python
+"""Validate plan §10.6: each `replace` occurs `count` times at its round's SHA, and an entry that
+no longer applies at HEAD (text, or test function gone) carries a SUPERSEDED line."""
+import ast
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+PLAN = Path("docs/plans/2026-10-13-wiki-to-ui-phase8.md")
+FENCE = "`" * 3  # spelled out: a literal one would end this script's own code block
+text = PLAN.read_text(encoding="utf-8")
+catalog = text[text.index("### 10.6"):]
+rounds = re.findall(
+    rf"\*\*Round (T\d|C) — against `([0-9a-f]{{7}})`.*?\n{FENCE}text\n(.*?)\n{FENCE}",
+    catalog,
+    re.S,
+)
+
+
+def show(sha: str, path: str) -> str:
+    return subprocess.run(
+        ["git", "show", f"{sha}:{path}"], capture_output=True, text=True, check=True
+    ).stdout
+
+
+failures = 0
+superseded = 0
+headers = re.findall(r"\*\*Round \S+ — against `", catalog)
+if len(headers) != len(rounds):
+    failures += 1
+    print(f"UNPARSED: {len(headers)} round headers, {len(rounds)} blocks parsed")
+for number, sha, body in rounds:
+    entries = [e for e in body.strip().split("\n\n") if e.strip()]
+    matched = 0
+    for entry in entries:
+        lines = entry.splitlines()
+        fields = {}
+        tests = []
+        for line in lines[1:]:
+            key, _, value = line.partition(":")
+            if key.strip() in {"file", "replace", "count"}:
+                fields[key.strip()] = value.strip()
+            if key.strip() == "test":
+                tests.append(value.strip())
+        old = ast.literal_eval(fields["replace"])
+        want = int(fields["count"])
+        got = show(sha, fields["file"]).count(old)
+        if got == want:
+            matched += 1
+        else:
+            failures += 1
+            print(f"MISMATCH round {number} {lines[0]!r}: {got} != {want} at {sha}")
+        marked = any(line.strip().startswith("SUPERSEDED") for line in lines)
+        superseded += marked
+        gone = [
+            t for t in tests
+            if f"def {t.split('::')[1].split('[')[0]}(" not in show("HEAD", t.split("::")[0])
+        ]
+        if show("HEAD", fields["file"]).count(old) != want and not marked:
+            failures += 1
+            print(f"UNMARKED round {number} {lines[0]!r}: no longer applies at HEAD")
+        elif gone and not marked:
+            failures += 1
+            print(f"UNMARKED round {number} {lines[0]!r}: test gone at HEAD: {gone}")
+    print(f"round {number} @ {sha}: {matched}/{len(entries)} entries match their count")
+print(f"superseded at HEAD, and marked: {superseded}")
+sys.exit(1 if failures else 0)
+```
+
+**Round T0 — against `b3e0216`** (the T0 commit).
+
+```text
+T0-a conftest no longer sets BRAIN_LAUNCHCTL
+  file:    tests/conftest.py
+  replace: '    os.environ["BRAIN_LAUNCHCTL"] = str(env_stub)\n'
+  with:    ''
+  count:   1
+  test:    tests/test_launchctl_isolation.py::test_conftest_points_brain_launchctl_at_a_recording_stub
+  test:    tests/test_launchctl_isolation.py::test_undoubled_install_plists_lands_on_the_env_stub
+  red at:  conftest must point BRAIN_LAUNCHCTL at the session recording stub
+
+T0-b.1 install_plists defaults to a literal launchctl again
+  NOTE: edit 1 of 2; all are applied together
+  file:    src/brain/bin/launchd.py
+  replace: '    launchd_dir: Path,\n    launchctl: str | None = None,\n    vault_path: Path | None = None,\n) -> None:'
+  with:    '    launchd_dir: Path,\n    launchctl: str = "launchctl",\n    vault_path: Path | None = None,\n) -> None:'
+  count:   1
+  test:    tests/test_launchctl_isolation.py::test_undoubled_install_plists_lands_on_the_env_stub
+  red at:  the BRAIN_LAUNCHCTL stub recorded no call naming
+
+T0-b.2 install_plists defaults to a literal launchctl again
+  NOTE: edit 2 of 2; all are applied together
+  file:    src/brain/bin/launchd.py
+  replace: '    launchctl = launchctl if launchctl is not None else resolve_launchctl()\n    launchd_dir.mkdir(parents=True, exist_ok=True)'
+  with:    '    launchd_dir.mkdir(parents=True, exist_ok=True)'
+  count:   1
+  test:    tests/test_launchctl_isolation.py::test_undoubled_install_plists_lands_on_the_env_stub
+  red at:  the BRAIN_LAUNCHCTL stub recorded no call naming
+
+T0-c stub_dir no longer seeds a launchctl stand-in
+  file:    tests/test_bin_scripts.py
+  replace: '    _write_stub(\n        d,\n        "launchctl",\n        body=(\n            "#!/usr/bin/env bash\\n"\n            f\'echo "$@" >> {d}/launchctl.unexpected\\n\'\n            "exit 1\\n"\n        ),\n    )\n'
+  with:    ''
+  count:   1
+  test:    tests/test_launchctl_isolation.py::test_bin_script_env_resolves_launchctl_to_a_stub
+  red at:  a bare `launchctl` in a bin-script subprocess resolves to
+
+T0-d _make_env no longer defaults BRAIN_LAUNCHCTL
+  file:    tests/test_bin_scripts.py
+  replace: '        "BRAIN_LAUNCHCTL": str(stub_dir / "launchctl"),\n    }'
+  with:    '    }'
+  count:   1
+  test:    tests/test_launchctl_isolation.py::test_bin_script_env_resolves_launchctl_to_a_stub
+  red at:  assert None ==
+```
+
+**Round T1 — against `96f4b80`** (the T1 commit).
+
+```text
+T1-M1 a Quartz step back in the mirror stage
+  file:    src/brain/maintenance.py
+  replace: '        Step(\n            brain_argv(\n                "vault", "prune-orphans", "--apply", "--include-stale",\n                "--vault", str(vault_path),\n            ),\n            fatal=False,\n        ),\n    )\n    quartz_steps = ('
+  with:    '        Step(\n            brain_argv(\n                "vault", "prune-orphans", "--apply", "--include-stale",\n                "--vault", str(vault_path),\n            ),\n            fatal=False,\n        ),\n        Step(\n            brain_argv("vault", "render", "--overlay", "--no-build", "--vault", str(vault_path)),\n            fatal=False,\n        ),\n    )\n    quartz_steps = ('
+  count:   1
+  test:    tests/test_maintenance.py::test_mirror_stage_is_exactly_the_three_vault_steps
+  test:    tests/test_maintenance.py::test_default_plan_spawns_no_quartz_step
+  red at:  Left contains one more item
+
+T1-M2 prune-orphans dropped from the mirror stage
+  file:    src/brain/maintenance.py
+  replace: '        Step(\n            brain_argv(\n                "vault", "prune-orphans", "--apply", "--include-stale",\n                "--vault", str(vault_path),\n            ),\n            fatal=False,\n        ),\n    )\n    quartz_steps = ('
+  with:    '    )\n    quartz_steps = ('
+  count:   1
+  test:    tests/test_maintenance.py::test_mirror_stage_is_exactly_the_three_vault_steps
+  test:    tests/test_maintenance.py::test_run_stages_nonfatal_step_continues_to_prune_orphans
+  red at:  Right contains one more item
+
+T1-M3 --wiki-only aliased to --only mirror
+  file:    src/brain/maintenance.py
+  replace: '    if args.wiki_only:\n        # R8-3'
+  with:    "    if args.wiki_only:\n        args.only = 'mirror'\n    if False:\n        # R8-3"
+  count:   1
+  test:    tests/test_maintenance.py::test_main_wiki_only_exits_2_naming_the_replacements
+  red at:  must exit before running anything
+
+T1-M4 quartz in the default plan
+  file:    src/brain/maintenance.py
+  replace: '            quartz_steps,\n            opt_in=True,\n'
+  with:    '            quartz_steps,\n'
+  count:   1
+  test:    tests/test_maintenance.py::test_select_default_runs_every_stage_except_the_opt_in_quartz
+  test:    tests/test_maintenance.py::test_default_plan_spawns_no_quartz_step
+  red at:  Left contains one more item: 'quartz'
+
+T1-M5 the parser-cache wipe keyed back to wiki
+  file:    src/brain/maintenance.py
+  replace: 'if stage.stage_id == "quartz" and clean_cache:'
+  with:    'if stage.stage_id == "wiki" and clean_cache:'
+  count:   1
+  test:    tests/test_maintenance.py::test_run_stages_clean_cache_removes_only_parser_cache
+  red at:  parser cache dir must be wiped by --clean-cache
+
+T1-M6 --clean-cache accepted without quartz
+  file:    src/brain/maintenance.py
+  replace: 'if args.clean_cache and not any(s.stage_id == "quartz" for s in selected):'
+  with:    'if False:'
+  count:   1
+  test:    tests/test_maintenance.py::test_main_clean_cache_without_quartz_is_a_usage_error
+  red at:  must exit before running anything
+```
+
+**Round T2 — against `3bd0b96`** (the T2 commit).
+
+```text
+T2-N1 com.brain.build back in the installed set
+  file:    src/brain/bin/launchd.py
+  replace: '_INSTALLED_LABELS = ("com.brain.watcher", "com.brain.brief")'
+  with:    '_INSTALLED_LABELS = ("com.brain.watcher", "com.brain.build", "com.brain.brief")'
+  count:   1
+  test:    tests/test_bin_launchd_retired.py::test_the_build_daemon_is_retired_not_installed
+  test:    tests/test_bin_launchd_retired.py::test_install_writes_and_bootstraps_only_the_watcher_and_brief
+  red at:  'com.brain.build' != 'com.brain.brief'
+
+T2-N2 the retired bootout skipped
+  file:    src/brain/bin/launchd.py
+  replace: '        subprocess.run(\n            [launchctl, "bootout", f"gui/{uid}/{label}"],\n            check=False,\n            capture_output=True,\n        )\n        (launchd_dir / f"{label}.plist").unlink(missing_ok=True)'
+  with:    '        (launchd_dir / f"{label}.plist").unlink(missing_ok=True)'
+  count:   1
+  test:    tests/test_bin_launchd_retired.py::test_install_boots_out_and_deletes_a_leftover_build_daemon
+  red at:  /com.brain.build' in
+
+T2-N3 the retired plist left in place
+  file:    src/brain/bin/launchd.py
+  replace: '        (launchd_dir / f"{label}.plist").unlink(missing_ok=True)\n'
+  with:    ''
+  count:   1
+  test:    tests/test_bin_launchd_retired.py::test_install_boots_out_and_deletes_a_leftover_build_daemon
+  red at:  assert not True
+
+T2-N4 uninstall no longer sweeps the retired label
+  file:    src/brain/bin/launchd.py
+  replace: '    for label in _ALL_LABELS:\n'
+  with:    '    for label in _INSTALLED_LABELS:\n'
+  count:   1
+  test:    tests/test_bin_launchd_retired.py::test_uninstall_still_sweeps_the_retired_build_daemon
+  red at:  ['com.brain.build.plist'] == []
+
+T2-N5 the doctor reads every label again
+  file:    src/brain/doctor_runtime.py
+  replace: 'from .bin.launchd import _INSTALLED_LABELS as DAEMON_LABELS\n'
+  with:    'from .bin.launchd import _ALL_LABELS as DAEMON_LABELS\n'
+  count:   1
+  test:    tests/test_bin_launchd_retired.py::test_the_daemons_status_loop_ignores_a_leftover_build_plist
+  test:    tests/test_bin_launchd_retired.py::test_the_daemon_code_check_ignores_a_leftover_build_plist
+  red at:  com.brain.build installed but NOT LOADED
+
+T2-N6 _brain-build-fg shimmed again
+  file:    src/brain/bin/launchd.py
+  replace: '    for wrapper in ("_brain-watcher-fg", "_brain-brief-fg"):'
+  with:    '    for wrapper in ("_brain-watcher-fg", "_brain-build-fg", "_brain-brief-fg"):'
+  count:   1
+  test:    tests/test_bin_launchd_retired.py::test_install_shims_only_the_installed_wrappers
+  red at:  _brain-build-fg
+
+T2-N7 verify_release kickstarts com.brain.build again
+  file:    scripts/verify_release.py
+  replace: 'LAUNCHD_LABELS = ("com.brain.watcher", "com.brain.brief")'
+  with:    'LAUNCHD_LABELS = ("com.brain.watcher", "com.brain.build", "com.brain.brief")'
+  count:   1
+  test:    tests/test_verify_release_launchd_labels.py::test_tier_b_restarts_only_the_installed_agents
+  red at:  'com.brain.build' != 'com.brain.brief'
+```
+
+**Round T3 — against `b9c2631`** (the T3 commit).
+
+```text
+T3-P1.1 the wiki_installed gate restored
+  NOTE: edit 1 of 3; all are applied together
+  file:    src/brain/setup.py
+  replace: '    *,\n    non_interactive: bool = False,\n    daemons: bool = False,\n) -> None:'
+  with:    '    *,\n    wiki_installed: bool = False,\n    non_interactive: bool = False,\n    daemons: bool = False,\n) -> None:'
+  count:   1
+  test:    tests/test_setup.py::test_launchd_offered_when_wiki_interactively_declined
+  test:    tests/test_setup.py::test_setup_skip_wiki_no_longer_suppresses_launchd
+  red at:  declining the wiki must not suppress the daemons the user accepted
+
+T3-P1.2 the wiki_installed gate restored
+  NOTE: edit 2 of 3; all are applied together
+  file:    src/brain/setup.py
+  replace: '    if sys.platform != "darwin":\n        typer.echo("[skipped] launchd install (not macOS)")'
+  with:    '    if not wiki_installed:\n        typer.echo("[skipped] launchd install (wiki not installed)")\n        return\n    if sys.platform != "darwin":\n        typer.echo("[skipped] launchd install (not macOS)")'
+  count:   1
+  test:    tests/test_setup.py::test_launchd_offered_when_wiki_interactively_declined
+  test:    tests/test_setup.py::test_setup_skip_wiki_no_longer_suppresses_launchd
+  red at:  declining the wiki must not suppress the daemons the user accepted
+
+T3-P1.3 the wiki_installed gate restored
+  NOTE: edit 3 of 3; all are applied together
+  file:    src/brain/setup.py
+  replace: '        _maybe_install_launchd(\n            vault_path=vault_path,'
+  with:    '        _maybe_install_launchd(\n            wiki_installed=wiki_installed,\n            vault_path=vault_path,'
+  count:   1
+  test:    tests/test_setup.py::test_launchd_offered_when_wiki_interactively_declined
+  test:    tests/test_setup.py::test_setup_skip_wiki_no_longer_suppresses_launchd
+  red at:  declining the wiki must not suppress the daemons the user accepted
+
+T3-P2.1 --non-interactive installs the daemons
+  NOTE: edit 1 of 2; all are applied together
+  file:    src/brain/setup.py
+  replace: '    if non_interactive:\n        # Never auto-install'
+  with:    '    if False:\n        # Never auto-install'
+  count:   1
+  test:    tests/test_setup.py::test_setup_noninteractive_never_installs_launchd
+  red at:  install_plists must NOT run in --non-interactive mode
+
+T3-P2.2 --non-interactive installs the daemons
+  NOTE: edit 2 of 2; all are applied together
+  file:    src/brain/setup.py
+  replace: '    if daemons:\n        do_install = True'
+  with:    '    if daemons or non_interactive:\n        do_install = True'
+  count:   1
+  test:    tests/test_setup.py::test_setup_noninteractive_never_installs_launchd
+  red at:  install_plists must NOT run in --non-interactive mode
+
+T3-P3 the old daemon prompt text
+  SUPERSEDED at HEAD by 120934a: the prompt now reads "(vault-sync watcher + 07:00 daily brief, loaded on login)"; use round C's C-C2/C-C3
+  file:    src/brain/setup.py
+  replace: '"(vault-sync watcher + daily brief, started on login)?"'
+  with:    '"(auto-start Postgres + wiki watcher on login)?"'
+  count:   1
+  test:    tests/test_setup_daemons.py::test_the_daemon_prompt_names_the_vault_watcher_and_the_brief
+  red at:  auto-start Postgres + wiki watcher on login
+
+T3-P4 _brain-build-fg back in _SHIM_NAMES
+  file:    src/brain/setup.py
+  replace: '    "_brain-watcher-fg",\n)'
+  with:    '    "_brain-watcher-fg",\n    "_brain-build-fg",\n)'
+  count:   1
+  test:    tests/test_setup_daemons.py::test_setup_no_longer_installs_the_build_wrapper_shim
+  red at:  '_brain-build-fg' not in
+```
+
+**Round T4 — against `589cfed`** (the T4 commit).
+
+```text
+T4-Q1 a missing watcher reported OK
+  file:    src/brain/doctor_watcher.py
+  replace: '                "vault watcher",\n                "warn",\n                f"{WATCHER_LABEL} not installed: {_INVISIBLE_EDITS}",'
+  with:    '                "vault watcher",\n                "ok",\n                f"{WATCHER_LABEL} not installed: {_INVISIBLE_EDITS}",'
+  count:   1
+  test:    tests/test_doctor_watcher.py::test_macos_without_a_watcher_plist_warns_with_the_install_remedy
+  red at:  assert 'ok' == 'warn'
+
+T4-Q2 an old wiki build FAILs again
+  file:    src/brain/doctor_runtime.py
+  replace: '            "wiki build",\n            "ok",\n            f"dormant since R2, last built {when}'
+  with:    '            "wiki build",\n            "fail" if age_days > 3 else "ok",\n            f"dormant since R2, last built {when}'
+  count:   1
+  test:    tests/test_doctor_watcher.py::test_an_old_wiki_build_is_dormant_not_failing
+  test:    tests/test_doctor_watcher.py::test_a_dormant_wiki_never_turns_the_daemons_line_red
+  red at:  assert 'fail' == 'ok'
+
+T4-Q3 the never-built branch FAILs with a bare brain-rebuild
+  file:    src/brain/doctor_runtime.py
+  replace: '                "wiki build",\n                "ok",\n                f"dormant since R2, never built; `{WIKI_REBUILD_REMEDY}` builds it",\n                WIKI_REBUILD_REMEDY,'
+  with:    '                "wiki build",\n                "fail",\n                f"dormant since R2, never built; `{WIKI_REBUILD_REMEDY}` builds it",\n                "brain-rebuild",'
+  count:   1
+  test:    tests/test_doctor_watcher.py::test_a_workspace_that_never_built_is_dormant_not_failing
+  red at:  assert 'fail' == 'ok'
+
+T4-Q4 the retired-daemon warning dropped
+  file:    src/brain/doctor_watcher.py
+  replace: '    if not leftover:\n        return []\n'
+  with:    '    if leftover or not leftover:\n        return []\n'
+  count:   1
+  test:    tests/test_doctor_watcher.py::test_a_leftover_build_plist_is_one_warning_from_its_own_check
+  red at:  assert 0 == 1
+
+T4-Q5 the off-macOS process match flipped
+  file:    src/brain/doctor_watcher.py
+  replace: '    if any(is_vault_watcher(cmd) for cmd in procs):'
+  with:    '    if not any(is_vault_watcher(cmd) for cmd in procs):'
+  count:   1
+  test:    tests/test_doctor_watcher.py::test_off_macos_a_running_watcher_is_ok
+  red at:  assert 'warn' == 'ok'
+
+T4-Q6 the processes seam ignored
+  file:    src/brain/doctor_watcher.py
+  replace: '    procs = processes if processes is not None else snapshot_processes()'
+  with:    '    procs = snapshot_processes()'
+  count:   1
+  test:    tests/test_doctor_watcher.py::test_runtime_doctor_checks_threads_the_processes_seam
+  red at:  an explicit processes list must not be re-scanned
+
+T4-Q7 a signal-restarted daemon FAILs again
+  file:    src/brain/doctor_runtime.py
+  replace: '            else:\n                warnings.append(\n                    (\n                        label,\n                        f"killed by signal {signal_num} then restarted (a repeat "'
+  with:    '            else:\n                failures.append(\n                    (\n                        label,\n                        f"killed by signal {signal_num} then restarted (a repeat "'
+  count:   1
+  test:    tests/test_doctor_watcher.py::test_a_dormant_wiki_never_turns_the_daemons_line_red
+  red at:  assert 'fail' == 'warn'
+```
+
+**Round T5 — against `4bd08f2`** (the T5 commit).
+
+```text
+T5-R1 BRAIN_WIKI_BUILD defaults to 1
+  file:    src/brain/templates/bin/brain-up.sh
+  replace: 'if [[ "${BRAIN_WIKI_BUILD:-0}" == \'1\' ]]; then'
+  with:    'if [[ "${BRAIN_WIKI_BUILD:-1}" == \'1\' ]]; then'
+  count:   1
+  test:    tests/test_bin_scripts_r2.py::test_brain_up_runs_no_overlay_and_no_quartz_build_by_default
+  red at:  vault render --overlay --no-build
+  NOTE: a shell template behind a console script — run with a copy venv
+
+T5-R2 the re-rendering banner line
+  file:    src/brain/templates/bin/brain-up.sh
+  replace: "echo '   build:      dormant since R2 — brain-rebuild --only quartz rebuilds the wiki'"
+  with:    "echo '   build:      re-rendering on vault changes'"
+  count:   1
+  test:    tests/test_bin_scripts_r2.py::test_brain_up_banner_says_the_wiki_is_dormant
+  red at:  re-rendering on vault changes
+  NOTE: a shell template behind a console script — run with a copy venv
+
+T5-R3 the still-built-until-R2 banner line
+  file:    src/brain/templates/bin/brain-up.sh
+  replace: 'echo "   wiki:       $URL  (legacy, dormant since R2: serves its last build — BRAIN_OPEN_BROWSER=1 opens it)"'
+  with:    'echo "   wiki:       $URL  (legacy; still built until R2 — BRAIN_OPEN_BROWSER=1 opens it)"'
+  count:   1
+  test:    tests/test_bin_scripts_r2.py::test_brain_up_banner_says_the_wiki_is_dormant
+  red at:  still built until R2
+  NOTE: a shell template behind a console script — run with a copy venv
+
+T5-R4 the dormant build banner line deleted
+  file:    src/brain/templates/bin/brain-up.sh
+  replace: "echo '   build:      dormant since R2 — brain-rebuild --only quartz rebuilds the wiki'\n"
+  with:    ''
+  count:   1
+  test:    tests/test_bin_scripts_r2.py::test_brain_up_banner_says_the_wiki_is_dormant
+  red at:  {"wiki", "build"} <= lines.keys()
+  NOTE: a shell template behind a console script — run with a copy venv
+
+T5-R5 the probe's start-with-brain-up advice
+  file:    src/brain/bin/monitor.py
+  replace: '            "build watcher not running: the wiki is dormant since R2, so there is no "\n            "rebuild to time. Rebuild it once with `brain-rebuild --only quartz` (or "\n            "`BRAIN_WIKI_BUILD=1 brain-up` for a cold start).",'
+  with:    '            "build watcher not running — start with brain-up",'
+  count:   1
+  test:    tests/test_bin_monitor.py::test_probe_says_the_build_is_dormant_and_how_to_build
+  red at:  start with brain-up
+
+T5-R6 brain-status's stopped build row
+  file:    src/brain/templates/bin/brain-status.sh
+  replace: 'if [[ -f "$BUILD_PID" ]] && kill -0 "$(cat "$BUILD_PID")" 2>/dev/null; then\n    check_one "$BUILD_PID" \'build\' "(logs: $BUILD_LOG)"\nelse\n    printf \'  %-9s ⏸  dormant since R2 — brain-rebuild --only quartz rebuilds the wiki\\n\' \'build:\'\nfi'
+  with:    'check_one "$BUILD_PID" \'build\'   "(logs: $BUILD_LOG)"'
+  count:   1
+  test:    tests/test_bin_scripts_r2.py::test_brain_status_labels_a_stopped_build_watcher_dormant
+  red at:  stopped
+  NOTE: a shell template behind a console script — run with a copy venv
+
+T5-R7 the monitor labels the build watcher stopped
+  file:    src/brain/bin/monitor.py
+  replace: 'build_state = "running" if _pid_alive(BUILD_PID) else "dormant (R2)"'
+  with:    'build_state = "running" if _pid_alive(BUILD_PID) else "stopped"'
+  count:   1
+  test:    tests/test_bin_monitor.py::test_snapshot_labels_a_stopped_build_watcher_dormant
+  red at:  build watcher  stopped
+
+T5-R8 the monitor cross-check expects a build watcher
+  file:    src/brain/bin/monitor.py
+  replace: '    if sync_seen != 1 or build_mismatch:'
+  with:    '    if sync_seen != 1 or build_seen != 1:'
+  count:   1
+  test:    tests/test_bin_monitor.py::test_snapshot_labels_a_stopped_build_watcher_dormant
+  red at:  process count vs pid file
+```
+
+**Round T6 — against `e30160e`** (the T6 commit).
+
+```text
+T6-S1 publish left in wireTabs after its section is gone
+  file:    src/brain/ui/static/js/main.js
+  replace: 'for (const name of ["notes", "ingest", "agent"]) {'
+  with:    'for (const name of ["notes", "ingest", "agent", "publish"]) {'
+  count:   1
+  test:    tests/test_ui_browser_tabs.py::test_every_tab_switches_and_the_page_raises_nothing
+  test:    tests/test_ui_tabs_static.py::test_every_wired_name_has_a_section_and_every_button_a_pane
+  red at:  Cannot set properties of null (setting 'hidden')
+
+T6-S2 the Publish button re-added
+  file:    src/brain/ui/static/index.html
+  replace: '    <button class="tab" data-tab="agent" type="button">Agent</button>\n'
+  with:    '    <button class="tab" data-tab="agent" type="button">Agent</button>\n    <button class="tab" data-tab="publish" type="button">Publish</button>\n'
+  count:   1
+  test:    tests/test_ui_tabs_static.py::test_there_is_no_publish_tab
+  test:    tests/test_ui_browser_tabs.py::test_every_tab_switches_and_the_page_raises_nothing
+  red at:  data-tab="publish"
+
+T6-S3 brain.ui's docstring describes a Publish tab
+  file:    src/brain/ui/__init__.py
+  replace: 'Ingest and Agent are deliberately deferred:'
+  with:    'Ingest, Agent, and Publish are deliberately deferred:'
+  count:   1
+  test:    tests/test_ui_tabs_static.py::test_no_docstring_still_describes_the_publish_tab
+  red at:  'Publish' is contained here
+```
+
+**Round T7 — against `5780bb2`** (the T7 commit).
+
+```text
+T7-D1 README calls the wiki still built
+  file:    README.md
+  replace: 'is a legacy view, dormant since R2 (`brain-rebuild --only quartz` rebuilds it).'
+  with:    'still builds, as a legacy view.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_readme_intro_calls_the_wiki_dormant
+  red at:  still builds
+
+T7-D2 the vault-and-wiki callout says it still builds
+  file:    docs/vault-and-wiki.md
+  replace: 'The rest of this page describes how the wiki builds when you ask it to.'
+  with:    'The wiki still builds and serves exactly as described below.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_vault_and_wiki_callout_says_the_wiki_is_dormant
+  red at:  still builds and serves
+
+T7-D3 the --wiki-only flag line restored
+  file:    docs/vault-and-wiki.md
+  replace: '               #   --only STAGES   comma-separated stage ids to run\n'
+  with:    '               #   --wiki-only     run only the wiki stage (old fast path)\n               #   --only STAGES   comma-separated stage ids to run\n'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_vault_and_wiki_documents_the_r2_rebuild_flags
+  red at:  --wiki-only     run only the wiki stage
+
+T7-D4 BRAIN_WIKI_BUILD documented as default 1
+  file:    docs/vault-and-wiki.md
+  replace: '| `BRAIN_WIKI_BUILD` | `0` |'
+  with:    '| `BRAIN_WIKI_BUILD` | `1` |'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_vault_and_wiki_documents_the_r2_rebuild_flags
+  red at:  | `BRAIN_WIKI_BUILD` | `1` |
+
+T7-D5 the phone guide says the wiki keeps building
+  file:    docs/guides/brain-ui-on-your-phone.md
+  replace: 'Since phase 8 of the wiki → `brain ui` consolidation (R2), nothing rebuilds the Quartz wiki by\ndefault.'
+  with:    'Until phase 8 of the wiki → `brain ui` consolidation, the Quartz wiki keeps building.'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_phone_guide_says_the_wiki_is_dormant
+  red at:  Until phase 8
+
+T7-D6 the skill's bare --clean-cache
+  file:    skills/brain-maintenance/SKILL.md
+  replace: 'bin/brain-rebuild --only quartz --clean-cache  # wipe parser cache and rebuild from cold'
+  with:    'bin/brain-rebuild --clean-cache                # wipe parser cache and rebuild from cold'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_maintenance_skill_rebuilds_the_wiki_only_on_request
+  red at:  assert '--only quartz' in
+
+T7-D7 the CHANGELOG's migration warning removed
+  file:    CHANGELOG.md
+  replace: '- **The next `brain-up` after upgrading removes the `com.brain.build`\n  LaunchAgent.**'
+  with:    '- **`brain-install-launchd` no longer installs `com.brain.build`.**'
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_changelog_warns_that_the_next_brain_up_removes_the_build_daemon
+  red at:  next `brain-up` after upgrading removes
+```
+
+**Round C — against `120934a`** (the review-fixes commit).
+
+```text
+C-C1 the CHANGELOG drops the not-durable warning
+  file:    CHANGELOG.md
+  replace: "This release's next\n  `brain-up` removes it again, so keeping the daemon means staying on the\n  earlier release; on this release, rebuild on request with\n  `brain-rebuild --only quartz`."
+  with:    ''
+  count:   1
+  test:    tests/test_reading_surface_pointers.py::test_changelog_says_the_way_back_to_the_daemon_is_not_durable
+  red at:  removes it again
+
+C-C2 the prompt's old started-on-login wording
+  file:    src/brain/setup.py
+  replace: '"(vault-sync watcher + 07:00 daily brief, loaded on login)?"'
+  with:    '"(vault-sync watcher + daily brief, started on login)?"'
+  count:   1
+  test:    tests/test_setup_daemons.py::test_the_daemon_prompt_names_the_vault_watcher_and_the_brief
+  red at:  07:00 daily brief
+
+C-C3 the prompt names a time the brief plist does not schedule
+  file:    src/brain/setup.py
+  replace: '"(vault-sync watcher + 07:00 daily brief, loaded on login)?"'
+  with:    '"(vault-sync watcher + 08:00 daily brief, loaded on login)?"'
+  count:   1
+  test:    tests/test_setup_daemons.py::test_the_daemon_prompt_names_the_vault_watcher_and_the_brief
+  red at:  07:00 daily brief
+```
+
 
 **Recorded follow-ups (not phase 8):**
 
 - **A9's UI status line** (spec §8.5): "watcher not running — external edits will not appear in
   search" in `brain ui`'s status line, via a `/api/status` field. It is owed by A9 (phase 4's row)
   and is not a phase-8 exit criterion (R8-5).
+- **`bin/brain-skills-sync` after merge**, so the installed `brain-maintenance` skill matches the
+  repo (§10.3).
+- **S4:** verify the `com.brain.build` migration on this machine with the user's go (§10.4).
 
 ## 11. Plan review — where each finding landed (p7-reviewer, folded in 2026-10-14)
 
