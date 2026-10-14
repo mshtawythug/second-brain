@@ -5,10 +5,10 @@
     "snippet_context_tokens": 200,
     "vector_sim_floor": 0.25
   },
-  "generated_at": "2026-10-13T15:55:09.611826Z",
+  "generated_at": "2026-10-14T16:43:10.594830Z",
   "mean_mrr": 0.3826,
-  "mean_ndcg_at_5": 0.2779,
-  "mean_recall_at_20": 0.7112,
+  "mean_ndcg_at_5": 0.2724,
+  "mean_recall_at_20": 0.7089,
   "per_category": {
     "email": {
       "category": "email",
@@ -42,8 +42,8 @@
       "category": "recency",
       "count": 2,
       "mean_mrr": 0.25,
-      "mean_ndcg_at_5": 0.2648,
-      "mean_recall_at_20": 0.1429
+      "mean_ndcg_at_5": 0.18,
+      "mean_recall_at_20": 0.1071
     },
     "semantic": {
       "category": "semantic",
@@ -1015,24 +1015,24 @@
       "actual_doc_ids": [
         "d5dc1276-6340-4d64-b395-6ca5d7863eea",
         "752fb7ee-c005-4f14-8476-a3cfaa131d5d",
+        "0c73cdf1-b9bc-4adc-9a19-491b8029cadf",
         "12bc9814-7a7c-41b8-89da-f76b29b72f96",
+        "c1dbc1ee-7149-4537-8fa6-85f1d5177c63",
+        "6f56807f-c4ec-486a-b140-c9f79a1d986b",
+        "ea6280bf-cf5b-4ab9-9ee6-86e564770210",
+        "63bef287-719e-40dc-8d0b-ae6cbdd5e4ae",
         "be4accfa-76f2-4675-9dbc-9a791941ec76",
-        "b28db8ea-58b1-4f9f-a536-54e126d56f26",
-        "b5c637ee-5898-48b3-af34-24a29c882228",
         "05d2e581-b6d4-4288-9b61-b10c331aceea",
+        "b28db8ea-58b1-4f9f-a536-54e126d56f26",
+        "7586958e-3204-4301-90e7-14d62a6bfd12",
+        "b5c637ee-5898-48b3-af34-24a29c882228",
         "48f1b5d4-f79a-4c3b-be02-81b3cde8d026",
+        "eef87b58-853d-4d1e-b4af-ed363943c7c1",
         "96ffdb54-0bd7-49ba-a557-5cd87930a821",
         "571182e3-8c2b-413a-8160-3a564c172fcf",
-        "eef87b58-853d-4d1e-b4af-ed363943c7c1",
         "7d20773b-01b1-4c67-8faa-99268810c765",
-        "ec3beb79-e2c5-4e84-8f93-2affd13c25aa",
         "65fb18a1-276e-4387-a589-1435cf848f71",
-        "1948663e-e1d7-44f0-9935-3160d83eaac8",
-        "0c3c225d-9e43-4ccc-a7c2-c87dc845bdfd",
-        "0798727a-4d18-4490-ab1e-6ff8e9b98a9c",
-        "eee6dfa6-4f4a-42a6-b363-b9b42fc73b63",
-        "ad996490-8887-4d8c-9865-b22a522b9891",
-        "06020c23-c09f-40eb-90d5-ed548822130a"
+        "ec3beb79-e2c5-4e84-8f93-2affd13c25aa"
       ],
       "category": "recency",
       "expected_doc_ids": [
@@ -1066,9 +1066,9 @@
         "1948663e-e1d7-44f0-9935-3160d83eaac8"
       ],
       "mrr": 0.5,
-      "ndcg_at_5": 0.5296,
+      "ndcg_at_5": 0.3601,
       "query": "daily brief digest of recent captures and action items",
-      "recall_at_20": 0.2857
+      "recall_at_20": 0.2143
     },
     {
       "actual_doc_ids": [

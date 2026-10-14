@@ -41,6 +41,22 @@ about search changed. *(The first recording, 2026-09-02, sat in a different
 gap and drifted on 2026-09-20 exactly as this paragraph predicted — one query,
 `-0.15` nDCG@5, every other row unchanged to four decimals.)*
 
+**The gap protects only the trailing edge.** The SQL below finds when old
+documents cross the 40-day boundary. It says nothing about the leading edge:
+every newly ingested document lands inside the window at once. That matters for
+one query in particular. "Daily brief digest of recent captures and action
+items" has 28 judged documents, all of them daily briefs, and on 2026-10-14 its
+top 20 was all daily briefs too. The vault watcher now syncs a brief note
+(`daily/<year>/<date>-brief.md`) on most days, and each one is an unjudged
+competitor for exactly that query. Re-recorded **2026-10-14** for this reason:
+after a restart the watcher synced 7 notes (6 briefs and `index.md`), which
+moved that query alone (nDCG@5 0.5296 → 0.3601, Recall@20 0.2857 → 0.2143)
+and the means by −0.0055 nDCG@5 / −0.0023 Recall@20, with every other row at
+±0.0000. **Expect the same on most days a brief lands**: an exit 3 in which
+only that `recency` row moved is this drift, not a regression. Check the diff
+table before re-recording. The other `recency` query ("quarterly planning
+review …") had 3 briefs in its top 20 and was not moved by those 6.
+
 Re-derive the window before you re-record; it is a property of the document
 set, not of the code:
 
@@ -85,8 +101,10 @@ dilute the mean; but a re-judged one silently changes what "correct" means.
   on the graph, so spec §5 has a read-only recall check with a 0.99 trigger.
   `ci.json` was re-recorded for the ranking change (first for the exact scan,
   then for the iterative scan, whose metrics are identical): the means went
-  from 0.2589 / 0.3697 / 0.5852 to **0.2779 / 0.3826 / 0.7112**, on the same
-  document set and the same window as in (2). The same
+  from 0.2589 / 0.3697 / 0.5852 to 0.2779 / 0.3826 / 0.7112, on the same
+  document set and the same window as in (2). The current committed means,
+  after the 2026-10-14 re-record for the synced daily briefs in (2), are
+  **0.2724 / 0.3826 / 0.7089**. The same
   HNSW shape remains in `related.py` and `connect.py`; those are unmeasured
   follow-ups.
 
