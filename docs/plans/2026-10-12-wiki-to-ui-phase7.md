@@ -277,7 +277,8 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Round 16b — code | `6a46869` | `ui/context.py` (`LOOPBACK_NAMES` = `localhost` only), `cli_ui.py` (`_alias_reason`, the alias panel and Confidential line follow the lens), CHANGELOG, guide, cli-reference; `ui_cli_support.py` (the `build_context` double derives the lens), host, security, wiring and panel tests |
 | Merge of `second-brain/master` | `5b13ab9` | master `c30449e` (PRs #22 and #23). One conflict, `CLAUDE.md`'s ceiling table (adjacent rows), both kept; `wiki/build_watcher.py` and `search.py` hops promoted. MERGED, not rebased, so every SHA in this file stays valid |
 | Round 16b — tests | `7d1ec3d` | `test_cli_ui_host.py` (the mixed-answer test reads the boxed error as one line), `ui_cli_support.py` (the double's `.get`): two guards the strict sweep at `5b13ab9` found red beside their targets |
-| Rounds 16/16b — plan | **the commit that added this row** | this file: §10.1, §10.9 (R16-4 superseded, R16-7 NOTE, round-16b block), §10.24 rewritten for 16, 16b and the merge |
+| Rounds 16/16b — plan | `1b45da4` (PROMOTED from "the commit that added this row") | this file: §10.1, §10.9 (R16-4 superseded, R16-7 NOTE, round-16b block), §10.24 rewritten for 16, 16b and the merge |
+| Plan review of `1b45da4` | **the commit that added this row** | this file: R16b-9 keeps its `6a46869` needle plus a `NOTE at HEAD (7d1ec3d)`; §10.24's round-16b mutation sentence corrected (9/9 at `6a46869` only with that needle) and the `7d1ec3d` entry check recorded |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -2485,7 +2486,8 @@ R16b-9 a trusted name with a mixed answer gets the alias refusal
   with:    '    if not loopback and not token and any(a.is_loopback for a in resolved):\n'
   count:   1
   test:    tests/test_cli_ui_host.py::test_a_name_resolving_to_loopback_and_elsewhere_is_not_loopback
-  red at:  assert "only localhost is trusted" not in flat
+  red at:  assert "pass --token" in result.output
+  NOTE at HEAD (7d1ec3d): still applies, but goes red at `assert "only localhost is trusted" not in flat` — at `6a46869` the test asserted "pass --token" first on the raw output, and the alias refusal wraps that phrase across Rich's box edge, so the guard went red there, ahead of the assertion it targets; `7d1ec3d` reads the boxed error as one line and checks the alias text first
 ```
 
 ### 10.10 Review round 3 (2026-10-13)
@@ -2959,7 +2961,13 @@ test.
 - Round 16b: 9 guards against `6a46869`, including `ip6-localhost` trusted again (R16b-1,
   R16b-2) and the double hard-coding the lens again (R16b-8, the test of the tests).
 - Each guard holds on all five clauses with the strict clause 4, in a `git archive` copy, never
-  the worktree.
+  the worktree, at its own round SHA. Round 16b's nine were re-proved at `6a46869` itself after
+  the review of `1b45da4`: 9/9. That holds only with R16b-9's `6a46869` needle,
+  `assert "pass --token" in result.output`. The needle `1b45da4` first catalogued,
+  `assert "only localhost is trusted" not in flat`, exists only from `7d1ec3d`. Against it the
+  entry failed clause 4 at its own SHA, so this sentence's "all five clauses" was true of 8 of
+  the 9. The entry now carries its round-SHA needle plus a `NOTE at HEAD (7d1ec3d)`, the same
+  shape as R16-7.
 - Round 16b makes R16-4 inapplicable, so it is marked SUPERSEDED. R16-7's needle moved with the
   reason text, so it has a NOTE.
 - **Every non-superseded entry of every round was then re-run strict at the merge `5b13ab9`.**
@@ -2970,8 +2978,13 @@ test.
   - **R11-22:** the `build_context` double read `kwargs["resolved"]`, so the mutation went red
     as a KeyError inside the double.
   - `7d1ec3d` fixes both. The test now reads the boxed error as one line, and the double uses
-    `.get`. R16b-9's needle is now the line the guard actually targets. Both were re-proved
-    strict.
+    `.get`. At `7d1ec3d` R16b-9 goes red at the assertion it targets (its NOTE), and R11-22 at
+    its own needle again (`4cefe58`'s, no NOTE needed). Both were re-proved strict.
+  - The review of `1b45da4` asked for every entry whose test lines `7d1ec3d` changed to be
+    checked. Four entries name the two tests it touched: R10-6, R10-8 (superseded), R11-22 and
+    R16b-9. Each needle is present at its own round SHA (checked with `git show`), and each
+    still goes red at HEAD (the sweep below). Only R16b-9's needle differs between its round
+    SHA and HEAD, so it is the only one carrying a NOTE.
 - **The sweep was then run again at `7d1ec3d`:** **144 entries; 143 pass all five clauses, and R15b-1 stays green, as its NOTE says it does on any host with `::1`.** The copy's venv had the `browser` extra, so no entry passed by skipping.
 
 **Verification.** Every exit code was read from a file. The run of record is on the committed
