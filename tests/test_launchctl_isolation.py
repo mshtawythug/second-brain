@@ -150,7 +150,6 @@ def test_setup_daemons_install_lands_on_the_env_stub(
 
     with pytest.raises(LaunchdError, match="bootstrap failed"):
         _maybe_install_launchd(
-            wiki_installed=True,
             vault_path=tmp_path / "vault",
             brain_home=brain_home,
             dry_run=False,
