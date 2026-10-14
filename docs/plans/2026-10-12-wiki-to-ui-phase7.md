@@ -273,7 +273,11 @@ SHAs are the commits on `feat/wiki-to-ui-phase7` after its rebase onto `second-b
 | Rounds 11–15b — plan | `0965b61` (PROMOTED from "the commit that added this row" in round 16) | this file: §10.1, §10.9 (validator: `MOVED` lines; round headers may carry a letter), §10.19–§10.23. Rounds 11 to 15 never got a plan commit of their own: the next round arrived first each time |
 | Rounds 11–15b — plan-review fixes | `cb4b6ed` | this file: §10.19 count, §10.23 skips and numbering, the validator's per-test `MOVED` check |
 | Round 16 — code | `2af3667` | `ui/context.py` (`LOOPBACK_NAMES`, `is_loopback_alias`; `address_class` demotes an untrusted loopback name), `cli_ui.py` (`LOOPBACK_ALIAS_REASON` in the refusal and the panel), CHANGELOG, guide, cli-reference; tests in `test_cli_ui_host.py`, `test_ui_security.py`, `test_ui_bind_wiring.py`, `test_cli_ui.py`, `test_ui_server_bind.py`, `ui_cli_support.py` |
-| Round 16 — plan | **the commit that added this row** | this file: §10.1, §10.9 (R11-8 NOTE, round-16 block), §10.24 |
+| Round 16 — plan | `1dfe4c7` (PROMOTED from "the commit that added this row" in round 16b) | this file: §10.1, §10.9 (R11-8 NOTE, round-16 block), §10.24 — superseded in part by round 16b, before any review of it |
+| Round 16b — code | `6a46869` | `ui/context.py` (`LOOPBACK_NAMES` = `localhost` only), `cli_ui.py` (`_alias_reason`, the alias panel and Confidential line follow the lens), CHANGELOG, guide, cli-reference; `ui_cli_support.py` (the `build_context` double derives the lens), host, security, wiring and panel tests |
+| Merge of `second-brain/master` | `5b13ab9` | master `c30449e` (PRs #22 and #23). One conflict, `CLAUDE.md`'s ceiling table (adjacent rows), both kept; `wiki/build_watcher.py` and `search.py` hops promoted. MERGED, not rebased, so every SHA in this file stays valid |
+| Round 16b — tests | `7d1ec3d` | `test_cli_ui_host.py` (the mixed-answer test reads the boxed error as one line), `ui_cli_support.py` (the double's `.get`): two guards the strict sweep at `5b13ab9` found red beside their targets |
+| Rounds 16/16b — plan | **the commit that added this row** | this file: §10.1, §10.9 (R16-4 superseded, R16-7 NOTE, round-16b block), §10.24 rewritten for 16, 16b and the merge |
 
 Docs landed before task 3's commit so that `tests/test_reading_surface_pointers.py`, which pins
 both, is green at every commit.
@@ -460,7 +464,7 @@ marked, exit 0. At `4c164cb` (the final commit): 125/125, 44 marked, exit 0. At 
 44 marked, exit 0. Result at the commit that added this sentence (round 10): **round 0 22/22,
 round 1 17/17, round 2 13/13, round 3 7/7, round 4 4/4, round 5 11/11, round 6 9/9, round 7 9/9,
 round 8 6/6, round 9 8/8 + 10/10 + 9/9 + 3/3, round 10 16/16 — 144/144; 54 entries superseded at
-HEAD, every one marked; exit 0.** At the round-16 plan commit (rounds 11–15b and 16 added): **201/201, 65 superseded and marked, every round header parsed; exit 0.** The round-header pattern was `Round (\d)` until round 10 — a
+HEAD, every one marked; exit 0.** At the round-16 plan commit (rounds 11–15b and 16 added): **201/201, 65 superseded and marked, every round header parsed; exit 0.** At the rounds-16/16b plan commit: **210/210, 66 superseded and marked (R16-4 joined), every round header parsed; exit 0.** The round-header pattern was `Round (\d)` until round 10 — a
 "Round 10" block would have been skipped silently; it is `Round (\d+)` now. The address-based restructure superseded 16 entries at once; the
 validator listed all of them before any was marked. Its
 first run after round 9 flagged nine entries: six whose CLI code moved into `validate_host`, and
@@ -2350,6 +2354,7 @@ R16-3 any name resolving to loopback is loopback again (the classification)
   red at:  assert address_class(name, resolved) == kind
 
 R16-4 ip6-localhost is not a trusted name
+  SUPERSEDED at HEAD by round 16b (`6a46869`): ip6-localhost is no longer trusted, so the set this deletes it from is `{"localhost"}`; the opposite mutation is R16b-1/R16b-2
   file:    src/brain/ui/context.py
   replace: 'frozenset({"localhost", "ip6-localhost"})'
   with:    'frozenset({"localhost"})'
@@ -2380,6 +2385,7 @@ R16-7 the refusal does not say why an alias needs a token
   count:   1
   test:    tests/test_cli_ui_host.py::test_a_loopback_alias_without_a_token_is_refused
   red at:  only localhost and ip6-localhost are trusted
+  NOTE at HEAD (round 16b): still applies, but goes red at `only localhost is trusted as a loopback name` — round 16b's reason names localhost alone, and the test reads the boxed usage error as one line
 
 R16-8 the panel calls a loopback alias "NOT bound to loopback"
   file:    src/brain/cli_ui.py
@@ -2404,6 +2410,82 @@ R16-10 the busy-port notice is dropped
   count:   1
   test:    tests/test_cli_ui.py::test_a_busy_port_is_named_with_the_one_used_instead
   red at:  was busy — using 8766 instead
+```
+
+**Round 16b — against `6a46869`** (the review of `2af3667`: `localhost` is the only trusted name; the alias panel follows the confidential lens; the lead's two edge cases). Strict clause 4.
+
+```text
+R16b-1 ip6-localhost trusted again (CLI token rule)
+  file:    src/brain/ui/context.py
+  replace: 'frozenset({"localhost"})'
+  with:    'frozenset({"localhost", "ip6-localhost"})'
+  count:   1
+  test:    tests/test_cli_ui_host.py::test_a_loopback_alias_without_a_token_is_refused
+  red at:  assert result.exit_code == 2
+
+R16b-2 ip6-localhost trusted again (build_context allowlist and lens)
+  file:    src/brain/ui/context.py
+  replace: 'frozenset({"localhost"})'
+  with:    'frozenset({"localhost", "ip6-localhost"})'
+  count:   1
+  test:    tests/test_ui_bind_wiring.py::test_build_context_classifies_a_hostname_by_its_resolved_addresses
+  red at:  assert context.allowed_hosts == hosts
+
+R16b-3 localhost. is trusted as localhost
+  file:    src/brain/ui/context.py
+  replace: 'bind_address(host) in LOOPBACK_NAMES'
+  with:    'bind_address(host).rstrip(".") in LOOPBACK_NAMES'
+  count:   1
+  test:    tests/test_ui_security.py::test_only_a_trusted_name_resolving_to_loopback_is_loopback
+  red at:  assert address_class(name, resolved) == kind
+
+R16b-4 the localhost. refusal does not mention the trailing dot
+  file:    src/brain/cli_ui.py
+  replace: '    if host.endswith(".") and host.rstrip(".") == "localhost":\n'
+  with:    '    if False:\n'
+  count:   1
+  test:    tests/test_cli_ui_host.py::test_a_loopback_alias_without_a_token_is_refused
+  red at:  drop the trailing dot to use localhost
+
+R16b-5 the alias note says withheld under --include-confidential
+  file:    src/brain/cli_ui.py
+  replace: '("" if serve_confidential else ", confidential bodies withheld")'
+  with:    '", confidential bodies withheld"'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_panel_never_contradicts_the_confidential_lens_on_an_alias
+  red at:  assert ("withheld" in out) is not serve_confidential
+
+R16b-6 the Confidential line calls an alias a non-loopback bind
+  file:    src/brain/cli_ui.py
+  replace: '    elif alias_of:\n        typer.echo(\n'
+  with:    '    elif False:\n        typer.echo(\n'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_panel_never_contradicts_the_confidential_lens_on_an_alias
+  red at:  assert "non-loopback bind" not in out
+
+R16b-7 an alias under --include-confidential is "SERVED over the network"
+  file:    src/brain/cli_ui.py
+  replace: 'where = "on a loopback alias" if alias_of else "over the network"'
+  with:    'where = "over the network"'
+  count:   1
+  test:    tests/test_cli_ui.py::test_the_panel_never_contradicts_the_confidential_lens_on_an_alias
+  red at:  bodies SERVED on a loopback alias
+
+R16b-8 the CLI double hard-codes the lens again (the test of the tests)
+  file:    tests/ui_cli_support.py
+  replace: 'serve_confidential_bodies=serve, notices=()'
+  with:    'serve_confidential_bodies=False, notices=()'
+  count:   1
+  test:    tests/test_cli_ui_host.py::test_a_loopback_alias_with_include_confidential_never_says_withheld
+  red at:  assert "withheld" not in result.output
+
+R16b-9 a trusted name with a mixed answer gets the alias refusal
+  file:    src/brain/cli_ui.py
+  replace: '    if not loopback and not token and is_loopback_alias(host, resolved):\n'
+  with:    '    if not loopback and not token and any(a.is_loopback for a in resolved):\n'
+  count:   1
+  test:    tests/test_cli_ui_host.py::test_a_name_resolving_to_loopback_and_elsewhere_is_not_loopback
+  red at:  assert "only localhost is trusted" not in flat
 ```
 
 ### 10.10 Review round 3 (2026-10-13)
@@ -2820,48 +2902,89 @@ All of it ran on `5367194`, with the worktree untouched while the run of record 
 | `git merge-tree --write-tree HEAD second-brain/master` (`6a82db2`) | exit 0, no conflicts |
 | The §10.9 validator | exit 0: 191 entries, 65 superseded and marked, every round header parsed |
 
-### 10.24 Round 16 (2026-10-14)
+### 10.24 Rounds 16 and 16b, and the merge of master (2026-10-14)
 
-The phase-7 completion audit of `cb4b6ed` (AUDIT FAILED, three LOW findings). Fixed in `2af3667`,
-authored by the auditor at team-lead's direction; a different reviewer and auditor check it.
+The phase-7 completion audit of `cb4b6ed` (AUDIT FAILED, three LOW findings) was fixed as round 16
+in `2af3667` and recorded in `1dfe4c7`. The fixes were written by the auditor, at team-lead's
+direction, and are checked by a different reviewer and auditor. The review of `2af3667` found one
+MEDIUM, one LOW and two nits; those are fixed as round 16b in `6a46869`. Master `c30449e` (PRs #22
+and #23) was then merged in `5b13ab9`. A strict sweep at the merge found two round-16b guards
+going red beside their targets. They are fixed in `7d1ec3d`, which changes tests only, and the
+run of record is on `7d1ec3d`. `1dfe4c7`'s
+verification table is superseded by the one below: it ran on `2af3667`.
+
+**Round 16 (`2af3667`).**
 
 | Item | Fix |
 |---|---|
-| 1 LOW, security — a regression against master | Since round 10 a HOSTNAME was loopback when every address it resolved to was loopback. A loopback bind runs with no token, allowlists its own name, uses its name as the allowed Origin and serves confidential bodies, so `brain ui --host 127.0.0.1.nip.io` (a public service) did all four — measured: `GET /api/tree` with `Host: 127.0.0.1.nip.io:<port>` and no token answered 200. Whoever controls such a name's DNS could serve a page from it, re-point it at 127.0.0.1, and pass both the Host check and the Origin check: the DNS rebinding the allowlist exists to stop. On master (`6a82db2`) any name outside `LOOPBACK_HOSTS` needed a token. Now `context.LOOPBACK_NAMES` = {`localhost`, `ip6-localhost`} are the only names that can be loopback, and only when every address is loopback; `address_class` demotes any other loopback-resolving name to "other" (`context.is_loopback_alias`), so the token rule, the Host allowlist (the name alone), the Origin and the confidential lens (withheld) all follow from the one function. The CLI's refusal says why (`cli_ui.LOOPBACK_ALIAS_REASON`), and with `--token` the panel says the bind is guarded like a network bind instead of the false "NOT bound to loopback". Literals are unchanged (`127.0.0.2` is still loopback). CHANGELOG, guide and cli-reference say which names are trusted |
-| 2 LOW — R11-8 drifted | Since round 13 (`1264162`) `_listen_socket` parses its address, so R11-8's mutation raises `ValueError` on the hostname before its list assertion. The entry now carries the `NOTE at HEAD` line §10.9 requires; red at the recorded assertion on `4cefe58` (audit) and at the NOTE's needle at `2af3667` (round 16) |
-| 3 LOW — two branches no test ran | `resolve_bind_addresses` on an empty resolver answer (`test_resolve_bind_addresses_reports_an_empty_answer`, an injected resolver returning `[]`) and the panel's busy-port notice (`test_a_busy_port_is_named_with_the_one_used_instead`, `claim_port` replaced with pytest `monkeypatch`). `ui/server.py` is at 100% in the run of record |
+| 1 LOW, security — a regression against master | Since round 10 a HOSTNAME counted as loopback when every address it resolved to was loopback. A loopback bind runs with no token, allowlists its own name, takes its name as the allowed Origin and serves confidential bodies. So `brain ui --host 127.0.0.1.nip.io`, a public service, did all four. Measured: `GET /api/tree` with `Host: 127.0.0.1.nip.io:<port>` and no token answered 200. Whoever controls such a name's DNS could serve a page from it, re-point it at 127.0.0.1, and pass both the Host check and the Origin check — the DNS rebinding the allowlist exists to stop. On master (`6a82db2`) any name outside `LOOPBACK_HOSTS` needed a token. Now only names in `context.LOOPBACK_NAMES` can be loopback. `address_class` demotes any other loopback-resolving name to "other" (`context.is_loopback_alias`), so the token rule, the Host allowlist (the name alone), the Origin and the confidential lens (withheld) all follow from that one function. The CLI's refusal says why (`cli_ui.LOOPBACK_ALIAS_REASON`). Literals are unchanged: `127.0.0.2` is still loopback |
+| 2 LOW — R11-8 drifted | Since round 13 (`1264162`), `_listen_socket` parses its address, so R11-8's mutation raises `ValueError` on the hostname before its list assertion is reached. The entry now has the `NOTE at HEAD` line §10.9 requires |
+| 3 LOW — two branches no test ran | `resolve_bind_addresses` on an empty resolver answer is now covered by an injected resolver returning `[]`. The panel's busy-port notice is covered with `claim_port` replaced by pytest `monkeypatch`. `ui/server.py` is at 100% in the run of record |
+
+**Round 16b (`6a46869`), the review of `2af3667`, plus the lead's two edge cases.**
+
+| Item | Fix |
+|---|---|
+| 1 MEDIUM — `ip6-localhost` was trusted | Round 16 put `ip6-localhost` in `LOOPBACK_NAMES` beside `localhost`. That was wrong for three reasons. macOS's `/etc/hosts` does not define it, so `getaddrinfo` falls through to network DNS and the search domains, where a hostile resolver can point it anywhere. Browsers do not hard-wire it. Master never trusted it. `LOOPBACK_NAMES` is `{"localhost"}`. The literals `::1` and `[::1]` stay tokenless, by address. The reason text, the context.py justification and the CHANGELOG, guide and cli-reference sentences now name localhost alone |
+| 2 LOW — the alias panel contradicted the lens | The alias note said "confidential bodies withheld" even under `--include-confidential`, which serves them (`build_context`). The Confidential line also called a loopback alias a "non-loopback bind". The note now mentions withholding only when bodies are withheld. The line reads "withheld (loopback alias, guarded like a network bind)", or "SERVED on a loopback alias (--include-confidential)". The CLI tests could not see this because the `build_context` double in `tests/ui_cli_support.py` hard-coded `serve_confidential_bodies=False`. It now derives the value as `build_context` does, and a `_panel` unit test runs without the double |
+| 3 nits | The `--host localhost.` refusal now says to drop the trailing dot (`cli_ui._alias_reason`). In the CHANGELOG, "every spelling of loopback is loopback" now reads "every loopback address literal is loopback" |
+| Edge case (a) — spellings of the trusted name | `LOCALHOST` is `localhost`: `validate_host` lower-cases a hostname, as a browser lower-cases the Host header it sends, so it is trusted. `localhost.` is a different name, and a browser sends `Host: localhost.` as typed. `LOOPBACK_HOSTS` does not hold it, so it is "other" (token required), consistent with the Host check. Both are pinned in the CLI and the classification tests |
+| Edge case (b) — a trusted name with a mixed answer | `localhost` resolving to `127.0.0.1` and `192.0.2.30` stays "other" and needs a token. It gets the network-bind refusal, not the alias one. Pinned in the classification table and the CLI test (R16b-9) |
+
+**The merge (`5b13ab9`).** Master `c30449e` was merged, not rebased, so every SHA cited here
+stays valid. The one conflict was in `CLAUDE.md`'s ceiling table, on adjacent rows: this branch's
+rewritten `setup.py` row and PR #23's extended `wiki/build_watcher.py` row. Both were kept. Under
+the promotion rule, the two rows master touched have their descriptive hops promoted: `wiki/build_watcher.py`
+to 1,110 (`188a64f`), and `search.py` to 823 (`c343f5c`, touched, no net change). Both counts come
+from `git show "${sha}:<path>" | wc -l`. The over-800 row set was re-derived on the merged tree and
+matches the table.
 
 **Tests changed, not only added.** `test_a_name_is_classified_by_every_address_it_resolves_to`
-judged its table for `some.name`; an untrusted name can no longer be loopback, so it now judges
-`localhost` (node ids unchanged; R10-5 carries a NOTE for the moved line).
-`test_the_cli_binds_what_it_classified_even_if_dns_changes_its_answer` resolved `brain-1.lan` to
-127.0.0.1 without a token; it now resolves `localhost`, the only kind of name that can still bind
-loopback tokenless (R11-1's needle is unchanged). New: a `FAKE_DNS` row
-`loopback-alias.example → 127.0.0.1` (synthetic), its `HOST_SPELLINGS` row, the refusal and
-guarded-panel CLI tests, the trusted-names CLI test (`localhost`, `LOCALHOST`, `ip6-localhost`
-tokenless), a classification table and a literal test in `test_ui_security.py`, and two
-`build_context` rows (`ip6-localhost` trusted, the alias not).
+used to judge its table for `some.name`. An untrusted name can no longer be loopback, so the
+table is now judged for `localhost`; node ids are unchanged. R10-5 got a NOTE for the moved line.
+`test_the_cli_binds_what_it_classified_even_if_dns_changes_its_answer` now resolves `localhost`
+rather than `brain-1.lan`. The trusted-name test is now `localhost` and `LOCALHOST` only.
+`ip6-localhost` and `localhost.` joined the alias refusal, which reads the boxed usage error
+as one line. The `ip6-localhost` `build_context` row became "other". The `HOST_SPELLINGS` row for
+`ip6-localhost` is unchanged: it passes `--token`, as every table row does, and still proves the
+real IPv6-only bind.
 
-**Red first.** The new tests against `cb4b6ed`'s source, in a `git archive` copy: 11 failed, among
-them the CLI refusal, the guarded panel and the alias's `build_context` row (allowlist and lens).
+**Red first.** In `git archive` copies, the round-16 tests failed against `cb4b6ed`'s source: 11
+failures. The round-16b tests failed against `2af3667`'s source: 9 failures, including both
+panel cases, the `ip6-localhost` and `localhost.` refusals, and the `include_confidential` CLI
+test.
 
-**Mutation evidence (round 16):** 10 guards, each on all five clauses with the strict clause 4,
-against `2af3667` in a `git archive` copy (never the worktree) — R16-1 to R16-10. Then **every
-non-superseded entry of every round was re-run at `2af3667`**, strict: 136 entries; 135 pass all
-five clauses, and R15b-1 stays green, as its NOTE says it does on any host with `::1`. The sweep
-found one more drift, caused by this round: R10-5's assertion line moved with the table above —
-NOTE added, re-run with it: PASS. Its first pass also counted L-3's browser entry as green
-because the copy's venv lacked the `browser` extra (the test skipped); re-run with it: PASS.
+**Mutation evidence.**
+- Round 16: 10 guards against `2af3667`.
+- Round 16b: 9 guards against `6a46869`, including `ip6-localhost` trusted again (R16b-1,
+  R16b-2) and the double hard-coding the lens again (R16b-8, the test of the tests).
+- Each guard holds on all five clauses with the strict clause 4, in a `git archive` copy, never
+  the worktree.
+- Round 16b makes R16-4 inapplicable, so it is marked SUPERSEDED. R16-7's needle moved with the
+  reason text, so it has a NOTE.
+- **Every non-superseded entry of every round was then re-run strict at the merge `5b13ab9`.**
+  144 entries: 141 passed. R15b-1 stayed green, as its NOTE says it does on any host with `::1`.
+  Two failed, both caused by round 16b's tests:
+  - **R16b-9:** the alias refusal is longer, so Rich wrapped "pass --token" across the usage box's
+    edge, and that earlier assertion fired first.
+  - **R11-22:** the `build_context` double read `kwargs["resolved"]`, so the mutation went red
+    as a KeyError inside the double.
+  - `7d1ec3d` fixes both. The test now reads the boxed error as one line, and the double uses
+    `.get`. R16b-9's needle is now the line the guard actually targets. Both were re-proved
+    strict.
+- **The sweep was then run again at `7d1ec3d`:** **144 entries; 143 pass all five clauses, and R15b-1 stays green, as its NOTE says it does on any host with `::1`.** The copy's venv had the `browser` extra, so no entry passed by skipping.
 
-**Verification (every exit code read from a file; the run of record on the committed `2af3667`,
-nothing touching the worktree while it ran):**
+**Verification.** Every exit code was read from a file. The run of record is on the committed
+`7d1ec3d`, the merge plus the test fix. The worktree venv was reinstalled `[dev,browser]` for
+master's pytest-timeout, and nothing touched the worktree while the run went. An earlier run on
+`5b13ab9` also exited 0 (9,179 passed). It is superseded, because `7d1ec3d` changed tests after it.
 
 | Check | Result |
 |---|---|
 | `ruff check` (0.17.0) | exit 0 |
-| `mypy src/` (2.4.0) | exit 0, 225 source files |
-| **Full suite — the run of record**, `pytest` on `second_brain_t_p7aud3` | **exit 0**: 9,125 passed, 3 skipped, 306 deselected; coverage 94.63% (floor 85%); 19m30s |
-| The `ci.yml` browser command (14 modules, `-m browser --no-cov`) | exit 0, 197 passed |
+| `mypy src/` (2.4.0) | exit 0, 226 source files |
+| **Full suite — the run of record**, `pytest` on `second_brain_t_p7aud3` | **exit 0**: 9,179 passed, 3 skipped, 319 deselected; coverage 94.64% (floor 85%); 21m15s. `ui/server.py`, `ui/security.py` and `ui/lan.py` are at 100% |
+| The `ci.yml` browser command as the merged `ci.yml` spells it (15 modules, `-m browser --no-cov`), on `7d1ec3d` | exit 0, 210 passed |
 | `tests/test_ci_workflow.py` | exit 0, 22 passed |
-| `git merge-tree --write-tree HEAD second-brain/master` (`2b6f560`, after `git fetch`) | **exit 1: one conflict, `CLAUDE.md`'s ceiling table.** Master's PR #23 extended the `wiki/build_watcher.py` row next to this branch's rewritten `setup.py` row; the resolution keeps both rows' new text. Not resolved here — a merge of master is team-lead's call. Against `2dd7d61` (before PR #23) it was clean |
-| The §10.9 validator | exit 0: 201 entries, 65 superseded and marked, every round header parsed |
+| `git merge-tree --write-tree HEAD second-brain/master` (`edd8986`, after `git fetch`; master moved again with PR #25, an eval baseline re-record) | exit 0, no conflicts |
+| The §10.9 validator | exit 0: 210 entries, 66 superseded and marked, every round header parsed |
