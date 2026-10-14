@@ -698,7 +698,10 @@ def test_brain_status_three_rows(
 
 
 def test_brain_rebuild_dry_run_lists_stages(tmp_path: Path) -> None:
-    """``--dry-run`` prints all 7 stage ids and exits 0 (no live DB needed).
+    """``--dry-run`` prints the default stage ids and exits 0 (no live DB needed).
+
+    At R2 the default plan ends in ``mirror`` and never names the opt-in
+    ``quartz`` stage (phase 8, E1), so the subprocess check pins both halves.
 
     The Python orchestrator entry prints the stage plan and returns immediately
     when ``--dry-run`` is passed — it never opens a DB connection, never
@@ -721,12 +724,13 @@ def test_brain_rebuild_dry_run_lists_stages(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     for sid in (
         "embeddings", "summaries", "search", "graph",
-        "graph-weights", "communities", "wiki",
+        "graph-weights", "communities", "connect", "mirror",
     ):
         assert sid in result.stdout, (
             f"expected stage id {sid!r} in --dry-run output;\n"
             f"stdout: {result.stdout!r}\nstderr: {result.stderr!r}"
         )
+    assert "quartz" not in result.stdout.lower(), result.stdout
 
 
 # ---------------------------------------------------------------------------
