@@ -624,14 +624,74 @@ def test_a_name_is_classified_by_every_address_it_resolves_to(
     addresses: list[str], kind: str
 ) -> None:
     """Round 10, item 2: ANY unspecified address makes it a wildcard; it is
-    loopback only if ALL are loopback, because uvicorn binds every one."""
+    loopback only if ALL are loopback, because uvicorn binds every one.
+
+    Judged for ``localhost`` since round 16: an arbitrary name is never
+    loopback (see the next test), so it could not show the "loopback" row."""
     import ipaddress
 
     from brain.ui.context import address_class
 
     resolved = tuple(ipaddress.ip_address(a) for a in addresses)
-    assert address_class("some.name", resolved) == kind
-    assert is_loopback("some.name", resolved) is (kind == "loopback")
+    assert address_class("localhost", resolved) == kind
+    assert is_loopback("localhost", resolved) is (kind == "loopback")
+
+
+@pytest.mark.parametrize(
+    ("name", "addresses", "kind", "alias"),
+    [
+        ("loopback-alias.example", ["127.0.0.1"], "other", True),
+        ("loopback-alias.example", ["127.0.0.1", "::1"], "other", True),
+        ("127.0.0.1.nip.io", ["127.0.0.1"], "other", True),
+        ("localhost", ["127.0.0.1", "::1"], "loopback", False),
+        ("LOCALHOST", ["127.0.0.1"], "loopback", False),
+        # Round 16b: not trusted — macOS resolves it through network DNS
+        ("ip6-localhost", ["::1"], "other", True),
+        # Round 16b: the trailing dot is a different name and Host value
+        ("localhost.", ["127.0.0.1"], "other", True),
+        # Round 16b, edge case (b): a trusted name with a mixed answer
+        ("localhost", ["127.0.0.1", "192.0.2.30"], "other", False),
+        ("loopback-alias.example", ["0.0.0.0"], "wildcard", False),
+    ],
+)
+def test_only_a_trusted_name_resolving_to_loopback_is_loopback(
+    name: str, addresses: list[str], kind: str, alias: bool
+) -> None:
+    """Round 16 (phase-7 audit of `cb4b6ed`, finding 1). A loopback bind skips
+    the token and allowlists its own name, so a name whose DNS someone else
+    controls must not get it: rebound onto this server, a page from that name
+    sends an allowlisted Host and the allowed Origin. Only LOOPBACK_NAMES may
+    be loopback; any other name is "other" — Host allowlist the name alone,
+    confidential bodies withheld — and the addresses themselves still classify
+    as loopback, which is how the CLI says why."""
+    import ipaddress
+
+    from brain.ui.context import (
+        address_class,
+        classify_addresses,
+        host_allowlist,
+        is_loopback_alias,
+    )
+
+    resolved = tuple(ipaddress.ip_address(a) for a in addresses)
+    assert address_class(name, resolved) == kind
+    assert is_loopback(name, resolved) is (kind == "loopback")
+    assert is_loopback_alias(name, resolved) is alias
+    if alias:
+        assert classify_addresses(resolved) == "loopback"
+        assert host_allowlist(name, resolved) == frozenset({name.lower()})
+
+
+def test_a_loopback_literal_is_never_an_alias() -> None:
+    """Literals are judged on themselves; the name rule is for names only."""
+    import ipaddress
+
+    from brain.ui.context import address_class, is_loopback_alias
+
+    for literal in ("127.0.0.1", "127.0.0.2", "::1", "[::1]"):
+        resolved = (ipaddress.ip_address(literal.strip("[]")),)
+        assert not is_loopback_alias(literal, resolved)
+        assert address_class(literal, resolved) == "loopback"
 
 
 @pytest.mark.parametrize("name", ["localhoſt", "K", "brain-ı.lan"])

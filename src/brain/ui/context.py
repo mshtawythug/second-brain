@@ -40,6 +40,26 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
 #: what actually defeats DNS rebinding (see :mod:`brain.ui.security`).
 LOOPBACK_HOSTS: frozenset[str] = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
+#: The only HOSTNAMES that may be treated as loopback, and then only when every
+#: address they resolve to is loopback (review round 16). A loopback bind runs
+#: with no token and allowlists its own name, so trusting ANY name that happens
+#: to resolve to 127.0.0.1 handed the DNS-rebinding defence to whoever controls
+#: that name's DNS: `--host 127.0.0.1.nip.io` (a public service) ran tokenless,
+#: and a page served from that name, once re-pointed at 127.0.0.1, sent an
+#: allowlisted Host and the allowed Origin. Every other name is "other" and
+#: needs a token.
+#:
+#: ``localhost`` only (review round 16b). ``ip6-localhost`` was trusted in
+#: round 16 and is not: Debian's /etc/hosts defines it, macOS's does not, and
+#: there ``getaddrinfo`` falls through to network DNS and the search domains,
+#: so a hostile resolver could point it anywhere — and browsers do not
+#: hard-wire it the way they do ``localhost``. Master never trusted it. The
+#: literal ``::1`` (``[::1]``) is loopback by address and needs no name. A
+#: trailing dot (``localhost.``) is a different Host value from ``localhost``
+#: — a browser sends it as typed, and ``LOOPBACK_HOSTS`` does not hold it —
+#: so it is "other" too, consistently with the Host check.
+LOOPBACK_NAMES: frozenset[str] = frozenset({"localhost"})
+
 #: The wildcard binds: "every interface", a bind address and never a
 #: destination. Ruling W1 (phase 7): all three get exactly the loopback
 #: ALLOWLIST — never wider than ``0.0.0.0`` already was. That allowlist is a
@@ -104,7 +124,9 @@ class UiContext:
     graph_syncer: Any | None = None
     notices: tuple[str, ...] = field(default=())
     #: Whether a ``sensitivity='confidential'`` document may have its BODY sent
-    #: over the wire. True on a loopback bind, where the UI is exactly as
+    #: over the wire. True on a loopback bind (a loopback address, or
+    #: ``localhost`` resolving only to loopback; since round 16 a loopback
+    #: ALIAS is not one), where the UI is exactly as
     #: inside the trust boundary as ``brain show`` is. False on a non-loopback
     #: bind — there the corpus is crossing a network, which is a different
     #: trust question than "the user is looking at their own machine" — unless
@@ -245,8 +267,27 @@ def address_class(host: str, resolved: Resolved | None = None) -> str:
     (:func:`brain.ui.server.resolve_bind_addresses`). Unresolved, a hostname
     is "other" — ``localhost`` included, which used to be trusted as loopback by
     name alone, so a ``localhost`` mapped elsewhere skipped the token.
+
+    Review round 16: a hostname resolving only to loopback is loopback only if
+    it is one of :data:`LOOPBACK_NAMES`; any other such name is "other". Its
+    addresses are unchanged — :func:`classify_addresses` still says "loopback"
+    for them, which is how :func:`is_loopback_alias` tells the user why.
     """
+    if is_loopback_alias(host, resolved):
+        return "other"
     return classify_addresses(resolved if resolved is not None else literal_addresses(host))
+
+
+def is_loopback_alias(host: str, resolved: Resolved | None) -> bool:
+    """True for a hostname outside :data:`LOOPBACK_NAMES` that resolves only to loopback.
+
+    Such a name binds loopback but is guarded like a network bind — a token,
+    a Host allowlist of the name alone, confidential bodies withheld — because
+    whoever controls its DNS could re-point it (review round 16).
+    """
+    if literal_addresses(host) or bind_address(host) in LOOPBACK_NAMES:
+        return False
+    return classify_addresses(resolved or ()) == "loopback"
 
 
 def validate_host(host: str) -> str:

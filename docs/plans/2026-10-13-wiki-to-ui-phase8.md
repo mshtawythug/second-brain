@@ -681,6 +681,18 @@ existing test.
 
 ### 10.5 CLI surface changed (for the memory update, CLAUDE.md rule 11)
 
+**Auto-memory: done** (2026-10-14; outside the repo, in
+the project's auto-memory directory (`~/.claude/projects/<project>/memory/`), per CLAUDE.md rule 11).
+`cli.md` gained an R2 note at the top of "Wiki blue/green build", covering every item below.
+`vault.md` gained an R2 note under "Wiki rendering". `project_wiki_to_ui_consolidation_status.md`
+gained a phase-8 paragraph with the SHAs, and its `MEMORY.md` index line was updated.
+
+**Owed at the PR, not in this branch:** the PR body's migration note (§3). It must say, in plain
+words, that the user's next `brain-up` after merge boots out and deletes `com.brain.build`, and give
+the way back, including that reinstalling the daemon from an earlier release does not survive this
+release's next `brain-up`.
+
+
 - `brain-rebuild`: stages `connect → mirror` by default, plus the opt-in `quartz`; `--wiki-only`
   exits 2; `--clean-cache` requires `--only quartz`.
 - `brain-up`: `BRAIN_WIKI_BUILD=1` opts into the overlay and cold-start build; the banner says

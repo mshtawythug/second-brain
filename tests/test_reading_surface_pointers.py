@@ -250,6 +250,32 @@ def test_cli_reference_names_brain_ui_the_primary_reading_surface() -> None:
     assert "The primary reading surface" in section, section
 
 
+def test_cli_reference_documents_three_confidential_modes() -> None:
+    """Round 16c (audit of `e0d6067`): the section said bodies are "always
+    served" on loopback and `--include-confidential` "is ignored" — false for a
+    loopback alias, which withholds them unless the flag is passed."""
+    section = " ".join(_section(CLI_REFERENCE.read_text(encoding="utf-8"), "## brain ui").split())
+    assert "`--include-confidential` is ignored" not in section, section
+    assert "which of the two you got" not in section, section
+    assert "A **loopback alias**" in section, section
+    assert "which of the three you got" in section, section
+    # Round 16c (review): localhost is loopback only when it resolves only to
+    # loopback; a mixed answer is a non-loopback bind.
+    assert "or on **`localhost` when it resolves only to loopback**" in section, section
+
+
+def test_phone_guide_says_a_loopback_alias_withholds_bodies() -> None:
+    """Round 16c: "On loopback they are always served" no longer holds for a
+    name other than localhost that resolves to loopback."""
+    text = " ".join(PHONE_GUIDE.read_text(encoding="utf-8").split())
+    assert "On loopback they are always served" not in text, text
+    assert (
+        "On a loopback address, or on `localhost` when it resolves only to loopback, "
+        "they are always served" in text
+    ), text
+    assert "guarded like a LAN bind" in text, text
+
+
 def test_docs_index_calls_the_rendered_wiki_legacy() -> None:
     """S20 (phase-7 audit): the docs index row for vault-and-wiki.md was
     repointed to call the wiki legacy, and nothing pinned it."""

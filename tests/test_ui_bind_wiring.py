@@ -51,6 +51,12 @@ def test_build_context_derives_origin_and_hosts_from_the_bind(
         ("0.0.0.0.nip.io", ("0.0.0.0",), "http://127.0.0.1:8765", LOOPBACK_HOSTS, False),
         ("localhost", ("127.0.0.1", "::1"), "http://localhost:8765", LOOPBACK_HOSTS, True),
         ("localhost", ("192.0.2.30",), "http://localhost:8765", frozenset({"localhost"}), False),
+        # Round 16: an untrusted name resolving to loopback; round 16b made
+        # ip6-localhost one of them (only `localhost` is a trusted name)
+        ("ip6-localhost", ("::1",), "http://ip6-localhost:8765",
+         frozenset({"ip6-localhost"}), False),
+        ("loopback-alias.example", ("127.0.0.1",), "http://loopback-alias.example:8765",
+         frozenset({"loopback-alias.example"}), False),
     ],
 )
 def test_build_context_classifies_a_hostname_by_its_resolved_addresses(

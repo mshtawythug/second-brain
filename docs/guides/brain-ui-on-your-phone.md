@@ -65,8 +65,10 @@ a home network — cannot connect to it at all (connection refused, not 400), an
 
 `--host` is judged by the address it will bind, not by its spelling: `0`, `127.1`, a
 whitespace-padded value and any IPv6 zone such as `%en0` are refused with a message that says
-why. A hostname is judged by every address it resolves to — so `localhost` counts as loopback
-only if it resolves to loopback addresses alone — and it is looked up once: `brain ui` binds
+why. A hostname is judged by every address it resolves to, and only `localhost` can count as
+loopback — and only when it resolves to loopback addresses alone. Any other name needs `--token`,
+even one that resolves to `127.0.0.1` (`ip6-localhost` and `localhost.` included): whoever
+controls its DNS could point it at your machine and get past the Host check. A name is looked up once: `brain ui` binds
 exactly those addresses, so the name cannot point somewhere else by the time it binds. Zones are refused even on link-local addresses, because a browser cannot open a URL that
 carries one.
 
@@ -111,7 +113,10 @@ evicting the tab in the background — leaves every request refused (403) until 
 - **Prefer `--read-only` for phone reading.** A phone on the LAN then has no write path at all.
 - **Confidential documents are withheld off loopback.** On a LAN bind, the bodies of documents
   marked `sensitivity: confidential` are not served unless you pass `--include-confidential`.
-  The startup panel states which mode you got. On loopback they are always served.
+  The startup panel states which mode you got. On a loopback address, or on `localhost` when it
+  resolves only to loopback, they are always served; a name other than `localhost` that resolves
+  to loopback is guarded like a LAN bind, so its bodies are withheld unless you pass
+  `--include-confidential` too.
 - **The machine must keep `brain ui` running.** It runs in the foreground and has no daemon, by
   design: a write-capable server should not outlive your attention. Closing the terminal, or the
   machine sleeping, ends phone access.

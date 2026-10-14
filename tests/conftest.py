@@ -9,8 +9,12 @@ baseline afterwards so the next TRUNCATE-only test is unaffected.
 
 Past the 800-line ceiling (CLAUDE.md). Its growth on fix/phase5-followups is the
 ``pytest_plugins`` line that loads tests/browser_timeout.py, the comment beside
-it giving the reason it must live here, and this paragraph. No line count is
-given here: it would be stale as soon as written (``wc -l tests/conftest.py``).
+it giving the reason it must live here, and this paragraph. Its growth on
+feat/wiki-to-ui-phase8 (T0) is :func:`_force_test_launchctl_stubs` and its
+helper ``_write_launchctl_stub``: the session-wide ``launchctl`` stand-ins that
+keep the suite off the real binary, guarded by
+tests/test_launchctl_isolation.py. No line count is given here: it would be
+stale as soon as written (``wc -l tests/conftest.py``).
 """
 
 import hashlib

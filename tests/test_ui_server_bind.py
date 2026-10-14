@@ -387,7 +387,11 @@ def test_the_cli_binds_what_it_classified_even_if_dns_changes_its_answer(
     needed) could then bind wherever the second answer pointed — a wildcard,
     say. Here the second answer is ``::1``: different, but still loopback, so
     even a regression that re-resolves never binds a real interface. The bind
-    must be on the FIRST answer, from a single lookup."""
+    must be on the FIRST answer, from a single lookup.
+
+    The name is ``localhost`` since round 16: only a trusted loopback name can
+    bind loopback without a token, so ``brain-1.lan`` answering 127.0.0.1 is now
+    refused before any bind."""
     import brain.ui.server as server
 
     answers = [["127.0.0.1"], ["::1"]]
@@ -408,10 +412,10 @@ def test_the_cli_binds_what_it_classified_even_if_dns_changes_its_answer(
     )
     monkeypatch.setattr(server, "claim_port", claim_port)
     result = runner.invoke(
-        app, ["ui", "--host", "brain-1.lan", "--port", str(DEFAULT_PORT + 4300), "--no-open"]
+        app, ["ui", "--host", "localhost", "--port", str(DEFAULT_PORT + 4300), "--no-open"]
     )
     assert result.exit_code == 0, result.output
-    assert calls == ["brain-1.lan"], "the host was resolved more than once"
+    assert calls == ["localhost"], "the host was resolved more than once"
     assert [address for address, _ in started.bound] == ["127.0.0.1"]
 
 

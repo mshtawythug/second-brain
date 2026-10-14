@@ -63,6 +63,28 @@ def test_ui_command_is_registered(app: typer.Typer) -> None:
         assert flag in result.output
 
 
+def test_include_confidential_help_names_all_three_modes() -> None:
+    """Round 16c (audit of `e0d6067`): the help said the flag was "Ignored on
+    loopback, where they are always served", but since round 16 a loopback
+    ALIAS withholds bodies unless the flag is passed — it widens egress there.
+    Read from the option itself, so Rich's wrapping cannot split a phrase."""
+    from brain.cli_ui import ui_app
+
+    command = typer.main.get_command(ui_app)
+    # By `opts`, not `isinstance(click.Option)`: Typer vendors its own click,
+    # so the top-level click's Option is a different class (§10.2).
+    option = next(
+        p for p in command.params if "--include-confidential" in getattr(p, "opts", ())
+    )
+    text = getattr(option, "help", None) or ""
+    assert "Ignored on loopback" not in text, text
+    assert "a loopback alias" in text, text
+    # Round 16c (review): localhost is loopback only when EVERY address it
+    # resolves to is; a mixed answer withholds bodies, so the flag matters.
+    qualified = "No effect on a loopback address, or on localhost when it resolves only to loopback"
+    assert qualified in text, text
+
+
 def test_help_does_not_need_a_database(app: typer.Typer) -> None:
     """`--help` must work on a machine with no Postgres running at all."""
     result = runner.invoke(app, ["ui", "--help"])
@@ -77,6 +99,49 @@ def test_non_loopback_without_a_token_is_a_usage_error(app: typer.Typer) -> None
     """
     result = runner.invoke(app, ["ui", "--host", "0.0.0.0", "--no-open"])
     assert result.exit_code == 2
+
+
+def test_a_busy_port_is_named_with_the_one_used_instead(
+    app: typer.Typer, started: Started, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 16 (audit finding 3): when claim_port steps past a busy port the
+    panel says so — no test executed this line before."""
+    import brain.ui.server as server
+
+    monkeypatch.setattr(server, "claim_port", lambda port, **kw: (port + 1, []))
+    result = runner.invoke(app, ["ui", "--port", "8765", "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert "port 8765 was busy — using 8766 instead" in result.output, result.output
+    assert started.context_kwargs["port"] == 8766
+
+
+@pytest.mark.parametrize("serve_confidential", [False, True])
+def test_the_panel_never_contradicts_the_confidential_lens_on_an_alias(
+    capsys: pytest.CaptureFixture[str], serve_confidential: bool
+) -> None:
+    """Round 16b (review of `2af3667`): the alias note said "confidential bodies
+    withheld" even under --include-confidential, which serves them, and the
+    Confidential line called a loopback alias a "non-loopback bind"."""
+    from types import SimpleNamespace
+
+    from brain.cli_ui import _panel
+
+    _panel(
+        url="http://loopback-alias.example:8765/#t=x",
+        cfg=SimpleNamespace(  # type: ignore[arg-type]
+            vault_path=Path("/vault"), database_url="postgresql://h:1/db", embedder="none"
+        ),
+        read_only=False, loopback=False, serve_confidential=serve_confidential,
+        notices=(), note_count=None, alias_of="loopback-alias.example",
+    )
+    out = capsys.readouterr().out
+    assert "non-loopback bind" not in out, out
+    assert "guarded like a network bind" in out, out
+    assert ("withheld" in out) is not serve_confidential, out
+    if serve_confidential:
+        assert "bodies SERVED on a loopback alias" in out, out
+    else:
+        assert "bodies withheld (loopback alias, guarded like a network bind)" in out, out
 
 
 def test_default_bind_is_loopback() -> None:

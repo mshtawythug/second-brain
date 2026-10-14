@@ -719,7 +719,10 @@ dependency — `starlette` and `uvicorn` already ship as transitive deps of the
 MCP SDK — and the front end is hand-written static assets with no bundler and
 no CDN, so it works fully offline.
 
-`--token` is **required** whenever `--host` is not loopback.
+`--token` is **required** whenever `--host` is not loopback. The only hostname that counts as
+loopback is `localhost` (and only when it resolves to loopback alone); any other name — including
+`ip6-localhost` and `localhost.` — needs a token even if it resolves to `127.0.0.1`. The address
+literals `127.0.0.1` and `::1` need none.
 
 `--lan` binds this machine's LAN address. It uses `--token` if given and otherwise mints one,
 then prints `http://<address>:<port>/#t=<token>` to open on the other device. It cannot be
@@ -729,11 +732,16 @@ port is still reachable by programs that set `Host` themselves — the token, no
 what keeps other clients out. The server prints a warning when you use it. Full walkthrough and caveats:
 [Reading your brain from a phone](guides/brain-ui-on-your-phone.md).
 
-Confidential bodies follow the bind, not a flag. On a **loopback** bind they are
-always served — the UI is exactly as inside the trust boundary as `brain show`
-is — and `--include-confidential` is ignored. On a **non-loopback** bind they
-are withheld unless you pass `--include-confidential`, since the material is
-then crossing the wire. The startup banner states which of the two you got.
+Confidential bodies follow the bind. On a **loopback address** (`127.0.0.1`,
+`::1`), or on **`localhost` when it resolves only to loopback**, they are always
+served — the UI is exactly as inside the trust boundary as `brain show` is —
+and `--include-confidential` has no
+effect. (A `localhost` that also resolves to a non-loopback address is a
+non-loopback bind.) On a **non-loopback** bind they are withheld unless you pass
+`--include-confidential`, since the material is then crossing the wire. A
+**loopback alias** — any other name that resolves to loopback — is guarded like
+a network bind: a token is required, and bodies are withheld unless you pass
+`--include-confidential`. The startup banner states which of the three you got.
 
 ## brain people
 

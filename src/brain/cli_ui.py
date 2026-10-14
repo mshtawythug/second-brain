@@ -30,6 +30,26 @@ if TYPE_CHECKING:
 #: binds by the text itself, not by a guessed fragment (review round 6).
 PHONE_LINE = "open the URL above on your phone, on this network"
 
+#: Review round 16: a name that resolves only to loopback but is not one of
+#: ``context.LOOPBACK_NAMES`` is guarded like a network bind. Said in the
+#: refusal and in the panel, because "NOT bound to loopback" would be false.
+LOOPBACK_ALIAS_REASON = (
+    "resolves to loopback, but only localhost is trusted as a loopback name — "
+    "whoever controls another name's DNS could re-point it at this server "
+    "(DNS rebinding)"
+)
+
+
+def _alias_reason(host: str) -> str:
+    """:data:`LOOPBACK_ALIAS_REASON`, plus the fix when ``host`` is ``localhost.``.
+
+    Round 16b: the trailing dot makes a different name, and a different Host
+    header, so it is not trusted — say so rather than leave it a puzzle.
+    """
+    if host.endswith(".") and host.rstrip(".") == "localhost":
+        return f"{LOOPBACK_ALIAS_REASON}; drop the trailing dot to use localhost"
+    return LOOPBACK_ALIAS_REASON
+
 #: Registered as a sub-app with ``invoke_without_command=True`` so ``brain ui``
 #: runs the server directly, while leaving room for ``brain ui open`` later
 #: without a breaking change. Same shape as ``capture_app``.
@@ -57,6 +77,7 @@ def _panel(
     notices: tuple[str, ...],
     note_count: int | None,
     lan: bool = False,
+    alias_of: str = "",
 ) -> None:
     """Print the startup panel, in the `brain doctor` / `brain setup` style."""
     typer.echo("")
@@ -86,19 +107,36 @@ def _panel(
     # Always state the effective confidentiality mode, so an operator who
     # passed --include-confidential on a non-loopback bind SEES that they did.
     # A flag that silently widens egress is the one worth printing.
+    # Round 16b: a loopback alias is neither "over the network" nor a
+    # "non-loopback bind" — it is loopback, guarded like a network bind.
     if loopback:
         typer.echo("  Confidential  bodies served (loopback bind)")
     elif serve_confidential:
+        where = "on a loopback alias" if alias_of else "over the network"
         typer.secho(
-            "  Confidential  bodies SERVED over the network "
-            "(--include-confidential)",
+            f"  Confidential  bodies SERVED {where} (--include-confidential)",
             fg="red",
+        )
+    elif alias_of:
+        typer.echo(
+            "  Confidential  bodies withheld (loopback alias, guarded like a "
+            "network bind)"
         )
     else:
         typer.echo("  Confidential  bodies withheld (non-loopback bind)")
     typer.echo("")
 
-    if not loopback:
+    if alias_of:
+        # Round 16: bound to loopback, guarded as if it were not. Round 16b:
+        # bodies are withheld only when --include-confidential is absent.
+        guard = "token required" + ("" if serve_confidential else ", confidential bodies withheld")
+        typer.secho(
+            f"  ⚠  --host {alias_of} {_alias_reason(alias_of)}.\n"
+            f"     It is guarded like a network bind: {guard}.",
+            fg="yellow",
+        )
+        typer.echo("")
+    elif not loopback:
         typer.secho(
             "  ⚠  This server is NOT bound to loopback. Anyone who can reach\n"
             "     this address can read your entire brain.",
@@ -142,10 +180,14 @@ def ui(
     include_confidential: bool = typer.Option(
         False,
         "--include-confidential",
+        # Round 16c: three modes since round 16, not two — a loopback ALIAS
+        # withholds bodies like a network bind, so the flag is not a no-op there.
         help=(
-            "Serve bodies of documents marked sensitivity=confidential even on "
-            "a non-loopback bind. Ignored on loopback, where they are always "
-            "served."
+            "Serve bodies of documents marked sensitivity=confidential where "
+            "they are otherwise withheld: a non-loopback bind, or a loopback "
+            "alias (a name other than localhost that resolves to loopback). "
+            "No effect on a loopback address, or on localhost when it "
+            "resolves only to loopback, where they are always served."
         ),
     ),
     auto_port: bool = typer.Option(
@@ -167,7 +209,7 @@ def ui(
 
     from .ui import lan as lan_mod
     from .ui import server as ui_server
-    from .ui.context import HostRefused, address_class, validate_host
+    from .ui.context import HostRefused, address_class, is_loopback_alias, validate_host
     from .ui.server import claim_port
 
     # Once, here: every consumer below — the bind, the allowlist,
@@ -207,6 +249,8 @@ def ui(
     # Review round 10: classify by what the bind RESOLVES the host to, once,
     # here — a name pointing at 0.0.0.0 is a wildcard, and `localhost` is
     # loopback only if every address it resolves to is. Literals need no DNS.
+    # Round 16: and only a trusted name (context.LOOPBACK_NAMES) can be
+    # loopback at all; any other name is guarded like a network bind.
     try:
         resolved = ui_server.resolve_bind_addresses(host)
     except BrainError as exc:
@@ -214,6 +258,11 @@ def ui(
         raise typer.Exit(1) from exc
     kind = address_class(host, resolved)
     loopback = kind == "loopback"
+    if not loopback and not token and is_loopback_alias(host, resolved):
+        raise typer.BadParameter(
+            f"--host {host} {_alias_reason(host)}; pass --token <secret>, or "
+            "use --host 127.0.0.1."
+        )
     if not loopback and not token:
         raise typer.BadParameter(
             "binding to a non-loopback address exposes your entire brain to the "
@@ -288,6 +337,7 @@ def _start(
 ) -> None:
     """Build the context on the bound port, print the panel, and serve."""
     from .ui import lan as lan_mod
+    from .ui.context import is_loopback_alias
     from .ui.server import browser_url, build_context, serve
 
     context = build_context(
@@ -318,6 +368,7 @@ def _start(
         notices=notices,
         note_count=None,
         lan=lan,
+        alias_of=host if is_loopback_alias(host, resolved) else "",
     )
     serve(
         context,

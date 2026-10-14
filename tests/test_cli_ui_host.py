@@ -186,6 +186,10 @@ HOST_SPELLINGS: list[tuple[str, str, str]] = [
     ("0.0.0.0.nip.io", "wildcard", "0.0.0.0.nip.io"),
     # IPv6-only resolution is bound as IPv6 (round 10, item 3)
     ("ip6-localhost", "binds-real", "ip6-localhost"),
+    # Round 16: binds (with the table's --token), guarded like a network bind
+    ("loopback-alias.example", "binds", "loopback-alias.example"),
+    # Round 16b: a different name from localhost; binds only with the token
+    ("localhost.", "binds", "localhost."),
     ("FD00:0:0::5", "binds", "fd00::5"),
 ]
 
@@ -283,8 +287,80 @@ def test_a_name_resolving_to_loopback_and_elsewhere_is_not_loopback(
     """Loopback only if EVERY resolved address is loopback: uvicorn binds them all."""
     monkeypatch.setitem(FAKE_DNS, "localhost", ["127.0.0.1", "192.0.2.30"])
     result = runner.invoke(app, ["ui", "--host", "localhost", "--no-open"])
+    # Rich wraps the usage error in a box; read it as one line of words, so an
+    # assertion fails on its own text and not on where the box happened to wrap
+    # (the strict sweep at the merge caught "pass --token" split across a line).
+    flat = " ".join(result.output.replace("│", " ").split())
     assert result.exit_code == 2, result.output
-    assert "pass --token" in result.output, result.output
+    # Round 16b, the lead's edge case (b): a TRUSTED name with a mixed answer is
+    # plain "other" — the network-bind refusal, not the alias one.
+    assert "only localhost is trusted" not in flat, flat
+    assert "pass --token" in flat, flat
+
+
+@pytest.mark.parametrize("name", ["localhost", "LOCALHOST"])
+def test_a_trusted_loopback_name_needs_no_token(
+    app: typer.Typer, started: Started, name: str
+) -> None:
+    """LOOPBACK_NAMES resolving only to loopback stay tokenless. ``LOCALHOST``
+    is lower-cased by validate_host, as a browser lower-cases the Host it sends;
+    ``ip6-localhost`` left this list in round 16b (see the refusal test)."""
+    result = runner.invoke(app, ["ui", "--host", name, "--no-open"])
+    assert result.exit_code == 0, result.output
+    assert started.context_kwargs["token"] == ""
+    assert "bodies served (loopback bind)" in result.output, result.output
+
+
+@pytest.mark.parametrize("name", ["loopback-alias.example", "ip6-localhost", "localhost."])
+def test_a_loopback_alias_without_a_token_is_refused(
+    app: typer.Typer, started: Started, name: str
+) -> None:
+    """Round 16 (phase-7 audit of `cb4b6ed`, finding 1): a name outside
+    LOOPBACK_NAMES that resolves only to 127.0.0.1 ran with NO token and
+    allowlisted its own name — `--host 127.0.0.1.nip.io` was measured doing so.
+    Whoever controls that name's DNS could rebind it onto this server.
+
+    Round 16b: ``ip6-localhost`` is such a name (macOS resolves it through
+    network DNS), and so is ``localhost.`` — the refusal says to drop the dot."""
+    result = runner.invoke(app, ["ui", "--host", name, "--no-open"])
+    # Rich wraps the usage error in a box; read it as one line of words.
+    flat = " ".join(result.output.replace("│", " ").split())
+    assert result.exit_code == 2, result.output
+    assert "only localhost is trusted as a loopback name" in flat, result.output
+    assert "pass --token" in flat, result.output
+    assert ("drop the trailing dot to use localhost" in flat) is name.endswith("."), flat
+    assert started.context_kwargs == {}
+
+
+def test_a_loopback_alias_with_a_token_is_guarded_like_a_network_bind(
+    app: typer.Typer, started: Started
+) -> None:
+    """With --token it serves, and the panel says why it is guarded — not the
+    false "NOT bound to loopback"."""
+    result = runner.invoke(
+        app, ["ui", "--host", "loopback-alias.example", "--token", "x", "--no-open"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "guarded like a network bind" in result.output, result.output
+    assert "NOT bound to loopback" not in result.output, result.output
+    assert "bodies withheld (loopback alias" in result.output, result.output
+    assert "non-loopback bind" not in result.output, result.output
+    assert "http://loopback-alias.example:8765/#t=x" in result.output, result.output
+
+
+def test_a_loopback_alias_with_include_confidential_never_says_withheld(
+    app: typer.Typer, started: Started
+) -> None:
+    """Round 16b: --include-confidential DOES serve bodies on an alias
+    (build_context's lens), so neither the Confidential line nor the alias
+    note may claim they are withheld."""
+    result = runner.invoke(app, [
+        "ui", "--host", "loopback-alias.example", "--token", "x",
+        "--include-confidential", "--no-open",
+    ])
+    assert result.exit_code == 0, result.output
+    assert "withheld" not in result.output, result.output
+    assert "bodies SERVED on a loopback alias" in result.output, result.output
 
 
 def test_the_cli_threads_the_resolved_addresses_into_the_context(
@@ -341,6 +417,20 @@ def test_resolve_bind_addresses_reports_a_name_that_will_not_resolve() -> None:
 
     with pytest.raises(BrainError) as excinfo:
         resolve_bind_addresses("brain-2.invalid", resolver=fake_resolver)
+    assert "does not resolve to an address on this machine" in str(excinfo.value)
+
+
+def test_resolve_bind_addresses_reports_an_empty_answer() -> None:
+    """Round 16 (audit finding 3): a resolver answering with NO addresses binds
+    nothing — reported, never returned as an empty bind set."""
+    from brain.errors import BrainError
+    from brain.ui.server import resolve_bind_addresses
+
+    def empty(*args: object) -> list[object]:
+        return []
+
+    with pytest.raises(BrainError) as excinfo:
+        resolve_bind_addresses("brain-1.lan", resolver=empty)
     assert "does not resolve to an address on this machine" in str(excinfo.value)
 
 
