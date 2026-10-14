@@ -287,11 +287,15 @@ def test_a_name_resolving_to_loopback_and_elsewhere_is_not_loopback(
     """Loopback only if EVERY resolved address is loopback: uvicorn binds them all."""
     monkeypatch.setitem(FAKE_DNS, "localhost", ["127.0.0.1", "192.0.2.30"])
     result = runner.invoke(app, ["ui", "--host", "localhost", "--no-open"])
+    # Rich wraps the usage error in a box; read it as one line of words, so an
+    # assertion fails on its own text and not on where the box happened to wrap
+    # (the strict sweep at the merge caught "pass --token" split across a line).
+    flat = " ".join(result.output.replace("│", " ").split())
     assert result.exit_code == 2, result.output
-    assert "pass --token" in result.output, result.output
     # Round 16b, the lead's edge case (b): a TRUSTED name with a mixed answer is
     # plain "other" — the network-bind refusal, not the alias one.
-    assert "only localhost is trusted" not in result.output, result.output
+    assert "only localhost is trusted" not in flat, flat
+    assert "pass --token" in flat, flat
 
 
 @pytest.mark.parametrize("name", ["localhost", "LOCALHOST"])

@@ -105,8 +105,11 @@ def install_started(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Started:
         # itself under --include-confidential.
         from brain.ui.security import is_loopback
 
-        serve = bool(kwargs["include_confidential"]) or is_loopback(
-            str(kwargs["host"]), kwargs["resolved"]  # type: ignore[arg-type]
+        # ``.get``: a command that stops passing ``resolved`` must fail at the
+        # test's own assertion on it, not with a KeyError inside this double
+        # (the strict sweep at the merge caught R11-22 going red here).
+        serve = bool(kwargs.get("include_confidential")) or is_loopback(
+            str(kwargs["host"]), kwargs.get("resolved")  # type: ignore[arg-type]
         )
         return SimpleNamespace(
             serve_confidential_bodies=serve, notices=(), token=kwargs["token"]
