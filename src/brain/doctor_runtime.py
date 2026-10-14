@@ -1,4 +1,4 @@
-"""Runtime-health `brain doctor` checks: dotenv, launchd daemons, wiki freshness.
+"""Runtime-health `brain doctor` checks: dotenv, launchd daemons, the dormant wiki.
 
 Doctor's original checks all stop at the process boundary: they confirm that
 *this* invocation can reach Postgres, Ollama and the vault. That left a whole
@@ -18,8 +18,13 @@ process:
 ``daemon code``
     Do the daemons import the same ``brain`` package this CLI does? If not,
     every other check describes the CLI's install rather than the daemons'.
+``vault watcher`` / ``retired daemon``
+    Composed in from :mod:`brain.doctor_watcher` (wiki-to-ui phase 8): is the
+    vault-sync watcher installed or running (A9), and is the retired
+    ``com.brain.build`` still installed?
 ``wiki build``
-    Is the newest COMPLETED Quartz build recent?
+    The Quartz wiki is dormant since R2, so this reports its newest COMPLETED
+    build and how to rebuild on request. It never FAILs on age.
 
 Like :func:`brain.cli_backup.backup_doctor_checks` this module never imports
 ``brain.cli`` at module scope — ``cli.py`` imports *it*. The doctor value types
@@ -32,6 +37,7 @@ import plistlib
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -51,16 +57,8 @@ if TYPE_CHECKING:  # pragma: no cover — typing only; the real import is deferr
 #: twelve-day outage stayed invisible to an interactive `brain doctor`.
 REQUIRED_DOTENV_KEYS = ("DATABASE_URL",)
 
-#: `brain doctor` FAILs when the newest completed wiki build is older than this.
-#:
-#: Rationale: `com.brain.brief` writes ``<vault>/daily/<YYYY>/<date>-brief.md``
-#: at 07:00 every day, which the watcher observes and turns into a rebuild. A
-#: healthy install therefore rebuilds AT LEAST daily with zero user activity,
-#: so anything past a couple of days means a link in that chain is broken.
-#: Three days absorbs a long weekend with the machine off plus one missed
-#: cycle before crying wolf, and still catches the observed 12-day outage four
-#: times over.
-WIKI_STALE_DAYS = 3
+#: How a dormant wiki is rebuilt on request (R2; ``brain-rebuild``'s opt-in stage).
+WIKI_REBUILD_REMEDY = "brain-rebuild --only quartz"
 
 #: Marker file written into a build directory only after Quartz exits 0, just
 #: before the atomic ``current`` symlink swap (see
@@ -97,24 +95,20 @@ def runtime_doctor_checks(
     launchctl: str | None = None,
     platform: str | None = None,
     now: float | None = None,
+    processes: Sequence[str] | None = None,
 ) -> list[_DoctorCheck]:
-    """Build the ``config`` / ``daemons`` / ``wiki build`` doctor checks.
+    """Build the ``config`` / ``daemons`` / ``vault watcher`` / ``wiki build`` checks.
 
     Every keyword argument is a test seam with a production default resolved
-    lazily, so tests never shell out to the real ``launchctl`` nor read the
-    real ``~/.brain`` / ``~/brain-vault``.
+    lazily, so tests never shell out to the real ``launchctl`` or ``ps``, nor
+    read the real ``~/.brain`` / ``~/brain-vault``. ``processes`` feeds the
+    off-macOS watcher scan, the same seam ``maintenance.ingest_in_flight`` has.
     """
+    # Deferred: doctor_watcher imports this module's _check.
+    from .doctor_watcher import retired_daemon_doctor_check, watcher_doctor_check
+
     resolved_dir = launchd_dir if launchd_dir is not None else _default_launchd_dir()
     resolved_platform = platform if platform is not None else sys.platform
-
-    # Freshness is computed FIRST because the daemon check consumes its verdict:
-    # a signal-killed daemon that also left the wiki stale is a failure, not the
-    # routine restart a bare signal number suggests. Sharing one verdict (rather
-    # than each check deciding for itself) is what keeps them from disagreeing.
-    wiki = wiki_freshness_doctor_check(
-        cfg.vault_path, now=now if now is not None else time.time()
-    )
-    wiki_stale = any(check.status == "fail" for check in wiki)
 
     return [
         *dotenv_doctor_check(),
@@ -122,12 +116,17 @@ def runtime_doctor_checks(
             launchd_dir=resolved_dir,
             launchctl=launchctl if launchctl is not None else resolve_launchctl(),
             platform=resolved_platform,
-            wiki_stale=wiki_stale,
         ),
+        *watcher_doctor_check(
+            launchd_dir=resolved_dir, platform=resolved_platform, processes=processes
+        ),
+        *retired_daemon_doctor_check(launchd_dir=resolved_dir, platform=resolved_platform),
         *daemon_code_doctor_check(
             launchd_dir=resolved_dir, platform=resolved_platform
         ),
-        *wiki,
+        *wiki_freshness_doctor_check(
+            cfg.vault_path, now=now if now is not None else time.time()
+        ),
     ]
 
 
@@ -348,7 +347,7 @@ def _daemon_error_log(launchd_dir: Path, label: str) -> Path:
 
 
 def daemon_doctor_check(
-    *, launchd_dir: Path, launchctl: str, platform: str, wiki_stale: bool = False
+    *, launchd_dir: Path, launchctl: str, platform: str
 ) -> list[_DoctorCheck]:
     """Report whether each installed brain LaunchAgent is loaded and exited 0.
 
@@ -368,26 +367,22 @@ def daemon_doctor_check(
       information about cause, so classifying by signal is not possible from
       this data. ``launchctl list`` also exposes no history, so "three times
       today" is not observable either. What IS observable is whether the job is
-      alive now and whether the user actually has a wiki, so:
+      alive now, so:
 
       - **not running** and ``KeepAlive`` → FAIL. A resident daemon that is
         down is down, whatever killed it. (``com.brain.brief`` is a one-shot
         calendar job — not running is its normal state, so it is exempt.)
-      - **running but the wiki is stale** → FAIL. A signal death that left
-        users without a current wiki is a failure regardless of which signal
-        it was. This composition is what stops a repeating self-inflicted kill
-        — e.g. the 600s Quartz build timeout (C16) — from being filed as
-        routine noise.
-      - **running and the wiki is fresh** → WARN. The restart cost the user
-        nothing; the message still names the likely cause and the log.
+      - **running** → WARN. The restart recovered; the message still names the
+        likely cause and the log. (Until phase 8 a stale wiki turned this into
+        a FAIL. At R2 the wiki is dormant, so its age says nothing about a
+        daemon, and that coupling is gone.)
     * **no plists installed** → OK, "not installed". A fresh install that never
       opted into the daemons is not broken.
     * **non-macOS** → OK, not applicable. launchd is macOS-only; a Linux user
       must not see a red line for a subsystem that cannot exist.
 
-    ``wiki_stale`` is supplied by :func:`runtime_doctor_checks` from
-    :func:`wiki_freshness_doctor_check`'s verdict, so the two checks cannot
-    disagree about whether the wiki is current.
+    Only the INSTALLED labels are covered (``DAEMON_LABELS``); a leftover retired
+    plist is :func:`brain.doctor_watcher.retired_daemon_doctor_check`'s to report.
     """
     if platform != "darwin":
         return [_check("daemons", "ok", "n/a — launchd is macOS-only")]
@@ -451,21 +446,12 @@ def daemon_doctor_check(
                         f"(KeepAlive daemon is down)",
                     )
                 )
-            elif wiki_stale:
-                failures.append(
-                    (
-                        label,
-                        f"killed by signal {signal_num} and the wiki is STALE "
-                        f"— the restart did not recover",
-                    )
-                )
             else:
                 warnings.append(
                     (
                         label,
-                        f"killed by signal {signal_num} then restarted (wiki is "
-                        f"current; a repeat here means a self-inflicted kill, "
-                        f"e.g. a build timeout — check the log)",
+                        f"killed by signal {signal_num} then restarted (a repeat "
+                        f"here means a self-inflicted kill — check the log)",
                     )
                 )
         elif status == EXIT_CONFIG_ERROR:
@@ -650,16 +636,16 @@ def newest_completed_build(builds_root: Path) -> tuple[Path, float] | None:
 def wiki_freshness_doctor_check(
     vault_path: Path, *, now: float
 ) -> list[_DoctorCheck]:
-    """FAIL when the newest completed Quartz build is stale or absent.
+    """Report the dormant Quartz wiki's newest completed build. Never FAILs (R8-4).
 
-    FAIL rather than WARN: a stale wiki is the user-visible symptom of the whole
-    outage class, and it is indistinguishable from a healthy one by looking at
-    it — the site stays up and serves old content. A yellow line that still
-    exits 0 would reproduce the original bug, where every automated check said
-    "fine" for twelve days.
-
-    A vault with no ``.quartz`` workspace is OK, not broken: the wiki is
-    optional and plenty of installs never render one.
+    Until phase 8 this FAILed past a staleness threshold, because a stale wiki
+    was the user-visible symptom of a broken rebuild chain. At R2 nothing
+    rebuilds the wiki by default (``com.brain.build`` is retired and
+    ``brain-rebuild`` skips the opt-in ``quartz`` stage), so age is expected and
+    a permanently red doctor would be a defect. Both former FAIL branches (an
+    old build and no completed build) are OK, and both name
+    :data:`WIKI_REBUILD_REMEDY`. A vault with no ``.quartz`` workspace is OK as
+    before: plenty of installs never render one.
     """
     workspace = vault_path / ".quartz"
     if not workspace.is_dir():
@@ -673,27 +659,21 @@ def wiki_freshness_doctor_check(
         return [
             _check(
                 "wiki build",
-                "fail",
-                f"NO completed build in {builds_root} — the wiki has never "
-                f"published, or every build failed",
-                "brain-rebuild",
+                "ok",
+                f"dormant since R2, never built; `{WIKI_REBUILD_REMEDY}` builds it",
+                WIKI_REBUILD_REMEDY,
             )
         ]
 
     build_dir, completed_at = newest
     age_days = max(0.0, (now - completed_at) / _SECONDS_PER_DAY)
     when = time.strftime("%Y-%m-%d %H:%M", time.localtime(completed_at))
-    if age_days > WIKI_STALE_DAYS:
-        return [
-            _check(
-                "wiki build",
-                "fail",
-                f"newest completed build is {age_days:.1f} days old "
-                f"({when}, {build_dir.name}) — the wiki is serving STALE "
-                f"content; threshold is {WIKI_STALE_DAYS}d",
-                "brain-rebuild",
-            )
-        ]
     return [
-        _check("wiki build", "ok", f"{when}, {age_days:.1f} days old")
+        _check(
+            "wiki build",
+            "ok",
+            f"dormant since R2, last built {when} ({build_dir.name}, "
+            f"{age_days:.1f} days ago); `{WIKI_REBUILD_REMEDY}` rebuilds it",
+            WIKI_REBUILD_REMEDY,
+        )
     ]

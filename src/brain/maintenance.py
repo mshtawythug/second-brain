@@ -194,8 +194,12 @@ def select_stages(
 _INGEST_SUBCOMMAND_RE = re.compile(r"^ingest(-[a-z]+)?$")
 
 
-def _snapshot_processes() -> list[str]:
-    """Return one command-line string per running process (best-effort)."""
+def snapshot_processes() -> list[str]:
+    """Return one command-line string per running process (best-effort).
+
+    Public because it is shared: ``ingest_in_flight`` here and the vault-watcher
+    check in :mod:`brain.doctor_watcher` read the same ``ps`` snapshot.
+    """
     try:
         out = subprocess.run(  # noqa: S603,S607
             ["ps", "-axo", "command="],
@@ -228,7 +232,7 @@ def _is_brain_ingest(cmd: str) -> bool:
 
 def ingest_in_flight(processes: Sequence[str] | None = None) -> bool:
     """True iff a ``brain ingest*`` process is running. Watchers are not matched."""
-    procs = processes if processes is not None else _snapshot_processes()
+    procs = processes if processes is not None else snapshot_processes()
     return any(_is_brain_ingest(p) for p in procs)
 
 
