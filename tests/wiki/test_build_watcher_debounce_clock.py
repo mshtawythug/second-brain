@@ -94,9 +94,9 @@ def test_the_production_timer_is_a_daemon_threading_timer() -> None:
     ``threading.Timer(0.0, fire)`` would turn off production debouncing while
     every manual-clock test stayed green, because those never build a real
     timer. It is read off the timer, not measured by waiting. So is "not
-    started": a thread's ``ident`` is None until ``start()``, whereas waiting
-    for the callback could not tell a started 0.25s timer from an unstarted
-    one."""
+    started": a thread's ``ident`` is None until ``start()``, whereas checking
+    the callback could not tell a started 0.25s timer from an unstarted one
+    without waiting past the interval."""
     fired = threading.Event()
     timer = _daemon_timer(0.25, fired.set)
 
