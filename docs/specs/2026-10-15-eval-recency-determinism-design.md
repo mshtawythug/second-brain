@@ -101,11 +101,14 @@ keywords and the CLI's `--after` / `--before`:
 ```
 
 `EvalQuery` gains `after: date | None = None` and `before: date | None = None`.
-They default to `None`, so every existing construction site and corpus file
-behaves as it does today.
+They default to `None`, so every existing construction site behaves as it
+does today, and so does every corpus file whose `since_days` values are
+positive integers. The one exception is the stricter `since_days` rule in the
+table below.
 
-`load_corpus` validates the new fields as follows. Each failure raises
-`EvalCorpusError`, which the CLI already maps to exit `1`.
+`load_corpus` validates the new fields, and tightens the existing
+`since_days`, as follows. Each failure raises `EvalCorpusError`, which the CLI
+already maps to exit `1`.
 
 | Rule | Why |
 |---|---|
@@ -114,9 +117,12 @@ behaves as it does today.
 | `after < before` when both are set | Half-open interval: `after == before` matches nothing, which would score 0 silently |
 | `since_days` cannot be combined with `after` or `before` | The two filter different columns (`ingested_at` and `coalesce(sent_at, ingested_at)`), and mixing them keeps the clock dependency |
 | `before` alone is allowed | It is deterministic: everything before a fixed date |
+| `since_days`, when present, is an `int >= 1` (`_parse_since_days`). A `bool`, `float`, `str`, list or other type is rejected, and so is any value below 1 | The old `int(value)` coerced silently: `true` became 1, `40.7` and `'40'` became 40, so a typo'd corpus ran a window other than the one written. `bool` is checked explicitly because it subclasses `int`. `0` is rejected because `build_predicate` tests `if since_days:`, so 0 meant *no* window while reading as one |
 
-`since_days` stays valid, so existing corpora still load. Its clock
-dependency is documented in the README and in CLAUDE.md, not enforced.
+A positive-integer `since_days` stays valid, so a corpus that uses it
+correctly still loads. Its clock dependency is documented in the README and in
+CLAUDE.md, not enforced. Any other `since_days` value is now refused; §5
+records that break.
 
 ### 3.2 Runner (`brain.eval.runner`)
 
@@ -198,15 +204,27 @@ Regression tests (CLAUDE.md rule 12), added after review, in
     escaped as a traceback.
 13. A `since_days` that is not a positive `int` raises `EvalCorpusError`. The
     cases: `true`, `40.7`, `'40'`, `forty`, `[40]`, `0` and `-5`. Before the
-    fix, `int()` either raised a bare `ValueError`/`TypeError` or silently
-    coerced (`true` to 1, `40.7` to 40, `'40'` to 40). `0` is refused because
-    `build_predicate` tests `if since_days:`, so 0 silently means no window.
+    fix, `int()` either raised a bare `ValueError`/`TypeError` (`forty`,
+    `[40]`) or silently coerced (`true` to 1, `40.7` to 40, `'40'` to 40). `0`
+    is refused because `build_predicate` tests `if since_days:`, so 0 silently
+    means no window. `-5` passed through unchanged, as a window whose lower
+    bound is five days in the future.
 
 ## 5. Compatibility
 
 - **`ci.json`:** no schema change. `load_baseline` is untouched, and the
   committed file loads unchanged (covered by existing tests).
-- **Corpora without the new fields** parse to identical `EvalQuery` values.
+- **Corpora without the new fields** parse to identical `EvalQuery` values,
+  **provided every `since_days` is a positive `int`.** That proviso is a
+  deliberate compatibility break (§3.1). A corpus that used to load with
+  `since_days: '40'`, `40.7`, `true`, `0` or `-5` (run as 40, 40, 1, no
+  window, and a window starting in the future) now fails with
+  `EvalCorpusError`, exit `1`. Values that used to raise a bare `ValueError`
+  or `TypeError` (`forty`, `[40]`) now raise `EvalCorpusError` too. The
+  refusal is the point: each of those ran a window other than the one
+  written. The real local corpus is unaffected: all 31 of its queries parse
+  under the strict rule, and its two `since_days` entries are both `40`
+  (checked 2026-10-15 with `load_corpus` on the gitignored file).
 - **`--fail-below`:** exit codes, threshold and intersection semantics are
   unchanged. `diff_reports` matches by query string, so a query that changes
   from `since_days` to a pinned range keeps its row.

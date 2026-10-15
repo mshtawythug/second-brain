@@ -80,11 +80,13 @@ identity. A `before` that is already in the past guarantees the condition. See
 - Values must be plain dates, so `datetime`s and the ISO basic form are
   refused.
 - `before` alone is allowed.
-- `since_days` must be a positive `int`. `true`, `40.7`, `'40'` and `0` are
-  refused rather than coerced; `0` would silently mean no window at all.
+- `since_days` must be a positive `int`. `true`, `40.7`, `'40'`, `0` and
+  negatives are refused rather than coerced; `0` would silently mean no window
+  at all. This is stricter than before: a corpus that loaded with one of those
+  values now exits `1` until the value is fixed.
 
-`since_days` still loads, for corpora that have not been converted, and still
-drifts exactly as described above.
+A positive-int `since_days` still loads, for corpora that have not been
+converted, and still drifts exactly as described above.
 
 To convert, edit your local `tests/eval/golden_corpus.yaml`, which is
 gitignored, so no PR does it for you. On each `recency` entry, replace

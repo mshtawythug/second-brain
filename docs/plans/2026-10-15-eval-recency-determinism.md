@@ -17,9 +17,9 @@ search-layer change, no baseline-format change, and no CLI change.
 
 | File | Change |
 |---|---|
-| `src/brain/eval/corpus.py` | `EvalQuery.after` / `.before` (`date \| None`), `_parse_date_bound`, and the validation rules in spec §3.1 |
+| `src/brain/eval/corpus.py` | `EvalQuery.after` / `.before` (`date \| None`), `_parse_date_bound`, `_parse_since_days` (strict: an `int >= 1`, `bool` refused; replaces the old `int(since_raw)` coercion), `ValueError` mapped to `EvalCorpusError` around `safe_load`, and the validation rules in spec §3.1 |
 | `src/brain/eval/runner.py` | `_utc_midnight`; pass `after=` / `before=` to `hybrid_search` |
-| `tests/test_eval_corpus.py` | Spec §4 tests 1–7 |
+| `tests/test_eval_corpus.py` | Spec §4 tests 1–7, 12 and 13 |
 | `tests/test_eval_runner.py` | Spec §4 tests 8–11 |
 | `tests/eval/baselines/README.md` | (2): pinned form, the user-applied corpus edit, the window-check SQL |
 | `CLAUDE.md` | "The committed `ci.json` baseline", item 2 |
@@ -39,7 +39,18 @@ counts from `wc -l`.
    `datetime` before checking `date`, since `datetime` subclasses `date`;
    accept a `date` or an ISO `YYYY-MM-DD` string; reject everything else. Add
    the three cross-field rules.
-3. Refactor so each rule is one `if` with a message that names the query
+3. RED, then GREEN: spec §4 test 13. Replace the old
+   `int(since_raw) if since_raw is not None else None` with
+   `_parse_since_days(value, *, index)`, which returns `None` for `None` and
+   otherwise accepts only an `int >= 1`. Check `bool` first, because it
+   subclasses `int`. Refuse `0` too, because `build_predicate` tests
+   `if since_days:`, so 0 would mean no window. This is a deliberate
+   compatibility break: a corpus with `since_days: '40'`, `40.7`, `true`, `0`
+   or `-5` used to load and now fails (spec §5).
+4. RED, then GREEN: spec §4 test 12. Catch `ValueError` as well as
+   `yaml.YAMLError` around `safe_load`, because an unquoted impossible date
+   raises inside PyYAML before `_parse_date_bound` runs.
+5. Refactor so each rule is one `if` with a message that names the query
    number and the rule.
 
 ## Task 2 — runner pass-through (TDD)
