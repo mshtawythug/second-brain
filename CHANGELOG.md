@@ -81,7 +81,7 @@ git tag scheme:
   screen), and "Watcher status unknown" when the process list cannot be read.
   It says nothing while the watcher runs. The page asks
   `GET /api/watcher` — one enum, no process details, behind the same token
-  and Host checks as every other route — at load, every minute while the tab
+  and Host checks as every other `/api/` route — at load, every minute while the tab
   is visible, and when you return to it. On macOS it can differ from
   `brain doctor`, which checks the `com.brain.watcher` plist rather than the
   process; see `docs/vault-and-wiki.md`.

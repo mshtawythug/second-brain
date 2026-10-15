@@ -198,6 +198,6 @@ lines at 375 px predates this change (measured with the line removed). The brows
 
 No file in CLAUDE.md's over-ceiling table is touched; every touched file stays under 800.
 
-Every guard and test above is mutation-proved: the plan's catalog holds **31** mutations, each
+Every guard and test above is mutation-proved: the plan's catalog holds **32** mutations, each
 passing all five clauses (passes unmutated, lands once, red, needle on a `>`/`E` line,
 restored green).

@@ -190,6 +190,16 @@ def test_off_macos_an_unreadable_process_list_warns_unknown_not_stopped(
     )
 
 
+def test_off_macos_a_failing_ps_snapshot_warns_unknown_on_the_production_path(
+    tmp_path: Path,
+) -> None:
+    """The real call passes no ``processes``: a failed ``ps`` must still read "unknown"."""
+    with patch.object(doctor_watcher, "snapshot_processes", lambda: []):
+        (check,) = watcher_doctor_check(launchd_dir=tmp_path, platform="linux")
+
+    assert "could not be read" in check.detail
+
+
 def test_runtime_doctor_checks_threads_the_processes_seam(tmp_path: Path) -> None:
     def _no_scan() -> list[str]:
         raise AssertionError("an explicit processes list must not be re-scanned")
