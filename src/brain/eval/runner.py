@@ -8,7 +8,7 @@ metrics (nDCG@5, MRR, recall@20) against the golden corpus.
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import psycopg
@@ -68,6 +68,18 @@ class EvalReport:
     generated_at: datetime  # UTC
 
 
+def _utc_midnight(day: date | None) -> datetime | None:
+    """UTC-aware midnight for a corpus ``after``/``before`` date (``None`` passes).
+
+    Built aware here rather than left naive for ``hybrid_search``'s
+    ``_ensure_utc`` to stamp, so a pinned eval bound cannot depend on the
+    session ``TimeZone`` or on a helper in another module staying as it is.
+    """
+    if day is None:
+        return None
+    return datetime(day.year, day.month, day.day, tzinfo=UTC)
+
+
 def _normalize_ids(conn: psycopg.Connection[Any], ids: list[str]) -> list[str]:
     """Resolve 8-char hex prefixes to full UUIDs; pass full UUIDs through.
 
@@ -119,7 +131,8 @@ def run_eval(
 
     One ``hybrid_search`` call per query at ``limit=limit_per_query`` (default 20
     so recall@20 is computable).  Threads filter kwargs from :class:`EvalQuery`
-    through to the search function.
+    through to the search function, including the absolute ``after``/``before``
+    bounds a pinned ``recency`` query uses in place of ``since_days``.
 
     Tolerates :exc:`~brain.embeddings.OllamaEmbedError` by skipping the affected
     query with a warning and recording ``actual_doc_ids=[]`` / metrics=0.0.
@@ -149,6 +162,8 @@ def run_eval(
                 source_kind=q.source_filter,
                 tag=q.tag_filter,
                 since_days=q.since_days,
+                after=_utc_midnight(q.after),
+                before=_utc_midnight(q.before),
                 vector_sim_floor=vector_sim_floor,
                 recency_halflife_days=recency_halflife_days,
                 snippet_context_tokens=snippet_context_tokens,

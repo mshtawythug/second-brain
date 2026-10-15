@@ -123,6 +123,17 @@ git tag scheme:
   This class of bug was first reported as closed after review round 8; it was
   not, because each fix refused one more SPELLING. Classifying by the resolved
   address closes it.
+- **`brain eval` golden-corpus entries can pin `after:` / `before:` dates**
+  (`YYYY-MM-DD`) in place of `since_days:`. They are `hybrid_search`'s own
+  bounds on `coalesce(sent_at, ingested_at)`: `after` inclusive, `before`
+  exclusive, both at UTC midnight. A `since_days` window moves with the clock,
+  so a `recency` query drifted whenever a competing document was ingested (a
+  daily brief, on most days) and `--fail-below` exited 3 with no change to
+  search; a closed range in the past does not move. `load_corpus` refuses
+  `after` without `before`, `after >= before`, a value that is not a plain
+  date, and either bound mixed with `since_days`. Existing corpora keep
+  `since_days` until you convert them, and converting one needs a baseline
+  re-record. How to choose the dates: `tests/eval/baselines/README.md` (2).
 
 ### Fixed
 
@@ -181,6 +192,19 @@ git tag scheme:
   mixed-case hostname. A browser lower-cases the host it sends and the Host
   check is case-sensitive, so the allowlist and URL kept a spelling no browser
   uses. Hostnames are now lower-cased at the CLI.
+- **A golden-corpus `since_days` could run a window other than the one
+  written.** `brain eval` converted it with `int()`, so `true` ran as 1 day and
+  `40.7` and `'40'` as 40; `0` passed through as no window at all, and a
+  negative value as a window starting in the future. `since_days` must now be
+  a positive integer. **A corpus carrying `true`, `40.7`, `'40'`, `0` or a
+  negative value now exits 1** with the query number, instead of loading.
+  `forty` and `[40]`, which used to escape as a traceback, exit 1 the same way.
+- **An unquoted impossible date anywhere in a golden corpus crashed
+  `brain eval` with a traceback.** PyYAML builds an unquoted `2026-02-30` as a
+  date inside `yaml.safe_load`, in any field (`notes:` included), and raises a
+  bare `ValueError` that `load_corpus` did not catch. It now exits 1 with a
+  corpus parse error naming the file. A quoted `"2026-02-30"` stays a string
+  and, in `after:` / `before:`, is refused as not a calendar date.
 
 ### Dependencies
 

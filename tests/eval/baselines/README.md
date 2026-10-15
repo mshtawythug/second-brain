@@ -57,8 +57,83 @@ only that `recency` row moved is this drift, not a regression. Check the diff
 table before re-recording. The other `recency` query ("quarterly planning
 review …") had 3 briefs in its top 20 and was not moved by those 6.
 
-Re-derive the window before you re-record; it is a property of the document
-set, not of the code:
+**The fix: pin the recency queries to absolute dates (2026-10-15).** A corpus
+entry can now carry `after:` / `before:` (`YYYY-MM-DD`) in place of
+`since_days:`. These are `hybrid_search`'s own `after` / `before` filters on
+`coalesce(sent_at, ingested_at)`: `after` is inclusive and `before` is
+exclusive, both at UTC midnight. A closed range does not move with the clock,
+on either edge, so a pinned query's candidate set depends only on the
+document set, not on the clock. That is trigger (1), and it is a real
+re-record. Usually only an ingest *inside* the range moves the row, but not
+always: the vector leg is an approximate HNSW iterative scan, with the date
+filter applied inside the walk (`src/brain/search_vector_leg.py`, recall@50
+mean 0.9987, minimum 0.98, against an exact scan). An ingest *outside* the
+range still changes the index graph, so it can, rarely, change which in-range
+chunks reach the leg's top 50. The
+recency boost does not bring the clock back: `0.5^(age/halflife)` scales every
+candidate by the same factor as `now` advances, so the ranked order, which is
+all the metrics read, is unchanged, *provided no candidate is dated after
+`now`*. The boost clamps a future document's age to 0, which breaks the
+identity. A `before` that is already in the past guarantees the condition. See
+`docs/specs/2026-10-15-eval-recency-determinism-design.md` §2.2.
+
+`load_corpus` enforces the rules that keep a pinned query pinned:
+
+- `after` requires `before`, because an open upper bound is the leading-edge
+  drift above.
+- `after` must be earlier than `before`.
+- Neither can be combined with `since_days`.
+- Values must be plain dates, so `datetime`s and the ISO basic form are
+  refused.
+- `before` alone is allowed.
+- `since_days` must be a positive `int`. `true`, `40.7` and `'40'` used to be
+  coerced (to 1, 40 and 40); `0` and negatives used to pass through unchanged
+  (`0` as no window at all, `-5` as a window starting in the future). All of
+  them are now refused. This is stricter than before: a corpus that loaded with
+  one of those values now exits `1` until the value is fixed.
+
+A positive-int `since_days` still loads, for corpora that have not been
+converted, and still drifts exactly as described above.
+
+To convert, edit your local `tests/eval/golden_corpus.yaml`, which is
+gitignored, so no PR does it for you. On each `recency` entry, replace
+
+```yaml
+    since_days: 40
+```
+
+with
+
+```yaml
+    after: 2026-09-05    # example: before - 40 days (the half-open range is 40 days)
+    before: 2026-10-15   # example: <= TODAY's UTC date when you re-record, never later
+```
+
+`before` must not be later than the UTC date on which you re-record, so its
+midnight is already past. With a `before` of tomorrow, a brief ingested after
+the recording but before UTC midnight lands inside the "pinned" range, and the
+drift comes back for good. Briefs ingested earlier on the re-record day are
+left out; that is the intended trade-off.
+
+Then **re-record `ci.json`**. A converted row filters a different column
+against a fixed range, so its numbers move once, by design. Before
+re-recording, check that every judged document of a pinned query falls inside
+its range. This query lists the ones that do not. Fill in that query's
+`expected_doc_ids` prefixes and its two dates:
+
+```sql
+SELECT left(id::text, 8) AS id8, coalesce(sent_at, ingested_at) AS ts
+FROM documents
+WHERE left(id::text, 8) = ANY (ARRAY['abcd1234', 'ef567890'])
+  AND NOT (coalesce(sent_at, ingested_at) >= timestamptz '2026-09-05 00:00Z'
+       AND coalesce(sent_at, ingested_at) <  timestamptz '2026-10-15 00:00Z');
+```
+
+An empty result means the range covers the judgments. A judged document
+outside the range can never be retrieved, so it caps that query's recall.
+
+For a query still on `since_days`, re-derive the window before you re-record.
+It is a property of the document set, not of the code:
 
 ```sql
 WITH b AS (SELECT now() - interval '40 days' AS cut)
@@ -119,7 +194,8 @@ as any other committed fixture. Re-record after any of:
 - a change to the ranking code (SQL or fusion) — e.g. `search.py`,
   `search_vector_leg.py`, `rank_fusion.py`
 - an edit to `tests/eval/golden_corpus.yaml`
-- drift past the recency window in (2) above
+- drift past the recency window in (2) above (only for queries still on
+  `since_days`; a pinned `after`/`before` query does not drift)
 
 ```bash
 brain eval --record-baseline ci      # needs a populated brain + Ollama

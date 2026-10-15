@@ -2,13 +2,14 @@
 
 import hashlib
 import unittest.mock
+from datetime import UTC, date, datetime, timedelta
 
 import psycopg
 import pytest
 
 from brain.eval.corpus import EvalQuery
 from brain.eval.errors import EvalCorpusError
-from brain.eval.runner import EvalReport, _normalize_ids, run_eval
+from brain.eval.runner import EvalReport, _normalize_ids, _utc_midnight, run_eval
 from brain.ingest import ExtractedDoc, ingest_document
 
 # ---------------------------------------------------------------------------
@@ -241,3 +242,89 @@ def test_run_eval_mean_aggregates_match_per_query(test_db, fake_embedder):
     assert report.mean_recall_at_20 == pytest.approx(
         sum(r.recall_at_20 for r in report.results) / n, abs=1e-9
     )
+
+
+# ---------------------------------------------------------------------------
+# Clock determinism — spec docs/specs/2026-10-15-eval-recency-determinism-design.md.
+# ``since_days`` compiles to ``ingested_at >= NOW() - N days``, so any newly
+# ingested matching document enters the window at once and moves the ranked
+# list (the daily-brief drift that tripped ``--fail-below``). A closed
+# ``after``/``before`` range does not move.
+# ---------------------------------------------------------------------------
+
+
+def _set_ingested_at(test_db: psycopg.Connection, doc_id: str, ts: datetime) -> None:
+    """Pin one document's ``ingested_at`` (``sent_at`` stays NULL, so the
+    ``coalesce(sent_at, ingested_at)`` the bounds read is this value)."""
+    test_db.execute(
+        "UPDATE documents SET ingested_at = %s WHERE id = %s::uuid", (ts, doc_id)
+    )
+
+
+def test_run_eval_since_days_query_drifts_under_new_ingest(test_db, fake_embedder):
+    """The bug, reproduced: a ``since_days`` query's ranked list changes when an
+    unjudged matching document is ingested, with nothing about search changed."""
+    judged = _seed(test_db, fake_embedder, "Digest Judged", "daily digest of captures")
+    _set_ingested_at(test_db, judged, datetime.now(tz=UTC) - timedelta(days=10))
+    query = EvalQuery(
+        query="daily digest", expected_doc_ids=[judged], category="recency", since_days=40
+    )
+
+    before_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query])
+    newcomer = _seed(test_db, fake_embedder, "Digest Newcomer", "daily digest of captures too")
+    after_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query])
+
+    assert newcomer not in before_ingest.results[0].actual_doc_ids
+    assert newcomer in after_ingest.results[0].actual_doc_ids
+
+
+def test_run_eval_pinned_window_is_stable_under_new_ingest(test_db, fake_embedder):
+    """The fix: the same scenario with a closed ``after``/``before`` range — the
+    newcomer is dated after ``before``, so the ranked list is unchanged."""
+    judged = _seed(test_db, fake_embedder, "Digest Judged", "daily digest of captures")
+    _set_ingested_at(test_db, judged, datetime(2026, 1, 10, 12, 0, tzinfo=UTC))
+    query = EvalQuery(
+        query="daily digest",
+        expected_doc_ids=[judged],
+        category="recency",
+        after=date(2026, 1, 1),
+        before=date(2026, 2, 1),
+    )
+
+    before_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query])
+    _seed(test_db, fake_embedder, "Digest Newcomer", "daily digest of captures too")
+    after_ingest = run_eval(test_db, embedder=fake_embedder, queries=[query])
+
+    assert before_ingest.results[0].actual_doc_ids == [judged]
+    assert after_ingest.results[0].actual_doc_ids == [judged]
+
+
+def test_run_eval_pinned_bounds_are_half_open(test_db, fake_embedder):
+    """``after`` is inclusive and ``before`` exclusive, each at UTC midnight —
+    the same contract as ``hybrid_search``'s ``after``/``before``."""
+    on_after = _seed(test_db, fake_embedder, "Bound On After", "bounded digest entry one")
+    last_inside = _seed(test_db, fake_embedder, "Bound Last Inside", "bounded digest entry two")
+    on_before = _seed(test_db, fake_embedder, "Bound On Before", "bounded digest entry three")
+    _set_ingested_at(test_db, on_after, datetime(2026, 1, 1, tzinfo=UTC))
+    _set_ingested_at(test_db, last_inside, datetime(2026, 1, 31, 23, 59, 59, tzinfo=UTC))
+    _set_ingested_at(test_db, on_before, datetime(2026, 2, 1, tzinfo=UTC))
+    query = EvalQuery(
+        query="bounded digest entry",
+        expected_doc_ids=[on_after],
+        category="recency",
+        after=date(2026, 1, 1),
+        before=date(2026, 2, 1),
+    )
+
+    report = run_eval(test_db, embedder=fake_embedder, queries=[query])
+
+    assert set(report.results[0].actual_doc_ids) == {on_after, last_inside}
+
+
+def test_utc_midnight_is_utc_aware() -> None:
+    """The bound is built UTC-aware here, so it never depends on the session
+    ``TimeZone`` or on a later ``_ensure_utc`` call."""
+    assert _utc_midnight(date(2026, 1, 1)) == datetime(2026, 1, 1, tzinfo=UTC)
+    stamped = _utc_midnight(date(2026, 1, 1))
+    assert stamped is not None and stamped.tzinfo is UTC
+    assert _utc_midnight(None) is None
