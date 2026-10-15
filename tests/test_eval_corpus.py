@@ -362,15 +362,15 @@ def _corpus_with_bounds(tmp_path: Path, bounds: str) -> Path:
 @pytest.mark.parametrize(
     "bounds",
     [
-        "after: 2026-09-04\nbefore: 2026-10-15",
-        "after: '2026-09-04'\nbefore: '2026-10-15'",
+        "after: 2026-09-05\nbefore: 2026-10-15",
+        "after: '2026-09-05'\nbefore: '2026-10-15'",
     ],
     ids=["yaml-date", "quoted-string"],
 )
 def test_load_corpus_parses_absolute_date_bounds(tmp_path: Path, bounds: str) -> None:
     """``after``/``before`` parse from an unquoted YAML date and a quoted ISO string."""
     (q,) = load_corpus(_corpus_with_bounds(tmp_path, bounds))
-    assert q.after == date(2026, 9, 4)
+    assert q.after == date(2026, 9, 5)
     assert q.before == date(2026, 10, 15)
     assert q.since_days is None
 
@@ -391,7 +391,7 @@ def test_load_corpus_accepts_before_alone(tmp_path: Path) -> None:
 
 def test_load_corpus_rejects_after_without_before(tmp_path: Path) -> None:
     """An open upper bound is the leading-edge drift being fixed — refused."""
-    path = _corpus_with_bounds(tmp_path, "after: 2026-09-04")
+    path = _corpus_with_bounds(tmp_path, "after: 2026-09-05")
     with pytest.raises(EvalCorpusError, match="'after' requires 'before'"):
         load_corpus(path)
 
@@ -414,7 +414,7 @@ def test_load_corpus_rejects_after_not_before_before(tmp_path: Path, bounds: str
 @pytest.mark.parametrize(
     "bounds",
     [
-        "since_days: 40\nafter: 2026-09-04\nbefore: 2026-10-15",
+        "since_days: 40\nafter: 2026-09-05\nbefore: 2026-10-15",
         "since_days: 40\nbefore: 2026-10-15",
     ],
     ids=["with-both", "with-before"],
@@ -468,12 +468,20 @@ def test_load_corpus_unquoted_impossible_date_raises_corpus_error(tmp_path: Path
         load_corpus(path)
 
 
-@pytest.mark.parametrize("value", ["forty", "[40]"], ids=["non-numeric", "list"])
-def test_load_corpus_non_integer_since_days_raises_corpus_error(
+@pytest.mark.parametrize(
+    "value",
+    ["true", "40.7", "'40'", "forty", "[40]", "0", "-5"],
+    ids=["bool", "float", "quoted-string", "non-numeric", "list", "zero", "negative"],
+)
+def test_load_corpus_rejects_non_positive_integer_since_days(
     tmp_path: Path, value: str
 ) -> None:
-    """Regression: ``int()`` on a non-numeric ``since_days`` raised a bare
-    ``ValueError`` / ``TypeError`` instead of ``EvalCorpusError``."""
+    """Regression: ``int(since_raw)`` either raised a bare ``ValueError`` /
+    ``TypeError`` (``forty``, ``[40]``) or silently coerced — ``true`` → 1,
+    ``40.7`` → 40, ``'40'`` → 40 — so a typo'd corpus ran a different window
+    than the one written. ``0`` is refused too: ``build_predicate`` tests
+    ``if since_days:``, so 0 silently means NO window while reading as one; and
+    a negative window is one the CLI's ``--since`` already refuses."""
     path = _corpus_with_bounds(tmp_path, f"since_days: {value}")
-    with pytest.raises(EvalCorpusError, match="'since_days' must be an integer"):
+    with pytest.raises(EvalCorpusError, match="'since_days' must be a positive integer"):
         load_corpus(path)

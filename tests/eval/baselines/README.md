@@ -80,6 +80,8 @@ identity. A `before` that is already in the past guarantees the condition. See
 - Values must be plain dates, so `datetime`s and the ISO basic form are
   refused.
 - `before` alone is allowed.
+- `since_days` must be a positive `int`. `true`, `40.7`, `'40'` and `0` are
+  refused rather than coerced; `0` would silently mean no window at all.
 
 `since_days` still loads, for corpora that have not been converted, and still
 drifts exactly as described above.
@@ -114,7 +116,7 @@ its range. This query lists the ones that do not. Fill in that query's
 SELECT left(id::text, 8) AS id8, coalesce(sent_at, ingested_at) AS ts
 FROM documents
 WHERE left(id::text, 8) = ANY (ARRAY['abcd1234', 'ef567890'])
-  AND NOT (coalesce(sent_at, ingested_at) >= timestamptz '2026-09-04 00:00Z'
+  AND NOT (coalesce(sent_at, ingested_at) >= timestamptz '2026-09-05 00:00Z'
        AND coalesce(sent_at, ingested_at) <  timestamptz '2026-10-15 00:00Z');
 ```
 

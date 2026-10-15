@@ -105,6 +105,28 @@ def _parse_date_bound(value: Any, *, field: str, index: int) -> date | None:
     )
 
 
+def _parse_since_days(value: Any, *, index: int) -> int | None:
+    """Return a corpus ``since_days`` value, refusing anything but a positive int.
+
+    Strict on purpose. The previous ``int(value)`` silently coerced ``true`` to
+    1, ``40.7`` to 40 and ``'40'`` to 40, so a typo'd corpus ran a window other
+    than the one written. ``bool`` is refused explicitly because it subclasses
+    ``int``. ``0`` is refused because ``build_predicate`` tests
+    ``if since_days:``, so 0 would silently mean *no* window while reading as
+    one; negatives are refused by the CLI's ``--since`` already.
+
+    Raises:
+        EvalCorpusError: When *value* is not ``None`` and not an ``int >= 1``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise EvalCorpusError(
+            f"corpus query #{index} 'since_days' must be a positive integer, got {value!r}"
+        )
+    return value
+
+
 def _check_date_bounds(
     *, after: date | None, before: date | None, since_days: int | None, index: int
 ) -> None:
@@ -147,11 +169,12 @@ def load_corpus(path: Path | None = None) -> list[EvalQuery]:
     Raises:
         EvalCorpusError: On missing/malformed file (including an unquoted
             impossible YAML date), version mismatch, unknown category, missing
-            required fields, empty ``expected_doc_ids``, or a non-integer
-            ``since_days``; and on the date-bound rules — an ``after``/``before``
-            that is not a ``YYYY-MM-DD`` calendar date, ``after`` without
-            ``before``, ``after >= before``, or ``since_days`` combined with
-            either bound.
+            required fields, empty ``expected_doc_ids``, or a ``since_days``
+            that is not a positive ``int`` (bools, floats, quoted numbers and
+            0 are refused, not coerced); and on the date-bound rules — an
+            ``after``/``before`` that is not a ``YYYY-MM-DD`` calendar date,
+            ``after`` without ``before``, ``after >= before``, or
+            ``since_days`` combined with either bound.
     """
     if path is None:
         path = _DEFAULT_CORPUS_PATH
@@ -227,13 +250,7 @@ def load_corpus(path: Path | None = None) -> list[EvalQuery]:
                 f"`brain search \"<query>\" --json --limit 20` before running eval"
             )
 
-        since_raw = entry.get("since_days")
-        try:
-            since_days = int(since_raw) if since_raw is not None else None
-        except (TypeError, ValueError) as exc:
-            raise EvalCorpusError(
-                f"corpus query #{i + 1} 'since_days' must be an integer, got {since_raw!r}"
-            ) from exc
+        since_days = _parse_since_days(entry.get("since_days"), index=i + 1)
         after = _parse_date_bound(entry.get("after"), field="after", index=i + 1)
         before = _parse_date_bound(entry.get("before"), field="before", index=i + 1)
         _check_date_bounds(after=after, before=before, since_days=since_days, index=i + 1)

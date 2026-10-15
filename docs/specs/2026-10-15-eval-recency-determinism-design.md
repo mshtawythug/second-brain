@@ -95,7 +95,7 @@ keywords and the CLI's `--after` / `--before`:
 ```yaml
 - query: "daily brief digest of recent captures and action items"
   category: recency
-  after: 2026-09-04     # inclusive, UTC midnight
+  after: 2026-09-05     # inclusive, UTC midnight
   before: 2026-10-15    # exclusive, UTC midnight
   expected_doc_ids: [...]
 ```
@@ -196,8 +196,11 @@ Regression tests (CLAUDE.md rule 12), added after review, in
     `EvalCorpusError`. PyYAML's timestamp constructor raises a bare
     `ValueError` inside `safe_load`, before `_parse_date_bound` runs, so this
     escaped as a traceback.
-13. A non-integer `since_days` (`forty`, `[40]`) raises `EvalCorpusError`, not
-    a bare `ValueError` or `TypeError` from `int()`.
+13. A `since_days` that is not a positive `int` raises `EvalCorpusError`. The
+    cases: `true`, `40.7`, `'40'`, `forty`, `[40]`, `0` and `-5`. Before the
+    fix, `int()` either raised a bare `ValueError`/`TypeError` or silently
+    coerced (`true` to 1, `40.7` to 40, `'40'` to 40). `0` is refused because
+    `build_predicate` tests `if since_days:`, so 0 silently means no window.
 
 ## 5. Compatibility
 
@@ -222,4 +225,6 @@ Each new guard must go red under its mutation. The plan's §Mutation proofs has 
 | M6 | Runner swaps `after` and `before` | test 10 |
 | M7 | `_utc_midnight` returns a naive datetime | test 11 |
 | M8 | `safe_load` catches only `yaml.YAMLError` | test 12 |
-| M9 | `since_days` `int()` is not wrapped | test 13 |
+| M9 | `bool` accepted as an `int` | test 13 (`true`) |
+| M10 | the `isinstance(value, int)` check dropped | test 13 (`40.7`) |
+| M11 | `value < 1` becomes `value < 0` | test 13 (`0`) |

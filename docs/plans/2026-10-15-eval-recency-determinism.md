@@ -93,7 +93,9 @@ that is why M2's needle includes the trailing colon.
 | M6 | runner.py | the same block → `after=_utc_midnight(q.before),` / `before=_utc_midnight(q.after),` | 1 | `test_run_eval_pinned_bounds_are_half_open` | `assert` |
 | M7 | runner.py | `return datetime(day.year, day.month, day.day, tzinfo=UTC)` → `return datetime(day.year, day.month, day.day)` | 1 | `test_utc_midnight_is_utc_aware` | `assert` |
 | M8 | corpus.py | `except (yaml.YAMLError, ValueError) as exc:` → `except yaml.YAMLError as exc:` | 1 | `test_load_corpus_unquoted_impossible_date_raises_corpus_error` | `ValueError: day is out of range for month` (the bare escape the guard exists to catch) |
-| M9 | corpus.py | `except (TypeError, ValueError) as exc:` → `except () as exc:` | 1 | `test_load_corpus_non_integer_since_days_raises_corpus_error` | `invalid literal for int()` (the bare escape) |
+| M9 | corpus.py | `isinstance(value, bool) or ` → (deleted) | 1 | `test_load_corpus_rejects_non_positive_integer_since_days[bool]` | `'since_days' must be a positive integer` |
+| M10 | corpus.py | ` or not isinstance(value, int)` → (deleted) | 1 | `test_load_corpus_rejects_non_positive_integer_since_days[float]` | `'since_days' must be a positive integer` |
+| M11 | corpus.py | `or value < 1:` → `or value < 0:` | 1 | `test_load_corpus_rejects_non_positive_integer_since_days[zero]` | `'since_days' must be a positive integer` |
 
 ## What the coordinator / user applies after merge
 
