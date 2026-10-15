@@ -30,32 +30,47 @@ means see "Vector-leg candidate pool" under "Known retrieval issues" below. The 
 absolute scores understate quality until `golden_corpus.yaml` is re-judged
 against the new documents.
 
-**2. Two `recency` queries are clock-dependent.** They filter on
+**2. Two `recency` queries were clock-dependent until 2026-10-15**, when they
+were pinned to absolute dates (see "The fix" and "Applied" below). They filtered on
 `documents.ingested_at` via `since_days: 40`, so the matched set is stable only
 while `today - 40 days` stays inside one gap in this brain's ingest history.
 The baseline was re-recorded on **2026-10-13**, when that boundary sat inside a
-21-day gap (last ingest 2026-08-31, next 2026-09-21), which makes it stable
-from roughly **2026-10-10 to 2026-10-31**. Outside that range one or both of
-those queries drift on their own and the baseline needs re-recording. Nothing
-about search changed. *(The first recording, 2026-09-02, sat in a different
-gap and drifted on 2026-09-20 exactly as this paragraph predicted — one query,
-`-0.15` nDCG@5, every other row unchanged to four decimals.)*
+21-day gap (last ingest 2026-08-31, next 2026-09-21), which made it stable
+from roughly **2026-10-10 to 2026-10-31**. While the queries were on
+`since_days` (until 2026-10-15), outside that range one or both of them drifted
+on their own and the baseline needed re-recording, with nothing about search
+changed. That no longer applies to the committed baseline: both queries are
+now pinned, and the clock does not move them. *(The first recording,
+2026-09-02, sat in a different gap and drifted on 2026-09-20 exactly as this
+paragraph predicted — one query, `-0.15` nDCG@5, every other row unchanged to
+four decimals.)*
 
 **The gap protects only the trailing edge.** The SQL below finds when old
 documents cross the 40-day boundary. It says nothing about the leading edge:
-every newly ingested document lands inside the window at once. That matters for
+every newly ingested document lands inside the window at once. That mattered for
 one query in particular. "Daily brief digest of recent captures and action
 items" has 28 judged documents, all of them daily briefs, and on 2026-10-14 its
-top 20 was all daily briefs too. The vault watcher now syncs a brief note
-(`daily/<year>/<date>-brief.md`) on most days, and each one is an unjudged
-competitor for exactly that query. Re-recorded **2026-10-14** for this reason:
-after a restart the watcher synced 7 notes (6 briefs and `index.md`), which
-moved that query alone (nDCG@5 0.5296 → 0.3601, Recall@20 0.2857 → 0.2143)
-and the means by −0.0055 nDCG@5 / −0.0023 Recall@20, with every other row at
-±0.0000. **Expect the same on most days a brief lands**: an exit 3 in which
-only that `recency` row moved is this drift, not a regression. Check the diff
-table before re-recording. The other `recency` query ("quarterly planning
-review …") had 3 briefs in its top 20 and was not moved by those 6.
+top 20 was all daily briefs too. The vault watcher syncs a brief note
+(`daily/<year>/<date>-brief.md`) on most days, and while that query was on
+`since_days` each one was an unjudged competitor for it. Re-recorded
+**2026-10-14** for this reason: after a restart the watcher synced 7 notes (6
+briefs and `index.md`), which moved that query alone (nDCG@5 0.5296 → 0.3601,
+Recall@20 0.2857 → 0.2143) and the means by −0.0055 nDCG@5 / −0.0023 Recall@20,
+with every other row at ±0.0000. In the `since_days` era (until 2026-10-15) the
+same happened on most days a brief landed, and an exit 3 in which only that
+`recency` row moved was this drift, not a regression. The other `recency` query
+("quarterly planning review …") had 3 briefs in its top 20 and was not moved by
+those 6.
+
+**Since the pin, that reading is wrong.** Both `recency` queries now end at
+`before: 2026-10-15`, so a newly synced brief, dated on or after that day, is
+outside their range and cannot compete. A pinned row moves only when the
+document set changes *inside* its range, or, rarely, through the approximate
+vector leg (see "The fix" below). An exit 3 in which only a `recency` row moved
+is therefore **no longer automatically the known drift: investigate it** before
+re-recording. Check whether anything with a `coalesce(sent_at, ingested_at)`
+inside the range was added or deleted, then treat it like any other row that
+moved.
 
 **The fix: pin the recency queries to absolute dates (2026-10-15).** A corpus
 entry can now carry `after:` / `before:` (`YYYY-MM-DD`) in place of
@@ -132,6 +147,22 @@ WHERE left(id::text, 8) = ANY (ARRAY['abcd1234', 'ef567890'])
 An empty result means the range covers the judgments. A judged document
 outside the range can never be retrieved, so it caps that query's recall.
 
+**Applied 2026-10-15.** Both `recency` entries were converted to
+`after: 2026-09-05` / `before: 2026-10-15`, and `ci.json` was re-recorded. The
+check above was **not** empty: 18 of the daily-brief query's 28 judged
+documents and all 5 of the other query's fall before 2026-09-05. The
+`since_days` window at the previous recording already excluded the same set.
+That was measured, not inferred from the ingest gap: the gap is in
+`ingested_at`, and the new filter's `coalesce(sent_at, ingested_at)` has no gap
+there (29 documents fall in [2026-09-01, 2026-09-21) on that column). The
+reachable judged sets were checked under both filters and are identical: 10 of
+28 and 0 of 5, the same documents, so the conversion lost no reachable
+judgment. Both rows stay
+capped until they are re-judged. The means are unchanged at
+**0.2724 / 0.3826 / 0.7089**, and only the second query's top 20 moved: four
+Krisp meetings ingested 2026-10-05 but sent in July and August dropped out
+under the new filter column. That row still scores 0.0.
+
 For a query still on `since_days`, re-derive the window before you re-record.
 It is a property of the document set, not of the code:
 
@@ -178,7 +209,8 @@ dilute the mean; but a re-judged one silently changes what "correct" means.
   then for the iterative scan, whose metrics are identical): the means went
   from 0.2589 / 0.3697 / 0.5852 to 0.2779 / 0.3826 / 0.7112, on the same
   document set and the same window as in (2). The current committed means,
-  after the 2026-10-14 re-record for the synced daily briefs in (2), are
+  re-recorded 2026-10-15 when the recency queries were pinned in (2), and
+  unchanged from the 2026-10-14 re-record for the synced daily briefs, are
   **0.2724 / 0.3826 / 0.7089**. The same
   HNSW shape remains in `related.py` and `connect.py`; those are unmeasured
   follow-ups.
