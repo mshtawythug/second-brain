@@ -35,12 +35,15 @@ were pinned to absolute dates (see "The fix" and "Applied" below). They filtered
 `documents.ingested_at` via `since_days: 40`, so the matched set is stable only
 while `today - 40 days` stays inside one gap in this brain's ingest history.
 The baseline was re-recorded on **2026-10-13**, when that boundary sat inside a
-21-day gap (last ingest 2026-08-31, next 2026-09-21), which makes it stable
-from roughly **2026-10-10 to 2026-10-31**. Outside that range one or both of
-those queries drift on their own and the baseline needs re-recording. Nothing
-about search changed. *(The first recording, 2026-09-02, sat in a different
-gap and drifted on 2026-09-20 exactly as this paragraph predicted — one query,
-`-0.15` nDCG@5, every other row unchanged to four decimals.)*
+21-day gap (last ingest 2026-08-31, next 2026-09-21), which made it stable
+from roughly **2026-10-10 to 2026-10-31**. While the queries were on
+`since_days` (until 2026-10-15), outside that range one or both of them drifted
+on their own and the baseline needed re-recording, with nothing about search
+changed. That no longer applies to the committed baseline: both queries are
+now pinned, and the clock does not move them. *(The first recording,
+2026-09-02, sat in a different gap and drifted on 2026-09-20 exactly as this
+paragraph predicted — one query, `-0.15` nDCG@5, every other row unchanged to
+four decimals.)*
 
 **The gap protects only the trailing edge.** The SQL below finds when old
 documents cross the 40-day boundary. It says nothing about the leading edge:
@@ -53,10 +56,19 @@ competitor for exactly that query. Re-recorded **2026-10-14** for this reason:
 after a restart the watcher synced 7 notes (6 briefs and `index.md`), which
 moved that query alone (nDCG@5 0.5296 → 0.3601, Recall@20 0.2857 → 0.2143)
 and the means by −0.0055 nDCG@5 / −0.0023 Recall@20, with every other row at
-±0.0000. **Expect the same on most days a brief lands**: an exit 3 in which
-only that `recency` row moved is this drift, not a regression. Check the diff
-table before re-recording. The other `recency` query ("quarterly planning
+±0.0000. In the `since_days` era (until 2026-10-15) the same happened on most
+days a brief landed, and an exit 3 in which only that `recency` row moved was
+this drift, not a regression. The other `recency` query ("quarterly planning
 review …") had 3 briefs in its top 20 and was not moved by those 6.
+
+**Since the pin, that reading is wrong.** Both `recency` queries now end at
+`before: 2026-10-15`, so a newly synced brief, dated on or after that day, is
+outside their range and cannot compete. A pinned row moves only when the
+document set changes *inside* its range, or, rarely, through the approximate
+vector leg (see "The fix" below). An exit 3 in which only a `recency` row moved is therefore **no longer
+automatically the known drift: investigate it** before re-recording. Check
+whether anything with a `coalesce(sent_at, ingested_at)` inside the range was
+added or deleted, then treat it like any other row that moved.
 
 **The fix: pin the recency queries to absolute dates (2026-10-15).** A corpus
 entry can now carry `after:` / `before:` (`YYYY-MM-DD`) in place of
@@ -138,9 +150,12 @@ outside the range can never be retrieved, so it caps that query's recall.
 check above was **not** empty: 18 of the daily-brief query's 28 judged
 documents and all 5 of the other query's fall before 2026-09-05. The
 `since_days` window at the previous recording already excluded the same set.
-Nothing was ingested between 2026-08-31 and 2026-09-21, so both lower bounds
-fall in the same gap, and the conversion lost no reachable judgment: 10 of 28
-and 0 of 5 judged documents are reachable, before and after. Both rows stay
+That was measured, not inferred from the ingest gap: the gap is in
+`ingested_at`, and the new filter's `coalesce(sent_at, ingested_at)` has no gap
+there (29 documents fall in [2026-09-01, 2026-09-21) on that column). The
+reachable judged sets were checked under both filters and are identical: 10 of
+28 and 0 of 5, the same documents, so the conversion lost no reachable
+judgment. Both rows stay
 capped until they are re-judged. The means are unchanged at
 **0.2724 / 0.3826 / 0.7089**, and only the second query's top 20 moved: four
 Krisp meetings ingested 2026-10-05 but sent in July and August dropped out
